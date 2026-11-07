@@ -2210,6 +2210,110 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
     0
 }
 
+/// dfx=pid1spin (69th): dump pid `pid`'s epoll interests with the live
+/// readiness of each watched file — the discriminator between the three
+/// ways init's LoopEvent can go dark over the param children:
+///   (a) the interest is GONE (purged as a dead fd / never added),
+///   (b) the interest mask is EPOLLOUT-only (the reference LoopEvent's
+///       LE_Send flips it there until the reply flushes — if EPOLLOUT
+///       is never delivered the child is blind to incoming data),
+///   (c) the interest has EPOLLIN but the scan still misses the queued
+///       data (a poll/readiness divergence).
+/// For unix-socket targets each line carries the connection pair state
+/// (own queue segs/bytes, EOF/dead, peer truesize vs sndbuf cap). For
+/// other files the line names the ops table identity. Diagnostic-only
+/// cross-task fdtable walk (same contract as the taskdump path).
+pub fn pid1_epoll_interest_dump(pid: crate::process::task::Pid) {
+    // SAFETY: diagnostic lookup of the target task (find_task_by_pid
+    // contract); read-only walks of its fdtable below.
+    let task = unsafe { crate::sched::find_task_by_pid(pid) };
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: task is a live task pointer from the scheduler registry.
+    let tk = unsafe { &*task };
+    let fdtable = match tk.try_fdtable_mut() {
+        Some(f) => f,
+        None => return,
+    };
+    let mut epfds: alloc::vec::Vec<(usize, alloc::sync::Arc<crate::fs::File>)> =
+        alloc::vec::Vec::new();
+    fdtable.for_each_file(|fd, f| {
+        if f.get_ops()
+            .is_some_and(|o| core::ptr::eq(o, &EPOLL_OPS as *const _))
+        {
+            epfds.push((fd, alloc::sync::Arc::clone(f)));
+        }
+    });
+    if epfds.is_empty() {
+        crate::pr_warn!("PID1EPOLL pid={} no epoll instances", pid);
+        return;
+    }
+    for (epfd, ep_file) in epfds.iter() {
+        // SAFETY: ops identity confirmed an epoll File; private_data
+        // holds the Box::into_raw EpollFile.
+        let epoll_ptr = match unsafe { *ep_file.private_data.get() } {
+            Some(p) => p as *mut EpollFile,
+            None => continue,
+        };
+        // SAFETY: epoll_ptr came from Box::into_raw in sys_epoll_create;
+        // valid while the fdtable holds this Arc (cloned above).
+        let epoll = unsafe { &*epoll_ptr };
+        let entries = epoll.entries.lock();
+        crate::pr_warn!(
+            "PID1EPOLL pid={} epfd={} entries={} wait_count={}",
+            pid,
+            epfd,
+            entries.len(),
+            epoll.wait_count
+        );
+        for entry in entries.iter() {
+            let target = fdtable.get_file(entry.fd as usize);
+            let (fid_ok, unix_line, ops_id) = match &target {
+                Some(f) => {
+                    let fid_ok = f.file_id == entry.file_id;
+                    let ops_id = f
+                        .get_ops()
+                        .map(|o| o as *const _ as usize)
+                        .unwrap_or(0);
+                    let unix_line = crate::net::unix::unix_of_file_diag(f)
+                        .map(|s| {
+                            let (segs, qb, eof, dead, peer_alive, peer_ts, sndcap, acceptq) =
+                                s.diag_stream_pair();
+                            alloc::format!(
+                                " unix[segs={} bytes={} eof={} dead={} peer_alive={} peer_ts={} sndcap={} wr={} accq={}]",
+                                segs,
+                                qb,
+                                eof as u8,
+                                dead as u8,
+                                peer_alive as u8,
+                                peer_ts,
+                                sndcap,
+                                (peer_alive && peer_ts < sndcap) as u8,
+                                acceptq
+                            )
+                        })
+                        .unwrap_or_default();
+                    (fid_ok, unix_line, ops_id)
+                }
+                None => (false, alloc::string::String::new(), 0),
+            };
+            crate::pr_warn!(
+                "PID1EPOLL  fd={} mask={:#x} et={} oneshot={} reports={} file_id_match={} ops={:#x}{}{}",
+                entry.fd,
+                entry.events,
+                (entry.events & epoll_events::EPOLLET != 0) as u8,
+                (entry.events & epoll_events::EPOLLONESHOT != 0) as u8,
+                entry.reports,
+                fid_ok as u8,
+                ops_id,
+                if target.is_none() { " FD-GONE" } else { "" },
+                unix_line
+            );
+        }
+    }
+}
+
 /// sys_epoll_wait - Wait for epoll events
 ///
 /// # Arguments

@@ -345,6 +345,38 @@ impl UnixSocket {
         (qb, self.queued_truesize(), cap, ql)
     }
 
+    /// Stream-pair diagnostic for the epoll-interest dumps (69th,
+    /// dfx=pid1spin): the two sides of a connection in one snapshot —
+    /// own queue (segs/bytes), own EOF/dead, and the WRITE-ROOM inputs
+    /// (peer truesize vs own sndbuf cap), so a dump line decides
+    /// "writable" exactly like unix_file_poll's POLLOUT leg. Locks are
+    /// taken one at a time (own queue, flags, peer queue, options).
+    pub fn diag_stream_pair(&self) -> (usize, usize, bool, bool, bool, usize, usize, usize) {
+        let (segs, qb) = {
+            let q = self.recv_queue.lock();
+            (
+                q.segs.len(),
+                q.segs.iter().map(|s| s.data.len()).sum(),
+            )
+        };
+        let eof = *self.eof.lock();
+        let dead = *self.dead.lock();
+        // peer lock and peer queue lock are separate acquisitions; the
+        // peer Arc clone keeps it alive across them.
+        let peer = self
+            .peer
+            .lock()
+            .as_ref()
+            .and_then(|w| w.upgrade());
+        let (peer_alive, peer_ts) = match peer {
+            Some(p) => (true, p.queued_truesize()),
+            None => (false, 0),
+        };
+        let sndcap = self.options.lock().sndbuf as usize;
+        let acceptq = self.accept_queue.lock().len();
+        (segs, qb, eof, dead, peer_alive, peer_ts, sndcap, acceptq)
+    }
+
     /// Kernel-heap cost of the receive queue (Linux `sk_wmem_alloc` /
     /// skb-truesize semantics).
     ///

@@ -1395,3 +1395,107 @@ pub fn sleep_snapshot_early() {
     // (self-gated on dfx=sleepsnap inside).
     crate::syscall::misc::timerfd_wheel_audit();
 }
+
+/// pid=1 RUNNING-spin audit (69th, dfx=pid1spin): ohw75 proved the
+/// 105-family's dead leg is init itself going 100%-CPU RUNNING and
+/// silent (no LoopEvent prints, no param reads) from t=34.7 to the end
+/// of the boot while the rest of the system stays alive. This audit
+/// samples pid 1 on the heartbeat cadence: whenever it finds the init
+/// task on-CPU RUNNING, it prints the kernel-entry frame at the top of
+/// its kernel stack — the user RIP (inside the spin loop for a pure
+/// userspace spin; at the syscall instruction for a syscall loop) and
+/// the raw syscall number/args. Two consecutive audits landing on the
+/// same RIP at >2s distance name a steady spin; the first sample after
+/// a stall onset usually lands mid-loop and already symbolizes.
+/// Rate-capped (first 40 audits, then every 10th); zero cost when off.
+pub fn pid1spin_audit() {
+    use core::sync::atomic::Ordering;
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Pid1Spin) {
+        return;
+    }
+    static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    static N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    static PREV_RIP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let now = crate::drivers::timer::get_jiffies() as u64;
+    let last = LAST.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < 200 {
+        return;
+    }
+    if LAST
+        .compare_exchange(last, now, Ordering::AcqRel, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    // Every 10th audit also dumps init's epoll interests with live
+    // per-child readiness — the discriminator between a purged
+    // interest, a stuck EPOLLOUT-only mask, and a scan divergence
+    // (see pid1_epoll_interest_dump).
+    if n % 10 == 0 {
+        crate::syscall::misc::pid1_epoll_interest_dump(1);
+    }
+    // SAFETY: diagnostic lookup of the init task (find_task_by_pid
+    // contract); reads only task fields + its mapped kernel stack
+    // (sleep_snapshot contract, sc261).
+    let init = unsafe { crate::sched::find_task_by_pid(1) };
+    if init.is_null() {
+        return;
+    }
+    // SAFETY: init is a live task pointer from the scheduler registry.
+    let tk = unsafe { &*init };
+    let running = tk.state().is_running();
+    let on_cpu = tk.on_cpu();
+    if !running && !on_cpu {
+        // Reset the steady-spin tracker when init sleeps normally.
+        PREV_RIP.store(0, Ordering::Relaxed);
+        return;
+    }
+    if n >= 40 && n % 10 != 0 {
+        return;
+    }
+    let (sys, rip, a0, a1, a2) = match tk.kernel_stack_top_checked() {
+        None => (0u64, 0u64, 0u64, 0u64, 0u64),
+        Some(top) => {
+            #[cfg(feature = "x86_64")]
+            {
+                let regs = (top.wrapping_sub(
+                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+                // SAFETY: entry-frame read of this task's own stack.
+                unsafe { ((*regs).orig_rax as u64, (*regs).rip as u64, (*regs).rdi as u64, (*regs).rsi as u64, (*regs).rdx as u64) }
+            }
+            #[cfg(feature = "riscv64")]
+            {
+                let regs = (top.wrapping_sub(
+                    crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+                )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+                // SAFETY: entry-frame read of this task's own stack.
+                unsafe { ((*regs).a7 as u64, (*regs).epc as u64, (*regs).a0 as u64, (*regs).a1 as u64, (*regs).a2 as u64) }
+            }
+            #[cfg(feature = "aarch64")]
+            {
+                let regs = (top.wrapping_sub(
+                    crate::arch::aarch64::pt_regs::PT_REGS_SIZE,
+                )) as *const crate::arch::aarch64::pt_regs::PtRegs;
+                // SAFETY: entry-frame read of this task's own stack.
+                unsafe { ((*regs).syscallno as u64, (*regs).pc as u64, (*regs).regs[0] as u64, (*regs).regs[1] as u64, (*regs).regs[2] as u64) }
+            }
+        }
+    };
+    let prev = PREV_RIP.swap(rip, Ordering::Relaxed);
+    let steady = prev != 0 && prev == rip;
+    crate::pr_warn!(
+        "PID1SPIN #{} jiffies={} running={} on_cpu={} sys={} rip={:#x} a0={:#x} a1={:#x} a2={:#x}{}",
+        n,
+        now,
+        running as u8,
+        on_cpu as u8,
+        sys,
+        rip,
+        a0,
+        a1,
+        a2,
+        if steady { " STEADY" } else { "" }
+    );
+}

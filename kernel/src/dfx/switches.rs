@@ -109,6 +109,7 @@ macro_rules! dfx_switch_table {
             SyncWatch => "syncwatch",
             FuxStuck => "fuxstuck",
             PctlMon => "pctlmon",
+            Pid1Spin => "pid1spin",
         }
     };
 }
@@ -555,9 +556,17 @@ pub enum DfxSwitch {
     /// request dies (client send vs queued-unread vs dead connection).
     /// Zero cost when off.
     PctlMon,
+    /// pid=1 RUNNING-spin watch (69th, the 105-family hunt): ohw75
+    /// proved init goes 100%-CPU RUNNING and silent from t=34.7 while
+    /// every param child goes unread (the sole remaining 105 cause).
+    /// Every ~2 s of heartbeat, if pid 1 is on-CPU RUNNING, print its
+    /// kernel-entry frame (syscall nr, user rip, args) — for a
+    /// userspace spin the rip lands inside the spin loop; for a
+    /// syscall loop the nr names the call. Rate-capped; zero cost off.
+    Pid1Spin,
 }
 
-const SWITCH_COUNT: usize = 61;
+const SWITCH_COUNT: usize = 62;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -663,6 +672,7 @@ impl DfxSwitch {
             DfxSwitch::SyncWatch => 58,
             DfxSwitch::FuxStuck => 59,
             DfxSwitch::PctlMon => 60,
+            DfxSwitch::Pid1Spin => 61,
         }
     }
 
