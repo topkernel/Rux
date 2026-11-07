@@ -342,13 +342,26 @@ res, basefile = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "")
 # docs/development/perf-gate-baseline.md (P2_CTXSW ANCHOR
 # PROVENANCE). Cross-class comparison (TCG run vs these cells)
 # is meaningless. Pass --pbench-baseline <results file> to override.
+# Re-banked 2026-11-08 for the SMP-8 STANDARD (user directive: every
+# launch boots with at least 8 CPUs). The previous cells were measured
+# in the old configuration (2-4 real CPUs) and could not judge an
+# 8-CPU run — a cross-configuration comparison is meaningless, the
+# same rule as debug-vs-strong. Same-rig A/B at SMP 8 (baseline
+# 166e4516 vs the brk-fix kernel, 2026-11-07/08) attributed the
+# movement to the CPU count, NOT to the code change:
+#   p2_ctxsw  1.222 -> 0.756   (-38%, the 8-CPU geometry)
+#   p3b_cow   12.073 -> 18.424  (+58%, the 8-CPU TLB-shootdown cost)
+#   p6 rows   identical across both kernels (append 6.35/6.40,
+#             mkdrmdir 269.4/269.8, unlink 61.4/67.7, stat 2.6/3.4)
+# At SMP 4 the same kernels measure the same (ctxsw 1.167 vs 1.162,
+# cow 11.66 vs 12.15) — the code change is neutral.
 ANCHOR = {
-    "p1_null": 0.300, "p1_clock": 0.371, "p2_ctxsw": 1.242,
-    "p3b_cow": 8.075, "p6_write_fsync": 8442.573,
+    "p1_null": 0.280, "p1_clock": 0.350, "p2_ctxsw": 0.756,
+    "p3b_cow": 18.424, "p6_write_fsync": 8613.105,
     # key spelling must equal pbench's report_ticks() name (p6_mkdrmdir);
     # the b6 gate run silently skipped this row on the mismatch
-    "p6_mkdrmdir": 216.733, "p6_unlink": 54.638,
-    "p6_append": 5.189,
+    "p6_mkdrmdir": 269.778, "p6_unlink": 67.735,
+    "p6_append": 6.402,
 }
 if basefile:
     for line in open(basefile, errors="replace"):

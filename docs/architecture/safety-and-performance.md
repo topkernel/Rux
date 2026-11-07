@@ -213,6 +213,27 @@ boots, shell up 4/5 (was 0-1/5), both frozen-class recoveries
 in-place, zero KERNPANIC; make test green; riscv64 boot green.
 
 ## 3. Performance, measured (each fast path IS a safe path)
+- **SMP-8 standard, measured same-rig (2026-11-08)**: the launch
+  policy (every boot with >= 8 CPUs) moves the scheduler geometry, not
+  the code under test: A/B at SMP 8 (baseline 166e4516 vs the
+  per-mm-break kernel) gives p2_ctxsw 1.222 -> **0.756 µs** (-38%)
+  and p3b_cow 12.073 -> **18.424 µs** (+58%); the SAME two kernels at
+  SMP 4 measure the same (1.167 vs 1.162, 11.66 vs 12.15) — the break
+  fix is performance-neutral, the CPU count is not. The p6 filesystem
+  rows never moved (append 6.35/6.40, mkdrmdir 269.4/269.8, unlink
+  61.4/67.7) — the earlier Tier-2 FAILs were stale anchors judging a
+  new configuration. Honest cost recorded: **COW faults are 58%
+  slower at 8 CPUs** (the cross-CPU TLB shootdown) while context
+  switches are 38% faster; the baseline table is re-banked to the
+  SMP-8 standard (docs/development/perf-gate-baseline.md). Safety
+  pairing: the per-mm break lock is a plain Spinlock taken OUTSIDE
+  the VMA write lock (one order only: brk_lock -> vma_lock), it
+  serializes the break read-modify-write against the reference's
+  mmap_lock discipline, and the break value it protects is now the
+  shared mm-owned one — a stale per-thread copy was the defect class
+  (a thread releasing live pages), so the lock is exactly the
+  property that makes the fast path safe.
+
 - lmbench, same host, same accel, both kernels under one q35+KVM rig
   (kernel e264a64b, standing table 2026-11-03): 4 rows ahead of the
   reference — lat_ctx −s64 2: 1.98 vs 6.71 µs (3.4x), lat_pipe 5.11

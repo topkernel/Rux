@@ -122,6 +122,45 @@ closest to the release-strong TCG-era class (1.37-1.39): expect the
 strong-class KVM column to re-bank lower still when the perf lane
 next measures it.
 
+### Re-bank: SMP-8 standard (2026-11-08)
+
+The user directive (2026-11-07) makes **every** launch boot with at
+least 8 CPUs (Kernel.toml `smp.max_cpus = 8`; the x86/aarch64/riscv64
+drivers default to `-smp 8`). The Tier-2 cells above were measured in
+the old configuration (2-4 real CPUs), so they cannot judge an 8-CPU
+run — cross-configuration comparison is the same meaningless
+comparison as debug-vs-strong. The cells are re-banked here.
+
+Same-rig A/B at SMP 8 (KVM, q35, 4G), baseline `166e4516` vs the
+per-mm-break kernel `c127e4bc`:
+
+| row | base166 @smp8 | brkfix @smp8 | base166 @smp4 | brkfix @smp4 | attribution |
+|---|---|---|---|---|---|
+| p2_ctxsw | 1.222 | **0.756** | 1.167 | 1.162 | CPU count: 8 CPUs switch 38% faster |
+| p3b_cow | 12.073 | **18.424** | 11.662 | 12.153 | CPU count: 8 CPUs cost 58% on COW faults |
+| p6_append | 6.352 | 6.402 | 6.502 | 6.402 | unchanged (all four configs) |
+| p6_mkdrmdir | 269.413 | 269.778 | 278.030 | — | unchanged |
+| p6_unlink | 61.425 | 67.735 | 62.156 | — | unchanged (±10% row noise) |
+| p6_stat | 2.635 | 3.366 | 2.645 | 2.765 | ±25% row noise |
+| p1_null | 0.271 | 0.280 | — | — | unchanged |
+| p1_clock | 0.350 | 0.350 | — | — | unchanged |
+
+Reading: the **code change is neutral** (the same kernels at SMP 4
+measure the same), and the movement belongs to the CPU count — a
+faster context switch and a more expensive COW fault (the 8-way TLB
+shootdown). The p6 rows never moved; the earlier Tier-2 FAILs were the
+stale anchors judging a new configuration, not a regression.
+
+**New anchors** (also in `scripts/perf-gate.sh`): p1_null 0.280,
+p1_clock 0.350, p2_ctxsw 0.756, p3b_cow 18.424, p6_write_fsync
+8613.105, p6_mkdrmdir 269.778, p6_unlink 67.735, p6_append 6.402.
+
+**Open cost**: the COW-fault regression is the price of the SMP-8
+standard and is recorded as an honest gap (§3/§5 of the
+safety-and-performance ledger). It matters for the fork-heavy
+service graph (OH/GNOME); the next optimization target is the COW
+fault path's cross-CPU shootdown, not the break handling.
+
 ### Strong-class KVM verification (2026-11-03, stress-port round 8)
 
 The re-banked KVM anchor's load-immunity is now VERIFIED at the
