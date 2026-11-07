@@ -8272,3 +8272,24 @@ launcher tally.
   ordered at merge review; the pbench battery above is the measured
   no-harm proof on the same rig.
 
+
+### 71.5 COORDINATOR A/B VERDICT (abref1, 2026-11-08) — the usb_host storm is IMAGE-INHERITED; the launcher gate is our RESPONSE to it
+
+Reference kernel × OUR hunt rig (system-lb5 + userdata-fresh2, q35+KVM, 500s):
+- usb_host SIGSEGV storm: SAME 8 crashes from t=5.7s, continuing to
+  t=247s+ — the 54th's image-inherited verdict is CONFIRMED on the
+  exact hunting rig.
+- DESPITE the storm: bootevent.launcher.ready at **11.4s**, pixels
+  c37d2947 (non-black). The reference reaches the desktop WITH the
+  storm running.
+
+CONCLUSION: the storm is not ours and not the gate. The gate is our
+kernel's DIFFERENT RESPONSE to the same crash-restart interleaving:
+on the reference, DevSvcManager never opens the double-lock window;
+on ours, the founder (tid341-class ADD_SERVICE handler) re-enters the
+held mutex. The next hunt: diff the interleaving AROUND the crash
+restarts (the 71st's §71 recipe: symbolize the double-lock site in
+hdf DevSvcManager source; the crash-restart sequence that reaches it
+exists on BOTH kernels — find the kernel-visible event that orders
+them differently; with abref1's reference log now on the SAME rig,
+the txn/delivery timeline diff is directly alignable line-by-line).
