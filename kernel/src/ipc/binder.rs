@@ -1330,6 +1330,16 @@ struct ThreadState {
     /// True while blocked in binder_thread_read waiting for proc work
     /// (Linux waiting_threads list, drives BR_SPAWN_LOOPER).
     waiting_for_proc_work: bool,
+    /// Park sequence stamp (65th session, reference-order parity):
+    /// value of NEXT_PARK_SEQ when this thread last joined the
+    /// waiting-for-proc-work set. The reference registers a parking
+    /// reader with `list_add` at the HEAD of proc->waiting_threads and
+    /// binder_select_thread_ilocked pops the head — i.e. the MOST
+    /// RECENTLY parked looper is selected for delivery (LIFO, sticky to
+    /// the thread that just finished and re-parked). We have no list;
+    /// a monotonic stamp under WORLD reproduces the exact order (max
+    /// stamp = head). 0 = not parked.
+    park_seq: u64,
     txn_stack: Vec<Arc<BinderTxn>>,
     /// Transition ring (sc74 forensics); written under WORLD only.
     hist: [BinderEv; BHIST],
@@ -1400,6 +1410,7 @@ impl BinderThread {
                 todo: VecDeque::new(),
                 process_todo: false,
                 waiting_for_proc_work: false,
+                park_seq: 0,
                 txn_stack: Vec::new(),
                 hist: [BinderEv { j: 0, ev: 0, a: 0, b: 0 }; BHIST],
                 hcur: 0,
@@ -1509,6 +1520,13 @@ struct World {
 
 static WORLD: Spinlock<Option<World>> = Spinlock::new(None);
 static NEXT_PROC_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+/// Monotonic stamp for binder looper parks (65th session): stamped into
+/// ThreadState::park_seq each time a thread joins the waiting-for-proc-work
+/// set, consumed by wake_proc_one/unpin_txn_node picks. Reproduces the
+/// reference's proc->waiting_threads LIFO (list_add at head + first_entry
+/// pop) without a list. Under WORLD only.
+static NEXT_PARK_SEQ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
 
 /// Waiters parked while the context manager for their device context is
 /// not yet installed (see wait_for_context_manager). set_context_mgr
@@ -1788,32 +1806,36 @@ unsafe fn drain_deliver_parked_txn(
 fn wake_proc_one(p: &Arc<BinderProc>, prefer_tgid: u32) {
     let w = world_lock();
     // SAFETY: thread/proc scans below run under WORLD.
-    let (mut pick, poll_wake) = unsafe {
+    let (pick, poll_wake) = unsafe {
         let pim = pm(w.as_ref().unwrap(), p);
         let im = pim.im();
-        let pick = im
+        // Candidate set (waiting_threads membership parity): parked
+        // readers with empty own todo and empty txn stack.
+        let mut pick: Vec<(Arc<BinderThread>, u8, u64)> = im
             .threads
             .iter()
             .filter(|t| {
                 let th = t.st();
                 th.waiting_for_proc_work && th.todo.is_empty() && th.txn_stack.is_empty()
             })
-            .cloned()
-            .collect::<Vec<_>>();
-        // Routing-aware ordering (kept from sc161; the reference needs no
+            .map(|t| {
+                let th = t.st();
+                (t.clone(), 0, th.park_seq)
+            })
+            .collect();
+        // Routing-aware leg (kept from sc161; the reference needs no
         // ordering because every reader may take every item): prefer a
         // reader that can actually consume something queued — a pick that
         // cannot would wake, re-check has_work, and re-park, eating the
         // single wake.
-        let mut pick = pick;
         if !im.todo.is_empty() {
-            pick.sort_by_key(|t| {
+            for e in pick.iter_mut() {
                 let readable = im
                     .todo
                     .iter()
-                    .any(|wk| work_readable_by(wk, t.tgid, pim));
-                if readable { 0 } else { 1 }
-            });
+                    .any(|wk| work_readable_by(wk, e.0.tgid, pim));
+                e.1 = if readable { 0 } else { 1 };
+            }
         }
         // binder_wakeup_poll_threads_ilocked: POLL-mode threads with
         // empty stack+todo are never on waiting_threads; the reference
@@ -1836,16 +1858,106 @@ fn wake_proc_one(p: &Arc<BinderProc>, prefer_tgid: u32) {
         (pick, poll_wake)
     };
     drop(w);
-    if let Some(t) = if prefer_tgid != 0 {
-        pick.iter().position(|t| t.tgid == prefer_tgid).map(|i| pick.remove(i))
-    } else {
-        if !pick.is_empty() { Some(pick.remove(0)) } else { None }
-    } {
+    // Selection ORDER (65th session, reference parity): the reference
+    // pops the HEAD of proc->waiting_threads, and binder_wait_for_work
+    // inserts at the head with list_add — the MOST RECENTLY parked
+    // looper is picked (LIFO; delivery is sticky to the thread that
+    // just finished a txn and re-parked, so consecutive proc-todo items
+    // go to the same thread on the reference). The old remove(0) took
+    // the EARLIEST-CREATED parked reader — with samgr's 16-thread pool
+    // that systematically assigned incoming txns to DIFFERENT threads
+    // than the reference, executing each handler under a different
+    // thread context (locks, FFRT queues, TLS) and building a different
+    // dependency-graph interleaving from the same binary.
+    // The sc161 legs stay ahead of the parity order: prefer the
+    // child-tgid group, then a reader that can consume the work — the
+    // most recent park_seq (reference head) wins INSIDE each tier.
+    let mut selected: Option<Arc<BinderThread>> = None;
+    if !pick.is_empty() {
+        let mut group: Vec<&(Arc<BinderThread>, u8, u64)> = pick.iter().collect();
+        if prefer_tgid != 0 {
+            let pref: Vec<&(Arc<BinderThread>, u8, u64)> =
+                group.iter().filter(|e| e.0.tgid == prefer_tgid).copied().collect();
+            if !pref.is_empty() {
+                group = pref;
+            }
+        }
+        let best_readable = group.iter().map(|e| e.1).min().unwrap();
+        let tier: Vec<&(Arc<BinderThread>, u8, u64)> =
+            group.iter().filter(|e| e.1 == best_readable).copied().collect();
+        let head = tier.iter().max_by_key(|e| e.2).unwrap();
+        selected = Some(head.0.clone());
+    }
+    if let Some(t) = selected {
         wake_thread(&t);
     }
     for t in poll_wake {
         wake_thread(&t);
     }
+}
+
+/// binder_proc_transaction parity (65th session): when a fresh sync txn
+/// (or the first oneway taking a node's async slot) has no exact thread
+/// target, the reference SELECTS the most recently parked waiting reader
+/// (binder_select_thread_ilocked pops the waiting_threads head) and
+/// pushes the work onto THAT thread's todo (binder_enqueue_thread_work_
+/// ilocked) — the proc todo is only used when NO reader is waiting.
+/// Selecting REMOVES the thread from the waiting set until it re-parks
+/// (list_del_init at select), so a second rapid txn selects a DIFFERENT
+/// reader: two consecutive txns run CONCURRENTLY on the reference's
+/// pool. Our old proc-todo + wake-one shape left the selected thread
+/// flagged, so the second wake re-picked the same (still-flagged)
+/// thread and the pair serialized on one looper. This helper
+/// reproduces the reference: pick (max park_seq; the sc161
+/// preferred-tgid and work-readable legs stay as tiers), clear the
+/// waiting flag, push onto the thread's todo. Returns the thread to
+/// wake AFTER WORLD release; None means no waiting reader (caller
+/// pushes to the proc todo, reference's fallback leg).
+/// SAFETY: caller must hold WORLD.
+unsafe fn deliver_txn_to_selected_thread(
+    world: &World,
+    target: &Arc<BinderProc>,
+    txn: &Arc<BinderTxn>,
+) -> Option<Arc<BinderThread>> {
+    let pim = pm(world, target);
+    // Candidate set (waiting_threads membership), as wake_proc_one:
+    // parked readers with empty own todo and empty txn stack.
+    let cands: Vec<(Arc<BinderThread>, u64)> = pim
+        .im()
+        .threads
+        .iter()
+        .filter(|t| {
+            let th = t.st();
+            th.waiting_for_proc_work && th.todo.is_empty() && th.txn_stack.is_empty()
+        })
+        .map(|t| {
+            let th = t.st();
+            (t.clone(), th.park_seq)
+        })
+        .collect();
+    // Score (readable:u8, park_seq:u64): the sc161 readable tier first,
+    // the reference LIFO head (max park_seq) inside the tier.
+    let work = Work::Transaction(txn.clone());
+    let mut best: Option<(Arc<BinderThread>, u8, u64)> = None;
+    for (t, seq) in cands {
+        let readable = work_readable_by(&work, t.tgid, pim);
+        let rkey = if readable { 0u8 } else { 1u8 };
+        let better = match &best {
+            None => true,
+            Some((_, br, bp)) => rkey < *br || (rkey == *br && seq > *bp),
+        };
+        if better {
+            best = Some((t.clone(), rkey, seq));
+        }
+    }
+    let t = best?.0;
+    let th = t.st();
+    th.waiting_for_proc_work = false; // list_del_init at select
+    th.todo.push_back(Work::Transaction(txn.clone()));
+    th.process_todo = true;
+    let tid = t.tid;
+    t.hist(EV_TXN_TQUEUED, txn.id as u32, tid);
+    Some(t)
 }
 
 /// Number of refs (across all procs) pointing at a node.
@@ -2176,12 +2288,22 @@ unsafe fn unpin_txn_node(world: &World, t: &BinderTxn) {
     if let Some(owner) = owner {
         if (!ns.strong() && ns.has_strong_ref) || (!ns.weak(external) && ns.has_weak_ref) {
             owner.im().todo.push_back(Work::Node(node.clone()));
-            // pick-one wake; runs under WORLD like the S1 wake did
+            // pick-one wake; runs under WORLD like the S1 wake did.
+            // Reference order (65th session): binder_wakeup_proc_ilocked
+            // pops the most recently parked reader — max park_seq, not
+            // the earliest-created thread (list_add-at-head + first_entry
+            // parity, same as wake_proc_one).
             let pick = {
-                let th = owner.im().threads.iter().find(|t| {
-                    let x = t.st();
-                    x.waiting_for_proc_work && x.todo.is_empty() && x.txn_stack.is_empty()
-                }).cloned();
+                let th = owner
+                    .im()
+                    .threads
+                    .iter()
+                    .filter(|t| {
+                        let x = t.st();
+                        x.waiting_for_proc_work && x.todo.is_empty() && x.txn_stack.is_empty()
+                    })
+                    .max_by_key(|t| t.st().park_seq)
+                    .cloned();
                 th
             };
             if let Some(t) = pick {
@@ -9877,10 +9999,8 @@ fn binder_transaction(
                     // below carries route= — the AMS->child hop is mostly
                     // ONEWAY (ScheduleStartAbility family), so the queue
                     // verdict must be readable on both halves).
-                    let txn_route_label = if posted_thread.is_some() {
+                    let mut txn_route_label = if posted_thread.is_some() {
                         "child-looper"
-                    } else if pref != 0 {
-                        "child-proctodo"
                     } else {
                         "proctodo"
                     };
@@ -9902,12 +10022,27 @@ fn binder_transaction(
                                     })
                                     .count() as u8;
                             }
-                            pm(world, &target).im().todo.push_back(Work::Transaction(txn.clone()));
-                            thread.hist(EV_TXN_PQUEUED, txn.id as u32, target.pid);
-                            if pref != 0 {
-                                wakes_child.push((target.clone(), pref));
-                            } else {
-                                wakes.push(target.clone());
+                            // Reference parity (65th session,
+                            // binder_proc_transaction): select the most
+                            // recently parked reader and push the txn to
+                            // ITS todo; proc todo only when nobody waits.
+                            // SAFETY: under WORLD.
+                            let sel =
+                                unsafe { deliver_txn_to_selected_thread(world, &target, &txn) };
+                            match sel {
+                                Some(st) => {
+                                    wake_ths.push(st);
+                                    txn_route_label = "selthread";
+                                }
+                                None => {
+                                    pm(world, &target).im().todo.push_back(Work::Transaction(txn.clone()));
+                                    thread.hist(EV_TXN_PQUEUED, txn.id as u32, target.pid);
+                                    if pref != 0 {
+                                        wakes_child.push((target.clone(), pref));
+                                    } else {
+                                        wakes.push(target.clone());
+                                    }
+                                }
                             }
                         }
                     }
@@ -10056,14 +10191,29 @@ fn binder_transaction(
                                     })
                                     .count() as u8;
                             }
-                            pm(world, &target).im().todo.push_back(Work::Transaction(txn.clone()));
-                            thread.hist(EV_TXN_PQUEUED, txn.id as u32, target.pid);
-                            if pref != 0 {
-                                wakes_child.push((target.clone(), pref));
-                                txn_route_label = "child-proctodo";
-                            } else {
-                                wakes.push(target.clone());
-                                txn_route_label = "proctodo";
+                            // Reference parity (65th session,
+                            // binder_proc_transaction): select the most
+                            // recently parked reader and push the txn to
+                            // ITS todo; proc todo only when nobody waits.
+                            // SAFETY: under WORLD.
+                            let sel =
+                                unsafe { deliver_txn_to_selected_thread(world, &target, &txn) };
+                            match sel {
+                                Some(st) => {
+                                    wake_ths.push(st);
+                                    txn_route_label = "selthread";
+                                }
+                                None => {
+                                    pm(world, &target).im().todo.push_back(Work::Transaction(txn.clone()));
+                                    thread.hist(EV_TXN_PQUEUED, txn.id as u32, target.pid);
+                                    if pref != 0 {
+                                        wakes_child.push((target.clone(), pref));
+                                        txn_route_label = "child-proctodo";
+                                    } else {
+                                        wakes.push(target.clone());
+                                        txn_route_label = "proctodo";
+                                    }
+                                }
                             }
                         }
                     }
@@ -10618,6 +10768,13 @@ fn binder_thread_read(
                     // reference registers every such reader for wakeups).
                     let th = thread.st();
                     th.waiting_for_proc_work = th.todo.is_empty() && th.txn_stack.is_empty();
+                    // Reference parity: a joining reader goes to the HEAD
+                    // of proc->waiting_threads (binder_wait_for_work's
+                    // list_add). The stamp makes the pick order below
+                    // pop the most recently parked thread first.
+                    if th.waiting_for_proc_work {
+                        th.park_seq = NEXT_PARK_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    }
                     if t_armed {
                         t_proc_work = th.waiting_for_proc_work;
                         t_txn_stack = !th.txn_stack.is_empty();
