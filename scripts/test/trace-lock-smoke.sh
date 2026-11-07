@@ -37,6 +37,21 @@ mkdir -p "$ROOT/run" "$ROOT/work"
 rm -f "$LOG" "$IMG"
 cp "$ROOT/test/rootfs.img" "$IMG"
 
+# Pre-inject the biglock_fair corpus on the HOST (run/bigfair.py's
+# lesson: mass in-guest file creation trips an unrelated write-path
+# corruption family and burns minutes of TCG time; the fairness gate
+# only needs the READ side, and the probe accepts any content at the
+# right size — 6x6MB hammer corpus + 4MB canary + 6MB mmap file).
+CORPUS_DIR="$ROOT/work/tr4-smoke-corpus"
+mkdir -p "$CORPUS_DIR"
+for spec in bf-corpus-0:6 bf-corpus-1:6 bf-corpus-2:6 bf-corpus-3:6 \
+            bf-corpus-4:6 bf-corpus-5:6 bf-canary:4 bf-mmap:6; do
+    name="${spec%%:*}"; mb="${spec##*:}"
+    [ -f "$CORPUS_DIR/$name.dat" ] || \
+        dd if=/dev/zero of="$CORPUS_DIR/$name.dat" bs=1M count="$mb" status=none
+    debugfs -w -R "write $CORPUS_DIR/$name.dat /test/$name.dat" "$IMG" >/dev/null 2>&1
+done
+
 {
     sleep "$BOOT_DELAY"
     echo 'echo ===TR4: available lock/tcp/sock rows ==='
