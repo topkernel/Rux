@@ -116,7 +116,72 @@ impl GlobalRunQueue {
         crate::interrupt::preempt::preempt_count_add(
             crate::interrupt::preempt::PREEMPT_OFFSET,
         );
-        self.lock.lock();
+        // r12 wake/halt hunt: GRQ acquisition-stall probe (forkprof
+        // boots only — one relaxed armed-load when off). The queue
+        // freezes show both CPUs stuck at schedule() entry with a
+        // pickable candidate in the tree and the tick-path sampler hung
+        // before it could record: a long GRQ hold is the only shape
+        // that does all three. The report names the victim's call site
+        // (track_caller) and the wait; the holder's identity is
+        // inferable from a consistent victim pattern.
+        if crate::debug::forkprof::on() {
+            let t0 = crate::arch::cpu::read_counter();
+            self.lock.lock();
+            let waited = crate::arch::cpu::read_counter().saturating_sub(t0);
+            // ~4 ms at the calibrated TSC rate (2.5 GHz class).
+            if waited > 10_000_000 {
+                static SR_N: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                if SR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+                    let loc = core::panic::Location::caller();
+                    fn pnum(mut v: u64, out: &mut [u8; 24]) -> usize {
+                        if v == 0 {
+                            out[0] = b'0';
+                            return 1;
+                        }
+                        let mut k = 0;
+                        while v > 0 {
+                            out[k] = b'0' + (v % 10) as u8;
+                            v /= 10;
+                            k += 1;
+                        }
+                        out[..k].reverse();
+                        k
+                    }
+                    let mut buf: [u8; 192] = [0u8; 192];
+                    let mut n = 0usize;
+                    let head = b"GRQ-STALL cpu=";
+                    buf[..head.len()].copy_from_slice(head);
+                    n = head.len();
+                    let mut d = [0u8; 24];
+                    let l = pnum(crate::arch::cpu_id() as u64, &mut d);
+                    buf[n..n + l].copy_from_slice(&d[..l]);
+                    n += l;
+                    const M1: &[u8] = b" waited-cyc=";
+                    buf[n..n + M1.len()].copy_from_slice(M1);
+                    n += M1.len();
+                    let l = pnum(waited, &mut d);
+                    buf[n..n + l].copy_from_slice(&d[..l]);
+                    n += l;
+                    const M2: &[u8] = b" caller=";
+                    buf[n..n + M2.len()].copy_from_slice(M2);
+                    n += M2.len();
+                    let f = loc.file().as_bytes();
+                    let fl = f.len().min(96);
+                    buf[n..n + fl].copy_from_slice(&f[..fl]);
+                    n += fl;
+                    buf[n] = b':';
+                    n += 1;
+                    let l = pnum(loc.line() as u64, &mut d);
+                    buf[n..n + l].copy_from_slice(&d[..l]);
+                    n += l;
+                    buf[n] = b'\n';
+                    crate::console::puts_bytes_no_lock(&buf[..=n]);
+                }
+            }
+        } else {
+            self.lock.lock();
+        }
         GrqGuard { grq: self as *const Self as *mut Self, flags, _marker: core::marker::PhantomData }
     }
 
