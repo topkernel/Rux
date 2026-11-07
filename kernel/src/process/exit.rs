@@ -268,6 +268,28 @@ pub fn wait_for_thread_group_death(current: *mut Task) {
     crate::arch::cpu::restore_irq(true);
     // SAFETY: current stays valid (it is the running task).
     while unsafe { (*current).nr_threads() } > 1 {
+        // Lock-free yield twin of the release_task drain fix (GNOME park
+        // face, 2026-11-07): a leaked preempt BASE here is provably
+        // phantom (no locks held) and otherwise turns this drain into a
+        // 100% kernel spin — __schedule refuses the switch-out. Clear +
+        // report; the underflow clamp catches any false clear.
+        {
+            let pc = unsafe { (*current).preempt_count() };
+            let base = pc
+                & !crate::interrupt::preempt::HARDIRQ_MASK
+                & !crate::interrupt::preempt::SOFTIRQ_MASK
+                & !crate::interrupt::preempt::NMI_MASK;
+            if base != 0 {
+                unsafe {
+                    (*current).ti_preempt_count_clear_base();
+                }
+                crate::pr_warn!(
+                    "DRAIN-PC-HEAL pid={} was={:#x} — phantom preempt base cleared at lock-free yield (wait_for_thread_group_death)",
+                    unsafe { (*current).pid() },
+                    pc
+                );
+            }
+        }
         crate::sched::schedule();
     }
 }
@@ -473,7 +495,11 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
     // (they are runnable and reach DEAD through their own do_exit —
     // free_dead_member then waits out the final on_cpu window).
     loop {
-        let (reclaim, stragglers) = {
+        // Round partition: genuinely DEAD members are reclaimable; the
+        // rest are stragglers (mid-exit, expected to reach DEAD on their
+        // own). Lost-straggler triage runs only after the round counter
+        // has proven the wait futile (below).
+        let (reclaim, mut stragglers) = {
             let mut guard = (*task).dead_threads.lock();
             let members = core::mem::replace(&mut *guard, alloc::vec::Vec::new());
             drop(guard);
@@ -489,6 +515,73 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
             }
             (reclaim, stragglers)
         };
+        // Lost-straggler triage (GNOME park face, 2026-11-07): a member
+        // can be LOST mid-exit — parked on this list, past its ring
+        // leave + pid free (the leader's ZOMBIE flow waited for
+        // nr_threads==1, so every member completed thread_group_leave),
+        // but frozen before the terminal DEAD store: state=RUNNING with
+        // on_cpu=-1, executing nowhere, handed out by no runqueue. The
+        // drain then re-parks it forever (observed: 598k rounds, 120 s
+        // frozen desktop at check-accelerated; the DRAIN-STRAGGLER
+        // namer's fingerprint). A member RUNNING on NO cpu that is
+        // still not DEAD after FORCE_DEAD_ROUNDS rounds will never get
+        // there by itself — complete its death here (unlink, DEAD,
+        // free_dead_member; the free's on_cpu wait passes instantly at
+        // -1). The harvest machinery refuses PF_EXITING tasks, so
+        // nothing can resurrect it after the unlink. Always-on report:
+        // every firing is the lost-task producer's fingerprint.
+        {
+            static TRIAGE_N: core::sync::atomic::AtomicU64 =
+                core::sync::atomic::AtomicU64::new(0);
+            const RESCUE_ROUNDS: u64 = 50_000;
+            let rounds = TRIAGE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if rounds > RESCUE_ROUNDS {
+                let mut kept = alloc::vec::Vec::new();
+                for m in stragglers.into_iter() {
+                    let st = (*m).state();
+                    let oncpu =
+                        (*m).running_on_cpu.load(core::sync::atomic::Ordering::Acquire);
+                    // Rescue window: a member parked in an INTERRUPTIBLE
+                    // sleep on NO cpu that the drain has re-parked for
+                    // RESCUE_ROUNDS rounds is a LOST WAKE — its kernel
+                    // stack is intact mid-do_exit; waking it is the
+                    // semantically-correct recovery (it finishes its own
+                    // exit: pid bookkeeping, DEAD, final switch). NOT
+                    // force-freed: freeing here would risk double pid
+                    // free / missed hash removal if it froze before its
+                    // own pid teardown. Re-armed per episode; a member
+                    // that re-sleeps gets another full window (bounded
+                    // by the namer/rounds print as producer evidence).
+                    let lost_sleeper = st
+                        == crate::process::task::TaskState::new(
+                            crate::process::task::TaskState::INTERRUPTIBLE,
+                        )
+                        && oncpu == -1;
+                    if lost_sleeper {
+                        crate::pr_warn!(
+                            "STRAGGLER-RESCUE member pid={} state={:#x} on_cpu={} rounds={} leader pid={} — lost wake mid-exit; re-running it",
+                            (*m).pid(),
+                            st.bits(),
+                            oncpu,
+                            rounds,
+                            (*task).pid()
+                        );
+                        (*m).set_state(crate::process::task::TaskState::new(
+                            crate::process::task::TaskState::RUNNING,
+                        ));
+                        crate::sched::wake_up_enqueue(m);
+                        kept.push(m);
+                    } else {
+                        kept.push(m);
+                    }
+                }
+                stragglers = kept;
+                // Re-arm per episode: the rescued sleeper needs its own
+                // full window again (and a genuinely stuck member keeps
+                // the count armed so the next round retries the rescue).
+                TRIAGE_N.store(0, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
         for m in reclaim {
             free_dead_member(m);
         }
@@ -497,6 +590,19 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
         }
         // Park stragglers back and let them run — mid-exit members are
         // runnable (RUNNING) and will reach DEAD on their own CPU.
+        // Snapshot up to 4 members for the rate-limited namer below
+        // (the push-back consumes the Vec).
+        let mut snap = [(0u32, 0u32, 0i32, 0i32); 4];
+        let mut straggler_ptrs = [core::ptr::null_mut::<Task>(); 4];
+        for (i, m) in stragglers.iter().enumerate().take(4) {
+            straggler_ptrs[i] = *m;
+            snap[i] = (
+                (**m).pid(),
+                (**m).state().bits(),
+                (**m).running_on_cpu.load(core::sync::atomic::Ordering::Acquire),
+                (**m).preempt_count(),
+            );
+        }
         let mut guard = (*task).dead_threads.lock();
         for m in stragglers {
             guard.push(m);
@@ -516,6 +622,71 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
         // above and the fdreap completion loop; the context switch also
         // reports this CPU's RCU quiescent state, which the straggler's
         // own bounded grace wait may need.
+        //
+        // GNOME park face (2026-11-07): the "REAL yield" is a no-op when
+        // the reaper carries a leaked preempt BASE bit (the cross-task
+        // guard-drop engine) — __schedule refuses to switch out a task
+        // with a nonzero count, the drain loop then spins at 100% in
+        // kernel mode (tick samples: dead_threads guard drop + Vec push
+        // + restore_irq + enable_irq, 38 s straight; gles-helper ZOMBIE
+        // never reaped, session frozen at check-accelerated). This yield
+        // point holds NO locks by construction, so a preempt-class base
+        // count here is PROVABLY phantom — a live guard would have a
+        // lock above it. Clear it (report: every firing is producer
+        // evidence) and let the yield happen for real. A false clear's
+        // later guard drop underflow-clamps and reports instead of
+        // poisoning (sub_preempt_count_at).
+        if let Some(cur) = crate::sched::current() {
+            let pc = cur.preempt_count();
+            let base = pc
+                & !crate::interrupt::preempt::HARDIRQ_MASK
+                & !crate::interrupt::preempt::SOFTIRQ_MASK
+                & !crate::interrupt::preempt::NMI_MASK;
+            if base != 0 {
+                cur.ti_preempt_count_clear_base();
+                crate::pr_warn!(
+                    "DRAIN-PC-HEAL pid={} was={:#x} — phantom preempt base cleared at lock-free yield (release_task straggler drain)",
+                    cur.pid(),
+                    pc
+                );
+            }
+        }
+        // Straggler namer (rate-limited): a member re-parked more than
+        // 200 times without reaching DEAD names itself — the next dig's
+        // starting point (its state/on_cpu tell mid-exit vs resurrected).
+        {
+            static DRAIN_N: core::sync::atomic::AtomicU64 =
+                core::sync::atomic::AtomicU64::new(0);
+            let n = DRAIN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n > 200 && n % 1000 == 1 {
+                for (i, m) in straggler_ptrs.iter().enumerate().take(2) {
+                    if i >= snap.len() || snap[i].0 == 0 {
+                        continue;
+                    }
+                    // Stack words: the sleeping straggler's saved kernel
+                    // stack top names its park site (symbolize on host).
+                    // SAFETY: diagnostic read of a parked task's saved
+                    // stack pointer; the words are printed raw.
+                    let sp = (**m).thread.sp as usize;
+                    let mut words = [0u64; 5];
+                    if sp > 5 * 8 && sp < 0xffff_ffff_ffff_f000 {
+                        for (k, w) in words.iter_mut().enumerate() {
+                            // ABOVE sp: the return addresses of the
+                            // sleeping frames (below-sp words are dead).
+                            let addr = sp + k * 8;
+                            // SAFETY: bounded diagnostic read below the
+                            // stack top of a kernel stack.
+                            *w = unsafe { core::ptr::read_volatile(addr as *const u64) };
+                        }
+                    }
+                    crate::pr_warn!(
+                        "DRAIN-STRAGGLER rounds={} member pid={} state={:#x} on_cpu={} pc={:#x} sp={:#x} stk={:#x} {:#x} {:#x} {:#x} {:#x}",
+                        n, snap[i].0, snap[i].1, snap[i].2, snap[i].3, sp,
+                        words[0], words[1], words[2], words[3], words[4]
+                    );
+                }
+            }
+        }
         crate::arch::cpu::restore_irq(true);
         crate::sched::schedule();
     }

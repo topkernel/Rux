@@ -2530,6 +2530,86 @@ fn swapper_comm(cpu: usize) -> [u8; 16] {
     out
 }
 
+/// PARK-HOLDOUT-HEALED report (GNOME park face, 2026-11-07): always-on,
+/// one direct-console line per firing of the park-refusal escape hatch —
+/// every firing is both an unblocked desktop and producer evidence for
+/// the cross-task guard-drop hunt (pair it with debug=leakhunt's
+/// PARK-REFUSED-ORIGIN for the acquire site). Raw putchar (same R34
+/// discipline as the neighboring scheduler diagnostics); IRQs are
+/// already restored at the call site.
+unsafe fn park_holdout_healed(
+    prev: *mut crate::process::task::Task,
+    pc: i32,
+    since: u64,
+    now: u64,
+) {
+    use crate::console::putchar_no_lock as putchar;
+    fn pdec(mut v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        let mut buf = [0u8; 20];
+        let mut n = 0;
+        if v == 0 {
+            putchar(b'0');
+            return;
+        }
+        while v > 0 && n < buf.len() {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        while n > 0 {
+            n -= 1;
+            putchar(buf[n]);
+        }
+    }
+    fn phex(mut v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        let mut buf = [0u8; 16];
+        let mut n = 0;
+        if v == 0 {
+            putchar(b'0');
+            return;
+        }
+        while v > 0 && n < buf.len() {
+            let d = (v & 0xF) as u8;
+            buf[n] = if d < 10 { b'0' + d } else { b'a' + d - 10 };
+            v >>= 4;
+            n += 1;
+        }
+        while n > 0 {
+            n -= 1;
+            putchar(buf[n]);
+        }
+    }
+    for &c in b"\nPARK-HOLDOUT-HEALED pid=" {
+        putchar(c);
+    }
+    pdec((*prev).pid() as u64);
+    for &c in b" comm=" {
+        putchar(c);
+    }
+    let name = (*prev).comm();
+    let nm = name.split(|&b| b == 0).next().unwrap_or(b"?");
+    for &b in nm.iter().take(15) {
+        if b >= 0x20 && b < 0x7f {
+            putchar(b);
+        } else {
+            putchar(b'.');
+        }
+    }
+    for &c in b" was=0x" {
+        putchar(c);
+    }
+    phex(pc as u32 as u64);
+    for &c in b" refused_for=" {
+        putchar(c);
+    }
+    pdec(now.wrapping_sub(since));
+    for &c in b"jiffies (voluntary park re-allowed)\n" {
+        putchar(c);
+    }
+}
+
 unsafe fn __schedule() {
     // cctx probe (closegap lane): phase NS sums for the whole schedule
     // body. t0 at entry; the phases add below bracket guards, GRQ wait,
@@ -2859,11 +2939,71 @@ unsafe fn __schedule() {
                         b"PARK-REFUSED-ORIGIN",
                         prev,
                     );
+                    // PARK-HOLDOUT escape hatch (GNOME park face,
+                    // 2026-11-07): the refusal above is the correct
+                    // discipline for a REAL lock holder (jchurn wedge),
+                    // but for a LEAKED phantom holdout bit it is an
+                    // unbounded freeze — the task re-attempts the
+                    // voluntary park, is refused again, and spins
+                    // unpreemptible forever (the check-accelerated
+                    // freeze: PREEMPT-LEAK pc=0x10001 pctick=1 held
+                    // 38 s cumulative; the tick-side PREEMPT-HEAL never
+                    // matured because the leak flickers drain/re-leak,
+                    // resetting the consecutive-run bar). Discriminator
+                    // is TIME on this task's own refusal episode: every
+                    // real guard section in task context is
+                    // microseconds, and an I/O-bound holder's poll loop
+                    // completes in milliseconds (its condition is
+                    // IRQ-driven) — a voluntary park refused for 3 s
+                    // straight is a phantom by the same five-orders
+                    // argument PREEMPT-HEAL round 3c uses. Zero it and
+                    // park anyway; a false heal's later guard drop
+                    // underflow-clamps and REPORTS (sub_preempt_count_at)
+                    // instead of poisoning, and every firing prints —
+                    // the escape is itself producer evidence.
+                    const PARK_HEAL_HOLDOUT_JIFFIES: u64 = 300;
+                    let now = crate::drivers::timer::get_jiffies();
+                    let since = (*prev)
+                        .ti_parkref_since
+                        .load(core::sync::atomic::Ordering::Acquire);
+                    if since != 0
+                        && now.wrapping_sub(since)
+                            >= PARK_HEAL_HOLDOUT_JIFFIES
+                    {
+                        (*prev).ti_parkref_since.store(
+                            0,
+                            core::sync::atomic::Ordering::Release,
+                        );
+                        (*prev).ti_preempt_count_zero();
+                        crate::arch::cpu::restore_irq(flags);
+                        park_holdout_healed(prev, pc, since, now);
+                        // Fall through: the park proceeds below (state
+                        // stays the wait path's sleep state).
+                    } else {
+                        if since == 0 {
+                            (*prev).ti_parkref_since.store(
+                                now,
+                                core::sync::atomic::Ordering::Release,
+                            );
+                        }
+                        crate::arch::cpu::restore_irq(flags);
+                        (*prev).set_state(TaskState::new(TaskState::RUNNING));
+                        crate::sched::dequeue_if_enqueued(&*prev);
+                        return;
+                    }
+                } else {
+                    crate::arch::cpu::restore_irq(flags);
+                    (*prev).set_state(TaskState::new(TaskState::RUNNING));
+                    crate::sched::dequeue_if_enqueued(&*prev);
+                    return;
                 }
-                crate::arch::cpu::restore_irq(flags);
-                (*prev).set_state(TaskState::new(TaskState::RUNNING));
-                crate::sched::dequeue_if_enqueued(&*prev);
-                return;
+            } else {
+                // Holdout clean (phantom IRQ-class bits only, or count
+                // already drained): the phantom path below parks — the
+                // refusal episode is over either way.
+                (*prev)
+                    .ti_parkref_since
+                    .store(0, core::sync::atomic::Ordering::Release);
             }
             // Phantom interrupt bits on a voluntary sleeper: same
             // medicine WAKE-HEAL administers (full zero — the holdout is

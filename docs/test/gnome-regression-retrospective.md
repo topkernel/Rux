@@ -125,7 +125,78 @@ caught the same week. It needs its own bisect lane.
 3. **fdreap close-stall floods**: present in every recent boot's late
    phase (55–129 per boot); its own lane.
 
-## 8. Recommendations (prevent recurrence)
+## 8. The park face (2026-11-07): three stacked mechanisms, all fixed
+
+After the §3/§6 fixes the desktop still froze before the shell in
+3–5 of 5 boots (variance by kernel build). Three independent
+mechanisms produced the same visible face — "gnome-session frozen at
+check-accelerated" — and each had to be peeled off separately.
+
+### 8.1 SOFTIRQ_OFFSET migration across a mid-window task switch (main@166e4516)
+
+The first capture (taskdump on a frozen boot) showed
+check-accelerated (pid 318) RUNNING on CPU1 with preempt=0x100 — the
+softirq window's SOFTIRQ_OFFSET stranded on the entry task after a
+context switch inside the window booked the add on one task and the
+sub on another. Fixed by repairing the bracket on mismatch
+(commit 166e4516). Necessary but not sufficient: 3/5 boots still froze.
+
+### 8.2 Leaked preempt BASE bit defeating the drain's yield (DRAIN-PC-HEAL)
+
+Second capture: pid 318 spins in `release_task`'s straggler drain
+(tick samples: dead_threads SpinlockGuard drop, Vec push, slab alloc,
+restore_irq, enable_irq — 38 s cumulative; 216 PREEMPT-LEAK lines at
+pc=0x10001 pctick=1). The chain: a leaked +1 preempt base (the known
+cross-task guard-drop engine — VFS/ICACHE-heavy paths, which the
+ENOENT-heavy session start hammers) makes the drain's
+`schedule()` a no-op (`__schedule` refuses to switch out a task with a
+nonzero count — the correct discipline for a real lock holder), and
+the tick-side PREEMPT-HEAL never matures because the leak flickers
+(drain/re-leak resets the 200-consecutive-observation bar). Fix: at
+the drain's yield point — lock-free by construction — a nonzero
+preempt base is provably phantom; clear it, report (DRAIN-PC-HEAL),
+yield for real. Same treatment in `wait_for_thread_group_death`.
+Defense-in-depth: `__schedule`'s voluntary-park refusal now carries a
+3 s escape hatch (PARK-HOLDOUT-HEALED) for the same phantom class.
+
+### 8.3 The lost straggler: a mid-exit member whose wake never came (STRAGGLER-RESCUE)
+
+Third face (the dominant one, 4/5 freezes): the gles-helper's
+group-kill leaves a thread-group member parked on the leader's
+dead-threads list in state=INTERRUPTIBLE with on_cpu=-1 — lost between
+its ring leave and its terminal DEAD store, runnable by no one. The
+reaper's drain re-parks it forever (observed: 598k–33.7M rounds; the
+new DRAIN-STRAGGLER namer fingerprinted it: member RUNNING-on-no-cpu
+→ later corrected to INTERRUPTIBLE-sleeping-on-no-cpu — TaskState
+encoding: RUNNING=0, INTERRUPTIBLE=1). Fix: after 50k drain rounds a
+member in that state is a lost wake — re-run it (set RUNNING,
+wake_up_enqueue). Its kernel stack is intact mid-do_exit; it then
+finishes its own exit (pid bookkeeping, DEAD, final switch) with all
+invariants. Boots that hit the face now recover in-place:
+3/3 taskdump-classified frozen boots became shell-up boots with one
+STRAGGLER-RESCUE line each; zero panics.
+
+### 8.4 What is still open
+
+The **producer** of 8.3 (why the member's wake was lost — wake-refused
+state race vs pick/heal re-link) and of 8.2 (the cross-task
+SpinlockGuard add/drop engine) remain open hunts; the rescue/heal
+machinery bounds their damage to sub-second and reports every firing
+as evidence (pair with debug=leakhunt for acquire sites). The namer's
+stack words (sp+0.., above the saved sp) name the park site on the
+next occurrence. A rarer fourth face freezes the session past
+check-accelerated in the keyring phase (1 of 11 post-fix boots; no
+straggler/leak markers fired — needs its own taskdump capture).
+
+**Verification (2026-11-07)**: 11 post-fix boots across three
+batteries (5×160 s + 3×160 s + 3 taskdump), kernel main+this change,
+image work/gnome-x86.img: shell up in 10/11 (was 0–1/5); zero
+KERNPANIC; STRAGGLER-RESCUE fired in 3 of them and every firing
+recovered the boot in place; the one freeze left is a different,
+rarer face in the keyring phase (§8.4); dual-arch builds green;
+riscv64 scripted boot rc=0; make test green.
+
+## 9. Recommendations (updated)
 
 1. Add a **desktop-boot gate** to the standing merge tiers: serial
    shows "Running GNOME Shell" and the session survives 60 s — same
@@ -136,8 +207,14 @@ caught the same week. It needs its own bisect lane.
 3. Require perf landings that remove locks or batch I/O to state, in
    the merge message, how fault-around, brk-trim and multi-threaded
    munmap were re-verified.
+4. The exit-path drain loops are now three-deep in "wait for another
+   task to progress" shapes (group death, straggler drain, on_cpu
+   wait) — each has bitten once. Any new one needs the same trio:
+   lock-free yield point, bounded wait, always-on report.
 
 ---
 *Evidence: run/ probe sources (mmap_witness, arena_churn, coldfile,
 fmv, swaprt, mremap), boot serials under /tmp per session log, kernel
-commits 5b4a4bc7, 10705570, f8ffce15, 484f2144.*
+commits 5b4a4bc7, 10705570, f8ffce15, 484f2144; park-face serials
+/tmp/fz-td*.log, /tmp/fz-cen1.log, /tmp/tri-g*.log, /tmp/res-g*.log
+(2026-11-07).*

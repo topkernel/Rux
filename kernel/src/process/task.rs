@@ -928,6 +928,19 @@ pub struct Task {
     /// exceed MAX_TASKS, so the table silently skipped every real task.
     pub hung_task_since: core::sync::atomic::AtomicU64,
 
+    /// Park-refusal episode stamp (GNOME park face, 2026-11-07): jiffies
+    /// of the FIRST refused voluntary park in the current episode
+    /// (0 = no episode). A voluntary sleeper whose preempt-class holdout
+    /// is a leaked phantom bit is refused forever by __schedule's
+    /// lock-holder discipline — the wait loop degenerates into an
+    /// unpreemptible poll (the check-accelerated freeze: PREEMPT-LEAK
+    /// pc=0x10001 pctick=1 for 38 s cumulative, zero heals because the
+    /// leak flickers and the tick-side consecutive-run bar never
+    /// matures). After 3 s of consecutive refusals the schedule() site
+    /// zeroes the phantom and parks anyway (PARK-HOLDOUT-HEALED).
+    /// Cleared on every allowed park and on each heal.
+    pub ti_parkref_since: core::sync::atomic::AtomicU64,
+
     /// Timed-sleep shadow (ticktrap, r41v17): the deadline of the timed
     /// wait this task is currently parked in, if any. Set by the wait
     /// site at timer-arm time and cleared at scope exit (guard Drop);
@@ -1673,6 +1686,7 @@ impl Task {
             ti_cpu: core::sync::atomic::AtomicI32::new(-1),
             cpus_allowed: core::sync::atomic::AtomicU32::new(Self::default_cpus_allowed()),
             hung_task_since: core::sync::atomic::AtomicU64::new(0),
+            ti_parkref_since: core::sync::atomic::AtomicU64::new(0),
             timed_sleep_deadline: core::sync::atomic::AtomicU64::new(0),
             timed_sleep_kind: core::sync::atomic::AtomicU32::new(0),
             timed_sleep_timer_id: core::sync::atomic::AtomicU64::new(0),
@@ -1912,6 +1926,13 @@ impl Task {
         // "e ticks" surviving inside live ksoftirqd/0).
         ptr::write(
             (ptr as usize + offset_of!(Task, hung_task_since)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        // parkref episode stamp (same recycled-page class): zero at both
+        // clone-path constructions or a stale stamp heals a fresh leak
+        // instantly on a recycled Task page.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_parkref_since)) as *mut core::sync::atomic::AtomicU64,
             core::sync::atomic::AtomicU64::new(0),
         );
         // ticktrap shadow (same R68a recycled-page class): a fresh task
@@ -2616,6 +2637,13 @@ impl Task {
         // "e ticks" surviving inside live ksoftirqd/0).
         ptr::write(
             (ptr as usize + offset_of!(Task, hung_task_since)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        // parkref episode stamp (same recycled-page class): zero at both
+        // clone-path constructions or a stale stamp heals a fresh leak
+        // instantly on a recycled Task page.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_parkref_since)) as *mut core::sync::atomic::AtomicU64,
             core::sync::atomic::AtomicU64::new(0),
         );
         // ticktrap shadow (same R68a recycled-page class): a fresh task

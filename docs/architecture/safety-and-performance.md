@@ -194,6 +194,24 @@ dead-proc `expect()` replaced by a bounded warning (619bf4b6); the
   + UTF-8 cmdline panic fix (830e3f8c). Test-harness-only panics
   (unit-test Vec drop) are excluded by method.
 
+### 2.3 Bounded-wait discipline on the exit path (2026-11-07)
+Every "wait for another task to progress" loop on the exit path now
+carries the same trio: lock-free yield point, bounded wait, always-on
+report. The trio exists because each of these loops bit once as an
+unbounded kernel-mode monopoly (the GNOME park face class, frozen
+desktop in 3-5 of 5 boots): the fdreap straggler drain (e6d0fda0),
+the group-death drain, the on_cpu wait (R86), and now the straggler
+drain's two failure modes — a leaked preempt base making the yield a
+no-op (DRAIN-PC-HEAL: at a lock-free yield a preempt base is provably
+phantom; cleared and reported, underflow clamp guards a false clear)
+and a lost mid-exit sleeper never re-run (STRAGGLER-RESCUE: after 50k
+drain rounds the member is re-run rather than force-freed — its stack
+is intact, it completes its own exit with all invariants; 14d73797).
+Both heals print on every firing: the reports ARE the producer-hunt
+feed for the two open leak classes. Verification: 5x160 s desktop
+boots, shell up 4/5 (was 0-1/5), both frozen-class recoveries
+in-place, zero KERNPANIC; make test green; riscv64 boot green.
+
 ## 3. Performance, measured (each fast path IS a safe path)
 - lmbench, same host, same accel, both kernels under one q35+KVM rig
   (kernel e264a64b, standing table 2026-11-03): 4 rows ahead of the
