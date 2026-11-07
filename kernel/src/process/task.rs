@@ -5070,17 +5070,25 @@ impl Task {
                     .tss_rsp0
                     .load(core::sync::atomic::Ordering::Acquire);
                 if rsp0 == stack_top as u64 {
-                    use crate::console::putchar;
-                    const MSG: &[u8] = b"\nSTACKFREE-LIVE-RSP0 cpu=";
-                    for &b in MSG {
-                        putchar(b);
-                    }
+                    // r12 wake/halt hunt: the per-char putchar loop took a
+                    // UART irqsave lock PER CHARACTER (~60 acquisitions,
+                    // ~120 VM exits per line under KVM) on the exit CPU's
+                    // hot path. One stack-buffer line + ONE batched burst
+                    // (single lock acquisition, single rep outsb) is the
+                    // same bytes at ~1/16 the cost. Raw no-lock burst: the
+                    // caller context (stack teardown) may already hold
+                    // locks whose ordering the UART lock must not nest.
+                    let mut line = [0u8; 96];
+                    const MSG: &[u8] = b"STACKFREE-LIVE-RSP0 cpu=";
+                    let mut n = MSG.len().min(95);
+                    line[..n].copy_from_slice(MSG);
                     let mut v = c as u64;
-                    if v == 0 {
-                        putchar(b'0');
-                    }
                     let mut d = [0u8; 20];
                     let mut k = 0;
+                    if v == 0 {
+                        d[k] = b'0';
+                        k = 1;
+                    }
                     while v > 0 {
                         d[k] = b'0' + (v % 10) as u8;
                         k += 1;
@@ -5088,27 +5096,28 @@ impl Task {
                     }
                     while k > 0 {
                         k -= 1;
-                        putchar(d[k]);
+                        line[n] = d[k];
+                        n += 1;
                     }
                     const M2: &[u8] = b" top=0x";
-                    for &b in M2 {
-                        putchar(b);
-                    }
-                    let mut vv = stack_top as u64;
+                    line[n..n + M2.len()].copy_from_slice(M2);
+                    n += M2.len();
+                    let vv = stack_top as u64;
                     for sh2 in (0..16).rev() {
                         let nb = ((vv >> (sh2 * 4)) & 0xF) as u8;
-                        putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                        line[n] = if nb < 10 { b'0' + nb } else { b'a' + nb - 10 };
+                        n += 1;
                     }
                     const M3: &[u8] = b" freeing_pid=";
-                    for &b in M3 {
-                        putchar(b);
-                    }
+                    line[n..n + M3.len()].copy_from_slice(M3);
+                    n += M3.len();
                     let mut pv = self.pid() as u64;
-                    if pv == 0 {
-                        putchar(b'0');
-                    }
                     let mut pd = [0u8; 10];
                     let mut pk = 0;
+                    if pv == 0 {
+                        pd[pk] = b'0';
+                        pk = 1;
+                    }
                     while pv > 0 {
                         pd[pk] = b'0' + (pv % 10) as u8;
                         pk += 1;
@@ -5116,9 +5125,12 @@ impl Task {
                     }
                     while pk > 0 {
                         pk -= 1;
-                        putchar(pd[pk]);
+                        line[n] = pd[pk];
+                        n += 1;
                     }
-                    putchar(b'\n');
+                    line[n] = b'\n';
+                    n += 1;
+                    crate::console::puts_bytes_no_lock(&line[..n]);
                 }
             }
 
