@@ -94,6 +94,93 @@ fn caller_return_address() -> usize {
     ra
 }
 
+// r18 flame refinement (`nextgate` feature, hunt kernels only):
+// contended-lock witness histogram keyed by lock ADDRESS. The GB
+// flamegraph's kernel-side top bucket (22%) is IP-only — every
+// contended lock lands on the same pause instruction — so this table
+// records WHICH lock the spin time went to. One witness per ~1M spins
+// (the TTAS inner loop), fixed 24-slot table, linear probe with CAS
+// claim; entry 0 of the count marks the address slot. Adversarial
+// collisions only merge two locks' counts — fine for target ranking.
+#[cfg(feature = "nextgate")]
+mod lockhist {
+    pub const SLOTS: usize = 24;
+    pub static ADDR: [core::sync::atomic::AtomicUsize; SLOTS] =
+        [const { core::sync::atomic::AtomicUsize::new(0) }; SLOTS];
+    pub static N: [core::sync::atomic::AtomicU32; SLOTS] =
+        [const { core::sync::atomic::AtomicU32::new(0) }; SLOTS];
+}
+
+/// r18 flame refinement: record one contention witness for this lock
+/// address (see `lockhist`). Called from the spin loop with IRQ state
+/// whatever the caller had — atomics only.
+#[cfg(feature = "nextgate")]
+fn lockhist_witness(addr: usize) {
+    for s in 0..lockhist::SLOTS {
+        let a = &lockhist::ADDR[s];
+        let cur = a.load(core::sync::atomic::Ordering::Relaxed);
+        if cur == addr {
+            lockhist::N[s].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+        if cur == 0
+            && a
+                .compare_exchange(0, addr, core::sync::atomic::Ordering::Relaxed, core::sync::atomic::Ordering::Relaxed)
+                .is_ok()
+        {
+            lockhist::N[s].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+    }
+    // table full: count into the last slot's address-less overflow by
+    // incrementing nothing — dropping witnesses is acceptable (ranking
+    // only).
+}
+
+/// r18 flame refinement: print the contention witness table
+/// (putchar_no_lock discipline; safe from any context).
+#[cfg(feature = "nextgate")]
+pub fn lockhist_print() {
+    use crate::console::putchar_no_lock as putchar;
+    for s in 0..lockhist::SLOTS {
+        let n = lockhist::N[s].load(core::sync::atomic::Ordering::Relaxed);
+        if n == 0 {
+            continue;
+        }
+        let a = lockhist::ADDR[s].load(core::sync::atomic::Ordering::Relaxed);
+        const M: &[u8] = b"\nLOCKHIST addr=0x";
+        for &b in M {
+            putchar(b);
+        }
+        let mut v = a as u64;
+        for _ in 0..16 {
+            let nb = (v >> 60) as u8;
+            putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+            v <<= 4;
+        }
+        const M2: &[u8] = b" n=";
+        for &b in M2 {
+            putchar(b);
+        }
+        let mut buf = [0u8; 10];
+        let mut k = 0;
+        let mut w = n as u64;
+        if w == 0 {
+            buf[0] = b'0';
+            k = 1;
+        }
+        while w > 0 {
+            buf[k] = b'0' + (w % 10) as u8;
+            w /= 10;
+            k += 1;
+        }
+        for i in (0..k).rev() {
+            putchar(buf[i]);
+        }
+    }
+    putchar(b'\n');
+}
+
 pub struct RawSpinlock {
     locked: AtomicU32,
     /// Deadlock diagnostics: holder's hart id + 1 (0 = free).  Written
@@ -240,6 +327,14 @@ impl RawSpinlock {
             }
             while self.locked.load(Ordering::Relaxed) != 0 {
                 spins = spins.wrapping_add(1);
+                #[cfg(feature = "nextgate")]
+                if spins & 0xF_FFFF == 0 {
+                    // r18 flame refinement: one witness per ~1M spins
+                    // (≈1-10 ms contended) — a cheap per-lock contention
+                    // volume histogram for hunt kernels (IP-only samples
+                    // cannot name WHICH lock the 22% bucket is).
+                    lockhist_witness(self as *const Self as usize);
+                }
                 if spins == Self::DEADLOCK_WARN_ITERS {
                     Self::deadlock_warn(self as *const Self, caller_ra);
                     spins = 0; // continue spinning (might resolve)
@@ -291,7 +386,10 @@ impl RawSpinlock {
             unsafe { crate::console::putchar_no_lock(b); }
         }
         let lval = unsafe { (&*lock_addr).locked.load(Ordering::Relaxed) };
-        let mut shift = (core::mem::size_of::<usize>() * 8) as i32;
+        // u32 word: 8 nibbles (the inherited 64-bit loop shifted a u32
+        // by up to 60 — debug builds panic on the overflow, which ate
+        // the first owner5 capture).
+        let mut shift = (core::mem::size_of::<u32>() * 8) as i32;
         while shift > 0 {
             shift -= 4;
             let nibble = (lval >> (shift as usize)) & 0xF;
@@ -327,9 +425,17 @@ impl RawSpinlock {
                     unsafe { crate::console::putchar_no_lock(b); }
                 }
             } else {
-                let h = holder - 1;
-                if h < 10 {
-                    unsafe { crate::console::putchar_no_lock(b'0' + h as u8); }
+                // r18: the owner word has been RA-stamped since r12, so
+                // the old hart-id decode printed nothing; the raw low
+                // nibble is the stamping CPU+1 (a legitimate stamp) or
+                // whatever a wild write left there — print it raw.
+                let nib = holder & 0xF;
+                unsafe {
+                    crate::console::putchar_no_lock(if nib < 10 {
+                        b'0' + nib as u8
+                    } else {
+                        b'a' + (nib - 10) as u8
+                    });
                 }
             }
             // r16 (GB GRQ lost-release deadlock): the owner word's HIGH
@@ -348,6 +454,14 @@ impl RawSpinlock {
                 let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
                 unsafe { crate::console::putchar_no_lock(c); }
             }
+        }
+
+        // r18 mechanism-C hunt: the per-CPU GRQ hold table discriminates
+        // "a real acquire leaked the section" (slot names the site) from
+        // "a wild write put the lock word at 1" (all slots clear).
+        #[cfg(feature = "nextgate")]
+        {
+            crate::sched::sched::grq_hold_table_print();
         }
 
         unsafe { crate::console::putchar_no_lock(b'\n'); }
