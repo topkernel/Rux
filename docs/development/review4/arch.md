@@ -174,7 +174,7 @@ x86_64 twin (exception.rs:527) does the guard correctly on the RAW CR2
 value. Fix: test `regs.badaddr`/`regs.far` canonicality directly before the
 VirtAddr conversion.
 
-### [Medium] riscv64/mm/exception.rs:451-697 — NOVMA-EXEC forensics fire unconditionally on every user exec fault at an unmapped VA
+### [Medium] riscv64/mm/exception.rs:451-697 — NOVMA-EXEC forensics fire unconditionally on every user exec fault at an unmapped VA — ✅ FIXED (`724e40be`)
 
 ~250 lines of hunt instrumentation (fixed-address PLTGOT probes at
 0x1842/0x17208/..., fixed stack base 0x3fffffe_a80 "for this rootfs", full-page
