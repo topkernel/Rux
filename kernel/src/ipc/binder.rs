@@ -1541,6 +1541,19 @@ struct ThreadState {
     /// stamp = head). 0 = not parked.
     park_seq: u64,
     txn_stack: Vec<Arc<BinderTxn>>,
+    /// 75th OH parity (CONFIG_BINDER_SENDER_INFO): thread->tokens.
+    /// sender_tokenid source — the SENDER's tgid of the transaction this
+    /// thread last staged to userspace (BR_TRANSACTION or BR_REPLY),
+    /// stamped for EVERY delivered txn exactly like the reference's
+    /// `thread->tokens.sender_tokenid = t->sender_tokenid`
+    /// (linux-6.6 binder.c:4829). The GET_SENDER_INFO ioctl resolves
+    /// the native access token through it. txn_stack cannot serve:
+    /// oneways are never stacked (no BC_REPLY will come).
+    sender_token_pid: u32,
+    /// 75th OH parity: thread->sender_pid_nr — task_tgid_nr of the
+    /// sender, but ONLY when t->from was set (sync txns; the reference
+    /// zeroes it for oneway/reply, binder.c:4737-4745).
+    sender_pid_nr: u32,
     /// Transition ring (sc74 forensics); written under WORLD only.
     hist: [BinderEv; BHIST],
     hcur: usize,
@@ -1613,6 +1626,8 @@ impl BinderThread {
                 looper_need_return: false,
                 park_seq: 0,
                 txn_stack: Vec::new(),
+                sender_token_pid: 0,
+                sender_pid_nr: 0,
                 hist: [BinderEv { j: 0, ev: 0, a: 0, b: 0 }; BHIST],
                 hcur: 0,
                 live_bwr: None,
@@ -7310,6 +7325,33 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
             }
             // The calling thread's transaction stack top is the txn being
             // serviced (Linux thread->transaction_stack, OH reads the same).
+            //
+            // 75th OH parity fix (the SA:511 launcher gate): the OH
+            // reference kernel stamps the SENDER's access token into
+            // EVERY transaction at send time (`t->sender_tokenid =
+            // current->token`, linux-6.6 binder.c:3247 — ONE_WAY
+            // included) and copies it onto the servicing thread at
+            // BR_TRANSACTION staging (binder.c:4829); only sender_pid_nr
+            // is gated on t->from (NULL for oneway → 0, binder.c:4737-
+            // 4745). Our old derivation took BOTH from txn.from_proc —
+            // None for every oneway — so token_of(0) returned the
+            // synthetic 0x28000000 (no process 0 ever registered), and
+            // every permission-checked ONEWAY stub handler silently
+            // denied: safwk LocalAbilityManagerStub::StartAbility's
+            // VerifyAccessToken(MANAGE_SYSTEM_ABILITY) returned -1
+            // (ohw103 txn4986 parcel=ffffffff), samgr could never load
+            // installd SA:511, InstalldClient::Mkdir never created
+            // /data/service/el1/public/bms/bundle_manager_service,
+            // CheckSystemFreeSize failed ENOENT and BMS OnBmsStarting
+            // took the "no space" early return — zero first-boot
+            // installs, no launcher. The same shape walls every other
+            // oneway to a permission-checking stub (the AMS code-46
+            // StartUser family). Token source is now txn.sender_pid —
+            // the sender's tgid, stamped for every txn at
+            // BC_TRANSACTION time (the task->token equivalent: our
+            // registry maps the sender tgid to its registered native
+            // token); the pid field stays t_from-gated like the
+            // reference.
             let (sender_pid, token, ftoken) = {
                 // dfx=syscalltrace: the GET_SENDER_INFO round-trip trace.
                 // Ungated it prints twice per call — samgr-side polls make
@@ -7322,7 +7364,8 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
                     crate::pr_info!("btx: GET_SENDER_INFO caller tid {}", current_tid());
                 }
                 let tid = current_tid();
-                let mut out = (0u32, 0u64, 0u64);
+                let mut token_src = 0u32;
+                let mut pid_out = 0u32;
                 let w = world_lock();
                 // SAFETY: under WORLD.
                 unsafe {
@@ -7333,19 +7376,45 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
                         .find(|q| Arc::ptr_eq(q, &proc))
                         .and_then(|q| q.im().threads.iter().find(|t| t.tid == tid))
                     {
-                        if let Some(txn) = th.st().txn_stack.last() {
-                            if let Some(fp) = &txn.from_proc {
-                                out = (fp.pid, 0, 0);
-                            }
-                        }
+                        let th = th.st();
+                        // Thread-level sender identity stamped at every
+                        // BR_TRANSACTION/BR_REPLY staging (reference
+                        // thread->tokens / thread->sender_pid_nr).
+                        token_src = th.sender_token_pid;
+                        pid_out = th.sender_pid_nr;
                     }
                 }
                 drop(w);
-                let (t, f) = crate::ipc::access_token::token_of(out.0);
+                let (t, f) = crate::ipc::access_token::token_of(token_src);
                 if trace {
-                    crate::pr_info!("btx: GET_SENDER_INFO sender pid {} token {:#x} ftoken {:#x}", out.0, t, f);
+                    crate::pr_info!(
+                        "btx: GET_SENDER_INFO sender pid {} token {:#x} ftoken {:#x}",
+                        pid_out,
+                        t,
+                        f
+                    );
                 }
-                (out.0, t, f)
+                // 75th installs lane: what the safwk stub's token check
+                // actually received — token_src is the serviced txn's
+                // sender tgid (0 = stack empty / not stamped), pid_out
+                // the t_from-gated pid field.
+                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang)
+                    && is_inst(proc.pid)
+                {
+                    static GSI_N: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    if GSI_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
+                        crate::pr_warn!(
+                            "INSTGSI tid={} token_src(pid)={} pid_out={} token={:#x} ftoken={:#x}",
+                            tid,
+                            token_src,
+                            pid_out,
+                            t,
+                            f
+                        );
+                    }
+                }
+                (pid_out, t, f)
             };
             let mut rec = [0u64; 5];
             rec[0] = token;
@@ -10043,8 +10112,43 @@ fn binder_transaction(
                 .map(|c| core::str::from_utf8(c).unwrap_or(""))
                 .unwrap_or("")
                 .trim_end_matches('\0');
+            // 75th: parcel hexdump for the shapes the StartAbility decode
+            // needs — (a) samgr->installs oneways (StartAbility(511):
+            // token + said + eventStr; libipc drops on token mismatch),
+            // (b) installs->accesstoken code-1 verify calls + their
+            // REPLY (the safwk stub's CheckPermission verdict: reply
+            // word 0 = PERMISSION_GRANTED, anything else = silently
+            // denied StartAbility).
+            let want_dump = (is_inst(target.pid)
+                && tr.flags & TF_ONE_WAY != 0
+                && !reply)
+                || (is_inst(proc.pid)
+                    && !reply
+                    && tr.code == 1
+                    && data_size >= 100)
+                || (reply && is_inst(target.pid) && data_size <= 16);
+            let mut hex = alloc::string::String::new();
+            if want_dump {
+                let n = if reply { 24 } else { 160 }.min(data_size.max(1));
+                let mut pb = alloc::vec![0u8; n];
+                let ok = tr.data_buffer != 0
+                    && unsafe {
+                        crate::arch::uaccess::copy_from_user(
+                            pb.as_mut_ptr(),
+                            tr.data_buffer as *const u8,
+                            pb.len(),
+                        ) == 0
+                    };
+                if ok {
+                    const HEXC: &[u8; 16] = b"0123456789abcdef";
+                    for &b in pb.iter() {
+                        hex.push(HEXC[(b >> 4) as usize] as char);
+                        hex.push(HEXC[(b & 0xf) as usize] as char);
+                    }
+                }
+            }
             crate::pr_warn!(
-                "INST-TXN txn{} {} pid{}/tid{} ('{}') -> pid{} code={:#x} oneway={} dlen={}",
+                "INST-TXN txn{} {} pid{}/tid{} ('{}') -> pid{} code={:#x} oneway={} dlen={} parcel={}",
                 txn.id,
                 if reply { "REPLY" } else { "SEND" },
                 proc.pid,
@@ -10053,7 +10157,8 @@ fn binder_transaction(
                 target.pid,
                 tr.code,
                 tr.flags & TF_ONE_WAY != 0,
-                data_size
+                data_size,
+                hex
             );
         }
     }
@@ -10663,6 +10768,21 @@ fn binder_transaction(
                                 ns.async_todo.len()
                             );
                         }
+                        // 75th installs lane: an oneway into installs
+                        // parked behind the node's async slot.
+                        if txnhunt_on() && is_inst(target.pid) {
+                            static IQP_N: core::sync::atomic::AtomicUsize =
+                                core::sync::atomic::AtomicUsize::new(0);
+                            if IQP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
+                                crate::pr_warn!(
+                                    "INSTQ txn{} code={:#x} PARKED node{} qlen={}",
+                                    txn.id,
+                                    txn.code,
+                                    node.id,
+                                    ns.async_todo.len()
+                                );
+                            }
+                        }
                     } else {
                         ns.has_async_transaction = true;
                     }
@@ -10742,6 +10862,42 @@ fn binder_transaction(
                             txn.id,
                             txn_route_label
                         );
+                    }
+                    // 75th installs lane: route verdict for every oneway
+                    // into the installs daemon (samgr StartAbility(511)
+                    // is the SA-load kick that gates the BMS first-boot
+                    // install stream). nwait = parked eligible readers at
+                    // enqueue; route=selthread needs the matching
+                    // INSTWAKE + INSTRD to complete delivery, route=
+                    // proctodo with nwait=0 parks on the proc list until
+                    // a looper reader arrives.
+                    if txnhunt_on() && is_inst(target.pid) {
+                        static IQ_N: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        if IQ_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
+                            // SAFETY: WORLD held (enq path); diagnostic scan.
+                            let nwait = unsafe {
+                                pm(world, &target)
+                                    .im()
+                                    .threads
+                                    .iter()
+                                    .filter(|x| {
+                                        let xh = x.st();
+                                        xh.waiting_for_proc_work
+                                            && xh.todo.is_empty()
+                                            && xh.txn_stack.is_empty()
+                                    })
+                                    .count()
+                            };
+                            crate::pr_warn!(
+                                "INSTQ txn{} code={:#x} route={} nwait={} proctodo={}",
+                                txn.id,
+                                txn.code,
+                                txn_route_label,
+                                nwait,
+                                unsafe { pm(world, &target).im().todo.len() }
+                            );
+                        }
                     }
                     // sc140: oneway half of the APPTXN tracer (see the
                     // sync branch below for the rationale).
@@ -10970,7 +11126,29 @@ fn binder_transaction(
         return;
     }
     for t in wake_ths {
-        wake_thread(&t);
+        // 75th installs lane: the post-delivery wake for a txn routed to
+        // a waiting reader of the installs daemon — the exact-thread
+        // counterpart of INSTQ route=selthread. ok==0 && refused==0 means
+        // the wake found no waiter entry at all (thread not parked on
+        // its binder wait queue); refused>0 means the entry refused.
+        if txnhunt_on() && is_inst(t.tgid) {
+            let b_ok = t.kick_wake_ok.load(core::sync::atomic::Ordering::Relaxed);
+            let b_ref = t.kick_wake_refused.load(core::sync::atomic::Ordering::Relaxed);
+            wake_thread(&t);
+            static IW_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if IW_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
+                crate::pr_warn!(
+                    "INSTWAKE tid={} ok={} refused={}",
+                    t.tid,
+                    t.kick_wake_ok.load(core::sync::atomic::Ordering::Relaxed).wrapping_sub(b_ok),
+                    t.kick_wake_refused.load(core::sync::atomic::Ordering::Relaxed)
+                        .wrapping_sub(b_ref)
+                );
+            }
+        } else {
+            wake_thread(&t);
+        }
     }
     // 66th: sync-txn thread deliveries wake with the WF_SYNC hint.
     for t in wake_ths_sync {
@@ -11345,7 +11523,17 @@ unsafe fn work_readable_by(w: &Work, tgid: u32, proc: &BinderProc) -> bool {
 
 unsafe fn thread_has_work(world: &World, proc: &Arc<BinderProc>, thread: &Arc<BinderThread>) -> bool {
     let th = thread.st();
-    if th.process_todo {
+    // Reference parity (binder_has_work_ilocked, 6.6 binder.c:1122):
+    //   !binder_worklist_empty(&thread->todo) || thread->process_todo ||
+    //   (do_proc_work && !binder_worklist_empty(&proc->todo))
+    // Own-todo work is the FIRST term — unconditional, flag-free. The
+    // old shape only returned true via process_todo or the proc-work
+    // arm (whose avail_for_proc requires todo EMPTY), so a thread whose
+    // own todo held a leftover item (a tcomplete left behind when the
+    // read buffer filled — the INSTSTRAND head=tcomplete shape, 75th)
+    // PARKED with pending work and delivered it only at the next
+    // unrelated wake; the reference never parks in that state.
+    if !th.todo.is_empty() || th.process_todo {
         return true;
     }
     // Reference parity (binder_available_for_proc_work_ilocked, 6.6):
@@ -11505,6 +11693,40 @@ fn binder_thread_read(
                     // pop the most recently parked thread first.
                     if th.waiting_for_proc_work {
                         th.park_seq = NEXT_PARK_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    }
+                    // 75th installs lane: a thread of the installs daemon
+                    // entering the read wait while its own todo already
+                    // holds work — the stranded shape (wait_event should
+                    // have short-circuited; if this fires the wake/flag
+                    // bookkeeping diverges from thread_has_work).
+                    if txnhunt_on() && is_inst(proc.pid) && (!th.todo.is_empty() || th.process_todo)
+                    {
+                        static IS_N: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        if IS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+                            let kind = match th.todo.front() {
+                                Some(Work::Transaction(t)) => {
+                                    // SAFETY: WORLD held; to_tid read.
+                                    match unsafe { t.to_tid() } {
+                                        Some(tt) => "txn",
+                                        None => "txn(reply)",
+                                    }
+                                }
+                                Some(Work::TransactionComplete) => "tcomplete",
+                                Some(Work::ReturnError(..)) => "err",
+                                Some(Work::Node(_)) => "node",
+                                Some(Work::DeadBinder { .. }) => "dead",
+                                Some(Work::ClearDeathDone { .. }) => "cleardone",
+                                None => "-",
+                            };
+                            crate::pr_warn!(
+                                "INSTSTRAND tid={} own_todo={} process_todo={} head={}",
+                                thread.tid,
+                                th.todo.len(),
+                                th.process_todo,
+                                kind
+                            );
+                        }
                     }
                     if t_armed {
                         t_proc_work = th.waiting_for_proc_work;
@@ -11811,6 +12033,32 @@ fn binder_thread_read(
                                     );
                                 }
                             }
+                            // 75th installs lane (read side): every txn
+                            // delivered to a thread of the installs
+                            // daemon. The samgr StartAbility(511)
+                            // oneways that decide the BMS first-boot
+                            // install stream must appear here; an
+                            // enqueue-side INSTQ with no matching INSTRD
+                            // names the wake/read loss point.
+                            if txnhunt_on() && !is_reply && is_inst(proc.pid) {
+                                static IRD_N: core::sync::atomic::AtomicUsize =
+                                    core::sync::atomic::AtomicUsize::new(0);
+                                if IRD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400 {
+                                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                                    use core::fmt::Write as _;
+                                    let _ = writeln!(
+                                        w,
+                                        "INSTRD pid={} tid={} txn{} code={:#x} oneway={} from pid{} tid{}",
+                                        proc.pid,
+                                        thread.tid,
+                                        t.id,
+                                        t.code,
+                                        t.flags & TF_ONE_WAY != 0,
+                                        t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
+                                        t.from_tid.unwrap_or(0)
+                                    );
+                                }
+                            }
                             // binder:binder_transaction_received — the
                             // transaction is being read out to its
                             // receiving thread (BR_TRANSACTION/BR_REPLY).
@@ -11982,6 +12230,23 @@ fn binder_thread_read(
                                 if let Some(b) = a.blocks.iter_mut().find(|b| b.off == t.buffer_off) {
                                     b.allow_user_free = true;
                                 }
+                            }
+                            // 75th OH parity (CONFIG_BINDER_SENDER_INFO,
+                            // linux-6.6 binder.c:4728-4747,4829): stamp the
+                            // servicing thread's sender identity for EVERY
+                            // staged txn — oneway included. Token source:
+                            // the sender's tgid (t->sender_tokenid =
+                            // current->token at send time; our registry maps
+                            // the sender tgid to its registered token).
+                            // sender_pid_nr is t_from-gated: sync only, 0
+                            // for oneway/reply.
+                            {
+                                let th = thread.st();
+                                if t.sender_pid > 0 {
+                                    th.sender_token_pid = t.sender_pid as u32;
+                                }
+                                th.sender_pid_nr =
+                                    t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0);
                             }
                             if !is_reply && t.flags & TF_ONE_WAY == 0 {
                                 // The receiver stacks it for its BC_REPLY.
