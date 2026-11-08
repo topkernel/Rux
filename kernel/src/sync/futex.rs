@@ -6338,6 +6338,60 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
     ) {
         fuxw_push(cmd as u8, uaddr as u64, ret as i32);
     }
+    // 76th (launcher lane, dfx=txnhunt): samgr FFRT wake audit. The
+    // accountmgr ready-flag gate (ohw106): accountmgr's four SA-listener
+    // subscribes post two subscribe-time OnAddSystemAbility notify tasks
+    // into samgr's FFRT workHandler queue ~30 ms apart — the FIRST runs
+    // (notify sent 26.375 s) and the SECOND never does, silently
+    // dropping the BMS ready callback and with it the whole StartUser(46)
+    // chain. FFRT dispatches queues via futex wakes on its worker pool;
+    // this tap prints every WAKE-class op issued by a samgr thread
+    // during the first 70 s so the missing PostTask's wake (and its ret
+    // — whether a parked worker was actually found) is visible. Zero
+    // cost when dfx=txnhunt is off.
+    if matches!(
+        cmd,
+        FUTEX_WAKE | FUTEX_WAKE_BITSET | FUTEX_WAKE_OP | FUTEX_REQUEUE | FUTEX_CMP_REQUEUE
+    ) {
+        let sp = crate::ipc::binder::binder_sareg_samgr_pid();
+        if sp != 0 {
+            let mine = crate::sched::current()
+                .map(|t| unsafe { (*t).tgid() == sp })
+                .unwrap_or(false);
+            if mine
+                && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang)
+                && crate::drivers::timer::get_jiffies() <= 7000
+            {
+                static SMW_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if SMW_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 3000 {
+                    let tid = crate::sched::current()
+                        .map(|t| unsafe { (*t).pid() })
+                        .unwrap_or(0);
+                    let comm = crate::sched::current()
+                        .map(|t| unsafe { (*t).comm() })
+                        .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                        .unwrap_or("")
+                        .trim_end_matches('\0');
+                    crate::pr_warn!(
+                        "SAMWAKE tid={} comm='{}' cmd={} uaddr={:#x} val={} ret={}",
+                        tid,
+                        comm,
+                        match cmd {
+                            FUTEX_WAKE => "WAKE",
+                            FUTEX_WAKE_BITSET => "WAKE-bs",
+                            FUTEX_WAKE_OP => "WAKE-op",
+                            FUTEX_REQUEUE => "REQ",
+                            _ => "CMP-REQ",
+                        },
+                        uaddr,
+                        val,
+                        ret
+                    );
+                }
+            }
+        }
+    }
     ret
 }
 

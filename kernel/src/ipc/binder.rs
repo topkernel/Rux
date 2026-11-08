@@ -10070,14 +10070,43 @@ fn binder_transaction(
         {
             static SACB_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
-            if SACB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400 {
+            // 76th: budget 400 -> 4000 (ohw106 exhausted it by 37.6 s,
+            // blinding exactly the window where the accountmgr BMS
+            // notify was expected), and decode the notify parcels:
+            // OnAdd/OnRemoveSystemAbility carry [i32 ver][i32 tokLen]
+            // [utf16 token][i32 said] — the said names which SA each
+            // callback reports (the ohw106 accountmgr gate: only ONE
+            // of the two subscribe-time notifies ever fired).
+            if SACB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4000 {
                 let comm = crate::sched::current()
                     .map(|t| unsafe { (*t).comm() })
                     .map(|c| core::str::from_utf8(c).unwrap_or(""))
                     .unwrap_or("")
                     .trim_end_matches('\0');
+                let mut parcel = alloc::string::String::from("-");
+                if tr.flags & TF_ONE_WAY != 0 && tr.code <= 2 && data_size >= 1 {
+                    let n = 64.min(data_size);
+                    let mut pb = alloc::vec![0u8; n];
+                    let ok = tr.data_buffer != 0
+                        && unsafe {
+                            crate::arch::uaccess::copy_from_user(
+                                pb.as_mut_ptr(),
+                                tr.data_buffer as *const u8,
+                                pb.len(),
+                            ) == 0
+                        };
+                    if ok {
+                        const HEXC: &[u8; 16] = b"0123456789abcdef";
+                        let mut s = alloc::string::String::with_capacity(n * 2);
+                        for &b in pb.iter() {
+                            s.push(HEXC[(b >> 4) as usize] as char);
+                            s.push(HEXC[(b & 0xf) as usize] as char);
+                        }
+                        parcel = s;
+                    }
+                }
                 crate::pr_warn!(
-                    "SACB txn{} code={} flags={:#x}{} comm='{}' -> pid={} tid={} dlen={}",
+                    "SACB txn{} code={} flags={:#x}{} comm='{}' -> pid={} tid={} dlen={} parcel={}",
                     txn.id,
                     tr.code,
                     tr.flags,
@@ -10085,7 +10114,8 @@ fn binder_transaction(
                     comm,
                     target.pid,
                     crate::process::current_pid(),
-                    data_size
+                    data_size,
+                    parcel
                 );
             }
         }
@@ -12015,12 +12045,55 @@ fn binder_thread_read(
                             if txnhunt_on() && is_acct(proc.pid) {
                                 static AR_N: core::sync::atomic::AtomicUsize =
                                     core::sync::atomic::AtomicUsize::new(0);
-                                if AR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 2400 {
+                                // 76th: budget 2400 -> 8000 (ohw106 hit
+                                // 2392/2400 — the late-boot window went
+                                // dark exactly where the missing BMS
+                                // notify was being hunted), and decode
+                                // the OnAdd/OnRemoveSystemAbility parcels
+                                // so each code<=2 oneway names its SA id.
+                                if AR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8000 {
+                                    let mut parcel = alloc::string::String::from("");
+                                    if !is_reply
+                                        && t.flags & TF_ONE_WAY != 0
+                                        && t.code <= 2
+                                    {
+                                        // The parcel was copied into the
+                                        // RECEIVER's mmap buffer at enqueue
+                                        // (user_base + buffer_off); read it
+                                        // back from there.
+                                        // SAFETY: diagnostic user copy from
+                                        // the receiver's own buffer mapping.
+                                        let src = pm(world, proc)
+                                            .im()
+                                            .alloc
+                                            .as_ref()
+                                            .map(|a| a.user_base + t.buffer_off as u64)
+                                            .unwrap_or(0);
+                                        let mut pb = [0u8; 64];
+                                        let ok = src != 0
+                                            && unsafe {
+                                                crate::arch::uaccess::copy_from_user(
+                                                    pb.as_mut_ptr(),
+                                                    src as *const u8,
+                                                    pb.len(),
+                                                ) == 0
+                                            };
+                                        if ok {
+                                            const HEXC: &[u8; 16] = b"0123456789abcdef";
+                                            let mut s =
+                                                alloc::string::String::with_capacity(128);
+                                            for &b in pb.iter() {
+                                                s.push(HEXC[(b >> 4) as usize] as char);
+                                                s.push(HEXC[(b & 0xf) as usize] as char);
+                                            }
+                                            parcel = s;
+                                        }
+                                    }
                                     let mut w = crate::dfx::backtrace::ConsoleWriter::new();
                                     use core::fmt::Write as _;
                                     let _ = writeln!(
                                         w,
-                                        "ACCT-RECV pid={} tid={} txn{} code={:#x} reply={} oneway={} from pid{} tid{} stack_depth={}",
+                                        "ACCT-RECV pid={} tid={} txn{} code={:#x} reply={} oneway={} from pid{} tid{} stack_depth={} parcel={}",
                                         proc.pid,
                                         thread.tid,
                                         t.id,
@@ -12029,7 +12102,8 @@ fn binder_thread_read(
                                         t.flags & TF_ONE_WAY != 0,
                                         t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
                                         t.from_tid.unwrap_or(0),
-                                        thread.st().txn_stack.len()
+                                        thread.st().txn_stack.len(),
+                                        parcel
                                     );
                                 }
                             }
