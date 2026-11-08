@@ -8476,3 +8476,14 @@ name the blocker — it is NOT devmgr and NOT binder delivery:
   servers are the first suspects — pid 401's identity and why the
   code-12/19 calls queue for minutes), and why the handler parks in a
   write-less read with the reply unsent.
+
+#### 8. TIER-2 GATE FINAL (quiet-host rerun, run/abpb-base72-fix72.txt)
+
+First A/B pass ran contaminated (ohw94 KVM boot + make-test
+concurrently; flagged p2_ctxsw +42%/p6_append +30% — both noise).
+Quiet rerun, base 23270d34 vs fix 40d78cc8, 3 interleaved reps, KVM
+same rig: EVERY row within ±20% — p1_clock +5.4%, p1_null 0.0%,
+p2_ctxsw -5.5%, p3b_fault_cow +2.9%, p4_fork_exec +2.6%,
+p4_fork_exit +2.1%, p5 IPC rows -0.6..+7.9%, p6_stat -0.4%,
+p6_unlink -13.0%, p6_append -20.1% (improved), p6_mkdrmdir +9.4%.
+No REGRESS>20% rows. Gate verdict: PASS.
