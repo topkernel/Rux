@@ -545,11 +545,14 @@ pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
         // va_pa_offset is immutable after boot.
         let va_pa_offset = unsafe { KERNEL_MAP.va_pa_offset };
         PhysAddr::new(addr - va_pa_offset as u64)
-    } else if addr >= 0xffff_ffff_8000_0000 && addr < 0xffff_ffff_8100_0000 {
+    } else if addr >= 0xffff_ffff_8000_0000 && addr < 0xffff_ffff_8180_0000 {
         // Kernel image mapping: the kernel is linked at VA
         // 0xffffffff80000000 and loaded at PHYS KERNEL_ENTRY. Static
         // driver buffers (virtio queues in .bss) translate through here —
         // feeding the raw VA to a device DMA never completes.
+        // Window is 24MB (LAYOUT-4/5: the image grew past the old 16MB
+        // cap; review4 H-11 — .bss VAs above the old cap returned a
+        // virtual address as physical with only a pr_warn).
         PhysAddr::new(addr - 0xffff_ffff_8000_0000 + KERNEL_ENTRY)
     } else if addr >= KERNEL_ENTRY && addr < 0x90000000 {
         // Legacy identity mapping (for transition period)

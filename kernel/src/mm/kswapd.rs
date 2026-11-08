@@ -70,7 +70,14 @@ extern "C" fn kswapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         let needs_reclaim = zone_below_high_watermark();
 
         if !needs_reclaim {
-            // Nothing to do — sleep.
+            // Nothing to do — sleep. State-first recheck (review4 H-9):
+            // a wakeup_kswapd() landing between the KSWAPD_WAKE.store(false)
+            // above and the set_state below finds the swap(true) already set
+            // → early-returns → the wake is lost, the token stays set, and
+            // every later wakeup_kswapd() early-returns forever (kswapd
+            // permanently parked). Rechecking the token AFTER setting
+            // INTERRUPTIBLE closes the window: if a wake slipped in, we
+            // revert to RUNNING and loop instead of sleeping.
             if let Some(current) = crate::sched::current() {
                 unsafe {
                     (*current).set_state(
@@ -79,6 +86,19 @@ extern "C" fn kswapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
                         ),
                     );
                 }
+            }
+            if KSWAPD_WAKE.load(Ordering::Acquire) {
+                // A wake arrived in the window — don't sleep
+                if let Some(current) = crate::sched::current() {
+                    unsafe {
+                        (*current).set_state(
+                            crate::process::task::TaskState::new(
+                                crate::process::task::TaskState::RUNNING,
+                            ),
+                        );
+                    }
+                }
+                continue;
             }
             crate::sched::schedule();
             continue;

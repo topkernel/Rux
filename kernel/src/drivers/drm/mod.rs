@@ -2478,7 +2478,14 @@ pub fn gem_mmap_resolve(
     let trace = mt < 30;
     if is_prime_file(file) {
         let gem = prime_file_gem(file)?;
-        let n = len.min(gem.size);
+        // Bound the offset against the GEM size (Linux dma_buf_mmap rejects
+        // offset + len > dmabuf->size; review4 H-1): without this, any
+        // process can mint a prime fd (CREATE_DUMB + PRIME_HANDLE_TO_FD on
+        // the 0666 node) and read/write ARBITRARY physical memory.
+        if offset >= gem.size as u64 {
+            return None;
+        }
+        let n = len.min((gem.size as u64 - offset) as usize);
         if trace {
             crate::pr_warn!(
                 "drm: prime mmap#{} pid={} gem={} off={:#x} len={} -> phys={:#x}",

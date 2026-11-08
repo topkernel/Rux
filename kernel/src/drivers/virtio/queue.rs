@@ -969,10 +969,23 @@ impl VirtQueue {
                 si = si.wrapping_add(1);
             }
 
-            // Sleep until woken by interrupt
+            // Sleep until woken by interrupt. Deadline arm (review4 H-10):
+            // one lost IRQ strands this waiter forever — its sibling
+            // wait_for_used_interruptible carries the same 10s
+            // add_timer_wakeup + kick/walk recovery (documented there as
+            // mandatory). Port the same discipline here.
+            let deadline = crate::drivers::timer::get_jiffies()
+                + crate::drivers::timer::msecs_to_jiffies(10_000);
+            let timer_id = crate::timer::add_timer_wakeup(
+                deadline,
+                crate::sched::get_current_pid(),
+            );
             // R54: schedule() now restores the caller's SIE state; wait-path callers re-arm explicitly (semaphore.rs discipline) so ticks/IPIs reach this CPU across the wait loop.
             crate::arch::cpu::restore_irq(true);
             crate::sched::schedule();
+            if timer_id != 0 {
+                crate::timer::del_timer(timer_id);
+            }
             wait_queue.finish_wait(current);
         }
 

@@ -845,18 +845,26 @@ pub(crate) fn iov_entry_error(base: usize, len: usize) -> Option<i64> {
 /// lazy validation wrote the iovs preceding the bad one first (probe
 /// S5: [{stack,3},{kernel_addr,5}] delivered 3 bytes then EFAULT'd;
 /// reference: EFAULT, 0 bytes).
-fn validate_iov_entries(iov_addr: usize, iovcnt: usize) -> Option<i64> {
+/// Snapshot + validate the user iovec array in ONE pass (review4 H-4,
+/// the recvmsg 32fd359f discipline): the returned Vec is the kernel-side
+/// copy every consumer loop uses — a racing CLONE_VM thread can no longer
+/// swap iov_base between validation and use (the old validate-then-refetch
+/// double-fetch was a TOCTOU redirect of kernel copies to unvalidated
+/// addresses).
+fn snapshot_iov_entries(iov_addr: usize, iovcnt: usize) -> Result<alloc::vec::Vec<Iovec>, i64> {
+    let mut vec = alloc::vec::Vec::with_capacity(iovcnt);
     for i in 0..iovcnt {
         let Some(iov) = crate::arch::uaccess_safe::read_user::<Iovec>(
             iov_addr + i * core::mem::size_of::<Iovec>(),
         ) else {
-            return Some(-(errno::EFAULT as i64));
+            return Err(-(errno::EFAULT as i64));
         };
         if let Some(e) = iov_entry_error(iov.iov_base as usize, iov.iov_len) {
-            return Some(e);
+            return Err(e);
         }
+        vec.push(iov);
     }
-    None
+    Ok(vec)
 }
 
 /// sys_writev - Write multiple buffers to file descriptor
@@ -892,9 +900,10 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
     // Whole-vector validation before any transfer (reference import
     // order): a bad entry fails the call with nothing written, and a
     // total-0 vector falls through to return 0 below (probe S2-S6).
-    if let Some(e) = validate_iov_entries(iov_addr, iovcnt) {
-        return e;
-    }
+    let iov_snap = match snapshot_iov_entries(iov_addr, iovcnt) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     // Datagram writev must gather (Linux semantics): one writev() on a
     // SOCK_DGRAM/SOCK_SEQPACKET unix socket is ONE datagram built from
@@ -929,13 +938,7 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
             // the Vec per iovec — hilogd's writev(header, tag, content)
             // paid three realloc+memcpy growth rounds per record
             // (UNIXRD-WV gather phase 4.7 us/op).
-            for i in 0..iovcnt {
-                let Some(iov) = crate::arch::uaccess_safe::read_user::<Iovec>(
-                    iov_addr + i * core::mem::size_of::<Iovec>(),
-                ) else {
-                    crate::debug::unixrd::add(&crate::debug::unixrd::WV_OUTER_NS, ur_t0);
-                    return -errno::EFAULT as i64;
-                };
+            for iov in iov_snap.iter() {
                 if !iov.iov_base.is_null() && iov.iov_len != 0 {
                     if gathered.try_reserve_exact(iov.iov_len).is_err() {
                         crate::debug::unixrd::add(&crate::debug::unixrd::WV_OUTER_NS, ur_t0);
@@ -947,14 +950,7 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
             // NULL-base entries contribute nothing (a total-0 dgram
             // writev is a no-op returning 0, like the reference).
             let ur_t_gather = crate::debug::unixrd::now();
-            for i in 0..iovcnt {
-                // Read the iovec entry through the exception-table copy.
-                let Some(iov) = crate::arch::uaccess_safe::read_user::<Iovec>(
-                    iov_addr + i * core::mem::size_of::<Iovec>(),
-                ) else {
-                    crate::debug::unixrd::add(&crate::debug::unixrd::WV_OUTER_NS, ur_t0);
-                    return -errno::EFAULT as i64;
-                };
+            for iov in iov_snap.iter() {
                 let base = iov.iov_base as usize;
                 let len = iov.iov_len;
                 if base == 0 || len == 0 {
@@ -1019,12 +1015,8 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
     // harmless shapes the validator lets through — skip them here; a
     // vector of only such entries transfers nothing and returns 0.
     for i in 0..iovcnt {
-        // Read the iovec entry through the exception-table copy.
-        let Some(iov) = crate::arch::uaccess_safe::read_user::<Iovec>(
-            iov_addr + i * core::mem::size_of::<Iovec>(),
-        ) else {
-            return -errno::EFAULT as i64;
-        };
+        // Kernel-side snapshot (review4 H-4: no user re-fetch after validate)
+        let iov = &iov_snap[i];
 
         let base = iov.iov_base as usize;
         let len = iov.iov_len;
@@ -1079,21 +1071,18 @@ pub fn sys_readv(args: SyscallArgs) -> i64 {
     // Whole-vector validation before any transfer (probe S9: a total-0
     // readv returns 0 instead of EFAULT; the reference never blocks on
     // it either).
-    if let Some(e) = validate_iov_entries(iov_addr, iovcnt) {
-        return e;
-    }
+    let iov_snap = match snapshot_iov_entries(iov_addr, iovcnt) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     let mut total_read: isize = 0;
 
     // Entries were whole-vector validated above; the harmless shapes
     // (zero length / NULL base) transfer nothing.
     for i in 0..iovcnt {
-        // Read the iovec entry through the exception-table copy.
-        let Some(iov) = crate::arch::uaccess_safe::read_user::<Iovec>(
-            iov_addr + i * core::mem::size_of::<Iovec>(),
-        ) else {
-            return -errno::EFAULT as i64;
-        };
+        // Kernel-side snapshot (review4 H-4: no user re-fetch after validate)
+        let iov = &iov_snap[i];
 
         let base = iov.iov_base as usize;
         let len = iov.iov_len;
@@ -2035,23 +2024,19 @@ pub fn sys_preadv(args: SyscallArgs) -> i64 {
 
     // Whole-vector validation before any transfer (rw_copy_check_uvector
     // parity; see iov_entry_error).
-    if let Some(e) = validate_iov_entries(iov_addr, iovcnt) {
-        return e;
-    }
+    let iov_snap = match snapshot_iov_entries(iov_addr, iovcnt) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     let mut total_read: isize = 0;
     // Each successive iov reads from the advancing offset (previously every
     // iov re-read the SAME offset — preadv(N iovs) returned N copies).
     let mut cur_off: u64 = offset as u64;
 
-    // Entries were whole-vector validated above; harmless shapes skip.
+    // Harmless shapes skip (snapshot: review4 H-4).
     for i in 0..iovcnt {
-        let Some(iov) = crate::arch::uaccess_safe::read_user::<Iovec>(
-            iov_addr + i * core::mem::size_of::<Iovec>(),
-        ) else {
-            return -errno::EFAULT as i64;
-        };
-
+        let iov = &iov_snap[i];
         let base = iov.iov_base as usize;
         let len = iov.iov_len;
         if base == 0 || len == 0 { continue; }
@@ -2094,9 +2079,10 @@ pub fn sys_pwritev(args: SyscallArgs) -> i64 {
 
     // Whole-vector validation before any transfer (rw_copy_check_uvector
     // parity; see iov_entry_error).
-    if let Some(e) = validate_iov_entries(iov_addr, iovcnt) {
-        return e;
-    }
+    let iov_snap = match snapshot_iov_entries(iov_addr, iovcnt) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     let mut total_written: isize = 0;
     // Successive iovs write at the advancing offset (previously every
@@ -2105,12 +2091,8 @@ pub fn sys_pwritev(args: SyscallArgs) -> i64 {
 
     // Entries were whole-vector validated above; harmless shapes skip.
     for i in 0..iovcnt {
-        // Read the iovec entry through the exception-table copy.
-        let Some(iov) = crate::arch::uaccess_safe::read_user::<Iovec>(
-            iov_addr + i * core::mem::size_of::<Iovec>(),
-        ) else {
-            return -errno::EFAULT as i64;
-        };
+        // Kernel-side snapshot (review4 H-4: no user re-fetch after validate)
+        let iov = &iov_snap[i];
 
         let base = iov.iov_base as usize;
         let len = iov.iov_len;
