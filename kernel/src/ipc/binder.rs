@@ -8758,6 +8758,17 @@ fn binder_transaction(
     // with the Sync hint — binder.c's wake_up_interruptible_sync for
     // sync txns (binder_wakeup_thread_ilocked(proc, thread, !oneway)).
     let mut wake_ths_sync: Vec<Arc<BinderThread>> = Vec::new();
+    // 74th (73.5/73.6 v2): reply exact-thread wake list. The replied
+    // thread is woken AFTER the WORLD release — never inside it (the
+    // synchronous in-lock wake is the 73.5 kickdog mechanism class:
+    // the wakee on another CPU runs immediately and blocks on WORLD,
+    // inverting hold times) — and its proc is NOT queued for the
+    // wake_proc_one pick below (reference parity, binder.c 6.6
+    // binder_proc_transaction: a reply wakes the TARGET thread exactly,
+    // once, with sync=true; the proc-wide pick never runs for it —
+    // wake_proc_one's empty-own-todo filter can never select the
+    // replied thread anyway).
+    let mut reply_exact_wakes: Vec<Arc<BinderThread>> = Vec::new();
 
     // Bring-up crutch for the samgr-install race — see
     // wait_for_context_manager: stretch bounded client retry budgets
@@ -10431,11 +10442,17 @@ fn binder_transaction(
                     }
                     rth.todo.push_back(Work::Transaction(txn.clone()));
                     rth.process_todo = true;
-                    // exact-thread wake (wake_up_interruptible_sync on
-                    // target_thread->wait in Linux — 66th: now carrying
-                    // the WF_SYNC hint for real, stacking the replied
-                    // client with the replying server)
-                    wake_thread_hint(&rthread, true);
+                    // Exact-thread wake (reference wake_up_interruptible_
+                    // sync on target_thread->wait, binder.c 6.6:3671-3672)
+                    // — DEFERRED to reply_exact_wakes, fired after the
+                    // WORLD release (74th v2: the 66th fired it here,
+                    // synchronously under the global lock; the wakee on
+                    // another CPU could run immediately and block on
+                    // WORLD, inverting hold times — the 73.5 kickdog
+                    // mechanism class). The wakee's read-side condition
+                    // re-check runs under WORLD, so the deferral cannot
+                    // lose the wake: process_todo is already set above.
+                    reply_exact_wakes.push(rthread.clone());
                     rthread.hist(EV_REPLY_PUSHED, txn.id as u32, *rtid);
                     // 73rd accountmgr lane: every reply pushed TO an
                     // accountmgr thread — orig txn, remaining stack depth,
@@ -10479,7 +10496,16 @@ fn binder_transaction(
                             }
                         }
                     }
-                    wakes.push(tproc.clone());
+                    // 74th v2: NO wake_proc_one pick for tproc here —
+                    // the reply's exact-thread wake (reply_exact_wakes,
+                    // processed after the WORLD release) replaces it.
+                    // The reference never runs a proc-wide wake for a
+                    // reply (binder_proc_transaction wakes the target
+                    // thread only), and our proc pick could never
+                    // select the replied thread anyway (its todo now
+                    // carries the reply — the empty-own-todo filter
+                    // excludes it); pushing tproc only bought a
+                    // bystander wake or nothing (the 73.5 double-wake).
                     wakes.push(proc.clone());
                 } else {
                     sendfail_why(17);
@@ -10886,6 +10912,13 @@ fn binder_transaction(
     }
     // 66th: sync-txn thread deliveries wake with the WF_SYNC hint.
     for t in wake_ths_sync {
+        wake_thread_hint(&t, true);
+    }
+    // 74th (73.6 v2): reply exact-thread wakes — AFTER the WORLD
+    // release, BEFORE the wake_proc_one loop. Exactly one wake per
+    // reply, on the target thread, WF_SYNC (reference parity:
+    // binder_wakeup_thread_ilocked(proc, target_thread, sync=true)).
+    for t in reply_exact_wakes {
         wake_thread_hint(&t, true);
     }
     for p in wakes {
