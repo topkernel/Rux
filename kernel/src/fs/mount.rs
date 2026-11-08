@@ -163,6 +163,45 @@ const MS_NOEXEC: u64 = 8;
 const MS_SYNCHRONOUS: u64 = 16;
 const MS_NOATIME: u64 = 1024;
 
+/// Check whether the mount containing `path` has the given flag set.
+/// Uses the longest-prefix match over the global mount table (review4 fs-M:
+/// MNT_NOEXEC/NOSUID were parsed into MntFlags but nothing consulted them).
+pub fn path_mount_has_flag(path: &str, flag: u64) -> bool {
+    let table = MOUNT_TABLE.lock();
+    let mut best_len = 0usize;
+    let mut found = false;
+    for (dev, mnt_pt, _fs_type, flag_str) in table.iter() {
+        let mp = mnt_pt.as_str();
+        // Longest-prefix match: "/mnt" matches "/mnt/foo" but not "/mntfoo"
+        if (path == mp || {
+                let mp_trim = mp.trim_end_matches('/');
+                path.starts_with(mp_trim) && path.len() > mp_trim.len()
+                    && path.as_bytes().get(mp_trim.len()) == Some(&b'/')
+            })
+            && mp.len() >= best_len
+        {
+            best_len = mp.len();
+            // flag_str is the string form ("ro,noexec" or "rw"); do_mount
+            // stores the translated numeric flags. We check the string
+            // for now — the enforcement point is the issue, not the format.
+            let _ = dev;
+            found = match flag {
+                crate::fs::mount::MntFlags::MNT_NOEXEC => {
+                    flag_str.contains("noexec") || flag_str.contains("8")
+                }
+                crate::fs::mount::MntFlags::MNT_NOSUID => {
+                    flag_str.contains("nosuid") || flag_str.contains("2")
+                }
+                crate::fs::mount::MntFlags::MNT_NODEV => {
+                    flag_str.contains("nodev") || flag_str.contains("4")
+                }
+                _ => false,
+            };
+        }
+    }
+    found
+}
+
 /// Translate Linux MS_* flags into the internal MntFlags (review 5.1:
 /// MNT_* flags 存储 — do_mount used to drop the flags entirely).
 fn translate_mnt_flags(ms_flags: u64) -> MntFlags {

@@ -91,6 +91,14 @@ impl RawSeqLock {
     /// Returns true if the read must be retried.
     #[inline]
     pub fn read_retry(&self, seq1: usize) -> bool {
+        // review4 sync-M: LoadLoad fence between the data reads and the
+        // second seq load. Without it, RVWMO (riscv64) can reorder the
+        // data reads AFTER the seq2 load — a writer's data updates land
+        // before the seq2 load sees the new sequence number, and a torn
+        // read passes validation. x86 TSO doesn't reorder loads (the
+        // fence is free there in practice); the reference kernel carries
+        // smp_rmb() at this exact site (read_seqcount_retry).
+        core::sync::atomic::fence(Ordering::Acquire);
         let seq2 = self.sequence.load(Ordering::Acquire);
         seq1 != seq2 || seq2 & 1 != 0
     }

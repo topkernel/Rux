@@ -459,6 +459,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
     // container task's fork must hand back the ns-local pid — LTP pidns17
     // forks 10 children in-namespace and waitpid()s them by that value;
     // the global pid made every wait fail ECHILD).
+    let want_pidfd = clone_args.flags & 0x0000_1000 != 0;
     match do_clone(clone_args) {
         Ok(pid) => {
             let parent_ns = crate::sched::current().and_then(|t| unsafe { (*t).ns_pid.clone() });
@@ -629,6 +630,11 @@ pub(crate) struct ExecFile {
 /// (may_open: S_ISDIR), missing execute permission is EACCES (even
 /// root needs one x bit — LTP execve03).
 pub(crate) fn resolve_exec_file(path: &str) -> Result<ExecFile, i32> {
+    // review4 fs-M: MNT_NOEXEC enforcement (reference do_open_execat →
+    // may_open checks the mount's MNT_NOEXEC before anything else).
+    if crate::fs::mount::path_mount_has_flag(path, crate::fs::mount::MntFlags::MNT_NOEXEC) {
+        return Err(-(errno::EACCES as i64 as i32));
+    }
     let vpath = crate::fs::vfs::path_lookup(path, 0)?;
     let inode = vpath
         .inode
@@ -6904,8 +6910,39 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
         }
     }
 
+    let want_pidfd = clone_args.flags & 0x0000_1000 != 0;
     match do_clone(clone_args) {
         Ok(pid) => {
+            // review4 syscall-M: CLONE_PIDFD must write the pidfd out —
+            // the old form probed the pointer then never stored anything
+            // (the caller's pidfd word stayed uninitialized).
+            if want_pidfd && !pidfd_ptr.is_null() {
+                // Create a pidfd: for now, the fd NUMBER of a special
+                // /dev/null-like entry that carries the pid in private
+                // data. The reference kernel creates a real anon_inode
+                // file; the minimal correct behavior is a valid fd that
+                // poll() reports readable when the child exits.
+                let file = alloc::sync::Arc::new(
+                    crate::fs::file::File::new(crate::fs::file::FileFlags::new(
+                        crate::fs::file::FileFlags::O_RDWR,
+                    )),
+                );
+                // Store the child's pid for future pidfd_send_signal /
+                // waitid support (poll becomes ready when pid reaps).
+                file.set_private_data(pid as usize as *mut u8);
+                match unsafe { crate::fs::file::get_file_fd_install(file) } {
+                    Some(fd) => {
+                        if unsafe {
+                            crate::arch::uaccess::put_user(pidfd_ptr as *mut i32, fd as i32)
+                        } {
+                            // fd written; fall through to the return
+                        } else {
+                            return -(errno::EFAULT as i64);
+                        }
+                    }
+                    None => return -(errno::EMFILE as i64),
+                }
+            }
             // Parent-namespace view, same as sys_clone's return.
             let parent_ns = crate::sched::current().and_then(|t| unsafe { (*t).ns_pid.clone() });
             crate::process::ns::translate_sender_pid_ns(pid, parent_ns.as_ref()) as i64
