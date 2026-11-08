@@ -1199,7 +1199,7 @@ fn ext4_mkdir_no_journal(
     mode: u16,
 ) -> Result<u32, i32> {
     // Check name length (NAME_MAX; Linux returns ENAMETOOLONG — review 5.5:
-    // name_len u8 截断无检查, the u8 field would silently truncate)
+    // name_len u8 unchecked truncation, the u8 field would silently truncate)
     if name.is_empty() {
     return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
@@ -1413,7 +1413,7 @@ fn ext4_create_inner(
     mode: u16,
 ) -> Result<u32, i32> {
     // Check name length (NAME_MAX; Linux returns ENAMETOOLONG — review 5.5:
-    // name_len u8 截断无检查, the u8 field would silently truncate)
+    // name_len u8 unchecked truncation, the u8 field would silently truncate)
     if name.is_empty() {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
@@ -1559,7 +1559,7 @@ fn ext4_symlink_inner(
     target: &[u8],
 ) -> Result<u32, i32> {
     // Check name length (NAME_MAX; Linux returns ENAMETOOLONG — review 5.5:
-    // name_len u8 截断无检查, the u8 field would silently truncate)
+    // name_len u8 unchecked truncation, the u8 field would silently truncate)
     if name.is_empty() {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
@@ -2629,7 +2629,7 @@ fn ext4_rename_inner(
     let new_file_type = file_type_from_mode(old_inode.i_mode);
 
     // Renaming a directory into itself or its own subdirectory would
-    // create a ".." cycle (review 5.5: rename 环检查错 — the old check only
+    // create a ".." cycle (review 5.5: rename ring-check error — the old check only
     // compared names within the same directory). Walk the new parent's
     // ancestor chain; if it reaches the renamed directory, refuse.
     if old_is_dir && old_dir_ino != new_dir_ino {

@@ -3662,7 +3662,7 @@ pub fn sys_statfs(args: SyscallArgs) -> i64 {
     };
 
     // Linux statfs fails with ENOENT for paths that do not exist — the old
-    // code fabricated rootfs numbers for ANY path (review批次1: statfs 不查
+    // code fabricated rootfs numbers for ANY path (reviewround 1: statfs 不查
     // 路径存在性).
     let full_path = match resolve_user_path(-100, pathname_ptr) {
         Ok(p) => p,
@@ -4611,7 +4611,7 @@ fn do_fsync(args: SyscallArgs, datasync: i32) -> i64 {
                         let _ = crate::fs::bio::sync_buffers();
                         // Persist the DISK's volatile cache too — draining
                         // only the kernel buffer cache was a no-op flush
-                        // (review BUG: "Flush 假成功，fsync 无持久化").
+                        // (review BUG: "Flush 假成功，fsync no persistence").
                         if crate::drivers::virtio::flush_pci_blk().is_err() {
                             return -(errno::EIO as i64);
                         }
@@ -5922,7 +5922,7 @@ pub fn sys_copy_file_range(args: SyscallArgs) -> i64 {
             let n = in_file.read_at(cur_in as u64, buf.as_mut_ptr(), chunk);
             if n <= 0 {
                 // Linux: a FIRST read failure is an error return, not a
-                // fake "0 bytes copied" success (review批次1).
+                // fake "0 bytes copied" success (reviewround 1).
                 if total == 0 && n < 0 {
                     first_err = n as i64;
                 }

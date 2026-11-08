@@ -1841,7 +1841,7 @@ fn panic(info: &PanicInfo) -> ! {
 
     // Stop the other CPUs (Linux panic → smp_send_stop). Without this the
     // panicking CPU halts while the others keep running — corrupting state
-    // under the panic dump and stealing the UART mid-print (review批次8).
+    // under the panic dump and stealing the UART mid-print (reviewround 8).
     {
         let me = arch::cpu_id() as usize;
         for cpu in 0..crate::config::MAX_CPUS {

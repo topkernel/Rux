@@ -356,7 +356,7 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
                 }
             }
             // Copy the whole struct from user memory through the
-            // exception-table path (review IPC M: uaccess 裸访改 copy_from_user).
+            // exception-table path (review IPC M: uaccess raw-access rewrite copy_from_user).
             let mut ds = SemidDsUapi::zeroed();
             // SAFETY: buf_ptr was access_ok-validated above; ds is a
             // stack-local repr(C) struct of exactly that size.
@@ -876,7 +876,7 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
     };
 
     // Copy sops from userspace through the exception-table path
-    // (review IPC M: uaccess 裸访改 copy_from_user).
+    // (review IPC M: uaccess raw-access rewrite copy_from_user).
     // Allocation discipline (s2-a finding P3): nsops <= 500 and SemBuf
     // is 6 bytes — a bounded stack array replaces the per-call heap Vec.
     // closegap lane: op sets ≤ MAX_SOPS_FAST stage in a small array (the

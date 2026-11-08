@@ -568,7 +568,7 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
             if new_brk > current_brk {
                 // Upper bound: the brk must stay inside the user address
                 // space. Without this check a brk above USER_END would map
-                // user-accessible pages into the kernel range (review批次4).
+                // user-accessible pages into the kernel range (reviewround 4).
                 let user_end = crate::arch::mm::user_addr::USER_END as u64;
                 if new_brk > user_end {
                     return current_brk as i64; // Linux: keep old brk on failure
@@ -1037,7 +1037,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
         }
     }
 
-    // (review批次1) The "fd >= 1000 means framebuffer" special case is
+    // (reviewround 1) The "fd >= 1000 means framebuffer" special case is
     // GONE: an unrelated file that happens to get a high fd number was    // silently mapped onto the framebuffer instead of its own contents.
     // File-backed mappings now go through the generic path; mmap on a file
     // description without mmap-capable ops (e.g. a device node with no
@@ -1211,7 +1211,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
             match current_task.address_space_mut() {
                 Some(address_space) => {
                     // Parse protection flags — exact, no implicit W for
-                    // exec (review批次1: "PROT_EXEC simplified to RWX"
+                    // exec (reviewround 1: "PROT_EXEC simplified to RWX"
                     // broke W^X for every mapped library).
                     let perm = match (
                         prot_flags & prot::PROT_READ != 0,
@@ -1382,6 +1382,23 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                             // already present), unmap only clears PTEs.
                             // Kick the auto-flush presenter awake: this
                             // mapper may be a flush-less renderer (Xorg).
+                            {
+                                static N: core::sync::atomic::AtomicU32 =
+                                    core::sync::atomic::AtomicU32::new(0);
+                                let n = N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                                if n < 3 {
+                                    crate::pr_warn!(
+                                        "FB-MMAP-HIT n={} placement={:#x} fb_phys={:#x} len={:#x} w={} h={} stride={}",
+                                        n,
+                                        placement,
+                                        info.addr,
+                                        actual_length,
+                                        info.width,
+                                        info.height,
+                                        info.stride
+                                    );
+                                }
+                            }
                             crate::drivers::gpu::fbdev::mark_fb_user_mapped();
                             return placement as i64;
                         }
@@ -3769,7 +3786,7 @@ pub fn sys_madvise(args: [u64; 6]) -> i64 {
             // MADV_DONTNEED: discard the mapped pages but keep the VMAs.
             // The next fault re-zero-fills anonymous ranges — glibc/jemalloc
             // heap shrink depends on the data actually being discarded
-            // (review批次1: previously a silent no-op). MADV_FREE is
+            // (reviewround 1: previously a silent no-op). MADV_FREE is
             // permitted to behave like DONTNEED (eager discard instead of
             // lazy marking).
             match address_space.zap_page_range(VirtAddr::new(addr), length_aligned) {

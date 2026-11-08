@@ -2837,7 +2837,7 @@ fn eventfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     // SAFETY: ptr came from Box::into_raw in sys_eventfd2; valid and properly aligned.
     let efd = unsafe { &*(ptr as *const EventFd) };
 
-    // Blocking semantics (review批次1: previously returned EAGAIN even for
+    // Blocking semantics (reviewround 1: previously returned EAGAIN even for
     // blocking fds, busy-looping every poll/read caller).
     if efd.counter.load(core::sync::atomic::Ordering::Relaxed) == 0 {
         if file.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0 {
@@ -2953,7 +2953,7 @@ fn eventfd_write(file: &crate::fs::File, buf: &[u8]) -> isize {
                     return -errno::EAGAIN as isize;
                 }
                 // Blocking mode: wait for a reader to drain the counter
-                // (review批次1: previously returned EAGAIN immediately).
+                // (reviewround 1: previously returned EAGAIN immediately).
                 let cur_ok = || {
                     efd.counter.load(core::sync::atomic::Ordering::Relaxed)
                         .checked_add(val).is_some()
@@ -3056,7 +3056,7 @@ fn timerfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     // SAFETY: ptr came from Box::into_raw in sys_timerfd_create; valid and properly aligned.
     let tfd = unsafe { &*(ptr as *const TimerFd) };
 
-    // Blocking read (review批次1: previously EAGAIN — busy loop for every
+    // Blocking read (reviewround 1: previously EAGAIN — busy loop for every
     // blocking timerfd consumer). Block until an expiration is pending.
     if tfd.expiration_count.load(core::sync::atomic::Ordering::Acquire) == 0 {
         if file.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0 {
@@ -4142,7 +4142,7 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> i64 {
 
     // Use timerfd mode: pass the TimerFd address to the timer softirq; on
     // expiry it calls timerfd_expire_notify() which bumps the counter AND
-    // wakes readers blocked in timerfd_read (review批次1: the counter bump
+    // wakes readers blocked in timerfd_read (reviewround 1: the counter bump
     // alone never woke anyone, so a blocking read would sleep forever).
     let tfd_addr = tfd as *const TimerFd as u64;
 
@@ -4282,7 +4282,7 @@ pub fn sys_getrandom(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // ChaCha20-based CRNG (review批次1: the old LCG was trivially
+    // ChaCha20-based CRNG (reviewround 1: the old LCG was trivially
     // predictable — a fatal weakness for TLS/SSH seeding).
     // Stage each block in a kernel buffer and go through copy_to_user:
     // a raw memcpy to a U-bit page faults in S-mode (SUM=0) and the
@@ -4458,7 +4458,7 @@ static GETRANDOM_CRNG: crate::sync::spinlock::Spinlock<Option<ChaCha20Crng>> =
 /// Best-effort eventpoll_release: when a file description is closed, purge
 /// that fd number from every epoll instance still held by the calling
 /// process, so stale entries cannot report EPOLLERR|EPOLLHUP forever
-/// (review批次1: close 后 epoll 条目不删; Linux removes entries on the
+/// (reviewround 1: close 后 epoll 条目不删; Linux removes entries on the
 /// file's last release).
 /// (review-s2b perf) Live epoll instances in the whole system. Pure fast-out
 /// gate for epoll_purge_closed_fd: when zero, no interest entries can exist

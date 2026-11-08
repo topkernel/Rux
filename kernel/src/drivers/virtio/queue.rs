@@ -1050,7 +1050,7 @@ impl VirtQueue {
     /// Allocate the head descriptor of a chain that will consume
     /// `chain_len` descriptors in total.
     ///
-    /// R24 (R14 MED "RX 因 blk 的链限流只剩 2 缓冲"): the in-flight limiter
+    /// R24 (R14 MED "RX 因 blk 的链限流只剩 2 buffer"): the in-flight limiter
     /// was hard-wired to 3 descriptors per chain. virtio-net RX buffers are
     /// single-descriptor chains, so the RX queue was capped at 2 posted
     /// buffers (2*3+3 > 8) even though the queue holds 8. Passing the real

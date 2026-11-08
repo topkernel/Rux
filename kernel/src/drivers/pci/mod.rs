@@ -464,7 +464,7 @@ pub const PCIE_ECAM_SIZE: u64 = 0x1000;
 /// stride is 0x8000 and each slot carries 8 functions. The driver-local
 /// scans previously walked the space with a bare 0x1000 stride — they read
 /// the FUNCTION bits as device numbers, hiding every slot >= 4 (review
-/// BUG "PCI 探测步长 0x1000 错"). All probe paths now share this helper.
+/// BUG "PCI probe stride 0x1000 错"). All probe paths now share this helper.
 ///
 /// Buses 0..8 are covered (bounded by the kernel's 8MB ECAM mapping):
 /// boot devices live on bus 0, while devices hot-added behind a

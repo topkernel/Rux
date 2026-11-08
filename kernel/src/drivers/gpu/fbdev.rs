@@ -74,6 +74,12 @@ extern "C" fn kfbflush_fn(_arg: *mut core::ffi::c_void) -> i32 {
         }
 
         if FB_USER_MAPPED.load(Ordering::Acquire) {
+            static N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            let n = N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 3 {
+                crate::pr_warn!("KFBFLUSH-WOKE n={} (presenter alive)", n);
+            }
             super::flush_framebuffer();
         }
     }

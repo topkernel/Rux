@@ -350,7 +350,7 @@ pub fn sys_pread64(args: SyscallArgs) -> i64 {
 
     match crate::fs::file::get_file_fd_safe(fd) {
         Some(file) => {
-                // RACE fix (review批次1): pread must not touch the shared fd
+                // RACE fix (reviewround 1): pread must not touch the shared fd
                 // position — the old get_pos/set_pos/restore dance corrupted
                 // concurrent reads on other threads sharing the fd. Use the
                 // position-invariant read_at() instead.
@@ -873,7 +873,7 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
     let iov_addr = args[1] as usize;
     let iovcnt = args[2] as usize;
 
-    // IOV_MAX + overflow-safe iovec array validation (review批次1 OVERFLOW)
+    // IOV_MAX + overflow-safe iovec array validation (reviewround 1 OVERFLOW)
     if let Err(e) = check_iov_array(iov_addr, iovcnt) {
         return e;
     }
@@ -1063,7 +1063,7 @@ pub fn sys_readv(args: SyscallArgs) -> i64 {
     let iov_addr = args[1] as usize;
     let iovcnt = args[2] as usize;
 
-    // IOV_MAX + overflow-safe iovec array validation (review批次1 OVERFLOW)
+    // IOV_MAX + overflow-safe iovec array validation (reviewround 1 OVERFLOW)
     if let Err(e) = check_iov_array(iov_addr, iovcnt) {
         return e;
     }
@@ -1119,7 +1119,7 @@ pub fn sys_readv(args: SyscallArgs) -> i64 {
         // Short read: for pipes this means the buffered data was
         // exhausted — return the batch now instead of blocking on the
         // next iov (Linux readv never blocks after a partial
-        // fill; review批次1 "readv/writev pipe 一次拿可用").
+        // fill; reviewround 1 "readv/writev pipe 一次拿可用").
         if (result as usize) < len {
             break;
         }
@@ -1823,7 +1823,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             if !crate::arch::uaccess::access_ok(arg, 4) {
                 return -errno::EFAULT as i64;
             }
-            // Real readable count (review批次1: previously hard-coded 0):
+            // Real readable count (reviewround 1: previously hard-coded 0):
             // pipes report their buffered bytes; regular files report
             // size - position; other objects report 0.
             let readable: i32 = crate::fs::file::get_file_fd_safe(fd as usize)
@@ -1960,7 +1960,7 @@ pub fn sys_pwrite64(args: SyscallArgs) -> i64 {
 
     match crate::fs::file::get_file_fd_safe(fd) {
         Some(file) => {
-            // RACE fix (review批次1): use the position-invariant
+            // RACE fix (reviewround 1): use the position-invariant
             // write_at() — the old set_pos/restore dance corrupted the
             // shared fd position under concurrent I/O.
             // Chunked (SYSA-C1): bounded staging, sequential offset
@@ -2024,7 +2024,7 @@ pub fn sys_preadv(args: SyscallArgs) -> i64 {
     // arg[4] is unused garbage — do NOT combine it into a 128-bit offset.
     let offset = args[3] as u64 as u128;
 
-    // IOV_MAX + overflow-safe iovec array validation (review批次1 OVERFLOW)
+    // IOV_MAX + overflow-safe iovec array validation (reviewround 1 OVERFLOW)
     if let Err(e) = check_iov_array(iov_addr, iovcnt) {
         return e;
     }
@@ -2083,7 +2083,7 @@ pub fn sys_pwritev(args: SyscallArgs) -> i64 {
     // arg[4] is unused garbage — do NOT combine it into a 128-bit offset.
     let offset = args[3] as u64 as u128;
 
-    // IOV_MAX + overflow-safe iovec array validation (review批次1 OVERFLOW)
+    // IOV_MAX + overflow-safe iovec array validation (reviewround 1 OVERFLOW)
     if let Err(e) = check_iov_array(iov_addr, iovcnt) {
         return e;
     }
@@ -2261,7 +2261,7 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
     if len == 0 { return 0; }
 
     // Read the caller-provided offsets through the exception-table copy
-    // path — bare dereferences of user pointers fault the kernel (review批次1).
+    // path — bare dereferences of user pointers fault the kernel (reviewround 1).
     // A non-NULL offset drives position-invariant I/O and must NOT disturb
     // the fd's own position (Linux semantics).
     let mut in_off: Option<u64> = None;
@@ -2664,7 +2664,7 @@ pub fn sys_sendfile(args: SyscallArgs) -> i64 {
     }
 
     // Validate offset pointer and read its value through the exception-table
-    // copy path (review批次1: bare dereference of a user pointer).
+    // copy path (reviewround 1: bare dereference of a user pointer).
     let mut saved_offset: i64 = 0;
     if offset_ptr != 0 {
         if !crate::arch::uaccess::access_ok(offset_ptr, core::mem::size_of::<i64>()) {

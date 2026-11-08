@@ -801,7 +801,7 @@ fn uart_irq_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
                         UART_RX_BUF.put(c);
                         chars_received += 1;
 
-                        // ^C interrupt path (review批次8): record ISIG characters
+                        // ^C interrupt path (reviewround 8): record ISIG characters
                         // the moment they arrive instead of waiting for a reader to
                         // consume them — a busy foreground task (not blocked in
                         // read) must still be interruptible. The byte STAYS in the

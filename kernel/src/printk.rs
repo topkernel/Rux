@@ -146,7 +146,7 @@ static SAVED_CONSOLE_LOGLEVEL: AtomicI8 = AtomicI8::new(NO_SAVED_LOGLEVEL);
 /// Set during boot after printk is ready.
 static PRINTK_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
-/// Re-entrancy guard to prevent recursive printk. PER-CPU (review批次8):
+/// Re-entrancy guard to prevent recursive printk. PER-CPU (reviewround 8):
 /// a single global flag meant a printk running on CPU A silently dropped
 /// every concurrent printk from CPU B (lost logs under exactly the
 /// multi-CPU conditions printk matters most).
@@ -580,7 +580,7 @@ fn printk_bytes(level: u8, text: &[u8]) {
 fn write_to_ring_buffer(level: u8, text: &[u8], timestamp: u64) {
     crate::debug::syscost::note_printk_ring(text.len()); // syscost probe
     let pid = crate::process::current_pid() as u32;
-    // Real CPU id (review批次8: hard-coded 0 attributed every message to
+    // Real CPU id (reviewround 8: hard-coded 0 attributed every message to
     // CPU 0, hiding cross-CPU issues in the logs).
     let cpu_id: u16 = (crate::arch::cpu_id() as u16).min(u16::MAX);
 

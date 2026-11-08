@@ -38,7 +38,7 @@ pub struct VirtioGpuDevice {
     /// path (flush_framebuffer) happens to serialize through the
     /// GPU_DEVICE spinlock, but that invariant lives in another module —
     /// this lock makes it local and future-proof (review RACE:
-    /// "virtio-gpu desc 无锁").
+    /// "virtio-gpu desc lock-free").
     cmd_lock: crate::sync::spinlock::Spinlock<()>,
     /// Framebuffer information
     fb_info: Option<FrameBufferInfo>,
@@ -888,13 +888,69 @@ impl VirtioGpuDevice {
         self.pci.pci_config.base_addr
     }
 
-    pub fn flush(&self) {        let rect = self.display_rect;
+    pub fn flush(&self) {
+        let rect = self.display_rect;
 
         // 1. Transfer framebuffer data to device
-        let _ = self.transfer_to_host_2d(self.resource_id, 0, &rect);
-
+        let t = self.transfer_to_host_2d(self.resource_id, 0, &rect);
         // 2. Flush resource to display
-        let _ = self.resource_flush(self.resource_id, &rect);
+        let f = self.resource_flush(self.resource_id, &rect);
+
+        // Diagnostic (first few flushes only): the display chain is
+        // mmap(/dev/fb0) -> guest pixels -> TRANSFER_TO_HOST_2D ->
+        // RESOURCE_FLUSH -> host scanout. A black host window with a
+        // running desktop means one link is silent — name which.
+        {
+            static N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            let n = N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 4 {
+                // Is the resource's backing actually painted? Sample the
+                // first 64 bytes of the framebuffer the scanout reads: an
+                // all-zero sample means the renderer wrote into a
+                // DIFFERENT mapping (the mmap miss path) — the flush
+                // would then faithfully transfer an empty frame.
+                let mut nonzero = 0u32;
+                let mut sampled = 0u32;
+                if let Some(fb) = self.fb_info.as_ref() {
+                    let kv = crate::arch::mm::phys_to_virt(
+                        crate::arch::mm::PhysAddr::new(fb.addr),
+                    )
+                    .bits() as *const u8;
+                    // Sample the WHOLE frame (one word per 4 KiB) plus the
+                    // first 64 bytes: a zero sample across the frame means
+                    // the renderer never painted (or painted elsewhere).
+                    for i in 0..64usize {
+                        sampled += 1;
+                        // SAFETY: the framebuffer is live memory.
+                        if unsafe { *kv.add(i) } != 0 {
+                            nonzero += 1;
+                        }
+                    }
+                    let words = (fb.size as usize) / 4;
+                    let mut w = 64usize;
+                    while w < words {
+                        sampled += 1;
+                        // SAFETY: in-bounds word of the framebuffer.
+                        if unsafe { core::ptr::read_volatile(kv.add(w * 4) as *const u32) } != 0 {
+                            nonzero += 1;
+                        }
+                        w += 1024; // every 4 KiB
+                    }
+                }
+                crate::pr_warn!(
+                    "GPU-FLUSH n={} res={} rect={}x{} transfer_ok={} flush_ok={} fb_nonzero={}/{} sampled",
+                    n,
+                    self.resource_id,
+                    rect.width,
+                    rect.height,
+                    t.is_some() as u8,
+                    f.is_some() as u8,
+                    nonzero,
+                    sampled
+                );
+            }
+        }
     }
 
     /// Get framebuffer

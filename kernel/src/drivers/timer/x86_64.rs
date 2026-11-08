@@ -21,7 +21,7 @@
 //!    jiffies-derived pre-calibration clock via a one-time offset.
 //!
 //! With N CPUs ticking, jiffies must NOT be incremented once per IRQ
-//! (that ran 4x fast on the riscv64 twin before review批次7): the tick
+//! (that ran 4x fast on the riscv64 twin before reviewround 7): the tick
 //! handler derives jiffies from the timebase (`floor(elapsed/period)`),
 //! which is idempotent under concurrent tick handlers on any CPU.
 
@@ -455,7 +455,7 @@ pub fn set_next_trigger() {
     if !timebase_precise() {
         return;
     }
-    // Grid-glued (review批次8 discipline): round UP to the next grid
+    // Grid-glued (reviewround 8 discipline): round UP to the next grid
     // multiple so handler latency never accumulates into the cadence.
     let current = read_time();
     let mut deadline = (current / TIME_SLICE_TICKS + 1) * TIME_SLICE_TICKS;
@@ -492,7 +492,7 @@ pub fn pre_hpet_time() -> u64 {
 }
 
 /// Advance jiffies from the TIMEBASE, not from IRQ counts (riscv64
-/// review批次7 discipline): with N CPUs each running a periodic LAPIC
+/// reviewround 7 discipline): with N CPUs each running a periodic LAPIC
 /// timer, per-IRQ increments ran jiffies N times fast.  Deriving
 /// `floor((now - base) / period)` makes the update idempotent and
 /// multi-CPU safe.

@@ -1039,7 +1039,7 @@ impl MmStruct {
     /// USER portion of this address space, preserving each PTE's PPN.
     ///
     /// Used by the init/ELF loaders to tighten a one-shot RWX pre-map down
-    /// to per-segment (W^X) permissions (review批次8). `flags` holds the
+    /// to per-segment (W^X) permissions (reviewround 8). `flags` holds the
     /// low PTE bits (V/U/R/W/X/A/D); pages not currently mapped are left
     /// alone. Callers must ensure `end <= USER_END` (kernel range PTEs are
     /// shared and must never be rewritten from here).

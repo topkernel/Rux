@@ -1104,7 +1104,7 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
                 // periodic ones). The H48 close-race (increment on a freed
                 // counter) is accepted per the timerfd refcount audit.
                 // The address names the whole TimerFd so the notify hook can
-                // also wake readers blocked in timerfd_read (review批次1).
+                // also wake readers blocked in timerfd_read (reviewround 1).
                 crate::syscall::misc::timerfd_expire_notify(tfd);
             }
             Action::Signal { pid, signo } => {

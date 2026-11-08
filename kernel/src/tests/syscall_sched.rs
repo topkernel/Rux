@@ -83,7 +83,7 @@ fn test_priority() {
         test_pass("getpriority returns valid priority");
     }
 
-    // getpriority PRIO_PGRP / PRIO_USER (review批次1: both selectors are
+    // getpriority PRIO_PGRP / PRIO_USER (reviewround 1: both selectors are
     // now supported — who=0 takes the caller's own pgid/uid and returns
     // the best priority among matching tasks). At this point the boot
     // task still has nice=0 → 20 - 0 = 20.
@@ -124,7 +124,7 @@ fn test_priority() {
         test_skip("setpriority", "no valid process context");
     }
 
-    // setpriority PRIO_PGRP (supported since review批次1): who=0 selects
+    // setpriority PRIO_PGRP (supported since reviewround 1): who=0 selects
     // the caller's own process group. In the test context pgrp 0 also
     // contains kernel threads, and renicing a foreign task needs
     // CAP_SYS_NICE — the syscall then reports -EPERM, which is the

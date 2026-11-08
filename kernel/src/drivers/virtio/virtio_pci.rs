@@ -1762,7 +1762,7 @@ fn write_block_once(
 /// Sends a real VIRTIO_BLK_T_FLUSH request (header + resp, no data
 /// descriptor) so the disk's volatile cache is persisted. The old fsync
 /// path only drained the kernel's write-through buffer cache and never
-/// told the DEVICE to persist — "Flush 假成功" (review BUG: fsync 无持久化).
+/// told the DEVICE to persist — "Flush 假成功" (review BUG: fsync no persistence).
 ///
 /// # Returns
 /// Ok(0) when the device acknowledges the flush.

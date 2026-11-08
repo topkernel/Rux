@@ -1213,7 +1213,7 @@ pub fn sys_timer_create(args: SyscallArgs) -> i64 {
     // Allocate a stable, never-reused timer handle. Previously the id was
     // `timers.len() + 1` and lookups were by Vec index: deleting a middle
     // timer shifted every later entry and silently redirected operations on
-    // surviving timers to the WRONG timer (review批次1). Ids only need to be
+    // surviving timers to the WRONG timer (reviewround 1). Ids only need to be
     // unique within the process; a global monotonic source guarantees it
     // across create/delete cycles for the process' lifetime.
     static NEXT_POSIX_TIMER_ID: core::sync::atomic::AtomicI32 =
@@ -1302,7 +1302,7 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    // Find timer by stable user handle (review批次1: index arithmetic
+    // Find timer by stable user handle (reviewround 1: index arithmetic
     // misdirected operations after a middle timer was deleted).
     let mut timers = task.posix_timers.lock();
     let timer = match timers.iter_mut().find(|t| t.user_timer_id == timerid) {
@@ -1521,7 +1521,7 @@ pub fn sys_timer_gettime(args: SyscallArgs) -> i64 {
         None => return -(errno::ESRCH as i64),
     };
 
-    // Lookup by stable user handle, not Vec index (review批次1).
+    // Lookup by stable user handle, not Vec index (reviewround 1).
     let timers = task.posix_timers.lock();
     let timer = match timers.iter().find(|t| t.user_timer_id == timerid) {
         Some(t) => t,
@@ -1560,7 +1560,7 @@ pub fn sys_timer_getoverrun(args: SyscallArgs) -> i64 {
         None => return -(errno::ESRCH as i64),
     };
 
-    // Lookup by stable user handle, not Vec index (review批次1).
+    // Lookup by stable user handle, not Vec index (reviewround 1).
     let timers = task.posix_timers.lock();
     match timers.iter().find(|t| t.user_timer_id == timerid) {
         Some(t) => t.overrun_count as i64,

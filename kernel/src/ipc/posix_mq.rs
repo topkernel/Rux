@@ -556,7 +556,7 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> i64 {
     // SAFETY: msg_ptr was access_ok-validated for msg_len bytes above;
     // data is a Vec with capacity msg_len, so the destination is valid.
     // The uncopied count MUST be checked — a partial copy would silently
-    // zero-fill the tail (review IPC M: mq_send 忽略 copy_from_user 返回值).
+    // zero-fill the tail (review IPC M: mq_send ignore copy_from_user return value).
     if unsafe { copy_from_user(data.as_mut_ptr(), msg_ptr, msg_len) } != 0 {
         return -(errno::EFAULT as i64);
     }

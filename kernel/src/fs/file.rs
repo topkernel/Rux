@@ -1673,7 +1673,7 @@ fn reg_file_write(file: &File, buf: &[u8]) -> isize {
         // Serialize the whole read-offset → write → update-pos sequence so
         // that two O_APPEND writers on SMP cannot interleave (their writes
         // would each position at the "old" end). Also protects plain
-        // read/write pos racing. Review 5.2 (O_APPEND 与 pos 更新无锁).
+        // read/write pos racing. Review 5.2 (O_APPEND 与 pos 更新lock-free).
         // (Also against reg_file_read now — see the io_lock field note.)
         let _write_guard = file.io_lock.guard();
 

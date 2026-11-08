@@ -240,7 +240,7 @@ fn tasklet_action(_vec: usize) {
             let next = (*pos).next;
             let tasklet = (pos as usize - offset_of!(TaskletStruct, list)) as *mut TaskletStruct;
 
-            // CAS (review批次8): atomically clear SCHED and set RUN in one
+            // CAS (reviewround 8): atomically clear SCHED and set RUN in one
             // swap. This is the Linux tasklet_trylock() +
             // test_and_clear_bit(SCHED) pair. It closes the double-link race
             // of the old plain store: an interrupt re-scheduling the tasklet

@@ -73,7 +73,7 @@ pub fn ext4_file_read(
         }
 
         // Sparse hole (block 0 = unallocated): serve ZEROES, never physical
-        // block 0 (superblock-backup garbage) — review 5.5 (稀疏洞读盘块 0,
+        // block 0 (superblock-backup garbage) — review 5.5 (sparse-hole disk read 0,
         // 非缓存路径).
         if blocks[block_index] == 0 {
             // debug=exthunt: O_DIRECT hole verdict — see exthunt_read_hole.
@@ -2372,7 +2372,7 @@ unsafe fn ext4_write_at_core(
     skip_update_pfn: u64,
 ) -> isize {
     // SMP serialization for the write path (review 5.5 high: 写路径/位图
-    // RMW 无锁——SMP 位图丢更新双分配): allocation, bitmap RMW, group
+    // RMW lock-free——SMP 位图丢更新双分配): allocation, bitmap RMW, group
     // descriptor updates and the inode rewrite all happen under the
     // ext4 big lock, same as namei.
     let _ext4_guard = crate::fs::ext4::EXT4_BIG_LOCK.lock();

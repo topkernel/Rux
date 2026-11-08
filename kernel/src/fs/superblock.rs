@@ -291,7 +291,7 @@ pub unsafe fn do_mount(
     flags: u64,
     _data: Option<&str>,
 ) -> Result<(), i32> {
-    // Review 5.1 (低: do_mount 忽略 flags/source、三套 mount 并存): the
+    // Review 5.1 (低: do_mount ignore flags/source、三套 mount 并存): the
     // unified mount path lives in fs::mount (the registry-based path here
     // built a SuperBlock but never linked a mount into the namespace).
     // Keep the registry lookup for type validation, then delegate the

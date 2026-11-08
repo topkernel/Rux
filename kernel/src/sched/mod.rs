@@ -45,6 +45,7 @@ pub use sched::{
     wake_up_enqueue,
     wake_up_enqueue_nested,
     wake_up_enqueue_opt,
+    release_phantom_pick,
     steer_task_cpu,
     change_task_policy,
     init,

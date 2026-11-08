@@ -380,7 +380,7 @@ fn io_uring_create(entries: u32, params: &mut IoUringParams) -> Result<Box<IoUri
         core::ptr::write_volatile(base.add(20) as *mut u32, 0);  // flags
     }
 
-    // Fill in params. NOTE (review批次6 P1): do NOT advertise
+    // Fill in params. NOTE (reviewround 6 P1): do NOT advertise
     // IORING_FEAT_SINGLE_MMAP — this implementation maps the SQ ring, CQ
     // ring and SQEs as SEPARATE regions. With the bit set, liburing maps
     // one region for both rings and computes wrong ring pointers.
@@ -547,7 +547,7 @@ pub fn io_uring_mmap_handler(
     let addr_space = current_task.address_space().ok_or(-12)?;
     let user_ppn = addr_space.root_ppn();
 
-    // addr == 0 asks the kernel to choose (review批次6 P1: the old fixed
+    // addr == 0 asks the kernel to choose (reviewround 6 P1: the old fixed
     // MMAP_START made every SECOND ring mmap collide with the first).
     // find_free_area honors existing VMAs, so repeated NULL mappings stack.
     let vaddr = if addr == 0 {
@@ -1009,7 +1009,7 @@ pub fn sys_io_uring_setup(args: [u64; 6]) -> u64 {
     let ring = match io_uring_create(entries, &mut params) {
         Ok(r) => r,
         // `e` is already a NEGATIVE errno (io_uring_create returns Err(-12)
-        // etc.) — do NOT negate again (review批次6 P2: the double negation
+        // etc.) — do NOT negate again (reviewround 6 P2: the double negation
         // turned ENOMEM into a fake "returned fd 12").
         Err(e) => return (e as i64) as u64,
     };
@@ -1097,7 +1097,7 @@ pub fn sys_io_uring_enter(args: [u64; 6]) -> u64 {
         let result = wait_for_cqes(ring, min_complete);
         if result < 0 {
             // result is already a negative errno — no double negation
-            // (review批次6 P2).
+            // (reviewround 6 P2).
             return (result as i64) as u64;
         }
     }
@@ -1105,7 +1105,7 @@ pub fn sys_io_uring_enter(args: [u64; 6]) -> u64 {
     // Linux io_uring_enter returns the number of CQEs ready (post-wait)
     // when nothing was submitted — previously a pure-enter wait call
     // always returned 0 and callers could not distinguish "woke with N
-    // completions" from "timeout/nothing" (review批次6 M).
+    // completions" from "timeout/nothing" (reviewround 6 M).
     if submitted == 0 {
         let head = unsafe {
             core::ptr::read_volatile(ring.cq_ring.kvirt.add(ring.cq_head_off) as *const u32)

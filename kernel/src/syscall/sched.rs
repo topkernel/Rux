@@ -93,7 +93,7 @@ pub fn sys_getpriority(args: SyscallArgs) -> i64 {
             let nice = unsafe { (*task).nice() };
             (20 - nice) as i64
         }
-        // Group/user-wide queries (review批次1: previously EINVAL). who==0
+        // Group/user-wide queries (reviewround 1: previously EINVAL). who==0
         // selects the caller's own pgid/uid; the result is the HIGHEST
         // priority (lowest nice) among all matching tasks.
         PRIO_PGRP | PRIO_USER => {
@@ -177,7 +177,7 @@ pub fn sys_setpriority(args: SyscallArgs) -> i64 {
     // Check nice value range
     let niceval = niceval.clamp(MIN_NICE, MAX_NICE);
 
-    // Collect the target PIDs for the selector (review批次1: PRIO_PGRP /
+    // Collect the target PIDs for the selector (reviewround 1: PRIO_PGRP /
     // PRIO_USER were previously EINVAL).
     let mut target_pids: alloc::vec::Vec<u32> = alloc::vec::Vec::new();
     match which {
@@ -240,7 +240,7 @@ pub fn sys_setpriority(args: SyscallArgs) -> i64 {
         // - a task owned by another user requires CAP_SYS_NICE (EPERM) —
         //   the caller's own processes and threads do not;
         // - RAISING priority (lowering nice) requires CAP_SYS_NICE for any
-        //   target (EACCES) — previously any self-renice passed (review批次1).
+        //   target (EACCES) — previously any self-renice passed (reviewround 1).
         // SAFETY: task validated non-null; nice() only reads.
         let cur_nice = unsafe { (*task).nice() };
         // SAFETY: task is pinned above.
@@ -757,7 +757,7 @@ pub fn sys_sched_setattr(args: SyscallArgs) -> i64 {
     if attr_ptr.is_null() {
         return -(errno::EINVAL as i64);
     }
-    // Read the user-declared size first (review批次1: setattr 不按 size 截读).
+    // Read the user-declared size first (reviewround 1: setattr 不按 size 截读).
     // Linux copies only attr->size bytes: an older/smaller user struct must
     // not be over-read (the rest of the kernel copy stays zero).
     if !crate::arch::uaccess::access_ok(attr_ptr as usize, 8) {
@@ -1200,7 +1200,7 @@ pub fn sys_sched_getaffinity(args: SyscallArgs) -> i64 {
         target
     };
 
-    // Report the STORED affinity mask (review批次1: previously always
+    // Report the STORED affinity mask (reviewround 1: previously always
     // all-CPUs regardless of what setaffinity installed).
     // SAFETY: task validated non-null; cpus_allowed() is an atomic read.
     let allowed = unsafe { (*task).cpus_allowed() };

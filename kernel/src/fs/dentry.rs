@@ -665,7 +665,7 @@ impl Dentry {
         let mut components: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
         let name = self.get_name();
         // Limit depth to prevent infinite loops on corrupted dentry trees.
-        // 256 (review 5.1: build_path>64 截断 — deep trees silently got
+        // 256 (review 5.1: build_path>64 truncate — deep trees silently got
         // truncated paths, breaking /proc/self/fd links and getcwd).
         let max_depth = 256;
         // `self` IS the process root: the rooted path is "/".

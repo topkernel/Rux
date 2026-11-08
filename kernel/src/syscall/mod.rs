@@ -434,5 +434,5 @@ impl FdSet {
 ///
 /// FD_SETSIZE is fixed at 1024 to match the FdSet layout above (16 × u64 =
 /// 1024 bits) and the asm-generic ABI. Taking it from config would silently
-/// break the bit layout whenever the config value differs (review 批次1).
+/// break the bit layout whenever the config value differs (review round 1).
 pub const FD_SETSIZE: i32 = 1024;

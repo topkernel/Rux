@@ -3796,7 +3796,7 @@ fn vfs_rename_locked(oldpath: &str, newpath: &str) -> Result<(), i32> {
 
     // Rename a directory into itself or its own subdirectory would create a
     // ".." cycle — check the ancestor chain of the new parent (review 5.5:
-    // rename 环检查错). Only directories can form cycles.
+    // rename ring-check error). Only directories can form cycles.
     if let Some(ref src_inode) = source_vpath.as_ref().and_then(|vp| vp.inode.as_ref()) {
         if src_inode.mode.is_directory() {
             // Renaming a dir to the same place is a no-op.

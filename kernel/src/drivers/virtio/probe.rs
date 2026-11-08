@@ -325,7 +325,7 @@ pub fn init_pci_block_devices() -> usize {
     // Scan PCIe bus through the shared ECAM walker: 0x8000 stride per slot
     // + all 8 functions. The old local scan used a 0x1000 stride, reading
     // the FUNCTION bits as device numbers — every slot >= 4 was invisible
-    // (review BUG "PCI 探测步长 0x1000 错，slot≥4 全漏").
+    // (review BUG "PCI probe stride 0x1000 错，slot≥4 全漏").
     let ecam_addresses = crate::drivers::pci::find_ecam_devices(
         crate::drivers::pci::vendor::RED_HAT,
         &[

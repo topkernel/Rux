@@ -575,7 +575,7 @@ impl VirtIONetDevice {
         // - Followed by Ethernet frame data
         let total_len = used_elem.len as usize;
         if total_len <= core::mem::size_of::<VirtIONetHdr>() {
-            // R24 (R14 MED "poll 早退泄漏 RX 缓冲"): every early return after
+            // R24 (R14 MED "poll 早退泄漏 RX buffer"): every early return after
             // this point has consumed a used entry — the buffer must be
             // recycled or the buffer AND its descriptor are lost forever
             // (enough of them wedge RX at zero posted buffers).

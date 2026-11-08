@@ -666,7 +666,7 @@ pub fn sys_msgsnd(args: [u64; 6]) -> i64 {
     // data is a Vec with capacity msgsz, so the destination is valid.
     // The return value (uncopied byte count) MUST be checked — a partial
     // copy would zero-fill the tail and corrupt the message (review IPC M:
-    // msgsnd 忽略 copy_from_user 返回值).
+    // msgsnd ignore copy_from_user return value).
     if unsafe { copy_from_user(data.as_mut_ptr(), data_ptr, msgsz) } != 0 {
         return -(errno::EFAULT as i64);
     }

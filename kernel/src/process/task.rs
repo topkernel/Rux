@@ -922,7 +922,7 @@ pub struct Task {
     /// the underflow clamp. Heals only at run >= 200.
     ti_pc_pirq_present_run: AtomicU64,
 
-    /// khungtaskd bookkeeping (review批次8): timestamp (ns) when this task
+    /// khungtaskd bookkeeping (reviewround 8): timestamp (ns) when this task
     /// was FIRST seen in D-state in the current window; 0 = not in D-state.
     /// Per-task storage replaces the old pid-indexed side table — real pids
     /// exceed MAX_TASKS, so the table silently skipped every real task.

@@ -3701,7 +3701,7 @@ pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::pt_regs::PtR
     }
     use crate::sched;
 
-    // ^C interrupt path (review批次8): deliver any ISIG character the UART
+    // ^C interrupt path (reviewround 8): deliver any ISIG character the UART
     // RX IRQ recorded. Must run even when no signal is pending YET — this
     // delivery is what CREATES the pending signal, and it lets ^C reach a
     // busy foreground task that is not blocked in read().

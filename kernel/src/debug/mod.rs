@@ -147,7 +147,23 @@ pub fn init() {
     switches::init_from_cmdline();
     // mmprof (cmdline mmprof=1): spawn the task-context dump thread here
     // (cmdline is parsed; the thread prints with the task emit budget).
-    mmprof::ensure_dump_thread();
+    //
+    // ONLY when the instrument is armed (GNOME black-screen regression,
+    // 2026-11-08: the thread was started on EVERY boot, and its naked
+    // sleep discipline — one-shot wakeup timer + INTERRUPTIBLE
+    // schedule() with NO wait queue — made the timer fire at a task
+    // that was not waiting. That path drives the wake-side phantom
+    // family (the boot showed 41 WAKE-HEAL-SKIP refusals, 10
+    // R46-RUNNING-PHANTOM heals and 38 TIMEDSLEEP-PARK reports, all
+    // ABSENT in a boot that paints): the GJS worker pool's condition
+    // signal was refused, the shell never produced its first frame and
+    // the desktop stayed black. The painted/blank difference was
+    // bisected to this thread's introduction (97c95c30). A debug
+    // instrument must not run (or perturb the scheduler) on a standard
+    // boot — gate it like every other arm-on-demand instrument.
+    if mmprof::on() {
+        mmprof::ensure_dump_thread();
+    }
     // oops=panic seeds panic_on_oops (the sysctl can flip it later).
     oops::init_from_cmdline();
     // Wild-write tripwire arms between the timekeeper's init and

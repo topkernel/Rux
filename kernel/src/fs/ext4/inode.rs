@@ -313,7 +313,7 @@ impl Ext4Inode {
 
             // Sparse hole / unwritten block (block number 0): reads must
             // return ZEROES, never the content of physical block 0
-            // (superblock backup garbage) — review 5.5 (稀疏洞读盘块 0).
+            // (superblock backup garbage) — review 5.5 (sparse-hole disk read 0).
             let this_block = self.get_data_block(fs, block_index as u64)?;
             if this_block == 0 {
                 let remaining = to_read - total_read;
@@ -517,7 +517,7 @@ pub fn write_inode(
 
     // Bounds check: copy length clamped to the on-disk slot size so the
     // 172-byte in-memory struct never spills into the next inode's slot
-    // (review 5.5: write_inode 的 172B 布局按实际 inode_size 拷贝).
+    // (review 5.5: write_inode 的 172B 布局按实际 inode_size copy).
     let copy_len = core::cmp::min(
         core::mem::size_of::<Ext4InodeOnDisk>(),
         fs.inode_size as usize,
@@ -700,7 +700,7 @@ pub fn write_inode_disk(
     // size (s_inode_size) AND to the block: with s_inode_size < 172 the full
     // in-memory struct would spill into the NEXT inode's slot; with the last
     // slot of the block it would overrun the buffer outright (review 5.5:
-    // 172B 布局按实际 inode_size 拷贝).
+    // 172B 布局按实际 inode_size copy).
     let copy_len = core::cmp::min(
         core::mem::size_of::<Ext4InodeOnDisk>(),
         fs.inode_size as usize,

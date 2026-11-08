@@ -5,7 +5,7 @@
 //! Page Cache — per-inode file data cache layering on top of bio block cache.
 //!
 //! Caches 4KB file data pages keyed by ((fs_id, inode_number), page_index).
-//! The fs_id component (review 5.3: 页缓存键 ino:u32 截断/跨文件系统串页)
+//! The fs_id component (review 5.3: 页缓存键 ino:u32 truncate/跨文件系统串页)
 //! separates inodes of different filesystem instances that would otherwise
 //! collide on the same small inode number.
 //! Reduces disk I/O for repeated reads and enables read-ahead population.

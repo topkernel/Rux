@@ -569,6 +569,19 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
                         )
                         && oncpu == -1;
                     if lost_sleeper {
+                        // Release the member's PHANTOM pick state
+                        // BEFORE re-running it (GNOME park face,
+                        // 2026-11-08): the frozen member still carries
+                        // the slot + ownership word its last pick
+                        // published, so the wake below is REFUSED
+                        // (curr_on) — the task never runs, the drain
+                        // re-parks it forever and the lying slot
+                        // refuses every wake aimed at it (41 refusals
+                        // in one boot: the GJS worker pool dies and the
+                        // desktop never paints). on_cpu == -1 proves
+                        // no switch-in completed, so the slot is stale
+                        // and the rewrite is safe.
+                        crate::sched::release_phantom_pick(m);
                         crate::pr_warn!(
                             "STRAGGLER-RESCUE member pid={} state={:#x} on_cpu={} rounds={} leader pid={} — lost wake mid-exit; re-running it",
                             (*m).pid(),

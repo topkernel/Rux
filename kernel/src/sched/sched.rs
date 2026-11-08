@@ -3966,7 +3966,7 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
             // the first-ever enqueue, where deadline is still 0). A wake
             // WITHIN the period keeps the residual budget — otherwise a task
             // that sleeps just before exhausting its budget would be refilled
-            // on every wake, re-opening the 100%-CPU hole (review批次8).
+            // on every wake, re-opening the 100%-CPU hole (reviewround 8).
             if now >= deadline {
                 dl.update_deadline(now);
                 dl.replenish_runtime();
@@ -4145,6 +4145,58 @@ pub fn steer_task_cpu(task: *mut Task, target: i32) {
 /// Returns true if the task was transitioned and enqueued.
 pub fn wake_up_enqueue(task: *mut Task) -> bool {
     wake_up_enqueue_opt(task, None)
+}
+
+/// Release a PHANTOM sleeper's published pick state (GNOME park face,
+/// 2026-11-08: the black-screen face).
+///
+/// A group member that froze mid-exit (past its ring leave, before the
+/// terminal DEAD store) still carries the pick state its last pick
+/// published: the CPU slot naming it and its ownership word
+/// ({on_cpu, claim}). The rescue path re-runs it — but the wake is
+/// REFUSED while a slot still names it (the curr_on refusal), so the
+/// task never runs, the drain re-parks it forever (199 rounds observed
+/// in one boot) and the lying slot refuses EVERY wake aimed at that
+/// CPU's slot — which is how the GJS worker pool dies and the desktop
+/// never paints.
+///
+/// Safety of the rewrite: the caller proves the task is INTERRUPTIBLE
+/// with on_cpu == -1 (it is executing nowhere). A slot naming it can
+/// therefore only be a stale publish (the switch-in affirm never ran),
+/// not a live pick or a mid-switch-to-it. This mirrors the R46 heal's
+/// adjudication (a LIVE mark with no slot and no SWITCHING_OUT is
+/// impossible in-tree) and the wake path's idle-slot heal (rewrite the
+/// slot to the owning CPU's idle task).
+///
+/// Returns true if a slot was rewritten (the wake may now proceed).
+pub fn release_phantom_pick(task: *mut Task) -> bool {
+    let mut rewritten = false;
+    {
+        let _g = grq().lock_irqsave();
+        for c in 0..crate::config::MAX_CPUS {
+            if cpu_state(c).current == task {
+                let idle_task = cpu_state(c).idle;
+                if !idle_task.is_null() && idle_task != task {
+                    cpu_state_mut(c).current = idle_task;
+                    slot_tag_write(c, SLOT_W_R56C, idle_task);
+                    pick_gen_supersede(c, idle_task);
+                    rewritten = true;
+                }
+            }
+        }
+        if rewritten {
+            // The ownership word is the task's own half of the publish
+            // (R56 protocol: {on_cpu=false, claim=-1}).
+            unsafe { (*task).release_pick_ownership(); }
+        }
+    }
+    if rewritten {
+        crate::pr_warn!(
+            "PHANTOM-PICK-RELEASED pid={} — stale slot rewritten; the wake can proceed now",
+            unsafe { (*task).pid() }
+        );
+    }
+    rewritten
 }
 
 /// r24 (kill10 wedge hunt): discriminator census for the W2

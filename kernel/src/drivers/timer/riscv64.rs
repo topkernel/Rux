@@ -85,7 +85,7 @@ pub fn coarse_ns_since_boot() -> u64 {
 
 /// Advance jiffies from the TIMEBASE, not from IRQ counts.
 ///
-/// Review批次7 (TIMING 高): every hart's timer IRQ incremented the single
+/// Reviewround 7 (TIMING 高): every hart's timer IRQ incremented the single
 /// global counter — with 4 CPUs, jiffies ran 4x fast (every jiffies-based
 /// timeout fired at 1/4 of its nominal duration). Deriving jiffies from
 /// `floor((time - base) / ticks_per_period)` instead makes the update
@@ -182,7 +182,7 @@ pub fn set_timer(deadline: u64) {
 /// sleeps; LTP clock_nanosleep02 forbids early wakeups, so the hart timer
 /// must be able to fire BETWEEN grid ticks).
 ///
-/// Review批次8: arming at `now + period` accumulates every handler's
+/// Reviewround 8: arming at `now + period` accumulates every handler's
 /// latency into the period (permanent drift — sleeps lengthen under
 /// load). Rounding up to the next grid multiple keeps the interrupt
 /// cadence glued to nominal 1/HZ boundaries.

@@ -28,7 +28,7 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 fn now_ns() -> u64 {
     let time: u64 = crate::arch::cpu::read_time();
     // timebase ticks → ns (×100 for the 10 MHz CLINT; the old ×10
-    // multiplier read every window 10x too small — review批次8).
+    // multiplier read every window 10x too small — reviewround 8).
     time.saturating_mul(1_000_000_000) / crate::config::TIMER_CLOCK_FREQ_HZ as u64
 }
 
@@ -72,7 +72,7 @@ extern "C" fn khungtaskd_fn(_arg: *mut core::ffi::c_void) -> i32 {
             break;
         }
 
-        // --- Periodic sleep with a real waker (review批次8: the old loop
+        // --- Periodic sleep with a real waker (reviewround 8: the old loop
         // set INTERRUPTIBLE and scheduled with NO waker armed — khungtaskd
         // slept until some unrelated wake happened to land on it, so hung
         // tasks were detected minutes late or never). Mirror the
@@ -145,7 +145,7 @@ extern "C" fn khungtaskd_fn(_arg: *mut core::ffi::c_void) -> i32 {
 /// Scan all tasks for hung tasks (pid-hash traversal; bookkeeping lives on
 /// each Task — the old pid-indexed side table skipped every task whose pid
 /// was >= MAX_TASKS, which on this system means essentially all of them,
-/// review批次8).
+/// reviewround 8).
 fn check_tasks() {
     let now = now_ns();
     let timeout_ns = HUNG_TASK_TIMEOUT_SECS * 1_000_000_000;
