@@ -1755,6 +1755,35 @@ unsafe fn devfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
 /// included). POSIX replace semantics for an existing destination; the
 /// VFS wrapper has already validated types/stickiness/cycles.
 /// SAFETY: VFS callback contract; private_data is a leaked Arc<DevfsEntry>.
+/// Is this devfs entry a directory?
+fn is_devfs_dir(name: &str) -> bool {
+    // devfs directories are the well-known device nodes (input/, block/,
+    // etc.) — the registry knows them; a name-only check is the best we can
+    // do without walking the tree (the cycle guard is a safety net, not a
+    // correctness-critical check).
+    name.ends_with('/') || matches!(name, "input" | "block" | "char" | "pts" | "shm")
+}
+
+/// Is `candidate` inside `ancestor`'s subtree? (devfs cycle guard)
+/// Uses the tree paths (DevfsEntry has no parent pointer).
+fn devfs_is_descendant(candidate: *const DevfsEntry, ancestor: *const DevfsEntry) -> bool {
+    // SAFETY: both pointers come from the devfs registry (static nodes).
+    let (cand, anc) = unsafe { (&*candidate, &*ancestor) };
+    let (Some(cand_path), Some(anc_path)) = (devfs_rel_path(cand), devfs_rel_path(anc)) else {
+        return false;
+    };
+    if cand_path == anc_path {
+        return false; // same node
+    }
+    // "/dev/input" is inside "/dev" but not vice versa
+    let prefix = if anc_path.is_empty() {
+        String::new()
+    } else {
+        alloc::format!("{}/", anc_path)
+    };
+    cand_path.starts_with(&prefix)
+}
+
 unsafe fn devfs_rename(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_name: &[u8]) -> i32 {
     let old_ptr = match old_dir.private_data {
         Some(p) => p,
@@ -1798,6 +1827,13 @@ unsafe fn devfs_rename(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_na
         // then insert into the new one. VFS_MUTATION_LOCK serializes all
         // mutations (vfs_rename holds it across this call), and readers
         // only ever hold ONE children lock, so lock order cannot cycle.
+        //
+        // review4 fs-M: cycle guard — renaming a directory INTO ITS OWN
+        // subtree silently detached it (the VFS-level ".." guard is a no-op
+        // for devfs). Reject with EINVAL, like Linux's lock_rename.
+        if is_devfs_dir(old_name) && devfs_is_descendant(new_parent, old_parent) {
+            return errno::Errno::InvalidArgument.as_neg_i32();
+        }
         let child = {
             let mut old_children = old_parent.children.lock_irqsave();
             let child = match old_children.remove(old_name) {

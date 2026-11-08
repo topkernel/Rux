@@ -879,6 +879,11 @@ static SEQ_SEEN_REQS: [AtomicU32; 16] = [
 static SEQ_SEEN_N: AtomicU32 = AtomicU32::new(0);
 
 fn trace_seq(request: u32, ret: i64) {
+    // review4 drivers-M: the whole console-trace family rides
+    // debug=ohhunt (which also arms the drm: tracepoint family).
+    if !crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::OhHunt) {
+        return;
+    }
     let pid = crate::process::current_pid();
     let n = SEQ_N.fetch_add(1, Ordering::Relaxed);
     if n < 128 {
@@ -921,17 +926,11 @@ fn trace_ioctl(request: u32, ret: i64) {
     let (slot, name) = match request {
         DRM_IOCTL_VERSION => {
             // VERSION is every DRM client's first ioctl — an effective
-            // "node open" marker. First 8 callers with pid.
-            static VTRACE: AtomicU32 = AtomicU32::new(0);
-            let v = VTRACE.fetch_add(1, Ordering::Relaxed);
-            if v < 8 {
-                crate::pr_warn!(
-                    "drm: VERSION probe #{} pid={} (ret {})",
-                    v,
-                    crate::process::current_pid(),
-                    ret
-                );
-            }
+            // "node open" marker. review4 drivers-M: the first-8 pr_warn
+            // became the drm:open tracepoint (minor is always 0 here:
+            // both /dev/dri nodes share DRM_OPS, the funnel can't tell
+            // them apart; pid is the payload).
+            crate::trace::trace_drm_open(crate::process::current_pid() as i32, 0);
             return;
         }
         DRM_IOCTL_MODE_GETRESOURCES
@@ -953,6 +952,13 @@ fn trace_ioctl(request: u32, ret: i64) {
         _ if ret == -25 => (T_UNHANDLED, "ENOTTY"),
         _ => return,
     };
+    // review4 drivers-M: the first-use/throttle pr_warns ride
+    // debug=ohhunt like the rest of the bring-up family (the VERSION
+    // arm above emits its tracepoint unconditionally — the macro
+    // self-gates on armed()).
+    if !crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::OhHunt) {
+        return;
+    }
     let n = TRACE_COUNTS[slot].fetch_add(1, Ordering::Relaxed);
     if n == 0 {
         if slot == T_UNHANDLED {
@@ -1431,16 +1437,20 @@ fn obj_get_properties(arg: usize) -> i64 {
     let Some(props) = props_for_obj(obj_id) else { return -22 };
     let total = props.len();
     let n = count.min(total);
-    static OGP_TRACE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-    if OGP_TRACE.fetch_add(1, Ordering::Relaxed) < 4 {
-        crate::pr_info!(
-            "drm: obj_getprops obj={} count={} n={} first_id={} props_ptr={:#x}",
-            obj_id,
-            count,
-            n,
-            props.first().map(|p| p.prop_id).unwrap_or(0),
-            props_ptr
-        );
+    // review4 drivers-M: bring-up probe — behind the graphics-hunt
+    // switch (the DRM bring-up trace families moved to tracepoints).
+    if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::OhHunt) {
+        static OGP_TRACE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        if OGP_TRACE.fetch_add(1, Ordering::Relaxed) < 4 {
+            crate::pr_info!(
+                "drm: obj_getprops obj={} count={} n={} first_id={} props_ptr={:#x}",
+                obj_id,
+                count,
+                n,
+                props.first().map(|p| p.prop_id).unwrap_or(0),
+                props_ptr
+            );
+        }
     }
     if n > 0 && props_ptr != 0 && values_ptr != 0 {
         if !crate::arch::uaccess::access_ok(props_ptr, n * 4)
@@ -1886,6 +1896,10 @@ fn prime_fd_to_handle(arg: usize, size: usize) -> i64 {
                 samples[1] = s(row_words * 640 + 200);
                 samples[2] = s(row_words * 300 + 360);
             }
+            // review4 drivers-M: the import identity goes to the
+            // tracepoint (off by default); the pixel census stays a
+            // hunt-lane print.
+            crate::trace::trace_drm_prime_import(gem.id as u32, 0);
             crate::pr_warn!(
                 "drm: import#{} pid={} fd={} gem={} nz={} clear={} s0={:08x} s1={:08x} s2={:08x}",
                 it,
@@ -1995,20 +2009,9 @@ fn add_fb_common(arg: usize, size: usize, handle: u32, width: u32, height: u32, 
 
     // Bring-up trace: every FB creation (the composer makes one per
     // present; the handle/pitch pair identifies which GEM backs it).
-    static FB_TRACE_N: AtomicU32 = AtomicU32::new(0);
-    let fn_ = FB_TRACE_N.fetch_add(1, Ordering::Relaxed);
-    if fn_ < 60 {
-        crate::pr_warn!(
-            "drm: addfb#{} fb={} gem={} {}x{} pitch={} fourcc={:#x}",
-            fn_,
-            fb_id,
-            handle,
-            width,
-            height,
-            pitch,
-            fourcc
-        );
-    }
+    // review4 drivers-M: the bring-up trace family became a tracepoint
+    // (off by default; lands in the trace buffer, not the serial log).
+    crate::trace::trace_drm_addfb(fb_id, handle, width, height, pitch, fourcc);
 
     let mut out = [0u8; 104];
     wru32(&mut out, 0, fb_id);
@@ -2057,7 +2060,10 @@ fn present_fb(fb_id: u32) -> i64 {
     // shows up there even when the background is opaque black.
     static FLIP_TRACE_N: AtomicU32 = AtomicU32::new(0);
     let ft = FLIP_TRACE_N.fetch_add(1, Ordering::Relaxed);
-    if ft < 40 || ft % 10 == 0 {
+    // review4 drivers-M: the whole-framebuffer scan now runs ONLY when the
+    // drm:flip tracepoint is armed — before, it ran on every 10th flip for
+    // the life of the boot (a permanent cost on every graphics workload).
+    if crate::trace::EVENT_DRM_FLIP.armed() {
         let mut nz: usize = 0;
         let mut paint: usize = 0;
         let mut samples = [0u32; 4];
@@ -2099,6 +2105,9 @@ fn present_fb(fb_id: u32) -> i64 {
             samples[2] = s(mid_row + (width as usize / 2));
             samples[3] = s(last_row + 720 / 4);
         }
+        // The event carries the flip identity; the pixel census stays in
+        // the serial log (it is the hunt's actual payload).
+        crate::trace::trace_drm_flip(fb_id, 0); // single CRTC in the Rux DRM device
         crate::pr_warn!(
             "drm: flip#{} fb={} gem={} {}x{} pitch={} vfmt={} nz={}/{} paint={} ctr={:08x} cmid={:08x}",
             ft,
@@ -2284,7 +2293,9 @@ fn mode_atomic(arg: usize) -> i64 {
     // binding would show up. First 60 commits in full, then 1-in-25.
     static ATOM_TRACE_N: AtomicU32 = AtomicU32::new(0);
     let at = ATOM_TRACE_N.fetch_add(1, Ordering::Relaxed);
-    let trace_on = at < 60 || at % 25 == 0;
+    // review4 drivers-M: the bring-up trace family became a tracepoint;
+    // `trace_on` now drives the event, not a serial print.
+    let trace_on = crate::trace::EVENT_DRM_ATOMIC.armed();
     let mut trace = if trace_on {
         alloc::string::String::with_capacity(128)
     } else {
@@ -2330,6 +2341,9 @@ fn mode_atomic(arg: usize) -> i64 {
         if flags & DRM_MODE_ATOMIC_TEST_ONLY != 0 {
             trace.push_str(" TEST");
         }
+        // The event carries the commit identity; the per-object property
+        // walk stays in the serial log (it is the hunt's actual payload).
+        crate::trace::trace_drm_atomic(flags, count_objs as u32);
         crate::pr_warn!("drm: {}", trace);
     }
 
@@ -2475,7 +2489,8 @@ pub fn gem_mmap_resolve(
     // llvmpipe must map the SAME objects the composer flips.
     static MMAP_TRACE_N: AtomicU32 = AtomicU32::new(0);
     let mt = MMAP_TRACE_N.fetch_add(1, Ordering::Relaxed);
-    let trace = mt < 30;
+    // review4 drivers-M: the bring-up trace family became a tracepoint.
+    let trace = crate::trace::EVENT_DRM_PRIME_MMAP.armed();
     if is_prime_file(file) {
         let gem = prime_file_gem(file)?;
         // Bound the offset against the GEM size (Linux dma_buf_mmap rejects
@@ -2487,6 +2502,12 @@ pub fn gem_mmap_resolve(
         }
         let n = len.min((gem.size as u64 - offset) as usize);
         if trace {
+            crate::trace::trace_drm_prime_mmap(
+                gem.id as u32,
+                offset,
+                n as u64,
+                gem.phys,
+            );
             crate::pr_warn!(
                 "drm: prime mmap#{} pid={} gem={} off={:#x} len={} -> phys={:#x}",
                 mt,
@@ -2508,6 +2529,12 @@ pub fn gem_mmap_resolve(
         let off = offset & 0xfff;
         let n = len.min(gem.size.saturating_sub(off as usize));
         if trace {
+            crate::trace::trace_drm_prime_mmap(
+                gem.id as u32,
+                offset,
+                n as u64,
+                gem.phys,
+            );
             crate::pr_warn!(
                 "drm: node mmap#{} gem={} off={:#x} len={} -> phys={:#x}",
                 mt,

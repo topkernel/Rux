@@ -822,6 +822,30 @@ pub fn trace_alias(switch: DebugSwitch) -> Option<&'static [&'static crate::trac
         &trace::EVENT_TCP_DESTROY_SOCK,
         &trace::EVENT_INET_SOCK_SET_STATE,
     ];
+    // The round-4 drm: wave: ohhunt (the GNOME bring-up hunt) arms the
+    // drm: bring-up family — addfb/flip/atomic/prime import/prime mmap/
+    // open — alongside the sched+syscall set it always carried (the
+    // bring-up traces keep their OGP/serial probes working alongside,
+    // per the ledger's do-not-delete rule).
+    static OH_HUNT: &[&trace::TraceEvent] = &[
+        &trace::EVENT_SCHED_SWITCH,
+        &trace::EVENT_SCHED_WAKING,
+        &trace::EVENT_SCHED_WAKEUP,
+        &trace::EVENT_SCHED_WAKEUP_NEW,
+        &trace::EVENT_SCHED_PROCESS_FORK,
+        &trace::EVENT_SCHED_PROCESS_EXIT,
+        &trace::EVENT_SCHED_PROCESS_FREE,
+        &trace::EVENT_SCHED_PROCESS_WAIT,
+        &trace::EVENT_SCHED_MIGRATE_TASK,
+        &trace::EVENT_SYS_ENTER,
+        &trace::EVENT_SYS_EXIT,
+        &trace::EVENT_DRM_ADDFB,
+        &trace::EVENT_DRM_FLIP,
+        &trace::EVENT_DRM_ATOMIC,
+        &trace::EVENT_DRM_PRIME_IMPORT,
+        &trace::EVENT_DRM_PRIME_MMAP,
+        &trace::EVENT_DRM_OPEN,
+    ];
     match switch {
         // The ledger's ready-to-port wave. (WwCensus is deliberately
         // ABSENT: the ledger keeps the wild-write tripwires frozen —
@@ -835,7 +859,10 @@ pub fn trace_alias(switch: DebugSwitch) -> Option<&'static [&'static crate::trac
         DebugSwitch::SyscallTrace | DebugSwitch::SysForensic | DebugSwitch::SysRing => {
             Some(RAW_SYSCALLS)
         }
-        DebugSwitch::ExecCost | DebugSwitch::OhHunt | DebugSwitch::TreeHunt => Some(SCHED_AND_SYSCALLS),
+        DebugSwitch::ExecCost | DebugSwitch::TreeHunt => Some(SCHED_AND_SYSCALLS),
+        // ohhunt additionally arms the round-4 drm: bring-up family
+        // (see OH_HUNT above).
+        DebugSwitch::OhHunt => Some(OH_HUNT),
         DebugSwitch::SigTrace => Some(SIGNAL),
         DebugSwitch::BinderTrace | DebugSwitch::DbFileTrace | DebugSwitch::TxnHang => Some(BINDER),
         // The futex family: reference-shaped visibility only (see the

@@ -1575,6 +1575,72 @@ tracepoints! {
         )
     };
 
+    /// drm:addfb — a framebuffer object was created. The graphics-hunt
+    /// lane's replacement for the old pr_warn trace family (review4
+    /// drivers-M: six bring-up trace families ran on every boot and
+    /// polluted the serial log; tracepoints are off by default and land
+    /// in the trace buffer instead).
+    EVENT_DRM_ADDFB / drm_addfb_fmt / trace_drm_addfb : "drm", "addfb", 62,
+    print: "\"fb=%u handle=%u width=%u height=%u pitch=%u fourcc=%#x\", REC->fb_id, REC->handle, REC->width, REC->height, REC->pitch, REC->fourcc",
+    fields: "\tfield:unsigned int fb_id;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned int handle;\toffset:12;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned int width;\toffset:16;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned int height;\toffset:20;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned int pitch;\toffset:24;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned int fourcc;\toffset:28;\tsize:4;\tsigned:0;\n",
+    call (fb_id: u32, handle: u32, width: u32, height: u32, pitch: u32, fourcc: u32),
+    render |args: &[u64; TRACE_ARGS]| format!(
+        "fb={} handle={} {}x{} pitch={} fourcc={:#x}",
+        args[0], args[1], args[2], args[3], args[4], args[5] as u32
+    );
+
+    /// drm:flip — a page flip (scanout update) was submitted.
+    EVENT_DRM_FLIP / drm_flip_fmt / trace_drm_flip : "drm", "flip", 63,
+    print: "\"fb=%u crtc=%u\", REC->fb_id, REC->crtc_id",
+    fields: "\tfield:unsigned int fb_id;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned int crtc_id;\toffset:12;\tsize:4;\tsigned:0;\n",
+    call (fb_id: u32, crtc_id: u32),
+    render |args: &[u64; TRACE_ARGS]| format!("fb={} crtc={}", args[0], args[1]);
+
+    /// drm:atomic — an atomic commit with its object count.
+    EVENT_DRM_ATOMIC / drm_atomic_fmt / trace_drm_atomic : "drm", "atomic", 64,
+    print: "\"flags=%#x nobj=%u\", REC->flags, REC->count_objs",
+    fields: "\tfield:unsigned int flags;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned int count_objs;\toffset:12;\tsize:4;\tsigned:0;\n",
+    call (flags: u32, count_objs: u32),
+    render |args: &[u64; TRACE_ARGS]| format!("flags={:#x} nobj={}", args[0], args[1]);
+
+    /// drm:prime_import — a prime handle was imported into a GEM object.
+    EVENT_DRM_PRIME_IMPORT / drm_prime_import_fmt / trace_drm_prime_import :
+        "drm", "prime_import", 65,
+    print: "\"handle=%u fb_id=%u\", REC->handle, REC->fb_id",
+    fields: "\tfield:unsigned int handle;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned int fb_id;\toffset:12;\tsize:4;\tsigned:0;\n",
+    call (handle: u32, fb_id: u32),
+    render |args: &[u64; TRACE_ARGS]| format!("handle={} fb={}", args[0], args[1]);
+
+    /// drm:prime_mmap — a prime GEM was mapped (the placement/resolve
+    /// attribution the graphics hunt needed).
+    EVENT_DRM_PRIME_MMAP / drm_prime_mmap_fmt / trace_drm_prime_mmap :
+        "drm", "prime_mmap", 66,
+    print: "\"gem=%u off=%#x len=%u phys=%#x\", REC->gem_id, REC->offset, REC->len, REC->phys",
+    fields: "\tfield:unsigned int gem_id;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned long offset;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long len;\toffset:24;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long phys;\toffset:32;\tsize:8;\tsigned:0;\n",
+    call (gem_id: u32, offset: u64, len: u64, phys: u64),
+    render |args: &[u64; TRACE_ARGS]| format!(
+        "gem={} off={:#x} len={} phys={:#x}", args[0], args[1], args[2], args[3]
+    );
+
+    /// drm:open — a DRM node was opened.
+    EVENT_DRM_OPEN / drm_open_fmt / trace_drm_open : "drm", "open", 67,
+    print: "\"pid=%d minor=%u\", REC->pid, REC->minor",
+    fields: "\tfield:int pid;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned int minor;\toffset:12;\tsize:4;\tsigned:0;\n",
+    call (pid: i32, minor: u32),
+    render |args: &[u64; TRACE_ARGS]| format!("pid={} minor={}", args[0] as i32, args[1]);
+
     /// tcp:tcp_receive_reset — an acceptable RST was processed by the
     /// connection (the reference's tcp_event_sk class shape, fired from
     /// tcp_reset()). Site: Rux's handle_rst_recv entry — the funnel the
