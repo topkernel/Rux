@@ -272,6 +272,15 @@ pub enum Action {
     Wake { pid: u32 },
     /// Send `signo` to `pid` (itimer / POSIX timers).
     Signal { pid: u32, signo: i32 },
+    /// POSIX-timer notification (review4 syscall-M): the reference's
+    /// posix-timers deliver SI_TIMER siginfo — si_value from
+    /// sigevent.sigev_value and si_overrun from the expiry accounting —
+    /// so an SA_SIGINFO handler can tell WHICH timer fired. `tid` is the
+    /// user-visible timer id (PosixTimerState.user_timer_id), used at
+    /// delivery to find the timer's state and to detect a still-pending
+    /// previous notification (that expiry becomes an overrun instead of
+    /// a second queued signal).
+    PosixTimer { pid: u32, signo: i32, sival: u64, tid: i32 },
     /// Notify the timerfd at `tfd` (counter bump + reader wake).
     TimerFd { tfd: u64 },
 }
@@ -296,6 +305,7 @@ pub enum OneshotAction {
     None,
     Wake { pid: u32 },
     Signal { pid: u32, signo: i32 },
+    PosixTimer { pid: u32, signo: i32, sival: u64, tid: i32 },
     TimerFd { tfd: u64 },
 }
 
@@ -309,6 +319,7 @@ pub enum OneshotAction {
 pub enum PeriodicAction {
     None,
     Signal { pid: u32, signo: i32 },
+    PosixTimer { pid: u32, signo: i32, sival: u64, tid: i32 },
     TimerFd { tfd: u64 },
 }
 
@@ -330,6 +341,9 @@ impl OneshotAction {
             OneshotAction::None => Action::None,
             OneshotAction::Wake { pid } => Action::Wake { pid },
             OneshotAction::Signal { pid, signo } => Action::Signal { pid, signo },
+            OneshotAction::PosixTimer { pid, signo, sival, tid } => {
+                Action::PosixTimer { pid, signo, sival, tid }
+            }
             OneshotAction::TimerFd { tfd } => Action::TimerFd { tfd },
         }
     }
@@ -351,6 +365,9 @@ impl PeriodicAction {
         match self {
             PeriodicAction::None => Action::None,
             PeriodicAction::Signal { pid, signo } => Action::Signal { pid, signo },
+            PeriodicAction::PosixTimer { pid, signo, sival, tid } => {
+                Action::PosixTimer { pid, signo, sival, tid }
+            }
             PeriodicAction::TimerFd { tfd } => Action::TimerFd { tfd },
         }
     }
@@ -873,6 +890,10 @@ impl TimerWheel {
                         Action::None => (0, 0, 0, 0),
                         Action::Wake { pid } => (0, 0, pid, 0),
                         Action::Signal { pid, signo } => (pid, signo, 0, 0),
+                        // The census tuple has no timer-payload columns;
+                        // report it like a plain signal (si_value is in
+                        // the arm's syscall state).
+                        Action::PosixTimer { pid, signo, .. } => (pid, signo, 0, 0),
                         Action::TimerFd { tfd } => (0, 0, 0, tfd),
                     };
                     out.push(TimerSnapshot {

@@ -9889,6 +9889,34 @@ fn binder_thread_read(
                                 stage_cmd!(BR_DECREFS);
                                 stage_u64!(ptr);
                                 stage_u64!(cookie);
+                                // review4 syscall-M (node release): the last
+                                // reference of any kind is gone — weak()
+                                // == false means external refs counted 0
+                                // above AND local weak/strong are 0 AND
+                                // !strong() (internal refs 0); the *_DONE
+                                // handshake already cleared the pending
+                                // flags. The reference drops the node from
+                                // its owner's tree here (binder_put_node)
+                                // so a long-running service registering
+                                // many temporary callback binders does not
+                                // accumulate nodes for its lifetime.
+                                // Kept: the context manager's own node,
+                                // and any node with a ref command still
+                                // undelivered. In-flight transactions hold
+                                // their own Arc — memory safety does not
+                                // depend on the tree entry.
+                                let is_mgr = world.mgr_node[proc.ctx as usize]
+                                    .as_ref()
+                                    .is_some_and(|m| Arc::ptr_eq(m, &node));
+                                if !is_mgr
+                                    && !ns.pending_weak_ref
+                                    && !ns.pending_strong_ref
+                                {
+                                    pm(world, proc)
+                                        .im()
+                                        .nodes
+                                        .retain(|n| !Arc::ptr_eq(n, &node));
+                                }
                             }
                         }
                         Work::DeadBinder { desc, cookie } => {

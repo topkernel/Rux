@@ -343,6 +343,8 @@ pub fn add_timer_with_action_hres(
     signo: i32,
     interval_jiffies: u64,
     tfd_addr: u64,
+    sival: u64,
+    ptid: i32,
 ) -> u64 {
     let _ = expires; // diagnostics-only for hres arms (kept for API symmetry)
     let id = NEXT_TIMER_ID.fetch_add(1, Ordering::Relaxed);
@@ -351,19 +353,31 @@ pub fn add_timer_with_action_hres(
         return 0;
     }
 
+    // review4 syscall-M: a POSIX-timer arm (ptid != 0) carries the
+    // sigevent payload so expiry delivers SI_TIMER siginfo (si_value +
+    // si_overrun — the reference posix-timers contract); everything else
+    // keeps the legacy action set.
     let horizon = hres_horizon_for(expires_time);
     let mut table = TIMER_TABLE.lock_irqsave();
     let armed = match non_zero_interval(interval_jiffies) {
         None => table.arm_oneshot_hres(
             expires_time,
             horizon,
-            OneshotAction::from_legacy_oneshot(pid, signo, tfd_addr),
+            if ptid != 0 && pid != 0 && signo != 0 {
+                OneshotAction::PosixTimer { pid, signo, sival, tid: ptid }
+            } else {
+                OneshotAction::from_legacy_oneshot(pid, signo, tfd_addr)
+            },
             id,
         ),
         Some(interval) => table.arm_periodic_hres(
             expires_time,
             horizon,
-            PeriodicAction::from_legacy_periodic(pid, signo, tfd_addr),
+            if ptid != 0 && pid != 0 && signo != 0 {
+                PeriodicAction::PosixTimer { pid, signo, sival, tid: ptid }
+            } else {
+                PeriodicAction::from_legacy_periodic(pid, signo, tfd_addr)
+            },
             interval,
             id,
         ),
@@ -1110,8 +1124,62 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
             Action::Signal { pid, signo } => {
                 let _ = crate::signal::send_signal(pid, signo);
             }
+            Action::PosixTimer { pid, signo, sival, tid } => {
+                posix_timer_notify(pid, signo, sival, tid);
+            }
             Action::None => {}
         }
+    }
+}
+
+/// Deliver a POSIX-timer expiry notification with SI_TIMER siginfo
+/// (review4 syscall-M — the reference's posix_timer_fn /
+/// common_timer_get contract):
+///
+/// - si_value carries sigevent.sigev_value, so an SA_SIGINFO handler
+///   can tell WHICH timer fired (sigqueue-based timer users and
+///   glibc's timer_getoverrun consumers need this).
+/// - si_overrun carries the expirations accumulated since the last
+///   DELIVERED notification (seeded by the late-TIMER_ABSTIME arm
+///   accounting in sys_timer_settime), then resets — so
+///   timer_getoverrun after a missed delivery reports the count, and 0
+///   after a clean one.
+/// - A periodic expiry whose previous notification is still pending
+///   (same timer, still queued with SI_TIMER) does NOT queue a second
+///   signal — it increments the overrun instead (Linux keeps one
+///   pending notification per timer and counts the rest).
+fn posix_timer_notify(pid: u32, signo: i32, sival: u64, tid: i32) {
+    let Some(task) = crate::process::find_task_by_pid(pid) else {
+        return;
+    };
+    // SAFETY: find_task_by_pid returns a live Task with an elevated
+    // reference (if any); the posix_timers list and signal state are
+    // valid for its lifetime. Touching them from softirq context uses
+    // their spinlocks only.
+    unsafe {
+        // Pending check + overrun accounting under the timers lock (the
+        // same lock order the scheduler-tick cputime path uses).
+        let overrun_at_delivery;
+        {
+            let mut timers = (*task).posix_timers.lock();
+            let Some(pt) = timers.iter_mut().find(|t| t.user_timer_id == tid) else {
+                return; // timer deleted since the arm — nothing to notify
+            };
+            if let Some(prev) = (*task).pending.peek_info(signo) {
+                // si_pid slot carries si_tid in the _timer layout
+                if prev.si_code == crate::signal::si_code::SI_TIMER
+                    && prev.si_pid == tid
+                {
+                    pt.overrun_count = pt.overrun_count.saturating_add(1);
+                    return;
+                }
+            }
+            overrun_at_delivery = pt.overrun_count;
+            pt.overrun_count = 0;
+        }
+        let info = crate::signal::SigInfo::new(signo, crate::signal::si_code::SI_TIMER, pid, 0)
+            .with_timer_payload(tid, overrun_at_delivery, sival);
+        let _ = crate::signal::send_signal_with_info(pid, info);
     }
 }
 

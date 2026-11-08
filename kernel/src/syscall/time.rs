@@ -1180,6 +1180,7 @@ pub fn sys_timer_create(args: SyscallArgs) -> i64 {
     // Parse sigevent for signal notification
     let mut sigev_signo = crate::signal::Signal::SIGALRM as i32;
     let mut sigev_notify = 0; // SIGEV_SIGNAL
+    let mut sigev_value = 0u64; // review4 syscall-M: si_value payload
 
     if !sigevent_ptr.is_null() {
         if !crate::arch::uaccess::access_ok(sigevent_ptr as usize, 64) {
@@ -1195,6 +1196,15 @@ pub fn sys_timer_create(args: SyscallArgs) -> i64 {
         unsafe {
             let p = sigevent_ptr as *const i32;
             // sigev_value is 8 bytes (union), then sigev_signo at offset 8
+            let lo = match crate::arch::uaccess::get_user(p.add(0)) {
+                Some(v) => v as u32,
+                None => return -(errno::EFAULT as i64),
+            };
+            let hi = match crate::arch::uaccess::get_user(p.add(1)) {
+                Some(v) => v as u32,
+                None => return -(errno::EFAULT as i64),
+            };
+            sigev_value = (lo as u64) | ((hi as u64) << 32);
             let signo = match crate::arch::uaccess::get_user(p.add(2)) {
                 Some(v) => v,
                 None => return -(errno::EFAULT as i64),
@@ -1231,6 +1241,7 @@ pub fn sys_timer_create(args: SyscallArgs) -> i64 {
         interval_jiffies: 0,
         sigev_signo,
         sigev_notify,
+        sigev_value,
         overrun_count: 0,
         user_timer_id: user_timer_id,
         cputime_deadline_ns: core::sync::atomic::AtomicU64::new(0),
@@ -1451,13 +1462,28 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
     };
 
     // Arm with the precise deadline (add_timer_with_action_hres).
+    // review4 syscall-M: (a) SIGEV_NONE arms the wheel (timer_gettime
+    // readback works) but delivers nothing — signo 0 maps to the None
+    // action, matching the CPU-time tick path's sigev_notify check and
+    // the reference (a notification-less timer never signals); (b)
+    // SIGEV_SIGNAL arms carry the sigevent payload so expiry delivers
+    // SI_TIMER siginfo with si_value/si_overrun.
+    let sigev_none = timer.sigev_notify == 1;
+    let arm_signo = if sigev_none { 0 } else { timer.sigev_signo };
+    let (sival, ptid) = if sigev_none || timer.sigev_signo <= 0 {
+        (0, 0)
+    } else {
+        (timer.sigev_value, timer.user_timer_id)
+    };
     let new_kernel_id = crate::timer::add_timer_with_action_hres(
         expires,
         deadline_ticks,
         pid,
-        timer.sigev_signo,
+        arm_signo,
         interval_jiffies,
         0,
+        sival,
+        ptid,
     );
 
     timer.kernel_timer_id = new_kernel_id;

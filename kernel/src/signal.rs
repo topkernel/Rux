@@ -670,6 +670,17 @@ impl SigInfo {
         self._rest[..8].copy_from_slice(bytes);
     }
 
+    /// Fill the _timer layout (SI_TIMER posix-timer notification):
+    /// si_tid at offset 16 (the si_pid slot), si_overrun at 20 (the
+    /// si_uid slot), sigval at 24 — asm-generic/siginfo.h's _timer
+    /// union. Consumed by SA_SIGINFO handlers and sigtimedwait.
+    pub fn with_timer_payload(mut self, tid: i32, overrun: i32, sival: u64) -> Self {
+        self.si_pid = tid;
+        self.si_uid = overrun as u32;
+        self._rest[..8].copy_from_slice(&sival.to_ne_bytes());
+        self
+    }
+
     /// Create child process exit signal info
     pub fn child(pid: u32, uid: u32, status: i32) -> Self {
         let mut info = Self::new(Signal::SIGCHLD as i32, 1, pid, uid);

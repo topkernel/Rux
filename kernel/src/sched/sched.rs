@@ -6917,8 +6917,8 @@ pub fn scheduler_tick() {
         // — if the interrupted task holds the lock (mid timer_settime),
         // spinning for it would self-deadlock the CPU. A skipped check
         // simply re-runs on the next tick.
-        if let Some(posix_timers) = (*current).posix_timers.try_lock() {
-            for pt in posix_timers.iter() {
+        if let Some(mut posix_timers) = (*current).posix_timers.try_lock() {
+            for pt in posix_timers.iter_mut() {
                 let deadline = pt.cputime_deadline_ns.load(core::sync::atomic::Ordering::Acquire);
                 if deadline != 0 && now >= deadline {
                     let interval =
@@ -6926,9 +6926,22 @@ pub fn scheduler_tick() {
                     let next = if interval != 0 { now + interval } else { 0 };
                     pt.cputime_deadline_ns.store(next, core::sync::atomic::Ordering::Release);
                     if pt.sigev_notify != 1 && pt.sigev_signo > 0 {
-                        let _ = crate::signal::send_signal(
-                            (*current).pid() as u32,
+                        // review4 syscall-M: SI_TIMER siginfo like the
+                        // wheel path — si_value identifies the timer for
+                        // SA_SIGINFO handlers, si_overrun carries (and
+                        // resets) the expiry accounting.
+                        let overrun = pt.overrun_count;
+                        pt.overrun_count = 0;
+                        let info = crate::signal::SigInfo::new(
                             pt.sigev_signo,
+                            crate::signal::si_code::SI_TIMER,
+                            (*current).pid() as u32,
+                            0,
+                        )
+                        .with_timer_payload(pt.user_timer_id, overrun, pt.sigev_value);
+                        let _ = crate::signal::send_signal_with_info(
+                            (*current).pid() as u32,
+                            info,
                         );
                     }
                 }

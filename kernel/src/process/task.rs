@@ -1625,6 +1625,9 @@ pub struct PosixTimerState {
     pub sigev_signo: i32,
     /// sigev_notify (SIGEV_SIGNAL=0, SIGEV_NONE=1).
     pub sigev_notify: i32,
+    /// sigev_value (the sigevent payload, verbatim 8 bytes) — delivered
+    /// as SI_TIMER si_value on expiry (review4 syscall-M).
+    pub sigev_value: u64,
     /// Overrun count.
     pub overrun_count: i32,
     /// User-visible timer ID.
@@ -1651,6 +1654,7 @@ impl Clone for PosixTimerState {
             interval_jiffies: self.interval_jiffies,
             sigev_signo: self.sigev_signo,
             sigev_notify: self.sigev_notify,
+            sigev_value: self.sigev_value,
             overrun_count: self.overrun_count,
             user_timer_id: self.user_timer_id,
             cputime_deadline_ns: core::sync::atomic::AtomicU64::new(

@@ -600,19 +600,61 @@ pub fn io_uring_mmap_handler(
         if prot & 0x1 != 0 { pte_flags |= PageTableEntry::R; }
         if prot & 0x2 != 0 { pte_flags |= PageTableEntry::R | PageTableEntry::W; }
 
-        for i in 0..map_pages {
-            let va = vaddr + i * PAGE_SIZE;
-            let pa = region.phys + i * PAGE_SIZE;
-            map_page(user_ppn, VirtAddr::new(va as u64), PhysAddr::new(pa as u64), pte_flags);
-            // The user PTE now references the ring page: take a mapping
-            // reference so munmap's put_page cannot free a page the ring
-            // still owns (Wave-2 regression, review 2R.6). The final free
-            // happens in Drop only when every mapping is gone.
-            let page = crate::mm::pfn_to_page_mut(
-                crate::mm::phys_to_pfn(pa),
-            );
-            if !page.is_null() {
-                (*page).get_page();
+        // Eager install under PTE_MODIFY_LOCK (review4 syscall-M, the
+        // NEW2 class — same discipline as binder_mmap): an unlocked
+        // leaf-PTE writer racing fork's COW walk or a same-mm demand
+        // fault through the just-reserved VMA diverges refcounts and
+        // leaves dangling child PTEs. The VMA is already reserved, so a
+        // racing fault can only be a same-mm thread touching a brand-new
+        // address it cannot know; if one did win a page anyway, its anon
+        // zero page is exclusive inside OUR VMA — zap it and install
+        // the ring frame so the kvirt/PTE pairing holds.
+        {
+            #[cfg(feature = "x86_64")]
+            let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock();
+            #[cfg(not(feature = "x86_64"))]
+            let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+            for i in 0..map_pages {
+                let va = vaddr + i * PAGE_SIZE;
+                let pa = region.phys + i * PAGE_SIZE;
+                // SAFETY: user_ppn is the task's live page-table root;
+                // the walk is read-only and lock-protected.
+                if let Some((old_ppn, _bits)) =
+                    crate::arch::mm::mm_ops::PageTableWalker::walk(user_ppn, va as u64)
+                {
+                    // Demand-fault winner: free its exclusive anon page,
+                    // then replace below (binder twin).
+                    let page = crate::mm::pfn_to_page_mut(old_ppn as usize);
+                    if !page.is_null() {
+                        // SAFETY: descriptor of the mapped frame under the
+                        // PTE lock.
+                        unsafe {
+                            (*page).rmap_alt_remove(
+                                addr_space as *const _ as usize,
+                                va / PAGE_SIZE,
+                            );
+                            (*page).dec_mapcount();
+                            if (*page).put_page() == 0 {
+                                crate::mm::page_alloc::free_pages((old_ppn as usize) << 12, 0);
+                            }
+                        }
+                    }
+                    addr_space.sub_rss(1);
+                }
+                // SAFETY: user_ppn is the task's page-table root;
+                // region.phys..+map_len is the ring's own contiguous
+                // allocation, mapped page-aligned under the PTE lock.
+                map_page(user_ppn, VirtAddr::new(va as u64), PhysAddr::new(pa as u64), pte_flags);
+                // The user PTE now references the ring page: take a mapping
+                // reference so munmap's put_page cannot free a page the ring
+                // still owns (Wave-2 regression, review 2R.6). The final free
+                // happens in Drop only when every mapping is gone.
+                let page = crate::mm::pfn_to_page_mut(
+                    crate::mm::phys_to_pfn(pa),
+                );
+                if !page.is_null() {
+                    (*page).get_page();
+                }
             }
         }
         crate::arch::mm::asid::flush_tlb_all();
