@@ -174,6 +174,26 @@ impl RawSpinlock {
         0
     }
 
+    /// r17 mechanism-C hunt (`nextgate` feature): the address of the
+    /// lock word, for the DR-register write watchpoint that catches a
+    /// wild write onto it red-handed (a lost release leaves the word at
+    /// exactly 1; a scribble leaves anything else).
+    #[inline]
+    #[cfg(feature = "nextgate")]
+    pub fn locked_addr(&self) -> usize {
+        &self.locked as *const _ as usize
+    }
+
+    /// r17 mechanism-C hunt: the address of the owner word (requires
+    /// debug-lock-owner). A legitimate stamp always has cpu+1 in the
+    /// low nibble and kernel text in the high bits; anything else is a
+    /// wild write.
+    #[inline]
+    #[cfg(all(feature = "nextgate", feature = "debug-lock-owner"))]
+    pub fn owner_addr(&self) -> usize {
+        &self.owner as *const _ as usize
+    }
+
     #[inline]
     #[cfg(not(feature = "debug-lock-owner"))]
     fn clear_owner(&self) {}

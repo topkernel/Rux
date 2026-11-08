@@ -1349,7 +1349,182 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
 
 /// Shared timer-tick body (used by both the LAPIC-timer vector and the
 /// legacy PIC IRQ0 fallback) — faithful port of the riscv64 twin.
+// r17 mechanism-C hunt (`nextgate` feature): DR-register write
+// watchpoints on the GRQ lock word (u32) and owner word (u64). The GRQ
+// lost-release deadlock wedges with the lock word nonzero and the owner
+// word holding a value NO legitimate stamp can produce (cpu nibble 0,
+// kernel-text high bits — a saved return address). The watchpoints turn
+// the next such scribble into a trap AT THE WRITING INSTRUCTION: the
+// handler classifies the written value (lock word must be 0/1; owner
+// word must be 0 or text|nibble 1..=8) and prints the foreign writer.
+// Legitimate acquires/releases also trap and are classified silently —
+// hunt kernels only, the overhead is a few hundred cycles per GRQ
+// section.
+#[cfg(feature = "nextgate")]
+mod grq_watch {
+    const MAX_CPUS: usize = crate::config::MAX_CPUS;
+    static ARMED: [core::sync::atomic::AtomicBool; MAX_CPUS] =
+        [const { core::sync::atomic::AtomicBool::new(false) }; MAX_CPUS];
+    static PRINTS: core::sync::atomic::AtomicU32 =
+        core::sync::atomic::AtomicU32::new(0);
+
+    #[inline(always)]
+    unsafe fn dr_write(n: u32, v: u64) {
+        match n {
+            0 => core::arch::asm!(
+                "mov dr0, {}",
+                in(reg) v,
+                options(nomem, nostack, preserves_flags)
+            ),
+            1 => core::arch::asm!(
+                "mov dr1, {}",
+                in(reg) v,
+                options(nomem, nostack, preserves_flags)
+            ),
+            7 => core::arch::asm!(
+                "mov dr7, {}",
+                in(reg) v,
+                options(nomem, nostack, preserves_flags)
+            ),
+            6 => core::arch::asm!(
+                "mov dr6, {}",
+                in(reg) v,
+                options(nomem, nostack, preserves_flags)
+            ),
+            _ => {}
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn dr6_read() -> u64 {
+        let v: u64;
+        core::arch::asm!("mov {}, dr6", out(reg) v, options(nomem, nostack, preserves_flags));
+        v
+    }
+
+    /// Arm DR0/DR1 on this CPU (called lazily from the timer tick, once
+    /// the GRQ exists). DR0 = lock word, RW=01 (writes), LEN=4B; DR1 =
+    /// owner word, RW=01, LEN=8B. Both addresses are 8-aligned.
+    pub fn maybe_arm(cpu: usize) {
+        if cpu >= MAX_CPUS
+            || ARMED[cpu].load(core::sync::atomic::Ordering::Relaxed)
+            || !crate::sched::sched::grq_watch_ready()
+        {
+            return;
+        }
+        let (lock_a, own_a) = crate::sched::sched::grq_watch_addrs();
+        let mut dr7: u64 = 0x3; // L0|L1 local enables
+        // DR0: RW0=01 (write) bits16-17, LEN0=11 (4B) bits18-19.
+        dr7 |= 0x1 << 16 | 0x3 << 18;
+        unsafe {
+            dr_write(0, lock_a as u64);
+            if let Some(oa) = own_a {
+                // DR1: RW1=01 bits20-21, LEN1=10 (8B) bits22-23.
+                dr7 |= 0x1 << 20 | 0x2 << 22;
+                dr_write(1, oa as u64);
+            }
+            dr_write(7, dr7);
+        }
+        ARMED[cpu].store(true, core::sync::atomic::Ordering::Release);
+    }
+
+    /// Called at the head of the #DB handler. Returns true when the
+    /// exception came from our watchpoints (handled; resume).
+    pub fn handle_hit(regs: &crate::arch::pt_regs::PtRegs) -> bool {
+        let dr6 = unsafe { dr6_read() };
+        if dr6 & 0b11 == 0 {
+            return false;
+        }
+        let (lock_a, own_a) = crate::sched::sched::grq_watch_addrs();
+        let lock_v = unsafe { (lock_a as *const u32).read_volatile() } as u64;
+        let own_v = own_a.map(|a| unsafe { (a as *const u64).read_volatile() });
+        // Legitimate shapes: the lock word only ever holds 0 or 1; the
+        // owner word is 0 (cleared) or a stamp with cpu+1 in the low
+        // nibble and kernel text in the high bits. The restamp keeps
+        // the nibble; nothing else writes these words.
+        let lock_bad = dr6 & 1 != 0 && lock_v != 0 && lock_v != 1;
+        let own_bad = match own_v {
+            Some(v) if dr6 & 2 != 0 => {
+                if v == 0 {
+                    false
+                } else {
+                    let nib = v & 0xF;
+                    let hi = v & !0xF;
+                    let (klo, khi) = crate::sched::sched::kernel_text_window();
+                    !(nib >= 1 && nib <= 8 && hi >= klo && hi < khi)
+                }
+            }
+            _ => false,
+        };
+        if (lock_bad || own_bad) && PRINTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
+            use crate::console::putchar_no_lock as putchar;
+            fn ph(v: u64) {
+                use crate::console::putchar_no_lock as putchar;
+                for sh in (0..16).rev() {
+                    let n = ((v >> (sh * 4)) & 0xF) as u8;
+                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                }
+            }
+            fn pd(v: u64) {
+                use crate::console::putchar_no_lock as putchar;
+                if v == 0 {
+                    putchar(b'0');
+                    return;
+                }
+                let mut buf = [0u8; 12];
+                let mut n = 0;
+                let mut x = v;
+                while x > 0 && n < 12 {
+                    buf[n] = b'0' + (x % 10) as u8;
+                    x /= 10;
+                    n += 1;
+                }
+                while n > 0 {
+                    n -= 1;
+                    putchar(buf[n]);
+                }
+            }
+            const M: &[u8] = b"\nWW-GRQ-SCRIB cpu=";
+            for &b in M {
+                putchar(b);
+            }
+            pd(crate::arch::cpu_id() as u64);
+            const M2: &[u8] = b" rip=0x";
+            for &b in M2 {
+                putchar(b);
+            }
+            ph(regs.rip);
+            if lock_bad {
+                const M3: &[u8] = b" w=lock val=0x";
+                for &b in M3 {
+                    putchar(b);
+                }
+                ph(lock_v & 0xFFFF_FFFF);
+            }
+            if own_bad {
+                const M4: &[u8] = b" w=own val=0x";
+                for &b in M4 {
+                    putchar(b);
+                }
+                ph(own_v.unwrap_or(0));
+            }
+            const M5: &[u8] = b" pid=";
+            for &b in M5 {
+                putchar(b);
+            }
+            pd(crate::process::current_pid() as u64);
+            putchar(b'\n');
+        }
+        // Clear the status bits we consumed (B0-B3; leave the rest).
+        unsafe { dr_write(6, dr6 & !0xF) };
+        true
+    }
+}
+
 fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
+    // r17 mechanism-C hunt: lazily arm the GRQ watchpoints on this CPU.
+    #[cfg(feature = "nextgate")]
+    grq_watch::maybe_arm(cpu);
     // r12 wake/halt hunt: record the interrupted RIP when a forkprof
     // boot is armed — a CPU stuck across many ticks shows the same rip
     // (the spin site) in every FGSQ sample.
@@ -1942,6 +2117,13 @@ fn handle_device_not_available() {
 /// #DB — hardware single-step (TF) or debug-register trap.
 fn handle_debug(regs: &mut PtRegs) {
     const TF: u64 = 1 << 8;
+    // r17 mechanism-C hunt: the GRQ watchpoints first — every legit
+    // GRQ acquire/release traps here and must resume unchanged, long
+    // before the TF/user handling below.
+    #[cfg(feature = "nextgate")]
+    if grq_watch::handle_hit(regs) {
+        return;
+    }
     if regs.user_mode() {
         // Stop stepping before delivering anything, or iretq/sysret
         // would re-trap on the first handler/user instruction.
