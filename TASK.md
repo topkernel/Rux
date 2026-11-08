@@ -8532,3 +8532,126 @@ write-read interleave of the woken thread.
   exact-wake list processed AFTER the WORLD release, BEFORE the
   wake_proc_one loop, and skip wake_proc_one's proc pick when the
   exact list is non-empty for that proc (reference wakes once, exact).
+
+### 74. 74TH SESSION (2026-11-08) — v2 LANDED AND GATED: reply wake is
+### exact-thread, ONCE, outside WORLD; the v1 kickdog is dead (0/3 vs
+### 3/3), the accountmgr stranding metric is clean (all lags <= 0 vs
+### +34.7 s); the launcher gate moves to the BMS install stream, which
+### never runs — and the el1/bmsdb/latch theories are eliminated with
+### evidence (branch oh-crash @ 5f6b1e02-class)
+
+#### 1. v2 IMPLEMENTATION (df0cd40e, per the 73.6 shape)
+
+Source-read first: HEAD already carried the 66th's in-WORLD
+wake_thread_hint(&rthread, sync=true) at the reply push (2f521c9b) —
+v1 (52a9d4f3) had added a SECOND in-WORLD wake on top of it plus kept
+the wake_proc_one(tproc) pick: two synchronous wakes under the global
+lock + a third proc-wide wake. v2:
+- the push no longer wakes inside WORLD; the target thread goes on
+  reply_exact_wakes;
+- the list is processed AFTER the WORLD release, BEFORE the
+  wake_proc_one loop — exactly one wake, WF_SYNC (reference parity,
+  binder.c 6.6 binder_proc_transaction wakes the target thread only);
+- tproc is no longer queued for wake_proc_one on the reply arm (the
+  73.6 skip).
+No lost-wake window: the wakee's wait_event condition
+(thread_has_work: process_todo) re-checks under WORLD, and process_todo
+is set by the push before the lock drops. The wakee-on-another-CPU
+hazard of the in-lock wake (73.5's mechanism class) is gone by
+construction. dfx companion (5c68fa01): ACCT print budgets raised
+(RECV 2400 / REPLYPUSH 800 / CMD 1500) — the 73rd's caps froze the
+stranding metric inside the first 90 s; plus run/acct-strand.sh, the
+battery extractor.
+
+#### 2. THE BATTERY (ohw97b/98/99, system-lb5 + userdata-fresh2, SMP2
+#### KVM, dfx=txnhunt,ams46)
+
+- KILLER: ExecReboot 0/3 (v1: 3/3 at 25 s), vibrator kickdog 0/3.
+  ohw97b ran 279 s, ohw98 the full 900 s wall, ohw99 372 s — all past
+  the v1 killer by an order of magnitude.
+- STRANDING METRIC (last ACCT-RECV vs last ACCT-REPLYPUSH per
+  accountmgr thread): ohw96 (pre-v2) tid840 lag +34.7 s (RECV tail
+  83.8 vs push tail 118.5). v2 boots: EVERY thread lag <= 0 —
+  -0.001 .. -0.077 s (RECV tails track push tails to the
+  millisecond; tid784/788/776 — the workhorse — lag -0.001/-0.002 s).
+  todo_after stays 1-2 (the deferred tcomplete + reply: reference
+  shape, the sync tcomplete queues without process_todo by design).
+- The endgame chain v2 unlocks is LIVE: accountmgr now sends the
+  code-46 StartUser itself (ohw98 txn13084 at 113.878, ENQ ->
+  foundation READ 1 ms later, euid 3058 as CheckUserParam requires)
+  — the launcher decision chain has its trigger.
+- Deaths on 2 of 3 boots: the KNOWN dead-task-switch wedge family
+  (SWITCHIN-DEAD-TASK + R56-SWITCH-ABORTED + FOREIGN-ENTRY after a
+  usb_host child SIGSEGV), documented since the 46th session
+  (r41v15/18/19/20/26/29/30 tails); ohw96 (pre-v2) died the same way
+  at 510 s. ohw99 SURVIVED its first hit (111.9 s) and died at the
+  second (372 s). Not the v1 killer; not binder-reply-coupled; the
+  usb_host storm is image-inherited (71.5).
+
+#### 3. GATES
+
+- Builds: x86_64 rc=0, riscv64 CLEAN-CONFIG rc=0 (run/build-rv-74.log),
+  aarch64 rc=0 (run/build-a64-74.log).
+- riscv64 make test: ALL TESTS PASSED (run/test-rv-74.log).
+- pbench Tier-2 A/B, base a9f1274d (post-revert = ohw96's kernel) vs
+  v2, 3 interleaved reps KVM same rig
+  (perf-gap-hunt/run/abpb-base73-v2.txt): P1-P5 all in band — p1_null
+  +3.9%, p2_ctxsw +5.7%, p5a_pipe +9.3%, every other P5 row -2.6..+1.1%.
+  The binder hot path (the guarded domain here) is CLEAN. One flagged
+  row: p6_unlink +20.7% at host load 3.7-4.6 — non-binder fs row,
+  same noise class the 72nd documented on its contaminated pass; a
+  quiet 2-rep rerun was launched to confirm (run/abpb-74b.out).
+
+#### 4. THE NEXT GATE, NAMED WITH EVIDENCE (the launcher blocker after
+#### accountmgr)
+
+With accountmgr healthy, the launcher still never spawns. The chain:
+StartUser(46) at 113.9 -> ... -> AMS StartHighestPriorityAbility ->
+BMS ImplicitQueryInfoByPriority returns EMPTY -> RESOLVE_ABILITY_ERR
+-> no spawn. The BMS store is empty because the FIRST-BOOT INSTALL
+STREAM NEVER RUNS:
+- ohw98/100: scanning_apps.status 0 -> 1 with ZERO SetBundleQuota
+  (reference abref1, same rig + userdata: 84 installs at 5.5-9.9 s).
+- ohw100 instrumentation (insts lane, INST-TXN commit + the
+  pre-existing BMSSCAN probe, both dfx=txnhunt/ams46-gated):
+  - the `installs` daemon (pid 682) is NOT the installer —
+    BundleInstallerHost is created IN-PROC in foundation
+    (bundle_mgr_service.cpp:179). The only installs traffic is a 4 s
+    samgr notify poll + installs' own call to pid460.
+  - foundation NEVER getdents /data/app/el1 (the guard's ScanDir),
+    NEVER opens /system/etc/app/install_list.json, NEVER touches
+    /system/app. OnBmsStarting took the ONLY early return:
+    LoadInstallInfosFromDb()==true (the no-install REBOOT path) — or
+    exited before the guard; the 41 s scan window (46-88 s) is
+    dominated by the bmsdb.db open-retry loop against a MISSING
+    parent dir (/data/service/el1/public/bms/bundle_manager_service
+    — ENOENT from 46.4 s past 124 s, across a restarted foundation).
+- ELIMINATED with evidence (do not re-hunt): (a) the missing el1
+  skeleton is IDENTICAL on the reference — abref1 fails the same
+  persist_param create at 1.86 s and still installs 84; userdata-
+  fresh2.img contains ONLY lost+found (checked with debugfs) so all
+  of /data is runtime-created on both kernels; (b) fref1 (Nov 7
+  22:04, 42 installs) ran possibly-dirty 71st WIP — the CLEAN
+  pre-latch kernel 23270d34 (ohw101, this session) shows the same
+  ZERO-install shape as 40d78cc8 and v2: the read-drain latch fix is
+  EXONERATED, there is no single-commit regression; the stream has
+  been degrading for days (lb317 Nov 1: 84 -> ohw52 Nov 7: 4 ->
+  Nov 8 clean kernels: 0), consistent with a timing race tipped by
+  cumulative kernel speedups, not a bisectable commit.
+- FOR THE 75TH: the question is razor-sharp — OnBmsStarting returns
+  through LoadInstallInfosFromDb()==true on our boots: WHICH store
+  returns data to a fresh /data? Instrument the BMS store load
+  (distributeddata GetEntries for the bms store during the scan
+  window, or a foundation-side trace of LoadDataFromPersistentStorage
+  via the KVS protocol), and where the 41 s between status 0 and the
+  return goes. The BMSSCAN/INST-TXN probes are landed and budgeted;
+  ohw100's log is the reference decode.
+
+#### 5. SESSION LEDGER
+
+ohw97 (pre-bump v2 kernel): 160 s clean cut, killer absent. ohw97b:
+279 s, wedge death, metric clean. ohw98: 900 s full, metric clean.
+ohw99: 372 s, two wedge hits (survived the first). ohw100: v2 +
+insthunt, scan-window decode. ohw101: pre-latch 23270d34 A/B — latch
+exonerated. Commits: df0cd40e (v2), 5c68fa01 (budgets), 5f6b1e02-class
+(INST-TXN installs lane). Extractor: run/acct-strand.sh.
