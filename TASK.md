@@ -8516,3 +8516,19 @@ returns with looper state changed so the NEXT park mis-registers
 earlier wake timing). Instrument: KSIG9-prone services' ACCT trace
 (vibrator_host), plus a boot with the fix + dfx=bwrtrace to see the
 write-read interleave of the woken thread.
+
+### 73.6 COORDINATOR v2 PRE-WORK — candidates (1) and (3) eliminated by source read; (2) double-wake is prime
+
+- (1) ELIMINATED: our BWR processes the FULL write buffer before the
+  read loop (binder.rs:7421, same order as reference).
+- (3) ELIMINATED: park_seq re-stamps at every waiting-set entry
+  (:11412); the early wake cannot leave a stale stamp.
+- (2) REMAINS: the landed fix woke the target inside WORLD AND the
+  wakes-loop (wake_proc_one) ran after — two wakes per reply, plus the
+  woken thread can re-enter its read while the replier still holds
+  WORLD (the wake is synchronous in our kernel — the wakee can run on
+  another CPU immediately and block on WORLD, inverting hold times).
+  v2 shape: do NOT wake inside WORLD; push rthread onto a dedicated
+  exact-wake list processed AFTER the WORLD release, BEFORE the
+  wake_proc_one loop, and skip wake_proc_one's proc pick when the
+  exact list is non-empty for that proc (reference wakes once, exact).
