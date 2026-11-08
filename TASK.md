@@ -8988,3 +8988,146 @@ branch; coordinator gates at merge.
   riscv64 make test GREEN ("suite verdict green", run/test-rv-77.log,
   wrapper rc=124 after kernel halt = known pattern). All changes
   dfx-gated; no plain-boot behavior change.
+
+### 78. 78TH SESSION (2026-11-08) — THE BOOT-KILLER CLASS FIXED (the
+### switch guard's PF_EXITING arm, ohw109/111/115); the samgr-pid latch
+### drift that disarmed every instrument closed; the 8250 wedge named
+### DEEPER than ever: the holder loops a 15 s param-ack timeout under
+### the processLock, then parks PERMANENTLY mid-brk in the kernel
+### allocator path — kernel stack captured; exact sleep frame = 79th
+### item 1. (9d0d92dc, 638d5580+2e229b08, 300d8944, cb6714a2)
+
+#### 1. THE 77TH'S DIAGNOSIS WAS INCOMPLETE — the latch, not the budget
+
+ohw113 re-read: the mscan budget DID admit samgr rows (4 rows, found
+the live word m1=0x7ff000499a48l2) — the FUXWATCH2-CHAIN arm failed
+because EVERY samgr-pid comparison downstream compared 328 against a
+DRIFTED latch: SAREG_SAMGR_PID_PUB flipped on ANY code-{1,3,5,6,7,10,
+21} request whose parcel carried a lowercase "oh" UTF-16 prefix — i.e.
+every ohos.* interface descriptor in the image — and a wifi request
+had left it at wifi_manager_se (877). The drift silently disarmed
+OH67_M2/OH68 (latch sites), the chain arm, and mscan eligibility.
+FIX (9d0d92dc): the latch now requires the FULL 22-char UTF-16
+"ohos.samgr.accessToken" token (u32 len 0x16 @8, token @12..56).
+Verified live first boot after: FUX-RUN samgr_pid=328, OH67-M2 and
+OH68-HLD printing, chain arm + FW trace working. Plus: samgr mscan
+rows draw from a dedicated budget slot (the 77th's fix, kept), the
+slot-2 owner latch is samgr-tgid-gated (foreign same-VA acquires had
+corrupted it — every FFRT process maps a mutexPrivate at the same
+heap VA), FW lines carry tgid, and SAMGR-VMAW prints the samgr mm's
+VMA-rwsem owner/count each snapshot.
+
+#### 2. THE BOOT-KILLER: SWITCHIN-DEAD-TASK = the guard's PF_EXITING arm
+
+ohw115 died the ohw109/111 death: SWITCHIN-DEAD-TASK pid 536 at
+154.371 and 156.862 — a FREED task struct (0xffff888041a84000) still
+occupying cpu0's current slot at 199 s while a REUSED pid 536 lived
+healthily as a param_watcher thread — then rcu-gp-frozen-cpu fired
+and the taskdump froze the VM at 199.484 (SCRIBBLE-RING last line).
+Decode: the freed struct printed top=NON-ZERO, so the arm that fired
+was PF_EXITING, not the freed-context arms — a MID-EXIT task that
+do_exit re-linked after a voluntary deschedule (do_exit CAN block:
+locks, exit_notify, group-exit handoff) was refused its resume, left
+LIVE-claimed with the slot naming the "corpse", and cycled
+abort/heal/re-pick. 638d5580 first tried refusing PF_EXITING at the
+three pick gates — WRONG within one boot (ohw116: pid 307 hung at
+30 s, boot dead; the pick refusal strands woken-to-die group-exit
+victims): reverted as 2e229b08. The correct fix (300d8944): DELETE
+the PF_EXITING arm from x86_switch_publish's resume guard — the
+freed-context dangers are exactly top==0 and is_dead; a merely-
+exiting task has a live stack and its own saved sp and MUST be
+resumable (Linux parity). VERIFIED: ohw117/120/121/122 all run past
+the 199 s cliff to their full 800-900 s windows (ohw120 alive 382 s+,
+ohw121 500 s+; the freeze signature never recurs). The ohw109/111
+"taskdump freeze" was this cascade's terminal symptom — the dump
+itself is exonerated as the initiator.
+
+#### 3. THE 8250 WEDGE, NAMED DEEPER (ohw119/120/121, probe78c/d/e)
+
+The instruments now fire end-to-end on every wedge boot:
+- OH67-M2: the contested mutex is instance+80376 — NOT a samgr
+  singleton member (external heap object = SystemProcessContext::
+  processLock class); ring = 1 thread waiter (the code-7 load
+  handler, exec 117-121 s) + 1 coroutine waiter (collect task gid
+  varies per boot).
+- CoTask SLAB sweep (new): shape-matches CoTasks in the samgr heap
+  window by SSO label ('sq_*'), gid/ty/st, live fiber — catches
+  suspended MID-RUN coroutines invisible to every ring/worker walk
+  (the holder clears ctx->task at yield). Found sq_workHandler_3_569
+  and sq_CommonHandler_8_460 suspended in mutexPrivate CoWait
+  (libffrt file offset 0x87ec4) on ohw119; six more tasks sit QUEUED
+  behind them (st=6, rip=context_entry — never dispatched; the
+  serial queue's single concurrency slot is occupied).
+- The chain-armed FUXWATCH2 write trace (ohw120, word 0x7ff000499a50,
+  symbolized against libffrt bb6920ed): worker tid 354 acquires
+  (lock() cmpxchg, 0x86f8a) on a REPEATING 15 s cadence — the
+  StartDynamicSystemProcess ServiceControlWithExtra param set-ack
+  timeout — retry after retry INSIDE the processLock, while the
+  installs' LOAD handler (tid 577, txn13793) parks on the same word.
+- TERMINAL STATE: the holder worker finally parks PERMANENTLY mid-brk
+  (sys=45, INTERRUPTIBLE): ohw115 tid 344 (112→172 s+), ohw121 tids
+  356@147 s and 345@267 s. SAMGR-BRKSTUCK (new) printed their kernel
+  stacks — IDENTICAL: sys_brk → VMA surgery → CombinedAllocator::
+  alloc → park. The VMA rwsem owner word shows count=0 (NO holder —
+  not the rwsem); no OOM/pressure lines; the sleep is INSIDE the
+  kernel allocator path. Neither allocator lock is a sleeping lock
+  (both Spinlock irqsave) — the exact sleep frame sits just past the
+  first 16-word capture; probe78f prints 28 words + the sp value
+  (ohw123 in flight at close).
+
+THE CHAIN, end-to-end: samgr worker runs an on-demand start task →
+takes the SystemProcessContext processLock → StartDynamicSystemProcess
+waits out the 15 s param-set ack (init never acks the ctl.start — the
+69th's 105-family residue) in a retry loop → a later iteration calls
+malloc/brk inside the loop → the kernel alloc path parks forever →
+the processLock is held forever → the installs daemon's code-7 LOAD
+(installs' LoadSystemAbility for SA:8250/el5) parks at first lock
+touch → the per-user install stream stalls at com.ohos.medialibrary.
+medialibrarydata → CreateNewUser never returns → no StartUser(46) →
+no launcher. TWO kernel-side questions remain: (a) the exact sleep
+frame in the allocator path under brk (79th item 1), (b) why init's
+param ack never arrives for the process samgr keeps re-starting
+(cross-check pctlmon: the ctl.start sends DO go out — 69th lane).
+
+#### 4. BOOTS THIS SESSION
+
+ohw115 (probe78: latch+budget fixes; wedge reproduced, instruments
+live, killed at 199 s by the PF_EXITING cascade), ohw116 (probe78a:
+pick-gate variant — WRONG, pid 307 early hang, reverted), ohw117
+(probe78b: guard fix; survived 199 s+, stalled 42 s in an unrelated
+freed-task-linked class — sensor_host tid 570 runnable-unpicked 22 s+
+with garbage registers), ohw118 (killed early — slow variant), ohw119
+(probe78c: slab sweep first light), ohw120 (probe78d: full FW holder
+cycle + chain arm), ohw121 (probe78e: BRKSTUCK stacks x2), ohw122
+(probe78f: slow-stall variant, no wedge), ohw123 (probe78f rerun,
+in flight at session close). All KVM SMP2/4G, system-lb5 +
+userdata-fresh2, dfx=txnhunt,ams46,fuxstuck.
+
+#### 5. GATES
+
+x86_64 build rc=0 (run/build-x86-78*.log); riscv64 clean-config
+rc=0 (run/build-rv-78.log); aarch64 rc=0 (run/build-a64-78.log);
+riscv64 make test ALL TESTS PASSED (run/test-rv-78.log). Behavior
+changes: ONE (the switch-guard arm deletion — three loads removed
+from the resume guard, strict instruction REMOVAL, no locks/no
+alloc; Tier-2 pbench at coordinator merge on a quiet host — the
+lane's numbers under host load 8-15 would be noise). Everything
+else dfx-gated.
+
+#### 6. FOR THE 79TH (priority order)
+
+1. ohw123's 28-word BRKSTUCK stack (or one rerun): the exact sleep
+   frame in CombinedAllocator::alloc under sys_brk — the founder's
+   kernel half. Candidates by reading: deferred_free::drain (called
+   at alloc entry), small_alloc class lock under spin contention
+   with IRQs off elsewhere, or a buddy memwait. The sp is printed
+   for exact re-walks against target/.../debug/rux.
+2. The init/param side: WHY the ctl.start ack never lands (the 15 s
+   loop's engine). pctlmon exists; one boot with pctlmon over the
+   wedge window names the missing ack. If the ack arrives on the
+   reference kernel (it must — reference boots launcher in 12 s),
+   the divergence is ours.
+3. The per-bundle 0.5-1.4 s install cost (77th item 3) still stands
+   as the secondary optimizer once the wedge is dead.
+4. ohw117's freed-task-linked class (sensor_host tid 570 garbage
+   registers, runnable-unpicked 22 s) is a separate small lane.
