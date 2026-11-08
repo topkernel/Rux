@@ -149,6 +149,25 @@ impl RawSpinlock {
         self.owner.load(Ordering::Relaxed) & !0xF
     }
 
+    /// Overwrite the owner word's RA with a DEEPER caller's return
+    /// address (debug-lock-owner only). Used by wrapper locks (the GRQ
+    /// acquisition wrappers) whose frame is the only one RawSpinlock's
+    /// own caller capture sees: after acquiring, the wrapper restamps
+    /// so a lost release names the wrapper's CALLER — the true acquire
+    /// site — in the deadlock warn's ow_ra field. The cpu nibble is
+    /// preserved from the wrapper's own record_owner.
+    #[inline]
+    #[cfg(feature = "debug-lock-owner")]
+    pub fn restamp_owner_ra(&self, ra: usize) {
+        let cur = self.owner.load(Ordering::Relaxed);
+        self.owner
+            .store((ra & !0xFusize) | (cur & 0xF), Ordering::Relaxed);
+    }
+
+    #[inline]
+    #[cfg(not(feature = "debug-lock-owner"))]
+    pub fn restamp_owner_ra(&self, _ra: usize) {}
+
     #[inline]
     #[cfg(not(feature = "debug-lock-owner"))]
     pub fn owner_hint(&self) -> usize {
@@ -275,6 +294,22 @@ impl RawSpinlock {
                 if h < 10 {
                     unsafe { crate::console::putchar_no_lock(b'0' + h as u8); }
                 }
+            }
+            // r16 (GB GRQ lost-release deadlock): the owner word's HIGH
+            // bits are the LAST ACQUIRER'S RETURN ADDRESS (the r12
+            // shape) — a lock stuck "locked" with no CPU inside any
+            // longer names its lost-release site right here. Print it.
+            let msg5b = b" ow_ra=0x";
+            for &b in msg5b {
+                unsafe { crate::console::putchar_no_lock(b); }
+            }
+            let ra = holder & !0xFusize;
+            let mut shift2 = (core::mem::size_of::<usize>() * 8) as i32;
+            while shift2 > 0 {
+                shift2 -= 4;
+                let nibble = (ra >> (shift2 as usize)) & 0xF;
+                let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
+                unsafe { crate::console::putchar_no_lock(c); }
             }
         }
 
