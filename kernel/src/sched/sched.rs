@@ -2363,20 +2363,16 @@ pub fn free_task_slot(task_ptr: *mut Task) {
         // removal.
         {
             let mut guard = grq().lock_irqsave();
-            // r18 mechanism-C fix: clear any per-CPU slot that still
-            // names this Task BEFORE the page is poisoned/deallocated —
-            // the resurrection-door closer (sched_detach_before_free
-            // already did the stack side; this is the Task-page side).
-            for c in 0..MAX_CPUS {
-                if cpu_state(c).current == task_ptr {
-                    let idle_task = cpu_state(c).idle;
-                    if !idle_task.is_null() && idle_task != task_ptr {
-                        cpu_state_mut(c).current = idle_task;
-                        slot_tag_write(c, SLOT_W_FREE_CLEAR, idle_task);
-                        pick_gen_supersede(c, idle_task);
-                    }
-                }
-            }
+            // r19: the r18 WIP's slot-clearing here is REVERTED — it
+            // rewrote cpu_state(c).current/pick-gen for a task whose
+            // final switch could still be in flight on that CPU (no
+            // wait, unlike the x86 rsp0 fix), and same-window riscv
+            // soak A/B showed the branch at 4/6 graffiti panics vs
+            // pristine main 0/6 with this hunk live. The resurrection
+            // door it closed needed the aged arm of the slot-lie heal
+            // (deleted at the source); the four remaining instant arms
+            // cannot act on a freed task (they require a wake FOR the
+            // task, which cannot arrive after free).
             let mut unlinked = 0usize;
             // SAFETY: task_ptr is non-null and still a valid Task (poison
             // and dealloc happen below); the GRQ lock is held.
