@@ -1049,6 +1049,95 @@ fn ams46_on() -> bool {
     crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Ams46)
 }
 
+// ============================================================================
+// 72nd (death-callback window tracer, dfx=txnhunt). The devmgr founder
+// class (ohw87/91): the thread that reads a BR_DEAD_BINDER runs the
+// death-callback chain inline (DevSvcManagerOnServiceDied ->
+// RemoveService -> DevSvcManager.mutex held -> NotifyStatus external
+// callback). While that window is open, two kernel-visible events name
+// the nesting that opens the double-lock:
+//   DEATHCB-STEAL — the same thread's NEXT read stages a Transaction
+//     (a nested ioctl inside the callback stole a proc-todo txn: its
+//     userspace handler will run on this thread INSIDE whatever lock
+//     the callback holds);
+//   DEATHCB-SEND  — the thread issues a BC_TRANSACTION while the
+//     window is open (the NotifyStatus DispatchAsync, or a nested sync
+//     call made by a listener callback).
+// Window opens at DeadBinder staging, closes at BC_DEAD_BINDER_DONE
+// (the image's callback-completion write). Budget-capped; zero cost
+// when dfx=txnhunt is off.
+// ============================================================================
+static DEATHCB_TIDS: [core::sync::atomic::AtomicU32; 8] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; 8];
+static DEATHCB_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+fn deathcb_open(tid: u32) -> bool {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang) {
+        return false;
+    }
+    DEATHCB_TIDS
+        .iter()
+        .any(|s| s.load(core::sync::atomic::Ordering::Relaxed) == tid)
+}
+
+/// Open the window at DeadBinder staging (budget-gated print).
+fn deathcb_mark(pid: u32, tid: u32, desc: u32, cookie: u64, todo_len: usize) {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang) {
+        return;
+    }
+    if !DEATHCB_TIDS
+        .iter()
+        .any(|s| s.load(core::sync::atomic::Ordering::Relaxed) == tid)
+    {
+        for s in DEATHCB_TIDS.iter() {
+            if s
+                .compare_exchange(
+                    0,
+                    tid,
+                    core::sync::atomic::Ordering::Relaxed,
+                    core::sync::atomic::Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                break;
+            }
+        }
+    }
+    if DEATHCB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 160 {
+        crate::pr_warn!(
+            "DEATHCB-OPEN pid={} tid={} desc={} cookie={:#x} proc_todo_len={}",
+            pid,
+            tid,
+            desc,
+            cookie,
+            todo_len
+        );
+    }
+}
+
+/// Close the window at BC_DEAD_BINDER_DONE.
+fn deathcb_close(pid: u32, tid: u32) {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang) {
+        return;
+    }
+    for s in DEATHCB_TIDS.iter() {
+        if s
+            .compare_exchange(
+                tid,
+                0,
+                core::sync::atomic::Ordering::Relaxed,
+                core::sync::atomic::Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            break;
+        }
+    }
+    if DEATHCB_N.load(core::sync::atomic::Ordering::Relaxed) < 160 {
+        crate::pr_warn!("DEATHCB-CLOSE pid={} tid={}", pid, tid);
+    }
+}
+
 // lb47 (sixth successor): failed-send reason shadow. The fast-fail decode
 // (lb44/lb45) proved the code-46 handler's IsExistOsAccount returned false
 // in ~1 ms with ZERO binder traffic from foundation — the cached
@@ -7667,6 +7756,21 @@ fn binder_thread_write(
                     *consumed = ptr as u64;
                     return -(EFAULT as i64);
                 };
+                // 72nd: a send issued while this thread is inside a death
+                // callback — the NotifyStatus DispatchAsync (oneway to the
+                // listener) or a nested sync call from a listener callback.
+                if !reply && deathcb_open(thread.tid) {
+                    if DEATHCB_N.load(core::sync::atomic::Ordering::Relaxed) < 160 {
+                        crate::pr_warn!(
+                            "DEATHCB-SEND pid={} tid={} target={} code={:#x} oneway={}",
+                            proc.pid,
+                            thread.tid,
+                            tr.target_handle,
+                            tr.code,
+                            tr.flags & TF_ONE_WAY != 0
+                        );
+                    }
+                }
                 // struct binder_transaction_data_sg: the trailing u64
                 // buffers_size covers the sg (extra) area the PTR objects
                 // will copy into (Linux extra_buffers_size).
@@ -8388,6 +8492,9 @@ fn binder_thread_write(
                     return -(EFAULT as i64);
                 };
                 ptr += 8;
+                // 72nd: the death callback chain completed — close the
+                // window for this thread.
+                deathcb_close(proc.pid as u32, thread.tid);
                 let mut wake_self = false;
                 {
                     let mut w = world_lock();
@@ -11131,6 +11238,34 @@ fn binder_thread_read(
             unsafe {
                 let world = w.as_ref().unwrap();
                 let mut stop_full = false;
+                // 72nd: latch the proc-work eligibility ONCE per drain
+                // pass — reference binder.c 6.6 computes
+                // `wait_for_proc_work = binder_available_for_proc_work_
+                // ilocked(thread)` at the `retry:` label (binder.c:4460,
+                // BEFORE the wait) and the drain arm at :4506-4508 uses
+                // the LATCHED value: `else if (!binder_worklist_empty_
+                // ilocked(&proc->todo) && wait_for_proc_work)`. A read
+                // that ENTERED with own-todo work present (the
+                // TransactionComplete pushed by this thread's own just-
+                // issued async dispatch, consumed inside
+                // BinderInvoker::WaitForCompletion) therefore CANNOT take
+                // proc-todo work in the same pass. Recomputing per
+                // iteration (the old code) let a death-callback thread
+                // (DevSvcManagerOnServiceDied -> RemoveService, holding
+                // DevSvcManager.mutex) consume its tcomplete, become
+                // "eligible", steal its own same-proc async notify txn
+                // off the proc todo and run the listener stub INLINE on
+                // the same thread — the stub handler re-locked the mutex
+                // and self-deadlocked (the ohw87/91/92 founder class;
+                // ohw92 DEATHCB-SEND target=49 -> FUXW-PARK on the
+                // frozen word 12 ms later). Own-todo work stays
+                // unconditional, exactly like the reference.
+                let avail_for_proc = {
+                    let th = thread.st();
+                    th.txn_stack.is_empty()
+                        && th.todo.is_empty()
+                        && (th.looper & (LOOPER_ENTERED | LOOPER_REGISTERED)) != 0
+                };
                 loop {
                     // Budget covers BR_TRANSACTION_SECCTX (transaction
                     // data + trailing secctx pointer) even when unused.
@@ -11140,25 +11275,14 @@ fn binder_thread_read(
                     }
                     let from_thread = !thread.st().todo.is_empty();
                     // Reference parity: list choice is own-todo first,
-                    // else proc todo — but ONLY for pool threads:
-                    // binder_thread_read's 6.6 drain arm calls
-                    // binder_available_for_proc_work_ilocked, whose
-                    // availability INCLUDES the ENTERED/REGISTERED
-                    // looper term. The flagless version here was the
-                    // oh68 wedge's actual steal: an FFRT worker (never a
-                    // pool thread) inside BinderInvoker::WaitForCompletion
-                    // of its own oneway send, own todo momentarily empty,
-                    // pulled an incoming samgr SUBSCRIBE off the proc
-                    // todo and dispatched it on its own stack — under
-                    // the listenerMapLock_ the worker's notify coroutine
-                    // held (self-deadlock; ohw63-74). Own-todo work
-                    // stays unconditional, like the reference.
-                    let avail_for_proc = {
-                        let th = thread.st();
-                        th.txn_stack.is_empty()
-                            && th.todo.is_empty()
-                            && (th.looper & (LOOPER_ENTERED | LOOPER_REGISTERED)) != 0
-                    };
+                    // else proc todo — but ONLY for pool threads and only
+                    // when the ENTRY latch allowed proc work. The
+                    // flagless version was the oh68 wedge's actual steal
+                    // (an FFRT worker inside WaitForCompletion of its own
+                    // oneway send pulled an incoming samgr SUBSCRIBE off
+                    // the proc todo and dispatched it on its own stack,
+                    // under the listenerMapLock_ the worker's notify
+                    // coroutine held; ohw63-74).
                     let work = if from_thread {
                         thread.st().todo.pop_front()
                     } else if avail_for_proc && !pm(world, proc).im().todo.is_empty() {
@@ -11247,6 +11371,16 @@ fn binder_thread_read(
                         Work::DeadBinder { desc, cookie } => {
                             stage_cmd!(BR_DEAD_BINDER);
                             stage_u64!(cookie);
+                            // 72nd: the death-callback window opens here —
+                            // the reader runs the death-callback chain
+                            // inline before its next binder write.
+                            deathcb_mark(
+                                proc.pid as u32,
+                                thread.tid,
+                                desc,
+                                cookie,
+                                pm(world, proc).im().todo.len(),
+                            );
                             // Mark delivered on the ref (move onto the
                             // delivered_death list).
                             if let Some(r) = pm(world, proc).im().refs.iter_mut().find(|r| r.desc == desc) {
@@ -11267,6 +11401,28 @@ fn binder_thread_read(
                         }
                         Work::Transaction(t) => {
                             let is_reply = t.target_node.is_none();
+                            // 72nd: a Transaction staged while this same
+                            // thread is inside a death-callback window =
+                            // the nested-execution steal (the handler runs
+                            // in userspace INSIDE the callback — under
+                            // whatever lock it holds). This is the
+                            // founder-shape print.
+                            if deathcb_open(thread.tid)
+                                && DEATHCB_N.load(core::sync::atomic::Ordering::Relaxed) < 160
+                            {
+                                crate::pr_warn!(
+                                    "DEATHCB-STEAL pid={} tid={} txn{} code={:#x} reply={} from pid{} tid{} to pid{} proc_todo_len={}",
+                                    proc.pid,
+                                    thread.tid,
+                                    t.id,
+                                    t.code,
+                                    is_reply,
+                                    t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
+                                    t.from_tid.unwrap_or(0),
+                                    t.to_proc.pid,
+                                    pm(world, proc).im().todo.len()
+                                );
+                            }
                             if is_reply {
                                 thread.hist(EV_REPLY_RECV, t.id as u32, 0);
                             } else {
