@@ -109,13 +109,18 @@ mod lockhist {
         [const { core::sync::atomic::AtomicUsize::new(0) }; SLOTS];
     pub static N: [core::sync::atomic::AtomicU32; SLOTS] =
         [const { core::sync::atomic::AtomicU32::new(0) }; SLOTS];
+    /// r19: the first witness's caller RA per slot — names the acquire
+    /// site of heap-allocated locks (their addresses cannot be
+    /// symbolized against the ELF).
+    pub static RA: [core::sync::atomic::AtomicUsize; SLOTS] =
+        [const { core::sync::atomic::AtomicUsize::new(0) }; SLOTS];
 }
 
 /// r18 flame refinement: record one contention witness for this lock
 /// address (see `lockhist`). Called from the spin loop with IRQ state
 /// whatever the caller had — atomics only.
 #[cfg(feature = "nextgate")]
-fn lockhist_witness(addr: usize) {
+fn lockhist_witness(addr: usize, ra: usize) {
     for s in 0..lockhist::SLOTS {
         let a = &lockhist::ADDR[s];
         let cur = a.load(core::sync::atomic::Ordering::Relaxed);
@@ -129,6 +134,8 @@ fn lockhist_witness(addr: usize) {
                 .is_ok()
         {
             lockhist::N[s].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            // r19: the claimant stamps the acquire site once.
+            lockhist::RA[s].store(ra, core::sync::atomic::Ordering::Relaxed);
             return;
         }
     }
@@ -148,6 +155,7 @@ pub fn lockhist_print() {
             continue;
         }
         let a = lockhist::ADDR[s].load(core::sync::atomic::Ordering::Relaxed);
+        let ra = lockhist::RA[s].load(core::sync::atomic::Ordering::Relaxed);
         const M: &[u8] = b"\nLOCKHIST addr=0x";
         for &b in M {
             putchar(b);
@@ -176,6 +184,42 @@ pub fn lockhist_print() {
         }
         for i in (0..k).rev() {
             putchar(buf[i]);
+        }
+        // r19: the first witness's acquire site (heap locks' identity).
+        // r19b: for heap-allocated locks (physmap range) the address
+        // cannot be symbolized — dump the surrounding qwords instead;
+        // long-lived containers self-identify (inode names, pool
+        // counters). Advisory read of maybe-freed memory is acceptable
+        // for a hunt print.
+        if a >= 0xffff_8880_0000_0000 && a < 0xffff_9000_0000_0000 {
+            const M4: &[u8] = b" ctx=";
+            for &b in M4 {
+                putchar(b);
+            }
+            for off in [-2i64, -1, 0, 1, 2, 3, 4, 5] {
+                let p = (a as i64 + off * 8) as *const u64;
+                // SAFETY: advisory hunt print; may read freed memory.
+                let v = unsafe { core::ptr::read_volatile(p) };
+                let mut u = v;
+                if off != -2 {
+                    putchar(b' ');
+                }
+                for _ in 0..16 {
+                    let nb = (u >> 60) as u8;
+                    putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                    u <<= 4;
+                }
+            }
+        }
+        const M3: &[u8] = b" ra=0x";
+        for &b in M3 {
+            putchar(b);
+        }
+        let mut u = ra as u64;
+        for _ in 0..16 {
+            let nb = (u >> 60) as u8;
+            putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+            u <<= 4;
         }
     }
     putchar(b'\n');
@@ -337,7 +381,7 @@ impl RawSpinlock {
                     // contention volume histogram for hunt kernels
                     // (IP-only samples cannot name WHICH lock the 22%
                     // bucket is).
-                    lockhist_witness(self as *const Self as usize);
+                    lockhist_witness(self as *const Self as usize, caller_ra);
                 }
                 if spins == Self::DEADLOCK_WARN_ITERS {
                     Self::deadlock_warn(self as *const Self, caller_ra);
