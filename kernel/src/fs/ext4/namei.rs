@@ -1154,7 +1154,7 @@ fn add_block_to_inode_extent(
         unwritten: false,
     };
     let mut meta_sectors: u64 = 0;
-    crate::fs::ext4::extent::ext4_ext_append(fs, &mut inode.i_block, &ext, &mut meta_sectors)?;
+    crate::fs::ext4::extent::ext4_ext_append(fs, ino, &mut inode.i_block, &ext, &mut meta_sectors)?;
 
     inode.i_size += block_size;
     inode.i_blocks += (block_size / 512) as u32 + meta_sectors as u32;

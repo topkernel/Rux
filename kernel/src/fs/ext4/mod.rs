@@ -1697,7 +1697,7 @@ pub fn ext4_fallocate_on(
                         }
                     }
                     let meta_delta = crate::fs::ext4::extent::ext4_ext_rebuild(
-                        fs, &mut ext4_inode.block, &kept,
+                        fs, ino, &mut ext4_inode.block, &kept,
                     )?;
                     ext4_inode.blocks = ext4_inode
                         .blocks
@@ -2351,7 +2351,7 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                             }
                         }
                         let meta_delta = match crate::fs::ext4::extent::ext4_ext_rebuild(
-                            fs, &mut ext4_inode.block, &kept,
+                            fs, ext4_ino, &mut ext4_inode.block, &kept,
                         ) {
                             Ok(d) => d,
                             Err(e) => return e,

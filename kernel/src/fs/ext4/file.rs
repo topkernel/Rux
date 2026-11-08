@@ -857,7 +857,7 @@ pub fn ext4_file_write(
                 if inode.has_extent() {
                     let mut ext_meta: u64 = 0;
                     match crate::fs::ext4::extent::ext4_ext_materialize_block(
-                        fs, &mut inode.block, block_index, &mut ext_meta,
+                        fs, inode.ino, &mut inode.block, block_index, &mut ext_meta,
                     ) {
                         Ok(Some(phys)) => {
                             // Materialize the block contents now: the
@@ -896,7 +896,7 @@ pub fn ext4_file_write(
                             {
                                 let mut hm: u64 = 0;
                                 match crate::fs::ext4::extent::ext4_ext_insert_written(
-                                    fs, &mut inode.block, block_index, new_block, 1, &mut hm,
+                                    fs, inode.ino, &mut inode.block, block_index, new_block, 1, &mut hm,
                                 ) {
                                     Ok(()) => {
                                         inode.blocks += hm;
@@ -1150,7 +1150,7 @@ pub fn preallocate_unwritten_extents(
             len: run_len as u16,
             unwritten: true,
         };
-        crate::fs::ext4::extent::ext4_ext_append(fs, &mut inode.block, &ext, &mut meta_sectors)?;
+        crate::fs::ext4::extent::ext4_ext_append(fs, inode.ino, &mut inode.block, &ext, &mut meta_sectors)?;
         inode.blocks += sectors_per_block * run_len as u64;
         logical_block += run_len as u64;
     }
@@ -1222,7 +1222,7 @@ fn allocate_blocks_with_extents(
             len: run_len as u16,
             unwritten: false,
         };
-        crate::fs::ext4::extent::ext4_ext_append(fs, &mut inode.block, &ext, &mut meta_sectors)?;
+        crate::fs::ext4::extent::ext4_ext_append(fs, inode.ino, &mut inode.block, &ext, &mut meta_sectors)?;
         inode.blocks += sectors_per_block * run_len as u64;
         logical_block += run_len as u64;
     }

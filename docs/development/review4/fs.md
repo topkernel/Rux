@@ -182,7 +182,7 @@ the generation-chained seed.
 The window would also leak its marked-used blocks if the owner were deleted
 before consuming them. Delete or wire discard_prealloc into free_inode.
 
-### [High] jbd2/commit.rs:268+559 vs jbd2/revoke.rs:255 — revoke blocks are placed at the PRE-commit j_head and clobber the descriptor (or get clobbered by the commit block)
+### [High] jbd2/commit.rs:268+559 vs jbd2/revoke.rs:255 — revoke blocks are placed at the PRE-commit j_head and clobber the descriptor (or get clobbered by the commit block) — ✅ FIXED (`8952fd96`)
 
 `jbd2_journal_commit_transaction` walks the log with a LOCAL
 `current_journal_block` and only stores `journal.j_head` in Phase 4. Phase 2.6

@@ -1283,11 +1283,28 @@ unsafe fn read_node(
 /// SAFETY: blk is a valid filesystem block; data.len() == fs.block_size.
 unsafe fn write_node(
     fs: &crate::fs::ext4::Ext4FileSystem,
+    ino: u32,
     blk: u64,
     data: &[u8],
 ) -> Result<(), i32> {
     let bh = bio::bread(fs.device, blk).ok_or(errno::Errno::IOError.as_neg_i32())?;
     (*bh).b_data.copy_from_slice(data);
+    // review4 fs-M (extent tail seal): external extent-tree blocks carry
+    // an ext4_extent_tail — crc32c over the block minus its last 4 bytes,
+    // seeded with the inode's generation-chained seed (the same chain
+    // directory blocks use; ext4_extent_csum in the reference). The
+    // mount's policy comment claims the tails are sealed at their write
+    // sites; before this the sealing helper had zero callers and every
+    // tree growth on a metadata_csum rw mount left a stale/absent tail
+    // (e2fsck flags them all; self-consistent at runtime only because
+    // the read path does not verify extent tails).
+    if fs.metadata_csum {
+        let generation = super::inode::read_inode(fs, ino)
+            .map(|i| i.i_generation)
+            .unwrap_or(0);
+        let seed = super::csum::dir_csum_seed(fs.csum_seed, ino, generation);
+        super::csum::extent_block_csum_set(seed, (*bh).b_data.as_mut_slice());
+    }
     (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
     let sync_res = bio::sync_dirty_buffer(bh);
     bio::brelse(bh);
@@ -1312,6 +1329,7 @@ fn init_node_header(data: &mut [u8], depth: u16, cap: u16) {
 /// (data mutated in place — caller persists external nodes itself).
 fn append_node(
     fs: &crate::fs::ext4::Ext4FileSystem,
+    ino: u32,
     data: &mut [u8],
     cap: usize,
     depth: u16,
@@ -1363,7 +1381,7 @@ fn append_node(
         unsafe { node_extents_mut(&mut nd, ext_cap)[0] = e.to_disk() };
         node_header_mut(&mut nd).eh_entries = 1;
         // SAFETY: blk was just allocated (valid fs block).
-        unsafe { write_node(fs, blk, &nd)? };
+        unsafe { write_node(fs, ino, blk, &nd)? };
         Ok(Some(SplitIdx { ei_block: e.ee_block, child: blk }))
     } else {
         let n = node_header(data).eh_entries as usize;
@@ -1377,10 +1395,10 @@ fn append_node(
         };
         // SAFETY: last_child is a valid fs block read from the index node.
         let mut child = unsafe { read_node(fs, last_child)? };
-        match append_node(fs, &mut child, external_node_cap(fs), depth - 1, e, meta_sectors)? {
+        match append_node(fs, ino, &mut child, external_node_cap(fs), depth - 1, e, meta_sectors)? {
             None => {
                 // SAFETY: last_child valid.
-                unsafe { write_node(fs, last_child, &child)? };
+                unsafe { write_node(fs, ino, last_child, &child)? };
                 Ok(None)
             }
             Some(split) => {
@@ -1414,7 +1432,7 @@ fn append_node(
                     }
                     node_header_mut(&mut nd).eh_entries = 1;
                     // SAFETY: blk just allocated.
-                    unsafe { write_node(fs, blk, &nd)? };
+                    unsafe { write_node(fs, ino, blk, &nd)? };
                     Ok(Some(SplitIdx { ei_block: split.ei_block, child: blk }))
                 }
             }
@@ -1429,6 +1447,7 @@ fn append_node(
 /// blocks allocated (the caller adds them to i_blocks).
 pub fn ext4_ext_append(
     fs: &crate::fs::ext4::Ext4FileSystem,
+    ino: u32,
     i_block: &mut [u32; 15],
     e: &RawExtent,
     meta_sectors: &mut u64,
@@ -1443,7 +1462,7 @@ pub fn ext4_ext_append(
         init_node_header(&mut root, 0, ROOT_NODE_CAP as u16);
     }
 
-    match append_node(fs, &mut root, ROOT_NODE_CAP, depth, e, meta_sectors)? {
+    match append_node(fs, ino, &mut root, ROOT_NODE_CAP, depth, e, meta_sectors)? {
         None => {}
         Some(split) => {
             // The root itself overflowed. Promote: move the current root
@@ -1458,7 +1477,7 @@ pub fn ext4_ext_append(
             // layout, more slots).
             node_header_mut(&mut down_data).eh_max = external_node_cap(fs) as u16;
             // SAFETY: down just allocated.
-            unsafe { write_node(fs, down, &down_data)? };
+            unsafe { write_node(fs, ino, down, &down_data)? };
             let new_depth = old_depth + 1;
             init_node_header(&mut root, new_depth, old_cap);
             // SAFETY: root 60B holds 4 index entries per contract.
@@ -1613,6 +1632,7 @@ unsafe fn free_index_node(
 /// Returns the metadata sector delta (added - freed) for i_blocks.
 pub fn ext4_ext_rebuild(
     fs: &crate::fs::ext4::Ext4FileSystem,
+    ino: u32,
     i_block: &mut [u32; 15],
     exts: &[RawExtent],
 ) -> Result<i64, i32> {
@@ -1626,7 +1646,7 @@ pub fn ext4_ext_rebuild(
     );
     let mut added: u64 = 0;
     for e in exts {
-        ext4_ext_append(fs, i_block, e, &mut added)?;
+        ext4_ext_append(fs, ino, i_block, e, &mut added)?;
     }
     Ok(added as i64 - freed as i64)
 }
@@ -1706,6 +1726,7 @@ fn find_covering_leaf_blk(
 /// Returns the physical block.
 pub fn ext4_ext_materialize_block(
     fs: &crate::fs::ext4::Ext4FileSystem,
+    ino: u32,
     i_block: &mut [u32; 15],
     logical_block: u64,
     meta_sectors: &mut u64,
@@ -1775,7 +1796,7 @@ pub fn ext4_ext_materialize_block(
         match node_blk {
             Some(blk) => {
                 // SAFETY: blk from the tree walk.
-                unsafe { write_node(fs, blk, &node)? };
+                unsafe { write_node(fs, ino, blk, &node)? };
             }
             None => {
                 // Root: copy the 60-byte image back.
@@ -1808,7 +1829,7 @@ pub fn ext4_ext_materialize_block(
         if !spliced {
             return Err(errno::Errno::IOError.as_neg_i32());
         }
-        let delta = ext4_ext_rebuild(fs, i_block, &all)?;
+        let delta = ext4_ext_rebuild(fs, ino, i_block, &all)?;
         *meta_sectors = (*meta_sectors as i64 + delta) as u64;
         Ok(Some(raw.phys + prefix as u64))
     }
@@ -1818,6 +1839,7 @@ pub fn ext4_ext_materialize_block(
 /// fast path; deep trees insert into the covering leaf (rebuild fallback).
 pub fn ext4_ext_insert_written(
     fs: &crate::fs::ext4::Ext4FileSystem,
+    ino: u32,
     i_block: &mut [u32; 15],
     ee_block: u64,
     phys: u64,
@@ -1845,7 +1867,7 @@ pub fn ext4_ext_insert_written(
                 .position(|e| e.ee_block as u64 > ee_block)
                 .unwrap_or(all.len());
             all.insert(pos, RawExtent { ee_block: ee_block as u32, phys, len, unwritten: false });
-            let delta = ext4_ext_rebuild(fs, i_block, &all)?;
+            let delta = ext4_ext_rebuild(fs, ino, i_block, &all)?;
             *meta_sectors = (*meta_sectors as i64 + delta) as u64;
             return Ok(());
         }
@@ -1888,7 +1910,7 @@ pub fn ext4_ext_insert_written(
             // SAFETY: ne.len() <= cap.
             unsafe { node_extents_mut(&mut leaf, cap)[..ne.len()].copy_from_slice(&ne) };
             // SAFETY: leaf_blk valid.
-            unsafe { write_node(fs, leaf_blk, &leaf)? };
+            unsafe { write_node(fs, ino, leaf_blk, &leaf)? };
             return Ok(());
         }
     }
@@ -1908,7 +1930,7 @@ pub fn ext4_ext_insert_written(
         // SAFETY: new_entries.len() <= cap.
         unsafe { node_extents_mut(&mut leaf, cap)[..new_entries.len()].copy_from_slice(&new_entries) };
         // SAFETY: leaf_blk valid.
-        unsafe { write_node(fs, leaf_blk, &leaf)? };
+        unsafe { write_node(fs, ino, leaf_blk, &leaf)? };
         Ok(())
     } else {
         // Leaf full: whole-tree rebuild with the entry inserted sorted.
@@ -1918,7 +1940,7 @@ pub fn ext4_ext_insert_written(
             .position(|e| e.ee_block as u64 > ee_block)
             .unwrap_or(all.len());
         all.insert(pos, RawExtent { ee_block: ee_block as u32, phys, len, unwritten: false });
-        let delta = ext4_ext_rebuild(fs, i_block, &all)?;
+        let delta = ext4_ext_rebuild(fs, ino, i_block, &all)?;
         *meta_sectors = (*meta_sectors as i64 + delta) as u64;
         Ok(())
     }

@@ -45,6 +45,21 @@ pub struct VirtIONetHdr {
     pub num_buffers: u16,
 }
 
+/// One submitted TX chain awaiting its used-ring completion (review4
+/// drivers-M). Kept alive — header and skb are DMA targets until the
+/// device returns the chain; freed only with that proof (R21-N2
+/// discipline, preserved by construction in the async design).
+struct TxPending {
+    hdr_ptr: *mut VirtIONetHdr,
+    hdr_layout: alloc::alloc::Layout,
+    skb: SkBuff,
+    bytes: u64,
+}
+
+// SAFETY: the raw pointers are DMA targets owned by the queue until the
+// used-ring entry lands; access is serialized by tx_pending's lock.
+unsafe impl Send for TxPending {}
+
 /// VirtIO network device
 pub struct VirtIONetDevice {
     /// MMIO base address
@@ -67,6 +82,14 @@ pub struct VirtIONetDevice {
     rx_buffers: Spinlock<alloc::vec::Vec<u64>>,
     /// Last processed RX used index
     rx_last_used: Spinlock<u16>,
+    /// In-flight TX chains awaiting reclaim + the used-ring watermark at
+    /// the last reclaim (review4 drivers-M: the Linux
+    /// start_xmit/free_old_xmit_skbs shape — xmit posts the chain and
+    /// returns; completed chains are reclaimed on the next xmit or from
+    /// the NetRx softirq, never by spinning for completion with IRQs
+    /// off. The watermark counts COMPLETED CHAINS, the same domain as
+    /// get_used()).
+    tx_pending: Spinlock<(alloc::collections::VecDeque<TxPending>, u16)>,
 }
 
 // SAFETY: All shared state is protected by Spinlocks (irqsave where needed),
@@ -87,6 +110,7 @@ impl VirtIONetDevice {
             stats: Spinlock::new(DeviceStats::default()),
             rx_buffers: Spinlock::new(alloc::vec::Vec::new()),
             rx_last_used: Spinlock::new(0),
+            tx_pending: Spinlock::new((alloc::collections::VecDeque::new(), 0)),
         }
     }
 
@@ -359,6 +383,10 @@ impl VirtIONetDevice {
             return -5; // EIO
         }
 
+        // Reclaim completed TX first (Linux start_xmit → free_old_xmit_skbs)
+        // — this is also the bound on pending growth.
+        self.tx_reclaim();
+
         // Get TX queue (irqsafe: IRQ handler may access rx/tx queues)
         let mut queue_guard = self.tx_queue.lock_irqsave();
         let queue = match queue_guard.as_mut() {
@@ -438,82 +466,67 @@ impl VirtIONetDevice {
             0,
         );
 
-        // Snapshot used.idx BEFORE submit: QEMU's iothread can complete the
-        // TX before a post-submit get_used() runs, and a snapshot that
-        // already includes our completion makes the wait below time out —
-        // reporting a false EIO for every fast completion.
-        let prev_used = queue.get_used();
-
-        // Submit to available ring
+        // review4 drivers-M: the Linux start_xmit shape — post the chain,
+        // record the pending entry, kick, and RETURN. No completion spin
+        // (the old design held this lock_irqsave across up to 700K spin
+        // iterations PER PACKET: an IRQ blackout window on the sending
+        // CPU for every frame, and effective TX capped at one in-flight
+        // frame). Reclaim happens on the next xmit or from the NetRx
+        // softirq (tx_reclaim / free_old_xmit_skbs); a stalled device
+        // fills the ring and the NEXT allocation fails — a bounded,
+        // by-ring-capacity leak instead of a spin (R21-N2: nothing is
+        // freed without its used-ring proof, by construction).
+        let bytes = skb.len as u64;
         queue.submit(header_desc_idx);
+
+        // Record BEFORE notify: the completion IRQ can fire the moment we
+        // kick — the reclaim walk must already see this entry.
+        {
+            let mut pending = self.tx_pending.lock_irqsave();
+            pending.0.push_back(TxPending {
+                hdr_ptr,
+                hdr_layout,
+                skb,
+                bytes,
+            });
+        }
 
         // Notify device
         queue.notify();
 
-        // Wait for completion — with a BOUNDED spin budget.
-        //
-        // This wait runs while holding the tx_queue lock_irqsave: external
-        // interrupts are disabled for the whole window. The old budget was
-        // 10M iterations here plus a 50M-iteration late-drain below (tens
-        // of seconds of IRQ blackout under QEMU TCG — review TIMING).
-        // 200K iterations is a few ms of TCG time, orders of magnitude
-        // beyond what a healthy virtio-net TX completion needs (the slirp
-        // backend completes in microseconds); a genuinely stuck device now
-        // fails fast instead of freezing every CPU's interrupts.
-        const TX_WAIT_BUDGET: u64 = 200_000;
-        let new_used = queue.wait_for_completion_max(prev_used, TX_WAIT_BUDGET);
-
-        if new_used == prev_used {
-            // R8-M2 / R21-N2 discipline (same as virtio-blk): the TX chain
-            // is STILL SUBMITTED — the device may be DMA-reading hdr_ptr and
-            // the skb data right now. Late-drain the used ring with a
-            // bounded spin (500K iters — see TX_WAIT_BUDGET above; the old
-            // 50M-iteration drain held the IRQ-off lock for tens of
-            // seconds); on a true timeout LEAK both buffers instead of
-            // freeing in-flight DMA targets.
-            const TX_LATE_DRAIN_BUDGET: u64 = 500_000;
-            let used_ring = queue.used_ring_ptr();
-            let mut late = false;
-            for _ in 0..TX_LATE_DRAIN_BUDGET {
-                // SAFETY: used_ring points to this queue's used ring; offset 2
-                // is the idx field (u16) within the ring structure.
-                let idx = unsafe {
-                    core::ptr::read_volatile((used_ring as usize + 2) as *const u16)
-                };
-                if idx != prev_used {
-                    late = true;
-                    break;
-                }
-                core::hint::spin_loop();
-            }
-            if !late {
-                let mut stats = self.stats.lock_irqsave();
-                stats.tx_errors += 1;
-                drop(stats);
-                // hdr and skb deliberately NOT freed — device still owns them.
-                // SkBuff's Drop releases its buffer, so forget() it to make
-                // the leak explicit (R21-N2: integrity over a leak).
-                core::mem::forget(skb);
-                return -5;  // EIO
-            }
-            // Completed late — fall through to the normal cleanup.
-        }
-
-        // Free packet header
-        // SAFETY: hdr_ptr was allocated with hdr_layout above and is still valid.
-        unsafe {
-            alloc::alloc::dealloc(hdr_ptr as *mut u8, hdr_layout);
-        }
-
-        // Update statistics
-        let mut stats = self.stats.lock_irqsave();
-        stats.tx_packets += 1;
-        stats.tx_bytes += skb.len as u64;
-
-        // Free skb
-        skb.free();
-
         0
+    }
+
+    /// Reclaim completed TX chains (Linux free_old_xmit_skbs).
+    ///
+    /// Called at the head of every xmit and from the NetRx softirq (TX
+    /// completions raise the same ISR bit). Lock order
+    /// tx_queue → tx_pending → stats, matching xmit.
+    fn tx_reclaim(&self) {
+        let mut queue_guard = self.tx_queue.lock_irqsave();
+        let Some(queue) = queue_guard.as_mut() else { return };
+        let used_now = queue.get_used();
+        let mut pending = self.tx_pending.lock_irqsave();
+        let completed = used_now.wrapping_sub(pending.1);
+        for _ in 0..completed {
+            match pending.0.pop_front() {
+                Some(p) => {
+                    // SAFETY: hdr_ptr was allocated with hdr_layout at xmit
+                    // time; the used-ring advance proves the device returned
+                    // the chain — no DMA is reading it.
+                    unsafe {
+                        alloc::alloc::dealloc(p.hdr_ptr as *mut u8, p.hdr_layout);
+                    }
+                    let mut stats = self.stats.lock_irqsave();
+                    stats.tx_packets += 1;
+                    stats.tx_bytes += p.bytes;
+                    drop(stats);
+                    p.skb.free();
+                }
+                None => break, // watermark ahead of the queue: device bug
+            }
+        }
+        pending.1 = used_now;
     }
 
     /// Receive packet
@@ -882,6 +895,12 @@ pub fn interrupt_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqRetu
 /// Processes received network packets deferred from the interrupt handler.
 /// Runs in softirq context (at `irq_exit` time or from ksoftirqd).
 pub fn net_rx_softirq_handler(_vec: usize) {
+    // TX reclaim rides the same bottom half: TX completions raise the
+    // same ISR bit (review4 drivers-M — the async-TX free_old_xmit_skbs
+    // arm).
+    if let Some(dev) = get_device() {
+        dev.tx_reclaim();
+    }
     crate::net::ethernet::ethernet_poll();
 }
 
