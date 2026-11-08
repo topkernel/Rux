@@ -1050,6 +1050,50 @@ fn ams46_on() -> bool {
 }
 
 // ============================================================================
+// 73rd (accountmgr wedge lane, dfx=txnhunt). The ohw94 decode: accountmgr
+// tid 810's write at j3354 staged [BC_TRANSACTION(code2, h=0 -> samgr),
+// BC_REPLY(outer txn4392 error parcel)] — the reply was correctly refused
+// why=7 (reference binder.c:3010 parity), the samgr reply txn4456 landed
+// on the todo a hair AFTER the read had drained [tcomplete, error], the
+// image's recovery retry was then refused why=21 (todo-head-txn) and the
+// thread parked owing txn4392 forever. Every step is reference-parity in
+// isolation; the FOUNDER is whichever kernel event poisoned the proxy /
+// produced that write interleaving. This lane names, for the accountmgr
+// proc only (pid latched from the leader comm), every BC command it
+// issues, every ReturnError queued to it with its exact push site, every
+// reply-push (orig id + removed-stack count), and every read that
+// RETURNS while its own todo still holds Transaction work (the stranded
+// shape the why=21 guard then punishes).
+static ACCT_PID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+fn txnhunt_on() -> bool {
+    crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang)
+}
+
+/// True when `pid` is the accountmgr process. Latches the pid once from
+/// the leader task's comm so later lookups are a single atomic read.
+fn is_acct(pid: u32) -> bool {
+    let latched = ACCT_PID.load(core::sync::atomic::Ordering::Relaxed);
+    if latched != 0 {
+        return latched == pid;
+    }
+    // SAFETY: diagnostic task lookup + comm read (same contract as the
+    // TXN-HANG comm decode).
+    let t = unsafe { crate::sched::find_task_by_pid(pid) };
+    if t.is_null() {
+        return false;
+    }
+    let comm = unsafe { (*t).comm() };
+    let name = core::str::from_utf8(&comm[..]).unwrap_or("");
+    if name.starts_with("accountmgr") {
+        ACCT_PID.store(pid, core::sync::atomic::Ordering::Relaxed);
+        true
+    } else {
+        false
+    }
+}
+
+// ============================================================================
 // 72nd (death-callback window tracer, dfx=txnhunt). The devmgr founder
 // class (ohw87/91): the thread that reads a BR_DEAD_BINDER runs the
 // death-callback chain inline (DevSvcManagerOnServiceDied ->
@@ -2350,6 +2394,26 @@ pub fn binder_close(file: &crate::fs::File) -> i32 {
                             th.todo.push_back(Work::ReturnError(BR_DEAD_REPLY, 0));
                             th.process_todo = true;
                             needs_wake = true;
+                            // 73rd accountmgr lane (site=procdeath): the
+                            // dying proc's teardown fails this waiter's txn.
+                            if txnhunt_on()
+                                && (is_acct(p.pid) || is_acct(proc.pid))
+                            {
+                                static RD_N: core::sync::atomic::AtomicUsize =
+                                    core::sync::atomic::AtomicUsize::new(0);
+                                if RD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
+                                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                                    use core::fmt::Write as _;
+                                    let _ = writeln!(
+                                        w,
+                                        "RERR-PUSH site=procdeath dying_pid={} txn{} -> pid{} tid{} BR_DEAD_REPLY",
+                                        proc.pid,
+                                        x.id,
+                                        p.pid,
+                                        t.tid
+                                    );
+                                }
+                            }
                         }
                         !involved
                     });
@@ -2568,6 +2632,24 @@ unsafe fn dead_reply_to_sender(
             fth.todo.push_back(Work::ReturnError(BR_DEAD_REPLY, 0));
             fth.process_todo = true;
             ft.hist(EV_DEAD_REPLY, txn.id as u32, ftid);
+            // 73rd accountmgr lane (site=drs): a dying thread's pending
+            // txn failed — name the waiter that just got BR_DEAD_REPLY.
+            if txnhunt_on() && is_acct(fp.pid) {
+                static DRS2_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if DRS2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
+                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                    use core::fmt::Write as _;
+                    let _ = writeln!(
+                        w,
+                        "RERR-PUSH site=drs dying_pid={} txn{} -> pid{} tid{} BR_DEAD_REPLY",
+                        dying.pid,
+                        txn.id,
+                        fp.pid,
+                        ftid
+                    );
+                }
+            }
             // Exact-thread wake, same as the BC_REPLY path: the proc-wide
             // pick-one wake (wake_proc_one) only selects threads with an
             // EMPTY todo, so a thread carrying this ReturnError would
@@ -2581,6 +2663,23 @@ unsafe fn dead_reply_to_sender(
             dying.im().todo.push_back(Work::ReturnError(BR_DEAD_REPLY, 0));
         } else {
             pm(world, fp).im().todo.push_back(Work::ReturnError(BR_DEAD_REPLY, 0));
+        }
+        // 73rd accountmgr lane (site=drs-fallback): originator thread
+        // gone — the error went to a PROC todo.
+        if txnhunt_on() && is_acct(fp.pid) {
+            static DRS3_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if DRS3_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
+                let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                use core::fmt::Write as _;
+                let _ = writeln!(
+                    w,
+                    "RERR-PUSH site=drs-fallback dying_pid={} txn{} -> PROC pid{} BR_DEAD_REPLY",
+                    dying.pid,
+                    txn.id,
+                    fp.pid
+                );
+            }
         }
     }
     if same {
@@ -2631,6 +2730,25 @@ unsafe fn send_failed_reply(
             fth.todo.push_back(Work::ReturnError(err, 0));
             fth.process_todo = true;
             ft.hist(EV_DEAD_REPLY, in_reply_to.id as u32, ftid);
+            // 73rd accountmgr lane (site=sfr): a failed REPLY routed the
+            // error to this originator thread.
+            if txnhunt_on() && is_acct(fp.pid) {
+                static SFR_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if SFR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
+                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                    use core::fmt::Write as _;
+                    let _ = writeln!(
+                        w,
+                        "RERR-PUSH site=sfr txn{} replier_tgid={} -> pid{} tid{} cmd={:#x}",
+                        in_reply_to.id,
+                        thread.tgid,
+                        fp.pid,
+                        ftid,
+                        err
+                    );
+                }
+            }
             wake_thread(&ft);
         }
     }
@@ -7784,6 +7902,27 @@ fn binder_thread_write(
                     0
                 };
                 ptr += if sg { 72 } else { 64 };
+                // 73rd accountmgr lane: every BC_TRANSACTION/BC_REPLY this
+                // proc issues, before processing (so refused commands and
+                // their kernel verdicts line up in the serial log).
+                if txnhunt_on() && is_acct(proc.pid) {
+                    static AC_N: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    if AC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 500 {
+                        crate::pr_warn!(
+                            "ACCT-CMD pid={} tid={} cmd={:#x} reply={} h={:#x} code={:#x} oneway={} ds={} os={}",
+                            proc.pid,
+                            thread.tid,
+                            cmd,
+                            reply,
+                            tr.target_handle,
+                            tr.code,
+                            tr.flags & TF_ONE_WAY != 0,
+                            tr.data_size,
+                            tr.offsets_size
+                        );
+                    }
+                }
                 // lb57 (eighth successor): the osaccount proxy-poison engine.
                 // OH's IPCObjectProxy::SendRequestInner marks its proxy dead
                 // when the send returns ERR_DEAD_OBJECT (=32, c_utils errors.h
@@ -7956,6 +8095,35 @@ fn binder_thread_write(
                         th.process_todo = true;
                     }
                     drop(w);
+                    // 73rd accountmgr lane (site=writecmd): the write
+                    // command failed and its error work is queued for the
+                    // next read — for accountmgr this names the exact
+                    // command + kernel verdict (out of WORLD, plain WARN).
+                    if txnhunt_on() && is_acct(proc.pid) {
+                        static WC_N: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        if WC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
+                            let why = SENDFAIL_WHY.load(core::sync::atomic::Ordering::Relaxed);
+                            crate::pr_warn!(
+                                "RERR-PUSH site=writecmd pid={} tid={} cmd={:#x} reply={} h={:#x} code={:#x} BR={:#x} why={} todo_len_after={}",
+                                proc.pid,
+                                thread.tid,
+                                cmd,
+                                reply,
+                                tr.target_handle,
+                                tr.code,
+                                err_cmd,
+                                sendfail_reason_name(why),
+                                {
+                                    let w = world_lock();
+                                    // SAFETY: diagnostic len under WORLD.
+                                    let n = unsafe { thread.st().todo.len() };
+                                    drop(w);
+                                    n
+                                }
+                            );
+                        }
+                    }
                     wake_thread(thread);
                     break;
                 }
@@ -9646,6 +9814,70 @@ fn binder_transaction(
                 .unwrap_or(false)
             && proc.pid as u32
                 == SAREG_SAMGR_PID.load(core::sync::atomic::Ordering::Relaxed);
+        // 73rd launcher lane: samgr CheckSystemAbility (code 2) — the
+        // per-SA liveness lookups that gate BMS's provisioning (the
+        // SendToStorageQuota path bails when CheckSystemAbility(storage)
+        // returns null; abref1 shows an 84-row SetBundleQuota sweep we
+        // produce ZERO of). Own budget so the volume of routine lookups
+        // cannot eat the SAREG register/subscribe budget above.
+        if !reply && tr.code == 2 && !is_samgr_req {
+            let mut hdr = [0u8; 16];
+            let ok = tr.data_buffer != 0
+                && unsafe {
+                    crate::arch::uaccess::copy_from_user(
+                        hdr.as_mut_ptr(),
+                        tr.data_buffer as *const u8,
+                        hdr.len(),
+                    ) == 0
+                };
+            if ok && &hdr[12..16] == &[0x6f, 0x00, 0x68, 0x00] {
+                static CSA_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if CSA_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 300 {
+                    // SA id: first int32 past the interface token's
+                    // length word (parcel: header 8 + strlen 4 + token
+                    // bytes...). Decode conservatively: the first
+                    // int32-aligned field after the token; print the
+                    // raw first 24 bytes so the offline decode can
+                    // extract the said for any shape.
+                    let mut pb = [0u8; 24];
+                    let pb_ok = tr.data_buffer != 0
+                        && unsafe {
+                            crate::arch::uaccess::copy_from_user(
+                                pb.as_mut_ptr(),
+                                tr.data_buffer as *const u8,
+                                pb.len(),
+                            ) == 0
+                        };
+                    const HEXC: &[u8; 16] = b"0123456789abcdef";
+                    let mut hex = alloc::string::String::with_capacity(pb.len() * 2);
+                    if pb_ok {
+                        for &b in pb.iter() {
+                            hex.push(HEXC[(b >> 4) as usize] as char);
+                            hex.push(HEXC[(b & 0xf) as usize] as char);
+                        }
+                    }
+                    crate::pr_warn!(
+                        "SACSA txn{} from pid={} comm-check={} -> samgr pid={} dlen={} parcel={}",
+                        txn.id,
+                        proc.pid,
+                        crate::sched::current()
+                            .map(|t| unsafe { (*t).comm() })
+                            .map(|c| {
+                                alloc::string::String::from(
+                                    core::str::from_utf8(&c[..])
+                                        .unwrap_or("")
+                                        .trim_end_matches('\0'),
+                                )
+                            })
+                            .unwrap_or_default(),
+                        target.pid,
+                        data_size,
+                        hex
+                    );
+                }
+            }
+        }
         if is_samgr_req || reply_to_mutation {
             if SAREG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 600 {
                 // leg-25: the enqueued txn's id, so the send line pairs
@@ -10205,6 +10437,30 @@ fn binder_transaction(
                     // client with the replying server)
                     wake_thread_hint(&rthread, true);
                     rthread.hist(EV_REPLY_PUSHED, txn.id as u32, *rtid);
+                    // 73rd accountmgr lane: every reply pushed TO an
+                    // accountmgr thread — orig txn, remaining stack depth,
+                    // and the todo length the reply lands on (a reply that
+                    // queues BEHIND an error work is the stranded shape).
+                    if txnhunt_on() && is_acct(tproc.pid) {
+                        static RPUSH_N: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        if RPUSH_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
+                            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                            use core::fmt::Write as _;
+                            let _ = writeln!(
+                                w,
+                                "ACCT-REPLYPUSH reply txn{} orig=txn{} replier pid{}/tid{} -> pid{}/tid{} stack_after={} todo_after={}",
+                                txn.id,
+                                in_reply_to.as_ref().map(|o| o.id).unwrap_or(0),
+                                proc.pid,
+                                thread.tid,
+                                tproc.pid,
+                                rtid,
+                                rth.txn_stack.len(),
+                                rth.todo.len()
+                            );
+                        }
+                    }
                     // The original transaction is finished: unpin its node.
                     if let Some(orig) = &in_reply_to {
                         unpin_txn_node(world, orig);
@@ -11432,6 +11688,34 @@ fn binder_thread_read(
                                     t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
                                 );
                             }
+                            // 73rd accountmgr lane: every transaction
+                            // DELIVERED to an accountmgr thread — the
+                            // read-side counterpart of ACCT-CMD. The BMS
+                            // CheckAllUser chain (QueryAllCreatedOsAccounts
+                            // / IsOsAccountExists) arrives here; a missing
+                            // or refused query names the launcher-gate
+                            // divergence directly.
+                            if txnhunt_on() && is_acct(proc.pid) {
+                                static AR_N: core::sync::atomic::AtomicUsize =
+                                    core::sync::atomic::AtomicUsize::new(0);
+                                if AR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400 {
+                                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                                    use core::fmt::Write as _;
+                                    let _ = writeln!(
+                                        w,
+                                        "ACCT-RECV pid={} tid={} txn{} code={:#x} reply={} oneway={} from pid{} tid{} stack_depth={}",
+                                        proc.pid,
+                                        thread.tid,
+                                        t.id,
+                                        t.code,
+                                        is_reply,
+                                        t.flags & TF_ONE_WAY != 0,
+                                        t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
+                                        t.from_tid.unwrap_or(0),
+                                        thread.st().txn_stack.len()
+                                    );
+                                }
+                            }
                             // binder:binder_transaction_received — the
                             // transaction is being read out to its
                             // receiving thread (BR_TRANSACTION/BR_REPLY).
@@ -11790,6 +12074,45 @@ fn binder_thread_read(
     }
 
     // Copy the staged commands out to user memory.
+    // 73rd accountmgr lane: a read that RETURNS while its own todo still
+    // holds Transaction work — the stranded-reply shape (the image's
+    // recovery retry will hit the why=21 todo-head-txn guard until some
+    // later read drains it; if the thread parks in userspace first, the
+    // reply sits undelivered).
+    if txnhunt_on() && is_acct(proc.pid) {
+        let head = {
+            let w = world_lock();
+            // SAFETY: diagnostic head snapshot under WORLD.
+            unsafe {
+                thread.st().todo.front().map(|wk| match wk {
+                    Work::Transaction(t) => alloc::format!(
+                        "txn{} code{:#x} reply={}",
+                        t.id,
+                        t.code,
+                        t.target_node.is_none()
+                    ),
+                    Work::TransactionComplete => "tcomplete".into(),
+                    Work::ReturnError(c, _) => alloc::format!("err#{:#x}", c),
+                    _ => "other".into(),
+                })
+            }
+        };
+        if let Some(h) = head {
+            if h.starts_with("txn") {
+                static STR_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if STR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
+                    crate::pr_warn!(
+                        "ACCT-STRANDED pid={} tid={} read returned {} bytes, own todo head [{}]",
+                        proc.pid,
+                        thread.tid,
+                        staged.len(),
+                        h
+                    );
+                }
+            }
+        }
+    }
     let Some(dst) = read_buffer.checked_add(*consumed) else {
         return -(EFAULT as i64);
     };
