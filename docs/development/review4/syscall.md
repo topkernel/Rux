@@ -178,7 +178,7 @@ nodemask, and limits flags to MPOL_MF_STRICT|MOVE|MOVE_ALL (+MPOL_F_NUMA in newe
 bits are EINVAL (flag-validation completeness). Rux only access_oks the nodemask and returns 0 for
 anything. Trigger: `mbind(..., mode=99, flags=0xffff)` → Linux EINVAL, Rux 0.
 
-### [Medium] net/socket.rs:631-680 — IPv6 TCP connect() ignores nonblocking and never waits for the handshake
+### [Medium] net/socket.rs:631-680 — IPv6 TCP connect() ignores nonblocking and never waits for the handshake — ✅ FIXED (`00a52820`)
 `Socket::connect` (v4) has the full machinery: EISCONN/EALREADY guards, loopback drain, blocking wait
 to ESTABLISHED/RST/ETIMEDOUT, and EINPROGRESS for O_NONBLOCK. `connect6` sets Connecting, calls
 `tcp_connect6` once, and then either marks the socket Connected on ret==0 (success reported while the

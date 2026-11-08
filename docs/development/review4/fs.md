@@ -198,7 +198,7 @@ breaks early on the garbage); a real jbd2 replaying this journal reads nonsense.
 Fix: pass the caller's current_journal_block into write_revoke_records and
 thread the advanced position back.
 
-### [Medium] jbd2/transaction.rs:261-283 — no time-based commit; j_commit_interval/j_expires are dead
+### [Medium] jbd2/transaction.rs:261-283 — no time-based commit; j_commit_interval/j_expires are dead — ✅ FIXED (`00a52820`)
 
 Lazy-commit leaves a running transaction open until explicit h_sync or the
 1024-buffer/510-revoke thresholds. A slow metadata trickle with no fsync stays

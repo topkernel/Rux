@@ -53,7 +53,7 @@ double-skips. Also `c.ebreak` (2 bytes) gets +4. Suggested fix: don't advance
 epc for user ebreak under a tracer; report pc as-is (single-step arm already
 does this correctly).
 
-### [Medium] riscv64/trap.rs:1896 — user-mode unknown exceptions (misaligned load/store, access fault) killed with SIGKILL; reference delivers SIGBUS/SIGSEGV
+### [Medium] riscv64/trap.rs:1896 — user-mode unknown exceptions (misaligned load/store, access fault) killed with SIGKILL; reference delivers SIGBUS/SIGSEGV — ✅ FIXED (`00a52820`)
 
 `handle_unknown_exception` does `do_exit(-SIGKILL)` for every user-mode cause
 that isn't page-fault/ecall/illegal/breakpoint — that includes
@@ -158,7 +158,7 @@ hazard the shootdown exists to prevent. Benign while QEMU presents contiguous
 harts 0..N-1, wrong the moment one hart fails to start. Fix: iterate
 0..MAX_CPUS and test cpu_started(cpu) (the helper exists for exactly this).
 
-### [Medium] riscv64/mm/exception.rs:405 AND aarch64/mm/exception.rs:247 — non-canonical-VA guard tests the VirtAddr-masked address, not raw stval/FAR
+### [Medium] riscv64/mm/exception.rs:405 AND aarch64/mm/exception.rs:247 — non-canonical-VA guard tests the VirtAddr-masked address, not raw stval/FAR — ✅ FIXED (`724e40be`)
 
 The guard `fault_addr.bits() >> 39 (resp. 47) != 0` operates on
 `VirtAddr::new(badaddr)`, which for bit38/47-clear addresses has ALREADY
