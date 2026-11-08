@@ -8442,3 +8442,37 @@ windows decoded, crash #3 names tid353/target-49/the nested steal; the
 founder is caught mid-act. ohw93: fix validation boot (900 s) — all
 yardstick rungs to StartUser + bootanimation completion + first
 pixels. Both system-lb5 + userdata-fresh2, SMP2 KVM, LOGLEVEL7.
+
+#### 7. SAME-SESSION ADDENDUM (ohw94 — the AMS gate opened one level:
+#### the launcher blocker is ACCOUNTMGR, wedged since t≈34 s)
+
+ohw94 (fix kernel + dfx=ams46): bundles.ready 125.8 reproduces
+(ohw93: 124.8), still no launcher spawn. The ams46 census + TXN-HANG
+name the blocker — it is NOT devmgr and NOT binder delivery:
+
+- TXN-HANG txn4392 code14 netmanager 466 -> accountmgr 779 tid 810:
+  exec grows 3.5 s -> 167+ s. tid 810 (OS_IPC_0_810, looper=0x2
+  ENTERED) picked the txn up at ~34 s, ran the handler, and then sat
+  in a pure-read BWR (w=0/0 rsz=256) FOREVER with txn4392 still
+  stacked — the handler never issued BC_REPLY and never queued a
+  write. accountmgr's OTHER threads are parked in WaitForCompletion of
+  their own SYNC-OUTs (tid 813: code19 -> pid 401 queued; tid 936:
+  code12 -> samgr 328 queued) — the whole proc starves behind them.
+- Foundation side: accountmgr main (tid 779) holds pending txn11959
+  code0 -> foundation OS_IPC_4_1066 (exec 17.5 s at t=112); the
+  foundation handler is futex-parked mid-handler — a cross-proc
+  A->B->A wait chain around accountmgr <-> foundation.
+- NOT a fix regression: ohw91 (old kernel) shows the same accountmgr
+  SYNC-OUT waits (txn6376 code12 at 53 s) and every kernel since the
+  69th stalls post-bundles identically. My latch change cannot affect
+  tid 810's shape (its read has a non-empty txn stack — ineligible for
+  proc-todo under BOTH old and new code, same as the reference).
+- The launcher trigger chain (reference: appfwk.ready 6.18 -> spawn
+  7.25) is driven by the account/user-unlocked events accountmgr
+  emits; with accountmgr wedged from t≈34 s, AMS never sees user
+  unlock and never calls StartHighestPriorityAbility
+  (ability_manager_service.cpp:7870). The 73rd's hunt: decode what
+  tid 810's code-14 handler awaits (the pid-401 / samgr SYNC-OUT
+  servers are the first suspects — pid 401's identity and why the
+  code-12/19 calls queue for minutes), and why the handler parks in a
+  write-less read with the reply unsent.
