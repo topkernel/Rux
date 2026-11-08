@@ -129,37 +129,67 @@ symbolic targets compared):
 
 ### x86_64+KVM armed proof boot (the money output)
 
-pbench boot with `debug=lockdep` on the feature-ON bzImage
-(work/pbench-lockdep-armed-serial.log, PBENCH DONE rc=0):
+pbench boot with `debug=lockdep` on the feature-ON bzImage built at
+final HEAD (work/pbench-lockdep-armed2-serial.log, PBENCH DONE rc=0 at
+t=69s; the earlier armed log pbench-lockdep-armed-serial.log predates
+the reference-shape rework 61f65804 and is superseded):
 
 ```
 lockdep: selftest s0 key<->registry mapping: PASS
-lockdep: cost-probe keyed acquire/release pair (N=200000): disarmed 38 ns, armed 129 ns (hook delta 90 ns)
+lockdep: cost-probe keyed acquire/release pair (N=200000): disarmed 38 ns, armed 128 ns (hook delta 90 ns)
 lockdep: selftest s1 declared forward (bucket -> grq): PASS
-LOCKDEP: ORDER-VIOLATION grq -> futex-bucket contradicts INV-LOCK-5 (declared: futex-bucket -> grq)
-  acquiring: futex-bucket at rux::debug::lockdep::runtime::arm_runtime+...
-  held:      grq at ... (depth 0)
-  task= pid=0 cpu=0 preempt=0x0 in_irq=false in_softirq=false
-LOCKDEP: disabling lockdep (first splat; debug_locks=0 equivalent)
+=========================================================
+WARNING: possible circular locking dependency detected            <- reference banner
+---------------------------------------------------------
+?/0 on cpu 0 is trying to acquire lock:                          <- task/cpu context line
+ (futex-bucket){....}, at: rux::debug::lockdep::runtime::arm_runtime+0x4/0x4c (ip 0xffffffff8040e664)
+but task is already holding lock:
+ (grq){....}, at: rux::debug::lockdep::runtime::arm_runtime+0x0/0x4c (ip 0xffffffff8040e660)
+
+the existing dependency chain (in reverse order) is:             <- reference -> #N chain
+-> #1 (grq){....}  [declared INNER, INV-LOCK-5]
+-> #0 (futex-bucket){....}  [declared OUTER, INV-LOCK-5]
+
+ ORDER-VIOLATION of INV-LOCK-5: the declared order is futex-bucket -> grq (docs/architecture/lock-ordering.md); observed the reverse
+                                                                  <- Rux addition: the INV-LOCK-* citation
+ Possible unsafe locking scenario:
+       CPU0                    CPU1
+       ----                    ----
+  lock(futex-bucket);
+                               lock(grq);
+                               lock(futex-bucket);
+  lock(grq);
+ *** DEADLOCK ***                                                 <- reference closing line
+
+1 lock(s) held by this task:                                     <- reference numbered held list
+ #0: (grq){....}, at: rux::debug::lockdep::runtime::arm_runtime+0x0/0x4c
+cpu=0 preempt_count=0x0 in_hardirq=false in_softirq=false        <- Rux addition: context tail
+LOCKDEP: turning off the locking correctness validator (debug_locks = 0; first splat)
+                                                                  <- reference self-disable wording
 lockdep: selftest s2 declared-order violation (grq held, bucket acquired): PASS (splat above)
-LOCKDEP: SLEEP-IN-ATOMIC-CONTEXT acquiring sleep-domain vfs-mutation (INV-LOCK-8 rule 1)   [s3 PASS]
-LOCKDEP: SLEEP-IN-ATOMIC-CONTEXT acquiring sleep-domain ext4-big (INV-LOCK-8 rule 1)       [s4 PASS]
-LOCKDEP: CYCLE inode -> process-tree -> inode                                             [s5 PASS]
-lockdep: selftest PASS (s0 mapping + s1-s5 scenarios)
 ```
 
+The other selftest scenarios in the same shape: s3/s4 print
+`WARNING: sleeping lock in atomic context (INV-LOCK-8 rule 1)
+detected` with the held spin lock (grq -> vfs-mutation) or the
+preempt_count arm (ext4-big, preempt_count=0x1) named; s5 prints the
+CYCLE splat with the observed-edge chain (inode <-> process-tree,
+INV-LOCK-4) before the same CPU0/CPU1 diagram. All five PASS; usage
+chars print `{....}` until P2 arms irq-state tracking.
+
 Zero LOCKDEP lines from the real pbench workload (futex storm, fs
-writes through VFS_MUTATION/EXT4_BIG, 100k context switches) — the
-checker ran silent, then the whole P1-P8 battery completed.
+writes through VFS_MUTATION/EXT4_BIG, 100k context switches) — the 10
+splat/warning lines in the whole serial are all the selftest's own;
+the checker ran silent, then the whole P1-P8 battery completed.
 
 ### Measurement (design §7 rows)
 
 | row | verdict |
 |---|---|
-| 1 feature-OFF build identity | **PASS** — ASM identical both arches (above); dual-arch builds rc=0 |
-| 2 feature-OFF tier 1 syscost | [pending] |
+| 1 feature-OFF build identity | **PASS** — ASM identical both arches (above); dual-arch builds rc=0, re-verified at final HEAD (x86_64 default rebuild sha256-identical to the gated image; riscv64 `rm build/.config && make build` rc=0) |
+| 2 feature-OFF tier 1 syscost | **PASS — scripted verdict, zero FAIL** (run/perf-gate-lockdep-p1-default-v3-verdict.txt; 780s quiet boot run/pa-lockdep-p1-default-stamped.log, 22:53–23:07 window, foreign_qemus<=2): panics 0 / OOM 0; census TERM 8 (8±2) / REFUSED 32 (32±4), no 1001ms grid class (STRANDED 9 organic); ticks 122.07/121.08 /CPU (min 99.5); syscall volume 135,520,840 (126M ±10%); clock_gettime 3us (3–5); nanosleep 122.9ms (<=244); GRQ hold 4732ns (1200–7320); small_alloc REST share 0.5% (<=10%); buffer-cache/fsw SKIP (instruments not in this build). Third-launch note: the verdict pass originally SKIPped volume because grep read the ANSI/NUL-bearing stamped log as binary; re-run on the cleaned copy run/pa-lockdep-p1-default-stamped-clean.log — every metric now carries a real verdict, all PASS. |
 | 3 feature-ON disarmed tier 2 (pbench) | **PASS** — every anchor row within band or improved: p1_null 0.281 (anchor 0.300), p1_clock 0.361 (0.371), p2_ctxsw 1.232 (1.242), p3b_cow 9.377 (8.075, +16% < 20%), p6_write_fsync 8391 (8443), p6_mkdrmdir 224.1 (216.7), p6_unlink 57.7 (54.6), p6_append 5.41 (5.19); disarmed boot emitted zero LOCKDEP lines |
-| 4 feature-ON armed (report class) | armed boot medians: p1_null 0.287, p2 1.29-ish class, p8 rows below; +110 ns/futex-wake vs disarmed — the armed per-acquire class |
+| 4 feature-ON armed (report class) | armed boot medians: p1_null 0.287, p2 1.29-ish class, p8 rows below; +110 ns/futex-wake vs disarmed — the armed per-acquire class. Re-measured at final HEAD (armed2 boot): p1_null 0.281, p2 1.312, p8_futex_wake 0.922, p8_futex_pp 5.160 — same class |
 | 5 pbench P8 lock-pair row | table below |
 
 **P8 lock-pair rows** (median us; same KVM boot class, quiet-ish
@@ -170,7 +200,33 @@ window at host load ~6-7):
 | ON, disarmed (one relaxed load/site) | 0.842 | 4.704 |
 | ON, armed (full pipeline, chain-hit) | 0.952 | 5.150 |
 | armed delta | +110 ns | +446 ns |
-| OFF (default build) | from the perf-gate tier-2 boot | [pending] |
+| OFF (default build, no hooks compiled) | 0.862 | 4.388 |
+
+The OFF row comes from the default-build tier-2 pbench boot
+(run/perf-gate-lockdep-p1-default-pb.log, foreign_qemus=2). OFF sits
+within noise of ON-disarmed on the wake row (0.862 vs 0.842, both in
+the 0.84-0.86 us class for this window) — consistent with the
+disarmed contract being one relaxed load per site; ON-armed carries
+the +110 ns pipeline cost. The pp row is two-task scheduler-bound and
+window-sensitive (4.4-5.2 across same-class boots).
+
+### Feature-OFF tier-2 anchor compare (third launch)
+
+Scripted anchor compare (the perf-gate.sh tier-2 python,
+run/tier2-anchor-compare.py) on the default-build serial
+work/pbench-lockdep-p1-default-pb-serial.log
+(run/perf-gate-lockdep-p1-default-tier2-anchor.txt):
+p1_null 0.271/0.300, p1_clock 0.351/0.371, p2_ctxsw 1.247/1.242,
+p6_unlink 60.3/54.6, p6_write_fsync 9210.5/8442.6 all PASS; but
+**p6_append 6.422 (anchor 5.189, +24%) and p6_mkdrmdir 271.9 (anchor
+216.7, +25%) above the +20% band** — with mkdrmdir p99 ~38s / max
+~62s: host-stall signature, and the boot started one minute after the
+780s syscost boot ended (23:07). The same rows on the feature-ON
+DISARMED boot in the banked row-3 window were in band (5.41, 224.1),
+and the default build is lock-path ASM-identical to main, so the
+rerun-once rule applies: isolated rerun in a quiet window (detached
+wait-and-retry run/tier2-retry.sh, polls for <=2 foreign QEMUs).
+Verdict appended below in the third-launch section when it lands.
 
 In-kernel cost probe (x86_64/KVM, N=200k pairs, O0 debug build):
 disarmed 38 ns/pair (~19 ns per acquire site: relaxed load + ra
@@ -206,3 +262,83 @@ exercised by the ktest assertions (amortization counters + the
 - baseline worktree for ASM A/B: /home/william/rux-agents/debug-lockdep-p1-base
 - feature-on x86_64 bzImage: target/x86_64-unknown-none/debug/bzImage-lockdep
 - default x86_64 bzImage: target/x86_64-unknown-none/debug/bzImage
+- tier-1 verdict (third launch): run/perf-gate-lockdep-p1-default-v3-verdict.txt
+  (cleaned log source: run/pa-lockdep-p1-default-stamped-clean.log)
+- tier-2 anchor compare (default build, 23:07 boot):
+  run/perf-gate-lockdep-p1-default-tier2-anchor.txt
+- tier-2 quiet-window rerun (wait-and-retry): run/tier2-retry.sh,
+  output run/tier2-retry-out.log, serial
+  work/pbench-lockdep-p1-default-v3-pb-serial.log when it fires
+
+## Resume state (11-08, third launch)
+
+### What the second launch finished (uncommitted until now)
+
+Tier-1 verdict computed and row 2 filled; feature-ON rebuilt at HEAD
+(20:20) + armed2 KVM proof boot captured (20:21,
+work/pbench-lockdep-armed2-serial.log — the money excerpt above is
+that boot's output, verified verbatim); OFF P8 cells filled from the
+default-build pbench boot. Third launch verified all of it against the
+artifacts on disk before committing (below).
+
+### Third-launch verification (all against on-disk artifacts)
+
+1. **Dirty-file reconciliation**: the modified run/LANE.md (the second
+   launch's fill — kept, re-checked) and the untracked
+   `toolchain/x86_64-rux-linux-musl` (a symlink to the debug-lockdep
+   lane's toolchain dir, needed for x86_64 builds) — the symlink is
+   now .gitignored next to the riscv64 toolchain entry; nothing else
+   was dirty, no code moved since 61f65804 (kernel diffs of the last
+   two commits: docs-only + feature-gated-only).
+2. **Tier-1 verdict (the leg the predecessor died on)**: re-run
+   scripted on an ANSI/NUL-cleaned copy of the stamped log — ALL PASS,
+   zero FAIL (run/perf-gate-lockdep-p1-default-v3-verdict.txt; row 2
+   above updated: volume now a real PASS at 135.5M, not SKIP).
+3. **ASM identity re-verified live at HEAD** with the on-disk pair
+   (base worktree main@97189069 ELFs vs this worktree's Nov-8 20:20/20:24
+   default-build ELFs): x86_64 **447/447 IDENTICAL**, riscv64
+   **443/443 IDENTICAL** (run/asm_identity_diff.sh re-run, third
+   launch). Valid without rebuild: code has not moved since 61f65804
+   and the OFF build is provably untouched by the splat rework (all
+   its hunks are inside the feature-gated `mod runtime`).
+4. **make test evidence**: ON+armed suite re-checked
+   (run/unittest-featureon-final.log, 22:36 Nov 7 = post-rework code:
+   "All tests passed", 1360 PASS lines, all 11 p1 runtime cases PASS —
+   including "reverse of INV-LOCK-5 splats" (violation) and
+   "sleep-under-spin" + "sleep-in-preempt-ctx" (the context
+   negatives)); OFF suite green stands for HEAD because the rework
+   touched only feature-gated code (1343 PASS, recorded in the
+   committed round).
+5. **riscv64 regression boot**: run/riscv-regression-boot2.log —
+   /proc loop + churn completed (LOOP-DONE, loop_done=True), 0
+   KERNPANIC lines; the driver's `wedge_reported: True` is the BENIGN
+   branch ("loop finished, then quiet (shell exited?)") — checked in
+   the driver source (scripts/test/boot-soak-riscv.py) and log.
+6. **Tier-2 on the DEFAULT build**: anchor compare run — 5/7 anchored
+   rows PASS, p6_append/p6_mkdrmdir above band (see the anchor-compare
+   section above; host-stall tails, rerun-once rule). Detached
+   wait-and-retry launched (run/tier2-retry.sh, log
+   run/tier2-retry-out.log): polls every 5 min for <=2 foreign QEMUs,
+   then `perf-gate.sh --tiers 2` on
+   target/x86_64-unknown-none/debug/bzImage (tag
+   lockdep-p1-default-v3, serial
+   work/pbench-lockdep-p1-default-v3-pb-serial.log).
+
+### Remaining for the successor (if quota death before the rerun lands)
+
+1. Poll `run/tier2-retry-out.log`. If the rerun completed: paste its
+   anchor-compare verdict into the anchor-compare section above; if
+   the two fs rows are in band (or improved), the battery is green.
+   If still above band in a genuinely quiet window, that is a real
+   lead — but note the same rows are in band on the feature-ON
+   disarmed boot and the default build is ASM-identical to main, so
+   weigh against host noise first (the gate's own note).
+2. Commit this record (plus .gitignore) if not yet committed; PUSH
+   origin debug-lockdep-p1 only when the battery is green.
+3. If no quiet window in ~5h (60 attempts), keep the retry verdict as
+   documented-pending and let the coordinator decide (the retry loop
+   exits 4).
+
+Host note at launch: 8 foreign QEMUs, load ~9.6 — the gate's own
+preflight would self-refuse; hence wait-and-retry instead of stacking
+a boot.
