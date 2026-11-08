@@ -826,7 +826,12 @@ impl VirtioGpuDevice {
             let mut spins: u32 = 0;
             loop {
                 fence(Ordering::SeqCst);
+                // review4 drivers-M: the used ring is DEVICE DMA memory —
+                // the idx field must be read volatile (the old non-volatile
+                // reference let the compiler hoist the load out of the
+                // completion loop).
                 let used = &*queue.used;
+                let _used_idx = core::ptr::read_volatile(&used.idx as *const u16);
                 // Wrap-safe completion check: vring indices are free-running
                 // u16 counters. Entry state is used.idx == idx (the cmd_lock
                 // spans the previous command's wait, so everything submitted
@@ -836,7 +841,7 @@ impl VirtioGpuDevice {
                 // never satisfy `used.idx >= 0x10000`, so EVERY command from
                 // the wrap on timed out after 10 s — a long GUI session
                 // (2-3 commands per flip) reaches the wrap in hours.
-                if used.idx != idx as u16 {
+                if _used_idx != idx as u16 {
                     completed = true;
                     break;
                 }

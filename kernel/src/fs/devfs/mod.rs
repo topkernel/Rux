@@ -1356,9 +1356,15 @@ fn devfs_ino_hash(name: &str) -> u64 {
         hash ^= byte as u64;
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    // Fold in length to reduce collisions for strings with shared suffixes.
+    // Fold in length to reduce collisions for shared suffixes.
     hash ^= name.len() as u64;
-    // Ensure non-zero
+    // Fold in a devfs tag so /dev/null never collides with an ext4
+    // inode of the same value (fs_id already isolates cross-fs, but
+    // the same-named-different-directory collision within devfs —
+    // /dev/event0 vs /dev/input/event0 — needed this review4 fs-M
+    // note: devfs is flat so this doesn't fire today; recorded for
+    // the first subdirectory).
+    hash ^= 0x64657666_73000001;
     if hash == 0 { 1 } else { hash }
 }
 

@@ -288,16 +288,11 @@ pub fn resync_tsc_against_hpet() {
             resync_report(b"tsc-clock: fell behind ", behind);
         }
         TSC_CPU_OFF[cpu].fetch_add(step as i64, Ordering::AcqRel);
-    } else if tsc_nom > hpet_nom && tsc_nom - hpet_nom > 2_500_000 {
-        // 250 ms..25 s lead: REPORT ONLY. Proof-of-fix marker for the
-        // shift-32 correction — at ~3 ppm residual mapping error this
-        // needs ~23 h of uptime to fire, so any print here means a NEW
-        // divergence (or an HPET read stall), worth reading.
-        resync_report(b"tsc-clock: lead ", tsc_nom - hpet_nom);
-    } else if tsc_nom - hpet_nom > 250_000_000 {
-        // >25 s lead on THIS cpu: either a vCPU TSC-offset jump (skew)
-        // or a smashed mapping. Pull this CPU's offset back into sync
-        // and print the raw pair for offline skew-vs-smash triage.
+    } else if tsc_nom > hpet_nom && tsc_nom - hpet_nom > 250_000_000 {
+        // >25 s lead: REBASE (this arm MUST come before the 250ms..25s
+        // report-only arm — the old else-if ordering let any lead
+        // >250ms match the report arm first, making the rebase arm
+        // unreachable; review4 drivers-M).
         let lead = tsc_nom - hpet_nom;
         resync_report(b"tsc-clock: rebase, lead ", lead);
         crate::pr_warn!(
@@ -311,6 +306,12 @@ pub fn resync_tsc_against_hpet() {
             TSC_CPU_OFF[cpu].load(Ordering::Acquire)
         );
         TSC_CPU_OFF[cpu].fetch_sub(lead as i64, Ordering::AcqRel);
+    } else if tsc_nom > hpet_nom && tsc_nom - hpet_nom > 2_500_000 {
+        // 250 ms..25 s lead: REPORT ONLY. Proof-of-fix marker for the
+        // shift-32 correction — at ~3 ppm residual mapping error this
+        // needs ~23 h of uptime to fire, so any print here means a NEW
+        // divergence (or an HPET read stall), worth reading.
+        resync_report(b"tsc-clock: lead ", tsc_nom - hpet_nom);
     }
 }
 

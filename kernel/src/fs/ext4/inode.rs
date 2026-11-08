@@ -711,11 +711,38 @@ pub fn write_inode_disk(
     }
 
     // Write inode to block buffer
-    // SAFETY: inode is a reference to an Ext4InodeOnDisk; copy_len bytes
-    // fit within the block starting at in_block_offset (bounds-checked above).
+    //
+    // review4 fs-M: the copy OVERWRITES the tracked region of the on-disk
+    // slot. The fields the in-memory inode does not track (i_generation,
+    // i_file_acl_lo, osd2 — which carries l_i_blocks_high, l_i_file_acl_high,
+    // l_i_uid_high, l_i_gid_high, l_i_checksum_lo) were therefore zeroed on
+    // disk by EVERY write (the fallocate path included). Preserve them:
+    // copy the current on-disk bytes into a scratch copy before the
+    // overwrite.
+    let mut scratch = *inode;
+    {
+        // Byte offsets of the untracked fields inside the 128-byte ext4
+        // inode (i_generation at 100, i_file_acl_lo at 104, osd2 at 116).
+        const OFF_I_GENERATION: usize = 100;
+        const OFF_I_FILE_ACL_LO: usize = 104;
+        const OFF_OSD2: usize = 116;
+        let base = in_block_offset;
+        let disk = &data[base..base + copy_len];
+        if copy_len >= OFF_OSD2 + 12 {
+            scratch.i_generation = u32::from_le_bytes(
+                disk[OFF_I_GENERATION..OFF_I_GENERATION + 4].try_into().unwrap(),
+            );
+            scratch.i_file_acl_lo = u32::from_le_bytes(
+                disk[OFF_I_FILE_ACL_LO..OFF_I_FILE_ACL_LO + 4].try_into().unwrap(),
+            );
+            scratch.osd2.copy_from_slice(&disk[OFF_OSD2..OFF_OSD2 + 12]);
+        }
+    }
+    // SAFETY: scratch is an Ext4InodeOnDisk; copy_len bytes fit within the
+    // block starting at in_block_offset (bounds-checked above).
     let inode_bytes = unsafe {
         core::slice::from_raw_parts(
-            inode as *const _ as *const u8,
+            &scratch as *const _ as *const u8,
             copy_len,
         )
     };
