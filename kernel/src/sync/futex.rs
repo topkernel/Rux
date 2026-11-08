@@ -3834,9 +3834,20 @@ pub fn futex_stuck_census() {
     }
     let mut order: Vec<usize> = (0..groups.len()).collect();
     order.sort_by(|&a, &b| groups[b].max_age.cmp(&groups[a].max_age));
+    // 77th: the OS_Dfx* periodic pollers (DfxWatchdog 60 s poll,
+    // DfxIpcCheck) are always-benign stuck groups that monopolize the
+    // 8-line print budget on wedged OH boots (ohw108: stuck_total=193
+    // printed=8, all watchdog-class — the samgr processLock parks
+    // never surfaced). Deprioritize them in BOTH selectors: skipped in
+    // the by-age top-4 and in the fresh fill; a genuinely stuck
+    // DfxWatchdog still shows via TXN-HANG (it would hold a txn).
+    let is_dfx_poller = |g: &Group| g.rep_comm.starts_with(b"OS_Dfx");
     let mut chosen: Vec<(usize, bool)> = Vec::new(); // (group idx, is_fresh)
-    for (i, &gi) in order.iter().enumerate() {
-        if i < 4 {
+    for &gi in order.iter() {
+        if chosen.len() >= 4 {
+            break;
+        }
+        if !is_dfx_poller(&groups[gi]) {
             chosen.push((gi, false));
         }
     }
@@ -3845,6 +3856,9 @@ pub fn futex_stuck_census() {
     for &gi in fresh_order.iter() {
         if chosen.len() >= 8 {
             break;
+        }
+        if is_dfx_poller(&groups[gi]) {
+            continue;
         }
         if !chosen.iter().any(|(c, _)| *c == gi) {
             chosen.push((gi, true));

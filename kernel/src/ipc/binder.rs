@@ -4874,6 +4874,88 @@ pub fn txn_hang_audit() {
         }
     }
     // WORLD released — task forensics + prints happen here (sc207).
+    // 77th: samgr-threads snapshot — one line per thread of the
+    // registered samgr pid, whenever any hung txn exists (the audit's
+    // own 5 s cadence, one snapshot per 30 s). The 8250-load wedge's
+    // mutex holder is a samgr FFRT/IPC worker parked with NO pending
+    // txn (invisible to every TXN-HANG pass and — when its park is a
+    // short timed wait — to the fuxstuck census); its entry-frame
+    // syscall + rip names the leaf the whole load path is stuck behind.
+    {
+        static SNAP_AT: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        let last = SNAP_AT.load(Relaxed);
+        if last == 0 || now.wrapping_sub(last) >= 3000 {
+            if SNAP_AT
+                .compare_exchange(last, now, Relaxed, Relaxed)
+                .is_ok()
+            {
+                let samgr = binder_sareg_samgr_pid();
+                if samgr != 0 {
+                    use core::fmt::Write;
+                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                    let mut n = 0usize;
+                    crate::sched::for_each_task_try(|task| {
+                        // SAFETY: diagnostic reads under the
+                        // for_each_task contract.
+                        let tk = unsafe { &*task };
+                        if tk.tgid() as u32 != samgr || n >= 24 {
+                            return;
+                        }
+                        let mut sys = 0u64;
+                        let mut rip = 0u64;
+                        if let Some(top) = tk.kernel_stack_top_checked() {
+                            #[cfg(feature = "x86_64")]
+                            {
+                                let regs = (top.wrapping_sub(
+                                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                                ))
+                                    as *const crate::arch::x86_64::pt_regs::PtRegs;
+                                // SAFETY: entry-frame read of this task's
+                                // pinned kernel-stack pages.
+                                let r = unsafe { &*regs };
+                                sys = r.orig_rax as u64;
+                                rip = r.rip as u64;
+                            }
+                            #[cfg(feature = "riscv64")]
+                            {
+                                let regs = (top.wrapping_sub(
+                                    crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+                                ))
+                                    as *const crate::arch::riscv64::pt_regs::PtRegs;
+                                let r = unsafe { &*regs };
+                                sys = r.a7 as u64;
+                                rip = r.epc as u64;
+                            }
+                            #[cfg(feature = "aarch64")]
+                            {
+                                let regs = (top.wrapping_sub(
+                                    crate::arch::aarch64::pt_regs::PT_REGS_SIZE,
+                                ))
+                                    as *const crate::arch::aarch64::pt_regs::PtRegs;
+                                let r = unsafe { &*regs };
+                                sys = r.syscallno as u64;
+                                rip = r.pc as u64;
+                            }
+                        }
+                        let _ = writeln!(
+                            w,
+                            "SAMGR-SNAP tid={} st={:#x} sys={} rip={:#x} comm={}",
+                            tk.pid(),
+                            tk.state().bits(),
+                            sys,
+                            rip,
+                            core::str::from_utf8(tk.comm())
+                                .unwrap_or("?")
+                                .trim_end_matches('\0')
+                        );
+                        n += 1;
+                    });
+                    let _ = writeln!(w, "SAMGR-SNAP-END printed={}", n);
+                }
+            }
+        }
+    }
     let comm_of = |p: *mut crate::process::Task| -> &str {
         if p.is_null() {
             return "?";
@@ -9939,7 +10021,10 @@ fn binder_transaction(
             if ok && &hdr[12..16] == &[0x6f, 0x00, 0x68, 0x00] {
                 static CSA_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
-                if CSA_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 300 {
+                // 77th: 300 -> 3000 (ohw107 hit the cap by 30 s; the
+                // pre-load CheckSystemAbility lines that name the wedged
+                // loads' targets went dark).
+                if CSA_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 3000 {
                     // SA id: first int32 past the interface token's
                     // length word (parcel: header 8 + strlen 4 + token
                     // bytes...). Decode conservatively: the first
@@ -9985,7 +10070,10 @@ fn binder_transaction(
             }
         }
         if is_samgr_req || reply_to_mutation {
-            if SAREG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 600 {
+            // 77th: 600 -> 4000 (ohw107 starved the SAREG budget silent
+            // before 65 s — exactly the window where the wedged
+            // LoadSystemAbility sends landed).
+            if SAREG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4000 {
                 // leg-25: the enqueued txn's id, so the send line pairs
                 // 1:1 with the SLRD read line (offline delivery audit).
                 let t_id = txn.id;
@@ -10002,9 +10090,16 @@ fn binder_transaction(
                 // delivery audit without the 192-char dump. Hex built in
                 // one pass (the old per-byte format! collect spent 96
                 // heap Strings per line, 57k allocations across a boot).
+                // 77th: 40 -> 800, and code-7 LOAD sends ALWAYS get the
+                // hex dump — the said (u32 at parcel offset 60, past the
+                // 8-byte header + u32 toklen + 44-byte
+                // "ohos.samgr.accessToken" token + 4 pad) names which SA
+                // each load targets; ohw107's two wedged loads
+                // (txn13020 158 s, txn13847 92 s) were budget-dark.
                 static SAREG_HEX_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
-                let want_hex = SAREG_HEX_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40;
+                let want_hex = SAREG_HEX_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 800
+                    || (!reply && tr.code == 7 /* SamgrInterfaceCode::LOAD_SYSTEM_ABILITY */);
                 let hex: alloc::string::String = if want_hex {
                     let mut pb = [0u8; 96];
                     let pb_ok = tr.data_buffer != 0
@@ -12228,9 +12323,13 @@ fn binder_thread_read(
                                             // send-side SAREG id pairing
                                             // still audits early boot, where
                                             // the interesting deliveries are).
+                                            // 77th: 300 -> 4000 (ohw107 hit
+                                            // the 300 cap by 30 s; the wedge
+                                            // window's samgr read-side went
+                                            // dark before the hung loads).
                                             if SLRD_N
                                                 .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
-                                                < 300
+                                                < 4000
                                             {
                                                 let name = core::str::from_utf8(unsafe { (*cur).comm() })
                                                     .unwrap_or("")
