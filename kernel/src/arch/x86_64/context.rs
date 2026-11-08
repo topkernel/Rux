@@ -325,23 +325,33 @@ pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) ->
                 !(0xffff_8880_4000_0000..0xffff_8880_4800_0000).contains(&(next as usize));
             // Resume-boundary guard (LTP chunk@700 panic hunt, KSO census
             // 2026-11-02): a HEAP task with NO kernel stack (fields cleared
-            // at exit-free) or a dead/exiting state, resumed through a
-            // stale link, executes on freed-and-reused memory — the
-            // deterministic rip=0 "Kernel stack overflow" panic family
-            // (4/4 boots of chunk 700; fault rsp inside an unowned 80KB
-            // kstack slot holding recycled "./loop" path buffers). The
-            // FOREIGN-SP check below skips when top==0, so this shape was
-            // silent before. Runs AFTER try_affirm_pick flipped the claim
-            // to LIVE: aborting leaves the corpse LIVE-claimed by this
-            // CPU, which neutralizes further picks of it (a re-pick after
-            // a claim-sweep reset just aborts again — cheap, no tear).
-            if !is_static
-                && (top == 0
-                    || (*next).state().is_dead()
-                    || ((*next).ti_flags()
-                        & crate::process::task::task_flags::TaskFlags::PF_EXITING.bits()
-                            != 0))
-            {
+            // at exit-free) or a DEAD state, resumed through a stale link,
+            // executes on freed-and-reused memory — the deterministic
+            // rip=0 "Kernel stack overflow" panic family (4/4 boots of
+            // chunk 700; fault rsp inside an unowned 80KB kstack slot
+            // holding recycled "./loop" path buffers). The FOREIGN-SP
+            // check below skips when top==0, so this shape was silent
+            // before. Runs AFTER try_affirm_pick flipped the claim to
+            // LIVE: aborting leaves the corpse LIVE-claimed by this CPU,
+            // which neutralizes further picks of it (a re-pick after a
+            // claim-sweep reset just aborts again — cheap, no tear).
+            //
+            // 78th (ohw115/ohw116): the PF_EXITING arm is GONE. PF_EXITING
+            // is do_exit's FIRST store on the task itself (exit.rs), and
+            // do_exit CAN block (locks, exit_notify, the group-exit
+            // handoff) — a mid-exit task that voluntarily deschedules
+            // MUST be resumed when re-woken: its stack is live, its saved
+            // sp is its own wait site, and Linux reschedules it like any
+            // other task. Aborting its resume stranded it LIVE-claimed
+            // with the per-CPU slot naming the "corpse" while the real
+            // task waited forever — the SWITCHIN-DEAD-TASK boot-killer
+            // (ohw109/111/115: pid 536 aborted twice mid-exit, then
+            // rcu-gp-frozen-cpu and the taskdump froze the VM), and the
+            // same arm is what the pick gates must NOT copy (ohw116:
+            // refusing PF_EXITING picks hung pid 307 at 30 s and killed
+            // the whole boot). The freed-context dangers are exactly
+            // top==0 and is_dead; a merely-exiting task has neither.
+            if !is_static && (top == 0 || (*next).state().is_dead()) {
                 use crate::console::putchar_no_lock as putchar;
                 const M: &[u8] = b"\nSWITCHIN-DEAD-TASK task=0x";
                 for &b in M {
