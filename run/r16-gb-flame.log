@@ -463,32 +463,17 @@ GBSAMINFO: task 308:308 blocked for more than 120 seconds
 
 ffffff80202d6a 0xffffffff80202d48
       Tainted: G      D        
- 55e024 78
-GBSAMP 1995b6d 77
-GBSAMP 5165a5 75
-GBSAMP 524e3e 75
-GBSAMP 51ef1b 74
-GBSAMP 5e0c81 74
-GBSAMP 1a40495 72
-GBSAMP 635bc3 70
-GBSAMP 19de469 70
-GBSAMP 544ed5 70
-GBSAMP 5b59c6 69
-GBSAMP 5c1051 69
-GBSAMP 55e3f8 69
-GBSAMP 19da68b 67
-GBSAMP 7c728b 67
-GBSAMP 565612 67
-GBSAMP 1995c2e 67
-GBSAMP 1995bbe 65
-GBSAMP 63207c 65
-GBSAMP 524e7b 65
-GBSAMP 51edc8 64
-GBSAMP 5165c2 64
-GBSAMP 19de428 64
-GBSAMP 54e2ba 63
-GBSAMP 198e15a 62
-GBSAMP 1995b7a 62
+INFO: task 308:308 blocked for more than 120 seconds
+      HUNG-CTX pid=308 state=0x2 oncpu=0 claim=-1 pk=1 ti_cpu=3 onrq=0 vfork_ppid=0
+      HUNG-STK sp=0xffff88807c69fdc0 0xffffffff802cb15a 0xffffffff8036c720 0xffffffff8036c720 0xffffffff80586ab6 0xffCall Trace:
+  [<ffffffff80431fe3>] ? (current)
+  [<ffffffff80431fe3>] ?
+  [<ffffffff80586ab6>] ?
+  [<ffffffff80202d6a>] ?
+
+ffffff80202d6a 0xffffffff80202d48
+      Tainted: G      D        
+BSAMP 1995b7a 62
 GBSAMP 1995b85 62
 GBSAMP 5e05eb 61
 GBSAMP 1c1d012 61
