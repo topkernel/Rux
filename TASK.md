@@ -8487,3 +8487,32 @@ p2_ctxsw -5.5%, p3b_fault_cow +2.9%, p4_fork_exec +2.6%,
 p4_fork_exit +2.1%, p5 IPC rows -0.6..+7.9%, p6_stat -0.4%,
 p6_unlink -13.0%, p6_append -20.1% (improved), p6_mkdrmdir +9.4%.
 No REGRESS>20% rows. Gate verdict: PASS.
+
+### 73.5 COORDINATOR REPLY-WAKE POST-MORTEM (2026-11-08) — reverted; full evidence chain for the 74th
+
+The stranding fix (exact-thread reply wake, binder.c:3672 parity) is
+CORRECT in diagnosis but its first landing (52a9d4f3, reverted a9f1274d)
+introduced a deterministic 25s panic-reboot on 3/3 boots; control boots
+at 179bf150 and post-revert ohr5 are healthy (419s, appfwk passes).
+Reproduction: vibrator_host(523/608 across boots) — its OWN hdf kickdog
+kills its IPC thread at t≈22.1 (KSIG9 caller=523 target=553 group=1),
+the respawned instance is then killed by init, ExecReboot panic fires
+at 25.457 (BC_REPLY originator 608 gone is adjacent, not causal).
+Control boots: vibrator_host never triggers kickdog.
+
+WHY the exact-thread wake would trip the hdf kickdog — the 74th's
+candidates, in order: (1) wake happens while the target thread is STILL
+INSIDE ITS WRITE SIDE (the same BWR ioctl's write batch processed the
+BC_TRANSACTION that will receive this reply — no: replies come from
+OTHER procs' threads; but a SAME-PROC nested reply CAN land while the
+originator is mid-write: the woken thread re-enters the read while its
+write batch is unconsumed — check our BWR ioctl write-read interleaving
+vs reference BINDER_WRITE_READ semantics: the reference processes the
+FULL write buffer BEFORE the read; verify we don't interleave);
+(2) double-wake: wake_thread + the later wakes loop both fire —
+reference wakes once; (3) the woken thread's read drains its todo but
+returns with looper state changed so the NEXT park mis-registers
+(waiting_for_proc_work stamp vs park_seq bookkeeping under the new
+earlier wake timing). Instrument: KSIG9-prone services' ACCT trace
+(vibrator_host), plus a boot with the fix + dfx=bwrtrace to see the
+write-read interleave of the woken thread.
