@@ -238,7 +238,12 @@ impl Ext4FileSystem {
             }
         }
 
-        self.journal = Some(journal_arc);
+        self.journal = Some(journal_arc.clone());
+        // review4 fs-M: register for kjournald's timed commits (the
+        // reference's jbd2_journal_start_thread at journal load) — a
+        // slow metadata trickle with no fsync now commits within
+        // j_commit_interval (5 s) instead of staying open indefinitely.
+        jbd2::kjournald_register(&journal_arc);
 
         bio::brelse(j_sb_bh);
         Ok(())

@@ -1891,27 +1891,58 @@ fn oops_show_regs(w: &mut crate::debug::backtrace::ConsoleWriter, regs: &PtRegs)
 fn handle_unknown_exception(regs: &mut PtRegs, cause: Cause) {
     crate::pr_debug!("trap: unknown exception {:?}, epc={:#x}, badaddr={:#x}",
         cause, regs.epc, regs.badaddr);
-    crate::pr_err!("trap: Unknown exception: {:?}, epc={:#x}, badaddr={:#x}",
-        cause, regs.epc, regs.badaddr);
 
     if regs.user_mode() {
-        // review4 arch-M: deliver per-cause signals (reference behavior).
-        // Misaligned load/store = SIGBUS; instruction/access fault =
-        // SIGSEGV; hardware error / anything else = SIGBUS. The old
-        // blanket SIGKILL made every alignment bug and hardware fault
-        // unkillable-by-handler (no sigaction could catch it).
+        // review4 arch-M: per-cause routing per the reference's
+        // DO_ERROR_INFO table (arch/riscv/kernel/traps.c):
+        //   0 instruction address misaligned → SIGBUS/BUS_ADRALN
+        //   1 instruction access fault       → SIGSEGV/SEGV_ACCERR
+        //   4 load address misaligned        → SIGBUS/BUS_ADRALN
+        //   5 load access fault              → SIGSEGV/SEGV_ACCERR
+        //   6 store/AMO address misaligned   → SIGBUS/BUS_ADRALN
+        //   7 store/AMO access fault         → SIGSEGV/SEGV_ACCERR
+        // (The reference emulates 4/6 in-kernel and signals only when
+        // the emulation fails; Rux does not emulate — the signal is the
+        // reference's fallback, always taken. epc stays put: the
+        // handler-returning re-execute matches force_sig_fault
+        // semantics; handlers that recover longjmp out.)
+        // Handler-first routing like the page-fault termination paths:
+        // a task with a SIGBUS/SIGSEGV handler (LTP alignment tests)
+        // gets the delivery; the default action kills. The old blanket
+        // SIGKILL (then do_exit(-sig)) made these uncatchable by any
+        // sigaction.
         let sig = match cause {
-            Cause::LoadAddressMisaligned | Cause::StoreAmoAddressMisaligned => {
-                crate::signal::Signal::SIGBUS
-            }
-            Cause::InstructionAccessFault | Cause::LoadAccessFault | Cause::StoreAmoAccessFault => {
-                crate::signal::Signal::SIGSEGV
-            }
+            Cause::InstructionAddressMisaligned
+            | Cause::LoadAddressMisaligned
+            | Cause::StoreAmoAddressMisaligned => crate::signal::Signal::SIGBUS,
+            Cause::InstructionAccessFault
+            | Cause::LoadAccessFault
+            | Cause::StoreAmoAccessFault => crate::signal::Signal::SIGSEGV,
             _ => crate::signal::Signal::SIGBUS,
         };
+        let pid = crate::process::current_pid();
+        let _ = crate::signal::send_signal_directed(pid, sig as i32);
+        // Synchronous fault: deliver despite a blocked mask (forced
+        // signal) unless a handler would re-enter itself — same
+        // reasoning as sigsegv_blocked_current.
+        let has_handler = crate::sched::current()
+            .and_then(|t| unsafe { (*t).signal.as_ref().map(|s| s.get_action(sig as i32)) })
+            .map(|a| a.is_some_and(|a| a.has_handler()))
+            .unwrap_or(false);
+        let blocked = crate::sched::current()
+            .map(|t| (*t).sigmask & (1u64 << (sig as u64 - 1)) != 0)
+            .unwrap_or(true);
+        if has_handler && !blocked {
+            crate::signal::force_unblock_current(sig as i32);
+            return;
+        }
+        crate::pr_err!("trap: Unknown exception: {:?}, epc={:#x}, badaddr={:#x}",
+            cause, regs.epc, regs.badaddr);
         crate::process::exit::do_exit(-(sig as i32));
         // Do NOT advance epc — the task is now ZOMBIE and will not resume
     } else {
+        crate::pr_err!("trap: Unknown exception: {:?}, epc={:#x}, badaddr={:#x}",
+            cause, regs.epc, regs.badaddr);
         // Kernel-mode unknown exceptions (misaligned access, access
         // fault, ...) indicate a kernel bug; skipping the instruction
         // corrupts state. The Oops path prints the report and applies

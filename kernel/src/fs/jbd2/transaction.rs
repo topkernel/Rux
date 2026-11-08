@@ -295,47 +295,68 @@ pub fn jbd2_journal_stop(handle: &mut Handle) -> Result<(), i32> {
     }
 
     // Commit the transaction
-    if err == 0 {
-        // jbd2:jbd2_start_commit / jbd2_end_commit — fired at Rux's
-        // single commit funnel (every commit passes through this stop
-        // site). Divergences (see the event docs): sync_commit carries
-        // the stopping handle's h_sync (no t_synchronous_commit field on
-        // Rux's Transaction), and dev is the journal's backing device.
-        let jbd2_dev = if crate::trace::EVENT_JBD2_START_COMMIT.armed()
-            || crate::trace::EVENT_JBD2_END_COMMIT.armed()
-        {
-            // SAFETY: j_bio_device is the installed GenDisk pointer,
-            // valid for the journal's lifetime.
-            Some(unsafe {
-                ((*journal.j_bio_device).major << 20) | (*journal.j_bio_device).first_minor
-            })
-        } else {
-            None
-        };
-        if let Some(dev) = jbd2_dev {
-            crate::trace::trace_jbd2_start_commit(dev, txn.t_tid, handle.h_sync as i8);
-        }
-        err = match super::commit::jbd2_journal_commit_transaction(&journal, &txn) {
-            Ok(()) => 0,
-            Err(e) => e,
-        };
-        if let Some(dev) = jbd2_dev {
-            crate::trace::trace_jbd2_end_commit(
-                dev,
-                txn.t_tid,
-                handle.h_sync as i8,
-                journal.j_tail_sequence.load(Ordering::SeqCst),
-            );
-        }
-    }
-
-    // Clear running transaction
+    //
+    // review4 fs-M (jbd2 timed commit): the gate serializes against
+    // kjournald's timed commit, and the running-tid recheck makes this
+    // stop path single-committer with it — if the timer thread already
+    // committed this transaction and cleared j_running_transaction,
+    // there is nothing left to do here (the t_updates == 0 observation
+    // above can race the timer's own t_updates == 0 check on the same
+    // last-stop). The clear of j_running_transaction stays INSIDE the
+    // gate so kjournald can never observe a committed-but-uncleared
+    // transaction and commit it twice.
     {
-        let mut running = journal.j_running_transaction.lock();
-        // Only clear if it's our transaction
-        if let Some(ref r) = *running {
-            if r.t_tid == txn.t_tid {
-                *running = None;
+        let _commit_gate = journal.j_commit_gate.lock();
+        if err == 0 {
+            let still_running = {
+                let running = journal.j_running_transaction.lock();
+                matches!(&*running, Some(r) if r.t_tid == txn.t_tid)
+            };
+            if !still_running {
+                handle.h_transaction = None;
+                return Ok(());
+            }
+            // jbd2:jbd2_start_commit / jbd2_end_commit — fired at Rux's
+            // single commit funnel (every commit passes through this stop
+            // site). Divergences (see the event docs): sync_commit carries
+            // the stopping handle's h_sync (no t_synchronous_commit field on
+            // Rux's Transaction), and dev is the journal's backing device.
+            let jbd2_dev = if crate::trace::EVENT_JBD2_START_COMMIT.armed()
+                || crate::trace::EVENT_JBD2_END_COMMIT.armed()
+            {
+                // SAFETY: j_bio_device is the installed GenDisk pointer,
+                // valid for the journal's lifetime.
+                Some(unsafe {
+                    ((*journal.j_bio_device).major << 20) | (*journal.j_bio_device).first_minor
+                })
+            } else {
+                None
+            };
+            if let Some(dev) = jbd2_dev {
+                crate::trace::trace_jbd2_start_commit(dev, txn.t_tid, handle.h_sync as i8);
+            }
+            err = match super::commit::jbd2_journal_commit_transaction(&journal, &txn) {
+                Ok(()) => 0,
+                Err(e) => e,
+            };
+            if let Some(dev) = jbd2_dev {
+                crate::trace::trace_jbd2_end_commit(
+                    dev,
+                    txn.t_tid,
+                    handle.h_sync as i8,
+                    journal.j_tail_sequence.load(Ordering::SeqCst),
+                );
+            }
+        }
+
+        // Clear running transaction (both paths — the pre-gate behavior
+        // cleared it on commit error too; only clear if it's ours)
+        {
+            let mut running = journal.j_running_transaction.lock();
+            if let Some(ref r) = *running {
+                if r.t_tid == txn.t_tid {
+                    *running = None;
+                }
             }
         }
     }
@@ -348,6 +369,87 @@ pub fn jbd2_journal_stop(handle: &mut Handle) -> Result<(), i32> {
     } else {
         Ok(())
     }
+}
+
+/// kjournald's timed-commit arm (review4 fs-M).
+///
+/// The reference stamps every new transaction with `t_expires = jiffies +
+/// j_commit_interval` (jbd2_get_transaction) and its commit thread requests
+/// a commit once that passes (fs/jbd2/journal.c: `time_after_eq(jiffies,
+/// transaction->t_expires)` → j_commit_request). Rux's lazy batching (the
+/// h_sync / LAZY_COMMIT_MAX_BUFFERS / LAZY_COMMIT_MAX_REVOKES gates in
+/// jbd2_journal_stop) can otherwise leave a slow metadata trickle with no
+/// fsync uncommitted indefinitely — a crash loses all of it. This bounds
+/// the window at the reference's 5 s (j_commit_interval).
+///
+/// Divergence: where kjournald2 blocks waiting for t_updates to drain, this
+/// arm skips and retries on the next 1 s tick — simpler, and a handle still
+/// mid-flight means its own stop path will commit soon anyway.
+///
+/// Both locks are try-locks: contention means a task is joining a handle or
+/// committing — not our turn. Lock order j_barrier → j_commit_gate →
+/// j_running_transaction matches journal_start (j_barrier → running) and
+/// the stop path (gate → running).
+pub fn jbd2_journal_commit_if_expired(journal: &Arc<Journal>) -> bool {
+    let _barrier = match journal.j_barrier.try_lock() {
+        Some(g) => g,
+        None => return false,
+    };
+    let _commit_gate = match journal.j_commit_gate.try_lock() {
+        Some(g) => g,
+        None => return false,
+    };
+    let txn = journal.j_running_transaction.lock().clone();
+    let Some(txn) = txn else {
+        return false;
+    };
+    if txn.t_updates.load(Ordering::SeqCst) != 0 {
+        return false;
+    }
+    if crate::drivers::timer::get_jiffies() < txn.t_expires {
+        return false;
+    }
+    let has_work = !txn.t_dirty_buffers.lock().is_empty()
+        || !txn.t_revoke_records.lock().is_empty();
+    if !has_work {
+        return false;
+    }
+
+    // Same commit funnel as the stop path (jbd2:jbd2_start_commit /
+    // jbd2_end_commit): sync_commit is false — the reference's timer
+    // commits are not synchronous-commit flagged.
+    let jbd2_dev = if crate::trace::EVENT_JBD2_START_COMMIT.armed()
+        || crate::trace::EVENT_JBD2_END_COMMIT.armed()
+    {
+        // SAFETY: j_bio_device is the installed GenDisk pointer, valid
+        // for the journal's lifetime.
+        Some(unsafe {
+            ((*journal.j_bio_device).major << 20) | (*journal.j_bio_device).first_minor
+        })
+    } else {
+        None
+    };
+    if let Some(dev) = jbd2_dev {
+        crate::trace::trace_jbd2_start_commit(dev, txn.t_tid, 0);
+    }
+    let committed = super::commit::jbd2_journal_commit_transaction(journal, &txn).is_ok();
+    if let Some(dev) = jbd2_dev {
+        crate::trace::trace_jbd2_end_commit(
+            dev,
+            txn.t_tid,
+            0,
+            journal.j_tail_sequence.load(Ordering::SeqCst),
+        );
+    }
+    {
+        let mut running = journal.j_running_transaction.lock();
+        if let Some(ref r) = *running {
+            if r.t_tid == txn.t_tid {
+                *running = None;
+            }
+        }
+    }
+    committed
 }
 
 /// Extend a handle's credits

@@ -676,6 +676,11 @@ pub struct Journal {
     pub j_barrier_count: AtomicI32,
     /// The barrier lock itself
     pub j_barrier: Spinlock<()>,
+    /// Commit funnel gate: serializes the stop-path commit against the
+    /// kjournald timed commit so a transaction can only be committed
+    /// once (review4 fs-M — Linux's equivalent is the T_LOCKED state
+    /// transition under j_state_lock).
+    pub j_commit_gate: Spinlock<()>,
     /// The current running transaction (protected by j_barrier mutex)
     pub j_running_transaction: Spinlock<Option<Arc<Transaction>>>,
     /// The transaction we are pushing to disk (protected by j_barrier mutex)
@@ -802,6 +807,7 @@ impl Journal {
             j_superblock: core::ptr::null_mut(),
             j_barrier_count: AtomicI32::new(0),
             j_barrier: Spinlock::new(()),
+            j_commit_gate: Spinlock::new(()),
             j_running_transaction: Spinlock::new(None),
             j_committing_transaction: Spinlock::new(None),
             j_checkpoint_transactions: Spinlock::new(VecDeque::new()),
@@ -938,6 +944,12 @@ pub fn journal_start(journal: &Arc<Journal>, nblocks: i32) -> Handle {
         let tid = journal.j_transaction_sequence.fetch_add(1, Ordering::SeqCst);
         let mut txn = Transaction::new(journal.clone());
         txn.t_tid = tid;
+        // review4 fs-M (jbd2 timed commit): the reference stamps every
+        // new transaction with t_expires = jiffies + j_commit_interval
+        // in jbd2_get_transaction(); kjournald requests a commit once it
+        // passes. Rux's kjournald thread reads the same field.
+        txn.t_expires =
+            crate::drivers::timer::get_jiffies() + journal.j_commit_interval;
         *running_txn = Some(Arc::new(txn));
     }
 
@@ -974,4 +986,101 @@ pub fn journal_stop(handle: &mut Handle) -> Result<(), i32> {
 pub fn journal_extend(handle: &mut Handle, nblocks: i32) -> Result<(), i32> {
     handle.h_total_credits += nblocks;
     Ok(())
+}
+
+// ============================================================================
+// kjournald — the timed-commit thread
+// ============================================================================
+
+/// Journals the kjournald thread services. Registered at journal load
+/// (the ext4 mount path), never deregistered — Rux has no umount that
+/// drops a journal's Arc (the same lifetime stance as GLOBAL_EXT4_FS).
+static KJOURNALS: Spinlock<Vec<Arc<Journal>>> = Spinlock::new(Vec::new());
+
+// SAFETY: Journal's raw pointers (j_bio_device — the installed GenDisk,
+// valid for the journal's lifetime; the buffer-head and superblock
+// pointers, reached only under their owning Spinlocks) are already
+// shared across tasks today: every ext4_journal_start clones this Arc on
+// the write path, and the Spinlock fields carry the actual
+// synchronization. The impls exist so kjournald's static registry can
+// hold Arc<Journal> (same stance as File/SkBuff).
+unsafe impl Sync for Journal {}
+unsafe impl Send for Journal {}
+
+/// kjournald task pointer (set once at first registration).
+static KJOURNALD_TASK: core::sync::atomic::AtomicPtr<crate::process::task::Task> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+/// The reference's commit thread: sleeps until a transaction's
+/// t_expires passes (1 s granularity here vs kjournald2's exact timer —
+/// the bound is 5 s + 1 s worst case, vs unbounded before), then
+/// requests a commit via jbd2_journal_commit_if_expired. Every commit
+/// still funnels through the same commit path as the stop site.
+extern "C" fn kjournald_fn(_arg: *mut core::ffi::c_void) -> i32 {
+    loop {
+        if crate::process::kthread::kthread_should_stop() {
+            break;
+        }
+        // Arm the 1 s tick BEFORE sleeping: a wake that lands before the
+        // state store finds the task RUNNING and the schedule below
+        // returns immediately (the kswapd state-first pattern).
+        let pid = crate::process::current_pid();
+        let expires = crate::drivers::timer::get_jiffies()
+            + crate::drivers::timer::HZ;
+        let armed = crate::timer::add_timer_wakeup(expires, pid) != 0;
+        if let Some(current) = crate::sched::current() {
+            unsafe {
+                (*current).set_state(crate::process::task::TaskState::new(
+                    crate::process::task::TaskState::INTERRUPTIBLE,
+                ));
+            }
+        }
+        if !armed {
+            // Timer table full: yield instead of parking forever — the
+            // next loop iteration retries the arm (same discipline as
+            // the DL replenish arm failure).
+            if let Some(current) = crate::sched::current() {
+                unsafe {
+                    (*current).set_state(crate::process::task::TaskState::new(
+                        crate::process::task::TaskState::RUNNING,
+                    ));
+                }
+            }
+        }
+        crate::sched::schedule();
+
+        let journals: Vec<Arc<Journal>> = KJOURNALS.lock().clone();
+        for journal in journals {
+            if journal.is_aborted() {
+                continue;
+            }
+            super::transaction::jbd2_journal_commit_if_expired(&journal);
+        }
+    }
+    0
+}
+
+/// Register a journal for timed commits. Called from the ext4 mount path
+/// after recovery completes — which runs BEFORE the scheduler's GRQ is
+/// initialized (mount_root_filesystem precedes kswapd::init), so this
+/// must NOT spawn the thread; kjournald_init() does, from the same
+/// boot point kswapd/klogd start (main.rs, after sched::init).
+pub fn kjournald_register(journal: &Arc<Journal>) {
+    KJOURNALS.lock().push(journal.clone());
+}
+
+/// Spawn the kjournald thread once (the reference's
+/// jbd2_journal_start_thread, deferred to the kthreads-ready boot point).
+pub fn kjournald_init() {
+    if KJOURNALD_TASK.load(core::sync::atomic::Ordering::Acquire).is_null() {
+        if let Some(task) = crate::process::kthread::kthread_run(
+            kjournald_fn,
+            core::ptr::null_mut(),
+            "kjournald",
+        ) {
+            KJOURNALD_TASK.store(task as *mut _, core::sync::atomic::Ordering::Release);
+        } else {
+            crate::pr_err!("jbd2: kjournald thread failed to start");
+        }
+    }
 }

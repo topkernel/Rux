@@ -1228,7 +1228,7 @@ pub fn sys_connect(args: SyscallArgs) -> i64 {
                 if !socket.is_ipv6() {
                     return -(errno::EAFNOSUPPORT as i64);
                 }
-                socket.connect6(addr, port)
+                socket.connect6(addr, port, nonblock)
             }
             ParsedSockAddr::V4 { addr, port } => socket.connect(addr, port, nonblock),
         };

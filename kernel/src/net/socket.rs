@@ -628,7 +628,12 @@ impl Socket {
     }
 
     /// P1 IPv6: connect to a pure v6 remote (same semantics as connect()).
-    pub fn connect6(&self, addr: crate::net::ipv6::Ipv6Addr, port: u16) -> Result<(), i32> {
+    pub fn connect6(
+        &self,
+        addr: crate::net::ipv6::Ipv6Addr,
+        port: u16,
+        nonblock: bool,
+    ) -> Result<(), i32> {
         // Same stream-socket guards as connect() (EISCONN / EALREADY).
         if self.sock_type == SocketType::Tcp {
             match *self.state.lock() {
@@ -655,6 +660,85 @@ impl Socket {
                     }
                     if lport != 0 {
                         *self.local_port.lock() = lport;
+                    }
+                    // review4 net-M: the v4 connect() flow, mirrored —
+                    // tcp_connect6 returning 0 only means the SYN was
+                    // queued; the old code flipped to Connected here and
+                    // reported success while the handshake was still in
+                    // flight (the "fake connection" shape fixed for v4).
+                    // The protocol slot lives in the same TCP table, so
+                    // the same snapshot/drain/wait machinery applies.
+                    let mut established = false;
+                    let mut refused = 0u32;
+                    for _ in 0..8 {
+                        let done = crate::net::tcp::tcp_connect_snapshot(tcp_fd)
+                            .map(|(st, err)| {
+                                if st == crate::net::tcp::TcpState::TCP_CLOSE {
+                                    refused = err as u32;
+                                }
+                                st == crate::net::tcp::TcpState::TCP_ESTABLISHED
+                                    || st == crate::net::tcp::TcpState::TCP_CLOSE
+                            })
+                            .unwrap_or(true);
+                        if done {
+                            established = true;
+                            break;
+                        }
+                        crate::net::ethernet::ethernet_poll();
+                    }
+                    if refused != 0 {
+                        *self.state.lock() = SocketState::Unconnected;
+                        self.options.lock().error = refused as i32;
+                        return Err(-(refused as i32));
+                    }
+                    if !established && !nonblock {
+                        // Blocking connect: wait for ESTABLISHED, RST
+                        // (ECONNREFUSED) or SYN-retry exhaustion
+                        // (ETIMEDOUT) — the tcp_timer's pending_error
+                        // wake is address-family-agnostic.
+                        loop {
+                            match socket_wait_round(self, WaitKind::Connect, None) {
+                                Ok(()) => {}
+                                Err(e) => {
+                                    self.options.lock().error = -e;
+                                    return Err(e);
+                                }
+                            }
+                            crate::net::ethernet::ethernet_poll();
+                            let resolved = crate::net::tcp::tcp_connect_snapshot(tcp_fd)
+                                .map(|(st, _)| match st {
+                                    crate::net::tcp::TcpState::TCP_ESTABLISHED => Some(true),
+                                    crate::net::tcp::TcpState::TCP_SYN_SENT
+                                    | crate::net::tcp::TcpState::TCP_SYN_RECV => None,
+                                    _ => Some(false),
+                                })
+                                .unwrap_or(Some(true));
+                            match resolved {
+                                Some(true) => {
+                                    established = true;
+                                    break;
+                                }
+                                Some(false) => {
+                                    let err = crate::net::tcp::tcp_connect_snapshot(tcp_fd)
+                                        .map(|(_, err)| err)
+                                        .filter(|e| *e != 0)
+                                        .unwrap_or(110) as i32;
+                                    *self.state.lock() = SocketState::Unconnected;
+                                    self.options.lock().error = err;
+                                    return Err(-err);
+                                }
+                                None => {}
+                            }
+                        }
+                    } else if !established {
+                        // O_NONBLOCK and unresolved: EINPROGRESS; completion
+                        // arrives via poll/SO_ERROR like v4.
+                        self.options.lock().error = 0;
+                        return Err(-115); // EINPROGRESS
+                    }
+                    if established {
+                        crate::net::ethernet::ethernet_poll();
+                        crate::net::ethernet::ethernet_poll();
                     }
                     *self.state.lock() = SocketState::Connected;
                     Ok(())

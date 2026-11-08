@@ -914,6 +914,15 @@ pub fn rust_main_tail() -> ! {
             print_status("mm", "kswapd reclaim thread", true);
         }
 
+        // jbd2 kjournald (timed-commit thread): the journals registered
+        // themselves at ext4 mount (mount_root_filesystem, BEFORE this
+        // point — the GRQ was not up yet); spawn the thread now, at the
+        // same kthreads-ready point as kswapd/klogd.
+        {
+            fs::jbd2::kjournald_init();
+            print_status("fs", "jbd2 kjournald timed-commit thread", true);
+        }
+
         // Initialize debug subsystem (must be after sched::init)
         {
             debug::init();

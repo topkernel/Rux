@@ -32,7 +32,8 @@ pub use journal::{
     BJ_Shadow, BJ_LogCtl, BJ_Reserved, BJ_Locked,
     JI_COMMIT_RUNNING, JI_WRITE_DATA, JI_WAIT_DATA,
     // Functions
-    journal_start, journal_stop, journal_extend,
+    journal_start, journal_stop, journal_extend, kjournald_register,
+    kjournald_init,
 };
 pub use transaction::{
     jbd2_journal_start, jbd2_journal_stop, jbd2_journal_extend,
