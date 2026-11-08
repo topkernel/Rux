@@ -2680,8 +2680,8 @@ pub fn oh68_holder_decode() -> alloc::string::String {
             if taskp != 0 && (taskp >> 47) == 0 && taskp > 0x1000 {
                 // Coroutine waiter on this mutex: the ring entry IS the
                 // task's own we (CoTask+256 = +0x100). CV waiters sit at
-                // task->wue (+0x128). Thread-mode parks (entry == some
-                // ctx+32) are covered by the sweep.
+                // task->wue (+0x128). Thread parks (entry == some ctx+32)
+                // are covered by the sweep.
                 if rd(taskp + 0x100) == Some(cur) || rd(taskp + 0x128) == Some(cur) {
                     cotask(taskp, "rw", false, &mut out);
                     ct_n += 1;
@@ -2692,6 +2692,159 @@ pub fn oh68_holder_decode() -> alloc::string::String {
                 _ => break,
             }
             n += 1;
+        }
+    }
+
+    // 78th: CoTask slab sweep. The wedge's HOLDER (the suspended
+    // mid-run task that acquired the processLock and CoWait'ed inside
+    // the critical section) is invisible to everything above: it is
+    // not in the mutex waiter ring (holders are not waiters), its
+    // worker's ctx->task was cleared at the yield (the worker sweep
+    // only sees thread-mode or queued tasks), and the fuxwatch owner
+    // latch needs the watch armed BEFORE the acquire — the chain arms
+    // at the first stuck print, which is AFTER the founder acquired
+    // (ohw115: holder acquired pre-81.5 s, watch armed 84 s). A CoTask
+    // whose saved coroutine RIP sits inside libffrt's CoWait internals
+    // (vaddr class 0x87xxx-0x8axxx file-offset window — NOT
+    // context_entry, the fresh-queue state) is a suspended mid-run
+    // task; its saved stack names the critical-section site directly.
+    // Sweep the CoTask heap neighborhood (observed 0x7ff0004cxx-
+    // 0x7ff0005xxxx, 432-byte CoTask stride with neighbors at any
+    // 8-byte offset), shape-test each candidate, print up to 24 with
+    // label + saved rip/stack. Only runs when the M2 latch is set
+    // (wedge live) and at most once per 30 s.
+    {
+        static SLAB_LAST_J: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        let nowj = crate::drivers::timer::get_jiffies() as u32;
+        let lj = SLAB_LAST_J.load(Relaxed);
+        if nowj.wrapping_sub(lj) >= 3000 {
+            SLAB_LAST_J.store(nowj, Relaxed);
+            let _ = write!(out, " SLAB[");
+            let mut printed = 0u32;
+            let mut scanned = 0u64;
+            // libffrt's RX segment covers the CoWait internals; the
+            // context_entry trampoline (fresh, never-started coroutine)
+            // is at file offset 0x86a24 on this image — a saved rip AT
+            // it means queued, not suspended.
+            'outer: for base in (0x7ff0004c0000u64..0x7ff000600000u64).step_by(8) {
+                scanned += 1;
+                if scanned > 400_000 {
+                    break;
+                }
+                let w0 = match rd(base + 0xd8) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                // SSO libc++ string at +0xd8 with a plausible length and
+                // printable ASCII in the first 8 bytes (labels observed:
+                // "sq_collect_6_PostTask_488" class).
+                if w0 & 1 != 0 {
+                    continue; // long-form label: rare; skip (ptr deref cost)
+                }
+                let n = ((w0 & 0xff) >> 1) as usize;
+                if !(6..=22).contains(&n) {
+                    continue;
+                }
+                let b0 = (w0 >> 8) & 0xff;
+                let b1 = (w0 >> 16) & 0xff;
+                let b2 = (w0 >> 24) & 0xff;
+                if !(b's' == b0 as u8 && b'q' == b1 as u8 && b'_' == b2 as u8) {
+                    continue;
+                }
+                // gid/ty/st plausibility (fields observed: gid<=0x1000,
+                // ty in {2,3,4}, st in 1..=8).
+                let gid = match rd(base + 0x20) {
+                    Some(g) if (1..0x10000).contains(&g) => g,
+                    _ => continue,
+                };
+                let ty = rd32(base + 0x18).unwrap_or(0xffff);
+                if ty > 4 {
+                    continue;
+                }
+                let st = rd(base + 0x30).unwrap_or(0) & 0xff;
+                if !(1..=8).contains(&st) {
+                    continue;
+                }
+                // coRoutine: a live fiber with a saved rip inside an exec
+                // VMA.
+                let co = match rd(base + 0x130) {
+                    Some(c) if c > 0x1000 && (c >> 47) == 0 => c,
+                    _ => continue,
+                };
+                let rsp = match rd(co + 24 + 48) {
+                    Some(v) if v > 0x1000 && (v >> 47) == 0 => v,
+                    _ => continue,
+                };
+                let rip = match rd(co + 24 + 56) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                let ripoff = match word_off(rip) {
+                    Some((m, o)) => alloc::format!("v{}+{:#x}", m, o),
+                    None => continue,
+                };
+                // Label body (bytes 4..n of the SSO window span w0/w1/w2).
+                let w1 = rd(base + 0xd8 + 8).unwrap_or(0);
+                let w2 = rd(base + 0xd8 + 16).unwrap_or(0);
+                let buf = [w0, w1, w2];
+                let mut lbl: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+                for i in 1..=n {
+                    let b = ((buf[i / 8] >> (8 * (i % 8))) & 0xff) as u8;
+                    if !(0x20..0x7f).contains(&b) {
+                        lbl.clear();
+                        break;
+                    }
+                    lbl.push(b);
+                }
+                if lbl.is_empty() {
+                    continue;
+                }
+                // Deep stack walk for the first few SUSPENDED mid-run
+                // tasks (rip NOT at context_entry): the frames above the
+                // CoWait name the in-critical-section site.
+                let _ = write!(
+                    out,
+                    " {}[tp={:#x} g{} ty{} st{} rip={} \"{}\"]",
+                    if printed == 0 { "" } else { "," },
+                    base,
+                    gid,
+                    ty,
+                    st,
+                    ripoff,
+                    core::str::from_utf8(&lbl).unwrap_or("?")
+                );
+                printed += 1;
+                if printed <= 2 {
+                    // Stack walk for the FIRST TWO matches (any module —
+                    // the libffrt index shifts per boot; ohw119 had it
+                    // at v47 and the hardcoded v19 gate suppressed every
+                    // walk): saved rsp upward, exec-VMA words only. The
+                    // frames above the CoWait name the samgr function
+                    // that holds/waits the lock.
+                    let stk_sz = rd(co + 0x68).unwrap_or(0).min(0x1800);
+                    let hi = co + 120 + stk_sz;
+                    if rsp >= co + 120 && rsp < hi && (rsp & 7) == 0 {
+                        let _ = write!(out, " stk[");
+                        let mut found = 0u32;
+                        let mut va = rsp;
+                        while va < hi && found < 16 {
+                            if let Some(w) = rd(va) {
+                                if let Some((m, o)) = word_off(w) {
+                                    let _ = write!(out, " v{}:{:#x}", m, o);
+                                    found += 1;
+                                }
+                            }
+                            va += 8;
+                        }
+                        let _ = write!(out, "]");
+                    }
+                }
+                if printed >= 24 {
+                    break 'outer;
+                }
+            }
+            let _ = write!(out, " ] scanned={}", scanned);
         }
     }
     out

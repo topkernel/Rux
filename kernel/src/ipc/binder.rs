@@ -4949,6 +4949,96 @@ pub fn txn_hang_audit() {
                                 .unwrap_or("?")
                                 .trim_end_matches('\0')
                         );
+                        // 78th (ohw115 tid 344 / ohw120 tid 354): a samgr
+                        // FFRT worker parked mid-brk (sys=45) for minutes
+                        // while holding the wedge's FFRT mutex — the VMA
+                        // rwsem owner word shows NO holder (count=0), so
+                        // the sleep is NOT the rwsem park. On the SECOND
+                        // consecutive 30 s snapshot in brk, print the
+                        // thread's kernel stack (sp-up walk, same contract
+                        // as TXN-HANG-STK) — the frames name the sleep
+                        // site exactly.
+                        if sys == 45 {
+                            const BRKT_N: usize = 8;
+                            static BRKT_TIDS: [core::sync::atomic::AtomicU32; BRKT_N] =
+                                [const {
+                                    core::sync::atomic::AtomicU32::new(0)
+                                }; BRKT_N];
+                            static BRKT_SEEN: [core::sync::atomic::AtomicU32; BRKT_N] = [const {
+                                core::sync::atomic::AtomicU32::new(0)
+                            }; BRKT_N];
+                            let tid = tk.pid() as u32;
+                            let mut slot = usize::MAX;
+                            for i in 0..BRKT_N {
+                                let t = BRKT_TIDS[i].load(Relaxed);
+                                if t == tid {
+                                    slot = i;
+                                    break;
+                                }
+                                if t == 0
+                                    && slot == usize::MAX
+                                    && BRKT_TIDS[i]
+                                        .compare_exchange(
+                                            0,
+                                            tid,
+                                            Relaxed,
+                                            Relaxed,
+                                        )
+                                        .is_ok()
+                                {
+                                    slot = i;
+                                }
+                            }
+                            if slot != usize::MAX {
+                                if BRKT_SEEN[slot].fetch_add(1, Relaxed) == 1 {
+                                    let _ = write!(w, "SAMGR-BRKSTUCK tid={} st={:#x}", tid, tk.state().bits());
+                                    if let Some(top) = tk.kernel_stack_top_checked() {
+                                        #[cfg(feature = "x86_64")]
+                                        extern "C" {
+                                            static __stext: u8;
+                                            static __etext: u8;
+                                        }
+                                        #[cfg(feature = "x86_64")]
+                                        let (lo, hi) = (
+                                            core::ptr::addr_of!(__stext) as u64,
+                                            core::ptr::addr_of!(__etext) as u64,
+                                        );
+                                        #[cfg(not(feature = "x86_64"))]
+                                        let (lo, hi) = (0u64, u64::MAX);
+                                        let base = top - crate::config::KERNEL_STACK_SIZE;
+                                        let thsp = tk.thread().sp;
+                                        let _ = write!(w, " sp={:#x}", thsp);
+                                        if thsp as usize >= base
+                                            && thsp as usize + 8 <= top
+                                            && (thsp & 7) == 0
+                                        {
+                                            // SAFETY: diagnostic read inside the
+                                            // task's own kernel-stack window;
+                                            // bounds checked above.
+                                            let p = thsp as *const u64;
+                                            let _ = write!(w, " sp-up:");
+                                            let mut shown = 0;
+                                            for k in 0..640usize {
+                                                let v = unsafe {
+                                                    core::ptr::read_volatile(p.add(k))
+                                                };
+                                                if v >= lo && v < hi && (v & 1) == 0 {
+                                                    let _ = write!(w, " {v:#x}");
+                                                    shown += 1;
+                                                    if shown >= 28 {
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            if shown == 0 {
+                                                let _ = write!(w, " (none)");
+                                            }
+                                        }
+                                    }
+                                    let _ = writeln!(w);
+                                }
+                            }
+                        }
                         n += 1;
                     });
                     // 78th (ohw115): the VMA rwsem owner word for samgr's
