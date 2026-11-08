@@ -134,7 +134,7 @@ The reference kernel's dma_buf_mmap rejects `offset + len > dmabuf->size`
 with EINVAL before calling the exporter's mmap. Fix: mirror the DRM-node
 branch's bound (reject `offset >= gem.size` or clamp length accordingly).
 
-### [Medium] drm/mod.rs:881-974/1998-2011/2058-2117/2285-2334/2476-2513 — six ungated bring-up trace families run on every boot; one scans the whole framebuffer every 10th flip forever
+### [Medium] drm/mod.rs:881-974/1998-2011/2058-2117/2285-2334/2476-2513 — six ungated bring-up trace families run on every boot; one scans the whole framebuffer every 10th flip forever — ✅ FIXED (`f88ff011`)
 The known-gap-4 sweep (95094dd2) moved the prime-import content probe behind
 debug=ohhunt, but left these unconditional: (a) `trace_seq` — first 128
 ioctls per boot printed verbatim (pr_warn); (b) `trace_ioctl` — first-use +
@@ -149,6 +149,13 @@ own "debug infrastructure cost when OFF must be zero-ish" rule and pollutes
 the printk ring (pr_warn level: every line also hits consoles with
 loglevel<=4). Gate them behind debug=ohhunt (or a drm-specific switch) like
 their sibling probes.
+
+Fix shape: six new `drm:` tracepoints (addfb/flip/atomic/prime_import/
+prime_mmap/open, events 62-67) now carry the families — (c)(d)(e)(f) gate
+their expensive work on `EVENT_*.armed()` and emit the event, (a)(b) ride
+`debug=ohhunt` (which also arms the drm: family via the OH_HUNT trace
+alias), the VERSION first-8 pr_warn became `drm:open`. When nothing is
+armed the cost is one atomic load per ioctl.
 
 ### [Low] drm/mod.rs:2410-2412 — sleep_until_ns busy-spins when the timer table is exhausted
 The `timer_id == 0` fallback calls `schedule()` with the task still RUNNING —

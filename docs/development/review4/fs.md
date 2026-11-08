@@ -263,7 +263,7 @@ dual-instance class the icache guards against. Fix: fold the parent's ino (or
 the full path) into the hash; devfs names must also stay unique per directory
 only.
 
-### [Medium] devfs/mod.rs devfs_rename — VFS-level ".."-cycle guard is a no-op for devfs; renaming a directory into its own subtree silently detaches it
+### [Medium] devfs/mod.rs devfs_rename — VFS-level ".."-cycle guard is a no-op for devfs; renaming a directory into its own subtree silently detaches it — ✅ FIXED (`f88ff011`)
 
 vfs_rename_locked's cycle check (is_ancestor_of) walks ".." via op_lookup —
 devfs_lookup serves only real children, never "..", so the walk fails
