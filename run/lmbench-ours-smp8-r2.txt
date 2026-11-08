@@ -1,0 +1,12 @@
+CASE[lat_proc fork] OURS-SMP8-r2 rep1 load=3.28 VAL=91.1370
+CASE[lat_proc fork] OURS-SMP8-r2 rep2 load=3.33 VAL=90.2082
+CASE[lat_proc fork] OURS-SMP8-r2 rep3 load=4.29 VAL=89.6751
+CASE[lat_proc exec] OURS-SMP8-r2 rep1 load=4.56 VAL=141.1762
+CASE[lat_proc exec] OURS-SMP8-r2 rep2 load=4.96 VAL=169.7108
+CASE[lat_proc exec] OURS-SMP8-r2 rep3 load=4.99 VAL=175.2162
+CASE[lat_pipe] OURS-SMP8-r2 rep1 load=5.87 VAL=10.1167
+CASE[lat_pipe] OURS-SMP8-r2 rep2 load=5.79 VAL=6.5153
+CASE[lat_pipe] OURS-SMP8-r2 rep3 load=5.91 VAL=7.1327
+CASE[lat_ctx -s 64 2] OURS-SMP8-r2 rep1 load=5.48 VAL=3.94
+CASE[lat_ctx -s 64 2] OURS-SMP8-r2 rep2 load=5.06 VAL=2.18
+CASE[lat_ctx -s 64 2] OURS-SMP8-r2 rep3 load=4.65 VAL=2.29

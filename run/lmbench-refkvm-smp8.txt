@@ -1,0 +1,36 @@
+CASE[lat_syscall null] REF-SMP8 rep1 load=3.33 VAL=0.0409
+CASE[lat_syscall null] REF-SMP8 rep2 load=3.14 VAL=0.0408
+CASE[lat_syscall null] REF-SMP8 rep3 load=3.13 VAL=0.0411
+CASE[lat_syscall read] REF-SMP8 rep1 load=3.18 VAL=0.0586
+CASE[lat_syscall read] REF-SMP8 rep2 load=3.18 VAL=0.0594
+CASE[lat_syscall read] REF-SMP8 rep3 load=3.24 VAL=0.0590
+CASE[lat_syscall write] REF-SMP8 rep1 load=3.14 VAL=0.0557
+CASE[lat_syscall write] REF-SMP8 rep2 load=3.05 VAL=0.0551
+CASE[lat_syscall write] REF-SMP8 rep3 load=2.97 VAL=0.0580
+CASE[lat_syscall stat] REF-SMP8 rep1 load=2.89 VAL=0.2166
+CASE[lat_syscall stat] REF-SMP8 rep2 load=2.82 VAL=0.2143
+CASE[lat_syscall stat] REF-SMP8 rep3 load=2.75 VAL=0.2160
+CASE[lat_syscall fstat] REF-SMP8 rep1 load=2.79 VAL=0.1111
+CASE[lat_syscall fstat] REF-SMP8 rep2 load=2.72 VAL=0.1111
+CASE[lat_syscall fstat] REF-SMP8 rep3 load=2.59 VAL=0.1171
+CASE[lat_syscall open] REF-SMP8 rep1 load=2.62 VAL=0.3506
+CASE[lat_syscall open] REF-SMP8 rep2 load=2.57 VAL=0.3488
+CASE[lat_syscall open] REF-SMP8 rep3 load=3.00 VAL=0.3544
+CASE[lat_proc fork] REF-SMP8 rep1 load=3.00 VAL=60.6970
+CASE[lat_proc fork] REF-SMP8 rep2 load=3.16 VAL=57.7563
+CASE[lat_proc fork] REF-SMP8 rep3 load=2.99 VAL=55.8981
+CASE[lat_proc exec] REF-SMP8 rep1 load=3.39 VAL=91.2207
+CASE[lat_proc exec] REF-SMP8 rep2 load=3.39 VAL=93.7327
+CASE[lat_proc exec] REF-SMP8 rep3 load=3.33 VAL=94.1675
+CASE[lat_pipe] REF-SMP8 rep1 load=3.36 VAL=13.1812
+CASE[lat_pipe] REF-SMP8 rep2 load=3.30 VAL=13.0940
+CASE[lat_pipe] REF-SMP8 rep3 load=3.25 VAL=13.1496
+CASE[lat_ctx -s 64 2] REF-SMP8 rep1 load=3.23 VAL=NONE
+CASE[lat_ctx -s 64 2] REF-SMP8 rep2 load=3.21 VAL=NONE
+CASE[lat_ctx -s 64 2] REF-SMP8 rep3 load=3.12 VAL=NONE
+== medians ==
+  ==
+lat_syscall  0.0409 0.0408 0.0411 0.0586 0.0594 0.0590 0.0557 0.0551 0.0580 0.2166 0.2143 0.2160 0.1111 0.1111 0.1171 0.3506 0.3488 0.3544
+lat_proc  60.6970 57.7563 55.8981 91.2207 93.7327 94.1675
+lat_pipe  13.1812 13.0940 13.1496
+lat_ctx  NONE NONE NONE
