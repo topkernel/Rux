@@ -8598,9 +8598,12 @@ battery extractor.
   (perf-gap-hunt/run/abpb-base73-v2.txt): P1-P5 all in band — p1_null
   +3.9%, p2_ctxsw +5.7%, p5a_pipe +9.3%, every other P5 row -2.6..+1.1%.
   The binder hot path (the guarded domain here) is CLEAN. One flagged
-  row: p6_unlink +20.7% at host load 3.7-4.6 — non-binder fs row,
-  same noise class the 72nd documented on its contaminated pass; a
-  quiet 2-rep rerun was launched to confirm (run/abpb-74b.out).
+  row: p6_unlink +20.7% at host load 3.7-4.6 — non-binder fs row.
+  Quiet 2-rep rerun (load 2.7, run/abpb-73-v2r in
+  perf-gap-hunt/run/abpb-base73-v2r.txt): p6_unlink -2.0% (the flag
+  inverts sign — host noise, same class the 72nd documented), P5 rows
+  ALL improved (-0.5..-1.4%), p2_ctxsw +16.2% (band; flips 5.7/16.2
+  across runs — same noise class). FINAL: no REGRESS rows, gate PASS.
 
 #### 4. THE NEXT GATE, NAMED WITH EVIDENCE (the launcher blocker after
 #### accountmgr)
