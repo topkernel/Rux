@@ -328,11 +328,15 @@ impl RawSpinlock {
             while self.locked.load(Ordering::Relaxed) != 0 {
                 spins = spins.wrapping_add(1);
                 #[cfg(feature = "nextgate")]
-                if spins & 0xF_FFFF == 0 {
-                    // r18 flame refinement: one witness per ~1M spins
-                    // (≈1-10 ms contended) — a cheap per-lock contention
-                    // volume histogram for hunt kernels (IP-only samples
-                    // cannot name WHICH lock the 22% bucket is).
+                if spins & 0xFFFF == 0 {
+                    // r18 flame refinement: one witness per 64K spins
+                    // (≈60-250 µs contended; the spins counter RESETS per
+                    // lock() attempt, so a 1M threshold never fires on
+                    // ordinary contention — only wedges, which never
+                    // reach the shutdown dump) — a cheap per-lock
+                    // contention volume histogram for hunt kernels
+                    // (IP-only samples cannot name WHICH lock the 22%
+                    // bucket is).
                     lockhist_witness(self as *const Self as usize);
                 }
                 if spins == Self::DEADLOCK_WARN_ITERS {

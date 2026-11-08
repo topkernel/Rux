@@ -1231,6 +1231,10 @@ pub const SLOT_W_IDLE_HEAL: u32 = 6;
 /// (idle-marked slot / losing pick generation / 50-jiffy continuous
 /// shape) and rewrote it to the idle task.
 pub const SLOT_W_WAKE_LIE_HEAL: u32 = 7;
+/// r18 mechanism-C fix: slot rewritten to its idle by
+/// sched_detach_before_free at kernel-stack/Task free time — the
+/// resurrection door closer (see sched_detach_before_free).
+pub const SLOT_W_FREE_CLEAR: u32 = 8;
 pub static SLOT_WRITER: [core::sync::atomic::AtomicU32; MAX_CPUS] =
     [const { core::sync::atomic::AtomicU32::new(0) }; MAX_CPUS];
 pub static SLOT_WRITER_TASK: [core::sync::atomic::AtomicU64; MAX_CPUS] =
@@ -2198,6 +2202,119 @@ static FREED_RING_HEAD: core::sync::atomic::AtomicUsize = core::sync::atomic::At
 /// R12-4: poison marker written into a freed Task's state/pid words.
 pub const TASK_POISON: u32 = 0xDEAD_BEEF;
 
+/// r18 mechanism-C fix: detach a task from every live scheduler
+/// reference — per-CPU current slots AND class-queue links — so the
+/// memory (kernel stack first, Task page later) can be freed with
+/// nothing left to resurrect it.
+///
+/// The conviction chain (owner5 GB churn boots, r17o5-{1,3,4}): a
+/// losing-switch leaves a per-CPU slot NAMING a parked task; the exit
+/// sweeper frees the task's kernel stack while that lying slot
+/// survives; the wake-side curr_on scan keeps refusing the dead task's
+/// wakes (why=c), the aged slot-lie heal (500 ms) then re-enqueues it,
+/// and the resume lands on a freed-then-reused stack — the kernel
+/// jumps to garbage (captured rip shapes: a user text address, a
+/// zero-extended kernel text address, the GRQ lock word itself), and
+/// the register saves of that wild switch scribble live objects (the
+/// GRQ lost-release deadlock, val=1 with no holder).
+///
+/// Clearing the naming slots under the GRQ (the SLOT_W_WAKE_LIE_HEAL
+/// discipline) plus pick_gen_supersede (the R56-STEAL abort: a pending
+/// switch-in fails its affirm CAS and re-picks) closes the door at the
+/// free itself: after this, no wake can be refused on this task's
+/// behalf and no aged conviction can fire for it. The class-queue
+/// force-unlink mirrors free_task_slot's FREED-WHILE-LINKED block.
+/// Callers must NOT hold the GRQ (this takes it).
+pub fn sched_detach_before_free(task: *mut Task) -> usize {
+    if task.is_null() {
+        return 0;
+    }
+    let mut cleared = 0usize;
+    {
+        let mut guard = grq().lock_irqsave();
+        for c in 0..MAX_CPUS {
+            if cpu_state(c).current == task {
+                let idle_task = cpu_state(c).idle;
+                if !idle_task.is_null() && idle_task != task {
+                    cpu_state_mut(c).current = idle_task;
+                    slot_tag_write(c, SLOT_W_FREE_CLEAR, idle_task);
+                    pick_gen_supersede(c, idle_task);
+                    cleared += 1;
+                }
+            }
+        }
+        // SAFETY: the caller is on the free path — the task is dead and
+        // owned by this thread; the GRQ lock is held.
+        unsafe {
+            if guard.rt_rq.force_unlink(task) {
+                guard.nr_running.fetch_update(
+                    core::sync::atomic::Ordering::SeqCst,
+                    core::sync::atomic::Ordering::SeqCst,
+                    |v| v.checked_sub(1),
+                ).ok();
+            }
+            if guard.cfs_rq.is_linked(task) && guard.cfs_rq.dequeue(task) {
+                guard.nr_running.fetch_update(
+                    core::sync::atomic::Ordering::SeqCst,
+                    core::sync::atomic::Ordering::SeqCst,
+                    |v| v.checked_sub(1),
+                ).ok();
+            }
+            if guard.dl_rq.is_linked(task) && guard.dl_rq.dequeue(task) {
+                guard.nr_running.fetch_update(
+                    core::sync::atomic::Ordering::SeqCst,
+                    core::sync::atomic::Ordering::SeqCst,
+                    |v| v.checked_sub(1),
+                ).ok();
+            }
+        }
+    }
+    if cleared > 0 {
+        // Budgeted witness — every firing is a saved resurrection
+        // (previously: refused wakes aging into a garbage-resume).
+        static SDF_N: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        if SDF_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
+            use crate::console::putchar_no_lock as putchar;
+            const M: &[u8] = b"\nFREE-DETACHED-SLOTS n=";
+            for &b in M {
+                putchar(b);
+            }
+            let mut v = cleared as u64;
+            let mut buf = [0u8; 4];
+            let mut k = 0;
+            while v > 0 {
+                buf[k] = b'0' + (v % 10) as u8;
+                v /= 10;
+                k += 1;
+            }
+            if k == 0 {
+                putchar(b'0');
+            }
+            for i in (0..k).rev() {
+                putchar(buf[i]);
+            }
+            const M2: &[u8] = b" pid=";
+            for &b in M2 {
+                putchar(b);
+            }
+            let mut p = unsafe { (*task).pid() } as u64;
+            let mut pb = [0u8; 10];
+            let mut pk = 0;
+            while p > 0 {
+                pb[pk] = b'0' + (p % 10) as u8;
+                p /= 10;
+                pk += 1;
+            }
+            for i in (0..pk).rev() {
+                putchar(pb[i]);
+            }
+            putchar(b'\n');
+        }
+    }
+    cleared
+}
+
 pub fn free_task_slot(task_ptr: *mut Task) {
     if task_ptr.is_null() {
         return;
@@ -2246,6 +2363,20 @@ pub fn free_task_slot(task_ptr: *mut Task) {
         // removal.
         {
             let mut guard = grq().lock_irqsave();
+            // r18 mechanism-C fix: clear any per-CPU slot that still
+            // names this Task BEFORE the page is poisoned/deallocated —
+            // the resurrection-door closer (sched_detach_before_free
+            // already did the stack side; this is the Task-page side).
+            for c in 0..MAX_CPUS {
+                if cpu_state(c).current == task_ptr {
+                    let idle_task = cpu_state(c).idle;
+                    if !idle_task.is_null() && idle_task != task_ptr {
+                        cpu_state_mut(c).current = idle_task;
+                        slot_tag_write(c, SLOT_W_FREE_CLEAR, idle_task);
+                        pick_gen_supersede(c, idle_task);
+                    }
+                }
+            }
             let mut unlinked = 0usize;
             // SAFETY: task_ptr is non-null and still a valid Task (poison
             // and dealloc happen below); the GRQ lock is held.
