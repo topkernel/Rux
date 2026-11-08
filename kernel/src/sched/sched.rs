@@ -591,6 +591,29 @@ static mut GRQ: core::mem::MaybeUninit<GlobalRunQueue> = core::mem::MaybeUninit:
 /// Whether GRQ has been initialized
 static GRQ_READY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
+/// r17 mechanism-C hunt (`nextgate` feature): expose the GRQ lock's
+/// diagnostic-word addresses and readiness for the x86_64 DR-register
+/// write watchpoints (trap.rs grq_watch). A wild write onto the GRQ
+/// header is caught at the writing instruction.
+#[cfg(feature = "nextgate")]
+pub fn grq_watch_ready() -> bool {
+    GRQ_READY.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// r17 mechanism-C hunt: the GRQ lock word address (u32) and, when the
+/// owner word exists, its address (u64).
+#[cfg(feature = "nextgate")]
+pub fn grq_watch_addrs() -> (usize, Option<usize>) {
+    // SAFETY: GRQ is initialized (callers gate on grq_watch_ready) and
+    // the addresses are read-only diagnostics.
+    let l = unsafe { GRQ.assume_init_ref() };
+    #[cfg(feature = "debug-lock-owner")]
+    let own = Some(l.lock.owner_addr());
+    #[cfg(not(feature = "debug-lock-owner"))]
+    let own = None;
+    (l.lock.locked_addr(), own)
+}
+
 /// Initialize the global run queue (called once during boot).
 unsafe fn grq_init() {
     // SAFETY: called exactly once during boot on the primary CPU before any
