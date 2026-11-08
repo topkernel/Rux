@@ -46,7 +46,7 @@ descriptor slots while the abandoned chain may still be at the device.
 Fix: gate `late` on our head descriptor appearing in the ring (or resp byte
 != 0xFF), not on the raw index delta.
 
-### [Medium] virtio_pci.rs:889-1203 — dead one-shot read_block/write_block build an unregistered vring; a call would always time out and leak
+### [Medium] virtio_pci.rs:889-1203 — dead one-shot read_block/write_block build an unregistered vring; a call would always time out and leak — ✅ FIXED (`0843bb2a`)
 `VirtIOPCI::read_block`/`write_block` (per-call `VirtQueue::new(8,...)` +
 `setup_queue` never called on it) have zero callers — all live paths go through
 `read_block_using_configured_queue`/`write_block_using_configured_queue`. If

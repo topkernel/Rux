@@ -20,7 +20,7 @@ glibc's timer_create/timer_settime contract is process-wide. Fix direction: move
 itimer fields into the shared signal struct (whatever CLONE_THREAD aliases today) and look up timers
 through the thread-group leader.
 
-### [Medium] syscall/time.rs:1454 + timer.rs wheel action — POSIX timer signal carries no siginfo; overruns never accumulate
+### [Medium] syscall/time.rs:1454 + timer.rs wheel action — POSIX timer signal carries no siginfo; overruns never accumulate — ✅ FIXED (`0843bb2a`)
 Wall-clock POSIX timers arm the wheel with a bare `signo` (`add_timer_with_action_hres(..., timer.sigev_signo, ...)`);
 expiry delivers a plain `send_signal(pid, signo)`. Linux posix-timers deliver `SI_TIMER` siginfo with
 `si_value = sigev_value.sival_ptr` and `si_overrun`; a `SA_SIGINFO` handler cannot tell which timer
@@ -30,7 +30,7 @@ expiry path never increments it, so `timer_getoverrun` after a missed delivery r
 Fix direction: extend the wheel action to carry (timer handle, sival) and enqueue a siginfo-carrying
 signal; count expirations between deliveries on the wheel/tick path.
 
-### [Low] syscall/time.rs:1454 — SIGEV_NONE wall-clock timers still deliver their signal
+### [Low] syscall/time.rs:1454 — SIGEV_NONE wall-clock timers still deliver their signal — ✅ FIXED (`0843bb2a`)
 `sys_timer_settime` arms `sigev_signo` unconditionally for CLOCK_REALTIME/MONOTONIC/BOOTTIME/TAI; the
 CPU-time tick path (`sched/sched.rs:6936`) checks `sigev_notify != SIGEV_NONE`, the wheel action path
 does not. Linux: SIGEV_NONE = timer runs, never notifies (timer_gettime still counts down).
@@ -313,7 +313,7 @@ recycled. Deliberate (OH leak mitigation, leg-17/leg-19) but a protocol divergen
 compat risk — a Linux workload with minute-scale IPC latency breaks. Fix direction: bound the grace by
 receiver-thread liveness rather than wall age, or make it a mount/cmdline opt-in.
 
-### [Medium] ipc/binder.rs:9392-9416 — binder nodes are never released while the owner lives
+### [Medium] ipc/binder.rs:9392-9416 — binder nodes are never released while the owner lives — ✅ FIXED (`0843bb2a`)
 translate_object creates a node per (ptr, reg_tgid) in the owner's `nodes` list; when the last external
 ref drops (Work::Node → BR_RELEASE/BR_DECREFS read with zero external refs), nothing removes the node
 — Linux releases the node (binder_put_node → deleted from proc->nodes) once internal+local refs and
@@ -347,7 +347,7 @@ The reference (io_cqring_fill_event → io_cqring_ev_posted) uses smp_store_rele
 smp_mb after). Fix: fence(Release) BEFORE the tail store (or an atomic release store), same for the
 SQE ring's head write-back in submit_sqes:679.
 
-### [Medium] io_uring/mod.rs:597-618 — ring mmap installs PTEs without PTE_MODIFY_LOCK
+### [Medium] io_uring/mod.rs:597-618 — ring mmap installs PTEs without PTE_MODIFY_LOCK — ✅ FIXED (`0843bb2a`)
 binder_mmap_handler (and sys_mmap's device paths) take PTE_MODIFY_LOCK around every map_page and
 tear down any racing demand-fault leaf — the NEW2 class (eager PTE install racing fork's COW walk).
 io_uring_mmap_handler runs its map loop unlocked, only holding the VMA it just added. A fork (or a
