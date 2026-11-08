@@ -402,7 +402,10 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
     // position would make every fault resolve as "already mapped, perms
     // OK", retrying the same non-canonical fetch forever: a silent
     // machine-wide trap loop (bit us with an out-of-range SIGTRAMP_BASE).
-    if (fault_addr.bits() >> 39) != 0 {
+    // review4 arch-M: check the RAW stval, not the VirtAddr-masked
+    // value — VirtAddr::new() sign-extends bit 38, so non-canonical bits
+    // 63..39 were silently re-encoded (a hole the guard can't see through).
+    if (regs.badaddr >> 39) != 0 {
         return bad_area(regs, access_type, fault_addr);
     }
 
@@ -448,6 +451,13 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
             // FORENSIC: identify mixed-state tasks — exe_path tells whether
             // exec completed for THIS task; satp vs pgd tells whether the
             // active root matches task->mm.
+            // review4 arch-M: ~250 lines of hunt-era instrumentation
+            // ran unconditionally on EVERY user exec fault at an unmapped
+            // VA (~40 pr_err lines through the polled UART). Now gated
+            // behind debug=novma (off by default, like the x86_64 twin).
+            if crate::debug::switches::enabled(
+                crate::debug::switches::DebugSwitch::NovmaTrace,
+            ) {
             if access_type & FaultFlags::EXEC != 0 {
                 let satp_val: u64;
                 unsafe { core::arch::asm!("csrr {}, satp", out(reg) satp_val); }
@@ -694,6 +704,7 @@ crate::pr_err!(
                         );
                     }
                 }
+            }
             }
             return bad_area(regs, access_type, fault_addr);
         }

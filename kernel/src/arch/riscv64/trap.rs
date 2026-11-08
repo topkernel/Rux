@@ -1893,7 +1893,21 @@ fn handle_unknown_exception(regs: &mut PtRegs, cause: Cause) {
         cause, regs.epc, regs.badaddr);
 
     if regs.user_mode() {
-        crate::process::exit::do_exit(-(crate::signal::Signal::SIGKILL as i32));
+        // review4 arch-M: deliver per-cause signals (reference behavior).
+        // Misaligned load/store = SIGBUS; instruction/access fault =
+        // SIGSEGV; hardware error / anything else = SIGBUS. The old
+        // blanket SIGKILL made every alignment bug and hardware fault
+        // unkillable-by-handler (no sigaction could catch it).
+        let sig = match cause {
+            Cause::LoadAddressMisaligned | Cause::StoreAmoAddressMisaligned => {
+                crate::signal::Signal::SIGBUS
+            }
+            Cause::InstructionAccessFault | Cause::LoadAccessFault | Cause::StoreAmoAccessFault => {
+                crate::signal::Signal::SIGSEGV
+            }
+            _ => crate::signal::Signal::SIGBUS,
+        };
+        crate::process::exit::do_exit(-(sig as i32));
         // Do NOT advance epc — the task is now ZOMBIE and will not resume
     } else {
         // Kernel-mode unknown exceptions (misaligned access, access

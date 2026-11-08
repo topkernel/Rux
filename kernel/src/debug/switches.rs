@@ -57,6 +57,7 @@ macro_rules! debug_switch_table {
             ScribblePark => "scribblepark",
             ScribblePid1 => "scribblepid1",
             ScribbleSweep => "scribblesweep",
+            NovmaTrace => "novma",
             InputTrace => "inputtrace",
             DbFileTrace => "dbtrace",
             EpollTrace => "epolltrace",
@@ -150,6 +151,9 @@ pub enum DebugSwitch {
     /// Park when the 64th task registers (early in the fork/exec storm)
     /// so gdb can arm quiet-region watchpoints across the live set.
     ScribbleSweep,
+    /// review4 arch-M: NOVMA-EXEC forensics in the riscv64 page-fault
+    /// path (~40 pr_err lines per user exec fault at an unmapped VA).
+    NovmaTrace,
     /// Input-event payload trace: every event pushed into the evdev queues
     /// prints a one-line record (device, type, code, value) plus the push
     /// count. Used to hunt phantom input streams; printing happens on the
@@ -570,7 +574,7 @@ pub enum DebugSwitch {
     AbbaTest,
 }
 
-const SWITCH_COUNT: usize = 63;
+const SWITCH_COUNT: usize = 64;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -612,72 +616,73 @@ impl DebugSwitch {
             DebugSwitch::ScribblePark => 6,
             DebugSwitch::ScribblePid1 => 7,
             DebugSwitch::ScribbleSweep => 8,
-            DebugSwitch::InputTrace => 9,
-            DebugSwitch::EpollTrace => 10,
-            DebugSwitch::ClaimInject => 11,
-            DebugSwitch::Strace1 => 12,
-            DebugSwitch::SchedTrace => 13,
-            DebugSwitch::Steptrace => 14,
+            DebugSwitch::NovmaTrace => 9,
+            DebugSwitch::InputTrace => 10,
+            DebugSwitch::EpollTrace => 11,
+            DebugSwitch::ClaimInject => 12,
+            DebugSwitch::Strace1 => 13,
+            DebugSwitch::SchedTrace => 14,
+            DebugSwitch::Steptrace => 15,
             // 15 used to be shared by WriteTrace AND OncpuInject (both
             // mapped to 15) — `debug=writetrace` silently armed the
             // adjudication injector (and vice versa). Split while adding
             // the Ledger switch: each switch now owns its bit.
-            DebugSwitch::WriteTrace => 15,
-            DebugSwitch::OncpuInject => 16,
-            DebugSwitch::Ledger => 17,
-            DebugSwitch::BinderTrace => 18,
-            DebugSwitch::SyscallTrace => 19,
-            DebugSwitch::SleepSnap => 23,
-            DebugSwitch::FutexTrace => 20,
-            DebugSwitch::MonoWatch => 21,
-            DebugSwitch::TcpTrace => 22,
-            DebugSwitch::SockSnap => 24,
-            DebugSwitch::DataTap => 25,
-            DebugSwitch::WildWatch => 26,
-            DebugSwitch::MetaWatch => 27,
-            DebugSwitch::ParkDump => 28,
-            DebugSwitch::Schb => 29,
-            DebugSwitch::KsProbe => 30,
-            DebugSwitch::R83HeapScan => 31,
-            DebugSwitch::LeakHunt => 32,
-            DebugSwitch::WwCensus => 33,
-            DebugSwitch::TxnHang => 34,
-            DebugSwitch::TreeHunt => 35,
-            DebugSwitch::SfdDbg => 36,
-            DebugSwitch::Ams46 => 37,
-            DebugSwitch::VmaProbe => 38,
+            DebugSwitch::WriteTrace => 16,
+            DebugSwitch::OncpuInject => 17,
+            DebugSwitch::Ledger => 18,
+            DebugSwitch::BinderTrace => 19,
+            DebugSwitch::SyscallTrace => 20,
+            DebugSwitch::SleepSnap => 24,
+            DebugSwitch::FutexTrace => 21,
+            DebugSwitch::MonoWatch => 22,
+            DebugSwitch::TcpTrace => 23,
+            DebugSwitch::SockSnap => 25,
+            DebugSwitch::DataTap => 26,
+            DebugSwitch::WildWatch => 27,
+            DebugSwitch::MetaWatch => 28,
+            DebugSwitch::ParkDump => 29,
+            DebugSwitch::Schb => 30,
+            DebugSwitch::KsProbe => 31,
+            DebugSwitch::R83HeapScan => 32,
+            DebugSwitch::LeakHunt => 33,
+            DebugSwitch::WwCensus => 34,
+            DebugSwitch::TxnHang => 35,
+            DebugSwitch::TreeHunt => 36,
+            DebugSwitch::SfdDbg => 37,
+            DebugSwitch::Ams46 => 38,
+            DebugSwitch::VmaProbe => 39,
             // Index renumbering note (merge of 584c1105): main claimed
             // 39/40 for poolcensus/slowtask; EpollScan (perf-audit lane)
             // moves 39 -> 41. Cmdline lookup is by name, so the shift is
             // invisible to users; indices only key the SWITCHES array.
-            DebugSwitch::PoolCensus => 39,
-            DebugSwitch::SlowTask => 40,
-            DebugSwitch::EpollScan => 41,
-            DebugSwitch::ExtHunt => 42,
-            DebugSwitch::ExecCost => 43,
-            DebugSwitch::ThPark => 44,
-            DebugSwitch::RipSample => 45,
-            DebugSwitch::DbFileTrace => 46,
-            DebugSwitch::OhHunt => 47,
-            DebugSwitch::TfdCensus => 48,
-            DebugSwitch::ScmTap => 49,
-            DebugSwitch::SigTrace => 50,
-            DebugSwitch::SysForensic => 51,
-            DebugSwitch::SysRing => 52,
-            DebugSwitch::FilerdProbe => 53,
-            DebugSwitch::LostParkTrace => 54,
-            DebugSwitch::AcqDiv => 55,
+            DebugSwitch::PoolCensus => 40,
+            DebugSwitch::SlowTask => 41,
+            DebugSwitch::EpollScan => 42,
+            DebugSwitch::ExtHunt => 43,
+            DebugSwitch::ExecCost => 44,
+            DebugSwitch::ThPark => 45,
+            DebugSwitch::RipSample => 46,
+            DebugSwitch::DbFileTrace => 47,
+            DebugSwitch::OhHunt => 48,
+            DebugSwitch::TfdCensus => 49,
+            DebugSwitch::ScmTap => 50,
+            DebugSwitch::SigTrace => 51,
+            DebugSwitch::SysForensic => 52,
+            DebugSwitch::SysRing => 53,
+            DebugSwitch::FilerdProbe => 54,
+            DebugSwitch::LostParkTrace => 55,
+            DebugSwitch::AcqDiv => 56,
             // AllocWatch arrives after FilerdProbe/LostParkTrace on
             // main, so it takes 56 (its lane-local index of 53 belonged
             // to a table without those two). Lookup is by name; indices
             // only key the SWITCHES array.
-            DebugSwitch::AllocWatch => 56,
-            DebugSwitch::SyncGuard => 57,
-            DebugSwitch::SyncWatch => 58,
-            DebugSwitch::FuxStuck => 59,
-            DebugSwitch::LockDep => 60,
-            DebugSwitch::HungPanic => 61,
-            DebugSwitch::AbbaTest => 62,
+            DebugSwitch::AllocWatch => 57,
+            DebugSwitch::SyncGuard => 58,
+            DebugSwitch::SyncWatch => 59,
+            DebugSwitch::FuxStuck => 60,
+            DebugSwitch::LockDep => 61,
+            DebugSwitch::HungPanic => 62,
+            DebugSwitch::AbbaTest => 63,
         }
     }
 

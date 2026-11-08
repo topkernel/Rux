@@ -244,7 +244,9 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
     // mapped at the truncated position would make every fault resolve
     // as "mapped, perms OK" and retry forever (twin non-canonical-loop
     // note).
-    if (fault_addr.bits() >> 47) != 0 {
+    // review4 arch-M: check the RAW FAR_EL1, not the VirtAddr-masked
+    // value (the twin of the riscv64 guard fix above).
+    if (regs.far >> 47) != 0 {
         return bad_area(regs, access_type, fault_addr);
     }
 
