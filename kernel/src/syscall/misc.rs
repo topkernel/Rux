@@ -2785,12 +2785,21 @@ pub fn sys_epoll_pwait(args: SyscallArgs) -> i64 {
         Some(c) => c as *const _ as *mut crate::process::task::Task,
         None => return -(errno::EPERM as i64),
     };
-    // SAFETY: current is the running task; sigmask is a plain u64 field.
-    let saved_mask = unsafe { (*current).sigmask };
-    unsafe { (*current).sigmask = new_mask; }
-    let ret = sys_epoll_wait([args[0], args[1], args[2], args[3], 0, 0]);
-    unsafe { (*current).sigmask = saved_mask; }
-    ret
+    // review4 syscall-M: use WaitScopedMask so an interrupting signal —
+    // unblocked by the wait mask — is delivered BEFORE the old mask is
+    // reinstated (the immediate restore re-blocked the pending signal,
+    // so it was typically never delivered: epoll_pwait returned EINTR
+    // from a signal the handler never saw).
+    match WaitScopedMask::install(new_mask) {
+        Some(_scope) => {
+            let ret = sys_epoll_wait([args[0], args[1], args[2], args[3], 0, 0]);
+            if ret == -(errno::EINTR as i64) {
+                _scope.defer_restore(); // restore happens after delivery
+            } // else: Drop restores on scope exit
+            ret
+        }
+        None => -(errno::EPERM as i64),
+    }
 }
 
 // ============================================================================

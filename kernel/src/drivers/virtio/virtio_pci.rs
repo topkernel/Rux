@@ -1463,17 +1463,15 @@ fn read_block_once(
         // freed memory on the ROOT FS path. Late-drain the used-ring
         // index (R8-M2 discipline); a true timeout leaks the 64B block
         // instead of freeing in-flight DMA targets.
-        let mut late = false;
-        for _ in 0..2_000_000u64 {
-            let idx = unsafe {
-                core::ptr::read_volatile((used_ring_ptr as usize + 2) as *const u16)
-            };
-            if idx != prev_expected {
-                late = true;
-                break;
-            }
-            core::hint::spin_loop();
-        }
+        // review4 drivers-M: ANY used.idx advance (another chain's
+        // completion) used to count as ours — a concurrent async
+        // completion freed this 64B while the device could still DMA
+        // into it (R21-N2 class). We don't have the head descriptor
+        // ID at this site to scan properly; the conservative fix is
+        // to treat the drain-exhausted path like a true timeout:
+        // LEAK the buffer, never free it in-flight.
+        let late = false; // disable the any-advance-as-mine path
+        let _ = late;
         if !late {
             // True timeout (10s deadline expired): the chain may still be
             // in flight on the device. Flag our tombstone so the walker's
@@ -1719,17 +1717,15 @@ fn write_block_once(
         // freed memory on the ROOT FS path. Late-drain the used-ring
         // index (R8-M2 discipline); a true timeout leaks the 64B block
         // instead of freeing in-flight DMA targets.
-        let mut late = false;
-        for _ in 0..2_000_000u64 {
-            let idx = unsafe {
-                core::ptr::read_volatile((used_ring_ptr as usize + 2) as *const u16)
-            };
-            if idx != prev_expected {
-                late = true;
-                break;
-            }
-            core::hint::spin_loop();
-        }
+        // review4 drivers-M: ANY used.idx advance (another chain's
+        // completion) used to count as ours — a concurrent async
+        // completion freed this 64B while the device could still DMA
+        // into it (R21-N2 class). We don't have the head descriptor
+        // ID at this site to scan properly; the conservative fix is
+        // to treat the drain-exhausted path like a true timeout:
+        // LEAK the buffer, never free it in-flight.
+        let late = false; // disable the any-advance-as-mine path
+        let _ = late;
         if !late {
             // True timeout (10s deadline expired) — flag the tombstone and
             // leak-note the chain (same pairing as the read path).
@@ -1931,17 +1927,15 @@ fn flush_block_once(slot: usize) -> Result<usize, &'static str> {
         // Same R21-N2 discipline as the RW paths: descriptors still
         // submitted, late-drain bounded; a true timeout leaks the 64B
         // block instead of freeing in-flight DMA targets.
-        let mut late = false;
-        for _ in 0..2_000_000u64 {
-            let idx = unsafe {
-                core::ptr::read_volatile((used_ring_ptr as usize + 2) as *const u16)
-            };
-            if idx != prev_expected {
-                late = true;
-                break;
-            }
-            core::hint::spin_loop();
-        }
+        // review4 drivers-M: ANY used.idx advance (another chain's
+        // completion) used to count as ours — a concurrent async
+        // completion freed this 64B while the device could still DMA
+        // into it (R21-N2 class). We don't have the head descriptor
+        // ID at this site to scan properly; the conservative fix is
+        // to treat the drain-exhausted path like a true timeout:
+        // LEAK the buffer, never free it in-flight.
+        let late = false; // disable the any-advance-as-mine path
+        let _ = late;
         if !late {
             // True timeout (10s deadline expired) — flag the tombstone and
             // leak-note the chain (same pairing as the read path).

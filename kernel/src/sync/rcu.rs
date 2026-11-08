@@ -770,12 +770,15 @@ fn fire_graced_batch() {
         // SAFETY: CBS_BATCH_LOCK held; list pointers initialised in init().
         unsafe {
             if CBS_PENDING_LIST.is_empty() {
-                unlock_cbs_batch();
-                // Nothing pending: release the QS-reporting announcement
-                // we hold (exactly one holder via the swap).
+                // review4 sync-M: release the QS-reporting announcement
+                // BEFORE dropping the lock — the interleaving (empty
+                // under lock → unlock → other CPU takes the announcement
+                // → we sub it to 0) strands the other CPU's freshly
+                // spliced batch with no QS reporting (callbacks leak).
                 if CBS_WAITER_HELD.swap(false, Ordering::AcqRel) {
                     RCU_WAITERS.fetch_sub(1, Ordering::AcqRel);
                 }
+                unlock_cbs_batch();
                 return;
             }
             let gen = CBS_BATCH_GEN.load(Ordering::Acquire);

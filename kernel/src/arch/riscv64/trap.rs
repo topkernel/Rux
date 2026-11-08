@@ -1250,9 +1250,11 @@ fn handle_breakpoint(regs: &mut PtRegs) {
             // A real user ebreak under a tracer stops for the tracer
             // instead of dying (gdb inserts/relies on breakpoints).
             if (*task).tracer_pid() != 0 {
-                // Advance past the 4-byte ebreak so CONT resumes at the
-                // following instruction (Linux do_trap_break).
-                regs.epc += 4;
+                // review4 arch-M: Linux do_trap_break does NOT advance
+                // sepc — the tracer reads/writes the reg set itself
+                // (gdb sets epc past the breakpoint on its own). Our
+                // forced +=4 broke gdb's RIP-relative PC restore.
+                // The tracer can advance epc via POKEUSR if it wants.
                 // SAFETY: task is the current task in its trap path.
                 unsafe {
                     crate::process::ptrace::ptrace_stop(
