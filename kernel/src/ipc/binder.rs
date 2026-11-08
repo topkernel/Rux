@@ -7908,7 +7908,7 @@ fn binder_thread_write(
                 if txnhunt_on() && is_acct(proc.pid) {
                     static AC_N: core::sync::atomic::AtomicUsize =
                         core::sync::atomic::AtomicUsize::new(0);
-                    if AC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 500 {
+                    if AC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 1500 {
                         crate::pr_warn!(
                             "ACCT-CMD pid={} tid={} cmd={:#x} reply={} h={:#x} code={:#x} oneway={} ds={} os={}",
                             proc.pid,
@@ -10461,7 +10461,7 @@ fn binder_transaction(
                     if txnhunt_on() && is_acct(tproc.pid) {
                         static RPUSH_N: core::sync::atomic::AtomicUsize =
                             core::sync::atomic::AtomicUsize::new(0);
-                        if RPUSH_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
+                        if RPUSH_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 800 {
                             let mut w = crate::dfx::backtrace::ConsoleWriter::new();
                             use core::fmt::Write as _;
                             let _ = writeln!(
@@ -11731,7 +11731,7 @@ fn binder_thread_read(
                             if txnhunt_on() && is_acct(proc.pid) {
                                 static AR_N: core::sync::atomic::AtomicUsize =
                                     core::sync::atomic::AtomicUsize::new(0);
-                                if AR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400 {
+                                if AR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 2400 {
                                     let mut w = crate::dfx::backtrace::ConsoleWriter::new();
                                     use core::fmt::Write as _;
                                     let _ = writeln!(
