@@ -168,7 +168,7 @@ add_dir_entry. Boot-time-only today; route through the wrapper or delete.
 
 Directories clump into the first groups — fidelity/perf note only.
 
-### [Medium] ext4/extent.rs write_node — extent-tree blocks are never sealed with their metadata_csum tail
+### [Medium] ext4/extent.rs write_node — extent-tree blocks are never sealed with their metadata_csum tail — ✅ FIXED (`6a593a60`)
 
 `csum::extent_block_csum_set` exists (and mod.rs's policy comment claims the
 tails are sealed at their write sites) but has NO callers. On a metadata_csum rw

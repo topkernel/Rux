@@ -288,7 +288,7 @@ free_irq's synchronize relies on it).
 
 ## drivers/net (device side)
 
-### [Medium] virtio_net.rs:357-517 — every TX packet synchronously spins for device completion under tx_queue lock_irqsave
+### [Medium] virtio_net.rs:357-517 — every TX packet synchronously spins for device completion under tx_queue lock_irqsave — ✅ FIXED (`6a593a60`)
 xmit() holds `tx_queue.lock_irqsave()` across submit → notify →
 wait_for_completion_max(200K iters) → 500K late-drain — external interrupts
 disabled for up to a few ms of TCG time PER PACKET on the sending CPU
