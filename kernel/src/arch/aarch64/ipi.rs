@@ -292,10 +292,15 @@ fn csd_flush_queue() {
     // is exclusively ours until completion; senders spin on done until
     // after we store true, so no Box is freed under us.
     let queue_ptr = unsafe { &CSD_QUEUES[cpu] as *const _ as *mut ListHead };
+    // The list link sits at an offset INSIDE CallSingleData: node→struct
+    // requires the back-adjustment (a bare cast reads the link pointers
+    // as func/info and calls the queue head). Ported from the x86_64
+    // twin (review4 C-2).
+    let list_off = core::mem::offset_of!(CallSingleData, list);
     let mut node = head;
     while node != queue_ptr {
         unsafe {
-            let csd = node as *mut CallSingleData;
+            let csd = (node as *mut u8).sub(list_off) as *mut CallSingleData;
             let next = (*node).next;
             let f = (*csd).func;
             let arg = (*csd).info;

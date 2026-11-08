@@ -322,13 +322,18 @@ fn csd_flush_queue() {
     // SAFETY: queue_ptr is a stable address of a static. The list was detached under
     // lock above, so we have exclusive ownership of all nodes until completion.
     let queue_ptr = unsafe { &CSD_QUEUES[cpu] as *const _ as *mut ListHead };
+    // The list link sits at an offset INSIDE CallSingleData: node→struct
+    // requires the back-adjustment (a bare cast reads the link pointers
+    // as func/info and calls the queue head). Ported from the x86_64
+    // twin (review4 C-2).
+    let list_off = core::mem::offset_of!(CallSingleData, list);
     let mut node = head;
     while node != queue_ptr {
         // SAFETY: node points into the detached list of CallSingleData entries.
         // Each node was allocated via Box::new and is valid. The sender is
         // spin-waiting on done, so the Box is not freed until after we store true.
         unsafe {
-            let csd = node as *mut CallSingleData;
+            let csd = (node as *mut u8).sub(list_off) as *mut CallSingleData;
             let next = (*node).next;
             let f = (*csd).func;
             let arg = (*csd).info;
