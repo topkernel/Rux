@@ -4949,15 +4949,16 @@ pub fn txn_hang_audit() {
                                 .unwrap_or("?")
                                 .trim_end_matches('\0')
                         );
-                        // 78th (ohw115 tid 344 / ohw120 tid 354): a samgr
-                        // FFRT worker parked mid-brk (sys=45) for minutes
-                        // while holding the wedge's FFRT mutex — the VMA
-                        // rwsem owner word shows NO holder (count=0), so
-                        // the sleep is NOT the rwsem park. On the SECOND
-                        // consecutive 30 s snapshot in brk, print the
-                        // thread's kernel stack (sp-up walk, same contract
-                        // as TXN-HANG-STK) — the frames name the sleep
-                        // site exactly.
+                        // 78th (ohw115-123): a samgr FFRT worker parked in
+                        // sys=45 — x86_64 RECVFROM, first misread as brk —
+                        // for minutes while holding the wedge's FFRT
+                        // mutex. The stacks (ohw121/123, three workers
+                        // 340/343/347): sys_recvfrom -> unix_recv_ctl ->
+                        // unix_wait_round -> schedule — the beget param
+                        // client's socket recv never completes. On the
+                        // SECOND consecutive 30 s snapshot in recvfrom,
+                        // print the kernel stack (sp-up walk, same
+                        // contract as TXN-HANG-STK).
                         if sys == 45 {
                             const BRKT_N: usize = 8;
                             static BRKT_TIDS: [core::sync::atomic::AtomicU32; BRKT_N] =
@@ -4991,7 +4992,7 @@ pub fn txn_hang_audit() {
                             }
                             if slot != usize::MAX {
                                 if BRKT_SEEN[slot].fetch_add(1, Relaxed) == 1 {
-                                    let _ = write!(w, "SAMGR-BRKSTUCK tid={} st={:#x}", tid, tk.state().bits());
+                                    let _ = write!(w, "SAMGR-RECVSTUCK tid={} st={:#x}", tid, tk.state().bits());
                                     if let Some(top) = tk.kernel_stack_top_checked() {
                                         #[cfg(feature = "x86_64")]
                                         extern "C" {
