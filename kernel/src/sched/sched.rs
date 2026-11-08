@@ -5540,16 +5540,33 @@ pub fn wake_up_enqueue_opt(
                 //     never raced. Instant conviction — this is the arm
                 //     the permanent wedge actually presents (a single
                 //     observation, no wake ever comes again to age it).
-                //   arm a (aged): the shape persisted CONTINUOUSLY for
-                //     ≥50 jiffies (the WM-fix discipline: first-seen jiffy
-                //     recorded, entry retired the moment any observation
-                //     stops seeing this exact shape — a genuine park window
-                //     is microseconds and a genuinely running task is
-                //     RUNNING-state, so a 500 ms continuous lying shape is
-                //     stale bookkeeping nobody will ever clear). PICK_LIVE
-                //     marks additionally require this arm (R74: LIVE is
-                //     executing-somewhere; only a matured age window
-                //     acquits it of that).
+                //   arm a (aged) — DELETED 2026-11-08 (r19, mechanism-C
+                //     conviction): it convicted ANY task whose naming
+                //     slot persisted ≥50 jiffies across ≥2 refused wakes,
+                //     which is exactly the healthy shape of a CPU-bound
+                //     task (picked → gen retired at switch-in → runs for
+                //     seconds → spurious wakes correctly refused as
+                //     why=c). The heal then double-enqueued a RUNNING
+                //     task (one Task, one kernel stack, two CPUs —
+                //     interleaved __switch_to saves, scribbled return
+                //     addresses) and zeroed its live preempt count.
+                //     r18 evidence: 10 GB-churn boots, 8 healed, 5 of
+                //     them wedged/panicked — every wedge immediately
+                //     preceded by "SLOT-LIE-WAKE-HEALED arm=a"; damage =
+                //     ring-0 jumps to wild addresses (kernel heap, .bss)
+                //     and the GRQ spinlock stuck at val=1 (a CPU's
+                //     __schedule frame destroyed mid-section, the unlock
+                //     never executed) — every DEADLOCK wedge in the batch.
+                //     The heal pid showed PREEMPT-UNDERFLOW at its own
+                //     next preempt_count_sub (r18fix-7: heal pid=0x134 →
+                //     underflow pid=0x134): the "victim" was executing
+                //     with a nonzero preempt count when zeroed. r15's own
+                //     reproducer recorded slotlie=0 on its wedges — the
+                //     aged arm never healed a real wedge; its only
+                //     demonstrated effect was this corruption. The four
+                //     instant arms (contradiction-keyed) remain: they
+                //     cannot fire on a genuinely running task whose
+                //     ledger is consistent.
                 // On conviction: rewrite every naming slot to its idle
                 // task (+ generation supersede), release a leftover pick
                 // qword (R74 full-qword discipline), drop curr_on so the
@@ -5558,12 +5575,6 @@ pub fn wake_up_enqueue_opt(
                 // pickable again (pick_owner_live now false) and any CPU's
                 // tick (halted CPUs keep ticking) resumes it within a
                 // jiffy.
-                const LSS: usize = 8;
-                static LS_TASK: [core::sync::atomic::AtomicUsize; LSS] =
-                    [const { core::sync::atomic::AtomicUsize::new(0) }; LSS];
-                static LS_JIF: [core::sync::atomic::AtomicU64; LSS] =
-                    [const { core::sync::atomic::AtomicU64::new(0) }; LSS];
-                let ls_key = task as usize;
                 if curr_on && !exiting && !mid_switch {
                     let ls_now = crate::drivers::timer::get_jiffies();
                     let mut ls_idle_arm = false;
@@ -5610,51 +5621,23 @@ pub fn wake_up_enqueue_opt(
                             }
                         }
                     }
-                    let mut ls_aged_arm = false;
-                    if !ls_idle_arm && !ls_lost_arm {
-                        for s in 0..LSS {
-                            let prev =
-                                LS_TASK[s].load(core::sync::atomic::Ordering::Relaxed);
-                            if prev == ls_key {
-                                let prev_jif =
-                                    LS_JIF[s].load(core::sync::atomic::Ordering::Relaxed);
-                                if ls_now.wrapping_sub(prev_jif) >= 50 {
-                                    ls_aged_arm = true;
-                                }
-                                break;
-                            }
-                            if prev == 0
-                                && LS_TASK[s]
-                                    .compare_exchange(
-                                        0,
-                                        ls_key,
-                                        core::sync::atomic::Ordering::Relaxed,
-                                        core::sync::atomic::Ordering::Relaxed,
-                                    )
-                                    .is_ok()
-                            {
-                                LS_JIF[s].store(ls_now, core::sync::atomic::Ordering::Relaxed);
-                                break;
-                            }
-                        }
-                    }
                     let mut ls_convict =
-                        ls_idle_arm || ls_lost_arm || ls_ledger_arm || ls_parked_arm || ls_aged_arm;
+                        ls_idle_arm || ls_lost_arm || ls_ledger_arm || ls_parked_arm;
                     // Pick-ownership adjudication (R74, keyed on the
                     // ownership QWORD — on_cpu/claim are published together
                     // at pick and released together by the switch-out; a
                     // released qword leaves pick_state as an advisory
                     // remnant that cannot veto the rewrite): a leftover
                     // {on_cpu=1} mark is only clearable when no live
-                    // execution can be behind it. LIVE needs the matured
-                    // age window; PICKED must be revoked so a starved
+                    // execution can be behind it. With the aged arm gone,
+                    // PICK_LIVE is never clearable here (LIVE +
+                    // consistent ledger = the task really is executing —
+                    // the r18 lesson); PICKED must be revoked so a starved
                     // picker aborts at its affirm CAS.
                     if ls_convict && (*task).on_cpu() {
                         let ps = (*task).pick_state();
                         if ps == PICK_LIVE {
-                            if !ls_aged_arm {
-                                ls_convict = false;
-                            }
+                            ls_convict = false;
                         } else if ps == PICK_PICKED && !(*task).revoke_pending_pick() {
                             // The picker affirmed LIVE under us — it is
                             // resuming this task right now; not healable.
@@ -5714,41 +5697,14 @@ pub fn wake_up_enqueue_opt(
                                 } else if ls_parked_arm {
                                     b'p'
                                 } else {
-                                    b'a'
+                                    b'?'
                                 });
                                 putchar(b'\n');
                             }
-                            // The aged entry's job is done (the shape is
-                            // gone); fall into the phantom-count heal and
-                            // the normal enqueue below.
-                            for s in 0..LSS {
-                                LS_TASK[s]
-                                    .compare_exchange(
-                                        ls_key,
-                                        0,
-                                        core::sync::atomic::Ordering::Relaxed,
-                                        core::sync::atomic::Ordering::Relaxed,
-                                    )
-                                    .ok();
-                            }
+                            // Fall into the phantom-count heal and the
+                            // normal enqueue below.
                             curr_on = false;
                         }
-                    }
-                } else {
-                    // The lying shape is not observed at this wake (no
-                    // naming slot, the mid-switch marker is live, or the
-                    // task is exiting): retire any aged entry so the next
-                    // stuck shape ages from scratch (WM-fix discipline —
-                    // entries only survive while the shape does).
-                    for s in 0..LSS {
-                        LS_TASK[s]
-                            .compare_exchange(
-                                ls_key,
-                                0,
-                                core::sync::atomic::Ordering::Relaxed,
-                                core::sync::atomic::Ordering::Relaxed,
-                            )
-                            .ok();
                     }
                 }
                 if !exiting && !mid_switch && !curr_on {
