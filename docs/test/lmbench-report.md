@@ -96,6 +96,31 @@ sweep ran under loadavg 10–19; strikethrough values show the lineage.*
 
 
 
+## SMP-8 caliber re-anchor (2026-11-08, round 16 — read this before any ratio)
+
+The campaign rigs moved to -smp 8 (round 15+); per the user ruling the
+reference column was re-anchored at the same caliber (data:
+run/lmbench-refkvm-smp8.txt, ours: run/lmbench-ours-smp8.txt; scripts
+r16-refanchor-smp8.sh / r16-ours-smp8.sh).
+
+**Reference under SMP-8 vs the old SMP-2 column**: only fork (51.61 →
+57.76 µs, +11.9%) and exec (84.80 → 93.73, +10.5%) got measurably
+costlier; the syscall rows are within ±2%.
+
+**Ours under SMP-8 is where the real movement is**: fork 55.7-57.9 →
+90.2 µs (+62%), exec 77.6-82 → 169.7 (+118%, measured in a 4.6-5 load
+window — conservative-high). The amplification is on OUR side, not the
+reference's, and matches the perf-gate SMP-8 re-bank's p3b_cow +58%:
+COW/TLB-shootdown costs scale with vCPU count.
+
+**New open-rows queue at the SMP-8 caliber**: exec 1.81x > fork 1.56x
+> open 1.33x > stat 1.29x > null 1.20x > write 1.19x > read 1.09x.
+Closed rows hold: ctx 2.87x ahead, pipe 0.54x, fstat 0.77x.
+
+The fork/exec values above carry a 3.3-6.9 load window (no <3 quiet
+window that round) — quiet-window re-measure pending, folded into the
+mechanism-C hunt (the GB churn reproducer is the same family).
+
 ## Campaign standings (2026-11-08, rounds 1-14 of perf-gap-hunt — the current authoritative table)
 
 Fourteen rounds (kernel lineage 53fba4f6 → branch tip; evidence chain in
