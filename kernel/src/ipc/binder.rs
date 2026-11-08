@@ -6006,7 +6006,35 @@ pub fn bwr_park_audit() {
                 && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck)
             {
                 match crate::sync::futex::ffrt_mutex_scan(task) {
-                    Some(t) => alloc::format!(" mscan[{}]", t),
+                    Some(t) => {
+                        // 77th: auto-arm fuxwatch slot 2 on the live
+                        // contended mutex word (chain-detected; shifts
+                        // per boot). Only when the slot is free and a
+                        // samgr-thread scan found it.
+                        let w2 = crate::sync::futex::FRMTX_LIVE_WORD
+                            .load(core::sync::atomic::Ordering::Relaxed);
+                        if w2 != 0
+                            && s.pid as u32
+                                == crate::ipc::binder::binder_sareg_samgr_pid()
+                        {
+                            if crate::sync::futex::FUXWATCH2_ADDR
+                                .compare_exchange(
+                                    0,
+                                    w2,
+                                    core::sync::atomic::Ordering::Relaxed,
+                                    core::sync::atomic::Ordering::Relaxed,
+                                )
+                                .is_ok()
+                            {
+                                crate::pr_warn!(
+                                    "FUXWATCH2-CHAIN word={:#x} (live contended FFRT mutex)",
+                                    w2
+                                );
+                                crate::dfx::taskdump::ensure_defer_thread();
+                            }
+                        }
+                        alloc::format!(" mscan[{}]", t)
+                    }
                     None => alloc::string::String::new(),
                 }
             } else {

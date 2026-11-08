@@ -8791,3 +8791,200 @@ this session: ohw102 (probes v1: delivery works, drop named), ohw103
 (control: ffffffff verdict + tcomplete strand), ohw104 (fix v1:
 token_src still 0 — txn_stack empty for oneway), ohw105 (GSI debug:
 confirmed stack-empty), ohw106 (fix v2: the proof boot).
+
+### 76. 76TH SESSION (WIP preserved as 68b6d3d0, finished by the 77th)
+
+The 76th raised SACB/ACCT budgets and built the OnAdd/OnRemove parcel
+decoder (budget 400->4000 / 2400->8000 + hex decode of the
+[ver][tokLen][utf16 token][said] shape); ohw107 ran it (44 quota
+lines). Decode beyond 64 bytes cuts before the said (offset 70 for
+the 31-char listener token) — the SA id had to be recovered by
+timestamp correlation instead (see §77.1).
+
+### 77. 77TH SESSION (2026-11-08) — THE READY-FLAG QUESTION CLOSED: ALL
+### THREE OnAdd CALLBACKS DELIVER. The launcher chain now dies inside
+### CreateNewUser(100): the per-user install stream stalls at
+### com.ohos.medialibrary.medialibrarydata because installs'
+### LoadSystemAbility(SA:8250 EL5) parks 90-160 s on samgr's
+### deterministic FFRT mutex 0x7ff0004b5ec8 (the 57th's suspended-task
+### class) and retries every 4 s forever. Wedge fully re-instrumented
+### (budgets raised, LOAD said decoded, SAMGR-SNAP landed); warm-boot
+### pixel attempt + fuxwatch trace handed to the 78th. (483f1c7f)
+
+#### 1. THE OnAdd DECODE (ohw107, the 76th's rig + timestamp join)
+
+Four OnAdd (code 1, dlen 88) reached accountmgr pid 798:
+  txn4225  28.564s — OnAdd(5003 storage): SA:5003_6 inserted 6.220s
+           (before accountmgr's 28.3-28.6 subscribes — samgr's
+           immediate subscribe-time notify), delivered 28.584
+  txn7983  40.903s — OnAdd(180 AMS): SA:180_72 inserted 40.955
+  txn8160  41.049s — OnAdd(182 appmgr) fanout neighbor
+  txn12161 61.466s — OnAdd(401 BMS): SA:401_82 inserted 61.454,
+           delivered 61.475
+All four DELIVERED (ACCT-RECV read-side). isStorageReady/isAmsReady/
+isBmsReady ALL SET by 61.5 s. The 75th's fear (a lost callback) is
+DISPROVEN — OnAdd delivery works. (Parcel layout for future boots:
+header 8 + toklen@8 + token@12; said = u32 at offset 60 for the
+22-char "ohos.samgr.accessToken" token; the OnAdd said sits past the
+76-byte dump — correlate by insert timestamps.)
+
+#### 2. THE NEW BREAK: inside CreateNewUser (ohw107 62.4s)
+
+61.475 OnAdd(401) -> AccountMgrService::OnAddSystemAbility case 401:
+all three flags set -> Init({100}) -> CreateOsAccount(100) ->
+SendMsgForAccountCreate -> SendToBMSAccountCreate ->
+BundleManagerAdapter::CreateNewUser -> IBundleUserMgr code 0
+(CREATE_USER, parcel 84 B) = txn12405 accountmgr.826 -> foundation.
+710 at 62.402. BMS (SA:401 runs INSIDE foundation; tid 1047 'foundation'
+does the bmsdb work) handles it ON THE MAIN THREAD:
+OnCreateNewUser posts per-bundle preinstall tasks to the installs
+daemon then bundlePromise->WaitForAllTasksExecute() — tid 710
+futex-parks (0x7fffffffc304, its TLS-block cv) from 62.4 s. THE
+ENTIRE REMAINING BOOT now depends on the per-user install stream.
+
+#### 3. THE INSTALL STREAM'S DEATH (the 8250 metronome)
+
+Per-user installs (el2/100) flow 63-67 s (~0.5-1.4 s/bundle vs
+reference ~50 ms — the per-bundle slowness is real but SECONDARY),
+then com.ohos.medialibrary.medialibrarydata needs EL5 filekey
+(SA:8250, host el5_filekey_man pid 313/315 ALIVE, SA registered at
+6.3 s): installs daemon LoadSystemAbility(8250) at 89-95 s — and
+every retry parks 90-160 s: samgr's load handler (OS_IPC thread)
+futex-parks acquiring the FFRT mutex at heap 0x7ff0004b5ec8
+(DETERMINISTIC across ohw108/109/110 — same image+build). Holder
+(ohw108 tid345 / ohw109 tid356, +0x148 in its ExecuteCtx) is itself
+parked in futex with NO pending txn — the 57th's suspended-task-in-
+critical-section class, down to the same frame shape (mallocng +
+libffrt + sa_main). No StartAbility is ever sent (no dlen=152 code-1
+to el5), no ohos.ctl.start set — the handler never gets past lock
+acquisition. The stream: 14 bundles by ~170 s, then a 102 s stall
+(the 91-158 s lock holds), a 6-bundle resume at 169-176 s, then dead
+to 900 s. CreateNewUser never returns; ActivateDefaultOsAccount/
+StartUser(46) never fire; AMS46 ENQ = 0 all boot.
+
+This is the SAME wedge family the 57th/58th decoded (ohc57-75:
+A = listenerMapLock_ class, owner suspended mid-load/subscribe,
+pandemic of parked samgr handlers; 58th's verdict: futex layer clean,
+no WAKE ever fires on the stuck words — the notify that would resume
+the suspended task never EXECUTES). What changed: the 75th's install
+stream re-exercises the load path at 60-120 s and makes the wedge
+4/4 reproducible at the same bundle.
+
+#### 4. INSTRUMENTS LANDED THIS SESSION (483f1c7f, all dfx-gated)
+
+- SAREG 600->4000, hex 40->800 + hex ALWAYS for code-7 LOAD sends
+  (said decodes at offset 60 — verified: txn25 ADD parcel -> 3901 =
+  param_watcher's SA). ohw108+ decode every load target: the
+  metronome is 8250 (installs), plus one-off 8350 (foundation),
+  1124/2802 (systemui), 114 (audio_server), 101/3511 etc.
+- SACSA 300->3000, SLRD 300->4000 (ohw107 hit both by 30 s — blind
+  exactly over the wedge window).
+- fuxstuck census: OS_Dfx* poll groups skipped in BOTH print
+  selectors (ohw108: stuck_total=193 printed=8, all watchdog-class).
+  NOTE: still not enough alone — 96-sample walk cap over a 193-stuck
+  population can miss samgr (48th's known blind spot); SAMGR-SNAP
+  covers samgr directly.
+- SAMGR-SNAP: 30 s cadence inside txn_hang_audit, one line per
+  samgr thread (tid/state/sys/rip/comm). ohw110 261s sample: all
+  OS_IPC threads healthy in ioctl-read EXCEPT the load waiters;
+  FFRT workers 342/344(?)/345(?)/347/348 futex-parked; 343
+  OS_FFRT_Delay in epoll; 346 nanosleep — the worker pool idle-park
+  picture of the 57th, now directly visible per boot.
+- SAMGR-THREADEXIT catch: 'Executor' (preferences task-queue thread,
+  executor.h — 2 s timed idle waits, idle self-retirement) exits at
+  ~8.3 s code=0. The 57th saw the same and acquitted it (pre-wedge);
+  it remains a candidate only as "the pool that could have resumed
+  the suspended task went away early".
+
+#### 5. BOOTS
+
+ohw108 (probe77: budgets+census; wedge reproduced; census still
+watchdog-clogged -> filter), ohw109 (probe77b: census filter; froze
+202 s in the dead-task-switch family mid-taskdump — the txn-hang-20s
+dump_all_tasks trigger NEVER fires on ohw108/109/110 despite 20 s+
+exec entries: known-broken, needs its own look), ohw110 (probe77c:
++SAMGR-SNAP; wedge reproduced, snapshots banked), ohw111 (population
+boot, NOSNAP, userdata-warm77.img — warm-boot pixel attempt), ohw112
+(fuxwatch=0x7ff0004b5ec8,1 from t=1 — the acquire/release lifecycle
+trace of the contested mutex, the 57th's ohc70 rig on the current
+build; handed to the 78th with the holder's decode path).
+
+#### 6. FOR THE 78TH (priority order)
+
+1. ohw112's fuxwatch trace: the LAST acquire (cmpxchg old=0) before
+   the wedge that never releases names the owner tid + its frame
+   window (the 57th's ohc70 decode: samgr 0x82127 CheckListenerNotify
+   / listenerMapLock_ class — re-derive for this build via
+   lib.unstripped libsamgr_server + the frame-address window).
+2. The suspended task's own (coroutine) stack — the 57th's §4.1
+   handoff (widen ffrt_lock_region_scan / find CPUEUTask in the FFRT
+   slab, follow saved SP): symbolize what the task blocks on. Prime
+   suspects unchanged: beget param client (ServiceWaitForStatus) or
+   the FFRT queue-internal mutex; on the timerfd/epoll side the 56th's
+   open epoll_notify_file wiring items are still unlanded.
+3. The per-bundle 0.5-1.4 s install cost (10-20x reference) — fix
+   this and the idle-window that trips the wedge mostly closes; the
+   75th's SetBundleQuota timeline (44 quota lines by 61 s vs
+   reference 84 events by 9.9 s) is the metric.
+4. Warm-boot route to PIXELS (ohw111 population -> ohw112-class warm
+   boot): if the post-install chain (StartUser(46) -> AMS
+   StartHighestPriorityAbility -> ServiceStart starting:launcher ->
+   bootevent.launcher.ready) has never been exercised on this image,
+   a warm boot that dodges the first-boot install wedge proves the
+   whole downstream ladder — take the screenshot either way.
+5. The dead-task-switch freeze (ohw109 202 s, SWITCHIN-DEAD-TASK
+   pid 0x59a/0x599, serial dies mid-taskdump) and the never-firing
+   txn-hang-20s dump trigger are two small standalone bugs worth a
+   lane each.
+
+Gates: x86_64 rc=0 (probe77c); riscv64 clean-config rc=0
+(build-rv-77b.log); aarch64 rc=0 (build-a64-77.log); riscv64 make
+test: see run/test-rv-77.log (result appended at session close). No
+behavior changes outside dfx gates — pbench not required for the
+branch; coordinator gates at merge.
+
+#### 7. SESSION CLOSE ADDENDUM — warm-boot verdict + self-arm status
+
+- ohw111 (population, NOSNAP, userdata-warm77.img): froze 500.486 s
+  mid-taskdump (SCRIBBLE-RING last line, then serial silence) — the
+  SECOND boot to die exactly there (ohw109 202 s). The dump path
+  (dump_all_tasks direct-console) can hang the whole VM; two samples,
+  same signature. /data through 500 s persisted (19 quota events +
+  launcher rows).
+- ohw114 (warm boot on userdata-warm77.img, probe77d): warm path
+  WORKS — "com.ohos.launcher" marker at 2.464 s (bmsdb rows found
+  instantly), only 3 quota events all boot. BUT account 100's
+  completion record never persisted (the population boot wedged
+  mid-CreateNewUser), so CreateNewUser re-ran, the per-user stream
+  re-ran, and the SAME medialibrarydata -> LoadSystemAbility(8250)
+  wedge re-formed at ~229 s (metronome to 270+ s). No pixels. The
+  warm route does NOT dodge the wedge — CreateNewUser re-runs until
+  account 100 completes, and completion requires the install stream
+  to finish, which requires the wedge fix. (A userdata cooked by the
+  REFERENCE kernel would dodge it — out of scope for this rig.)
+- ohw112 (fuxwatch=0x7ff0004b5ec8,1): the contested word SHIFTED this
+  boot (0x7ff000499a48 per the chain) — the fixed-address watch only
+  caught a foreign process's same-VA object (17 FW lines, tid 469,
+  non-lock data). Wedge otherwise identical: first 8250 load 106.6 s,
+  85 s stall, metronome from 191.6 s to 389+ s; a txn11467 (code 7
+  from pid 767) sat 165 s on samgr.1075.
+- ohw113 (probe77d, chain self-arm of FUXWATCH2): the
+  FUXWATCH2-CHAIN auto-arm did NOT fire — the mscan 3-per-burst
+  budget (MS_N) is first-come and non-samgr hung-txn threads eat it
+  before any samgr row. Fix for the 78th: give samgr-pid rows
+  priority in the MS_N budget (or a separate samgr-only budget slot)
+  — the code path (futex.rs FRMTX_LIVE_WORD + binder.rs
+  FUXWATCH2-CHAIN arm) is landed and compiled, just gated out.
+- OH68-HLD module map (banked per boot, ohw112): ld-musl
+  0x3fbf077000-0x3fbf138000, samgr 0x555555597000-0x55555560e000,
+  libfwmark_client 0x7ff0004c2000, libhitrace_meter 0x7ff000646000,
+  libc++ 0x7ff000716000+0x95000, libbeget_proxy 0x7ff000810000,
+  libsamgr_common 0x7ff00084f000. The ohw108 holder frames decode:
+  0x7ff00078fc46/0x7ff00079b217 = libc++ +0x79c46/+0x85217 (cv/mutex
+  internals), 0x3fbf0ba05c = mallocng, 0x7ff00131095a = the FFRT
+  region, 0x5555555c603a = samgr main binary.
+- Gates final: x86_64 rc=0 (probe77c/d); riscv64 clean-config rc=0
+  (run/build-rv-77b.log); aarch64 rc=0 (run/build-a64-77.log);
+  riscv64 make test GREEN ("suite verdict green", run/test-rv-77.log,
+  wrapper rc=124 after kernel halt = known pattern). All changes
+  dfx-gated; no plain-boot behavior change.

@@ -920,6 +920,13 @@ pub fn ffrt_chain_walk(
 /// assembled across threads. Walker-only reads of the pinned task's
 /// frozen mm; dfx-gated by the caller. Returns None when nothing in
 /// the window shape-tests (plain cond/mutex parks).
+/// 77th: the most recent CONTENDED (l==2) mutexPrivate lock word seen
+/// by any ffrt_mutex_scan — the TXN-HANG print site auto-arms fuxwatch
+/// slot 2 on it (the samgr load-wedge's live word, which shifts per
+/// boot: 0x7ff0004b5ec8 on ohw108-110 vs 0x7ff000499a48 on ohw112).
+pub static FRMTX_LIVE_WORD: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
 pub fn ffrt_mutex_scan(task: *mut crate::process::Task) -> Option<alloc::string::String> {
     use core::fmt::Write as _;
     if task.is_null() {
@@ -1030,6 +1037,14 @@ pub fn ffrt_mutex_scan(task: *mut crate::process::Task) -> Option<alloc::string:
             seen_locks[nhit % 4] = b;
             nhit += 1;
             let l = rd(b + 0x8).unwrap_or(0) & 0xffff_ffff;
+            // 77th: publish the first CONTENDED (l==2) mutex's lock word
+            // for the TXN-HANG auto-arm (FUXWATCH2) — the wedge's live
+            // word shifts per boot (0x7ff0004b5ec8 on ohw108-110 vs
+            // 0x7ff000499a48 on ohw112), so a fixed cmdline address
+            // misses; the chain scan sees the real word every burst.
+            if l == 2 {
+                FRMTX_LIVE_WORD.store(b + 0x8, core::sync::atomic::Ordering::Relaxed);
+            }
             let _ = write!(out, " m{nhit}={:#x}l{l}(", b);
             // Waiter ring: head node at b+0x10 (next at +0x0, prev +0x8).
             let head = b + 0x10;
