@@ -8293,3 +8293,152 @@ hdf DevSvcManager source; the crash-restart sequence that reaches it
 exists on BOTH kernels — find the kernel-visible event that orders
 them differently; with abref1's reference log now on the SAME rig,
 the txn/delivery timeline diff is directly alignable line-by-line).
+
+### 72. 72ND SESSION (2026-11-08) — THE FOUNDER CLASS CLOSED: the
+### death-callback self-deadlock was a read-drain latch divergence
+### (binder.c:4460 parity fix, 40d78cc8); ohw93 boots PAST every
+### historical gate: bootanimation FINISHES (first time), StartUser
+### completes, first non-black pixels on the rig (06b933b4)
+
+#### 1. THE AUDIT (mission step 2 — enqueue-order vs reference)
+
+Method: reference = /home/william/workspace/oh-robot/kernel/linux/
+linux-6.6/drivers/android/binder.c (in-tree); ours = binder.rs. All
+three mission candidates checked:
+
+- (a) DeadBinder enqueue vs failed-reply ORDER: AT PARITY. Reference
+  binder_deferred_release runs the threads-loop FIRST (binder_thread_
+  release -> send_failed_reply for the TOP incoming txn) and the
+  nodes-loop SECOND (binder_node_release -> DEAD_BINDER works to each
+  holder proc->todo + wakeup). Ours: binder_task_died reaps each dying
+  thread at task exit (dead_reply_to_sender -> exact-thread wake of the
+  originator) and binder_close (fd teardown) queues the death notices
+  AFTER — same relative order (ohw91: DRS to tid446 at 33.193, notices
+  33.235). The structural difference (reference defers the whole pass
+  to a workqueue, ours runs sync in the exit path) is wall-clock near-
+  equivalent (workqueue runs µs-ms after exit_files; SIGCHLD/reap/
+  restart all land later) — not the gate.
+- (b) delivered_death semantics: at parity (phase machine Armed->
+  Queued->Delivered, dedup via the phase transition, BC_DEAD_BINDER_
+  DONE re-arms; read-side moves to Delivered like list_move_tail).
+- (c) the "5 notices per death" flood: the reference delivers the same
+  5 works (one per armed ref; usb_host publishes 5 nodes, devmgr holds
+  5 armed refs). NOT a divergence.
+
+Auxiliary finding for a later parity session: reference binder_thread_
+release sends the failed reply ONLY for the stack-TOP incoming txn;
+ours (dead_reply_to_sender) errors EVERY stacked txn's sender. In both
+observed founder shapes the top WAS incoming (identical outcome), so
+this did not gate — but it is a real semantics divergence worth
+aligning.
+
+The abref1 timeline also explains the storm-shape difference: on the
+reference usb_host instances #2+ die 0.07-0.15s after exec (before
+publishing binder nodes — the storm self-limits), while ours each live
+~4s and publish 5 nodes (our binder dance is seconds-slow: SLOW-TXN
+exec 3020/1960 ms on the ADD_SERVICE path). The reference's storm
+window (0-7s) never overlaps its armed-listener window (10s+); ours
+does. The coordinator's verdict stands: the interleaving generator is
+image-inherited; our RESPONSE divergence (below) is what wedged.
+
+#### 2. THE ACTUAL DIVERGENCE (mission step 3 — instrumented, ohw92)
+
+New instrument (dfx=txnhunt): the death-callback window tracer
+(DEATHCB-OPEN at DeadBinder staging / DEATHCB-SEND on any BC_TRANSACTION
+inside the window / DEATHCB-STEAL if a Transaction is staged into the
+same window / DEATHCB-CLOSE at BC_DEAD_BINDER_DONE). One boot (ohw92)
+named the founder end-to-end:
+
+- crash #1/#2 windows: clean — readers (devmgr OS_IPC threads) run the
+  callback chain, async NotifyStatus sends (target handle 3), all
+  windows close, DevSvcManager.mutex cycles.
+- crash #3 (t=29.71): tid353 reads desc52 -> DEATHCB-SEND target=3;
+  reads desc53 -> DEATHCB-SEND target=49 (a listener proxy IN DEVMGR'S
+  OWN PROCESS) at 29.726 -> 1 ms later FUXW-PARK tid353 on the frozen
+  mutex word 0x7ff000856ec4 (want 0x80000010) — the SELF-DEADLOCK.
+  The window NEVER closes. Every other devmgr looper piles on.
+
+Userspace chain (oh-robot source): DevSvcManagerOnServiceDied
+(devsvc_manager_stub.c:584) runs INLINE on the notice reader ->
+RemoveService -> DevSvcManager.mutex held -> NotifyServiceStatusLocked
+-> UServStatListenerHolderNotifyStatus -> DispatchAsync ->
+BinderInvoker::SendRequest(TF_ASYNC) STILL CALLS WaitForCompletion
+(binder_invoker.cpp:188-192) — a nested BWR read ON THE SAME THREAD,
+INSIDE THE LOCK.
+
+THE KERNEL DIVERGENCE: reference binder_thread_read computes
+`wait_for_proc_work = binder_available_for_proc_work_ilocked(thread)`
+ONCE at the retry label (binder.c:4460-4462, BEFORE the wait) and the
+drain arm uses the LATCHED value (`else if (!binder_worklist_empty_
+ilocked(&proc->todo) && wait_for_proc_work)`, binder.c:4506-4508).
+binder_available_for_proc_work INCLUDES "own todo EMPTY" — so a read
+that entered with own-todo work (the TransactionComplete just produced
+by the nested async dispatch) can NEVER take proc-todo work in the
+same pass. OUR drain loop recomputed eligibility per iteration: after
+staging the tcomplete (own todo now empty, txn stack empty, looper
+flags set) the loop "became eligible", took the same-proc async notify
+txn off proc-todo, staged BR_TRANSACTION — OH's work-thread loop then
+ran the listener stub INLINE on that thread, INSIDE WaitForCompletion,
+INSIDE the held mutex; the stub handler re-locked DevSvcManager.mutex
+(musl NORMAL, non-recursive) -> self-deadlock. This also retro-
+explains the ohw63-74 "oh68 wedge" (an FFRT worker stealing a samgr
+SUBSCRIBE inside its own oneway's WaitForCompletion) — the 26th
+session's looper-flag fix treated the non-pool symptom; the LATCH is
+the reference rule.
+
+FIX (40d78cc8): hoist the avail_for_proc computation out of the drain
+loop — latch once per drain pass, exactly the retry-label semantics.
+Own-todo work stays unconditional (reference parity).
+
+#### 3. VALIDATION (ohw93, fixed kernel, same rig)
+
+- The founder class is DEAD: DevSvcManager.mutex cycles through every
+  crash window (transitions at 23.2/27.1/29.2/33.1 -> released 33.17;
+  late window 274.9 -> released 288.1); the ohw91-style hard-stick
+  never forms in 900 s.
+- 21/21 death-callback windows closed; no DEATHCB-STEAL rows (with the
+  latch, the steal cannot happen by construction).
+- Yardstick rungs crossed for the first time on this rig:
+  bootanimation.ready 43.4 -> bootanimation.FINISHED 70.4 (previous
+  boots: black forever); appfwk.ready 60.8; bms.main.bundles.ready
+  124.8; StorageDaemon StartUser COMPLETED 128.4 (the 70th session's
+  crosswait gate); SA:801 published 127.8.
+- SCREEN PIXELS: shots 420-780 all md5 06b933b4 (black was 82f0a25f)
+  — first non-black frame on the hunting rig (bootanimation end
+  state; white fragments on black, not yet the launcher UI).
+
+#### 4. THE NEXT GATE (for the 73rd)
+
+The launcher spawn. Reference order: appfwk.ready 6.18 -> com.ohos.
+launcher spawned ~7.2 (hmdfs bundle item + arkui param watchers) ->
+bundles.ready 9.6 -> launcher.ready 11.4. Ours: appfwk.ready 60.8 ...
+and NO spawn by 900 s (appspawn alive, kickdog every 10 s; no hung
+binder txns anywhere — census shows only the usb_host sandwich). The
+trigger is AbilityManagerService::StartHighestPriorityAbility
+(ability_manager_service.cpp:7870: BMS connect -> ImplicitQueryInfoBy-
+Priority loop -> StartAbility -> appspawn). Not blocked on binder
+(no TXN-HANG): either the user-start event chain never fires the
+handler, or the BMS query loop repolls forever (hilog-invisible).
+Next boot: dfx=ams46,pctlmon,pid1spin + SAREG; the ams46 ripple window
+covers the StartUser->OnStartUserDone->launcher-decision chain.
+
+#### 5. GATES (40d78cc8)
+
+- x86_64 build rc=0; riscv64 clean-config build rc=0 + make test
+  "All tests passed!" (run/test-rv-72.log first pass verdict green;
+  run/test-rv-72b.log full-log rerun with the pass line; the HUNG-CTX
+  prints are post-halt artifacts, same in both runs); aarch64 build
+  rc=0 (run/build-a64-72.log).
+- Tier-2 pbench A/B (base 23270d34 vs 40d78cc8, 3 interleaved reps,
+  KVM same rig): run/abpb-base72-fix72.txt — see file for rows.
+- Tier-1 note: the changed line is one boolean latched per BWR read
+  (same WORLD section as before, one fewer recompute per staged
+  command — the read path cannot get slower).
+
+#### 6. SESSION LEDGER
+
+ohw92: founder-hunt boot (tracer armed; old kernel) — three crash
+windows decoded, crash #3 names tid353/target-49/the nested steal; the
+founder is caught mid-act. ohw93: fix validation boot (900 s) — all
+yardstick rungs to StartUser + bootanimation completion + first
+pixels. Both system-lb5 + userdata-fresh2, SMP2 KVM, LOGLEVEL7.
