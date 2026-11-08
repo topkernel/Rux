@@ -8658,3 +8658,136 @@ ohw99: 372 s, two wedge hits (survived the first). ohw100: v2 +
 insthunt, scan-window decode. ohw101: pre-latch 23270d34 A/B — latch
 exonerated. Commits: df0cd40e (v2), 5c68fa01 (budgets), 5f6b1e02-class
 (INST-TXN installs lane). Extractor: run/acct-strand.sh.
+
+### 75. 75TH SESSION (2026-11-08) — THE LAUNCHER GATE IS OPENED: the
+### first-boot install stream RUNS (0 -> 32 SetBundleQuota, com.ohos.
+### launcher installed). Root cause: our binder returned caller-token 0
+### for every ONEWAY transaction, so safwk's StartAbility permission
+### check silently denied samgr's SA:511 load — installd never started,
+### the BMS store dir was never created, OnBmsStarting took the "no
+### space" early return. Fixed with OH binder.c parity (thread-stamped
+### sender identity + binder_has_work own-todo term) (branch oh-crash @
+#### 1bc38827)
+
+#### 1. THE ANSWER TO THE 74TH'S HANDOFF QUESTION
+
+"Which store returns data to make LoadInstallInfosFromDb()==true on a
+fresh /data?" — NONE, and it cannot: with this image's BMS (RDB-based,
+bmsdb.db), LoadAllData -> QueryAllData returns false BOTH when the db
+cannot open AND when the table is empty (GoToFirstRow fails on zero
+rows). LoadInstallInfosFromDb()==true requires non-empty
+installed_bundle ROWS — impossible on userdata-fresh2 (lost+found
+only). The 74th's guess was half right: OnBmsStarting DID take an
+early return, but the SECOND one, two lines later:
+
+  bundle_mgr_service_event_handler.cpp:254 — CheckSystemFreeSize(
+  BUNDLE_MANAGER_SERVICE_PATH, TEN_MB) — BundleUtil::CheckSystemFreeSize
+  does statfs() and returns FALSE on ENOENT. With the store dir
+  missing, BMS logs "OnBmsStarting no space" and RETURNS — no install
+  stream, but AfterBmsStart still sets scanning_apps.status=1 exactly
+  as observed on ohw98/100/101.
+
+The dir is created by HasBundleUserInfoJsonDb() (the FIRST call inside
+LoadDataFromPersistentStorage) via InstalldClient::Mkdir — a binder
+call to installd (SA 511, hosted by the `installs` daemon, profile
+run-on-create=false = pure on-demand). On the reference (abref1):
+installs starts 4.37 s, a LoadSystemAbility(511) at ~5.1 s (some early
+foundation consumer) makes samgr send StartAbility(511) to installs,
+OpenSo 32 ms, insert SA:511 at 5.172 — BEFORE BMS's BeforeBmsStart
+(5.34) — so the Mkdir proxy is warm, dir created, statfs passes, 84
+installs at 5.5-9.9 s.
+
+#### 2. WHERE OUR CHAIN BROKE (ohw100/102/103 forensics)
+
+ohw100: SA:511 NEVER inserted; the 4 s "metronome" into installs was
+samgr's StartAbility(511) retries (code=1 = START_ABILITY_TRANSACTION,
+dlen=152). ohw102 probes (INSTQ/INSTWAKE/INSTRD, new): every
+StartAbility oneway was DELIVERED and READ by installs' main thread
+within 1-2 ms — kernel delivery fine; installs then issued ONE
+accesstoken call (code=1 dlen=188 = AccessTokenKit::VerifyAccessToken,
+the safwk stub's CheckPermission for
+ohos.permission.MANAGE_SYSTEM_ABILITY) and did NOTHING else: no clone
+for LocalAbilityManager::StartAbility's detached std::thread, no
+OpenSo. ohw103 parcel dumps sealed it: the ATM reply is
+parcel=00000000ffffffff = PERMISSION_DENIED(-1) on EVERY attempt, and
+INSTGSI showed GET_SENDER_INFO returning token 0x28000000 — the
+synthetic fallback for pid 0.
+
+ROOT CAUSE (ours): BINDER_GET_SENDER_INFO / BINDER_GET_ACCESS_TOKEN
+derived the sender pid from txn.from_proc — set ONLY for sync txns
+(`from_proc: if !reply && !oneway { Some } else { None }`). For every
+ONEWAY the token source was pid 0 -> synthetic token -> ATM denies ->
+silent drop. The OH reference kernel (oh-robot
+kernel/linux/linux-6.6, CONFIG_BINDER_SENDER_INFO) stamps the sender
+TASK's token into the txn at SEND time for EVERY txn (binder.c:3247
+t->sender_tokenid = current->token) and copies it onto the SERVICING
+THREAD at BR_TRANSACTION staging (binder.c:4829); only sender_pid_nr
+is t_from-gated (0 for oneway, :4737-4745). libipc's dispatch
+(binder_invoker.cpp:902-909) reads exactly that ioctl.
+
+This also explains the long-standing AMS46 wall (accountmgr's code-46
+StartUser oneway "read but never executes" — AbilityManagerStub has
+the same VerifyAccessToken gate) — same class, same fix.
+
+#### 3. THE FIX (1bc38827, reference parity)
+
+- ThreadState gains sender_token_pid/sender_pid_nr, stamped at EVERY
+  BR_TRANSACTION/BR_REPLY staging (token source = txn.sender_pid, the
+  sender tgid stamped at BC_TRANSACTION time — our registry maps it to
+  the sender's REGISTERED native token, the task->token equivalent;
+  pid field = from_proc-gated like t_from). GET_SENDER_INFO reads the
+  thread fields — txn_stack cannot serve (oneways are never stacked).
+- thread_has_work gains the reference's first term
+  (binder_has_work_ilocked: own todo non-empty => work): a thread with
+  a leftover tcomplete (read-buffer-full) used to PARK with pending
+  work (ohw103: 18 INSTSTRAND head=tcomplete; ohw106 fix: 0).
+- Probes (dfx=txnhunt cohort, budgeted): INSTQ (enqueue route),
+  INSTWAKE (post-delivery wake result), INSTRD (read-side delivery),
+  INSTSTRAND (park-with-work + head kind), INSTGSI (GET_SENDER_INFO
+  decode), INST-TXN parcel hexdumps (StartAbility + VerifyAccessToken
+  shapes).
+
+#### 4. OHW106 PROOF (fix kernel, system-lb5 + userdata-fresh2, SMP2
+#### KVM, dfx=txnhunt,ams46)
+
+- 29.597 INSTGSI token=0x280b5095 (samgr's REGISTERED token, atid
+  line "pid 329 set token 0x280b5095" at 4.99 s).
+- 29.982 SAMGR: SA:511 OpenSo 374ms; 30.106 insert SA:511_61 —
+  installd LOADS on demand, first time ever on a clean kernel.
+- 29.994 BMSSCAN-MKDIR pid=979 SaOndemand
+  /data/service/el1/public/bms/bundle_manager_service (the store dir,
+  by the OnDemand worker thread); 30.422 bmsdb.db RDWR+CREAT
+  parent=ok.
+- SetBundleQuota: 32 installs 36-72 s (ZERO on every clean boot since
+  Nov 7; reference 84) — com.ohos.launcher IS among them
+  (launcher_settings dirs, uid 20010015 quota row at 72.2).
+- scanning_apps.status 0->1 in 25 s (36.4->61.3; was the 41-47 s
+  empty-scan park).
+- Launcher NOT started on this boot: AMS46 ENQ count 0 — accountmgr
+  never SENT StartUser(46) (it did at 113.9 s on ohw98). The chain
+  upstream of StartUser differs on a boot where the install stream now
+  runs (ohw98 had no installs). Pixel: 06b933b4 (bootanimation), boot
+  survived 11 dead-task-switch wedge hits to the full 900 s wall.
+
+#### 5. GATES
+
+- Builds: x86_64 rc=0; riscv64 CLEAN-CONFIG rc=0 (run/build-rv-75.log);
+  aarch64 rc=0 (run/build-a64-75.log).
+- riscv64 make test: ALL TESTS PASSED (run/test-rv-75.log).
+- pbench Tier-2 A/B base74 (91519c30) vs fix75 (1bc38827), 3
+  interleaved reps KVM same rig: perf-gap-hunt/run/abpb-base74-fix75.txt
+  (numbers appended at close).
+
+#### 6. FOR THE 76TH
+
+The named gate is open; the next link is accountmgr's StartUser(46)
+which never fires on a healthy-install boot (ohw106: AMS46-ARM armed,
+ENQ 0 through 900 s). ohw98's 113.9 s StartUser came from the OsAccount
+restore path — find what arms it (bootevent.user / account publish /
+storage user-100 create at 79-80 s on ohw100-class boots) and why the
+installs-running boot never reaches it. The 32-vs-84 install count
+delta (which preinstalls skip and why) is the secondary thread. Boots
+this session: ohw102 (probes v1: delivery works, drop named), ohw103
+(control: ffffffff verdict + tcomplete strand), ohw104 (fix v1:
+token_src still 0 — txn_stack empty for oneway), ohw105 (GSI debug:
+confirmed stack-empty), ohw106 (fix v2: the proof boot).
