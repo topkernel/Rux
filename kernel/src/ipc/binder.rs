@@ -1066,6 +1066,32 @@ fn ams46_on() -> bool {
 // shape the why=21 guard then punishes).
 static ACCT_PID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
+/// 74th installs lane: pid of the `installs` daemon (BundleInstallerHost
+/// SA process), latched from the leader comm the same way is_acct does.
+static INST_PID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// True when `pid` is the installs daemon process.
+fn is_inst(pid: u32) -> bool {
+    let latched = INST_PID.load(core::sync::atomic::Ordering::Relaxed);
+    if latched != 0 {
+        return latched == pid;
+    }
+    // SAFETY: diagnostic task lookup + comm read (same contract as the
+    // TXN-HANG comm decode).
+    let t = unsafe { crate::sched::find_task_by_pid(pid) };
+    if t.is_null() {
+        return false;
+    }
+    let comm = unsafe { (*t).comm() };
+    let name = core::str::from_utf8(&comm[..]).unwrap_or("");
+    if name.starts_with("installs") {
+        INST_PID.store(pid, core::sync::atomic::Ordering::Relaxed);
+        true
+    } else {
+        false
+    }
+}
+
 fn txnhunt_on() -> bool {
     crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang)
 }
@@ -9993,6 +10019,42 @@ fn binder_transaction(
                     data_size
                 );
             }
+        }
+    }
+
+    // 74th installs lane (dfx=txnhunt, oh-launcher hunt): the BMS
+    // first-boot install stream posts per-bundle tasks to the separate
+    // `installs` daemon over binder (BundleInstallerHost). 71.6
+    // evidence: every fresh roll since cg17 completes the scan
+    // (scanning_apps.status 0->1) with ZERO installs ("installs
+    // service parked in an empty binder read, nobody ever sent it
+    // work"), while the REFERENCE on the same rig + userdata runs 84
+    // SetBundleQuota installs at 5.5-9.9 s. This lane rings every
+    // transaction crossing the installs proc boundary in EITHER
+    // direction (sends and replies) with the code word, so one boot's
+    // scan window shows whether the task posts are SENT at all, and
+    // what comes back.
+    if txnhunt_on() && (is_inst(proc.pid) || is_inst(target.pid)) {
+        static INST_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if INST_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 800 {
+            let comm = crate::sched::current()
+                .map(|t| unsafe { (*t).comm() })
+                .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            crate::pr_warn!(
+                "INST-TXN txn{} {} pid{}/tid{} ('{}') -> pid{} code={:#x} oneway={} dlen={}",
+                txn.id,
+                if reply { "REPLY" } else { "SEND" },
+                proc.pid,
+                thread.tid,
+                comm,
+                target.pid,
+                tr.code,
+                tr.flags & TF_ONE_WAY != 0,
+                data_size
+            );
         }
     }
 
