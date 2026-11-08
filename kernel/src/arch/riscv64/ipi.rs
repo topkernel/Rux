@@ -120,10 +120,12 @@ pub fn send_reschedule_ipi(target_cpu: usize) {
 /// Safe to call from any context; returns immediately (fire-and-forget —
 /// remote harts flush asynchronously).
 pub fn flush_tlb_others() {
+    // review4 arch-M: iterate the STARTED mask, not [0, count) — sparse
+    // bring-up (e.g. CPU 0 and CPU 2 online, CPU 1 failed) sent the flush
+    // to a dead CPU and skipped a live one.
     let me = crate::arch::cpu_id() as usize;
-    let online = crate::arch::smp::num_started_cpus().max(1);
-    for cpu in 0..core::cmp::min(online, MAX_CPUS) {
-        if cpu != me {
+    for cpu in 0..MAX_CPUS {
+        if cpu != me && crate::arch::smp::cpu_started(cpu) {
             send_ipi_type(cpu, IpiType::TlbFlush);
         }
     }

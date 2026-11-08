@@ -660,11 +660,17 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
         // SAFETY: fds_ptr validated with access_ok; nfds bounded to 1024.
         // (buffer hoisted out of the loop — reused per round)
         unsafe {
-            crate::arch::uaccess::copy_from_user(
+            // review4 syscall-M: check the copy result — a racing munmap
+            // after access_ok produced a silent all-zeros poll (every fd
+            // POLLNVAL, every entry "ready") instead of EFAULT.
+            let uncopied = crate::arch::uaccess::copy_from_user(
                 pollfds.as_mut_ptr() as *mut u8,
                 fds_ptr as *const u8,
                 fds_size,
             );
+            if uncopied > 0 {
+                return -(errno::EFAULT as i64);
+            }
 
             for i in 0..nfds {
                 let pollfd = &mut pollfds[i];
@@ -714,11 +720,16 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
             }
 
             // SAFETY: fds_ptr validated with access_ok(fds_size) above.
-            crate::arch::uaccess::copy_to_user(
+            // review4 syscall-M: check the copy-back result (EFAULT, not
+            // a silent success with no revents written).
+            let uncopied_out = crate::arch::uaccess::copy_to_user(
                 fds_ptr as *mut u8,
                 pollfds.as_ptr() as *const u8,
                 fds_size,
             );
+            if uncopied_out > 0 {
+                return -(errno::EFAULT as i64);
+            }
         }
 
         if ready_count > 0 {

@@ -118,11 +118,9 @@ pub fn send_reschedule_ipi(target_cpu: usize) {
 /// hold cached translations of pages we unmapped must invalidate too;
 /// riscv64 review 4.10 twin). Fire-and-forget: handlers drain async.
 pub fn flush_tlb_others() {
-    crate::arch::cpu::local_flush_tlb_all();
     let me = crate::arch::cpu_id() as usize;
-    let online = crate::arch::smp::num_started_cpus().max(1);
-    for cpu in 0..core::cmp::min(online, MAX_CPUS) {
-        if cpu != me {
+    for cpu in 0..MAX_CPUS {
+        if cpu != me && crate::arch::smp::cpu_started(cpu) {
             send_ipi_type(cpu, IpiType::TlbShootdown);
         }
     }

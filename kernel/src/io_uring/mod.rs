@@ -932,6 +932,13 @@ fn io_uring_post_cqe(ring: &IoUring, user_data: u64, res: i32, flags: u32) {
         core::ptr::write_volatile(cqe_ptr, IoUringCqe { user_data, res, flags });
     }
 
+    // review4 io_uring-M: the Release fence must sit BETWEEN the CQE data
+    // store and the tail store — the tail IS the publication flag (the
+    // consumer loads it Acquire then reads the CQE). The old form put the
+    // fence after the tail store, so a weakly-ordered CPU could publish
+    // the tail before the CQE data landed.
+    core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+
     // Advance cq_tail
     let new_tail = tail.wrapping_add(1);
     unsafe {
@@ -940,7 +947,6 @@ fn io_uring_post_cqe(ring: &IoUring, user_data: u64, res: i32, flags: u32) {
             new_tail,
         );
     }
-    core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
 
     drop(cq_guard);
 

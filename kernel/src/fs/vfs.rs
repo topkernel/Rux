@@ -4645,6 +4645,56 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                 if _e != -(errno::constants::ENOENT) {
                     return Err(_e);
                 }
+                // review4 fs-M: a DANGLING SYMLINK at the final component
+                // (link exists, target doesn't) falls here with ENOENT —
+                // the create arm then tries to create at the original path
+                // (which already has a dirent for the link name → EEXIST).
+                // Linux follows the link and creates the TARGET. Re-resolve
+                // with NOFOLLOW; if the final component is a symlink, read
+                // its target and restart this open against it (bounded by
+                // the caller's recursion or our own 8-deep cap).
+                if let Ok(vp) = path_lookup(filename, LOOKUP_NOFOLLOW) {
+                    if let Some(ref ino) = vp.inode {
+                        if ino.mode.is_symlink() {
+                            // Read the link target
+                            let mut buf = [0u8; 256];
+                            let n = ino.op_readlink(&mut buf);
+                            if n > 0 && (n as usize) < buf.len() {
+                                // Resolve against the link's parent dir
+                                let target = core::str::from_utf8(&buf[..n as usize])
+                                    .map_err(|_| errno::Errno::InvalidArgument.as_neg_i32())?;
+                                let (_parent, child) = path_parent_and_name(filename)?;
+                                let parent = if filename.ends_with(&child) {
+                                    &filename[..filename.len() - child.len()]
+                                } else { "/" };
+                                let full = if target.starts_with('/') {
+                                    alloc::format!("{}", target)
+                                } else {
+                                    // Handle simple "../" and "./" prefix
+                                    let mut base = String::from(parent.trim_end_matches('/'));
+                                    for part in target.split('/') {
+                                        match part {
+                                            "" | "." => {}
+                                            ".." => {
+                                                if let Some(pos) = base.rfind('/') {
+                                                    base.truncate(pos);
+                                                }
+                                            }
+                                            p => {
+                                                base.push('/');
+                                                base.push_str(p);
+                                            }
+                                        }
+                                    }
+                                    base
+                                };
+                                // Recurse (bounded by the link's target
+                                // being a real path, not a link)
+                                return file_open(&full, flags, mode);
+                            }
+                        }
+                    }
+                }
                 let (parent_path, child_name) = path_parent_and_name(filename)?;
                 // O_CREAT|O_EXCL is a NOFOLLOW-style existence probe: a
                 // dangling symlink at the final component is EEXIST (the

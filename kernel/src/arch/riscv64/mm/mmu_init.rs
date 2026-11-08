@@ -1582,9 +1582,11 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
 pub unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool {
     let ok = map_page_noflush(root_ppn, virt, phys, flags);
 
-    // Flush TLB (single-page callers — page faults, mremap, io_uring —
-    // need the new translation visible before the retrying access).
-    asm!("sfence.vma");
+    // Flush TLB for THIS page only (review4 arch-M perf: the full
+    // sfence.vma on every demand fault invalidated every page on every
+    // hart — the x86_64 twin uses targeted invlpg here).
+    let va = virt.bits();
+    asm!("sfence.vma {0}, zero", in(reg) va, options(nostack));
     ok
 }
 

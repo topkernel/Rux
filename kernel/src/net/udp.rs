@@ -932,12 +932,13 @@ fn udp_build_locked(
 
     // P2 SO_BROADCAST: sending to a broadcast address without the option
     // fails with EACCES (Linux udp_sendmsg ip_mc_sf_allow / EACCES gate).
-    // Minimal broadcast set: the limited broadcast 255.255.255.255 and
-    // directed subnet broadcasts (host part all-ones, last octet 255) —
-    // we have no netmask model for the precise per-interface check.
-    if !socket.broadcast
-        && (dest_ip == 0xFFFF_FFFF || (dest_ip & 0xFF) == 0xFF)
-    {
+    // review4 net-M: the (dest_ip & 0xFF) == 0xFF check gated every
+    // unicast ending in .255 (e.g. 192.168.1.255 IS directed broadcast
+    // on a /24 but 10.0.0.255 is a perfectly normal unicast on most
+    // networks). With no netmask model, only gate the LIMITED broadcast
+    // (255.255.255.255); directed broadcasts are effectively UDP
+    // unicasts from our side.
+    if !socket.broadcast && dest_ip == 0xFFFF_FFFF {
         return Err(-13); // EACCES
     }
 
