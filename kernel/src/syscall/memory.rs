@@ -4518,16 +4518,29 @@ pub fn sys_get_mempolicy(args: [u64; 6]) -> i64 {
         let _ = crate::arch::uaccess::put_user(mode_ptr, 0i32);
     }
 
-    // Fill nodemask with all nodes
+    // Fill nodemask with all nodes. The reference kernel truncates
+    // maxnode to MAX_NUMNODES, copies ceil(maxnode/64) words, and the
+    // LAST word is masked to maxnode bits. review4 S-13: the old form
+    // validated (maxnode+7)/8 bytes but wrote nwords*8 — maxnode=65
+    // validated 9 bytes and wrote 16 (7-byte user OOB write).
     if !nodemask_ptr.is_null() && maxnode > 0 {
-        if !crate::arch::uaccess::access_ok(nodemask_ptr as usize, (maxnode + 7) / 8) {
+        let maxnode = maxnode.min(64); // single-node system: node 0 only
+        let nbytes = (maxnode + 7) / 8;
+        if !crate::arch::uaccess::access_ok(nodemask_ptr as usize, nbytes) {
             return -errno::EFAULT as i64;
         }
-        let nwords = (maxnode + core::mem::size_of::<usize>() * 8 - 1) / (core::mem::size_of::<usize>() * 8);
-        // SAFETY: nodemask_ptr validated with access_ok; nwords bounded by maxnode.
+        let nwords = nbytes / core::mem::size_of::<usize>()
+            + usize::from(nbytes % core::mem::size_of::<usize>() != 0);
+        // SAFETY: nodemask_ptr validated with access_ok(nbytes); the
+        // masked final word stays within the validated byte count.
         unsafe {
             for i in 0..nwords {
-                let _ = crate::arch::uaccess::put_user(nodemask_ptr.add(i), usize::MAX);
+                let mut word = usize::MAX;
+                let bits_left = maxnode.saturating_sub(i * 64);
+                if bits_left < 64 {
+                    word &= (1usize << bits_left) - 1;
+                }
+                let _ = crate::arch::uaccess::put_user(nodemask_ptr.add(i), word);
             }
         }
     }

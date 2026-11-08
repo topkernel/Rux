@@ -1161,7 +1161,14 @@ pub fn sys_shmdt(args: [u64; 6]) -> i64 {
         None => return -(errno::EINVAL as i64),
     };
 
-    // Find the VMA at shmaddr and get shm_id
+    // Find the VMA at shmaddr and get shm_id. The reference kernel
+    // requires shmaddr to be EXACTLY the attach address (do_shmat
+    // removes only the VMA whose start == shmaddr — shmdt with an
+    // interior pointer returns EINVAL). review4 S-13: the old find()
+    // accepted any address INSIDE the VMA, then munmap'ed from the
+    // interior — leaving a partial mapping live while decrementing
+    // nattch (combined with marked_destroy, the segment could be freed
+    // while pages were still mapped).
     let shm_id;
     let vma_size;
     {
@@ -1172,6 +1179,9 @@ pub fn sys_shmdt(args: [u64; 6]) -> i64 {
         };
         if vma.vma_type() != VmaType::SharedMemory {
             return -(errno::EINVAL as i64);
+        }
+        if vma.start().as_usize() != shmaddr {
+            return -(errno::EINVAL as i64); // interior address: EINVAL
         }
         shm_id = vma.file_fd();
         vma_size = vma.end().as_usize() - vma.start().as_usize();

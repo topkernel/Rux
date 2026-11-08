@@ -1545,7 +1545,18 @@ pub fn sem_undo_exit(task: *mut crate::process::Task) {
                 if let Some(ref sems) = *e.inner.sems.lock() {
                     let snum = entry.sem_num as usize;
                     if snum < sems.len() {
-                        sems[snum].value.fetch_sub(entry.adjustment, Ordering::Relaxed);
+                        // Clamp the undo to [0, SEMVMX] (reference
+                        // exit_sem discipline; review4 S-13): the raw
+                        // fetch_sub can push the value negative, after
+                        // which every P operation on that semaphore
+                        // blocks forever.
+                        let old = sems[snum].value.fetch_sub(entry.adjustment, Ordering::Relaxed);
+                        let new_val = old.wrapping_sub(entry.adjustment);
+                        if new_val < 0 {
+                            sems[snum].value.store(0, Ordering::Relaxed);
+                        } else if new_val > SEMVMX {
+                            sems[snum].value.store(SEMVMX, Ordering::Relaxed);
+                        }
                     }
                 }
                 // Wake waiters since values changed
