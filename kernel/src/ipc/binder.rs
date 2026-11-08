@@ -10481,7 +10481,24 @@ fn binder_transaction(
                     }
                     wakes.push(tproc.clone());
                     wakes.push(proc.clone());
-                } else {
+                    // Reply wake parity (reference binder.c:3671-3672:
+                    // binder_enqueue_thread_work_ilocked(target) +
+                    // binder_wakeup_thread_ilocked(target, sync=true)):
+                    // a reply is THREAD-TARGETED — the reference wakes the
+                    // TARGET thread exactly, never a proc-wide pick-one.
+                    // Our wake_proc_one only selects readers with an EMPTY
+                    // own todo (the proc-work eligibility), so the replied
+                    // thread — whose todo now carries the reply — is
+                    // unselectable: if no other empty reader drains the
+                    // (empty) proc todo and re-parks, the reply sits on the
+                    // target's todo UNREAD forever (ohw96 tid840: 38
+                    // replies pushed, last RECV 35s earlier, parked in a
+                    // write-less BWR read with todo=1 head=txn-complete;
+                    // accountmgr wedged behind it — the 73rd's "every step
+                    // reference-parity yet the thread dies" stranding).
+                    // Exact-thread wake, same as the DRS death path.
+                    // SAFETY: WORLD held (the reply push site's contract).
+                    wake_thread(&rthread);
                     sendfail_why(17);
                     reply_target_gone = true;
                     thread.hist(
