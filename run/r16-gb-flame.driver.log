@@ -1,0 +1,2 @@
+qemu-system-x86_64: terminating on signal 15 from pid 2828046 (/bin/bash)
+== flame run: DONE=0 SAMPLER=0 samples=1
