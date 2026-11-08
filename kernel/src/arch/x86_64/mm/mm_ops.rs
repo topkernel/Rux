@@ -985,11 +985,72 @@ pub fn find_free_area_32bit(&self, size: usize) -> Result<PageVirtAddr, MapError
         // Deferred-zap phase (giant ranges only): no tree access, bounded
         // chunks, handoffs between them. unmap_pages takes only the PTE
         // lock (one-way nest).
+        //
+        // RACER GUARD (the LLVM-JIT corruption fix, 2026-11-08): after
+        // the surgery guard dropped, this range is a PERMANENT hole in
+        // the tree — any VMA that now covers an address here was
+        // installed by a racing same-mm mmap landing in that hole, and
+        // its PTEs (and its frames!) are NOT ours to clear. The old
+        // unconditional zap cleared those fresh PTEs and put_page()d the
+        // fresh frames: the racer's writes vanished (demand refault
+        // zero-fills) and the freed frames got reused under live
+        // mappings — cross-mapping aliasing. The deterministic
+        // reproducer (run/jitstress.c) catches all three faces in the
+        // first round: ZAPCLEAR (fresh mapping zeroed after the munmap
+        // returned), LOSTWRITE (fill lost mid-race), VANISH (mapping
+        // gone). Discipline: per chunk, re-check the tree (read guard)
+        // and zap only the sub-ranges covered by NO VMA — a present PTE
+        // there can only be a stale one from the torn-down mapping
+        // (demand faults require a VMA; a fresh mmap installs its VMA
+        // and PTEs under the tree write guard). Holding the read guard
+        // across unmap_pages follows the ≤4MB path's precedent (the
+        // write guard is held across its zaps above).
         for (zs, ze) in zap_pieces {
             let mut z = zs;
             while z < ze {
                 let chunk_end = z + (MUNMAP_CHUNK_BYTES).min(ze - z);
-                self.unmap_pages(PageVirtAddr::new(z), chunk_end - z, true)?;
+                {
+                    let vma_mgr = self.vma_read();
+                    let mut cur = z;
+                    while cur < chunk_end {
+                        // First VMA overlapping [cur, chunk_end): the one
+                        // containing cur, else the first starting inside.
+                        let hit = vma_mgr
+                            .last_at_or_before(PageVirtAddr::new(cur))
+                            .filter(|v| v.end().as_usize() > cur)
+                            .or_else(|| {
+                                vma_mgr.find_vma_after(PageVirtAddr::new(cur))
+                            })
+                            .filter(|v| v.start().as_usize() < chunk_end);
+                        match hit {
+                            None => {
+                                // No racer owns [cur, chunk_end): every
+                                // present PTE there is stale — ours.
+                                self.unmap_pages(
+                                    PageVirtAddr::new(cur),
+                                    chunk_end - cur,
+                                    true,
+                                )?;
+                                cur = chunk_end;
+                            }
+                            Some(v) => {
+                                let vs = v.start().as_usize();
+                                let ve = v.end().as_usize();
+                                if vs > cur {
+                                    self.unmap_pages(
+                                        PageVirtAddr::new(cur),
+                                        vs - cur,
+                                        true,
+                                    )?;
+                                }
+                                // Both hit-branches guarantee ve > cur
+                                // (containing VMA: end > cur; after-VMA:
+                                // start >= cur ∧ start < end).
+                                cur = ve.min(chunk_end);
+                            }
+                        }
+                    }
+                }
                 z = chunk_end;
                 // Same-mm racers keep the handoff the old per-chunk guard
                 // drop provided; the syscall-exit need_resched check

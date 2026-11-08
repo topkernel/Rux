@@ -89,17 +89,127 @@ pub fn generate() -> Vec<u8> {
 
         #[cfg(feature = "x86_64")]
         {
-            // Generic x86_64 fields (vendor/family/model detection is a
-            // later CPUID-driven upgrade).
+            // CPUID-driven x86_64 fields (the llvmpipe/JIT fix,
+            // 2026-11-08): Mesa's gallium/llvmpipe derives the CPU
+            // capabilities from THIS file's flags line (util_get_cpu_caps
+            // parses /proc/cpuinfo on Linux — not CPUID). An empty flags
+            // row made it pick a 32-bit-only JIT subtarget, and the first
+            // 64-bit codegen request aborted the process: "LLVM ERROR:
+            // 64-bit code requested on a subtarget that doesn't support
+            // it!" — which killed gnome-shell (sig=6) on every boot after
+            // its first frame, taking the session down with it
+            // ("failed to register before timeout" → respawn storm →
+            // the gnome-session-failed dialog). Emit the real feature
+            // words from CPUID.
+            let (leaf1a, _b, leaf1c, leaf1d) = crate::arch::x86_64::cpu::cpuid(1, 0);
+            let (_7a, leaf7b, _c, _d) = crate::arch::x86_64::cpu::cpuid(7, 0);
+            let family = ((leaf1a >> 8) & 0xf) + ((leaf1a >> 20) & 0xff);
+            let model = ((leaf1a >> 4) & 0xf) | (((leaf1a >> 16) & 0xf) << 4);
+            let stepping = leaf1a & 0xf;
+
+            let mut flags = String::new();
+            // leaf-1 EDX
+            for (bit, name) in [
+                (0u32, "fpu"),
+                (1, "vme"),
+                (2, "de"),
+                (3, "pse"),
+                (4, "tsc"),
+                (5, "msr"),
+                (6, "pae"),
+                (7, "mce"),
+                (8, "cx8"),
+                (9, "apic"),
+                (11, "sep"),
+                (12, "mtrr"),
+                (13, "pge"),
+                (14, "mca"),
+                (15, "cmov"),
+                (16, "pat"),
+                (17, "pse36"),
+                (18, "pn"),
+                (19, "clflush"),
+                (21, "dts"),
+                (22, "acpi"),
+                (23, "mmx"),
+                (24, "fxsr"),
+                (25, "sse"),
+                (26, "sse2"),
+                (27, "ss"),
+                (28, "ht"),
+                (29, "tm"),
+                (31, "pbe"),
+            ] {
+                if leaf1d & (1 << bit) != 0 {
+                    flags.push_str(name);
+                    flags.push(' ');
+                }
+            }
+            // leaf-1 ECX
+            for (bit, name) in [
+                (0u32, "pni"),
+                (1, "pclmulqdq"),
+                (2, "dtes64"),
+                (3, "monitor"),
+                (5, "vmx"),
+                (6, "smx"),
+                (7, "est"),
+                (8, "tm2"),
+                (9, "ssse3"),
+                (12, "fma"),
+                (13, "cx16"),
+                (14, "xtpr"),
+                (17, "pdcm"),
+                (19, "sse4_1"),
+                (20, "sse4_2"),
+                (21, "x2apic"),
+                (22, "movbe"),
+                (23, "popcnt"),
+                (24, "tsc_deadline_timer"),
+                (25, "aes"),
+                (26, "xsave"),
+                (27, "avx"),
+                (28, "f16c"),
+                (29, "rdrand"),
+                (30, "hypervisor"),
+            ] {
+                if leaf1c & (1 << bit) != 0 {
+                    flags.push_str(name);
+                    flags.push(' ');
+                }
+            }
+            // leaf-7 EBX (only the ones llvmpipe/gallium look for).
+            for (bit, name) in [
+                (3u32, "bmi1"),
+                (5, "avx2"),
+                (8, "bmi2"),
+            ] {
+                if leaf7b & (1 << bit) != 0 {
+                    flags.push_str(name);
+                    flags.push(' ');
+                }
+            }
+            // Long mode: leaf 0x80000001 EDX bit 29 — THE flag Mesa's
+            // probe needs to build a 64-bit-capable JIT subtarget.
+            let (_ea, _eb, _ec, ext_d) = crate::arch::x86_64::cpu::cpuid(0x80000001, 0);
+            if ext_d & (1 << 29) != 0 {
+                flags.push_str("lm ");
+            }
+            // Trim the trailing space.
+            if flags.ends_with(' ') {
+                flags.pop();
+            }
+
             let rows: &[(&'static str, &dyn core::fmt::Display)] = &[
                 ("processor\t", &cpu),
-                ("vendor_id\t", &"unknown"),
-                ("cpu family\t", &"0"),
-                ("model\t\t", &"0"),
+                ("vendor_id\t", &"AuthenticAMD"),
+                ("cpu family\t", &family),
+                ("model\t\t", &model),
                 ("model name\t", &"x86_64"),
-                ("flags\t\t", &""), // no flags: `flags\t\t:\n` byte shape
+                ("flags\t\t", &flags),
                 ("clflush size\t", &"64"),
                 ("cache_alignment\t", &"64"),
+                ("stepping\t", &stepping),
             ];
             content.push_str(&super::procfile::render_kvtab_pad(rows));
         }
