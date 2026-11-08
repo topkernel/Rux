@@ -261,6 +261,23 @@ impl RawSpinlock {
             let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
             unsafe { crate::console::putchar_no_lock(c); }
         }
+        // r17 (mechanism-C hunt): the lock word's VALUE discriminates the
+        // lost-release shapes — 1 = a real acquire that never unlocked,
+        // any other nonzero (a stack-pointer-shaped 0xffff8880.. word,
+        // ASCII, poison) = a wild write landed on the word (e.g. context
+        // -switch register saves through a stale task pointer).
+        let msg2b = b" val=0x";
+        for &b in msg2b {
+            unsafe { crate::console::putchar_no_lock(b); }
+        }
+        let lval = unsafe { (&*lock_addr).locked.load(Ordering::Relaxed) };
+        let mut shift = (core::mem::size_of::<usize>() * 8) as i32;
+        while shift > 0 {
+            shift -= 4;
+            let nibble = (lval >> (shift as usize)) & 0xF;
+            let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
+            unsafe { crate::console::putchar_no_lock(c); }
+        }
 
         // Print caller return address (ra) for debugging
         let msg3 = b" ra=0x";

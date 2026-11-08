@@ -3164,7 +3164,21 @@ unsafe fn __schedule() {
 
     // Pick next task (R8-1b: prev is passed so the switching CPU may
     // re-pick itself through the next == prev fast path).
-    let next = pick_next_task(&mut *grq_guard, cpu_id, prev);
+    let mut next = pick_next_task(&mut *grq_guard, cpu_id, prev);
+    // r17 NEXTGATE (mechanism-C hunt, `nextgate` feature): the switch
+    // target must be a live task BEFORE the context switch. Two stale
+    // shapes convicted this family: a `next` pointing into static
+    // storage that is not this CPU's idle task (the __switch_to
+    // callee-saved saves then write through the wild pointer — the GRQ
+    // lost-release deadlock when the saves land on the GRQ header), and
+    // a `next` whose switch return address is outside kernel text (a
+    // freed-then-reused heap task — the heap-jump switch panic). The
+    // gate names the full scheduler state at the trip and falls back to
+    // idle so the box lives and the print convicts.
+    #[cfg(feature = "nextgate")]
+    if nextgate_stale(cpu_id, prev, next) {
+        next = cpu_state(cpu_id).idle;
+    }
     let cc_t4 = crate::debug::cctx::now();
     crate::debug::cctx::add(&crate::debug::cctx::SCH_PICK_NS, cc_t3);
 
@@ -3531,6 +3545,162 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
 
     // 5. Nothing runnable → idle task
     pcpu.idle
+}
+
+/// r17 NEXTGATE (mechanism-C hunt, `nextgate` feature): is the pick
+/// result a task we must refuse to switch to? Called under the GRQ
+/// lock with IRQs off; prints with putchar_no_lock (the DEADLOCK-warn
+/// discipline — printk may need locks we hold).
+///
+/// Classification:
+/// - `next == prev`: always legitimate (repick fast path).
+/// - `next` in the kernel image mapping: only the per-CPU idle task
+///   legitimately lives in static storage. Any OTHER static pointer is
+///   a wild `next` — the __switch_to callee-saved saves would write
+///   through it into arbitrary static data (the GRQ lost-release shape
+///   when the saves land on the GRQ header: lock word ← saved sp ≠ 0,
+///   owner word ← saved RA with cpu nibble 0).
+/// - `next` in the physmap: its switch return address must lie inside
+///   kernel text (task creation stamps ret_addr = ret_from_fork BEFORE
+///   the task can be queued; a freed-then-reused page reads whatever
+///   the reuse left there — the heap-jump panic shape).
+#[cfg(feature = "nextgate")]
+fn nextgate_stale(cpu_id: usize, prev: *mut Task, next: *mut Task) -> bool {
+    use crate::console::putchar_no_lock as putchar;
+    if next.is_null() || next == prev {
+        return false;
+    }
+    let idle = cpu_state(cpu_id).idle;
+    if next == idle {
+        return false;
+    }
+    let a = next as usize;
+    let in_image = a >= 0xffff_ffff_8000_0000 && a < 0xffff_ffff_a000_0000;
+    // The x86_64 direct map (kernel_ptr_in_physmap's window): every
+    // live Task allocation lives here, and freed pages stay mapped, so
+    // field reads of a physmap pointer cannot fault. Anything else
+    // (poison like -1, torn pointers) is wild by classification.
+    let in_physmap = a >= 0xffff_8880_0000_0000 && a < 0xffff_9000_0000_0000;
+    let (klo, khi) = kernel_text_window();
+    // SAFETY: reads only through pointers classified into mapped
+    // regions (image or physmap); the wild arm reads nothing.
+    let (pid, ra, sp, pc) = if in_image || in_physmap {
+        unsafe {
+            (
+                (*next).pid(),
+                (*next).thread.callee.ret_addr,
+                (*next).thread.sp,
+                (*next).preempt_count(),
+            )
+        }
+    } else {
+        (u32::MAX, 0, 0, 0)
+    };
+    let bad = if in_image {
+        true
+    } else if in_physmap {
+        !(klo != 0 && ra >= klo && ra < khi)
+    } else {
+        true
+    };
+    if !bad {
+        return false;
+    }
+    fn ph(mut v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        for _ in 0..16 {
+            let n = (v >> 60) as u8;
+            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+            v <<= 4;
+        }
+    }
+    fn pd(mut v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        if v == 0 {
+            putchar(b'0');
+            return;
+        }
+        let mut buf = [0u8; 20];
+        let mut n = 0;
+        while v > 0 {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        for i in (0..n).rev() {
+            putchar(buf[i]);
+        }
+    }
+    const M: &[u8] = b"\nNEXTGATE-STALE cpu=";
+    for &b in M {
+        putchar(b);
+    }
+    pd(cpu_id as u64);
+    const M2: &[u8] = b" next=0x";
+    for &b in M2 {
+        putchar(b);
+    }
+    ph(a as u64);
+    const M3: &[u8] = b" cls=";
+    for &b in M3 {
+        putchar(b);
+    }
+    let cls: &[u8] = if in_image {
+        b"static"
+    } else if in_physmap {
+        b"heap"
+    } else {
+        b"wild"
+    };
+    for &b in cls {
+        putchar(b);
+    }
+    const M4: &[u8] = b" pid=";
+    for &b in M4 {
+        putchar(b);
+    }
+    pd(pid as u64);
+    const M5: &[u8] = b" ra=0x";
+    for &b in M5 {
+        putchar(b);
+    }
+    ph(ra);
+    const M6: &[u8] = b" sp=0x";
+    for &b in M6 {
+        putchar(b);
+    }
+    ph(sp);
+    const M7: &[u8] = b" pc=0x";
+    for &b in M7 {
+        putchar(b);
+    }
+    ph(pc as u64);
+    const M8: &[u8] = b" prevpid=";
+    for &b in M8 {
+        putchar(b);
+    }
+    pd(if prev.is_null() {
+        0
+    } else {
+        unsafe { (*prev).pid() as u64 }
+    });
+    const M9: &[u8] = b" nrun=";
+    for &b in M9 {
+        putchar(b);
+    }
+    pd(grq().nr_running.load(core::sync::atomic::Ordering::Relaxed) as u64);
+    const M10: &[u8] = b" slots=";
+    for &b in M10 {
+        putchar(b);
+    }
+    for c in 0..crate::config::MAX_CPUS {
+        if c > 0 {
+            putchar(b',');
+        }
+        ph(cpu_state(c).current as usize as u64);
+    }
+    putchar(b'\n');
+    true
 }
 
 /// Mark a picked task on-CPU (R8-1b). Called under the GRQ lock; __switch_to
