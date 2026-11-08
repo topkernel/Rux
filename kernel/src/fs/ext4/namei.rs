@@ -2691,21 +2691,35 @@ fn ext4_rename_inner(
             free_inode(fs, target_ino)?;
             free_inode_blocks(fs, target_ino, &target_mut)?;
         } else {
-            // Decrement link count of replaced file
+            // Decrement link count of replaced file. review4 H-5: when the
+            // count reaches zero and a process still holds the file open
+            // (running-binary upgrade: mv new old while old executes),
+            // freeing blocks NOW lets the allocator hand them to another
+            // file while the live mapper still reads/writes through the
+            // stale inode. The unlink path defers via PENDING_REAPS (the
+            // VFS inode Drop queues the reap); rename-replace must do the
+            // same: mark dead (dtime=1, links=0) but leave blocks/inode
+            // allocated — ext4_reap_unlinked (the next ext4 entry point
+            // after the last descriptor closes) does the actual freeing.
             if target_mut.i_links_count > 0 {
                 target_mut.i_links_count -= 1;
             }
             if target_mut.i_links_count == 0 {
                 target_mut.i_dtime = 1;
-                // R14-8 (F5, order fixed r17): persist the dead inode FIRST
-                // (dtime set), then free blocks and the inode number — the
-                // old order wrote the inode back AFTER freeing it (writing
-                // a recycled inode / resurrecting freed-block pointers).
-            }
-            super::inode::write_inode_disk(fs, target_ino, &target_mut)?;
-            if target_mut.i_links_count == 0 {
-                free_inode_blocks(fs, target_ino, &target_mut)?;
-                free_inode(fs, target_ino)?;
+                // Persist the dead inode (dtime set, links 0, blocks
+                // INTACT) — the reap frees them later, after the last
+                // mapper is gone.
+                super::inode::write_inode_disk(fs, target_ino, &target_mut)?;
+                // Queue the reap: same mechanism as ext4_destroy_inode,
+                // except rename sets dtime itself so we push directly.
+                // The inode cache still holds a VFS inode for target_ino;
+                // its Drop (last close) is the normal reap trigger, but
+                // rename-replace has no Drop to rely on if the target was
+                // already closed — queue unconditionally so a closed-file
+                // replace is reaped at the next ext4 entry point too.
+                crate::fs::ext4::queue_pending_reap(fs, target_ino);
+            } else {
+                super::inode::write_inode_disk(fs, target_ino, &target_mut)?;
             }
         }
     }

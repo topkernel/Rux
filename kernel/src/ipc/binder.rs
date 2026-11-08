@@ -6736,7 +6736,26 @@ fn binder_thread_write(
                             .im()
                             .refs
                             .iter()
-                            .position(|r| r.desc == desc);
+                            .position(|r| r.desc == desc)
+                            // review4 H-3: handle-0 symmetry — a DECREMENT
+                            // on handle 0 must resolve the same ref the
+                            // INCREMENT special case created (that ref
+                            // carries next_desc, not desc==0). Without this,
+                            // every BpBinder(0) release cycle found no ref,
+                            // silently leaked the strong count, and the ref
+                            // table grew by one entry per cycle.
+                            .or_else(|| {
+                                if desc != 0 {
+                                    return None;
+                                }
+                                let mgr = world.mgr_node[proc.ctx as usize].clone();
+                                let mgr = mgr?;
+                                pm(world, proc)
+                                    .im()
+                                    .refs
+                                    .iter()
+                                    .position(|r| Arc::ptr_eq(&r.node, &mgr))
+                            });
                         // Linux binder_thread_write special case: an
                         // INCREMENT on handle 0 (the context-manager
                         // proxy every BpBinder(0) takes on creation)
@@ -9589,19 +9608,31 @@ fn binder_thread_read(
     }
     impl<'a> Staged<'a> {
         #[inline]
-        fn extend(&mut self, bytes: &[u8]) {
+        fn extend(&mut self, bytes: &[u8]) -> bool {
             if *self.len + bytes.len() <= self.buf.len() {
                 self.buf[*self.len..*self.len + bytes.len()].copy_from_slice(bytes);
                 *self.len += bytes.len();
+                true
+            } else {
+                // Full: the caller must stop staging (the old silent
+                // drop desynchronized the BR stream mid-payload — a 4-byte
+                // command header fit while its 8-byte ptr/cookie did not;
+                // review4 H-2). The un-staged work stays queued for the
+                // next read() (short-read semantics).
+                false
             }
+        }
+        #[inline]
+        fn room(&self, bytes: usize) -> bool {
+            *self.len + bytes <= self.buf.len()
         }
         #[inline]
         fn len(&self) -> usize {
             *self.len
         }
         #[inline]
-        fn extend_from_slice(&mut self, bytes: &[u8]) {
-            self.extend(bytes);
+        fn extend_from_slice(&mut self, bytes: &[u8]) -> bool {
+            self.extend(bytes)
         }
         #[inline]
         fn as_ptr(&self) -> *const u8 {
@@ -9795,10 +9826,13 @@ fn binder_thread_read(
                     }
                     match work {
                         Work::TransactionComplete => {
+                            if !staged.room(4) { break; }
                             stage_cmd!(BR_TRANSACTION_COMPLETE);
                             thread.hist(EV_TC_RECV, 0, 0);
                         }
                         Work::ReturnError(cmd, param) => {
+                            let need = if cmd == BR_ERROR { 8 } else { 4 };
+                            if !staged.room(need) { break; }
                             stage_cmd!(cmd);
                             if cmd == BR_ERROR {
                                 staged.extend_from_slice(&(param as u32).to_ne_bytes());
@@ -9833,27 +9867,32 @@ fn binder_thread_read(
                             }
                             let (ptr, cookie) = (node.ptr, node.cookie);
                             if weak && !had_weak {
+                                if !staged.room(20) { break; }
                                 stage_cmd!(BR_INCREFS);
                                 stage_u64!(ptr);
                                 stage_u64!(cookie);
                             }
                             if strong && !had_strong {
+                                if !staged.room(20) { break; }
                                 stage_cmd!(BR_ACQUIRE);
                                 stage_u64!(ptr);
                                 stage_u64!(cookie);
                             }
                             if !strong && had_strong {
+                                if !staged.room(20) { break; }
                                 stage_cmd!(BR_RELEASE);
                                 stage_u64!(ptr);
                                 stage_u64!(cookie);
                             }
                             if !weak && had_weak {
+                                if !staged.room(20) { break; }
                                 stage_cmd!(BR_DECREFS);
                                 stage_u64!(ptr);
                                 stage_u64!(cookie);
                             }
                         }
                         Work::DeadBinder { desc, cookie } => {
+                            if !staged.room(12) { break; }
                             stage_cmd!(BR_DEAD_BINDER);
                             stage_u64!(cookie);
                             // Mark delivered on the ref (move onto the
@@ -9871,6 +9910,7 @@ fn binder_thread_read(
                             break;
                         }
                         Work::ClearDeathDone { cookie } => {
+                            if !staged.room(12) { break; }
                             stage_cmd!(BR_CLEAR_DEATH_NOTIFICATION_DONE);
                             stage_u64!(cookie);
                         }
@@ -10024,6 +10064,9 @@ fn binder_thread_read(
                                 data_offsets: off_user,
                             };
                             let sec = !is_reply && t.security_ctx != 0;
+                            let txn_need = 4 + core::mem::size_of::<BinderTransactionData>()
+                                + if sec { 8 } else { 0 };
+                            if !staged.room(txn_need) { break; }
                             stage_cmd!(if is_reply {
                                 BR_REPLY
                             } else if sec {
@@ -10202,7 +10245,7 @@ fn binder_thread_read(
                     // transaction never stacks a second userspace-
                     // pending command, unlike the double-BR_TRANSACTION
                     // shape that crossed replies in sc79.
-                    if emit_spawn && staged.len() + 4 <= read_size {
+                    if emit_spawn && staged.len() + 4 <= read_size && staged.room(4) {
                         if !is_child {
                             pim.requested_threads += 1;
                         }

@@ -1826,14 +1826,19 @@ fn remove_waiter(bucket_idx: usize, target_idx: usize) {
             current_idx = next;
         }
         if !found {
-            // Unreachable while the invariants hold (we held the bucket
-            // the waiter itself says it is linked into): surface it
-            // rather than silently leaking the slot, but do not spin.
+            // The waiter is not in this bucket's chain: a racing wake or
+            // requeue already unlinked it (woken=true + detached) and the
+            // slot's bucket field was stale. The CALLER owns this slot —
+            // free it here rather than leaking (review4 H-7: the old
+            // miss path returned without freeing, and nothing ever
+            // reclaimed unchained slots; pool exhaustion degraded every
+            // futex wait to the 1-jiffy backoff loop).
             crate::pr_warn!(
-                "futex-remove-miss: slot {} bucket {} not in chain",
+                "futex-remove-miss: slot {} bucket {} not in chain (freed)",
                 target_idx,
                 b
             );
+            free_waiter(target_idx);
         }
         return;
     }

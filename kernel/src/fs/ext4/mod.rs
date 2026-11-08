@@ -2510,6 +2510,20 @@ static PENDING_REAPS: crate::sync::spinlock::Spinlock<
     alloc::vec::Vec<(&'static Ext4FileSystem, u32)>,
 > = crate::sync::spinlock::Spinlock::new(alloc::vec::Vec::new());
 
+/// Queue an inode for deferred reaping (rename-replace path; the unlink
+/// path goes through ext4_destroy_inode's Drop). Idempotent per (fs, ino).
+pub(crate) fn queue_pending_reap(fs: &Ext4FileSystem, ino: u32) {
+    // The PENDING_REAPS vec carries &'static Ext4FileSystem — the ext4
+    // mount's fs instance lives for the boot (one static per mount);
+    // extend the lifetime (the callers hold the mount's fs under the
+    // big lock, and the reap re-validates by reading the inode).
+    let fs_static: &'static Ext4FileSystem = unsafe { core::mem::transmute(fs) };
+    let mut q = PENDING_REAPS.lock();
+    if !q.iter().any(|&(f, i)| core::ptr::eq(f, fs_static) && i == ino) {
+        q.push((fs_static, ino));
+    }
+}
+
 /// Drain the deferred-delete queue. Called from ext4 entry points that
 /// already serialize on EXT4_BIG_LOCK (unlink/create/mkdir wrappers);
 /// each item is reaped under the big lock, one at a time.

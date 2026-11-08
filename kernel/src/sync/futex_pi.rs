@@ -586,8 +586,14 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
         crate::sched::schedule();
         drop(wake);
 
+        // Re-acquire the PI bucket lock for the sleeper-side cleanup
+        // (review4 H-8: unlink/free without it raced futex_unlock_pi's
+        // handoff — 'handed' could land on a freed/reallocated slot).
+        // pi_requeue_detach in this file is the in-tree correct pattern.
+        let _bkt2 = pi_bucket_lock(&key);
         if pi_waiter_handed(wi) {
             pi_waiter_free(wi);
+            drop(_bkt2);
             return 0; // the user word already holds our TID
         }
         // Timed out / interrupted / spurious: leave the queue and end
@@ -601,6 +607,7 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
             pi_unboost_owner_if_last(si);
             pi_state_maybe_free(si);
         }
+        drop(_bkt2);
         if timed {
             return -(ETIMEDOUT as i64);
         }
@@ -810,9 +817,19 @@ pub unsafe fn pi_requeue_detach(key2: &FutexKey, wi: usize) {
 /// hands the lock to its top waiter with FUTEX_OWNER_DIED latched
 /// (robust-mutex contract); the waiter's park ends OWNING the lock.
 pub fn futex_pi_exit_cleanup(task: *mut Task) {
-    // 1. Waiter side: leave every PI queue (no wake).
+    // 1. Waiter side: leave every PI queue (no wake). Bucket lock held
+    // across the unlink/free (review4 H-8: the unlocked form raced a
+    // concurrent futex_unlock_pi handoff on the same state — 'handed'
+    // could land on a freed/reallocated slot). Part 2 below already had
+    // this discipline.
     while let Some(si) = pi_blocked_state_of(task) {
         let mut found = None;
+        let bucket_key = {
+            let st = PI_STATE_POOL[si].lock_irqsave();
+            st.as_ref().map(|s| s.key)
+        };
+        let Some(bucket_key) = bucket_key else { break };
+        let _bkt = pi_bucket_lock(&bucket_key);
         {
             let st = PI_STATE_POOL[si].lock_irqsave();
             if let Some(ref s) = *st {
@@ -841,6 +858,7 @@ pub fn futex_pi_exit_cleanup(task: *mut Task) {
             pi_unboost_owner_if_last(si);
         }
         pi_state_maybe_free(si);
+        drop(_bkt);
     }
 
     // 2. Owner side: died holding PI locks — hand each to its top
