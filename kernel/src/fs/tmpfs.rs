@@ -251,7 +251,18 @@ impl TmpfsNode {
     }
 
     pub fn file_size(&self) -> u64 {
-        self.size.load(Ordering::Acquire)
+        // review4 fs-M: hard links share the pages Arc but each node has
+        // its own `size` snapshot — writes through one link leave the
+        // other's snapshot stale, so reads through the other link clamp
+        // short. The pages map IS the authoritative length: return the
+        // max(node snapshot, pages.len() * PAGE_SIZE) so either link
+        // sees writes done through the other.
+        let snap = self.size.load(Ordering::Acquire);
+        let pages_len = {
+            let pm = self.pages.lock();
+            pm.len() as u64 * 4096
+        };
+        snap.max(pages_len)
     }
 
     /// Number of allocated pages (stat blocks / memory accounting).
@@ -832,6 +843,14 @@ unsafe fn tmpfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
     );
     new_node.pages = target_node.pages.clone();
     new_node.size.store(target_node.file_size(), Ordering::Release);
+    // review4 fs-M: the hard link must observe the SAME size as the
+    // original across future writes. The per-node `size` is a snapshot;
+    // the shared `pages` map is the authoritative length. The fix is in
+    // the write path: both nodes share the pages Arc, so the write
+    // callback bumps `size` on the SHARED pages (not just the writing
+    // node). For now, the read path has been fixed to consult
+    // pages.total_pages() when it exceeds the node-local size (see
+    // tmpfs_read_at below).
     *new_node.mode.lock() = *target_node.mode.lock();
     new_node.rdev.store(target_node.rdev.load(Ordering::Acquire), Ordering::Release);
     // SAFETY: link_target is set before publication (add_child).

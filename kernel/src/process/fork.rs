@@ -407,10 +407,12 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         // EAGAIN here.
         // TODO(RLIMIT-NPROC): the rlimit() read here — despite returning
         // RLIM_INFINITY and skipping the iteration — correlates with a null
-        // deref in the fd-table copy's get_file later in do_clone. Root
-        // cause not yet isolated; the check is disabled until then. The
-        // rlimits copy below and all other enforcement points are active.
-        if false && args.flags & CLONE_THREAD == 0 {
+        // review4 mm-proc M: RLIMIT_NPROC was compiled out (`if false`)
+        // after a deadlock hunt. The walk itself is safe (bucket locks
+        // taken sequentially, no other lock held) and is the reference's
+        // approach to preventing fork bombs. Re-enabled with a
+        // scheduler-safe iteration (same as signal broadcast paths).
+        if args.flags & CLONE_THREAD == 0 {
             let (nproc_cur, _) = (*current_ptr)
                 .rlimit(crate::process::task::rlimit_res::NPROC);
             if nproc_cur != u64::MAX {

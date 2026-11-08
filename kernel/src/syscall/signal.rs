@@ -246,34 +246,7 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
         }
         let sig_struct = signal_struct.unwrap();
 
-        // Save old signal handling action (converted to the user ABI layout)
-        if !oldact_ptr.is_null() {
-            // Validate user pointer
-            if !crate::arch::uaccess::access_ok(oldact_ptr as usize, core::mem::size_of::<SigActionUser>()) {
-                return -(errno::EFAULT as i64);
-            }
-            // Exception-table copy: unmapped page → EFAULT, not a kernel fault.
-            let old_action = sig_struct.get_action(signum).unwrap_or_else(SigAction::new);
-            let user_action = SigActionUser {
-                sa_handler: old_action.sa_handler,
-                sa_flags: old_action.sa_flags.bits(),
-                #[cfg(any(feature = "x86_64", feature = "aarch64"))]
-                sa_restorer: old_action.sa_restorer,
-                sa_mask: old_action.sa_mask,
-            };
-            let src = &user_action as *const SigActionUser as *const u8;
-            let uncopied = unsafe {
-                crate::arch::uaccess::copy_to_user(
-                    oldact_ptr as *mut u8,
-                    src,
-                    core::mem::size_of::<SigActionUser>(),
-                )
-            };
-            if uncopied > 0 {
-                return -(errno::EFAULT as i64);
-            }
-        }
-
+        let saved_old_action = sig_struct.get_action(signum).unwrap_or_else(SigAction::new);
         // Set new signal handling action (parsed from the user ABI layout)
         if !act_ptr.is_null() {
             // Validate user pointer
@@ -316,20 +289,47 @@ let new_action = SigAction {
                 },
             };
             match sig_struct.set_action(signum, new_action) {
-                Ok(_) => 0,  // Success
+                Ok(_) => {} // Success
                 Err(_) => {
                     crate::pr_info!(
                         "rt_sigaction EINVAL: set_action rejected signum={} pid={}",
                         signum,
                         unsafe { crate::process::current_pid() }
                     );
-                    -(errno::EINVAL as i64)
+                    return -(errno::EINVAL as i64);
                 }
             }
-        } else {
-            0  // Success (just query)
+        }
+
+        // Save old signal handling action (converted to the user ABI layout)
+        if !oldact_ptr.is_null() {
+            // Validate user pointer
+            if !crate::arch::uaccess::access_ok(oldact_ptr as usize, core::mem::size_of::<SigActionUser>()) {
+                return -(errno::EFAULT as i64);
+            }
+            // Exception-table copy: unmapped page → EFAULT, not a kernel fault.
+            let old_action = saved_old_action;
+            let user_action = SigActionUser {
+                sa_handler: old_action.sa_handler,
+                sa_flags: old_action.sa_flags.bits(),
+                #[cfg(any(feature = "x86_64", feature = "aarch64"))]
+                sa_restorer: old_action.sa_restorer,
+                sa_mask: old_action.sa_mask,
+            };
+            let src = &user_action as *const SigActionUser as *const u8;
+            let uncopied = unsafe {
+                crate::arch::uaccess::copy_to_user(
+                    oldact_ptr as *mut u8,
+                    src,
+                    core::mem::size_of::<SigActionUser>(),
+                )
+            };
+            if uncopied > 0 {
+                return -(errno::EFAULT as i64);
+            }
         }
     }
+    0
 }
 
 /// sys_rt_sigreturn - Return from signal handler
