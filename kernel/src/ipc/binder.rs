@@ -4951,6 +4951,38 @@ pub fn txn_hang_audit() {
                         );
                         n += 1;
                     });
+                    // 78th (ohw115): the VMA rwsem owner word for samgr's
+                    // mm — tid 344 was observed stuck mid-brk (sys=45) for
+                    // 60+ s; if the write lock is held by a sleeper this
+                    // names the founder pid directly (WRITER pid = low 32
+                    // bits; bit 1<<32 = READER-owned; bit 1<<33 =
+                    // NONSPINNABLE).
+                    {
+                        let mut done = false;
+                        crate::sched::for_each_task_try(|task| {
+                            if done {
+                                return;
+                            }
+                            // SAFETY: diagnostic read under the for_each
+                            // task contract.
+                            let tk = unsafe { &*task };
+                            if tk.tgid() as u32 != samgr {
+                                return;
+                            }
+                            if let Some(aspace) = tk.address_space() {
+                                let (owner, count) = aspace.vma_rwsem_diag();
+                                let _ = writeln!(
+                                    w,
+                                    "SAMGR-VMAW owner={:#x} count={}",
+                                    owner, count
+                                );
+                                done = true;
+                            }
+                        });
+                        if !done {
+                            let _ = writeln!(w, "SAMGR-VMAW owner=? (no aspace)");
+                        }
+                    }
                     let _ = writeln!(w, "SAMGR-SNAP-END printed={}", n);
                 }
             }
@@ -5983,6 +6015,13 @@ pub fn bwr_park_audit() {
         let mscan_txt = {
             static MS_N: core::sync::atomic::AtomicU32 =
                 core::sync::atomic::AtomicU32::new(0);
+            // 78th: dedicated samgr budget — first-come ordering let
+            // non-samgr hung-txn rows eat all 3 scans before the walk
+            // reached the samgr load-waiters, so the chain-driven
+            // FUXWATCH2 arm and the live-word publish never fired. samgr
+            // rows count against MS_S only.
+            static MS_S: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
             static MS_BURST: core::sync::atomic::AtomicU32 =
                 core::sync::atomic::AtomicU32::new(0);
             // Per-BURST budget (the audit runs one burst per 5 s): reset
@@ -5995,12 +6034,19 @@ pub fn bwr_park_audit() {
             if burst_id != prev_burst {
                 MS_BURST.store(burst_id, core::sync::atomic::Ordering::Relaxed);
                 MS_N.store(0, core::sync::atomic::Ordering::Relaxed);
+                MS_S.store(0, core::sync::atomic::Ordering::Relaxed);
             }
+            let samgr_row = s.pid as u32 == crate::ipc::binder::binder_sareg_samgr_pid()
+                && crate::ipc::binder::binder_sareg_samgr_pid() != 0;
             let eligible = park == "FUTEX"
                 && !task.is_null()
-                && (!s.stack.is_empty()
-                    || s.pid as u32 == crate::ipc::binder::binder_sareg_samgr_pid());
-            if (eligible && MS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 3 || is_owner)
+                && (!s.stack.is_empty() || samgr_row);
+            let budget_ok = if samgr_row {
+                MS_S.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 3
+            } else {
+                MS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 3
+            };
+            if (eligible && budget_ok || is_owner)
                 && park == "FUTEX"
                 && !task.is_null()
                 && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck)
@@ -10000,17 +10046,51 @@ fn binder_transaction(
                         hdr.len(),
                     ) == 0
                 };
-            // "oh" in UTF-16LE at offsets 12..16.
+            // "oh" in UTF-16LE at offsets 12..16 (cheap prefilter; HDI
+            // interfaces use "OH"/"HDI" prefixes).
             if ok && &hdr[12..16] == &[0x6f, 0x00, 0x68, 0x00] {
-                is_samgr_req = true;
-                SAREG_SAMGR_PID.store(target.pid as u32, core::sync::atomic::Ordering::Relaxed);
-                // leg-25 mirror for the SLRD read-side gate (see
-                // binder_sareg_samgr_pid): samgr's leader comm matches
-                // no app prefix, so the tracer keys on the pid.
-                SAREG_SAMGR_PID_PUB.store(
-                    target.pid as u32,
-                    core::sync::atomic::Ordering::Relaxed,
-                );
+                // 78th: exact-token verify before calling this a samgr
+                // request. The "oh" prefilter alone also matches every
+                // OTHER lowercase-ohos.* interface descriptor — on ohw113
+                // a wifi request flipped SAREG_SAMGR_PID to
+                // wifi_manager_se (877), and the drifted latch silently
+                // disarmed every samgr-keyed instrument downstream
+                // (OH67_M2/OH68 holder decode, the FUXWATCH2-CHAIN arm,
+                // mscan eligibility). The samgr proxy descriptor is the
+                // 22-char UTF-16 string "ohos.samgr.accessToken" at
+                // parcel offset 12 with u32 length 0x16 at offset 8 —
+                // match it fully.
+                let mut tok = [0u8; 56];
+                let tok_ok = unsafe {
+                    crate::arch::uaccess::copy_from_user(
+                        tok.as_mut_ptr(),
+                        tr.data_buffer as *const u8,
+                        tok.len(),
+                    ) == 0
+                };
+                let is_samgr_proxy_req = tok_ok
+                    && tok[8] == 22
+                    && tok[9] == 0
+                    && tok[10] == 0
+                    && tok[11] == 0
+                    && &tok[12..56]
+                        == &[
+                            0x6f, 0x00, 0x68, 0x00, 0x6f, 0x00, 0x73, 0x00, 0x2e, 0x00, 0x73,
+                            0x00, 0x61, 0x00, 0x6d, 0x00, 0x67, 0x00, 0x72, 0x00, 0x2e, 0x00,
+                            0x61, 0x00, 0x63, 0x00, 0x63, 0x00, 0x65, 0x00, 0x73, 0x00, 0x73,
+                            0x00, 0x54, 0x00, 0x6f, 0x00, 0x6b, 0x00, 0x65, 0x00, 0x6e, 0x00,
+                        ];
+                if is_samgr_proxy_req {
+                    is_samgr_req = true;
+                    SAREG_SAMGR_PID.store(target.pid as u32, core::sync::atomic::Ordering::Relaxed);
+                    // leg-25 mirror for the SLRD read-side gate (see
+                    // binder_sareg_samgr_pid): samgr's leader comm matches
+                    // no app prefix, so the tracer keys on the pid.
+                    SAREG_SAMGR_PID_PUB.store(
+                        target.pid as u32,
+                        core::sync::atomic::Ordering::Relaxed,
+                    );
+                }
             }
         }
         let reply_to_mutation = reply

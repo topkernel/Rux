@@ -1346,14 +1346,29 @@ pub fn fuxwatch_log_write(tid: u32, rip: u64, exact: bool, old_word: u32, fault_
     }
     // HOTPATH-PRINT: compact per-write line; the wedge window carries
     // at most a few hundred. (w2 marker identifies second-watch words
-    // when both pages share rips.)
-    crate::pr_warn!("FW tid={} rip={:#x} old={} n={} addr={:#x}{}", tid, rip, old_word, n, fault_addr, if which2 { " w2" } else { "" });
+    // when both pages share rips.) 78th: tgid too — every FFRT process
+    // allocates a mutexPrivate at the SAME heap VA, so a slot-2 watch
+    // traces N processes' objects at once and tid alone cannot
+    // attribute a write (ohw115: param_watcher's counter and samgr's
+    // mutex shared 0x7ff000499a50).
+    let wtgid = crate::sched::current()
+        .map(|t| unsafe { (*t).tgid() as u32 })
+        .unwrap_or(0);
+    crate::pr_warn!("FW tid={} tgid={} rip={:#x} old={} n={} addr={:#x}{}", tid, wtgid, rip, old_word, n, fault_addr, if which2 { " w2" } else { "" });
     // 62nd: latch the owner-of-record on every successful 0->1
     // acquire-class write (the fast-path CAS or the xchg that wins
     // from UNLOCK). old_word==0 with the word transitioning to a
     // locked value = an acquire. After a freeze only old=2 pile-ins
     // remain, so the latch holds the freeze acquirer.
-    if old_word == 0 {
+    // 78th: the slot-2 latch is samgr-tgid-gated — the chain armed the
+    // slot on SAMGR's mutex word, but the watch itself covers every mm
+    // mapping that VA, and foreign acquires (ohw115: param_watcher's
+    // old=0 counter write) corrupted the latch and the OH68 owner
+    // decode with it.
+    if old_word == 0 && (!which2 || {
+        let samgr = crate::ipc::binder::binder_sareg_samgr_pid();
+        samgr == 0 || wtgid == samgr
+    }) {
         FUXWATCH_OWNER_TID.store(tid, core::sync::atomic::Ordering::Relaxed);
         FUXWATCH_OWNER_J
             .store(crate::drivers::timer::get_jiffies() as u32, core::sync::atomic::Ordering::Relaxed);

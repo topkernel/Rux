@@ -1207,6 +1207,18 @@ impl<T> Rwsem<T> {
     pub fn is_contended(&self) -> bool {
         self.raw.is_contended()
     }
+
+    /// 78th (ohw115): diagnostic snapshot of the raw owner word and
+    /// count for the census (the samgr VMA-lock wedge hunt — a thread
+    /// stuck mid-brk needs to know WHO holds the write lock). Relaxed
+    /// reads only; never on any fast path beyond the two loads.
+    #[inline]
+    pub fn diag(&self) -> (usize, i64) {
+        (
+            self.raw.owner.load(Ordering::Relaxed),
+            self.raw.count.load(Ordering::Relaxed),
+        )
+    }
 }
 
 pub struct RwsemReadGuard<'a, T: ?Sized> {

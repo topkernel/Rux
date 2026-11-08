@@ -989,6 +989,16 @@ impl MmStruct {
         self.vma_manager.try_read()
     }
 
+    /// 78th (ohw115): census-only snapshot of the VMA rwsem's raw
+    /// owner word + count. When a thread is observed stuck mid-brk
+    /// (sys=45 for minutes — ohw115 tid 344), the owner word names
+    /// the founder: a WRITER pid (owner low bits) or READER-owned
+    /// (bit set; count's reader units). Relaxed loads, no locking.
+    #[inline]
+    pub fn vma_rwsem_diag(&self) -> (usize, i64) {
+        self.vma_manager.diag()
+    }
+
     /// Acquire VMA write lock
     #[inline]
     /// Pin a file reference for a file-backed VMA (Linux vm_file hold).
