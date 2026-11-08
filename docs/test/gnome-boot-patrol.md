@@ -173,3 +173,45 @@ first frame never arrives within 5 minutes.
 **Next**: unattended valid-judgment bisect (run/paint-bisect.sh —
 a verdict counts only when the shell started; pre-shell freezes are
 skipped) over 7791d772 (good) .. 1d9c8b75 (bad).
+
+## Round 5 — 2026-11-08 ~09:40 — **终点：Ubuntu 干净启动（主线）**
+
+**Root cause of the black screen + freeze faces**: commit 885640e5
+"wake-side lying-slot heal" (+ its fixup 1ebfe066, Nov 8 03:11-04:06).
+The heal ran in the WAKE path: it convicted a busy CPU slot naming the
+being-woken task as "stale" and rewrote the slot + released the pick
+ownership — but the naming CPU can legitimately be MID-RESUME of that
+exact task (the PICKED→LIVE affirm window). The captured failure chain
+(debug=taskdump,periodic,sysforensic,wwcensus boot bc1):
+
+    SLOT-LIE-WAKE-HEALED pid=138 arm=a
+    → WAKE-HEAL pid=138 was=1          (preempt count zeroed)
+    → PREEMPT-UNDERFLOW pid=138        (unpaired decrement clamped)
+    → BUG: Illegal instruction [138] on CPU1 → KERNPANIC → CPU halted
+    → the stranded spinlock (near the GRQ/PER_CPU block) deadlocks the
+      other CPUs — the freeze face; the half-dead machine limps the
+      session with no paint — the black face.
+
+Timeline correlation: the heal landed 03:11; boots before it start the
+shell 4/5; every boot after it freezes (0/7) or panics. Interleaved
+controls (1d9c8b75 == 4f77f0f7, both 2/3 painted) bracket the window.
+
+**Fix**: revert 29c2acba (removes the heal + its fixup, 270 lines).
+
+**Verification (main 29c2acba, SMP 8, 300 s windows, screendumps)**:
+
+| boot | shell lines | non-black @300s | panic | SIGSEGV (session) |
+|---|---|---|---|---|
+| pv1 | 20 | 1,023,986 / 1,024,000 (99%) | 0 | 0 |
+| pv2 | 20 | 1,023,986 (99%) | 0 | 1 (gsettings helper; shell unaffected) |
+| pv3 | 15 | 1,023,986 (99%) | 0 | 0 |
+| pv4 | 20 | 1,023,986 (99%) | 0 | 0 |
+
+Screenshot: runs/gnome-x86-pv1/shot-0300s.ppm (99% non-black, the GNOME
+default wallpaper #e0e0c0 with the top-panel color rows).
+
+Every clean-boot criterion met: shell up, session stable through the
+full 300 s window (paint held at t=240 and t=300), zero SIGSEGV in the
+session, zero "respawning too quickly", zero TRIMQ-HIT, zero panic.
+
+**Patrol terminated at its success condition.**
