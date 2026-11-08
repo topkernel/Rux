@@ -222,6 +222,30 @@ impl GlobalRunQueue {
             self.lock
                 .restamp_owner_ra(unsafe { grq_caller_ra() });
         }
+        // r18 mechanism-C hunt (`nextgate` feature): per-CPU GRQ hold
+        // stamp. The owner-word restamp above proved UNREADABLE for
+        // holder attribution — this wrapper is #[inline] and inlined at
+        // most sites, where [rbp+8] is not a frame-pointer slot (the
+        // r17-gbo-2 wedge's ow_ra matched NO wrapper call boundary).
+        // #[track_caller] Location is reliable at BOTH inline and
+        // out-of-line sites, so stamp it here; both release paths
+        // (unlock_irqretain / Drop) clear it. At a DEADLOCK warn the
+        // table discriminates the two lost-release shapes:
+        //   slot set  = a real acquire path leaked the section (named);
+        //   all clear = lock word went to 1 with no acquire protocol —
+        //               a wild write landed on the word (scribble).
+        // IRQs are off + preemption disabled between stamp and clear,
+        // so the stamping CPU cannot migrate.
+        #[cfg(feature = "nextgate")]
+        {
+            let cpu = crate::arch::smp::cpu_id() as usize;
+            if cpu < MAX_CPUS {
+                let loc = core::panic::Location::caller();
+                GRQ_HOLD_LOC[cpu].0.store(loc.file().as_ptr() as usize, core::sync::atomic::Ordering::Relaxed);
+                GRQ_HOLD_LOC[cpu].1.store(loc.file().len(), core::sync::atomic::Ordering::Relaxed);
+                GRQ_HOLD_LOC[cpu].2.store(loc.line(), core::sync::atomic::Ordering::Relaxed);
+            }
+        }
         GrqGuard { grq: self as *const Self as *mut Self, flags, _marker: core::marker::PhantomData }
     }
 
@@ -490,11 +514,95 @@ pub struct GrqGuard<'a> {
     _marker: core::marker::PhantomData<&'a GlobalRunQueue>,
 }
 
+// r18 mechanism-C hunt (`nextgate` feature): per-CPU GRQ hold table —
+// (file ptr, file len, line) of the #[track_caller] acquire site, 0/0/0
+// when that CPU does not hold the GRQ. Advisory Relaxed reads; see the
+// stamp in lock_irqsave for the discrimination logic.
+#[cfg(feature = "nextgate")]
+static GRQ_HOLD_LOC: [(
+    core::sync::atomic::AtomicUsize,
+    core::sync::atomic::AtomicUsize,
+    core::sync::atomic::AtomicU32,
+); MAX_CPUS] = [const {
+    (
+        core::sync::atomic::AtomicUsize::new(0),
+        core::sync::atomic::AtomicUsize::new(0),
+        core::sync::atomic::AtomicU32::new(0),
+    )
+}; MAX_CPUS];
+
+/// r18 mechanism-C hunt: clear this CPU's GRQ hold slot. Called from
+/// both GrqGuard release paths (unlock_irqretain / Drop) — IRQs are
+/// still off there, so cpu_id is stable.
+#[cfg(feature = "nextgate")]
+#[inline]
+fn grq_hold_clear() {
+    let cpu = crate::arch::smp::cpu_id() as usize;
+    if cpu < MAX_CPUS {
+        // line first: a reader must never see a nonzero file with a
+        // stale line (advisory anyway, but keep the pair consistent).
+        GRQ_HOLD_LOC[cpu].2.store(0, core::sync::atomic::Ordering::Relaxed);
+        GRQ_HOLD_LOC[cpu].1.store(0, core::sync::atomic::Ordering::Relaxed);
+        GRQ_HOLD_LOC[cpu].0.store(0, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// r18 mechanism-C hunt: print the per-CPU GRQ hold table from a
+/// spinlock DEADLOCK warn (putchar_no_lock discipline — the warn path
+/// may not take console locks). One line per CPU: "GRQHOLD c=N
+/// <file:line>" or "GRQHOLD c=N -".
+#[cfg(feature = "nextgate")]
+pub fn grq_hold_table_print() {
+    use crate::console::putchar_no_lock as putchar;
+    for cpu in 0..MAX_CPUS {
+        let line = GRQ_HOLD_LOC[cpu].2.load(core::sync::atomic::Ordering::Relaxed);
+        let len = GRQ_HOLD_LOC[cpu].1.load(core::sync::atomic::Ordering::Relaxed);
+        let ptr = GRQ_HOLD_LOC[cpu].0.load(core::sync::atomic::Ordering::Relaxed);
+        const M: &[u8] = b"\nGRQHOLD c=";
+        for &b in M {
+            putchar(b);
+        }
+        putchar(b'0' + cpu as u8);
+        putchar(b' ');
+        if ptr == 0 || len == 0 || len > 256 {
+            putchar(b'-');
+            continue;
+        }
+        // SAFETY: the pointer/len pair came from a &'static str
+        // (&'static Location::file()); freed memory cannot occur.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len) };
+        for &b in bytes {
+            putchar(b);
+        }
+        putchar(b':');
+        let mut buf = [0u8; 10];
+        let mut n = 0;
+        let mut v = line as u64;
+        if v == 0 {
+            buf[0] = b'0';
+            n = 1;
+        }
+        while v > 0 {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        for i in (0..n).rev() {
+            putchar(buf[i]);
+        }
+    }
+    putchar(b'\n');
+}
+
 impl<'a> GrqGuard<'a> {
     /// Release the spinlock but keep interrupts disabled.
     /// Returns the saved IRQ flags. Caller must call restore_irq() later.
     pub fn unlock_irqretain(self) -> bool {
         let flags = self.flags;
+        // r18 mechanism-C hunt: clear the hold slot BEFORE the unlock
+        // store (see grq_hold_clear).
+        #[cfg(feature = "nextgate")]
+        grq_hold_clear();
         // SAFETY: we hold the GRQ lock via this guard, so the unlock is valid.
         unsafe { (*self.grq).lock.unlock() };
         crate::interrupt::preempt::preempt_count_sub(
@@ -522,6 +630,12 @@ impl core::ops::DerefMut for GrqGuard<'_> {
 
 impl Drop for GrqGuard<'_> {
     fn drop(&mut self) {
+        // r18 mechanism-C hunt: clear the hold slot BEFORE the unlock
+        // store — a corrupted-guard unlock (grq pointer smashed by the
+        // rsp0/UAF family) then leaves lock=1 with ALL slots clear,
+        // convicting the scribble shape at the deadlock warn.
+        #[cfg(feature = "nextgate")]
+        grq_hold_clear();
         unsafe { (*self.grq).lock.unlock() };
         crate::interrupt::preempt::preempt_count_sub(
             crate::interrupt::preempt::PREEMPT_OFFSET,
@@ -3620,7 +3734,15 @@ fn nextgate_stale(cpu_id: usize, prev: *mut Task, next: *mut Task) -> bool {
         (u32::MAX, 0, 0, 0)
     };
     let bad = if in_image {
-        true
+        // Static-storage switch targets are legal ONLY for the static
+        // Task storages — the boot init task (INIT_TASK_STORAGE) and
+        // the per-CPU idles — exactly the set kernel_task_ptr_range_ok
+        // admits. r17 owner4 false positive, 10/10 boots: PID 1's
+        // FIRST dispatch picks INIT_TASK_STORAGE with ra=ret_from_fork
+        // and preempt_count 0 — a healthy never-run task, not a wild
+        // pointer; blanket-refusing every image pointer wedged every
+        // boot at PID 1's first pick before GB could even start.
+        !kernel_task_ptr_range_ok(next.cast())
     } else if in_physmap {
         !(klo != 0 && ra >= klo && ra < khi)
     } else {
