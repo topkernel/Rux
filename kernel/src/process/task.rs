@@ -5098,6 +5098,13 @@ impl Task {
     ///
     /// Free current task's kernel stack (returns to cache)
     pub fn free_kernel_stack(&mut self) {
+        // r18 mechanism-C fix: no scheduler reference may survive into
+        // the free — a per-CPU slot still naming this task turns the
+        // freed stack into a resurrection bomb (refused wakes age into
+        // the slot-lie heal, the heal re-enqueues, the resume lands on
+        // freed-then-reused memory — the garbage-jump/GRQ-scribble
+        // family). Clear naming slots + queue links first.
+        crate::sched::sched::sched_detach_before_free(self as *mut Task);
         if let Some(stack_top) = self.kernel_stack {
             // Calculate stack bottom address (stack top - stack size)
             // SAFETY: kernel_stack was set by alloc_kernel_stack() as bottom + KERNEL_STACK_SIZE,
