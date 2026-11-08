@@ -490,11 +490,19 @@ pub fn jbd2_journal_commit_transaction(
     // BEFORE the commit block: a crash between data blocks and here simply
     // replays everything (old behaviour); a crash after the commit block
     // sees the revokes and skips the freed blocks.
-    let revoke_blocks = super::revoke::jbd2_journal_write_revoke_records(
-        journal,
-        commit_transaction,
-    )?;
+    // review4 H-2b: pass our current log position (after the data blocks)
+    // so the revoke blocks land AFTER the descriptor/data, not on the
+    // pre-commit j_head (the old form clobbered the descriptor in mixed
+    // commits, or was clobbered by this commit block in revoke-only
+    // commits — the on-disk log was malformed).
+    let (revoke_blocks, revoke_end) =
+        super::revoke::jbd2_journal_write_revoke_records_at(
+            journal,
+            commit_transaction,
+            Some(current_journal_block),
+        )?;
     let _ = revoke_blocks;
+    current_journal_block = revoke_end;
 
     // Phase 3: Write commit block
     {

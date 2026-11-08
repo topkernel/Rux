@@ -707,7 +707,7 @@ fn read_file_via(
 /// - combined total (argv+envp bytes): 2 MB
 /// Exceeding a limit fails exec with E2BIG instead of silent truncation.
 const MAX_ARG_STRINGS: usize = 2048;
-const MAX_ARG_STRLEN: usize = 8192;
+const MAX_ARG_STRLEN: usize = 128 * 1024; // Linux MAX_ARG_STRLEN (review4 H-2a)
 const MAX_ARG_TOTAL: usize = 2 * 1024 * 1024;
 
 /// Read argv array from user space using fault-safe uaccess helpers.
@@ -721,7 +721,7 @@ fn copy_argv_from_user(argv_ptr: *const *const u8) -> Result<alloc::vec::Vec<all
     }
 
     let mut total = 0usize;
-    let mut buf = [0u8; MAX_ARG_STRLEN];
+    let mut buf = alloc::vec![0u8; MAX_ARG_STRLEN];
     for i in 0..MAX_ARG_STRINGS {
         if i == MAX_ARG_STRINGS - 1 {
             // Hit the entry cap with no NULL terminator seen.
@@ -738,15 +738,16 @@ fn copy_argv_from_user(argv_ptr: *const *const u8) -> Result<alloc::vec::Vec<all
         // Read the null-terminated string via strncpy_from_user (byte-by-byte get_user).
         match crate::arch::uaccess::strncpy_from_user(arg_ptr, MAX_ARG_STRLEN, &mut buf) {
             Ok(slice) => {
+                if slice.len() == MAX_ARG_STRLEN {
+                    return Err(-(errno::E2BIG as i64));
+                }
                 total = total.saturating_add(slice.len());
                 if total > MAX_ARG_TOTAL {
                     return Err(-(errno::E2BIG as i64));
                 }
-                // Non-UTF-8 bytes become U+FFFD instead of silently
-                // dropping the entry (paths with stray bytes still exec).
                 args.push(String::from_utf8_lossy(slice).into_owned());
             }
-            Err(_) => break, // page fault reading user string
+            Err(_) => return Err(-(errno::EFAULT as i64)),
         }
     }
     Ok(args)
@@ -761,7 +762,7 @@ fn copy_envp_from_user(envp_ptr: *const *const u8) -> Result<alloc::vec::Vec<all
     }
 
     let mut total = 0usize;
-    let mut buf = [0u8; MAX_ARG_STRLEN];
+    let mut buf = alloc::vec![0u8; MAX_ARG_STRLEN];
     for i in 0..MAX_ARG_STRINGS {
         if i == MAX_ARG_STRINGS - 1 {
             return Err(-(errno::E2BIG as i64));
@@ -776,13 +777,16 @@ fn copy_envp_from_user(envp_ptr: *const *const u8) -> Result<alloc::vec::Vec<all
         }
         match crate::arch::uaccess::strncpy_from_user(env_str_ptr, MAX_ARG_STRLEN, &mut buf) {
             Ok(slice) => {
+                if slice.len() == MAX_ARG_STRLEN {
+                    return Err(-(errno::E2BIG as i64));
+                }
                 total = total.saturating_add(slice.len());
                 if total > MAX_ARG_TOTAL {
                     return Err(-(errno::E2BIG as i64));
                 }
                 envs.push(String::from_utf8_lossy(slice).into_owned());
             }
-            Err(_) => break,
+            Err(_) => return Err(-(errno::EFAULT as i64)),
         }
     }
     Ok(envs)

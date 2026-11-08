@@ -2302,13 +2302,31 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
             let file = match fdtable.get_file(entry.fd as usize) {
                 Some(f) if f.file_id == entry.file_id => f,
                 _ => {
-                    // The interest is dead (closed fd / reused number).
-                    // Remove it silently — Linux delivers NOTHING for a
-                    // closed interest (removed at close), and the former
-                    // forever-EPOLLERR|EPOLLHUP report was a phantom
-                    // wakeup source.
-                    dead_fds.push(entry.fd as usize);
-                    continue;
+                    // The fd NUMBER no longer resolves to this description.
+                    // review4 H-2c: the description may still be alive at a
+                    // DIFFERENT fd number (dup/dup2/fork + close of the
+                    // original). Linux removes an epitem only at the file
+                    // description's LAST reference drop — scan the table
+                    // for the description before purging the interest.
+                    let mut found_at = None;
+                    for fd_i in 0..1024usize {
+                        if let Some(f) = fdtable.get_file(fd_i) {
+                            if f.file_id == entry.file_id {
+                                found_at = Some(f);
+                                break;
+                            }
+                        }
+                    }
+                    match found_at {
+                        Some(f) => f,
+                        None => {
+                            // The open file description is truly gone: the
+                            // interest is dead. Remove it silently (Linux
+                            // delivers NOTHING for a closed interest).
+                            dead_fds.push(entry.fd as usize);
+                            continue;
+                        }
+                    }
                 }
             };
 

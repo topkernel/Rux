@@ -212,16 +212,31 @@ pub fn jbd2_journal_write_revoke_records(
     journal: &Arc<Journal>,
     commit_transaction: &Arc<Transaction>,
 ) -> Result<usize, i32> {
+    jbd2_journal_write_revoke_records_at(journal, commit_transaction, None).map(|(n, _)| n)
+}
+
+/// `start_block`: the caller's current log position (review4 H-2b). The
+/// commit transaction walks the log with a LOCAL current_journal_block and
+/// only publishes journal.j_head in Phase 4 — the old form re-loaded the
+/// PRE-commit j_head here, writing revoke blocks on top of the descriptor
+/// block (mixed commits) or being clobbered by the commit block itself
+/// (revoke-only commits). Pass Some(pos) to place revokes after the
+/// caller's data blocks; None preserves the legacy self-positioned form.
+pub fn jbd2_journal_write_revoke_records_at(
+    journal: &Arc<Journal>,
+    commit_transaction: &Arc<Transaction>,
+    start_block: Option<u64>,
+) -> Result<(usize, u64), i32> {
     use crate::fs::bio;
 
     let device = journal.j_bio_device;
     if device.is_null() {
-        return Ok(0);
+        return Ok((0, journal.j_head.load(core::sync::atomic::Ordering::SeqCst)));
     }
 
     let records = take_revoke_records(commit_transaction);
     if records.is_empty() {
-        return Ok(0);
+        return Ok((0, match start_block { Some(p) => p, None => journal.j_head.load(core::sync::atomic::Ordering::SeqCst) }));
     }
 
     let blk_offset = journal.j_blk_offset;
@@ -249,10 +264,12 @@ pub fn jbd2_journal_write_revoke_records(
     let tid = commit_transaction.t_tid;
     let mut blocks_written = 0usize;
     let mut idx = 0usize;
+    let mut current_journal_block = match start_block {
+        Some(pos) => pos,
+        None => journal.j_head.load(core::sync::atomic::Ordering::SeqCst),
+    };
 
     while idx < records.len() {
-        let mut current_journal_block =
-            journal.j_head.load(core::sync::atomic::Ordering::SeqCst);
         let abs_block = blk_offset + current_journal_block;
 
         // SAFETY: bio::bread returns a valid BufferHead or None.
@@ -320,7 +337,9 @@ pub fn jbd2_journal_write_revoke_records(
         if current_journal_block >= journal.j_last {
             current_journal_block = journal.j_first;
         }
-        journal.j_head.store(current_journal_block, core::sync::atomic::Ordering::SeqCst);
+        if start_block.is_none() {
+            journal.j_head.store(current_journal_block, core::sync::atomic::Ordering::SeqCst);
+        }
 
         let sync_res = bio::sync_dirty_buffer(bh);
         bio::brelse(bh);
@@ -330,7 +349,7 @@ pub fn jbd2_journal_write_revoke_records(
         blocks_written += 1;
     }
 
-    Ok(blocks_written)
+    Ok((blocks_written, current_journal_block))
 }
 
 /// Parse a revoke block read during recovery and add its entries to the
