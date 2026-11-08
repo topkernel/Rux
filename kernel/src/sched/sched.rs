@@ -3319,7 +3319,24 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
             // by every interrupt that woke the park). Drop it like a
             // poisoned entry; the terminal deschedule loop keeps
             // re-asserting DEAD+dequeue, so the next round picks idle.
-            if (*task).pid() == 0 || (*task).state().is_dead() {
+            // PF_EXITING arm (78th, ohw115): the switch-in guard
+            // (x86_switch_publish) ALSO aborts on PF_EXITING — a
+            // re-linked mid-exit task that passes THIS gate dies at the
+            // switch instead, leaving the corpse LIVE-claimed with the
+            // slot pointing at it; the R85 heal clears the marks, the
+            // next pick re-links, and the abort/repair cycle repeats
+            // (SWITCHIN-DEAD-TASK pid 536 twice in 2.5 s, then
+            // rcu-gp-frozen-cpu and the dump froze the VM at 199 s —
+            // ohw109/111/115 boot-killer family). A queued task with
+            // PF_EXITING set has already entered do_exit on its own
+            // context; it needs no further CPU to finish dying.
+            // Refuse it here so the abort path never engages.
+            if (*task).pid() == 0
+                || (*task).state().is_dead()
+                || ((*task).ti_flags()
+                    & crate::process::task::task_flags::TaskFlags::PF_EXITING.bits())
+                    != 0
+            {
                 report_poisoned_rq_entry(cpu_id, task as usize);
                 grq.nr_running.fetch_update(
                     core::sync::atomic::Ordering::SeqCst,
@@ -3357,8 +3374,14 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
     if !grq.rt_rq.is_empty() && !rt_throttled(cpu_id) {
         if let Some(task) = grq.rt_rq.pick_next_cpu(cpu_id, prev) {
             // PID-0 GATE — see the Deadline block above. Also the
-            // DEAD-PICK GATE (sc193, v4) — see the Deadline block above.
-            if (*task).pid() == 0 || (*task).state().is_dead() {
+            // DEAD-PICK GATE (sc193, v4) and the PF_EXITING arm
+            // (78th, ohw115) — see the Deadline block above.
+            if (*task).pid() == 0
+                || (*task).state().is_dead()
+                || ((*task).ti_flags()
+                    & crate::process::task::task_flags::TaskFlags::PF_EXITING.bits())
+                    != 0
+            {
                 report_poisoned_rq_entry(cpu_id, task as usize);
                 grq.nr_running.fetch_update(
                     core::sync::atomic::Ordering::SeqCst,
@@ -3389,8 +3412,13 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
             // DEAD-PICK GATE (sc193, v4) — see the Deadline block above;
             // the CFS queue is where the re-linked launcher IPC thread
             // (tgid 5033) was re-picked from, parking cpu1 in wfi+5 for
-            // 13+ min.
-            if (*task).pid() == 0 || (*task).state().is_dead() {
+            // 13+ min. PF_EXITING arm (78th, ohw115) — same block.
+            if (*task).pid() == 0
+                || (*task).state().is_dead()
+                || ((*task).ti_flags()
+                    & crate::process::task::task_flags::TaskFlags::PF_EXITING.bits())
+                    != 0
+            {
                 report_poisoned_rq_entry(cpu_id, task as usize);
                 grq.nr_running.fetch_update(
                     core::sync::atomic::Ordering::SeqCst,
