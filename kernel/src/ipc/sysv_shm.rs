@@ -1020,18 +1020,56 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
     vma.set_file_fd(shmid);
     vma.set_file_size(segsz);
 
-    if addr_space.add_vma(vma).is_err() {
-        // Concurrent mapper won the range (auto-pick race or fixed-address
-        // request raced): undo the reservation and fail — never unmap the
-        // winner's range.
-        {
+    // Whole-attach write guard (the LLVM-slab zero-read fix, 2026-11-08).
+    // The old shape added the VMA and then installed the PTEs one page at
+    // a time with NO mm-level lock held: for the multi-MB segments the
+    // JIT attaches (gallium's os_malloc_aligned uses shm — the captured
+    // 0x410000 slab), a same-mm worker faulting through the half-built
+    // VMA held vma_read (the fault path holds it from the VMA lookup
+    // through its own PTE install) and demand-faulted a FRESH ZERO page
+    // for a page our loop had not reached — llvmpipe's subtarget object
+    // then read its In64BitMode byte as 0 and LLVM aborted with
+    // "64-bit code requested on a subtarget that doesn't support it!"
+    // (~1/3 of boots; 8 workers race one attach). Holding vma_write
+    // across {insert + every PTE + flush} excludes the fault path's
+    // vma_read and other mappers' vma_write for the whole attach —
+    // exactly the reference's mmap_sem write discipline for shmat.
+    // add_vma takes vma_write internally (non-reentrant), so its body
+    // is inlined under OUR guard: add + total_vm + highest-end.
+    {
+        let mut vma_mgr = addr_space.vma_write();
+        // Re-validate the placement under the WRITE guard: a racing
+        // mapper may have landed inside the picked range since the pick
+        // (the pick ran under a read window). Never steal the winner's
+        // range — fail cleanly (b91 discipline).
+        let lo = VirtAddr::new(attach_addr);
+        let hi = VirtAddr::new(attach_addr + size_aligned);
+        let overlaps = vma_mgr
+            .find_vma_after(lo)
+            .map(|v| v.start().as_usize() < hi.as_usize())
+            .unwrap_or(false)
+            || vma_mgr.find(lo).is_some();
+        if overlaps {
+            drop(vma_mgr);
             let slots = SHM_IDS.slots.lock();
             if let Some(ref entry) = slots[idx] {
                 entry.inner.nattch.fetch_sub(1, Ordering::Relaxed);
             }
+            return -(errno::ENOMEM as i64);
         }
-        return -(errno::ENOMEM as i64);
-    }
+        if vma_mgr.add(vma).is_err() {
+            drop(vma_mgr);
+            let slots = SHM_IDS.slots.lock();
+            if let Some(ref entry) = slots[idx] {
+                entry.inner.nattch.fetch_sub(1, Ordering::Relaxed);
+            }
+            return -(errno::ENOMEM as i64);
+        }
+        addr_space.add_total_vm(hi.as_usize().saturating_sub(lo.as_usize()) as u64 / 4096);
+        addr_space.update_highest_vm_end(hi.as_usize());
+        // PTE install loop — moved INSIDE the guard (see the comment
+        // above). The per-page PTE lock nests under vma_write with the
+        // same one-way order the ≤4MB munmap path uses.
 
     // Map each page — OUTSIDE the SHM_IDS lock.
     for (i, &phys) in phys_pages.iter().enumerate() {
@@ -1079,8 +1117,29 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
         }
     }
 
-    // Flush TLB after modifying page table entries for the mapping.
-    crate::arch::mm::flush_tlb_all();
+        // CROSS-CPU TLB SHOOTDOWN (the LLVM-JIT stale-entry fix,
+        // 2026-11-08): flush_tlb_all() reaches ONLY THIS CPU (invpcid /
+        // CR3 reload are local-core operations). The multi-MB JIT slab
+        // is often attached at an address that previously held another
+        // mapping whose entries are STILL CACHED in the sibling cores'
+        // TLBs (the llvmpipe workers ran there) — without the shootdown
+        // those workers read through the STALE entries into the OLD
+        // (freed, zeroed) page: llvmpipe's subtarget In64BitMode byte
+        // read 0 and LLVM aborted with "64-bit code requested on a
+        // subtarget that doesn't support it!" on ~1/3 of boots. The
+        // munmap path already uses exactly this pairing (mm_ops.rs).
+        // Fire-and-forget per the IPI contract; the local flush below
+        // covers this CPU.
+        #[cfg(feature = "x86_64")]
+        crate::arch::ipi::flush_tlb_others(
+            attach_addr as u64,
+            (attach_addr + size_aligned) as u64,
+        );
+        // The riscv64/aarch64 twins take no range (full flush).
+        #[cfg(not(feature = "x86_64"))]
+        crate::arch::ipi::flush_tlb_others();
+        crate::arch::mm::flush_tlb_all();
+    } // vma_write guard
 
     attach_addr as i64
 }
