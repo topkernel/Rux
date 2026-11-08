@@ -57,7 +57,7 @@ Fix direction: take `pi_bucket_lock(&key)` around the post-schedule cleanup in
 futex_lock_pi and around part 1 of futex_pi_exit_cleanup (re-derive si under the
 lock), and re-check `handed` AFTER acquiring the lock.
 
-### [Medium] kernel/src/sync/rcu.rs:766-779 vs 714-719 — lost waiter announcement strands call_rcu callbacks
+### [Medium] kernel/src/sync/rcu.rs:766-779 vs 714-719 — lost waiter announcement strands call_rcu callbacks — ✅ FIXED (`834f2fca`)
 
 
 
@@ -93,7 +93,7 @@ the condition in a loop (the doc example does). Harmless today, but the name/doc
 behavior disagree — Linux wait queues distinguish TASK_INTERRUPTIBLE from
 TASK_UNINTERRUPTIBLE here.
 
-### [Medium] kernel/src/sync/seqlock.rs:93-96 — reader side lacks the LoadLoad fence between data read and second seq read
+### [Medium] kernel/src/sync/seqlock.rs:93-96 — reader side lacks the LoadLoad fence between data read and second seq read — ✅ FIXED (`5b93ce8e`)
 
 Defect: `read_inner()` loads seq1 (Acquire), reads the data via `read_volatile` (a plain
 load to the CPU), then `read_retry()` loads seq2 with Acquire. Acquire on a load orders
@@ -114,7 +114,7 @@ testing runs under TCG, but this is a correctness gap on the silicon target.
 
 
 
-### [Medium] kernel/src/process/fork.rs:413-427 — RLIMIT_NPROC enforcement at fork is compiled out (`if false`)
+### [Medium] kernel/src/process/fork.rs:413-427 — RLIMIT_NPROC enforcement at fork is compiled out (`if false`) — ✅ FIXED (`3df6acb6`)
 
 Defect: the NPROC check block is gated on `if false` with a TODO ("correlates with a null
 deref ... the check is disabled until then"). Nothing else limits process count at fork:

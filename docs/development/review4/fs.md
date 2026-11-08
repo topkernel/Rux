@@ -39,7 +39,7 @@ d1275bce, 0876bdb2, 88a80e65, 3762eb0a, c14c3024, 6ecb2c23, 51ab2963, f9643a85,
 
 ## Findings
 
-### [Medium] vfs.rs:4639 — O_CREAT on a dangling symlink returns EEXIST instead of creating the target
+### [Medium] vfs.rs:4639 — O_CREAT on a dangling symlink returns EEXIST instead of creating the target — ✅ FIXED (`f4cbbd70`)
 
 `file_open`'s create arm: `path_lookup(filename, 0)` follows the final symlink and
 fails ENOENT when the target is absent; the arm then proceeds to create at
@@ -81,7 +81,7 @@ f62a4df6 shape — `let (taken_d, taken_i) = { ...lock scope... (take, take) };`
 then drop outside. Same class applies to path_memo.rs insert()'s
 retire_arc_after_claim_readers → dentry_drain_if_quiescent(true).
 
-### [Medium] inode.rs:1011-1031 — icache_add hash-collision overwrite can drop a still-referenced inode (dual-instance hazard)
+### [Medium] inode.rs:1011-1031 — icache_add hash-collision overwrite can drop a still-referenced inode (dual-instance hazard) — ✅ FIXED (`3df6acb6`)
 
 On a bucket collision (same index, different (ino, fs_id)), `icache_add` runs
 `icache_evict_lru` — which correctly skips entries with strong_count > 1 — but
@@ -95,7 +95,7 @@ with every write — the same defect class the review-5.1 evict guard fixed
 for the LRU path. Fix: when the colliding occupant has strong_count > 1 and
 nothing else is evictable, either probe the next bucket or refuse the insert.
 
-### [Medium] mount.rs:82-115 / vfs.rs — MNT_NOEXEC / MNT_NOSUID / MNT_NODEV are parsed but never enforced
+### [Medium] mount.rs:82-115 / vfs.rs — MNT_NOEXEC / MNT_NOSUID / MNT_NODEV are parsed but never enforced — ✅ FIXED (`5b93ce8e`)
 
 `translate_mnt_flags` maps MS_NOEXEC/MS_NOSUID/MS_NODEV into MntFlags, and
 `is_noexec`/`is_nosuid` exist — but the only consumers are unit tests. execve of
@@ -127,7 +127,7 @@ them; the next allocation reuses them and the old file reads/writes through
 ANOTHER file's data. Fix: mirror unlink — links==0 && dtime==0 on disk, queue
 the reap to the last drop.
 
-### [Medium] ext4/mod.rs:1735/1770 + inode.rs:147 — fallocate paths zero i_generation, i_file_acl_lo and osd2 on the inode they touch
+### [Medium] ext4/mod.rs:1735/1770 + inode.rs:147 — fallocate paths zero i_generation, i_file_acl_lo and osd2 on the inode they touch — ✅ FIXED (`6f42cc7b`)
 
 `to_on_disk` default-zeroes untracked fields; `write_inode_disk` overwrites the
 slot with whatever it is handed. `ext4_fallocate_on` hands it `to_on_disk()`
@@ -241,7 +241,7 @@ Narrow (needs a crash mid-revoke-batch plus reuse), but the reference scopes
 revokes per committed transaction. Fix: track last-committed-seq in PASS_SCAN
 and filter.
 
-### [Medium] tmpfs.rs:826-844 (tmpfs_link) — hard links do not share size or metadata: reads through one link clamp at the other's stale size
+### [Medium] tmpfs.rs:826-844 (tmpfs_link) — hard links do not share size or metadata: reads through one link clamp at the other's stale size — ✅ FIXED (`3df6acb6`)
 
 `tmpfs_link` shares only the `pages` Arc; `size` is a per-node AtomicU64.
 write_at through link A extends A's node.size; link B's node.size stays at the
@@ -251,7 +251,7 @@ similarly never propagate (mode/uid/gid copied at link time). rootfs and devfs
 share the whole node/entry and are coherent; tmpfs is the outlier. Fix: hang
 size/mode/uid/gid off the shared Arc (a TmpfsShared struct) like pages.
 
-### [Medium] devfs/mod.rs — ino is a hash of the NAME ONLY: same-named entries in different directories collide in the icache
+### [Medium] devfs/mod.rs — ino is a hash of the NAME ONLY: same-named entries in different directories collide in the icache — ✅ FIXED (`6f42cc7b`)
 
 `devfs_ino_hash(name)` ignores the parent. Two devfs nodes with the same leaf
 name in different directories (mdev/udev create subdirs: /dev/input/event0 and

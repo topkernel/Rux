@@ -37,7 +37,7 @@ does not. Linux: SIGEV_NONE = timer runs, never notifies (timer_gettime still co
 Trigger: `timer_create(CLOCK_MONOTONIC, &(SIGEV_NONE timer), ...)` + `timer_settime` → signal arrives.
 Fix: keep the wheel arm for the deadline but pass signo=0 when sigev_notify == SIGEV_NONE.
 
-### [Medium] syscall/signal.rs:250-331 — rt_sigaction copies oldact out BEFORE reading act; Linux reads act first, swaps, then copies oldact out
+### [Medium] syscall/signal.rs:250-331 — rt_sigaction copies oldact out BEFORE reading act; Linux reads act first, swaps, then copies oldact out — ✅ FIXED (`3df6acb6`)
 Ordering: Rux writes `oldact` to user, then copies `act` in, then installs. Linux `sys_rt_sigaction`
 does `copy_from_user(act)` → `do_sigaction` (install) → `copy_to_user(oact)`. Divergences: (a) Rux with
 a faulting `act` pointer writes a modified `oldact` first (user-visible side effect on a failed call);
@@ -111,7 +111,7 @@ description is still alive at fd 9. Linux removes an epitem only when the file d
 reference drops (eventpoll_release), so the watch keeps firing through any dup. Fix: keep a Weak to the
 File in the entry and purge on description-liveness, not fd-number resolution.
 
-### [Medium] syscall/misc.rs:2731-2765 — epoll_pwait restores the signal mask on EINTR immediately (not deferred)
+### [Medium] syscall/misc.rs:2731-2765 — epoll_pwait restores the signal mask on EINTR immediately (not deferred) — ✅ FIXED (`834f2fca`)
 ppoll/pselect6 use `WaitScopedMask::defer_restore` so the interrupting signal — unblocked by the wait
 mask — is actually delivered at return-to-user before the old mask is reinstated. epoll_pwait (and its
 epoll_pwait2 sibling in file.rs — verify) does a plain save/restore around sys_epoll_wait: on EINTR the
@@ -128,7 +128,7 @@ but ignored. Anything deriving secrets (tls keys, ASLR canary via AT_RANDOM if t
 guessable. Fix: mix device/IRQ timing entropy into a pool with a seeded flag, block until ready
 (GRND_INSECURE excepted).
 
-### [Medium] syscall/misc.rs:591-731 — poll(2) ignores copy_from_user/copy_to_user results for the pollfd array
+### [Medium] syscall/misc.rs:591-731 — poll(2) ignores copy_from_user/copy_to_user results for the pollfd array — ✅ FIXED (`f4cbbd70`)
 Both copies (in at :663, out at :717) discard the residual count. An in-range-but-unmapped array is
 zero-filled on the way in (fds read as 0 → stdin is polled!) and the revents store silently vanishes on
 the way out; Linux returns EFAULT (fault_in_pages_readable + copyout checks). Trigger: `poll(mmap-trimmed
@@ -160,7 +160,7 @@ The EBADF gate fetches `get_file_fd_safe`, then the O_PATH check, fb, DRM, prime
 evdev, pty, VT, loop, watchdog, ashmem, tokenid blocks each fetch again (Arc clone + drop pair each).
 One fetch at the top passed by reference would remove ~10 atomic inc/dec pairs per ioctl.
 
-### [Medium] syscall/memory.rs:4522-4533 — get_mempolicy nodemask write exceeds the access_ok-validated length (Sept M6 still present)
+### [Medium] syscall/memory.rs:4522-4533 — get_mempolicy nodemask write exceeds the access_ok-validated length (Sept M6 still present) — ✅ FIXED (`4f76fab0`)
 `access_ok(nodemask_ptr, (maxnode + 7) / 8)` validates ceil(maxnode/8) BYTES, then the loop writes
 `nwords = ceil(maxnode/64)` usize WORDS (8 bytes each) of all-ones. For maxnode=65: 9 bytes validated,
 16 written — a 7-byte overwrite of adjacent user memory past the caller's buffer (Linux masks the final
@@ -202,7 +202,7 @@ bytes and silently reads tv_usec as 0, arming a seconds-only timeout. (Also: the
 `deadline = jiffies + (us / 10_000).max(1)` assumes HZ=100; use `drivers::timer::HZ` like the other
 deadline conversions or the timeout mis-scales if HZ ever changes.
 
-### [Medium] syscall/process.rs:709-788 — execve argv/envp: 8KB per-string cap with silent truncation; unreadable strings silently drop the rest
+### [Medium] syscall/process.rs:709-788 — execve argv/envp: 8KB per-string cap with silent truncation; unreadable strings silently drop the rest — ✅ FIXED (`8952fd96`)
 `copy_argv_from_user`/`copy_envp_from_user`:
 1. `strncpy_from_user(arg_ptr, MAX_ARG_STRLEN=8192, &mut buf)` TRUNCATES a longer string at 8 KB —
    `bash -c "<10KB script>"`, long java/python command lines exec with a silently shortened argument.
@@ -213,7 +213,7 @@ deadline conversions or the timeout mis-scales if HZ ever changes.
 Also 2048-entry array cap vs Linux's (2MB/8)-ish; minor. Fix: cap strings at 128 KB returning E2BIG,
 and surface read faults as EFAULT.
 
-### [Medium] syscall/process.rs:6838-6857 — clone3 CLONE_PIDFD never writes the pidfd out
+### [Medium] syscall/process.rs:6838-6857 — clone3 CLONE_PIDFD never writes the pidfd out — ✅ FIXED (`5b93ce8e`)
 The CLONE_PIDFD arm only probes the user word's PTE writability; the actual fd is never stored
 ("writing the actual fd stays future work"). Callers (systemd, libuv, Go runtime via clone3) then read
 an uninitialized variable and use it as a pidfd — EBADF at best, wrong-process signal at worst.
@@ -252,7 +252,7 @@ fchownat does.
 The handle_type store at handle_ptr+4 discards its residual; a fault there reports success with a
 half-written handle. The neighboring payload copy is checked. Fix: check both.
 
-### [Medium] ipc/sysv_shm.rs:1147-1178 — shmdt accepts an INTERIOR address and unmaps past the VMA end
+### [Medium] ipc/sysv_shm.rs:1147-1178 — shmdt accepts an INTERIOR address and unmaps past the VMA end — ✅ FIXED (`4f76fab0`)
 `vma_mgr.find(VirtAddr::new(shmaddr))` returns the VMA CONTAINING shmaddr, then the syscall munmaps
 `[shmaddr, shmaddr + vma_size)` — for an interior address the range overruns the shm VMA's end by
 (shmaddr - vma.start) into whatever mapping follows, destroying it. Linux shmdt requires the address to
@@ -332,14 +332,14 @@ Linux queues BR_ERROR (binder_user_error path) for ref commands on an invalid ha
 pr_info and continues — userspace cannot detect its own protocol bug. Fix: stage Work::ReturnError
 (BR_ERROR, EINVAL) like the reference.
 
-### [Medium] net/udp.rs:938-941 — SO_BROADCAST gate treats every destination ending in .255 as broadcast
+### [Medium] net/udp.rs:938-941 — SO_BROADCAST gate treats every destination ending in .255 as broadcast — ✅ FIXED (`f4cbbd70`)
 `!socket.broadcast && (dest_ip == 0xFFFF_FFFF || (dest_ip & 0xFF) == 0xFF) → EACCES`. Linux requires
 SO_BROADCAST only when the route classifies the destination as broadcast (limited broadcast or the
 local subnet's directed broadcast). Any legitimate UNICAST host whose last octet is 255 (8.8.1.255,
 1.2.3.255, ...) is refused EACCES unless the caller set SO_BROADCAST. Trigger: `sendto` a UDP peer
 at x.x.x.255. Fix: gate on 255.255.255.255 plus the interface-derived subnet broadcast only.
 
-### [Medium] io_uring/mod.rs:928-943 — CQE publish lacks a release barrier between the CQE store and the cq_tail store
+### [Medium] io_uring/mod.rs:928-943 — CQE publish lacks a release barrier between the CQE store and the cq_tail store — ✅ FIXED (`f4cbbd70`)
 io_uring_post_cqe writes the CQE, then cq_tail, then a fence(Release) AFTER both stores. On the
 weakly-ordered RISC-V memory model (and under compiler reordering) the tail store can become visible
 before the CQE store: userspace polling cq_tail sees a new entry and reads a stale/garbage CQE.

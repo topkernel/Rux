@@ -41,7 +41,7 @@ docs/archive/code-review-2026-09-12.md ARCH-* items are already fixed — not re
 
 ## Findings
 
-### [Medium] riscv64/trap.rs:1255 — traced user ebreak advances epc by 4; reference leaves epc at the ebreak
+### [Medium] riscv64/trap.rs:1255 — traced user ebreak advances epc by 4; reference leaves epc at the ebreak — ✅ FIXED (`834f2fca`)
 
 `handle_breakpoint`'s real-user-ebreak-under-tracer arm does `regs.epc += 4`
 before ptrace_stop. The reference `handle_break` (arch/riscv/kernel/traps.c:294)
@@ -136,7 +136,7 @@ Misleading doc only; no behavior change.
 
 ## Findings (riscv64 context/smp/ipi/mm-layout, continued)
 
-### [Medium] riscv64/mm/memory_layout.rs:548 — virt_to_phys kernel-image window bound is stale (16MB cap vs 24MB image window)
+### [Medium] riscv64/mm/memory_layout.rs:548 — virt_to_phys kernel-image window bound is stale (16MB cap vs 24MB image window) — ✅ FIXED (`3a17c555`)
 
 Arm 2 accepts image VAs only up to `0xffff_ffff_8100_0000` (= link + 16MB), but
 the image window grew to 24MB (KERNEL_SIZE=0x1800000, RUX-RISCV-LAYOUT-4/5;
@@ -148,7 +148,7 @@ this arm's documented consumer) above 16MB would DMA to a bogus PA. Fix: bound
 the arm by `_end` (linker symbol) or KERNEL_LINK_ADDR + KERNEL_SIZE, not a
 hand-copied 16MB constant.
 
-### [Medium] riscv64/ipi.rs:122-130 — flush_tlb_others targets CPUs [0, online_count) instead of the started set
+### [Medium] riscv64/ipi.rs:122-130 — flush_tlb_others targets CPUs [0, online_count) instead of the started set — ✅ FIXED (`f4cbbd70`)
 
 `let online = num_started_cpus(); for cpu in 0..min(online, MAX_CPUS)` — with a
 sparse started set (e.g. harts {0,1,3} online because hart 2's hart_start
@@ -223,7 +223,7 @@ secondary_start_kernel order.
 
 ## Findings (riscv64/mm: page_fault, mm_ops, mmu_init)
 
-### [Medium] riscv64/mm/mmu_init.rs:1582 — map_page does a FULL sfence.vma on every call (double flush on every demand fault)
+### [Medium] riscv64/mm/mmu_init.rs:1582 — map_page does a FULL sfence.vma on every call (double flush on every demand fault) — ✅ FIXED (`f4cbbd70`)
 
 `map_page` ends with bare `asm!("sfence.vma")` = `sfence.vma zero,zero` — a
 whole-TLB flush (all ASIDs) — while its main caller (handle_mm_fault) installs

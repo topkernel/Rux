@@ -31,7 +31,7 @@ queue.rs:597-607). `wait_for_desc_completion` still uses `max_iterations = 5000`
 re-arm + waiter-side rescue (`pci_rescue_lagged_completions` equivalent for the
 MMIO ring) from the sibling.
 
-### [Medium] virtio_pci.rs:1467-1471/1723-1727/1935-1939 — PCI sync late-drain treats ANY used.idx advance as own completion; frees io_buf under a possibly in-flight chain
+### [Medium] virtio_pci.rs:1467-1471/1723-1727/1935-1939 — PCI sync late-drain treats ANY used.idx advance as own completion; frees io_buf under a possibly in-flight chain — ✅ FIXED (`834f2fca`)
 The Phase-3 late-drain in `read_block_once`/`write_block_once`/`flush_block_once`
 breaks out when `idx != prev_expected` — i.e. when ANY chain's used-ring entry
 landed, not necessarily THIS one. The file itself documents that QEMU virtio-blk
@@ -173,7 +173,7 @@ consistent.
 
 ## drivers/gpu
 
-### [Medium] virtio_gpu.rs:827-852 — used-ring completion poll reads device DMA memory through a non-volatile reference
+### [Medium] virtio_gpu.rs:827-852 — used-ring completion poll reads device DMA memory through a non-volatile reference — ✅ FIXED (`6f42cc7b`)
 The send_command wait loop does `let used = &*queue.used; ... if used.idx != idx`
 — a plain (non-volatile, non-atomic) load of the used-ring index that the
 DEVICE writes via DMA. Every other consumer of this ring in the tree uses
@@ -251,7 +251,7 @@ explicitly inert stub.
 
 ## drivers/timer + kernel/src/timer.rs
 
-### [Medium] timer/x86_64.rs:283-314 — resync_tsc_against_hpet's ">25 s lead" rebase arm is unreachable: the else-if chain shadows it
+### [Medium] timer/x86_64.rs:283-314 — resync_tsc_against_hpet's ">25 s lead" rebase arm is unreachable: the else-if chain shadows it — ✅ FIXED (`6f42cc7b`)
 The chain is: (1) `hpet > tsc` → step forward; (2) `else if tsc > hpet &&
 tsc - hpet > 2_500_000` → REPORT ONLY; (3) `else if tsc - hpet >
 250_000_000` → pull back TSC_CPU_OFF. Any lead > 250M ticks also satisfies
