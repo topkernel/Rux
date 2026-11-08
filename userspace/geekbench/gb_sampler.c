@@ -42,6 +42,8 @@ struct perf_event_attr_min {
     unsigned long long sample_type;
     unsigned long long read_format;
     unsigned long long flags1;
+    unsigned long long padding0; /* ABI minimum attr.size is 64 */
+    unsigned long long padding1;
 };
 
 #define MAX_CPUS 8
@@ -91,6 +93,8 @@ static int cmp_ent(const void *a, const void *b)
 int main(int argc, char **argv)
 {
     long seconds = argc > 1 ? atol(argv[1]) : 90;
+    if (seconds > 300)
+        seconds = 300; /* flamegraph window: the workload phase, not the idle tail */
     int fds[MAX_CPUS];
     int ncpu = 0;
 

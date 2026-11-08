@@ -1,0 +1,2452 @@
+R[36m[1m
+██████  ██    ██ ██   ██
+██   ██ ██    ██  ██ ██
+██████  ██    ██   ███
+██   ██ ██    ██  ██ ██
+██   ██  ██████  ██   ██
+[0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
+
+[0march: CR4.FSGSBASE enabled
+fpu: OSXSAVE+XCR0=0xe7 AVX (cpu feature mask 0xe7)
+mm: x86_64 4-level page tables (building real PML4)
+mm: switched CR3 to real PML4 (phys 0x1288000), image 0xffffffff80200000-0xffffffff81400000
+mm: PCID off (no CPUID PCID/INVPCID)
+e820[0] 0x0-0x9fc00 usable=true
+e820[1] 0x9fc00-0xa0000 usable=false
+e820[2] 0xf0000-0x100000 usable=false
+e820[3] 0x100000-0x7ffdc000 usable=true
+e820[4] 0x7ffdc000-0x80000000 usable=false
+e820[5] 0xb0000000-0xc0000000 usable=false
+e820[6] 0xfed1c000-0xfed20000 usable=false
+e820[7] 0xfeffc000-0xff000000 usable=false
+e820[8] 0xfffc0000-0x100000000 usable=false
+e820[9] 0x100000000-0x180000000 usable=true
+e820[10] 0xfd00000000-0x10000000000 usable=false
+boot: static regions phys_end=0x180000000 heap_region_end=0x7ffdc000 heap=0x40000000+0x3d000000 slab=0x7d000000+0x1000000
+[33mKernel starting...
+
+[0m[36mModule            Description                        Status
+----------------  --------------------------------   --------
+[0mconsole:          UART ns16550a driver               [ok]
+trap:             stvec handler installed            [ok]
+trap:             ecall syscall handler              [ok]
+mm:               Sv39 3-level page table            [ok]
+mm:               satp CSR configured                [ok]
+mm:               buddy allocator order 0-12         [ok]
+mm:               heap region 1024MB @ 0x40000000    [ok]
+mm:               slab allocator 4MB                 [ok]
+boot:             multiboot cmdline + e820 parsed    [ok]
+boot:             cmd: root=/dev/vda rw init=...     [ok]
+console:          console=ttyS0 (ns16550a uart)      [ok]
+mm:               linear mapping 4095 MB             [ok]
+mm:               vmemmap mapping initialized        [ok]
+mm:               layout: kernel=0x200000-0x400000   [ok]
+mm:               layout: heap=0x40000000-0x7d0000   [ok]
+page_desc: marked 524421 non-RAM hole pages Reserved (2048 MB)
+mm:               1572864 page descriptors (span 6   [ok]
+page_alloc: zone Normal span=1572864 pages (6144 MB), seeded=737658 (2881 MB), unmanaged-in-span=835206 (3262 MB)
+mm:               zone allocator initialized (1572   [ok]
+memblock:         total 4095MB, available 2881MB     [ok]
+mm:               device mappings created            [ok]
+hpet: TSC timekeeper promoted (tsc 4291956973 Hz, mult 10007014, 20ms window)
+timer:            HPET-calibrated TSC timekeeper (   [ok]
+irq:              irq_desc array initialized         [ok]
+timer:            TSC 4292 MHz, LAPIC 62 MHz (x2 A   [ok]
+TICKARM-RING va=0xffffffff81214600 phys=0x1214600 slots=16 stride=40
+console:          UART interrupt-driven RX           [ok]
+bio:              buffer cache layer                 [ok]
+fs:               ext4 driver loaded                 [ok]
+fs:               ramfs mounted /                    [ok]
+fs:               procfs initialized                 [ok]
+fs:               procfs mounted /proc               [ok]
+fs:               sysfs mounted /sys                 [ok]
+fsw: off (cmdline fsw param = None)
+fs:               debugfs mounted /sys/kernel/debu   [ok]
+negmemo: off (cmdline negmemo param = None)
+fs:               tracefs mounted /sys/kernel/trac   [ok]
+cgroup:           v2 unified hierarchy init          [ok]
+virtio-pci: BAR 0xe0000000000+0x4000 -> ioremap arena 0xffff8b0000200000
+virtio-pci: INTx pin 1 routed to PIC line 10 (shared dispatch)
+driver:           vda virtio-blk 3530752 sectors     [ok]
+driver:           virtio-blk PCI x1                  [ok]
+driver:           GenDisk registered                 [ok]
+fs:               root /dev/vda -> vda               [done]
+fs:               ext4 mounted /                     [ok]
+fs:               procfs remounted /proc             [ok]
+mm:               swap 256 MB tail carve             [done]
+virtio-pci: BAR 0xe0000004000+0x4000 -> ioremap arena 0xffff8b0000600000
+virtio-pci: INTx pin 1 routed to PIC line 11 (shared dispatch)
+virtio-net-pci: eth0 up, MAC 52:54:00:12:34:56, queues rx0/tx1 depth 32
+driver:           virtio-net x2                      [ok]
+vdso:             page built; mapping off            [done]
+ipv6: link-local fe80:0000:0000:0000 (SLAAC EUI-64)
+security:         capability LSM initialized         [ok]
+arch: WARNING — CR4.SMAP NOT armed though CPUID.7.0:EBX[20]=1 (live CR4=0x50620); user-mode access prevention is ABSENT on this boot (arming path latent-broken, see sec-r1 notes)
+sched:            CFS scheduler v1                   [ok]
+sched:            runqueue per-CPU                   [ok]
+sched:            PID allocator init                 [ok]
+sched:            idle task (PID 0)                  [ok]
+mm:               kswapd reclaim thread              [ok]
+DEFERFREE: engaged (first MmStruct free held back 1500ms)
+debug:            diagnostic subsystem               [ok]
+printk:           persistent log /var/log/kmsg (kl   [ok]
+ipc:              System V + POSIX MQ                [ok]
+mm: PCID off (no CPUID PCID/INVPCID)
+arch: CR4.FSGSBASE enabled
+fpu: OSXSAVE+XCR0=0xe7 AVX (cpu feature mask 0xe7)
+smp: CPU 1 online (lapic 0x1)
+virtio-pci: first PCI INTx interrupt delivered
+mm: PCID off (no CPUID PCID/INVPCID)
+arch: CR4.FSGSBASE enabled
+fpu: OSXSAVE+XCR0=0xe7 AVX (cpu feature mask 0xe7)
+smp: CPU 2 online (lapic 0x2)
+mm: PCID off (no CPUID PCID/INVPCID)
+arch: CR4.FSGSBASE enabled
+fpu: OSXSAVE+XCR0=0xe7 AVX (cpu feature mask 0xe7)
+smp: CPU 3 online (lapic 0x3)
+affinity: 11 of 11 task(s) default mask -> 0xf
+smp:              4 CPUs online                      [ok]
+smp:              IPI selftest 3/3 calls, 4 remote   [ok]
+cctx: off (cmdline cctx param = None)
+softirq:          ksoftirqd per-CPU threads          [ok]
+debug:            khungtaskd hung-task detector      [ok]
+fs: fdreapd retire reaper started
+fs:               fdreapd fd retire reaper           [ok]
+trap:             sie.SEIE enabled                   [ok]
+[31mdriver:           virtio-gpu not found               [fail][0m
+fs:               devfs mounted /dev                 [ok]
+fs:               tmpfs mounted /dev/shm             [ok]
+fs:               tmpfs mounted /run                 [ok]
+PARKWALK-ARMED
+driver:           evdev nodes (no input hw)          [done]
+driver:           no keyboard (headless)             [done]
+driver:           no pointer (headless)              [done]
+init:             ELF /test/geekbench_run loaded     [ok]
+init:             init task (PID 1) enqueued         [ok]
+
+SCHED-IRQOFF caller=kernel/src/mm/kswapd.rs:83 pid=300 pc=0x0
+SCHED-IRQOFF caller=kernel/src/interrupt/ksoftirqd.rs:102 pid=306 pc=0x0
+SCHED-IRQOFF caller=kernel/src/interrupt/ksoftirqd.rs:102 pid=304 pc=0x0
+SCHED-IRQOFF caller=kernel/src/interrupt/ksoftirqd.rs:102 pid=305 pc=0x0
+GEEKBENCH NET up (10.0.2.15/24 gw 10.0.2.2 dns 10.0.2.3)
+GEEKBENCH SAMPLER pid=309 secs=1190
+GEEKBENCH RUN cpu (timeout 1200 s)
+GBSAMP start cpus=8 secs=300
+PINSITE mm=0xffff88807d05b420 addr=0x7feffffff000 fd=3 fileptr=0xffff88807c6ef510 ino=77
+PINSITE mm=0xffff88807d05b420 addr=0x7ff000003000 fd=3 fileptr=0xffff88807c6eff10 ino=975
+PINSITE mm=0xffff88807d05b420 addr=0x7ff000004000 fd=3 fileptr=0xffff88807c6eff10 ino=975
+PINSITE mm=0xffff88807d05b420 addr=0x7ff000005000 fd=3 fileptr=0xffff88807c6eff10 ino=975
+PINSITE mm=0xffff88807d05b420 addr=0x7ff000006000 fd=3 fileptr=0xffff88807c6eff10 ino=975
+PINSITE mm=0xffff88807d05b420 addr=0x7ff000008000 fd=3 fileptr=0xffff88807c6efe10 ino=1013
+PINSITE mm=0xffff88807d05b420 addr=0x7ff000016000 fd=3 fileptr=0xffff88807c6efe10 ino=1013
+PINSITE mm=0xffff88807d05b420 addr=0x7ff000092000 fd=3 fileptr=0xffff88807c6efe10 ino=1013
+PINSITE mm=0xffff88807d05b420 addr=0x7ff0000ed000 fd=3 fileptr=0xffff88807c6efe10 ino=1013
+PINSITE mm=0xffff88807d05b420 addr=0x7ff0000ef000 fd=3 fileptr=0xffff88807c6ef410 ino=1056
+PINSITE mm=0xffff88807d05b420 addr=0x7ff0000f0000 fd=3 fileptr=0xffff88807c6ef410 ino=1056
+PINSITE mm=0xffff88807d05b420 addr=0x7ff0000f1000 fd=3 fileptr=0xffff88807c6ef410 ino=1056
+PINSITE mm=0xffff88807d05b420 addr=0x7ff0000f2000 fd=3 fileptr=0xffff88807c6ef410 ino=1056
+PINSITE mm=0xffff88807d05b420 addr=0x7ff0000f4000 fd=3 fileptr=0xffff88807c6efd10 ino=1058
+PINSITE mm=0xffff88807d05b420 addr=0x7ff0000f5000 fd=3 fileptr=0xffff88807c6efd10 ino=1058
+PINSITE mm=0xffff88807d05b420 addr=0x7ff0000f6000 fd=3 fileptr=0xffff88807c6efd10 ino=1058
+PINSITE mm=0xffff88807d05b420 addr=0x7ff0000f7000 fd=3 fileptr=0xffff88807c6efd10 ino=1058
+PINSITE mm=0xffff88807d05b420 addr=0x7ff0000f9000 fd=3 fileptr=0xffff88807c6efc10 ino=986
+PINSITE mm=0xffff88807d05b420 addr=0x7ff0000fc000 fd=3 fileptr=0xffff88807c6efc10 ino=9t8i6me
+r: P I N S I T E   m m= 0 xlfafpficf 8t8i8c0k7 dc0h5eb4c2k0:  a1d5 djri=f0fxi7efsf 0/00 111 3 0 0[o0k ]f
+d=3 fileptr=0xffff88807c6efc10 ino=986
+SCHED-IRQOFF caller=kernel/src/interrupt/ksoftirqd.rs:102 pid=303 pc=0x0
+PINSITE mm=0xffff88807d05b420 addr=0x7ff000117000 fd=3 fileptr=0xffff88807c6efc10 ino=986
+PINSITE mm=0xffff88807d05b420 addr=0x7ff000119000 fd=3 fileptr=0xffff88807c6dda10 ino=961
+PINSITE mm=0xffff88807d05b420 addr=0x7ff000141000 fd=3 fileptr=0xffff88807c6dda10 ino=961
+PINSITE mm=0xffff88807d05b420 addr=0x7ff0002d6000 fd=3 fileptr=0xffff88807c6dda10 ino=961
+PINSITE mm=0xffff88807d05b420 addr=0x7ff00032e000 fd=3 fileptr=0xffff88807c6dda10 ino=961
+open ENOENT: '/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq' (pid 310)
+PINSITE mm=0xffff88807d557020 addr=0x7feffffff000 fd=4 fileptr=0xffff88807c6e1110 ino=77
+PINSITE mm=0xffff88807d557020 addr=0x7ff000003000 fd=4 fileptr=0xffff88807c433f10 ino=975
+PINSITE mm=0xffff88807d557020 addr=0x7ff000004000 fd=4 fileptr=0xffff88807c433f10 ino=975
+PINSITE mm=0xffff88807d557020 addr=0x7ff000005000 fd=4 fileptr=0xffff88807c433f10 ino=975
+PINSITE mm=0xffff88807d557020 addr=0x7ff000006000 fd=4 fileptr=0xffff88807c433f10 ino=975
+PINSITE mm=0xffff88807d557020 addr=0x7ff000008000 fd=4 fileptr=0xffff88807c433e10 ino=1013
+PINSITE mm=0xffff88807d557020 addr=0x7ff000016000 fd=4 fileptr=0xffff88807c433e10 ino=1013
+PINSITE mm=0xffff88807d557020 addr=0x7ff000092000 fd=4 fileptr=0xffff88807c433e10 ino=1013
+PINSITE mm=0xffff88807d557020 addr=0x7ff0000ed000 fd=4 fileptr=0xffff88807c433e10 ino=1013
+PINSITE mm=0xffff88807d557020 addr=0x7ff0000ef000 fd=4 fileptr=0xffff88807c433d10 ino=1056
+PINSITE mm=0xffff88807d557020 addr=0x7ff0000f0000 fd=4 fileptr=0xffff88807c433d10 ino=1056
+PINSITE mm=0xffff88807d557020 addr=0x7ff0000f1000 fd=4 fileptr=0xffff88807c433d10 ino=1056
+PINSITE mm=0xffff88807d557020 addr=0x7ff0000f2000 fd=4 fileptr=0xffff88807c433d10 ino=1056
+PINSITE mm=0xffff88807d557020 addr=0x7ff0000f4000 fd=4 fileptr=0xffff88807c433c10 ino=1058
+PINSITE mm=0xffff88807d557020 addr=0x7ff0000f5000 fd=4 fileptr=0xffff88807c433c10 ino=1058
+PINSITE mm=0xffff88807d557020 addr=0x7ff0000f6000 fd=4 fileptr=0xffff88807c433c10 ino=1058
+PINSITE mm=0xffff88807d557020 addr=0x7ff0000f7000 fd=4 fileptr=0xffff88807c433c10 ino=1058
+PINSITE mm=0xffff88807d557020 addr=0x7ff0000f9000 fd=4 fileptr=0xffff88807c433b10 ino=986
+PINSITE mm=0xffff88807d557020 addr=0x7ff0000fc000 fd=4 fileptr=0xffff88807c433b10 ino=986
+PINSITE mm=0xffff88807d557020 addr=0x7ff000113000 fd=4 fileptr=0xffff88807c433b10 ino=986
+PINSITE mm=0xffff88807d557020 addr=0x7ff000117000 fd=4 fileptr=0xffff88807c433b10 ino=986
+PINSITE mm=0xffff88807d557020 addr=0x7ff000119000 fd=4 fileptr=0xffff88807c433a10 ino=961
+PINSITE mm=0xffff88807d557020 addr=0x7ff000141000 fd=4 fileptr=0xffff88807c433a10 ino=961
+PINSITE mm=0xffff88807d557020 addr=0x7ff0002d6000 fd=4 fileptr=0xffff88807c433a10 ino=961
+PINSITE mm=0xffff88807d557020 addr=0x7ff00032e000 fd=4 fileptr=0xffff88807c433a10 ino=961
+unix connect fail(-2) '/var/run/nscd/socket':20 (pid 311)
+open ENOENT: '/root/.geekbench5' (pid 311)
+open ENOENT: '/proc/sys/kernel/random/uuid' (pid 311)
+open ENOENT: '/etc/localtime' (pid 311)
+Geekbench 5.5.1 Tryout : https://www.geekbench.com/
+
+Geekbench 5 requires an active Internet connection when in tryout mode and 
+automatically uploads benchmark results to the Geekbench Browser.
+
+Buy a Geekbench 5 license from the Primate Labs Store to enable offline use 
+and unlock other features:
+
+  https://store.primatelabs.com/v5
+
+Enter your Geekbench 5 license using the following command line:
+
+  ./geekbench5 --unlock <email> <key>
+
+  Running Gathering system information
+open ENOENT: '/sys/class/dmi/id/sys_vendor' (pid 311)
+open ENOENT: '/sys/class/dmi/id/product_name' (pid 311)
+open ENOENT: '/sys/firmware/devicetree/base/model' (pid 311)
+open ENOENT: '/sys/class/dmi/id/board_vendor' (pid 311)
+open ENOENT: '/sys/class/dmi/id/board_name' (pid 311)
+open ENOENT: '/sys/class/dmi/id/bios_vendor' (pid 311)
+open ENOENT: '/sys/class/dmi/id/bios_version' (pid 311)
+open ENOENT: '/sys/class/dmi/id/chassis_vendor' (pid 311)
+open ENOENT: '/dev/mem' (pid 311)
+open ENOENT: '/sys/class/dmi/id/chassis_type' (pid 311)
+open ENOENT: '/dev/mem' (pid 311)
+System Information
+  Operating System              Ubuntu 22.04 LTS
+  Kernel                        Linux 6.8.0-rux x86_64
+  Model                         N/A
+  Motherboard                   N/A
+
+Processor Information
+  Name                          AMD Ryzen 9 9950X 16-Core Processor            
+  Topology                      1 Processor, 1 Core, 4 Threads
+  Identifier                    AuthenticAMD Family 26 Model 68 Stepping 0
+  Base Frequency                0.00 Hz
+  L1 Instruction Cache          64.0 KB x 4
+  L1 Data Cache                 64.0 KB x 4
+  L2 Cache                      512 KB x 4
+  L3 Cache                      16.0 MB
+
+Memory Information
+  Size                          4.00 GB
+
+
+Single-Core
+  Running AES-XTS
+  Running Text Compression
+  Running Image Compression
+  Running Navigation
+  Running HTML5
+  Running SQLite
+  Running PDF Rendering
+  Running Text Rendering
+  Running Clang
+open ENOENT: '/test/geekbench/./stdlib.h' (pid 320)
+  Running Camera
+  Running N-Body Physics
+  Running Rigid Body Physics
+  Running Gaussian Blur
+  Running Face Detection
+  Running Horizon Detection
+  Running Image Inpainting
+  Running HDR
+  Running Ray Tracing
+  Running Structure from Motion
+  Running Speech Recognition
+  Running Machine Learning
+
+Multi-Core
+  Running AES-XTS
+  Running Text Compression
+  Running Image Compression
+
+WAKE-HEAL-SKIP pid=343 why=c
+
+WAKE-HEAL-SKIP pid=342 why=c
+
+WAKE-HEAL-SKIP pid=343 why=c
+  Running Navigation
+
+WAKE-HEAL-SKIP pid=347 why=c
+
+WAKE-HEAL-SKIP pid=347 why=c
+
+WAKE-HEAL-SKIP pid=348 why=c
+  Running HTML5
+
+WAKE-HEAL-SKIP pid=352 why=c
+
+WAKE-HEAL-SKIP pid=350 why=c
+  Running SQLite
+  Running PDF Rendering
+
+WAKE-HEAL-SKIP pid=357 why=c
+  Running Text Rendering
+
+WAKE-HEAL-SKIP pid=363 why=c
+  Running Clang
+  Running Camera
+
+WAKE-HEAL-SKIP pid=311 why=c
+
+WAKE-HEAL-SKIP pid=378 why=c
+  Running N-Body Physics
+
+WAKE-HEAL-SKIP pid=377 why=s
+
+WAKE-HEAL-SKIP pid=379 why=s
+
+WAKE-HEAL-SKIP pid=379 why=c
+
+WAKE-HEAL-SKIP pid=377 why=s
+
+WAKE-HEAL-SKIP pid=377 why=c
+  Running Rigid Body Physics
+
+WAKE-HEAL-SKIP pid=311 why=c
+
+WAKE-HEAL-SKIP pid=311 why=c
+  Running Gaussian Blur
+  Running Face Detection
+
+WAKE-HEAL-SKIP pid=391 why=c
+
+WAKE-HEAL-SKIP pid=388 why=c
+
+WAKE-HEAL-SKIP pid=388 why=c
+
+WAKE-HEAL-SKIP pid=388 why=c
+  Running Horizon Detection
+
+WAKE-HEAL-SKIP pid=392 why=c
+
+WAKE-HEAL-SKIP pid=394 why=c
+
+WAKE-HEAL-SKIP pid=393 why=c
+  Running Image Inpainting
+  Running HDR
+
+WAKE-HEAL-SKIP pid=401 why=c
+
+WAKE-HEAL-SKIP pid=403 why=c
+
+SLOT-LIE-WAKE-HEALED pid=0000000000000192 arm=a
+
+WAKE-HEAL pid=0000000000000192 was=0000000000000001
+
+PREEMPT-UNDERFLOW pid=00000192 count_was=00000000 sub=00000001 (unpaired decrement clamped to 0) at kernel/src/sched/sched.rs:000001f4
+  Running Ray Tracing
+
+WAKE-HEAL-SKIP pid=410 why=c
+  Running Structure from Motion
+  Running Speech Recognition
+  Running Machine Learning
+
+WAKE-HEAL-SKIP pid=418 why=c
+open ENOENT: '/usr/local/ssl/openssl.cnf' (pid 311)
+tcp-in[0]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x12
+tcp-in[1]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+
+tcp-in[2]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x18
+tcp-in[3]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[4]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x18
+tcp-in[5]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[6]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[7]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[8]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[9]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[10]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[11]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[12]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[13]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[14]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[15]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[16]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[17]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[18]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[19]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[20]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[21]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[22]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[23]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[24]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[25]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[26]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[27]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[28]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[29]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[30]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[31]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[32]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[33]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[34]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[35]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[36]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[37]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[38]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[39]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[40]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[41]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x18
+tcp-in[42]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[43]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x18
+
+Uploading results to the Geekbench Browser. This could take a minute or two 
+depending on the speed of your internet connection.
+
+ Unable to parse server response: JSON value is not an integer
+tcp-in[44]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x10
+tcp-in[45]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x18
+tcp-in[46]: 2.2.0.10:443 -> 15.2.0.10:32768 flags 0x11
+GEEKBENCH EXIT status=255
+GEEKBENCH DONE cpu
+kernel: initINFO: task 308:308 blocked for more than 120 seconds
+      HUNG-CTX pid=308 state=0x2 oncpu=0 claim=-1 pk=1 ti_cpu=2 onrq=0 vfork_ppid=0
+      HUNG-STK sp=0xffff88807c69fdc0 0xffffffff802cb15a 0xffffffff8036c720 0xffffffff8036c720 0xffffffff80586ab6 0xffCall Trace:
+  [<ffffffff80431fe3>] ? (current)
+  [<ffffffff80431fe3>] ?
+  [<ffffffff80586ab6>] ?
+  [<ffffffff80202d6a>] ?
+
+ffffff80202d6a 0xffffffff80202d48
+      Tainted: G      D        
+INFO: task 308:308 blocked for more than 120 seconds
+      HUNG-CTX pid=308 state=0x2 oncpu=0 claim=-1 pk=1 ti_cpu=2 onrq=0 vfork_ppid=0
+      HUNG-STK sp=0xffff88807c69fdc0 0xffffffff802cb15a 0xffffffff8036c720 0xffffffff8036c720 0xffffffff80586ab6 0xffCall Trace:
+  [<ffffffff80431fe3>] ? (current)
+  [<ffffffff80431fe3>] ?
+  [<ffffffff80586ab6>] ?
+  [<ffffffff80202d6a>] ?
+
+ffffff80202d6a 0xffffffff80202d48
+      Tainted: G      D        
+ ?
+  [<ffffffff80586ab6>] ?
+  [<ffffffff80202d6a>] ?
+
+ffffff80202d6a 0xffffffff80202d48
+      Tainted: G      D        
+GBSAMP end total_ips=3058 kern=195 user=33505 other=0
+GBSAMP 1995c61 1364
+GBSAMP 1995b95 361
+GBSAMP 51f6a7 324
+GBSAMP 51f6d5 289
+GBSAMP 635c54 281
+GBSAMP 51ef52 273
+GBSAMP 19958fa 262
+GBSAMP 7ff0002c023a 260
+GBSAMP 54dd61 253
+GBSAMP 54bbf1 201
+GBSAMP 51ef5c 198
+GBSAMP 7d6e2e 188
+GBSAMP 7ff0002bfcd5 184
+GBSAMP 54dd7e 184
+GBSAMP 1995c54 180
+GBSAMP 524e5a 173
+GBSAMP 5ae70a 169
+GBSAMP 1995bea 168
+GBSAMP 1995c3c 165
+GBSAMP 19da999 161
+GBSAMP 545364 138
+GBSAMP 19d9341 137
+GBSAMP 521510 133
+GBSAMINFO: task 308:308 blocked for more than 120 seconds
+      HUNG-CTX pid=308 state=0x2 oncpu=0 claim=-1 pk=1 ti_cpu=3 onrq=0 vfork_ppid=0
+      HUNG-STK sp=0xffff88807c69fdc0 0xffffffff802cb15a 0xffffffff8036c720 0xffffffff8036c720 0xffffffff80586ab6 0xffCall Trace:
+  [<ffffffff80431fe3>] ? (current)
+  [<ffffffff80431fe3>] ?
+  [<ffffffff80586ab6>] ?
+  [<ffffffff80202d6a>] ?
+
+ffffff80202d6a 0xffffffff80202d48
+      Tainted: G      D        
+INFO: task 308:308 blocked for more than 120 seconds
+      HUNG-CTX pid=308 state=0x2 oncpu=0 claim=-1 pk=1 ti_cpu=3 onrq=0 vfork_ppid=0
+      HUNG-STK sp=0xffff88807c69fdc0 0xffffffff802cb15a 0xffffffff8036c720 0xffffffff8036c720 0xffffffff80586ab6 0xffCall Trace:
+  [<ffffffff80431fe3>] ? (current)
+  [<ffffffff80431fe3>] ?
+  [<ffffffff80586ab6>] ?
+  [<ffffffff80202d6a>] ?
+
+ffffff80202d6a 0xffffffff80202d48
+      Tainted: G      D        
+BSAMP 1995b7a 62
+GBSAMP 1995b85 62
+GBSAMP 5e05eb 61
+GBSAMP 1c1d012 61
+GBSAMP 51edb6 60
+GBSAMP 7ccb9b 60
+GBSAMP 1995b99 59
+GBSAMP 1944019 59
+GBSAMP 5c1087 59
+GBSAMP 7ff0002cadfa 59
+GBSAMP 1c1c792 59
+GBSAMP 7b8fc8 58
+GBSAMP 7d6e45 58
+GBSAMP 7c4d36 56
+GBSAMP 1992da4 56
+GBSAMP 51f39c 56
+GBSAMP 19c20c0 56
+GBSAMP 5214c3 55
+GBSAMP 19daacc 55
+GBSAMP 19de46f 55
+GBSAMP 54e2a0 55
+GBSAMP 524e44 54
+GBSAMP 5b59c3 54
+GBSAMP 5214cf 54
+GBSAMP 19ce340 54
+GBSAMP 187e59f 54
+GBSAMP 7c2fa9 53
+GBSAMP 198e20c 53
+GBSAMP 51ef7b 53
+GBSAMP 198d244 52
+GBSAMP 5c109a 52
+GBSAMP 19de3ef 51
+GBSAMP 19959c8 50
+GBSAMP 198e1d0 50
+GBSAMP 55e300 50
+GBSAMP 7ff0002bfacf 49
+GBSAMP 6320b8 49
+GBSAMP 1c1d22a 49
+GBSAMP 7ff0001be482 49
+GBSAMP 19de46d 48
+GBSAMP 1995bfe 48
+GBSAMP 1995c26 48
+GBSAMP 191a3b2 47
+GBSAMP 5b708b 47
+GBSAMP 198d5ec 47
+GBSAMP 63210f 47
+GBSAMP 7ff0002c0223 47
+GBSAMP 55d903 46
+GBSAMP 55e334 46
+GBSAMP 1bd12eb 46
+GBSAMP 51ef6b 45
+GBSAMP 635bfc 45
+GBSAMP 51f274 45
+GBSAMP 19bbaa6 45
+GBSAMP 544eb7 45
+GBSAMP 54d756 44
+GBSAMP 55e42d 44
+GBSAMP 51f2e2 44
+GBSAMP 19de3f6 44
+GBSAMP 7ff0002bfb46 44
+GBSAMP 5dfe3c 43
+GBSAMP 198e0ef 43
+GBSAMP 5e05f2 43
+GBSAMP ffffffff80277482 43
+GBSAMP 1995c8a 43
+GBSAMP 1acf983 42
+GBSAMP 5dff7c 42
+GBSAMP 51f3ad 41
+GBSAMP 187e953 41
+GBSAMP 1c35b02 41
+GBSAMP 5c105e 40
+GBSAMP 1995bde 40
+GBSAMP 51f2a4 39
+GBSAMP 19ded8e 39
+GBSAMP 198e180 39
+GBSAMP 6320f1 39
+GBSAMP 544f64 38
+GBSAMP 1acf969 38
+GBSAMP 7ff0001ba922 38
+GBSAMP 63212d 38
+GBSAMP 7ff0002bf953 38
+GBSAMP 1995dc9 37
+GBSAMP 191a970 37
+GBSAMP 575afe 37
+GBSAMP 63208b 37
+GBSAMP 1995c72 37
+GBSAMP 1c1c9b8 36
+GBSAMP 544ece 36
+GBSAMP 54e2a4 36
+GBSAMP 54467e 36
+GBSAMP 524f1d 36
+GBSAMP 19daac1 36
+GBSAMP 524e72 36
+GBSAMP 1ae866a 36
+GBSAMP 1c3c92b 35
+GBSAMP 198e0c1 35
+GBSAMP 5b59b7 35
+GBSAMP 5451bc 35
+GBSAMP 19de434 35
+GBSAMP 198e1c0 35
+GBSAMP 2605878 35
+GBSAMP 1ac4c82 34
+GBSAMP 198e017 34
+GBSAMP 1acf96c 34
+GBSAMP 51eda7 34
+GBSAMP 63204c 34
+GBSAMP 1abfd02 34
+GBSAMP 556533 34
+GBSAMP 1995c33 34
+GBSAMP 198e1ff 34
+GBSAMP 5ae5f7 33
+GBSAMP 5ae65b 33
+GBSAMP 1995bca 33
+GBSAMP 7ff0001ba7c7 33
+GBSAMP 19ed70c 33
+GBSAMP 51f300 33
+GBSAMP 54dd73 33
+GBSAMP 635c4d 33
+GBSAMP 5b59d0 32
+GBSAMP 55d639 32
+GBSAMP 51f374 32
+GBSAMP 5451a7 32
+GBSAMP 54de50 32
+GBSAMP 5ae6d1 32
+GBSAMP 19de5a6 32
+GBSAMP 573cf7 32
+GBSAMP 5e0ca2 32
+GBSAMP 19de400 31
+GBSAMP 7ff000082f90 31
+GBSAMP 198d8d4 31
+GBSAMP 19de3d2 31
+GBSAMP 1c1ba56 31
+GBSAMP 1995981 31
+GBSAMP 5df6e0 31
+GBSAMP 564077 31
+GBSAMP 5b46e2 31
+GBSAMP 5214b0 31
+GBSAMP 635be6 31
+GBSAMP 693ba2 31
+GBSAMP 1943a25 31
+GBSAMP 52148e 31
+GBSAMP 51f0ed 30
+GBSAMP 1c1d20c 30
+GBSAMP 524f03 30
+GBSAMP 1943a03 30
+GBSAMP 5e056a 30
+GBSAMP 1abfd08 30
+GBSAMP 1993640 30
+GBSAMP 635c2d 30
+GBSAMP 6320a9 30
+GBSAMP 63215a 30
+GBSAMP 198ceeb 30
+GBSAMP 5565d2 30
+GBSAMP 19ef85d 30
+GBSAMP 7ff0001ba7a3 30
+GBSAMP 565202 29
+GBSAMP 575b02 29
+GBSAMP 544f8c 29
+GBSAMP 5c13d3 29
+GBSAMP 7ff0001be1c8 29
+GBSAMP 53697a 29
+GBSAMP 7c7287 29
+GBSAMP 54e069 29
+GBSAMP 55e2ed 29
+GBSAMP 7c0027 29
+GBSAMP 5ae6ef 28
+GBSAMP 6492fb 28
+GBSAMP 5bcefc 28
+GBSAMP 5e05ef 28
+GBSAMP 5b59d9 28
+GBSAMP 7ccb73 28
+GBSAMP 1944012 28
+GBSAMP 198d960 28
+GBSAMP 5565af 28
+GBSAMP 5b61f1 28
+GBSAMP 5b63ed 28
+GBSAMP 1bc817f 27
+GBSAMP 5b59d7 27
+GBSAMP 544fb1 27
+GBSAMP 198d2d3 27
+GBSAMP 5165a8 27
+GBSAMP 1c3c591 27
+GBSAMP 1bc7eca 27
+GBSAMP 51f2e6 26
+GBSAMP 5b5de0 26
+GBSAMP 5248f4 26
+GBSAMP 51f0e0 26
+GBSAMP 19ded70 26
+GBSAMP 1995b65 26
+GBSAMP 1c44c89 26
+GBSAMP 19bcdb4 26
+GBSAMP 524ed2 26
+GBSAMP 7c7cba 26
+GBSAMP 55e5ae 26
+GBSAMP 51f3bb 26
+GBSAMP 198e0e0 26
+GBSAMP 5b6818 26
+GBSAMP 699653 26
+GBSAMP 7d6e8a 26
+GBSAMP 6320c4 26
+GBSAMP 544f82 26
+GBSAMP 198d8fb 26
+GBSAMP 575af6 25
+GBSAMP 5e05bb 25
+GBSAMP 63214b 25
+GBSAMP 544e80 25
+GBSAMP 54bcf4 25
+GBSAMP 5b67a5 25
+GBSAMP 544e09 25
+GBSAMP 632088 25
+GBSAMP 7c7171 25
+GBSAMP 7c7304 25
+GBSAMP 516530 25
+GBSAMP 1995e8e 25
+GBSAMP 544f6c 24
+GBSAMP 575adb 24
+GBSAMP 544fa2 24
+GBSAMP 1bf605f 24
+GBSAMP 19ce7c5 24
+GBSAMP 6f33a6 24
+GBSAMP 7d5f7c 24
+GBSAMP ffffffff8021aeec 24
+GBSAMP 1c42c34 24
+GBSAMP 5b55f4 24
+GBSAMP 5165fd 23
+GBSAMP 7ff0002bfdc9 23
+GBSAMP 2d1b5c7 23
+GBSAMP 5165ab 23
+GBSAMP 230c963 23
+GBSAMP 5e05d2 23
+GBSAMP 19de437 23
+GBSAMP 55e3c2 23
+GBSAMP 7ff0002ca98c 23
+GBSAMP 51f28e 23
+GBSAMP 5b6879 23
+GBSAMP 45ac4d 23
+GBSAMP 7c7b1c 23
+GBSAMP 55e4a0 23
+GBSAMP 51f333 23
+GBSAMP 520cd3 23
+GBSAMP 1995e9c 23
+GBSAMP 63213f 23
+GBSAMP 51f5df 22
+GBSAMP 536959 22
+GBSAMP 1acf3b3 22
+GBSAMP 1abfd13 22
+GBSAMP 5b45a2 22
+GBSAMP 1a4048a 22
+GBSAMP 1c1d3a3 22
+GBSAMP 1aa5f06 22
+GBSAMP 544f93 22
+GBSAMP 51f2ac 22
+GBSAMP 1995e68 22
+GBSAMP 544fad 22
+GBSAMP 543c91 22
+GBSAMP 2634120 22
+GBSAMP 1acf950 22
+GBSAMP 7d5f37 22
+GBSAMP 51f3f5 22
+GBSAMP 6320e5 22
+GBSAMP 53c318 22
+GBSAMP 575ab5 22
+GBSAMP 198d8f1 22
+GBSAMP 6320e2 22
+GBSAMP 5b59e4 22
+GBSAMP 5b5d54 21
+GBSAMP 575980 21
+GBSAMP 536884 21
+GBSAMP 54e054 21
+GBSAMP 191a95c 21
+GBSAMP 556593 21
+GBSAMP 1c422bc 21
+GBSAMP 1c2c83b 21
+GBSAMP 51f0fe 21
+GBSAMP 543e17 21
+GBSAMP 524837 21
+GBSAMP 5e05ce 21
+GBSAMP 55e4e0 21
+GBSAMP 63204f 21
+GBSAMP 1c45c1a 21
+GBSAMP 198e1a4 21
+GBSAMP 5b5e0b 21
+GBSAMP 5214db 21
+GBSAMP 5c104a 21
+GBSAMP 51ef44 21
+GBSAMP 544f77 21
+GBSAMP 19de454 21
+GBSAMP 55e5e1 21
+GBSAMP 1c45be8 21
+GBSAMP 5b641a 20
+GBSAMP 198d53c 20
+GBSAMP 521519 20
+GBSAMP 516557 20
+GBSAMP 19de42e 20
+GBSAMP 5ae670 20
+GBSAMP 1a2afd6 20
+GBSAMP 187ed41 20
+GBSAMP 63362a 20
+GBSAMP 5c1405 20
+GBSAMP 198d3b5 20
+GBSAMP 1bf6381 20
+GBSAMP 1c37215 20
+GBSAMP 54e2bd 20
+GBSAMP 19dd72c 20
+GBSAMP 545324 20
+GBSAMP 19f79fe 20
+GBSAMP 1c379e6 20
+GBSAMP 5c13ea 20
+GBSAMP 1995e82 20
+GBSAMP 5dfe41 20
+GBSAMP 19389ce 20
+GBSAMP 19925b0 20
+GBSAMP 198dffc 20
+GBSAMP 1943a31 19
+GBSAMP 51edbd 19
+GBSAMP 536962 19
+GBSAMP 524ea0 19
+GBSAMP 635b8b 19
+GBSAMP 1943ff0 19
+GBSAMP 63205b 19
+GBSAMP 198d060 19
+GBSAMP 5a8986 19
+GBSAMP 198e0e3 19
+GBSAMP 1c1c782 19
+GBSAMP 63213c 19
+GBSAMP 198d3c2 19
+GBSAMP 1c35b2e 19
+GBSAMP 198d8e6 19
+GBSAMP 51f3a5 19
+GBSAMP 17ed8d4 19
+GBSAMP 19ce351 19
+GBSAMP 56525f 19
+GBSAMP 1c3c54a 19
+GBSAMP 51f0c4 19
+GBSAMP 1c42c5d 19
+GBSAMP 6320f4 19
+GBSAMP ffffffff804802ab 19
+GBSAMP 191a40d 19
+GBSAMP 1c2b4b2 18
+GBSAMP 7ff0002c7980 18
+GBSAMP 7ff0001bcf55 18
+GBSAMP 7c6956 18
+GBSAMP 1c3c5c0 18
+GBSAMP 25fc978 18
+GBSAMP 5451a0 18
+GBSAMP 1c1d1ba 18
+GBSAMP 1943fe7 18
+GBSAMP 7ff0002bfaa8 18
+GBSAMP 524eb4 18
+GBSAMP 1c3454d 18
+GBSAMP 7b0a4f 18
+GBSAMP 1807d5c 18
+GBSAMP 7ff0001ba8c6 18
+GBSAMP 7ff00008377b 18
+GBSAMP 63206d 18
+GBSAMP 5b70c4 18
+GBSAMP 575a64 18
+GBSAMP 1c3bfb5 18
+GBSAMP 7ff000082c17 18
+GBSAMP 51f2fc 18
+GBSAMP 5165dc 18
+GBSAMP 1c45bba 18
+GBSAMP 198e230 18
+GBSAMP 7ccc3d 18
+GBSAMP 6350b0 18
+GBSAMP 198cf21 18
+GBSAMP 198e155 18
+GBSAMP 632052 17
+GBSAMP 1c35a1f 17
+GBSAMP 5b5d78 17
+GBSAMP 545369 17
+GBSAMP 7ccb86 17
+GBSAMP 5a897a 17
+GBSAMP 5e05a0 17
+GBSAMP 55e2dc 17
+GBSAMP 1995eb4 17
+GBSAMP 19c1eb8 17
+GBSAMP 5b70a3 17
+GBSAMP 544ea4 17
+GBSAMP 51f6e6 17
+GBSAMP 54bcc6 17
+GBSAMP 1bc81a8 17
+GBSAMP 524e97 17
+GBSAMP 19c20ce 17
+GBSAMP 1c372e8 17
+GBSAMP 7ff0002bfb4d 17
+GBSAMP 7ff000082c46 16
+GBSAMP 7b19b8 16
+GBSAMP 632121 16
+GBSAMP 19432a1 16
+GBSAMP 55e314 16
+GBSAMP 19da6a5 16
+GBSAMP 545355 16
+GBSAMP 7bfc23 16
+GBSAMP 5ae63c 16
+GBSAMP 51f2db 16
+GBSAMP 51f2d7 16
+GBSAMP 7ff000083026 16
+GBSAMP 1c1c2e0 16
+GBSAMP 5dff55 16
+GBSAMP 1c2b51f 16
+GBSAMP 55e536 16
+GBSAMP 51edaf 16
+GBSAMP 19927ab 16
+GBSAMP 1f1f862 16
+GBSAMP 198e043 16
+GBSAMP 19ef856 16
+GBSAMP 51f26e 16
+GBSAMP 5c1034 16
+GBSAMP 55e557 16
+GBSAMP 7d5e7e 16
+GBSAMP 198e0b4 16
+GBSAMP 2313f17 16
+GBSAMP 1943297 16
+GBSAMP 5451b7 16
+GBSAMP 19ce61b 15
+GBSAMP 54e205 15
+GBSAMP 19ee598 15
+GBSAMP 55e3bc 15
+GBSAMP 198df4b 15
+GBSAMP 7d5720 15
+GBSAMP 54bcce 15
+GBSAMP 7cce47 15
+GBSAMP 57c78d 15
+GBSAMP 1c44ac5 15
+GBSAMP 19dc424 15
+GBSAMP 26237c3 15
+GBSAMP 1942d17 15
+GBSAMP 7d6d92 15
+GBSAMP 573d93 15
+GBSAMP 67b4cc 15
+GBSAMP 5dff78 15
+GBSAMP 1d817cb 15
+GBSAMP 55e2a6 15
+GBSAMP 1995bda 15
+GBSAMP 63205e 15
+GBSAMP 1c05a6c 15
+GBSAMP 19de463 15
+GBSAMP 206fd53 15
+GBSAMP 1919024 15
+GBSAMP 1995bcf 15
+GBSAMP 5b5dbe 15
+GBSAMP 186b99c 15
+GBSAMP 7ff0002bf9f7 15
+GBSAMP 544ecb 15
+GBSAMP ffffffff8038b798 15
+GBSAMP 5214fc 15
+GBSAMP 1995bfb 15
+GBSAMP 198d03e 15
+GBSAMP 51f308 15
+GBSAMP 5368ef 15
+GBSAMP 1943ff9 15
+GBSAMP 575b08 14
+GBSAMP 19ce3ba 14
+GBSAMP 1c2b2c5 14
+GBSAMP 1c1254f 14
+GBSAMP 5e05b7 14
+GBSAMP 55e859 14
+GBSAMP 5c13e2 14
+GBSAMP 6320af 14
+GBSAMP 5165be 14
+GBSAMP 1acf7b7 14
+GBSAMP 544e27 14
+GBSAMP 7b04f4 14
+GBSAMP 19de40b 14
+GBSAMP 1c35c34 14
+GBSAMP 198e0cc 14
+GBSAMP 51f3f3 14
+GBSAMP 524ebc 14
+GBSAMP 19de47e 14
+GBSAMP 1acf37b 14
+GBSAMP 68e969 14
+GBSAMP 1c1c9c6 14
+GBSAMP 1919da4 14
+GBSAMP 7d573d 14
+GBSAMP 1db64ac 14
+GBSAMP 7b8310 14
+GBSAMP 1995b73 14
+GBSAMP 198e262 14
+GBSAMP 1db2133 14
+GBSAMP 55e2b9 14
+GBSAMP 54dd5e 14
+GBSAMP 1942d07 14
+GBSAMP 632097 14
+GBSAMP 7ae492 14
+GBSAMP 206ec56 14
+GBSAMP 1acf9d6 14
+GBSAMP 198e621 14
+GBSAMP 1c45bf3 14
+GBSAMP 5c1067 14
+GBSAMP 19dec6c 14
+GBSAMP 1995872 14
+GBSAMP 7b0661 14
+GBSAMP 55d919 14
+GBSAMP 524e32 14
+GBSAMP 19de441 13
+GBSAMP 5165a2 13
+GBSAMP 51f0cc 13
+GBSAMP 5b70c0 13
+GBSAMP 7ff0002bfc7f 13
+GBSAMP 5c1468 13
+GBSAMP 516577 13
+GBSAMP 7ae563 13
+GBSAMP 198e0b7 13
+GBSAMP 6320a6 13
+GBSAMP 1acf793 13
+GBSAMP 7ff00007e40a 13
+GBSAMP 19da68e 13
+GBSAMP 5b6882 13
+GBSAMP 7ccb62 13
+GBSAMP 63206a 13
+GBSAMP 1995c91 13
+GBSAMP ffffffff8029cf23 13
+GBSAMP 5c1079 13
+GBSAMP 7b35bd 13
+GBSAMP 19432b0 13
+GBSAMP 5b5386 13
+GBSAMP 5dff8d 13
+GBSAMP 7ff0001be477 13
+GBSAMP 632133 13
+GBSAMP 632130 13
+GBSAMP 1c422e0 13
+GBSAMP 198d446 13
+GBSAMP 1c35a43 13
+GBSAMP 1995ea6 13
+GBSAMP 1c1c485 13
+GBSAMP 5b67a1 13
+GBSAMP 7c75fa 13
+GBSAMP 1c44c81 13
+GBSAMP 1995ec5 13
+GBSAMP 19389ab 13
+GBSAMP 7ff000082f75 13
+GBSAMP 198d398 13
+GBSAMP 5c1060 13
+GBSAMP 575a3f 13
+GBSAMP 52147a 13
+GBSAMP 7d6d8a 13
+GBSAMP 18776fc 13
+GBSAMP 521543 13
+GBSAMP 632142 13
+GBSAMP 62daf3 13
+GBSAMP 5b5d47 13
+GBSAMP 676eef 13
+GBSAMP 545148 13
+GBSAMP 7be6ba 12
+GBSAMP 1992ae6 12
+GBSAMP 5b5373 12
+GBSAMP 19de448 12
+GBSAMP 7ccb7b 12
+GBSAMP 63212a 12
+GBSAMP 26153b9 12
+GBSAMP 1c36ea9 12
+GBSAMP 54be26 12
+GBSAMP 7ff0002ca997 12
+GBSAMP 1db9c85 12
+GBSAMP 5ae60e 12
+GBSAMP 2608f7f 12
+GBSAMP 5b686d 12
+GBSAMP 5e05a3 12
+GBSAMP 1c44d11 12
+GBSAMP 54bd24 12
+GBSAMP 1db6850 12
+GBSAMP 64ed5d 12
+GBSAMP ffffffff803889c0 12
+GBSAMP 1c1d175 12
+GBSAMP 198d476 12
+GBSAMP 5e051f 12
+GBSAMP 51f257 12
+GBSAMP 1c2c318 12
+GBSAMP 1eea90f 12
+GBSAMP 68fbe5 12
+GBSAMP 5ae71c 12
+GBSAMP 198bb0b 12
+GBSAMP 1c372f9 12
+GBSAMP 7ff000082fbb 12
+GBSAMP 55e2e7 12
+GBSAMP 1c36e24 12
+GBSAMP 1995b8e 12
+GBSAMP 7ff00007e750 12
+GBSAMP 187ecf0 12
+GBSAMP 634f70 12
+GBSAMP 1c1d121 12
+GBSAMP 1b14d44 12
+GBSAMP 5b538d 12
+GBSAMP 7ff00015d724 12
+GBSAMP 2b635be 12
+GBSAMP 1c2b50b 12
+GBSAMP 19bbb84 12
+GBSAMP 19193e3 12
+GBSAMP 5c14a6 12
+GBSAMP 5657fa 12
+GBSAMP 54d797 12
+GBSAMP 1c4179c 12
+GBSAMP 1ab2883 12
+GBSAMP 55e009 12
+GBSAMP 23b9078 12
+GBSAMP 1c35bf6 12
+GBSAMP 56541a 12
+GBSAMP 19de478 12
+GBSAMP 68fc2c 12
+GBSAMP 1acf386 12
+GBSAMP 7ff000083037 12
+GBSAMP 7c765d 12
+GBSAMP 5c1056 12
+GBSAMP 53c30c 12
+GBSAMP 2641b02 12
+GBSAMP 5b5d13 12
+GBSAMP 51f2ca 12
+GBSAMP 7c76ae 12
+GBSAMP 5b45b5 12
+GBSAMP 5dfb98 12
+GBSAMP 51f291 12
+GBSAMP 5c147c 12
+GBSAMP 1acf1ba 12
+GBSAMP 7beccc 12
+GBSAMP 5dec66 12
+GBSAMP 1acf7ce 12
+GBSAMP 1dc0bf3 12
+GBSAMP 21be3c3 12
+GBSAMP 1bcb025 12
+GBSAMP 24dc677 12
+GBSAMP 565cce 12
+GBSAMP 1c416e9 11
+GBSAMP 19ce5ec 11
+GBSAMP 55e411 11
+GBSAMP 1c1c99f 11
+GBSAMP 5565c2 11
+GBSAMP 54e030 11
+GBSAMP 7d5865 11
+GBSAMP 1c37202 11
+GBSAMP 1c1d255 11
+GBSAMP 7ff0001bc2cb 11
+GBSAMP 7c7460 11
+GBSAMP 1995c5c 11
+GBSAMP 55d938 11
+GBSAMP 5b59d4 11
+GBSAMP 524eeb 11
+GBSAMP 5e05a7 11
+GBSAMP 19de422 11
+GBSAMP 5214f8 11
+GBSAMP 54de81 11
+GBSAMP 1c1d172 11
+GBSAMP 198da16 11
+GBSAMP 5b45ae 11
+GBSAMP 7ff000082c2b 11
+GBSAMP 5ae6bc 11
+GBSAMP 198e29f 11
+GBSAMP 1c2c7c4 11
+GBSAMP 7be909 11
+GBSAMP 53d1b7 11
+GBSAMP 1f074e2 11
+GBSAMP 7d5e70 11
+GBSAMP 7ff0002ca9a3 11
+GBSAMP 5b799c 11
+GBSAMP 19de44c 11
+GBSAMP d2e309 11
+GBSAMP 63208e 11
+GBSAMP 1c2b526 11
+GBSAMP 7ff000082c4f 11
+GBSAMP 63215d 11
+GBSAMP 1995e87 11
+GBSAMP 1c2b375 11
+GBSAMP 1c2b3a3 11
+GBSAMP ffffffff8028e7f7 11
+GBSAMP 55d915 11
+GBSAMP 557c1d 11
+GBSAMP 55e361 11
+GBSAMP 199589c 11
+GBSAMP 1c2ae19 11
+GBSAMP 51f70d 11
+GBSAMP 55e4fb 11
+GBSAMP 51658b 11
+GBSAMP 5440f7 11
+GBSAMP 198d3ad 11
+GBSAMP 198d900 11
+GBSAMP 5b63e0 11
+GBSAMP 1c3c532 11
+GBSAMP 7d718b 11
+GBSAMP 1c1ba31 11
+GBSAMP 19de450 11
+GBSAMP 5c13f0 11
+GBSAMP 5c1095 11
+GBSAMP 55e5ec 11
+GBSAMP 6320c7 11
+GBSAMP 5ae6fc 11
+GBSAMP 1f425dc 10
+GBSAMP 1ed8841 10
+GBSAMP 7c0269 10
+GBSAMP 6320d3 10
+GBSAMP 1ab2c59 10
+GBSAMP 54be0f 10
+GBSAMP 1c35977 10
+GBSAMP 521464 10
+GBSAMP 544fc3 10
+GBSAMP 7bf3bb 10
+GBSAMP 5bcf7b 10
+GBSAMP 565e3d 10
+GBSAMP 54de63 10
+GBSAMP 1db4806 10
+GBSAMP 5dec6a 10
+GBSAMP 1abd52e 10
+GBSAMP 7ff0001bcf0a 10
+GBSAMP 7b8c23 10
+GBSAMP 19389d3 10
+GBSAMP 7ff000082fd2 10
+GBSAMP 7aed36 10
+GBSAMP 198e173 10
+GBSAMP 543ca8 10
+GBSAMP 55e45c 10
+GBSAMP 198d4f6 10
+GBSAMP 2386bf6 10
+GBSAMP 573c8d 10
+GBSAMP 1f06e6c 10
+GBSAMP 7c6e69 10
+GBSAMP 5b537a 10
+GBSAMP 51f713 10
+GBSAMP 54de56 10
+GBSAMP 524822 10
+GBSAMP 1992da6 10
+GBSAMP 19da98e 10
+GBSAMP 55e58c 10
+GBSAMP 1943a1e 10
+GBSAMP 198e1ca 10
+GBSAMP 1c3c708 10
+GBSAMP 557bd6 10
+GBSAMP 5ae69e 10
+GBSAMP 5165d4 10
+GBSAMP 19b3f3b 10
+GBSAMP 7ff0001bd80a 10
+GBSAMP 7ff0001ba7ae 10
+GBSAMP 51f220 10
+GBSAMP 6995c4 10
+GBSAMP 565826 10
+GBSAMP 19ce09c 10
+GBSAMP 19ee5f5 10
+GBSAMP 1abfd0e 10
+GBSAMP 6334ee 10
+GBSAMP 25fccc3 10
+GBSAMP 2b53994 10
+GBSAMP 1995c30 10
+GBSAMP 2c414af 10
+GBSAMP 55d644 10
+GBSAMP 524e9b 10
+GBSAMP 7c718d 10
+GBSAMP 206fe93 10
+GBSAMP 54533a 10
+GBSAMP 7ccde3 10
+GBSAMP 5b7073 10
+GBSAMP 5368c7 10
+GBSAMP 51f33a 10
+GBSAMP 19dd927 10
+GBSAMP 51f3fc 10
+GBSAMP 524eb0 10
+GBSAMP 5ae60a 10
+GBSAMP 1acf390 10
+GBSAMP 18776ea 10
+GBSAMP 632040 10
+GBSAMP 5c108d 10
+GBSAMP 1d46737 9
+GBSAMP 19da99c 9
+GBSAMP 1c33229 9
+GBSAMP 565e0f 9
+GBSAMP 5b680f 9
+GBSAMP 1acf399 9
+GBSAMP 1c3c44e 9
+GBSAMP 6320fa 9
+GBSAMP 635c41 9
+GBSAMP 51eea2 9
+GBSAMP 55d92f 9
+GBSAMP 544fcb 9
+GBSAMP 1c2c77a 9
+GBSAMP 1acf7c1 9
+GBSAMP 5b6be0 9
+GBSAMP 199229d 9
+GBSAMP 51f2eb 9
+GBSAMP 55d911 9
+GBSAMP 55e59a 9
+GBSAMP 7c858b 9
+GBSAMP 1807932 9
+GBSAMP 524e37 9
+GBSAMP 632079 9
+GBSAMP 7c704c 9
+GBSAMP 1bcb0bf 9
+GBSAMP 544e46 9
+GBSAMP 51f3b3 9
+GBSAMP 7c0413 9
+GBSAMP 1f0a671 9
+GBSAMP 1c1c78d 9
+GBSAMP 1877728 9
+GBSAMP 51ef71 9
+GBSAMP 1d4208c 9
+GBSAMP 55e3b4 9
+GBSAMP 55e015 9
+GBSAMP 7ccb7f 9
+GBSAMP 7ff0001b2b26 9
+GBSAMP 7c7265 9
+GBSAMP 853a93 9
+GBSAMP 198cf48 9
+GBSAMP 1995cc1 9
+GBSAMP 5b5dcf 9
+GBSAMP 7be735 9
+GBSAMP 20fde54 9
+GBSAMP 57374c 9
+GBSAMP 7c72bf 9
+GBSAMP 564966 9
+GBSAMP 7c7253 9
+GBSAMP 1bf6092 9
+GBSAMP 51f398 9
+GBSAMP a248f0 9
+GBSAMP 198e080 9
+GBSAMP 7ff000082bef 9
+GBSAMP 54516e 9
+GBSAMP 7c0115 9
+GBSAMP 51ee88 9
+GBSAMP ffffffff80594733 9
+GBSAMP 7ff0001bb722 9
+GBSAMP 7ff000082c02 9
+GBSAMP 1bf621b 9
+GBSAMP 5b67aa 9
+GBSAMP 198cf6d 9
+GBSAMP 565210 9
+GBSAMP 544fb8 9
+GBSAMP 1acf39c 9
+GBSAMP 198e18a 9
+GBSAMP 239c147 9
+GBSAMP 5df8b6 9
+GBSAMP 5dfe1f 9
+GBSAMP 7ff000082c27 9
+GBSAMP 7c025c 9
+GBSAMP 1c357c4 9
+GBSAMP 63203d 9
+GBSAMP 7c72cb 9
+GBSAMP 19bcc02 9
+GBSAMP 7ff0001be192 9
+GBSAMP 7c57a7 9
+GBSAMP 7ff000083910 9
+GBSAMP 632136 9
+GBSAMP 544e62 9
+GBSAMP 187e8da 9
+GBSAMP 55e4c6 9
+GBSAMP 187e900 9
+GBSAMP 556577 9
+GBSAMP 521475 9
+GBSAMP 55e57f 9
+GBSAMP 55dfd0 9
+GBSAMP 7c766c 9
+GBSAMP 524ec7 9
+GBSAMP 7c5414 9
+GBSAMP 7d6e26 9
+GBSAMP 17ec008 9
+GBSAMP 2b85df3 9
+GBSAMP 7b8f87 9
+GBSAMP 7ff0001bce06 8
+GBSAMP 56548d 8
+GBSAMP 198b904 8
+GBSAMP 524f06 8
+GBSAMP 198e09d 8
+GBSAMP 7b89d4 8
+GBSAMP 198e26e 8
+GBSAMP 198e165 8
+GBSAMP 51f2ef 8
+GBSAMP 1c1c2b4 8
+GBSAMP 5e04d4 8
+GBSAMP ffffffff8028e789 8
+GBSAMP 7bed2c 8
+GBSAMP 191a3a4 8
+GBSAMP 198ded9 8
+GBSAMP 19de420 8
+GBSAMP 19de4f0 8
+GBSAMP 1ef13d1 8
+GBSAMP 1c3334a 8
+GBSAMP 1c2c837 8
+GBSAMP 198e177 8
+GBSAMP 56445e 8
+GBSAMP 1c35ad8 8
+GBSAMP 55d64f 8
+GBSAMP 634b76 8
+GBSAMP 19daaaa 8
+GBSAMP 7ff000082f18 8
+GBSAMP 574166 8
+GBSAMP 54bae4 8
+GBSAMP 5e05de 8
+GBSAMP 5ae6e9 8
+GBSAMP 67b07b 8
+GBSAMP 63211e 8
+GBSAMP 54bceb 8
+GBSAMP 1c3720d 8
+GBSAMP 5c1f72 8
+GBSAMP 20a4766 8
+GBSAMP 198e1d8 8
+GBSAMP 5452ac 8
+GBSAMP 4084f0 8
+GBSAMP 7bdc70 8
+GBSAMP 7cce6f 8
+GBSAMP 19958e7 8
+GBSAMP 5dfdd9 8
+GBSAMP 198e1b7 8
+GBSAMP 55e236 8
+GBSAMP 1c37241 8
+GBSAMP 7c7ce7 8
+GBSAMP 55e33c 8
+GBSAMP 1c3c7c1 8
+GBSAMP 198df69 8
+GBSAMP 633474 8
+GBSAMP 1c2c829 8
+GBSAMP 1c332b1 8
+GBSAMP 7ff0001bd018 8
+GBSAMP 55e28c 8
+GBSAMP 7ccd76 8
+GBSAMP 7ff0001b105a 8
+GBSAMP 2b85201 8
+GBSAMP 55e5d7 8
+GBSAMP 575a87 8
+GBSAMP 198dfd3 8
+GBSAMP 26fcbc2 8
+GBSAMP 1c2b39c 8
+GBSAMP 7ff0002bfb54 8
+GBSAMP 55def5 8
+GBSAMP 2146d7a 8
+GBSAMP 635c38 8
+GBSAMP 1acf948 8
+GBSAMP 6320d6 8
+GBSAMP 2330c45 8
+GBSAMP 55e571 8
+GBSAMP 1d602e0 8
+GBSAMP 19ce093 8
+GBSAMP 7ff0001bb7e1 8
+GBSAMP 191b0c8 8
+GBSAMP 19c2310 8
+GBSAMP 51f0fa 7
+GBSAMP 5b6d68 7
+GBSAMP 55e30b 7
+GBSAMP 7ff0001ba956 7
+GBSAMP 5e05e7 7
+GBSAMP 198e184 7
+GBSAMP 19de43a 7
+GBSAMP 18701c4 7
+GBSAMP 198e05d 7
+GBSAMP 5c1f98 7
+GBSAMP 1d46cbd 7
+GBSAMP 199257f 7
+GBSAMP 6320b5 7
+GBSAMP 1c422c5 7
+GBSAMP 7cce2a 7
+GBSAMP 55e55c 7
+GBSAMP 7d61bb 7
+GBSAMP 7c7db9 7
+GBSAMP 1944021 7
+GBSAMP 19d95bd 7
+GBSAMP 7ff0002bfbeb 7
+GBSAMP 2b859cd 7
+GBSAMP 1995cae 7
+GBSAMP 1992532 7
+GBSAMP 565e16 7
+GBSAMP 19daa56 7
+GBSAMP 575bbd 7
+GBSAMP 5565c4 7
+GBSAMP 5565cd 7
+GBSAMP 7c0381 7
+GBSAMP 5b70cb 7
+GBSAMP 55e38e 7
+GBSAMP 1acf975 7
+GBSAMP 1995aef 7
+GBSAMP 55e295 7
+GBSAMP 19c1eda 7
+GBSAMP 55e37b 7
+GBSAMP 278318b 7
+GBSAMP 55e3ef 7
+GBSAMP 7ff000082c07 7
+GBSAMP 5b5390 7
+GBSAMP 19389c5 7
+GBSAMP 51656b 7
+GBSAMP 55e141 7
+GBSAMP 7cce6a 7
+GBSAMP 632055 7
+GBSAMP 5c1213 7
+GBSAMP 263a69d 7
+GBSAMP 51f28a 7
+GBSAMP 1c1d201 7
+GBSAMP 198d0d9 7
+GBSAMP 198e110 7
+GBSAMP 198d3c0 7
+GBSAMP 6889a1 7
+GBSAMP 1991b26 7
+GBSAMP 5df8d2 7
+GBSAMP 5b70b6 7
+GBSAMP 1bc7f70 7
+GBSAMP 1c4173b 7
+GBSAMP 524f10 7
+GBSAMP 51f304 7
+GBSAMP 5214df 7
+GBSAMP 17ed934 7
+GBSAMP 1f3eca4 7
+GBSAMP 1943a17 7
+GBSAMP 543ca4 7
+GBSAMP 66cb0f 7
+GBSAMP 198dfab 7
+GBSAMP 7c726a 7
+GBSAMP 198d02d 7
+GBSAMP 68d734 7
+GBSAMP 18608a0 7
+GBSAMP 5bbe88 7
+GBSAMP 198e1c7 7
+GBSAMP 187efe5 7
+GBSAMP 544e7c 7
+GBSAMP 1c35aba 7
+GBSAMP 198d158 7
+GBSAMP 69964c 7
+GBSAMP 7ccbba 7
+GBSAMP 1c37218 7
+GBSAMP 5ad121 7
+GBSAMP 524e8f 7
+GBSAMP 6436cb 7
+GBSAMP 5b5db4 7
+GBSAMP 5565ee 7
+GBSAMP 198e207 7
+GBSAMP 1943fdd 7
+GBSAMP 635c32 7
+GBSAMP 19ce60d 6
+GBSAMP 19dec8c 6
+GBSAMP 1bf599e 6
+GBSAMP 5b6d64 6
+GBSAMP 544e03 6
+GBSAMP 1abfcfc 6
+GBSAMP 19de51a 6
+GBSAMP 198e2ad 6
+GBSAMP 1c2c322 6
+GBSAMP 19deaf9 6
+GBSAMP 19ce1cd 6
+GBSAMP 1c3c538 6
+GBSAMP 68e938 6
+GBSAMP 564733 6
+GBSAMP 524f23 6
+GBSAMP 19ef862 6
+GBSAMP 51f640 6
+GBSAMP 19db230 6
+GBSAMP 63d194 6
+GBSAMP 5565b6 6
+GBSAMP 19d5a56 6
+GBSAMP 5447bd 6
+GBSAMP 67db60 6
+GBSAMP 5b5d5e 6
+GBSAMP 1c45bda 6
+GBSAMP 54dd70 6
+GBSAMP 5bab33 6
+GBSAMP 677492 6
+GBSAMP 679ee2 6
+GBSAMP 198bd0b 6
+GBSAMP 677439 6
+GBSAMP 5c146d 6
+GBSAMP 198e241 6
+GBSAMP 19da4eb 6
+GBSAMP 7b8a21 6
+GBSAMP 51f102 6
+GBSAMP 7ae5cb 6
+GBSAMP 1c1c766 6
+GBSAMP 1c35bb0 6
+GBSAMP 1d6f6e3 6
+GBSAMP 1c2c6b4 6
+GBSAMP 544ea8 6
+GBSAMP 1bf6097 6
+GBSAMP 7bf87d 6
+GBSAMP 1acf977 6
+GBSAMP 19fd3a7 6
+GBSAMP 18778ed 6
+GBSAMP 198d05e 6
+GBSAMP 1b8e86c 6
+GBSAMP 1c35b7e 6
+GBSAMP 1c372c4 6
+GBSAMP 7b8a03 6
+GBSAMP 7ccbe2 6
+GBSAMP 6334d7 6
+GBSAMP 1acf7ae 6
+GBSAMP 19c22d7 6
+GBSAMP 535b30 6
+GBSAMP 54529c 6
+GBSAMP 191a3bf 6
+GBSAMP 51f6cc 6
+GBSAMP 28569a0 6
+GBSAMP 55e5e4 6
+GBSAMP 1c2c8a2 6
+GBSAMP 51f123 6
+GBSAMP 19db8ba 6
+GBSAMP 54bf32 6
+GBSAMP 55653d 6
+GBSAMP 5b6bf8 6
+GBSAMP 51f0dc 6
+GBSAMP 19de511 6
+GBSAMP 1acf38a 6
+GBSAMP 274adb8 6
+GBSAMP 19de465 6
+GBSAMP 544e2c 6
+GBSAMP 7ccc2f 6
+GBSAMP 1995b92 6
+GBSAMP 7ff0001604f1 6
+GBSAMP 19aea9a 6
+GBSAMP 7d6d7f 6
+GBSAMP 1995e4d 6
+GBSAMP 17f43e2 6
+GBSAMP 5e05d6 6
+GBSAMP 198d56f 6
+GBSAMP 67a104 6
+GBSAMP 543c9f 6
+GBSAMP 51f6ea 6
+GBSAMP 5b5d4c 6
+GBSAMP 7c7b7a 6
+GBSAMP 5b6c17 6
+GBSAMP 7ff000082c34 6
+GBSAMP 4797c4 6
+GBSAMP 238fe1c 6
+GBSAMP 5b5e2e 6
+GBSAMP 19ce376 6
+GBSAMP 19196e7 6
+GBSAMP 55e565 6
+GBSAMP 7b834d 6
+GBSAMP 1ab28e8 6
+GBSAMP 5c03ae 6
+GBSAMP 1ab0964 6
+GBSAMP 66bf7c 6
+GBSAMP 19bf654 6
+GBSAMP 1f43822 6
+GBSAMP 19da766 6
+GBSAMP 7c70b2 6
+GBSAMP 5c105a 6
+GBSAMP 7ac7e0 6
+GBSAMP 51f1f3 6
+GBSAMP 55e544 6
+GBSAMP 2610a13 6
+GBSAMP 1c35c16 6
+GBSAMP 55e8aa 6
+GBSAMP 7b85db 6
+GBSAMP 1995ec8 6
+GBSAMP 1995f03 6
+GBSAMP 7beda0 6
+GBSAMP 5dfe38 6
+GBSAMP 51f0e9 6
+GBSAMP 5b63b9 6
+GBSAMP 1ee974d 6
+GBSAMP 19da9a7 6
+GBSAMP 1c3c52f 6
+GBSAMP 198bd14 6
+GBSAMP 19389d0 6
+GBSAMP ffffffff8028e7d3 6
+GBSAMP 1995c37 6
+GBSAMP 5c12cc 6
+GBSAMP 1992a6d 6
+GBSAMP 19432bc 6
+GBSAMP 1876d8c 6
+GBSAMP 566295 6
+GBSAMP 564290 6
+GBSAMP 7c6b29 6
+GBSAMP 62d6ce 6
+GBSAMP ffffffff80594736 6
+GBSAMP 7c72ea 6
+GBSAMP 186df07 6
+GBSAMP 1808365 6
+GBSAMP 28ec8b6 6
+GBSAMP 56d7e3 6
+GBSAMP 1c35bda 6
+GBSAMP 5b7997 6
+GBSAMP 7c72c8 6
+GBSAMP 19c72c3 6
+GBSAMP 5249e5 6
+GBSAMP 1acf965 6
+GBSAMP 55e409 6
+GBSAMP 7bd4e0 6
+GBSAMP 1bcbef9 6
+GBSAMP 5c14a3 6
+GBSAMP 5786ff 6
+GBSAMP 5b6735 6
+GBSAMP 1c3329f 6
+GBSAMP ffffffff80452120 6
+GBSAMP 5759e2 6
+GBSAMP 19ce3a6 6
+GBSAMP 19da8dd 6
+GBSAMP 7ccce8 5
+GBSAMP 7bf37a 5
+GBSAMP 63209a 5
+GBSAMP 7bf393 5
+GBSAMP 7cccef 5
+GBSAMP 55e0b9 5
+GBSAMP 55e4d5 5
+GBSAMP 7ff0002bf9c4 5
+GBSAMP 543fbe 5
+GBSAMP 5c1043 5
+GBSAMP 1b160f0 5
+GBSAMP 19d7fb3 5
+GBSAMP 634ba7 5
+GBSAMP 19d5551 5
+GBSAMP 1c2497b 5
+GBSAMP 198d4d6 5
+GBSAMP 7ff0001bcf4c 5
+GBSAMP 7ff0001bbd22 5
+GBSAMP 1995c21 5
+GBSAMP 5dec71 5
+GBSAMP a24119 5
+GBSAMP 5164c0 5
+GBSAMP 5e0c7b 5
+GBSAMP 198d437 5
+GBSAMP 693a9f 5
+GBSAMP 5368e7 5
+GBSAMP 198d003 5
+GBSAMP 1b14a29 5
+GBSAMP 632064 5
+GBSAMP 536965 5
+GBSAMP 5741ee 5
+GBSAMP 1c44cd3 5
+GBSAMP 55e25f 5
+GBSAMP 5bf835 5
+GBSAMP 1c344c5 5
+GBSAMP 198d2f5 5
+GBSAMP 544fbc 5
+GBSAMP 632043 5
+GBSAMP 7d5e75 5
+GBSAMP 19c9d57 5
+GBSAMP 1b26028 5
+GBSAMP 5b5e28 5
+GBSAMP 565336 5
+GBSAMP 5c1089 5
+GBSAMP 7d622d 5
+GBSAMP 1c45bc5 5
+GBSAMP 544e74 5
+GBSAMP 544e76 5
+GBSAMP 7ff000082bd3 5
+GBSAMP 55e512 5
+GBSAMP 5452ca 5
+GBSAMP 7c7439 5
+GBSAMP 54bf51 5
+GBSAMP 679d58 5
+GBSAMP 7ff000082e95 5
+GBSAMP 516573 5
+GBSAMP 55e8bd 5
+GBSAMP 7ff0002bfa20 5
+GBSAMP 19c2173 5
+GBSAMP 209a848 5
+GBSAMP 19ce354 5
+GBSAMP 209a863 5
+GBSAMP 1c37220 5
+GBSAMP 19daf06 5
+GBSAMP 5b5deb 5
+GBSAMP 1995bba 5
+GBSAMP 7ff0002ca999 5
+GBSAMP 5c11ed 5
+GBSAMP 1a404a0 5
+GBSAMP 1f3ed0e 5
+GBSAMP 575b0e 5
+GBSAMP 19ce820 5
+GBSAMP 54e05d 5
+GBSAMP 54e057 5
+GBSAMP 5b7093 5
+GBSAMP 544fc8 5
+GBSAMP 19da4e4 5
+GBSAMP 54bcd4 5
+GBSAMP 7c30b7 5
+GBSAMP 575b70 5
+GBSAMP 1c2adc0 5
+GBSAMP 7ff0001bba2d 5
+GBSAMP 214ef32 5
+GBSAMP 7ff000083010 5
+GBSAMP 1944036 5
+GBSAMP 19daad0 5
+GBSAMP 1c3c5de 5
+GBSAMP 4701af 5
+GBSAMP 1876d23 5
+GBSAMP 54de76 5
+GBSAMP 7d6d54 5
+GBSAMP 1d4683f 5
+GBSAMP 1abfd1b 5
+GBSAMP 565206 5
+GBSAMP 54bf6d 5
+GBSAMP 556589 5
+GBSAMP 408650 5
+GBSAMP 55e45f 5
+GBSAMP 1995ca2 5
+GBSAMP 19c658e 5
+GBSAMP 7ccc12 5
+GBSAMP 1e79562 5
+GBSAMP 5b5d6c 5
+GBSAMP 634b7d 5
+GBSAMP 19c1e74 5
+GBSAMP 1acf1ab 5
+GBSAMP 55e494 5
+GBSAMP 1bf6377 5
+GBSAMP 559007 5
+GBSAMP 19de5b9 5
+GBSAMP 19389b1 5
+GBSAMP 565300 5
+GBSAMP 19c22ef 5
+GBSAMP 7ff0001bd10a 5
+GBSAMP 544fd3 5
+GBSAMP 7d5acd 5
+GBSAMP 1c1de27 5
+GBSAMP 7b8f1c 5
+GBSAMP 19d8210 5
+GBSAMP 198dfc8 5
+GBSAMP 7ff000082c53 5
+GBSAMP 632166 5
+GBSAMP 1c2c811 5
+GBSAMP 54bce5 5
+GBSAMP 7ff0001ba9db 5
+GBSAMP 5b5d34 5
+GBSAMP 5b5d3a 5
+GBSAMP 184dac3 5
+GBSAMP 1c33287 5
+GBSAMP 565352 5
+GBSAMP 199599b 5
+GBSAMP 54dd57 5
+GBSAMP 7ff0001bceba 5
+GBSAMP 51f2f3 5
+GBSAMP 6320ca 5
+GBSAMP 1c3c546 5
+GBSAMP 6335eb 5
+GBSAMP 676ef8 5
+GBSAMP 19dac99 5
+GBSAMP 54de84 5
+GBSAMP 1993633 5
+GBSAMP 19de505 5
+GBSAMP 55e501 5
+GBSAMP 544df4 5
+GBSAMP 5c1488 5
+GBSAMP 7ff0001aa0b4 5
+GBSAMP 7ff0000837dd 5
+GBSAMP 6320c1 5
+GBSAMP 4084a0 5
+GBSAMP 1919020 5
+GBSAMP 1c1d18c 5
+GBSAMP 55e54a 5
+GBSAMP 19ed628 5
+GBSAMP 55e326 5
+GBSAMP 5b687d 5
+GBSAMP 536930 5
+GBSAMP 7b0652 5
+GBSAMP 198b92d 5
+GBSAMP 55e4ab 5
+GBSAMP 7ff0002bfcd7 5
+GBSAMP 55e286 5
+GBSAMP 7c72c5 5
+GBSAMP 1c372d1 5
+GBSAMP 1c416d3 5
+GBSAMP 635118 5
+GBSAMP 5214d3 5
+GBSAMP 1943ff7 5
+GBSAMP 19959b4 5
+GBSAMP 516315 5
+GBSAMP 7ff0001ac0ae 5
+GBSAMP 55e427 5
+GBSAMP 5ae634 5
+GBSAMP 5dec60 5
+GBSAMP 7ff0002c0247 5
+GBSAMP 7ff000082e02 5
+GBSAMP 5e05b3 5
+GBSAMP 198d427 5
+GBSAMP 633438 5
+GBSAMP 1ec0eff 5
+GBSAMP 1d48072 5
+GBSAMP 191a3ce 5
+GBSAMP 5165b8 5
+GBSAMP 575c0b 5
+GBSAMP 55e245 5
+GBSAMP 1807b67 5
+GBSAMP 5b5db8 5
+GBSAMP 1995ee7 5
+GBSAMP 1acf1c6 4
+GBSAMP 5b5e1e 4
+GBSAMP 19389dc 4
+GBSAMP 7c76b5 4
+GBSAMP 198fe6d 4
+GBSAMP 5dff74 4
+GBSAMP 55e0b4 4
+GBSAMP 1b16607 4
+GBSAMP 214fdf9 4
+GBSAMP 1c2add3 4
+GBSAMP 5e0c73 4
+GBSAMP 1c2c877 4
+GBSAMP 516563 4
+GBSAMP 55e52a 4
+GBSAMP 7c7e42 4
+GBSAMP 18782a7 4
+GBSAMP 7c7626 4
+GBSAMP 55e522 4
+GBSAMP 1d42162 4
+GBSAMP 1d6095c 4
+GBSAMP 7ff0002bfb0e 4
+GBSAMP 19959cf 4
+GBSAMP 63211b 4
+GBSAMP 7ff0002bfde1 4
+GBSAMP 54535a 4
+GBSAMP 7ff0002bff7b 4
+GBSAMP 7ff0001bb74f 4
+GBSAMP 1d7d5f8 4
+GBSAMP 1995b4d 4
+GBSAMP 198d392 4
+GBSAMP 55e378 4
+GBSAMP 5368c3 4
+GBSAMP 19ded86 4
+GBSAMP 54535f 4
+GBSAMP 198e04b 4
+GBSAMP 54517d 4
+GBSAMP 54d769 4
+GBSAMP 1acf168 4
+GBSAMP 1c35a5f 4
+GBSAMP 198e789 4
+GBSAMP 198d3f9 4
+GBSAMP 545334 4
+GBSAMP 524ec0 4
+GBSAMP 7ff0001bcb7f 4
+GBSAMP 7ff0001bcfe6 4
+GBSAMP 55e958 4
+GBSAMP 7ff000082f61 4
+GBSAMP 19959b0 4
+GBSAMP 68cca2 4
+GBSAMP 198d0e9 4
+GBSAMP 1e83c1b 4
+GBSAMP 199252c 4
+GBSAMP 263032d 4
+GBSAMP 1807d67 4
+GBSAMP 55e44e 4
+GBSAMP 2625ea1 4
+GBSAMP 1bf6c90 4
+GBSAMP 198e195 4
+GBSAMP 55e81b 4
+GBSAMP 260be15 4
+GBSAMP 19926bd 4
+GBSAMP 5dec4c 4
+GBSAMP 1943a3d 4
+GBSAMP 56d7cb 4
+GBSAMP 7ff000082c4b 4
+GBSAMP 1acf9e5 4
+GBSAMP 5e04d2 4
+GBSAMP 1acf178 4
+GBSAMP 1c3722b 4
+GBSAMP 7c767f 4
+GBSAMP 19d85d7 4
+GBSAMP 7b89ff 4
+GBSAMP 7c76a5 4
+GBSAMP 21445a8 4
+GBSAMP 55e476 4
+GBSAMP 1b85648 4
+GBSAMP 19ce344 4
+GBSAMP 1c422e9 4
+GBSAMP 545319 4
+GBSAMP 198d17d 4
+GBSAMP 19958d6 4
+GBSAMP 7b0576 4
+GBSAMP 693ac4 4
+GBSAMP 55e8c5 4
+GBSAMP 19923b8 4
+GBSAMP 55e456 4
+GBSAMP 7d6e21 4
+GBSAMP 7b0a44 4
+GBSAMP 55e453 4
+GBSAMP 55e084 4
+GBSAMP 5e0c9e 4
+GBSAMP 55e823 4
+GBSAMP 7c73ff 4
+GBSAMP 1acf73b 4
+GBSAMP 1c2c833 4
+GBSAMP 68e9e6 4
+GBSAMP 191a404 4
+GBSAMP 5c0330 4
+GBSAMP 263f763 4
+GBSAMP 7d5726 4
+GBSAMP 7ff000082be7 4
+GBSAMP 7ff0001bd4d3 4
+GBSAMP 7beed6 4
+GBSAMP 1942d1c 4
+GBSAMP 1c2b3b6 4
+GBSAMP 1c2c815 4
+GBSAMP 524ee7 4
+GBSAMP 19d817e 4
+GBSAMP 6350f0 4
+GBSAMP 520cf5 4
+GBSAMP 191a3ba 4
+GBSAMP 51f25f 4
+GBSAMP 54d4ae 4
+GBSAMP 55e036 4
+GBSAMP 7c72e5 4
+GBSAMP 55e50f 4
+GBSAMP 55e09c 4
+GBSAMP 253ed9e 4
+GBSAMP 214bf79 4
+GBSAMP 1993630 4
+GBSAMP 68ea92 4
+GBSAMP 198d8de 4
+GBSAMP 1c371ff 4
+GBSAMP 54d46a 4
+GBSAMP 1c3c5e8 4
+GBSAMP 5c1481 4
+GBSAMP 536913 4
+GBSAMP 19c5b8c 4
+GBSAMP 1995b75 4
+GBSAMP 51f286 4
+GBSAMP 57412b 4
+GBSAMP 684a5c 4
+GBSAMP 7ff0001bb9c1 4
+GBSAMP 19959bc 4
+GBSAMP 1acf197 4
+GBSAMP 1c372de 4
+GBSAMP 2a0f2ea 4
+GBSAMP 1c41824 4
+GBSAMP 1acf934 4
+GBSAMP 6320df 4
+GBSAMP 7ff000082c0c 4
+GBSAMP 5c1204 4
+GBSAMP 1993643 4
+GBSAMP 51f2a8 4
+GBSAMP 1942b76 4
+GBSAMP 54534c 4
+GBSAMP 7ff000083775 4
+GBSAMP 198e2b8 4
+GBSAMP 19dd730 4
+GBSAMP 19dd735 4
+GBSAMP 1c34493 4
+GBSAMP 1c1badc 4
+GBSAMP 536899 4
+GBSAMP 19ce8fa 4
+GBSAMP 2b85cb3 4
+GBSAMP 536973 4
+GBSAMP 5c140f 4
+GBSAMP 7ff0002bfdd0 4
+GBSAMP 55e22b 4
+GBSAMP 55d633 4
+GBSAMP 1995860 4
+GBSAMP 1937e69 4
+GBSAMP 1bc7fa2 4
+GBSAMP 7c7c06 4
+GBSAMP 198e001 4
+GBSAMP 198be79 4
+GBSAMP 55defd 4
+GBSAMP 5bf827 4
+GBSAMP 7ff0002bfdbb 4
+GBSAMP 5ae615 4
+GBSAMP 1c454a0 4
+GBSAMP 62d6d2 4
+GBSAMP 7cce67 4
+GBSAMP 7c7278 4
+GBSAMP 51f355 4
+GBSAMP 56532b 3
+GBSAMP 214c085 3
+GBSAMP 19ce36e 3
+GBSAMP 19ce7d5 3
+GBSAMP 7ff0002bfb5b 3
+GBSAMP 2a268bb 3
+GBSAMP 1995954 3
+GBSAMP 837812 3
+GBSAMP 2148212 3
+GBSAMP 56569f 3
+GBSAMP 565282 3
+GBSAMP 5b61e6 3
+GBSAMP 55d920 3
+GBSAMP 1acf990 3
+GBSAMP 69963a 3
+GBSAMP 516605 3
+GBSAMP 516609 3
+GBSAMP 5b5d2f 3
+GBSAMP 521548 3
+GBSAMP 543e5a 3
+GBSAMP 521504 3
+GBSAMP 7c7dfb 3
+GBSAMP 19c2204 3
+GBSAMP 1c37303 3
+GBSAMP 1c3c616 3
+GBSAMP 7bed62 3
+GBSAMP 17ebfef 3
+GBSAMP 5c14b4 3
+GBSAMP 25f9174 3
+GBSAMP 5c1046 3
+GBSAMP 1bcbf4d 3
+GBSAMP 54bf4c 3
+GBSAMP 521469 3
+GBSAMP 545285 3
+GBSAMP 633ba5 3
+GBSAMP 198d940 3
+GBSAMP 834791 3
+GBSAMP 56e1dd 3
+GBSAMP 1acf7be 3
+GBSAMP 55e2b6 3
+GBSAMP 1c11f05 3
+GBSAMP 5655b8 3
+GBSAMP 18092e0 3
+GBSAMP 198beaa 3
+GBSAMP ffffffff80388a00 3
+GBSAMP 5c1083 3
+GBSAMP 5643f4 3
+GBSAMP 634eed 3
+GBSAMP 5164ce 3
+GBSAMP 1acf998 3
+GBSAMP 7ff0002bf979 3
+GBSAMP 1995be5 3
+GBSAMP 55e399 3
+GBSAMP 5e0594 3
+GBSAMP 7cccd3 3
+GBSAMP 55e3dd 3
+GBSAMP 1c1d1d2 3
+GBSAMP 575b9f 3
+GBSAMP 7b871d 3
+GBSAMP 1bb0c52 3
+GBSAMP 5b63dc 3
+GBSAMP 7b8f97 3
+GBSAMP 5b63d8 3
+GBSAMP 51f278 3
+GBSAMP 7ccb1a 3
+GBSAMP 7ff000082bd0 3
+GBSAMP 5df6ef 3
+GBSAMP 575afa 3
+GBSAMP 51efae 3
+GBSAMP 7be57b 3
+GBSAMP 565806 3
+GBSAMP 1c01b74 3
+GBSAMP 5b7084 3
+GBSAMP 544265 3
+GBSAMP 1db11a7 3
+GBSAMP 51ef06 3
+GBSAMP 1c42c3f 3
+GBSAMP 1d6b0c6 3
+GBSAMP 7c7ad8 3
+GBSAMP 19c1eeb 3
+GBSAMP 1c12560 3
+GBSAMP 7ff0001bba13 3
+GBSAMP 5c119a 3
+GBSAMP 5c119f 3
+GBSAMP 1995e7b 3
+GBSAMP 544ea0 3
+GBSAMP 21450b1 3
+GBSAMP 51ee64 3
+GBSAMP 1c45bca 3
+GBSAMP 6320ac 3
+GBSAMP 5b59ba 3
+GBSAMP 25f6b1d 3
+GBSAMP 56569c 3
+GBSAMP 55e352 3
+GBSAMP 564dbd 3
+GBSAMP 198aaae 3
+GBSAMP 56482e 3
+GBSAMP 54de60 3
+GBSAMP 688f51 3
+GBSAMP 1c37310 3
+GBSAMP 7c7e0f 3
+GBSAMP 564829 3
+GBSAMP 7b8c2c 3
+GBSAMP 19bb469 3
+GBSAMP 25ae3bb 3
+GBSAMP 54bf56 3
+GBSAMP 54e231 3
+GBSAMP 51f19a 3
+GBSAMP 198e14e 3
+GBSAMP 1f413d4 3
+GBSAMP 55657f 3
+GBSAMP 261098a 3
+GBSAMP 26e403b 3
+GBSAMP 1992456 3
+GBSAMP 198bd23 3
+GBSAMP 55e5c0 3
+GBSAMP 114217b 3
+GBSAMP 19da99f 3
+GBSAMP 55faaf 3
+GBSAMP 187efbc 3
+GBSAMP 1eea8d3 3
+GBSAMP 55e3a8 3
+GBSAMP 19cd8bd 3
+GBSAMP 19ee5b8 3
+GBSAMP 5368fe 3
+GBSAMP 7ccb69 3
+GBSAMP 7c6b07 3
+GBSAMP 19bb326 3
+GBSAMP 2ba13dd 3
+GBSAMP 7c7c2f 3
+GBSAMP 1c44bfd 3
+GBSAMP 198d3a5 3
+GBSAMP 19926b2 3
+GBSAMP 198dfe3 3
+GBSAMP 51eea6 3
+GBSAMP 62d6b6 3
+GBSAMP 524f0b 3
+GBSAMP 198b902 3
+GBSAMP 198e052 3
+GBSAMP 199033e 3
+GBSAMP 544fcf 3
+GBSAMP 1992619 3
+GBSAMP 186d72e 3
+GBSAMP 2ab5181 3
+GBSAMP 7ff000082e7f 3
+GBSAMP 566977 3
+GBSAMP 407f50 3
+GBSAMP 19929e2 3
+GBSAMP 7ff0000838f2 3
+GBSAMP 51f14a 3
+GBSAMP 51ee7f 3
+GBSAMP 19c9981 3
+GBSAMP 7beef9 3
+GBSAMP 5452f7 3
+GBSAMP 198d294 3
+GBSAMP 5652a1 3
+GBSAMP 19da6f6 3
+GBSAMP 5565ab 3
+GBSAMP 53c335 3
+GBSAMP 282baca 3
+GBSAMP 7ff0001ba7cd 3
+GBSAMP 2ca397b 3
+GBSAMP 5b5d97 3
+GBSAMP 198da0d 3
+GBSAMP 198db7e 3
+GBSAMP 2a06dd3 3
+GBSAMP 1acf3ad 3
+GBSAMP 7ff0001607df 3
+GBSAMP 6335a6 3
+GBSAMP 19d4b87 3
+GBSAMP 19dd541 3
+GBSAMP 295c7fa 3
+GBSAMP 55658d 3
+GBSAMP 521482 3
+GBSAMP 19de458 3
+GBSAMP 52148a 3
+GBSAMP 1c3308f 3
+GBSAMP 1866792 3
+GBSAMP 7beef1 3
+GBSAMP 1c3c598 3
+GBSAMP 1992803 3
+GBSAMP 1db69a6 3
+GBSAMP 54446d 3
+GBSAMP 55e3bf 3
+GBSAMP 19432a8 3
+GBSAMP 7b0bf5 3
+GBSAMP 1b14ebe 3
+GBSAMP 575bb7 3
+GBSAMP 20a47ed 3
+GBSAMP 6752d5 3
+GBSAMP 1c34583 3
+GBSAMP 7ae527 3
+GBSAMP 1c416e0 3
+GBSAMP 1c35b1a 3
+GBSAMP 567779 3
+GBSAMP 5b798e 3
+GBSAMP 2b855ca 3
+GBSAMP 1992a9c 3
+GBSAMP 5b70ab 3
+GBSAMP 1c3c842 3
+GBSAMP 1c416ce 3
+GBSAMP 19da4fc 3
+GBSAMP 7bd4d8 3
+GBSAMP 7bd4d3 3
+GBSAMP 19d9334 3
+GBSAMP 198bce5 3
+GBSAMP 1c3724b 3
+GBSAMP 57c9ce 3
+GBSAMP 19db3ba 3
+GBSAMP 1c3c559 3
+GBSAMP 198d042 3
+GBSAMP 19aea9d 3
+GBSAMP 53696e 3
+GBSAMP 1acf798 3
+GBSAMP 635c1f 3
+GBSAMP 7ff000082bc4 3
+GBSAMP 1e745e1 3
+GBSAMP 7b34cc 3
+GBSAMP 19ed3c0 3
+GBSAMP 19b3f73 3
+GBSAMP 1995b2e 3
+GBSAMP 19959cb 3
+GBSAMP 187efd2 3
+GBSAMP 19da9c0 3
+GBSAMP 1c41727 3
+GBSAMP 198e339 3
+GBSAMP 1bc7f05 3
+GBSAMP 18774d8 3
+GBSAMP 198e1d6 3
+GBSAMP 565c92 3
+GBSAMP 6925ef 3
+GBSAMP 1ab072f 3
+GBSAMP 1acf140 3
+GBSAMP 5b55ce 3
+GBSAMP 1ace3f1 3
+GBSAMP 7ff000082c13 3
+GBSAMP 198d8ef 3
+GBSAMP 1acf986 3
+GBSAMP 7ccdc8 3
+GBSAMP 1ec0ee2 3
+GBSAMP 27471df 3
+GBSAMP 5641f8 3
+GBSAMP 51ee4b 3
+GBSAMP 51ee43 3
+GBSAMP 6350b6 3
+GBSAMP 7c003b 3
+GBSAMP 5452c4 3
+GBSAMP 5b61d1 3
+GBSAMP 55cf31 3
+GBSAMP 635131 3
+GBSAMP 198e2b5 3
+GBSAMP 55d736 3
+GBSAMP 1c2c86e 3
+GBSAMP 634ba0 3
+GBSAMP 55e4cc 3
+GBSAMP 19de4cd 3
+GBSAMP 1c35c82 3
+GBSAMP 693150 3
+GBSAMP 55e0a5 3
+GBSAMP 1c2c771 3
+GBSAMP 1992403 3
+GBSAMP 1c2b231 3
+GBSAMP 1c3c602 3
+GBSAMP 1bf60f4 3
+GBSAMP 545346 3
+GBSAMP 1bd9fa9 3
+GBSAMP 524e8b 3
+GBSAMP 19897a8 3
+GBSAMP 54e21a 3
+GBSAMP 7c7246 3
+GBSAMP ffffffff802fbc32 3
+GBSAMP 260d4c4 3
+GBSAMP 5655a9 3
+GBSAMP 6892d7 3
+GBSAMP 1c1bc34 3
+GBSAMP 5368dd 3
+GBSAMP 1c2b569 3
+GBSAMP 19debcd 3
+GBSAMP 55de7f 3
+GBSAMP 1876ca3 3
+GBSAMP 19b683a 3
+GBSAMP 1f43649 3
+GBSAMP 7ff0002cb249 3
+GBSAMP 198b8e4 3
+GBSAMP 1864b8a 3
+GBSAMP 55e681 3
+GBSAMP 544fa9 3
+GBSAMP 5662a1 3
+GBSAMP 7c69a2 3
+GBSAMP 1f09563 3
+GBSAMP 23fb1c2 3
+GBSAMP 564dce 3
+GBSAMP 687ca5 3
+GBSAMP 19389c0 3
+GBSAMP 56523f 3
+GBSAMP 51f1d2 3
+GBSAMP 633533 3
+GBSAMP 51f3de 3
+GBSAMP 7c72ee 3
+GBSAMP 1ab0b82 3
+GBSAMP 19da4a8 3
+GBSAMP 17ec471 3
+GBSAMP 1d8120c 3
+GBSAMP 62d6e0 3
+GBSAMP 545350 3
+GBSAMP 1995e44 3
+GBSAMP 7c2075 3
+GBSAMP 1c44a79 3
+GBSAMP 2b3cf63 3
+GBSAMP 191a40a 3
+GBSAMP 51ee34 3
+GBSAMP 7ff000082fdf 3
+GBSAMP 7ff0002bffae 3
+GBSAMP 1daa2c1 3
+GBSAMP 6889b8 3
+GBSAMP 633602 3
+GBSAMP 565266 3
+GBSAMP 1995af2 3
+GBSAMP 634bfb 3
+GBSAMP 51f679 3
+GBSAMP 1c358e6 3
+GBSAMP 5652f4 3
+GBSAMP 7d617d 3
+GBSAMP 55e4bd 3
+GBSAMP 1995e3a 3
+GBSAMP 7c708b 3
+GBSAMP 7b915e 3
+GBSAMP 5c1499 3
+GBSAMP 7d6e29 3
+GBSAMP 5c1027 3
+GBSAMP 7ff0001be460 3
+GBSAMP 55e88f 3
+GBSAMP 19db85e 3
+GBSAMP 55e419 3
+GBSAMP 699570 3
+GBSAMP 573cf0 3
+GBSAMP 186d82e 3
+GBSAMP 1c1d183 3
+GBSAMP 1f1f8f2 3
+GBSAMP 67f436 3
+GBSAMP 19923b3 3
+GBSAMP 5b6813 3
+GBSAMP 1bf5f37 3
+GBSAMP 7c7bed 3
+GBSAMP 565253 3
+GBSAMP 1c35ac2 3
+GBSAMP 7bd529 3
+GBSAMP 51f3e6 3
+GBSAMP 1f1f857 3
+GBSAMP 1acf788 3
+GBSAMP 5dec46 3
+GBSAMP 198e150 3
+GBSAMP 1d46833 3
+GBSAMP 7ff0002bf940 3
+GBSAMP 543fa8 3
+GBSAMP 565588 3
+GBSAMP 19915fe 3
+GBSAMP 1942d2b 3
+GBSAMP 19ce090 3
+GBSAMP 1988740 3
+GBSAMP 5c03d0 3
+GBSAMP 7ff0002bff9a 3
+GBSAMP 19389af 3
+GBSAMP 7c7684 3
+GBSAMP 19bba3d 3
+GBSAMP 51f659 3
+GBSAMP 186d690 3
+GBSAMP 54bce8 3
+GBSAMP 51f2f6 3
+GBSAMP 19ce397 3
+GBSAMP 1c44b87 3
+GBSAMP 1926401 3
+GBSAMP 7d626f 3
+GBSAMP 20accaa 3
+GBSAMP 51f6cf 3
+GBSAMP 675937 3
+GBSAMP 7ff0001bb720 3
+GBSAMP 1c35b36 3
+GBSAMP 19de501 3
+GBSAMP 55e50a 3
+GBSAMP 7cccc5 3
+GBSAMP 565686 3
+GBSAMP 1bcbf76 3
+GBSAMP 5ad55c 3
+GBSAMP 565218 3
+GBSAMP 199282f 3
+GBSAMP 545331 3
+GBSAMP 5ae67c 3
+GBSAMP 1bcbedc 3
+GBSAMP 19ded79 3
+GBSAMP 7ff000082e4f 3
+GBSAMP 54d463 3
+GBSAMP 7ccb81 3
+GBSAMP 1d4740f 3
+GBSAMP 688997 3
+GBSAMP 19917cc 3
+GBSAMP 693894 3
+GBSAMP 51f6fb 3
+GBSAMP 536916 3
+GBSAMP 187f02b 3
+GBSAMP 687c50 3
+GBSAMP 1c35807 3
+GBSAMP 516508 3
+GBSAMP 51f282 3
+GBSAMP 7d5f47 3
+GBSAMP 7ff00015d41b 3
+GBSAMP 7bef86 3
+GBSAMP 1ba6158 3
+GBSAMP 5c126d 3
+GBSAMP 1c35a89 3
+GBSAMP 55d906 3
+GBSAMP 7beee8 3
+GBSAMP 1995ea9 3
+GBSAMP 56aae9 3
+GBSAMP 1c1c935 3
+GBSAMP 51f30f 3
+GBSAMP 6320d9 3
+GBSAMP 55df8e 3
+GBSAMP 565694 3
+GBSAMP 198d4af 3
+GBSAMP 5c148f 3
+GBSAMP 51f5c5 3
+GBSAMP 2152651 3
+GBSAMP 1d432f3 3
+GBSAMP 634f54 3
+GBSAMP 2b855d7 3
+GBSAMP 55e4a5 3
+GBSAMP 55e4a8 3
+GBSAMP 5565dd 3
+GBSAMP 575c05 2
+GBSAMP 19915f5 2
+GBSAMP 198e153 2
+GBSAMP 1c24837 2
+GBSAMP 55e2a3 2
+GBSAMP 7c8567 2
+GBSAMP 634ebc 2
+GBSAMP 19b45da 2
+GBSAMP 198d403 2
+GBSAMP 687bc3 2
+GBSAMP done
