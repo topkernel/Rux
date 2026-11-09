@@ -3005,16 +3005,31 @@ pub fn oh68_holder_decode_tgid(tgid: u32) -> alloc::string::String {
             if anchor == 0 {
                 anchor = OH67_M2.load(Relaxed);
             }
+            // 81st fix: scan BOTH the derived anchor window AND the
+            // legacy fixed window — when the anchor is the park word but
+            // the CoTasks live in the samgr-era region (ohw136: word
+            // 0x7ff000bcd5b4 vs CoTasks at 0x7ff0004c-0x7ff00060), the
+            // derived-only window missed them exactly as the fixed-only
+            // window missed the accountmgr class.
             let (win_lo, win_hi) = if anchor > 0x1000 && (anchor >> 47) == 0 {
                 ((anchor - 0x100000).max(0x7ff000000000), anchor + 0x100000)
             } else {
                 (0x7ff0004c0000u64, 0x7ff000600000u64)
             };
+            let legacy = (0x7ff0004c0000u64, 0x7ff000600000u64);
+            let mut wins = [(win_lo, win_hi), legacy];
+            if (win_lo, win_hi) == legacy {
+                wins = [legacy, (0, 0)];
+            }
             // libffrt's RX segment covers the CoWait internals; the
             // context_entry trampoline (fresh, never-started coroutine)
             // is at file offset 0x86a24 on this image — a saved rip AT
             // it means queued, not suspended.
-            'outer: for base in (win_lo..win_hi).step_by(8) {
+            'outer: for &(lo, hi) in wins.iter() {
+            if lo == 0 {
+                break;
+            }
+            for base in (lo..hi).step_by(8) {
                 scanned += 1;
                 if scanned > 400_000 {
                     break;
@@ -3137,6 +3152,7 @@ pub fn oh68_holder_decode_tgid(tgid: u32) -> alloc::string::String {
                 if printed >= 24 {
                     break 'outer;
                 }
+            }
             }
             let _ = write!(out, " ] scanned={}", scanned);
         }
@@ -8390,7 +8406,11 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
         }
         let mut found_at: [u64; 3] = [0; 3];
         let mut nf = 0usize;
-        for i in 0..160u64 {
+        // 81st: 640 words — the rwlock WAITERS park at the lock (pointer
+        // near rsp), but readers stuck INSIDE their critical section hold
+        // it deeper (nested SendRequest frames) — ohw136's 160-word cut
+        // only caught the 6 samgr waiters, never the 16 holders.
+        for i in 0..640u64 {
             if nf == 3 {
                 break;
             }
