@@ -82,7 +82,7 @@ preempt_count always has HARDIRQ_OFFSET, so the condition is never true. The
 comment implies it fires. Dead code; remove or route through the
 irq_exit_maybe_preempt_kernel hook like the IPI path.
 
-### [Low] riscv64/trap.rs:1514-1543 — kernel-mode Segfault/PermissionDenied/BusError arms print and return (verify unreachable)
+### [Low] riscv64/trap.rs:1514-1543 — kernel-mode Segfault/PermissionDenied/BusError arms print and return (verify unreachable) — ✅ FIXED (`a17e2b29`)
 
 These arms `pr_err!` and fall through, returning to re-execute the faulting
 instruction in an infinite loop if ever reached. If do_page_fault's
@@ -108,7 +108,7 @@ raised, secondary harts with ti_cpu >= 4 would clamp to CPU 0 (wrong interrupt
 stack aliasing, wrong IPI targeting) with no build failure. Inject
 `crate::config::MAX_CPUS` as a global_asm! const like the other offsets.
 
-### [Low] riscv64/cpu.rs:55 — get_counter_freq hardcodes 10 MHz instead of reading timebase-frequency from DTB
+### [Low] riscv64/cpu.rs:55 — get_counter_freq hardcodes 10 MHz instead of reading timebase-frequency from DTB — ✅ FIXED (`a17e2b29`)
 
 Linux reads /cpus/timebase-frequency (riscv_timebase). Any platform whose
 timebase != 10MHz gets wrong timer scaling while the DTB is already available
@@ -346,7 +346,7 @@ correct <<48 operand). No further defects found in these three files.
 
 ## Findings (final batch: x86_64 mm + aarch64 remainder)
 
-### [Low] x86_64/mm/asid.rs:225-233 — flush_tlb_asid with PCID on does a full all-contexts flush of every CPU instead of a single-PCID invlpg
+### [Low] x86_64/mm/asid.rs:225-233 — flush_tlb_asid with PCID on does a full all-contexts flush of every CPU instead of a single-PCID invlpg — ✅ FIXED (`a17e2b29`)
 
 `flush_tlb_asid(asid != 0)` calls flush_all_cpus_local() → INVPCID type 3 on
 every CPU (plus a synchronous smp_call_function round trip each). INVPCID

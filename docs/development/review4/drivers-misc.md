@@ -184,7 +184,7 @@ machine; the same file's own comment history (the 65536-wrap fix directly
 above) shows this loop is load-bearing for long sessions. Same issue on the
 `avail.idx` read at line 781. Convert both to the read_volatile pattern.
 
-### [Low] virtio_gpu.rs:863-875 — post-timeout commands can consume the leaked chain's late used-ring entry and accept a stale response
+### [Low] virtio_gpu.rs:863-875 — post-timeout commands can consume the leaked chain's late used-ring entry and accept a stale response — ✅ FIXED (`a17e2b29`)
 On timeout the io_buf is deliberately leaked (correct, R21-N2), but the next
 command's `used.idx != idx` check treats the leaked chain's late completion as
 the NEW command's completion: its snapshot `idx` equals the leaked ordinal's
