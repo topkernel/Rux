@@ -10,11 +10,11 @@
 
 | Severity | Count | Notes |
 |---|---|---|
-| **Critical** | 2 | dentry-drop-under-lock regression; IPI csd container_of (code-exec) |
-| **High** | 11 | incl. DRM prime mmap = arbitrary phys R/W; binder BR stream desync; ext4 rename-over-open-file frees blocks |
-| **Medium** | 42 | |
-| **Low** | 67 | |
-| **Info** | 40 | design observations |
+| **Critical** | 2 | dentry-drop-under-lock regression; IPI csd container_of (code-exec) — both ✅ FIXED |
+| **High** | 11 | all ✅ FIXED (incl. DRM prime mmap = arbitrary phys R/W; binder BR stream desync; ext4 rename-over-open-file frees blocks) |
+| **Medium** | 42 | 39 ✅ FIXED; 3 open (getrandom entropy source, binder silent-txn retirement — deliberate OH-leak-mitigation divergence, ext4 async read gate — bio completion attribution) |
+| **Low** | 67 | 64 ✅ FIXED; 2 recorded deliberate divergences (binder handle-0 8s park, c.ecall +4 reference-parity); 1 attempted-blocked (fixmap Svpbmt IO bit — needs an Svpbmt probe; QEMU default rv64 treats bit 62 as reserved) |
+| **Info** | 40 | design observations (a handful addressed with the Lows they annotated; remainder tracked in the per-area reports) |
 | **Total** | **162 findings** (+8 retracted/merged sections = 170 `###` blocks) | |
 
 Per area: arch 33 · fs 30 · mm-proc 14 · syscall+ipc+net 61 · drivers+misc 32.
