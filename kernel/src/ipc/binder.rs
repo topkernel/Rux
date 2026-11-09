@@ -6059,24 +6059,6 @@ pub fn bwr_park_audit() {
                         if !m2txt.is_empty() {
                             let _ = writeln!(w, "OH67-M2{}", m2txt);
                         }
-                        // oh68: the holder's block primitive — worker
-                        // TLS sweep (ctx->task), latched acquire-time
-                        // holder decode, and the ring CoTasks' labels +
-                        // saved coroutine RIP. Same burst throttle.
-                        let h68txt = {
-                            static H68_LAST_J: core::sync::atomic::AtomicU32 =
-                                core::sync::atomic::AtomicU32::new(0);
-                            let lj = H68_LAST_J.load(core::sync::atomic::Ordering::Relaxed);
-                            if now.wrapping_sub(lj) >= 500 {
-                                H68_LAST_J.store(now, core::sync::atomic::Ordering::Relaxed);
-                                crate::sync::futex::oh68_holder_decode()
-                            } else {
-                                alloc::string::String::new()
-                            }
-                        };
-                        if !h68txt.is_empty() {
-                            let _ = writeln!(w, "OH68-HLD{}", h68txt);
-                        }
                         if !holders.is_empty() || !regions.is_empty() {
                             alloc::format!(
                                 " ffrt-chain[{}] ffrt-holders[{}] ffrt-regions[{}]",
@@ -6259,9 +6241,66 @@ pub fn bwr_park_audit() {
         } else {
             alloc::string::String::new()
         };
+        // 81st (ohw126 frontier): the sync-holder futex park verdict.
+        // A thread parked in FUTEX while STILL holding a sync txn (the
+        // AMS-looper shape: foundation tid 852 owing accountmgr's
+        // txn12953) is the install-stream blocker. Latch its park word
+        // (arms the write watch + the immediate wake verdict + the oh68
+        // decode tgid) and print the per-burst verdict fragment:
+        //   wake[] — the sc58 ring's history for THIS word (ring covers
+        //     ~6 s, so the FIRST burst still sees the park's birth);
+        //   park[] — the kernel waiter pool's live state (age resets =
+        //     the waiter woke and re-parked; woken set but still parked =
+        //     wake delivered but not consumed).
+        let parkv_txt = if park == "FUTEX"
+            && !s.stack.is_empty()
+            // looper!=0 — a registered/entered IPC looper, the AMS-looper
+            // shape (ohw127 first cut latched render_service's compositor
+            // tid 785, looper=0x0, on a 2 s transient park at 38 s and
+            // stole the slots).
+            && s.looper != 0
+            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck)
+            && a0 as u64 >= 0x1000
+        {
+            crate::sync::futex::fuxpark_latch(a0 as u64, s.tid, s.pid as u32);
+            let wakes = crate::sync::futex::fuxw_word_wake_summary(a0 as u64, now);
+            let (page, pwoken, pothers) =
+                crate::sync::futex::fuxw_owner_park_state(s.tid, a0 as u64, now);
+            // oh68 sweep for the park's own tgid, hoisted out of the
+            // chain-walk closure (ohw130: the accountmgr tid-1188 park's
+            // walk returned None — the decode never ran; the sweep's
+            // task labels + ctx+224 parkw name the suspended task by
+            // construction). Once per burst.
+            {
+                static H68P_LAST_J: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                let lj = H68P_LAST_J.load(core::sync::atomic::Ordering::Relaxed);
+                if now.wrapping_sub(lj) >= 500 {
+                    H68P_LAST_J.store(now, core::sync::atomic::Ordering::Relaxed);
+                    let t = crate::sync::futex::oh68_holder_decode_tgid(s.pid as u32);
+                    if !t.is_empty() {
+                        let _ = writeln!(w, "OH68-PARK{}", t);
+                    }
+                }
+            }
+            alloc::format!(
+                " parkv[wake[{}] park[age={}ms woken={} others={}] jlatch={}ms]",
+                wakes,
+                page,
+                pwoken,
+                pothers,
+                now.wrapping_sub(
+                    crate::sync::futex::FUXPARK_J
+                        .load(core::sync::atomic::Ordering::Relaxed)
+                )
+                .saturating_mul(10)
+            )
+        } else {
+            alloc::string::String::new()
+        };
         let _ = writeln!(
             w,
-            "TXN-HANG-BWR pid={} tid={} ({}) park={} st={:#x} sys={} a0={:#x} a1={:#x}{}{}{} looper={:#x} wfpw={} todo={}{}{} stack={}{}{}{}{}",
+            "TXN-HANG-BWR pid={} tid={} ({}) park={} st={:#x} sys={} a0={:#x} a1={:#x}{}{}{} looper={:#x} wfpw={} todo={}{}{} stack={}{}{}{}{}{}",
             s.pid,
             s.tid,
             comm_of(task),
@@ -6282,7 +6321,8 @@ pub fn bwr_park_audit() {
             stx,
             chain_txt,
             mscan_txt,
-            owner_txt
+            owner_txt,
+            parkv_txt
         );
     }
     if printed > 0 {

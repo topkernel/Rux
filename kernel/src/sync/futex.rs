@@ -192,7 +192,23 @@ pub fn fuxw_push(cmd: u8, uaddr: u64, ret: i32) {
     {
         let w1 = FUXWATCH_ADDR.load(core::sync::atomic::Ordering::Relaxed);
         let w2 = FUXWATCH2_ADDR.load(core::sync::atomic::Ordering::Relaxed);
-        if (uaddr == w1 || uaddr == w2) && uaddr != 0 {
+        // 81st: the latched sync-holder park word matches too (the word
+        // shifts per boot and even mid-park; the census latch tracks it,
+        // so the immediate verdict follows the live word). Same-VA
+        // foreign objects: the park word is a stack/heap VA mapped in
+        // many processes — only the park tgid's ops are the verdict.
+        let wp = FUXPARK_WORD.load(core::sync::atomic::Ordering::Relaxed);
+        let wp_tgid = FUXPARK_TGID.load(core::sync::atomic::Ordering::Relaxed);
+        let w1_tgid = FUXWATCH1_TGID.load(core::sync::atomic::Ordering::Relaxed);
+        let cur0 = crate::sched::current();
+        let cur0_tgid = match cur0 {
+            Some(t) => unsafe { (*t).tgid() as u32 },
+            None => 0,
+        };
+        let m1 = uaddr == w1 && (w1_tgid == 0 || cur0_tgid == w1_tgid);
+        let m2 = uaddr == w2;
+        let mp = uaddr == wp && (wp_tgid == 0 || cur0_tgid == wp_tgid);
+        if (m1 || m2 || mp) && uaddr != 0 {
             static FWW_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if FWW_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 256 {
@@ -1145,10 +1161,106 @@ static FUXWATCH_HITS: core::sync::atomic::AtomicUsize =
 // marker would lose one thread's #DB → SIGTRAP → thread killed.
 static FUXWATCH_STEP_TIDS: [core::sync::atomic::AtomicU32; 4] =
     [const { core::sync::atomic::AtomicU32::new(0) }; 4];
-static FUXWATCH_MM_DONE: [core::sync::atomic::AtomicU64; 16] =
-    [const { core::sync::atomic::AtomicU64::new(0) }; 16];
+static FUXWATCH_MM_DONE: [core::sync::atomic::AtomicU64; 128] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 128];
 const FUXWATCH_BUDGET: usize = 4096;
 use core::sync::atomic::Ordering as Relaxed2;
+// 81st: when slot 1 was armed by the sync-holder park latch, its word is
+// a SINGLE process's object (foundation's main-stack condvar on ohw128:
+// 0x7fffffffc304) — but the VA is mapped in EVERY process (main-stack
+// page). Arming the page in all 67 mms both floods the exact-word log
+// with foreign same-VA writes and (ohw128) overflowed the 16-slot mm
+// done-set: mms armed-but-unrecorded took the un-watched fault path on
+// their own stack writes -> Permission denied -> SIGSEGV storm ->
+// sysrq-c cascade at 97 s. With this set, slot 1's page arms ONLY in
+// the latched tgid's mms; foreign same-VA words never fault at all.
+pub static FUXWATCH1_TGID: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+// 81st (ohw126 frontier): the sync-holder futex park latch. The 80th's
+// immediate per-word wake verdict (fuxw_push) only fires when a fuxwatch
+// slot holds the word, but the tid-852 class park word SHIFTS per boot
+// (and even mid-park: ohw126 0x7ff082348a84 -> ...fb4 within one page)
+// so no fixed cmdline arm can target it. The TXN-HANG-BWR census is the
+// first kernel component that SEES the word (a thread parked in FUTEX
+// while holding a sync txn — exactly the AMS-looper shape); it latches
+// the word here. The latch (a) feeds the immediate wake verdict, (b)
+// arms a watch slot for the write side, (c) names the oh68 decode tgid
+// (the holder's process — foundation on ohw126, not samgr, so the
+// OH67_M2 gate would never decode it).
+pub static FUXPARK_WORD: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+pub static FUXPARK_TID: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+pub static FUXPARK_TGID: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+/// Jiffies of the first latch (park age reference for the verdict line).
+pub static FUXPARK_J: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Census-side latch+arm for a sync-holder futex park word (see the
+/// FUXPARK statics). Called every audit burst; stores unconditionally so
+/// a mid-park word SHIFT is tracked (the immediate wake verdict follows
+/// the live word). Watch arming: slot 1 when free; a DIFFERENT page than
+/// slot 1 takes slot 2 (the PTE watch is per page — a same-page shift is
+/// already covered by slot 1's page plus the FW-PG page-mate log).
+/// dfx=fuxstuck-gated by the caller.
+pub fn fuxpark_latch(word: u64, tid: u32, tgid: u32) {
+    use core::sync::atomic::Ordering::Relaxed;
+    if word == 0 || word < 0x1000 {
+        return;
+    }
+    let prev = FUXPARK_WORD.swap(word, Relaxed);
+    FUXPARK_TID.store(tid, Relaxed);
+    FUXPARK_TGID.store(tgid, Relaxed);
+    if prev == 0 {
+        FUXPARK_J.store(crate::drivers::timer::get_jiffies() as u32, Relaxed);
+    }
+    // Arm the write watch on first sight and on a page move only — the
+    // shift-within-page case keeps slot 1's page RO (write side covered).
+    let page_move = prev != 0 && (prev & !0xfff) != (word & !0xfff);
+    if prev == 0 || page_move {
+        let s1 = FUXWATCH_ADDR.load(Relaxed);
+        if s1 == 0 || ((s1 & !0xfff) != (word & !0xfff) && page_move) {
+            if FUXWATCH_ADDR
+                .compare_exchange(s1, word, Relaxed, Relaxed)
+                .is_ok()
+            {
+                FUXWATCH1_TGID.store(tgid, Relaxed);
+                crate::pr_warn!(
+                    "FUXPARK-ARM s1 word={:#x} tid={} tgid={} (sync-holder park)",
+                    word,
+                    tid,
+                    tgid
+                );
+                crate::dfx::taskdump::ensure_defer_thread();
+                return;
+            }
+        }
+        // Slot 1 busy with a foreign page: slot 2, and re-open the mm
+        // done-set so the arm round arms the new page in every mm
+        // (FUXWATCH_MM_DONE entries are per root and would skip mms
+        // already armed for slot 1's page).
+        let s2 = FUXWATCH2_ADDR.load(Relaxed);
+        if s2 == 0
+            && (s1 == 0 || (s1 & !0xfff) != (word & !0xfff))
+            && FUXWATCH2_ADDR
+                .compare_exchange(0, word, Relaxed, Relaxed)
+                .is_ok()
+        {
+            for d in FUXWATCH_MM_DONE.iter() {
+                d.store(0, Relaxed);
+            }
+            crate::pr_warn!(
+                "FUXPARK-ARM s2 word={:#x} tid={} tgid={} (sync-holder park)",
+                word,
+                tid,
+                tgid
+            );
+            crate::dfx::taskdump::ensure_defer_thread();
+        }
+    }
+}
 
 /// 62nd (ohw13 post-decode): owner-of-record latch for the watched
 /// lock's l word. Every successful 0->1 acquire write overwrites the
@@ -1236,6 +1348,13 @@ pub fn fuxwatch_arm_round() {
     crate::sched::for_each_task_try(|task| {
         // SAFETY: diagnostic read under the for_each_task contract.
         let tk = unsafe { &*task };
+        // 81st: a park-latched slot-1 word is watched in its OWN tgid
+        // only (see FUXWATCH1_TGID) — the same VA in every other mm is
+        // a different object.
+        let park_tgid = FUXWATCH1_TGID.load(Relaxed);
+        if park_tgid != 0 && tk.tgid() as u32 != park_tgid {
+            return;
+        }
         let Some(aspace) = tk.address_space() else {
             return;
         };
@@ -1269,6 +1388,21 @@ pub fn fuxwatch_arm_round() {
             }
         }
         if narm == 0 {
+            return;
+        }
+        // 81st (ohw128 SEGV storm): claim a done-slot BEFORE the
+        // mprotect — an armed-but-unrecorded mm (done-set overflow: 82
+        // mms armed into 16 slots) takes the UN-watched fault path on
+        // its own writes -> present-RO PTE -> Permission denied ->
+        // SIGSEGV. No free slot: skip the mm whole (never half-arm).
+        let mut slot_free = false;
+        for d in FUXWATCH_MM_DONE.iter() {
+            if d.load(Relaxed) == 0 {
+                slot_free = true;
+                break;
+            }
+        }
+        if !slot_free {
             return;
         }
         let g = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock();
@@ -2312,6 +2446,11 @@ pub static FUXWATCH_OWNER_TASK: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 static OH68_ROOT: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
+/// tgid the cached root belongs to (81st: the park-row decode targets a
+/// DIFFERENT process than the OH67-M2 samgr slot — a stale cross-tgid
+/// root would read the wrong address space).
+static OH68_ROOT_TGID: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
 
 #[cfg(target_arch = "x86_64")]
 fn oh68_fs_base(tk: &crate::process::Task) -> u64 {
@@ -2415,14 +2554,35 @@ pub fn oh68_latch_owner_task(tid: u32) {
 /// is printed as a FILE OFFSET — offline addr2line against the identical
 /// image .so names the exact cv/future frames.
 pub fn oh68_holder_decode() -> alloc::string::String {
+    use core::sync::atomic::Ordering::Relaxed;
+    // 81st: when no OH67-M2 samgr web exists, decode the latched
+    // sync-holder park's process instead (ohw126: foundation tid 852 —
+    // the AMS looper parked in FFRT while owing accountmgr's txn; the
+    // suspended task and its block primitive live in THAT process).
+    let mut tgid = OH67_M2_TGID.load(Relaxed);
+    if tgid == 0 {
+        tgid = FUXPARK_TGID.load(Relaxed);
+    }
+    oh68_holder_decode_tgid(tgid)
+}
+
+/// 81st: explicit-tgid variant — the census park row decodes ITS OWN
+/// process (ohw130: accountmgr tid 1188's park; the OH67_M2 samgr slot
+/// would otherwise win the tgid choice on web-forming boots).
+pub fn oh68_holder_decode_tgid(tgid: u32) -> alloc::string::String {
     use core::fmt::Write as _;
     use core::sync::atomic::Ordering::Relaxed;
-    let tgid = OH67_M2_TGID.load(Relaxed);
     if tgid == 0 {
         return alloc::string::String::new();
     }
     let mut out = alloc::string::String::new();
-    // Pass 1: any thread's aspace root (shared across the tgid).
+    // Pass 1: any thread's aspace root (shared across the tgid). The
+    // cache is tgid-scoped: a root latched for another process must not
+    // leak into this decode (81st).
+    if OH68_ROOT_TGID.load(Relaxed) != tgid {
+        OH68_ROOT.store(0, Relaxed);
+        OH68_ROOT_TGID.store(tgid, Relaxed);
+    }
     crate::sched::for_each_task_try(|task| {
         if OH68_ROOT.load(Relaxed) != 0 {
             return;
@@ -2525,7 +2685,7 @@ pub fn oh68_holder_decode() -> alloc::string::String {
         let taskp = rd(ctx + 16).unwrap_or(0);
         let _ = write!(
             out,
-            " w{}[ctx={:#x} task={:#x} gid={:#x} ty={} st={} ft={}]",
+            " w{}[ctx={:#x} task={:#x} gid={:#x} ty={} st={} ft={}",
             tid,
             ctx,
             taskp,
@@ -2550,6 +2710,34 @@ pub fn oh68_holder_decode() -> alloc::string::String {
                 0xffff
             }
         );
+        // 81st: for thread-mode entries (task set — the thread parks
+        // inside Execute()) also print the task LABEL (same SSO decode
+        // as the cotask helper) and the ThreadWait park word ctx+224, so
+        // a standing park row's uaddr correlates with its FFRT task by
+        // construction instead of needing the acquire latch.
+        if taskp > 0x1000 && (taskp >> 47) == 0 {
+            let w0 = rd(taskp + 0xd8).unwrap_or(0);
+            let mut lbl: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+            if w0 & 1 == 0 {
+                let n = ((w0 & 0xff) >> 1) as usize;
+                if n > 0 && n <= 22 {
+                    let w1 = rd(taskp + 0xd8 + 8).unwrap_or(0);
+                    let w2 = rd(taskp + 0xd8 + 16).unwrap_or(0);
+                    let buf = [w0, w1, w2];
+                    for i in 1..=n {
+                        let b = ((buf[i / 8] >> (8 * (i % 8))) & 0xff) as u8;
+                        lbl.push(b);
+                    }
+                }
+            }
+            let _ = write!(
+                out,
+                " lbl=\"{}\" parkw={:#x}",
+                core::str::from_utf8(&lbl).unwrap_or("?"),
+                rd(ctx + 224).unwrap_or(0)
+            );
+        }
+        let _ = write!(out, "]");
     });
     let _ = write!(out, " swept={}", swept);
 
