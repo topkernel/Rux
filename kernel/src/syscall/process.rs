@@ -468,14 +468,29 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
             // parent_tid word in the PARENT (clone(2)); same pidfd
             // construction as the clone3 arm.
             if want_pidfd && !parent_tid.is_null() {
+                // Same pidfd construction as pidfd_open(2): a File with
+                // PIDFD_OPS and an attached PidFdData. The old form
+                // stored the raw pid in private_data with NO ops —
+                // pidfd_send_signal() shape-checks for PIDFD_OPS and
+                // returned EBADF for every clone-made pidfd (LTP
+                // clone301: "pidfd_send_signal() failed: EBADF").
                 let file = alloc::sync::Arc::new(
                     crate::fs::file::File::new(crate::fs::file::FileFlags::new(
                         crate::fs::file::FileFlags::O_RDWR,
                     )),
                 );
-                file.set_private_data(pid as usize as *mut u8);
+                file.set_ops(&crate::fs::pidfd::PIDFD_OPS);
+                let data = match crate::fs::pidfd::make_pidfd_data(pid) {
+                    Some(d) => d,
+                    None => return -(errno::ENOMEM as i64),
+                };
+                crate::fs::pidfd::attach(&file, data);
                 match unsafe { crate::fs::file::get_file_fd_install(file) } {
                     Some(fd) => {
+                        // The pidfd contract carries close-on-exec
+                        // (pidfd_open sets it; clone(2) pidfd is the
+                        // same shape).
+                        crate::fs::set_cloexec_fd(fd, true);
                         if !unsafe {
                             crate::arch::uaccess::put_user(parent_tid, fd as i32)
                         } {
@@ -6956,21 +6971,24 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
             // the old form probed the pointer then never stored anything
             // (the caller's pidfd word stayed uninitialized).
             if want_pidfd && !pidfd_ptr.is_null() {
-                // Create a pidfd: for now, the fd NUMBER of a special
-                // /dev/null-like entry that carries the pid in private
-                // data. The reference kernel creates a real anon_inode
-                // file; the minimal correct behavior is a valid fd that
-                // poll() reports readable when the child exits.
+                // Same pidfd construction as pidfd_open(2) (see the
+                // legacy-clone arm: PIDFD_OPS + attached PidFdData, or
+                // pidfd_send_signal() refuses the fd with EBADF — LTP
+                // clone301).
                 let file = alloc::sync::Arc::new(
                     crate::fs::file::File::new(crate::fs::file::FileFlags::new(
                         crate::fs::file::FileFlags::O_RDWR,
                     )),
                 );
-                // Store the child's pid for future pidfd_send_signal /
-                // waitid support (poll becomes ready when pid reaps).
-                file.set_private_data(pid as usize as *mut u8);
+                file.set_ops(&crate::fs::pidfd::PIDFD_OPS);
+                let data = match crate::fs::pidfd::make_pidfd_data(pid) {
+                    Some(d) => d,
+                    None => return -(errno::ENOMEM as i64),
+                };
+                crate::fs::pidfd::attach(&file, data);
                 match unsafe { crate::fs::file::get_file_fd_install(file) } {
                     Some(fd) => {
+                        crate::fs::set_cloexec_fd(fd, true);
                         if unsafe {
                             crate::arch::uaccess::put_user(pidfd_ptr as *mut i32, fd as i32)
                         } {
