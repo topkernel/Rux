@@ -175,6 +175,52 @@ pub fn fuxw_push(cmd: u8, uaddr: u64, ret: i32) {
     if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck) {
         return;
     }
+    // 80th (ohw126 AMS park): immediate per-word wake verdict line. The
+    // sc58 ring only covers ~6 s of wake traffic; on ohw126 the tid-852
+    // park's birth window (77-138 s) was overwritten long before the
+    // census dumped it, so the lost-wake-vs-never-sent verdict was
+    // unanswerable from the ring. When a fuxwatch slot is armed, every
+    // WAKE-class op whose uaddr EQUALS the watched word prints at once:
+    //   - wake ret>=1 while the parked waiter stays parked = kernel
+    //     wake drop;
+    //   - word write (FUXWATCH write log) with NO matching wake line =
+    //     userspace never signaled;
+    //   - neither = the producer never ran (graph stall, oh68 decode).
+    // The watched word is quiet by construction (it is a stall word), so
+    // the line volume is small; bounded anyway (the word may be a hot
+    // lock before the wedge window).
+    {
+        let w1 = FUXWATCH_ADDR.load(core::sync::atomic::Ordering::Relaxed);
+        let w2 = FUXWATCH2_ADDR.load(core::sync::atomic::Ordering::Relaxed);
+        if (uaddr == w1 || uaddr == w2) && uaddr != 0 {
+            static FWW_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if FWW_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 256 {
+                let cur = crate::sched::current();
+                let (tid2, tgid2, comm) = match cur {
+                    Some(t) => unsafe {
+                        (
+                            (*t).pid(),
+                            (*t).tgid() as u32,
+                            core::str::from_utf8((*t).comm().as_slice()).unwrap_or(""),
+                        )
+                    },
+                    None => (0, 0, ""),
+                };
+                let comm = comm.trim_end_matches('\0');
+                crate::pr_warn!(
+                    "FUXWATCH-WAKE j={} tid={} tgid={} comm='{}' op={} uaddr={:#x} ret={}",
+                    crate::drivers::timer::get_jiffies(),
+                    tid2,
+                    tgid2,
+                    comm,
+                    cmd,
+                    uaddr,
+                    ret
+                );
+            }
+        }
+    }
     let (tid, tgid) = match crate::sched::current() {
         Some(t) => unsafe { ((*t).pid(), (*t).tgid() as u32) },
         None => (0, 0),
