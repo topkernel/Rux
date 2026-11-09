@@ -6266,6 +6266,7 @@ pub fn bwr_park_audit() {
             let wakes = crate::sync::futex::fuxw_word_wake_summary(a0 as u64, now);
             let (page, pwoken, pothers) =
                 crate::sync::futex::fuxw_owner_park_state(s.tid, a0 as u64, now);
+            let park_age_ms = page;
             // oh68 sweep for the park's own tgid, hoisted out of the
             // chain-walk closure (ohw130: the accountmgr tid-1188 park's
             // walk returned None — the decode never ran; the sweep's
@@ -6280,6 +6281,21 @@ pub fn bwr_park_audit() {
                     let t = crate::sync::futex::oh68_holder_decode_tgid(s.pid as u32);
                     if !t.is_empty() {
                         let _ = writeln!(w, "OH68-PARK{}", t);
+                    }
+                }
+            }
+            // 81st: the waiter's own user stack, once the park is
+            // clearly STANDING (age > 30 s) and at most once per 60 s —
+            // the frames above the futex syscall name the FFRT wait
+            // primitive and the handler that parked.
+            if park_age_ms > 30_000 {
+                static PSTACK_LAST_J: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                let lj = PSTACK_LAST_J.load(core::sync::atomic::Ordering::Relaxed);
+                if now.wrapping_sub(lj) >= 600 {
+                    PSTACK_LAST_J.store(now, core::sync::atomic::Ordering::Relaxed);
+                    if !task.is_null() {
+                        unsafe { user_task_park_stack(task) };
                     }
                 }
             }
@@ -6828,6 +6844,18 @@ unsafe fn user_park_stack_dump(t: &Arc<BinderThread>) {
     if task.is_null() {
         return;
     }
+    user_task_park_stack(task);
+}
+
+/// 81st: the task-level half of the park-stack dump, callable from the
+/// FUTEX-park census rows directly (the tid-852/1188-class parks are
+/// futex parks, not BWR parks — the BinderThread variant never ran for
+/// them). Frames above the waiter's rsp name the FFRT wait call site
+/// and the handler that parked (module+fileoff, offline-symbolized).
+unsafe fn user_task_park_stack(task: *mut crate::process::Task) {
+    if task.is_null() {
+        return;
+    }
     let tk = &*task;
     let Some(aspace) = tk.address_space() else { return };
     let root = aspace.root_ppn();
@@ -6871,7 +6899,7 @@ unsafe fn user_park_stack_dump(t: &Arc<BinderThread>) {
     let (rsp, rip) = (0u64, 0u64);
     crate::pr_warn!(
         "binder-stall:   PARK-STACK tid {} rip={:#x} rsp={:#x}",
-        t.tid,
+        tk.pid(),
         rip,
         rsp
     );

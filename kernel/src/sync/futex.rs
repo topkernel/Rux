@@ -2451,6 +2451,10 @@ static OH68_ROOT: core::sync::atomic::AtomicU64 =
 /// root would read the wrong address space).
 static OH68_ROOT_TGID: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
+/// A live CoTask pointer seen by the worker sweep (thread-mode or
+/// queued) — the anchor for the slab sweep's derived window (81st).
+static OH68_SWEEP_TASK: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
 
 #[cfg(target_arch = "x86_64")]
 fn oh68_fs_base(tk: &crate::process::Task) -> u64 {
@@ -2712,10 +2716,12 @@ pub fn oh68_holder_decode_tgid(tgid: u32) -> alloc::string::String {
         );
         // 81st: for thread-mode entries (task set — the thread parks
         // inside Execute()) also print the task LABEL (same SSO decode
-        // as the cotask helper) and the ThreadWait park word ctx+224, so
-        // a standing park row's uaddr correlates with its FFRT task by
-        // construction instead of needing the acquire latch.
+        // as the cotask helper, long form included) and the ThreadWait
+        // park word ctx+224, so a standing park row's uaddr correlates
+        // with its FFRT task by construction instead of needing the
+        // acquire latch.
         if taskp > 0x1000 && (taskp >> 47) == 0 {
+            OH68_SWEEP_TASK.store(taskp, Relaxed);
             let w0 = rd(taskp + 0xd8).unwrap_or(0);
             let mut lbl: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
             if w0 & 1 == 0 {
@@ -2726,6 +2732,15 @@ pub fn oh68_holder_decode_tgid(tgid: u32) -> alloc::string::String {
                     let buf = [w0, w1, w2];
                     for i in 1..=n {
                         let b = ((buf[i / 8] >> (8 * (i % 8))) & 0xff) as u8;
+                        lbl.push(b);
+                    }
+                }
+            } else {
+                let size = rd(taskp + 0xd8 + 8).unwrap_or(0);
+                let ptr = rd(taskp + 0xd8 + 16).unwrap_or(0);
+                if size <= 64 && (ptr >> 47) == 0 && ptr > 0x1000 {
+                    for i in 0..size as u64 {
+                        let b = rd(ptr + i).map(|w| (w & 0xff) as u8).unwrap_or(0);
                         lbl.push(b);
                     }
                 }
@@ -2957,11 +2972,36 @@ pub fn oh68_holder_decode_tgid(tgid: u32) -> alloc::string::String {
             let _ = write!(out, " SLAB[");
             let mut printed = 0u32;
             let mut scanned = 0u64;
+            // 81st: the window is DERIVED, not fixed — ohw131's wedged
+            // process (accountmgr-class) holds CoTasks at 0x7ff085xxxxxx,
+            // far outside the samgr-era 0x7ff0004c-0x7ff00060 window the
+            // 78th hardcoded (its SLAB printed empty, scanned=163840).
+            // Anchor: any task pointer this decode already knows (a
+            // sweep thread-mode task, the acquire latch, or the M2 ring
+            // waiters); fall back to the old fixed window.
+            let mut anchor = OH68_SWEEP_TASK.load(Relaxed);
+            if anchor == 0 {
+                anchor = FUXWATCH_OWNER_TASK.load(Relaxed);
+            }
+            if anchor == 0 {
+                // The parked word itself lives in the wedged process's
+                // heap — CoTasks from the same arena are often within
+                // the window.
+                anchor = FUXPARK_WORD.load(Relaxed) & !0xfff;
+            }
+            if anchor == 0 {
+                anchor = OH67_M2.load(Relaxed);
+            }
+            let (win_lo, win_hi) = if anchor > 0x1000 && (anchor >> 47) == 0 {
+                ((anchor - 0x100000).max(0x7ff000000000), anchor + 0x100000)
+            } else {
+                (0x7ff0004c0000u64, 0x7ff000600000u64)
+            };
             // libffrt's RX segment covers the CoWait internals; the
             // context_entry trampoline (fresh, never-started coroutine)
             // is at file offset 0x86a24 on this image — a saved rip AT
             // it means queued, not suspended.
-            'outer: for base in (0x7ff0004c0000u64..0x7ff000600000u64).step_by(8) {
+            'outer: for base in (win_lo..win_hi).step_by(8) {
                 scanned += 1;
                 if scanned > 400_000 {
                     break;
@@ -2983,7 +3023,14 @@ pub fn oh68_holder_decode_tgid(tgid: u32) -> alloc::string::String {
                 let b0 = (w0 >> 8) & 0xff;
                 let b1 = (w0 >> 16) & 0xff;
                 let b2 = (w0 >> 24) & 0xff;
-                if !(b's' == b0 as u8 && b'q' == b1 as u8 && b'_' == b2 as u8) {
+                // 81st: sq_ (serial-queue) OR any printable 6..22-char
+                // label — the accountmgr/foundation classes name their
+                // tasks differently; the shape tests below do the real
+                // filtering.
+                if !(0x20..0x7f).contains(&b0)
+                    || !(0x20..0x7f).contains(&b1)
+                    || !(0x20..0x7f).contains(&b2)
+                {
                     continue;
                 }
                 // gid/ty/st plausibility (fields observed: gid<=0x1000,
