@@ -39,7 +39,7 @@ d1275bce, 0876bdb2, 88a80e65, 3762eb0a, c14c3024, 6ecb2c23, 51ab2963, f9643a85,
 
 ## Findings
 
-### [Medium] vfs.rs:4639 — O_CREAT on a dangling symlink returns EEXIST instead of creating the target — ✅ FIXED (`f4cbbd70`)
+### [Medium] vfs.rs:4639 — O_CREAT on a dangling symlink returns EEXIST instead of creating the target — ✅ FIXED (`f4cbbd70` + `8ec51f23`; f4cbbd70's recursion ran before the EEXIST probe and broke O_CREAT|O_EXCL — post-merge gate section)
 
 `file_open`'s create arm: `path_lookup(filename, 0)` follows the final symlink and
 fails ENOENT when the target is absent; the arm then proceeds to create at
@@ -95,7 +95,7 @@ with every write — the same defect class the review-5.1 evict guard fixed
 for the LRU path. Fix: when the colliding occupant has strong_count > 1 and
 nothing else is evictable, either probe the next bucket or refuse the insert.
 
-### [Medium] mount.rs:82-115 / vfs.rs — MNT_NOEXEC / MNT_NOSUID / MNT_NODEV are parsed but never enforced — ✅ FIXED (`5b93ce8e`)
+### [Medium] mount.rs:82-115 / vfs.rs — MNT_NOEXEC / MNT_NOSUID / MNT_NODEV are parsed but never enforced — ✅ FIXED (`8ec51f23`; 5b93ce8e's string-table check never fired — post-merge gate section)
 
 `translate_mnt_flags` maps MS_NOEXEC/MS_NOSUID/MS_NODEV into MntFlags, and
 `is_noexec`/`is_nosuid` exist — but the only consumers are unit tests. execve of
@@ -114,7 +114,7 @@ leader falls through to `Some(null)`; `target_exited` then runs
 
 RLIMIT_NOFILE > 1024 silently can't be honored. Comment drift only.
 
-### [High] ext4/namei.rs:2693-2709 — rename-replace of an open file frees its blocks and inode EAGERLY (no deferred deletion)
+### [High] ext4/namei.rs:2693-2709 — rename-replace of an open file frees its blocks and inode EAGERLY (no deferred deletion) — ✅ FIXED (`0e48201f`; d5fa104e's reap-queue shape was a no-op — see the post-merge gate section)
 
 `ext4_rename_inner`'s replace arm: when the replaced file's link count hits 0 it
 runs `free_inode_blocks` + `free_inode` immediately — `free_inode` invalidates
@@ -241,7 +241,7 @@ Narrow (needs a crash mid-revoke-batch plus reuse), but the reference scopes
 revokes per committed transaction. Fix: track last-committed-seq in PASS_SCAN
 and filter.
 
-### [Medium] tmpfs.rs:826-844 (tmpfs_link) — hard links do not share size or metadata: reads through one link clamp at the other's stale size — ✅ FIXED (`3df6acb6`)
+### [Medium] tmpfs.rs:826-844 (tmpfs_link) — hard links do not share size or metadata: reads through one link clamp at the other's stale size — 🔁 REOPENED by the re-audit: 3df6acb6's max(size, pages*4096) inflated st_size for every non-page-multiple file (reverted in `0e48201f`); the shared-metadata-Arc redesign is still owed
 
 `tmpfs_link` shares only the `pages` Arc; `size` is a per-node AtomicU64.
 write_at through link A extends A's node.size; link B's node.size stays at the
@@ -263,7 +263,7 @@ dual-instance class the icache guards against. Fix: fold the parent's ino (or
 the full path) into the hash; devfs names must also stay unique per directory
 only.
 
-### [Medium] devfs/mod.rs devfs_rename — VFS-level ".."-cycle guard is a no-op for devfs; renaming a directory into its own subtree silently detaches it — ✅ FIXED (`f88ff011`)
+### [Medium] devfs/mod.rs devfs_rename — VFS-level ".."-cycle guard is a no-op for devfs; renaming a directory into its own subtree silently detaches it — ✅ FIXED (`0e48201f`; f88ff011's guard anchored on the old parent and never fired — post-merge gate section)
 
 vfs_rename_locked's cycle check (is_ancestor_of) walks ".." via op_lookup —
 devfs_lookup serves only real children, never "..", so the walk fails

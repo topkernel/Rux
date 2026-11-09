@@ -10,7 +10,7 @@ docs/archive/code-review-2026-09-12.md, prior-round fixed items.
 Findings
 ========
 
-### [Medium] process/task.rs:1403 + syscall/time.rs:1242 — POSIX timers and itimers are per-Task (per-thread), Linux has them per-process — ✅ FIXED (`9bf06ed7`)
+### [Medium] process/task.rs:1403 + syscall/time.rs:1242 — POSIX timers and itimers are per-Task (per-thread), Linux has them per-process — ✅ FIXED (`9bf06ed7` + `0e48201f`; 9bf06ed7 still delivered to the arming thread's pid — notifications died with that thread; the re-audit's delivery half landed in 0e48201f)
 `posix_timers: Spinlock<Vec<PosixTimerState>>`, `itimer_real/virt/prof` live directly on `Task`. Linux
 keeps itimers and POSIX interval timers in the shared `signal_struct` (CLONE_THREAD shares them).
 Trigger: `timer_create` in thread A, `timer_settime`/`timer_delete` from thread B returns EINVAL (timer
@@ -283,7 +283,7 @@ everything else the file — one number, two identities). O_NONBLOCK is also per
 (apply_open_nonblock) rather than per-open-description, so a second open flips the first fd's blocking
 mode. Known TODO (F12-34 comment); recorded because OH image processes with >512 fds will trip it.
 
-### [High] ipc/binder.rs:9584-9611 + 9758 — BR staging buffer is 512 bytes with a SILENT drop; read_size > 512 lets the command stream corrupt
+### [High] ipc/binder.rs:9584-9611 + 9758 — BR staging buffer is 512 bytes with a SILENT drop; read_size > 512 lets the command stream corrupt — ✅ FIXED (`d5fa104e` + `0e48201f`; d5fa104e stopped the silent drop but broke-after-pop DROPPED whole work items at read_size > 512 — the re-audit's head-budget bound landed in 0e48201f)
 binder_thread_read stages into `staged_buf: [u8; 512]`; `Staged::extend` drops bytes silently when the
 buffer is full, while the drain loop's only bound is the USER read_size (`staged.len() + 76 >
 read_size`). With the default large read buffers (libbinder/OH pass read_size of tens of KB) a burst of

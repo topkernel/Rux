@@ -63,3 +63,94 @@ interrupt/ (irqdesc/softirq/tasklet), intc cores (APIC/GICv3/PLIC), timer driver
 ## Coverage
 
 All 458 `kernel/src` files enumerated; the five appendices record per-file status (✅ end-to-end / 🔶 hotspot-verified with prior-round full read / quality-pass for infra). Gaps honestly marked: aarch64 6 mm files (arch), mm page_desc/vma prior-round-verified regions (mm-proc). Coverage counts by the appendices: ~93% end-to-end this round, remainder covered by prior-round reads re-verified at their highest-risk regions.
+
+## Post-merge gate verification (2026-11-09, main session)
+
+The round (87ed94dc..f25124e3) was re-reviewed domain-by-domain and run
+through the full merge gate after landing. Every P0/P1 finding below was
+re-verified in code by the main session before any fix was written.
+
+### Gate table (first pass, tree as landed + aarch64 build fix 8ec8c473)
+
+| Gate | Result |
+|---|---|
+| Triple-arch build | x86_64 OK · riscv64 OK · aarch64 FAILED at f25124e3 (config.toml target-section rename; fixed 8ec8c473) |
+| riscv64 regression boot | PASS (cd /proc rc=0, zero panics) |
+| make test riscv64 | 1348/1348 |
+| Tier-1 syscost (780 s) | census/tick/clock/GRQ/small_alloc PASS; nanosleep avg FAIL — adjudicated SEED-vehicle population artifact (n=5499, max 295 s; band applies to tok-class only, baseline L55/L370); p7_sleep1ms 15.98 µs = family reference |
+| Tier-2 pbench | first attempt eaten by the boot-mount race (below); retry PASS attempt 4, but p6_stat SKIP (tree-build errno) — race-contaminated, re-run on fixed tree |
+| LTP full scan #1 | PASS 585/1869 — INVALID as a round verdict: the pre-existing used.idx race turned every tst_tmpdir setup into EIO (505 PASS→FAIL) |
+
+### The boot race (NOT a review4 regression — pre-existing, root-caused and fixed)
+
+`wait_for_used_interruptible` read used.idx ONCE right after the response
+byte was observed done; the device publishes resp-byte → used-entry →
+used.idx → IRQ, and the pause-poll routinely lands in the gap, so
+completed requests were classified "VirtIO request timeout" → EIO.
+Faces: ~50% fresh-image mount [fail]; the LTP#1 mass mkdtemp EIO;
+pbench p6 tree-build errno. Two noise-blind bisects (blaming 2ceb0fe7,
+then a docs-only commit) are RETRACTED; repeated-boot statistics showed
+the anchor 87ed94dc failing at the same rate. Fix dbbed246: bounded
+grace read of used.idx at the five resp-done exits (hunt verification
+18/18 + 6/6 here, vs 15ok/10fail unfixed).
+
+### Re-audit fixes (three commits, all main-session verified)
+
+- 8ec8c473 — aarch64 cargo target-section restore (P0 build break).
+- 8ec51f23 — WTRACE gating hoist; io_uring offset-path RW_CHUNK staging
+  (2 GB heap panic vector); mbind/set_mempolicy get_user (raw 8-byte
+  user read → kernel fault); O_CREAT|O_EXCL answered before the
+  dangling-symlink recursion; MNT_NOEXEC consults the numeric
+  VfsMountInternal flags (the landed string check never fired).
+- 0e48201f — ext4 rename-reap leak (d5fa104e stamped dtime=1 which the
+  reap itself treats as already-done → permanent inode+blocks leak);
+  tmpfs st_size inflation reverted; devfs cycle guard re-anchored on the
+  moved child's subtree; ARCH_SET_FS/GS EPERM; faccessat2 AT_EACCESS;
+  fchmodat2 AT_EMPTY_PATH; legacy-clone CLONE_PIDFD; epoll moved-fd
+  refresh; jbd2 yield-under-commit-gate removed; binder staging
+  head-budget bound (break-after-pop dropped whole work items); POSIX
+  timers record tgid + deliver to any live member.
+- dbbed246 — the used.idx grace fix above.
+
+Marks in review4/*.md corrected to point at the real fixes (rename H-5,
+MNT_NOEXEC, tmpfs, O_CREAT recursion, devfs cycle, binder staging H-2,
+POSIX-timer scoping). Ledger defects found but not edited: summary
+claims 11 High/42 Medium vs the area files' 10/43 (virt_to_phys
+double-classified); per-area files carry FIXED marks for only 1 of 10
+High blocks and neither Critical.
+
+### LTP full scan #2 (dbbed246 = round + re-audit fixes, race fixed)
+
+**PASS 1007/1869** (FAIL 347, TCONF 425, CRASH 59, EXECFAIL 17,
+TIMEOUT 11, POISON 2) in 2441 s, zero boot stalls vs scan #1's seven
+wedge-retry chunks. vs r27 (1084): **−77 net** (−86/+9), two open
+clusters, both confirmed present on PURE f25124e3 (not caused by the
+re-audit fixes):
+
+1. **loop/mkfs family (~20 tests, deterministic)**: mke2fs on /dev/loop0
+   cannot get device geometry, then fails EINVAL writing out —
+   suspects ae7a0f7a (loop-0 canonical GenDisk registration) /
+   2ceb0fe7 (sizelimit transfer cap). Hunt in progress; rename01/
+   utime01/msync01 fail solo on f25124e3 and PASS solo on the anchor.
+2. **SysV msg family (13+ tests, CRASH 254 with
+   "ListHead::for_each: Too many iterations")**: msg tests PASS solo;
+   the crash needs the same-boot context after msgstress01 (167
+   children released to init) — a 1000-cap list walker breaking on a
+   legitimately long list (fragility, not per-test semantics).
+
++9 gains include getdents×2, epoll, faccessat, ptrace, sched, timer,
+futex — the round's real fixes at work. Scan #1's 585 is retained only
+as the race's evidence artifact.
+
+### Final gate re-run on dbbed246 (round + all re-audit fixes)
+
+| Gate | Result |
+|---|---|
+| Triple-arch build | x86_64 / riscv64 / aarch64 all rc=0 |
+| make test riscv64 | 1348/1348 (each fix batch) |
+| Tier-1 syscost (780 s, KVM) | ALL PASS — panics 0, OOM 0, census 8/32 dead-center, ticks 125/s, clock_gettime 3 µs, **nanosleep avg 102.7 ms (n=40,083, tok-class — the enforceable population)**, GRQ hold 4.54 µs in band, small_alloc REST 0.3% |
+| Tier-2 pbench (KVM, first-attempt DONE) | **8/8 PASS** — p1_null +0.4%, p1_clock +2.9%, p2_ctxsw +10.6%, p3b_cow +2.6%, p6_write_fsync +11.9% (in band); **p6_mkdrmdir −21.0%, p6_unlink −28.3%, p6_append −21.6% (improved)**; p7_sleep1ms 15.38 µs = family reference |
+| LTP | 1007/1869 (above) — two open clusters hunting |
+
+Perf-gate artifacts: run/perf-gate-r4fix-parse.txt,
+work/pbench-r4fix-pb1-serial.log, run/r4review-ltp2-results.txt.
