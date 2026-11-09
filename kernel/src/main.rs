@@ -1463,6 +1463,9 @@ pub extern "C" fn rust_main() -> ! {
         // misa is not S-mode readable, so the ISA string is the source.
         #[cfg(feature = "riscv64")]
         arch::riscv64::vext::prime_hart_has_v(dtb_phys);
+        // review4 arch-L: /cpus/timebase-frequency (10 MHz fallback).
+        #[cfg(feature = "riscv64")]
+        arch::riscv64::cpu::prime_timebase(dtb_phys);
         #[cfg(feature = "x86_64")]
         let memory_regions = x86_boot_memory_regions();
         #[cfg(feature = "x86_64")]

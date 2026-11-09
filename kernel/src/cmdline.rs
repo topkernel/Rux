@@ -65,6 +65,7 @@ pub struct MemoryRegion {
 
 const FDT_BEGIN_NODE: u32 = 0x1;
 const FDT_END_NODE: u32 = 0x2;
+const FDT_NOP: u32 = 0x4;
 const FDT_PROP: u32 = 0x3;
 const FDT_END: u32 = 0x9;
 
@@ -399,6 +400,84 @@ pub unsafe fn parse_memory_regions(dtb_ptr: u64) -> [MemoryRegion; MAX_MEMORY_RE
 /// optional _multi_letter names after): the base prefix "rv" + width
 /// digits is skipped, then any single-letter extension 'v' counts.
 /// Used to prime the V-extension capability cache at boot (vext.rs).
+/// Parse /cpus/timebase-frequency from the DTB (review4 arch-L: the
+/// counter frequency was hardcoded 10 MHz — QEMU virt's value, but any
+/// platform with a different timebase got wrong timer scaling while the
+/// DTB sat right there). Returns None on any structural problem.
+pub unsafe fn parse_timebase_frequency(dtb_ptr: u64) -> Option<u32> {
+    let fdt = dtb_ptr as *const u8;
+
+    // SAFETY: mirrors parse_cpu_isa_has_v — the bootloader-provided DTB
+    // is mapped at its physical address by boot.S's early tables.
+    unsafe fn read_u32(p: *const u8) -> u32 {
+        let b0 = *p as u32;
+        let b1 = *p.offset(1) as u32;
+        let b2 = *p.offset(2) as u32;
+        let b3 = *p.offset(3) as u32;
+        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+    }
+
+    if unsafe { read_u32(fdt) } != 0xd00dfeed {
+        return None;
+    }
+    let off_dt_struct = unsafe { read_u32(fdt.offset(0x08)) } as usize;
+    let off_dt_strings = unsafe { read_u32(fdt.offset(0x0C)) } as usize;
+    let size_dt_struct = unsafe { read_u32(fdt.offset(0x24)) } as usize;
+
+    let mut ptr = fdt.offset(off_dt_struct as isize);
+    let end = fdt.offset((off_dt_struct + size_dt_struct) as isize);
+    let strings = fdt.offset(off_dt_strings as isize);
+
+    let mut in_cpus = false;
+    while ptr < end {
+        let token = unsafe { read_u32(ptr) };
+        ptr = ptr.offset(4);
+        match token {
+            FDT_BEGIN_NODE => {
+                let mut name = [0u8; 32];
+                let mut i = 0;
+                while unsafe { *ptr } != 0 && i < 32 {
+                    name[i] = unsafe { *ptr };
+                    ptr = ptr.offset(1);
+                    i += 1;
+                }
+                while unsafe { *ptr } != 0 {
+                    ptr = ptr.offset(1);
+                }
+                ptr = ptr.offset(1); // NUL
+                let pad = (4 - (ptr as usize & 3)) & 3;
+                ptr = ptr.offset(pad as isize);
+                let n = &name[..i];
+                in_cpus = n == b"cpus";
+            }
+            FDT_PROP => {
+                let len = unsafe { read_u32(ptr) } as usize;
+                let nameoff = unsafe { read_u32(ptr.offset(4)) } as usize;
+                ptr = ptr.offset(8);
+                let val = ptr;
+                let mut name = [0u8; 32];
+                let mut i = 0;
+                while i < 32 {
+                    let c = unsafe { *strings.offset((nameoff + i) as isize) };
+                    if c == 0 {
+                        break;
+                    }
+                    name[i] = c;
+                    i += 1;
+                }
+                if in_cpus && &name[..i] == b"timebase-frequency" && len == 4 {
+                    return Some(unsafe { read_u32(val) });
+                }
+                let adv = (len + 3) & !3;
+                ptr = ptr.offset(adv as isize);
+            }
+            FDT_NOP => {}
+            _ => {}
+        }
+    }
+    None
+}
+
 pub unsafe fn parse_cpu_isa_has_v(dtb_ptr: u64) -> bool {
     let fdt = dtb_ptr as *const u8;
 

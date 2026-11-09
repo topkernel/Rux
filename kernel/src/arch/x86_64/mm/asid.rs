@@ -183,6 +183,16 @@ fn ipi_flush_all(_arg: *mut core::ffi::c_void) {
     unsafe { crate::arch::x86_64::cpu::invpcid(crate::arch::x86_64::cpu::INVPCID_ALL_NON_GLOBAL, 0, 0) };
 }
 
+/// Remote payload for flush_tlb_asid (review4 arch-L): one PCID, one
+/// context — the targeted operation the ISA provides, vs the old
+/// type-3 EVERY-PCID flush on every CPU.
+fn ipi_flush_pcid(arg: *mut core::ffi::c_void) {
+    let pcid = arg as usize as u64;
+    // SAFETY: type 1 is legal regardless of the target's current CR3
+    // (it invalidates by PCID tag, not the live page tables).
+    unsafe { crate::arch::x86_64::cpu::invpcid(crate::arch::x86_64::cpu::INVPCID_SINGLE_CTX, pcid, 0) };
+}
+
 /// Full local invalidation plus a SYNCHRONOUS full flush of every other
 /// started CPU. Returns when no CPU retains a non-global entry.
 fn flush_all_cpus_local() {
@@ -227,9 +237,29 @@ pub fn flush_tlb_asid(asid: u16) {
         flush_tlb_all();
         return;
     }
-    // Remote CPUs may cache entries under this PCID: synchronous
-    // full flush (the cheap single-PCID INVPCID only reaches this CPU).
-    flush_all_cpus_local();
+    // Remote CPUs may cache entries under this PCID. review4 arch-L:
+    // send the SINGLE-CONTEXT INVPCID (type 1, PCID-tagged) to every
+    // peer — the old type-3 full flush invalidated EVERY PCID on EVERY
+    // core (the whole-TLB cost the PCID layer exists to avoid) on every
+    // mm teardown.
+    let me = crate::arch::cpu_id() as usize;
+    // SAFETY: type 1 targets the tag, legal on this CPU too.
+    unsafe {
+        crate::arch::x86_64::cpu::invpcid(
+            crate::arch::x86_64::cpu::INVPCID_SINGLE_CTX,
+            asid as u64,
+            0,
+        );
+    }
+    for cpu in 0..crate::config::MAX_CPUS {
+        if cpu != me && crate::arch::smp::cpu_started(cpu) {
+            crate::arch::ipi::smp_call_function(
+                cpu,
+                ipi_flush_pcid,
+                asid as usize as *mut core::ffi::c_void,
+            );
+        }
+    }
 }
 
 /// Flush one page of the CURRENT address space (the fault paths run in

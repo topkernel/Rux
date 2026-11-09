@@ -735,6 +735,17 @@ impl VirtioGpuDevice {
         if io_buf.is_null() {
             return None;
         }
+        // review4 drivers-L: zero the RESPONSE half — the block comes
+        // from the allocator UNINITIALIZED, and a recycled heap block
+        // very plausibly holds a PREVIOUS response of the same command
+        // type: after a leaked chain's late used-ring entry is consumed
+        // as this command's completion, the hdr_type check could pass
+        // on that stale content (the comment below claimed "a zeroed
+        // response" — nothing zeroed it). A zeroed hdr_type fails every
+        // command-type check, so callers reject it.
+        unsafe {
+            core::ptr::write_bytes(io_buf.add(cmd_size) as *mut u8, 0, resp_size);
+        }
         let cmd_ptr = io_buf as *const u8;
         // SAFETY: io_buf is cmd_size + resp_size bytes; +cmd_size is in
         // bounds and resp_size bytes remain after it.

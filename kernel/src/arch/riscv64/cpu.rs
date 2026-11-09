@@ -49,9 +49,30 @@ pub fn set_thread_id(tid: u64) {
 }
 
 /// Get counter frequency (RISC-V uses time CSR)
-#[inline]
+/// /cpus/timebase-frequency parsed at boot (0 = not primed yet — the
+/// QEMU-virt default applies until then). review4 arch-L: the old
+/// hardcoded 10 MHz happened to match QEMU virt; any other platform
+/// would scale every timer wrong.
+static TIMEBASE_HZ: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Prime the timebase from the bootloader DTB (10 MHz fallback).
+pub fn prime_timebase(dtb_phys: u64) {
+    if let Some(hz) = unsafe { crate::cmdline::parse_timebase_frequency(dtb_phys) } {
+        if hz != 0 {
+            TIMEBASE_HZ.store(hz as u64, core::sync::atomic::Ordering::Release);
+            return;
+        }
+    }
+    TIMEBASE_HZ.store(10_000_000, core::sync::atomic::Ordering::Release);
+}
+
 pub fn get_counter_freq() -> u64 {
-    // QEMU virt platform default frequency: 10 MHz
+    let hz = TIMEBASE_HZ.load(core::sync::atomic::Ordering::Acquire);
+    if hz != 0 {
+        return hz;
+    }
+    // Not primed yet (very early calls): the QEMU-virt default.
     10_000_000
 }
 

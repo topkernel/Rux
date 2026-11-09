@@ -1516,10 +1516,23 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                 let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
             } else {
-                crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, ra={:#x}, sp={:#x}, t6={:#x}, pid={}, mode={}",
-                    fault_addr, regs.epc, regs.ra, regs.sp, regs.t6,
-                    crate::sched::get_current_pid(),
-                    "kernel");
+                // review4 arch-L (verified unreachable): Segfault/
+                // PermissionDenied/BusError producers live on the
+                // USER-gated paths of do_page_fault (bad_area's kernel
+                // branch goes to no_context/KernelPanic instead) — this
+                // arm is defensive. The old print-and-return would have
+                // re-executed the faulting instruction in an infinite
+                // loop; oops makes the (impossible) arrival visible and
+                // policy-handled.
+                crate::debug::oops::oops(
+                    crate::debug::oops::Kind::PageFault { addr: fault_addr },
+                    &|w: &mut crate::debug::backtrace::ConsoleWriter| {
+                        let _ = core::fmt::Write::write_str(
+                            w,
+                            "kernel-mode Segfault fault arm\n",
+                        );
+                    },
+                );
             }
         }
         MmFaultResult::PermissionDenied => {
@@ -1543,7 +1556,23 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                 let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
             } else {
-                crate::pr_err!("pagefault: Permission denied at {:#x}", fault_addr);
+                // review4 arch-L (verified unreachable): Segfault/
+                // PermissionDenied/BusError producers live on the
+                // USER-gated paths of do_page_fault (bad_area's kernel
+                // branch goes to no_context/KernelPanic instead) — this
+                // arm is defensive. The old print-and-return would have
+                // re-executed the faulting instruction in an infinite
+                // loop; oops makes the (impossible) arrival visible and
+                // policy-handled.
+                crate::debug::oops::oops(
+                    crate::debug::oops::Kind::PageFault { addr: fault_addr },
+                    &|w: &mut crate::debug::backtrace::ConsoleWriter| {
+                        let _ = core::fmt::Write::write_str(
+                            w,
+                            "kernel-mode PermissionDenied fault arm\n",
+                        );
+                    },
+                );
             }
         }
         MmFaultResult::BusError => {
@@ -1562,7 +1591,23 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                     crate::signal::force_unblock_current(crate::signal::Signal::SIGBUS as i32);
                 }
             } else {
-                crate::pr_err!("pagefault: Bus error (past EOF) at {:#x}", fault_addr);
+                // review4 arch-L (verified unreachable): Segfault/
+                // PermissionDenied/BusError producers live on the
+                // USER-gated paths of do_page_fault (bad_area's kernel
+                // branch goes to no_context/KernelPanic instead) — this
+                // arm is defensive. The old print-and-return would have
+                // re-executed the faulting instruction in an infinite
+                // loop; oops makes the (impossible) arrival visible and
+                // policy-handled.
+                crate::debug::oops::oops(
+                    crate::debug::oops::Kind::PageFault { addr: fault_addr },
+                    &|w: &mut crate::debug::backtrace::ConsoleWriter| {
+                        let _ = core::fmt::Write::write_str(
+                            w,
+                            "kernel-mode BusError fault arm\n",
+                        );
+                    },
+                );
             }
         }
         MmFaultResult::OutOfMemory => {
