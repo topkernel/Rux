@@ -9131,3 +9131,139 @@ else dfx-gated.
    as the secondary optimizer once the wedge is dead.
 4. ohw117's freed-task-linked class (sensor_host tid 570 garbage
    registers, runnable-unpicked 22 s) is a separate small lane.
+
+### 79. 79TH SESSION (2026-11-09) — THE FOUNDER FIXED: the epoll
+### close-path purge stripped a LIVE fork-shared interest by fd NUMBER
+### (chipset_init's exit vs init's paramservice child fd 21); keying the
+### purge on the dying file description kills the whole 8250 wedge
+### family — dslm/app_fwk/el5-8250 ctl.starts all 0_xx ms on ohw126,
+### install stream past bundle 14 to 42/84; NEW frontier: foundation's
+### AMS looper parked in futex holding accountmgr's sync txn since 77 s.
+### (4045d4d9)
+
+#### 1. §78'S "RECVSTUCK" RE-DECODE — not a park, a TIMED-retry loop
+
+ohw123's own census data re-read: the "stuck" workers (tids 340/342/
+343/347) CYCLE between sys=45 (recvfrom) and sys=202 (futex) across
+snapshots — tid 342 sits in recvfrom 327→387 s then EXITS it at 417.
+Both param-client recv sites are TIMED (SO_RCVTIMEO=15 s on the
+persistent g_clientFd; 1 s on SystemWaitParameter's per-call fd —
+param_request.c read from oh-robot source), so nothing parks untimed:
+each SystemSetParameter(ohos.ctl.start) burns exactly its 15 s and
+returns 105 (ReadMessage's diff>=timeout branch), samgr retries under
+the processLock, and the census catches the worker inside recv ~94%
+of the time. The kernel's recvfrom was never broken — the REPLY never
+came because init never READ the request.
+
+#### 2. THE ACTUAL FOUNDER — init stops reading ONE paramservice child
+
+ohw124 (first boot with dfx=pctlmon full lifecycle): the PCTL-SEND
+queue-state field tells the whole story — dslm's ctl.start (52.842 s)
+lands on an EMPTY child queue [q=0/0]; every later samgr send shows
+the SAME child's queue growing 1/748 → 2/1472 → 3/2208 → 4/2944 →
+5/3668 B while OTHER connections keep getting served (replies
+result=0 throughout). PID1EPOLL's fdtable-vs-interests diff names
+it: `UNWATCHED fd=21 fid=0x2c12 segs=5..26 peer_alive=1` — init's
+FIRST accepted param child (PCTL-ACCEPT #0), alive in the fdtable
+with samgr's messages piling up, its epoll interest GONE between
+46.9 s (reports=16, healthy) and 72 s. No PID1EPOLL-PURGE print, no
+close of fd 21, beget only DELs together with close (le_epoll.c:93
+has exactly one DEL site, inside the stream-close path).
+
+#### 3. THE KILLER CAUGHT (attribution instruments, ohw125)
+
+New dfx-gated prints on every interest removal: EPDEL (sys_epoll_ctl
+DEL with fd_now liveness), EPPURGE (close-path purge, pid+fd+fids),
+EPREBIND (ADD-on-reused-fd rewrite); the wait-path purge print drops
+its pid==1 restriction. ohw125, t=43.899:
+
+    [pid=462][PLUGIN] Poll sub init timeout, sub init 0 exit
+    EPPURGE #3 pid=462 fd=21 fids=0x2bd0
+    EXITGRP: pid=462 comm='chipset_init' code=32512
+
+pid 462 = chipset_init, a sub-init plugin FORKED from init — it
+inherited init's fdtable copy INCLUDING the epoll fd (one SHARED
+EpollFile). At exit it closed its OWN fd-21 description (last
+reference — the sys_close others==0 gate correctly fired), and the
+purge then scanned the SHARED instance for e.fd==21, validated
+liveness against the CHILD's fdtable (slot just cleared → None) and
+STRIPPED init's live (fd=21, fid=0x2bd0 = the paramservice child,
+PCTL-ACCEPT #0 at 13.941) interest. From that moment init's LoopEvent
+never polled that child again: every later samgr SystemSetParameter
+on the process-wide g_clientFd burned 15 s → 105 → the samgr retry
+loop held SystemAbilityManager.processLock for minutes → installs'
+LoadSystemAbility(8250) parked at first lock touch → the whole
+install-stream wedge of §77/§78.
+
+Linux divergence: the reference epi is keyed to the open file
+DESCRIPTION (epi->ffd.file, itself referenced) — a foreign process's
+same-numbered close can never remove a parent's interest. Our purge
+was keyed by fd NUMBER against the closer's table. The 69th's b20
+gate (purge only on the description's last fd-table reference) closed
+the direct fork-close case but NOT the fd-number-reuse case: after
+exec's CLOEXEC sweep, a child reuses the parent's fd NUMBERS for its
+own files, and closing THOSE legitimately fires the gate — while the
+purge still acts on the number.
+
+#### 4. THE FIX (4045d4d9) + VALIDATION
+
+sys_close captures the dying description's file_id alongside the Weak
+handle; epoll_purge_closed_fd(fd, dying_file_id) removes only entries
+matching BOTH the fd number AND the dying file_id. A foreign
+same-numbered entry (different description) survives, exactly like
+the reference. Within one table the (fd, file_id) pairs stay
+consistent, so the owner's own closes still purge exactly their dead
+interests.
+
+ohw126 (fix build, same rig as every wedge boot): dslm_service
+3511 0_319ms (was 105_14998ms EVERY prior boot), app_fwk_update
+8350 0_188ms (was 105_45019ms), el5_filekey_manager 8250 0_70ms —
+the 8250 LOAD's own process start. Install stream flows: SetBundleQuota
+uid 20010035…20010041 through t=127 s, 42 quota events (the 77th's
+metric; reference: 84 by 9.9 s), bundle 14 passed at ~98 s. The
+wedge family is DEAD on its exact historical trigger.
+
+#### 5. NEW FRONTIER (the 80th's item 1)
+
+ohw126 stalls at 42/84 bundles: foundation (pid 731, the AMS host)
+looper tid 852 parked in FUTEX (sys=202, uaddr=0x7ff082348fb4) since
+~77 s holding accountmgr's sync txn12953 (exec 330470+ ms,
+"outstanding=[NONE - reply deferred userspace-side]"); second parked
+sync txn9124 pid898→distributeddata 568 since 52 s (server tid 766
+parked in IOCTL-BWR read, wcmd=BC_FREE_BUFFER). Both are the FFRT
+serial-queue class (66th's M2 shape: a looper blocked userspace-side
+inside a critical section) — BUT the 66th's holder was cycling; these
+two sit in ONE futex/ioctl park for 5+ minutes. Before declaring it
+userspace: fuxwatch on 0x7ff082348fb4 + the tid-852 wake history
+(decide lost-wake vs userspace graph) is the first boot of the 80th.
+ohw124 (pre-fix) incidentally reached bootevent.launcher.ready at
+431 s through the LATE recovery path — pixels remain the yardstick.
+
+#### 6. GATES
+
+x86_64 build rc=0; riscv64 clean-config rc=0 (run/build-rv-79.log);
+aarch64 rc=0 (run/build-a64-79.log); riscv64 make test 1319/1319 ALL
+TESTS PASSED (run/test-rv-79.log). Tier-2 pbench A/B (syscall close +
+epoll path touched) 3 reps interleaved base79a(de8b0b8a) vs
+fix79c(4045d4d9), run/abpb-base79a-fix79c.txt: every row within
+±2.0% (p2_ctxsw −9.6% improved; p6_openclose −0.5% — the row that
+exercises close(2) directly; p5c stream family +1.8-1.9% well inside
+the ±20% band; p6_mkdrmdir MISSING in 1 rep = the known host-noise
+class, load ~4.2 during the run — coordinator re-verifies on a quiet
+host at merge). dfx-gated attribution prints ride along under
+dfx=pid1spin (EPDEL/EPPURGE/EPREBIND — see commit).
+
+#### 7. FOR THE 80TH (priority order)
+
+1. The 42-bundle stall: foundation tid 852's futex park (uaddr
+   0x7ff082348fb4, txn12953) — one fuxwatch boot over 77-200 s decides
+   lost-wake (ours) vs FFRT graph (userspace/speed wall). If lost-wake,
+   it is the LAST kernel bug before the launcher; if FFRT, item 2.
+2. The per-bundle 0.5-1.4 s install cost (77th item 3) is now the
+   primary speed lever: 42 bundles by 127 s vs reference 84 by 9.9 s.
+   Profile one install's kernel time (INSTQ/BMSSCAN probes exist).
+3. txn9124 (pid898→distributeddata 568, server tid 766 parked in
+   BWR-read since 52 s): second face of the same question.
+4. Screenshots every 120 s through the whole window — ohw124 proved
+   launcher.ready is reachable; the first non-06b933b4 md5 is the
+   campaign's finish line.
