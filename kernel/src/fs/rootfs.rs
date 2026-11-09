@@ -1588,6 +1588,15 @@ unsafe fn rootfs_rename(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_n
         return errno::Errno::InvalidArgument.as_neg_i32();
     }
 
+    // review4 fs-L: replacing an existing DIRECTORY destination requires
+    // it to be empty (POSIX ENOTEMPTY — the unconditional remove_child
+    // dropped a whole subtree); mirrors tmpfs's check.
+    if let Some(dest) = new_dir_node.find_child(new_name) {
+        if dest.is_dir() && !dest.children.lock().is_empty() {
+            return errno::Errno::DirectoryNotEmpty.as_neg_i32();
+        }
+    }
+
     // Replace an existing destination entry (POSIX rename overwrites).
     new_dir_node.remove_child(new_name);
 

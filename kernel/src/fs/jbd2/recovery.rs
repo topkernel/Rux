@@ -197,6 +197,16 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
 
     info.end_transaction = last_found_seq;
 
+    // review4 fs-L: scope the collected revokes to COMMITTED transactions
+    // — scan_revoke_block accumulated uncommitted-tail revoke blocks too,
+    // and block_is_revoked_for's tid >= let an uncommitted tail's revoke
+    // for block B suppress an older COMMITTED transaction's B replay
+    // (a legitimate write lost). Drop records newer than the last commit.
+    {
+        let mut records = journal.revoke_records.lock();
+        records.retain(|&(_b, t)| t <= last_found_seq);
+    }
+
     // ========================================================================
     // PASS_REPLAY: replay committed blocks
     // ========================================================================

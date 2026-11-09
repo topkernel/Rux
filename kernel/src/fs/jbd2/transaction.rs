@@ -258,6 +258,16 @@ pub fn jbd2_journal_stop(handle: &mut Handle) -> Result<(), i32> {
     // window; fsync/sync still force immediate commits, and credit
     // exhaustion in start_this_handle bounds the batch at
     // j_max_transaction_buffers anyway.
+    // review4 fs-L: capped by journal geometry too — a lazy batch larger
+    // than the log aborts the journal permanently at commit time
+    // (commit.rs's total_journal_blocks > j_free → abort). With the
+    // write-through commit resetting tail=head every time, j_free between
+    // commits is the whole log, so half the log minus descriptor/revoke/
+    // commit headroom always fits. Floor 16 keeps tiny journals usable.
+    fn lazy_commit_max_buffers(journal: &Journal) -> usize {
+        let log = journal.j_last.saturating_sub(journal.j_first);
+        ((log / 2).saturating_sub(8) as usize).clamp(16, 1024)
+    }
     const LAZY_COMMIT_MAX_BUFFERS: usize = 1024;
     // Arm-2 (f4-ext4-route-map.md §6.2 R3): revokes used to force a
     // synchronous slow-path commit at the NEXT stop after any free
@@ -273,7 +283,9 @@ pub fn jbd2_journal_stop(handle: &mut Handle) -> Result<(), i32> {
     if err == 0 && !handle.h_sync {
         let dirty_len = txn.t_dirty_buffers.lock().len();
         let revoke_len = txn.t_revoke_records.lock().len();
-        if dirty_len < LAZY_COMMIT_MAX_BUFFERS && revoke_len < LAZY_COMMIT_MAX_REVOKES {
+        if dirty_len < lazy_commit_max_buffers(&journal)
+            && revoke_len < LAZY_COMMIT_MAX_REVOKES.min(lazy_commit_max_buffers(&journal))
+        {
             // Leave j_running_transaction in place: the next
             // start_this_handle joins this transaction.
             crate::debug::fsw::note_j_lazy();
@@ -288,6 +300,11 @@ pub fn jbd2_journal_stop(handle: &mut Handle) -> Result<(), i32> {
     while txn.t_updates.load(Ordering::SeqCst) > 0 {
         core::hint::spin_loop();
         spin_count += 1;
+        if spin_count % 4096 == 0 {
+            // review4 fs-L: let the concurrent handle-holder run instead
+            // of burning the CPU for its whole I/O window.
+            crate::sched::yield_cpu();
+        }
         if spin_count > 1_000_000 {
             err = EIO;
             break;

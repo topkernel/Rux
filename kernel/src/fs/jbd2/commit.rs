@@ -61,9 +61,20 @@ pub fn jbd2_journal_commit_transaction(
         *state = TransactionState::Locked;
     }
 
-    // Wait for all updates (spin on single-core — should already be 0)
+    // Wait for all updates (spin on single-core — should already be 0).
+    // review4 fs-L: an fsync-forced commit can enter while a writer on
+    // another CPU is mid-handle — the old unbounded spin busy-waited for
+    // the whole writer I/O with preemption available. Yield every 4K
+    // spins (the writer needs the CPU to finish its handle and drop
+    // t_updates; the commit holds only the commit gate here, which the
+    // writer's journal_start does not take).
+    let mut spin_count = 0u64;
     while commit_transaction.t_updates.load(core::sync::atomic::Ordering::SeqCst) > 0 {
         core::hint::spin_loop();
+        spin_count += 1;
+        if spin_count % 4096 == 0 {
+            crate::sched::yield_cpu();
+        }
     }
 
     // Collect dirty buffers (keyed map — block order; see the field doc

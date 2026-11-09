@@ -66,7 +66,14 @@ fn pin_leader(pid: u32) -> Option<*mut Task> {
     }
     // SAFETY: t is pinned for the duration of this function.
     let leader = unsafe { (*t).group_leader_ptr() };
-    if (leader as *const Task) != (t as *const Task) && !leader.is_null() {
+    // review4 fs-L: a null leader (group never linked) used to fall
+    // through to Some(null) — target_exited's (*data.task).state() then
+    // dereferenced null. Report the task itself instead: a leaderless
+    // task IS its own group for lifecycle purposes.
+    if leader.is_null() {
+        return Some(t);
+    }
+    if (leader as *const Task) != (t as *const Task) {
         // Pin the leader too; drop the intermediate pin.
         // SAFETY: group_leader_ptr() of a pinned task is in the same
         // thread ring (kept alive by the ring linkage discipline).

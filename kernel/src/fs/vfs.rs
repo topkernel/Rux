@@ -6091,6 +6091,9 @@ pub fn getdents_with_dots(
 /// # Returns
 /// Returns number of bytes read on success, error code on failure
 pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize, i32> {
+    // review4 fs-L: trust the buffer length over the caller's count —
+    // a future caller with count > buf.len() would overflow below.
+    let count = count.min(buf.len());
     // SAFETY: get_file_fd returns valid Arc<File>; inode UnsafeCell accessed under fd table lock
     unsafe {
         let file = match get_file_fd(fd) {
@@ -6287,8 +6290,11 @@ pub fn mem_file_stat(file: &File, stat: &mut crate::fs::Stat) -> Option<i32> {
     // SAFETY: read-only access to the content length for st_size.
     let size = unsafe { (*(ptr as *const MemFileContent)).data.len() };
     stat.st_dev = 0;
-    // Distinct identity per content instance (the raw pointer is unique).
-    stat.st_ino = ptr as usize as u64;
+    // review4 fs-L: synthetic identity, NOT the raw heap pointer —
+    // kernel-address disclosure to userspace (and unstable across
+    // realloc). Hash the pointer: distinct per instance, never a
+    // kernel VA.
+    stat.st_ino = (ptr as usize as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 20;
     stat.st_nlink = 1;
     stat.st_uid = 0;
     stat.st_gid = 0;

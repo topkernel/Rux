@@ -1442,7 +1442,9 @@ pub fn pipe_file_stat(file: &File, stat: &mut crate::fs::Stat) -> Option<i32> {
     // while the File exists.
     let ptr = unsafe { *file.private_data.get() }?;
     stat.st_dev = PIPE_STAT_DEV;
-    stat.st_ino = ptr as usize as u64;
+    // review4 fs-L: synthetic identity (hashed, never the raw Pipe
+    // address — kernel-pointer disclosure + unstable inos).
+    stat.st_ino = (ptr as usize as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 20;
     stat.st_nlink = 1;
     stat.st_uid = 0;
     stat.st_gid = 0;
