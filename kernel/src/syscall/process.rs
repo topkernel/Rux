@@ -2618,12 +2618,18 @@ pub fn sys_getgroups(args: SyscallArgs) -> i64 {
     if ngroups > 0 {
         let groups = &task.cred().groups;
         let bytes = ngroups * core::mem::size_of::<u32>();
-        unsafe {
-            crate::arch::uaccess::copy_to_user(
-                list_ptr as *mut u8,
-                groups.as_ptr() as *const u8,
-                bytes,
-            );
+        // review4 syscall-L: a faulting list pointer is EFAULT, not
+        // silent success (the residual was discarded).
+        if !crate::arch::uaccess::access_ok(list_ptr as usize, bytes)
+            || unsafe {
+                crate::arch::uaccess::copy_to_user(
+                    list_ptr as *mut u8,
+                    groups.as_ptr() as *const u8,
+                    bytes,
+                )
+            } != 0
+        {
+            return -(errno::EFAULT as i64);
         }
     }
 
@@ -4050,39 +4056,45 @@ pub fn sys_sysinfo(args: SyscallArgs) -> i64 {
     // through put_user (exception-table copy path, SUM=0 safe).
     unsafe {
         let put_u64 = crate::arch::uaccess::put_user::<u64>;
+        // review4 syscall-L: collect the per-field residuals — an
+        // in-range-but-unmapped buffer is EFAULT, not silent success.
+        let mut ok = true;
         // uptime (seconds) - from jiffies
         let uptime = crate::drivers::timer::get_jiffies() as u64 / crate::drivers::timer::HZ as u64;
-        let _ = put_u64(info_ptr as *mut u64, uptime);
+        ok &= put_u64(info_ptr as *mut u64, uptime);
         // loads[1],2,3] - zero
-        let _ = put_u64(info_ptr.add(8) as *mut u64, 0);
-        let _ = put_u64(info_ptr.add(16) as *mut u64, 0);
-        let _ = put_u64(info_ptr.add(24) as *mut u64, 0);
+        ok &= put_u64(info_ptr.add(8) as *mut u64, 0);
+        ok &= put_u64(info_ptr.add(16) as *mut u64, 0);
+        ok &= put_u64(info_ptr.add(24) as *mut u64, 0);
         // totalram (bytes): the discovered memory map (runtime descriptor
         // count), not the Kernel.toml nominal size — sysinfo(2) callers
         // (installers, OOM-aware daemons) size their behavior off these
         // fields; freeram used to be a hard-coded "half of nominal".
         let mem = crate::mm::meminfo::get_basic_memory_info();
-        let _ = put_u64(info_ptr.add(32) as *mut u64, mem.mem_total as u64);
+        ok &= put_u64(info_ptr.add(32) as *mut u64, mem.mem_total as u64);
         // freeram
-        let _ = put_u64(info_ptr.add(40) as *mut u64, mem.mem_free as u64);
+        ok &= put_u64(info_ptr.add(40) as *mut u64, mem.mem_free as u64);
         // sharedram, bufferram
-        let _ = put_u64(info_ptr.add(48) as *mut u64, 0);
-        let _ = put_u64(info_ptr.add(56) as *mut u64, 0);
+        ok &= put_u64(info_ptr.add(48) as *mut u64, 0);
+        ok &= put_u64(info_ptr.add(56) as *mut u64, 0);
         // totalswap, freeswap
-        let _ = put_u64(info_ptr.add(64) as *mut u64, 0);
-        let _ = put_u64(info_ptr.add(72) as *mut u64, 0);
+        ok &= put_u64(info_ptr.add(64) as *mut u64, 0);
+        ok &= put_u64(info_ptr.add(72) as *mut u64, 0);
         // procs (current process count)
         use core::sync::atomic::{AtomicU16, Ordering};
         static PROC_COUNT: AtomicU16 = AtomicU16::new(0);
         PROC_COUNT.store(0, Ordering::Relaxed);
         crate::sched::for_each_task(|_| { PROC_COUNT.fetch_add(1, Ordering::Relaxed); });
-        let _ = crate::arch::uaccess::put_user::<u16>(
+        ok &= crate::arch::uaccess::put_user::<u16>(
             info_ptr.add(80) as *mut u16, PROC_COUNT.load(Ordering::Relaxed));
         // totalhigh, freehigh, mem_unit
-        let _ = put_u64(info_ptr.add(88) as *mut u64, 0);
-        let _ = put_u64(info_ptr.add(96) as *mut u64, 0);
-        let _ = crate::arch::uaccess::put_user::<u32>(
+        ok &= put_u64(info_ptr.add(88) as *mut u64, 0);
+        ok &= put_u64(info_ptr.add(96) as *mut u64, 0);
+        ok &= crate::arch::uaccess::put_user::<u32>(
             info_ptr.add(104) as *mut u32, 1); // mem_unit = 1 (bytes)
+        if !ok {
+            return -(errno::EFAULT as i64);
+        }
     }
     0
 }
@@ -7163,13 +7175,14 @@ pub fn sys_pidfd_getfd(args: SyscallArgs) -> i64 {
 
 /// sys_faccessat2 - Check file access permissions (extended) (NR 439)
 pub fn sys_faccessat2(args: SyscallArgs) -> i64 {
-    let dirfd = args[0] as i32;
-    let pathname_ptr = args[1] as *const u8;
-    let mode = args[2] as i32;
-    let _flags = args[3] as i32;
-    // Delegate to faccessat (NR 48), ignoring extra flags
-    let faccessat_args = [dirfd as u64, pathname_ptr as u64, mode as u64, 0, 0, 0];
-    crate::syscall::file::sys_faccessat(faccessat_args)
+    // review4 syscall-L: flags are honored now (faccessat2_core): unknown
+    // bits EINVAL, AT_SYMLINK_NOFOLLOW checks the link inode itself.
+    crate::syscall::file::faccessat2_core(
+        args[0] as i32,
+        args[1] as *const u8,
+        args[2] as i32,
+        args[3] as i32,
+    )
 }
 
 /// sys_process_madvise - Advise kernel about process memory (NR 440)

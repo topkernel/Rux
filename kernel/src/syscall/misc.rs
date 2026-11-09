@@ -2060,12 +2060,18 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
             // SAFETY: event_ptr validated with access_ok above; copy_from_user
             // is the exception-table copy path (SUM=0 safe).
             let mut event = EPollEvent { events: 0, data: 0 };
-            unsafe {
+            // review4 syscall-L: the residual was discarded — a faulting
+            // event pointer registered events=0,data=0 (a watch that
+            // never fires) instead of EFAULT.
+            if unsafe {
                 crate::arch::uaccess::copy_from_user(
                     &mut event as *mut EPollEvent as *mut u8,
                     event_ptr as *const u8,
                     core::mem::size_of::<EPollEvent>(),
-                );
+                )
+            } != 0
+            {
+                return -(errno::EFAULT as i64);
             }
             let mut entries = epoll.entries.lock();
             enum Reg {
@@ -2148,12 +2154,18 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
             // SAFETY: event_ptr validated with access_ok above; copy_from_user
             // is the exception-table copy path (SUM=0 safe).
             let mut event = EPollEvent { events: 0, data: 0 };
-            unsafe {
+            // review4 syscall-L: the residual was discarded — a faulting
+            // event pointer registered events=0,data=0 (a watch that
+            // never fires) instead of EFAULT.
+            if unsafe {
                 crate::arch::uaccess::copy_from_user(
                     &mut event as *mut EPollEvent as *mut u8,
                     event_ptr as *const u8,
                     core::mem::size_of::<EPollEvent>(),
-                );
+                )
+            } != 0
+            {
+                return -(errno::EFAULT as i64);
             }
             let mut entries = epoll.entries.lock();
             if let Some(entry) = entries.iter_mut().find(|e| e.fd == fd) {

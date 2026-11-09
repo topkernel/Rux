@@ -479,15 +479,15 @@ pub fn sys_sigpending(args: SyscallArgs) -> i64 {
     // SAFETY: current is the running task's Task pointer; set_ptr validated with access_ok(8).
     unsafe {
         let pending = (*current).pending.get_all();
-        let blocked = (*current).sigmask;
-        // R7-D6: POSIX/Linux sigpending returns pending AND blocked (the
-        // complement was written before — a blocked-and-pending signal
-        // read as not-pending, breaking sigwait-style polling).
-        let pending_and_blocked = pending & blocked;
-
+        // review4 syscall-L: the reference's do_sigpending reports the
+        // RAW pending set (private | shared) with NO blocked-mask
+        // intersection — masking made a raised-and-undelivered signal
+        // (task busy in a syscall) read as not-pending from a sibling
+        // thread. The earlier "& blocked" was itself a fix for the
+        // COMPLEMENT bug; the raw set is the correct final form.
         // Exception-table write (the old naked store could not produce
         // EFAULT on a bad page — it took a kernel fault instead).
-        if !crate::arch::uaccess::put_user(set_ptr, pending_and_blocked) {
+        if !crate::arch::uaccess::put_user(set_ptr, pending) {
             return -(errno::EFAULT as i64);
         }
     }

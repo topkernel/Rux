@@ -4465,9 +4465,10 @@ pub fn sys_mlock2(args: [u64; 6]) -> i64 {
     if length == 0 {
         return -22_i64;
     }
-    if addr % crate::mm::page::PAGE_SIZE != 0 {
-        return -22_i64;
-    }
+    // review4 syscall-L: mlock2 rounds addr down / len up exactly like
+    // mlock (mlock2(2): "addr is rounded down") — the alignment gate
+    // rejected an unaligned mlock2 where Linux succeeds; mlock_impl does
+    // the rounding.
     mlock_impl(addr, length, flags & MLOCK_ONFAULT != 0)
 }
 

@@ -186,6 +186,19 @@ fn parse_proc_fd_dir_path(path: &str) -> Option<u64> {
 /// of the inner PRE/TAIL brackets) for the wall-vs-exec anatomy that
 /// attributes the syscost 85us-under-load open row. One relaxed load
 /// when off.
+
+/// The O_ bits open/openat accept (Linux build_open_flags' valid set —
+/// shared by openat and openat2; review4 syscall-L: openat used to pass
+/// any garbage flags through to file_open where Linux answers EINVAL).
+pub const O_VALID_FLAGS: u64 = 0o3 /*access mode*/
+    | 0o100 /*O_CREAT*/ | 0o200 /*O_EXCL*/ | 0o400 /*O_NOCTTY*/
+    | 0o1000 /*O_TRUNC*/ | 0o2000 /*O_APPEND*/ | 0o4000 /*O_NONBLOCK*/
+    | 0o10000 /*O_DSYNC*/ | 0o20000 /*FASYNC*/ | 0o40000 /*O_DIRECT*/
+    | 0o100000 /*O_LARGEFILE*/ | 0o200000 /*O_DIRECTORY*/
+    | 0o400000 /*O_NOFOLLOW*/ | 0o1000000 /*O_NOATIME*/
+    | 0o2000000 /*O_CLOEXEC*/ | 0o4000000 /*__O_SYNC*/
+    | 0o10000000 /*O_PATH*/ | 0o20000000 /*__O_TMPFILE*/;
+
 pub fn sys_openat(args: SyscallArgs) -> i64 {
     let (w0, exec_armed) = crate::debug::fsw::open_exec_stamp();
     let rc = sys_openat_impl(args);
@@ -198,6 +211,12 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
     let pathname_ptr = args[1] as *const u8;
     let flags = args[2] as u32;
     let mode = args[3] as u32;
+
+    // review4 syscall-L: reject undefined O_ bits like the reference's
+    // build_open_flags (openat2's check, shared mask).
+    if (flags as u64) & !O_VALID_FLAGS != 0 {
+        return -(errno::EINVAL as i64);
+    }
 
     // pathcost: entry bracket; PRE closes at the dispatch call below,
     // TAIL covers File creation + fd install + return path.
@@ -3046,6 +3065,66 @@ pub fn sys_faccessat(args: SyscallArgs) -> i64 {
     }
 }
 
+/// faccessat2 core (review4 syscall-L): flags-validated faccessat.
+/// AT_SYMLINK_NOFOLLOW lstats the link itself (LOOKUP_NOFOLLOW — the
+/// permission check then runs against the link inode's mode, the
+/// reference's behavior); AT_EACCESS is already the default here (the
+/// check uses the REAL ids like faccessat); unknown bits are EINVAL.
+pub fn faccessat2_core(dirfd: i32, pathname_ptr: *const u8, mode: i32, flags: i32) -> i64 {
+    const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
+    const AT_EACCESS: i32 = 0x200;
+    const AT_EMPTY_PATH: i32 = 0x1000;
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EACCESS | AT_EMPTY_PATH) != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    if mode & !0o7 != 0 {
+        return -(errno::EINVAL as i64);
+    }
+
+    let full_path = match resolve_user_path(dirfd, pathname_ptr) {
+        Ok(p) => p,
+        Err(e) => return e as i64,
+    };
+    MNT_EXPIRE_STATE.lock().note_access(full_path.as_bytes());
+
+    let mut may_mask = 0u32;
+    if mode & 0o004 != 0 { may_mask |= crate::fs::permission::MAY_READ; }
+    if mode & 0o002 != 0 { may_mask |= crate::fs::permission::MAY_WRITE; }
+    if mode & 0o001 != 0 { may_mask |= crate::fs::permission::MAY_EXEC; }
+    if mode & 0o002 != 0 && crate::fs::vfs::path_on_readonly_mount(&full_path) {
+        return -(errno::EROFS as i64);
+    }
+
+    let mut cred = if let Some(task) = crate::sched::current() {
+        task.cred().clone()
+    } else {
+        crate::process::task::Cred::new_init()
+    };
+    cred.euid = cred.uid;
+    cred.egid = cred.gid;
+
+    let lookup_flags = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        crate::fs::vfs::LOOKUP_NOFOLLOW
+    } else {
+        0
+    };
+    match crate::fs::vfs::path_lookup(&full_path, lookup_flags) {
+        Ok(vfs_path) => {
+            if let Some(inode) = &vfs_path.inode {
+                let inode_mode = inode.mode.bits() as u16;
+                let inode_uid = inode.uid.load(core::sync::atomic::Ordering::Relaxed);
+                let inode_gid = inode.gid.load(core::sync::atomic::Ordering::Relaxed);
+
+                if !crate::fs::permission::generic_permission(inode_mode, inode_uid, inode_gid, may_mask, &cred) {
+                    return -(errno::EACCES as i64);
+                }
+            }
+            0
+        }
+        Err(e) => e as i64,
+    }
+}
+
 /// sys_futimesat - Change file timestamps (syscall 88 = utimensat)
 ///
 /// utimensat ABI: (dirfd, pathname, times, flags)
@@ -3976,14 +4055,6 @@ pub fn sys_openat2(args: SyscallArgs) -> i64 {
     // strictness): unknown O_ bits are EINVAL, and a mode with bits
     // outside 07777 alongside O_CREAT is EINVAL (LTP openat203).
     {
-        const O_VALID_FLAGS: u64 = 0o3 /*access mode*/
-            | 0o100 /*O_CREAT*/ | 0o200 /*O_EXCL*/ | 0o400 /*O_NOCTTY*/
-            | 0o1000 /*O_TRUNC*/ | 0o2000 /*O_APPEND*/ | 0o4000 /*O_NONBLOCK*/
-            | 0o10000 /*O_DSYNC*/ | 0o20000 /*FASYNC*/ | 0o40000 /*O_DIRECT*/
-            | 0o100000 /*O_LARGEFILE*/ | 0o200000 /*O_DIRECTORY*/
-            | 0o400000 /*O_NOFOLLOW*/ | 0o1000000 /*O_NOATIME*/
-            | 0o2000000 /*O_CLOEXEC*/ | 0o4000000 /*__O_SYNC*/
-            | 0o10000000 /*O_PATH*/ | 0o20000000 /*__O_TMPFILE*/;
         if how.flags & !O_VALID_FLAGS != 0 {
             return -(errno::EINVAL as i64);
         }
@@ -5671,12 +5742,14 @@ pub fn sys_name_to_handle_at(args: SyscallArgs) -> i64 {
     let mut scratch = [0u8; 8];
     scratch[..4].copy_from_slice(&HANDLE_TYPE.to_le_bytes());
     unsafe {
-        crate::arch::uaccess::copy_to_user(handle_ptr.add(4), scratch.as_ptr(), 4);
-        if crate::arch::uaccess::copy_to_user(
-            handle_ptr.add(8),
-            payload.as_ptr(),
-            HANDLE_BYTES as usize,
-        ) != 0
+        // review4 syscall-L: the handle_type store's residual was
+        // discarded — a fault there reported success with a torn handle.
+        if crate::arch::uaccess::copy_to_user(handle_ptr.add(4), scratch.as_ptr(), 4) != 0
+            || crate::arch::uaccess::copy_to_user(
+                handle_ptr.add(8),
+                payload.as_ptr(),
+                HANDLE_BYTES as usize,
+            ) != 0
         {
             return -(errno::EFAULT as i64);
         }
@@ -6301,10 +6374,25 @@ pub fn sys_fchmodat2(args: SyscallArgs) -> i64 {
     if flags & AT_SYMLINK_NOFOLLOW != 0 {
         return -(errno::EOPNOTSUPP as i64);
     }
-    if flags & AT_EMPTY_PATH != 0 && args[1] != 0 {
-        // chmod through the fd the path argument names. An empty path
-        // with a nonempty string is EINVAL; a plain empty string with
-        // AT_EMPTY_PATH operates on dirfd itself.
+    if flags & AT_EMPTY_PATH != 0 {
+        // review4 syscall-L: an EMPTY path (not a nonempty one — that is
+        // EINVAL, matching the fchownat twin) with AT_EMPTY_PATH chmods
+        // the dirfd's file itself (fchmodat2(2), Linux 6.14+): route to
+        // the fd-based fchmod core instead of falling through to
+        // fchmodat's path resolution, which answered ENOENT for "".
+        let pathname_ptr = args[1] as *const u8;
+        let is_empty = if pathname_ptr.is_null() {
+            true
+        } else {
+            match unsafe { crate::arch::uaccess::get_user(pathname_ptr) } {
+                Some(b) => b == 0,
+                None => return -(errno::EFAULT as i64),
+            }
+        };
+        if is_empty {
+            return sys_fchmod([args[0], args[2], 0, 0, 0, 0]);
+        }
+        return -(errno::EINVAL as i64);
     }
     sys_fchmodat(args)
 }

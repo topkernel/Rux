@@ -412,7 +412,6 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
 
         // Calculate remaining time (ns, from the precise deadline)
         let remaining_ns = (hres_deadline - now) * (1_000_000_000 / crate::config::TIMER_CLOCK_FREQ_HZ);
-        let remaining_msecs = (remaining_ns + 999_999) / 1_000_000;
 
         // Check for pending signals
         use crate::signal;
@@ -430,9 +429,12 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
                 // SAFETY: rem_ptr validated with access_ok in caller;
                 // copy_to_user is the exception-table copy path (SUM=0 safe).
                 unsafe {
-                    // Convert milliseconds to timespec
-                    let rem_sec = (remaining_msecs / 1000) as i64;
-                    let rem_nsec = ((remaining_msecs % 1000) * 1_000_000) as i64;
+                    // review4 syscall-L: split the ns directly — the old
+                    // msec round-trip rounded UP, so rem could exceed the
+                    // true remaining time (and even the request) by up to
+                    // 1 ms (POSIX: rem <= req).
+                    let rem_sec = (remaining_ns / 1_000_000_000) as i64;
+                    let rem_nsec = (remaining_ns % 1_000_000_000) as i64;
                     if crate::arch::uaccess::copy_to_user(
                         rem_ptr as *mut u8,
                         &Timespec { tv_sec: rem_sec, tv_nsec: rem_nsec }
@@ -551,14 +553,17 @@ pub fn sys_clock_settime(args: SyscallArgs) -> i64 {
     let clk_id = args[0] as u32;
     let tp_ptr = args[1] as *const u8;
 
+    // review4 syscall-L: validate the clock id FIRST — the reference's
+    // posix-clock dispatch fails EINVAL (no clock_set op) before any
+    // permission check, so an unprivileged clock_settime(CLOCK_MONOTONIC)
+    // sees EINVAL, not EPERM.
+    if clk_id != CLOCK_REALTIME {
+        return -(errno::EINVAL as i64);
+    }
+
     // CAP_SYS_TIME required to set time
     if !crate::security::capable(crate::security::CAP_SYS_TIME) {
         return -(errno::EPERM as i64);
-    }
-
-    // Only CLOCK_REALTIME can be set
-    if clk_id != CLOCK_REALTIME {
-        return -(errno::EINVAL as i64);
     }
 
     if tp_ptr.is_null() {
@@ -1993,9 +1998,20 @@ pub fn sys_get_robust_list(args: SyscallArgs) -> i64 {
     // SAFETY: both pointers validated with access_ok(8); put_user is the
     // exception-table copy path.
     unsafe {
+        // review4 syscall-L: report the head set_robust_list actually
+        // registered (was hardcoded 0), and propagate put_user failures
+        // as EFAULT instead of silent success.
+        let current = match crate::sched::current() {
+            Some(t) => t,
+            None => return -(errno::ESRCH as i64),
+        };
+        let head = (*current).robust_list_head() as u64;
         // size_t len: 8 bytes on 64-bit (sizeof(struct robust_list_head))
-        let _ = crate::arch::uaccess::put_user(len_ptr as *mut u64, 24u64);
-        let _ = crate::arch::uaccess::put_user(head_ptr, 0u64);
+        if !crate::arch::uaccess::put_user(len_ptr as *mut u64, 24u64)
+            || !crate::arch::uaccess::put_user(head_ptr, head)
+        {
+            return -(errno::EFAULT as i64);
+        }
     }
     0
 }
