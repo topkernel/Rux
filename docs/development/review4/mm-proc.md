@@ -78,7 +78,7 @@ list state (kernel/rcu/tiny.c rcu_process_callbacks). Fix direction: do the
 swap(false)/sub decision while holding CBS_BATCH_LOCK, and have the splice side take
 its swap(true)/add under the same lock after linking the batch.
 
-### [Low] kernel/src/sync/rcu.rs:387 — sleepy-wait deadline rounds sub-jiffy budgets to zero wait
+### [Low] kernel/src/sync/rcu.rs:387 — sleepy-wait deadline rounds sub-jiffy budgets to zero wait — ✅ FIXED (`7006cc43`)
 
 `deadline = get_jiffies() + max_ms * hz / 1000`: a max_ms below 1000/hz (e.g. 5 ms at
 HZ=100) yields +0 jiffies, so the first deadline check at the loop bottom fails the
@@ -145,7 +145,7 @@ cgroup_post_fork-undo (kernel/cgroup/cgroup.c). Fix direction: add
 `sched::cgroup::cgroup_on_fork_cancel(child)` to the unwind closure (detach_task +
 sub_cgroup_mem_charged settle mirrors cgroup_exit).
 
-### [Low] kernel/src/process/exit.rs:2144-2151 — do_wait ignores the status copy fault, unlike do_wait_nonblock
+### [Low] kernel/src/process/exit.rs:2144-2151 — do_wait ignores the status copy fault, unlike do_wait_nonblock — ✅ FIXED (`7006cc43`)
 
 Blocking do_wait writes the wait status with `let _uncopied = copy_to_user(...)` and
 returns Ok(child_pid) even when the user pointer was unwritable: the caller sees success

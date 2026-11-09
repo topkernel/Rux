@@ -74,7 +74,7 @@ next instruction. The reference do_trap_ecall_u does the same unconditional
 is reference-parity, not a divergence. No action needed; documenting because
 round-1 ARCH-M6 flagged this class.
 
-### [Low] riscv64/trap.rs:678 — dead resched branch inside hardirq bracket
+### [Low] riscv64/trap.rs:678 — dead resched branch inside hardirq bracket — ✅ FIXED (`7006cc43`)
 
 `handle_timer_interrupt` step 4 calls `schedule()` "if need_resched &&
 preemptible()" — but the caller runs it between irq_enter()/irq_exit(), where
@@ -91,7 +91,7 @@ are unreachable defensive arms — but nothing in trap.rs documents that
 contract. (Pending verification in mm/exception.rs — will be adjudicated
 below.)
 
-### [Low] riscv64/mod.rs:121 — hardcoded ti_cpu offset 0x18 duplicates task_offsets::TI_CPU
+### [Low] riscv64/mod.rs:121 — hardcoded ti_cpu offset 0x18 duplicates task_offsets::TI_CPU — ✅ FIXED (`7006cc43`)
 
 cpu_id() hardcodes `ti_cpu_offset = 0x18` while trap.S correctly injects
 `task_offsets::TI_CPU` via the global_asm! const mechanism (the R57 lesson:
@@ -302,14 +302,14 @@ were left with exactly the bug the comment describes. Fix: port the
 ALSO: aarch64/ipi.rs:120-129 flush_tlb_others carries the same count-vs-set
 bug as the riscv64 twin (0..min(online, MAX_CPUS) instead of the started set).
 
-### [Low] syscall/process.rs:4115 (generic, arch consumer) — membarrier targets CPUs [0, online_count), same count-vs-set bug as riscv64 flush_tlb_others
+### [Low] syscall/process.rs:4115 (generic, arch consumer) — membarrier targets CPUs [0, online_count), same count-vs-set bug as riscv64 flush_tlb_others — ✅ FIXED (`7006cc43`)
 
 `for cpu in 0..online.min(MAX_CPUS)` — with a sparse started set the loop
 fences a dead hart (no-op on x86 via the lapic_id sentinel) and SKIPS a live
 one, violating membarrier's "every running CPU" contract. Use the started-set
 iteration (x86_64 ipi.rs:93 flush_tlb_others already does it correctly).
 
-### [Low] x86_64/process.rs:141 — ARCH_SET_GS accepts a non-canonical base; SET_FS's bound check not applied
+### [Low] x86_64/process.rs:141 — ARCH_SET_GS accepts a non-canonical base; SET_FS's bound check not applied — ✅ FIXED (`7006cc43`)
 
 ARCH_SET_FS rejects addr >= 1<<47 with EFAULT, but ARCH_SET_GS stores and
 wrmsr's any value (reference arch_prctl validates both with
@@ -321,7 +321,7 @@ task in ring 3 unrecoverably instead of failing the syscall.
 
 ## Findings (aarch64 tree)
 
-### [Low] aarch64/context.rs:111-112 — switch-sp alignment gate is inverted: accepts an 8-mod-16 sp
+### [Low] aarch64/context.rs:111-112 — switch-sp alignment gate is inverted: accepts an 8-mod-16 sp — ✅ FIXED (`7006cc43`)
 
 `tbz x9,#4, 2f; tbnz x9,#3, .Lswitch_sp_bad` — the bit-3 (8-mod-16) test only
 runs when bit 4 is SET, so an sp ending in 0x8 (bit3=1, bit4=0) SKIPS the
@@ -355,7 +355,7 @@ the matching address class, is the targeted operation the ISA provides; the
 current form makes mm teardown flush the ENTIRE TLB of every core — the same
 whole-TLB cost the PCID layer exists to avoid. Correctness unaffected.
 
-### [Low] x86_64/trap.rs:1847 — every user #GP prints an unconditional pr_info
+### [Low] x86_64/trap.rs:1847 — every user #GP prints an unconditional pr_info — ✅ FIXED (`7006cc43`)
 
 `handle_general_protection` leads with pr_info for every #GP (and
 handle_illegal_instruction builds a 16-byte hex dump string per #UD). A

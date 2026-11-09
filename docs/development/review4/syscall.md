@@ -220,7 +220,7 @@ an uninitialized variable and use it as a pidfd — EBADF at best, wrong-process
 Fix: alloc a pidfd in the parent and put_user it (the pidfd infrastructure already exists —
 pidfd_open builds exactly this file).
 
-### [Low] syscall/process.rs:863-884 — do_execve joins relative paths against the GLOBAL cwd
+### [Low] syscall/process.rs:863-884 — do_execve joins relative paths against the GLOBAL cwd — ✅ FIXED (`7006cc43`)
 Every path syscall moved to `get_cwd_user()` (root-relative) so path_lookup's root prefixing applies
 exactly once (file.rs resolve_user_path comment); do_execve still uses `get_cwd()`. Under chroot,
 execve("bin/sh") resolves to <jail>/<global-cwd>/bin/sh. Fix: reuse resolve_user_path for the execve
