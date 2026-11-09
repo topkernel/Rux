@@ -3209,19 +3209,49 @@ static SQW_DONE: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
 static SQW_LAST_J: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
+/// root_ppn of the pass's mm (83rd: drained-word abandonment reads the
+/// OPEN word through it — a transient reader pile must not lock the
+/// wedge's own word out for the whole boot, ohw148's trap).
+static SQW_ROOT: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+/// 83rd: RAW phase cursor + done latch — after the shape pass, a second
+/// full-window scan looks for the lock word VALUE itself. ohw149's
+/// foundation pass validated ZERO tasks (no shape hit anywhere in
+/// 146 MB) while the lock sits frozen at 16 readers: if a holder keeps
+/// the pointer in a register-save area or a stack buffer whose owning
+/// task fails the shape test, only the raw value scan finds it — and
+/// if the value appears NOWHERE in userspace, the reader COUNT is
+/// leaked (abandoned coroutines), not held.
+static SQW_RAWCUR: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+static SQW_RAWDONE: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+/// RAW-phase hits printed (cap across the whole phase).
+static SQW_RAWHITS: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+/// 83rd: set when the region table hits its cap (truncation visibility).
+static SQW_TRUNC: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+/// 83rd: the open pass was armed from a deep CLUSTER (non-rwlock word);
+/// such a pass never drains on value shape.
+static SQW_DEEP: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
 /// Mapped non-exec RW regions (the scan window): starts/ends pairs,
 /// count in SQW_RN. Rebuilt per (tgid, word) burst pass.
-static SQW_RSTARTS: [core::sync::atomic::AtomicU64; 128] =
-    [const { core::sync::atomic::AtomicU64::new(0) }; 128];
-static SQW_RENDS: [core::sync::atomic::AtomicU64; 128] =
-    [const { core::sync::atomic::AtomicU64::new(0) }; 128];
+static SQW_RSTARTS: [core::sync::atomic::AtomicU64; 512] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 512];
+static SQW_RENDS: [core::sync::atomic::AtomicU64; 512] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 512];
 static SQW_RN: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
 
 const SQW_LO: u64 = 0x7ff0_0000_0000;
-/// Words per burst (the SLAB sweep's 400k class, proven safe in both
-/// the audit and stall-scan contexts).
-const SQW_BUDGET: u64 = 500_000;
+/// Words per burst (83rd: 500k -> 1M -> 4M — the 594 MB full window is
+/// 74M words; at 1M/burst the pass needed 74 gated rounds and could
+/// not finish before the boot's own watchdog death. In the censusd
+/// kthread a multi-second burst only delays census prints, so 4M
+/// words/burst completes a full dual-arena pass in <= 19 rounds).
+const SQW_BUDGET: u64 = 4_000_000;
 /// Hard window cap (bytes) above SQW_LO — the OH heap arena observed on
 /// every wedged process sits far below this.
 const SQW_MAX_WIN: u64 = 0x1000_0000;
@@ -3233,10 +3263,23 @@ fn sqw_canon(p: u64) -> bool {
 /// One sqwalk burst: scans up to SQW_BUDGET words from the cursor,
 /// validating QueueTask candidates structurally and printing every
 /// hit (task decode + queue summary + saved-stack lock-word match).
-/// Sliced across bursts (5 s rate) until the window is covered, then
-/// latches done until the word changes. Prints through ConsoleWriter
-/// (safe in the audit and stall-scan contexts).
+/// 83rd: split into ARM (cheap, callable from ANY context — softirq,
+/// kthread: gates + sticky-word arbitration + pass OPEN, one page walk
+/// worst case) and SLICE (the actual 1M-word burst — kthread ONLY:
+/// ohw151 deadlocked both CPUs when a 594 MB window's bursts ran in
+/// the timer softirq: the softirq-context locks stayed held across
+/// seconds of page walks and every other CPU spun on them forever).
+/// Sliced across bursts until the window is covered, then the RAW
+/// phase, then latched. Prints through ConsoleWriter.
 pub fn sqwalk_step(tgid: u32, word: u64) {
+    sqwalk_step_deep(tgid, word, false);
+}
+
+/// `deep`: armed from a >=12-thread futex cluster on a NON-rwlock word
+/// (ohw152: 16 samgr threads never-woken on a cond-class ...194 word,
+/// the same never-sent stall without any 0x80000010 face forming). The
+/// raw phase then maps that word's holder graph in the host tgid.
+pub fn sqwalk_step_deep(tgid: u32, word: u64, deep: bool) {
     use core::fmt::Write as _;
     use core::sync::atomic::Ordering::Relaxed;
     if cfg!(not(target_arch = "x86_64")) || tgid == 0 || !sqw_canon(word) {
@@ -3245,22 +3288,48 @@ pub fn sqwalk_step(tgid: u32, word: u64) {
     if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck) {
         return;
     }
-    let nowj = crate::drivers::timer::get_jiffies() as u32;
-    let lj = SQW_LAST_J.load(Relaxed);
-    if nowj.wrapping_sub(lj) < 400 && SQW_CURSOR.load(Relaxed) != SQW_LO {
-        return; // mid-slice: keep the audit-burst cadence
-    }
     // Sticky word (ohw145 lesson: THREE deep-frozen words in one boot
     // — foundation twins + systemui — and every trigger's word reset
     // the cursor; 20 slices burned without one completing a pass).
-    // Once a pass starts, different words wait until it completes.
+    // Once a pass starts, different words wait until it completes —
+    // EXCEPT when the open word has DRAINED (83rd, the ohw148 trap: a
+    // TRANSIENT 16-reader pile in tgid 650 opened the pass, drained to
+    // readers=1 within 35 ms, and then starved the real wedge word
+    // 549/0x7ff00081391c for the whole boot). Read the open word via
+    // the pass's own root: no writer marker and < 8 readers = not
+    // frozen anymore — abandon the pass and let the new word in. A
+    // DEEP-cluster pass never drains on value shape (a cond word's
+    // value says nothing about liveness); passes complete reliably now
+    // (kthread-driven full window), so stickiness is bounded anyway.
     if SQW_DONE.load(Relaxed) == 0
         && SQW_WORD.load(Relaxed) != 0
         && (SQW_WORD.load(Relaxed) != word || SQW_TGID.load(Relaxed) != tgid)
     {
-        return;
+        let old_w = SQW_WORD.load(Relaxed);
+        let old_root = SQW_ROOT.load(Relaxed);
+        let drained = match rd_word(old_root, old_w & !7) {
+            Some(x) => {
+                let v = ((x >> ((old_w & 4) * 8)) & 0xffff_ffff) as u32;
+                SQW_DEEP.load(Relaxed) != 0
+                    || !(v & 0x8000_0000 != 0 && (v & 0x7fff_ffff) >= 8)
+            }
+            None => true, // mm gone: nothing to scan anyway
+        };
+        if !drained {
+            return;
+        }
+        let mut dw = crate::dfx::backtrace::ConsoleWriter::new();
+        use core::fmt::Write as _;
+        let _ = writeln!(
+            dw,
+            "SQW-DRAIN abandoning tgid={} word={:#x} (lock no longer frozen) for tgid={} word={:#x}",
+            SQW_TGID.load(Relaxed),
+            old_w,
+            tgid,
+            word
+        );
+        SQW_WORD.store(0, Relaxed); // pass the sticky guard below
     }
-    SQW_LAST_J.store(nowj, Relaxed);
     if SQW_TGID.load(Relaxed) != tgid || SQW_WORD.load(Relaxed) != word {
         SQW_TGID.store(tgid, Relaxed);
         SQW_WORD.store(word, Relaxed);
@@ -3268,10 +3337,41 @@ pub fn sqwalk_step(tgid: u32, word: u64) {
         SQW_HI.store(0, Relaxed);
         SQW_DONE.store(0, Relaxed);
         SQW_RN.store(0, Relaxed);
+        SQW_ROOT.store(0, Relaxed);
+        SQW_RAWCUR.store(SQW_LO, Relaxed);
+        SQW_RAWDONE.store(0, Relaxed);
+        SQW_RAWHITS.store(0, Relaxed);
+        SQW_TRUNC.store(0, Relaxed);
+        SQW_DEEP.store(if deep { 1 } else { 0 }, Relaxed);
     }
-    if SQW_DONE.load(Relaxed) != 0 {
+}
+
+/// The slice half of the walk: runs at most ONE burst (shape or raw
+/// phase) of the OPEN pass. kthread context ONLY (censusd) — the
+/// seconds-class page-walk loop must never run under softirq locks.
+pub fn sqwalk_slice() {
+    use core::fmt::Write as _;
+    use core::sync::atomic::Ordering::Relaxed;
+    if cfg!(not(target_arch = "x86_64")) {
         return;
     }
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck) {
+        return;
+    }
+    if SQW_RAWDONE.load(Relaxed) != 0 || SQW_WORD.load(Relaxed) == 0 {
+        return;
+    }
+    let tgid = SQW_TGID.load(Relaxed);
+    let word = SQW_WORD.load(Relaxed);
+    if tgid == 0 || !sqw_canon(word) {
+        return;
+    }
+    let nowj = crate::drivers::timer::get_jiffies() as u32;
+    let lj = SQW_LAST_J.load(Relaxed);
+    if nowj.wrapping_sub(lj) < 50 && SQW_CURSOR.load(Relaxed) != SQW_LO {
+        return; // mid-slice: one burst per ~2 censusd rounds (250 ms)
+    }
+    SQW_LAST_J.store(nowj, Relaxed);
     // Root + exec-VMA table (module classification + dequeFunc
     // validation) + the mapped-REGION table (the scan window: the OH
     // layout splits into a LOW early arena at 0x7ff000xxxxxx AND high
@@ -3301,7 +3401,7 @@ pub fn sqwalk_step(tgid: u32, word: u64) {
                         hi_hint = ve;
                     }
                     if vma.flags().is_executable() {
-                        if exec_vmas.len() < 48 {
+                        if exec_vmas.len() < 96 {
                             let name = aspace
                                 .try_get_vma_file(vma.start().as_usize())
                                 .map(|f| f.path())
@@ -3315,7 +3415,7 @@ pub fn sqwalk_step(tgid: u32, word: u64) {
                                 .collect();
                             exec_vmas.push((vs, ve, vma.offset() as u64, base));
                         }
-                    } else if regions.len() < 128
+                    } else if regions.len() < 512
                         && ve > vs
                         && ve - vs <= SQW_MAX_WIN
                         && vs >= SQW_LO
@@ -3335,10 +3435,19 @@ pub fn sqwalk_step(tgid: u32, word: u64) {
                 }
             }
         }
+        if regions.len() >= 512 {
+            // 83rd: truncation MUST be visible — the 82nd's 128-cap
+            // silently dropped foundation's high heap chunks (0x7ff08cbf+
+            // / 0x7ff08f0d+ where the FFRT task stacks live: ohw148's
+            // OH68 sweep saw task pointers there) and BOTH passes then
+            // "completed" without ever scanning the readers.
+            SQW_TRUNC.fetch_add(1, Relaxed);
+        }
     });
     if root == 0 {
         return;
     }
+    SQW_ROOT.store(root, Relaxed);
     // publish the region table (idempotent per (tgid,word))
     if SQW_RN.load(Relaxed) == 0 {
         for (i, &(s, e)) in regions.iter().enumerate() {
@@ -3346,6 +3455,15 @@ pub fn sqwalk_step(tgid: u32, word: u64) {
             SQW_RENDS[i].store(e, Relaxed);
         }
         SQW_RN.store(regions.len() as u32, Relaxed);
+        if SQW_TRUNC.load(Relaxed) != 0 {
+            use core::fmt::Write as _;
+            let mut tw = crate::dfx::backtrace::ConsoleWriter::new();
+            let _ = writeln!(
+                tw,
+                "SQW-TRUNC tgid={} regions hit the 512 cap — tail VMAs dropped",
+                tgid
+            );
+        }
     }
     let rn = SQW_RN.load(Relaxed) as usize;
     let regions: alloc::vec::Vec<(u64, u64)> = if rn > 0 {
@@ -3370,6 +3488,105 @@ pub fn sqwalk_step(tgid: u32, word: u64) {
         rd(va & !7).map(|w| (w >> ((va & 4) * 8)) as u32)
     };
     let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+
+    // ---- 83rd: RAW phase — after the shape pass completes, scan the
+    // SAME window for the lock word VALUE (±0x400 owner neighborhood).
+    // Every hit prints its address and decoded neighborhood: a hit
+    // inside a coroutine stack buffer names the critical-section site
+    // by the saved rip sitting next to it; a hit nowhere = leaked
+    // reader count. Runs on the same 1 Hz resume clock.
+    if SQW_DONE.load(Relaxed) != 0 {
+        if SQW_RAWDONE.load(Relaxed) != 0 {
+            return;
+        }
+        let mut rcur = SQW_RAWCUR.load(Relaxed).max(SQW_LO);
+        let hits0 = SQW_RAWHITS.load(Relaxed);
+        let mut scanned = 0u64;
+        let _ = writeln!(
+            w,
+            "SQW-RAWSCAN tgid={} lockw={:#x} cur={:#x} hits={}",
+            tgid, word, rcur, hits0
+        );
+        'raw: for &(rs, re) in regions.iter() {
+            if re <= rcur {
+                continue;
+            }
+            rcur = rcur.max(rs);
+            while rcur + 8 <= re && scanned < SQW_BUDGET {
+                scanned += 1;
+                if let Some(x) = rd(rcur) {
+                    let near = x >= word.saturating_sub(0x400)
+                        && x < word + 0x20
+                        && (x & 3) == (word & 3);
+                    if near && hits0 < 24 {
+                        SQW_RAWHITS.fetch_add(1, Relaxed);
+                        let _ = writeln!(
+                            w,
+                            "SQW-RAW hit at {:#x} val={:#x} d{:+} ctx[-0x40,+0x40]:",
+                            rcur,
+                            x,
+                            x as i64 - word as i64
+                        );
+                        for i in 0..16u64 {
+                            let va = rcur + i * 8 - 0x40;
+                            if va & 0xfff > 0xff8 {
+                                continue;
+                            }
+                            if let Some(y) = rd(va) {
+                                let cls = match word_off(y) {
+                                    Some((m, o)) => {
+                                        alloc::format!("v{}+{:#x}", m, o)
+                                    }
+                                    None => {
+                                        // printable-ASCII pair detection
+                                        let b0 = (y & 0xff) as u8;
+                                        let b7 = (y >> 56) as u8;
+                                        if (0x20..0x7f).contains(&b0)
+                                            && (0x20..0x7f).contains(&b7)
+                                        {
+                                            alloc::format!("{:#x} \"{}\"", y, {
+                                                let bytes = y.to_le_bytes();
+                                                let s: alloc::vec::Vec<u8> =
+                                                    bytes.iter().copied().take_while(|&c| (0x20..0x7f).contains(&c)).collect();
+                                                alloc::string::String::from_utf8_lossy(&s).into_owned()
+                                            })
+                                        } else {
+                                            alloc::format!("{:#x}", y)
+                                        }
+                                    }
+                                };
+                                let _ = writeln!(
+                                    w,
+                                    "  {:#x}{} = {}",
+                                    va,
+                                    if va == rcur { " *HIT*" } else { "" },
+                                    cls
+                                );
+                            }
+                        }
+                    }
+                }
+                rcur += 8;
+            }
+            if scanned >= SQW_BUDGET {
+                break 'raw;
+            }
+        }
+        if scanned < SQW_BUDGET {
+            SQW_RAWDONE.store(1, Relaxed);
+            let _ = writeln!(
+                w,
+                "SQW-RAWDONE tgid={} word={:#x} totalhits={} mapped={:#x}",
+                tgid,
+                word,
+                SQW_RAWHITS.load(Relaxed),
+                total_mapped
+            );
+        } else {
+            SQW_RAWCUR.store(rcur, Relaxed);
+        }
+        return;
+    }
     let cur = SQW_CURSOR.load(Relaxed);
     // 82nd b: lock CONTEXT dump, once per word — the words around the
     // rwlock identify the OWNING structure (a vtable pointer names the
@@ -3716,7 +3933,7 @@ pub fn sqwalk_step(tgid: u32, word: u64) {
                     print_queue(queue, &mut w);
                 }
                 printed += 1;
-            } else if ty <= 2 && (6..=8).contains(&st) && printed_c < 16 {
+            } else if ty <= 2 && (6..=8).contains(&st) && printed_c < 48 {
                 // ---- class C: non-queue CoTask (ffrt_submit/io/uv)
                 // that is EXECUTING or blocked — the read-holders may
                 // be plain coroutines, not queue tasks. Structural:
@@ -3764,6 +3981,16 @@ pub fn sqwalk_step(tgid: u32, word: u64) {
     } else {
         SQW_CURSOR.store(cur, Relaxed);
     }
+}
+
+/// 83rd: self-driving pass resume — advance the OPEN sqwalk pass from
+/// the censusd kthread (250 ms rounds; the slice self-gates to one
+/// burst per 500 ms). The 82nd's trigger sites (census park rows,
+/// freeze_scan clusters) only OPEN passes now (sqwalk_step = arm);
+/// the pass must run to completion on its own clock, and NEVER in the
+/// timer softirq (ohw151's both-CPU deadlock).
+pub fn sqwalk_resume() {
+    sqwalk_slice();
 }
 
 /// True once the heap map COMPLETED (successfully or having burned its
@@ -9022,11 +9249,17 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
         // near rsp), but readers stuck INSIDE their critical section hold
         // it deeper (nested SendRequest frames) — ohw136's 160-word cut
         // only caught the 6 samgr waiters, never the 16 holders.
+        // 83rd: 640 -> 4096 words (32 KB) — ohw149's full-window heap
+        // scan found the word on NO heap stack either, so the remaining
+        // thread-side blind spot is depth: a reader that rdlocked and
+        // then nested 10-40 KB of C++ frames into a binder call keeps
+        // the unlock pointer ABOVE a 5 KB window. ~30 tasks x 4096 x 2
+        // reads ~= 250k page-walks, the proven reader-scan cost class.
         // 82nd: match the lock's 1KB NEIGHBORHOOD (owner-pointer holders
         // — the rwlock is a member and readers usually hold the owner
         // object; exact-word matching alone found only waiters on
         // ohw141/143/144).
-        for i in 0..640u64 {
+        for i in 0..4096u64 {
             if nf == 3 {
                 break;
             }
@@ -9630,8 +9863,21 @@ pub fn freeze_scan(now: u64, hz: u64) {
             // face (BWR-parked looper) never takes the census park-row
             // path, so the audit-site trigger alone would miss it. The
             // word-keyed statics make this idempotent across triggers.
-            if readers >= 8 && !adopted {
+            // 83rd: `!adopted` DROPPED — same-pass re-adoption of an
+            // earlier word starved later frozen words forever (ohw150:
+            // foundation's 0x7ff000cb1444 froze at 188 s and NEVER got
+            // a pass because the 853 word was re-adopted first in every
+            // freeze_scan pass). sqwalk's own sticky/drain latch
+            // arbitrates; duplicate triggers are harmless.
+            if readers >= 8 {
                 sqwalk_step(c.tgid, c.uaddr as u64);
+            } else if c.n >= 12 {
+                // 83rd: a DEEP cluster on a non-rwlock word — ohw152's
+                // face (16 samgr threads never-woken on a cond-class
+                // ...194 word, wake[ever=0] for 415 s, no 0x80000010
+                // rwlock ever forming). The raw phase maps that word's
+                // holder graph in the host tgid.
+                sqwalk_step_deep(c.tgid, c.uaddr as u64, true);
             }
             continue;
         }

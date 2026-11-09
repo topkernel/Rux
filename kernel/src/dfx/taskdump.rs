@@ -1285,6 +1285,12 @@ extern "C" fn defer_emit_fn(_arg: *mut core::ffi::c_void) -> i32 {
         // word's page in every mapping mm (kthread context; TLB
         // shootdown via flush_tlb_all is safe here).
         crate::sync::futex::fuxwatch_arm_round();
+        // 83rd: drive the OPEN sqwalk pass (frozen-rwlock reader
+        // naming) — kthread context ONLY: ohw151's 594 MB-window bursts
+        // in the timer softirq held softirq-context locks across
+        // seconds of page walks and deadlocked both CPUs. The slice
+        // self-gates to one burst per ~500 ms.
+        crate::sync::futex::sqwalk_resume();
         // 61st: the ONE-SHOT ffrt::mutex heap map — armed by the first
         // closed chain walk, consumed ONCE here (kthread/sleepable
         // context; the full-heap walk is seconds of page-table walks
