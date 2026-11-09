@@ -241,7 +241,13 @@ pub fn do_mount(
     // ext2/ext4 from a LOOP device: a second ext4 instance on the loop's
     // GenDisk (LTP mount/umount tests: losetup an mkfs.ext2 image, mount,
     // verify, umount). The boot root keeps its own instance.
-    if (fs_type == "ext2" || fs_type == "ext4") && source.starts_with("/dev/loop") {
+    // "ext3" is the ext4 driver's alias (reference >= 4.3: ext3 mounts
+    // through ext4). LTP's device tests pick their scratch fstype from a
+    // probe that lands on ext3 whenever mkfs.ext3 exists — rejecting it
+    // broke every loop-mounted LTP mount test that chose that name.
+    if (fs_type == "ext2" || fs_type == "ext3" || fs_type == "ext4")
+        && source.starts_with("/dev/loop")
+    {
         let minor: Option<u32> = source["/dev/loop".len()..]
             .parse()
             .ok();
@@ -271,7 +277,8 @@ pub fn do_mount(
     }
 
     match fs_type {
-        "ext4" => {
+        "ext4" | "ext3" => {
+            // ext3: ext4-driver alias (reference >= 4.3).
             // SOURCE RESOLUTION (OH Phase 1b): the source names the disk —
             // "/dev/vdb", "/dev/block/vdc" (ueventd's node dir), or bare
             // "vdb" all resolve through the vdX letter. The named disk is
