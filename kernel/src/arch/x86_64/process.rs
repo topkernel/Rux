@@ -114,8 +114,11 @@ pub fn sys_arch_prctl(args: crate::syscall::SyscallArgs) -> i64 {
 
     match code {
         ARCH_SET_FS => {
+            // Reference do_arch_prctl_64: an address at/above
+            // TASK_SIZE_MAX is EPERM, not EFAULT (post-review4 errno
+            // re-audit).
             if addr >= 1 << 47 {
-                return -crate::errno::constants::EFAULT as i64;
+                return -crate::errno::constants::EPERM as i64;
             }
             // SAFETY: current is the running task; we are the only context
             // that may touch our own thread state.
@@ -142,9 +145,11 @@ pub fn sys_arch_prctl(args: crate::syscall::SyscallArgs) -> i64 {
             // review4 arch-L: canonical-bound check like ARCH_SET_FS — a
             // non-canonical GS base programs fine via wrmsr and later
             // #GPs the task in ring 3 unrecoverably instead of failing
-            // the syscall.
+            // the syscall. EPERM per do_arch_prctl_64 (post-review4
+            // errno re-audit; EFAULT was never returned by the
+            // reference here).
             if addr >= 1 << 47 {
-                return -crate::errno::constants::EFAULT as i64;
+                return -crate::errno::constants::EPERM as i64;
             }
             // SAFETY: see ARCH_SET_FS.
             unsafe {

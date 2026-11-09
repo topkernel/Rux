@@ -9793,10 +9793,21 @@ fn binder_thread_read(
             unsafe {
                 let world = w.as_ref().unwrap();
                 let mut stop_full = false;
+                // Post-review4 re-audit of d5fa104e: the head budget used
+                // to compare against the USER read_size only, but the
+                // per-arm room() checks bound against the 512-byte staging
+                // buffer — with read_size > 512 the loop popped work and
+                // THEN hit a failed room(), dropping the popped item on
+                // the floor (a lost Transaction strands the sender; a
+                // lost ReturnError loses the reply). Bound the head by
+                // BOTH budgets so the loop stops BEFORE popping, and
+                // reserve the true worst-case single item (the Node arm:
+                // up to four BR_*_REFS commands × 20 bytes = 80).
+                const STAGED_CAP: usize = 512;
+                let staged_cap = (read_size as usize).min(STAGED_CAP);
+                const MAX_ITEM: usize = 80;
                 loop {
-                    // Budget covers BR_TRANSACTION_SECCTX (transaction
-                    // data + trailing secctx pointer) even when unused.
-                    if staged.len() + 4 + core::mem::size_of::<BinderTransactionData>() + 8 > read_size {
+                    if staged.len() + MAX_ITEM > staged_cap {
                         stop_full = true;
                         break;
                     }

@@ -1356,7 +1356,11 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
         }
     }
 
-    let pid = task.pid();
+    // Post-review4 re-audit of 9bf06ed7: a process-scoped POSIX timer
+    // must survive its ARMING THREAD exiting before expiry — record the
+    // process identity (tgid), not the arming thread's pid; the notify
+    // path resolves any live member for delivery.
+    let pid = task.tgid();
 
     // Disarm existing kernel timer / cpu-time deadline
     if timer.kernel_timer_id != 0 {

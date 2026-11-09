@@ -462,6 +462,29 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
     let want_pidfd = clone_args.flags & 0x0000_1000 != 0;
     match do_clone(clone_args) {
         Ok(pid) => {
+            // Post-review4 re-audit of 5b93ce8e: legacy clone computed
+            // want_pidfd and dropped it — only clone3 wrote the fd.
+            // Legacy-ABI CLONE_PIDFD returns the pidfd through the
+            // parent_tid word in the PARENT (clone(2)); same pidfd
+            // construction as the clone3 arm.
+            if want_pidfd && !parent_tid.is_null() {
+                let file = alloc::sync::Arc::new(
+                    crate::fs::file::File::new(crate::fs::file::FileFlags::new(
+                        crate::fs::file::FileFlags::O_RDWR,
+                    )),
+                );
+                file.set_private_data(pid as usize as *mut u8);
+                match unsafe { crate::fs::file::get_file_fd_install(file) } {
+                    Some(fd) => {
+                        if !unsafe {
+                            crate::arch::uaccess::put_user(parent_tid, fd as i32)
+                        } {
+                            return -(errno::EFAULT as i64);
+                        }
+                    }
+                    None => return -(errno::EMFILE as i64),
+                }
+            }
             let parent_ns = crate::sched::current().and_then(|t| unsafe { (*t).ns_pid.clone() });
             crate::process::ns::translate_sender_pid_ns(pid, parent_ns.as_ref()) as i64
         }

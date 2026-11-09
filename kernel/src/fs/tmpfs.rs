@@ -251,18 +251,16 @@ impl TmpfsNode {
     }
 
     pub fn file_size(&self) -> u64 {
-        // review4 fs-M: hard links share the pages Arc but each node has
-        // its own `size` snapshot — writes through one link leave the
-        // other's snapshot stale, so reads through the other link clamp
-        // short. The pages map IS the authoritative length: return the
-        // max(node snapshot, pages.len() * PAGE_SIZE) so either link
-        // sees writes done through the other.
-        let snap = self.size.load(Ordering::Acquire);
-        let pages_len = {
-            let pm = self.pages.lock();
-            pm.len() as u64 * 4096
-        };
-        snap.max(pages_len)
+        // Post-review4 re-audit of 3df6acb6: the max(node snapshot,
+        // pages.len()*PAGE_SIZE) shape reported st_size = next page
+        // multiple for EVERY non-page-multiple file (100-byte file →
+        // 4096), and O_APPEND/SEEK_END landed at the inflated offset.
+        // The node snapshot IS the size (write/truncate maintain it);
+        // revert to it. The original hard-link staleness divergence
+        // (this fn's max() attempted to paper over) needs the shared-
+        // metadata-Arc redesign the ledger prescribed — not a size
+        // definition that breaks the common path.
+        self.size.load(Ordering::Acquire)
     }
 
     /// Number of allocated pages (stat blocks / memory accounting).

@@ -61,20 +61,17 @@ pub fn jbd2_journal_commit_transaction(
         *state = TransactionState::Locked;
     }
 
-    // Wait for all updates (spin on single-core — should already be 0).
-    // review4 fs-L: an fsync-forced commit can enter while a writer on
-    // another CPU is mid-handle — the old unbounded spin busy-waited for
-    // the whole writer I/O with preemption available. Yield every 4K
-    // spins (the writer needs the CPU to finish its handle and drop
-    // t_updates; the commit holds only the commit gate here, which the
-    // writer's journal_start does not take).
-    let mut spin_count = 0u64;
+    // Wait for all updates (spin — should already be 0).
+    // Post-review4 re-audit of 1668208c: the yield-every-4K-spins called
+    // schedule() while j_commit_gate (a preempt-off Spinlock) is held —
+    // scheduling away with a spinlock held and preemption disabled. The
+    // wait is cross-CPU in practice (a writer mid-handle cannot be on
+    // THIS cpu: we are the running task under the gate), so a pure spin
+    // makes progress without the scheduler. The preempt-off-across-I/O
+    // shape of the gate itself is the tracked follow-up (jbd2 gate
+    // redesign, docs/development/code-review-2026-11-08.md).
     while commit_transaction.t_updates.load(core::sync::atomic::Ordering::SeqCst) > 0 {
         core::hint::spin_loop();
-        spin_count += 1;
-        if spin_count % 4096 == 0 {
-            crate::sched::yield_cpu();
-        }
     }
 
     // Collect dirty buffers (keyed map — block order; see the field doc

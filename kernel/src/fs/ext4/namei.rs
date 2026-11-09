@@ -2705,19 +2705,24 @@ fn ext4_rename_inner(
                 target_mut.i_links_count -= 1;
             }
             if target_mut.i_links_count == 0 {
-                target_mut.i_dtime = 1;
-                // Persist the dead inode (dtime set, links 0, blocks
-                // INTACT) — the reap frees them later, after the last
-                // mapper is gone.
+                // links==0, dtime==0 = pending-delete — the SAME on-disk
+                // state unlink leaves. NEVER stamp dtime here: the reap
+                // treats dtime != 0 as already-done and returns without
+                // freeing, so d5fa104e's dtime=1 turned every
+                // rename-over-file into a permanent inode+blocks leak
+                // (post-review4 re-audit).
+                target_mut.i_dtime = 0;
                 super::inode::write_inode_disk(fs, target_ino, &target_mut)?;
-                // Queue the reap: same mechanism as ext4_destroy_inode,
-                // except rename sets dtime itself so we push directly.
-                // The inode cache still holds a VFS inode for target_ino;
-                // its Drop (last close) is the normal reap trigger, but
-                // rename-replace has no Drop to rely on if the target was
-                // already closed — queue unconditionally so a closed-file
-                // replace is reaped at the next ext4 entry point too.
-                crate::fs::ext4::queue_pending_reap(fs, target_ino);
+                // Queue NOW only when the icache holds no VFS inode for
+                // the number (target was already closed: no Drop will
+                // ever fire). With a live/cached inode the last-reference
+                // Drop queues instead — queueing here would let the next
+                // ext4 entry point free blocks under an open descriptor
+                // (the H-5 reuse-under-live-mapper bug).
+                let fs_id = fs as *const Ext4FileSystem as u64;
+                if crate::fs::inode::icache_lookup(target_ino as u64, fs_id).is_none() {
+                    crate::fs::ext4::queue_pending_reap(fs, target_ino);
+                }
             } else {
                 super::inode::write_inode_disk(fs, target_ino, &target_mut)?;
             }

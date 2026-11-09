@@ -2337,13 +2337,23 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                     // description's LAST reference drop — scan the table
                     // for the description before purging the interest.
                     let mut found_at = None;
+                    let mut moved_to: Option<usize> = None;
                     for fd_i in 0..1024usize {
                         if let Some(f) = fdtable.get_file(fd_i) {
                             if f.file_id == entry.file_id {
                                 found_at = Some(f);
+                                moved_to = Some(fd_i);
                                 break;
                             }
                         }
+                    }
+                    if let Some(new_fd) = moved_to {
+                        // Post-review4 re-audit: the description moved to a
+                        // new fd number — remember it so the NEXT wait goes
+                        // straight through the fast path instead of
+                        // re-scanning up to 1024 slots under
+                        // epoll.entries.lock().
+                        entry.fd = new_fd as i32;
                     }
                     match found_at {
                         Some(f) => f,

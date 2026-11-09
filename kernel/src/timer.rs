@@ -1149,8 +1149,31 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
 ///   signal — it increments the overrun instead (Linux keeps one
 ///   pending notification per timer and counts the rest).
 fn posix_timer_notify(pid: u32, signo: i32, sival: u64, tid: i32) {
-    let Some(task) = crate::process::find_task_by_pid(pid) else {
-        return;
+    // Post-review4 re-audit of 9bf06ed7: the arm records the process
+    // (tgid) now, but even a tgid-named expiry must survive the GROUP
+    // LEADER exiting while other threads live (the reference delivers
+    // process-directed posix-timer signals to any member). Exact-pid
+    // lookup first (fast path), then a tgid scan.
+    let task = match crate::process::find_task_by_pid(pid) {
+        Some(t) => t,
+        None => {
+            // Resolve a live MEMBER of the tgid inside the walk (raw
+            // borrows must not outlive the bucket-locked iteration),
+            // then take a normal pinned lookup on that member.
+            let mut member_pid: u32 = 0;
+            crate::process::pid_hash::pid_hash_for_each_task(|t| unsafe {
+                if member_pid == 0 && (*t).tgid() == pid {
+                    member_pid = (*t).pid();
+                }
+            });
+            if member_pid == 0 {
+                return; // whole process gone — nothing to notify
+            }
+            match crate::process::find_task_by_pid(member_pid) {
+                Some(t) => t,
+                None => return,
+            }
+        }
     };
     // SAFETY: find_task_by_pid returns a live Task with an elevated
     // reference (if any); the posix_timers list and signal state are
@@ -1182,7 +1205,12 @@ fn posix_timer_notify(pid: u32, signo: i32, sival: u64, tid: i32) {
         }
         let info = crate::signal::SigInfo::new(signo, crate::signal::si_code::SI_TIMER, pid, 0)
             .with_timer_payload(tid, overrun_at_delivery, sival);
-        let _ = crate::signal::send_signal_with_info(pid, info);
+        // Deliver to the RESOLVED member task: in the leader-exited
+        // fallback the tgid number no longer hashes to a live task, and
+        // re-sending by tgid would drop the notification again (the
+        // exact bug this path exists to close).
+        let target = task.pid();
+        let _ = crate::signal::send_signal_with_info(target, info);
     }
 }
 

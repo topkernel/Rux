@@ -1755,34 +1755,6 @@ unsafe fn devfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
 /// included). POSIX replace semantics for an existing destination; the
 /// VFS wrapper has already validated types/stickiness/cycles.
 /// SAFETY: VFS callback contract; private_data is a leaked Arc<DevfsEntry>.
-/// Is this devfs entry a directory?
-fn is_devfs_dir(name: &str) -> bool {
-    // devfs directories are the well-known device nodes (input/, block/,
-    // etc.) — the registry knows them; a name-only check is the best we can
-    // do without walking the tree (the cycle guard is a safety net, not a
-    // correctness-critical check).
-    name.ends_with('/') || matches!(name, "input" | "block" | "char" | "pts" | "shm")
-}
-
-/// Is `candidate` inside `ancestor`'s subtree? (devfs cycle guard)
-/// Uses the tree paths (DevfsEntry has no parent pointer).
-fn devfs_is_descendant(candidate: *const DevfsEntry, ancestor: *const DevfsEntry) -> bool {
-    // SAFETY: both pointers come from the devfs registry (static nodes).
-    let (cand, anc) = unsafe { (&*candidate, &*ancestor) };
-    let (Some(cand_path), Some(anc_path)) = (devfs_rel_path(cand), devfs_rel_path(anc)) else {
-        return false;
-    };
-    if cand_path == anc_path {
-        return false; // same node
-    }
-    // "/dev/input" is inside "/dev" but not vice versa
-    let prefix = if anc_path.is_empty() {
-        String::new()
-    } else {
-        alloc::format!("{}/", anc_path)
-    };
-    cand_path.starts_with(&prefix)
-}
 
 unsafe fn devfs_rename(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_name: &[u8]) -> i32 {
     let old_ptr = match old_dir.private_data {
@@ -1830,9 +1802,36 @@ unsafe fn devfs_rename(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_na
         //
         // review4 fs-M: cycle guard — renaming a directory INTO ITS OWN
         // subtree silently detached it (the VFS-level ".." guard is a no-op
-        // for devfs). Reject with EINVAL, like Linux's lock_rename.
-        if is_devfs_dir(old_name) && devfs_is_descendant(new_parent, old_parent) {
-            return errno::Errno::InvalidArgument.as_neg_i32();
+        // for devfs). Post-review4 re-audit: the landed shape anchored on
+        // the old PARENT (devfs_rel_path of the devfs root returns None,
+        // so the guard never fired for any built-in dir) and type-checked
+        // the child by a fixed name allowlist. Reference lock_rename
+        // semantics: reject when the NEW parent is the moved directory
+        // itself or anywhere inside its subtree. Both paths are resolved
+        // BEFORE any mutation (the child is still attached).
+        {
+            let child = {
+                let old_children = old_parent.children.lock_irqsave();
+                old_children.get(old_name).cloned()
+            };
+            if let Some(child) = child {
+                if child.is_dir() {
+                    let self_move =
+                        core::ptr::eq(new_parent as *const DevfsEntry, child.as_ref() as *const DevfsEntry);
+                    if !self_move {
+                        if let (Some(child_path), Some(newp_path)) =
+                            (devfs_rel_path(&child), devfs_rel_path(new_parent))
+                        {
+                            let prefix = alloc::format!("{}/", child_path);
+                            if newp_path.starts_with(&prefix) {
+                                return errno::Errno::InvalidArgument.as_neg_i32();
+                            }
+                        }
+                    } else {
+                        return errno::Errno::InvalidArgument.as_neg_i32();
+                    }
+                }
+            }
         }
         let child = {
             let mut old_children = old_parent.children.lock_irqsave();

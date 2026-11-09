@@ -3100,8 +3100,14 @@ pub fn faccessat2_core(dirfd: i32, pathname_ptr: *const u8, mode: i32, flags: i3
     } else {
         crate::process::task::Cred::new_init()
     };
-    cred.euid = cred.uid;
-    cred.egid = cred.gid;
+    // Reference semantics: the check uses the REAL ids by default;
+    // AT_EACCESS switches to the EFFECTIVE ids. Post-review4 re-audit:
+    // the unconditional downgrade made AT_EACCESS a silent no-op (a
+    // setuid caller got real-id answers either way).
+    if flags & AT_EACCESS == 0 {
+        cred.euid = cred.uid;
+        cred.egid = cred.gid;
+    }
 
     let lookup_flags = if flags & AT_SYMLINK_NOFOLLOW != 0 {
         crate::fs::vfs::LOOKUP_NOFOLLOW
@@ -6392,7 +6398,10 @@ pub fn sys_fchmodat2(args: SyscallArgs) -> i64 {
         if is_empty {
             return sys_fchmod([args[0], args[2], 0, 0, 0, 0]);
         }
-        return -(errno::EINVAL as i64);
+        // NON-empty path + AT_EMPTY_PATH: the reference ignores the
+        // flag and resolves the path (the *at() convention — the flag
+        // only has meaning for an empty pathname; post-review4 re-audit
+        // replaced the EINVAL here).
     }
     sys_fchmodat(args)
 }
