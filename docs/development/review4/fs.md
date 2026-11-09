@@ -104,7 +104,7 @@ nosuid mount keeps its privilege. Linux enforces both in may_open/exec and
 cap_bprm. Fix: consult `mount_flags_for_path` in the exec gate and the
 setuid-grant path.
 
-### [Low] pidfd.rs:61-81 — pin_leader can return a null leader and target_exited derefs it
+### [Low] pidfd.rs:61-81 — pin_leader can return a null leader and target_exited derefs it — ✅ FIXED (`1668208c`)
 
 `pin_leader` only pins when `group_leader_ptr()` is non-null and != t; a null
 leader falls through to `Some(null)`; `target_exited` then runs
@@ -206,14 +206,14 @@ uncommitted indefinitely; a crash loses ALL of it where Linux jbd2 guarantees a
 commit within 5s. Fix: timer/kthread forcing a commit past j_commit_interval
 when t_updates == 0.
 
-### [Low] jbd2/commit.rs:273-279 — a commit larger than the journal aborts the journal permanently
+### [Low] jbd2/commit.rs:273-279 — a commit larger than the journal aborts the journal permanently — ✅ FIXED (`1668208c`)
 
 `total_journal_blocks > j_free` → journal.abort(ENOMEM), no checkpoint/retry
 path; every later handle EROFS. The lazy threshold (1024) plus a small journal
 can exceed the whole log. Fix: cap LAZY_COMMIT_MAX_BUFFERS by journal geometry
 or chunk commits.
 
-### [Low] jbd2/commit.rs:65-67 / transaction.rs:288-295 — unbounded t_updates busy-wait
+### [Low] jbd2/commit.rs:65-67 / transaction.rs:288-295 — unbounded t_updates busy-wait — ✅ FIXED (`1668208c`)
 
 Both spin on `t_updates > 0` with no yield (commit.rs has no timeout at all).
 The fsync-forced commit takes no EXT4_BIG_LOCK and can enter while a writer on
@@ -231,7 +231,7 @@ Both commit paths sync every registered buffer to its FINAL location, then
 advance tail=head. Crash semantics equal write-back mode, not ordered
 journaling. This is what masks the High revoke-clobber finding at runtime.
 
-### [Low] jbd2/recovery.rs PASS_SCAN — revoke records are collected for ALL transactions including uncommitted tails
+### [Low] jbd2/recovery.rs PASS_SCAN — revoke records are collected for ALL transactions including uncommitted tails — ✅ FIXED (`1668208c`)
 
 scan_revoke_block accumulates every revoke block it walks, including those
 after the last commit block (uncommitted transactions); block_is_revoked_for
@@ -274,7 +274,7 @@ everything under A). ext4/tmpfs/rootfs have their own subtree walks; devfs
 relies on the (broken for it) VFS one. Fix: add a devfs-side subtree check
 like tmpfs_subtree_contains.
 
-### [Low] rootfs.rs rootfs_rename (op) — replacing a destination DIRECTORY removes it without an emptiness check
+### [Low] rootfs.rs rootfs_rename (op) — replacing a destination DIRECTORY removes it without an emptiness check — ✅ FIXED (`1668208c`)
 
 `new_dir_node.remove_child(new_name)` runs unconditionally when the
 destination exists; a non-empty destination directory's whole subtree is
@@ -291,7 +291,7 @@ Documented divergences (comments say so); listed so the ledger is complete.
 Mount-model gaps for the record: no per-path vfsmount, and the root overlay
 installs no VfsMountInternal so `mount -o remount,rw /` fails.
 
-### [Low] vfs.rs:6043 file_getdents64 trusts `count` over `buf.len()`; vfs.rs:6241 mem_file_stat leaks the heap pointer in st_ino; pipe.rs pipe_file_stat leaks the Pipe address in st_ino
+### [Low] vfs.rs:6043 file_getdents64 trusts `count` over `buf.len()`; vfs.rs:6241 mem_file_stat leaks the heap pointer in st_ino; pipe.rs pipe_file_stat leaks the Pipe address in st_ino — ✅ FIXED (`1668208c`)
 
 getdents: only in-tree caller allocates equal buffers, but any new caller
 panics; add `count.min(buf.len())`. st_ino = raw Box/Pipe pointers are
