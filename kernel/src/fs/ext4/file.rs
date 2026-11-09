@@ -2654,7 +2654,13 @@ pub fn ext4_file_poll(file: &File, events: u16) -> u16 {
     let size = ino.get_size() as u64;
     let at_eof = file.get_pos() >= size;
     let mut r = 0u16;
-    if events & POLLIN != 0 && !at_eof {
+    // Post-review4 re-audit of 6a593a60: a REGULAR file is ALWAYS
+    // readable in the reference — poll/select never blocks on it and
+    // read() at EOF simply returns 0. Suppressing POLLIN at EOF broke
+    // LTP select01 ("select() with regular file timed out" — the
+    // reference's own glib poll->read(0) spin at EOF is the same
+    // contract there; apps that poll regular files spin identically).
+    if events & POLLIN != 0 {
         r |= POLLIN | POLLRDNORM;
     }
     if events & POLLRDHUP != 0 && at_eof {

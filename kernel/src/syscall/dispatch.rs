@@ -272,11 +272,13 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             return;
         }
         34 => {
-            // review4 syscall-L: nr 34 is a TABLE HOLE on real x86_64
-            // Linux (ENOSYS; pause is nr 34 only on 32-bit — glibc/musl
-            // never issue it here). A program probing the hole's ENOSYS
-            // used to HANG in our pause() shim instead.
-            syscall_set_return_value(regs, -(errno::ENOSYS as i64));
+            // Post-review4 re-audit of dc097913: nr 34 IS pause(2) on
+            // x86_64 (33 dup2, 34 pause, 35 nanosleep — not a table
+            // hole; glibc/musl pause() issues it directly, and LTP
+            // pause01-03 read ENOSYS from this arm). The "probing
+            // program" that hung was paused — which is the contract.
+            // sleep until a signal; then always -EINTR.
+            syscall_set_return_value(regs, signal::sys_pause(args));
             return;
         }
         37 => {
