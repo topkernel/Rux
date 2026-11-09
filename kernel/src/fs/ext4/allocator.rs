@@ -261,6 +261,19 @@ impl<'a> BlockAllocator<'a> {
     }
 
     /// Free a block
+    /// Total free blocks across all groups (read-only group-descriptor
+    /// sum — the rebuild pre-flight's headroom check, review4 fs-L).
+    pub fn total_free_blocks(&self) -> u64 {
+        let group_descs = self.fs.group_descs.lock();
+        group_descs
+            .iter()
+            .map(|g| {
+                (g.bg_free_blocks_count_lo as u64)
+                    | ((g.bg_free_blocks_count_hi as u64) << 16)
+            })
+            .sum()
+    }
+
     pub fn free_block(&self, block: u64) -> Result<(), i32> {
         self.free_block_run(block, 1)
     }

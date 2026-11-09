@@ -186,7 +186,12 @@ static UART_VIRT_ADDR: AtomicUsize = AtomicUsize::new(0);
 pub fn init_uart_fixmap() -> usize {
     let virt = fix_to_virt(FixedAddress::FixEarlycon as usize);
 
-    // Device memory flags: RW, accessed, dirty, global
+    // Device memory flags: RW, accessed, dirty, global. review4 arch-L:
+    // the reference maps devices _PAGE_IO (Svpbmt bit 62), but QEMU's
+    // default -cpu rv64 ISA does NOT include Svpbmt — bit 62 is RESERVED
+    // there and the PTE turns INVALID (first boot attempt died silent
+    // before the kernel's first print). Cacheable stays until an Svpbmt
+    // probe exists (see the same note at mmu_init.rs early_pmd_io).
     let flags = PageTableEntry::V
         | PageTableEntry::R
         | PageTableEntry::W

@@ -2413,7 +2413,17 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                         ext4_inode.block[14] = 0;
                     }
                 }
-                ext4_inode.blocks = (new_blocks * (block_size / 512)) as u64;
+                // review4 fs-L: count the SURVIVING indirect metadata
+                // blocks too — a pure-data rewrite understated i_blocks
+                // by the surviving indirect/dind/tind blocks (the
+                // extent/punch path is subtract-only; e2fsck flags the
+                // mismatch).
+                let meta_ptr_blocks = (new_blocks > 12 && ext4_inode.block[12] != 0) as u64
+                    + (new_blocks > 12 + (block_size / 4) as u64 && ext4_inode.block[13] != 0) as u64
+                    + (new_blocks > 12 + (block_size / 4) as u64 * (1 + (block_size / 4) as u64)
+                        && ext4_inode.block[14] != 0) as u64;
+                ext4_inode.blocks =
+                    (new_blocks * (block_size / 512)) as u64 + meta_ptr_blocks * (block_size / 512);
 
                 // Partial last block: ZERO the tail of the kept block.
                 // POSIX truncate-extend semantics make [old, new) read as

@@ -1802,20 +1802,10 @@ pub unsafe fn map_kernel_region_huge(virt: u64, size: u64, flags: u64) {
     asm!("sfence.vma zero, zero", options(nomem, nostack));
 }
 
-/// Map device memory page to user space
-pub fn map_device_page(virt: usize, phys: usize, flags: u64) {
-    let vpn2 = (virt >> 30) & 0x1FF;
-    let ppn = (phys >> 12) as u64;
-    let entry_bits = (ppn << 10) | flags;
-
-    unsafe {
-        ROOT_PAGE_TABLE.set(vpn2 as usize, PageTableEntry::from_bits(entry_bits));
-    }
-
-    unsafe {
-        asm!("sfence.vma", options(nomem, nostack));
-    }
-}
+// map_device_page was deleted (review4 arch-L): zero callers, and it
+// installed a PGD-LEVEL 1GB LEAF for a single 4K request — a revived
+// call would shadow the entire GB containing `phys`. Descend to L0 if
+// device mapping is ever needed here.
 
 /// Select best mapping size
 #[inline]

@@ -866,6 +866,11 @@ impl MmStruct {
                         // SAFETY: addr is a page-aligned user address whose
                         // leaf was verified above.
                         unsafe { self.clear_pte(addr as u64); }
+                        // review4 arch-L: advance before the continue (the
+                        // U==0 arm above does) — the old missing advance
+                        // walked every foreign page twice via the
+                        // cleared-then-restored PTE routing.
+                        addr += PAGE_SIZE as usize;
                         continue;
                     }
                 }
@@ -1583,9 +1588,10 @@ pub static MM_CTX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64
 pub static PTE_MODIFY_LOCK: crate::mm::mm_struct::GlobalPteLock =
     crate::mm::mm_struct::GlobalPteLock::new();
 
-/// Per-mm leaf-PTE section hook (INV-LOCK-7), GLOBAL mode on riscv64:
-/// every mm maps to the same global epoch section, so arch-neutral
-/// callers compile unchanged against the x86_64 shape.
+/// Per-mm leaf-PTE section hook (INV-LOCK-7). SPLIT mode on riscv64
+/// (since the 2026-10-31 perf review): every mm owns its PteLock section
+/// and writers on different mms run concurrently — the old GLOBAL-mode
+/// doc comment was stale (review4 arch-L).
 #[inline]
 pub fn pte_lock_for(
     mm: &crate::mm::mm_struct::MmStruct,
@@ -2090,8 +2096,8 @@ pub(super) fn release_cache_mapping_pin(ppn: usize) {
 /// Kernel mappings (VPN2 >= KERNEL_PGD_START or U=0 entries) are shared by copying PGD entries.
 /// User space mappings are copied with COW marking for writable pages.
 ///
-/// `parent` supplies the walk's root (and, on split-mode arches, the
-/// per-mm PTE section; riscv64 is GLOBAL mode — INV-LOCK-7).
+/// `parent` supplies the walk's root and the per-mm PTE section
+/// (split mode — INV-LOCK-7).
 pub unsafe fn copy_page_table_cow(
     parent: &crate::mm::mm_struct::MmStruct,
     cow_exempt: &[(u64, u64)],
@@ -2387,8 +2393,9 @@ pub enum CowFaultResult {
     OutOfMemory,
 }
 
-/// Handle copy-on-write page fault (GLOBAL-mode PTE section on riscv64,
-/// INV-LOCK-7; `mm` is the owning address space of `root_ppn`).
+/// Handle copy-on-write page fault under the per-mm PTE section
+/// (split mode — INV-LOCK-7; `mm` is the owning address space of
+/// `root_ppn`).
 pub unsafe fn handle_cow_fault(
     mm: &crate::mm::mm_struct::MmStruct,
     root_ppn: u64,

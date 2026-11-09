@@ -80,93 +80,11 @@ pub fn start_thread(regs: &mut PtRegs, pc: u64, sp: u64) {
 /// - Copy parent's register state
 /// - Set child return value to 0 (a0 = 0)
 /// - Set return address to ret_from_fork
-///
-/// # Arguments
-/// - `child`: Child process task structure
-/// - `parent_regs`: Parent's PtRegs
-///
-/// # Returns
-/// Returns child's PtRegs pointer on success, None on failure
-///
-/// # Note
-/// Memory allocated by this function is caller's responsibility to free
-pub unsafe fn copy_thread(
-    child: *mut Task,
-    parent_regs: &PtRegs,
-) -> Option<*mut PtRegs> {
-    use alloc::alloc::{alloc, Layout};
 
-    // Allocate memory for child's PtRegs
-    let pt_regs_size = core::mem::size_of::<PtRegs>();
-    let layout = Layout::from_size_align(pt_regs_size, 16).ok()?;
-
-    let mem_ptr = alloc(layout);
-    if mem_ptr.is_null() {
-        return None;
-    }
-
-    let child_regs = mem_ptr as *mut PtRegs;
-
-    // Copy parent's register state
-    // The parent frame's epc is ALREADY past the ecall (handle_syscall in
-    // trap.rs advanced it when the trap was taken — by 4 for a 32-bit
-    // ecall, 2 for c.ecall); copying it verbatim, exactly like the live
-    // generic copy_thread in process/fork.rs. The old unconditional +4
-    // here skipped one more instruction in the child (and mis-skipped
-    // compressed ecalls outright).
-    core::ptr::write(child_regs, PtRegs {
-        epc: parent_regs.epc,          // already past the ecall
-        ra: parent_regs.ra,
-        sp: parent_regs.sp,           // User stack pointer
-        gp: parent_regs.gp,           // Global pointer
-        tp: parent_regs.tp,           // Thread pointer (TLS)
-        t0: parent_regs.t0,
-        t1: parent_regs.t1,
-        t2: parent_regs.t2,
-        s0: parent_regs.s0,
-        s1: parent_regs.s1,
-        a0: 0,                        // Child return value is 0
-        a1: parent_regs.a1,
-        a2: parent_regs.a2,
-        a3: parent_regs.a3,
-        a4: parent_regs.a4,
-        a5: parent_regs.a5,
-        a6: parent_regs.a6,
-        a7: parent_regs.a7,
-        s2: parent_regs.s2,
-        s3: parent_regs.s3,
-        s4: parent_regs.s4,
-        s5: parent_regs.s5,
-        s6: parent_regs.s6,
-        s7: parent_regs.s7,
-        s8: parent_regs.s8,
-        s9: parent_regs.s9,
-        s10: parent_regs.s10,
-        s11: parent_regs.s11,
-        t3: parent_regs.t3,
-        t4: parent_regs.t4,
-        t5: parent_regs.t5,
-        t6: parent_regs.t6,
-        status: parent_regs.status,   // sstatus
-        badaddr: parent_regs.badaddr, // stval
-        cause: parent_regs.cause,     // scause
-        orig_a0: 0,                   // Child orig_a0 = 0
-    });
-
-    // Set child's fork info
-    (*child).set_fork_child(child_regs);
-
-    // Set up thread struct for context switch
-    extern "C" {
-        fn ret_from_fork();
-    }
-
-    let thread = (*child).thread_mut();
-    thread.ra = ret_from_fork as u64;  // Return address = ret_from_fork
-    thread.sp = child_regs as u64;     // Stack pointer = pt_regs address
-
-    Some(child_regs)
-}
+// The arch copy_thread was deleted (review4 arch-L): zero callers, and
+// it heap-allocated the child's PtRegs — a revived call would push trap
+// frames below a HEAP address instead of the kernel stack. The live path
+// is the GENERIC copy_thread in process/fork.rs.
 
 /// Clean up thread state
 ///

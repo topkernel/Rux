@@ -1636,6 +1636,31 @@ pub fn ext4_ext_rebuild(
     i_block: &mut [u32; 15],
     exts: &[RawExtent],
 ) -> Result<i64, i32> {
+    // review4 fs-L: pre-flight the new tree's metadata demand BEFORE
+    // freeing the old tree — a mid-rebuild append failure (ENOSPC on a
+    // meta block) after the free left a PREFIX-ONLY tree: silent mapping
+    // loss. The reference reserves the metadata credit up front; the
+    // pre-flight check (leaf blocks + index levels + slack, against the
+    // allocator's live free count) rejects up front instead.
+    {
+        let leaf_cap = external_node_cap(fs).max(1) as u64;
+        let leaves = exts.len() as u64;
+        let need_leaves = if leaves == 0 {
+            0
+        } else {
+            leaves.div_ceil(leaf_cap)
+        };
+        let mut nodes = need_leaves;
+        let mut total = need_leaves;
+        while nodes > 1 {
+            nodes = nodes.div_ceil(leaf_cap);
+            total += nodes;
+        }
+        let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
+        if allocator.total_free_blocks() < total + 1 {
+            return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+        }
+    }
     let mut freed: u64 = 0;
     ext4_ext_free_index_blocks(fs, i_block, &mut freed)?;
     init_node_header(
