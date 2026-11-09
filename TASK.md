@@ -9657,17 +9657,53 @@ precedent). The fix REMOVES one ioctl return+re-enter per sync send
 Boot stability: ohw156 ran the full 1500 s, zero panics, census
 instruments healthy.
 
-#### 5. FOR THE 85TH (priority order)
+#### 5. TWO MORE FOUNDERS, FOUND AND FIXED THIS SESSION (a6be074f)
 
-1. The isolated notifier founder: m.ohos.systemui ace.bg/OS_FFRT
-   parks (words at arena offset 0x8007d4/0x800734, anywoken=0, park
-   386 s+) — who enqueues work to them and what syscall of ours
-   fails/slow-paths before the enqueue? The accountmgr->foundation
-   txn21887 chain (word 0x7ff000ef3b94, offset 0xb94 family) is the
-   upper edge; systemui's own main threads (RUNNING-shaped at the
-   dumps) are the producers to trace.
-2. If the notifiers need a kernel-side push: check the FFRT queue
-   counters (FUXW-SUM pool=337/8192, ring activity) over the wedge
-   window — producers enqueue but never wake, matching S81's
-   never-sent verdict; the missing wake's producer syscall is the
-   85th's first read.
+Chasing ohw156's remaining pair with the standing EFAULTTRAC tap plus
+two new KUFILL diagnostics (kernel-uaccess-fill refusal: result code +
+VMA flags; budget 60):
+
+- FIX 2 (mm, tri-arch): kernel-mode uaccess faults BELOW a stack VMA
+  floor never grew the stack (the demand-fill gate only ran for
+  VMA-covered addresses). Linux expands GROWSDOWN stacks for
+  kernel-originated faults too. The kernel branch now offers
+  uncovered faults to handle_mm_fault when find_stack_vma has a
+  candidate; non-stack uncovered addresses keep the fixup.
+- FIX 3 (THE SIGABRT founder, dfx): the fuxstuck write-watchpoint
+  clears the watched page's PTE W-bit and only cycled USER writes
+  through restore/log/single-step. A KERNEL put_user to the same page
+  — clock_gettime's timespec out-param lives on the same FFRT-arena
+  control page as the watched futex word (the +0x8007xx last-page
+  family) — took PermissionDenied -> fixup -> EFAULT -> libc++
+  system_error -> SIGABRT. The instrument was killing its own
+  subject: installs died at ohw156 t=161.5 (install stream stopped),
+  telecom at ohw157/158 t=33.9. Kernel writers now get W restored, a
+  budgeted FUXWATCH-KWRITE line, and a retry. ohw159 (900 s): 0
+  uncaught-exception aborts, 0 clock_gettime failures (every prior
+  boot aborted by t=85), why=7 still 0, 104 ServiceStarts, no new
+  wedge class — but the S83 never-run-notifier parks remain
+  (stuck_total=193, OS_FFRT_2_0/PlayerRequest/bluetooth families,
+  anywoken=0) and the screen is still 06b933b4.
+
+Gates for a6be074f: x86_64/riscv64/aarch64 builds rc=0; riscv64 make
+test ALL TESTS PASSED (run/test-rv-84b.log, run/test-rv-84c.log);
+Tier-2 pbench A/B fix84 vs fix84b (mm fault path), 3 reps interleaved,
+run/abpb-fix84-fix84b.txt: every present row within +-8% (p3b_fault_cow
+-2.3%, p2_ctxsw +3.3% — the touched rows; p6_mkdrmdir/p5f_stream_dwait
+MISSING in 1 rep = the known host-noise class, foreign_qemus=10).
+
+#### 6. FOR THE 85TH (priority order)
+
+1. The never-run-notifier founder is now the ONLY wedge class left,
+   and the boots are CLEAN for hunting it (no protocol orphans, no
+   instrument kills, no early returns): FFRT workers parked at arena
+   last-page offsets (+0x8007c4/0x8007d4/0x800734/0x800884),
+   anywoken=0, fval=0x2, across many processes (ohw159: tgid 664/740
+   OS_FFRT_2_0, 730 PlayerRequest, 384 bluetooth_servi). The producer
+   that should enqueue-and-wake them never does — find the producer
+   thread and its last syscall (the sqwalk stack-hit owner naming +
+   FUX-CHAIN hops are the standing tools; the samgr ...194 family is
+   gone, these are all arena-control-page words).
+2. Yardstick unchanged: notifiers run -> install stream completes ->
+   CreateNewUser -> StartUser(46) -> launcher -> PIXELS (report any
+   md5 != 06b933b4/82f0a25f immediately).
