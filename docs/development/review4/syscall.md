@@ -46,14 +46,14 @@ Linux installs it and returns EFAULT. Trigger: `sigaction(SIGUSR1, bad_ptr, &old
 `sigaction(SIGUSR1, &new, bad_ptr)`. Fix: copy act in first, install, then copy oldact out
 (match kernel/signal.c sys_rt_sigaction).
 
-### [Low] syscall/signal.rs:486 — rt_sigpending returns `pending & blocked`; Linux returns the raw pending union
+### [Low] syscall/signal.rs:486 — rt_sigpending returns `pending & blocked`; Linux returns the raw pending union — ✅ FIXED (`bcbd69f7`)
 `do_sigpending` (kernel/signal.c) ORs private and shared pending with no blocked-mask intersection;
 `sigdelsetmask(SIGKILL|SIGSTOP)` only. Rux masks out unblocked pending signals, so a raised-and-
 undelivered signal (task still in kernel on the delivery check) reads as not-pending. Trigger: raise a
 signal to a task busy in a long syscall, sigpending() from another thread. Fix: report the full
 `pending` set.
 
-### [Low] syscall/time.rs:414-445 — nanosleep remainder quantized to whole milliseconds, rounded UP
+### [Low] syscall/time.rs:414-445 — nanosleep remainder quantized to whole milliseconds, rounded UP — ✅ FIXED (`bcbd69f7`)
 `remaining_ns` is converted via `remaining_msecs = (ns + 999_999)/1_000_000` and back to sec/nsec, so
 `rem` can exceed the actual remaining time by up to 1 ms — and exceed the original REQUEST when the
 request is < 1 ms or interrupted early (POSIX: rem <= req; LTP clock_nanosleep02 monotonicity checks
@@ -65,13 +65,13 @@ signal. A program probing ENOSYS behavior of nr 34 hangs instead. (The sibling l
 23 select, 33 dup2, 37 alarm, 139 sysfs, 213/232 epoll — are all real x86_64 numbers and correct.)
 Fix: return ENOSYS for 34 like Linux, or keep the shim documented as intentional.
 
-### [Low] syscall/time.rs:1952-1956 — get_robust_list always reports head=0 and ignores put_user failures
+### [Low] syscall/time.rs:1952-1956 — get_robust_list always reports head=0 and ignores put_user failures — ✅ FIXED (`bcbd69f7`)
 Linux returns the address the task registered via set_robust_list. Rux stores `0` (set_robust_list
 apparently discards the pointer — see process.rs) so no round-trip is possible; and the two `put_user`
 results are discarded, so an in-range-but-unmapped pointer silently "succeeds" instead of EFAULT.
 Fix: store the registered head in the task and report it; propagate put_user failure.
 
-### [Low] syscall/time.rs:555-561 — clock_settime checks CAP_SYS_TIME before the clock-id validity
+### [Low] syscall/time.rs:555-561 — clock_settime checks CAP_SYS_TIME before the clock-id validity — ✅ FIXED (`bcbd69f7`)
 `clock_settime(CLOCK_MONOTONIC)` without the cap returns EPERM; Linux's posix-clock dispatch fails
 EINVAL (no clock_set op) before any permission check. Trigger: unprivileged
 `clock_settime(CLOCK_MONOTONIC, ...)` → Rux EPERM, Linux EINVAL. Fix: validate clk_id first
@@ -134,7 +134,7 @@ zero-filled on the way in (fds read as 0 → stdin is polled!) and the revents s
 the way out; Linux returns EFAULT (fault_in_pages_readable + copyout checks). Trigger: `poll(mmap-trimmed
 page, 1, 0)`. Fix: propagate both copy results to -EFAULT (partial-out may keep the delivered count).
 
-### [Low] syscall/misc.rs:2053-2057, 2141-2145 — epoll_ctl ADD/MOD ignore the event copy_from_user result
+### [Low] syscall/misc.rs:2053-2057, 2141-2145 — epoll_ctl ADD/MOD ignore the event copy_from_user result — ✅ FIXED (`bcbd69f7`)
 A faulting event pointer (access_ok-passed, unmapped) registers `events=0,data=0` (a watch that never
 fires) instead of EFAULT. Fix: check the residual like the other paths here do.
 
@@ -167,7 +167,7 @@ One fetch at the top passed by reference would remove ~10 atomic inc/dec pairs p
 word to maxnode bits and copies min(maxnode, ...)). The Sept review recorded this as M6-fixed; the
 current code still has the mismatch. Fix: write ceil(maxnode/8) bytes with the last word masked.
 
-### [Low] syscall/memory.rs:4454-4472 — mlock2 rejects an unaligned address with EINVAL
+### [Low] syscall/memory.rs:4454-4472 — mlock2 rejects an unaligned address with EINVAL — ✅ FIXED (`bcbd69f7`)
 Linux mlock2 rounds addr down / len up exactly like mlock (mlock2(man): "addr is rounded down"); Rux's
 mlock2 gate `addr % PAGE_SIZE != 0 -> EINVAL` makes an unaligned mlock2 fail where Linux succeeds.
 Fix: reuse mlock_impl's rounding, drop the alignment gate.
@@ -226,29 +226,29 @@ exactly once (file.rs resolve_user_path comment); do_execve still uses `get_cwd(
 execve("bin/sh") resolves to <jail>/<global-cwd>/bin/sh. Fix: reuse resolve_user_path for the execve
 wrapper too.
 
-### [Low] syscall/process.rs:2607-2618 + 4041-4076 — getgroups and sysinfo swallow copy-out failures
+### [Low] syscall/process.rs:2607-2618 + 4041-4076 — getgroups and sysinfo swallow copy-out failures — ✅ FIXED (`bcbd69f7`)
 getgroups calls copy_to_user without access_ok and ignores the residual (bad list pointer = success);
 sysinfo ignores every field's put_user result. Linux returns EFAULT. Fix: check the copy results like
 the neighboring syscalls do.
 
-### [Low] syscall/process.rs:7124-7132 — faccessat2 ignores its flags argument
+### [Low] syscall/process.rs:7124-7132 — faccessat2 ignores its flags argument — ✅ FIXED (`bcbd69f7`)
 Delegates to faccessat with flags dropped: AT_SYMLINK_NOFOLLOW follows the symlink (Linux lstats the
 link itself), and flag validation (unknown bits → EINVAL) is missing. Fix: validate flags and honor
 NOFOLLOW in the lookup.
 
-### [Low] syscall/file.rs:196-782 — openat/open does not validate unknown O_ flag bits
+### [Low] syscall/file.rs:196-782 — openat/open does not validate unknown O_ flag bits — ✅ FIXED (`bcbd69f7`)
 Linux build_open_flags rejects undefined flag bits with EINVAL (and O_ACCMODE==3); openat2 in this
 tree does exactly that (file.rs:3979-4001) but the openat path passes any garbage flags through to
 file_open. Trigger: `openat(..., flags=0x40000000)` succeeds instead of EINVAL. Fix: share openat2's
 O_VALID_FLAGS check.
 
-### [Low] syscall/file.rs:6289-6310 — fchmodat2 AT_EMPTY_PATH is a no-op stub
+### [Low] syscall/file.rs:6289-6310 — fchmodat2 AT_EMPTY_PATH is a no-op stub — ✅ FIXED (`bcbd69f7`)
 The `if flags & AT_EMPTY_PATH != 0 && args[1] != 0` block has an empty body; fchmodat2(fd, "",
 mode, AT_EMPTY_PATH) falls through to sys_fchmodat → resolve_user_path("") → ENOENT, where Linux
 (since 6.14) chmods the fd's file. Fix: route the empty-path form to fchmod_file_core like
 fchownat does.
 
-### [Low] syscall/file.rs:5674 — name_to_handle_at ignores one copy_to_user result
+### [Low] syscall/file.rs:5674 — name_to_handle_at ignores one copy_to_user result — ✅ FIXED (`bcbd69f7`)
 The handle_type store at handle_ptr+4 discards its residual; a fault there reports success with a
 half-written handle. The neighboring payload copy is checked. Fix: check both.
 
@@ -260,7 +260,7 @@ equal the attach address exactly (ipc/shm.c: `vma->vm_start == addr`), else EINV
 + PAGE_SIZE)` (LTP shmat01 probes wrong addresses). Sept M12 recorded this ("shmdt accepts any offset");
 still live. Fix: `if vma.start() != shmaddr { EINVAL }`.
 
-### [Low] ipc/sysv_sem.rs:1546-1549 — sem_undo_exit lacks the [0, SEMVMX] clamp
+### [Low] ipc/sysv_sem.rs:1546-1549 — sem_undo_exit lacks the [0, SEMVMX] clamp — ✅ FIXED (`4f76fab0`)
 Exit-time undo does a raw `fetch_sub(entry.adjustment)`: with a concurrent SETVAL/other-undo the result
 can go negative (or above SEMVMX), and every later P on that semaphore blocks forever. Linux exit_sem
 clamps `semval = clamp(semval, 0, SEMVMX)` after the subtraction (ipc/sem.c). Sept M5 recorded this;
