@@ -6308,6 +6308,15 @@ pub fn bwr_park_audit() {
                             let readers = v & 0x7fff_ffff;
                             if v & 0x8000_0000 != 0 && readers >= 1 && readers < 0x4000_0000 {
                                 crate::sync::futex::rwfrz_reader_scan(s.pid as u32, a0 as u64);
+                                // 82nd: deep freeze (8+ readers) — the
+                                // read-holders are yielded coroutines no
+                                // thread scan can see; run the
+                                // SerialQueue/QueueTask walk slice for
+                                // THIS word (sliced 500k words / 5 s;
+                                // latch per word).
+                                if readers >= 8 {
+                                    crate::sync::futex::sqwalk_step(s.pid as u32, a0 as u64);
+                                }
                             }
                         }
                     }

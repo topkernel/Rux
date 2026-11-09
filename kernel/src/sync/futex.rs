@@ -3160,6 +3160,550 @@ pub fn oh68_holder_decode_tgid(tgid: u32) -> alloc::string::String {
     out
 }
 
+// ==== 82nd: SQWALK — the SerialQueue/QueueTask walk ====
+//
+// Why: musl rwlock readers are ANONYMOUS (count only, no list), so the
+// 16 read-holders freezing every writer cannot be named from the lock.
+// They are FFRT coroutines that yielded inside the read section; their
+// stacks live in the heap and are reachable only through the task
+// graph. The 81st's slab sweep printed empty on ohw127-139 because its
+// shape test REQUIRED a short-form SSO label at +0xd8 — QueueTask
+// labels are queue-name[_attr-name]_gid and routinely exceed the
+// 22-char SSO window (long form, heap pointer). The sqwalk shape test
+// is STRUCTURAL instead:
+//   type@24 == ffrt_queue_task(3), gid@32 small, curStatus@49 valid,
+//   handler_@440 -> queue_@8 -> BaseQueue validated by dequeFunc_@128
+//   (a code pointer inside libffrt's EXEC vma) + printable name_@200.
+// For every validated QueueTask AND every task referenced by its queue
+// (whenMap_ tree, headTaskVec_ batch, nextTask_ chain, handler
+// curTaskVec_), decode identity + saved coroutine context, walk the
+// saved stack, and MATCH IT AGAINST THE FROZEN LOCK WORD: a reader
+// suspended inside its critical section keeps the rwlock pointer in
+// its saved stack.
+//
+// Layouts (libffrt bb6920ed; image copy and the unstripped out-tree
+// twin verified same BuildID — ptype /o, 82nd):
+//   BaseQueue(224)/SerialQueue(232): vptr@0, mutex_@8(64),
+//     queueId_@72(u32), delayStatus_@76, isExit_@77,
+//     isActiveState_@78, whenMap_@80 (libc++ __tree: begin_node@80,
+//     root@88, size@96; node: left@0 right@8 parent@16 color@24,
+//     value key@32 task@40), headTaskVec_@104 (begin@104 end@112
+//     cap@120), dequeFunc_@128, cond_@136(64), name_@200(24).
+//   QueueTask(496) = CoTask(432) + uptime_@432, handler_@440,
+//     insertHead_@448, delay_@456, schedTimeout_@464, nextTask_@472,
+//     isFinished_@480, onWait_@481, isWeStart_@482, prio_@484,
+//     monitorWe_@488.
+//   QueueHandler(320): qos_@0, queue_@8, isUsed_@16, execTaskId_@24,
+//     maxConcurrency_@32, curTaskVec_@40 (begin@40 end@48), ...,
+//     we_@264, threadMode_@316.
+
+static SQW_TGID: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+static SQW_WORD: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+static SQW_CURSOR: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+static SQW_HI: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+static SQW_DONE: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+static SQW_LAST_J: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+/// Mapped non-exec RW regions (the scan window): starts/ends pairs,
+/// count in SQW_RN. Rebuilt per (tgid, word) burst pass.
+static SQW_RSTARTS: [core::sync::atomic::AtomicU64; 128] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 128];
+static SQW_RENDS: [core::sync::atomic::AtomicU64; 128] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 128];
+static SQW_RN: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+const SQW_LO: u64 = 0x7ff0_0000_0000;
+/// Words per burst (the SLAB sweep's 400k class, proven safe in both
+/// the audit and stall-scan contexts).
+const SQW_BUDGET: u64 = 500_000;
+/// Hard window cap (bytes) above SQW_LO — the OH heap arena observed on
+/// every wedged process sits far below this.
+const SQW_MAX_WIN: u64 = 0x1000_0000;
+
+fn sqw_canon(p: u64) -> bool {
+    p > 0x1000 && (p >> 47) == 0
+}
+
+/// One sqwalk burst: scans up to SQW_BUDGET words from the cursor,
+/// validating QueueTask candidates structurally and printing every
+/// hit (task decode + queue summary + saved-stack lock-word match).
+/// Sliced across bursts (5 s rate) until the window is covered, then
+/// latches done until the word changes. Prints through ConsoleWriter
+/// (safe in the audit and stall-scan contexts).
+pub fn sqwalk_step(tgid: u32, word: u64) {
+    use core::fmt::Write as _;
+    use core::sync::atomic::Ordering::Relaxed;
+    if cfg!(not(target_arch = "x86_64")) || tgid == 0 || !sqw_canon(word) {
+        return;
+    }
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck) {
+        return;
+    }
+    let nowj = crate::drivers::timer::get_jiffies() as u32;
+    let lj = SQW_LAST_J.load(Relaxed);
+    if nowj.wrapping_sub(lj) < 400 && SQW_CURSOR.load(Relaxed) != SQW_LO {
+        return; // mid-slice: keep the audit-burst cadence
+    }
+    SQW_LAST_J.store(nowj, Relaxed);
+    if SQW_TGID.load(Relaxed) != tgid || SQW_WORD.load(Relaxed) != word {
+        SQW_TGID.store(tgid, Relaxed);
+        SQW_WORD.store(word, Relaxed);
+        SQW_CURSOR.store(SQW_LO, Relaxed);
+        SQW_HI.store(0, Relaxed);
+        SQW_DONE.store(0, Relaxed);
+        SQW_RN.store(0, Relaxed);
+    }
+    if SQW_DONE.load(Relaxed) != 0 {
+        return;
+    }
+    // Root + exec-VMA table (module classification + dequeFunc
+    // validation) + the mapped-REGION table (the scan window: the OH
+    // layout splits into a LOW early arena at 0x7ff000xxxxxx AND high
+    // mmap chunks at 0x7ff08xxxxxxx 2 GB up — foundation's QueueTasks
+    // live at 0x7ff08667xxxx, far past any linear window from
+    // SQW_LO). Rebuilt per burst: ~100 vma reads, noise against the
+    // 500k-word slice.
+    let mut root = 0u64;
+    let mut hi_hint = 0u64;
+    let mut exec_vmas: alloc::vec::Vec<(u64, u64, u64, alloc::string::String)> =
+        alloc::vec::Vec::new();
+    // non-exec RW regions, (start,end), ascending insertion
+    let mut regions: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
+    crate::sched::for_each_task_try(|task| {
+        // SAFETY: diagnostic read under the for_each_task contract.
+        let tk = unsafe { &*task };
+        if root != 0 || tk.tgid() as u32 != tgid {
+            return;
+        }
+        if let Some(aspace) = tk.address_space() {
+            root = aspace.root_ppn();
+            if let Some(mgr) = aspace.vma_try_read() {
+                for vma in mgr.iter() {
+                    let vs = vma.start().as_usize() as u64;
+                    let ve = vma.end().as_usize() as u64;
+                    if ve > hi_hint {
+                        hi_hint = ve;
+                    }
+                    if vma.flags().is_executable() {
+                        if exec_vmas.len() < 48 {
+                            let name = aspace
+                                .try_get_vma_file(vma.start().as_usize())
+                                .map(|f| f.path())
+                                .unwrap_or_default();
+                            let base: alloc::string::String = name
+                                .rsplit('/')
+                                .next()
+                                .unwrap_or("-")
+                                .chars()
+                                .take(24)
+                                .collect();
+                            exec_vmas.push((vs, ve, vma.offset() as u64, base));
+                        }
+                    } else if regions.len() < 128
+                        && ve > vs
+                        && ve - vs <= SQW_MAX_WIN
+                        && vs >= SQW_LO
+                    {
+                        // merge with a previous region if adjacent
+                        // (within 64 KB) to keep the table small
+                        if let Some(last) = regions.last_mut() {
+                            if vs <= last.1 + 0x1_0000 {
+                                if ve > last.1 {
+                                    last.1 = ve;
+                                }
+                                continue;
+                            }
+                        }
+                        regions.push((vs, ve));
+                    }
+                }
+            }
+        }
+    });
+    if root == 0 {
+        return;
+    }
+    // publish the region table (idempotent per (tgid,word))
+    if SQW_RN.load(Relaxed) == 0 {
+        for (i, &(s, e)) in regions.iter().enumerate() {
+            SQW_RSTARTS[i].store(s, Relaxed);
+            SQW_RENDS[i].store(e, Relaxed);
+        }
+        SQW_RN.store(regions.len() as u32, Relaxed);
+    }
+    let rn = SQW_RN.load(Relaxed) as usize;
+    let regions: alloc::vec::Vec<(u64, u64)> = if rn > 0 {
+        (0..rn)
+            .map(|i| (SQW_RSTARTS[i].load(Relaxed), SQW_RENDS[i].load(Relaxed)))
+            .collect()
+    } else {
+        alloc::vec::Vec::new()
+    };
+    let total_mapped: u64 =
+        regions.iter().map(|&(s, e)| e.saturating_sub(s)).sum();
+    let word_off = |w: u64| -> Option<(usize, u64)> {
+        for (i, &(s, e, f, _)) in exec_vmas.iter().enumerate() {
+            if w >= s && w < e {
+                return Some((i, w - s + f));
+            }
+        }
+        None
+    };
+    let rd = |va: u64| -> Option<u64> { rd_word(root, va) };
+    let rd32 = |va: u64| -> Option<u32> {
+        rd(va & !7).map(|w| (w >> ((va & 4) * 8)) as u32)
+    };
+    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+    let cur = SQW_CURSOR.load(Relaxed);
+    {
+        // progress line: cursor + the covering region's extent
+        let mut prog = cur;
+        for &(rs, re) in regions.iter() {
+            if cur >= rs && cur < re {
+                prog = re;
+                break;
+            }
+        }
+        let _ = writeln!(
+            w,
+            "SQW-SCAN tgid={} lockw={:#x} cur={:#x}..{:#x} regions={} mapped={:#x}",
+            tgid,
+            word,
+            cur,
+            prog,
+            regions.len(),
+            total_mapped
+        );
+    }
+
+    // ---- decode helpers ----
+    let label_of = |base: u64| -> alloc::string::String {
+        // libc++ string at base: SSO (len byte0>>1, chars +1..) or long
+        // (cap byte0, size@+8, ptr@+16).
+        let w0 = rd(base).unwrap_or(0);
+        let mut lbl: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        if w0 & 1 == 0 {
+            let n = ((w0 & 0xff) >> 1) as usize;
+            if n <= 24 && n > 0 {
+                let buf = [w0, rd(base + 8).unwrap_or(0), rd(base + 16).unwrap_or(0)];
+                for i in 1..=n {
+                    let b = ((buf[i / 8] >> (8 * (i % 8))) & 0xff) as u8;
+                    if !(0x20..0x7f).contains(&b) {
+                        return "?".into();
+                    }
+                    lbl.push(b);
+                }
+            }
+        } else {
+            let size = rd(base + 8).unwrap_or(0);
+            let ptr = rd(base + 16).unwrap_or(0);
+            if size <= 96 && sqw_canon(ptr) {
+                for i in 0..size {
+                    let b = rd(ptr + i).map(|x| (x & 0xff) as u8).unwrap_or(0);
+                    if !(0x20..0x7f).contains(&b) {
+                        break;
+                    }
+                    lbl.push(b);
+                }
+            }
+        }
+        alloc::string::String::from_utf8(lbl).unwrap_or_else(|_| "?".into())
+    };
+
+    // Decode one task: returns the printed line; `lockw` match appends
+    // the READER marker with the saved-stack offsets that carry the
+    // lock pointer (the critical-section evidence).
+    let print_task = |tp: u64, tag: &str, w: &mut crate::dfx::backtrace::ConsoleWriter| {
+        if !sqw_canon(tp) {
+            return;
+        }
+        let st = (rd(tp + 48).unwrap_or(0) >> 8) & 0xff; // curStatus@49
+        let lbl = label_of(tp + 216);
+        let co = rd(tp + 0x130).unwrap_or(0);
+        let handler = rd(tp + 440).unwrap_or(0);
+        // queue name via handler->queue_ (validated by the caller or
+        // probed here for referenced tasks)
+        let mut qname: alloc::string::String = "?".into();
+        let mut qid = 0xffff_ffffu32;
+        if sqw_canon(handler) {
+            if let Some(q) = rd(handler + 8) {
+                if sqw_canon(q) {
+                    qname = label_of(q + 200);
+                    qid = rd32(q + 72).unwrap_or(0xffff_ffff);
+                }
+            }
+        }
+        let _ = write!(
+            w,
+            " SQW-T{}[tp={:#x} g{} st={} ft={} ct={} q=\"{}\"({}) lbl=\"{}\" wue={:#x}",
+            tag,
+            tp,
+            rd(tp + 32).unwrap_or(0),
+            st,
+            rd32(tp + 112).unwrap_or(0xffff),
+            rd(tp + 96).unwrap_or(0),
+            qname,
+            qid,
+            lbl,
+            rd(tp + 0x128).unwrap_or(0)
+        );
+        if sqw_canon(co) {
+            let rsp = rd(co + 72).unwrap_or(0);
+            let rip = rd(co + 80).unwrap_or(0);
+            let ripoff = match word_off(rip) {
+                Some((m, o)) => alloc::format!("v{}+{:#x}", m, o),
+                None => "?".into(),
+            };
+            let stk_sz = rd(co + 0x68).unwrap_or(0).min(0x10_0000);
+            let _ = write!(
+                w,
+                " co(st={} rip={} rsp={:#x} sz={:#x})",
+                rd32(co).unwrap_or(0xffff),
+                ripoff,
+                rsp,
+                stk_sz
+            );
+            // saved-stack walk: lock-word matches (READER evidence) +
+            // exec-VMA frames (the critical-section site). Window: rsp
+            // up to min(stack top, rsp+32KB) — the active region; the
+            // buffer can be 1MB and a near-top rsp must still walk.
+            if rsp >= co + 120 && rsp < co + 120 + stk_sz && (rsp & 7) == 0 {
+                let top = (rsp + 0x8000).min(co + 120 + stk_sz);
+                let mut frames = 0;
+                let mut hits = 0;
+                let _ = write!(w, " lock[");
+                let mut va = rsp;
+                while va < top && (hits < 3 || frames < 14) {
+                    if let Some(x) = rd(va) {
+                        if hits < 3 && x == word {
+                            let _ = write!(w, "{}+{:#x}", if hits == 0 { "" } else { "," }, va - rsp);
+                            hits += 1;
+                        } else if frames < 14 {
+                            if let Some((m, o)) = word_off(x) {
+                                if frames > 0 || hits > 0 {
+                                    let _ = write!(w, " ");
+                                }
+                                let _ = write!(w, "f:v{}+{:#x}", m, o);
+                                frames += 1;
+                            }
+                        }
+                    }
+                    va += 8;
+                }
+                let _ = write!(w, "]");
+                if hits > 0 {
+                    let _ = write!(w, " READER");
+                }
+            }
+        }
+        let _ = writeln!(w);
+    };
+
+    // Queue summary: whenMap size + head entries, headTaskVec batch,
+    // handler curTaskVec (dedup of task prints is by explicit lists).
+    let print_queue = |q: u64, w: &mut crate::dfx::backtrace::ConsoleWriter| {
+        let qname = label_of(q + 200);
+        let wm_sz = rd(q + 96).unwrap_or(0);
+        let _ = write!(
+            w,
+            " SQW-Q[q={:#x} id={} name=\"{}\" active={} exit={} wm={}]",
+            q,
+            rd32(q + 72).unwrap_or(0xffff),
+            qname,
+            rd(q + 78).unwrap_or(0) & 0xff,
+            rd(q + 77).unwrap_or(0) & 0xff,
+            wm_sz
+        );
+        // whenMap head nodes (leftmost chain, up to 6): key + task
+        let mut cur = rd(q + 80).unwrap_or(0); // begin_node
+        let mut n = 0;
+        let _ = write!(w, " wm[");
+        while sqw_canon(cur) && n < 6 {
+            let key = rd(cur + 32).unwrap_or(0);
+            let taskp = rd(cur + 40).unwrap_or(0);
+            let _ = write!(w, "{}{:#x}:t{:#x}", if n == 0 { "" } else { "," }, key, taskp);
+            // successor: right subtree's leftmost, else climb parents
+            let r = rd(cur + 8).unwrap_or(0);
+            if sqw_canon(r) {
+                let mut x = r;
+                while sqw_canon(rd(x).unwrap_or(0)) {
+                    x = rd(x).unwrap_or(0);
+                }
+                cur = x;
+            } else {
+                let mut x = cur;
+                loop {
+                    let p = rd(x + 16).unwrap_or(0);
+                    if !sqw_canon(p) {
+                        x = 0;
+                        break;
+                    }
+                    if rd(p).unwrap_or(0) != x {
+                        x = p;
+                        break;
+                    }
+                    x = p;
+                }
+                cur = x;
+            }
+            n += 1;
+        }
+        let _ = write!(w, "]");
+        // headTaskVec batch
+        let b = rd(q + 104).unwrap_or(0);
+        let e = rd(q + 112).unwrap_or(0);
+        if sqw_canon(b) && e >= b && (e - b) / 8 <= 16 {
+            let _ = write!(w, " htv[");
+            for i in 0..((e - b) / 8) {
+                let _ = write!(w, "{}{:#x}", if i == 0 { "" } else { "," }, rd(b + i * 8).unwrap_or(0));
+            }
+            let _ = write!(w, "]");
+        }
+        let _ = writeln!(w);
+    };
+
+    // ---- the slice scan ----
+    let mut printed = 0u32;
+    let mut printed_c = 0u32;
+    let mut scanned = 0u64;
+    let mut cur = cur;
+    'regions: for &(rs, re) in regions.iter() {
+        if re <= cur {
+            continue; // region already covered by earlier bursts
+        }
+        cur = cur.max(rs);
+        while cur + 8 <= re && scanned < SQW_BUDGET {
+            scanned += 1;
+            // cheap prefilter: gid@32 small (both classes)
+            let _gid = match rd(cur + 32) {
+                Some(g) if (1..0x4_0000).contains(&g) => g,
+                _ => {
+                    cur += 8;
+                    continue;
+                }
+            };
+            let ty = match rd32(cur + 24) {
+                Some(t) => t,
+                None => {
+                    cur += 8;
+                    continue;
+                }
+            };
+            let stw = rd(cur + 48).unwrap_or(0);
+            let st = (stw >> 8) & 0xff;
+            if ty == 3 {
+                // ---- class Q: QueueTask (handler->queue_ chain) ----
+                if st > 11 {
+                    cur += 8;
+                    continue;
+                }
+                let tail = rd(cur + 480).unwrap_or(0xffff_ffff_ffff_ffff);
+                // isFinished@480 / onWait_@481 / isWeStart_@482 {0,1}
+                if tail & 0x00ff_ffff > 0x0101_01 {
+                    cur += 8;
+                    continue;
+                }
+                // prio_@484: ffrt_queue_priority_{immediate..idle} 0..=4
+                if rd32(cur + 484).unwrap_or(0xffff) > 4 {
+                    cur += 8;
+                    continue;
+                }
+                let handler = rd(cur + 440).unwrap_or(0);
+                if !sqw_canon(handler) || (handler & 7) != 0 {
+                    cur += 8;
+                    continue;
+                }
+                let queue = match rd(handler + 8) {
+                    Some(q) if sqw_canon(q) => q,
+                    _ => {
+                        cur += 8;
+                        continue;
+                    }
+                };
+                // BaseQueue validation: dequeFunc_ is libffrt code;
+                // queueId_ small; printable name.
+                let dq = rd(queue + 128).unwrap_or(0);
+                if word_off(dq).is_none() {
+                    cur += 8;
+                    continue;
+                }
+                if rd32(queue + 72).unwrap_or(0xffff) > 0x1000 {
+                    cur += 8;
+                    continue;
+                }
+                let name_w0 = rd(queue + 200).unwrap_or(0);
+                let name_ok = if name_w0 & 1 == 0 {
+                    let n = ((name_w0 & 0xff) >> 1) as usize;
+                    let c0 = (name_w0 >> 8) & 0xff;
+                    n == 0 || c0 == b'_' as u64 || c0 == 0 || (0x41..=0x7a).contains(&c0)
+                } else {
+                    true // long form: decoded later
+                };
+                if !name_ok {
+                    cur += 8;
+                    continue;
+                }
+                if printed < 24 {
+                    print_task(cur, "", &mut w);
+                    print_queue(queue, &mut w);
+                }
+                printed += 1;
+            } else if ty <= 2 && (6..=8).contains(&st) && printed_c < 16 {
+                // ---- class C: non-queue CoTask (ffrt_submit/io/uv)
+                // that is EXECUTING or blocked — the read-holders may
+                // be plain coroutines, not queue tasks. Structural:
+                // coRoutine with a saved rsp inside its own stack.
+                let co = match rd(cur + 0x130) {
+                    Some(c) if sqw_canon(c) => c,
+                    _ => {
+                        cur += 8;
+                        continue;
+                    }
+                };
+                let rsp = match rd(co + 72) {
+                    Some(r) if sqw_canon(r) => r,
+                    _ => {
+                        cur += 8;
+                        continue;
+                    }
+                };
+                let sz = rd(co + 0x68).unwrap_or(0);
+                if sz == 0 || sz > 0x10_0000 || rsp < co + 120 || rsp >= co + 120 + sz {
+                    cur += 8;
+                    continue;
+                }
+                print_task(cur, "C", &mut w);
+                printed_c += 1;
+            }
+            cur += 8;
+        }
+        if scanned >= SQW_BUDGET {
+            break 'regions;
+        }
+    }
+    if scanned < SQW_BUDGET {
+        // every region covered within the budget: the walk is complete
+        SQW_DONE.store(1, Relaxed);
+        let _ = writeln!(
+            w,
+            "SQW-DONE tgid={} qtasks={} ctasks={} regions={} mapped={:#x}",
+            tgid,
+            printed,
+            printed_c,
+            regions.len(),
+            total_mapped
+        );
+    } else {
+        SQW_CURSOR.store(cur, Relaxed);
+    }
+}
+
 /// True once the heap map COMPLETED (successfully or having burned its
 /// one successful-signature pass) — the consumer stops re-arming.
 pub fn ffrt_mutex_heap_map_done() -> bool {
@@ -9007,6 +9551,14 @@ pub fn freeze_scan(now: u64, hz: u64) {
             drop(hl);
         }
         if adopted || c.n < 3 || !rwlock_frozen_shape(v) {
+            // 82nd: even before adoption, a DEEP freeze (8+ readers) on
+            // any clustered word runs the sqwalk slice — ohw139's wedge
+            // face (BWR-parked looper) never takes the census park-row
+            // path, so the audit-site trigger alone would miss it. The
+            // word-keyed statics make this idempotent across triggers.
+            if readers >= 8 && !adopted {
+                sqwalk_step(c.tgid, c.uaddr as u64);
+            }
             continue;
         }
         let cur_u = RWFRZ_UADDR.load(core::sync::atomic::Ordering::Relaxed);
