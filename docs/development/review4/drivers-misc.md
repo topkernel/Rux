@@ -325,7 +325,7 @@ loopback's backlog + single-consumer poll design all verified — sound.
 
 ## blkdev + misc drivers
 
-### [Low] loop_dev.rs:105-157 — two distinct GenDisk objects exist for loop 0; the buffer cache can key the same blocks twice
+### [Low] loop_dev.rs:105-157 — two distinct GenDisk objects exist for loop 0; the buffer cache can key the same blocks twice — ✅ FIXED (`ae7a0f7a`)
 init_loops leaks one GenDisk per loop (loop_disk(idx), major 7,
 first_minor=idx) AND registers a separate representative GenDisk (major 7,
 minor 0) in the block manager for i==0. Anything resolving the disk through
