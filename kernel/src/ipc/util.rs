@@ -493,8 +493,14 @@ pub fn ipc_check_permissions(perm: &KernIpcPerm, desired_mode: u16) -> bool {
         return (desired_mode & owner_bits) == desired_mode;
     }
 
-    // Group check
-    if cred.egid == perm.gid || cred.egid == perm.cgid {
+    // Group check — primary OR supplementary (review4 ipc-L: the
+    // reference's in_group_p grants via the setgroups list too; only
+    // testing the primary egid denied a supplementary-gid member).
+    let in_group = cred.egid == perm.gid
+        || cred.egid == perm.cgid
+        || cred.groups.contains(&perm.gid)
+        || cred.groups.contains(&perm.cgid);
+    if in_group {
         let group_bits = (mode >> 3) & 0o7;
         return (desired_mode & group_bits) == desired_mode;
     }

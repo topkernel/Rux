@@ -772,12 +772,28 @@ fn io_uring_op_read(sqe: &IoUringSqe) -> i32 {
         // needed — the old code double-counted by adding result again.
         do_read(&file, buf, len)
     } else {
-        // pread: read from a specific offset without changing file position.
-        let saved_pos = file.get_pos();
-        let _ = file.set_pos(off as u64);
-        let result = do_read(&file, buf, len);
-        let _ = file.set_pos(saved_pos);
-        result
+        // pread: read at the offset through the position-invariant
+        // read_at path (review4 syscall-L: the old set_pos/restore raced
+        // a CLONE_FILES sharer's position — the same pattern removed
+        // from sys_pread64; two ring submits on one shared fd
+        // interleaved positions). Kernel staging buffer + one copy out.
+        let mut kbuf = alloc::vec![0u8; len];
+        let result = file.read_at_slice(off as u64, &mut kbuf);
+        if result < 0 {
+            return result as i32;
+        }
+        let n = result as usize;
+        if n > 0 {
+            // SAFETY: buf was access_ok(len) above; copy_to_user is the
+            // exception-table path.
+            if unsafe {
+                crate::arch::uaccess::copy_to_user(buf as *mut u8, kbuf.as_ptr(), n)
+            } != 0
+            {
+                return -14; // EFAULT
+            }
+        }
+        n as i32
     }
 }
 
@@ -856,12 +872,23 @@ fn io_uring_op_write(sqe: &IoUringSqe) -> i32 {
         // double-counted by adding result again.
         do_write(&file, buf, len)
     } else {
-        // pwrite: write at a specific offset without changing file position.
-        let saved_pos = file.get_pos();
-        let _ = file.set_pos(off as u64);
-        let result = do_write(&file, buf, len);
-        let _ = file.set_pos(saved_pos);
-        result
+        // pwrite: position-invariant write_at path (review4 syscall-L:
+        // the set_pos/restore raced CLONE_FILES sharers — see the read
+        // twin). Kernel staging + one copy in.
+        let mut kbuf = alloc::vec![0u8; len];
+        // SAFETY: buf was access_ok(len) above; copy_from_user is the
+        // exception-table path.
+        if unsafe {
+            crate::arch::uaccess::copy_from_user(kbuf.as_mut_ptr(), buf as *const u8, len)
+        } != 0
+        {
+            return -14; // EFAULT
+        }
+        let result = file.write_at_slice(off as u64, &kbuf);
+        if result < 0 {
+            return result as i32;
+        }
+        result as i32
     }
 }
 
@@ -1009,7 +1036,13 @@ fn io_uring_post_cqe(ring: &IoUring, user_data: u64, res: i32, flags: u32) {
 /// Since operations execute synchronously, CQEs are already posted
 /// before this is called. The first check will always succeed.
 fn wait_for_cqes(ring: &IoUring, min_complete: u32) -> i32 {
-    for _ in 0..1000 {
+    // review4 syscall-L: block interruptibly like the reference's
+    // io_cqring_wait — the old 1000-yield spin then INVENTED an
+    // ETIMEDOUT that Linux never produces (a pure-wait enter with
+    // min_complete above the ready count got a bogus timeout instead of
+    // blocking). Rounds are INTERRUPTIBLE+schedule (kswapd's
+    // state-first pattern); no deadline.
+    loop {
         let head = unsafe {
             core::ptr::read_volatile(ring.cq_ring.kvirt.add(ring.cq_head_off) as *const u32)
         };
@@ -1026,11 +1059,15 @@ fn wait_for_cqes(ring: &IoUring, min_complete: u32) -> i32 {
             return -4; // EINTR
         }
 
-        crate::sched::yield_cpu();
+        if let Some(current) = crate::sched::current() {
+            unsafe {
+                (*current).set_state(crate::process::task::TaskState::new(
+                    crate::process::task::TaskState::INTERRUPTIBLE,
+                ));
+            }
+        }
+        crate::sched::schedule();
     }
-
-    // Timeout (should not happen with sync ops)
-    -110 // ETIMEDOUT
 }
 
 // ==================== Public Syscall API ====================

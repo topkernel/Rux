@@ -322,9 +322,11 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             }
             // SAFETY: buf_ptr was null-checked and access_ok-validated for size_of::<SemidDsUapi>() above;
             // ds is a stack-local copy of the semaphore set metadata.
-            unsafe {
-                copy_to_user(buf_ptr as *mut u8, &ds as *const SemidDsUapi as *const u8, core::mem::size_of::<SemidDsUapi>());
-            }
+            if unsafe {
+                copy_to_user(buf_ptr as *mut u8, &ds as *const SemidDsUapi as *const u8, core::mem::size_of::<SemidDsUapi>())
+                } != 0 {
+                return -14; // EFAULT (review4 ipc-L: residual propagates)
+                }
             0
         }
         IPC_SET => {
@@ -623,13 +625,15 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
                 semaem: 16384,
             };
             // SAFETY: buf_ptr was null-checked and access_ok-validated above.
-            unsafe {
+            if unsafe {
                 copy_to_user(
                     buf_ptr as *mut u8,
                     &info as *const SemInfoUapi as *const u8,
                     core::mem::size_of::<SemInfoUapi>(),
-                );
-            }
+                )
+                } != 0 {
+                return -14; // EFAULT (review4 ipc-L: residual propagates)
+                }
             // Return: highest used slot index (ipc_get_maxidx), -1 when
             // empty — LTP feeds it into SEM_STAT as a raw index.
             sem_max_idx() as i64
@@ -671,13 +675,15 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             }
             // SAFETY: buf_ptr was null-checked and access_ok-validated above;
             // ds is a stack-local repr(C) struct of exactly that size.
-            unsafe {
+            if unsafe {
                 copy_to_user(
                     buf_ptr as *mut u8,
                     &ds as *const SemidDsUapi as *const u8,
                     core::mem::size_of::<SemidDsUapi>(),
-                );
-            }
+                )
+                } != 0 {
+                return -14; // EFAULT (review4 ipc-L: residual propagates)
+                }
             result_id as i64
         }
         20 => {
@@ -716,13 +722,15 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             }
             // SAFETY: buf_ptr was null-checked and access_ok-validated above;
             // ds is a stack-local repr(C) struct of exactly that size.
-            unsafe {
+            if unsafe {
                 copy_to_user(
                     buf_ptr as *mut u8,
                     &ds as *const SemidDsUapi as *const u8,
                     core::mem::size_of::<SemidDsUapi>(),
-                );
-            }
+                )
+                } != 0 {
+                return -14; // EFAULT (review4 ipc-L: residual propagates)
+                }
             result_id as i64
         }
         19 => {
@@ -755,13 +763,15 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
                 semaem: total_sems as i32,
             };
             // SAFETY: buf_ptr was null-checked and access_ok-validated above.
-            unsafe {
+            if unsafe {
                 copy_to_user(
                     buf_ptr as *mut u8,
                     &info as *const SemInfoUapi as *const u8,
                     core::mem::size_of::<SemInfoUapi>(),
-                );
-            }
+                )
+                } != 0 {
+                return -14; // EFAULT (review4 ipc-L: residual propagates)
+                }
             // Return: highest used slot index, -1 when empty (see IPC_INFO).
             sem_max_idx() as i64
         }

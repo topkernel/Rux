@@ -458,7 +458,10 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
                 WTRACE_USED[slot].store(0, core::sync::atomic::Ordering::Relaxed);
                 0
             };
-            if used < WTRACE_PID_MAX as u8 {
+            // review4 syscall-L: `WTRACE_PID_MAX as u8` truncated 512 to
+            // 0 — `used < 0` is always false and the whole trace block
+            // was dead. Compare in usize.
+            if (used as usize) < WTRACE_PID_MAX {
                 // 480 bytes: enough to zlib-inflate a hilog frame offline
                 // (HiLogAdapter compresses each socket message; 200 cut the
                 // stream mid-dictionary and the frames read as pure noise).

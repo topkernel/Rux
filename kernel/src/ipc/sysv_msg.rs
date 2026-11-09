@@ -336,13 +336,15 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
             }
             // SAFETY: buf_ptr was null-checked and access_ok-validated for size_of::<MsqidDsUapi>() above;
             // ds is a stack-local copy of the message queue metadata.
-            unsafe {
+            if unsafe {
                 copy_to_user(
                     buf_ptr as *mut u8,
                     &ds as *const MsqidDsUapi as *const u8,
                     core::mem::size_of::<MsqidDsUapi>(),
-                );
-            }
+                )
+                } != 0 {
+                return -14; // EFAULT (review4 ipc-L: residual propagates)
+                }
             0
         }
         IPC_SET => {
@@ -439,13 +441,15 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
                 msgseg: 0xffff,
             };
             // SAFETY: buf_ptr was null-checked and access_ok-validated above.
-            unsafe {
+            if unsafe {
                 copy_to_user(
                     buf_ptr as *mut u8,
                     &info as *const MsgInfoUapi as *const u8,
                     core::mem::size_of::<MsgInfoUapi>(),
-                );
-            }
+                )
+                } != 0 {
+                return -14; // EFAULT (review4 ipc-L: residual propagates)
+                }
             // Return: highest used slot index (Linux ipc_get_maxidx);
             // -1 when empty. LTP feeds this value straight into MSG_STAT.
             msg_max_idx() as i64
@@ -479,13 +483,15 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
                 msgseg: 0xffff,
             };
             // SAFETY: buf_ptr was null-checked and access_ok-validated above.
-            unsafe {
+            if unsafe {
                 copy_to_user(
                     buf_ptr as *mut u8,
                     &info as *const MsgInfoUapi as *const u8,
                     core::mem::size_of::<MsgInfoUapi>(),
-                );
-            }
+                )
+                } != 0 {
+                return -14; // EFAULT (review4 ipc-L: residual propagates)
+                }
             // Return: highest used slot index, -1 when empty (see IPC_INFO).
             msg_max_idx() as i64
         }
@@ -548,13 +554,15 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
             }
             // SAFETY: buf_ptr was null-checked and access_ok-validated above;
             // ds is a stack-local repr(C) struct of exactly that size.
-            unsafe {
+            if unsafe {
                 copy_to_user(
                     buf_ptr as *mut u8,
                     &ds as *const MsqidDsUapi as *const u8,
                     core::mem::size_of::<MsqidDsUapi>(),
-                );
-            }
+                )
+                } != 0 {
+                return -14; // EFAULT (review4 ipc-L: residual propagates)
+                }
             result_id as i64
         }
         11 => {
@@ -612,13 +620,15 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
             }
             // SAFETY: buf_ptr was null-checked and access_ok-validated above;
             // ds is a stack-local repr(C) struct of exactly that size.
-            unsafe {
+            if unsafe {
                 copy_to_user(
                     buf_ptr as *mut u8,
                     &ds as *const MsqidDsUapi as *const u8,
                     core::mem::size_of::<MsqidDsUapi>(),
-                );
-            }
+                )
+                } != 0 {
+                return -14; // EFAULT (review4 ipc-L: residual propagates)
+                }
             result_id as i64
         }
         _ => -(errno::EINVAL as i64),
@@ -913,13 +923,15 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
                         let msg_len = msg.data.len().min(msgsz);
                         // SAFETY: msgp+8 was access_ok-validated for msgsz bytes above;
                         // msg_len <= msgsz, so the copy is within bounds.
-                        unsafe {
+                        if unsafe {
                             copy_to_user(
                                 msgp.add(8),
                                 msg.data.as_ptr(),
                                 msg_len,
-                            );
-                        }
+                            )
+                            } != 0 {
+                            return -14; // EFAULT (review4 ipc-L: residual propagates)
+                            }
                         // Do NOT update stats, do NOT wake senders
                         return msg_len as i64;
                     }
@@ -954,13 +966,15 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
             let copy_len = msg.data.len().min(msgsz);
             // SAFETY: msgp+8 was access_ok-validated for msgsz bytes above;
             // copy_len <= msgsz, so the copy is within bounds.
-            unsafe {
+            if unsafe {
                 copy_to_user(
                     msgp.add(8),
                     msg.data.as_ptr(),
                     copy_len,
-                );
-            }
+                )
+                } != 0 {
+                return -14; // EFAULT (review4 ipc-L: residual propagates)
+                }
             // Wake up senders (space freed)
             {
                 let slots = MSG_IDS.slots.lock();

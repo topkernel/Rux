@@ -272,8 +272,11 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             return;
         }
         34 => {
-            // pause(): sleep until a signal; always -EINTR.
-            syscall_set_return_value(regs, signal::sys_pause(args));
+            // review4 syscall-L: nr 34 is a TABLE HOLE on real x86_64
+            // Linux (ENOSYS; pause is nr 34 only on 32-bit — glibc/musl
+            // never issue it here). A program probing the hole's ENOSYS
+            // used to HANG in our pause() shim instead.
+            syscall_set_return_value(regs, -(errno::ENOSYS as i64));
             return;
         }
         37 => {
@@ -744,8 +747,11 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
 
         // ==================== Unimplemented System Calls ====================
         _ => {
-            crate::println!("syscall: unknown syscall {} (args: {:#x}, {:#x}, {:#x})",
-                native_nr, args[0], args[1], args[2]);
+            // review4 syscall-L: gated like the rest of the hunt taps.
+            if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SyscallTrace) {
+                crate::println!("syscall: unknown syscall {} (args: {:#x}, {:#x}, {:#x})",
+                    native_nr, args[0], args[1], args[2]);
+            }
             -(errno::ENOSYS as i64)
         }
     };
@@ -754,7 +760,11 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // from some syscall, but not from any of the instrumented sleep paths.
     // Name every syscall that returns exactly -EFAULT so the culprit is
     // identifiable from the console. Rate-limited.
-    if result == -(errno::EFAULT as i64) {
+    // review4 syscall-L: behind debug=syscalltrace (the hunt's budget
+    // gate was always-on).
+    if result == -(errno::EFAULT as i64)
+        && crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SyscallTrace)
+    {
         static EFT_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if EFT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {

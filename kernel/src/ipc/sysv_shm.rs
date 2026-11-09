@@ -429,13 +429,15 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
             }
             // SAFETY: buf_ptr was null-checked and access_ok-validated for size_of::<ShmidDsUapi>() above;
             // ds is a stack-local copy of the shared memory segment metadata.
-            unsafe {
+            if unsafe {
                 copy_to_user(
                     buf_ptr as *mut u8,
                     &ds as *const ShmidDsUapi as *const u8,
                     core::mem::size_of::<ShmidDsUapi>(),
-                );
-            }
+                )
+                } != 0 {
+                return -14; // EFAULT (review4 ipc-L: residual propagates)
+                }
             0
         }
         IPC_SET => {
@@ -612,13 +614,15 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
             }
             // SAFETY: buf_ptr was null-checked and access_ok-validated for size_of::<ShmidDsUapi>() above;
             // ds is a stack-local copy of the shared memory segment metadata.
-            unsafe {
+            if unsafe {
                 copy_to_user(
                     buf_ptr as *mut u8,
                     &ds as *const ShmidDsUapi as *const u8,
                     core::mem::size_of::<ShmidDsUapi>(),
-                );
-            }
+                )
+                } != 0 {
+                return -14; // EFAULT (review4 ipc-L: residual propagates)
+                }
             result_id as i64
         }
         14 => {
@@ -702,13 +706,15 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
             // SAFETY: buf_ptr was null-checked and access_ok-validated for
             // size_of::<ShmidDsUapi>() above; ds is a stack-local copy of the
             // segment metadata.
-            unsafe {
+            if unsafe {
                 copy_to_user(
                     buf_ptr as *mut u8,
                     &ds as *const ShmidDsUapi as *const u8,
                     core::mem::size_of::<ShmidDsUapi>(),
-                );
-            }
+                )
+                } != 0 {
+                return -14; // EFAULT (review4 ipc-L: residual propagates)
+                }
             result_id as i64
         }
         _ => -(errno::EINVAL as i64),

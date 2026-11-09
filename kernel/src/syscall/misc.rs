@@ -255,15 +255,20 @@ pub fn epoll_notify_file(file_id: u64) {
     // as the TOTAL counter. Name sizes BEFORE taking the lock (printk
     // discipline).
     {
-        static EPN_N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-        let n = EPN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if n < 400 && (n < 40 || n % 10 == 0) {
-            crate::pr_warn!(
-                "epollnotify#{}: registry_total={} this_fid={:#x}",
-                n,
-                EPOLL_WAKE_TOTAL.load(core::sync::atomic::Ordering::Relaxed),
-                file_id
-            );
+        // review4 syscall-L: behind debug=syscalltrace now — the old
+        // always-on budget (40 + every 10th to 400) printed per boot on
+        // the epoll wake path with no switch.
+        if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SyscallTrace) {
+            static EPN_N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+            let n = EPN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 400 && (n < 40 || n % 10 == 0) {
+                crate::pr_warn!(
+                    "epollnotify#{}: registry_total={} this_fid={:#x}",
+                    n,
+                    EPOLL_WAKE_TOTAL.load(core::sync::atomic::Ordering::Relaxed),
+                    file_id
+                );
+            }
         }
     }
     let registry = epoll_wake_shard(file_id).lock_irqsave();

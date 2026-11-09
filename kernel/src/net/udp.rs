@@ -1515,18 +1515,8 @@ pub fn udp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
     // R24 (HIGH-6): serialize table iteration/enqueue against syscalls
     // (alloc/free/bind/send/recv) — the NetRx softirq runs concurrently on
     // the 4-CPU kernel. Leaf lock: nothing below re-enters UDP.
-    // lmbench-fix TEMP probe (drop before merge).
-    static UIN_N: core::sync::atomic::AtomicU32 =
-        core::sync::atomic::AtomicU32::new(0);
-    let uin_dbg = UIN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40;
-    if uin_dbg {
-        crate::pr_info!(
-            "udp-in dport={} sport={} len={} connected_filters_on",
-            dest_port,
-            src_port,
-            data_len
-        );
-    }
+    // lmbench-fix TEMP probe dropped (review4 net-L: it was marked
+    // "drop before merge" and printed 40 lines per boot).
     let mut delivered_fd: Option<i32> = None;
     // net:udp_deliver outcome fields (captured under the table lock —
     // the queue length read races the consumer otherwise).
@@ -1575,16 +1565,9 @@ pub fn udp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
 
     if let Some(fd) = delivered_fd {
         // W3: wake blocking recv waiters on this socket (after the lock).
-        if uin_dbg {
-            crate::pr_info!("udp-in -> delivered fd={}", fd);
-        }
         crate::net::socket::wake_udp_socket(fd);
         return Ok(());
     }
-    if uin_dbg {
-        crate::pr_info!("udp-in -> NO MATCH (port unreach path)");
-    }
-
     // No socket found bound to this port. If the datagram was addressed to
     // us (this stack does not forward), answer with ICMP port unreachable
     // (W3 — the old code silently dropped, so peers' send-then-recv-echo

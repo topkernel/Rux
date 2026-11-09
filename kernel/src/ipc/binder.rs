@@ -6814,8 +6814,18 @@ fn binder_thread_write(
                             (None, false) => None,
                         };
                         let Some(ridx) = ridx else {
+                            // review4 ipc-L: the reference's
+                            // binder_user_error queues BR_ERROR so
+                            // userspace can detect its own protocol bug;
+                            // the old silent skip only pr_info'd.
                             drop(w);
-                            crate::pr_info!("binder: pid {} ref command on invalid handle {}", proc.pid, desc);
+                            let w = world_lock();
+                            // SAFETY: under WORLD.
+                            unsafe {
+                                thread.st().todo.push_back(Work::ReturnError(BR_ERROR, 22 /* EINVAL */));
+                            }
+                            drop(w);
+                            wake_thread(thread);
                             continue;
                         };
                         let node = pm(world, proc).im().refs[ridx].node.clone();
