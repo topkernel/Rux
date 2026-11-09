@@ -22,7 +22,7 @@ pub mod evdev;
 // Re-export common types
 pub use event::*;
 pub use evdev::{EvdevDevice, evdev_file_ioctl};
-pub use virtio_input::{VirtioInputDevice, probe_virtio_input};
+pub use virtio_input::VirtioInputDevice;
 
 // ============================================================================
 // Global input devices
@@ -270,41 +270,8 @@ pub fn init_virtio_input() -> (usize, usize) {
     (keyboard_count, pointer_count)
 }
 
-/// Poll input events
-pub fn poll_events() {
-    // Poll keyboard (irqsafe: called from softirq which may be preempted by hard IRQ)
-    if let Some(ref mut kb) = *INPUT_KEYBOARD.lock_irqsave() {
-        while kb.has_event() {
-            if let Some(event) = kb.read_event() {
-                evdev::push_input_event(false, event);
-            }
-        }
-    }
 
-    // Poll pointer device
-    if let Some(ref mut ptr) = *INPUT_POINTER.lock_irqsave() {
-        while ptr.has_event() {
-            if let Some(event) = ptr.read_event() {
-                evdev::push_input_event(true, event);
-            }
-        }
-    }
-}
 
-/// Get keyboard event (legacy interface compatibility)
-pub fn get_keyboard_event() -> Option<InputEvent> {
-    if let Some(ref mut kb) = *INPUT_KEYBOARD.lock_irqsave() {
-        kb.read_event()
-    } else {
-        None
-    }
-}
 
-/// Get pointer event (legacy interface compatibility)
-pub fn get_pointer_event() -> Option<InputEvent> {
-    if let Some(ref mut ptr) = *INPUT_POINTER.lock_irqsave() {
-        ptr.read_event()
-    } else {
-        None
-    }
-}
+
+

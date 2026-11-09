@@ -225,13 +225,17 @@ pub fn unregister_netdevice(device: &mut NetDevice) {
 /// # Returns
 /// Found device, or None if not found
 pub fn get_netdevice_by_index(ifindex: u32) -> Option<&'static mut NetDevice> {
-    // Simplified implementation: currently only supports finding loopback device
-    // Full implementation needs to maintain device list
+    // review4 net-L: resolve the registered devices — the old loopback-
+    // only registry hid eth0 from every future consumer (SIOCGIFCONF,
+    // getifaddrs). Index 0 is the loopback (registered first);
+    // index 1 is eth0 (publish_eth0 registers second).
     if ifindex == 0 {
-        crate::drivers::net::get_loopback_device()
-    } else {
-        None
+        return crate::drivers::net::get_loopback_device();
     }
+    if ifindex == 1 {
+        return crate::drivers::net::virtio_net::get_net_device();
+    }
+    None
 }
 
 /// Find network device by name
@@ -242,13 +246,14 @@ pub fn get_netdevice_by_index(ifindex: u32) -> Option<&'static mut NetDevice> {
 /// # Returns
 /// Found device, or None if not found
 pub fn get_netdevice_by_name(name: &str) -> Option<&'static mut NetDevice> {
-    // Simplified implementation: currently only supports finding loopback device
-    // Full implementation needs to maintain device list
+    // review4 net-L: eth0 resolvable by name too (the index twin's note).
     if name == "lo" {
-        crate::drivers::net::get_loopback_device()
-    } else {
-        None
+        return crate::drivers::net::get_loopback_device();
     }
+    if name == "eth0" {
+        return crate::drivers::net::virtio_net::get_net_device();
+    }
+    None
 }
 
 /// Get total network device count

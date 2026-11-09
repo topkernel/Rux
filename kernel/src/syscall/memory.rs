@@ -4479,19 +4479,54 @@ pub fn sys_mlock2(args: [u64; 6]) -> i64 {
 pub fn sys_mbind(args: [u64; 6]) -> i64 {
     let _start = args[0] as usize;
     let _len = args[1] as usize;
-    let _mode = args[2] as i32;
-    let _nodemask_ptr = args[3] as *const usize;
-    let _maxnode = args[4] as usize;
-    let _flags = args[5] as u32;
+    let mode = args[2] as i32;
+    let nodemask_ptr = args[3] as *const usize;
+    let maxnode = args[4] as usize;
+    let flags = args[5] as u32;
 
-    // Validate nodemask pointer if provided
-    if !_nodemask_ptr.is_null() && _maxnode > 0 {
-        if !crate::arch::uaccess::access_ok(_nodemask_ptr as usize, (_maxnode + 7) / 8) {
+    // review4 syscall-L: validate like the reference (kernel/exit of
+    // do_mbind: unknown mode or flag bits are EINVAL, not silent
+    // acceptance; MPOL_DEFAULT with a non-empty nodemask is EINVAL).
+    const MPOL_DEFAULT: i32 = 0;
+    const MPOL_BIND: i32 = 1;
+    const MPOL_INTERLEAVE: i32 = 2;
+    const MPOL_PREFERRED: i32 = 3;
+    const MPOL_LOCAL: i32 = 4;
+    const MPOL_F_STATIC_NODES: u32 = 1 << 15;
+    const MPOL_F_RELATIVE_NODES: u32 = 1 << 14;
+    const MPOL_MF_STRICT: u32 = 1 << 0;
+    const MPOL_MF_MOVE: u32 = 1 << 1;
+    const MPOL_MF_MOVE_ALL: u32 = 1 << 2;
+    match mode {
+        MPOL_DEFAULT | MPOL_BIND | MPOL_INTERLEAVE | MPOL_PREFERRED | MPOL_LOCAL => {}
+        _ => return -errno::EINVAL as i64,
+    }
+    if flags
+        & !(MPOL_MF_STRICT | MPOL_MF_MOVE | MPOL_MF_MOVE_ALL
+            | MPOL_F_STATIC_NODES | MPOL_F_RELATIVE_NODES)
+        != 0
+    {
+        return -errno::EINVAL as i64;
+    }
+    // Nodemask word (single-node: node 0 only — any nonzero bit is a
+    // nonexistent node).
+    let mut mask_word = 0usize;
+    if !nodemask_ptr.is_null() && maxnode > 0 {
+        if !crate::arch::uaccess::access_ok(nodemask_ptr as usize, (maxnode + 7) / 8) {
             return -errno::EFAULT as i64;
+        }
+        // SAFETY: access_ok covered one word (maxnode >= 1).
+        mask_word = unsafe { core::ptr::read_volatile(nodemask_ptr) };
+        if mode == MPOL_DEFAULT && mask_word != 0 {
+            return -errno::EINVAL as i64;
+        }
+        // Node bits above node 0 do not exist on this system.
+        if mask_word & !1 != 0 {
+            return -errno::EINVAL as i64;
         }
     }
 
-    // Single-node system: silently accept any policy
+    // Single-node system: policy accepted, no NUMA action to take.
     0
 }
 
@@ -4551,17 +4586,37 @@ pub fn sys_get_mempolicy(args: [u64; 6]) -> i64 {
 
 /// sys_set_mempolicy - Set process memory policy (NR 237)
 pub fn sys_set_mempolicy(args: [u64; 6]) -> i64 {
-    let _mode = args[0] as i32;
-    let _nodemask_ptr = args[1] as *const usize;
-    let _maxnode = args[2] as usize;
+    let mode = args[0] as i32;
+    let nodemask_ptr = args[1] as *const usize;
+    let maxnode = args[2] as usize;
 
-    if !_nodemask_ptr.is_null() && _maxnode > 0 {
-        if !crate::arch::uaccess::access_ok(_nodemask_ptr as usize, (_maxnode + 7) / 8) {
+    // review4 syscall-L: same validation as mbind (the reference's
+    // do_set_mind mask/flag completeness).
+    const MPOL_DEFAULT: i32 = 0;
+    const MPOL_BIND: i32 = 1;
+    const MPOL_INTERLEAVE: i32 = 2;
+    const MPOL_PREFERRED: i32 = 3;
+    const MPOL_LOCAL: i32 = 4;
+    match mode {
+        MPOL_DEFAULT | MPOL_BIND | MPOL_INTERLEAVE | MPOL_PREFERRED | MPOL_LOCAL => {}
+        _ => return -errno::EINVAL as i64,
+    }
+    let mut mask_word = 0usize;
+    if !nodemask_ptr.is_null() && maxnode > 0 {
+        if !crate::arch::uaccess::access_ok(nodemask_ptr as usize, (maxnode + 7) / 8) {
             return -errno::EFAULT as i64;
+        }
+        // SAFETY: access_ok covered one word (maxnode >= 1).
+        mask_word = unsafe { core::ptr::read_volatile(nodemask_ptr) };
+        if mode == MPOL_DEFAULT && mask_word != 0 {
+            return -errno::EINVAL as i64;
+        }
+        if mask_word & !1 != 0 {
+            return -errno::EINVAL as i64;
         }
     }
 
-    // Single-node system: accept any policy silently
+    // Single-node system: policy accepted, no NUMA action to take.
     0
 }
 

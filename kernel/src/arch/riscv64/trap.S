@@ -95,7 +95,7 @@
     // Defensive: clamp invalid ti_cpu (negative or >= MAX_CPUS) to CPU 0.
     // ti_cpu is i32 sign-extended by lw; -1 becomes 0xFFFFFFFF which
     // causes index-out-of-bounds if used unclamped.
-    li   t0, 4            // MAX_CPUS = 4
+    li   t0, {max_cpus}    // injected from config::MAX_CPUS (review4 arch-L)
     bltu t1, t0, .Lcalc_stack\@
     li   t1, 0            // Invalid → fall back to CPU 0
     j .Lcalc_stack\@
@@ -104,7 +104,7 @@
     // Early boot / corrupted tp: tp = hart_id directly
     // When tp is corrupted (e.g., 0x8000000000000000), clamp to 0
     // as a safe fallback — uses CPU 0's interrupt stack.
-    li t0, 4
+    li t0, {max_cpus}    // injected (review4 arch-L)
     bgeu tp, t0, .Lfallback_stack\@
     mv t1, tp
     j .Lcalc_stack\@
@@ -663,7 +663,7 @@ trap_entry:
     // Normal path: tp is task_struct pointer, read ti_cpu
     lw a1, {task_ti_cpu}(tp)
     // Defensive: clamp invalid ti_cpu to CPU 0
-    li   t0, 4            // MAX_CPUS
+    li   t0, {max_cpus}    // injected from config::MAX_CPUS (review4 arch-L)
     bltu a1, t0, .Ldo_call_handler
     li   a1, 0
     j .Ldo_call_handler

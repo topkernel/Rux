@@ -501,6 +501,24 @@ fn detach_task(node: &CgroupNode, pid: u32) {
     }
 }
 
+/// fork-unwind hook (review4 mm-proc-L): cgroup_on_fork attaches the
+/// child BEFORE fork's later failure arms run (settid EFAULT, copy_mm,
+/// enqueue-refused, ...); every unwind must drop the membership or the
+/// dead pid stays in the cgroup's tasks Vec forever — skewing
+/// subtree_task_count, pids.max enforcement, and the procfs listing.
+pub fn on_fork_unwind(task: *mut crate::process::task::Task) {
+    // SAFETY: the caller (fork's unwind) owns the still-initialized task.
+    unsafe {
+        let ptr = (*task).cgroup_ptr();
+        if !ptr.is_null() {
+            let pid = (*task).pid();
+            // SAFETY: the ptr was set by cgroup_on_fork from a live Arc.
+            detach_task(&*ptr, pid);
+            (*task).set_cgroup_ptr(core::ptr::null_mut());
+        }
+    }
+}
+
 /// Attach the boot init task (PID 1) to the root cgroup so its membership
 /// and memory usage are tracked from the start. Kernel threads stay
 /// cgroup_ptr = NULL (implicit root, unlimited — Linux kthreads bypass

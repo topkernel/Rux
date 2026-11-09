@@ -573,51 +573,6 @@ impl Drop for VirtioInputDevice {
 // Device probing
 // ============================================================================
 
-/// Probe VirtIO Input devices
-pub fn probe_virtio_input_devices() -> Option<(VirtioInputDevice, Option<VirtioInputDevice>)> {
-    let mut keyboard: Option<VirtioInputDevice> = None;
-    let mut pointer: Option<VirtioInputDevice> = None;
 
-    // Shared ECAM walker: 0x8000 stride per slot + all 8 functions (the
-    // old 0x1000 stride hid every slot >= 4 — review BUG).
-    for ecam_addr in pci::find_ecam_devices(VIRTIO_INPUT_PCI_VENDOR, &[VIRTIO_INPUT_PCI_DEVICE]) {
-        if let Ok(virtio_pci) = VirtIOPCI::new(ecam_addr) {
-            if let Some(input_dev) = VirtioInputDevice::new(virtio_pci) {
-                if input_dev.is_pointer() {
-                    if pointer.is_none() {
-                        pointer = Some(input_dev);
-                    }
-                } else {
-                    if keyboard.is_none() {
-                        keyboard = Some(input_dev);
-                    }
-                }
-            }
-        }
 
-        // If both devices found, stop
-        if keyboard.is_some() && pointer.is_some() {
-            break;
-        }
-    }
 
-    if keyboard.is_some() || pointer.is_some() {
-        // Return (keyboard, pointer)
-        Some((keyboard?, pointer))
-    } else {
-        None
-    }
-}
-
-/// Probe single VirtIO Input device
-pub fn probe_virtio_input() -> Option<VirtioInputDevice> {
-    // Shared ECAM walker: 0x8000 stride per slot + all 8 functions (the
-    // old 0x1000 stride hid every slot >= 4 — review BUG).
-    for ecam_addr in pci::find_ecam_devices(VIRTIO_INPUT_PCI_VENDOR, &[VIRTIO_INPUT_PCI_DEVICE]) {
-        if let Ok(virtio_pci) = VirtIOPCI::new(ecam_addr) {
-            return VirtioInputDevice::new(virtio_pci);
-        }
-    }
-
-    None
-}

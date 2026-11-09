@@ -508,6 +508,10 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         // freeing the stack (R33-pre: a concurrent kill on a hashed slot
         // with a freed stack is the context-switch-onto-heap wedge).
         let unwind = |task_ptr: *mut Task, err: i32| -> Result<Pid, i32> {
+            // review4 mm-proc-L: detach the cgroup membership FIRST
+            // (cgroup_on_fork attached the child at :572; the old unwind
+            // never dropped it — the dead pid stayed in tasks Vec).
+            crate::sched::cgroup::on_fork_unwind(task_ptr);
             (*current_ptr).remove_child(task_ptr);
             crate::process::pid_hash::pid_hash_remove((*task_ptr).pid());
             (*task_ptr).free_kernel_stack();
