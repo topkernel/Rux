@@ -1278,22 +1278,37 @@ fn kmsg_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
                 continue;
             }
 
+            // review4 drivers-L: snapshot the record and DROP the ring
+            // lock before formatting — the alloc::format! below heap-
+            // allocates, and it used to run under RING_BUFFER's
+            // irqsave lock (allocation failure/deadlock surface on every
+            // /dev/kmsg read).
+            let rec_level = record.level;
+            let rec_seq = record.seq;
+            // cycles to microseconds (10MHz clock)
+            let rec_timestamp_us = record.timestamp / 10;
+            let rec_text_len = record.text_len as usize;
+            let mut rec_text = [0u8; RECORD_TEXT_SIZE];
+            rec_text[..rec_text_len.min(RECORD_TEXT_SIZE)]
+                .copy_from_slice(&record.text[..rec_text_len.min(RECORD_TEXT_SIZE)]);
+            drop(rb);
+
             // Format: "level,seq,timestamp_us,-;text\n"
-            let timestamp_us = record.timestamp / 10; // cycles to microseconds (10MHz clock)
+            let timestamp_us = rec_timestamp_us;
 
             // Format into a local buffer
             let mut line_buf = [0u8; 300];
             let mut lpos = 0;
 
             // Write "level,seq,timestamp_us,-;"
-            let header = alloc::format!("{},{},{},-;", record.level, record.seq, timestamp_us);
+            let header = alloc::format!("{},{},{},-;", rec_level, rec_seq, timestamp_us);
             let header_bytes = header.as_bytes();
             let header_len = header_bytes.len().min(line_buf.len());
             line_buf[..header_len].copy_from_slice(&header_bytes[..header_len]);
             lpos = header_len;
 
-            // Write message text
-            let text_bytes = &record.text[..record.text_len as usize];
+            // Write message text (from the lock-free snapshot)
+            let text_bytes = &rec_text[..rec_text_len];
             let text_len = text_bytes.len().min(line_buf.len() - lpos);
             line_buf[lpos..lpos + text_len].copy_from_slice(&text_bytes[..text_len]);
             lpos += text_len;
@@ -1309,7 +1324,6 @@ fn kmsg_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
             let data = &line_buf[..lpos];
             let copy_len = data.len().min(buf.len());
             if copy_len == 0 {
-                drop(rb);
                 return 0;
             }
             buf[..copy_len].copy_from_slice(&data[..copy_len]);
@@ -1317,9 +1331,6 @@ fn kmsg_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
             // Advance position to next record
             file.set_pos(seq + 1);
             KMSG_N_RECORD.fetch_add(1, Ordering::Relaxed);
-
-            // Drop lock before returning
-            drop(rb);
 
             return copy_len as isize;
         }

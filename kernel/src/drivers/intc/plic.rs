@@ -195,23 +195,10 @@ impl Plic {
         }
     }
 
-    /// Read the FIRST pending word (IRQs 0..31). See read_pending_word for
-    /// the full array.
-    pub fn read_pending(&self) -> u32 {
-        self.read_pending_word(0)
-    }
-
-    pub fn trigger_ipi(&self, irq: usize) {
-        if irq >= 32 { return; }
-        let addr = self.base + offset::PENDING;
-        // SAFETY: addr is a valid PLIC pending register; read-modify-write to set a pending bit.
-        unsafe {
-            let pending: u32;
-            asm!("lw {}, 0({})", out(reg) pending, in(reg) addr, options(nostack));
-            let new_pending = pending | (1 << irq);
-            asm!("sw t1, 0(a0)", in("a0") addr, in("t1") new_pending, options(nostack));
-        }
-    }
+    // review4 drivers-L: trigger_ipi deleted — zero callers; the pending
+    // registers are READ-ONLY per the PLIC spec (its RMW write was
+    // silently dropped/UNPREDICTABLE and raced hardware setting adjacent
+    // bits). IPIs go through SBI/MSIP (clint.rs).
 }
 
 /// R14-15 (MED-11): PLIC enable-word read-modify-writes from different
@@ -220,7 +207,7 @@ impl Plic {
 static ENABLE_RMW_LOCK: crate::sync::spinlock::Spinlock<()> =
     crate::sync::spinlock::Spinlock::new(());
 
-static PLIC: Plic = Plic::new(PLIC_BASE, 4);
+static PLIC: Plic = Plic::new(PLIC_BASE, crate::config::MAX_CPUS);
 
 // ==================== IrqChip implementation ====================
 
@@ -298,7 +285,7 @@ pub fn init() {
     }
 
     // 4. Enable IPI interrupts for all harts (S-mode contexts)
-    for hart in 0..4 {
+    for hart in 0..crate::config::MAX_CPUS {
         for ipi_irq in 11..14 {
             PLIC.enable_interrupt(hart, ipi_irq);
         }
@@ -317,10 +304,3 @@ pub fn enable_interrupt(hart: usize, irq: usize) {
     PLIC.enable_interrupt(hart, irq)
 }
 
-pub fn read_pending() -> u32 {
-    PLIC.read_pending()
-}
-
-pub fn trigger_ipi(irq: usize) {
-    PLIC.trigger_ipi(irq)
-}

@@ -423,7 +423,9 @@ impl VirtioInputDevice {
             let ring_ptr = (queue.avail as *mut u8).add(4) as *mut u16;
             write_volatile(ring_ptr.add(avail.idx as usize % queue.queue_size as usize), desc_idx as u16);
             fence(Ordering::SeqCst);
-            avail.idx = avail.idx.wrapping_add(1);
+            // review4 drivers-L: volatile like the sibling store at :384
+            // and queue.rs — a plain store on DMA-shared state.
+            write_volatile(core::ptr::addr_of_mut!(avail.idx), avail.idx.wrapping_add(1));
             self.last_used = self.last_used.wrapping_add(1);
 
             fence(Ordering::SeqCst);
@@ -439,7 +441,11 @@ impl VirtioInputDevice {
         if let Some(queue) = &self.event_queue {
             unsafe {
                 let used = &*queue.used;
-                used.idx as usize != self.last_used as usize
+                // review4 drivers-L: DMA-written field — read_volatile
+                // like read_event (a plain load is the pattern LTO
+                // could hoist out of a poll loop).
+                read_volatile(core::ptr::addr_of!(used.idx)) as usize
+                    != self.last_used as usize
             }
         } else {
             false

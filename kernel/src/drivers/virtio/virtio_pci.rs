@@ -583,9 +583,13 @@ impl VirtIOPCI {
 
     /// Reset device
     pub fn reset_device(&self) {
+        // review4 drivers-L: device_status is a u8 at common-config
+        // offset 0x14 (config_generation u8 @ 0x15, queue_select u16 @
+        // 0x16 follow) — the old u32 RMW also zeroed queue_select.
+        // virtio_gpu's init already uses u8; match it.
         // SAFETY: common_cfg_bar points to a valid MMIO-mapped VirtIO common config region.
         unsafe {
-            let status_ptr = (self.common_cfg_bar + 0x14) as *mut u32;
+            let status_ptr = (self.common_cfg_bar + 0x14) as *mut u8;
             core::ptr::write_volatile(status_ptr, 0);
         }
     }
@@ -594,8 +598,8 @@ impl VirtIOPCI {
     pub fn set_status(&self, status: u32) {
         // SAFETY: common_cfg_bar points to a valid MMIO-mapped VirtIO common config region.
         unsafe {
-            let status_ptr = (self.common_cfg_bar + 0x14) as *mut u32;
-            core::ptr::write_volatile(status_ptr, status);
+            let status_ptr = (self.common_cfg_bar + 0x14) as *mut u8;
+            core::ptr::write_volatile(status_ptr, status as u8);
         }
     }
 
@@ -603,8 +607,8 @@ impl VirtIOPCI {
     pub fn get_status(&self) -> u32 {
         // SAFETY: common_cfg_bar points to a valid MMIO-mapped VirtIO common config region.
         unsafe {
-            let status_ptr = (self.common_cfg_bar + 0x14) as *const u32;
-            core::ptr::read_volatile(status_ptr)
+            let status_ptr = (self.common_cfg_bar + 0x14) as *const u8;
+            core::ptr::read_volatile(status_ptr) as u32
         }
     }
 

@@ -316,18 +316,36 @@ unsafe extern "C" fn loop_request_fn(req: &mut Request) {
             return;
         }
     };
+    // review4 drivers-L: the sizelimit caps the transfer LENGTH too, not
+    // just the start — the old code clamped byte_start but passed the
+    // full block buffer, so the tail past the limit was read/written
+    // against the backing file anyway.
+    let allowed = if limit != 0 {
+        (off.saturating_add(limit)).saturating_sub(byte_start) as usize
+    } else {
+        usize::MAX
+    };
+    let eff_len = req.buffer.len().min(allowed);
+
     let saved_pos = file.get_pos();
     file.set_pos(byte_start);
     let rc = match req.cmd_type {
         ReqCmd::Read => match ops.read {
-            Some(f) => f(file, &mut req.buffer),
+            Some(f) => {
+                // Zero the beyond-limit tail up front: a block device is
+                // always block_size wide.
+                for b in req.buffer[eff_len..].iter_mut() {
+                    *b = 0;
+                }
+                f(file, &mut req.buffer[..eff_len])
+            }
             None => {
                 req.error.store(-5, Ordering::Release);
                 return;
             }
         },
         ReqCmd::Write => match ops.write {
-            Some(f) => f(file, &req.buffer),
+            Some(f) => f(file, &req.buffer[..eff_len]),
             None => {
                 req.error.store(-5, Ordering::Release);
                 return;

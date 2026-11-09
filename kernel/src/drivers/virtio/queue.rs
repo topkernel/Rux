@@ -1071,7 +1071,6 @@ impl VirtQueue {
     /// (net TX) users; blk keeps the 3-desc accounting via alloc_desc().
     pub fn alloc_desc_chain(&mut self, _chain_len: u16) -> Option<u16> {
         let used_idx = self.get_used();
-        let avail_idx = self.get_avail();
 
         // Descriptor allocation is a free-running counter taken modulo
         // queue_size. Do NOT clamp it against the used-ring index: next_desc
@@ -1103,6 +1102,13 @@ impl VirtQueue {
         // drift into a PERMANENT "all descriptors in flight" refusal and
         // every submission failed with -5 forever after.
         let leaked = self.leaked_chains.load(Ordering::Acquire);
+        // review4 drivers-L: the driver-side term is the SHADOW, not the
+        // shared ring's avail.idx — submit_quiet stopped trusting the
+        // shared idx after a stray write made the device walk garbage
+        // heads (queue.rs:992 family); the guard must not re-trust it
+        // (a corrupted-low idx under-reports in-flight and lets a chain
+        // wrap onto a live chain's slots).
+        let avail_idx = self.avail_shadow.load(Ordering::Acquire);
         let in_flight = avail_idx.wrapping_sub(used_idx).saturating_sub(leaked);
         // Bound by the WORST-CASE chain length (3: blk header/data/resp),
         // not the caller's: a 2-descriptor flush admitted under the old

@@ -2422,6 +2422,12 @@ fn sleep_until_ns(deadline_ns: u64) -> bool {
                 }
             }
         } else {
+            // review4 drivers-L: timer table full — schedule() with the
+            // task still RUNNING returns immediately and the loop spins
+            // on the clock for up to 16.6 ms. Yield explicitly (same
+            // discipline as wait_for_used_interruptible's poll_fallback):
+            // let another task use the CPU for the remainder.
+            crate::sched::yield_cpu();
             crate::sched::schedule();
         }
     }

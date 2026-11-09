@@ -663,12 +663,9 @@ pub fn pci_rescan_block_hotplug() -> usize {
         } else {
             dev.common_cfg_bar + 0x2000
         };
-        // SAFETY: cfg_base is a valid MMIO-mapped virtio-blk device
-        // config region (parsed from the device's PCI capabilities).
-        crate::println!(
-            "AUDIT: rescan cfg_base={:#x} dev_bar={:#x} common_bar={:#x}",
-            cfg_base, dev.device_cfg_bar, dev.common_cfg_bar
-        );
+        // review4 drivers-L: the ungated "AUDIT:" println fired on every
+        // /sys/bus/pci/rescan — dropped (serial-clean discipline, see the
+        // probe.rs:439 comments).
         let capacity = unsafe { core::ptr::read_volatile(cfg_base as *const u64) };
 
         // Assign identity: vdX with minor stride 16, continuing past the
