@@ -9267,3 +9267,133 @@ dfx=pid1spin (EPDEL/EPPURGE/EPREBIND — see commit).
 4. Screenshots every 120 s through the whole window — ohw124 proved
    launcher.ready is reachable; the first non-06b933b4 md5 is the
    campaign's finish line.
+
+### 81. 81ST SESSION (2026-11-09) — THE PARK VERDICTS ARE IN: lost-wake
+### is DEAD kernel-side (observed unlock-write + WAKE ret=1 + waiter
+### re-acquire on watched words; standing parks show ZERO wakes and ZERO
+### writes for their whole life = never-sent); every standing park sits
+### on a FROZEN musl rwlock (0x80000010-class: a parked WRLOCK waiter +
+### readers that never drain — samgr abilityMapLock_/foundation twin);
+### the read-holders are FFRT coroutines whose stacks need the
+### queue-walk (82nd item 1). (1e4b6dee + 2 dfx commits)
+
+Boots this session: ohw127-ohw138 (12 KVM boots, system-lb5 +
+userdata-fresh2, SMP2/4G, LOGLEVEL7, dfx=txnhunt,ams46,fuxstuck).
+
+#### 1. THE VERDICT INSTRUMENTS (all dfx-gated, all committed)
+
+- FUXPARK latch (futex.rs): the TXN-HANG-BWR census row for the
+  sync-holder park shape (park=FUTEX, stack!=0, looper!=0) latches the
+  park word (tracks mid-park word SHIFTS), arms the fuxwatch write
+  watch tgid-SCOPED (FUXWATCH1_TGID — see the ohw128 lesson below), and
+  prints per-burst parkv[wake[ring summary] park[age/woken/others]].
+- The 80th's immediate per-word wake verdict now also matches the
+  latched word (tgid-filtered against foreign same-VA objects).
+- OH68-PARK / OH68-BWRPARK: the oh68 TLS->ctx->task sweep runs for the
+  PARK'S OWN tgid (explicit-tgid variant; root cache tgid-scoped),
+  printing worker task labels + ctx+224 parkw; triggered from BOTH the
+  futex-park rows and the BWR-parked sync-holders (rwait>30s).
+- PARK-STACK: the parked waiter's own user stack (16 words above entry
+  rsp, module+fileoff) for standing parks (age>30s, 1/60s), via the
+  audit's ConsoleWriter.
+- RWFRZ-READERS: when a standing park's word shape-matches the frozen
+  rwlock class (0x80000000|N), scan every tgid task's stack (640 words)
+  for the word address — names the WAITERS and what each is blocked on.
+- LESSON (cost one boot): arming the park page in EVERY mm (main-stack
+  VA 0x7fffffffc000) overflowed the 16-slot mm done-set — 82 mms
+  armed-but-unrecorded took the un-watched fault path on their own
+  stack writes -> Permission denied -> SIGSEGV storm -> sysrq-c. Fixed:
+  done-set 128 with claim-BEFORE-arm + tgid scoping. Second lesson:
+  pr_warn from the censusd audit context is DROPPED — all audit-path
+  prints go through ConsoleWriter now (the never-printing FUXPARK-ARM
+  class).
+
+#### 2. PARK 1 VERDICT (ohw126 tid-852 class) — NEVER-SENT, kernel clean
+
+ohw129: observed on a watched word: FW write (unlock-side, old=2) ->
+FUXWATCH-WAKE op=1 ret=1 -> FW write by the parked waiter itself
+(old=0, re-acquire) — the wake machinery DELIVERS. ohw130
+(accountmgr tid 1188, txn12813 code53): 174s standing park,
+wake[ever=0] EVERY burst + ZERO FW writes after birth = no wake was
+ever sent, no one ever touched the word. VERDICT: never-sent — the
+userspace FFRT graph's producer never runs. Lost-wake is dead.
+
+#### 3. PARK 2 VERDICT (ohw126 tid-766 class) — kernel clean, same class
+
+ohw126's own hist rings re-read: tid 766's nested txn9329->samgr was
+replied and DELIVERED (REPLY_PUSHED@5164 REPLY_RECV@5175); the why=7
+SENDFAIL at 52.61 was the deferred BC_REPLY burned while the nested
+send's ioctl shape let userspace reply early (the known EARLYRET
+family — only 2 early boots, none at the wedge). The BWR-parked
+servers (distdata tid 766/547/713, code0=GetFeatureInterface from
+wifi_manager/sensors/camera_service; accountmgr code13/code53) all
+hold their replies userspace-side with todo=0, no outstanding nested
+txns — the handler deferred to an FFRT graph that never completes.
+
+#### 4. THE FROZEN-RWLOCK LAYER (the structural founder under the parks)
+
+ohw135: the standing park word's VALUE is 0x80000010 — musl
+pthread_rwlock with a PARKED WRLOCK waiter (t|r marker, musl
+timedwrlock.c) behind 16 readers that never drain. ohw126's RWFRZ-HIGH
+lines show the same 16-reader freeze in 7+ processes (samgr 328, wifi
+898, 642, 735, 646, 738...). ohw136 reader scan: SIX samgr loopers
+(596/599/611/361/618/366) all wrlock-parked on 0x7ff000bcd5b4
+(abilityMapLock_ class — CheckSystemAbility read sections are short;
+AddSystemAbility takes the write lock). ohw138: foundation twin
+(0x7ff000cffcb4, tid 1265 wrlock-parked holding accountmgr's
+txn18799 code0 for 320s+). musl unlock wakes only from the LAST
+reader (cnt 1->0), so ONE stuck reader freezes every writer, and this
+patched musl does NOT block new readers on the writer marker — the
+count must simply never reach 0.
+
+The read-holders are NOT on any thread's syscall-adjacent stack (640-
+word scan finds only the waiters): they are FFRT COROUTINES that
+yielded inside the read section — their stacks live in the heap and
+are reachable only via the queue/task-list walk (the 68th's CoTask
+offsets + the SerialQueue list offsets, libffrt bb6920ed DWARF). The
+CoTask slab sweep now scans BOTH the derived anchor window and the
+68th's fixed samgr window (dual-window), but printed empty on
+127-138 — shape-test or window miss; the QUEUE WALK is the reliable
+route.
+
+#### 5. CONTEXT CLASS (downstream noise, do not chase)
+
+- usb_host NULL-deref crash loops (rip 0x7ff082996bac, libipc_single
+  fileoff ~0x55bac-class) are BASELINE (ohw126 shows 15 too).
+- First-instance accountmgr SIGSEGVs (~70-80s, wild pointer) then
+  restart; foundation sig=6 group aborts are its own startup watchdog
+  (KOT-KILL) — all downstream of the stall.
+- The sysrq-c "deliberate crash" panics at 97-140s on wedged boots are
+  the image's service_checker writing /proc/sysrq-trigger.
+- ohw129's samgr M2-web (32 stack-holders at 89s) DRAINED by 118s by
+  itself — transient pile, not the standing wedge.
+
+#### 6. GATES
+
+x86_64 build rc=0 (run/build-x86-81.log); riscv64 clean-config rc=0
+(run/build-rv-81.log); aarch64 rc=0 (run/build-a64-81.log); riscv64
+make test 1319/1319 ALL TESTS PASSED (run/test-rv-81.log). Behavior
+changes: NONE — every change is dfx-gated (fuxstuck/txnhunt); no
+pbench duty. Boot stability with instruments: ohw138 ran 420s+ with
+56 SetBundleQuota events (past ohw126's 42) before the wedge face
+settled on the foundation rwlock twin.
+
+#### 7. FOR THE 82ND (priority order)
+
+1. THE QUEUE WALK: extract libffrt (bb6920ed) DWARF offsets for
+   SerialQueue/queue-concurrency map + task list; walk the parked
+   waiters' process queues from the 68th's CoTask offsets; the
+   suspended coroutine holding the abilityMapLock_ READ lock names the
+   in-critical-section wait directly (the mission's original ask).
+2. The reference-diff question: what makes the read-holders'
+   dependency resolve in ms on the reference (boot 12s) but never on
+   ours — carry dfx=pctlmon on the next boots (the 15s/105 param
+   family may still be burning under the graph: each 15s timeout
+   multiplies into every SA registration behind the frozen lock).
+3. The strand-wall residue: FFRTWAIT rows still show few-pick threads
+   with multi-second max waits (ohw126 tid 323: pk2 wm4851ms) — check
+   whether the 63rd's delay-wheel fixes hold on current boots before
+   hunting new scheduler causes.
+4. PIXELS remain the yardstick: ohw138's screenshots still
+   06b933b4-class at 300s; screenshot every shot tick continues to be
+   wired in lb-boot.py.
