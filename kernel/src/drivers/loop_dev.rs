@@ -112,6 +112,34 @@ pub fn init_loops() {
         // registry stores it; the buffer cache keys on its address).
         unsafe {
             let dev = &mut LOOPS[i];
+            // review4 drivers-L: loop 0 registers THE canonical disk and
+            // loop_disk(0) hands out that same object — the old code
+            // registered a SECOND representative GenDisk for major 7, and
+            // get_disk(7) vs loop_disk(0) were different objects: the
+            // buffer cache keyed the same physical block under both,
+            // an incoherency hazard for any get_disk(7) consumer.
+            if i == 0 {
+                let mut boxed = Box::new(GenDisk::new(
+                    loop_static_name(i),
+                    LOOP_MAJOR,
+                    N_LOOPS as u32,
+                    4096,
+                    None,
+                ));
+                boxed.first_minor = 0;
+                boxed.minors = N_LOOPS as u32;
+                boxed.capacity.store(0, Ordering::Release);
+                boxed.request_fn = Some(loop_request_fn);
+                if crate::drivers::blkdev::register_disk(boxed).is_ok() {
+                    // SAFETY: just registered; the registry owns the
+                    // GenDisk for the machine's lifetime.
+                    let canonical = unsafe {
+                        &*crate::drivers::blkdev::get_disk(LOOP_MAJOR).unwrap()
+                    };
+                    dev.disk = Some(canonical);
+                }
+                continue;
+            }
             let disk = Box::leak(Box::new(GenDisk::new(
                 loop_static_name(i),
                 LOOP_MAJOR,
@@ -124,24 +152,6 @@ pub fn init_loops() {
             disk.capacity.store(0, Ordering::Release);
             disk.request_fn = Some(loop_request_fn);
             dev.disk = Some(disk);
-            // The registry deduplicates by major; one representative row
-            // exposes the loop family to /proc/partitions consumers.
-            if i == 0 {
-                let _ = crate::drivers::blkdev::register_disk(
-                    alloc::boxed::Box::new(GenDisk {
-                        name: loop_static_name(i),
-                        major: LOOP_MAJOR,
-                        first_minor: 0,
-                        minors: N_LOOPS as u32,
-                        capacity: core::sync::atomic::AtomicU64::new(0),
-                        block_size: 4096,
-                        ops: None,
-                        private_data: None,
-                        request_fn: Some(loop_request_fn),
-                        async_read_fn: None,
-                    }),
-                );
-            }
         }
     }
 }
