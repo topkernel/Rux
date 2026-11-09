@@ -10,7 +10,7 @@ docs/archive/code-review-2026-09-12.md, prior-round fixed items.
 Findings
 ========
 
-### [Medium] process/task.rs:1403 + syscall/time.rs:1242 — POSIX timers and itimers are per-Task (per-thread), Linux has them per-process
+### [Medium] process/task.rs:1403 + syscall/time.rs:1242 — POSIX timers and itimers are per-Task (per-thread), Linux has them per-process — ✅ FIXED (`9bf06ed7`)
 `posix_timers: Spinlock<Vec<PosixTimerState>>`, `itimer_real/virt/prof` live directly on `Task`. Linux
 keeps itimers and POSIX interval timers in the shared `signal_struct` (CLONE_THREAD shares them).
 Trigger: `timer_create` in thread A, `timer_settime`/`timer_delete` from thread B returns EINVAL (timer
@@ -187,18 +187,18 @@ Unconnected and returns the raw error. The `nonblock` argument the syscall layer
 passed. Trigger: nonblocking or blocking `connect()` on an AF_INET6 SOCK_STREAM socket. Fix: mirror
 the v4 flow (wait rounds + EINPROGRESS + pending-error surfacing).
 
-### [Low] syscall/network.rs:4033/4255 — sendmmsg/recvmmsg on AF_PACKET/AF_INET-raw sockets return ENOTSOCK
+### [Low] syscall/network.rs:4033/4255 — sendmmsg/recvmmsg on AF_PACKET/AF_INET-raw sockets return ENOTSOCK — ✅ FIXED (`9bf06ed7`)
 The batch entry points special-case AF_UNIX/AF_NETLINK through the per-message engines, then fall to
 `socket_file_of_checked`, which only resolves the INET socket ops table — a raw/packet fd yields
 ENOTSOCK although single sendmsg/recvmsg on the same fd work. Route raw fds through the per-message
 syscalls like unix/netlink.
 
-### [Low] syscall/network.rs:2022-2183 — SO_RCVTIMEO/SO_SNDTIMEO setsockopt accepts optlen 8
+### [Low] syscall/network.rs:2022-2183 — SO_RCVTIMEO/SO_SNDTIMEO setsockopt accepts optlen 8 — ✅ FIXED (`9bf06ed7`)
 Linux requires optlen >= sizeof(struct timeval) (16 on LP64) and returns EINVAL for 8; Rux copies 8
 bytes and silently reads tv_usec as 0, arming a seconds-only timeout. (Also: the unix-socket twin
 `read_tv` at :1979 accepts optlen 8 the same way.)
 
-### [Info] syscall/network.rs:4281 — recvmmsg timeout conversion hardcodes 10ms jiffies
+### [Info] syscall/network.rs:4281 — recvmmsg timeout conversion hardcodes 10ms jiffies — ✅ FIXED (`9bf06ed7`)
 `deadline = jiffies + (us / 10_000).max(1)` assumes HZ=100; use `drivers::timer::HZ` like the other
 deadline conversions or the timeout mis-scales if HZ ever changes.
 
