@@ -1398,9 +1398,6 @@ pub struct Task {
     /// return value via musl).
     pub itimer_real: [AtomicU64; 2],
 
-    /// POSIX timers created via timer_create.
-    /// Stores (timer_id, clock_id, interval_jiffies, sigev_signo, sigev_notify, overrun_count).
-    pub posix_timers: Spinlock<alloc::vec::Vec<PosixTimerState>>,
 
     /// Resource limits (RLIMIT_*): [(rlim_cur, rlim_max); 16].
     /// Initialized to kernel defaults; getrlimit/setrlimit/prlimit64 read
@@ -1632,6 +1629,11 @@ pub struct PosixTimerState {
     pub overrun_count: i32,
     /// User-visible timer ID.
     pub user_timer_id: i32,
+    /// Creating task's tid — CLOCK_THREAD_CPUTIME_ID timers are per-thread
+    /// (the reference attaches them to the creating task, not the shared
+    /// signal struct); the scheduler tick skips a thread-cputime timer
+    /// owned by another thread (review4 syscall-M, process-wide timers).
+    pub owner_tid: u32,
     /// CPU-time deadline (ns on sum_exec_runtime; 0 = none armed) for
     /// CLOCK_PROCESS/THREAD_CPUTIME_ID timers. Atomics: scheduler_tick
     /// reads/re-arms them from timer-IRQ context where taking the
@@ -1657,6 +1659,7 @@ impl Clone for PosixTimerState {
             sigev_value: self.sigev_value,
             overrun_count: self.overrun_count,
             user_timer_id: self.user_timer_id,
+            owner_tid: self.owner_tid,
             cputime_deadline_ns: core::sync::atomic::AtomicU64::new(
                 self.cputime_deadline_ns.load(core::sync::atomic::Ordering::Relaxed),
             ),
@@ -1817,7 +1820,6 @@ impl Task {
             itimer_virt: [AtomicU64::new(0), AtomicU64::new(0)],
             itimer_prof: [AtomicU64::new(0), AtomicU64::new(0)],
             itimer_real: [AtomicU64::new(0), AtomicU64::new(0)],
-            posix_timers: Spinlock::new(alloc::vec::Vec::new()),
             rlimits: Spinlock::new(default_rlimits()),
             cpu_time_last_sigxcpu: AtomicU64::new(0),
             utime_ticks: AtomicU64::new(0),
@@ -2297,10 +2299,6 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, itimer_real)) as *mut [AtomicU64; 2],
             [AtomicU64::new(0), AtomicU64::new(0)],
-        );
-        ptr::write(
-            (ptr as usize + offset_of!(Task, posix_timers)) as *mut Spinlock<alloc::vec::Vec<PosixTimerState>>,
-            Spinlock::new(alloc::vec::Vec::new()),
         );
         // Rlimits + RLIMIT_CPU bookkeeping: Task pages come from the
         // NON-ZEROING buddy allocator, so every field read by enforcement
@@ -3002,10 +3000,6 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, itimer_real)) as *mut [AtomicU64; 2],
             [AtomicU64::new(0), AtomicU64::new(0)],
-        );
-        ptr::write(
-            (ptr as usize + offset_of!(Task, posix_timers)) as *mut Spinlock<alloc::vec::Vec<PosixTimerState>>,
-            Spinlock::new(alloc::vec::Vec::new()),
         );
         // Rlimits + RLIMIT_CPU bookkeeping: see new_idle_at — the buddy
         // allocator does not zero Task pages, so enforcement-read fields
@@ -5496,7 +5490,17 @@ impl Task {
     }
 
     /// Set signal struct
-    pub fn set_signal(&mut self, signal: Option<alloc::sync::Arc<SignalStruct>>) {
+    /// POSIX interval timers, process-scoped on the shared SignalStruct
+/// (review4 syscall-M): CLONE_SIGHAND threads share the list, a timer
+/// created by any thread is operable by every thread. Kernel threads
+/// carry no signal struct — callers treat None as "no timers".
+pub fn posix_timers(
+    &self,
+) -> Option<&Spinlock<alloc::vec::Vec<PosixTimerState>>> {
+    self.signal.as_ref().map(|s| &s.posix_timers)
+}
+
+pub fn set_signal(&mut self, signal: Option<alloc::sync::Arc<SignalStruct>>) {
         self.signal = signal;
     }
 

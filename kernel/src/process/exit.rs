@@ -1385,15 +1385,10 @@ pub fn do_exit(exit_code: i32) -> ! {
             }
         }
 
-        // ===== Disarm POSIX timers =====
-        {
-            let mut timers = (*current).posix_timers.lock();
-            for pt in timers.drain(..) {
-                if pt.kernel_timer_id != 0 {
-                    crate::timer::del_timer(pt.kernel_timer_id);
-                }
-            }
-        }
+        // ===== POSIX timers =====
+        // Process-scoped on the shared SignalStruct (review4 syscall-M):
+        // a surviving sibling thread still owns the list — the disarm
+        // moved to SignalStruct::drop (last-thread death).
 
         // ===== Reverse SEM_UNDO adjustments =====
         crate::ipc::sysv_sem::sem_undo_exit(current);

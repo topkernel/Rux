@@ -1161,7 +1161,10 @@ fn posix_timer_notify(pid: u32, signo: i32, sival: u64, tid: i32) {
         // same lock order the scheduler-tick cputime path uses).
         let overrun_at_delivery;
         {
-            let mut timers = (*task).posix_timers.lock();
+            let Some(timers_lock) = (*task).posix_timers() else {
+                return;
+            };
+            let mut timers = timers_lock.lock();
             let Some(pt) = timers.iter_mut().find(|t| t.user_timer_id == tid) else {
                 return; // timer deleted since the arm — nothing to notify
             };

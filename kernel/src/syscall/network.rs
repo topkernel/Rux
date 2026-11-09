@@ -1977,7 +1977,8 @@ pub fn sys_setsockopt(args: SyscallArgs) -> i64 {
 
     if let Some(usock) = crate::net::unix::unix_socket_from_fd(fd) {
         let read_tv = || -> Option<u64> {
-            if optval.is_null() || optlen < 8 {
+            // sizeof(struct timeval) on LP64 (the inet twin's bound).
+            if optval.is_null() || optlen < 16 {
                 return None;
             }
             let mut tv = [0u8; 16];
@@ -2020,8 +2021,11 @@ pub fn sys_setsockopt(args: SyscallArgs) -> i64 {
         return match level {
             SOL_SOCKET => match optname {
                 SO_RCVTIMEO | SO_SNDTIMEO => {
+                    // Linux requires optlen >= sizeof(struct timeval) —
+                    // 16 bytes on LP64; 8 used to be accepted and read
+                    // tv_usec as 0 (review4 net-L: seconds-only timeouts).
                     let mut tv = [0u8; 16];
-                    if optval.is_null() || optlen < 8 {
+                    if optval.is_null() || optlen < 16 {
                         return -(errno::EINVAL as i64);
                     }
                     let cpy = core::cmp::min(optlen as usize, 16);
@@ -3997,8 +4001,13 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
     // msghdr; msg_len is written back at offset 56).
     // Leg-52 lever A: one lookup shared by both family probes.
     let fam_file = crate::sched::get_current_fdtable().and_then(|t| t.get_file(fd as usize));
+    // review4 net-L: AF_PACKET/AF_INET-raw fds route through the
+    // single-message syscall too — the INET-only socket_file_of_checked
+    // below used to answer ENOTSOCK for them although single
+    // sendmsg/recvmsg work.
     if fam_file.as_ref().and_then(crate::net::unix::unix_file_of_file).is_some()
         || fam_file.as_ref().and_then(crate::net::netlink::netlink_file_of_file).is_some()
+        || crate::net::raw::raw_socket_from_fd(fd as usize).is_some()
     {
         let mut total_sent = 0u32;
         for i in 0..vlen as usize {
@@ -4218,8 +4227,11 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
     // recvmmsg batch timeout is approximated by SO_RCVTIMEO here).
     // Leg-52 lever A: one lookup shared by both family probes.
     let fam_file = crate::sched::get_current_fdtable().and_then(|t| t.get_file(fd as usize));
+    // review4 net-L: raw/packet fds route through the single-message
+    // syscalls (the sendmmsg twin's note).
     if fam_file.as_ref().and_then(crate::net::unix::unix_file_of_file).is_some()
         || fam_file.as_ref().and_then(crate::net::netlink::netlink_file_of_file).is_some()
+        || crate::net::raw::raw_socket_from_fd(fd as usize).is_some()
     {
         let mut total_recv = 0u32;
         for i in 0..vlen as usize {
@@ -4278,7 +4290,10 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
                 // Zero timeout = poll once (deadline already due).
                 deadline = Some(crate::drivers::timer::get_jiffies());
             } else {
-                deadline = Some(crate::drivers::timer::get_jiffies() + (us / 10_000).max(1));
+                // HZ-scaled jiffies (review4 net-L: the hardcoded 10_000
+                // assumed HZ=100).
+                deadline = Some(crate::drivers::timer::get_jiffies()
+                    + (us / (1_000_000 / crate::drivers::timer::HZ)).max(1));
             }
         }
     }

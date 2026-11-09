@@ -1244,13 +1244,18 @@ pub fn sys_timer_create(args: SyscallArgs) -> i64 {
         sigev_value,
         overrun_count: 0,
         user_timer_id: user_timer_id,
+        owner_tid: task.pid() as u32,
         cputime_deadline_ns: core::sync::atomic::AtomicU64::new(0),
         cputime_interval_ns: core::sync::atomic::AtomicU64::new(0),
         wall_deadline_ticks: core::sync::atomic::AtomicU64::new(0),
         interval_ns: 0,
     };
 
-    let mut timers = task.posix_timers.lock();
+    // Process-scoped list on the shared SignalStruct (review4 syscall-M).
+    let mut timers = match task.posix_timers() {
+        Some(t) => t.lock(),
+        None => return -(errno::ESRCH as i64),
+    };
     timers.push(state);
     // SAFETY: timerid_ptr validated with access_ok(4); put_user is the
     // exception-table copy path.
@@ -1315,7 +1320,10 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
 
     // Find timer by stable user handle (reviewround 1: index arithmetic
     // misdirected operations after a middle timer was deleted).
-    let mut timers = task.posix_timers.lock();
+    let mut timers = match task.posix_timers() {
+        Some(t) => t.lock(),
+        None => return -(errno::EINVAL as i64),
+    };
     let timer = match timers.iter_mut().find(|t| t.user_timer_id == timerid) {
         Some(t) => t,
         None => return -(errno::EINVAL as i64),
@@ -1548,7 +1556,10 @@ pub fn sys_timer_gettime(args: SyscallArgs) -> i64 {
     };
 
     // Lookup by stable user handle, not Vec index (reviewround 1).
-    let timers = task.posix_timers.lock();
+    let timers = match task.posix_timers() {
+        Some(t) => t.lock(),
+        None => return -(errno::EINVAL as i64),
+    };
     let timer = match timers.iter().find(|t| t.user_timer_id == timerid) {
         Some(t) => t,
         None => return -(errno::EINVAL as i64),
@@ -1587,7 +1598,10 @@ pub fn sys_timer_getoverrun(args: SyscallArgs) -> i64 {
     };
 
     // Lookup by stable user handle, not Vec index (reviewround 1).
-    let timers = task.posix_timers.lock();
+    let timers = match task.posix_timers() {
+        Some(t) => t.lock(),
+        None => return -(errno::EINVAL as i64),
+    };
     match timers.iter().find(|t| t.user_timer_id == timerid) {
         Some(t) => t.overrun_count as i64,
         None => -(errno::EINVAL as i64),
@@ -1605,7 +1619,10 @@ pub fn sys_timer_delete(args: SyscallArgs) -> i64 {
 
     // Lookup by stable user handle. Removing the entry is safe now that
     // every other operation resolves handles by value (no index shift).
-    let mut timers = task.posix_timers.lock();
+    let mut timers = match task.posix_timers() {
+        Some(t) => t.lock(),
+        None => return -(errno::EINVAL as i64),
+    };
     let idx = match timers.iter().position(|t| t.user_timer_id == timerid) {
         Some(i) => i,
         None => return -(errno::EINVAL as i64),

@@ -6917,8 +6917,21 @@ pub fn scheduler_tick() {
         // — if the interrupted task holds the lock (mid timer_settime),
         // spinning for it would self-deadlock the CPU. A skipped check
         // simply re-runs on the next tick.
-        if let Some(mut posix_timers) = (*current).posix_timers.try_lock() {
+        // Process-scoped list (review4 syscall-M): every thread's tick
+        // walks the SAME shared list; CLOCK_THREAD_CPUTIME_ID timers
+        // (per-thread in the reference — attached to the creating task)
+        // expire only on their owner's tick.
+        let posix_timers_lock = (*current).posix_timers();
+        if let Some(mut posix_timers) =
+            posix_timers_lock.and_then(|l| l.try_lock())
+        {
+            let cur_tid = (*current).pid() as u32;
             for pt in posix_timers.iter_mut() {
+                if pt.clock_id == 3 /* CLOCK_THREAD_CPUTIME_ID */
+                    && pt.owner_tid != cur_tid
+                {
+                    continue;
+                }
                 let deadline = pt.cputime_deadline_ns.load(core::sync::atomic::Ordering::Acquire);
                 if deadline != 0 && now >= deadline {
                     let interval =

@@ -441,7 +441,8 @@ impl SigPending {
 /// Signal handling structure
 ///
 #[repr(C)]
-#[derive(Debug)]
+// No derive(Debug): the posix_timers Spinlock would need a lock to
+// format — nothing formats a SignalStruct wholesale.
 pub struct SignalStruct {
     /// Action for each signal (64 signals)
     /// Use RwLock for interior mutability (needed for Arc sharing)
@@ -470,6 +471,16 @@ pub struct SignalStruct {
     /// thread then reported TBROK "Test killed!" (LTP mq_notify03).
     pub group_exiting: core::sync::atomic::AtomicBool,
     pub group_exit_code: core::sync::atomic::AtomicI32,
+    /// POSIX interval timers (timer_create family) — PROCESS-scoped
+    /// (review4 syscall-M): CLONE_SIGHAND threads share this struct, so
+    /// a timer created by any thread is gettime/settime/deletable by
+    /// every thread of the process, like the reference's
+    /// signal->posix_timers. CLOCK_THREAD_CPUTIME_ID timers live here
+    /// too but carry owner_tid — the tick only expires them on the
+    /// creating thread.
+    pub posix_timers: crate::sync::spinlock::Spinlock<
+        alloc::vec::Vec<crate::process::task::PosixTimerState>,
+    >,
 }
 
 impl SignalStruct {
@@ -492,6 +503,7 @@ impl SignalStruct {
             timer_slack_default_ns: core::sync::atomic::AtomicU64::new(50_000),
             group_exiting: core::sync::atomic::AtomicBool::new(false),
             group_exit_code: core::sync::atomic::AtomicI32::new(0),
+            posix_timers: crate::sync::spinlock::Spinlock::new(alloc::vec::Vec::new()),
         }
     }
 
@@ -616,6 +628,26 @@ impl Clone for SignalStruct {
             ),
             group_exiting: core::sync::atomic::AtomicBool::new(false),
             group_exit_code: core::sync::atomic::AtomicI32::new(0),
+            // Linux copy_signal()/fork: POSIX timers are NOT inherited by
+            // the child — it starts with an empty list.
+            posix_timers: crate::sync::spinlock::Spinlock::new(alloc::vec::Vec::new()),
+        }
+    }
+}
+
+impl Drop for SignalStruct {
+    /// Process death (the last thread's Task drop releases the final
+    /// Arc): disarm every still-live POSIX timer's wheel entry. The
+    /// per-task exit path no longer touches the shared list (a surviving
+    /// sibling thread owns it now). Same lock profile as the exit-path
+    /// itimer disarm that used to run here (del_timer under no held
+    /// task/timer-table lock at drop time).
+    fn drop(&mut self) {
+        let timers = self.posix_timers.lock();
+        for pt in timers.iter() {
+            if pt.kernel_timer_id != 0 {
+                crate::timer::del_timer(pt.kernel_timer_id);
+            }
         }
     }
 }
