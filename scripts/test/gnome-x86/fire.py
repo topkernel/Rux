@@ -9,9 +9,15 @@ socket and QMP on another, then:
 
 QEMU shape mirrors test/run-x86-ub.sh with two changes from the R86
 handover (commit 1bffb8a7):
-  - -cpu Haswell: with -cpu max, TCG reports AuthenticAMD family=0
-    model=0 and llvmpipe's JIT fatally aborts ("can't map a 64-bit host
-    CPU") — Haswell gives llvmpipe a CPUID it accepts.
+  - -cpu host (KVM): the llvmpipe JIT's CPU-name lookup must yield a
+    64-bit CPU. With -cpu Haswell on this AMD KVM host the guest CPUID
+    reports vendor AuthenticAMD + family 6, so LLVM 15's
+    getHostCPUName() returns "athlon-xp" (a 32-bit-only model) and the
+    first 64-bit JIT build aborts the process: "LLVM ERROR: 64-bit code
+    requested on a subtarget that doesn't support it!" — that killed
+    gnome-shell on every boot (the desktop blocker, 2026-11-10).
+    -cpu host reports the real 9950X, which maps to "generic" (implies
+    64-bit) and the JIT lives. Haswell only suits Intel hosts.
   - -vga none: QMP `screendump` dumps the first console; without this it
     grabs the default std-VGA text console instead of virtio-gpu scanout.
 
@@ -51,7 +57,7 @@ p.add_argument("--bzimage", default=os.path.join(WT, "target/x86_64-unknown-none
 p.add_argument("--init", default="/sbin/runit")
 p.add_argument("--mem", default="2G")
 p.add_argument("--smp", default="8")
-p.add_argument("--cpu", default="Haswell")
+p.add_argument("--cpu", default="host")
 p.add_argument("--extra-append", default="")
 p.add_argument("--dump-every", type=int, default=20)
 p.add_argument("--accel", default="kvm",
