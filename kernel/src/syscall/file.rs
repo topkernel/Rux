@@ -473,7 +473,18 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
     // because VFS inode lookup doesn't support PID subdirectories.
     // (P1 chroot: global-namespace shortcut, non-chrooted tasks only.)
     // (perf-gap-hunt) not_rooted reuse — same verdict, no re-probe.
-    if not_rooted && (flags & O_CREAT) == 0 && (flags & O_DIRECTORY) == 0 {
+    // Read-only opens only: a WRITABLE open (oom_score_adj, sysrq-trigger)
+    // must reach the real procfs open, whose node carries the write
+    // handler. The mem-file shortcut has no write op, so every dbus
+    // activation child died writing /proc/self/oom_score_adj (EINVAL,
+    // "writing oom_score_adj error") and no dbus-activated service
+    // ever started — the whole session chain collapsed to the fail
+    // dialog (gnome-x86 hostboot1, 2026-11-10).
+    if not_rooted
+        && (flags & O_CREAT) == 0
+        && (flags & O_DIRECTORY) == 0
+        && (flags & 0x3 /* O_ACCMODE */) == 0 /* O_RDONLY */
+    {
         // ptrace_may_access gate for environ BEFORE generating content
         // (review 5.7): self or CAP_SYS_PTRACE.
         // (perf-syscall lane) starts_with gate FIRST — same reason as
