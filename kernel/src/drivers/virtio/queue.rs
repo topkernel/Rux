@@ -539,6 +539,44 @@ impl VirtQueue {
             core::ptr::read_volatile(resp_status) != 0xFF
         }
 
+        /// Read the used-ring idx with a short BOUNDED grace for the
+        /// device's idx publication, for use ONLY after `resp_done` is
+        /// already true.
+        ///
+        /// The device publishes completion in order: chain DMA (incl.
+        /// the response byte), then the used-ring entry, then used.idx,
+        /// then the interrupt. A waiter polling the response byte can
+        /// therefore observe completion while used.idx still reads its
+        /// pre-submit value — under KVM the pause-poll routinely catches
+        /// exactly this window (bootrace-hunt traces: resp=0x0,
+        /// used==prev at the readback, used==prev+1 well under 1µs
+        /// later). Returning the stale idx made every caller's
+        /// `new_used == prev_used` test classify a COMPLETED request as
+        /// "VirtIO request timeout" — the ~50% ext4 mount failure on
+        /// fresh-mkfs images AND the mass mkdtemp-EIO LTP face (every
+        /// sync I/O rides the same wait; 7-60 idx-lag events per boot).
+        /// The grace spin is bounded (µs-to-ms class, far under every
+        /// caller's own 10 s deadline / 5M-lap budget); a device that
+        /// truly never publishes falls through to the raw read and the
+        /// existing timeout path keeps its protections.
+        ///
+        /// # Safety
+        /// `used_ring` must point at a valid used ring (caller contract).
+        unsafe fn used_idx_after_resp(used_ring: *const UsedRing, prev_used: u16) -> u16 {
+            // SAFETY: used_ring offset 2 is the idx field.
+            let used_idx_ptr = (used_ring as usize + 2) as *const u16;
+            // SAFETY: volatile so each lap re-reads DMA memory.
+            let mut idx = core::ptr::read_volatile(used_idx_ptr);
+            let mut laps = 0u32;
+            while idx == prev_used && laps < 1_000_000 {
+                core::hint::spin_loop();
+                // SAFETY: see above.
+                idx = core::ptr::read_volatile(used_idx_ptr);
+                laps += 1;
+            }
+            idx
+        }
+
         // Detect early boot phase: no current task or PID 0 (idle/boot thread).
         // During early boot (e.g., ext4 mount before scheduler/IRQ init),
         // interrupts are not enabled and there is no scheduler, so we must
@@ -631,10 +669,10 @@ impl VirtQueue {
                 if poll_only {
                     // SAFETY: resp_done reads the caller-owned response byte.
                     if unsafe { resp_done(resp_status) } {
-                        // SAFETY: used_ring offset 2 is the idx field.
+                        // SAFETY: grace read after completion (see
+                        // used_idx_after_resp).
                         break 'wait_done unsafe {
-                            let used_idx_ptr = (used_ring as usize + 2) as *const u16;
-                            core::ptr::read_volatile(used_idx_ptr)
+                            used_idx_after_resp(used_ring, prev_used)
                         };
                     }
 
@@ -671,11 +709,9 @@ impl VirtQueue {
                                     blk_slot,
                                 );
                                 if unsafe { resp_done(resp_status) } {
-                                    // SAFETY: used_ring offset 2 is the idx field.
+                                    // SAFETY: grace read after completion.
                                     break 'wait_done unsafe {
-                                        let used_idx_ptr =
-                                            (used_ring as usize + 2) as *const u16;
-                                        core::ptr::read_volatile(used_idx_ptr)
+                                        used_idx_after_resp(used_ring, prev_used)
                                     };
                                 }
                                 *next_recover = now + POLL_RECOVER_TICKS;
@@ -717,10 +753,9 @@ impl VirtQueue {
                 // Fast check: our own request may have completed already.
                 // SAFETY: resp_done reads the caller-owned response byte.
                 if unsafe { resp_done(resp_status) } {
-                    // SAFETY: used_ring offset 2 is the idx field.
+                    // SAFETY: grace read after completion.
                     break 'wait_done unsafe {
-                        let used_idx_ptr = (used_ring as usize + 2) as *const u16;
-                        core::ptr::read_volatile(used_idx_ptr)
+                        used_idx_after_resp(used_ring, prev_used)
                     };
                 }
 
@@ -755,10 +790,9 @@ impl VirtQueue {
                     // finish — take ourselves back off the GRQ or nr_running
                     // stays inflated until our next context switch.
                     crate::sched::dequeue_task(&*current);
-                    // SAFETY: used_ring offset 2 is the idx field.
+                    // SAFETY: grace read after completion.
                     break 'wait_done unsafe {
-                        let used_idx_ptr = (used_ring as usize + 2) as *const u16;
-                        core::ptr::read_volatile(used_idx_ptr)
+                        used_idx_after_resp(used_ring, prev_used)
                     };
                 }
 
@@ -779,10 +813,9 @@ impl VirtQueue {
                     crate::drivers::virtio::pci_blk_kick(blk_slot);
                     crate::drivers::virtio::pci_process_async_completions_slot(blk_slot);
                     if unsafe { resp_done(resp_status) } {
-                        // SAFETY: used_ring offset 2 is the idx field.
+                        // SAFETY: grace read after completion.
                         break 'wait_done unsafe {
-                            let used_idx_ptr = (used_ring as usize + 2) as *const u16;
-                            core::ptr::read_volatile(used_idx_ptr)
+                            used_idx_after_resp(used_ring, prev_used)
                         };
                     }
                     // prev_used sentinel: caller runs its late-drain and
@@ -981,10 +1014,21 @@ impl VirtQueue {
                 crate::sched::get_current_pid(),
             );
             // R54: schedule() now restores the caller's SIE state; wait-path callers re-arm explicitly (semaphore.rs discipline) so ticks/IPIs reach this CPU across the wait loop.
-            crate::arch::cpu::restore_irq(true);
-            crate::sched::schedule();
             if timer_id != 0 {
+                crate::arch::cpu::restore_irq(true);
+                crate::sched::schedule();
                 crate::timer::del_timer(timer_id);
+            } else {
+                // Timer pool full (post-review4 re-audit of the H-10
+                // port): with no deadline armed, a blind schedule()
+                // sleeps forever on a lost IRQ — the exact stranding the
+                // deadline exists to prevent. Poll instead (the sibling
+                // wait's poll_fallback shape; bounded by this loop's
+                // iteration budget, the caller retries).
+                crate::arch::cpu::restore_irq(true);
+                for _ in 0..1000 {
+                    core::hint::spin_loop();
+                }
             }
             wait_queue.finish_wait(current);
         }
