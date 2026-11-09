@@ -3250,6 +3250,16 @@ pub fn sqwalk_step(tgid: u32, word: u64) {
     if nowj.wrapping_sub(lj) < 400 && SQW_CURSOR.load(Relaxed) != SQW_LO {
         return; // mid-slice: keep the audit-burst cadence
     }
+    // Sticky word (ohw145 lesson: THREE deep-frozen words in one boot
+    // — foundation twins + systemui — and every trigger's word reset
+    // the cursor; 20 slices burned without one completing a pass).
+    // Once a pass starts, different words wait until it completes.
+    if SQW_DONE.load(Relaxed) == 0
+        && SQW_WORD.load(Relaxed) != 0
+        && (SQW_WORD.load(Relaxed) != word || SQW_TGID.load(Relaxed) != tgid)
+    {
+        return;
+    }
     SQW_LAST_J.store(nowj, Relaxed);
     if SQW_TGID.load(Relaxed) != tgid || SQW_WORD.load(Relaxed) != word {
         SQW_TGID.store(tgid, Relaxed);
@@ -3361,6 +3371,40 @@ pub fn sqwalk_step(tgid: u32, word: u64) {
     };
     let mut w = crate::dfx::backtrace::ConsoleWriter::new();
     let cur = SQW_CURSOR.load(Relaxed);
+    // 82nd b: lock CONTEXT dump, once per word — the words around the
+    // rwlock identify the OWNING structure (a vtable pointer names the
+    // class; a libc++ map header, counters etc. are readable offline).
+    {
+        static LOCKW_DUMPED: core::sync::atomic::AtomicU64 =
+            core::sync::atomic::AtomicU64::new(0);
+        if LOCKW_DUMPED.load(Relaxed) != word {
+            LOCKW_DUMPED.store(word, Relaxed);
+            // module table for offline symbolization of the frames the
+            // task prints carry (vN+fileoff): the OH68 line prints one
+            // only for ITS park tgid — sqwalk often runs for another.
+            for (i, &(s, e, f, ref n)) in exec_vmas.iter().enumerate() {
+                let _ = writeln!(w, "SQW-VMA v{}={:#x}-{:#x}/{:#x}/{}", i, s, e, f, n);
+            }
+            let base = word & !7;
+            let _ = writeln!(w, "SQW-LOCKW {:#x} ctx[-0x100,+0x40]:", word);
+            for i in 0..0x28u64 {
+                let va = base + i * 8 - 0x100;
+                if let Some(x) = rd(va) {
+                    let cls = match word_off(x) {
+                        Some((m, o)) => alloc::format!("v{}+{:#x}", m, o),
+                        None => alloc::format!("{:#x}", x),
+                    };
+                    let _ = writeln!(
+                        w,
+                        "  {:#x}{} = {}",
+                        va,
+                        if va == (word & !7) { " *LOCK*" } else { "" },
+                        cls
+                    );
+                }
+            }
+        }
+    }
     {
         // progress line: cursor + the covering region's extent
         let mut prog = cur;
@@ -3473,6 +3517,12 @@ pub fn sqwalk_step(tgid: u32, word: u64) {
             // exec-VMA frames (the critical-section site). Window: rsp
             // up to min(stack top, rsp+32KB) — the active region; the
             // buffer can be 1MB and a near-top rsp must still walk.
+            // MATCH SET: the exact word AND any pointer into the lock's
+            // 1KB neighborhood (ohw144 lesson: no task carried the
+            // exact word — a reader inside its critical section usually
+            // holds the OWNER object pointer, and the rwlock is a
+            // member at owner+off; deltas are printed so the member
+            // offset is readable offline).
             if rsp >= co + 120 && rsp < co + 120 + stk_sz && (rsp & 7) == 0 {
                 let top = (rsp + 0x8000).min(co + 120 + stk_sz);
                 let mut frames = 0;
@@ -3481,8 +3531,17 @@ pub fn sqwalk_step(tgid: u32, word: u64) {
                 let mut va = rsp;
                 while va < top && (hits < 3 || frames < 14) {
                     if let Some(x) = rd(va) {
-                        if hits < 3 && x == word {
-                            let _ = write!(w, "{}+{:#x}", if hits == 0 { "" } else { "," }, va - rsp);
+                        let near = x >= word.saturating_sub(0x400)
+                            && x < word + 0x20
+                            && (x & 3) == (word & 3);
+                        if hits < 3 && near {
+                            let _ = write!(
+                                w,
+                                "{}+{:#x}(d{:+})",
+                                if hits == 0 { "" } else { "," },
+                                va - rsp,
+                                x as i64 - word as i64
+                            );
                             hits += 1;
                         } else if frames < 14 {
                             if let Some((m, o)) = word_off(x) {
@@ -3649,7 +3708,10 @@ pub fn sqwalk_step(tgid: u32, word: u64) {
                     cur += 8;
                     continue;
                 }
-                if printed < 24 {
+                if printed < 24 && (6..=8).contains(&st) {
+                    // live/blocked only: FINISH-state (st=9) freed
+                    // chunks passed the shape test on ohw144 and burned
+                    // the whole print budget
                     print_task(cur, "", &mut w);
                     print_queue(queue, &mut w);
                 }
@@ -8954,11 +9016,16 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
             return;
         }
         let mut found_at: [u64; 3] = [0; 3];
+        let mut deltas: [i64; 3] = [0; 3];
         let mut nf = 0usize;
         // 81st: 640 words — the rwlock WAITERS park at the lock (pointer
         // near rsp), but readers stuck INSIDE their critical section hold
         // it deeper (nested SendRequest frames) — ohw136's 160-word cut
         // only caught the 6 samgr waiters, never the 16 holders.
+        // 82nd: match the lock's 1KB NEIGHBORHOOD (owner-pointer holders
+        // — the rwlock is a member and readers usually hold the owner
+        // object; exact-word matching alone found only waiters on
+        // ohw141/143/144).
         for i in 0..640u64 {
             if nf == 3 {
                 break;
@@ -8969,8 +9036,12 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
             }
             let lo = unsafe { read_u32_via_task(t, va as usize) }.unwrap_or(0) as u64
                 | ((unsafe { read_u32_via_task(t, va as usize + 4) }.unwrap_or(0) as u64) << 32);
-            if lo == word || lo == word.wrapping_sub(4) || lo == word.wrapping_add(4) {
+            let near = lo >= word.saturating_sub(0x400)
+                && lo < word + 0x20
+                && (lo & 3) == (word & 3);
+            if near {
                 found_at[nf] = va;
+                deltas[nf] = lo as i64 - word as i64;
                 nf += 1;
             }
         }
@@ -8984,14 +9055,17 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
             .trim_end_matches('\0');
         let _ = writeln!(
             w,
-            "  RDR tid={} comm='{}' sys={} park_a0={:#x} slots={:#x},{:#x},{:#x}",
+            "  RDR tid={} comm='{}' sys={} park_a0={:#x} slots={:#x},{:#x},{:#x} deltas={:+},{:+},{:+}",
             tk.pid(),
             name,
             sys,
             a0,
             found_at[0],
             found_at[1],
-            found_at[2]
+            found_at[2],
+            deltas[0],
+            deltas[1],
+            deltas[2]
         );
         if sys == FUTEX_SYSNO && a0 != 0 {
             // what this reader is blocked on, plus its wait word's shape
@@ -9563,6 +9637,13 @@ pub fn freeze_scan(now: u64, hz: u64) {
         }
         let cur_u = RWFRZ_UADDR.load(core::sync::atomic::Ordering::Relaxed);
         if cur_u == c.uaddr {
+            // 82nd: the ADOPTED word is the wedge's own — drive its
+            // sqwalk slice here too (ohw146: once adopted, only the
+            // 60 s census path called sqwalk and the 40-slice pass
+            // could not finish before the boot died).
+            if readers >= 8 {
+                sqwalk_step(c.tgid, c.uaddr as u64);
+            }
             continue; // already watched (delta path below)
         }
         RWFRZ_UADDR.store(c.uaddr, core::sync::atomic::Ordering::Relaxed);
