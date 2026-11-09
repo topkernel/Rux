@@ -588,73 +588,95 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                 }
 
                 let page = PAGE_SIZE as u64;
-                // The heap VMA covers whole pages; the page containing
-                // current_brk belongs to the previous growth (or to exec's
-                // bss tail) — start at its ceiling so the new VMA is
-                // ADJACENT to the existing one (VmaManager::add merges
-                // compatible neighbors) instead of overlapping it.
-                let vma_start = (current_brk + page - 1) & !(page - 1);
+                let old_page_end = (current_brk + page - 1) & !(page - 1);
                 let new_page_end = (new_brk + page - 1) & !(page - 1);
 
                 if let Some(addr_space) = current_task.address_space() {
-                    if new_page_end > vma_start {
+                    if new_page_end > old_page_end {
                         use crate::mm::vma::{Vma, VmaFlags, VmaType};
                         // Linux sys_brk refuses growth when any VMA
                         // overlaps [oldbrk_page, newbrk_page + PAGE)
                         // (find_vma_intersection(mm, oldbrk,
-                        // newbrk + PAGE_SIZE)): the break keeps a
-                        // ONE-PAGE GAP below the next mapping — brk()
-                        // to EXACTLY the neighbor's start returns the
-                        // old break. Previously the heap VMA could grow
-                        // to touch — and with compatible flags MERGE
-                        // with — a foreign neighbor, so a write past
-                        // the break's last byte could fault straight
-                        // into the neighbor's first page. The probe
-                        // only needs the first VMA starting at/after
-                        // the heap's new first page; a VMA straddling
-                        // that boundary is caught by add()'s overlap
-                        // refusal below (same keep-old-brk outcome).
-                        // Residual divergence, documented: Linux's
-                        // vm_start_gap also subtracts the 1MB stack
-                        // guard below VM_GROWSDOWN stacks; this VMA has
-                        // no guard-gap model, so the gap is exactly one
-                        // page for every neighbor. Sub-page growth
-                        // (new_page_end == vma_start) skips all VMA
-                        // work, like Linux's oldbrk == newbrk fast path.
+                        // newbrk + PAGE_SIZE), both page-aligned there):
+                        // the break keeps a ONE-PAGE GAP below the next
+                        // mapping — brk() to EXACTLY the neighbor's start
+                        // returns the old break. Previously the heap VMA
+                        // could grow to touch — and with compatible flags
+                        // MERGE with — a foreign neighbor, so a write past
+                        // the break's last byte could fault straight into
+                        // the neighbor's first page.
+                        //
+                        // The heap VMA itself must be excluded from the
+                        // guard: the auto-grow fault path can leave a
+                        // BRK-origin VMA whose start sits at/above the
+                        // aligned break — the old guard
+                        // (find_vma_after(PAGE_ALIGN(brk))) matched the
+                        // heap's own VMA on every growth and brk() became
+                        // a NO-OP for the whole process (brkprobe5,
+                        // 2026-11-09: every step returned the unchanged
+                        // break; LTP brk01 "have 0x466000 expected
+                        // 0x466fff"). Linux's heap VMA always ends AT the
+                        // aligned break, so its intersection check cannot
+                        // self-match; Rux's BRK-origin pages mean the
+                        // check must skip BRK-origin VMAs and the VMA add
+                        // must extend from the heap's existing top, never
+                        // below it.
                         let guard_end = new_page_end + page;
                         let mut vma_mgr = addr_space.vma_write();
-                        let next = vma_mgr.find_vma_after(
-                            crate::mm::page::VirtAddr::new(vma_start as usize),
-                        );
-                        if next.is_some_and(|v| (v.start().as_usize() as u64) < guard_end) {
-                            // Keep the old brk on failure (Linux parity:
-                            // sys_brk returns mm->brk, not an error).
-                            return current_brk as i64;
+                        // The heap VMA(s) = every BRK-origin VMA (the
+                        // auto-grow fault path and brk growth itself label
+                        // BRK; exec creates none). Their top end is where
+                        // growth continues.
+                        let is_brk_vma = |v: &crate::mm::vma::Vma| {
+                            v.origin().bits() & !crate::mm::vma::VmaOrigin::FORKED
+                                == crate::mm::vma::VmaOrigin::BRK
+                        };
+                        let mut heap_end = old_page_end;
+                        for v in vma_mgr.iter() {
+                            if is_brk_vma(v) {
+                                heap_end = heap_end.max(v.end().as_usize() as u64);
+                            }
                         }
-                        let heap_vma = Vma::new(
-                            crate::mm::page::VirtAddr::new(vma_start as usize),
-                            crate::mm::page::VirtAddr::new(new_page_end as usize),
-                            VmaFlags::from_bits(
-                                VmaFlags::READ | VmaFlags::WRITE | VmaFlags::PRIVATE,
-                            ),
-                        );
-                        let mut heap_vma = heap_vma;
-                        heap_vma.set_type(VmaType::Anonymous);
-                        heap_vma.set_origin(crate::mm::vma::VmaOrigin::from_bits(
-                            crate::mm::vma::VmaOrigin::BRK,
-                        ));
-                        // The heap grows by the new VMA's own pages:
-                        // charge them (the reference kernel accounts a brk
-                        // growth as mm->total_vm += pages, kernel/mm/mmap.c:
-                        // do_brk_flags) so RLIMIT_AS and the reported
-                        // VmSize see the heap. The brk shrink below goes
-                        // through munmap, which releases the same pages.
-                        let heap_pages = heap_vma.page_count() as u64;
-                        if vma_mgr.add(heap_vma).is_err() {
-                            // Keep the old brk on failure (Linux parity).
-                            return current_brk as i64;
+                        for v in vma_mgr.iter() {
+                            if is_brk_vma(v) {
+                                continue;
+                            }
+                            let vs = v.start().as_usize() as u64;
+                            let ve = v.end().as_usize() as u64;
+                            if vs < guard_end && ve > old_page_end {
+                                // Keep the old brk on failure (Linux parity:
+                                // sys_brk returns mm->brk, not an error).
+                                return current_brk as i64;
+                            }
                         }
-                        addr_space.add_total_vm(heap_pages);
+                        let grow_start = heap_end.max(old_page_end);
+                        if new_page_end > grow_start {
+                            let heap_vma = Vma::new(
+                                crate::mm::page::VirtAddr::new(grow_start as usize),
+                                crate::mm::page::VirtAddr::new(new_page_end as usize),
+                                VmaFlags::from_bits(
+                                    VmaFlags::READ | VmaFlags::WRITE | VmaFlags::PRIVATE,
+                                ),
+                            );
+                            let mut heap_vma = heap_vma;
+                            heap_vma.set_type(VmaType::Anonymous);
+                            heap_vma.set_origin(crate::mm::vma::VmaOrigin::from_bits(
+                                crate::mm::vma::VmaOrigin::BRK,
+                            ));
+                            // The heap grows by the new VMA's own pages:
+                            // charge them (the reference kernel accounts a
+                            // brk growth as mm->total_vm += pages,
+                            // kernel/mm/mmap.c: do_brk_flags) so RLIMIT_AS
+                            // and the reported VmSize see the heap. The brk
+                            // shrink below goes through munmap, which
+                            // releases the same pages.
+                            let heap_pages = heap_vma.page_count() as u64;
+                            if vma_mgr.add(heap_vma).is_err() {
+                                // Keep the old brk on failure (Linux parity).
+                                return current_brk as i64;
+                            }
+                            addr_space.add_total_vm(heap_pages);
+                        }
                     }
                 }
 
