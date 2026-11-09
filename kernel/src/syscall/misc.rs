@@ -2125,6 +2125,28 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                     existing.data = event.data;
                     existing.last_reported = 0;
                     existing.oneshot_fired = false;
+                    // 79th (ohw124): a rebind rewrites an fd-number-keyed
+                    // entry onto a NEW description — if the old description
+                    // is still open elsewhere this is bookkeeping drift the
+                    // dark-child hunt needs named.
+                    if crate::dfx::switches::enabled(
+                        crate::dfx::switches::DfxSwitch::Pid1Spin,
+                    ) {
+                        static REB_N: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        let n = REB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n < 300 {
+                            crate::pr_warn!(
+                                "EPREBIND #{} pid={} epfd={} fd={} old_fid={:#x} new_fid={:#x}",
+                                n,
+                                crate::process::current_pid(),
+                                epfd,
+                                fd,
+                                old_id,
+                                file_id
+                            );
+                        }
+                    }
                     Reg::Rebind(old_id, file_id)
                 }
                 None => {
@@ -2167,6 +2189,35 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
             if let Some(pos) = entries.iter().position(|e| e.fd == fd) {
                 let removed = entries.remove(pos);
                 drop(entries);
+                // 79th (ohw124): init's paramservice child fd 21 lost its
+                // epoll interest between two snapshots with no purge print
+                // — attribute EVERY interest removal (pid, fd, file_id,
+                // whether the fd still resolves to the same description:
+                // a DEL of a still-live registered fd is the dark-child
+                // signature; a foreign-process DEL names the diverging
+                // caller directly). dfx=pid1spin-gated.
+                if crate::dfx::switches::enabled(
+                    crate::dfx::switches::DfxSwitch::Pid1Spin,
+                ) {
+                    static DEL_N: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    let n = DEL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 300 {
+                        let live = crate::sched::get_current_fdtable()
+                            .and_then(|ft| ft.get_file(fd as usize))
+                            .map(|f| f.file_id)
+                            .unwrap_or(0);
+                        crate::pr_warn!(
+                            "EPDEL #{} pid={} epfd={} fd={} fid={:#x} fd_now={:#x}",
+                            n,
+                            crate::process::current_pid(),
+                            epfd,
+                            fd,
+                            removed.file_id,
+                            live
+                        );
+                    }
+                }
                 epoll_wake_unregister(removed.file_id, epoll_ptr);
                 // rux:epoll_ctl_remove — the interest is gone.
                 if crate::trace::EVENT_EPOLL_CTL_REMOVE.armed() {
@@ -2500,9 +2551,12 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                     // sends land in a queue nobody polls — the 105s).
                     // dfx=pid1spin names every purge for pid 1's epoll:
                     // fd-gone vs fd-reused (and the new file's class).
+                    // 79th: the pid==1 restriction dropped — ohw124 lost
+                    // fd 21's interest with NO purge print, so if this
+                    // path fired at all it was from a non-pid-1 context.
                     if crate::dfx::switches::enabled(
                         crate::dfx::switches::DfxSwitch::Pid1Spin,
-                    ) && crate::process::current_pid() == 1
+                    )
                     {
                         static PURGE_N: core::sync::atomic::AtomicUsize =
                             core::sync::atomic::AtomicUsize::new(0);
@@ -4710,7 +4764,7 @@ static GETRANDOM_CRNG: crate::sync::spinlock::Spinlock<Option<ChaCha20Crng>> =
 static EPOLL_INSTANCES: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
-pub fn epoll_purge_closed_fd(fd: usize) {
+pub fn epoll_purge_closed_fd(fd: usize, dying_file_id: u64) {
     if EPOLL_INSTANCES.load(core::sync::atomic::Ordering::Acquire) == 0 {
         return;
     }
@@ -4723,6 +4777,23 @@ pub fn epoll_purge_closed_fd(fd: usize) {
     // finds nothing actionable, the loop repeats). Purge the entry at
     // close, exactly like Linux removes the interest when the fd's last
     // table reference goes away.
+    //
+    // 79th (ohw124/125, the 8250 wedge's founder): the purge must key
+    // on the DYING OPEN FILE DESCRIPTION (dying_file_id), never on the
+    // bare fd number. A fork-inherited epoll is ONE EpollFile shared by
+    // parent and child, and their fd NUMBERINGS diverge the moment the
+    // child execs (CLOEXEC sweep) and reuses numbers for its own files.
+    // chipset_init (ohw125 EPPURGE #3) closed its own fd 21 — the
+    // closer's-table liveness check saw the cleared slot and stripped
+    // init's live (fd=21, paramservice child) interest from the shared
+    // instance; init's LoopEvent never read that connection again and
+    // every later samgr SystemSetParameter burned its 15 s SO_RCVTIMEO
+    // (the app_fwk_update_service 105 loop under the processLock — the
+    // whole install-stream wedge). Linux keys the epi to the
+    // description (epi->ffd.file, itself referenced), so a foreign
+    // process's same-numbered close can never remove it; matching
+    // BOTH fd and dying_file_id restores that invariant: the entry
+    // dies only when the description it watches dies.
     let fdtable = match crate::sched::current() {
         Some(t) => unsafe { (*t).try_fdtable() },
         None => return,
@@ -4762,7 +4833,11 @@ pub fn epoll_purge_closed_fd(fd: usize) {
         {
             let mut entries = epoll.entries.lock();
             entries.retain(|e| {
-                if e.fd as usize != fd {
+                // 79th: remove ONLY the dying description's entries. A
+                // same-numbered entry for a DIFFERENT description (the
+                // fork-shared instance's foreign owner — see the function
+                // doc) must survive this close untouched.
+                if e.fd as usize != fd || e.file_id != dying_file_id {
                     return true;
                 }
                 // The fd slot is empty at this point (close_fd cleared it
@@ -4780,6 +4855,24 @@ pub fn epoll_purge_closed_fd(fd: usize) {
         }
         // Registry lock only after the entries lock is released (the
         // documented nesting rule — registry helpers never nest entries).
+        // 79th (ohw124): attribute every purge removal — the paramservice
+        // dark-child hunt needs the closer's pid/fd/file_id triad.
+        if !removed_ids.is_empty()
+            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Pid1Spin)
+        {
+            static PURGE2_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let n = PURGE2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 300 {
+                crate::pr_warn!(
+                    "EPPURGE #{} pid={} fd={} fids={:#x}",
+                    n,
+                    crate::process::current_pid(),
+                    fd,
+                    removed_ids.iter().fold(0u64, |a, id| a ^ id)
+                );
+            }
+        }
         for id in removed_ids {
             epoll_wake_unregister(id, ep);
         }

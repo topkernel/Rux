@@ -780,10 +780,16 @@ pub fn sys_close(args: SyscallArgs) -> i64 {
     // whether THIS close dropped the last fd-table reference to the open
     // file description. A strong Arc here would keep the description
     // alive and suppress its close op (pipe EOF, socket HUP) — a Weak
-    // observes without holding.
+    // observes without holding. The description's identity (file_id)
+    // rides along: the 79th's epoll purge keys removal on the DYING
+    // DESCRIPTION, not the bare fd number (fork-shared epolls carry
+    // foreign same-numbered interests that must survive).
+    let mut desc_file_id = 0u64;
     let desc_weak = crate::sched::get_current_fdtable().and_then(|ft| {
-        ft.get_file(fd)
-            .map(|f| alloc::sync::Arc::downgrade(&f))
+        ft.get_file(fd).map(|f| {
+            desc_file_id = f.file_id;
+            alloc::sync::Arc::downgrade(&f)
+        })
     });
     // SAFETY: fd is a valid file descriptor owned by the current process.
     unsafe {
@@ -812,7 +818,7 @@ pub fn sys_close(args: SyscallArgs) -> i64 {
                     .map(alloc::sync::Weak::strong_count)
                     .unwrap_or(1);
                 if others == 0 {
-                    crate::syscall::misc::epoll_purge_closed_fd(fd);
+                    crate::syscall::misc::epoll_purge_closed_fd(fd, desc_file_id);
                 }
                 0
             }
