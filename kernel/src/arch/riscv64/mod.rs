@@ -116,9 +116,11 @@ pub fn cpu_id() -> u64 {
             // Early boot phase, tp directly stores hart_id
             tp_value
         } else {
-            // tp points to task_struct, get hart_id from ti_cpu field
-            // ti_cpu offset in Task struct is 0x18 (24 bytes)
-            let ti_cpu_offset = 0x18;
+            // tp points to task_struct, get hart_id from ti_cpu field.
+            // review4 arch-L: the exported constant, not a hand-maintained
+            // 0x18 (the R57 offset-drift lesson — trap.S already injects
+            // task_offsets::TI_CPU).
+            let ti_cpu_offset = crate::process::task::task_offsets::TI_CPU;
             let cpu_ptr = (tp_value as usize + ti_cpu_offset) as *const core::sync::atomic::AtomicI32;
             let raw = (*cpu_ptr).load(core::sync::atomic::Ordering::Relaxed);
             // Defensive: clamp negative or out-of-range ti_cpu to CPU 0.

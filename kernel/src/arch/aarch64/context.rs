@@ -108,8 +108,12 @@ __switch_to:
     cbz x9, .Lswitch_sp_bad
     tbnz x9, #63, 1f
     b .Lswitch_sp_bad
-1:  tbz x9, #4, 2f               // bit 4/3 alignment check below
-    tbnz x9, #3, .Lswitch_sp_bad
+1:  // review4 arch-L: the old bit-4/bit-3 ladder only tested bit 3 when
+    // bit 4 was SET — an sp ending 0x8 passed the gate and 0x18 was
+    // rejected. Test all four low bits like the riscv64 twin
+    // (andi t1,t6,0xF; bnez bad).
+    and x17, x9, #0xF
+    cbnz x17, .Lswitch_sp_bad
 2:  adrp x16, _stext
     add x16, x16, :lo12:_stext
     cmp x9, x16

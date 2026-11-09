@@ -139,6 +139,13 @@ pub fn sys_arch_prctl(args: crate::syscall::SyscallArgs) -> i64 {
             if ok { 0 } else { -crate::errno::constants::EFAULT as i64 }
         }
         ARCH_SET_GS => {
+            // review4 arch-L: canonical-bound check like ARCH_SET_FS — a
+            // non-canonical GS base programs fine via wrmsr and later
+            // #GPs the task in ring 3 unrecoverably instead of failing
+            // the syscall.
+            if addr >= 1 << 47 {
+                return -crate::errno::constants::EFAULT as i64;
+            }
             // SAFETY: see ARCH_SET_FS.
             unsafe {
                 (*current).thread_mut().gs_base = addr;

@@ -674,10 +674,11 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
     // 3. Check for soft lockups
     crate::debug::softlockup::check();
 
-    // 4. Reschedule if needed
-    if crate::sched::need_resched() && crate::interrupt::preempt::preemptible() {
-        crate::sched::schedule();
-    }
+    // 4. Reschedule: DEAD — this handler runs between irq_enter() and
+    // irq_exit(), so preempt_count always carries HARDIRQ_OFFSET and
+    // preemptible() is never true here (review4 arch-L; the irq_exit
+    // path owns the preempt decision). Left as a comment so the next
+    // reader does not re-add it.
 }
 
 /// Handle software interrupt (IPI)

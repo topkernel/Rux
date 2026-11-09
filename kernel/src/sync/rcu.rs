@@ -384,7 +384,9 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
     use crate::process::task::TaskState;
 
     let hz = crate::drivers::timer::HZ as u64;
-    let deadline = crate::drivers::timer::get_jiffies() + max_ms * hz / 1000;
+    // review4 mm-proc-L: sub-jiffy budgets (e.g. 5 ms at HZ=100) rounded
+    // to +0 — the first deadline check then failed the wait instantly.
+    let deadline = crate::drivers::timer::get_jiffies() + (max_ms * hz / 1000).max(1);
 
     loop {
         if all_online_cpus_reported(gen) {

@@ -2136,13 +2136,20 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                     s
                 };
 
-                // Write exit status safely using copy_to_user
+                // Write exit status safely using copy_to_user.
+                // review4 mm-proc-L: a faulting status pointer reports
+                // EFAULT — the child is STILL reaped (the reference's
+                // wait_task_zombie puts the user status after the reap
+                // and propagates -EFAULT); the old silent-success left
+                // the caller reading an unmodified word.
+                let mut status_uncopied = 0;
                 if !status_ptr.is_null() {
-                    let _uncopied = crate::arch::uaccess::copy_to_user(
+                    let uncopied = crate::arch::uaccess::copy_to_user(
                         status_ptr as *mut u8,
                         &status as *const i32 as *const u8,
                         core::mem::size_of::<i32>()
                     );
+                    status_uncopied = uncopied;
                 }
 
                 // Release task resources (kernel stack, Arc refs, PID)
@@ -2155,6 +2162,9 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                     crate::debug::forkprof::trace(crate::debug::forkprof::T_REAP_DONE, child_pid);
                 }
 
+                if status_uncopied != 0 {
+                    return Err(errno::Errno::BadAddress.as_neg_i32());
+                }
                 return Ok(child_pid);
             }
 

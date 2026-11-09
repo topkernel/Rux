@@ -874,23 +874,18 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
     let full_path = if pathname.starts_with('/') {
         alloc::borrow::Cow::Borrowed(pathname)
     } else {
-        if let Some(current) = crate::sched::current() {
-            // SAFETY: current is guaranteed non-null from sched::current() above.
-            let cwd = unsafe { (*current).get_cwd() };
-            if let Ok(cwd_str) = core::str::from_utf8(&cwd) {
-                let mut path = String::with_capacity(cwd_str.len() + pathname.len() + 1);
-                path.push_str(cwd_str);
-                if !path.ends_with('/') {
-                    path.push('/');
-                }
-                path.push_str(pathname);
-                alloc::borrow::Cow::Owned(path)
-            } else {
-                alloc::borrow::Cow::Borrowed(pathname)
-            }
-        } else {
-            alloc::borrow::Cow::Borrowed(pathname)
+        // review4 syscall-L: join against the ROOT-RELATIVE cwd like
+        // every other path syscall (get_cwd_user) — the task-local
+        // get_cwd() is the GLOBAL cwd, so under chroot execve("bin/sh")
+        // resolved to <jail>/<global-cwd>/bin/sh.
+        let cwd = crate::fs::vfs::get_cwd_user();
+        let mut path = String::with_capacity(cwd.len() + pathname.len() + 1);
+        path.push_str(&cwd);
+        if !path.ends_with('/') {
+            path.push('/');
         }
+        path.push_str(pathname);
+        alloc::borrow::Cow::Owned(path)
     };
 
     // ONE resolution gates and feeds everything downstream (Linux
@@ -4132,10 +4127,14 @@ pub fn sys_membarrier(args: SyscallArgs) -> i64 {
                 // memory operations.
                 core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             }
-            let online = crate::arch::smp::num_started_cpus().max(1);
             let me = crate::arch::cpu_id() as usize;
-            for cpu in 0..online.min(crate::config::MAX_CPUS) {
-                if cpu != me {
+            // review4 arch-L: iterate the STARTED SET, not [0, count) —
+            // with a sparse started set the count loop fenced a dead
+            // hart and SKIPPED a live one (the same count-vs-set bug
+            // fixed for riscv64 flush_tlb_others; x86's
+            // flush_tlb_others already does this).
+            for cpu in 0..crate::config::MAX_CPUS {
+                if cpu != me && crate::arch::smp::cpu_started(cpu) {
                     crate::arch::ipi::smp_call_function(cpu, remote_fence, core::ptr::null_mut());
                 }
             }

@@ -1842,11 +1842,20 @@ fn sigill_has_handler() -> bool {
 
 /// Handle #GP: user mode → SIGSEGV (Linux semantics), kernel → bug.
 fn handle_general_protection(regs: &mut PtRegs) {
-    // OH bring-up: name the faulting task — b85's repeating user #GP at
-    // ld.so+0xba256 could not be attributed to any pid.
-    crate::pr_info!("trap: #GP at rip={:#x}, mode={}, pid {}",
-        regs.rip, if regs.user_mode() { "user" } else { "kernel" },
-        crate::process::current_pid());
+    // OH bring-up attribution print, now budgeted (review4 arch-L): a
+    // segv-storming program (fuzzers, LTP crashers) used to spam the
+    // polled UART with one line per #GP — the serial-cost class the
+    // print-audit lane polices. First 8, then silent; kernel-mode #GPs
+    // still print (they are always a kernel bug worth seeing).
+    static GP_PRINT_N: core::sync::atomic::AtomicU32 =
+        core::sync::atomic::AtomicU32::new(0);
+    if !regs.user_mode() {
+        crate::pr_info!("trap: #GP at rip={:#x}, mode=kernel, pid {}",
+            regs.rip, crate::process::current_pid());
+    } else if GP_PRINT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+        crate::pr_info!("trap: #GP at rip={:#x}, mode=user, pid {}",
+            regs.rip, crate::process::current_pid());
+    }
 
     if regs.user_mode() {
         // Handler-first routing (same as the page-fault Segfault path):
