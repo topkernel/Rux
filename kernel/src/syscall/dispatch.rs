@@ -225,6 +225,20 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // legacy no-`at` ABI). Untranslatable numbers report as unknown.
     // x86_64-native syscalls with no asm-generic equivalent.
     #[cfg(feature = "x86_64")]
+    if syscall_no == 172 {
+        // iopl(2): port-I/O privilege level (contract surface only).
+        let result = crate::arch::process::sys_iopl(args);
+        syscall_set_return_value(regs, result);
+        return;
+    }
+    #[cfg(feature = "x86_64")]
+    if syscall_no == 173 {
+        // ioperm(2): port-I/O permission bitmap (contract surface only).
+        let result = crate::arch::process::sys_ioperm(args);
+        syscall_set_return_value(regs, result);
+        return;
+    }
+    #[cfg(feature = "x86_64")]
     if syscall_no == 158 {
         // arch_prctl(2): TLS base (glibc/musl startup requirement).
         let result = crate::arch::process::sys_arch_prctl(args);

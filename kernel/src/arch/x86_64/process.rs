@@ -178,3 +178,37 @@ pub fn sys_arch_prctl(args: crate::syscall::SyscallArgs) -> i64 {
         _ => -crate::errno::constants::EINVAL as i64,
     }
 }
+
+/// ioperm(2) — x86_64 native nr 173. The reference maintains a per-task
+/// I/O permission bitmap consulted by user-mode port instructions. Rux
+/// runs user mode without port-I/O facilities, so the bitmap has nothing
+/// to gate; the syscall CONTRACT surface is what callers (LTP ioperm01,
+/// legacy hw tools) probe: CAP_SYS_RAWIO for permission, EINVAL when
+/// [from, from+num) leaves the 0..0x10000 port space, 0 otherwise.
+pub fn sys_ioperm(args: crate::syscall::SyscallArgs) -> i64 {
+    let from = args[0];
+    let num = args[1];
+    let turn_on = args[2] as i32;
+    if !crate::security::capable(crate::security::CAP_SYS_RAWIO) {
+        return -crate::errno::constants::EPERM as i64;
+    }
+    if (from + num) > 0x10000 || (from + num) < from {
+        return -crate::errno::constants::EINVAL as i64;
+    }
+    let _ = turn_on;
+    0
+}
+
+/// iopl(2) — x86_64 native nr 172. Same contract surface: levels 0..3
+/// accepted (0 = normal, 3 = all ports), anything else EINVAL; requires
+/// CAP_SYS_RAWIO. No EFLAGS.IOPL switch exists to perform.
+pub fn sys_iopl(args: crate::syscall::SyscallArgs) -> i64 {
+    let level = args[0] as i32;
+    if !crate::security::capable(crate::security::CAP_SYS_RAWIO) {
+        return -crate::errno::constants::EPERM as i64;
+    }
+    if !(0..=3).contains(&level) {
+        return -crate::errno::constants::EINVAL as i64;
+    }
+    0
+}
