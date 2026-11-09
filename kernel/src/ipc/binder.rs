@@ -6980,15 +6980,30 @@ unsafe fn user_task_park_stack_w(
             // Instruction bytes at the frame (Session F's byte-match method:
             // search these bytes at fileoff in the debugfs-extracted .so).
             let bytes = read_u64_at(v).unwrap_or(0);
+            // 81st: the module BASENAME inline — per-boot module bases
+            // shift and offline VA mapping across boots fails (ohw135's
+            // tid-1583 frame sat in a vma no decode table covered).
+            let name: alloc::string::String = tk
+                .address_space()
+                .and_then(|a| a.try_get_vma_file(vm.start().as_usize()))
+                .map(|f| f.path())
+                .unwrap_or_default()
+                .rsplit('/')
+                .next()
+                .unwrap_or("-")
+                .chars()
+                .take(28)
+                .collect();
             let _ = writeln!(
                 w,
-                "binder-stall:   ustack[{}]={:#x} vma={:#x}-{:#x} fd={} fileoff={:#x} bytes={:#018x}",
+                "binder-stall:   ustack[{}]={:#x} vma={:#x}-{:#x} fd={} fileoff={:#x} mod={} bytes={:#018x}",
                 i,
                 v,
                 vm.start().as_usize(),
                 vm.end().as_usize(),
                 vm.file_fd(),
                 off,
+                name,
                 bytes
             );
         }

@@ -8379,7 +8379,12 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
     let mut w = crate::dfx::backtrace::ConsoleWriter::new();
     let mut hits = 0u32;
     let _ = writeln!(w, "RWFRZ-READERS tgid={} word={:#x}:", tgid, word);
-    crate::sched::for_each_task(|t| {
+    // ohw139 lesson: for_each_task runs the callback under the pid-hash
+    // bucket lock — 640x2 page-table walks per task under that spinlock
+    // soft-locked CPU#1 for 10 s+ and killed the console mid-print.
+    // for_each_task_try is the diagnostic contract the oh68 sweeps use
+    // (no bucket lock held across the walk).
+    crate::sched::for_each_task_try(|t| {
         if hits >= 24 {
             return;
         }
