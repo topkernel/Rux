@@ -8139,10 +8139,17 @@ fn binder_ioctl_write_read(
 
 /// Clear the live-BWR ioctl shadow (r41v6) — called at every exit of
 /// binder_ioctl_write_read so the audit never sees a stale shadow.
+/// 84th: also clear looper_need_return here — the reference clears it at
+/// binder_ioctl's err: label (binder.c:5713), i.e. at every ioctl exit, so
+/// a flush's force-return is consumed exactly once by the read it broke.
 fn clear_live_bwr(thread: &Arc<BinderThread>) {
     let w = world_lock();
     // SAFETY: under WORLD.
-    unsafe { thread.st().live_bwr = None };
+    unsafe {
+        let ts = &mut *thread.st.get();
+        ts.live_bwr = None;
+        ts.looper_need_return = false;
+    }
 }
 
 // ============================================================================
@@ -12003,17 +12010,27 @@ unsafe fn work_readable_by(w: &Work, tgid: u32, proc: &BinderProc) -> bool {
 
 unsafe fn thread_has_work(world: &World, proc: &Arc<BinderProc>, thread: &Arc<BinderThread>) -> bool {
     let th = thread.st();
-    // Reference parity (binder_has_work_ilocked, 6.6 binder.c:1122):
-    //   !binder_worklist_empty(&thread->todo) || thread->process_todo ||
-    //   (do_proc_work && !binder_worklist_empty(&proc->todo))
-    // Own-todo work is the FIRST term — unconditional, flag-free. The
-    // old shape only returned true via process_todo or the proc-work
-    // arm (whose avail_for_proc requires todo EMPTY), so a thread whose
-    // own todo held a leftover item (a tcomplete left behind when the
-    // read buffer filled — the INSTSTRAND head=tcomplete shape, 75th)
-    // PARKED with pending work and delivered it only at the next
-    // unrelated wake; the reference never parks in that state.
-    if !th.todo.is_empty() || th.process_todo {
+    // Reference parity (binder_has_work_ilocked — linux-6.6 binder.c:586
+    // and linux-5.10 binder.c:959, identical):
+    //   thread->process_todo || thread->looper_need_return ||
+    //   (do_proc_work && !binder_worklist_empty_ilocked(&proc->todo))
+    // There is deliberately NO "!todo empty" own-todo term: the DEFERRED
+    // sync-send TRANSACTION_COMPLETE sits on thread->todo precisely so
+    // the sender's read parks until the reply (the reference's deferred-
+    // work doc, binder.c:477-490: "the thread will go to sleep without
+    // handling this work when it calls read"). The 75th (1bc38827) added
+    // an own-todo term citing a formula the reference does not contain;
+    // combined with the tcomplete deferral (963b3e95) it made every
+    // sync-send BWR return its tcomplete immediately — the lb348/349
+    // SYNCSEND-EARLYRET class that lets userspace abandon a nested
+    // call, take the why=7 reply rejection, and orphan the outer txn
+    // (ohw155 t=50.080: distributeddata tid 547 orphaned txn8847 with
+    // txn9104 still unpicked on its stack; sensors then waited 1065 s+;
+    // the §83 rwlock pandemic is the downstream projection). A full-
+    // buffer leftover never parks anyway: process_todo is only cleared
+    // when the todo drains EMPTY (the drain rule below), so leftover
+    // items keep it true — the 75th's INSTSTRAND case is covered.
+    if th.process_todo || th.looper_need_return {
         return true;
     }
     // Reference parity (binder_available_for_proc_work_ilocked, 6.6):
@@ -12114,24 +12131,16 @@ fn binder_thread_read(
 
     loop {
         // ---- wait for work (binder_wait_for_work) ------------------------
-        let mut has_work = {
+        let has_work = {
             let w = world_lock();
             // SAFETY: under WORLD.
             unsafe { thread_has_work(w.as_ref().unwrap(), proc, thread) }
         };
-        if !has_work {
-            // looper_need_return (reference binder_thread_read checks
-            // return_error != BR_OK before waiting — the flush path's
-            // contract: break the read so the thread returns to
-            // userspace, then re-enters).
-            let w = world_lock();
-            // SAFETY: under WORLD.
-            let ts = unsafe { &mut *thread.st.get() };
-            if ts.looper_need_return {
-                ts.looper_need_return = false;
-                has_work = true;
-            }
-        }
+        // 84th: looper_need_return is now a thread_has_work term (reference
+        // binder_has_work_ilocked) and is cleared at BWR ioctl exit — the
+        // old pre-park consumption here ate a flush's force-return before
+        // the retry-break below could see it, so the flushed thread just
+        // re-parked (binder_flush's contract broken).
         if !has_work {
             if non_block {
                 if staged.len() > 4 || *consumed != 0 {
@@ -12179,7 +12188,17 @@ fn binder_thread_read(
                     // holds work — the stranded shape (wait_event should
                     // have short-circuited; if this fires the wake/flag
                     // bookkeeping diverges from thread_has_work).
-                    if txnhunt_on() && is_inst(proc.pid) && (!th.todo.is_empty() || th.process_todo)
+                    // 84th: parking with ONLY deferred tcompletes on the
+                    // todo is now the normal reference state for a sync
+                    // sender (process_todo false, own-todo term gone) —
+                    // exclude it so the print keeps meaning "stranded".
+                    if txnhunt_on()
+                        && is_inst(proc.pid)
+                        && (th.process_todo
+                            || th
+                                .todo
+                                .iter()
+                                .any(|wk| !matches!(wk, Work::TransactionComplete)))
                     {
                         static IS_N: core::sync::atomic::AtomicUsize =
                             core::sync::atomic::AtomicUsize::new(0);
@@ -12936,7 +12955,15 @@ fn binder_thread_read(
         if stop_full {
             break;
         }
-        if staged.len() > 4 || *consumed != 0 {
+        // Reference parity (binder.c:4513): "if (ptr - buffer == 4 &&
+        // !thread->looper_need_return) goto retry; break;" — a flush's
+        // looper_need_return returns the read with just BR_NOOP so the
+        // thread re-evaluates in userspace instead of re-parking.
+        if staged.len() > 4 || *consumed != 0 || {
+            let w = world_lock();
+            // SAFETY: under WORLD.
+            unsafe { thread.st().looper_need_return }
+        } {
             break;
         }
         // Only the leading BR_NOOP staged and no work found: retry the wait
