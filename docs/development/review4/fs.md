@@ -143,13 +143,13 @@ i_file_acl_lo (orphaned xattr block, silent xattr loss). Fix: read-modify-write
 Every cold miss drains through per-block synchronous `bio::bread`; the
 readahead/fault-around design is inert. Track it: fix and re-arm, or delete.
 
-### [Low] ext4/extent.rs:1614-1632 — ext4_ext_rebuild frees old metadata blocks BEFORE building the new tree
+### [Low] ext4/extent.rs:1614-1632 — ext4_ext_rebuild frees old metadata blocks BEFORE building the new tree — ✅ FIXED (`33fff096`)
 
 Mid-rebuild append failure (ENOSPC on a meta block) leaves a prefix-only tree —
 silent mapping loss. Linux reserves metadata credit first. Reachable via
 punch/materialize/insert fallbacks on a nearly-full fs.
 
-### [Low] ext4/mod.rs:2416 — ATTR_SIZE truncate rewrites i_blocks as pure data blocks, dropping extent-tree metadata
+### [Low] ext4/mod.rs:2416 — ATTR_SIZE truncate rewrites i_blocks as pure data blocks, dropping extent-tree metadata — ✅ FIXED (`33fff096`)
 
 st_blocks understates by the tree's metadata after ftruncate; e2fsck flags the
 mismatch. The punch path already does subtract-only.

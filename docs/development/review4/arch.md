@@ -193,14 +193,14 @@ panics on stack overflow); Segfault/PermissionDenied/BusError are produced on
 user-mode paths only. The trap.rs else-arms are dead defensive code, not a
 fault-retry loop. No action needed; a one-line comment in trap.rs would help.
 
-### [Low] riscv64/process.rs:93 — arch copy_thread is dead code that heap-allocates pt_regs
+### [Low] riscv64/process.rs:93 — arch copy_thread is dead code that heap-allocates pt_regs — ✅ FIXED (`33fff096`)
 
 The doc comment says the live path is process/fork.rs's generic copy_thread;
 this arch variant (heap-allocated PtRegs, thread.sp pointing into the heap)
 has no callers. If ever revived, a trap on the child would push frames below a
 HEAP address, not a kernel stack. Delete or mark clearly.
 
-### [Low] riscv64/mm/fixmap.rs:190-195 — UART fixmap maps device memory cacheable (no SVPBMT IO bit)
+### [Low] riscv64/mm/fixmap.rs:190-195 — UART fixmap maps device memory cacheable (no SVPBMT IO bit) — ⚠️ ATTEMPTED-BLOCKED (`33fff096`): Svpbmt IO bit kills QEMU's default rv64 (bit 62 reserved → invalid PTE, silent pre-print death); needs an Svpbmt probe first — constraint documented at the site
 
 PageTableEntry::IO (bit 62) exists but set_fixmap/init_uart_fixmap and
 copy_fixmap_to_user use V|R|W|A|D|G only. On Svpbmt-capable hardware the UART
@@ -236,7 +236,7 @@ PTEs with no flush at all on the local hart (flush_tlb_page only when
 REPLACING a translation). Fix: drop the fence from map_page (each caller
 already fences) or make it `sfence.vma {vaddr}, zero`.
 
-### [Low] riscv64/mm/mm_ops.rs:865-870 — unmap_pages foreign-frame arm continues without advancing addr (double walk per foreign page, no sub_rss)
+### [Low] riscv64/mm/mm_ops.rs:865-870 — unmap_pages foreign-frame arm continues without advancing addr (double walk per foreign page, no sub_rss) — ✅ FIXED (`33fff096`)
 
 The device/foreign-frame arm does `clear_pte(addr); continue;` — unlike the
 U==0 arm right above, it does NOT `addr += PAGE_SIZE` first. Not an infinite
@@ -246,7 +246,7 @@ the map path DID `add_rss` for device VMA pages — RSS drifts upward for tasks
 that unmap drm/GEM windows. Fix: advance before continue (and consider
 sub_rss).
 
-### [Low] riscv64/mm/mmu_init.rs:1804 — map_device_page is dead code that would write a 1GB leaf for one 4K page
+### [Low] riscv64/mm/mmu_init.rs:1804 — map_device_page is dead code that would write a 1GB leaf for one 4K page — ✅ FIXED (`33fff096`)
 
 `ROOT_PAGE_TABLE.set(vpn2, (ppn<<10)|flags)` installs a PGD-LEVEL LEAF — if
 ever called it maps an entire 1GB region starting at `phys` with one entry,
@@ -254,7 +254,7 @@ silently shadowing everything else in that GB. Zero callers in-tree (the
 aarch64 hits are that arch's own function). Delete or rewrite to descend to
 L0.
 
-### [Low] riscv64/mm/mm_ops.rs:1590 — contradictory stale comments on pte_lock_for mode
+### [Low] riscv64/mm/mm_ops.rs:1590 — contradictory stale comments on pte_lock_for mode — ✅ FIXED (`33fff096`)
 
 The doc comment says "GLOBAL mode on riscv64: every mm maps to the same
 global epoch section" while the body comment says "Split mode on all arches
