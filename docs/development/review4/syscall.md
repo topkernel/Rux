@@ -59,7 +59,7 @@ signal to a task busy in a long syscall, sigpending() from another thread. Fix: 
 request is < 1 ms or interrupted early (POSIX: rem <= req; LTP clock_nanosleep02 monotonicity checks
 tolerate some slack). Fix: copy `remaining_ns` split into sec/nsec directly (drop the msec round-trip).
 
-### [Low] syscall/dispatch.rs:274-278 — x86_64 native NR 34 (a table hole on real Linux) implemented as pause()
+### [Low] syscall/dispatch.rs:274-278 — x86_64 native NR 34 (a table hole on real Linux) implemented as pause() — ✅ FIXED (`dc097913`)
 On the x86_64 table 34 is unused (glibc musl never issue it; Linux returns ENOSYS). Rux sleeps until a
 signal. A program probing ENOSYS behavior of nr 34 hangs instead. (The sibling legacy arms — 7 poll,
 23 select, 33 dup2, 37 alarm, 139 sysfs, 213/232 epoll — are all real x86_64 numbers and correct.)
@@ -138,14 +138,14 @@ page, 1, 0)`. Fix: propagate both copy results to -EFAULT (partial-out may keep 
 A faulting event pointer (access_ok-passed, unmapped) registers `events=0,data=0` (a watch that never
 fires) instead of EFAULT. Fix: check the residual like the other paths here do.
 
-### [Low] syscall/misc.rs:240/258-267 — always-on hunt prints on hot paths
+### [Low] syscall/misc.rs:240/258-267 — always-on hunt prints on hot paths — ✅ FIXED (`dc097913`)
 - `epoll_notify_file` prints "epollnotify#..." via pr_warn for the first 40 notifies of every boot
   (then every 10th up to 400) with no debug switch — pure residue.
 - `sys_timerfd_create` prints 60 TFDC lines per boot unconditionally.
 - dispatch.rs's `EFAULTTRAC` (60 lines) and the `println!` on unknown syscalls are likewise ungated.
 Fix: move behind the debug= switches catalog like the rest of the hunt taps.
 
-### [Low] syscall/io.rs:438-501 — sys_write's fd-trace budget gate is dead code (512 as u8 == 0)
+### [Low] syscall/io.rs:438-501 — sys_write's fd-trace budget gate is dead code (512 as u8 == 0) — ✅ FIXED (`dc097913`)
 `if used < WTRACE_PID_MAX as u8` with `WTRACE_PID_MAX = 512` truncates to 0 — the branch never runs, so
 the intended 512-line write trace never fires (harmless in production, but the diagnostic is broken and
 the surrounding atomic bookkeeping still executes per call). Fix: compare in usize or store u16.
@@ -266,12 +266,12 @@ can go negative (or above SEMVMX), and every later P on that semaphore blocks fo
 clamps `semval = clamp(semval, 0, SEMVMX)` after the subtraction (ipc/sem.c). Sept M5 recorded this;
 still live. Fix: clamp after fetch_sub and wake waiters (wake is present).
 
-### [Low] ipc/util.rs:491-504 — ipc permission check ignores supplementary groups
+### [Low] ipc/util.rs:491-504 — ipc permission check ignores supplementary groups — ✅ FIXED (`dc097913`)
 The group arm compares only `cred.egid == perm.gid`; a caller made member of the object's group via a
 supplementary gid (setgroups) is denied (EACCES) where Linux's `in_group_p` grants. LTP as根 mostly
 masks it. Fix: also test `cred.groups.contains(&perm.gid)`.
 
-### [Low] ipc/sysv_sem.rs + sysv_msg.rs + sysv_shm.rs — IPC_STAT/SEM_STAT/INFO copy_to_user results ignored
+### [Low] ipc/sysv_sem.rs + sysv_msg.rs + sysv_shm.rs — IPC_STAT/SEM_STAT/INFO copy_to_user results ignored — ✅ FIXED (`dc097913`)
 Every `*ctl` stat path access_oks the buffer then discards copy_to_user's residual — an in-range but
 unmapped page (PROT_NONE) yields "success" with nothing written (Linux: EFAULT). GETALL/SETVAL check
 theirs; the struct paths do not. Fix: propagate the residual like GETALL does.
@@ -327,7 +327,7 @@ when no manager is installed; Rux blocks the sending thread up to 8 s (250 ms sl
 probing manager absence hangs 8 s per attempt instead of failing fast. Recorded as a compat
 divergence; keep or bound lower.
 
-### [Low] ipc/binder.rs:6797-6800 — invalid-handle BC ref commands are skipped silently
+### [Low] ipc/binder.rs:6797-6800 — invalid-handle BC ref commands are skipped silently — ✅ FIXED (`dc097913`)
 Linux queues BR_ERROR (binder_user_error path) for ref commands on an invalid handle; Rux logs
 pr_info and continues — userspace cannot detect its own protocol bug. Fix: stage Work::ReturnError
 (BR_ERROR, EINVAL) like the reference.
@@ -354,19 +354,19 @@ io_uring_mmap_handler runs its map loop unlocked, only holding the VMA it just a
 CLONE_VM thread faulting through the half-built VMA) racing the loop diverges refcounts / leaves
 dangling child PTEs exactly like the fixed binder cases. Fix: same pte_lock section as binder.rs:2662.
 
-### [Low] io_uring/mod.rs:713-739 — READ/WRITE at an explicit offset implemented as set_pos/restore
+### [Low] io_uring/mod.rs:713-739 — READ/WRITE at an explicit offset implemented as set_pos/restore — ✅ FIXED (`dc097913`)
 io_uring_op_read with off != -1 saves file.get_pos(), set_pos(off), reads, restores — the exact
 racy pattern removed from sys_pread64 (position corrupted under CLONE_FILES sharers; the syscall
 layer uses position-invariant read_at). Two ring submits on one shared fd interleave positions.
 Fix: route through read_at_slice/write_at_slice like syscall/io.rs does.
 
-### [Low] io_uring/mod.rs:963-986 — GETEVENTS wait spins 1000 yields then invents ETIMEDOUT
+### [Low] io_uring/mod.rs:963-986 — GETEVENTS wait spins 1000 yields then invents ETIMEDOUT — ✅ FIXED (`dc097913`)
 wait_for_cqes loops yield_cpu() 1000 times and returns -ETIMEDOUT — Linux blocks interruptibly
 until the completions exist (no timeout, EINTR on signal). A pure-wait enter (to_submit=0) with
 min_complete above the ready count returns a bogus ETIMEDOUT instead of blocking. Fix: wait-queue
 round (prepare_to_wait + recheck) like the socket waits.
 
-### [Low] net/udp.rs:1518-1528 — always-on "udp-in" debug prints (marked "TEMP probe drop before merge")
+### [Low] net/udp.rs:1518-1528 — always-on "udp-in" debug prints (marked "TEMP probe drop before merge") — ✅ FIXED (`dc097913`)
 udp_rcv prints the first 40 datagrams of every boot unconditionally ("lmbench-fix TEMP probe").
 Merges with the misc.rs always-on taps finding. Fix: remove or gate.
 
