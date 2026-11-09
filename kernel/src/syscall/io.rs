@@ -435,7 +435,17 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
     // one early service retrying "GetSystemAbilityManager failed" burned
     // the whole global 4000 budget in ~3999 lines (boot b43) and the
     // graphics services' output stayed invisible.
-    if count <= 256 && fd != 1 && fd != 2 {
+    if count <= 256 && fd != 1 && fd != 2
+        && crate::debug::switches::enabled(
+            crate::debug::switches::DebugSwitch::WriteTrace,
+        )
+    {
+        // The switch gate above is the FIRST check: review4's syscall-L
+        // fix un-deadened the budget bookkeeping but left the copy_in +
+        // hex render + String/Vec allocs running on EVERY small write —
+        // un-gated per-syscall work on the write hot path. Switches are
+        // boot-time only (debug=writetrace), so when off nothing here is
+        // observable; skip the whole block.
         // 512/pid: samgr's runtime HILOGE lines (the SAMStub
         // "PERMISSION DENIED"/"interfaceToken failed" family) arrive after
         // its ~20 init-time frames; the old 48/pid budget cut exactly

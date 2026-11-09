@@ -776,24 +776,41 @@ fn io_uring_op_read(sqe: &IoUringSqe) -> i32 {
         // read_at path (review4 syscall-L: the old set_pos/restore raced
         // a CLONE_FILES sharer's position — the same pattern removed
         // from sys_pread64; two ring submits on one shared fd
-        // interleaved positions). Kernel staging buffer + one copy out.
-        let mut kbuf = alloc::vec![0u8; len];
-        let result = file.read_at_slice(off as u64, &mut kbuf);
-        if result < 0 {
-            return result as i32;
-        }
-        let n = result as usize;
-        if n > 0 {
-            // SAFETY: buf was access_ok(len) above; copy_to_user is the
-            // exception-table path.
-            if unsafe {
-                crate::arch::uaccess::copy_to_user(buf as *mut u8, kbuf.as_ptr(), n)
-            } != 0
-            {
-                return -14; // EFAULT
+        // interleaved positions). Kernel staging buffer + copy out.
+        // R20-FS9 twin (post-review4 re-audit): chunk the staging — a
+        // single `vec![0u8; len]` with user len up to MAX_RW_COUNT (2GB)
+        // panics the kernel heap; do_read two hunks below carries the
+        // full rationale.
+        const RW_CHUNK: usize = crate::syscall::io::RW_CHUNK;
+        let mut kbuf = alloc::vec![0u8; len.min(RW_CHUNK)];
+        let mut total = 0usize;
+        while total < len {
+            let chunk = core::cmp::min(len - total, kbuf.len());
+            let result = file.read_at_slice(off as u64 + total as u64, &mut kbuf[..chunk]);
+            if result < 0 {
+                return if total > 0 { total as i32 } else { result as i32 };
+            }
+            let n = result as usize;
+            if n > 0 {
+                // SAFETY: buf was access_ok(len) above; copy_to_user is
+                // the exception-table path.
+                if unsafe {
+                    crate::arch::uaccess::copy_to_user(
+                        (buf + total) as *mut u8,
+                        kbuf.as_ptr(),
+                        n,
+                    )
+                } != 0
+                {
+                    return if total > 0 { total as i32 } else { -14 }; // EFAULT
+                }
+            }
+            total += n;
+            if n < chunk {
+                break; // EOF / short read
             }
         }
-        n as i32
+        total as i32
     }
 }
 
@@ -874,21 +891,40 @@ fn io_uring_op_write(sqe: &IoUringSqe) -> i32 {
     } else {
         // pwrite: position-invariant write_at path (review4 syscall-L:
         // the set_pos/restore raced CLONE_FILES sharers — see the read
-        // twin). Kernel staging + one copy in.
-        let mut kbuf = alloc::vec![0u8; len];
-        // SAFETY: buf was access_ok(len) above; copy_from_user is the
-        // exception-table path.
-        if unsafe {
-            crate::arch::uaccess::copy_from_user(kbuf.as_mut_ptr(), buf as *const u8, len)
-        } != 0
-        {
-            return -14; // EFAULT
+        // twin). Kernel staging + copy in.
+        // R20-FS9 twin (post-review4 re-audit): chunk the staging like
+        // do_write below — same kernel-heap panic vector as the read
+        // side.
+        const RW_CHUNK: usize = crate::syscall::io::RW_CHUNK;
+        let mut kbuf = alloc::vec![0u8; len.min(RW_CHUNK)];
+        let mut total = 0usize;
+        while total < len {
+            let chunk = core::cmp::min(len - total, kbuf.len());
+            // SAFETY: buf was access_ok(len) above; copy_from_user is
+            // the exception-table path.
+            if unsafe {
+                crate::arch::uaccess::copy_from_user(
+                    kbuf.as_mut_ptr(),
+                    (buf + total) as *const u8,
+                    chunk,
+                )
+            } != 0
+            {
+                return if total > 0 { total as i32 } else { -14 }; // EFAULT
+            }
+            let result = file.write_at_slice(off as u64 + total as u64, &kbuf[..chunk]);
+            if result < 0 {
+                return if total > 0 { total as i32 } else { result as i32 };
+            }
+            if result == 0 {
+                break; // full / short write
+            }
+            total += result as usize;
+            if (result as usize) < chunk {
+                break;
+            }
         }
-        let result = file.write_at_slice(off as u64, &kbuf);
-        if result < 0 {
-            return result as i32;
-        }
-        result as i32
+        total as i32
     }
 }
 

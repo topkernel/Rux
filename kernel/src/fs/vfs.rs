@@ -330,6 +330,36 @@ fn check_not_readonly(pathname: &str) -> Result<(), i32> {
     Ok(())
 }
 
+/// Covering-mount MNT_NOEXEC test for a RESOLVED dentry: climb the
+/// dentry tree (hopping mount boundaries via the mountpoint back-refs,
+/// the same idiom as the ancestry walk) and consult the numeric
+/// MntFlags of the first attached VfsMountInternal. Post-review4
+/// re-audit: the execve-time check used to string-match the
+/// /proc/mounts table ("contains(\"noexec\")"), but every
+/// register_mount writer stores only "rw"/"ro" — the numeric flags
+/// translated by mount(2) live here, on the mount descriptor, and were
+/// never consulted (the enforcement was inert).
+pub fn dentry_covering_mount_noexec(start: &Arc<Dentry>) -> bool {
+    let mut cur = start.clone();
+    loop {
+        if let Some(mnt) = cur.get_mount() {
+            return mnt.flags.lock().is_noexec();
+        }
+        let next = {
+            let parent = cur.parent.lock().clone();
+            match parent {
+                Some(p) => p,
+                None => match cur.get_mountpoint_back() {
+                    // The mountpoint dentry itself carries the mount.
+                    Some(m) => m,
+                    None => return false,
+                },
+            }
+        };
+        cur = next;
+    }
+}
+
 /// Update the flags of the mount attached at `mountpoint` (mount(2) with
 /// MS_REMOUNT). Returns Ok(()) when a mount was found and updated,
 /// Err(EINVAL) when the path is not a mount point.
@@ -4656,6 +4686,18 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                 if let Ok(vp) = path_lookup(filename, LOOKUP_NOFOLLOW) {
                     if let Some(ref ino) = vp.inode {
                         if ino.mode.is_symlink() {
+                            // O_CREAT|O_EXCL on ANY symlink at the final
+                            // component — dangling included — is EEXIST:
+                            // the atomic-create existence probe (POSIX
+                            // open). Post-review4 re-audit: this must be
+                            // answered BEFORE the follow-and-recreate
+                            // recursion below, which otherwise creates
+                            // the link's target where the caller demanded
+                            // a fail-if-exists. (O_NOFOLLOW is already
+                            // answered ELOOP by the top-level resolution.)
+                            if o_excl {
+                                return Err(errno::Errno::FileExists.as_neg_i32());
+                            }
                             // Read the link target
                             let mut buf = [0u8; 256];
                             let n = ino.op_readlink(&mut buf);

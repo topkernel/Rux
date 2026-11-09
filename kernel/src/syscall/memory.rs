@@ -4512,11 +4512,17 @@ pub fn sys_mbind(args: [u64; 6]) -> i64 {
     // nonexistent node).
     let mut mask_word = 0usize;
     if !nodemask_ptr.is_null() && maxnode > 0 {
-        if !crate::arch::uaccess::access_ok(nodemask_ptr as usize, (maxnode + 7) / 8) {
-            return -errno::EFAULT as i64;
-        }
-        // SAFETY: access_ok covered one word (maxnode >= 1).
-        mask_word = unsafe { core::ptr::read_volatile(nodemask_ptr) };
+        // Post-review4 re-audit: the raw `read_volatile` read 8 bytes
+        // after access_ok of only ceil(maxnode/8) and with no extable
+        // protection — a nodemask at the end of the user range faulted
+        // in kernel mode (panic, not EFAULT). get_user routes through
+        // the exception table and returns None on fault.
+        // SAFETY: reads one usize from the (access_ok-checked inside
+        // get_user) user pointer.
+        mask_word = match unsafe { crate::arch::uaccess::get_user(nodemask_ptr) } {
+            Some(w) => w,
+            None => return -errno::EFAULT as i64,
+        };
         if mode == MPOL_DEFAULT && mask_word != 0 {
             return -errno::EINVAL as i64;
         }
@@ -4603,11 +4609,13 @@ pub fn sys_set_mempolicy(args: [u64; 6]) -> i64 {
     }
     let mut mask_word = 0usize;
     if !nodemask_ptr.is_null() && maxnode > 0 {
-        if !crate::arch::uaccess::access_ok(nodemask_ptr as usize, (maxnode + 7) / 8) {
-            return -errno::EFAULT as i64;
-        }
-        // SAFETY: access_ok covered one word (maxnode >= 1).
-        mask_word = unsafe { core::ptr::read_volatile(nodemask_ptr) };
+        // Post-review4 re-audit: raw read_volatile → fault-safe get_user
+        // (see the mbind twin for the full rationale).
+        // SAFETY: one usize from user memory via the exception table.
+        mask_word = match unsafe { crate::arch::uaccess::get_user(nodemask_ptr) } {
+            Some(w) => w,
+            None => return -errno::EFAULT as i64,
+        };
         if mode == MPOL_DEFAULT && mask_word != 0 {
             return -errno::EINVAL as i64;
         }

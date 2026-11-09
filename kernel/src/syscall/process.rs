@@ -630,12 +630,17 @@ pub(crate) struct ExecFile {
 /// (may_open: S_ISDIR), missing execute permission is EACCES (even
 /// root needs one x bit — LTP execve03).
 pub(crate) fn resolve_exec_file(path: &str) -> Result<ExecFile, i32> {
-    // review4 fs-M: MNT_NOEXEC enforcement (reference do_open_execat →
-    // may_open checks the mount's MNT_NOEXEC before anything else).
-    if crate::fs::mount::path_mount_has_flag(path, crate::fs::mount::MntFlags::MNT_NOEXEC) {
-        return Err(-(errno::EACCES as i64 as i32));
-    }
     let vpath = crate::fs::vfs::path_lookup(path, 0)?;
+    // review4 fs-M: MNT_NOEXEC enforcement (reference do_open_execat →
+    // may_open checks the resolved file's mount MNT_NOEXEC). Post-review4
+    // re-audit: the original check string-matched the /proc/mounts table,
+    // which never carries "noexec" — the numeric flags translated by
+    // mount(2) live on the covering VfsMountInternal; consult those.
+    if let Some(d) = vpath.dentry.as_ref() {
+        if crate::fs::vfs::dentry_covering_mount_noexec(d) {
+            return Err(-(errno::EACCES as i64 as i32));
+        }
+    }
     let inode = vpath
         .inode
         .clone()
