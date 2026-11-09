@@ -3401,7 +3401,7 @@ pub fn sqwalk_slice() {
                         hi_hint = ve;
                     }
                     if vma.flags().is_executable() {
-                        if exec_vmas.len() < 96 {
+                        if exec_vmas.len() < 200 {
                             let name = aspace
                                 .try_get_vma_file(vma.start().as_usize())
                                 .map(|f| f.path())
@@ -3520,6 +3520,58 @@ pub fn sqwalk_slice() {
                         && (x & 3) == (word & 3);
                     if near && hits0 < 24 {
                         SQW_RAWHITS.fetch_add(1, Relaxed);
+                        // 83rd: name the TASK that owns this hit's stack
+                        // region — the thread whose pt_regs rsp lies in
+                        // the same stack VMA is the holder; its park
+                        // word names what it waits on (the CoWait host).
+                        // Once per 8 hits (the same stack repeats).
+                        if SQW_RAWHITS.load(Relaxed) % 8 == 1 {
+                            let hit = rcur;
+                            crate::sched::for_each_task_try(|t| {
+                                // SAFETY: diagnostic read, pt_regs only.
+                                let tk = unsafe { &*t };
+                                if tk.tgid() as u32 != tgid {
+                                    return;
+                                }
+                                let Some(top) = tk.kernel_stack_top_checked()
+                                else {
+                                    return;
+                                };
+                                #[cfg(feature = "x86_64")]
+                                let rsp = {
+                                    let regs = (top.wrapping_sub(
+                                        crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                                    ))
+                                        as *const crate::arch::x86_64::pt_regs::PtRegs;
+                                    unsafe { (*regs).rsp }
+                                };
+                                #[cfg(not(feature = "x86_64"))]
+                                let rsp = 0u64;
+                                // same 1 MB granule as the hit = same
+                                // stack region (thread stacks are 2-8 MB)
+                                if rsp != 0
+                                    && (rsp >> 20) == (hit >> 20)
+                                    && rsp <= hit + 0x1000
+                                {
+                                    #[cfg(feature = "x86_64")]
+                                    let (sys, a0) = {
+                                        let regs = (top.wrapping_sub(
+                                            crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                                        ))
+                                            as *const crate::arch::x86_64::pt_regs::PtRegs;
+                                        (unsafe { (*regs).orig_rax }, unsafe { (*regs).rdi })
+                                    };
+                                    #[cfg(not(feature = "x86_64"))]
+                                    let (sys, a0) = (0u64, 0u64);
+                                    use core::fmt::Write as _;
+                                    let _ = writeln!(
+                                        w,
+                                        "SQW-STKHIT hit={:#x} owner tid={} comm='{}' sys={} park_a0={:#x} rsp={:#x}",
+                                        hit, tk.pid(), tk.comm_str(), sys, a0, rsp
+                                    );
+                                }
+                            });
+                        }
                         let _ = writeln!(
                             w,
                             "SQW-RAW hit at {:#x} val={:#x} d{:+} ctx[-0x40,+0x40]:",
@@ -9910,6 +9962,51 @@ pub fn freeze_scan(now: u64, hz: u64) {
             v,
             readers
         );
+    }
+    // ---- 83rd: same-offset park family (the ohw154 samgr face) ----
+    // samgr's loopers each park on a DIFFERENT word that shares one page
+    // offset (...194-class: one waiter per word, so no cluster reaches
+    // the n>=12 deep trigger). A tgid with >=4 distinct parked words at
+    // the same offset = one object CLASS frozen across its instances —
+    // arm the raw scan for its oldest member; SQW_DEEP keeps the pass
+    // sticky (the word's value says nothing about liveness).
+    {
+        // (offset, tgid) -> (count, first_uaddr)
+        let mut fam: [(u32, u32, u32, usize); 8] = [(0, 0, 0, 0); 8];
+        let mut armed = false;
+        for c in waiter_clusters(1) {
+            let off = (c.uaddr & 0xfff) as u32;
+            let mut slot = None;
+            for i in 0..8 {
+                if fam[i].0 == off && fam[i].1 == c.tgid {
+                    slot = Some(i);
+                    break;
+                }
+                if fam[i].0 == 0 && slot.is_none() {
+                    slot = Some(i);
+                }
+            }
+            if let Some(i) = slot {
+                if fam[i].0 == off && fam[i].1 == c.tgid {
+                    fam[i].2 += 1;
+                } else {
+                    fam[i] = (off, c.tgid, 1, c.uaddr);
+                }
+            }
+        }
+        for &(off, t, n, u) in fam.iter() {
+            if off != 0 && n >= 4 && !armed {
+                armed = true;
+                crate::pr_warn!(
+                    "RWFRZ-OFFFAM offset={:#x} tgid={} words={} sample={:#x} (same-offset park family)",
+                    off,
+                    t,
+                    n,
+                    u
+                );
+                sqwalk_step_deep(t, u as u64, true);
+            }
+        }
     }
     let uaddr = RWFRZ_UADDR.load(core::sync::atomic::Ordering::Relaxed);
     let tgid = RWFRZ_TGID.load(core::sync::atomic::Ordering::Relaxed);

@@ -9419,3 +9419,134 @@ settled on the foundation rwlock twin.
 - ohw139's standing wedge: the distdata GetFeatureInterface face again
   (txn8853 code0 from pid 377 tid 384, 377 s+, install stream stalled
   at 18 bundles — the earlier boots reached 42-56).
+
+### 83. 83RD SESSION (2026-11-10) — THE READERS ARE NAMED: every frozen
+### rwlock's read-holders are IPC LOOPERS holding their read section
+### across a SYNC BINDER CALL into a service that never picks the txn
+### up (samgr first); the "16 readers" constant is the OH IPC
+### work-thread POOL SIZE. The instruments now deliver (kthread-driven
+### full-window sqwalk + RAW word scan + stack-hit owner naming), four
+### instrument bugs fixed. The wedge bottoms at never-run notifiers
+### (FFRT/event tasks) with recurring 2.3 s wake->pick strands visible
+### kernel-side — the 84th's lever. (dfx commits only)
+
+Boots this session: ohw149-ohw155 (7 KVM boots, system-lb5 +
+userdata-fresh2, SMP2/4G, LOGLEVEL7, dfx=txnhunt,ams46,fuxstuck).
+
+#### 1. THE ANSWER TO §82's MISSION (the stuck readers, named)
+
+ohw154, wedge word 0x7ff0006f1e8c in tgid 475 (telephony), word value
+0x80000010 (writer marker + 16 readers):
+
+- SQW-STKHIT (new): the raw word scan's stack hits now name their
+  OWNING THREAD — `hit=0x7ff083b51e68 owner tid=1076 comm='OS_IPC_6_1076'
+  sys=16 park_a0=0x5` — a telephony IPC looper parked in the binder
+  WRITE_READ ioctl, its stack carrying the lock-owner pointer
+  (0x7ff0006f1e80, d-12) in SEVEN live frames (0x7ff083b51c90..1ec8):
+  a deep C++ chain INSIDE the read section that ends in a sync binder
+  call. The lock is a std::shared_mutex (musl pthread_rwlock layout:
+  state + _rw_waiters@+4) whose owner object starts 12 bytes before
+  the state word.
+- What it awaits: txn10244 code7 SYNC to pid 328 (samgr), parcel
+  string "ohos.samgr.accessToken" — a GetSystemAbility-class lookup.
+  The txn sits on samgr's QUEUE (txn "328.0/queue") for 62 s+ and is
+  NEVER picked up.
+- Why the callee never picks it up: EVERY one of samgr's OS_IPC
+  loopers is itself parked userspace-side on a per-object futex word
+  (ohw154: tids 350/442/540/578/642 on 0x7ff08d2c5194, 0x7ff087aa4194,
+  0x7ff08b2b9194, 0x7ff0892ad194, 0x7ff08f2d1194 — one waiter per
+  word, ALL ending in offset 0x194, 280 s+ each, wake[ever=0]): the
+  samgr handlers deferred to FFRT/event tasks that NEVER RUN — §81's
+  never-sent verdict, one level deeper than the parks we watched.
+- THE "EXACTLY 16 READERS EVERYWHERE" CONSTANT EXPLAINED: the OH IPC
+  work-thread pool is 16 loopers per service. When a callee freezes,
+  every looper that entered a read section and issued a sync call
+  becomes one permanent "reader" -> state 0x80000010 in every frozen
+  process (samgr ohw136, foundation ohw138/149/150/153(*.BundleUserMgr,
+  $mouse_settings.xml-adjacent locks), distributeddata ohw148,
+  audio_service ohw155, telephony ohw154). The rwlock "pandemic" is a
+  PROJECTION of the callee freeze onto every caller that reads across
+  a sync binder call — the read-across-sync-call pattern is normal OH
+  code (resolves in ms on the reference).
+
+The frozen lock owners seen via SQW-LOCKW ctx dumps: foundation
+"*.BundleUserMgr" (DB store) and "$mouse_settings.xml" (prefs store);
+audio_service 5-instance mutex family at object offset 0x7c4
+(RWFRZ-OFFFAM new trigger); EventRunner#1 never-woken 229 s
+(FUX-STUCK-FRESH tgid=706 tid=1090). Same shape everywhere: the
+innermost waiters are EVENT/FFRT-task notifiers that never run.
+
+#### 2. INSTRUMENT WORK (all dfx=fuxstuck-gated; 4 bugs fixed)
+
+- sqwalk_step SPLIT into ARM (cheap, any context) + SLICE (the burst):
+  ohw148 ran ONE 500k slice in 104 s (census triggers 5-60 s cadence,
+  starved by adoption/word churn). Slices are now driven by censusd
+  (250 ms rounds, one 4M-word burst per 500 ms) — a full 625 MB
+  dual-arena window pass (397 regions) completes in ~65 s.
+- ohw151 DEADLOCK LESSON: 1M-word bursts in the TIMER SOFTIRQ (594 MB
+  window) held softirq-context locks across seconds of page walks ->
+  BOTH CPUs spun on one lock forever. Slices run ONLY in the censusd
+  kthread now. (This is the ohw20/ohw139 lesson relearned at 4x scale.)
+- The 82nd's 128-region cap SILENTLY DROPPED the tail chunks where the
+  FFRT task stacks live (ohw148 OH68 saw task pointers at
+  0x7ff08cbf+/0x7ff08f0d+; every prior pass window ended at
+  0x7ff08cb4d000): now 512 regions + SQW-TRUNC visibility + exec table
+  200. THE FIX THAT MADE THE READERS VISIBLE.
+- Sticky-word TRAP (ohw148: a transient 16-reader pile in tgid 650
+  locked out the real wedge word all boot): drained-word abandonment
+  via the pass's own root; deep-cluster/same-offset passes never drain
+  on value shape. `!adopted` dropped from the freeze_scan trigger
+  (same-pass re-adoption starved later words forever, ohw150).
+- NEW: RAW phase (after the shape pass: full-window scan for the lock
+  word VALUE ±0x400 — every holder structure/saved stack prints its
+  decoded neighborhood; ohw153: 31 hits, ohw154: 30, ohw155: 14).
+  NEW: SQW-STKHIT (names the thread owning a hit's stack region via
+  pt_regs rsp correlation + its syscall/park word).
+  NEW: RWFRZ-OFFFAM trigger (a tgid with >=4 parked words at the same
+  page offset = one object class frozen across instances; arms the raw
+  scan for its oldest member).
+- rwfrz_reader_scan window 640 -> 4096 words (readers blocked deep
+  above the syscall frame); class-C print cap 16 -> 48.
+- First class-Q QueueTask validated on any boot (ohw153):
+  sq_AppStartupSceneRecQueue_7 (the shape tests were right; the window
+  was wrong).
+
+#### 3. WHAT IS *NOT* THE FOUNDER (ruled out this session)
+
+- musl rwlock semantics (last-reader-wakes-writer): correct, and NOT
+  the bug — the readers are simply never coming back (each is one
+  16th of an IPC pool blocked on a frozen callee).
+- Kernel futex wake loss for the watched words: §81's verdict stands
+  (wake machinery delivers; watched words see ZERO writes = never-sent
+  by userspace).
+- Lost timer wakes: the TIMEDSLEEP-PARK u64-wrap ages (pid 783 class)
+  are re-arming 30 ms pollers, instrument arithmetic, not lost fires.
+
+#### 4. THE 84TH's LEVER (kernel-side, measurable with standing tools)
+
+The chain bottoms at NOTIFIERS THAT NEVER RUN (FFRT/event tasks whose
+producers' queues have work). Kernel-side suspects visible in our own
+census on the wedged boots:
+- WAKE-STRANDED RECURRING STRANDS: ohw155 pid 947 strands 2.2-2.4 s
+  EVERY ~3 s (h0/h1 wakers 498/561/320/788, pc=1/2); ohw154 same class.
+  A 2.3 s wake->pick on a 2-CPU mostly-idle guest is ~1000x the
+  reference class — if ANY thread is woken-but-never-picked (not just
+  slow), that is the founder. FFRTWAIT still shows few-pick threads
+  with wm up to 40 s (ohw155: 323pk4wm7382ms... 321pk3wm7807ms).
+- The binder pickup side: txn10244-class entries sit on a proc todo
+  queue with idle-shaped loopers parked userspace-side — check whether
+  the wake for a queued txn targets a thread that is NOT in the ioctl
+  (it can't be picked up until a BWR reader returns; on the reference
+  the deferred handler completes in ms and the looper re-enters).
+- PIXELS: ohw149-155 screenshots all 06b933b4-class at every tick;
+  screenshot cadence tightened to 60 s from 150 s in lb-boot.py.
+
+#### 5. GATES
+
+x86_64 build rc=0; riscv64 clean-config rc=0 (run/build-rv-83.log);
+aarch64 rc=0 (run/build-a64-83.log); riscv64 make test 1319/1319 ALL
+TESTS PASSED (run/test-rv-83.log). Behavior changes: NONE — every
+change is dfx-gated (fuxstuck/txnhunt); no pbench duty. Boot
+stability: ohw155 ran 400 s+ with 3 full sqwalk passes and zero
+deadlocks after the kthread fix (ohw151's softirq deadlock is the
+counter-example that fixed it).
