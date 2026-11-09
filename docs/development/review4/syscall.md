@@ -172,7 +172,7 @@ Linux mlock2 rounds addr down / len up exactly like mlock (mlock2(man): "addr is
 mlock2 gate `addr % PAGE_SIZE != 0 -> EINVAL` makes an unaligned mlock2 fail where Linux succeeds.
 Fix: reuse mlock_impl's rounding, drop the alignment gate.
 
-### [Low] syscall/memory.rs:4478-4551 — mbind/set_mempolicy accept every mode and flag silently
+### [Low] syscall/memory.rs:4478-4551 — mbind/set_mempolicy accept every mode and flag silently — ✅ FIXED (`5512b361`)
 Linux validates mode (MPOL_DEFAULT..MPOL_LOCAL, else EINVAL), rejects MPOL_DEFAULT with a non-empty
 nodemask, and limits flags to MPOL_MF_STRICT|MOVE|MOVE_ALL (+MPOL_F_NUMA in newer kernels); unknown
 bits are EINVAL (flag-validation completeness). Rux only access_oks the nodemask and returns 0 for
@@ -321,7 +321,7 @@ refs are all zero. Rux keeps every node until the owner exits. A long-running se
 many temporary callback binders (OH pattern) accumulates nodes unboundedly. Fix: on the Work::Node
 read-side transition to !weak && external==0, remove the node from owner nodes (keep the mgr node).
 
-### [Low] ipc/binder.rs:1535-1537 — handle-0 transactions park up to 8 s waiting for a context manager
+### [Low] ipc/binder.rs:1535-1537 — handle-0 transactions park up to 8 s waiting for a context manager — ⚠️ DELIBERATE-DIVERGENCE (documented at the site; Linux answers BR_DEAD_REPLY immediately — kept for the OH bring-up manager-race tolerance, bound at 8 s)
 wait_for_context_manager (documented deliberate divergence): Linux answers BR_DEAD_REPLY immediately
 when no manager is installed; Rux blocks the sending thread up to 8 s (250 ms slices). A Linux client
 probing manager absence hangs 8 s per attempt instead of failing fast. Recorded as a compat

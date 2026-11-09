@@ -227,7 +227,7 @@ future LTO pass cache the DMA-visible load across the poll loop's
 iterations. Make both volatile for uniformity with the rest of the vring
 code.
 
-### [Low] virtio_input.rs:571-604 + input/mod.rs:274-310 — standalone probe and legacy poll APIs are dead, and one drops pointer-only results
+### [Low] virtio_input.rs:571-604 + input/mod.rs:274-310 — standalone probe and legacy poll APIs are dead, and one drops pointer-only results — ✅ FIXED (`5512b361`)
 `probe_virtio_input_devices`, `probe_virtio_input`, `get_keyboard_event`,
 `get_pointer_event`, and `input::poll_events` have no callers (the live path
 is init_virtio_input's own probe + the tasklet BH + evdev's
@@ -300,7 +300,7 @@ windows; the sync design also caps effective TX to one in-flight frame. The
 R21-N2 leak-on-timeout discipline and the R22/R23/R24 buffer-leak fixes are
 all correctly in place — this is purely the wait architecture.
 
-### [Low] space.rs:227-252 — netdev lookup registry only knows "lo"; eth0 is unfindable through it
+### [Low] space.rs:227-252 — netdev lookup registry only knows "lo"; eth0 is unfindable through it — ✅ FIXED (`5512b361`)
 `get_netdevice_by_index` maps only ifindex 0 → loopback and
 `get_netdevice_by_name` only "lo"; the eth0 NetDevice registered by
 publish_eth0 (which merely bumps DEV_COUNT and assigns ifindex 1) is

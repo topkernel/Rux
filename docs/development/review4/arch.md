@@ -65,7 +65,7 @@ instruction misaligned → SIGBUS/ILL... (traps.c:231). A user program relying o
 a SIGBUS handler for misaligned data (LTP) sees SIGKILL. Fix: route per-cause
 signo like the reference's do_trap_error table.
 
-### [Low] riscv64/trap.rs:758 — 4-aligned c.ecall is skipped by 4 bytes (matches Linux's own +4, kept as Info-grade)
+### [Low] riscv64/trap.rs:758 — 4-aligned c.ecall is skipped by 4 bytes (matches Linux's own +4, kept as Info-grade) — ⚠️ REFERENCE-PARITY (the reference's do_trap_ecall_u does the same unconditional +4; no mainstream libc emits c.ecall)
 
 `instr_size = if orig_epc % 4 == 0 { 4 }` without reading the instruction: a
 c.ecall (16-bit 0x9002) landing on a 4-byte boundary resumes 2 bytes into the
@@ -100,7 +100,7 @@ family). Same class: boot.S hardcodes KERNEL_MAP field offsets (0/16/40)
 against Rust KernelMapping. Fix: use the exported constant (cpu_id can read it
 via a const from task_offsets).
 
-### [Low] riscv64/trap.S:98,107,666 — hardcoded MAX_CPUS=4 in asm (three sites)
+### [Low] riscv64/trap.S:98,107,666 — hardcoded MAX_CPUS=4 in asm (three sites) — ✅ FIXED (`5512b361`)
 
 `li t0, 4 // MAX_CPUS` in GET_PER_CPU_INTR_STACK and .Lcall_handler clamp.
 Kernel.toml `max_cpus` is the source of truth (config::MAX_CPUS); if it is ever

@@ -129,7 +129,7 @@ fork/exit instead of the pid-hash walk the disabled code did), and root-cause th
 null-deref (likely the `address_space()` unpinned borrow inside the walk — the mm-slot
 lock now makes a pinned variant trivial).
 
-### [Low] kernel/src/process/fork.rs:508-515 / 570-1036 — unwind after cgroup_on_fork never detaches from the cgroup
+### [Low] kernel/src/process/fork.rs:508-515 / 570-1036 — unwind after cgroup_on_fork never detaches from the cgroup — ✅ FIXED (`5512b361`)
 
 `cgroup_on_fork` attaches the child (pushes its pid into the cgroup's tasks Vec, sets
 cgroup_ptr) at :570. Every failure arm between there and the successful enqueue at
