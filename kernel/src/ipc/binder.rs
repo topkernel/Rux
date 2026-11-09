@@ -6295,7 +6295,21 @@ pub fn bwr_park_audit() {
                 if now.wrapping_sub(lj) >= 600 {
                     PSTACK_LAST_J.store(now, core::sync::atomic::Ordering::Relaxed);
                     if !task.is_null() {
-                        unsafe { user_task_park_stack(task) };
+                        unsafe { user_task_park_stack_w(task, &mut w) };
+                        // 81st: if the parked word is a FROZEN rwlock
+                        // (0x80000000|N-readers — ohw135 tid 1583: val
+                        // 0x80000010, 16 readers never release), scan the
+                        // tgid's stacks for the word address: each hit is
+                        // a READER holding its critical section, and its
+                        // own park word/shape prints inline.
+                        if let Some(v) =
+                            unsafe { crate::sync::futex::read_park_word_via_task(task, a0 as u64) }
+                        {
+                            let readers = v & 0x7fff_ffff;
+                            if v & 0x8000_0000 != 0 && readers >= 1 && readers < 0x4000_0000 {
+                                crate::sync::futex::rwfrz_reader_scan(s.pid as u32, a0 as u64);
+                            }
+                        }
                     }
                 }
             }
@@ -6314,6 +6328,43 @@ pub fn bwr_park_audit() {
         } else {
             alloc::string::String::new()
         };
+        // 81st (ohw133): the BWR-parked twin — a looper parked in an
+        // ioctl READ owing a sync reply (sensors -> pid 562 tid 713,
+        // 200 s+, the ohw126 tid-766 class). The handler runs on FFRT
+        // workers: the oh68 sweep of THIS tgid names them; the thread's
+        // own user stack names the dispatch frames. Same budgets as the
+        // futex variant.
+        if park == "IOCTL-BWR"
+            && !s.stack.is_empty()
+            && s.looper != 0
+            && s.read_wait_since != 0
+            && now.wrapping_sub(s.read_wait_since as u32) > 300
+            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck)
+        {
+            {
+                static H68B_LAST_J: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                let lj = H68B_LAST_J.load(core::sync::atomic::Ordering::Relaxed);
+                if now.wrapping_sub(lj) >= 500 {
+                    H68B_LAST_J.store(now, core::sync::atomic::Ordering::Relaxed);
+                    let t = crate::sync::futex::oh68_holder_decode_tgid(s.pid as u32);
+                    if !t.is_empty() {
+                        let _ = writeln!(w, "OH68-BWRPARK{}", t);
+                    }
+                }
+            }
+            if now.wrapping_sub(s.read_wait_since as u32) > 3000 {
+                static PSTK2_LAST_J: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                let lj = PSTK2_LAST_J.load(core::sync::atomic::Ordering::Relaxed);
+                if now.wrapping_sub(lj) >= 600 {
+                    PSTK2_LAST_J.store(now, core::sync::atomic::Ordering::Relaxed);
+                    if !task.is_null() {
+                        unsafe { user_task_park_stack_w(task, &mut w) };
+                    }
+                }
+            }
+        }
         let _ = writeln!(
             w,
             "TXN-HANG-BWR pid={} tid={} ({}) park={} st={:#x} sys={} a0={:#x} a1={:#x}{}{}{} looper={:#x} wfpw={} todo={}{}{} stack={}{}{}{}{}{}",
@@ -6852,7 +6903,18 @@ unsafe fn user_park_stack_dump(t: &Arc<BinderThread>) {
 /// futex parks, not BWR parks — the BinderThread variant never ran for
 /// them). Frames above the waiter's rsp name the FFRT wait call site
 /// and the handler that parked (module+fileoff, offline-symbolized).
+/// Writes through the caller's ConsoleWriter — pr_warn from the censusd
+/// audit context is dropped (the missing FUXPARK-ARM prints class).
 unsafe fn user_task_park_stack(task: *mut crate::process::Task) {
+    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+    user_task_park_stack_w(task, &mut w);
+}
+
+unsafe fn user_task_park_stack_w(
+    task: *mut crate::process::Task,
+    w: &mut crate::dfx::backtrace::ConsoleWriter,
+) {
+    use core::fmt::Write as _;
     if task.is_null() {
         return;
     }
@@ -6897,7 +6959,8 @@ unsafe fn user_task_park_stack(task: *mut crate::process::Task) {
     };
     #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
     let (rsp, rip) = (0u64, 0u64);
-    crate::pr_warn!(
+    let _ = writeln!(
+        w,
         "binder-stall:   PARK-STACK tid {} rip={:#x} rsp={:#x}",
         tk.pid(),
         rip,
@@ -6917,7 +6980,8 @@ unsafe fn user_task_park_stack(task: *mut crate::process::Task) {
             // Instruction bytes at the frame (Session F's byte-match method:
             // search these bytes at fileoff in the debugfs-extracted .so).
             let bytes = read_u64_at(v).unwrap_or(0);
-            crate::pr_warn!(
+            let _ = writeln!(
+                w,
                 "binder-stall:   ustack[{}]={:#x} vma={:#x}-{:#x} fd={} fileoff={:#x} bytes={:#018x}",
                 i,
                 v,

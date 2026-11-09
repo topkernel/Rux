@@ -1227,12 +1227,20 @@ pub fn fuxpark_latch(word: u64, tid: u32, tgid: u32) {
                 .is_ok()
             {
                 FUXWATCH1_TGID.store(tgid, Relaxed);
-                crate::pr_warn!(
-                    "FUXPARK-ARM s1 word={:#x} tid={} tgid={} (sync-holder park)",
-                    word,
-                    tid,
-                    tgid
-                );
+                // ConsoleWriter, not pr_warn — the censusd audit context
+                // drops printk (ohw128-134: this print never appeared
+                // while the arm provably happened).
+                {
+                    let mut cw = crate::dfx::backtrace::ConsoleWriter::new();
+                    use core::fmt::Write as _;
+                    let _ = writeln!(
+                        cw,
+                        "FUXPARK-ARM s1 word={:#x} tid={} tgid={} (sync-holder park)",
+                        word,
+                        tid,
+                        tgid
+                    );
+                }
                 crate::dfx::taskdump::ensure_defer_thread();
                 return;
             }
@@ -1251,12 +1259,17 @@ pub fn fuxpark_latch(word: u64, tid: u32, tgid: u32) {
             for d in FUXWATCH_MM_DONE.iter() {
                 d.store(0, Relaxed);
             }
-            crate::pr_warn!(
-                "FUXPARK-ARM s2 word={:#x} tid={} tgid={} (sync-holder park)",
-                word,
-                tid,
-                tgid
-            );
+            {
+                let mut cw = crate::dfx::backtrace::ConsoleWriter::new();
+                use core::fmt::Write as _;
+                let _ = writeln!(
+                    cw,
+                    "FUXPARK-ARM s2 word={:#x} tid={} tgid={} (sync-holder park)",
+                    word,
+                    tid,
+                    tgid
+                );
+            }
             crate::dfx::taskdump::ensure_defer_thread();
         }
     }
@@ -8317,6 +8330,107 @@ unsafe fn read_u32_via_task(task: *const Task, va: usize) -> Option<u32> {
         as usize
         + (va & 0xfff);
     Some(unsafe { core::ptr::read_volatile(kv as *const u32) })
+}
+
+/// 81st: read the parked word's CURRENT value through the parked
+/// task's page tables (shape test for the frozen-rwlock class).
+/// SAFETY: `task` must be live; read-only diagnostic walk.
+pub unsafe fn read_park_word_via_task(
+    task: *mut crate::process::Task,
+    word: u64,
+) -> Option<u32> {
+    if task.is_null() || word < 0x1000 {
+        return None;
+    }
+    read_u32_via_task(task as *const Task, word as usize)
+}
+
+/// 81st: reader-identity scan for a FROZEN rwlock word. The 68th-era
+/// freeze dump needed waiters>=3 to adopt (our freezes carry 1-2 waiters:
+/// the parked looper itself), so the frozen 16-reader words (value
+/// 0x80000010-class, ohw135 tid 1583's park) never got the full
+/// treatment. A reader inside its critical section keeps the lock
+/// object pointer in a stack slot: scan every task of the tgid for the
+/// word address in the 160 words above its entry rsp and print each
+/// hit's tid/comm/entry-syscall/park-uaddr — naming the readers and
+/// what EACH is blocked on. ConsoleWriter (censusd drops printk).
+pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
+    use core::fmt::Write as _;
+    #[cfg(feature = "x86_64")]
+    const FUTEX_SYSNO: u64 = 202;
+    #[cfg(not(feature = "x86_64"))]
+    const FUTEX_SYSNO: u64 = 0;
+    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+    let mut hits = 0u32;
+    let _ = writeln!(w, "RWFRZ-READERS tgid={} word={:#x}:", tgid, word);
+    crate::sched::for_each_task(|t| {
+        if hits >= 24 {
+            return;
+        }
+        // SAFETY: pid-hash walk contract; reads confined to pt-regs and
+        // the task's own user pages.
+        let tk = unsafe { &*t };
+        if tk.tgid() as u32 != tgid {
+            return;
+        }
+        let Some(top) = tk.kernel_stack_top_checked() else {
+            return;
+        };
+        #[cfg(feature = "x86_64")]
+        let (sys, a0, rsp) = {
+            let regs = (top.wrapping_sub(
+                crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+            )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+            unsafe { ((*regs).orig_rax, (*regs).rdi, (*regs).rsp) }
+        };
+        #[cfg(not(feature = "x86_64"))]
+        let (sys, a0, rsp) = (0u64, 0u64, 0u64);
+        if rsp == 0 || rsp > 0x7fff_ffff_ffff {
+            return;
+        }
+        let mut found_at: [u64; 3] = [0; 3];
+        let mut nf = 0usize;
+        for i in 0..160u64 {
+            if nf == 3 {
+                break;
+            }
+            let va = rsp + 8 * i;
+            if va & 0xfff > 0xff8 {
+                continue; // page-cross split — skip
+            }
+            let lo = unsafe { read_u32_via_task(t, va as usize) }.unwrap_or(0) as u64
+                | ((unsafe { read_u32_via_task(t, va as usize + 4) }.unwrap_or(0) as u64) << 32);
+            if lo == word || lo == word.wrapping_sub(4) || lo == word.wrapping_add(4) {
+                found_at[nf] = va;
+                nf += 1;
+            }
+        }
+        if nf == 0 {
+            return;
+        }
+        hits += 1;
+        let comm = tk.comm();
+        let name = core::str::from_utf8(&comm[..])
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        let _ = writeln!(
+            w,
+            "  RDR tid={} comm='{}' sys={} park_a0={:#x} slots={:#x},{:#x},{:#x}",
+            tk.pid(),
+            name,
+            sys,
+            a0,
+            found_at[0],
+            found_at[1],
+            found_at[2]
+        );
+        if sys == FUTEX_SYSNO && a0 != 0 {
+            // what this reader is blocked on, plus its wait word's shape
+            let w0 = unsafe { read_u32_via_task(t, a0 as usize) }.unwrap_or(0);
+            let _ = writeln!(w, "    parkword={:#x} val={:#x}", a0 as u64, w0);
+        }
+    });
+    let _ = writeln!(w, "RWFRZ-READERS end hits={}", hits);
 }
 
 /// sc138 (Session Q): display path for a File that may be a memfd —
