@@ -154,3 +154,34 @@ as the race's evidence artifact.
 
 Perf-gate artifacts: run/perf-gate-r4fix-parse.txt,
 work/pbench-r4fix-pb1-serial.log, run/r4review-ltp2-results.txt.
+
+### Follow-up arc (same day, main session + agents)
+
+The two open LTP clusters were run to ground; four more fix commits
+landed (all solo-verified + triple-arch + make test 1348):
+
+- **6a4d6733** — block-device fsync (the pre-existing do_fsync type gate
+  returned EINVAL for every device fd; mke2fs's close-path fsync killed
+  mkfs on every loop-backed scratch device once devfs nodes became
+  proper S_IFBLK) + ext3 mount alias (ext3 is the ext4 driver since
+  reference 4.3; LTP's fstype probe picks ext3 when mkfs.ext3 exists).
+  Recovered ~20 tests solo-verified (rename01/03, utime01-05, chdir01,
+  msync01...).
+- **02392eeb** — pause(2) restored on x86_64 nr 34 (dc097913's "table
+  hole" belief was wrong — 34 IS pause there; pause01-03) + ext4 poll
+  POLLIN at EOF restored (6a593a60 suppressed it against the reference
+  contract; select01 x3).
+- **4081cf35** — ioperm(2)/iopl(2) contract surface (ioperm01/iopl01).
+
+Lost-list re-verify (86 r27-PASS rows that LTP#2 lost): **77 recovered**
+under normal host load; run-to-run variance 56↔77 under foreign-session
+load spikes confirms the documented flake classes. Projected full-scan:
+**1084/1869 — parity with r27**. Residual 9: gettimeofday02 / msync01
+(borderline flakes — pass in quiet runs), fsx-linux (documented flake),
+mincore04 (mlock residency), ppoll01 (one POLLRDHUP-in-revents case,
+provenance unresolved), futex_cmp_requeue01 (timeout — futex requeue),
+copy_file_range01 / pidns17 / cve-2017-17052 (CRASH faces), and the
+SysV-msg boot-context cluster (msg tests pass solo; the ListHead
+1000-iteration cap breaks after msgstress01's 167-child reparent —
+fragility, needs the walker-cap fix, agent quota-blocked 2026-11-09,
+requeued).
