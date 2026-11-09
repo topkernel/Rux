@@ -9550,3 +9550,124 @@ change is dfx-gated (fuxstuck/txnhunt); no pbench duty. Boot
 stability: ohw155 ran 400 s+ with 3 full sqwalk passes and zero
 deadlocks after the kthread fix (ohw151's softirq deadlock is the
 counter-example that fixed it).
+
+### 84. 84TH SESSION (2026-11-10) — THE WEDGE MACHINE IS FOUND AND
+### REMOVED: our binder thread_has_work had an own-todo term NO
+### reference has (a 75th mis-transcription); combined with the sync
+### tcomplete deferral it returned every sync-send BWR early, letting
+### userspace abandon nested calls and take the why=7 reply rejection
+### — orphaning outer txns, one per boot, that projected into S83's
+### whole rwlock pandemic. Fix landed (reference-exact), the orphan
+### class is 0 on ohw156, the pandemic collapsed to ONE pair, and the
+### remaining wedge is the S83 never-run-notifier founder now cleanly
+### isolated. (1 kernel fix commit e3204f97)
+
+Boots this session: ohw156 (KVM, system-lb5 + userdata-fresh2, SMP2/4G,
+LOGLEVEL7, dfx=txnhunt,ams46,fuxstuck, 1500 s) + pbench A/B 3 reps.
+
+#### 1. TARGET 1 CLOSED (the wake->pick strands were NOT the founder)
+
+ohw155's recurring 2.2-2.4 s WAKE-STRANDED pid 947 is CENSUSD — the
+instrument kthread itself (taskdump: pid=947 comm=censusd), strands
+resolve every ~3 s (it IS picked), zero RUNQ-STRAND prints the whole
+boot (no pickable-shaped frozen task 15 s+), and the FFRTWAIT
+never-picked class (pk=0 wk>0) is exactly one 68 ms-lived thread (tid
+1828, fork 249.970 -> exit 250.038). The never-run notifiers are
+anywoken=0 — never woken AT ALL (S81's verdict) — so no scheduler
+pick-refusal exists. Scheduling is exonerated for this family.
+
+#### 2. THE WEDGE MACHINE (binder protocol collapse, all kernel-side)
+
+The R7-STACK print at ohw155 t=50.080 caught the founder in the act:
+distributeddata tid 547 sent BC_REPLY for txn8847 (sensors' sync call,
+delivered t=48.75) while its OWN nested sync txn9104 (to foundation,
+sent t=49.04, still UNDELIVERED pick_j=0) sat ON TOP of its txn stack.
+Our (reference-parity) why=7 rejection orphaned txn8847: sensors then
+waited 1065 s+ in BWR, its 16-looper read sections froze, and the
+pandemic projected from there (S83's own model, now with the seed).
+
+WHY did userspace reply while nested-unresolved? The 75th (1bc38827)
+added `|| !th.todo.is_empty()` to thread_has_work citing a
+binder_has_work_ilocked formula the reference does NOT contain
+(verified in-tree: linux-5.10 binder.c:959 and linux-6.6 binder.c:586
+both read `process_todo || looper_need_return || (do_proc_work &&
+proc-todo non-empty)` — no own-todo term; the reference's deferred-work
+doc says the point of NOT setting process_todo is that "the thread
+will go to sleep without handling this work when it calls read").
+Combined with the sync tcomplete deferral (963b3e95), the term made
+EVERY sync-send BWR return its tcomplete immediately (per-thread rings
+prove it: TC_RECV in the same jiffy as TXN_SENT; the 23rd/24th's
+SYNCSEND-EARLYRET probe family). The 23rd already knew the shape
+("that shape lets the userspace issue its deferred BC_REPLY while the
+nested call is unpicked, takes the why=7 rejection, and strands the
+outer txn — the 300-900 s wedge family") but the 75th reintroduced it
+while fixing an INSTSTRAND symptom (a full-buffer tcomplete leftover
+can never park anyway: process_todo is only cleared when the todo
+drains EMPTY — same rule the reference uses).
+
+FIX (e3204f97): thread_has_work = exact reference formula;
+looper_need_return moved INTO has_work and the post-drain retry-break
+(binder.c:4513 shape) and cleared at BWR ioctl exit (binder.c:5713
+shape) — the old pre-park consumption silently ate binder_flush
+force-returns. INSTSTRAND print retargeted off the normal
+parked-with-deferred-tcomplete state.
+
+#### 3. ohw156 VERDICT (fix armed, same rig as ohw155)
+
+- why=7 orphan class: 0 (ohw155: 1 by t=52, wedged by t=64).
+- SYNCSEND-EARLYRET: 4 total, benign shapes (2 replier tcompletes —
+  immediate by design; 2 reference-legal ptr-work returns) vs the
+  continuous old class.
+- SYNCSEND-GUARD (why=20/21 parity rejections): 78, ALL settled by
+  t~220 (in-flight nested calls unwinding; zero growth after) — the
+  old boots ping-ponged them forever (ohw155 t=99-120+).
+- THE PANDEMIC COLLAPSED: ohw155's parked-BWR census spread over 6+
+  processes (distributeddata 184 / sensors 183 / foundation 168 /
+  OS_IPC_3_1398 165 / ...); ohw156: ONE pair — accountmgr 1263 ->
+  foundation 1258 OS_IPC_2_1320 (txn21887), 80/77 census lines, rest
+  single digits. TXN-HANG-BWR-CENSUS: procs=68 threads=442
+  futex-waiters=141 idle=299 (vs 149/300 in ohw155 — waiters DOWN,
+  idle UP: the pools are parking as idle readers, not frozen clients).
+- REMAINING FOUNDER (S83's lever, now isolated): foundation tid 1320
+  received txn21887 cleanly (delivered; outstanding=[NONE — no kernel
+  reply loss]) and parked userspace-side on word 0x7ff000ef3b94
+  (offset-family 0xb94, RWFRZ-OFFFAM class, 2 instances) — the
+  deferred-handler chain bottoms in m.ohos.systemui (tgid 1478):
+  ace.bg.2/ace.bg.6 (word offset 0x8007d4) and OS_FFRT_0_0 (0x800734),
+  park 386 s+, anywoken=0 — the never-run notifiers, one level deeper,
+  with the samgr ...194 noise gone (6 vs 4 stale prints, none fresh).
+  The one-year fto values (31535999.999998 s) decode as OH's clamped
+  "forever" (31536000000 ms) — intentional untimed parks, not timeout
+  misreads.
+- Screen: 19/19 shots 06b933b4 — no pixels yet; the launcher chain
+  still needs the notifier founder fixed (85th).
+
+#### 4. GATES
+
+x86_64 build rc=0; riscv64 clean-config rc=0; aarch64 rc=0; riscv64
+make test ALL TESTS PASSED (run/test-rv-84.log). Tier-2 pbench A/B
+(binder read-wait path touched) 3 reps interleaved base83(a7da77a4)
+vs fix84(e3204f97), run/abpb-base83-fix84.txt: every present row
+within ±2% (p2_ctxsw −29.5% improved; p6_unlink −3.7%; p5 stream
+family +0.6-1.7%) — well inside the ±20% band; p6_mkdrmdir MISSING
+in 1 rep = the known host-noise class (host load ~2.5, the ltp lane's
+QEMUs running; coordinator re-verifies on a quiet host per the 79th
+precedent). The fix REMOVES one ioctl return+re-enter per sync send
+— neutral-to-better is the expected direction and the numbers agree.
+Boot stability: ohw156 ran the full 1500 s, zero panics, census
+instruments healthy.
+
+#### 5. FOR THE 85TH (priority order)
+
+1. The isolated notifier founder: m.ohos.systemui ace.bg/OS_FFRT
+   parks (words at arena offset 0x8007d4/0x800734, anywoken=0, park
+   386 s+) — who enqueues work to them and what syscall of ours
+   fails/slow-paths before the enqueue? The accountmgr->foundation
+   txn21887 chain (word 0x7ff000ef3b94, offset 0xb94 family) is the
+   upper edge; systemui's own main threads (RUNNING-shaped at the
+   dumps) are the producers to trace.
+2. If the notifiers need a kernel-side push: check the FFRT queue
+   counters (FUXW-SUM pool=337/8192, ring activity) over the wedge
+   window — producers enqueue but never wake, matching S81's
+   never-sent verdict; the missing wake's producer syscall is the
+   85th's first read.
