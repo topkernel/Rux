@@ -9397,3 +9397,25 @@ settled on the foundation rwlock twin.
 4. PIXELS remain the yardstick: ohw138's screenshots still
    06b933b4-class at 300s; screenshot every shot tick continues to be
    wired in lb-boot.py.
+
+#### 8. ADDENDUM (ohw139, post-§81-writeup same session)
+
+- ohw139 first run SOFT-LOCKED (BUG soft lockup CPU#1 stuck 10s, console
+  died mid-print at 202 s): the reader scan's 640x2 page-table walks ran
+  UNDER for_each_task's pid-hash bucket lock — the sc82 lesson relearned;
+  switched to for_each_task_try (dc5467cb). Second run stable 430 s+.
+- PARK-STACK frames now carry module basenames. Two CROSS-BOOT-STABLE
+  sites on the standing-park stacks (bytes recorded for byte-match):
+  libipc_single.z.so fileoff 0x65da3 (bytes 0x00002825048b4864; right
+  after Parcel::RewindRead, inside a hidden static — the
+  BinderInvoker/SendRequest family; seen on ohw133 distdata AND ohw139)
+  and libutils.z.so fileoff 0x2208b (bytes 0x0f1043110fc0570f; the
+  image's libutils.z.so is a symlink to libutils_rust.dylib.so — the
+  offline out-tree twin's bytes do NOT match there, sandbox/overlay
+  drift; byte-match inside the image file directly). The 82nd resolves
+  both with an in-image byte search (the oh68 DWARF route works for
+  libffrt; these two need it too: out/x86_64_virt twins exist but are
+  STALE builds vs the image for libipc_single — verify BuildID first).
+- ohw139's standing wedge: the distdata GetFeatureInterface face again
+  (txn8853 code0 from pid 377 tid 384, 377 s+, install stream stalled
+  at 18 bundles — the earlier boots reached 42-56).
