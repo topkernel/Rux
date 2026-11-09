@@ -57,7 +57,7 @@ guaranteed `wait_for_completion` timeout, leaked vring on the timeout arm
 consumed. ~315 lines of dead, wrong-by-construction code that contradicts the
 file's own lifecycle rules. Delete.
 
-### [Low] queue.rs:1060-1093 — in-flight admission guard trusts the corruptible shared avail.idx the submit path deliberately stopped trusting
+### [Low] queue.rs:1060-1093 — in-flight admission guard trusts the corruptible shared avail.idx the submit path deliberately stopped trusting — ✅ FIXED (`2ceb0fe7`)
 `alloc_desc_chain` computes `in_flight = avail_idx.wrapping_sub(used_idx)` from
 `get_avail()` — a volatile read of the heap-backed shared ring — while
 `submit_quiet` derives the published index from `avail_shadow` precisely
@@ -68,7 +68,7 @@ corrupted-high over-reports and refuses all I/O (the permanent "-5 forever"
 family this guard's saturating math already defends against for leaks). Read
 `avail_shadow` instead of the ring for the driver-side term.
 
-### [Low] probe.rs:668-671 — leftover "AUDIT:" println in the hotplug rescan path
+### [Low] probe.rs:668-671 — leftover "AUDIT:" println in the hotplug rescan path — ✅ FIXED (`2ceb0fe7`)
 `println!("AUDIT: rescan cfg_base=...")` fires on every `/sys/bus/pci/rescan`
 with no debug gate; the codebase elsewhere went to lengths to keep the serial
 log structured ("serial-clean" comments at probe.rs:439-443, 515-520). Drop or
@@ -86,7 +86,7 @@ prefix; only affects forensics readability.
 
 ## drivers/intc + drivers/pci
 
-### [Low] plic.rs:204-214 — trigger_ipi is dead code that RMWs the read-only PLIC pending array
+### [Low] plic.rs:204-214 — trigger_ipi is dead code that RMWs the read-only PLIC pending array — ✅ FIXED (`2ceb0fe7`)
 Zero callers. The PLIC pending registers are read-only per the spec (the write
 is silently dropped or UNPREDICTABLE), and the RMW also races hardware setting
 adjacent bits. IPIs go through SBI (`clint.rs send_ipi` → MSIP), and the
@@ -94,7 +94,7 @@ IRQ 11-13 PLIC handlers (arch/riscv64/ipi.rs:419-429) are the legacy compat
 path. Delete `trigger_ipi` (and `read_pending`/`Plic::read_pending_word` if
 their diagnostics consumers are gone too).
 
-### [Low] plic.rs:223/301-305 — hart-count literals ignore config::MAX_CPUS in two places while the rest of the file uses it
+### [Low] plic.rs:223/301-305 — hart-count literals ignore config::MAX_CPUS in two places while the rest of the file uses it — ✅ FIXED (`2ceb0fe7`)
 `static PLIC: Plic = Plic::new(PLIC_BASE, 4)` and `init()`'s
 `for hart in 0..4 { for ipi_irq in 11..14 ... }` hard-code 4 harts, while
 `plic_mask`/`plic_unmask` loop `0..crate::config::MAX_CPUS`. If MAX_CPUS ever
@@ -157,7 +157,7 @@ their expensive work on `EVENT_*.armed()` and emit the event, (a)(b) ride
 alias), the VERSION first-8 pr_warn became `drm:open`. When nothing is
 armed the cost is one atomic load per ioctl.
 
-### [Low] drm/mod.rs:2410-2412 — sleep_until_ns busy-spins when the timer table is exhausted
+### [Low] drm/mod.rs:2410-2412 — sleep_until_ns busy-spins when the timer table is exhausted — ✅ FIXED (`2ceb0fe7`)
 The `timer_id == 0` fallback calls `schedule()` with the task still RUNNING —
 schedule returns immediately and the loop spins on
 monotonic_ns_since_boot() until the vblank deadline (up to 16.6 ms of pure
@@ -196,7 +196,7 @@ holds a PREVIOUS response of the same command type, the hdr_type check can
 pass and the caller consumes a stale response. Match by descriptor id (the
 used-ring entry's id field, as the blk walkers do) or zero the resp half.
 
-### [Low] virtio_pci.rs:588-609 — set_status/get_status/reset_device access device_status as u32, overwriting queue_select
+### [Low] virtio_pci.rs:588-609 — set_status/get_status/reset_device access device_status as u32, overwriting queue_select — ✅ FIXED (`2ceb0fe7`)
 virtio_pci_common_cfg's device_status is a u8 at offset 20; config_generation
 (u8, offset 21) and queue_select (u16, offset 22) follow. The 4-byte write in
 `set_status(ACKNOWLEDGE|DRIVER|FEATURES_OK|DRIVER_OK)` also writes 0 into
@@ -215,7 +215,7 @@ system where phys != identity-VA, it writes to arbitrary physical memory.
 
 ## drivers/input
 
-### [Low] virtio_input.rs:426/441-442 — avail.idx store and has_event's used.idx load skip the volatile discipline used everywhere else
+### [Low] virtio_input.rs:426/441-442 — avail.idx store and has_event's used.idx load skip the volatile discipline used everywhere else — ✅ FIXED (`2ceb0fe7`)
 `read_event` writes `avail.idx = ...wrapping_add(1)` as a plain store (line
 426) while the sibling code at line 384 and the whole of queue.rs use
 `write_volatile` for the same field; `has_event` (line 442) reads
@@ -336,7 +336,7 @@ any future get_disk(7) consumer; today mount/mkfs go through loop_disk, so
 latent). Register the per-idx disks and drop the representative, or make
 get_disk(7) return loop_disk(0).
 
-### [Low] loop_dev.rs:306-348 — request path caps the transfer START at the sizelimit boundary but not the LENGTH
+### [Low] loop_dev.rs:306-348 — request path caps the transfer START at the sizelimit boundary but not the LENGTH — ✅ FIXED (`2ceb0fe7`)
 loop_request_fn clamps byte_start to offset+limit but never bounds
 req.buffer.len() against the limit: a block read/write past the sizelimit
 edge reads/writes backing-file bytes beyond it (Linux enforces lo_sizelimit
@@ -404,7 +404,7 @@ debugfs (root-only in practice).
 
 ## Top-level kernel files
 
-### [Low] printk.rs:1281-1299 — /dev/kmsg read heap-allocates the record header while holding the printk ring irqsave lock
+### [Low] printk.rs:1281-1299 — /dev/kmsg read heap-allocates the record header while holding the printk ring irqsave lock — ✅ FIXED (`2ceb0fe7`)
 kmsg_file_read holds `RING_BUFFER.lock_irqsave()` across the whole record
 build, and the header line uses `alloc::format!` (line 1289) — a heap
 allocation under an IRQs-off spinlock on every /dev/kmsg record read. Under
