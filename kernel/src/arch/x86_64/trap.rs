@@ -2639,11 +2639,20 @@ fn handle_page_fault(regs: &mut PtRegs) {
     // instruction, and single-steps it via TF; the #DB hook re-clears
     // W so the next write traps again. Zero cost when the param is
     // absent (one relaxed load).
+    // 84th: KERNEL-mode WRITE faults on the watched page (a syscall's
+    // put_user — clock_gettime's timespec out-param lives on the same
+    // arena control page as the watched futex word) are handled here
+    // too: restore W, name the kernel writer, retry. Before, they fell
+    // to the kernel-fill path, hit the W-cleared PTE
+    // (PermissionDenied), surfaced as EFAULT — libc++ turned that into
+    // system_error and the daemons SIGABRT'd (ohw156 t=161.5 installs,
+    // ohw157/158 t=33.9 telecom — the instrument was killing its own
+    // subject). No TF single-step for kernel writers.
     if access & crate::arch::mm::page_fault::FaultFlags::WRITE != 0
-        && access & crate::arch::mm::page_fault::FaultFlags::USER != 0
         && crate::sync::futex::fuxwatch_page_matches(fault_addr)
         && !crate::sync::futex::fuxwatch_over_budget()
     {
+        let is_user = access & crate::arch::mm::page_fault::FaultFlags::USER != 0;
         let tid = crate::sched::get_current_pid() as u32;
         let rip = regs.rip;
         // Handle only mms WE armed (a fork-COW write fault on this VA
@@ -2669,7 +2678,22 @@ fn handle_page_fault(regs: &mut PtRegs) {
             super::mm::asid::flush_tlb_page(fault_addr);
             let exact = (fault_addr & !0x3) == (crate::sync::futex::fuxwatch_addr() & !0x3);
             let old_word = crate::sync::futex::fuxwatch_read_word(root);
-            if crate::sync::futex::fuxwatch_log_write(tid, rip, exact, old_word, fault_addr) {
+            if !is_user {
+                // Kernel writer (put_user on the watched page): named
+                // via a budgeted line, retried with W present.
+                static KFW_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if KFW_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+                    crate::pr_warn!(
+                        "FUXWATCH-KWRITE tid={} rip={:#x} addr={:#x} exact={} old={:#x}",
+                        tid,
+                        rip,
+                        fault_addr,
+                        exact,
+                        old_word
+                    );
+                }
+            } else if crate::sync::futex::fuxwatch_log_write(tid, rip, exact, old_word, fault_addr) {
                 // Step the writer: TF traps right after the store;
                 // RF masks fault-class re-entry for this insn.
                 regs.rflags |= (1 << 8) | (1 << 16);

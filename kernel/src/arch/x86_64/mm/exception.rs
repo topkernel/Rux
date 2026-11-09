@@ -251,7 +251,26 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                 .vma_read()
                 .find(crate::mm::page::VirtAddr::new(fault_addr.as_usize()))
                 .is_some();
-            if covered {
+            // 84th (installs SIGABRT, ohw156 t=161.5): an UNCOVERED
+            // kernel uaccess fault must still reach handle_mm_fault —
+            // its VMA-miss arm grows a GROWSDOWN stack (try_expand_stack,
+            // Linux expand_downwards semantics for faults from kernel
+            // context, which copy_to_user relies on for out-params in
+            // never-touched below-floor stack pages). The old
+            // covered-only gate returned EFAULT for exactly those: the
+            // installs daemon's deferred-completion callback ran deeper
+            // on the main stack than ever before, steady_clock::now()'s
+            // timespec local sat in an ungrown page, clock_gettime's
+            // put_user faulted uncovered, libc++ threw
+            // system_error(EFAULT) and the daemon SIGABRT'd — killing
+            // the install stream. Uncovered non-stack addresses still
+            // fail: find_stack_vma returns None → Segfault → the
+            // exception-table fixup below, unchanged.
+            let stack_growable = addr_space
+                .vma_read()
+                .find_stack_vma(crate::mm::page::VirtAddr::new(fault_addr.as_usize()))
+                .is_some();
+            if covered || stack_growable {
                 let result = handle_mm_fault(
                     &addr_space,
                     fault_addr,
@@ -292,7 +311,67 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                     }
                     // Unresolvable (bad perms etc.): fall through to the
                     // exception-table fixup so the copy reports a short copy.
-                    _ => {}
+                    _ => {
+                        // 84th EFAULT hunt (installs/telecom SIGABRT):
+                        // name the refusal input — result code + the
+                        // VMA state at the fault address — for every
+                        // kernel uaccess fault the fill declined.
+                        // Budget 60, direct console.
+                        static KF_N: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        if KF_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
+                            use crate::console::putchar_no_lock as putchar;
+                            let mut s = alloc::string::String::new();
+                            use core::fmt::Write;
+                            let _ = write!(
+                                s,
+                                "KUFILL-REFUSED pid={} addr={:#x} res={:?} ",
+                                current.pid(),
+                                fault_addr.bits(),
+                                result
+                            );
+                            let vr = addr_space.vma_read();
+                            let va = crate::mm::page::VirtAddr::new(fault_addr.as_usize());
+                            match vr.find(va) {
+                                Some(v) => {
+                                    let _ = write!(
+                                        s,
+                                        "vma={:#x}-{:#x} flags={:?}",
+                                        v.start().as_usize(),
+                                        v.end().as_usize(),
+                                        v.flags()
+                                    );
+                                }
+                                None => {
+                                    let _ = write!(s, "vma=NONE");
+                                }
+                            }
+                            for &c in s.as_bytes() {
+                                putchar(c);
+                            }
+                            putchar(b'\n');
+                        }
+                    }
+                }
+            } else {
+                // 84th EFAULT hunt, miss arm: covered=false AND no
+                // GROWSDOWN candidate — the raw refusal input for
+                // uaccess EFAULTs whose address no VMA claims.
+                static KFM_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if KFM_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
+                    use crate::console::putchar_no_lock as putchar;
+                    let mut s = alloc::string::String::new();
+                    use core::fmt::Write;
+                    let _ = write!(
+                        s,
+                        "KUFILL-MISS pid={} addr={:#x} — no VMA, no growable stack\n",
+                        current.pid(),
+                        fault_addr.bits()
+                    );
+                    for &c in s.as_bytes() {
+                        putchar(c);
+                    }
                 }
             }
         }

@@ -287,7 +287,21 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                     .vma_read()
                     .find(crate::mm::page::VirtAddr::new(fault_addr.as_usize()))
                     .is_some();
-                if covered {
+                // 84th (x86_64 twin: installs SIGABRT, ohw156 t=161.5): an
+                // UNCOVERED kernel uaccess fault must still reach
+                // handle_mm_fault — its VMA-miss arm grows a GROWSDOWN
+                // stack (Linux expand_downwards for kernel-originated
+                // faults). covered-only gating EFAULTs out-params in
+                // never-touched below-floor stack pages (clock_gettime's
+                // timespec local after a deep deferred-completion
+                // callback -> libc++ system_error -> daemon SIGABRT).
+                // Non-stack uncovered addresses still fixup (None ->
+                // Segfault -> `_` arm).
+                if covered || addr_space
+                    .vma_read()
+                    .find_stack_vma(crate::mm::page::VirtAddr::new(fault_addr.as_usize()))
+                    .is_some()
+                {
                     let result = handle_mm_fault(
                         &addr_space,
                         fault_addr,
