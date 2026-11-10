@@ -148,7 +148,7 @@ impl RawSpinlock {
 
     #[inline]
     #[cfg(not(feature = "dfx-lock-owner"))]
-    fn record_owner(&self) {}
+    fn record_owner(&self, _ra: usize) {}
 
     #[inline]
     #[cfg(not(feature = "dfx-lock-owner"))]
