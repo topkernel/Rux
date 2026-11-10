@@ -4476,7 +4476,7 @@ pub fn futex_stuck_census() {
         uvma_cls: u8, // 'A'non, 'F'ile, 'H'eap, 'S'tack, 'M'shm, 'D'ev
         uvma_fd: i32,
         uvma_voff: usize, // file offset when FileBacked (vma.offset + off)
-        uret: [u64; 4],
+        uret: [u64; 8],
         uret_n: usize,
         // 34th successor — VMA decode of the STRONGEST return-address
         // candidate (uret[1], the first non-libc one: uret[0] is the
@@ -4490,6 +4490,25 @@ pub fn futex_stuck_census() {
         u2v_end: usize,
         u2v_off: usize,
         u2v_cls: u8,
+        // 85th (arena founder hunt): VMA decodes for uret[2]/uret[3] —
+        // the first frames ABOVE the libc wrapper + its immediate app
+        // frame; the +0x8007xx arena parks showed uret[1] still inside
+        // libc internals, so the app call site lives at frame 2/3.
+        u3v_ok: bool,
+        u3v_start: usize,
+        u3v_off: usize,
+        u4v_ok: bool,
+        u4v_start: usize,
+        u4v_off: usize,
+        // 85th: the park page's structure signature — 8 words at the
+        // park page start (allocator/arena headers live there: mallocng
+        // group header, ring control block) and 6 words ending at
+        // uaddr+0x18 (the wait object's neighborhood: mutex type word,
+        // cond seq/mtx pair, list heads).
+        pw0: [u64; 8],
+        pw0_ok: bool,
+        pwu: [u64; 6],
+        pwu_ok: bool,
         // sc57 (57th session): FFRT waiter-chain walk. The park word is
         // the musl condvar seq word at ExecuteCtx->wn.cv (WaitUntilEntry
         // +0x88); the intrusive node (LinkedList prev@0/next@8) at wn+0
@@ -4575,13 +4594,23 @@ pub fn futex_stuck_census() {
                         uvma_cls: b'-',
                         uvma_fd: -1,
                         uvma_voff: 0,
-                        uret: [0; 4],
+                        uret: [0; 8],
                         uret_n: 0,
                         u2v_ok: false,
                         u2v_start: 0,
                         u2v_end: 0,
                         u2v_off: 0,
                         u2v_cls: b'-',
+                        u3v_ok: false,
+                        u3v_start: 0,
+                        u3v_off: 0,
+                        u4v_ok: false,
+                        u4v_start: 0,
+                        u4v_off: 0,
+                        pw0: [0; 8],
+                        pw0_ok: false,
+                        pwu: [0; 6],
+                        pwu_ok: false,
                         chn_task: 0,
                         chn_wt: 0,
                         chn_node: 0,
@@ -4796,11 +4825,14 @@ pub fn futex_stuck_census() {
                         // frame walk). Foreign-mm reads go through the
                         // walker + linear map — no CR3 switch, page is
                         // resident (the thread executed on it).
+                        // 85th: window 32 -> 64 words, cap 4 -> 8 — the
+                        // +0x8007xx arena parks kept uret[1] inside libc
+                        // internals; the app call site sits at frame 2/3.
                         if usp != 0 {
                             let root = aspace.root_ppn();
                             let mut va = (usp + 7) & !7u64;
-                            for _ in 0..32 {
-                                if s.uret_n >= 4 {
+                            for _ in 0..64 {
+                                if s.uret_n >= 8 {
                                     break;
                                 }
                                 // SAFETY: root_ppn of the pinned task's
@@ -4858,6 +4890,201 @@ pub fn futex_stuck_census() {
                                         VmaType::Anonymous => b'A',
                                     }
                                 };
+                            }
+                        }
+                        // (c1) 85th: VMA decode of uret[2]/uret[3] — the
+                        // app-frame candidates above the libc wrapper
+                        // (file offset symbolizes offline vs the image).
+                        if s.uret_n > 2 {
+                            if let Some(vma) = mgr.find(VirtAddr::new(s.uret[2] as usize)) {
+                                s.u3v_ok = true;
+                                s.u3v_start = vma.start().as_usize();
+                                s.u3v_off = s.uret[2] as usize - s.u3v_start;
+                            }
+                        }
+                        if s.uret_n > 3 {
+                            if let Some(vma) = mgr.find(VirtAddr::new(s.uret[3] as usize)) {
+                                s.u4v_ok = true;
+                                s.u4v_start = vma.start().as_usize();
+                                s.u4v_off = s.uret[3] as usize - s.u4v_start;
+                            }
+                        }
+                        // (c2) 85th: park-page structure signature. The
+                        // +0x8007xx arena-control-page family parks point
+                        // at words 0x6xx-0x8xx into an 8MiB+4K anonymous
+                        // VMA's LAST page — either a dedicated control
+                        // page of a ring arena or a small mapping merged
+                        // behind an FFRT CSA arena. 8 words at the park
+                        // page start + 6 words around the wait word name
+                        // the owning structure (mallocng group header at
+                        // page start vs control-block vs object array).
+                        if s.uvma_ok {
+                            let root = aspace.root_ppn();
+                            let pw_base = (s.uaddr & !0xfff) as u64;
+                            let mut ok = true;
+                            for wi in 0..8usize {
+                                let va = pw_base + 8 * (wi as u64);
+                                match unsafe {
+                                    crate::arch::mm::mm_ops::PageTableWalker::walk(root, va)
+                                } {
+                                    Some((ppn, bits))
+                                        if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 =>
+                                    {
+                                        let kv = crate::arch::mm::memory_layout::phys_to_virt(
+                                            crate::arch::mm::memory_layout::PhysAddr::new(
+                                                (ppn << 12) | (va & 0xfff),
+                                            ),
+                                        );
+                                        // SAFETY: linear-mapped RAM word on
+                                        // the parked waiter's own page.
+                                        s.pw0[wi] = unsafe {
+                                            core::ptr::read_volatile(kv.as_usize() as *const u64)
+                                        };
+                                    }
+                                    _ => {
+                                        ok = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            s.pw0_ok = ok;
+                            // 6 words ending at uaddr+0x18 (uaddr-0x28 ..
+                            // uaddr+0x18): the wait object neighborhood.
+                            let ub = (s.uaddr & !0x7) as u64;
+                            let mut ok = true;
+                            for wi in 0..6usize {
+                                let va = ub.wrapping_sub(0x28) + 8 * (wi as u64);
+                                match unsafe {
+                                    crate::arch::mm::mm_ops::PageTableWalker::walk(root, va)
+                                } {
+                                    Some((ppn, bits))
+                                        if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 =>
+                                    {
+                                        let kv = crate::arch::mm::memory_layout::phys_to_virt(
+                                            crate::arch::mm::memory_layout::PhysAddr::new(
+                                                (ppn << 12) | (va & 0xfff),
+                                            ),
+                                        );
+                                        // SAFETY: linear-mapped RAM word on
+                                        // the parked waiter's own page.
+                                        s.pwu[wi] = unsafe {
+                                            core::ptr::read_volatile(kv.as_usize() as *const u64)
+                                        };
+                                    }
+                                    _ => {
+                                        ok = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            s.pwu_ok = ok;
+                        }
+                        // (c3) 85th: one-shot geometry dump for the stuck
+                        // tgid — (i) every anonymous VMA >= 8MiB (the FFRT
+                        // CSA arenas are exactly 0x800000; the park VMAs
+                        // are 0x801000 — merged? dedicated control page?)
+                        // plus the park VMA's immediate neighbors, and
+                        // (ii) the executable file-backed map so host-side
+                        // symbolization of uret[1..3] works for ANY stuck
+                        // pid (FUX-MAPS only ever dumped samgr). Budget:
+                        // 6 distinct tgids per boot, 24+48 lines each.
+                        if s.uvma_ok && s.uvma_end >= s.uvma_start + 0x800000 {
+                            const ARENA_TGID_BUDGET: usize = 6;
+                            static ARENA_SEEN: [core::sync::atomic::AtomicU32;
+                                ARENA_TGID_BUDGET] = [
+                                core::sync::atomic::AtomicU32::new(0),
+                                core::sync::atomic::AtomicU32::new(0),
+                                core::sync::atomic::AtomicU32::new(0),
+                                core::sync::atomic::AtomicU32::new(0),
+                                core::sync::atomic::AtomicU32::new(0),
+                                core::sync::atomic::AtomicU32::new(0),
+                            ];
+                            let mut already = false;
+                            for slot in ARENA_SEEN.iter() {
+                                if slot.load(Relaxed) == s.tgid {
+                                    already = true;
+                                    break;
+                                }
+                            }
+                            let mut claimed = false;
+                            if !already {
+                                for slot in ARENA_SEEN.iter() {
+                                    if slot
+                                        .compare_exchange(
+                                            0,
+                                            s.tgid,
+                                            Relaxed,
+                                            Relaxed,
+                                        )
+                                        .is_ok()
+                                    {
+                                        claimed = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if claimed {
+                                use crate::mm::vma::VmaType;
+                                // Collect the VMA table (small: < 256
+                                // entries per OH process), then select.
+                                struct VRow {
+                                    vs: usize,
+                                    ve: usize,
+                                    anon_big: bool,
+                                    exec_fb: bool,
+                                    off: usize,
+                                    fd: i32,
+                                }
+                                let mut rows: alloc::vec::Vec<VRow> = alloc::vec::Vec::new();
+                                for vma in mgr.iter() {
+                                    if rows.len() >= 256 {
+                                        break;
+                                    }
+                                    let vs = vma.start().as_usize();
+                                    let ve = vma.end().as_usize();
+                                    rows.push(VRow {
+                                        vs,
+                                        ve,
+                                        anon_big: matches!(vma.vma_type(), VmaType::Anonymous)
+                                            && ve - vs >= 0x800000,
+                                        exec_fb: vma.flags().is_executable()
+                                            && matches!(vma.vma_type(), VmaType::FileBacked),
+                                        off: vma.offset(),
+                                        fd: vma.file_fd(),
+                                    });
+                                }
+                                let park_idx = rows
+                                    .iter()
+                                    .position(|r| r.vs == s.uvma_start && r.ve == s.uvma_end);
+                                let mut arena_n = 0usize;
+                                let mut exec_n = 0usize;
+                                for (i, r) in rows.iter().enumerate() {
+                                    let near_park = park_idx.is_some_and(|p| {
+                                        i + 1 == p || i == p + 1 || i == p
+                                    });
+                                    if (r.anon_big || near_park) && arena_n < 24 {
+                                        crate::pr_warn!(
+                                            "ARENA-VMAS pid={} {:x}-{:x} sz={:#x} park{}",
+                                            s.tgid,
+                                            r.vs,
+                                            r.ve,
+                                            r.ve - r.vs,
+                                            if near_park { "*" } else { "" }
+                                        );
+                                        arena_n += 1;
+                                    }
+                                    if r.exec_fb && exec_n < 48 {
+                                        crate::pr_warn!(
+                                            "ARENA-EXEC pid={} {:x}-{:x} off={:#x} fd={}",
+                                            s.tgid,
+                                            r.vs,
+                                            r.ve,
+                                            r.off,
+                                            r.fd
+                                        );
+                                        exec_n += 1;
+                                    }
+                                }
                             }
                         }
                         // (d) sc57: FFRT waiter-chain walk —
@@ -5127,13 +5354,24 @@ pub fn futex_stuck_census() {
         rep_uvma_cls: u8,
         rep_uvma_fd: i32,
         rep_uvma_voff: usize,
-        rep_uret: [u64; 4],
+        rep_uret: [u64; 8],
         rep_uret_n: usize,
         rep_u2v_ok: bool,
         rep_u2v_start: usize,
         rep_u2v_end: usize,
         rep_u2v_off: usize,
         rep_u2v_cls: u8,
+        // 85th: app-frame decodes + park-page structure signature.
+        rep_u3v_ok: bool,
+        rep_u3v_start: usize,
+        rep_u3v_off: usize,
+        rep_u4v_ok: bool,
+        rep_u4v_start: usize,
+        rep_u4v_off: usize,
+        rep_pw0: [u64; 8],
+        rep_pw0_ok: bool,
+        rep_pwu: [u64; 6],
+        rep_pwu_ok: bool,
         rep_chn_task: u64,
         rep_chn_wt: u32,
         rep_chn_node: u64,
@@ -5197,6 +5435,16 @@ pub fn futex_stuck_census() {
                         rep_u2v_end: s.u2v_end,
                         rep_u2v_off: s.u2v_off,
                         rep_u2v_cls: s.u2v_cls,
+                        rep_u3v_ok: s.u3v_ok,
+                        rep_u3v_start: s.u3v_start,
+                        rep_u3v_off: s.u3v_off,
+                        rep_u4v_ok: s.u4v_ok,
+                        rep_u4v_start: s.u4v_start,
+                        rep_u4v_off: s.u4v_off,
+                        rep_pw0: s.pw0,
+                        rep_pw0_ok: s.pw0_ok,
+                        rep_pwu: s.pwu,
+                        rep_pwu_ok: s.pwu_ok,
                         rep_chn_task: s.chn_task,
                         rep_chn_wt: s.chn_wt,
                         rep_chn_node: s.chn_node,
@@ -5271,6 +5519,13 @@ pub fn futex_stuck_census() {
                 g.rep_u2v_off,
                 g.rep_u2v_cls as char
             );
+        }
+        // 85th: frame-2/3 decodes (app call-site candidates).
+        if g.rep_u3v_ok {
+            let _ = write!(u2v_s, " u3v={:#x}+{:#x}", g.rep_u3v_start, g.rep_u3v_off);
+        }
+        if g.rep_u4v_ok {
+            let _ = write!(u2v_s, " u4v={:#x}+{:#x}", g.rep_u4v_start, g.rep_u4v_off);
         }
         // 48th session: comm + live-word verdict on the print.
         let comm_s = core::str::from_utf8(&g.rep_comm)
@@ -5370,6 +5625,32 @@ pub fn futex_stuck_census() {
                     win_s
                 );
             }
+        }
+        // 85th: park-page structure signature — page-start words and the
+        // wait-word neighborhood; same dfx=fuxstuck gate + burst budget
+        // as the row above (follows its group).
+        if g.rep_pw0_ok || g.rep_pwu_ok {
+            let mut w_s = alloc::string::String::new();
+            if g.rep_pw0_ok {
+                let _ = write!(w_s, " pw0:");
+                for &wv in g.rep_pw0.iter() {
+                    let _ = write!(w_s, " {:#x}", wv);
+                }
+            }
+            if g.rep_pwu_ok {
+                let _ = write!(w_s, " pwu[-28..+18]:");
+                for &wv in g.rep_pwu.iter() {
+                    let _ = write!(w_s, " {:#x}", wv);
+                }
+            }
+            // HOTPATH-PRINT: park-page words — one line per reported
+            // group, inside the same 8-line burst budget.
+            crate::pr_warn!(
+                "FUX-PAGE tid={} page={:#x}{}",
+                g.rep_tid,
+                g.uaddr & !0xfff,
+                w_s
+            );
         }
         fxrs_word_add(g.uaddr);
         printed += 1;
