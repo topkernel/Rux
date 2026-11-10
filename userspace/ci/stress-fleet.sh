@@ -20,6 +20,7 @@ FLEET_DIR="$(cd "$(dirname "$0")" && pwd)"
 WT="$(cd "$FLEET_DIR/../.." && pwd)"
 BRANCH=qa-suites
 QUEUE_FILE="$FLEET_DIR/queue.txt"
+CLASSES_DIR="$WT/userspace/ci/classes"
 ROUNDS="$FLEET_DIR/rounds.log"
 STOP="$FLEET_DIR/stop"
 AVAIL_MIN_GB="${AVAIL_MIN_GB:-12}"
@@ -59,7 +60,7 @@ injbins_for() {  # per-class binary injection dir
 }
 
 build_queue() {  # every one-boot class we own, in rotation order
-    {   ls "$WT"/run/r5-*.cmds "$WT"/run/r5b-*.cmds "$WT"/run/r6-*.cmds "$WT"/run/r7-*.cmds 2>/dev/null | sort
+    {   ls "$WT"/userspace/ci/classes/*.cmds 2>/dev/null | sort
         printf '%s\n' "L|hackbench 20 process|200" "L|hackbench -p 20|200" \
             "L|60 cyclictest -D 30 -i 1000 -m|200" \
             "L|60 cyclictest -D 30 -i 1000 -m -p 98|200" \
@@ -118,13 +119,15 @@ worker() {
         mkdir -p "$outdir"
         if [ -n "$inj" ]; then
             INJBINS="$inj" BUDGET="$budget" OUTDIR="$outdir" \
-                nice -n 10 test/qrtests/run-suite-x86.sh -f "run/$e" > /dev/null 2>&1
+                nice -n 10 test/qrtests/run-suite-x86.sh -f "userspace/ci/classes/$e" > /dev/null 2>&1
         else
             BUDGET="$budget" OUTDIR="$outdir" \
                 nice -n 10 test/qrtests/run-suite-x86.sh "$cls" > /dev/null 2>&1
         fi
         classify "$outdir/$cls.log" "$cls" "$slot"
         sleep 5
+        # ONCE=1 (make ci): one finite pass over the slice, then exit
+        [ "${ONCE:-0}" = "1" ] && [ "$n" -ge "${#myq[@]}" ] && break
     done
     echo "$(date +%m%d-%H:%M:%S)|slot$slot|worker-exit|after $n boots|-" >> "$ROUNDS"
 }

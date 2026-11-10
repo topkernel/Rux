@@ -219,3 +219,10 @@ help:
 	@echo "  build/     - Build and configuration tools"
 	@echo "  test/      - Test scripts"
 	@echo "  docs/      - Documentation"
+
+# ---- CI: full unattended test pass (user directive 2026-11-10) ----
+# make ci = build + all suites + one finite rotation of every stress
+# class (3 QEMU slots) + summary. Long phases (LTP scan, boot/bench
+# regressions) are invoked per userspace/ci/run-ci.sh phase table.
+ci:
+	@bash userspace/ci/run-ci.sh

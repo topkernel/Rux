@@ -1,7 +1,7 @@
 #!/bin/bash
 # daily-stress.sh — the one-key daily campaign driver (user directive
 # 2026-11-10). Phases, in order, unattended; every phase logs to
-# run/daily/<date>/, a KERNPANIC anywhere raises run/daily/ALERT and
+# userspace/ci/<date>/, a KERNPANIC anywhere raises userspace/ci/ALERT and
 # halts the pipeline (the one condition that warrants intervention).
 #
 #   1 bootreg   — Ubuntu + OH boot regressions (scripted serial, rc+panic)
@@ -15,8 +15,8 @@
 # Usage: daily-stress.sh start|stop|status
 set -uo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"; WT="$(cd "$DIR/../.." && pwd)"
-DAY="$(date +%Y%m%d)"; OUT="$WT/run/daily/$DAY"; STOPF="$WT/run/daily/STOP"
-ALERT="$WT/run/daily/ALERT"; mkdir -p "$OUT"
+DAY="$(date +%Y%m%d)"; OUT="$WT/userspace/ci/$DAY"; STOPF="$WT/userspace/ci/STOP"
+ALERT="$WT/userspace/ci/ALERT"; mkdir -p "$OUT"
 
 panic_scan() {  # halt-everything condition: a real kernel panic in any phase log
     grep -al "KERNPANIC\|Kernel panic" "$OUT"/*.log "$OUT"/fleet-*.log 2>/dev/null | head -1
@@ -49,7 +49,7 @@ phase_ltp() {
 
 phase_stress() {
     echo "[stress] $(date +%H:%M:%S) — fleet3 continuous loop" | tee -a "$OUT/pipeline.log"
-    bash "$WT/run/fleet3/stress-fleet3.sh" start >> "$OUT/pipeline.log" 2>&1
+    bash "$WT/userspace/ci/stress-fleet.sh" start >> "$OUT/pipeline.log" 2>&1
     # fleet3 rounds ledger: run/fleet3/rounds.log; fio bw + cyclictest rows
     # parsed from run/qa-fleet/s*/<class>.log by the hourly agent check.
 }
@@ -67,13 +67,13 @@ start)
     echo "daily pipeline started → $OUT/pipeline.log"
     ;;
 stop)
-    touch "$STOPF"; bash "$WT/run/fleet3/stress-fleet3.sh" stop >/dev/null 2>&1
+    touch "$STOPF"; bash "$WT/userspace/ci/stress-fleet.sh" stop >/dev/null 2>&1
     echo "stopped (fleet reaped; scan finishes its current test)"
     ;;
 status)
     echo "== pipeline.log:"; tail -6 "$OUT/pipeline.log" 2>/dev/null
     [ -f "$ALERT" ] && echo "!! ALERT: $(cat "$ALERT")" || echo "no alert"
-    echo "== fleet:"; bash "$WT/run/fleet3/stress-fleet3.sh" log 6 2>/dev/null
+    echo "== fleet:"; bash "$WT/userspace/ci/stress-fleet.sh" log 6 2>/dev/null
     p="$(panic_scan)" && { echo "!! KERNPANIC in $p — halted"; touch "$ALERT"; } || true
     ;;
 esac
