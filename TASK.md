@@ -10263,3 +10263,91 @@ kernel-top.txt, user-ips.txt, nofp.data); boot-hp89{a..r}.sh pattern;
 userdata-hp89*.img (reclaimable); /tmp/ohsys + /tmp/ohlib hold the
 extracted OH lib64 tree for host-side hiperf experiments (rebuildable
 from system-hp88a.img).
+
+### 90. 90TH SESSION (2026-11-11 06:0x-.., branch oh-crash) — the install-window record lands: the giants are GONE, the tail is kernel-side; parser + tables delivered
+
+Mission: the install-window hiperf record (§86.5 boot-time charter) +
+first hot levers. Deliverables below; all rigs SMP8+4G KVM, x86_64
+build = cargo build --features x86_64 + gen-ksyms + mkbzimage.py ELF OUT.
+
+#### 90.1 The install-window record (hp90a/b; tables in run/hp90-out/)
+
+- hp90a: records ran fine (step1 "Captured 20.434 MB, 244k samples") but
+  the extraction failed — the 64MB output disk was FULL (cp ENOSPC).
+  hp87-out.img rebuilt at 256MB ^metadata_csum. RIG RULE: check output
+  disk free before a copy boot.
+- hp90b (2×90s records, armed t=30 and t=140): step1 captured 29.6MB /
+  376,466 samples but its dirty pages were LOST at teardown (see 90.2);
+  step2 (24.8MB / 329,585 samples) extracted whole, 83,644 samples
+  recovered after the ext4 zero-hole ate ~62% of the record stream.
+- **Parser: run/hp90-parse.py** (committed). Walks the hiperf perf.data2
+  dialect: probe-detected sample layout (ST=0x100d7 = IDENTIFIER|IP|TID|
+  TIME|ID|CPU|PERIOD, 72-byte records), record-type whitelisted resync
+  walk (ext4 holes), pid/tgid split kernel-vs-user by IP range, COMM/
+  MMAP attribution, nm symbolization. VALIDATED: reproduces the 89th's
+  kernel-top exactly on hp89-out/nofp.data. CORRECTION to 89.4: that
+  file physically holds ~10k recoverable samples (8MB zero hole + attr
+  region cross-written with hiperf log text), not 80,961 — the published
+  RATIOS stand, the absolute count did not.
+- **TAIL-WINDOW TABLES (140-230s; run/hp90-out/w2-*.txt), 83,644
+  samples, 89% kernel-side**:
+  - kernel top: wfi 13.8% | **enable_irq+0x1d 12.4%** | atomic_load
+    TTAS cloud ~15% (u8/u32/u64 variants across rux+log crates) |
+    RawSpinlock::lock 1.5% | wrmsr 0.8% | cpu_idle_loop 1.6%.
+    NO printk/puts_batch in the top-25 — the serial print flood is an
+    EARLY-window cost (spawn storm 5-60s), not a tail cost.
+  - top processes (kernel samples): idle 17.4k | **hilogd 321: 12.4k**
+    | sa_main 469: 11.8k | appspawn-child→com.ohos.settingsdata 1531:
+    11.7k | sa_main 631: 10.8k | m.ohos.systemui 1573: 10.8k | hiview
+    662: 8.3k (hiview also carries the most USER samples, 2.9k).
+  - time structure (5s buckets): burst A 150-160s (hilogd+settingsdata+
+    sa_main), quiet 185-195s, burst B 200-215s (~62k samples: idle+
+    hilogd+sa_main+settingsdata). ONLY 2 execs in the whole window —
+    the tail is NOT spawn churn; it is compute inside running processes
+    + kernel overhead on top.
+- **SLOW-TXN cross-reference (full-boot censuses, always-on probe)**:
+  hp90a 11 rows / hp90b 15 rows over 280s/340s, max 7.98s — **the §86.5
+  giants (foundation→installs code2 84.1s; installs→foundation code0
+  129.5s) DO NOT REPRODUCE on the current kernel** (the 79th's epoll
+  close-path fix and the 84th's thread_has_work fix own this). The
+  residual slow class is 2-8s exec-dominated: systemui→samgr code7
+  7.98s; ?→settingsdata(1531) code7 7.88s; 338→power_host code1 6.0s;
+  foundation→VSyncGenerator code24578 4.4s; media hosts 2.5-3.4s.
+  installs (pid 828) was SIGKILLed at 263.0s ("stop service installs" +
+  samgr Scheduler kill) — late install-service death/respawn remains a
+  tail contributor to check.
+- BOOT-TIME READ: with the giants gone, the 239s launcher.ready tail is
+  now (a) kernel overhead per syscall/IRQ (enable_irq + spin
+  contention = ~27% of tail kernel samples), (b) hilogd/hiview log
+  processing, (c) settingsdata/systemui compute. hp90d (fp callchains,
+  in flight) names (a)'s owners.
+
+#### 90.2 Kernel bugs the rig itself exposed (91st queue)
+
+1. **sync(2) HANGS forever** with tens of MB of dirty ext4 data: hp90a
+   sync exec 221.5 never exited by 280; hp90b sync exec 254.0 never
+   exited by 340. Workaround in scripts: umount directly (it flushes);
+   never call sync before it. Root-cause hunt = writeback completion
+   signaling.
+2. **ext4 writeback loses dirty pages of large files at kill**: hp90b's
+   w1.data was 31,048,764 bytes guest-visible (ls output on serial at
+   143.3) yet 0 bytes on the NOSNAP output disk after the driver killed
+   QEMU mid-hung-sync; w2.data (written seconds later) made it out.
+   Same family as the 89th nofp.data 8MB mid-file zero hole + attr
+   block cross-written with hiperf_log.txt text. This eats ~half of
+   every record extraction and is the fs-lane metadata_csum/writeback
+   parity bug's big sibling (§87.7#3).
+3. (rig, not kernel) 64MB output disks are too small for 2×25MB
+   records + logs.
+
+#### 90.3 LOGLEVEL A/B (in flight at write time)
+
+All boots so far ran loglevel=7 → every pr_debug! hunt instrument
+prints (hp90a serial: 52,278 lines/280s ≈ 187 lines/s ≈ serial-line
+saturation; classes: FXRS ~6.9k, pagefault-cow ~8k, SLRD ~3.2k, fork
+1.2k, SAREG ~1k, TIMEDSLEEP-PARK 476, STALE-CLAIM-RESET 377). printk_ln
+pre-filters BEFORE formatting when level > console_loglevel, so
+LOGLEVEL=4 removes pr_debug/pr_info console+fmt cost at ZERO code
+change (pr_warn/pr_err stay; SLOW-TXN prints via ConsoleWriter are
+loglevel-independent). A/B: hp90c (=7, control, stock system.img, no
+record) vs hp90cq (=4, treatment) — boot markers + serial volume.
