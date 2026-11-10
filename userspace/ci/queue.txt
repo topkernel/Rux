@@ -1,5 +1,4 @@
 /home/william/rux-agents/qa-suites/userspace/ci/classes/r5b-bigfile2.cmds
-/home/william/rux-agents/qa-suites/userspace/ci/classes/r5b-bigfile.cmds
 /home/william/rux-agents/qa-suites/userspace/ci/classes/r5b-churn.cmds
 /home/william/rux-agents/qa-suites/userspace/ci/classes/r5b-deepdirect.cmds
 /home/william/rux-agents/qa-suites/userspace/ci/classes/r5b-fsyncburn.cmds

@@ -55,6 +55,8 @@ injbins_for() {  # per-class binary injection dir
         r5-*|r5b-*) echo "$WT/run/fio-bin" ;;
         r6-*)       echo "$WT/run/futex-selftests-bin" ;;
         r7-*)       echo "$WT/run/fsfuzz-bin" ;;
+        threadtest*|posix_timers*|memfd*) echo "$WT/run/kselftest-bin" ;;
+        threadtest|posix_timers|memfd*) echo "$WT/run/kselftest-bin" ;;
         *)          echo "" ;;
     esac
 }
@@ -111,7 +113,7 @@ worker() {
         if [[ "$e" == L\|* ]]; then
             IFS='|' read -r _ cls budget <<< "$e"; inj=""
         else
-            cls="${e%.cmds}"
+            cls="${e%.cmds}"; cls="${cls##*/}"
             case "$cls" in *seqrw*|*randrw*) budget=600;; *verify*|*multi*|*bigfile*) budget=700;; *) budget=650;; esac
             inj="$(injbins_for "$cls")"
         fi
@@ -121,7 +123,7 @@ worker() {
             INJBINS="$inj" BUDGET="$budget" OUTDIR="$outdir" \
                 nice -n 10 test/qrtests/run-suite-x86.sh -f "userspace/ci/classes/$e" > /dev/null 2>&1
         else
-            BUDGET="$budget" OUTDIR="$outdir" \
+            INJBINS="$(injbins_for "$cls")" BUDGET="$budget" OUTDIR="$outdir" \
                 nice -n 10 test/qrtests/run-suite-x86.sh "$cls" > /dev/null 2>&1
         fi
         classify "$outdir/$cls.log" "$cls" "$slot"
