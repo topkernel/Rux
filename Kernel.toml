@@ -107,7 +107,7 @@ pcp_batch = 16
 # Enable multi-core support (SMP)
 enable_smp = true
 # Maximum CPU count
-max_cpus = 8
+max_cpus = 4
 # SMP boot stack size (bytes) - 64KB
 boot_stack_size = 65536
 

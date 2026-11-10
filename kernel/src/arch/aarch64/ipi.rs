@@ -204,10 +204,6 @@ static CSD_LOCKS: [Spinlock<()>; MAX_CPUS] = [
     Spinlock::new(()),
     Spinlock::new(()),
     Spinlock::new(()),
-    Spinlock::new(()),
-    Spinlock::new(()),
-    Spinlock::new(()),
-    Spinlock::new(()),
 ];
 
 fn csd_init() {

@@ -55,7 +55,7 @@ pub struct MemoryInfo {
     // ========== Per-CPU Pages ==========
     /// PCP page count for each CPU — frames cached in that CPU's
     /// per-CPU pageset (mm/pcp.rs); counted free by zone.free_pages.
-    pub pcp_pages: [usize; crate::config::MAX_CPUS],
+    pub pcp_pages: [usize; 4],
 
     // ========== Page Descriptor Statistics ==========
     /// Free page count
@@ -87,7 +87,7 @@ impl Default for MemoryInfo {
             slab_pages: 0,
             slab_allocs: 0,
             slab_frees: 0,
-            pcp_pages: [0; crate::config::MAX_CPUS],
+            pcp_pages: [0; 4],
             pages_free: 0,
             pages_used: 0,
             pages_reserved: 0,
