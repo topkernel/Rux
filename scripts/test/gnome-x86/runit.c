@@ -251,6 +251,13 @@ int main(void) {
             }
         }
     }
+    // A terminal on the desktop at boot (user ask, 2026-11-10: the
+    // minimal package set ships no terminal at all — this gives the
+    // session a usable shell window without any shell navigation).
+    {
+        const char *const argv[] = { "xterm", "-geometry", "100x32+160+80", NULL };
+        (void)launch_logged("/tmp/xterm.log", "/usr/bin/xterm", "xterm", argv);
+    }
     {
         const char *const argv[] = { "gnome-session-binary", "--session=rux", NULL };
         pid_t gpid = launch_logged("/tmp/gnome-session.log",
