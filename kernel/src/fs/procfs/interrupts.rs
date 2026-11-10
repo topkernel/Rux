@@ -26,14 +26,26 @@ const MAX_CPUS: usize = crate::config::MAX_CPUS;
 
 /// Timer interrupt counters per CPU
 static TIMER_COUNT: [AtomicU64; MAX_CPUS] = [
-    AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
 ];
 
 /// Software interrupt (IPI) counters per CPU
 static SOFT_COUNT: [AtomicU64; MAX_CPUS] = [
-    AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
 ];
 
 // ============================================================================

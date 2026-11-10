@@ -48,6 +48,10 @@ static CPU_STARTED: [AtomicU32; MAX_CPUS] = [
     AtomicU32::new(0),
     AtomicU32::new(0),
     AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
 ];
 
 /// Actual boot CPU ID, saved by init()

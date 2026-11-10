@@ -212,6 +212,10 @@ static CSD_LOCKS: [Spinlock<()>; MAX_CPUS] = [
     Spinlock::new(()),
     Spinlock::new(()),
     Spinlock::new(()),
+    Spinlock::new(()),
+    Spinlock::new(()),
+    Spinlock::new(()),
+    Spinlock::new(()),
 ];
 
 /// Initialize CSD queues. Called once during boot.
