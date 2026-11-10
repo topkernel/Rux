@@ -153,6 +153,23 @@ Section "Screen"
         Modes "1280x800"
     EndSubSection
 EndSection
+Section "InputDevice"
+    Identifier "Keyboard0"
+    Driver "evdev"
+    Option "Device" "/dev/input/event0"
+EndSection
+Section "InputDevice"
+    Identifier "Mouse0"
+    Driver "evdev"
+    Option "Device" "/dev/input/event1"
+    Option "Mode" "Absolute"
+EndSection
+Section "ServerLayout"
+    Identifier "Layout0"
+    Screen 0 "Screen0" 0 0
+    InputDevice "Keyboard0" "CoreKeyboard"
+    InputDevice "Mouse0" "CorePointer"
+EndSection
 EOX
 
 # ---------------------------------------------------------------------------
