@@ -1543,7 +1543,7 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
                         regs.rip,
                         crate::perf::MODE_KERNEL,
                         (*task).pid(),
-                        0,
+                        regs.rbp,
                         (*task).tgid(),
                     );
                 }

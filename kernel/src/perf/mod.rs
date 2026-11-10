@@ -155,6 +155,8 @@ const PERF_RECORD_MISC_KERNEL: u16 = 2;
 
 /// Callchain context marker (uapi): prefixes a user callchain.
 const PERF_CONTEXT_USER: u64 = u64::MAX - 2048 + 1;
+/// Callchain context marker (uapi): prefixes a kernel callchain.
+const PERF_CONTEXT_KERNEL: u64 = u64::MAX - 2048 + 2;
 
 /// Max frames per user callchain (reference perf_max_stack default 32
 /// for hiperf's use; bounded so the softirq walk stays cheap).
@@ -855,6 +857,50 @@ fn user_callchain(fp: u64, out: &mut [u64; MAX_CALLCHAIN]) -> usize {
     n
 }
 
+/// oh-crash 91st: kernel-side frame-pointer callchain walk. The old
+/// comment claimed kernel chains were "not walkable (no kernel frame
+/// pointers)" — false: this kernel is built with
+/// force-frame-pointers=yes (see dfx::backtrace). The tick stash now
+/// captures the interrupted rbp for KERNEL-mode ticks too (trap.rs),
+/// so kernel samples can carry their caller chain — the enable_irq /
+/// atomic-cloud ownership question from the 90th's tail window needs
+/// exactly this. Validation discipline = walk_stack_trace / REMOTE-BT:
+/// 8-aligned, kernel VA range, strictly ascending, sane gap; a frame
+/// counts only when its return address symbolizes inside the kernel
+/// (ksyms lookup is the text-range authority on every arch).
+fn kernel_callchain(fp: u64, out: &mut [u64; MAX_CALLCHAIN]) -> usize {
+    let mut n = 0;
+    out[n] = PERF_CONTEXT_KERNEL;
+    n += 1;
+    let mut bp = fp;
+    while n < MAX_CALLCHAIN {
+        if bp == 0 || bp % 8 != 0 || bp < 0xffff_8000_0000_0000 {
+            break;
+        }
+        // SAFETY: bp validated (aligned, kernel range); the two
+        // frame-word reads are the standard unwind operation on a
+        // kernel stack. A torn read ends the walk via the checks
+        // below — worst case a garbage frame address is filtered by
+        // the ksyms check.
+        let (ret, next) = unsafe {
+            (
+                core::ptr::read_volatile((bp + 8) as *const u64),
+                core::ptr::read_volatile(bp as *const u64),
+            )
+        };
+        if crate::dfx::ksyms::lookup(ret).is_none() {
+            break; // not a kernel-text return address
+        }
+        out[n] = ret;
+        n += 1;
+        if next <= bp || next - bp > 0x4000 {
+            break;
+        }
+        bp = next;
+    }
+    n
+}
+
 /// Charge pending ticks and emit samples. Called from the Hrtimer
 /// softirq on the CPU whose stash is being charged.
 pub fn softirq_tick() {
@@ -968,10 +1014,13 @@ fn emit_sample(
     if ev.sample_type & PERF_SAMPLE_CALLCHAIN != 0 {
         if mode == MODE_USER && !ev.exclude_user {
             nr_chain = user_callchain(fp, &mut chain);
+        } else if mode == MODE_KERNEL && !ev.exclude_kernel {
+            // oh-crash 91st: kernel chains ARE walkable (frame
+            // pointers forced on); the stash carries the interrupted
+            // rbp for kernel ticks. Exclude-context samples emit an
+            // empty chain (nr=0), matching the reference.
+            nr_chain = kernel_callchain(fp, &mut chain);
         }
-        // Kernel callchains are not walkable (no kernel frame
-        // pointers); an empty chain (nr=0) is emitted, matching the
-        // reference's behavior when a context is excluded.
     }
     let mut buf = [0u8; 8 + 9 * 8 + 8 + MAX_CALLCHAIN * 8];
     let mut o = 0usize;
@@ -1967,6 +2016,28 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
         inner: Spinlock::new(PerfInner::new()),
         wait_queue: WaitQueueHead::new(),
     });
+    // oh-crash 91st (callchain adjudication): the 90th's fp record
+    // (hp90e) came back with NO chain field in any sample — uniform
+    // 72-byte records — while the attr block in the .data was
+    // clobbered, so "did hiperf set PERF_SAMPLE_CALLCHAIN (bit 5)?"
+    // was undecidable from the artifact. This bounded line (pr_warn:
+    // visible at LOGLEVEL=4) prints the ACCEPTED sample_type once per
+    // sampled open — one hiperf boot now settles whether the missing
+    // chains are a userspace attr gap or an emission bug.
+    if sample_type != 0 {
+        static N_OK: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if N_OK.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+            crate::pr_warn!(
+                "PERF-OPEN sample_type={:#x} (CALLCHAIN bit {} set) period={} pid={} cpu={}",
+                sample_type,
+                if sample_type & PERF_SAMPLE_CALLCHAIN != 0 { "" } else { "NOT" },
+                sample_period,
+                pid,
+                cpu
+            );
+        }
+    }
     let ev_ptr = Box::into_raw(ev);
     register(ev_ptr, starts_armed);
 
