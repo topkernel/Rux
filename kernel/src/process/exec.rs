@@ -246,7 +246,7 @@ pub(crate) fn do_execve_elf(
     let phsize = (phnum * phent) as usize;
 
     // Calculate stack layout size (same as below)
-    let auxv_slots: usize = 34;  // 17 auxv entries * 2 (incl. AT_SYSINFO_EHDR + AT_PLATFORM)
+    let auxv_slots: usize = 32;  // 16 auxv entries * 2 (incl. AT_SYSINFO_EHDR)
     let envp_count = envp.len();
     let mut string_space: usize = 0;
     for arg in argv.iter() {
@@ -898,7 +898,6 @@ pub(crate) fn do_execve_elf(
     const AT_GID: u64 = 13;
     const AT_EGID: u64 = 14;
     const AT_HWCAP: u64 = 16;
-    const AT_PLATFORM: u64 = 15;
     const AT_CLKTCK: u64 = 17;
     const AT_SECURE: u64 = 23;
     const AT_RANDOM: u64 = 25;
@@ -911,7 +910,7 @@ pub(crate) fn do_execve_elf(
     let phsize = (phnum * phent) as usize;
 
     // Calculate stack layout
-    let auxv_slots: usize = 34;  // 17 auxv entries * 2 (incl. AT_SYSINFO_EHDR + AT_PLATFORM)
+    let auxv_slots: usize = 32;  // 16 auxv entries * 2 (incl. AT_SYSINFO_EHDR)
     let envp_count = envp.len();
     let mut string_space: usize = 0;
     for arg in argv.iter() {
@@ -934,17 +933,7 @@ pub(crate) fn do_execve_elf(
     let env_string_offset: usize = phdr_offset + (phdr_space + 7) / 8;
     let string_offset: usize = env_string_offset + (env_string_space + 7) / 8;
     let execfn_string_offset: usize = string_offset + (string_space + 7) / 8;
-    // AT_PLATFORM string — see the auxv entry comment for the rationale.
-    let platform_str: &[u8] = if cfg!(feature = "x86_64") {
-        b"x86_64\0"
-    } else if cfg!(feature = "riscv64") {
-        b"riscv64\0"
-    } else {
-        b"aarch64\0"
-    };
-    let platform_space: usize = ((platform_str.len() + 7) / 8) * 8;
-    let platform_string_offset: usize = execfn_string_offset + (execfn_space + 7) / 8;
-    let total_slots: usize = platform_string_offset + (platform_space + 7) / 8;
+    let total_slots: usize = execfn_string_offset + (execfn_space + 7) / 8;
     let adjusted_stack_top = stack_top.saturating_sub((total_slots * 8) as u64);
     // SysV x86-64 ABI (and Linux for every ABI it supports): the process
     // entry rsp — the word holding argc — is 16-byte aligned. All slot
@@ -1001,7 +990,6 @@ pub(crate) fn do_execve_elf(
         .unwrap_or(adjusted_stack_top + (phdr_offset * 8) as u64);
     let random_vaddr = adjusted_stack_top + (random_offset * 8) as u64;
     let execfn_vaddr = adjusted_stack_top + (execfn_string_offset * 8) as u64;
-    let platform_vaddr = adjusted_stack_top + (platform_string_offset * 8) as u64;
 
     // Copy program header table (bounds validated by get_program_headers:
     // e_phoff + phsize <= program_data.len()).
@@ -1039,12 +1027,6 @@ pub(crate) fn do_execve_elf(
         let execfn_pos = execfn_string_offset * 8;
         let path_bytes = pathname.as_bytes();
         args_buf[execfn_pos..execfn_pos + path_bytes.len()].copy_from_slice(path_bytes);
-    }
-
-    // Write platform string for AT_PLATFORM (see the auxv entry comment)
-    {
-        let plat_pos = platform_string_offset * 8;
-        args_buf[plat_pos..plat_pos + platform_str.len()].copy_from_slice(platform_str);
     }
 
     // argc
@@ -1109,7 +1091,6 @@ pub(crate) fn do_execve_elf(
         (AT_GID, at_gid),
         (AT_EGID, at_egid),
         (AT_HWCAP, AT_HWCAP_VALUE),
-        (AT_PLATFORM, platform_vaddr),
         (AT_CLKTCK, 100),
         (AT_SECURE, secure_exec as u64),
         (AT_RANDOM, random_vaddr),
