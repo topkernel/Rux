@@ -113,7 +113,9 @@ impl RawSpinlock {
     #[inline]
     #[cfg(feature = "dfx-lock-owner")]
     fn record_owner(&self) {
-        self.owner.store(crate::arch::smp::cpu_id() + 1, Ordering::Relaxed);
+        // cpu_id() is u64 on x86_64 / usize elsewhere — cast to the
+        // owner slot's usize.
+        self.owner.store((crate::arch::smp::cpu_id() + 1) as usize, Ordering::Relaxed);
     }
 
     /// Clear the holder (dfx-lock-owner feature only).
@@ -208,6 +210,12 @@ impl RawSpinlock {
         }
 
         // Holder identity: owner = hart+1 (0 = free / mid-handoff).
+        // oh-crash 91st extension (the meltdown holder hunt): the owner
+        // CPU's current task (pid/comm), the heap allocation CONTAINING
+        // the lock (small-object span + first words for offline
+        // symbolization of any ops/vtable pointers), and one REMOTE-BT
+        // of the holder per unique lock address per boot — the IPI
+        // handler on the holder captures its live interrupted stack.
         #[cfg(feature = "dfx-lock-owner")]
         {
             let msg4 = b" holder=";
@@ -216,6 +224,7 @@ impl RawSpinlock {
             }
             // SAFETY: lock_addr is a valid RawSpinlock pointer (from lock()).
             let holder = unsafe { (&*lock_addr).owner.load(Ordering::Relaxed) };
+            let mut holder_cpu: Option<usize> = None;
             if holder == 0 {
                 let msg5 = b"switching";
                 for &b in msg5 {
@@ -223,18 +232,157 @@ impl RawSpinlock {
                 }
             } else {
                 let h = holder - 1;
+                holder_cpu = Some(h);
                 if h < 10 {
                     unsafe { crate::console::putchar_no_lock(b'0' + h as u8); }
                 }
+                // Holder CPU's current task: pid + comm (best-effort —
+                // an irqsave holder cannot migrate, so this is the task
+                // that acquired; plain lock() holders may have been
+                // preempted, in which case the remote-BT below shows
+                // what the CPU runs NOW and the pid names the victim).
+                // SAFETY: cpu_state(h).current is the scheduler's own
+                // published pointer; read-only access.
+                let cur = unsafe { crate::sched::sched::cpu_state(h).current };
+                if !cur.is_null() {
+                    // SAFETY: read-only access to a live Task.
+                    let pid = unsafe { (*cur).pid() };
+                    let msg_pid = b" task=";
+                    for &b in msg_pid {
+                        unsafe { crate::console::putchar_no_lock(b); }
+                    }
+                    Self::putdec(pid as u64);
+                    // SAFETY: comm is a fixed [u8;16], no allocation.
+                    let comm = unsafe { (*cur).comm() };
+                    unsafe { crate::console::putchar_no_lock(b'('); }
+                    let mut any = false;
+                    for &b in comm.iter() {
+                        if b == 0 {
+                            break;
+                        }
+                        if (0x20..0x7f).contains(&b) {
+                            unsafe { crate::console::putchar_no_lock(b); }
+                            any = true;
+                        }
+                    }
+                    if !any {
+                        unsafe { crate::console::putchar_no_lock(b'?'); }
+                    }
+                    unsafe { crate::console::putchar_no_lock(b')'); }
+                }
             }
-        }
 
         unsafe { crate::console::putchar_no_lock(b'\n'); }
+
+        // Containing heap object (works with or without a known holder):
+        // slab span + the first 6 words of the object. Any word landing
+        // in kernel text (0xffffffff8...) symbolizes offline against
+        // gen-ksyms output — that names the lock's OWNER STRUCT (ops
+        // table / vtable / function pointer members).
+        if let Some((base, sz)) = crate::mm::small_alloc::object_span(lock_addr as usize) {
+            let msg = b"LOCK-OBJ: small kmalloc-";
+            for &b in msg {
+                unsafe { crate::console::putchar_no_lock(b); }
+            }
+            Self::putdec(sz as u64);
+            let msg = b" base=0x";
+            for &b in msg {
+                unsafe { crate::console::putchar_no_lock(b); }
+            }
+            Self::puthex(base as u64);
+            let msg = b" words=";
+            for &b in msg {
+                unsafe { crate::console::putchar_no_lock(b); }
+            }
+            for i in 0..6 {
+                // SAFETY: diagnostic read of the object's first words;
+                // the span was validated by object_span (inside a live
+                // slab page, in-bounds of the object's slot).
+                let w = unsafe { ((base + i * 8) as *const u64).read_unaligned() };
+                Self::puthex(w);
+                if i < 5 {
+                    unsafe { crate::console::putchar_no_lock(b','); }
+                }
+            }
+            unsafe { crate::console::putchar_no_lock(b'\n'); }
+        }
+
+        // One REMOTE-BT per unique lock address per boot: the IPI
+        // handler on the holder CPU captures the live interrupted
+        // stack. (x86_64 only — the riscv64/aarch64 twins have no
+        // IRQ_WORK remote capture yet.)
+        #[cfg(feature = "x86_64")]
+        {
+            static LAST_BT_LOCK: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let la = lock_addr as usize;
+            let prev = LAST_BT_LOCK.load(Ordering::Acquire);
+            if prev != la
+                && LAST_BT_LOCK
+                    .compare_exchange(prev, la, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+            {
+                if let Some(h) = holder_cpu {
+                    let _ = crate::arch::ipi::remote_backtrace(h, "deadlock-holder");
+                }
+            }
+        }
+        }
+        #[cfg(not(feature = "dfx-lock-owner"))]
+        {
+            unsafe { crate::console::putchar_no_lock(b'\n'); }
+
+            // The heap-object span dump is cheap and holder-independent:
+            // keep it on default builds too (the meltdown hunts run
+            // stock feature sets as controls).
+            if let Some((base, sz)) = crate::mm::small_alloc::object_span(lock_addr as usize) {
+                let msg = b"LOCK-OBJ: small kmalloc-";
+                for &b in msg {
+                    unsafe { crate::console::putchar_no_lock(b); }
+                }
+                Self::putdec(sz as u64);
+                let msg = b" base=0x";
+                for &b in msg {
+                    unsafe { crate::console::putchar_no_lock(b); }
+                }
+                Self::puthex(base as u64);
+                unsafe { crate::console::putchar_no_lock(b'\n'); }
+            }
+        }
 
         // dfx=watchdog: follow the warning with a full task-state snapshot
         // (silent-wedge diagnosis — CPUs idle + sleepers never woken).
         if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WatchdogDump) {
             crate::dfx::taskdump::dump_all_tasks("deadlock-watchdog");
+        }
+    }
+
+    /// Lockless hex print (deadlock diagnostics — putchar path only).
+    fn puthex(v: u64) {
+        let mut shift: i32 = 64;
+        while shift > 0 {
+            shift -= 4;
+            let nibble = ((v >> shift) & 0xF) as u8;
+            let c = if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 };
+            unsafe { crate::console::putchar_no_lock(c); }
+        }
+    }
+
+    /// Lockless decimal print (deadlock diagnostics).
+    fn putdec(mut v: u64) {
+        let mut buf = [0u8; 20];
+        let mut i = 0;
+        loop {
+            buf[i] = b'0' + (v % 10) as u8;
+            i += 1;
+            v /= 10;
+            if v == 0 {
+                break;
+            }
+        }
+        while i > 0 {
+            i -= 1;
+            unsafe { crate::console::putchar_no_lock(buf[i]); }
         }
     }
 

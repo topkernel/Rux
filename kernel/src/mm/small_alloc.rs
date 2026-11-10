@@ -135,6 +135,42 @@ pub fn is_slab_ptr(addr: usize, heap_start: usize) -> bool {
     (SLAB_PAGE_BITMAP[idx / 64].load(Ordering::Acquire) >> (idx % 64)) & 1 == 1
 }
 
+/// oh-crash 91st (holder hunt): map an arbitrary kernel-heap address to
+/// its containing small-object allocation, if any. Returns
+/// `(object_base, class_size)` when `addr` lies inside a live slab page
+/// (the in-page header names the class; the object base follows from the
+/// page's geometry). Read-only over the page header and the slab bitmap,
+/// no locks, safe from any context — built for forensic prints (the
+/// page may be concurrently mutating; a torn read prints a torn span,
+/// acceptable for a diagnostic).
+pub fn object_span(addr: usize) -> Option<(usize, usize)> {
+    let (heap_start, _heap_end) = crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.heap_bounds();
+    if heap_start == 0 || addr < heap_start {
+        return None;
+    }
+    if !is_slab_ptr(addr, heap_start) {
+        return None;
+    }
+    let page = addr & !(PAGE_SIZE - 1);
+    // SAFETY: read-only access to a slab page's in-page header; the
+    // page lies inside the kernel heap direct map (bitmap bit set) so
+    // the mapping is valid. Fields are plain u8/u16 loads — worst case
+    // a torn value, filtered by the magic check below.
+    let hdr = unsafe { &*(page as *const PageHdr) };
+    if hdr.magic != HDR_MAGIC {
+        return None;
+    }
+    let cls = (hdr.cls as usize).min(CLASSES.len() - 1);
+    let s = CLASSES[cls];
+    let off = addr - page;
+    if off < first_off(s) {
+        return None; // inside the header gap, not an object
+    }
+    let obj_idx = (off - first_off(s)) / s;
+    let base = page + first_off(s) + obj_idx * s;
+    Some((base, s))
+}
+
 struct SmallCache {
     lock: Spinlock<()>,
     /// Page INDEX of the first ACTIVE page (0 = none). Under lock.

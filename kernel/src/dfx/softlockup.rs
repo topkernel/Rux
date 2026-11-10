@@ -215,6 +215,17 @@ pub fn check() {
             // Stack trace
             backtrace::dump_stack();
 
+            // oh-crash 91st: the DETECTOR's own chain (above) is not the
+            // stuck CPU's. Poke the stuck CPU over the IRQ_WORK IPI and
+            // capture its live interrupted stack (REMOTE-BT): its RIP +
+            // frame chain is what that CPU has been spinning in for the
+            // whole 10s+ window. A timeout is itself evidence (that CPU
+            // stopped servicing interrupts entirely). x86_64 only.
+            #[cfg(feature = "x86_64")]
+            {
+                crate::arch::ipi::remote_backtrace(cpu, "softlockup");
+            }
+
             // Taint kernel
             taint::add_taint(taint::TaintFlags::SOFTLOCKUP);
         }
