@@ -2958,7 +2958,7 @@ fn abort_reason_dump(leader_tid: u32) {
     // abort chain can sit a few hundred bytes above rsp when CFI shims
     // pad the frames).
     let mut line = alloc::string::String::new();
-    for i in 0..64u64 {
+    for i in 0..192u64 {
         let mut w = [0u8; 8];
         if unsafe {
             crate::arch::uaccess::copy_from_user(w.as_mut_ptr(), (rsp + i * 8) as *const u8, 8)
@@ -2976,8 +2976,17 @@ fn abort_reason_dump(leader_tid: u32) {
         } else {
             line.push_str(&alloc::format!(" [{}]{:#x}", i, v));
         }
+        // Short lines survive serial interleaving (the core-hunt lane's
+        // 64-slot single line was torn at ~16 slots by concurrent kernel
+        // output; the llvmpipe-fatal caller frames sit at slots 90-130).
+        if line.len() > 96 {
+            crate::pr_warn!("ABORT-STK{}", line);
+            line.clear();
+        }
     }
-    crate::pr_warn!("ABORT-STK{}", line);
+    if !line.is_empty() {
+        crate::pr_warn!("ABORT-STK{}", line);
+    }
 }
 
 /// Thread-directed user signal (tkill/tgkill — glibc raise() is tgkill):
@@ -3045,9 +3054,9 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
         // debug=ohhunt so ordinary userspace aborts (glibc assertions in
         // LTP runs included) cost nothing.
         if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::OhHunt)
-            && ABORT_N.load(core::sync::atomic::Ordering::Relaxed) < 8
+            && ABORT_N.load(core::sync::atomic::Ordering::Relaxed) < 24
             && LAST_TGID.load(core::sync::atomic::Ordering::Relaxed) != tid
-            && ABORT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8
+            && ABORT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24
         {
             LAST_TGID.store(tid, core::sync::atomic::Ordering::Relaxed);
             abort_reason_dump(tid);
