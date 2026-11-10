@@ -10351,3 +10351,56 @@ LOGLEVEL=4 removes pr_debug/pr_info console+fmt cost at ZERO code
 change (pr_warn/pr_err stay; SLOW-TXN prints via ConsoleWriter are
 loglevel-independent). A/B: hp90c (=7, control, stock system.img, no
 record) vs hp90cq (=4, treatment) — boot markers + serial volume.
+
+#### 90.4 THE FIRST-BOOT MELTDOWN — the real launcher blocker (hp90c vs hp90cq vs hp90a/b)
+
+A/B pair (stock system.img, PRISTINE userdata-fresh, no hiperf, SMP8):
+  boot      loglevel  serial lines  bootanim.ready  finished  launcher
+  hp90c     7         42,730        48.4s           65.2s     NEVER (<430s)
+  hp90cq    4         11,485        19.2s           31.6s     NEVER (<430s)
+LOGLEVEL=4 kills 76% of serial volume and 2.5x's the early markers —
+pr_debug! is pre-format-filtered above console_loglevel, so this is a
+zero-code change (the pr_warn! binder instruments SLRD/SACSA/SAREG/
+SACB/SLTX/APPTXN and ConsoleWriter prints stay — next notch is =3).
+Single boot each; variance check pending.
+
+THE BLOCKER: on pristine (first-boot) userdata the machine MELTS DOWN:
+- hp90c @ 81.4s: DEADLOCK spinlock-stuck on ONE heap lock
+  (0xffff888076a3fedc) ×784 prints, every CPU; hp90cq @ 116s same shape
+  (0xffff888075fc7edc ×782) PLUS two soft lockups (CPU#1 pid 1613,
+  CPU#4 pid 1617 — os.settingsdata worker class, 10s+ each).
+- Before the pile-up, WAKE-STRANDED shows render/vsync threads (pids
+  1341/1343, forked by 1334 with CLONE_VM at 51.2s — VSyncGenerator
+  family) pinning grid slots 4.4-9.5s+ (h1/h2 of every strand census).
+- AFTER ~120s the quiet boot is nearly SILENT (no SLOW-TXN, no churn):
+  the system is frozen-waiting, launcher never spawns.
+- hp90a/hp90b (PRE-POPULATED userdata, f-generation): ZERO DEADLOCK
+  prints, ZERO soft lockups, install stream proceeds, launcher spawn
+  marker appears at ~36-41s. The meltdown is FIRST-BOOT-ONLY (install
+  stream driven: settingsdata/render churn under install I/O).
+So the 239s→11s gap decomposes: (1) early-window print flood (~16s of
+marker time, LOGLEVEL fix), (2) the first-boot meltdown = launcher NEVER
+(this is now the #1 boot-time hunt target), (3) kernel overhead per
+syscall in the tail (enable_irq 12.4% + atomic contention ~15%).
+
+FOR THE 91ST (priority order):
+1. NAME THE LOCK 0xffff...edc and the soft-lockup loops: boot pristine
+   userdata with `dfx=watchdog` (deadlock print then dumps all task
+   states — the RUNNING tasks at the pile-up name the holder class);
+   88.5#2's DEADLOCK-print owner extension (holder pid/comm + alloc
+   site) is still the highest-value instrument. Candidates for a
+   system-wide Box'd spinlock under install I/O: page-cache/ext4 inode
+   aux locks, wait_queue heads on the render/composer path, binder
+   buffer locks. The two soft-lockup CPUs (settingsdata workers) spin
+   somewhere ELSE for 10s+ — their RIP needs the lockup print extended
+   to dump the stuck RIP/stack (today it prints only the detector's
+   own chain).
+2. LOGLEVEL variance check (1-2 more =4 boots; optionally =3) — then
+   decide the production default (reference boots quiet).
+3. hp90e (fp callchains, 140-215s tail) — extraction hardened with
+   bounded sync; if it lands, callers.txt names enable_irq's owners.
+4. §89.6 queue: riscv execve KERNPANIC bisect, wait4/SIGCHLD (§87.8),
+   /dev/console user-write loss, ext4 metadata_csum + the NEW
+   glacial-writeback (~300KB/s) + sync-hang + dirty-page-loss bugs
+   (90.2) — the fs lane now has four separate parity/correctness
+   items from this campaign.
