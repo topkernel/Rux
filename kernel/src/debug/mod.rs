@@ -138,6 +138,7 @@ pub mod cctx;
 /// runtime acquire tracking is the P1 phase per
 /// docs/development/lockdep-lite-design.md.
 pub mod lockdep;
+pub mod dlspin;
 
 /// Initialize the debug subsystem.
 ///
@@ -166,6 +167,9 @@ pub fn init() {
     }
     // oops=panic seeds panic_on_oops (the sysctl can flip it later).
     oops::init_from_cmdline();
+    // spinowner=/spinpanic=/spindeadlock= (debug-dlspin): spinlock
+    // deadlock last-gasp boot policy.
+    dlspin::init_from_cmdline();
     // Wild-write tripwire arms between the timekeeper's init and
     // start_secondaries (no TLB shootdown needed; see wildwatch.rs).
     wildwatch::arm();

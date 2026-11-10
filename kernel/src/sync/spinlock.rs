@@ -118,13 +118,21 @@ impl RawSpinlock {
     /// owner word now stores the acquirer's RETURN ADDRESS (cpu+1 in
     /// the low bits kept for the pre-r12 readers) — the GRQ stall probe
     /// needs the holder's call site, not just its CPU.
+    ///
+    /// Boot-gated inside the feature (debug-dlspin, 2026-11-07): the
+    /// stores run only when `spinowner=1` (or forkprof) armed recording
+    /// — one relaxed load per acquire in feature builds, nothing in
+    /// default builds (zero-instruction mandate on the uncontended
+    /// fast path).
     #[inline]
     #[cfg(feature = "debug-lock-owner")]
     fn record_owner(&self, ra: usize) {
-        self.owner.store(
-            (ra & !0xFusize) | ((crate::arch::smp::cpu_id() as usize) + 1),
-            Ordering::Relaxed,
-        );
+        if crate::debug::dlspin::spinowner_armed() {
+            self.owner.store(
+                (ra & !0xFusize) | ((crate::arch::smp::cpu_id() as usize) + 1),
+                Ordering::Relaxed,
+            );
+        }
     }
 
     /// Clear the holder (debug-lock-owner feature only).
@@ -236,87 +244,31 @@ impl RawSpinlock {
         self.record_owner(caller_ra);
     }
 
-    /// Print deadlock warning via SBI (works even with interrupts disabled).
+    /// Deadlock warn boundary (every DEADLOCK_WARN_ITERS spin rounds):
+    /// hand off to the debug-dlspin last-gasp bundle. All printing is
+    /// putchar_no_lock-family (IRQ-off safe, no locks, no allocation);
+    /// debug-dlspin keeps the one-line warn format and adds the holder
+    /// attribution, cross-CPU peek, all-CPU stacks and the task dump.
+    /// COLD PATH ONLY — the spin loop's per-iteration work is unchanged.
     fn deadlock_warn(lock_addr: *const Self, caller_ra: usize) {
-        // Use SBI putchar directly — printk might need locks we're spinning on
         let cpu = crate::arch::smp::cpu_id();
-        let msg = b"DEADLOCK: spinlock stuck cpu=";
-        for &b in msg {
-            unsafe { crate::console::putchar_no_lock(b); }
-        }
-        // Print CPU id as decimal digit
-        if cpu < 10 {
-            unsafe { crate::console::putchar_no_lock(b'0' + cpu as u8); }
-        }
-        // Print lock address in hex
-        let msg2 = b" lock=0x";
-        for &b in msg2 {
-            unsafe { crate::console::putchar_no_lock(b); }
-        }
-        let addr = lock_addr as usize;
-        let mut shift = (core::mem::size_of::<usize>() * 8) as i32;
-        while shift > 0 {
-            shift -= 4;
-            let nibble = (addr >> (shift as usize)) & 0xF;
-            let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
-            unsafe { crate::console::putchar_no_lock(c); }
-        }
-
-        // Print caller return address (ra) for debugging
-        let msg3 = b" ra=0x";
-        for &b in msg3 {
-            unsafe { crate::console::putchar_no_lock(b); }
-        }
-        let mut shift = (core::mem::size_of::<usize>() * 8) as i32;
-        while shift > 0 {
-            shift -= 4;
-            let nibble = (caller_ra >> shift) & 0xF;
-            let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
-            unsafe { crate::console::putchar_no_lock(c); }
-        }
-
-        // Holder identity: owner = hart+1 (0 = free / mid-handoff).
+        // Holder word: the debug-lock-owner field when built (ra | cpu+1),
+        // 0 otherwise (dlspin prints the arming hint instead).
         #[cfg(feature = "debug-lock-owner")]
-        {
-            let msg4 = b" holder=";
-            for &b in msg4 {
-                unsafe { crate::console::putchar_no_lock(b); }
-            }
-            // SAFETY: lock_addr is a valid RawSpinlock pointer (from lock()).
-            let holder = unsafe { (&*lock_addr).owner.load(Ordering::Relaxed) };
-            if holder == 0 {
-                let msg5 = b"switching";
-                for &b in msg5 {
-                    unsafe { crate::console::putchar_no_lock(b); }
-                }
-            } else {
-                let h = holder - 1;
-                if h < 10 {
-                    unsafe { crate::console::putchar_no_lock(b'0' + h as u8); }
-                }
-            }
-            // r16 (GB GRQ lost-release deadlock): the owner word's HIGH
-            // bits are the LAST ACQUIRER'S RETURN ADDRESS (the r12
-            // shape) — a lock stuck "locked" with no CPU inside any
-            // longer names its lost-release site right here. Print it.
-            let msg5b = b" ow_ra=0x";
-            for &b in msg5b {
-                unsafe { crate::console::putchar_no_lock(b); }
-            }
-            let ra = holder & !0xFusize;
-            let mut shift2 = (core::mem::size_of::<usize>() * 8) as i32;
-            while shift2 > 0 {
-                shift2 -= 4;
-                let nibble = (ra >> (shift2 as usize)) & 0xF;
-                let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
-                unsafe { crate::console::putchar_no_lock(c); }
-            }
-        }
+        // SAFETY: lock_addr is a valid RawSpinlock pointer (from lock()).
+        let owner_word = unsafe { (&*lock_addr).owner.load(Ordering::Relaxed) };
+        #[cfg(not(feature = "debug-lock-owner"))]
+        let owner_word = 0usize;
+        crate::debug::dlspin::deadlock_warn(
+            cpu as usize,
+            lock_addr as usize,
+            caller_ra,
+            owner_word,
+        );
 
-        unsafe { crate::console::putchar_no_lock(b'\n'); }
-
-        // debug=watchdog: follow the warning with a full task-state snapshot
-        // (silent-wedge diagnosis — CPUs idle + sleepers never woken).
+        // debug=watchdog (frozen legacy switch): keep the historical
+        // every-boundary task-state snapshot for the lanes still hunting
+        // with it — the dlspin bundle's own dump is one-time per lock.
         if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::WatchdogDump) {
             crate::debug::taskdump::dump_all_tasks("deadlock-watchdog");
         }

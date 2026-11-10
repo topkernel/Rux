@@ -905,6 +905,7 @@ unit-test group in `make test`; scripts/test/psi-smoke.sh.
 
 ---
 
+<<<<<<< HEAD
 ## D-21: Hung-task report walks the waiter→lock→owner chain
 
 **Design.** The hung-task detector's report (`kernel/src/debug/hung_task.rs`)
@@ -991,3 +992,75 @@ here; serial + pstore carry the story today). kdump remains future work.
 show zero new print classes); the hungpanic+abba proof boot is the
 functional guard; the budget-used line in the bundle output self-reports
 against the 96 KiB cap.
+
+---
+
+## D-23: Spinlock-deadlock detection at the WAIT side (spin-count last gasp, not an acquire-time lock graph)
+
+**Design.** The reference kernel detects locking deadlocks with lockdep
+(CONFIG_PROVE_LOCKING): every acquire updates a held-locks graph and a
+graph cycle at acquire time is the deadlock verdict — which is why it
+must instrument every lock operation and still ships disabled in
+distro kernels for the overhead. Rux keeps detection on the WAIT side:
+`RawSpinlock::lock`'s pre-existing TTAS spin loop counts iterations,
+and crossing DEADLOCK_WARN_ITERS (100M, ≈1–2 s of spinning on real
+silicon) triggers a LAST-GASP BUNDLE from the spinning CPU itself —
+all of it through the `putchar_no_lock` console family: the waiter
+(cpu, lock, acquire call site symbolized), the holder from the
+debug-lock-owner word (cpu + acquire site, symbolized) when armed, a
+cross-CPU peek at the holder CPU's current task (comm/pid/state/preempt
++ bounded symbolized kernel-stack scan), a lockless all-CPU-stack twin
+of sysrq-'l', and the full `dump_all_tasks` snapshot; `spinpanic=1`
+escalates to a pstore-carrying panic (the softlockup_panic shape). The
+bundle runs once per lock address per boot (lock-free registry); the
+one-line warn repeats at every boundary and the spinner keeps spinning.
+Siblings: D-21 covers the D-state SleepMutex waiter→owner chain at the
+hung-task cadence; D-22 covers the panic-path whole-system dump; D-23
+is the spinning-CPU entry of the same detection family — the one that
+fires when the waiter cannot sleep and the holder's own tick is dead.
+
+**Advantage.**
+- Detection works DISARMED and works where lockdep is blind: the
+  trigger is the spinning CPU's own instruction stream, so it fires
+  with IRQs disabled on the waiter (lockdep's timer-based triggers
+  cannot run there), and the cross-CPU peek observes a holder frozen
+  with IF=0 whose own tick — and with it every same-CPU watchdog,
+  softlockup and lockdep heartbeat — is dead.
+- Zero default-build cost, provably: the lock/unlock/try_lock/is_locked
+  disassembly is byte-identical to the pre-dlspin build on both x86_64
+  and riscv64 (merge-gate ASM-identity proof, run/asm-diff*.sh); the
+  cold-path body grew but runs only past 100M spin iterations. The
+  owner-recording attribution is opt-in twice over — a cargo feature
+  (`debug-lock-owner`) plus a boot flag (`spinowner=1`, implied by
+  forkprof) — and in feature builds adds one relaxed load per acquire
+  when disarmed.
+- Allocation-free and lock-free by construction: the bundle may be
+  staring at a wedged printk, heap or pid-hash lock, so it takes no
+  locks, allocates nothing, and writes through the raw UART path —
+  the same discipline as the trap printer.
+
+**Compatibility evidence.** No external interface changes (a debug
+facility); `make test` green with the dlspin ktest (1351/1351 incl.
+the synthetic-wedge verdict group); the synthetic 2-CPU deadlock —
+holder kthread frozen holding a lock irqsave on one CPU, waiter
+spinning on another — resolves with the log naming BOTH sides
+symbolized on riscv64 (ktest + spindeadlock=1 boot) and x86_64 KVM,
+and the boot continues afterwards (holder releases once the bundle
+completed).
+
+**Known cost.** The warn threshold is a spin COUNT, not wall time, so
+under TCG the same 100M iterations cost tens of seconds of host time;
+false negatives remain for a wedge whose waiter never spins (sleeping
+locks, held once then abandoned with IRQs off elsewhere); stale frames
+can mix into the stack scan (it filters words falling inside known
+text symbols — no frame-pointer walk of a remote task is possible);
+attribution in default builds prints the arming hint instead of the
+holder name.
+
+**Status:** landed on the debug-dlspin lane (2026-11-10).
+
+**Guard.** Merge-gate ASM identity (default build, both arches);
+Tier-1/Tier-2 perf gate on the default build (dlspin adds no boot-path
+work: tier census/tick/per-op rows in band); the dlspin ktest group +
+verdict in `make test` (unit-test builds arm owner recording via the
+feature pull).
