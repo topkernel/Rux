@@ -9741,3 +9741,32 @@ FOR THE 87TH (priority order):
    calls = 100s); (c) allocator paths under the install churn.
 3. 1126 idle-while-queue-grows (from the §86 charter): immediate
    wake-verdict on its word.
+
+### 86.6 LAYOUT BUG FIXED by coordinator (2026-11-10 23:4x) — branch `layout-hunt` 2df7b612 — 87th MUST merge this first
+
+The "4G layout bug" is dead. Root cause was never an OOB write: the
+x86_64 kernel-image memblock reserve was the CONSTANT KERNEL_RESERVE_SIZE
+(30MB) while the SMP8 const-block arrays grew the real image to 31.4MB
+(__kernel_lma_end 0x1e5d000). The unreserved 368KB tail of live .bss was
+seeded into the buddy; early allocations wrote over kernel statics —
+kernel_layout() turned to garbage (phys_base 0xd459063), every
+create_user_address_space root was rejected "off-machine", and exec /init
+failed ENOMEM. The "ramfs ELF phdr corruption" reading was a misdiagnosis
+(dumped bytes were intact; init.rs wraps do_execve_elf errno as
+InvalidFormat). 2G survived by allocation-order luck only.
+
+Fix on layout-hunt (2df7b612): reserve = max(const,
+kernel_image_phys_end()) from the linker symbol + x86_64 linker ASSERT at
+40MB (riscv/aarch64 parity) + const bumped 40MB; also completes the SMP8
+const-block conversion (riscv64 smp.rs/ipi.rs, aarch64 smp.rs/ipi.rs) and
+caps aarch64 at arch-local MAX_CPUS=4 (boot.S parking truth). Triple-arch
+builds green. Verified: lh5 (4G SMP2) full exec chain; lh6 (4G SMP8!)
+bootanimation ready 38s / finished 50s, no panic, no ENOMEM — but
+launcher.ready NOT reached within 420s (usb_host spawn storm visible,
+install stream still churning). That tail is YOUR hunt.
+
+87th entry procedure: cd oh-crash && git merge layout-hunt (fast, no
+conflicts expected — different files), rebuild x86_64, confirm a 4G SMP8
+boot reaches bootevent.bootanimation.finished < 60s, THEN start the
+§86.5 charter (hiperf first). The SMP8+4G rig is now unblocked — run
+everything at SMP=8 as the directive requires.
