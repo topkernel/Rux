@@ -10459,3 +10459,131 @@ TX_STALLED-episode counts vs user-partial returns before touching code.
 Hypotheses for the residual: shell one-shot write semantics on short
 writes; another drop site (open path?); pure scheduling starvation of
 the echo loop (the script took ~8s for 50 echoes under contention).
+
+### 91. 91ST SESSION (2026-11-11 07:0x-.., branch oh-crash) — THE FIRST-BOOT MELTDOWN IS ROOT-CAUSED AND FIXED: mm_surgery was a Spinlock held across the vma Rwsem's PARK; as a Rwsem write section, pristine first boot reaches LAUNCHER SPAWN at 47.4s
+
+Mission was the §90.5 queue: name the meltdown lock holder, then fix.
+Both landed. Commits: 4950f396 (instruments), 57619346 (fix + perf),
+b91e6c41 (riscv64 stub arity). Triple-arch builds green (x86_64,
+riscv64, aarch64 all rc=0).
+
+#### 91.1 The instrument (88.5#2 done properly, all x86_64)
+
+- **REMOTE-BT** (arch/x86_64/ipi.rs): live remote stack capture over
+  the IRQ_WORK IPI — the handler stores the INTERRUPTED pt_regs
+  (rip/rsp/rbp) plus an fp-walk of up to 24 kernel frames into shared
+  slots; the requester (deadlock_warn / softlockup) polls lock-free
+  with a bounded spin and prints RAW addresses (zero allocation in
+  fragile contexts; symbolize offline). A timeout is itself evidence
+  (target not servicing IPIs). handle_ipi_vector now takes &PtRegs.
+- **deadlock_warn** (sync/spinlock.rs): holder cpu's current task
+  pid/comm; small_alloc::object_span() names the containing kmalloc
+  object (class + base + first words — a &"vma-lock" at +0x10 named
+  the wedge's owner struct on first fire); LOCK-ACQ stamps (last
+  acquirer pid + call site + acquire age, dfx-lock-owner builds).
+- **softlockup**: now pokes the STUCK cpu (its RIP is the spin loop;
+  the old print dumped the detector's own chain).
+- Build for hunts: `cargo build --target x86_64-unknown-none
+  --no-default-features --features x86_64,dfx-lock-owner` (record_owner
+  also fixed for x86_64 — cpu_id() is u64 there).
+
+#### 91.2 The diagnosis (hp91a = 90th's rig, pristine, LOGLEVEL=7)
+
+First DEADLOCK 51.47s: ONE lock 0xffff888076bb1890, ALL CPUs, 687+
+prints. Holder = cpu5 task 1389(foundation). REMOTE-BT live stack:
+sys_munmap → mm_surgery_guard → Spinlock::lock (spinning on its OWN
+mm's surgery lock). LOCK-OBJ: kmalloc-1024 object whose +0x10 holds
+&"vma-lock" (len 8) = an MmStruct's Rwsem<VmaManager> wait_lock;
++0x28 = 0x1_0000056d (pid 1389 = the waiter). SIX PREEMPT-HEAL events
+at 50.1-51.8s — five of them pid 0x56d..0x576 (foundation threads)
+parked with count=0x10001 (SOFTIRQ+1), held 1-59j. hp91b (Spinlock,
+LOGLEVEL=4) showed the OTHER face: binder traffic stops dead at 10.0s,
+no markers ever — same disease, waiters parked instead of spinning.
+
+MECHANISM (code-level, sync/rwsem.rs + syscall/memory.rs): every mm
+syscall takes mm_surgery — a Spinlock whose waiters spin with
+preemption DISABLED — then acquires vma_manager (read/write), and the
+vma Rwsem PARKS on contention. Install storm → vma-write contention →
+the surgery holder SLEPT holding the spinlock while sibling CPUs spun
+non-preemptibly on mm_surgery; the parked threads carried stranded
+preempt counts (the 0x10001 heals), and with all 8 CPUs spinning
+non-preemptibly there was no CPU left to run the granter or land wake
+IPIs. Violates spinlock.rs's own rule ("a Spinlock section must stay
+short by construction"; "every lock that may be held across blocking
+is a SleepMutex, never a Spinlock"). First-boot-only because only the
+install stream's CLONE_VM mmap/munmap storm produces vma-write
+contention under surgery.
+
+#### 91.3 The fix and the A/B (pristine userdata, SMP8+4G KVM, stock system.img)
+
+mm_surgery: Spinlock<()> → Rwsem<()> ("mm-surgery"); guard =
+mm_surgery.write(). Waiters park — the reference mmap_lock(write)
+semantics the field doc already claimed. No CPU burn, no wake-IPI
+starvation, preempt counts clean at park (PREEMPT-HEAL events are a
+direct canary for relapse).
+
+  boot     kernel      lvl  DEADLOCK  PREEMPT-HEAL  softlockup  markers
+  hp91a    Spinlock    7    687+ @51s 6             0 seen      appspawn 6.0s, dead
+  hp91b    Spinlock    4    0 (froze)0             0           NONE (binder stops @10s)
+  hp91c    Rwsem       7    ZERO     ZERO          ZERO        appspawn 5.7s,
+                     bootanim.ready 34.6s, com.ohos.launcher 47.4s,
+                     bootanim.finished 47.5s, alive ≥330s
+**LAUNCHER SPAWNS ON A PRISTINE FIRST BOOT** — the mission blocker.
+(hp90c: anim.ready 48.4s then meltdown, launcher NEVER; 90th's
+pre-populated best: launcher ~36-41s.) launcher.ready bootevent had
+not fired by 330s (hp91c tail still spawning services; next lever).
+
+New separate bug logged (91st, hp91c): pid 403 (sa_main hosting
+accessibility) spams `BC_TRANSACTION failed BR 0x7211` (609 lines
+over the boot) — a reply-failure retry loop, accessibility SA. Not
+today's target; candidate for the 92nd's tail work with the hp91
+stamps (any relapse prints LOCK-ACQ pid/site/age now).
+
+#### 91.4 perf callchain (hp90e follow-up)
+
+- The fp record's samples are UNIFORM 72 bytes = NO chain field ever
+  emitted, and the .data attr block is clobbered (cross-written with
+  log text) — so "did hiperf set bit 5?" was undecidable from the
+  artifact. Landed: PERF-OPEN pr_warn (8/boot, visible at =4) prints
+  the ACCEPTED sample_type + whether CALLCHAIN bit 5 is set — one
+  hiperf boot settles userspace-attr-gap vs emission bug.
+- Kernel-side chains are now EMITTED: trap.rs stashes the interrupted
+  rbp for KERNEL ticks; emit_sample walks it (kernel_callchain,
+  ksyms-validated frames, PERF_CONTEXT_KERNEL marker) when bit 5 set
+  and !exclude_kernel. The old "kernel not walkable" comment was
+  wrong — frame pointers are forced on.
+- User chains: walk code was already right; OH musl KEEPS frame
+  pointers (prologues verified host-side). Verification boot (hiperf
+  record + read PERF-OPEN lines + chain histogram) queued for the
+  92nd — needs a system-hp91x.img with the record script.
+
+#### 91.5 LOGLEVEL variance (running at write time)
+
+Series on the FIX kernel (same rig as hp91c): =7 {hp91c,d,e},
+=4 {hp91f,g,h}, SECS=330 each, driver run/hp91-variance.sh. With the
+meltdown gone the ladder is now measurable past bootanimation — the
+=4-vs-7 question can be answered on the full marker set (incl.
+com.ohos.launcher), not just the early pair. Results to be appended
+by the series (check run/hp91?-markers.txt + wc -l of the serials).
+NOTE: hp91b (Spinlock kernel, =4) is NOT a valid variance rep (froze
+at 10s); use only fix-kernel reps.
+
+#### 91.6 FOR THE 92ND (priority order)
+
+1. CLOSE THE MERGE GATE on 57619346+b91e6c41: the standard OH A/B is
+   hp91c (done); add riscv64 `make test` + the coordinator's tiered
+   perf gate (mm/ + sched/ domains touched: surgery waiters now park —
+   expect ctx-switch volume + pbench P2 delta; PREEMPT-HEAL count is
+   the relapse canary, keep an eye in syscost census).
+2. launcher.ready is the next marker gap (spawn 47.4s → ready
+   ~239s→? on pristine): with the meltdown gone, a hp91-generation
+   record (start hiperf at t=90s, system-hp91x.img via the hp88
+   two-step rig) measures the real remaining tail; PERF-OPEN lines
+   now print — if CALLCHAIN bit is NOT set by hiperf, the fp gap is
+   userspace (hiperf's -d fp flag vs its attr build), file upstream
+   of the kernel.
+3. The accessibility BR 0x7211 loop (91.3) and the §90.2 fs lane
+   items (sync-hang, writeback loss) are untouched.
+4. Rig: hunt builds MUST pass --features x86_64,dfx-lock-owner; the
+   variance series leaves 5 serial logs + markers in run/ for the
+   report.
