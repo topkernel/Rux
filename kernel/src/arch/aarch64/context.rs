@@ -296,13 +296,13 @@ el0_exit_fpsimd_restore:
 // Per-CPU variable for prev task
 // ============================================================================
 
-static CPU_PREV_TASK: [core::sync::atomic::AtomicU64; crate::config::MAX_CPUS] =
-    [const { core::sync::atomic::AtomicU64::new(0) }; crate::config::MAX_CPUS];
+static CPU_PREV_TASK: [core::sync::atomic::AtomicU64; crate::arch::aarch64::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; crate::arch::aarch64::MAX_CPUS];
 
 #[inline]
 pub fn set_prev_task(prev: *mut Task) {
     let cpu = crate::arch::cpu_id() as usize;
-    if cpu < crate::config::MAX_CPUS {
+    if cpu < crate::arch::aarch64::MAX_CPUS {
         CPU_PREV_TASK[cpu].store(prev as u64, core::sync::atomic::Ordering::Relaxed);
     }
 }
@@ -311,7 +311,7 @@ pub fn set_prev_task(prev: *mut Task) {
 #[no_mangle]
 pub extern "C" fn get_prev_task() -> *mut Task {
     let cpu = crate::arch::cpu_id() as usize;
-    if cpu < crate::config::MAX_CPUS {
+    if cpu < crate::arch::aarch64::MAX_CPUS {
         CPU_PREV_TASK[cpu].load(core::sync::atomic::Ordering::Relaxed) as *mut Task
     } else {
         core::ptr::null_mut()

@@ -1275,7 +1275,12 @@ use core::arch::global_asm;
 #[cfg(feature = "riscv64")]
 const KERNEL_RESERVE_SIZE: usize = 0x1A0_0000; // 26MB
 #[cfg(feature = "x86_64")]
-const KERNEL_RESERVE_SIZE: usize = 0x1E0_0000; // 30MB
+// 30MB -> 40MB (layout-hunt 2026-11-10): the SMP8 const-block arrays pushed
+// the image to 31.4MB; the 30MB reserve left 368KB of live .bss unreserved
+// and the buddy handed it out (kernel statics corrupted at boot). The
+// memblock reserve now tracks the REAL image end — this const is the
+// documented minimum and the linker.ld ASSERT bound; grow them together.
+const KERNEL_RESERVE_SIZE: usize = 0x2800_0000; // 40MB
 #[cfg(feature = "aarch64")]
 const KERNEL_RESERVE_SIZE: usize = 0x1800_000; // 24MB static window (the aarch64 reserve arm below uses its own top)
 /// Effective (RAM-clamped) static-region sizes computed by the early
@@ -1543,8 +1548,35 @@ pub extern "C" fn rust_main() -> ! {
 
         #[cfg(feature = "riscv64")]
         mm::memblock_reserve(0x80000000, KERNEL_RESERVE_SIZE).ok();  // OpenSBI + kernel
+        // x86_64 (layout-hunt 2026-11-10): the static 30MB window silently
+        // fell behind the real image (31.4MB after the SMP8 const-block
+        // arrays). The unreserved 368KB tail of live .bss was seeded into
+        // the buddy and handed out; the first allocations wrote over kernel
+        // statics (kernel_layout() garbage -> exec ENOMEM "ELF corruption"
+        // misread). Reserve the REAL image end (linker symbol, 2MB-aligned),
+        // never a chasing constant. KERNEL_RESERVE_SIZE stays as the
+        // documented minimum; linker.ld now ASSERTs the image against it so
+        // the next outgrowth fails the build instead of corrupting boots.
         #[cfg(feature = "x86_64")]
-        mm::memblock_reserve(0, KERNEL_RESERVE_SIZE).ok(); // low memory + kernel
+        {
+            let image_end = arch::mm::mmu_init::kernel_image_phys_end() as usize;
+            let reserve_size = core::cmp::max(KERNEL_RESERVE_SIZE, image_end);
+            if image_end > KERNEL_RESERVE_SIZE {
+                pr_err!(
+                    "boot: kernel image {:#x} exceeds KERNEL_RESERVE_SIZE {:#x} — reserving to {:#x} (bump the const + linker window)",
+                    image_end, KERNEL_RESERVE_SIZE, reserve_size
+                );
+            }
+            // Hard architectural bound: the static carve (heap at
+            // KERNEL_HEAP_PHYS) must never be reached by the image.
+            if image_end + (64 << 20) > KERNEL_HEAP_PHYS {
+                panic!(
+                    "x86_64 kernel image end {:#x} too close to heap base {:#x} — move KERNEL_HEAP_PHYS",
+                    image_end, KERNEL_HEAP_PHYS
+                );
+            }
+            mm::memblock_reserve(0, reserve_size).ok(); // low memory + kernel (real image end)
+        }
         // aarch64: image window + bring-up heap + slab — without this
         // memblock_find_in_range hands out the RAM base and vmemmap's
         // zeroing wipes the running kernel (the silent-boot hang).

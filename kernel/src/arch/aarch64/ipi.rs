@@ -20,7 +20,7 @@
 use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use crate::config::MAX_CPUS;
+use crate::arch::aarch64::MAX_CPUS;
 
 // ============================================================================
 // IPI types
@@ -199,12 +199,7 @@ static mut CSD_QUEUES: [ListHead; MAX_CPUS] = {
 };
 
 /// Per-CPU writer locks for the CSD queues.
-static CSD_LOCKS: [Spinlock<()>; MAX_CPUS] = [
-    Spinlock::new(()),
-    Spinlock::new(()),
-    Spinlock::new(()),
-    Spinlock::new(()),
-];
+static CSD_LOCKS: [Spinlock<()>; MAX_CPUS] = [const { Spinlock::new(()) }; MAX_CPUS];
 
 fn csd_init() {
     for i in 0..MAX_CPUS {

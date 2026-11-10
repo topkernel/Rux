@@ -9,6 +9,13 @@
 //! The bring-up plan and stage gates live in
 //! docs/development/aarch64-port-plan.md (living spine).
 
+/// Arch-local CPU ceiling: aarch64 boot.S secondary parking only handles
+/// cpu indices < 4 — the SMP8 const-block arrays stay sized by the global
+/// config elsewhere, but this port's bring-up path (PSCI CPU_ON gate,
+/// per-CPU statics) must keep the boot.S truth. Bump together with the
+/// boot.S parking table when this port grows past 4.
+pub const MAX_CPUS: usize = 4;
+
 pub mod boot;
 pub mod context;
 pub mod cpu;
