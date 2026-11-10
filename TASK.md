@@ -9941,3 +9941,131 @@ Rig: boot-hp87{p..s}.sh pattern; system image system-hp87o.img
 (foreground-stat script + cat-logcat + output-disk copy); userdata
 fresh copies from the f generation; NEVER sed-rename the system image
 reference; inject via sudo mount -o loop only.
+
+### 88.1 THE WATCHDOG CRASH IS DECODED — and it is NOT the watchdog (2026-11-11 03:0x-04:1x, 88th)
+
+The §87.11 crash chain, event by event (hp87s serial):
+1. **mallocng heap metadata corrupts** in a busy service. All 15 user
+   #GPs fire at ld-musl+0xba256 = mallocng get_meta (consistency
+   check; the decoded meta pointer was non-canonical, e.g.
+   rax=0x281452c9c96b1991). Same crash class as ohc3/ohc4 (§50).
+2. samgr (pid 334) dies SIGSEGV at 24.1s → its leader release
+   DEFERRED 5.4s (RELEASE-DEFER #2, parked threads 348/351/353/356/
+   357/699) → init's SIGCHLD reap at 29.5s.
+3. init: "ServiceReap error critical service crashed samgr" →
+   ExecReboot panic → StopAllServices (watchdog_service SIGKILLed at
+   33.7s — the "watchdog dies" reading was wrong) → DoRebootPanic
+   writes /proc/sysrq-trigger 'c' → our sysrq panics at 39.9s
+   (write_file_core stack = init writing the trigger).
+So: fix the heap corruption and record survives. NOT a watchdog
+starvation issue; watchdog_service was being fed (TIMEDSLEEP-PARK
+cycles healthy throughout).
+
+### 88.2 HP88 BISECT SERIES — the corruptor is inside the perf RING MMAP path
+
+Rig: system-hp88a.img (copy of system-hp87o.img, script hp88a-run.sh:
+sleep-anchored 2-step record — step1 nofp, step2 fp, -d 60 each,
+output-disk copy), fresh userdata copies from userdata-hp87f.img
+(NOSNAP), output disk mkfs'd ^metadata_csum, SMP8+4G KVM, `perfnode=`
+cmdline knob added to perf/mod.rs for the bisect. NEW BLOOD RULE
+LEARNED: `make build` builds RISCV64 (no build/.config — default
+platform) — always build x86_64 explicitly:
+`cargo build --target x86_64-unknown-none --no-default-features
+--features x86_64` + gen-ksyms + rebuild + mkbzimage, and CHECK rux
+mtime > source mtimes. hp88g..k initially ran a STALE bzImage because
+of this (the 87.9-era "instant Finished" mystery, now explained).
+
+Boot matrix (GP = user #GPs at mallocng sites):
+  boot   knob      opens rings armed emit  GP   notes
+  hp87p/q/r EINVAL-fail  no   no   no    0    (87th's boots)
+  hp88g   noperf   fail  no   no   no    0    today's-kernel control
+  hp88h   noring   OK    DENIED no  no   0    hiperf long-lived, fds+polls live
+  hp88e   noarm    OK    MAPPED no  no   7    CORRUPTS (old kernel, no alloc prints)
+  hp88j   noarm    OK    MAPPED no  no   8    CORRUPTS (corrected ALLOC-DIRTY silent)
+  hp88d   noemit   OK    (stalled) yes no 8    (step1 hiperf mapped no rings this boot)
+  hp88a/b/c normal OK    MAPPED yes yes  9-15
+  hp88f/i noarm+printkspam                    0    CONFOUNDED: 3767 pr_err lines in
+                                              the alloc loop slow the mmap path
+  hp88k   noarm    OK    MAPPED no  no   0    clean WITHOUT printk — the race is
+                                              BUILD-LAYOUT FLAKY (~2/5 noarm boots)
+Verdict: opens/fds/polling/long-hiperf = exonerated (noring clean);
+armed machinery (tick hooks, softirq, fp walk, wakes, ring writes) =
+exonerated (noemit and noarm corrupt). **The corruptor is inside
+perf_mmap_handler's mmap sequence itself** (VMA add + 257-frame
+alloc+zero burst + eager PTE install under the GLOBAL PTE lock, the
+only same-mm leaf writer that does NOT use pte_lock_for).
+
+Exonerated by instruments that never fired on corrupting boots:
+PERF-RING-RESOLD (ring frames re-sold through alloc_pages),
+PERF-RING-PAGE-BAD (ring frame refcount decay), PTE-OVERWRITE-LIVE
+(eager install replacing a live leaf), PERF-ALLOC-DIRTY (corrected:
+alloc_pages hands out pristine frames rc==1 mapcount==-1),
+PERF-CLOSE-UNDERFLOW, free_pages REFUSED-still-MAPPED tripwire.
+
+Victim forensics (hp88b/c/e): corrupted mallocng group headers read
+ZEROS with garbage encoded meta pointers; victims span processes
+(hiperf, foundation sa_main, accountmgr, wifi-era usb_host family is
+separate/pre-existing); corruption is FRAME-level, hits the busiest
+allocators, ~15-45s into the boot (spawn storm), and is
+timing/layout-sensitive. GP-PTE forensics landed LAST (victim PTE +
+frame + descriptor + ring-membership at fault time) — hp88k was a
+clean boot so it printed nothing; the 89th reruns noarm until a
+corrupt boot captures it.
+
+### 88.3 hp88k anomaly: DEADLOCK spinlock-stuck on a HEAP-address lock
+noarm boot hp88k: repeated `DEADLOCK: spinlock stuck cpu=3
+lock=0xffff88807397ea00` at 16.0/18.9/21.8s (and 199.9s) — a
+dynamically allocated spinlock (Box'd PerfEvent.inner / wait_queue
+are the perf-owned candidates) wedged during the ring-mmap window,
+and that boot was CLEAN of #GPs. A wedged holder may be *why* it was
+clean (all downstream timing frozen). The 89th should name the lock
+OWNER (extend the deadlock print with holder pid/comm) — the wedge
+and the corruption are plausibly the same race seen from two sides.
+
+### 88.4 LANDED THIS SESSION (commit b73ed3c0 + follow-up)
+kernel/src/perf/mod.rs: perf_close underflow-FREE fix (put_page()==-1
+freed on refused underflow = double-free of a possibly re-sold frame;
+now only ==0 frees, <0 leaks + bounded print) — REAL BUG FIX;
+PERF-RING-RESOLD/PAGE-BAD/ALLOC-DIRTY/RING-MAP prints; ring va/len +
+ring_covers()/ring_frame_member(); perfnode= bisect knob
+(noemit/noarm/noperf/noring) — TEMPORARY, remove on conviction.
+kernel/src/arch/x86_64/trap.rs: user #GP now runs the full
+user_segv_forensics report + GP-REGMEM (words at pointer regs) +
+GP-PTE (victim PTE/frame/descriptor/ring membership).
+kernel/src/mm/page_alloc.rs: alloc_pages → perf ring_frame_check hook
+(one relaxed load when no rings live).
+
+### 88.5 FOR THE 89TH (priority order)
+1. RERUN noarm until a CORRUPTING boot (expect ~2 of 5) and read the
+   GP-PTE lines: victim PTE present + frame rc/mapcount + ring_frame=?
+   decides between (a) fresh-zero-frame PTE replacement (stray-unmap
+   family in the victim mm — then hunt the victim's mm_ops ring) and
+   (b) victim frame = ring frame (eager install wiring into the wrong
+   root/PT page — then audit map_page's intermediate PT-page alloc).
+2. Extend the DEADLOCK print with the lock owner (pid/comm + symbol
+   of the allocation site) and rerun noarm — 88.3.
+3. Candidate hardening even without full conviction: make
+   perf_mmap_handler's eager install use pte_lock_for(current-mm)
+   like every other same-mm leaf writer (it currently takes the
+   GLOBAL PTE lock — the only same-mm writer that does), AND/OR make
+   placement+install atomic (hold vma_write across the install).
+   Justify with A/B boots (same rig, 5 boots each, GP counts).
+4. A printk-free timing probe (per-CPU timestamps into a static ring,
+   NOT serial prints — serial spam closes the race) around
+   perf_mmap_handler phases in a guest C probe that replicates the
+   hiperf pattern (17 opens + 16×(257-page mmap bursts) + concurrent
+   same-mm mremap churn) — reproduce without hiperf, bisect the exact
+   interleave.
+5. THEN the still-open §87.8 wait4/SIGCHLD wakeup loss (unhunted this
+   session — the perf hunt consumed it; §88 analysis groundwork:
+   do_wait's prepare_to_wait/recheck/dequeue_if_enqueued discipline
+   and wake_group_chldexit were read and look correct — the bug is
+   elsewhere; FUXW/wakewatch instruments ready).
+6. §87.7#2 console byte loss, #3 ext4 metadata_csum: untouched.
+
+Rig assets: run/system-hp88a.img (hp88a-run.sh injected);
+run/hp87/boot-hp88{a..k}.sh; userdata-hp88{a..k}.img (delete the
+a..e/j/k ones when disk is tight, keep f-generation source
+userdata-hp87f.img); output disk run/hp87-out.img drive 7
+(/data/hpout). NOTE: two-step script needs SECS ≥ 220 (160s windows
+cut the copy phase — hp88d lost its outputs that way).
