@@ -1,0 +1,31 @@
+r5b-bigfile2.cmds
+r5b-bigfile.cmds
+r5b-churn.cmds
+r5b-deepdirect.cmds
+r5b-fsyncburn.cmds
+r5b-hunt1.cmds
+r5b-hunt2.cmds
+r5b-hunt3.cmds
+r5b-hunt4.cmds
+r5-direct.cmds
+r5-engines2.cmds
+r5-engines.cmds
+r5-fsync.cmds
+r5-laio.cmds
+r5-mmaprwn.cmds
+r5-multi2.cmds
+r5-multi.cmds
+r5-posxaio-decode.cmds
+r5-posxaio-replay.cmds
+r5-randrw.cmds
+r5-seqrw.cmds
+r5-verify.cmds
+r6-futex.cmds
+L|hackbench 20 process|200
+L|hackbench -p 20|200
+L|60 cyclictest -D 30 -i 1000 -m|200
+L|60 cyclictest -D 30 -i 1000 -m -p 98|200
+L|45 pi_stress -D 15 -g 2|120
+L|60 memfd|200
+L|60 threadtest -t 20|300
+L|150 posix_timers|200

@@ -31,7 +31,13 @@ mkdir -p "$OUTDIR"
 # INJBINS: extra dir of static binaries to inject alongside the suites
 # (e.g. run/kselftest-bin for the kselftest classes).
 echo "inject: building rt-tests suite + qsrun into $IMAGE"
+# Serialize the build+qsrun-compile phase fleet-wide: concurrent callers
+# (stress-fleet3 slots) share run/rttests-build scratch (rm -rf + extract)
+# and racing them corrupts the scratch -> spurious set -e exits.
+exec 9>"$ROOT_DIR/run/.qrtests-build.lock"
+flock 9
 userspace/tests/rttests/build-x86.sh > "$OUTDIR/build.log" 2>&1 || {
+    flock -u 9
     cat "$OUTDIR/build.log" >&2
     exit 1
 }
@@ -45,6 +51,8 @@ toolchain/x86_64-rux-linux-musl/bin/musl-gcc -static -O2 -Wall \
     -o "$OUTDIR/qsrun" test/qrtests/qsrun.c 2>/dev/null
 toolchain/x86_64-rux-linux-musl/bin/musl-gcc -static -O2 -Wall \
     -o "$OUTDIR/schedprobe" test/qrtests/schedprobe.c 2>/dev/null
+flock -u 9
+exec 9>&-
 BIN="$OUTDIR"            # qsrun/schedprobe built here
 SUITE="$ROOT_DIR/run/rttests-bin"  # suite binaries (build-x86.sh output)
 INJ=$(mktemp /tmp/qa-inj-XXXX)
