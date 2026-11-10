@@ -104,7 +104,10 @@ pub fn flush_tlb_others(_start: u64, _end: u64) {
 // ============================================================================
 
 /// Dispatch a received IPI vector.  Called from interrupt context.
-pub fn handle_ipi_vector(vector: u64) {
+/// `regs` is the INTERRUPTED context's frame (trap.S-built PtRegs) —
+/// used by the REMOTE-BT capture to name what this CPU was executing
+/// when poked.
+pub fn handle_ipi_vector(vector: u64, regs: &crate::arch::pt_regs::PtRegs) {
     match vector {
         VECTOR_RESCHEDULE => {
             // Only set the flag.  Calling schedule() here (IRQs off)
@@ -142,7 +145,10 @@ pub fn handle_ipi_vector(vector: u64) {
             // contract holds by construction here.
             crate::arch::cpu::wfi();
         },
-        VECTOR_IRQ_WORK => snapshot_self(),
+        VECTOR_IRQ_WORK => {
+            snapshot_self();
+            remote_bt_self(regs);
+        }
         _ => {}
     }
 }
@@ -198,6 +204,193 @@ fn snapshot_self() {
         SNAP_TB[cpu].store(crate::drivers::timer::read_time(), Ordering::Relaxed);
     }
     SNAP_DONE[cpu].store(req, Ordering::Release);
+}
+
+// ============================================================================
+// REMOTE-BT (oh-crash 91st): live remote stack capture via IRQ_WORK
+// ============================================================================
+//
+// The 90th's pristine-userdata boots (hp90c/hp90cq/hp90f) melt down with
+// every CPU spinning on ONE heap-allocated spinlock (784 DEADLOCK
+// prints) plus two 10s soft lockups in settingsdata workers — and both
+// instruments printed only the OBSERVER's own context: the DEADLOCK
+// print names the spinner's acquire site (useless — the spinners are
+// all in RawSpinlock::lock), the softlockup print dumped the DETECTOR's
+// stack. This instrument answers the two open questions directly:
+//   - "what is the HOLDER doing?" (deadlock_warn pokes the owner CPU)
+//   - "where is the stuck CPU spinning?" (softlockup pokes it)
+// The requester arms a per-target request sequence, sends IRQ_WORK, and
+// polls the done-sequence with a bounded pure spin (no jiffies — the
+// local tick may be dead; no locks — the requester is by construction
+// in a fragile state). The handler on the target captures the
+// INTERRUPTED context (the IPI entry's pt_regs: rip/rsp/rbp — what that
+// CPU was executing when poked) and walks its own frame-pointer chain
+// into shared slots. A timeout is itself evidence: that CPU is not
+// servicing interrupts at all (IF=0 wedge / parked).
+//
+// Frame addresses are printed RAW (no ksyms lookup): the print paths
+// run in contexts where the allocator itself may be the wedged lock, so
+// no allocation happens anywhere in this instrument. Symbolize
+// host-side with gen-ksyms output, same as the DEADLOCK ra= field.
+
+/// Request sequence (requester bumps; handler echoes into BT_DONE).
+static BT_REQ: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static BT_DONE: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+/// Interrupted context at capture time. rbp = 0 when the target was
+/// interrupted in USER mode (kernel frame walk is meaningless there).
+static BT_RIP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static BT_RSP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static BT_RBP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+/// Captured kernel return addresses (frame-pointer walk), [cpu][i].
+static BT_FRAMES: [AtomicU64; REMOTE_BT_MAX_FRAMES * MAX_CPUS] =
+    [const { AtomicU64::new(0) }; REMOTE_BT_MAX_FRAMES * MAX_CPUS];
+/// Number of valid frames in BT_FRAMES[cpu] (0 = none / user mode).
+static BT_NFRAMES: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+
+/// Frames captured per remote request.
+pub const REMOTE_BT_MAX_FRAMES: usize = 24;
+
+/// One in-flight remote-BT per machine (any hunter): a second requester
+/// racing the same target would bump the request sequence under the
+/// first's poll and force a bogus timeout. CAS gate, never blocks.
+static BT_INFLIGHT: AtomicBool = AtomicBool::new(false);
+
+/// IRQ_WORK handler body: capture THIS CPU's interrupted context and
+/// frame-pointer chain (REMOTE-BT, see the block comment above).
+fn remote_bt_self(regs: &crate::arch::pt_regs::PtRegs) {
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu >= MAX_CPUS {
+        return;
+    }
+    let req = BT_REQ[cpu].load(Ordering::Acquire);
+    if BT_DONE[cpu].load(Ordering::Acquire) == req {
+        return; // no new request since the last service
+    }
+    BT_RIP[cpu].store(regs.rip, Ordering::Relaxed);
+    BT_RSP[cpu].store(regs.rsp, Ordering::Relaxed);
+    let mut n: u32 = 0;
+    if regs.kernel_mode() {
+        BT_RBP[cpu].store(regs.rbp, Ordering::Relaxed);
+        // Frame-pointer walk from the interrupted rbp — the same
+        // validation discipline as dfx::backtrace::walk_stack_trace
+        // (8-aligned, kernel range, strictly ascending, sane gap), but
+        // starting from the INTERRUPTED frame so the walk is the live
+        // chain of whatever the CPU was executing, not this handler's.
+        let mut fp = regs.rbp;
+        while n < REMOTE_BT_MAX_FRAMES as u32 {
+            if fp == 0 || fp % 8 != 0 || fp < 0x8000_0000 {
+                break;
+            }
+            // SAFETY: fp validated above (aligned, kernel range); the
+            // two frame-word reads are the standard unwind operation on
+            // a live kernel stack.
+            let (ret, next) = unsafe {
+                (*((fp + 8) as *const u64), *(fp as *const u64))
+            };
+            if ret == 0 {
+                break;
+            }
+            BT_FRAMES[cpu * REMOTE_BT_MAX_FRAMES + n as usize].store(ret, Ordering::Relaxed);
+            n += 1;
+            if next <= fp || next - fp > 0x4000 {
+                break;
+            }
+            fp = next;
+        }
+    } else {
+        BT_RBP[cpu].store(0, Ordering::Relaxed);
+    }
+    BT_NFRAMES[cpu].store(n, Ordering::Relaxed);
+    // Publish AFTER all slots (Release; pairs with the requester's
+    // Acquire poll of BT_DONE).
+    BT_DONE[cpu].store(req, Ordering::Release);
+}
+
+/// Request a remote backtrace of `target` and print it (raw addresses;
+// see the block comment). Callers run in fragile contexts (deadlock
+/// spinner, softlockup detector): no locks, no jiffies, no allocation —
+/// the bounded wait is a pure spin over relaxed loads. Returns true
+/// when the target answered, false on timeout / not-inflight.
+pub fn remote_backtrace(target: usize, why: &str) -> bool {
+    if target >= MAX_CPUS || !crate::arch::smp::cpu_started(target) {
+        return false;
+    }
+    let me = crate::arch::cpu_id() as usize;
+    if target == me {
+        return false;
+    }
+    // One hunter at a time (see BT_INFLIGHT comment).
+    if BT_INFLIGHT
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return false;
+    }
+    let req = BT_REQ[target].fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+    send_ipi_type(target, IpiType::IrqWork);
+    // Bounded poll (~200M relaxed loads ≈ the DEADLOCK_WARN spin-budget
+    // class — well under a second on KVM).
+    let mut spins: u32 = 0;
+    while BT_DONE[target].load(Ordering::Acquire) != req {
+        spins = spins.wrapping_add(1);
+        if spins > 200_000_000 {
+            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+            let _ = core::fmt::Write::write_fmt(
+                &mut w,
+                format_args!("REMOTE-BT[{}]: cpu={} TIMEOUT (not servicing IPIs)\n", why, target),
+            );
+            BT_INFLIGHT.store(false, Ordering::Release);
+            return false;
+        }
+        core::hint::spin_loop();
+    }
+    let rip = BT_RIP[target].load(Ordering::Relaxed);
+    let rsp = BT_RSP[target].load(Ordering::Relaxed);
+    let rbp = BT_RBP[target].load(Ordering::Relaxed);
+    let n = BT_NFRAMES[target].load(Ordering::Relaxed) as usize;
+    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+    // Target's current task pid/comm (best-effort; comm is fixed-size
+    // bytes, no allocation).
+    let cur = unsafe { crate::sched::sched::cpu_state(target).current };
+    if cur.is_null() {
+        let _ = core::fmt::Write::write_fmt(
+            &mut w,
+            format_args!("REMOTE-BT[{}] cpu={}: (no current task) rip={:#x} rsp={:#x}\n", why, target, rip, rsp),
+        );
+    } else {
+        let pid = unsafe { (*cur).pid() };
+        let comm = unsafe { (*cur).comm() };
+        let mut cbuf = [0u8; 17];
+        let mut cl = 0;
+        for &b in comm.iter() {
+            if b == 0 || cl == 16 {
+                break;
+            }
+            if (0x20..0x7f).contains(&b) {
+                cbuf[cl] = b;
+                cl += 1;
+            }
+        }
+        let cname = core::str::from_utf8(&cbuf[..cl]).unwrap_or("?");
+        let _ = core::fmt::Write::write_fmt(
+            &mut w,
+            format_args!("REMOTE-BT[{}] cpu={} task={}({}) rip={:#x} rsp={:#x} rbp={:#x}\n",
+                why, target, pid, cname, rip, rsp, rbp),
+        );
+    }
+    if rbp == 0 {
+        let _ = core::fmt::Write::write_str(&mut w, "REMOTE-BT: target was in USER mode\n");
+    }
+    let base = target * REMOTE_BT_MAX_FRAMES;
+    for i in 0..n.min(REMOTE_BT_MAX_FRAMES) {
+        let a = BT_FRAMES[base + i].load(Ordering::Relaxed);
+        let _ = core::fmt::Write::write_fmt(
+            &mut w,
+            format_args!("REMOTE-BT  #{:02} {:#x}\n", i, a),
+        );
+    }
+    BT_INFLIGHT.store(false, Ordering::Release);
+    true
 }
 
 // ============================================================================

@@ -1122,7 +1122,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                 {
                     crate::interrupt::preempt::irq_enter();
                     crate::drivers::intc::apic::eoi();
-                    crate::arch::ipi::handle_ipi_vector(v);
+                    crate::arch::ipi::handle_ipi_vector(v, regs_ref);
                     crate::interrupt::preempt::irq_exit();
                     irq_exit_maybe_preempt_kernel(regs_ref);
                 }
