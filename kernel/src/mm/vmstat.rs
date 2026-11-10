@@ -47,6 +47,9 @@ pub static PGALLOC_DMA: AtomicU64 = AtomicU64::new(0);
 /// Count one page fault.
 pub fn note_fault() {
     PGFAULT.fetch_add(1, Ordering::Relaxed);
+    // perf per-CPU page-fault accounting (PERF_COUNT_SW_PAGE_FAULTS;
+    // one relaxed load when no perf event wants it).
+    crate::perf::note_pfault();
 }
 
 /// Count one major page fault.

@@ -762,6 +762,33 @@ impl ProcFSSuperBlock {
             sysctl::write_core_pattern,
             self.alloc_ino(),
         )));
+        // perf_event knobs — hiperf's init cfg writes them when
+        // security.perf_harden=0; values are stored (the sampler's
+        // own granularity is KERNEL_HZ).
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"perf_event_paranoid".to_vec(),
+            sysctl::generate_perf_event_paranoid,
+            sysctl::write_perf_event_paranoid,
+            self.alloc_ino(),
+        )));
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"perf_event_max_sample_rate".to_vec(),
+            sysctl::generate_perf_max_sample_rate,
+            sysctl::write_perf_max_sample_rate,
+            self.alloc_ino(),
+        )));
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"perf_cpu_time_max_percent".to_vec(),
+            sysctl::generate_perf_cpu_time_max_percent,
+            sysctl::write_perf_cpu_time_max_percent,
+            self.alloc_ino(),
+        )));
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"perf_event_mlock_kb".to_vec(),
+            sysctl::generate_perf_event_mlock_kb,
+            sysctl::write_perf_event_mlock_kb,
+            self.alloc_ino(),
+        )));
         // SysV IPC message-queue limits (read by LTP msgstress01 and
         // ipcs(1); msgmni = queue-count limit, msgmax = largest message,
         // msgmnb = default queue bytes).

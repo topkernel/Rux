@@ -25,6 +25,7 @@
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 
+use alloc::format;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -607,5 +608,67 @@ pub fn write_ns_last_pid(input: &[u8]) -> i32 {
             0
         }
         Err(e) => e,
+    }
+}
+
+// perf_event sysctls — hiperf's init cfg writes these when
+// security.perf_harden=0; reads keep the reference defaults.
+/// /proc/sys/kernel/perf_event_paranoid (2: kernel-inclusive events
+/// need CAP_PERFMON/CAP_SYS_ADMIN — enforced in perf::sys_perf_event_open).
+pub static PERF_EVENT_PARANOID: AtomicU32 = AtomicU32::new(2);
+/// /proc/sys/kernel/perf_event_max_sample_rate (informational here:
+/// the tick-granular sampler's effective ceiling is KERNEL_HZ).
+pub static PERF_EVENT_MAX_SAMPLE_RATE: AtomicU32 = AtomicU32::new(100000);
+/// /proc/sys/kernel/perf_cpu_time_max_percent.
+pub static PERF_CPU_TIME_MAX_PERCENT: AtomicU32 = AtomicU32::new(25);
+/// /proc/sys/kernel/perf_event_mlock_kb.
+pub static PERF_EVENT_MLOCK_KB: AtomicU32 = AtomicU32::new(516);
+
+pub fn generate_perf_event_paranoid() -> Vec<u8> {
+    format!("{}\n", PERF_EVENT_PARANOID.load(Ordering::Relaxed)).into_bytes()
+}
+pub fn write_perf_event_paranoid(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v) if v <= 4 => {
+            PERF_EVENT_PARANOID.store(v as u32, Ordering::Relaxed);
+            0
+        }
+        _ => -(crate::errno::constants::EINVAL as i32),
+    }
+}
+pub fn generate_perf_max_sample_rate() -> Vec<u8> {
+    format!("{}\n", PERF_EVENT_MAX_SAMPLE_RATE.load(Ordering::Relaxed)).into_bytes()
+}
+pub fn write_perf_max_sample_rate(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v) if (1..=1_000_000).contains(&v) => {
+            PERF_EVENT_MAX_SAMPLE_RATE.store(v as u32, Ordering::Relaxed);
+            0
+        }
+        _ => -(crate::errno::constants::EINVAL as i32),
+    }
+}
+pub fn generate_perf_cpu_time_max_percent() -> Vec<u8> {
+    format!("{}\n", PERF_CPU_TIME_MAX_PERCENT.load(Ordering::Relaxed)).into_bytes()
+}
+pub fn write_perf_cpu_time_max_percent(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v) if (1..=100).contains(&v) => {
+            PERF_CPU_TIME_MAX_PERCENT.store(v as u32, Ordering::Relaxed);
+            0
+        }
+        _ => -(crate::errno::constants::EINVAL as i32),
+    }
+}
+pub fn generate_perf_event_mlock_kb() -> Vec<u8> {
+    format!("{}\n", PERF_EVENT_MLOCK_KB.load(Ordering::Relaxed)).into_bytes()
+}
+pub fn write_perf_event_mlock_kb(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v) if (1..=1 << 20).contains(&v) => {
+            PERF_EVENT_MLOCK_KB.store(v as u32, Ordering::Relaxed);
+            0
+        }
+        _ => -(crate::errno::constants::EINVAL as i32),
     }
 }

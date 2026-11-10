@@ -1285,6 +1285,12 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             if let Some(ret) = crate::ipc::binder::binder_file_ioctl(&file, request, arg) {
                 return ret;
             }
+            // perf-event ioctls (PERF_EVENT_IOC_ENABLE/DISABLE/… on
+            // perf_event_open fds): dispatch on the File's ops identity,
+            // same pattern as binder.
+            if let Some(ret) = crate::perf::perf_file_ioctl(&file, request, arg) {
+                return ret;
+            }
             // /dev/access_token_id ioctls (OH token registry): dispatch on
             // the File's ops identity, same pattern as binder.
             if let Some(ret) = crate::ipc::access_token::access_token_file_ioctl(&file, request, arg) {

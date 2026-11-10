@@ -148,6 +148,11 @@ pub(crate) fn do_execve_elf(
         name[..len].copy_from_slice(&base.as_bytes()[..len]);
         // SAFETY: task_ptr is the current task, valid throughout execve.
         unsafe { (*task_ptr).set_comm(&name); }
+        // perf COMM sideband (hiperf process tracking; no-op when no
+        // perf event asks for comm records).
+        unsafe {
+            crate::perf::hook_comm((*task_ptr).tgid(), (*task_ptr).pid(), &name);
+        }
     }
 
     // POSIX exec signal cleanup:
@@ -1331,6 +1336,29 @@ pub(crate) fn do_execve_elf(
                     let seg_pages = vma.page_count() as u64;
                     let _ = vma_mgr.add(vma);
                     new_addr_space.add_total_vm(seg_pages);
+
+                    // perf MMAP2 sideband: one record per executable
+                    // image segment (hiperf symbolization; gated on a
+                    // perf event asking for mmap records). prot from
+                    // the segment flags, flags = MAP_PRIVATE (0x02).
+                    if phdr.is_executable() {
+                        let mut prot: u32 = 0;
+                        if phdr.is_readable() { prot |= 0x1; }
+                        if phdr.is_writable() { prot |= 0x2; }
+                        prot |= 0x4; // PT_EXEC
+                        // SAFETY: task_ptr is the current task.
+                        let (tpid, ttgid) = unsafe { ((*task_ptr).pid(), (*task_ptr).tgid()) };
+                        crate::perf::hook_mmap2(
+                            ttgid,
+                            tpid,
+                            vma_start,
+                            vma_end - vma_start,
+                            (phdr.p_offset - (phdr.p_vaddr & (PAGE_SIZE as u64 - 1))) as u64,
+                            prot,
+                            0x02,
+                            pathname.as_bytes(),
+                        );
+                    }
                 }
             }
         }

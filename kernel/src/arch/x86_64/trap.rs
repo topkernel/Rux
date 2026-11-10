@@ -1518,8 +1518,16 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
                     // launcher-comm tasks (dfx-gated inside).
                     utime_sample_rip(regs.rip, (*task).comm());
                     // perf events (PERF_TYPE_SOFTWARE sampling): stash the
-                    // interrupted PC for the softirq charger. Lock-free.
-                    crate::perf::note_tick(regs.rip, crate::perf::MODE_USER, (*task).pid());
+                    // interrupted PC + frame pointer for the softirq
+                    // charger (RBP feeds the user callchain walk).
+                    // Lock-free.
+                    crate::perf::note_tick_fp(
+                        regs.rip,
+                        crate::perf::MODE_USER,
+                        (*task).pid(),
+                        regs.rbp,
+                        (*task).tgid(),
+                    );
                 } else {
                     (*task).stime_ticks.fetch_add(1, Relaxed);
                     // sc105 stime-burn attribution: sample WHERE the
@@ -1531,7 +1539,13 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
                         STIME_LAUNCHER_TICKS.fetch_add(1, Relaxed);
                     }
                     crate::dfx::syscost::tick_kern(regs.rip);
-                    crate::perf::note_tick(regs.rip, crate::perf::MODE_KERNEL, (*task).pid());
+                    crate::perf::note_tick_fp(
+                        regs.rip,
+                        crate::perf::MODE_KERNEL,
+                        (*task).pid(),
+                        0,
+                        (*task).tgid(),
+                    );
                 }
             } else {
                 crate::dfx::syscost::tick_idle();

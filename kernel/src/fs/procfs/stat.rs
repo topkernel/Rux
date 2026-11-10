@@ -114,6 +114,9 @@ pub fn charge_tick(user_mode: bool) {
 /// — voluntary.
 pub fn note_switch(prev: &crate::process::task::Task) {
     CTXT_SWITCHES.fetch_add(1, Ordering::Relaxed);
+    // perf per-CPU context-switch accounting (PERF_COUNT_SW_CONTEXT_
+    // SWITCHES; one relaxed load when no perf event wants it).
+    crate::perf::note_ctxsw();
     if prev.pid() == 0 {
         return; // the idle task is not a process
     }

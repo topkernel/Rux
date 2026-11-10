@@ -831,6 +831,10 @@ pub fn do_exit(exit_code: i32) -> ! {
     let dying_pid = unsafe { (*current).pid() };
     crate::mm::page_alloc::reclaim_gate_exit_release(dying_pid);
 
+    // perf EXIT sideband (hiperf process tracking; no-op unless a perf
+    // event is armed).
+    crate::perf::hook_exit(unsafe { (*current).tgid() }, dying_pid);
+
     // sc57 (57th session): thread-exit forensics for the OH wedge —
     // an FFRT/binder worker that exits while holding a userspace
     // ffrt::mutex leaves every later locker parked forever with no

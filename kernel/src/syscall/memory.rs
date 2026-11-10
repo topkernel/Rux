@@ -642,6 +642,29 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
         }
     }
 
+    // Perf-event mmap: the sampling ring buffer (page 0 metadata +
+    // npages data; see kernel/src/perf/mod.rs for the protocol).
+    // Dispatch on the File's ops identity (binder/io_uring pattern).
+    if fd >= 0 {
+        // SAFETY: fd is valid; get_file_fd returns a valid Arc<File>.
+        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+            if let Some(ops) = file.get_ops() {
+                if core::ptr::eq(ops as *const _, &crate::perf::PERF_OPS as *const _) {
+                    return match crate::perf::perf_mmap_handler(
+                        &file,
+                        addr,
+                        actual_length,
+                        offset,
+                        prot_flags,
+                    ) {
+                        Ok(mapped) => mapped as i64,
+                        Err(e) => -(e as i64),
+                    };
+                }
+            }
+        }
+    }
+
     // Binder mmap: /dev/binder maps the per-open transaction buffer zone
     // (kernel-allocated contiguous pages shared kernel<->user, like the
     // io_uring rings; transaction payloads land there and userspace reads

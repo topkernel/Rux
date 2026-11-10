@@ -31,7 +31,9 @@ pub fn test_config() {
     test_assert_eq!(PAGE_SHIFT, 12, "PAGE_SHIFT == 12");
 
     // Test 3: CPU and task limits
-    test_assert!(MAX_CPUS >= 1 && MAX_CPUS <= 4, "MAX_CPUS in valid range");
+    // MAX_CPUS bound moved 4 -> 8 with the SMP8 directive (Kernel.toml
+    // max_cpus=8; aarch64 caps at 4 arch-locally, still in range).
+    test_assert!(MAX_CPUS >= 1 && MAX_CPUS <= 8, "MAX_CPUS in valid range");
     test_assert_eq!(MAX_TASKS, 256, "MAX_TASKS == 256");
 
     // Test 4: Memory sizes

@@ -1092,6 +1092,19 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
 
         // /proc/stat "processes": the number of forks since boot.
         crate::fs::procfs::stat::note_fork();
+        // perf FORK sideband (hiperf process tracking; no-op unless a
+        // perf event is armed).
+        if let Some(cur) = crate::sched::current() {
+            // SAFETY: current is live here (parent side of the fork).
+            unsafe {
+                crate::perf::hook_fork(
+                    (*cur).tgid(),
+                    (*cur).pid(),
+                    pid as u32,
+                    pid as u32,
+                );
+            }
+        }
         if fp {
             crate::dfx::forkprof::add(crate::dfx::forkprof::P_FK_ENQUEUE, fp_t_enq);
             crate::dfx::forkprof::add(crate::dfx::forkprof::P_FK_TOTAL, fp_t0);
