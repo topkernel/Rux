@@ -1326,6 +1326,13 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
     if !addr_ptr.is_null() && (_addrlen as u64) > 128 {
         return -(errno::EINVAL as i64);
     }
+    // Unknown flags are EOPNOTSUPP (the reference's send-flag gate) —
+    // the INET sendto path used to ignore everything but MSG_DONTWAIT
+    // and ACCEPTED an unknown flag (half-sent the payload and returned
+    // a byte count; LTP sendmsg01's invalid-flags case).
+    if let Err(e) = validate_send_flags(_flags) {
+        return e;
+    }
     // Check buffer pointer validity
     if buf_ptr.is_null() {
         return -(errno::EFAULT as i64);
@@ -3056,6 +3063,22 @@ pub fn sys_shutdown(args: SyscallArgs) -> i64 {
 /// W3: msg_name is honored (the old code read and DISCARDED it — a UDP
 /// sendmsg could never address its datagram); MSG_DONTWAIT /
 /// O_NONBLOCK / SO_SNDTIMEO participate in the send.
+/// Reference send-flag validation (___sys_sendmsg's msg_valid_flags
+/// gate): unknown bits are EOPNOTSUPP. Shared by sendmsg and sendto
+/// (the reference gates sendto's flags through the same path).
+fn validate_send_flags(flags: i32) -> Result<(), i64> {
+    const MSG_VALID: i32 = 0x1 /* OOB */ | 0x4 /* DONTROUTE */
+        | 0x8 /* CTRUNC */ | 0x10 /* TRUNC */
+        | 0x20 /* WAITALL */ | 0x40 /* DONTWAIT */
+        | 0x80 /* EOR */ | 0x100 /* NOSIGNAL */
+        | 0x4000 /* MORE (cork) */ | 0x8000 /* WAITFORONE */
+        | 0x20000 /* FASTOPEN */ | 0x40000 /* CMSG_CLOEXEC */;
+    if flags & !MSG_VALID != 0 {
+        return Err(-(errno::EOPNOTSUPP as i64));
+    }
+    Ok(())
+}
+
 pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
     let fd = args[0] as i32;
     let msg_ptr = args[1] as *const u8;
@@ -3074,6 +3097,35 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
     }
     if !crate::arch::uaccess::access_ok(msg_ptr as usize, 64) {
         return -(errno::EFAULT as i64);
+    }
+
+    // Unknown flags are EOPNOTSUPP (the reference's msg_valid_flags
+    // gate in ___sys_sendmsg; LTP sendmsg01's invalid-flags case).
+    if let Err(e) = validate_send_flags(flags) {
+        return e;
+    }
+
+    // msg_control with a bad pointer is EFAULT for EVERY family (the
+    // unix path re-validates inside parse_unix_cmsgs; the INET path
+    // used to ignore control entirely — an invalid cmsg pointer then
+    // SUCCEEDED and the test's own cmsg walk crashed userspace).
+    {
+        // SAFETY: msg_ptr access_ok(64)-validated above; get_user is
+        // the exception-table path.
+        let control = unsafe {
+            crate::arch::uaccess::get_user::<usize>(msg_ptr.add(32) as *const usize)
+                .unwrap_or(0)
+        };
+        let controllen = unsafe {
+            crate::arch::uaccess::get_user::<usize>(msg_ptr.add(40) as *const usize)
+                .unwrap_or(0)
+        };
+        if control != 0
+            && controllen != 0
+            && !crate::arch::uaccess::access_ok(control, controllen)
+        {
+            return -(errno::EFAULT as i64);
+        }
     }
 
     // Read msg_name (sa_family) and msg_iov (iovec) from msghdr
@@ -3108,10 +3160,27 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
     for i in 0..msg_iovlen {
-        // SAFETY: iovec base/len read from user memory at validated offset; iov_base
-        // validated with access_ok before slice creation.
-        let iov_base = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(i * 16)) };
-        let iov_len = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(i * 16 + 8)) };
+        // SAFETY: iovec base/len read from user memory at validated
+        // offset — through the exception table, and a FAULT IS EFAULT
+        // (the old silent-zero reads turned an invalid iovec pointer
+        // into "empty message" and the send SUCCEEDED — LTP sendmsg01's
+        // invalid-iov-pointer case).
+        let iov_base = match unsafe {
+            crate::arch::uaccess::get_user::<usize>(
+                msg_iov_ptr.wrapping_add(i * 16) as *const usize
+            )
+        } {
+            Some(v) => v,
+            None => return -(errno::EFAULT as i64),
+        };
+        let iov_len = match unsafe {
+            crate::arch::uaccess::get_user::<usize>(
+                msg_iov_ptr.wrapping_add(i * 16 + 8) as *const usize
+            )
+        } {
+            Some(v) => v,
+            None => return -(errno::EFAULT as i64),
+        };
         if iov_len > 0 {
             if !crate::arch::uaccess::access_ok(iov_base, iov_len) {
                 return -(errno::EFAULT as i64);
