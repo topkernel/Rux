@@ -10069,3 +10069,39 @@ a..e/j/k ones when disk is tight, keep f-generation source
 userdata-hp87f.img); output disk run/hp87-out.img drive 7
 (/data/hpout). NOTE: two-step script needs SECS ≥ 220 (160s windows
 cut the copy phase — hp88d lost its outputs that way).
+
+### 88.6 ADDENDUM (final captures): GP-PTE verdict from hp88m
+
+Two more noarm boots: hp88l clean, **hp88m CORRUPTED (15 GPs at
+22.4s) with the GP-PTE forensics live**. The deciding print:
+
+  GP-PTE: rbx=0x7ff000449558 pte=0x800000017b559067 frame=0x17b559000
+          rc=1 mapcount=0 ring_frame=false   (x8 samples, same shape)
+
+Every corrupted victim pointer resolves to a **perfectly healthy PTE**
+(present|RW|US|A|D + NX, normal heap perms) pointing at a
+**once-mapped, singly-referenced anon frame that is NOT a ring
+frame** — with zeroed/garbage DATA inside. Combined with the silent
+ALLOC-DIRTY/RESOLD/PAGE-BAD/OVERWRITE detectors this kills every
+"ring frame ends up in the victim" theory. The surviving shapes:
+(a) **stray unmap clears the victim's live PTE -> frame freed -> the
+victim's own refault maps a FRESH ZERO frame** — post-hoc state is
+indistinguishable from a normal page (exactly what GP-PTE shows);
+(b) in-place zeroing of a live frame through the direct map by an
+unknown writer (no candidate left: the only zeroing burst — the ring
+mmap — provably touches only pristine frames).
+Hunt target now: **WHO CLEARS LIVE PTEs** (munmap/mremap/madvise/brk/
+mprotect surgery in the victim mm, likely racing ring-mmap-induced
+timing). The perf mmap remains the CATALYST (noring boots clean),
+plausibly via its GLOBAL PTE-epoch exclusive hold across the whole
+257-page install (16 rings/boot) reshuffling every other CPU's
+fault/unmap interleavings — cf. hp88k's DEADLOCK-on-heap-spinlock in
+the same window (88.3). 89th sharpening of 88.5#1: in a corrupting
+boot's serial, read the VICTIM's mm[self/sib] entries (printed by
+user_segv_forensics) against the corrupted VAs — a munmap/mremmap
+covering the VA right before the fault convicts the stray-unmap shape
+and names the syscall.
+
+hp88 boot ledger (GP counts): p/q/r=0, g=0(noperf), h=0(noring),
+e=7, j=8, d=8(noemit), m=15, a/b/c=9-15(normal), f/i=0(spam-
+confounded), k=0, l=0. Noarm corruption flakiness ~3/7 across builds.
