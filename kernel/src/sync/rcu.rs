@@ -68,6 +68,10 @@ static RCU_CBS_LOCK: [AtomicBool; MAX_CPUS] = [
     const { AtomicBool::new(false) },
     const { AtomicBool::new(false) },
     const { AtomicBool::new(false) },
+    const { AtomicBool::new(false) },
+    const { AtomicBool::new(false) },
+    const { AtomicBool::new(false) },
+    const { AtomicBool::new(false) },
 ];
 
 // ============================================================================
@@ -81,6 +85,10 @@ static RCU_GEN: AtomicU32 = AtomicU32::new(1);
 /// Per-CPU quiescent-state generation. Records the most recent `RCU_GEN`
 /// value this CPU reported via `rcu_note_context_switch()`.
 static RCU_QS_GEN: [AtomicU32; MAX_CPUS] = [
+    const { AtomicU32::new(0) },
+    const { AtomicU32::new(0) },
+    const { AtomicU32::new(0) },
+    const { AtomicU32::new(0) },
     const { AtomicU32::new(0) },
     const { AtomicU32::new(0) },
     const { AtomicU32::new(0) },

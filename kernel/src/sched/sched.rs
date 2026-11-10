@@ -724,10 +724,18 @@ static mut PER_CPU: [PerCpuState; MAX_CPUS] = [
     PerCpuState::new(),
     PerCpuState::new(),
     PerCpuState::new(),
+    PerCpuState::new(),
+    PerCpuState::new(),
+    PerCpuState::new(),
+    PerCpuState::new(),
 ];
 
 /// Per-CPU RQ initialization flags
 static RQ_INITIALIZED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
     core::sync::atomic::AtomicBool::new(false),
     core::sync::atomic::AtomicBool::new(false),
     core::sync::atomic::AtomicBool::new(false),
@@ -913,6 +921,10 @@ static mut NEED_RESCHED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
     core::sync::atomic::AtomicBool::new(false),
     core::sync::atomic::AtomicBool::new(false),
     core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
 ];
 
 /// Per-CPU polling-idle flags (closegap lane): set while the idle loop
@@ -923,6 +935,10 @@ static mut NEED_RESCHED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
 /// clear either takes the no-IPI path with the recheck catching the
 /// work, or takes the IPI path against a halting CPU (see cpu_idle_loop).
 static POLLING_IDLE: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
     core::sync::atomic::AtomicBool::new(false),
     core::sync::atomic::AtomicBool::new(false),
     core::sync::atomic::AtomicBool::new(false),
@@ -945,6 +961,10 @@ pub static WW_IDLE_PHASE: [core::sync::atomic::AtomicU32; MAX_CPUS] = [
     core::sync::atomic::AtomicU32::new(0),
     core::sync::atomic::AtomicU32::new(0),
     core::sync::atomic::AtomicU32::new(0),
+    core::sync::atomic::AtomicU32::new(0),
+    core::sync::atomic::AtomicU32::new(0),
+    core::sync::atomic::AtomicU32::new(0),
+    core::sync::atomic::AtomicU32::new(0),
 ];
 
 /// SP-5 r5 frozen-tick trap: per-CPU schedule() milestone inside the
@@ -957,6 +977,10 @@ pub static WW_IDLE_PHASE: [core::sync::atomic::AtomicU32; MAX_CPUS] = [
 /// (incl. the deferred-exit notify in the incoming frame); 4 = past
 /// restore (immediately cleared to 0). One relaxed store per milestone.
 pub static SCHED_CS_PHASE: [core::sync::atomic::AtomicU32; MAX_CPUS] = [
+    core::sync::atomic::AtomicU32::new(0),
+    core::sync::atomic::AtomicU32::new(0),
+    core::sync::atomic::AtomicU32::new(0),
+    core::sync::atomic::AtomicU32::new(0),
     core::sync::atomic::AtomicU32::new(0),
     core::sync::atomic::AtomicU32::new(0),
     core::sync::atomic::AtomicU32::new(0),
@@ -976,6 +1000,10 @@ fn sched_cs_stamp(cpu: usize, phase: u32) {
 // Sampled by each CPU's own tick (trap.rs) — no cross-CPU register
 // reads; printed as a per-second delta next to the phase stamp.
 static WW_SLOT_MISMATCH: [core::sync::atomic::AtomicU64; MAX_CPUS] = [
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0),
@@ -1151,6 +1179,10 @@ fn pick_gen_supersede(cpu: usize, task: *mut Task) {
 /// child_pid) into one atomic so the parent/child PAIR is never torn
 /// (0 = no pending notification).
 static DEFERRED_EXIT_NOTIFY: [core::sync::atomic::AtomicI64; MAX_CPUS] = [
+    const { core::sync::atomic::AtomicI64::new(0) },
+    const { core::sync::atomic::AtomicI64::new(0) },
+    const { core::sync::atomic::AtomicI64::new(0) },
+    const { core::sync::atomic::AtomicI64::new(0) },
     const { core::sync::atomic::AtomicI64::new(0) },
     const { core::sync::atomic::AtomicI64::new(0) },
     const { core::sync::atomic::AtomicI64::new(0) },
@@ -1336,6 +1368,10 @@ fn process_deferred_exit_notify_cpu(cpu: usize) {
 
 /// Per-CPU idle task storage
 static mut IDLE_TASK_STORAGES: [core::mem::MaybeUninit<Task>; MAX_CPUS] = [
+    core::mem::MaybeUninit::uninit(),
+    core::mem::MaybeUninit::uninit(),
+    core::mem::MaybeUninit::uninit(),
+    core::mem::MaybeUninit::uninit(),
     core::mem::MaybeUninit::uninit(),
     core::mem::MaybeUninit::uninit(),
     core::mem::MaybeUninit::uninit(),
