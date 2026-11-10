@@ -90,7 +90,7 @@ make ubuntu-image && make ubuntu-run    # boot-to-login ~4.5 s, login: root / ru
 
 ## OpenHarmony → launcher
 
-![OH launcher home screen](docs/images/oh-launcher-2026-10-31.png)
+![OH launcher home screen](docs/images/oh-launcher-2026-11-10.png)
 
 *Unmodified OH x86_64_virt image: samgr, foundation, render_service,
 hilogd, appspawn, hdf devhosts — 135+ services, launcher home screen,
