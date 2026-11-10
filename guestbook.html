@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>留言板 · Rux</title>
+<link rel="stylesheet" href="css/style.css?v=17">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="index.html">首页</a>
+      <a href="architecture/design.html">架构设计</a>
+      <a href="performance/index.html">性能</a>
+      <a href="security/index.html">安全</a>
+      <a href="testing/index.html">测试</a>
+      <a href="guides/getting-started.html">快速入门</a>
+      <a href="progress/roadmap.html">项目进展</a>
+      <a href="guestbook.html">留言</a>
+      <span class="lang-sw"><a class="on" href="guestbook.html">中文</a><a href="en/guestbook.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">架构设计</div>
+    <a href="architecture/design.html">架构与模块设计</a>
+    <a href="architecture/structure.html">代码结构</a>
+    <a href="architecture/boot.html">启动流程</a>
+    <a href="architecture/memory.html">内存管理</a>
+    <a href="architecture/riscv64.html">架构移植指南</a>
+    <a href="architecture/kernel-lock.html">锁序不变量</a>
+    <div class="grp">性能</div>
+    <a href="performance/index.html">性能测试</a>
+    <div class="grp">安全</div>
+    <a href="security/index.html">安全与形式验证</a>
+    <div class="grp">测试</div>
+    <a href="testing/index.html">测试总览</a>
+    <a href="testing/ltp.html">LTP 兼容扫描</a>
+    <a href="testing/ltp-full.html">LTP 全量用例</a>
+    <a href="testing/ltp-timeout.html">LTP TIMEOUT 审计</a>
+    <a href="testing/stability.html">稳定性</a>
+    <a href="testing/stress.html">压力</a>
+    <a href="testing/gnome-retrospective.html">回溯报告</a>
+    <div class="grp">开发指南</div>
+    <a href="guides/getting-started.html">快速入门</a>
+    <a href="guides/development.html">参与开发</a>
+    <a href="guides/configuration.html">内核配置</a>
+    <div class="grp">项目进展</div>
+    <a href="progress/roadmap.html">路线图</a>
+    <a href="progress/changelog.html">更新日志</a>
+    <a href="progress/quickref.html">命令速查</a>
+    <div class="grp">互动</div>
+    <a class="on" href="guestbook.html">留言板</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>留言板</h1>
+    <div class="sub">评论与留言由 GitHub Discussions 承载 —— 用你的 GitHub 账号登录即可发表,无需额外注册</div>
+
+    <div class="callout"><b>使用说明:</b>评论以 GitHub Discussions 为后端(giscus 提供),支持 Markdown、表情回应与回复串。本页(中文)与英文页各自独立成串。如果下方评论区显示初始化提示,说明仓库的 Discussions 开关刚打开、索引还在建立 —— 刷新一次即可。</div>
+
+    <h2 id="comments"><span class="anchor">§1</span>评论</h2>
+    <div class="giscus-wrap">
+      <script src="https://giscus.app/client.js"
+              data-repo="topkernel/Rux"
+              data-repo-id="R_kgDORGd4ag"
+              data-category="General"
+              data-category-id="__GISCUS_CATEGORY_ID__"
+              data-mapping="pathname"
+              data-strict="0"
+              data-reactions-enabled="1"
+              data-emit-metadata="0"
+              data-input-position="top"
+              data-theme="light"
+              data-lang="zh-CN"
+              data-loading="lazy"
+              crossorigin="anonymous"
+              async></script>
+      <noscript>需要启用 JavaScript 才能加载评论区;也可以直接到 <a href="https://github.com/topkernel/Rux/discussions">仓库的 Discussions</a> 留言。</noscript>
+    </div>
+
+    <h2 id="alt"><span class="anchor">§2</span>其他渠道</h2>
+    <ul>
+      <li><b>问题与缺陷</b>:开一个 <a href="https://github.com/topkernel/Rux/issues/new">Issue</a>(比留言板更利于跟踪)。</li>
+      <li><b>讨论串</b>:直接到 <a href="https://github.com/topkernel/Rux/discussions">Discussions</a> 发起或参与话题。</li>
+    </ul>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="index.html">返回首页</a></span>
+    
+      <span class="foot-stats">本站访问 <span id="busuanzi_value_site_pv"></span> 次 · 访客 <span id="busuanzi_value_site_uv"></span> 人</span></div>
+  </div>
+</footer>
+
+<script src="js/main.js?v=17"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>

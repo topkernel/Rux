@@ -634,3 +634,8 @@ details.family summary:hover { background: #e9edf3; }
 .lang-sw a:hover { text-decoration: none; color: var(--text); background: rgba(27,35,48,0.05); }
 .lang-sw a.on { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; }
 .lang-sw a + a { border-left: 1px solid var(--border-strong); }
+
+/* ---------- 页脚访客统计 ---------- */
+.foot-stats { font-family: var(--mono); color: var(--text-3); }
+.giscus-wrap { margin: 24px 0 40px; }
+.giscus-wrap .giscus, .giscus-wrap iframe { width: 100%; }
