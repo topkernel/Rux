@@ -10404,3 +10404,41 @@ FOR THE 91ST (priority order):
    glacial-writeback (~300KB/s) + sync-hang + dirty-page-loss bugs
    (90.2) — the fs lane now has four separate parity/correctness
    items from this campaign.
+
+#### 90.5 Session close-out: fp chains are EMPTY in our perf; hp90f holder hunt; extraction recipe
+
+- **hp90e fp record**: extraction recipe WORKED — cp, then `sync &` +
+  sleep 50 + kill the sync, umount, 15s settle → hp90e-fp.data landed
+  WHOLE (10.8MB; commit-ready in run/hp90-out/). BUT the record's
+  callchains are EMPTY: every sample's PERF_SAMPLE_CALLCHAIN nr=0 —
+  our perf_event_open machinery accepts the CALLCHAIN bit but never
+  fills frames. fp attribution is impossible until perf implements
+  chain capture (perf-lane item; also blocks `hiperf report` quality).
+  Parser (run/hp90-parse.py) already handles chain STs and emits
+  callers.txt the moment real chains exist.
+- **hp90f** (pristine userdata, `syscost=1 dfx=watchdog`, LOGLEVEL=4):
+  meltdown EARLIER (28.9s; syscost load shifts timing). Watchdog
+  snapshot at the 96.7s DEADLOCK: RUNNING = 7×OS_DfxWatchdog + 6×
+  foundation threads + installs + TaskExecutorRDB (settingsdata's RDB
+  executor) + accountmgr/softbus/netmanager — OH's per-service dfx
+  watchdogs all fired because their hosts stopped feeding; the KERNEL
+  lock 0xffff88807232c6dc spins system-wide. Holder still unnamed —
+  the dumps carry no kernel stacks; 88.5#2's DEADLOCK owner-extension
+  (holder pid/comm + alloc site) plus a stuck-RIP line in the soft-
+  lockup print are the two instruments that finish this hunt.
+  syscost census at t=240s readable fragment: cpu0 IF=0 tot=155,328ms
+  of 240s (64.7% — a meltdown boot; official share 25.7%); rest of the
+  census garbled by concurrent DEADLOCK printing into the same UART.
+- **Rig recipe (blood rules added)**: output-disk extraction = cp →
+  background sync killed at 50s → umount → 15s settle (hp90e proof);
+  debugfs name-lookup FAILS on kernel-written dirs (ext2_lookup
+  checksum) — `ls -l` the dir then `dump <inode> file`; a QEMU kill
+  during a hung sync loses ALL unflushed data (hp90d: 10.4MB record
+  visible in guest, zero on disk).
+
+Ledger of boots this session: hp90a (record ok / extraction ENOSPC),
+hp90b (2×90s records; w2 25.9MB extracted, w1 lost), hp90c (control
+LOGLEVEL=7), hp90cq (LOGLEVEL=4), hp90d (fp record lost to sync-hang),
+hp90e (fp record extracted whole; chains empty), hp90f (watchdog+
+syscost meltdown hunt). All artifacts under run/hp90-out/; parser
+run/hp90-parse.py committed.

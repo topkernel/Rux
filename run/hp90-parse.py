@@ -100,16 +100,18 @@ def collect_sample_offsets(limit=200):
     return offs
 
 cand_sts = [c for c in dict.fromkeys(
-    [ST, 0xF7, 0x100F7, ST | S_IDENTIFIER, 0xEF, 0x10EF, 0xD7, 0x100D7])]
+    [ST, 0xF7, 0x100F7, ST | S_IDENTIFIER, 0xEF, 0x10EF, 0xD7, 0x100D7,
+     0x2F7, 0x30F7, 0x100D7 | 512, 0x100F7 | 512])]
 soffs = collect_sample_offsets()
 best_st, best_score = ST or 0xF7, -1.0
 for st_c in cand_sts:
     if not st_c:
         continue
+    fixed = sample_size(st_c)
     okn = tot = 0
     for o in soffs:
         sz = struct.unpack_from("<H", d, o + 6)[0]
-        if sample_size(st_c) != sz:
+        if sz != fixed and not (st_c & 512 and sz > fixed):
             tot += 1
             continue
         ip, pid = parse_sample_probe(o + 8, st_c)
@@ -132,6 +134,29 @@ n_records = collections.Counter()
 samples = 0
 resyncs = 0
 covered = 0
+S_CALLCHAIN = 512
+chain_hist = collections.defaultdict(collections.Counter)  # leaf ip -> caller counter
+chain_depth = collections.Counter()
+
+def parse_chain(p):
+    """return list of ips if CALLCHAIN present in ST, else None"""
+    if not (ST & S_CALLCHAIN):
+        return None
+    # walk the fixed fields to reach the callchain nr (order matters)
+    q = p
+    if ST & S_IDENTIFIER: q += 8
+    if ST & S_IP: q += 8
+    if ST & S_TID: q += 8
+    if ST & S_TIME: q += 8
+    if ST & S_ADDR: q += 8
+    if ST & S_ID: q += 8
+    if ST & S_SID: q += 8
+    if ST & S_CPU: q += 16
+    if ST & S_PERIOD: q += 8
+    nr = struct.unpack_from("<Q", d, q)[0]
+    if nr > 128:
+        return None
+    return list(struct.unpack_from(f"<{nr}Q", d, q + 8))
 
 # main walk with resync: if header implausible, scan forward 4 bytes
 # at a time for the next plausible chain start
@@ -150,9 +175,13 @@ while off + 8 <= data_end:
         if t == 9:
             ip, pid, _m = parse_sample(p, off + sz, misc)
             samples += 1
+            chain = parse_chain(p)
             if ip >= 0xFFFFFFFF80000000:
                 proc[pid][0] += 1
                 kern_hist[ip] += 1
+                if chain and len(chain) > 1:
+                    chain_depth[len(chain)] += 1
+                    chain_hist[ip][chain[1]] += 1
             else:
                 proc[pid][1] += 1
                 user_hist[(pid, ip)] += 1
@@ -189,6 +218,18 @@ with open(f"{out_prefix}-kernel-top.txt", "w") as w:
     w.write(f"# kernel samples {tot}\ncount pct addr symbol\n")
     for ip, c in kern_hist.most_common(150):
         w.write(f"{c} {100.0*c/max(tot,1):.2f}% {ip:#x} {ksym(ip)}\n")
+
+# caller attribution for the top kernel leaves (fp records)
+if chain_hist:
+    with open(f"{out_prefix}-callers.txt", "w") as w:
+        for ip, c in kern_hist.most_common(25):
+            if ip not in chain_hist:
+                continue
+            w.write(f"LEAF {c} {ksym(ip)}\n")
+            for caller, cc in chain_hist[ip].most_common(12):
+                w.write(f"    {cc} <- {ksym(caller)}\n")
+    print("chain depths:", dict(sorted(chain_depth.items())[:10]))
+    print("callers ->", f"{out_prefix}-callers.txt")
 
 def module_of(tgid, ip):
     for (s, e, pgoff, name) in mmaps.get(tgid, ()):
