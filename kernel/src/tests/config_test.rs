@@ -31,7 +31,9 @@ pub fn test_config() {
     test_assert_eq!(PAGE_SHIFT, 12, "PAGE_SHIFT == 12");
 
     // Test 3: CPU and task limits
-    test_assert!(MAX_CPUS >= 1 && MAX_CPUS <= 4, "MAX_CPUS in valid range");
+    // SMP8 directive (2026-11-08): the ceiling moved 4 -> 8; the old
+    // <= 4 bound was the pre-SMP8 world.
+    test_assert!(MAX_CPUS >= 1 && MAX_CPUS <= 8, "MAX_CPUS in valid range");
     test_assert_eq!(MAX_TASKS, 256, "MAX_TASKS == 256");
 
     // Test 4: Memory sizes
