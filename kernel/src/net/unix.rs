@@ -3253,7 +3253,6 @@ fn unix_file_poll(file: &File, events: u16) -> u16 {
         None => return POLLERR,
     };
     let mut ready = 0u16;
-
     if events & POLLIN != 0 {
         if socket.recv_ready() {
             ready |= POLLIN | POLLRDNORM;
@@ -3368,6 +3367,94 @@ pub fn unix_listener_snapshot() {
             bk,
             fid
         );
+    }
+}
+
+/// wh4 (4th lost-wake face hunt, 2026-11-10): connected-socket census —
+/// every NON-listening socket with queued receive data, plus its waiter
+/// truth. The hunt's question is "data queued, reader parked, no wake
+/// delivered": a socket whose recv_queue is non-empty while its
+/// wait_queue census shows no live waiter (and its reader's task dump
+/// line says poll/read) convicts a lost poll/recv wake regardless of
+/// which side dropped it. Report-only; called from the dump path (no
+/// locks held by the caller; every lock here is leaf).
+pub fn unix_connected_snapshot() {
+    let mut rows: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+    let mut wanted_fids: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
+    {
+        let table = UNIX_TABLE.lock();
+        for (_key, sock) in table.iter() {
+            let st = *sock.state.lock();
+            if st == UnixState::Listening {
+                continue;
+            }
+            let (qbytes, qsegs) = {
+                let q = sock.recv_queue.lock();
+                let b = q.segs.iter().map(|s| s.data.len()).sum::<usize>();
+                (b, q.segs.len())
+            };
+            if qbytes == 0 && qsegs == 0 {
+                continue;
+            }
+            let fid = sock.file_id.load(core::sync::atomic::Ordering::Acquire);
+            let eof = *sock.eof.lock();
+            let (wq_total, wq_woken) = sock.wait_queue.vw_queue_census_try().unwrap_or((usize::MAX, 0));
+            let (pw_total, pw_woken) = sock.peer_wait.vw_queue_census_try().unwrap_or((usize::MAX, 0));
+            let peer_fid = sock
+                .peer_arc()
+                .map(|p| p.file_id.load(core::sync::atomic::Ordering::Acquire))
+                .unwrap_or(0);
+            rows.push(alloc::format!(
+                "wh4sock: fid={:#x} kind={:?} q={}B/{}seg eof={} wq={}/{} pw={}/{} peer={:#x}",
+                fid, sock.kind, qbytes, qsegs, eof as u8, wq_total, wq_woken, pw_total, pw_woken, peer_fid
+            ));
+            wanted_fids.push((fid, peer_fid));
+        }
+    }
+    // Owner resolution: which tasks' fd tables hold these file ids. The
+    // queued-data socket's READER is whoever holds it (or the peer's
+    // writer's counterpart); naming pid/comm/fd per fid settles "the
+    // reader is gone / never watches it".
+    let mut owner_lines: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+    if !wanted_fids.is_empty() {
+        crate::sched::for_each_task_try(|t| {
+            // SAFETY: read-only diagnostic walk of the task's fd table
+            // under the pid-hash bucket lock (for_each_task_try contract);
+            // get_file takes the table's own lock.
+            unsafe {
+                let tk = &*t;
+                if tk.pid() == 0 {
+                    return;
+                }
+                let Some(ft) = tk.fdtable_arc() else {
+                    return;
+                };
+                for fd in 0..1024usize {
+                    if let Some(f) = ft.get_file(fd) {
+                        let fid = f.file_id;
+                        if wanted_fids.iter().any(|(a, b)| *a == fid || *b == fid) {
+                            let comm = tk.comm();
+                            let name = comm.split(|&b| b == 0).next().unwrap_or(b"?");
+                            let nm = core::str::from_utf8(name).unwrap_or("?");
+                            owner_lines.push(alloc::format!(
+                                "wh4owner: fid={:#x} fd={} pid={} tgid={} comm={}",
+                                fid,
+                                fd,
+                                tk.pid(),
+                                tk.tgid(),
+                                nm
+                            ));
+                        }
+                    }
+                }
+            }
+        });
+    }
+    for r in rows.iter().take(48) {
+        crate::pr_warn!("{}", r);
+    }
+    for r in owner_lines.iter().take(24) {
+        crate::pr_warn!("{}", r);
     }
 }
 

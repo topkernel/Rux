@@ -92,7 +92,9 @@ unsafe fn exit_robust_list(task: *mut Task) {
             crate::sync::futex::futex_wake_in_mm(
                 uaddr as usize,
                 mm_id,
-                0, // private futex semantics
+                // Both key variants: robust-list waiters may park with
+                // either private or shared semantics on the word.
+                crate::sync::futex::FLAGS_IMMUTABLE,
                 1,
                 u32::MAX,
             );
@@ -115,7 +117,13 @@ unsafe fn exit_robust_list(task: *mut Task) {
             None => return,
         };
         if v & FUTEX_TID_MASK == 0 {
-            crate::sync::futex::futex_wake_in_mm(uaddr as usize, mm_id, 0, 1, u32::MAX);
+            crate::sync::futex::futex_wake_in_mm(
+                uaddr as usize,
+                mm_id,
+                crate::sync::futex::FLAGS_IMMUTABLE,
+                1,
+                u32::MAX,
+            );
         }
     }
 
@@ -188,12 +196,14 @@ unsafe fn exit_clear_child_tid(task: *mut Task) {
     // Private semantics + the exiting task's mm as the key identity.
     // musl pthread_exit holds __thread_list_lock across SYS_exit and
     // passes &__thread_list_lock as the clone ctid — THIS wake is what
-    // "unlocks" it for every later exiter/joiner (see futex_hash: the
-    // wake must reach waiters that parked with shared semantics too).
+    // "unlocks" it for every later exiter/joiner. FLAGS_IMMUTABLE makes
+    // the wake reach BOTH key variants on the word (private (mm, uaddr)
+    // waiters AND waiters that parked with shared semantics — see
+    // futex_hash and the flag's doc comment).
     crate::sync::futex::futex_wake_in_mm(
         tid_ptr as usize,
         mm_id,
-        0, // private futex
+        crate::sync::futex::FLAGS_IMMUTABLE,
         1,
         u32::MAX,
     );

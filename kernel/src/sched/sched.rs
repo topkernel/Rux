@@ -4236,20 +4236,42 @@ pub struct W2RefusalCensus {
     pub exec_ns: u64,
     pub jiffies: u64,
     pub quantum_ms: u32,
+    // wh4 (4th lost-wake face hunt): the discriminating extras. pc is the
+    // victim's preempt_count (a park-refusal oscillation carries a nonzero
+    // count; a parked victim shows 0 or the phantom it parked with).
+    // parkref_age is jiffies since ti_parkref_since armed (>=0 means the
+    // park-refusal episode is running RIGHT NOW — the RUNNING flip the
+    // locked check saw was __schedule's refusal, not a racing pick).
+    // claim/swout/slotw/gen are the ownership periphery: the claim word,
+    // the SWITCHING_OUT mask naming the task, the naming slot's last
+    // writer tag, and whether that slot's pick generation is LOST (the
+    // r11 ledger says the publish never materialized).
+    pub pc: u32,
+    pub parkref_age: i64,
+    pub claim: i32,
+    pub swout: u32,
+    pub slotw: u32,
+    pub gen_lost: bool,
 }
 
 impl core::fmt::Display for W2RefusalCensus {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "linked={} on_rq={} busy_slot={} idle_slot={} exec_ns={} jif={} q_ms={}",
+            "linked={} on_rq={} busy_slot={} idle_slot={} exec_ns={} jif={} q_ms={} pc={:#x} prage={} cl={} sw={} slotw={} genlost={}",
             self.linked,
             self.on_rq,
             self.busy_slot,
             self.idle_slot,
             self.exec_ns,
             self.jiffies,
-            self.quantum_ms
+            self.quantum_ms,
+            self.pc,
+            self.parkref_age,
+            self.claim,
+            self.swout,
+            self.slotw,
+            self.gen_lost
         )
     }
 }
@@ -4266,6 +4288,12 @@ pub fn w2_refusal_census(task: *mut Task) -> W2RefusalCensus {
         exec_ns: 0,
         jiffies: crate::drivers::timer::get_jiffies(),
         quantum_ms: 0,
+        pc: 0,
+        parkref_age: -1,
+        claim: -2,
+        swout: 0,
+        slotw: 0,
+        gen_lost: false,
     };
     if task.is_null() {
         return out;
@@ -4292,9 +4320,24 @@ pub fn w2_refusal_census(task: *mut Task) -> W2RefusalCensus {
                     out.idle_slot = c as i32;
                 } else {
                     out.busy_slot = c as i32;
+                    out.slotw = SLOT_WRITER[c].load(core::sync::atomic::Ordering::Relaxed);
+                    out.gen_lost =
+                        pick_gen_is_lost(c, task, out.jiffies);
                 }
             }
         }
+        // wh4: the extras (see the struct docs).
+        out.pc = (*task).preempt_count() as u32;
+        let prs = (*task)
+            .ti_parkref_since
+            .load(core::sync::atomic::Ordering::Acquire);
+        if prs != 0 {
+            out.parkref_age = out.jiffies.wrapping_sub(prs) as i64;
+        }
+        out.claim = (*task)
+            .running_on_cpu
+            .load(core::sync::atomic::Ordering::Acquire);
+        out.swout = switching_out_mask(task);
     }
     out
 }
@@ -5799,6 +5842,34 @@ pub fn scheduler_tick() {
                     owned_pids
                 );
             }
+        }
+    }
+
+    // wh4 (4th lost-wake face hunt, 2026-11-10): SLEEPING-VICTIM SWEEP.
+    // The W2 census shape — wake refused for a task the ownership
+    // protocol still believes is on a CPU (on_cpu set, a BUSY slot
+    // naming it) — is decidable directly: a SLEEPING, unlinked task
+    // named by a busy slot is parked while the wake path's curr_on gate
+    // and the harvester's alive-CPU refusal both block every recovery.
+    // Once per 100 jiffies (sharing the CLAIM-SWEEP cadence), one CPU
+    // walks the pid hash and time-confirms (2 sightings >= 30 jiffies
+    // apart, frozen exec clock) every such victim, then reports with the
+    // naming slot's writer tag and pick-generation verdict. The twin
+    // shape — a parked futex waiter whose wake was refused after the
+    // chain unlink (futex_wait_enqueued stuck true, no wake can ever
+    // find it again) — is convicted the same way (state sleeping,
+    // unlinked, owned by no slot, residency flag still set).
+    {
+        static WH4_LAST: core::sync::atomic::AtomicU64 =
+            core::sync::atomic::AtomicU64::new(0);
+        let now = crate::drivers::timer::get_jiffies();
+        let last = WH4_LAST.load(core::sync::atomic::Ordering::Acquire);
+        if now.wrapping_sub(last) >= 100
+            && WH4_LAST
+                .compare_exchange(last, now, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire)
+                .is_ok()
+        {
+            wh4_sleeping_victim_sweep(now);
         }
     }
 
@@ -7505,6 +7576,227 @@ fn orphan_watch_clear(task: *mut Task) {
     for s in ORPHAN_WATCH.iter() {
         if s.task.load(Ordering::Acquire) == raw {
             s.task.store(0, Ordering::Release);
+        }
+    }
+}
+
+// wh4 (4th lost-wake face hunt): refused-futex-wake marker. futex_wake's
+// R12-2 section unlinks the waiter BEFORE Task::wake_up and historically
+// ignored its result; a refusal there leaves a waiter no future wake can
+// find. The marker lets the sleeping-victim sweep convict the victim when
+// it stays parked with a frozen exec clock long after the refusal.
+const WH4_FUTEX_REFUSED: usize = 8;
+static WH4_FR_TASK: [core::sync::atomic::AtomicUsize; WH4_FUTEX_REFUSED] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; WH4_FUTEX_REFUSED];
+static WH4_FR_JIF: [core::sync::atomic::AtomicU64; WH4_FUTEX_REFUSED] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; WH4_FUTEX_REFUSED];
+
+pub fn wh4_note_futex_refusal(task: *mut Task) {
+    use core::sync::atomic::Ordering;
+    let key = task as usize;
+    let now = crate::drivers::timer::get_jiffies();
+    for s in 0..WH4_FUTEX_REFUSED {
+        if WH4_FR_TASK[s].load(Ordering::Relaxed) == key {
+            WH4_FR_JIF[s].store(now, Ordering::Relaxed);
+            return;
+        }
+    }
+    for s in 0..WH4_FUTEX_REFUSED {
+        if WH4_FR_TASK[s]
+            .compare_exchange(
+                0,
+                key,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            WH4_FR_JIF[s].store(now, Ordering::Relaxed);
+            return;
+        }
+    }
+}
+
+fn wh4_futex_refusal_age(task: *mut Task, now: u64) -> u64 {
+    use core::sync::atomic::Ordering;
+    let key = task as usize;
+    for s in 0..WH4_FUTEX_REFUSED {
+        if WH4_FR_TASK[s].load(Ordering::Relaxed) == key {
+            let j = WH4_FR_JIF[s].load(Ordering::Relaxed);
+            if j != 0 && now >= j {
+                return now - j;
+            }
+        }
+    }
+    0
+}
+
+fn wh4_futex_refusal_clear(task: *mut Task) {
+    use core::sync::atomic::Ordering;
+    let key = task as usize;
+    for s in 0..WH4_FUTEX_REFUSED {
+        if WH4_FR_TASK[s].load(Ordering::Relaxed) == key {
+            WH4_FR_TASK[s].store(0, Ordering::Relaxed);
+        }
+    }
+}
+
+/// wh4 (4th lost-wake face hunt): the SLEEPING-VICTIM SWEEP body — see
+/// the scheduler_tick hook for the shape proofs. Report-only: takes no
+/// locks of its own (pid-hash walk pins the task pages), reads the slot
+/// scan without the GRQ (a diagnostic pre-filter exactly like the
+/// harvester's — the conviction print happens after, lock-free), and
+/// prints from a captured row so no printk runs under any held lock.
+fn wh4_sleeping_victim_sweep(now: u64) {
+    use core::sync::atomic::Ordering;
+    static WH4_N: core::sync::atomic::AtomicU32 =
+        core::sync::atomic::AtomicU32::new(0);
+    struct Wh4Row {
+        kind: u8,
+        pid: u32,
+        st: u32,
+        pk: u32,
+        claim: i32,
+        pc: u32,
+        tcpu: i32,
+        slot: i32,
+        slotw: u32,
+        swout: u32,
+        age_j: u64,
+        exec: u64,
+    }
+    const ROWS: usize = 4;
+    let mut rows: [Option<Wh4Row>; ROWS] = [None, None, None, None];
+    let idle_mask = grq().idle_cpus.load(Ordering::Acquire);
+    crate::process::pid_hash::pid_hash_for_each_task_try(|t| {
+        // SAFETY: same pin discipline as harvest_orphan_tasks — the bucket
+        // lock pins the page through try_pin/task_put; all reads below are
+        // read-only diagnostics.
+        unsafe {
+            let pid = (*t).pid();
+            if pid == 0 || pid == TASK_POISON {
+                return;
+            }
+            if !Task::try_pin(t) {
+                return;
+            }
+            let mut body = || {
+                let st = (*t).state();
+                if !st.is_sleeping() {
+                    // It ran since the refusal (state left the sleeping
+                    // class): the refusal was benign — retire the marker.
+                    wh4_futex_refusal_clear(t);
+                    return;
+                }
+                if task_onrq_flag(t) {
+                    return;
+                }
+                let oncpu = (*t).on_cpu();
+                // Shape 1: a SLEEPING, unlinked task the ownership protocol
+                // still believes is on a CPU — on_cpu set AND a busy slot
+                // naming it. Time+frozen-exec confirmed via the shared
+                // orphan watch (30 jiffies).
+                if oncpu {
+                    let mut busy = -1i32;
+                    let mut idle_named = false;
+                    for c in 0..MAX_CPUS {
+                        if cpu_state(c).current == t {
+                            if idle_mask & (1u32 << c) != 0 {
+                                idle_named = true;
+                            } else {
+                                busy = c as i32;
+                            }
+                        }
+                    }
+                    if busy >= 0
+                        && !idle_named
+                        && orphan_watch_confirm(t, pid, now, 30)
+                    {
+                        for r in rows.iter_mut() {
+                            if r.is_none() {
+                                *r = Some(Wh4Row {
+                                    kind: 1,
+                                    pid,
+                                    st: st.bits(),
+                                    pk: (*t).pick_state(),
+                                    claim: (*t).running_on_cpu.load(Ordering::Acquire),
+                                    pc: (*t).preempt_count() as u32,
+                                    tcpu: (*t).ti_cpu(),
+                                    slot: busy,
+                                    slotw: SLOT_WRITER[busy as usize]
+                                        .load(Ordering::Relaxed),
+                                    swout: switching_out_mask(t),
+                                    age_j: 30,
+                                    exec: (*t)
+                                        .sched_entity()
+                                        .sum_exec_runtime
+                                        .load(Ordering::Relaxed),
+                                });
+                                break;
+                            }
+                        }
+                        return;
+                    }
+                }
+                // Shape 2: the refused-futex-wake orphan — a task whose
+                // futex wake was refused (marker armed by futex_wake's
+                // report) and which has stayed parked with a frozen exec
+                // clock for 200+ jiffies since. A waiter that merely
+                // oscillated returns to userspace and the marker ages out
+                // silently once its state stops being sleeping-frozen.
+                let fr_age = wh4_futex_refusal_age(t, now);
+                if fr_age >= 200 {
+                    let exec = (*t)
+                        .sched_entity()
+                        .sum_exec_runtime
+                        .load(Ordering::Relaxed);
+                    // Still parked since the refusal (sleeping, frozen
+                    // exec): the wake is lost — nothing can find the
+                    // unlinked waiter again.
+                    if orphan_watch_confirm(t, pid, now, 200) {
+                        for r in rows.iter_mut() {
+                            if r.is_none() {
+                                *r = Some(Wh4Row {
+                                    kind: 2,
+                                    pid,
+                                    st: st.bits(),
+                                    pk: (*t).pick_state(),
+                                    claim: (*t).running_on_cpu.load(Ordering::Acquire),
+                                    pc: (*t).preempt_count() as u32,
+                                    tcpu: (*t).ti_cpu(),
+                                    slot: -1,
+                                    slotw: 0,
+                                    swout: switching_out_mask(t),
+                                    age_j: fr_age,
+                                    exec,
+                                });
+                                break;
+                            }
+                        }
+                    }
+                }
+            };
+            body();
+            Task::task_put(t);
+        }
+    });
+    for r in rows.into_iter().flatten() {
+        if WH4_N.fetch_add(1, Ordering::Relaxed) < 24 {
+            crate::pr_warn!(
+                "WH4-VICTIM kind={} pid={} state={:#x} pk={} cl={} pc={:#x} cpu={} slot={} slotw={} sw={} age_j={} exec={}",
+                r.kind,
+                r.pid,
+                r.st,
+                r.pk,
+                r.claim,
+                r.pc,
+                r.tcpu,
+                r.slot,
+                r.slotw,
+                r.swout,
+                r.age_j,
+                r.exec
+            );
         }
     }
 }

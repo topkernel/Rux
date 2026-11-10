@@ -125,6 +125,17 @@ pub const FUTEX_BITSET_MATCH_ANY: u32 = 0xffffffff;
 // Internal flags
 pub const FLAGS_SHARED: u32 = 0x0010;
 pub const FLAGS_CLOCKRT: u32 = 0x0020;
+/// Internal (never set by userspace): the exit-path wakes (robust list,
+/// clear_child_tid) must reach BOTH key variants on the same word — a
+/// private waiter keyed (mm, uaddr) and a shared waiter keyed on the
+/// physical frame (musl parks __thread_list_lock waiters with shared
+/// semantics while relying on the kernel's cleartid exit wake). The
+/// reference solves this with FUTEX_IMMUTABLE (get_futex_key resolves
+/// the physical identity regardless of private/shared and matching
+/// accepts both); here the flag makes futex_wake_in_mm walk the private
+/// bucket first and then, if the wake budget is unmet, re-issue the wake
+/// with shared keying (the phys bucket).
+pub const FLAGS_IMMUTABLE: u32 = 0x0040;
 
 /// FUTEX_WAKE_OP encoding (Linux include/uapi/linux/futex.h)
 pub const FUTEX_OP_SET: u32 = 0;
@@ -317,6 +328,152 @@ fn current_futex_mm_id() -> usize {
         // valid for the duration of this syscall.
         Some(t) => task_futex_mm_id(t),
         None => 0,
+    }
+}
+
+// ============================================================================
+// wh5 wake-miss watch (lane debug for the gnome-session gdbus stall)
+// ============================================================================
+//
+// Conviction chain (wh5-2): the gdbus worker parks in FUTEX_WAIT on a
+// mutex word (fval=2), the live word later reads 0 (the holder unlocked —
+// glibc ALWAYS issues FUTEX_WAKE when the old value was 2), yet the
+// waiter entry stays linked with its original park stamp for minutes: no
+// futex_wake ever MATCHED it. The candidates are a key asymmetry between
+// the waiter's park-time key and the waker's wake-time key (mm id, phys
+// identity, flags) or a bucket divergence (phys vs uaddr keying). This
+// watch makes the NEXT wake on the convicted (uaddr, mm) print both
+// sides' resolutions plus the walk outcome — one line, one conviction.
+const WH5_WATCH_N: usize = 4;
+static WH5W_UADDR: [core::sync::atomic::AtomicUsize; WH5_WATCH_N] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; WH5_WATCH_N];
+static WH5W_MM: [core::sync::atomic::AtomicUsize; WH5_WATCH_N] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; WH5_WATCH_N];
+static WH5W_SLOT: [core::sync::atomic::AtomicUsize; WH5_WATCH_N] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; WH5_WATCH_N];
+static WH5W_PHYS: [core::sync::atomic::AtomicUsize; WH5_WATCH_N] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; WH5_WATCH_N];
+static WH5W_HITS: [core::sync::atomic::AtomicU32; WH5_WATCH_N] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; WH5_WATCH_N];
+
+/// Arm the wake-miss watch for a convicted stuck waiter (see the block
+/// comment above). One slot per (uaddr, mm); re-arming refreshes.
+pub fn wh5_arm_wake_watch(uaddr: usize, mm: usize, slot: usize, waiter_phys: usize) {
+    use core::sync::atomic::Ordering;
+    for i in 0..WH5_WATCH_N {
+        if WH5W_UADDR[i].load(Ordering::Relaxed) == uaddr
+            && WH5W_MM[i].load(Ordering::Relaxed) == mm
+        {
+            WH5W_SLOT[i].store(slot, Ordering::Relaxed);
+            WH5W_PHYS[i].store(waiter_phys, Ordering::Relaxed);
+            return;
+        }
+    }
+    for i in 0..WH5_WATCH_N {
+        if WH5W_UADDR[i]
+            .compare_exchange(
+                0,
+                uaddr,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            WH5W_MM[i].store(mm, Ordering::Relaxed);
+            WH5W_SLOT[i].store(slot, Ordering::Relaxed);
+            WH5W_PHYS[i].store(waiter_phys, Ordering::Relaxed);
+            return;
+        }
+    }
+}
+
+/// Wake-path leg of the watch (called from futex_wake_in_mm after the
+/// key is built, before the walk): returns Some((watch_idx, waiter_slot,
+/// waiter_phys)) when this wake targets a watched conviction. The hits
+/// counter distinguishes "wake came and matched/missed" (probe line from
+/// wh5_note_wake_outcome) from "no wake ever came" (counter stays 0).
+fn wh5_watch_lookup(key: &FutexKey) -> Option<(usize, usize, usize)> {
+    use core::sync::atomic::Ordering;
+    for i in 0..WH5_WATCH_N {
+        let u = WH5W_UADDR[i].load(Ordering::Relaxed);
+        if u != 0 && u == key.uaddr && WH5W_MM[i].load(Ordering::Relaxed) == key.mm {
+            let _ = WH5W_HITS[i].fetch_add(1, Ordering::Relaxed);
+            return Some((i, WH5W_SLOT[i].load(Ordering::Relaxed), WH5W_PHYS[i].load(Ordering::Relaxed)));
+        }
+    }
+    None
+}
+
+/// Post-walk leg: one loud line per watched wake (budget 12), naming the
+/// waker, both keys' phys identities, the bucket walked, whether the
+/// watched waiter's slot was linked in that bucket, and the walk result.
+fn wh5_note_wake_outcome(
+    watch: (usize, usize, usize),
+    key: &FutexKey,
+    bucket_idx: usize,
+    ret: i64,
+) {
+    use core::sync::atomic::Ordering;
+    static WH5_N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    if WH5_N.fetch_add(1, Ordering::Relaxed) >= 12 {
+        return;
+    }
+    let (wi, wslot, wphys) = watch;
+    // Is the watched waiter still linked in `bucket_idx`'s chain?
+    let mut in_chain = false;
+    let mut waiter_mm = 0usize;
+    let mut waiter_flags = 0u32;
+    {
+        let h = HASH_HEADS[bucket_idx].lock_irqsave();
+        let mut idx = *h;
+        let mut hops = 0;
+        while let Some(i) = idx {
+            if i == wslot {
+                in_chain = true;
+                break;
+            }
+            idx = {
+                let slot = WAITER_POOL[i].lock_nested(&h.proof());
+                match *slot {
+                    Some(ref w) => w.next,
+                    None => None,
+                }
+            };
+            hops += 1;
+            if hops > 512 {
+                break;
+            }
+        }
+        drop(h);
+        if in_chain {
+            let slot = WAITER_POOL[wslot].lock_irqsave();
+            if let Some(ref w) = *slot {
+                waiter_mm = w.key.mm;
+                waiter_flags = w.key.flags;
+            }
+        }
+    }
+    let waker_pid = crate::sched::current()
+        .map(|t| unsafe { (*t).pid() })
+        .unwrap_or(0);
+    crate::pr_warn!(
+        "WH5-WAKE-ON-WATCHED waker_pid={} uaddr={:#x} mm={:#x} waker_phys={:#x} waiter_phys={:#x} waker_flags={:#x} waiter_flags={:#x} bucket={} waiter_in_chain={} matched={} hits={}",
+        waker_pid,
+        key.uaddr,
+        key.mm,
+        key.phys,
+        wphys,
+        key.flags,
+        waiter_flags,
+        bucket_idx,
+        in_chain,
+        ret,
+        WH5W_HITS[wi].load(Ordering::Relaxed)
+    );
+    // Disarm when the wake actually consumed the waiter (matched >= 1):
+    // the conviction is resolved, keep the watch table free.
+    if ret >= 1 && in_chain == false {
+        WH5W_UADDR[wi].store(0, Ordering::Relaxed);
     }
 }
 
@@ -520,7 +677,7 @@ pub fn waiters_of_tgid(tgid: u32) -> alloc::vec::Vec<(u32, usize, bool)> {
 ///   - uaddr + mm identity of the condvar (exact, not the param-arena class)
 ///   - tgid/tid + the stuck thread's entry-frame syscall nr and rip
 ///   - the owning tgid's thread-state histogram (runnable vs futex-parked
-///     vs other-int vs unint) — a tgid with zero runnable threads is
+///   vs other-int vs unint) — a tgid with zero runnable threads is
 ///     deadlocked userspace (no kernel lever); one with runnable threads
 ///     but a never-woken condvar names the starving producer chain
 ///     (scheduling/priority territory).
@@ -529,6 +686,11 @@ pub fn waiters_of_tgid(tgid: u32) -> alloc::vec::Vec<(u32, usize, bool)> {
 /// under for_each_task (pid-hash per-bucket lock, slowtask contract) — the
 /// two phases never nest. Bounded: 8 lines per burst, 32 sampled waiters.
 /// Zero cost when debug=fuxstuck is off (one switch load).
+///
+/// wh5 wake-miss watch (lane debug, 2026-11-10): the census also ARMS a
+/// watch on convicted lost-unlock-waiters (mutex-shaped park, live word 0,
+/// 10+ s) — see wh5_arm_wake_watch. Cleared automatically when the waiter
+/// leaves the chain (waker consumed it or the waiter returned).
 pub fn futex_stuck_census() {
     use alloc::vec::Vec;
     use core::sync::atomic::Ordering::Relaxed;
@@ -589,6 +751,18 @@ pub fn futex_stuck_census() {
         fto_ok: bool,
         fto_sec: i64,
         fto_nsec: i64,
+        // wh5 (lost-wake hunt): the CURRENT u32 at uaddr, read through
+        // the stuck waiter's own page tables. fval is only the value the
+        // waiter EXPECTED at park time; cur is the live word. cur=0 on a
+        // mutex-shaped park (fval=2/1) convicts a LOST UNLOCK WAKE (the
+        // holder released and moved on; the FUTEX_WAKE never landed);
+        // cur still 2 says the holder itself is parked/dead while
+        // holding — a userspace deadlock chain.
+        cur: u32,
+        // wh5 wake-miss hunt: the waiter's key periphery + pool slot.
+        phys: usize,
+        keyflags: u32,
+        slot: usize,
         uvma_ok: bool,
         uvma_start: usize,
         uvma_end: usize,
@@ -627,7 +801,23 @@ pub fn futex_stuck_census() {
                     Some(ref w) if !w.task.is_null() && w.park_j != 0 => {
                         let age = now.wrapping_sub(w.park_j);
                         if age >= STUCK_MIN_J {
-                            (Some((w.task, w.key.uaddr, w.key.mm, age, w.woken)), w.next)
+                            (
+                                Some((
+                                    w.task,
+                                    w.key.uaddr,
+                                    w.key.mm,
+                                    age,
+                                    w.woken,
+                                    // wh5 wake-miss hunt: the waiter's own key
+                                    // periphery (phys identity + flags) and the
+                                    // pool slot it occupies — the pieces the
+                                    // wake-miss adjudication prints against.
+                                    w.key.phys,
+                                    w.key.flags,
+                                    i,
+                                )),
+                                w.next,
+                            )
                         } else {
                             (None, w.next)
                         }
@@ -636,7 +826,7 @@ pub fn futex_stuck_census() {
                     None => (None, None),
                 }
             };
-            if let Some((task, uaddr, mm, age, woken)) = entry {
+            if let Some((task, uaddr, mm, age, woken, wphys, wflags, wslot)) = entry {
                 total += 1;
                 if stuck.len() < 32 {
                     stuck.push(Stuck {
@@ -645,6 +835,9 @@ pub fn futex_stuck_census() {
                         mm,
                         age_s: (age / 100) as u32,
                         woken,
+                        phys: wphys,
+                        keyflags: wflags,
+                        slot: wslot,
                         tgid: 0,
                         tid: 0,
                         sys: 0,
@@ -655,6 +848,7 @@ pub fn futex_stuck_census() {
                         fto_ok: false,
                         fto_sec: 0,
                         fto_nsec: 0,
+                        cur: u32::MAX,
                         uvma_ok: false,
                         uvma_start: 0,
                         uvma_end: 0,
@@ -751,6 +945,19 @@ pub fn futex_stuck_census() {
                         usp = r.sp;
                     }
                 }
+        // wh5: live word value at the park uaddr (see Stuck::cur).
+        // SAFETY: same pinned-task read contract as the stack and
+        // VMA decodes below.
+        s.cur = unsafe { read_u32_via_task(task, s.uaddr) }.unwrap_or(u32::MAX);
+        // wh5 wake-miss watch: a mutex-shaped park (fval>=1) whose live
+        // word reads 0 is a CONVICTED lost unlock wake — the holder's
+        // FUTEX_WAKE (glibc wakes whenever the old value was 2) either
+        // never matched this waiter or hashed elsewhere. Arm the
+        // futex_wake_in_mm probe so the next wake on (uaddr, mm) reports
+        // its own key resolution against this waiter's.
+        if s.fval >= 1 && s.cur == 0 && s.age_s >= 10 {
+            wh5_arm_wake_watch(s.uaddr, s.mm, s.slot, s.phys);
+        }
                 // Wait-site decode (33rd successor). The waiter is parked
                 // in this very syscall, so its user stack is frozen and
                 // its mm cannot vanish while the task is pinned here.
@@ -987,6 +1194,9 @@ pub fn futex_stuck_census() {
         rep_fto_ok: bool,
         rep_fto_sec: i64,
         rep_fto_nsec: i64,
+        rep_cur: u32,
+        rep_phys: usize,
+        rep_keyflags: u32,
         rep_uvma_ok: bool,
         rep_uvma_start: usize,
         rep_uvma_end: usize,
@@ -1036,6 +1246,9 @@ pub fn futex_stuck_census() {
                         rep_fto_ok: s.fto_ok,
                         rep_fto_sec: s.fto_sec,
                         rep_fto_nsec: s.fto_nsec,
+                        rep_cur: s.cur,
+                        rep_phys: s.phys,
+                        rep_keyflags: s.keyflags,
                         rep_uvma_ok: s.uvma_ok,
                         rep_uvma_start: s.uvma_start,
                         rep_uvma_end: s.uvma_end,
@@ -1104,7 +1317,7 @@ pub fn futex_stuck_census() {
             );
         }
         crate::pr_warn!(
-            "FUX-STUCK{} tgid={} tid={} uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} fop={:#x} fval={:#x} fto={:#x}{} uvma={:#x}-{:#x} {}+{:#x}{} u2v={} uret={}tgidthr[run={} futex={} int={} unint={}]",
+            "FUX-STUCK{} tgid={} tid={} uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} fop={:#x} fval={:#x} cur={:#x} wphys={:#x} wflags={:#x} fto={:#x}{} uvma={:#x}-{:#x} {}+{:#x}{} u2v={} uret={}tgidthr[run={} futex={} int={} unint={}]{}",
             if is_fresh { "-FRESH" } else { "" },
             g.tgid,
             g.rep_tid,
@@ -1118,6 +1331,9 @@ pub fn futex_stuck_census() {
             g.rep_epc,
             g.rep_fop,
             g.rep_fval,
+            g.rep_cur,
+            g.rep_phys,
+            g.rep_keyflags,
             g.rep_fto,
             fto_s,
             g.rep_uvma_start,
@@ -1131,6 +1347,26 @@ pub fn futex_stuck_census() {
             h.map(|h| h.futex).unwrap_or(0),
             h.map(|h| h.int_other).unwrap_or(0),
             h.map(|h| h.unint).unwrap_or(0),
+            {
+                // wh5: the wake-miss watch state for this (uaddr, mm) —
+                // "watched(hits=N)" says wakes ARE arriving and missing;
+                // absent says no wake since arming.
+                use core::sync::atomic::Ordering::Relaxed;
+                let mut s = alloc::string::String::new();
+                use core::fmt::Write as _;
+                for i in 0..WH5_WATCH_N {
+                    if WH5W_UADDR[i].load(Relaxed) == g.uaddr
+                        && WH5W_MM[i].load(Relaxed) == g.rep_mm
+                    {
+                        let _ = write!(
+                            s,
+                            " watched(hits={})",
+                            WH5W_HITS[i].load(Relaxed)
+                        );
+                    }
+                }
+                s
+            }
         );
         printed += 1;
         if LINES.fetch_add(1, Relaxed) > 1200 {
@@ -1230,28 +1466,34 @@ fn pool_full_backoff() {
 
 /// Calculate futex hash value
 pub(crate) fn futex_hash(key: &FutexKey) -> usize {
-    // Hash by the PHYSICAL word identity when resolved (both private and
-    // shared keys), else by uaddr. matches() compares the physical word
-    // for shared keys — a parent waiting on a MAP_SHARED page at vaddr A
-    // and an exec'd child waking from a fresh mmap at vaddr B MUST share
-    // a bucket (the LTP tst_checkpoint protocol; the old uaddr-only
-    // bucketing put them in different chains and the wake never reached
-    // the waiter — waitid08 ETIMEDOUT). Phys-keyed bucketing also keeps
-    // the musl interop below inside one bucket: a shared waiter and a
-    // private waker on the SAME word resolve the same frame.
+    // PRIVATE keys hash on the COW-stable (mm, uaddr) identity — the
+    // reference keys private futexes on (mm, uaddr) precisely because a
+    // fork COW break can move the word to a different physical frame
+    // between one thread's park and another's wake. Phys-keyed bucketing
+    // stranded such waiters forever (wh5, 2026-11-10): the gnome-session
+    // gdbus worker parked in FUTEX_WAIT on a locked glibc mutex word
+    // (fval=2, bucket=hash(phys P1)); a concurrent component fork
+    // COW-broke the arena page; the unlocker's store faulted the word
+    // onto a fresh frame P2 and its FUTEX_WAKE hashed bucket(P2) — an
+    // empty chain — leaving the waiter linked in bucket(P1) with the
+    // live word already 0 and no future wake able to reach it. The whole
+    // session then died on the stalled D-Bus connection.
     //
-    // R31-9 fixed only the shared↔shared direction (mm excluded for
-    // shared keys); the 4-thread hang hunt caught the remaining
-    // shared-waiter ↔ private-waker split: musl's __thread_list_lock
-    // waiters park with priv=0 (shared key), while the kernel's
-    // CLONE_CHILD_CLEARTID exit wake (musl pthread_exit relies on it to
-    // "unlock" the list lock — it passes &__thread_list_lock as the
-    // clone ctid) hashed the private key (uaddr+mm) → a DIFFERENT bucket
-    // → the wake scanned an empty chain (woken=0 with three parked
-    // waiters) → every later exiter/joiner parked on the never-released
-    // lock word forever. Linux solves the same interop with
-    // FLAG_IMMUTABLE (the cleartid wake matches both key variants);
-    // same-word bucketing gives this kernel the same reach.
+    // SHARED keys hash on the resolved physical word identity (Rux's
+    // stand-in for the reference's (inode, pgoff)): a parent waiting on
+    // a MAP_SHARED page at vaddr A and an exec'd child waking from a
+    // fresh mmap at vaddr B MUST share a bucket (the LTP tst_checkpoint
+    // protocol; the old uaddr-only bucketing put them in different
+    // chains and the wake never reached the waiter — waitid08
+    // ETIMEDOUT). Shared pages never COW (fork's COW walk exempts them),
+    // so the phys identity is stable for them.
+    //
+    // The musl interop (R31-9 followup: shared __thread_list_lock
+    // waiters vs the kernel's private CLONE_CHILD_CLEARTID exit wake) is
+    // carried by FLAGS_IMMUTABLE: the exit paths' wake walks the private
+    // bucket and, budget unmet, re-issues with shared keying (the phys
+    // bucket) — the same reach the same-word bucketing gave, without the
+    // COW instability for every private futex.
     //
     // F12: the raw `uaddr % HASH_SIZE` clustered EVERY thread-stack
     // futex into ONE bucket. musl hands out 1 MB pthread stacks with a
@@ -1260,11 +1502,22 @@ pub(crate) fn futex_hash(key: &FutexKey) -> usize {
     // landed in the same bucket: pth_str02's 1000-thread join chain
     // serialised on a single spinlock (all 256 pool slots chained in one
     // bucket, every wake/alloc walking 256 entries under that lock).
-    // Fibonacci-multiply the byte offset so any fixed stride spreads
-    // across the buckets.
-    let id = if key.phys != 0 { key.phys } else { key.uaddr };
-    let x = (id >> 2) as u64;
-    let mixed = x.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    // Fibonacci-multiply so any fixed stride spreads across the buckets.
+    let id: u64 = if key.flags & FLAGS_SHARED != 0 {
+        if key.phys != 0 {
+            key.phys as u64
+        } else {
+            key.uaddr as u64
+        }
+    } else {
+        // Mix the private pair (mm from an aligned Arc address, uaddr
+        // 4-aligned): the multiply-first order keeps the stride-spread
+        // property for uaddr while folding in the mm identity.
+        (key.uaddr as u64)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ ((key.mm as u64) << 1)
+    };
+    let mixed = id.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     // Take the high bits (multiplicative hashing) modulo HASH_SIZE.
     let bits = HASH_SIZE.trailing_zeros();
     (mixed >> (64 - bits)) as usize
@@ -1291,8 +1544,39 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
         return -EINVAL as i64;
     }
 
+    // FLAGS_IMMUTABLE (exit paths only): after the private-keyed leg
+    // below, re-issue with shared keying so a shared-semantics waiter on
+    // the same word (musl __thread_list_lock) is also reached — the
+    // reference's FUTEX_IMMUTABLE reach, see the flag's doc comment.
+    // The recursive call carries FLAGS_SHARED (not IMMUTABLE), so the
+    // recursion is exactly one level.
+    if flags & FLAGS_IMMUTABLE != 0 {
+        let priv_leg = futex_wake_in_mm(
+            uaddr,
+            mm,
+            flags & !FLAGS_IMMUTABLE,
+            nr_wake,
+            bitset,
+        );
+        let remaining = nr_wake.saturating_sub(priv_leg.max(0) as i32);
+        if remaining <= 0 {
+            return priv_leg;
+        }
+        let shared_leg = futex_wake_in_mm(
+            uaddr,
+            mm,
+            (flags & !FLAGS_IMMUTABLE) | FLAGS_SHARED,
+            remaining,
+            bitset,
+        );
+        return priv_leg + shared_leg;
+    }
+
     let key = FutexKey::new_user(uaddr, mm, flags);
     let bucket_idx = futex_hash(&key);
+    // wh5 wake-miss watch: snapshot BEFORE the walk so the post-walk
+    // report is issued even when the walk finds nothing.
+    let wh5_watch = wh5_watch_lookup(&key);
     #[cfg(feature = "debug-futex-trace")]
     ftx_trace(b"WAKE-IN", uaddr, mm as u64, nr_wake as u64);
 
@@ -1385,15 +1669,74 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
         // store that schedules no one, and with no second FUTEX_WAKE the
         // waiter sleeps forever despite having been woken once.
         let woken_n = wake_list.len();
+    // wh4 (4th lost-wake face hunt): the wake result was historically
+    // ignored here — but this path has ALREADY unlinked the waiter and
+    // marked it woken, so a refused Task::wake_up leaves a waiter that no
+    // future FUTEX_WAKE can find (it is off the chain) and whose own
+    // post-schedule code never runs (it never scheduled back). Record
+    // every refusal with the victim's ownership state and print after the
+    // bucket lock drops (probe-lock discipline: printk under the bucket
+    // is legal bucket->GRQ, but keep the critical section lean).
+    let mut refused_n = 0usize;
+    let mut refused_task: *mut Task = core::ptr::null_mut();
     for task in wake_list {
         if !task.is_null() {
             // R12-2 wake-under-bucket, now compile-checked: the proof
             // minted by the bucket guard is what the nested GRQ acquire
             // requires (INV-LOCK-5 forward; D-11).
-            Task::wake_up_in_futex_bucket(task, &head.proof());
+            if !Task::wake_up_in_futex_bucket(task, &head.proof()) {
+                refused_n += 1;
+                if refused_task.is_null() {
+                    refused_task = task;
+                }
+                // wh4: arm the sleeping-victim sweep's marker so a parked
+                // orphan (the waiter never scheduled back) is convicted by
+                // time + frozen exec in scheduler_tick's WH4-VICTIM scan.
+                crate::sched::wh4_note_futex_refusal(task);
+            }
         }
     }
     drop(head);
+    if let Some(w) = wh5_watch {
+        wh5_note_wake_outcome(w, &key, bucket_idx, ret);
+    }
+    if !refused_task.is_null() {
+        static FWR_N: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        if FWR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
+            // SAFETY: diagnostic reads of a task the bucket chain pinned
+            // through the wake above; the waker's own reference context.
+            let (rpid, rst, roc, rpk, rcl, rpc, rtid) = unsafe {
+                (
+                    (*refused_task).pid(),
+                    (*refused_task).state().bits(),
+                    (*refused_task).on_cpu(),
+                    (*refused_task).pick_state(),
+                    (*refused_task)
+                        .running_on_cpu
+                        .load(core::sync::atomic::Ordering::Acquire),
+                    (*refused_task).preempt_count() as u32,
+                    (*refused_task).ti_cpu(),
+                )
+            };
+            let waker_pid = crate::sched::current()
+                .map(|c| unsafe { (*c).pid() })
+                .unwrap_or(0);
+            crate::pr_warn!(
+                "FUTEX-WAKE-REFUSED waker={} pid={} state={:#x} on_cpu={} pk={} cl={} pc={:#x} cpu={} n={} uaddr={:#x}",
+                waker_pid,
+                rpid,
+                rst,
+                roc,
+                rpk,
+                rcl,
+                rpc,
+                rtid,
+                refused_n,
+                uaddr
+            );
+        }
+    }
 
     #[cfg(feature = "debug-futex-trace")]
     ftx_trace(b"WAKE-OUT", uaddr, ret as u64, woken_n as u64);
@@ -4211,7 +4554,7 @@ unsafe fn read_cstr_via_task(task: *const Task, va: usize, max: usize) -> alloc:
 /// Read one u32 in `task`'s user address space via its page tables
 /// (khungtaskd's get_user would read through the wrong mm).
 /// SAFETY: `task` must be a live Task; read-only diagnostic walk.
-unsafe fn read_u32_via_task(task: *const Task, va: usize) -> Option<u32> {
+pub(crate) unsafe fn read_u32_via_task(task: *const Task, va: usize) -> Option<u32> {
     let tk = unsafe { &*task };
     let aspace = tk.address_space()?;
     let root = aspace.root_ppn();

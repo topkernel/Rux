@@ -696,6 +696,24 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
                 let file = match fdtable.get_file(pollfd.fd as usize) {
                     Some(f) => f,
                     None => {
+                        // wh4 probe: POLLNVAL for a live fd is the silent
+                        // GSource killer (GLib destroys the source and
+                        // stops watching the fd forever — no kernel error
+                        // is ever reported back). Distinguish a genuinely
+                        // closed fd from a transient lookup miss with one
+                        // immediate retry; a transient is a kernel bug.
+                        if fdtable.get_file(pollfd.fd as usize).is_some() {
+                            static WH4V_N: core::sync::atomic::AtomicU32 =
+                                core::sync::atomic::AtomicU32::new(0);
+                            if WH4V_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
+                                crate::pr_warn!(
+                                    "WH4-POLLNVAL-TRANSIENT pid={} fd={} nfds={} — lookup miss on a live fd",
+                                    crate::process::current_pid(),
+                                    pollfd.fd,
+                                    nfds
+                                );
+                            }
+                        }
                         pollfd.revents |= POLLNVAL;
                         ready_count += 1;
                         continue;
@@ -941,8 +959,109 @@ type PollWaitUnregFn = fn(&crate::fs::File, *mut crate::process::task::Task);
 /// epoll_wait blocker registers on the target's readiness queue and sleeps
 /// until a real producer event (data arrival, space freed, EOF, connect
 /// queued, inotify event, input event, timer expiry, signal arrival).
-fn poll_wait_impls(file: &crate::fs::File) -> Option<(PollWaitRegFn, PollWaitUnregFn)> {
-    let ops = file.get_ops()? as *const crate::fs::FileOps as *const ();
+/// wh4 (lost-wake hunt): parked-poll fd-set census — for every S-state
+/// task whose latched syscall is poll(7)/ppoll(73), read its USER pollfd
+/// array through the task's own page tables and print the fd numbers it
+/// is sleeping on. Paired with the queued-socket census
+/// (net::unix::unix_connected_snapshot) this turns "nobody watches the
+/// stuck socket" into named evidence: the socket's fd absent from its
+/// owner's parked poll set is a USERSPACE source-removal; present-but-
+/// unwoken would be a kernel wake loss. Report-only, dump-path only.
+pub fn wh4_parked_pollsets() {
+    struct Row {
+        pid: u32,
+        tgid: u32,
+        nfds: usize,
+        a0: usize,
+        fds: [u32; 12],
+    }
+    let mut rows: alloc::vec::Vec<Row> = alloc::vec::Vec::new();
+    crate::sched::for_each_task_try(|t| {
+        // SAFETY: read-only diagnostics under the pid-hash bucket lock;
+        // the user-memory reads go through the task's own page tables
+        // (walk-based, no faults). The syscall identity comes from the
+        // entry trap frame (orig_rax/rdi/rsi — the sleep_snapshot
+        // discipline; the last_syscall_nr latch is not populated).
+        unsafe {
+            let tk = &*t;
+            if tk.pid() == 0 {
+                return;
+            }
+            if !tk.state().is_sleeping() {
+                return;
+            }
+            let Some(top) = tk.kernel_stack_top_checked() else {
+                return;
+            };
+            #[cfg(feature = "x86_64")]
+            let (nr, a0, nfds): (u64, usize, usize) = {
+                let regs = (top.wrapping_sub(
+                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+                ((*regs).orig_rax, (*regs).rdi as usize, (*regs).rsi as usize)
+            };
+            #[cfg(feature = "riscv64")]
+            let (nr, a0, nfds): (u64, usize, usize) = {
+                let regs = (top.wrapping_sub(
+                    crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+                )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+                ((*regs).a7, (*regs).a0 as usize, (*regs).a1 as usize)
+            };
+            #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+            {
+                let _ = top;
+                return;
+            }
+            #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+            let (nr, a0, nfds): (u64, usize, usize) = (0, 0, 0);
+            if nr != 7 && nr != 270 && nr != 271 {
+                return; // poll(7) / pselect6(270) / ppoll(271) on x86_64
+            }
+            if a0 == 0 || nfds == 0 || nfds > 1024 {
+                return;
+            }
+            let mut fds = [u32::MAX; 12];
+            for k in 0..nfds.min(12) {
+                // pollfd layout (x86_64 + generic): { i32 fd; u16 events;
+                // u16 revents } = 8 bytes.
+                if let Some(fd) =
+                    crate::sync::futex::read_u32_via_task(t, a0 + k * 8)
+                {
+                    fds[k] = fd;
+                }
+            }
+            rows.push(Row { pid: tk.pid(), tgid: tk.tgid(), nfds, a0, fds });
+        }
+    });
+    for r in rows.iter().take(24) {
+        let mut line = alloc::string::String::new();
+        use core::fmt::Write as _;
+        let _ = write!(
+            line,
+            "wh4pollset: pid={} tgid={} nfds={} a0={:#x} fds=[",
+            r.pid, r.tgid, r.nfds, r.a0
+        );
+        for (k, fd) in r.fds.iter().enumerate() {
+            if k >= r.nfds.min(12) {
+                break;
+            }
+            if k > 0 {
+                let _ = write!(line, " ");
+            }
+            if *fd == u32::MAX {
+                let _ = write!(line, "?");
+            } else if (*fd as i64) < 0 {
+                let _ = write!(line, "-");
+            } else {
+                let _ = write!(line, "{}", fd);
+            }
+        }
+        let _ = write!(line, "]");
+        crate::pr_warn!("{}", line);
+    }
+}
+
+fn poll_wait_impls(file: &crate::fs::File) -> Option<(PollWaitRegFn, PollWaitUnregFn)> {    let ops = file.get_ops()? as *const crate::fs::FileOps as *const ();
     let is = |p: &crate::fs::FileOps| ops == (p as *const _ as *const ());
     if is(&crate::net::unix::UNIX_SOCKET_OPS) {
         return Some((
@@ -2439,6 +2558,36 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
             }
         }
         if !dead_fds.is_empty() {
+            // wh4 (lost-wake hunt): the purge is the one place a LIVE
+            // interest can be silently destroyed — a bug here (wrong
+            // fdtable, fd-number collision, fork inheritance) drops the
+            // watcher and every later event on that description is
+            // invisible to epoll. Budgeted loud print: names the purged
+            // (fd, file_id) pair with the purging pid so a capture says
+            // whether the stuck socket's entry died here.
+            static EPP_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            if EPP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
+                let mut line = alloc::string::String::new();
+                use core::fmt::Write as _;
+                for e in entries.iter() {
+                    if dead_fds.contains(&(e.fd as usize)) {
+                        let _ = write!(
+                            line,
+                            " [fd={} fid={:#x} rep={}]",
+                            e.fd, e.file_id, e.reports
+                        );
+                    }
+                }
+                crate::pr_warn!(
+                    "EP-PURGE pid={} epfd={} n={} owner_fd={}{}",
+                    crate::process::current_pid(),
+                    epfd,
+                    dead_fds.len(),
+                    dead_fds[0],
+                    line
+                );
+            }
             // Still under the entries lock here: remove the dead interests.
             // One entry per fd number (ADD dedups), so matching by number is
             // exact.

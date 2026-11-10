@@ -742,6 +742,15 @@ fn uart_rx_debug_magic(c: u8) {
                 crate::drivers::virtio::vw_report("dump");
                 crate::debug::taskdump::dump_all_tasks("uart-magic");
                 crate::ipc::binder::binder_debug_dump();
+                // wh4 (lost-wake hunt): queued-data socket census beside
+                // the task snapshot — data-with-no-waiter is the lost
+                // poll/recv wake signature. Plus the parked polls' own
+                // fd sets (user memory read via each task's page tables)
+                // so "socket unwatched" resolves to "fd absent from the
+                // owner's poll set" (userspace) or "present but unwoken"
+                // (kernel wake loss).
+                crate::net::unix::unix_connected_snapshot();
+                crate::syscall::misc::wh4_parked_pollsets();
             }
         }
 

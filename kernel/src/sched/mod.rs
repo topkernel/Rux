@@ -34,6 +34,7 @@ pub use sched::{
     current,
     kernel_text_window,
     w2_refusal_census,
+    wh4_note_futex_refusal,
     current_is_dying,
     get_current_pid,
     get_current_ppid,

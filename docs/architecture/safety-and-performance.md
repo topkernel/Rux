@@ -480,3 +480,37 @@ absents stated plainly. Each absent names what closing looks like.
   Source: wedge-format lane run/w2|w4|w5-serial.log (wedged, pre-fix),
   run/w1|w3|w6-w8-serial.log (good, pre-fix), run/v1-v5-serial.log +
   run/f1-serial.log (post-fix), fix commit on branch wedge-format.
+- Round-wh5 (2026-11-10, wake-hunt lane): the cross-COW lost private
+  futex wake class eliminated — a (b)-class liveness defect in safe
+  code. futex_hash bucketed EVERY key (private included) on the
+  resolved physical word, so a fork between one thread's FUTEX_WAIT
+  and another's unlock+FUTEX_WAKE stranded the waiter: fork's COW walk
+  write-protects the parent's private anon pages, the unlocker's
+  store faults the word onto a fresh frame, and the wake hashed the
+  NEW phys bucket while the waiter stayed linked in the OLD one — no
+  future wake could ever reach it (gnome-session-binary's gdbus worker
+  died exactly this way on every fork-heavy GNOME boot: parked in
+  FUTEX_WAIT on a mutex word with fval=2, the live word reading 0,
+  the entry linked for minutes; the session's D-Bus socket then
+  piled 2281-3783B unread and the RegisterClient timeout killed the
+  desktop). Fix: private keys hash the COW-stable (mm, uaddr)
+  identity — exactly the reference's private-futex key; shared keys
+  keep physical bucketing (the tst_checkpoint cross-exec property);
+  the exit paths (robust list, clear_child_tid) now pass an internal
+  FLAGS_IMMUTABLE so their wake walks both key variants (the musl
+  __thread_list_lock interop the old same-word bucketing carried, in
+  the reference's FUTEX_IMMUTABLE shape). Same-rig A/B (q35 KVM,
+  -cpu host, smp8, work/gnome-x86.img, 420 s boots): pre-fix
+  wh4-i10..12 + wh5-2/3 — 15-16 "failed to register before timeout"
+  per boot, session-bus socket unread, shell needed 3.5 min to start;
+  post-fix wh5-4..6 — 0 regfail, 0 stuck mutex parks for the session
+  tgid (FUX-STUCK rows 77 -> 2, both benign timer conds), the gdbus
+  worker back in poll([fd6]) at t=30 s, shell started in 14 s and
+  survived 7 min. Kernel-internal bucketing change only: LTP futex
+  gates futex_wake01 PASS, futex_cmp_requeue02 PASS (cmp_requeue01
+  TBROK-timeout reproduced identically on the pre-change baseline
+  build — pre-existing at this commit, not this change); make test
+  1348/1348; three-arch builds green.
+  Source: wake-hunt lane runs/gnome-x86-wh5-2..wh5-6 serial logs +
+  fix commit on branch wake-hunt (FUX-STUCK cur=0 conviction line,
+  wh4sock unread-socket census).

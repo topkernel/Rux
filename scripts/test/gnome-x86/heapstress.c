@@ -37,56 +37,6 @@
 static volatile int stop_flag;
 static volatile int corrupt_detected;
 
-// Top-chunk watch (the 17MB-trim discriminator follow-up): a thread
-// samples the main arena's top chunk header (size field at the word
-// just below the current brk) every 200us. The top size is large but
-// bounded (arena grew to at most ~64MB in the crashing boots); the
-// corruption signature is a size field that covers a range reaching
-// PAST the brk (impossible value = the writer that makes glibc trim
-// 17MB of live heap). On detection: print old/new, the 32 bytes
-// before the header (whose canary pattern landed there = the writer
-// identity), and freeze.
-static void *topwatch_thread(void *arg)
-{
-    (void)arg;
-    uint64_t last_size = 0;
-    int prints = 0;
-    while (!stop_flag && prints < 8) {
-        // sbrk(0) reads the current break; the top chunk header sits
-        // at [brk - 32, brk - 16) for prev_size and [brk - 16, brk)
-        // for size in glibc's layout (top chunk ends at brk).
-        void *brk = sbrk(0);
-        if (brk != (void *)-1) {
-            uint64_t *size_word = (uint64_t *)((char *)brk - 16);
-            // Only meaningful if the top chunk really ends at brk;
-            // glibc keeps top->size such that chunk+size == brk.
-            uint64_t sz = *size_word;
-            uint64_t mask = ~(uint64_t)7;
-            uint64_t top_end = ((uint64_t)((char *)brk - 32)) + (sz & mask);
-            if (last_size != 0 && (sz & mask) != (last_size & mask)) {
-                // Top size changed: normal on malloc/free, but if the
-                // new size claims to reach past brk, that is the
-                // corruption signature.
-                if (top_end > (uint64_t)brk + 0x1000) {
-                    printf("TOPWATCH-CORRUPT brk=%p old=%#lx new=%#lx top_end=%#lx PAST BRK\n",
-                           brk, (unsigned long)(last_size & mask),
-                           (unsigned long)(sz & mask), (unsigned long)top_end);
-                    // dump 32 bytes before the header for the writer pattern
-                    unsigned char *pre = (unsigned char *)brk - 48;
-                    printf("TOPWATCH-PRE ");
-                    for (int i = 0; i < 32; i++) printf("%02x", pre[i]);
-                    printf("\n");
-                    corrupt_detected = 1;
-                    prints++;
-                }
-            }
-            last_size = sz;
-        }
-        usleep(200);
-    }
-    return NULL;
-}
-
 // mode bits read from /etc/stress-mode (default full)
 static int do_malloc = 1, do_files = 1, do_mprotect = 1, do_munmap = 1;
 static int nthreads = NTHREADS;
@@ -199,50 +149,6 @@ static volatile unsigned char *g_corrupt_at;
 
 static void forensic_dump(void) {
     conprint("[heapstress] FORENSIC: target=%p\n", (void *)g_corrupt_at);
-    // Victim chunk header (glibc malloc_chunk: prev_size, size) — an
-    // intact size field means the chunk STRUCTURE was fine and the
-    // corruption arrived from outside (frame aliasing), while a smashed
-    // header points at metadata corruption (the first-bad-write family).
-    if (g_corrupt_at) {
-        const unsigned char *h = g_corrupt_at - 16;
-        conprint("[heapstress] FORENSIC: victim header: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                 h[0],h[1],h[2],h[3],h[4],h[5],h[6],h[7],
-                 h[8],h[9],h[10],h[11],h[12],h[13],h[14],h[15]);
-    }
-    // Identify the WRITER: whose canary landed in the victim? Recover
-    // the seed from the first foreign word (pat is invertible) and scan
-    // every live block for a block whose CURRENT data starts with that
-    // same pattern — that block's owner wrote the victim's page.
-    if (g_corrupt_at && g_got) {
-        // forward-inverse of pat(seed, 0):
-        // c = ((s ^ (s>>13)) * K) ^ (((s ^ (s>>13)) * K) >> 15)
-        unsigned d = g_got;
-        unsigned x = d; for (int i = 0; i < 6; i++) x = d ^ (x >> 15);
-        unsigned c = x;
-        unsigned K = 0x5bd1e995u, Kinv = 0;
-        // modular inverse of K mod 2^32 by brute exponentiation
-        unsigned long long acc = 1, base = K, e = 0xffffffffULL;
-        while (e) { if (e & 1) acc = (acc * base) & 0xffffffffULL; base = (base * base) & 0xffffffffULL; e >>= 1; }
-        Kinv = (unsigned)acc;
-        unsigned b = (c * Kinv) & 0xffffffffu;
-        unsigned y = b; for (int i = 0; i < 6; i++) y = b ^ (y >> 13);
-        unsigned seed = y;
-        conprint("[heapstress] FORENSIC: foreign seed=%08x (victim w0=%08x want=%08x)\n",
-                 seed, g_got, g_want);
-        for (int t = 0; t < NTHREADS; t++) {
-            for (int i = 0; i < NBLOCKS; i++) {
-                unsigned char *p = g_blocks[t][i];
-                if (!p) continue;
-                unsigned w;
-                memcpy(&w, p, 4);
-                if (w == g_got) {
-                    long d2 = (long)p - (long)g_corrupt_at;
-                    conprint("[heapstress] FORENSIC: WRITER-RESIDENT t%d blk=%d p=%p sz=%zu delta=%ld (first-word match)\n",
-                             t, i, (void *)p, g_sizes[t][i], d2);
-                }
-            }
-        }
-    }
     for (int t = 0; t < NTHREADS; t++) {
         for (int i = 0; i < NBLOCKS; i++) {
             unsigned char *p = g_blocks[t][i];
@@ -264,27 +170,6 @@ static void forensic_dump(void) {
                         conprint("[heapstress] FORENSIC: DUPLICATE ptr %p t%d/b%d AND t%d/b%d\n",
                                  (void *)a, t1, i1, t2, i2);
         }
-    // VA-overlap audit among ALL live blocks: glibc handing overlapping
-    // chunks = bin-metadata corruption; disjoint VAs sharing bytes =
-    // frame aliasing.
-    {
-        int overlaps = 0;
-        for (int t1 = 0; t1 < NTHREADS && overlaps < 8; t1++)
-            for (int i1 = 0; i1 < NBLOCKS && overlaps < 8; i1++) {
-                unsigned char *a = g_blocks[t1][i1]; if (!a) continue;
-                for (int t2 = t1; t2 < NTHREADS && overlaps < 8; t2++)
-                    for (int i2 = (t2 == t1 ? i1 + 1 : 0); i2 < NBLOCKS && overlaps < 8; i2++) {
-                        unsigned char *b = g_blocks[t2][i2]; if (!b) continue;
-                        if (a < b + g_sizes[t2][i2] && b < a + g_sizes[t1][i1]) {
-                            conprint("[heapstress] FORENSIC: VA-OVERLAP %p(+%zu) t%d/b%d AND %p(+%zu) t%d/b%d\n",
-                                     (void*)a, g_sizes[t1][i1], t1, i1,
-                                     (void*)b, g_sizes[t2][i2], t2, i2);
-                            overlaps++;
-                        }
-                    }
-            }
-        if (!overlaps) conprint("[heapstress] FORENSIC: no VA overlaps among live blocks\n");
-    }
     int fd = open("/proc/self/maps", O_RDONLY);
     if (fd >= 0) {
         static char b[512]; ssize_t r;
@@ -410,8 +295,6 @@ int main(void) {
         tas[i].id = i;
         pthread_create(&th[i], 0, worker, &tas[i]);
     }
-    pthread_t tw;
-    pthread_create(&tw, 0, topwatch_thread, NULL);
 
     int phase = 0;
     while (!corrupt_detected) {

@@ -3536,14 +3536,105 @@ impl Task {
                         core::sync::atomic::AtomicU32::new(0);
                     if W2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
                         let w2 = crate::sched::w2_refusal_census(task);
+                        // wh4: name the WAKER (its pid + the first 8 comm
+                        // bytes as two u32 words) so the census line says
+                        // who was trying to deliver the refused wake.
+                        let waker_pid = crate::sched::current()
+                            .map(|c| unsafe { (*c).pid() })
+                            .unwrap_or(0);
+                        // wh4 history (frozen-exec conviction across hits):
+                        // remember (task, exec, jif, busy_slot) per victim;
+                        // a repeat hit prints the deltas — dexec=+0 with a
+                        // sleeping state and an unchanged naming slot
+                        // convicts a lying slot on a live CPU (the 4th
+                        // face), while dexec>0 says the victim genuinely
+                        // ran between the refusals (the benign race /
+                        // park-refusal oscillation).
+                        const W2H: usize = 8;
+                        static W2H_TASK: [core::sync::atomic::AtomicUsize; W2H] =
+                            [const { core::sync::atomic::AtomicUsize::new(0) }; W2H];
+                        static W2H_EXEC: [core::sync::atomic::AtomicU64; W2H] =
+                            [const { core::sync::atomic::AtomicU64::new(0) }; W2H];
+                        static W2H_JIF: [core::sync::atomic::AtomicU64; W2H] =
+                            [const { core::sync::atomic::AtomicU64::new(0) }; W2H];
+                        static W2H_SLOT: [core::sync::atomic::AtomicI32; W2H] =
+                            [const { core::sync::atomic::AtomicI32::new(-2) }; W2H];
+                        let key = task as usize;
+                        let mut again = (0u64, 0u64, -2i32, false);
+                        for s in 0..W2H {
+                            let prev =
+                                W2H_TASK[s].load(core::sync::atomic::Ordering::Relaxed);
+                            if prev == key {
+                                again = (
+                                    w2.exec_ns.wrapping_sub(
+                                        W2H_EXEC[s]
+                                            .load(core::sync::atomic::Ordering::Relaxed),
+                                    ),
+                                    w2.jiffies.wrapping_sub(
+                                        W2H_JIF[s]
+                                            .load(core::sync::atomic::Ordering::Relaxed),
+                                    ),
+                                    W2H_SLOT[s]
+                                        .load(core::sync::atomic::Ordering::Relaxed),
+                                    true,
+                                );
+                                W2H_EXEC[s].store(
+                                    w2.exec_ns,
+                                    core::sync::atomic::Ordering::Relaxed,
+                                );
+                                W2H_JIF[s].store(
+                                    w2.jiffies,
+                                    core::sync::atomic::Ordering::Relaxed,
+                                );
+                                W2H_SLOT[s].store(
+                                    w2.busy_slot,
+                                    core::sync::atomic::Ordering::Relaxed,
+                                );
+                                break;
+                            }
+                            if prev == 0
+                                && W2H_TASK[s]
+                                    .compare_exchange(
+                                        0,
+                                        key,
+                                        core::sync::atomic::Ordering::Relaxed,
+                                        core::sync::atomic::Ordering::Relaxed,
+                                    )
+                                    .is_ok()
+                            {
+                                W2H_EXEC[s].store(
+                                    w2.exec_ns,
+                                    core::sync::atomic::Ordering::Relaxed,
+                                );
+                                W2H_JIF[s].store(
+                                    w2.jiffies,
+                                    core::sync::atomic::Ordering::Relaxed,
+                                );
+                                W2H_SLOT[s].store(
+                                    w2.busy_slot,
+                                    core::sync::atomic::Ordering::Relaxed,
+                                );
+                                break;
+                            }
+                        }
+                        let (dexec, djif, prev_slot, seen) = again;
+                        let prev_slot_txt: u64 = if seen && prev_slot >= 0 {
+                            prev_slot as u64
+                        } else {
+                            999
+                        };
                         crate::pr_warn!(
-                            "W2-WAKE-REFUSED-SLEEPING pid={} state={:#x} on_cpu={} pk={} cpu={} {}",
+                            "W2-WAKE-REFUSED-SLEEPING pid={} state={:#x} on_cpu={} pk={} cpu={} waker={} {} dexec=+{} djif={} prev_slot={}",
                             pid,
                             (*task).state().bits(),
                             (*task).on_cpu(),
                             (*task).pick_state(),
                             (*task).ti_cpu(),
-                            w2
+                            waker_pid,
+                            w2,
+                            dexec,
+                            djif,
+                            prev_slot_txt
                         );
                     }
                     return false;
