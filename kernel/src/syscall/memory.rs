@@ -382,7 +382,7 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
             // copy, exec's init).
             let mm_brk_now = |task: &crate::process::Task| -> u64 {
                 if let Some(addr_space) = task.address_space() {
-                    let v = addr_space.brk().as_usize() as u64;
+                    let v = addr_space.brk() as u64;
                     if v != 0 {
                         return v;
                     }
@@ -584,7 +584,7 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                 if data_cur != u64::MAX
                     && new_brk.saturating_sub(brk_floor) > data_cur
                 {
-                    return current_brk as i64;
+                                        return current_brk as i64;
                 }
 
                 let page = PAGE_SIZE as u64;
@@ -626,7 +626,7 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                         let next = vma_mgr.find_vma_after(
                             crate::mm::page::VirtAddr::new(vma_start as usize),
                         );
-                        if next.is_some_and(|v| (v.start().as_usize() as u64) < guard_end) {
+                                                if next.is_some_and(|v| (v.start().as_usize() as u64) < guard_end) {
                             // Keep the old brk on failure (Linux parity:
                             // sys_brk returns mm->brk, not an error).
                             return current_brk as i64;
@@ -651,7 +651,7 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                         // through munmap, which releases the same pages.
                         let heap_pages = heap_vma.page_count() as u64;
                         if vma_mgr.add(heap_vma).is_err() {
-                            // Keep the old brk on failure (Linux parity).
+                                                        // Keep the old brk on failure (Linux parity).
                             return current_brk as i64;
                         }
                         addr_space.add_total_vm(heap_pages);

@@ -247,7 +247,7 @@ impl MmStruct {
         use user_addr::{HEAP_START, HEAP_MAX_SIZE, BRK_DEFAULT, MMAP_START};
 
         if new_brk.as_usize() == 0 {
-            return Ok(self.brk());
+            return Ok(PageVirtAddr::new(self.brk()));
         }
 
         if self.space_type() != PageTableType::User {
@@ -257,10 +257,10 @@ impl MmStruct {
         let heap_end = BRK_DEFAULT + HEAP_MAX_SIZE;
 
         if new_brk.as_usize() < HEAP_START || new_brk.as_usize() > heap_end.min(MMAP_START) {
-            return Ok(self.brk());
+            return Ok(PageVirtAddr::new(self.brk()));
         }
 
-        let old_brk = self.brk().as_usize();
+        let old_brk = self.brk();
 
         if new_brk.as_usize() < old_brk {
             self.set_brk_val(new_brk.as_usize());
@@ -394,7 +394,7 @@ impl MmStruct {
         // [align_down(start_brk), align(brk)) — mapping over malloc's own
         // storage stays EINVAL (documented divergence: we never silently
         // free brk-managed pages).
-        let brk_cur = self.brk().as_usize();
+        let brk_cur = self.brk();
         let heap_lo = self.start_brk() & !(PAGE_SIZE_USIZE - 1);
         let heap_hi = if brk_cur > self.start_brk() {
             (brk_cur + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1)
@@ -994,7 +994,7 @@ impl MmStruct {
             MmStruct::new_shared(
                 new_root_ppn,
                 self.space_type(),
-                self.brk(),
+                PageVirtAddr::new(self.brk()),
             )
         };
 

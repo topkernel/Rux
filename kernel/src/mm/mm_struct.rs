@@ -610,10 +610,19 @@ impl MmStruct {
         self.start_brk.store(addr, Ordering::Release);
     }
 
-    /// Get current brk value
+    /// Get current brk value — EXACT bytes, never page-truncated.
+    ///
+    /// Post-review-campaign fix (2026-11-10, the mmapstress/brk01
+    /// family): routing the raw break through VirtAddr::new() masked it
+    /// to the page floor on every read-back — an unaligned break set by
+    /// brk(2) was silently forgotten, and the next growth's neighbor
+    /// check then collided with the heap's own VMA and refused EVERY
+    /// page-crossing grow (musl sbrk surfaced it as ENOMEM: "couldn't
+    /// round up brk"). Callers needing page-aligned math must floor()
+    /// explicitly.
     #[inline]
-    pub fn brk(&self) -> VirtAddr {
-        VirtAddr::new(self.brk.load(Ordering::Acquire))
+    pub fn brk(&self) -> usize {
+        self.brk.load(Ordering::Acquire)
     }
 
     /// Set brk value

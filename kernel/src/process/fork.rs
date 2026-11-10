@@ -849,7 +849,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         // cloning it into the child propagated the staleness).
         let parent_brk = (*current_ptr)
             .address_space()
-            .map(|aspace| aspace.brk().as_usize() as u64)
+            .map(|aspace| aspace.brk() as u64)
             .filter(|v| *v != 0)
             .unwrap_or_else(|| (*current_ptr).get_brk());
         (*task_ptr).set_brk(parent_brk);

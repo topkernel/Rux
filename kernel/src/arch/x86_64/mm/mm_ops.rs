@@ -183,7 +183,7 @@ impl MmStruct {
         use user_addr::{HEAP_START, HEAP_MAX_SIZE, BRK_DEFAULT, MMAP_START};
 
         if new_brk.as_usize() == 0 {
-            return Ok(self.brk());
+            return Ok(PageVirtAddr::new(self.brk()));
         }
 
         if self.space_type() != PageTableType::User {
@@ -193,10 +193,10 @@ impl MmStruct {
         let heap_end = BRK_DEFAULT + HEAP_MAX_SIZE;
 
         if new_brk.as_usize() < HEAP_START || new_brk.as_usize() > heap_end.min(MMAP_START) {
-            return Ok(self.brk());
+            return Ok(PageVirtAddr::new(self.brk()));
         }
 
-        let old_brk = self.brk().as_usize();
+        let old_brk = self.brk();
 
         if new_brk.as_usize() < old_brk {
             self.set_brk_val(new_brk.as_usize());
@@ -349,7 +349,7 @@ impl MmStruct {
         // growth into foreign VMAs is refused by sys_brk's VmaManager
         // overlap check, and the mm.brk mirror is synced by sys_brk so
         // this span tracks the real break.
-        let brk_cur = self.brk().as_usize();
+        let brk_cur = self.brk();
         let heap_lo = self.start_brk() & !(PAGE_SIZE_USIZE - 1);
         let heap_hi = if brk_cur > self.start_brk() {
             (brk_cur + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1)
@@ -1800,7 +1800,7 @@ pub fn find_free_area_32bit(&self, size: usize) -> Result<PageVirtAddr, MapError
         let new_space = unsafe { MmStruct::new_shared(
             new_root_ppn,
             self.space_type(),
-            self.brk(),
+            PageVirtAddr::new(self.brk()),
         ) };
 
         {
