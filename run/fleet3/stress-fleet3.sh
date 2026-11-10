@@ -53,12 +53,13 @@ injbins_for() {  # per-class binary injection dir
     case "$1" in
         r5-*|r5b-*) echo "$WT/run/fio-bin" ;;
         r6-*)       echo "$WT/run/futex-selftests-bin" ;;
+        r7-*)       echo "$WT/run/fsfuzz-bin" ;;
         *)          echo "" ;;
     esac
 }
 
 build_queue() {  # every one-boot class we own, in rotation order
-    {   ls "$WT"/run/r5-*.cmds "$WT"/run/r5b-*.cmds "$WT"/run/r6-*.cmds 2>/dev/null | sort
+    {   ls "$WT"/run/r5-*.cmds "$WT"/run/r5b-*.cmds "$WT"/run/r6-*.cmds "$WT"/run/r7-*.cmds 2>/dev/null | sort
         printf '%s\n' "L|hackbench 20 process|200" "L|hackbench -p 20|200" \
             "L|60 cyclictest -D 30 -i 1000 -m|200" \
             "L|60 cyclictest -D 30 -i 1000 -m -p 98|200" \
