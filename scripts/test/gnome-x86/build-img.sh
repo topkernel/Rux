@@ -47,7 +47,7 @@ cat > "$APT_SRC" <<'EOS'
 deb [trusted=yes] http://mirrors.aliyun.com/ubuntu/ jammy main restricted universe multiverse
 deb [trusted=yes] http://mirrors.aliyun.com/ubuntu/ jammy-updates main restricted universe multiverse
 EOS
-PKGS="dash bash xserver-xorg-core xserver-xorg-video-fbdev x11-xserver-utils dbus dbus-x11 libgl1-mesa-dri libgl1-mesa-glx gnome-session-bin gnome-shell fonts-dejavu-core util-linux coreutils"
+PKGS="dash bash xserver-xorg-core xserver-xorg-video-fbdev xserver-xorg-input-evdev x11-xserver-utils dbus dbus-x11 libgl1-mesa-dri libgl1-mesa-glx gnome-session-bin gnome-shell fonts-dejavu-core util-linux coreutils"
 
 # Resolve the full recursive dependency closure (no recommends), download
 # every .deb, and extract into the rootfs. dpkg-deb -x needs no privileges;
