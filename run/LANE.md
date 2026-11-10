@@ -250,6 +250,9 @@ exercised by the ktest assertions (amortization counters + the
   already in (first splat stops all checking).
 - D-21 registered in docs/architecture/design-divergences.md (the
   Rust-native mapping differences vs the reference lockdep).
+  Fourth-launch rebase note: main's dlsleep merge (87ed94dc) landed its
+  own D-21/D-22 (hung-task owner chain, panic last-gasp); the lane entry
+  is renumbered **D-23** on the rebased branch.
 - DEFAULT-build ASM identity RE-VERIFIED after these changes:
   x86_64 447/447, riscv64 443/443 (splat code is feature-gated).
 - Official dual-arch build commands: `PLATFORM=x86_64 make build` rc=0;
@@ -269,6 +272,15 @@ exercised by the ktest assertions (amortization counters + the
 - tier-2 quiet-window rerun (wait-and-retry): run/tier2-retry.sh,
   output run/tier2-retry-out.log, serial
   work/pbench-lockdep-p1-default-v3-pb-serial.log when it fires
+- fourth launch (post-rebase): armed boot serial
+  work/pbench-lockdep-armed3-serial.log, suite logs
+  run/unittest-featureon-rebase.log / run/maketest-off-rebase.log,
+  regression A/B logs run/riscv-regression-boot-rebase2.log +
+  run/riscv-regression-boot-MAIN2.log, preserved default ELFs
+  run/x86-default-final-rux + run/riscv-default-final-rux, gate loop
+  run/tier12-retry-rebase.sh → run/tier12-retry-rebase-out.log,
+  gate serials run/pa-lockdep-p1-rebase-serial.log +
+  work/pbench-lockdep-p1-rebase-pb-serial.log
 
 ## Resume state (11-08, third launch)
 
@@ -342,3 +354,154 @@ artifacts on disk before committing (below).
 Host note at launch: 8 foreign QEMUs, load ~9.6 — the gate's own
 preflight would self-refuse; hence wait-and-retry instead of stacking
 a boot.
+
+## Fourth launch (11-10): rebase onto main@ccac40ee + full re-verification
+
+### Rebase
+
+origin/main moved 122 commits past the 97189069 base. `git rebase
+origin/main`: ONE conflict — docs/architecture/design-divergences.md,
+where main's dlsleep merge (87ed94dc) added its own D-21 (hung-task
+owner chain) and D-22 (panic last-gasp) while the lane commit added a
+D-21; resolved by keeping both and renumbering the lane entry to
+**D-23** (next free number; the in-code and LANE references updated).
+Semantic reconciliation of the warned areas:
+
+- `sync/mutex.rs` (dlsleep merge): the merge's changes are the
+  blocked_on store in the contended wait path and owner-RA diagnostics;
+  the P1 hooks sit at the `lock()` funnel entry and the
+  `release()`/`release_if_owner()` funnels — both sides merged clean
+  and the pairing (one push per lock(), one pop per release path
+  including the exit force-drop) is unchanged.
+- `sync/spinlock.rs` (main's fc718f82/08c99b83 owner-RA commits): the
+  `caller_return_address` doc changed on main; the lane's
+  `pub(crate)` promotion (the P1 acquire-site source) merged with it.
+  Codegen unchanged (visibility only).
+- futex (main's c7f0fe48 private-key hashing): the bucket is still the
+  `KeyedSpinlock<FutexBucketKey>` funnel; key hashing changed, lock
+  type did not — hooks intact.
+
+### Re-verification on the rebased tree (all fresh, this launch)
+
+1. **Builds x3, rc=0**: `PLATFORM=x86_64 make build` (default);
+   `rm build/.config && make build` (riscv64 default); feature-ON
+   x86_64 (cargo `x86_64,debug-lockdep` + ksyms two-pass +
+   mkbzimage → bzImage-lockdep).
+2. **DEFAULT-build ASM identity vs CURRENT origin/main**
+   (base worktree rebuilt at ccac40ee, same-day pair):
+   **x86_64 451/451 IDENTICAL, riscv64 447/447 IDENTICAL.** Counts
+   grew from 447/443 — main added lock-path symbols under the same
+   filter, all identical. One riscv pair initially differed:
+   `SpinlockIrqGuard<TrimQEntry>::drop -> RawSpinlock::unlock` split
+   its PC-relative target differently between the auipc immediate and
+   the jalr offset (4KiB page-boundary; whole-binary layout artifact
+   from the rebase, not a codegen choice — same resolved symbol).
+   The gate's normalizer now folds auipc+consumer pairs to the
+   effective symbolic target (commit 5c3b3876; strict on resolved
+   targets — a different symbol still fails). Post-fix: both arches
+   fully identical.
+3. **Feature-ON armed suite (riscv64, unit-test+debug-lockdep,
+   checker ARMED for the whole suite)**: **ALL TESTS PASSED, 1360
+   PASS lines, 11/11 p1 runtime cases green** — including "reverse of
+   INV-LOCK-5 splats", "sleep-under-spin", "sleep-in-preempt-ctx",
+   "observed cycle splats", chain-key amortization, both /proc
+   renders (log run/unittest-featureon-rebase.log).
+4. **Feature-OFF suite (`make test`, riscv64)**: **rc=0, ALL TESTS
+   PASSED, 1349 PASS lines** (log run/maketest-off-rebase.log) —
+   exactly the armed count minus the 11 feature-gated p1 cases.
+5. **riscv64 regression boot (default build, smp8 TCG, 150s)**: rc=0,
+   zero KERNPANIC/panics/POISONED, LOOP-DONE printed
+   (run/riscv-regression-boot-rebase2.log). The window carried
+   TIMER-SOFTIRQ-STALL/WAKE-STRANDED markers (21/10/2) under host
+   load ~3.5 with 4+ foreign QEMUs; the same-rig A/B on PURE
+   origin/main in the same window shows the same class (13/6/2,
+   run/riscv-regression-boot-MAIN2.log) — TCG-under-load starvation,
+   not a branch regression (the third launch's zero-marker boot ran
+   in a quieter window). Merge-gate criteria (rc=0, zero panics)
+   hold.
+6. **Armed ns/acquire RE-MEASURED post-rebase** (constraint (b);
+   bzImage-lockdep, KVM, debug=lockdep, PBENCH DONE rc=0,
+   work/pbench-lockdep-armed3-serial.log): cost-probe keyed
+   acquire/release pair (N=200000): **disarmed 37 ns, armed 128 ns
+   (hook delta 91 ns)** — same class as the banked 38/128/90 (hooks
+   did not move materially). All five selftest scenarios PASS with
+   splats; the only WARNING/LOCKDEP lines in the whole serial are
+   the selftest's own 10 plus one pre-existing CR4.SMAP arch warning
+   (unrelated, image class) — zero splats/notes from the real pbench
+   traffic (futex storm, fs writes, 100k+ context switches).
+   Armed pbench rows this boot: p1_null 0.280, p2_ctxsw 0.771,
+   p8_futex_wake 0.952 (banked armed 0.952 — identical),
+   p8_futex_pp 10.269 (the pp row is two-task scheduler-bound and
+   window-hostage: this boot ran at foreign_qemus=4 with p2 p99
+   65 ms / max 510 ms spikes; quiet-window class 4.4-5.2 stands).
+
+### Annotated violation-splat excerpt (usage guide, fresh post-rebase boot)
+
+From work/pbench-lockdep-armed3-serial.log — the forced reverse of
+INV-LOCK-5 (selftest s2; the shape is what any real ORDER-VIOLATION
+will print). Annotations are in the right column; the DEFERFREE line
+is an unrelated serial interleave from another subsystem on the same
+console.
+
+```
+WARNING: possible circular locking dependency detected            <- reference banner
+---------------------------------------------------------
+?/0 on cpu 0 is trying to acquire lock:                          <- task/tgid/cpu context
+ (futex-bucket){....}, at: rux::debug::lockdep::runtime::successors+0x134/0x136 (ip 0xffffffff8042b5f4)
+                                                                 ^ acquiring class + ksyms-symbolized site + raw ip
+but task is already holding lock:
+ (grq){....}, at: rux::debug::lockdep::runtime::successors+0x130/0x136 (ip 0xffffffff8042b5f0)
+                                                                 ^ held class + its acquire site
+
+the existing dependency chain (in reverse order) is:             <- reference -> #N chain
+-> #1 (grq){....}  [declared INNER, INV-LOCK-5]
+-> #0 (futex-bucket){....}  [declared OUTER, INV-LOCK-5]
+
+ ORDER-VIOLATION of INV-LOCK-5: the declared order is futex-bucket -> grq (docs/architecture/lock-ordering.md); observed the reverse
+                                                                 ^ Rux addition: the INV-LOCK-* citation (what to fix and where)
+ Possible unsafe locking scenario:
+       CPU0                    CPU1
+       ----                    ----
+  lock(futex-bucket);
+                               lock(grq);
+                               lock(futex-bucket);
+  lock(grq);
+ *** DEADLOCK ***                                                 <- reference closing line
+
+1 lock(s) held by this task:                                     <- reference numbered held list
+ #0: (grq){....}, at: rux::debug::lockdep::runtime::successors+0x130/0x136
+cpu=0 preempt_count=0x0 in_hardirq=false in_softirq=false        <- Rux addition: context tail
+LOCKDEP: turning off the locking correctness validator (debug_locks = 0; first splat)
+                                                                 ^ reference self-disable semantics: first splat stops all checking
+lockdep: selftest s2 declared-order violation (grq held, bucket acquired): PASS (splat above)
+```
+
+Reading guide for a REAL splat (not the selftest): the "at:" site on
+the ACQUIRING line is where the bad order was observed (ra captured
+at the hook); the held-list "at:" is where the INNER lock was taken;
+the ORDER-VIOLATION line names the declared forward order and the
+lock-ordering.md invariant to fix against. The other splat families:
+"WARNING: sleeping lock in atomic context (INV-LOCK-8 rule 1)
+detected" names the held spin class or the preempt_count arm; the
+CYCLE splat prints the observed-edge chain before the same
+CPU0/CPU1 diagram. UNDECLARED-NEST lines are NOTES (once per pair),
+not splats — they feed lock-ordering.md, checking continues.
+
+### Merge-gate tiers on the DEFAULT build (the missing leg)
+
+Third-launch context: tier 1 green (row 2 above); tier 2 had two fs
+rows above the OLD anchor band in a host-stalled window (23:07 boot,
+one minute after the 780s syscost boot ended). NOTE: perf-gate.sh's
+tier-2 anchor was RE-BANKED on main 2026-11-08 for the SMP-8
+standard (p6_append 6.402, p6_mkdrmdir 269.778, p2_ctxsw 0.756,
+p1_null 0.280, p1_clock 0.350, p3b_cow 18.424, p6_write_fsync
+8613.105, p6_unlink 67.735) — against the re-banked anchor, the
+third launch's measured rows (append 6.422, mkdrmdir 271.9) are IN
+band (+0.3%, +0.8%). The re-banked anchor ships in the perf-gate.sh
+this lane runs, so the fourth-launch tier-2 run is judged against it
+directly.
+
+Fourth launch: wait-and-retry loop (run/tier12-retry-rebase.sh,
+detached; fires `perf-gate.sh --tiers 1,2 --kernel
+target/x86_64-unknown-none/debug/bzImage --tag lockdep-p1-rebase
+--secs 780` at <=1 foreign QEMU). Verdict below when it lands.
