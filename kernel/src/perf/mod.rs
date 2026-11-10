@@ -497,7 +497,9 @@ fn ring_publish_head(inner: &PerfInner) {
 /// Append one record; drops (+LOST counter) when it does not fit.
 /// Wakes readers if anything was written.
 fn emit_record(ev: &PerfEvent, rec: &[u8], wake: bool) {
-    let mut inner = ev.inner.lock();
+    // IRQ-safe uniformly (callers hold REGISTRY irqsave today; nested
+    // irq_save is benign and blocks future call-path surprises).
+    let mut inner = ev.inner.lock_irqsave();
     let size = inner.data_size;
     if size == 0 {
         return; // no ring (counting mode or not yet mmap'd)
@@ -536,7 +538,7 @@ fn emit_record(ev: &PerfEvent, rec: &[u8], wake: bool) {
         lrec[6..8].copy_from_slice(&24u16.to_le_bytes());
         lrec[8..16].copy_from_slice(&ev.id.to_le_bytes());
         lrec[16..24].copy_from_slice(&lost.to_le_bytes());
-        let mut inner2 = ev.inner.lock();
+        let mut inner2 = ev.inner.lock_irqsave();
         inner2.head = ring_put(&inner2, inner2.head, &lrec);
         ring_publish_head(&inner2);
         drop(inner2);
@@ -1022,7 +1024,10 @@ fn perf_poll(file: &crate::fs::File, events: u16) -> u16 {
     let mut ready = 0u16;
     let Some(ev) = event_of(file) else { return POLLERR };
     if events & POLLIN != 0 {
-        let inner = ev.inner.lock();
+        // IRQ-safe: the armed softirq takes inner from IRQ context; a
+        // plain take here deadlocks (poll holding inner when the tick
+        // softirq spins on it).
+        let inner = ev.inner.lock_irqsave();
         let has_data = match inner.pages.as_ref() {
             Some(_) => {
                 let tail = ring_read_user_tail(&inner);
@@ -1059,7 +1064,8 @@ fn perf_close(file: &crate::fs::File) -> i32 {
     // Free the ring pages (if mmap'd) under the event lock, then the
     // event itself. No reader can hold &File past the last fd release.
     {
-        let mut inner = ev.inner.lock();
+        // IRQ-safe take (softirq races — see perf_poll).
+        let mut inner = ev.inner.lock_irqsave();
         if let Some(pages) = inner.pages.take() {
             for p in pages {
                 // Owner reference (binder/io_uring discipline): the
@@ -1147,8 +1153,9 @@ pub fn perf_mmap_handler(
     let ev = event_of(file).ok_or(6)?; // ENXIO
 
     // One ring per event (second mmap: EBUSY, reference semantics).
+    // IRQ-safe take (softirq races — see perf_poll).
     {
-        let inner = ev.inner.lock();
+        let inner = ev.inner.lock_irqsave();
         if inner.pages.is_some() {
             return Err(16); // EBUSY
         }
@@ -1288,7 +1295,7 @@ pub fn perf_mmap_handler(
 
     // Publish the ring into the event (metadata fields on page 0).
     {
-        let mut inner = ev.inner.lock();
+        let mut inner = ev.inner.lock_irqsave();
         let base = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(pages[0] as u64))
             .bits() as *mut u8;
         // SAFETY: our own metadata page.
