@@ -9707,3 +9707,37 @@ MISSING in 1 rep = the known host-noise class, foreign_qemus=10).
 2. Yardstick unchanged: notifiers run -> install stream completes ->
    CreateNewUser -> StartUser(46) -> launcher -> PIXELS (report any
    md5 != 06b933b4/82f0a25f immediately).
+
+### 86.5 COORDINATOR SLOW-TXN DISSECTION (ohw160, 2026-11-10 22:0x) — the install-stream cost anatomy; 87th entry
+
+The 86th died at quota before hiperf. My hand-dissection of ohw160's
+31 SLOW-TXN rows (>1.9s class) lands the first cut:
+
+- Distribution: 30/31 are EXEC-dominated (server picked up fast, then
+  ran LONG); only 1 is queue-dominated. The bottleneck is server-side
+  execution cost, not pickup latency.
+- Targets: installs (pid 621) 9 rows via OS_IPC_2/3/4/5; media/input
+  hosts 5; i18n 2; foundation/render/composer singles.
+- The two giants: txn15137 foundation→installs OS_IPC_3_1147 code2
+  84.1s; txn13037 installs→foundation OS_IPC_3_1017 code0 129.5s — the
+  install handshake itself, exec-dominated both ways.
+
+FOR THE 87TH (priority order):
+1. hiperf FIRST (the user's directive): /system/bin/hiperf in the OH
+   image; our kernel wires perf_event_open (x86 nr 241) — verify it
+   arms; record the SA-init window AND the install window; symbolized
+   top kernel hotspots. If perf_event_open diverges from the reference
+   (attr validation, exclude bits, sample period), fix to parity first
+   — the tool is also a deliverable.
+2. The exec-dominated class says the cost is inside the server's
+   handler run — which for installs/foundation is userspace code doing
+   binder+fs+alloc syscalls. The kernel lever candidates (rank): (a)
+   every install does file I/O through our fs stack — per-op cost x
+   thousands of ops; pbench fs rows are in-band, so look at the OH
+   ACCESS PATTERN (what syscalls dominate in the window — syscost=1
+   boot over the install window gives the volume table); (b) binder
+   round-trip cost x thousands of nested IPCs (our 2.9ms p90 proxy vs
+   reference ~1ms class — the 80th's measurement; every ~2ms x ~50k
+   calls = 100s); (c) allocator paths under the install churn.
+3. 1126 idle-while-queue-grows (from the §86 charter): immediate
+   wake-verdict on its word.
