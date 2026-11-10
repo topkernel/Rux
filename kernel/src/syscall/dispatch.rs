@@ -314,7 +314,12 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         }
         213 => {
             // epoll_create(size): Linux rejects size <= 0 with EINVAL.
-            let result = if (args[0] as i64) <= 0 {
+            // The uapi parameter is INT — truncate like the reference's
+            // SYSCALL_DEFINE1(int) marshalling (musl's variadic syscall
+            // delivers a 32-bit -1 as 0x00000000FFFFFFFF; reading it as
+            // i64 made it +4294967295 and the size check passed — LTP
+            // epoll_create02's syscall variant).
+            let result = if (args[0] as u32 as i32) <= 0 {
                 -(errno::EINVAL as i64)
             } else {
                 misc::sys_epoll_create(args)

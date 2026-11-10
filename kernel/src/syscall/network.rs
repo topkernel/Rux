@@ -1950,10 +1950,36 @@ pub fn sys_setsockopt(args: SyscallArgs) -> i64 {
     const IP_ADD_MEMBERSHIP: i32 = 35;
     const IP_DROP_MEMBERSHIP: i32 = 36;
 
+    // Reference argument validation order (do_sock_setsockopt →
+    // sock_common_setsockopt): a NEGATIVE optlen is EINVAL; a NULL
+    // optval with a nonzero optlen is EFAULT (LTP setsockopt01's
+    // invalid-buffer and invalid-optlen cases; both used to succeed
+    // here).
+    if (args[4] as u32 as i32) < 0 {
+        return -(errno::EINVAL as i64);
+    }
+    if optval.is_null() && optlen != 0 {
+        return -(errno::EFAULT as i64);
+    }
     if !optval.is_null() && optlen > 0 {
         if !crate::arch::uaccess::access_ok(optval as usize, optlen as usize) {
             return -(errno::EFAULT as i64);
         }
+    }
+
+    // A nonexistent fd is EBADF BEFORE any socket-ness test (reference
+    // sockfd_lookup); the old order answered ENOTSOCK for fd=-1.
+    if unsafe { crate::fs::file::get_file_fd(fd).is_none() } {
+        return -(errno::EBADF as i64);
+    }
+
+    // SOL_SOCKET int-valued options need optlen >= sizeof(int) — the
+    // reference's sock_setsockopt size floors answer EINVAL for short
+    // buffers (LTP setsockopt01's invalid-optlen case). Every
+    // SOL_SOCKET option we implement reads an int or larger.
+    const SOL_SOCKET_CHK: i32 = 1;
+    if level == SOL_SOCKET_CHK && optlen < 4 {
+        return -(errno::EINVAL as i64);
     }
 
     // Validate fd is a socket (W3: get_socket_from_fd verifies the ops

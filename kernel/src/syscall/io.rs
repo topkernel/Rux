@@ -2686,6 +2686,20 @@ pub fn sys_sendfile(args: SyscallArgs) -> i64 {
             None => return -errno::EBADF as i64,
         };
 
+        // Reference fd-mode gates (do_sendfile): in_fd must be READABLE
+        // and out_fd WRITABLE — the wrong direction is EBADF (LTP
+        // sendfile03: in_fd O_WRONLY and out_fd O_RDONLY must both
+        // fail).
+        if in_file.flags().is_writeonly() {
+            return -errno::EBADF as i64;
+        }
+        if !out_file.flags().is_writeonly()
+            && !(out_file.flags().bits() & crate::fs::file::FileFlags::O_ACCMODE
+                == crate::fs::file::FileFlags::O_RDWR)
+        {
+            return -errno::EBADF as i64;
+        }
+
         // With a non-NULL offset, sendfile(2) reads from that offset and
         // leaves the fd's own position untouched (the old code set_pos'd the
         // shared position mid-transfer and only restored it on success).
