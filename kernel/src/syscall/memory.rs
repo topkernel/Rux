@@ -914,6 +914,19 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
         return mmap_error::EINVAL;
     }
 
+    // Reference do_mmap file-fetch order: for a non-anonymous mapping
+    // the fd is resolved right after the flag validation — a negative
+    // fd is EBADF there (LTP mmap08 passes fd=-1 with MAP_FILE|SHARED
+    // and reads EBADF; the old code answered EINVAL from a later
+    // VMA-shape check).
+    if map_type != 0
+        && map_flags & map::MAP_ANONYMOUS == 0
+        && map_flags & map::MAP_HUGETLB == 0
+        && (fd as i64) < 0
+    {
+        return mmap_error::EBADF;
+    }
+
     // Reject unknown mapping flags (Linux do_mmap rejects unmapped bits).
     // Honored set: type bits plus the asm-generic flags we recognize.
     // MAP_32BIT (x86_64) is accepted as a placement hint — OH's musl

@@ -561,10 +561,6 @@ pub fn sys_clock_settime(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    // CAP_SYS_TIME required to set time
-    if !crate::security::capable(crate::security::CAP_SYS_TIME) {
-        return -(errno::EPERM as i64);
-    }
 
     if tp_ptr.is_null() {
         return -(errno::EFAULT as i64);
@@ -589,8 +585,21 @@ pub fn sys_clock_settime(args: SyscallArgs) -> i64 {
     }
 
     // Linux (posix_clock_settime): tv_nsec must be normalized.
-    if ts[1] < 0 || ts[1] > 999_999_999 {
+    // Reference timespec64_valid(): a negative tv_sec or an
+    // unnormalized tv_nsec is EINVAL, checked BEFORE the capability
+    // gate (musl's settimeofday lands here via clock_settime and LTP
+    // settimeofday02 drops CAP_SYS_TIME while still expecting EINVAL).
+    if ts[0] < 0 || ts[1] < 0 || ts[1] > 999_999_999 {
         return -(errno::EINVAL as i64);
+    }
+
+    // Reference posix-clock set path: capable(CAP_SYS_TIME) gates every
+    // settable clock. musl's settimeofday() lands HERE via
+    // clock_settime(CLOCK_REALTIME) — without this gate the capability
+    // drop in LTP settimeofday02's third case never took effect (the
+    // call succeeded).
+    if !crate::security::capable(crate::security::CAP_SYS_TIME) {
+        return -(errno::EPERM as i64);
     }
 
     set_realtime_from_secs_nanos(ts[0], ts[1])
@@ -1714,12 +1723,13 @@ pub fn sys_settimeofday(args: SyscallArgs) -> i64 {
     let tv_ptr = args[0] as *const u8;
     let _tz_ptr = args[1] as *const u8; // timezone is deprecated and ignored
 
-    // CAP_SYS_TIME required to set time
-    if !crate::security::capable(crate::security::CAP_SYS_TIME) {
-        return -(errno::EPERM as i64);
-    }
     if tv_ptr.is_null() {
-        return -(errno::EFAULT as i64);
+        // tv==NULL only sets the (ignored) timezone: pure capability
+        // gate, same as the reference's NULL-tv path.
+        if !crate::security::capable(crate::security::CAP_SYS_TIME) {
+            return -(errno::EPERM as i64);
+        }
+        return 0;
     }
     if !crate::arch::uaccess::access_ok(tv_ptr as usize, 16) {
         return -(errno::EFAULT as i64);
@@ -1740,9 +1750,18 @@ pub fn sys_settimeofday(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // Linux (do_settimeofday64): tv_usec must be normalized.
-    if tv[1] < 0 || tv[1] > 999_999 {
+    // Reference settimeofday syscall order: timeval_valid() runs
+    // BEFORE the capability check — a negative tv_sec or an
+    // unnormalized tv_usec is EINVAL even for a caller without
+    // CAP_SYS_TIME (LTP settimeofday02 drops the capability and still
+    // expects EINVAL for the value cases).
+    if tv[0] < 0 || tv[1] < 0 || tv[1] > 999_999 {
         return -(errno::EINVAL as i64);
+    }
+
+    // CAP_SYS_TIME required to set the clock.
+    if !crate::security::capable(crate::security::CAP_SYS_TIME) {
+        return -(errno::EPERM as i64);
     }
 
     set_realtime_from_secs_nanos(tv[0], tv[1].saturating_mul(1_000))

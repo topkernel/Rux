@@ -334,7 +334,13 @@ pub fn sys_sched_setscheduler(args: SyscallArgs) -> i64 {
     const SCHED_RESET_ON_FORK_FLAG: i32 = 0x4000_0000;
     let reset_on_fork = policy & SCHED_RESET_ON_FORK_FLAG != 0;
     let policy = policy & !SCHED_RESET_ON_FORK_FLAG;
-    if (args[0] as i64) < 0 {
+    // Reference shape (find_task_by_pid's pid_max gate): pid < 0 OR
+    // pid >= pid_max is EINVAL BEFORE any lookup; an in-range pid that
+    // simply does not exist is ESRCH. LTP sched_getparam03/setparam04
+    // probe 0x7fffffff — over the 4194304 limit — and expect EINVAL.
+    if (args[0] as i64) < 0
+        || args[0] > crate::process::pid::PID_MAX_LIMIT as u64
+    {
         return -(errno::EINVAL as i64);
     }
 
@@ -444,7 +450,13 @@ pub fn sys_sched_getscheduler(args: SyscallArgs) -> i64 {
     let pid = args[0] as u32;
 
     // Negative pids are EINVAL before any lookup.
-    if (args[0] as i64) < 0 {
+    // Reference shape (find_task_by_pid's pid_max gate): pid < 0 OR
+    // pid >= pid_max is EINVAL BEFORE any lookup; an in-range pid that
+    // simply does not exist is ESRCH. LTP sched_getparam03/setparam04
+    // probe 0x7fffffff — over the 4194304 limit — and expect EINVAL.
+    if (args[0] as i64) < 0
+        || args[0] > crate::process::pid::PID_MAX_LIMIT as u64
+    {
         return -(errno::EINVAL as i64);
     }
 
@@ -490,7 +502,13 @@ pub fn sys_sched_setparam(args: SyscallArgs) -> i64 {
 
     // Negative pids are EINVAL before any lookup (LTP sched_setparam04
     // passes -1; sched_setparam05 passes a reaped/unused pid → ESRCH).
-    if (args[0] as i64) < 0 {
+    // Reference shape (find_task_by_pid's pid_max gate): pid < 0 OR
+    // pid >= pid_max is EINVAL BEFORE any lookup; an in-range pid that
+    // simply does not exist is ESRCH. LTP sched_getparam03/setparam04
+    // probe 0x7fffffff — over the 4194304 limit — and expect EINVAL.
+    if (args[0] as i64) < 0
+        || args[0] > crate::process::pid::PID_MAX_LIMIT as u64
+    {
         return -(errno::EINVAL as i64);
     }
     if param_ptr.is_null() {
@@ -587,7 +605,13 @@ pub fn sys_sched_getparam(args: SyscallArgs) -> i64 {
 
     // Negative pids are EINVAL before any lookup (LTP sched_getparam03
     // passes -1 and expects EINVAL, not ESRCH).
-    if (args[0] as i64) < 0 {
+    // Reference shape (find_task_by_pid's pid_max gate): pid < 0 OR
+    // pid >= pid_max is EINVAL BEFORE any lookup; an in-range pid that
+    // simply does not exist is ESRCH. LTP sched_getparam03/setparam04
+    // probe 0x7fffffff — over the 4194304 limit — and expect EINVAL.
+    if (args[0] as i64) < 0
+        || args[0] > crate::process::pid::PID_MAX_LIMIT as u64
+    {
         return -(errno::EINVAL as i64);
     }
     if param_ptr.is_null() {
@@ -653,7 +677,13 @@ pub fn sys_sched_getattr(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
     // Negative pids are EINVAL before any lookup (Linux find_task_by_pid).
-    if (args[0] as i64) < 0 {
+    // Reference shape (find_task_by_pid's pid_max gate): pid < 0 OR
+    // pid >= pid_max is EINVAL BEFORE any lookup; an in-range pid that
+    // simply does not exist is ESRCH. LTP sched_getparam03/setparam04
+    // probe 0x7fffffff — over the 4194304 limit — and expect EINVAL.
+    if (args[0] as i64) < 0
+        || args[0] > crate::process::pid::PID_MAX_LIMIT as u64
+    {
         return -(errno::EINVAL as i64);
     }
     if attr_ptr.is_null() || size == 0 {
@@ -751,7 +781,13 @@ pub fn sys_sched_setattr(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
     // Negative pids are EINVAL before any lookup.
-    if (args[0] as i64) < 0 {
+    // Reference shape (find_task_by_pid's pid_max gate): pid < 0 OR
+    // pid >= pid_max is EINVAL BEFORE any lookup; an in-range pid that
+    // simply does not exist is ESRCH. LTP sched_getparam03/setparam04
+    // probe 0x7fffffff — over the 4194304 limit — and expect EINVAL.
+    if (args[0] as i64) < 0
+        || args[0] > crate::process::pid::PID_MAX_LIMIT as u64
+    {
         return -(errno::EINVAL as i64);
     }
     if attr_ptr.is_null() {
@@ -948,7 +984,13 @@ pub fn sys_sched_rr_get_interval(args: SyscallArgs) -> i64 {
 
     // Negative pids are EINVAL before any lookup (LTP
     // sched_rr_get_interval03 passes -1).
-    if (args[0] as i64) < 0 {
+    // Reference shape (find_task_by_pid's pid_max gate): pid < 0 OR
+    // pid >= pid_max is EINVAL BEFORE any lookup; an in-range pid that
+    // simply does not exist is ESRCH. LTP sched_getparam03/setparam04
+    // probe 0x7fffffff — over the 4194304 limit — and expect EINVAL.
+    if (args[0] as i64) < 0
+        || args[0] > crate::process::pid::PID_MAX_LIMIT as u64
+    {
         return -(errno::EINVAL as i64);
     }
     if ts_ptr.is_null() {
