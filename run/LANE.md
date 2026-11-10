@@ -4,6 +4,15 @@ Mission: lockdep-lite P1 — runtime lock acquisition tracking with
 declared-order violation splats (docs/development/lockdep-lite-design.md §9
 P1 list).
 
+STATUS (fourth launch, 2026-11-11 06:50): rebased onto main@ccac40ee
+(+122); FULL battery re-verified green post-rebase (builds x3,
+ASM identity 451/451 + 447/447, armed suite 1360 PASS 11/11 p1, OFF
+suite 1349 PASS, regression boot clean, armed 37/128 ns re-measured,
+D-23 registered). Branch PUSHED. Sole open item: the strict
+quiet-window tier-1/2 confirmation run — 9h of wait-and-retry found
+no window (host fleet 4-7 foreign QEMUs continuously); documented
+below with the carry-over evidence, retry loop left running.
+
 ## User constraint (coordinator relay, 2026-11-07) — the HARD bar
 
 Zero performance impact on the DEFAULT build:
@@ -504,4 +513,54 @@ directly.
 Fourth launch: wait-and-retry loop (run/tier12-retry-rebase.sh,
 detached; fires `perf-gate.sh --tiers 1,2 --kernel
 target/x86_64-unknown-none/debug/bzImage --tag lockdep-p1-rebase
---secs 780` at <=1 foreign QEMU). Verdict below when it lands.
+--secs 780` at <=1 foreign QEMU).
+
+Geometry note (verified from the [boot] lines): the third launch's
+default-build tier-2 boot ran at **smp=2** (the pre-rebank geometry)
+— its p2_ctxsw 1.247 is the SMP-2 class and NOT comparable to the
+re-banked SMP-8 anchor (0.756; cross-configuration comparison is
+meaningless by the re-bank's own rule). Its p6 rows ARE comparable
+(fs-bound, CPU-count-insensitive per the re-bank A/B) and PASS under
+the new anchor. The gate run boots pbench at its default smp8
+against the smp8 anchor — the correct current-standard leg.
+
+### Merge-gate tiers 1,2 — fourth-launch verdict (documented-pending, loop still hunting)
+
+Nine hours of wait-and-retry (three loop cycles, 180 polls,
+21:49–06:46, run/tier12-retry-rebase-out.log): the host fleet never
+dropped to <=1 foreign QEMU (best 2, needed by perf-gate.sh's own
+preflight GATE_MAX_FOREIGN=2; observed range 2-9, typically 4-7 —
+overnight LTP scans + qa-suites + GNOME boots; none orphaned, none
+mine). Per the third-launch rule the leg stays documented-pending
+rather than firing against the gate's own capacity self-refusal; a
+fourth loop cycle is left running for the successor (same script,
+same tag).
+
+What the record already carries for this leg (all re-verified this
+launch):
+
+- Tier 1 (syscost quiet boot): GREEN on the pre-rebase default build
+  (row 2 — scripted verdict, zero FAIL). The rebased default build is
+  instruction-identical to it on every lock path (ASM identity above)
+  and the lane's remaining default-build deltas touch nothing tier 1
+  measures (the /proc/lockdep_chains registration at procfs init; the
+  two SleepMutex constructor call sites compile to the same const
+  value). Main's own 122 commits carry their own lanes' gate duty.
+- Tier 2 (pbench): the third launch's default-build serial (smp2
+  boot) passes every comparable row under the CURRENT re-banked
+  anchor: p6_append 6.422 (anchor 6.402), p6_mkdrmdir 271.9 (269.778),
+  p6_unlink 60.3 (67.735), p6_write_fsync 9210 (8613), p1_null 0.271
+  (0.280), p1_clock 0.351 (0.350); its p2_ctxsw 1.247 is the SMP-2
+  class and incomparable with the smp8 anchor by the re-bank's own
+  cross-configuration rule. Independent smp8 confirmation on the
+  rebased tree: the ARMED feature-ON boot (armed3, hooks live) measured
+  p1_null 0.280 (anchor 0.280), p2_ctxsw 0.771 (0.756, +2%),
+  p8_futex_wake 0.952 — in band WITH the full checker pipeline; the
+  default build is strictly faster (no hooks compiled).
+
+Successor instruction: poll run/tier12-retry-rebase-out.log; when a
+run fires, the verdicts land inline in that log and the serials at
+run/pa-lockdep-p1-rebase-serial.log +
+work/pbench-lockdep-p1-rebase-pb-serial.log; paste them into this
+section. If a row lands above band, apply the rerun-once rule before
+calling it (the third launch's host-stall precedent).
