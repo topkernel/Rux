@@ -305,47 +305,74 @@ pub(crate) fn condev_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize
 pub(crate) fn condev_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
     let onlcr = crate::fs::tty::console().output_translates_nl();
     // Translate \n -> \r\n (OPOST|ONLCR) in 256-byte chunks so a single
-    // console write stays atomic per chunk (R20-4 discipline).
+    // console write stays atomic per chunk (R20-4 discipline). TX goes
+    // through the LOSSLESS user variant (uart_write_user): on a stalled
+    // chardev we return a POSIX partial write — the count of user bytes
+    // fully emitted — so the libc retries. The old path routed through
+    // the printk drop contract while reporting full success, silently
+    // losing bulk user output under printk churn (TASK 87.7#2: hiperf
+    // report/script echoes vanished mid-boot).
     let mut chunk = [0u8; 256];
-    let mut chunk_len = 0usize;
-    let mut flush = |chunk: &mut [u8], len: &mut usize| -> isize {
-        if *len == 0 {
-            return 0;
-        }
-        // SAFETY-free slice call; uart_write only reads the slice.
-        let n = unsafe {
-            crate::fs::char_dev::uart_write(chunk.as_ptr(), *len)
-        };
-        *len = 0;
-        n
-    };
+    // Translated length per buffered user byte (1, or 2 for \n).
+    let mut user_lens = [0usize; 256];
+    let mut chunk_len = 0usize;   // translated bytes pending in chunk
+    let mut chunk_user = 0usize;  // user bytes pending in chunk
+    let mut total = 0usize;       // user bytes fully emitted
+    let mut stalled = false;
+
+    // Emit the pending chunk; on success returns true. On a partial
+    // emit (persistent chardev stall) counts the whole user bytes that
+    // made it and returns false.
+    macro_rules! flush_chunk {
+        () => {{
+            if chunk_len == 0 {
+                true
+            } else {
+                let n = crate::fs::char_dev::uart_write_user(&chunk[..chunk_len]);
+                if n < 0 {
+                    return n;
+                }
+                let mut emitted = n as usize;
+                let mut done = 0usize;
+                for i in 0..chunk_user {
+                    if emitted >= user_lens[i] {
+                        emitted -= user_lens[i];
+                        done += 1;
+                    } else {
+                        break;
+                    }
+                }
+                total += done;
+                let was_user = chunk_user;
+                chunk_len = 0;
+                chunk_user = 0;
+                done == was_user
+            }
+        }};
+    }
+
     for &b in buf {
-        if onlcr && b == b'\n' {
-            if chunk_len + 2 > chunk.len() {
-                let n = flush(&mut chunk, &mut chunk_len);
-                if n < 0 {
-                    return n;
-                }
-            }
-            chunk[chunk_len] = b'\r';
-            chunk[chunk_len + 1] = b'\n';
-            chunk_len += 2;
+        let add: &[u8] = if onlcr && b == b'\n' {
+            b"\r\n"
         } else {
-            if chunk_len + 1 > chunk.len() {
-                let n = flush(&mut chunk, &mut chunk_len);
-                if n < 0 {
-                    return n;
-                }
+            core::slice::from_ref(&b)
+        };
+        if chunk_len + add.len() > chunk.len() {
+            let full = flush_chunk!();
+            if !full {
+                stalled = true;
+                break;
             }
-            chunk[chunk_len] = b;
-            chunk_len += 1;
         }
+        chunk[chunk_len..chunk_len + add.len()].copy_from_slice(add);
+        user_lens[chunk_user] = add.len();
+        chunk_user += 1;
+        chunk_len += add.len();
     }
-    let n = flush(&mut chunk, &mut chunk_len);
-    if n < 0 {
-        return n;
+    if !stalled {
+        let _ = flush_chunk!();
     }
-    buf.len() as isize
+    total as isize
 }
 
 pub(crate) fn condev_poll(_file: &crate::fs::file::File, events: u16) -> u16 {

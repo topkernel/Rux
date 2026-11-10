@@ -516,6 +516,67 @@ impl Uart {
             }
         }
     }
+
+    /// Lossless variant of [`puts_batch`] for USER-facing console writes
+    /// (/dev/console, /dev/ttyS0 write(2)). The printk contract may drop
+    /// the rest of a batch when the chardev stalls (a wedged box beats a
+    /// lost diagnostic line), but USER DATA must never be silently
+    /// dropped — condev_write historically reported full success over
+    /// this drop path, and bulk user output (hiperf report, script
+    /// echoes) vanished under printk churn (TASK 87.7#2). Returns the
+    /// number of bytes actually emitted; on a stall it returns early so
+    /// the caller can retry with yields (bounded) and report a POSIX
+    /// partial write.
+    #[cfg(feature = "x86_64")]
+    pub fn puts_batch_user(&self, bytes: &[u8]) -> usize {
+        if bytes.is_empty() {
+            return 0;
+        }
+        // pstore-lite sees every byte we EMIT (same as puts_batch).
+        const FIFO_BURST: usize = 16;
+        let mut consumed: usize = 0;
+        for chunk in bytes.chunks(FIFO_BURST) {
+            let start = crate::arch::cpu::read_time();
+            while read_reg(COM1_BASE, UART_LSR) & LSR_THRE == 0 {
+                if crate::arch::cpu::read_time().saturating_sub(start)
+                    >= UART_THRE_WAIT_TICKS
+                {
+                    // Stalled: do NOT latch TX_STALLED (that discipline
+                    // belongs to printk), do NOT drop — hand the count
+                    // back to the caller.
+                    return consumed;
+                }
+                core::hint::spin_loop();
+            }
+            // SAFETY: same COM1 THR string-IO as puts_batch.
+            unsafe {
+                core::arch::asm!(
+                    "cld",
+                    "rep outsb",
+                    in("dx") COM1_BASE,
+                    in("rcx") chunk.len() as u64,
+                    in("rsi") chunk.as_ptr(),
+                    lateout("rcx") _,
+                    lateout("rsi") _,
+                    options(nostack)
+                );
+            }
+            consumed += chunk.len();
+            for &b in chunk {
+                crate::dfx::pstore::sink(b);
+            }
+        }
+        consumed
+    }
+
+    /// Non-x86 user path: the MMIO/PL011 sinks are synchronous (no stall
+    /// state exists) — everything is emitted, report it.
+    #[cfg(not(feature = "x86_64"))]
+    pub fn puts_batch_user(&self, bytes: &[u8]) -> usize {
+        self.puts_batch(bytes);
+        bytes.len()
+    }
+
 }
 
 /// Global UART console (protected by spinlock, SMP safe)

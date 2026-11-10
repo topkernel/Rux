@@ -90,6 +90,40 @@ pub unsafe fn uart_read(buf: *mut u8, count: usize) -> isize {
 /// locking (R20-4 atomicity / 2026-10-20 IRQ-off window bounds), batched
 /// register traffic per chunk (perf-console), cond_resched between
 /// chunks (leg-32B discipline). See `uart_write` for the history.
+/// Lossless UART TX for USER-facing writes (/dev/console, /dev/ttyS0).
+/// Retries stalls with yields under a wall-clock bound instead of
+/// dropping (printk's drop contract does not apply to user data); on a
+/// persistent stall returns the emitted count so write(2) reports a
+/// POSIX partial write and the libc retries.
+pub fn uart_write_user(slice: &[u8]) -> isize {
+    const UART_TX_CHUNK: usize = 32;
+    // NO-PROGRESS budget: 500 ms without emitting a single byte (after
+    // lock acquisition — time spent WAITING for the printk burst to
+    // release the console lock does not count; under boot churn that
+    // wait alone exceeded the old fixed 250 ms deadline and turned
+    // every contended write into a bogus partial that mksh's one-shot
+    // echo never retried).
+    const USER_TX_STALL: u64 = crate::config::TIMER_CLOCK_FREQ_HZ / 2;
+    let mut last_progress = crate::arch::cpu::read_time();
+    let mut idx = 0usize;
+    while idx < slice.len() {
+        let n = {
+            let uart = console::lock();
+            let end = core::cmp::min(idx + UART_TX_CHUNK, slice.len());
+            // SAFETY-free slice call; the batch only reads the slice.
+            uart.puts_batch_user(&slice[idx..end])
+        };
+        if n > 0 {
+            idx += n;
+            last_progress = crate::arch::cpu::read_time();
+        } else if crate::arch::cpu::read_time().saturating_sub(last_progress) >= USER_TX_STALL {
+            break; // true chardev stall: POSIX partial write
+        }
+        crate::sched::cond_resched();
+    }
+    idx as isize
+}
+
 pub fn uart_write_kernel(slice: &[u8]) -> isize {
     const UART_TX_CHUNK: usize = 32;
     let mut idx = 0usize;
@@ -205,9 +239,10 @@ fn uart_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
 }
 
 fn uart_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
-    if let Some(priv_data) = unsafe { *file.private_data.get() } {
-        let char_dev = unsafe { &*(priv_data as *const CharDev) };
-        unsafe { char_dev.write(buf.as_ptr(), buf.len()) }
+    if unsafe { *file.private_data.get() }.is_some() {
+        // Lossless user TX (TASK 87.7#2): the char_dev path funnels into
+        // the printk drop contract; user data must retry, not drop.
+        uart_write_user(buf)
     } else {
         -9  // EBADF
     }
