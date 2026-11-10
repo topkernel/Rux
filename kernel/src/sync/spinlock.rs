@@ -62,7 +62,7 @@ use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU32, Ordering};
 #[cfg(feature = "dfx-lock-owner")]
-use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::{AtomicU64, AtomicUsize};
 
 // ==================== RawSpinlock (TTAS) ====================
 
@@ -97,6 +97,16 @@ pub struct RawSpinlock {
     /// only needs "who held it when everything wedged".
     #[cfg(feature = "dfx-lock-owner")]
     owner: AtomicUsize,
+    /// oh-crash 91st (leak hunt): LAST-acquire forensics — pid + call
+    /// site + jiffies of the most recent acquire. NOT cleared on unlock
+    /// (they name the acquirer even after a leaked/dropped unlock), at
+    /// one relaxed store each on the acquire path.
+    #[cfg(feature = "dfx-lock-owner")]
+    acq_pid: AtomicU32,
+    #[cfg(feature = "dfx-lock-owner")]
+    acq_site: AtomicUsize,
+    #[cfg(feature = "dfx-lock-owner")]
+    acq_jiffies: AtomicU64,
 }
 
 impl RawSpinlock {
@@ -106,16 +116,27 @@ impl RawSpinlock {
             locked: AtomicU32::new(0),
             #[cfg(feature = "dfx-lock-owner")]
             owner: AtomicUsize::new(0),
+            #[cfg(feature = "dfx-lock-owner")]
+            acq_pid: AtomicU32::new(0),
+            #[cfg(feature = "dfx-lock-owner")]
+            acq_site: AtomicUsize::new(0),
+            #[cfg(feature = "dfx-lock-owner")]
+            acq_jiffies: AtomicU64::new(0),
         }
     }
 
     /// Record the holder (dfx-lock-owner feature only).
     #[inline]
     #[cfg(feature = "dfx-lock-owner")]
-    fn record_owner(&self) {
+    fn record_owner(&self, ra: usize) {
         // cpu_id() is u64 on x86_64 / usize elsewhere — cast to the
         // owner slot's usize.
         self.owner.store((crate::arch::smp::cpu_id() + 1) as usize, Ordering::Relaxed);
+        // Leak forensics (see field docs): last acquirer's pid + site.
+        self.acq_pid.store(crate::process::current_pid(), Ordering::Relaxed);
+        self.acq_site.store(ra, Ordering::Relaxed);
+        self.acq_jiffies
+            .store(crate::drivers::timer::get_jiffies(), Ordering::Relaxed);
     }
 
     /// Clear the holder (dfx-lock-owner feature only).
@@ -167,7 +188,7 @@ impl RawSpinlock {
         }
         // Diagnostics: record the holder AFTER the acquire (a spinner's
         // watchdog may read a stale 0 in the tiny window — acceptable).
-        self.record_owner();
+        self.record_owner(caller_ra);
     }
 
     /// Print deadlock warning via SBI (works even with interrupts disabled).
@@ -273,6 +294,47 @@ impl RawSpinlock {
             }
 
         unsafe { crate::console::putchar_no_lock(b'\n'); }
+
+        // Leak forensics (dfx-lock-owner): the LAST acquirer's pid,
+        // call site and acquire age — these persist past a cleared
+        // owner word, so a leaked lock names who took it and when
+        // even when the owner stamp is mid-handoff. Plus the raw
+        // locked word (1 = genuinely held; anything else is a torn
+        // or corrupted state worth seeing).
+        #[cfg(feature = "dfx-lock-owner")]
+        {
+            // SAFETY: lock_addr is a valid RawSpinlock pointer (from lock()).
+            let l = unsafe { &*lock_addr };
+            let apid = l.acq_pid.load(Ordering::Relaxed);
+            let asite = l.acq_site.load(Ordering::Relaxed);
+            let ajif = l.acq_jiffies.load(Ordering::Relaxed);
+            let wv = l.locked.load(Ordering::Relaxed);
+            let now = crate::drivers::timer::get_jiffies();
+            let msg = b"LOCK-ACQ: word=";
+            for &b in msg {
+                unsafe { crate::console::putchar_no_lock(b); }
+            }
+            Self::puthex(wv as u64);
+            let msg = b" pid=";
+            for &b in msg {
+                unsafe { crate::console::putchar_no_lock(b); }
+            }
+            Self::putdec(apid as u64);
+            let msg = b" site=0x";
+            for &b in msg {
+                unsafe { crate::console::putchar_no_lock(b); }
+            }
+            Self::puthex(asite as u64);
+            let msg = b" age=";
+            for &b in msg {
+                unsafe { crate::console::putchar_no_lock(b); }
+            }
+            Self::putdec(now.wrapping_sub(ajif));
+            let msg = b"j\n";
+            for &b in msg {
+                unsafe { crate::console::putchar_no_lock(b); }
+            }
+        }
 
         // Containing heap object (works with or without a known holder):
         // slab span + the first 6 words of the object. Any word landing
@@ -390,7 +452,7 @@ impl RawSpinlock {
     pub fn try_lock(&self) -> bool {
         let ok = self.locked.compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire).is_ok();
         if ok {
-            self.record_owner();
+            self.record_owner(caller_return_address());
         }
         ok
     }

@@ -179,7 +179,7 @@ pub struct MmStruct {
     /// SOURCE and copy_old_to_new_pages then silently installed NOTHING
     /// at the destination, fault-filling ZERO pages: the mallocng
     /// zeroed-metadata signature).
-    mm_surgery: crate::sync::spinlock::Spinlock<()>,
+    mm_surgery: Rwsem<()>,
 
     /// VMA manager. SLEEPABLE rwsem (the mmap_lock shape, linux-6.6
     /// kernel/locking/rwsem.c — see sync/rwsem.rs): mm paths hold
@@ -385,7 +385,7 @@ impl MmStruct {
             pgd,
             asid: AtomicU16::new(0),  // Will be allocated on first use
             pte_lock: PteLock::new(),
-            mm_surgery: crate::sync::spinlock::Spinlock::new(()),
+            mm_surgery: Rwsem::new("mm-surgery", ()),
             vma_manager: Rwsem::new("vma-lock", vma_manager),
             vma_files: RwSpinlock::new(alloc::collections::BTreeMap::new()),
             space_type,
@@ -557,10 +557,27 @@ impl MmStruct {
     /// Whole-syscall mm-surgery section (see the field doc): acquired by
     /// the mm syscall layer around multi-step surgery so sibling
     /// CLONE_VM threads cannot interleave into the gaps.
+    ///
+    /// oh-crash 91st: this is a SLEEPABLE Rwsem write section, not a
+    /// Spinlock. The Spinlock shape was illegal by this crate's own
+    /// rules (spinlock.rs: "a Spinlock section must stay short by
+    /// construction" / "every lock that may be held across blocking is
+    /// a SleepMutex, never a Spinlock"): every mm syscall holds
+    /// mm_surgery across vma_manager read/write acquisition, and the
+    /// vma rwsem PARKS on contention — so the surgery holder slept
+    /// while 7 sibling CPUs spun on mm_surgery non-preemptibly, waking
+    /// nobody. hp91a (pristine userdata, first boot): all-CPU spin at
+    /// 51.5s on the surgery lock + the vma wait_lock, six PREEMPT-HEAL
+    /// events un-stranding parked threads carrying count=0x10001 (the
+    /// parked-with-the-surgery-preempt-disable shape), launcher never
+    /// spawns. As the reference mmap_lock(write) role, the correct
+    /// primitive is a rwsem: waiters park (no CPU burn, no wake-IPI
+    /// starvation), and the grant machinery is the same one
+    /// vma_manager already uses inside a Box'd MmStruct.
     pub fn mm_surgery_guard(
         &self,
-    ) -> crate::sync::spinlock::SpinlockGuard<'_, ()> {
-        self.mm_surgery.lock()
+    ) -> crate::sync::rwsem::RwsemWriteGuard<'_, ()> {
+        self.mm_surgery.write()
     }
 
     /// Get address space type
