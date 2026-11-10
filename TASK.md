@@ -9913,3 +9913,31 @@ attr from the log, align validation with the reference
 (kernel/events/core.c perf_event_open validation order). Then record
 runs, the hotspot table lands via the output-disk rig, and the §86.5
 boot-time hunt gets its instrument.
+
+### 87.11 PERF UNBLOCKED by coordinator (2026-11-11 03:1x, commit 2cf784d1) — 88th starts from a WORKING hiperf stat + 20s-sampling record
+
+Three parity fixes landed via the PERF-EINVAL diagnostic rig (full
+story in the commit message): inherit no-op for counting + per-CPU
+sampled events; perf fds O_RDWR (ring is MAP_SHARED+PROT_WRITE).
+hp87s verdict: stat WORKS (real counting table in
+/tmp/hp87-final/q-stat.txt pattern), record samples ~20s, then
+**watchdog_servic dies at 33.7s and sysrq-c's the kernel at 39.9s**
+(serial: "Kernel panic - not syncing: PANIC: sysrq 'c' — deliberate
+crash", stack in write_file_core — the kickdog family, reply-wake v1's
+old amplifier shape).
+
+88th queue (in order):
+1. The record-window watchdog crash: why does watchdog_servic die
+   during sampling? (hdf kickdog starved by the sampler softirq? a
+   watched service missing a heartbeat while CPUs burn?) Keep record
+   alive 60s+ → the SA-init/install hotspot tables land.
+2. wait4/SIGCHLD wakeup loss (§87.8 conviction stands) — the night's
+   #1 kernel bug.
+3. /dev/console user-write loss; ext4 metadata_csum (fs lane, §87.7).
+4. §86.5 boot-time charter with working hiperf (reference
+   launcher.ready ~11s vs ours 239s; two giant SLOW-TXNs 84s+129s).
+
+Rig: boot-hp87{p..s}.sh pattern; system image system-hp87o.img
+(foreground-stat script + cat-logcat + output-disk copy); userdata
+fresh copies from the f generation; NEVER sed-rename the system image
+reference; inject via sudo mount -o loop only.
