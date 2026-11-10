@@ -9845,3 +9845,43 @@ Then the §86.5 charter continues on a working hiperf.
   /data/hpout mountpoint (this is the one to boot); userdata-hp87i.img
   is a fresh copy from the f generation; hp87-out.img freshly mkfs'd
   ^metadata_csum.
+
+### 87.9 FINAL CORRECTION (2026-11-11 02:5x) — the A/B never ran; 88th starts HERE
+
+ERROR in 87.8's experiment: the `git revert` before hp87k reverted the
+DOCS commit (d9e414fb), not the lockfix (e7675b9d). hp87j AND hp87k both
+ran the SAME lockfix kernel — no A/B happened. The lockfix-regression
+hypothesis is BACK ON THE TABLE: hp87b (the ONLY boot on the pre-fix
+kernel) is also the only boot where `hiperf stat` ran its full duration
+(13s, rc=0). Every post-fix boot (c..m) fails stat instantly
+("subcommand 'stat' failed", no other stdout) and record fails instantly
+without creating the .data file.
+
+88th EXPERIMENT 1 (decisive, ~15 min): build e5f1536f (pre-lockfix) in a
+side checkout, boot the hp87j rig (run/hp87/boot-hp87j.sh, system image
+run/system-hp87j.img, userdata run/userdata-hp87j.img, output disk
+run/hp87-out.img — read it with debugfs after teardown). If stat works
+on e5f1536f and fails on e7675b9d, the lockfix regressed the counting/
+poll path — redesign it (e.g. irqsave only where IRQ context is real,
+or make the softirq path defer). If BOTH fail, the hp87b difference is
+state-side (first-boot /data vs populated) — then chase via hiperf's
+verbose log: `--verbose` routes HLOGs to /data/local/tmp/hiperf_log.txt
+(buffered; it was still empty at cp time) — add a `cat` of it AFTER the
+subcommands exit, cp that to the output disk.
+
+Rig facts that cost blood — DO NOT relearn:
+- Inject scripts: sudo mount -o loop <img> /mnt; cp to
+  /mnt/system/etc/hp87-run.sh (the cfg /etc/init/hp87.cfg points there).
+  NEVER use debugfs interactive cd/write (corrupts the image) and NEVER
+  sed-rename a boot script's system image reference.
+- Output disk = drive 7 (ohd6/vdg), must be UN-snapshotted
+  (lb-boot-out.py: NOSNAP un-snaps 5 AND 6). Mount it at /data/hpout
+  (NOT /mnt — the root is read-only).
+- The wait4-wakeup stall conviction (87.8) STANDS — hp87g (sleep-
+  anchored) completed on the same kernel that stalled c/f. That kernel
+  bug is independent of the perf path and is the #1 hunt target.
+- Kernel-written ext4 (metadata_csum not maintained) is host-unreadable;
+  e2fsck DELETES the kernel-written dirs. Parity fix belongs to fs lane.
+
+Current branch state: e6291d03 (docs restored; lockfix e7675b9d in;
+bzImage built from it). Push: pending this commit.
