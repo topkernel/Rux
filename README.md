@@ -14,6 +14,8 @@ Unmodified Ubuntu 22.04 boots to a GNOME Shell desktop.
 Unmodified OpenHarmony boots its full 135+ services.
 No userspace patches, rebuilds, or configuration changes.
 
+**Documentation & reports: <https://topkernel.github.io/Rux/>** (中文 / EN)
+
 </div>
 
 ---
