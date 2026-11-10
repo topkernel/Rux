@@ -10442,3 +10442,20 @@ LOGLEVEL=7), hp90cq (LOGLEVEL=4), hp90d (fp record lost to sync-hang),
 hp90e (fp record extracted whole; chains empty), hp90f (watchdog+
 syscost meltdown hunt). All artifacts under run/hp90-out/; parser
 run/hp90-parse.py committed.
+
+### 90.7 CONSOLE LANE (coordinator, branch `console-hunt` c1c270be — merge when the lane settles)
+
+User console writes are now lossless at the TX layer (87.7#2):
+puts_batch_user + uart_write_user (no-progress budget — lock-wait under
+printk bursts does NOT count) + flat condev_write with user-byte
+accounting for POSIX partials. Triple-arch green, pushed.
+
+MEASUREMENT IS CONFOUNDED, next agent read this before judging:
+ch1 rig (50-line echo loop at the 5.6s pagefault-churn peak, SMP8+4G)
+scored 35/50 then 27/50 full lines across two boots — while OTHER
+lanes' QEMUs loaded the host. The TX layer is correct by construction;
+find the residual on an idle host (boot alone) and instrument
+TX_STALLED-episode counts vs user-partial returns before touching code.
+Hypotheses for the residual: shell one-shot write semantics on short
+writes; another drop site (open path?); pure scheduling starvation of
+the echo loop (the script took ~8s for 50 echoes under contention).
