@@ -9885,3 +9885,31 @@ Rig facts that cost blood — DO NOT relearn:
 
 Current branch state: e6291d03 (docs restored; lockfix e7675b9d in;
 bzImage built from it). Push: pending this commit.
+
+### 87.10 SOLVED: the hiperf blocker is perf_event_open EINVAL (2026-11-11 02:4x)
+
+hp87o (foreground stat + cat-the-log-after-exit trick) finally made
+hiperf speak — /data/local/tmp/hiperf_log.txt via `cat > $D/logcat.txt`:
+
+  HILOG/E: Open:syscall perf_event_open failed. (errno 22)   xN
+  HILOG/E: PrepareTracking:CreateFdEvents() failed
+  subcommand 'record' failed
+
+- **stat/record both die on perf_event_open EINVAL** — a concrete
+  validation gap in the 87th's perf slice (e5f1536f). NOTE: `hiperf stat`
+  EXITS 0 even when it fails — hp87b's "stat rc=0" was never a success.
+- The lockfix (e7675b9d) is innocent (true A/B hp87j re-run on
+  e5f1536f's perf/mod.rs: identical failure).
+- Rig notes: foreground-vs-background irrelevant; fifo-for-stdin idea
+  dead (record closes stdin itself); `cat hiperf_log.txt` AFTER the
+  processes exit is how to read the buffered verbose log; kernel-written
+  ext4 stays host-unreadable (output-disk rig remains the extraction path).
+
+88th FIX PATH (surgical): add a bounded EINVAL diagnostic to
+sys_perf_event_open (print which validation arm + the attr's
+type/config/sample_type/read_format/exclude bits — dfx-gated), one boot
+with `hiperf --verbose stat -a -d 5 -e sw-cpu-clock`, read the rejected
+attr from the log, align validation with the reference
+(kernel/events/core.c perf_event_open validation order). Then record
+runs, the hotspot table lands via the output-disk rig, and the §86.5
+boot-time hunt gets its instrument.
