@@ -25,6 +25,14 @@ aarch64 = []
 x86_64 = []
 riscv64 = []
 unit-test = ["debug-lock-owner"]  # Enable unit tests; pulls the spinlock-owner field so the dlspin ktest proves full holder attribution
+# debug: lockdep-lite P1 runtime acquire tracking
+# (docs/development/lockdep-lite-design.md §5/§7). Compiles the acquire/
+# release hooks into the keyed lock types and the SleepMutex pair; the
+# hooks stay inert until the boot switch debug=lockdep arms them. OFF =
+# the hook call sites do not exist (disassembly-identical lock paths,
+# the merge-gate hard bar); ON but disarmed = one relaxed load per
+# acquire site (the tracepoint discipline).
+debug-lockdep = []
 # debug: spinlock holder tracking (two atomic stores per lock/unlock pair).
 # Zero-cost when off; enabled when hunting lock deadlocks
 # (see test/hunt-wedge.sh and docs/guides/debugging.md).

@@ -411,6 +411,18 @@ fn setup_boot_task_fdtable() {
 pub fn run_all_tests() {
     test_println!("test: ===== Starting Rux OS Unit Tests =====");
 
+    // lockdep-lite P1 (design §10): with the checker compiled in, run
+    // the WHOLE unit-test workload armed — the checker must stay
+    // silent over it (any UNDECLARED-NEST found here is either a new
+    // lock-ordering.md row or a finding; both are outcomes). The
+    // lockdep group's own tests reset between scenarios.
+    #[cfg(feature = "debug-lockdep")]
+    {
+        use crate::debug::lockdep::reset_for_test;
+        reset_for_test(); // builds the bitsets and arms
+        test_println!("test: lockdep runtime tracking ARMED for the suite");
+    }
+
     // The suite runs on the kernel-main boot task (pid 0) which carries no
     // fdtable — fd-allocating syscall tests (eventfd/epoll/ioctl/pipes)
     // would all see EBADF. Give it a throwaway table with the UART console
@@ -523,9 +535,14 @@ pub fn run_all_tests() {
 
     // lockdep-lite P0: the declared lock-order registry validates
     // clean, and the validator's negative halves fire on synthetic
-    // tables (design doc §10).
+    // tables (design doc §10). P1 (cargo feature debug-lockdep): the
+    // runtime checker pipeline — declared forward passes, forced
+    // reverse splats, the INV-LOCK-8 context negatives, the observed
+    // cycle, chain-key amortization, and the key<->registry mapping.
     test_group_start("lockdep");
     lockdep::test_lockdep();
+    #[cfg(feature = "debug-lockdep")]
+    lockdep::test_lockdep_runtime();
 
     // Sync primitives (review-s2-c): SeqLock writer-guard accounting
     // (the try_write fix) + RwSpinlock two-phase write mechanics.

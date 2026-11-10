@@ -140,7 +140,18 @@ pub struct SleepMutex {
     /// True only for the ext4 big lock so its counters stay comparable
     /// across the perf gate; other instances do not pollute them.
     fsw_notes: bool,
+    /// lockdep-lite P1 class (VFS_MUTATION / EXT4_BIG; 0xFFFF =
+    /// unclassed). Only exists under the cargo feature; the hooks in
+    /// lock()/release() are cfg-gated call sites (a default build
+    /// compiles nothing — design §7 row 1).
+    #[cfg(feature = "debug-lockdep")]
+    lockdep_class: u16,
 }
+
+/// The unclassed sentinel for [`SleepMutex`] instances that have no
+/// lockdep-lite registry row (0xFFFF — beyond every table index).
+#[cfg(feature = "debug-lockdep")]
+const LOCKDEP_UNCLASSED: u16 = 0xFFFF;
 
 impl SleepMutex {
     /// R84 fairness: a waiter older than this may take a FREE lock at
@@ -171,6 +182,67 @@ impl SleepMutex {
             wait: WaitQueueHead::new(),
             name,
             fsw_notes,
+            #[cfg(feature = "debug-lockdep")]
+            lockdep_class: LOCKDEP_UNCLASSED,
+        }
+    }
+
+    /// The lockdep-lite classed constructor: the two static sleep
+    /// locks (VFS_MUTATION_LOCK, EXT4_BIG_LOCK) carry their registry
+    /// class so the P1 hooks can attribute them (INV-LOCK-8's teeth,
+    /// design §5 surface 2). The class argument is discarded in a
+    /// default build (no field, no hooks).
+    pub const fn with_lockdep_class(
+        name: &'static str,
+        fsw_notes: bool,
+        class: crate::debug::lockdep::LockClassId,
+    ) -> Self {
+        #[cfg(not(feature = "debug-lockdep"))]
+        let _ = class;
+        Self {
+            state: Spinlock::new(SleepMutexState {
+                locked: false,
+                owner: 0,
+                depth: 0,
+                acquired_at: 0,
+                waiters: 0,
+                handoff_epoch: 0,
+            }),
+            wait: WaitQueueHead::new(),
+            name,
+            fsw_notes,
+            #[cfg(feature = "debug-lockdep")]
+            lockdep_class: class.0,
+        }
+    }
+
+    /// lockdep-lite P1 acquire hook — feature-only. The check runs at
+    /// the funnel entry (the attempt is the ordering event; the
+    /// INV-LOCK-8 context check must fire before any parking). The
+    /// call sites in lock()/release()/release_if_owner() are cfg-gated
+    /// too, so a default build emits NOTHING here (design §7 row 1:
+    /// an empty #[inline] wrapper still emits a call at opt-level 0).
+    #[cfg(feature = "debug-lockdep")]
+    #[inline]
+    fn lockdep_acquire_hook(&'static self) {
+        if self.lockdep_class != LOCKDEP_UNCLASSED {
+            crate::debug::lockdep::acquire_classed(
+                crate::debug::lockdep::LockClassId(self.lockdep_class),
+                crate::sync::spinlock::caller_return_address() as u64,
+            );
+        }
+    }
+
+    /// lockdep-lite P1 release hook — feature-only. One pop per guard
+    /// drop, matching the one push per lock() call (recursion
+    /// included).
+    #[cfg(feature = "debug-lockdep")]
+    #[inline]
+    fn lockdep_release_hook(&'static self) {
+        if self.lockdep_class != LOCKDEP_UNCLASSED {
+            crate::debug::lockdep::release_classed(
+                crate::debug::lockdep::LockClassId(self.lockdep_class),
+            );
         }
     }
 
@@ -341,6 +413,8 @@ impl SleepMutex {
     /// relaxed load per site (the name marshalling runs only when
     /// armed).
     pub fn lock(&'static self) -> SleepMutexGuard {
+        #[cfg(feature = "debug-lockdep")]
+        self.lockdep_acquire_hook();
         self.trace_acquire();
         let mut contended = false;
         let guard = self.lock_inner(&mut contended);
@@ -754,6 +828,10 @@ impl SleepMutex {
     }
 
     fn release(&'static self) {
+        // lockdep-lite P1: one pop per guard drop (matches the one
+        // push per lock() call, recursion included).
+        #[cfg(feature = "debug-lockdep")]
+        self.lockdep_release_hook();
         // Tracepoint (round 4): the single normal-release funnel
         // (every guard drop passes here; release_if_owner — the
         // exit-path force-drop — is deliberately uninstrumented, no
@@ -809,6 +887,13 @@ impl SleepMutex {
     /// hands the next token down the queue) or re-sleeps — a storm of
     /// woken retryers is pointless load on the scheduler.
     pub fn release_if_owner(&'static self, pid: u32) {
+        // lockdep-lite P1: pop the dying task's held-stack entry for
+        // this class (the task can no longer run guard drops; a
+        // stale entry would outlive it — new_task_at re-initializes
+        // the stack on task-page recycle, this keeps live tasks
+        // coherent until then).
+        #[cfg(feature = "debug-lockdep")]
+        self.lockdep_release_hook();
         let was_held = {
             let mut st = self.state.lock();
             if st.locked && st.owner == pid {
