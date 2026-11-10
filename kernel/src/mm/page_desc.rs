@@ -456,6 +456,13 @@ impl Page {
 
     // ========== Flag operations ==========
 
+    /// Raw flag-set read (hp89 forensics: the flag word carries the
+    /// frame's recent history — reclaim, COW, LRU, rmap state).
+    #[inline]
+    pub fn flags(&self) -> &PageFlags {
+        &self.flags
+    }
+
     /// Test flag
     #[inline]
     pub fn test_flag(&self, flag: PageFlag) -> bool {

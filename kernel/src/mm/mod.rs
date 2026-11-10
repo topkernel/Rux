@@ -33,6 +33,8 @@ pub mod compact;
 pub mod deferred_free;
 pub mod small_alloc;
 pub mod vdso;
+/// hp89 hunt: PTE-clearing-event attribution ring (see module doc).
+pub mod unwatch;
 
 pub mod pcp;
 

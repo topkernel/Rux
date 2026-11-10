@@ -606,8 +606,8 @@ impl MmStruct {
         let end_addr = addr_us + aligned_size;
 
         // VMA-lock convoy bound (twin of the x86_64 fix; the OH
-        // service-graph crawl): the old shape collected the surgery for
-        // the WHOLE range and ran the entire PTE-zap walk under ONE
+        // service-graph crawl): the old shape collected the surgery for the
+        // WHOLE range and ran the entire PTE-zap walk under ONE
         // vma_write() hold — a multi-MB unmap parked every same-mm VMA
         // user (sys_brk above all) for the full zap PLUS scheduler
         // starvation of the holder. The surgery is CHUNKED: each
@@ -620,20 +620,32 @@ impl MmStruct {
         // under us between holds). unmap_pages takes no VMA lock (PTE
         // lock only, nested one-way), so the hold is safe.
         //
+        // CURSOR (89th session, Face-A closure — twin of the x86_64 fix):
+        // the search starts at the CURSOR (the end of the last processed
+        // piece), never back at addr_us. Re-deriving from addr_us let a
+        // fresh same-mm mmap that legally landed in an already-processed
+        // hole be found by the NEXT iteration's search and deleted as an
+        // "unprocessed piece" of THIS munmap.
+        //
         // Pin-table discipline (vm_file semantics): a split FILE VMA's
         // tail re-pins at its own start (vm_file follows the VMA).
         const MUNMAP_CHUNK_BYTES: usize = 256 * PAGE_SIZE_USIZE;
 
+        let mut cur = addr_us;
         loop {
+            if cur >= end_addr {
+                break;
+            }
             let mut vma_mgr = self.vma_write();
 
-            // First VMA overlapping [addr_us, end_addr): the one
-            // CONTAINING addr, else the first starting inside the range.
-            // Re-derived every iteration — revalidation after the relock.
+            // First VMA overlapping [cur, end_addr): the one CONTAINING
+            // cur, else the first starting inside the remaining range.
+            // Re-derived every iteration — but always FORWARD from the
+            // cursor, never from addr_us (Face A).
             let hit = vma_mgr
-                .last_at_or_before(PageVirtAddr::new(addr_us))
-                .filter(|v| v.end().as_usize() > addr_us)
-                .or_else(|| vma_mgr.find_vma_after(PageVirtAddr::new(addr_us)))
+                .last_at_or_before(PageVirtAddr::new(cur))
+                .filter(|v| v.end().as_usize() > cur)
+                .or_else(|| vma_mgr.find_vma_after(PageVirtAddr::new(cur)))
                 .filter(|v| v.start().as_usize() < end_addr);
             let Some(vma) = hit else {
                 break;
@@ -649,7 +661,7 @@ impl MmStruct {
             let vfsz = vma.file_size();
             let voff = vma.offset();
 
-            let seg_start = vs.max(addr_us);
+            let seg_start = vs.max(cur);
             let seg_end = ve.min(end_addr);
             let chunk_end = seg_start + MUNMAP_CHUNK_BYTES.min(seg_end - seg_start);
 
@@ -697,6 +709,10 @@ impl MmStruct {
             // be held across schedule().
             drop(vma_mgr);
             crate::sched::cond_resched();
+            // Face-A cursor: advance past the piece just processed so a
+            // fresh mmap landing in its (now fully consistent) hole is
+            // never revisited by this munmap.
+            cur = chunk_end;
         }
 
         Ok(())

@@ -734,33 +734,47 @@ impl MmStruct {
         let addr_us = addr.as_usize();
         let end_addr = addr_us + aligned_size;
 
-        // VMA-lock convoy bound (the OH service-graph crawl fix): the old
-        // shape collected the surgery for the WHOLE range and then ran the
-        // entire PTE-zap walk under ONE vma_write() hold — a multi-MB unmap
-        // parked every same-mm VMA user (sys_brk above all: VMA-surgery
-        // only, so it waits on exactly this lock) for the full zap PLUS
-        // whatever scheduler starvation the holder suffered while holding
-        // (the 100s-class brk convoy that crawls the OH service graph,
-        // 14-services-by-98s vs the healthy 41-by-41s). The reference
-        // kernel bounds its equivalent hold by detaching per-VMA and
-        // keeping its zap loops resched-friendly. Here the surgery is
-        // CHUNKED: each iteration removes at most MUNMAP_CHUNK_BYTES of
-        // ONE VMA — that piece's surgery AND its PTE zap still share ONE
-        // guard (mm-audit rule below) — then the guard is dropped and
-        // cond_resched() yields the CPU; the tree walk is RE-DERIVED from
-        // scratch each iteration because the tree can change under us
-        // between holds (never cache VMA pointers across the drop).
+        // Per-piece cursor loop (89th session, the mallocng-corruption
+        // root fix): each iteration removes at most MUNMAP_CHUNK_BYTES of
+        // ONE VMA and zaps that piece's PTEs INSIDE the SAME vma_write()
+        // guard as its surgery, then drops the guard, cond_resched()s, and
+        // advances an explicit CURSOR — the search for the next piece
+        // starts at the cursor, never back at addr_us.
         //
-        // mm-audit (unchanged invariant): a racing mmap may only ever land
-        // in a FULLY-CONSISTENT hole. At every guard drop, every page in
-        // the munmap range is either (VMA present AND PTEs live) — the
-        // unprocessed piece — or (VMA gone AND PTEs cleared) — a processed
-        // chunk. Releasing the guard with live PTEs under a VMA-free hole
-        // let a racing mmap's demand-fault installs interleave with the
-        // zap walk (silently zeroed or half-torn fresh mappings); the
-        // per-chunk surgery+zap pairing keeps the two from ever parting.
-        // unmap_pages takes no VMA lock (PTE lock only, nested one-way),
-        // so the hold is safe.
+        // Both prior shapes had a data-destroying same-mm race:
+        // - Face A (per-chunk re-derive from addr_us): between chunk
+        //   guards a racing same-mm mmap legally landed in the freed hole
+        //   BEHIND the processing position, and the NEXT chunk's
+        //   re-derived search treated the FRESH VMA as an unprocessed
+        //   piece of THIS munmap and deleted it (the arena-churn /
+        //   fontconfig crash class). The cursor closes it: processed
+        //   holes are never revisited.
+        // - Face B (detach-all-then-zap with a >4MB deferred zap): the
+        //   guard dropped with (VMA gone AND PTEs live) — the state the
+        //   mm-audit invariant forbids. A racing same-mm mmap landed in
+        //   the pending-zap hole (find_free_area prefers the LOWEST gap,
+        //   i.e. the freshly freed FFRT arena), demand-faulted its pages
+        //   in and STAMPED live mallocng group headers into them; the
+        //   deferred zap then cleared those FRESH PTEs and freed the
+        //   frames — the owner's next touch refaulted a ZERO page and
+        //   get_meta walked zeroed metadata (the hp88 #GP family: victim
+        //   PTEs perfectly healthy, rc=1/mapcount=0 non-ring frames with
+        //   zeroed data). "Self-healing refill" only heals pages whose
+        //   content lives elsewhere (page cache); anonymous pages with
+        //   user stores are DESTROYED. The window was microseconds wide
+        //   until the perf ring mmap began holding the GLOBAL PTE epoch
+        //   exclusive across its 257-page install: the zap chunk and the
+        //   fresh fault install queued together behind the same epoch
+        //   writer and then raced ~50/50 on the mm spin — the ~40%
+        //   build-flaky corruption rate of the hp88 noarm boots.
+        //
+        // Per-piece surgery+zap keeps BOTH faces closed at every guard
+        // drop (a racing mmap may only ever land in a FULLY-CONSISTENT
+        // hole: VMA gone ⇒ PTEs gone) while the vma_write hold stays
+        // bounded at one 256KB piece's zap — the convoy bound that
+        // motivated the chunking (the 100s-class brk convoy). unmap_pages
+        // takes no VMA lock (PTE lock only, nested one-way, INV-LOCK-7
+        // order vma → pte), so the hold is safe.
         //
         // Pin-table discipline (vm_file semantics): a split FILE VMA's
         // tail starts at a new address, so the pin keyed at the original
@@ -774,164 +788,102 @@ impl MmStruct {
         let mp = crate::dfx::mmprof::on();
         let mp_t0 = if mp { crate::dfx::mmprof::now() } else { 0 };
 
-        let mut zap_pieces: alloc::vec::Vec<(usize, usize)> =
-            alloc::vec::Vec::new();
-        let mut total_zap_bytes = 0usize;
-        {
+        let mut cur = addr_us;
+        while cur < end_addr {
             let mut vma_mgr = self.vma_write();
 
-            // Detach-ALL-then-zap (2026-11-05, the churn-race fix): the
-            // old shape re-derived the tree EVERY 256KB chunk (restarting
-            // from addr_us each time) and processed whatever VMA it found
-            // overlapping the range. Between chunk guards a racing
-            // same-mm mmap could legally land in the transient tree hole
-            // INSIDE this still-being-processed range — and the NEXT
-            // chunk's surgery then treated the FRESH VMA as an
-            // unprocessed piece of THIS munmap and deleted it. The
-            // owner's first touch faulted with vma=NONE (mmap-witness
-            // probes; the arena-churn / fontconfig crash class).
-            //
-            // This pass detaches EVERY piece in [addr, end) under ONE
-            // guard (the reference does its whole tree surgery under one
-            // mmap_lock hold); the tree is FINAL for the range when the
-            // guard drops, so a racing mmap lands in a permanent hole.
-            // The PTE zap below still runs chunked WITHOUT the tree
-            // lock (the write-lock hold stays O(surgery), never
-            // O(pages) — the convoy bound). Residual window, documented:
-            // a racing fresh mapping onto pages whose OLD PTEs are not
-            // yet zapped can have a fresh PTE cleared by the deferred
-            // zap; the fresh owner's demand fault must then RE-FILL the
-            // page (anon zero-fill / page-cache refill). The fault
-            // path's covered-page refill makes that self-healing — the
-            // same convergence the reference's batched TLB gather has
-            // at its boundaries.
-            let mut cur = addr_us;
-            while cur < end_addr {
-                // First VMA overlapping [cur, end_addr): the one
-                // CONTAINING cur, else the first one starting inside the
-                // remaining range.
-                let hit = vma_mgr
-                    .last_at_or_before(PageVirtAddr::new(cur))
-                    .filter(|v| v.end().as_usize() > cur)
-                    .or_else(|| {
-                        vma_mgr.find_vma_after(PageVirtAddr::new(cur))
-                    })
-                    .filter(|v| v.start().as_usize() < end_addr);
-                let vma = match hit {
-                    Some(v) => v,
-                    None => break,
-                };
+            // First VMA overlapping [cur, end_addr): the one CONTAINING
+            // cur, else the first one starting inside the remaining
+            // range. Re-derived every iteration — but always FORWARD from
+            // the cursor, never from addr_us (Face A).
+            let hit = vma_mgr
+                .last_at_or_before(PageVirtAddr::new(cur))
+                .filter(|v| v.end().as_usize() > cur)
+                .or_else(|| {
+                    vma_mgr.find_vma_after(PageVirtAddr::new(cur))
+                })
+                .filter(|v| v.start().as_usize() < end_addr);
+            let vma = match hit {
+                Some(v) => v,
+                None => break,
+            };
 
-                let vkey = vma.start();
-                let vs = vma.start().as_usize();
-                let ve = vma.end().as_usize();
-                let vflags = vma.flags();
-                let vtype = vma.vma_type();
-                let vorigin = vma.origin();
-                let vfd = vma.file_fd();
-                let vfsz = vma.file_size();
-                let voff = vma.offset();
+            let vkey = vma.start();
+            let vs = vma.start().as_usize();
+            let ve = vma.end().as_usize();
+            let vflags = vma.flags();
+            let vtype = vma.vma_type();
+            let vorigin = vma.origin();
+            let vfd = vma.file_fd();
+            let vfsz = vma.file_size();
+            let voff = vma.offset();
 
-                let seg_start = vs.max(addr_us);
-                let seg_end = ve.min(end_addr);
+            let seg_start = vs.max(cur);
+            let seg_end = ve.min(end_addr);
+            let chunk_end = seg_start + MUNMAP_CHUNK_BYTES.min(seg_end - seg_start);
 
-                if mp {
-                    crate::dfx::mmprof::bump(
-                        crate::dfx::mmprof::S_MUNLOOPS,
-                        1,
-                    );
-                }
-
-                // Pages of this piece leave the mapping: release their
-                // virtual-size charge (head/tail survivors stay charged).
-                self.release_unmapped_pages(vs, ve, seg_start, seg_end);
-
-                let pinned = self.get_vma_file(vs);
-                let _ = vma_mgr.remove(vkey);
-                self.unpin_vma_file(vs);
-                if vs < seg_start {
-                    let mut head = Vma::new(
-                        crate::mm::page::VirtAddr::new(vs),
-                        crate::mm::page::VirtAddr::new(seg_start),
-                        vflags,
-                    );
-                    head.set_type(vtype);
-                    head.set_origin(vorigin);
-                    head.set_file_fd(vfd);
-                    head.set_file_size(vfsz);
-                    head.set_offset(voff);
-                    let _ = vma_mgr.add(head);
-                    if let Some(f) = pinned.clone() {
-                        self.pin_vma_file(vs, f);
-                    }
-                }
-                if seg_end < ve {
-                    let mut tail = Vma::new(
-                        crate::mm::page::VirtAddr::new(seg_end),
-                        crate::mm::page::VirtAddr::new(ve),
-                        vflags,
-                    );
-                    tail.set_type(vtype);
-                    tail.set_origin(vorigin);
-                    tail.set_file_fd(vfd);
-                    tail.set_file_size(vfsz);
-                    tail.set_offset(voff + (seg_end - vs));
-                    let _ = vma_mgr.add(tail);
-                    if let Some(f) = pinned.clone() {
-                        self.pin_vma_file(seg_end, f);
-                    }
-                }
-                zap_pieces.push((seg_start, seg_end));
-                total_zap_bytes += seg_end - seg_start;
-                cur = seg_end;
+            if mp {
+                crate::dfx::mmprof::bump(
+                    crate::dfx::mmprof::S_MUNLOOPS,
+                    1,
+                );
             }
 
-            // Face-B closure (2026-11-05): for ranges up to this size the
-            // PTE zap runs INSIDE the same guard as the surgery, so a
-            // racing fresh mapping can never install onto pages whose
-            // old PTEs are still pending (that window let the deferred
-            // zap clear a FRESH PTE under a live VMA; the demand refill
-            // then zeroed a page of live heap metadata and malloc later
-            // walked a NULL freelist pointer — the gnome-shell NULL+8
-            // class). The bound keeps the write-lock hold O(small): the
-            // malloc/arena churn this guards is 64KB-1MB per call. Giant
-            // munmaps (image teardown, 100MB-class) take the chunked
-            // path below and keep the documented residual window.
-            const SINGLE_GUARD_ZAP_LIMIT: usize = 4 << 20;
-            if total_zap_bytes <= SINGLE_GUARD_ZAP_LIMIT {
-                for (zs, ze) in zap_pieces.iter() {
-                    let mut z = *zs;
-                    while z < *ze {
-                        let chunk_end =
-                            z + (MUNMAP_CHUNK_BYTES).min(*ze - z);
-                        self.unmap_pages(
-                            PageVirtAddr::new(z),
-                            chunk_end - z,
-                            true,
-                        )?;
-                        z = chunk_end;
-                    }
+            // Pages of this piece leave the mapping: release their
+            // virtual-size charge (head/tail survivors stay charged).
+            self.release_unmapped_pages(vs, ve, seg_start, chunk_end);
+
+            let pinned = self.get_vma_file(vs);
+            let _ = vma_mgr.remove(vkey);
+            self.unpin_vma_file(vs);
+            if vs < seg_start {
+                let mut head = Vma::new(
+                    crate::mm::page::VirtAddr::new(vs),
+                    crate::mm::page::VirtAddr::new(seg_start),
+                    vflags,
+                );
+                head.set_type(vtype);
+                head.set_origin(vorigin);
+                head.set_file_fd(vfd);
+                head.set_file_size(vfsz);
+                head.set_offset(voff);
+                let _ = vma_mgr.add(head);
+                if let Some(f) = pinned.clone() {
+                    self.pin_vma_file(vs, f);
                 }
-                zap_pieces.clear();
             }
-            drop(vma_mgr); // the tree is FINAL for this range from here
-
-        }
-
-        // Deferred-zap phase (giant ranges only): no tree access, bounded
-        // chunks, handoffs between them. unmap_pages takes only the PTE
-        // lock (one-way nest).
-        for (zs, ze) in zap_pieces {
-            let mut z = zs;
-            while z < ze {
-                let chunk_end = z + (MUNMAP_CHUNK_BYTES).min(ze - z);
-                self.unmap_pages(PageVirtAddr::new(z), chunk_end - z, true)?;
-                z = chunk_end;
-                // Same-mm racers keep the handoff the old per-chunk guard
-                // drop provided; the syscall-exit need_resched check
-                // covers preemption (lb339 lesson: no explicit yield).
-                crate::sched::cond_resched();
+            if chunk_end < ve {
+                let mut tail = Vma::new(
+                    crate::mm::page::VirtAddr::new(chunk_end),
+                    crate::mm::page::VirtAddr::new(ve),
+                    vflags,
+                );
+                tail.set_type(vtype);
+                tail.set_origin(vorigin);
+                tail.set_file_fd(vfd);
+                tail.set_file_size(vfsz);
+                tail.set_offset(voff + (chunk_end - vs));
+                let _ = vma_mgr.add(tail);
+                if let Some(f) = pinned.clone() {
+                    self.pin_vma_file(chunk_end, f);
+                }
             }
+
+            // Face-B closure: this piece's PTE zap runs INSIDE the same
+            // guard as its surgery (unmap_pages nests vma → pte one-way),
+            // so a guard drop never leaves live PTEs under a VMA-free
+            // hole.
+            self.unmap_pages(
+                PageVirtAddr::new(seg_start),
+                chunk_end - seg_start,
+                true,
+            )?;
+
+            // Drop the guard BEFORE yielding: the write lock must never
+            // be held across schedule().
+            drop(vma_mgr);
+            crate::sched::cond_resched();
+            cur = chunk_end;
         }
 
         // ONE TLB flush for the whole munmap (perf-gap-hunt; RESTORED
@@ -1255,6 +1207,14 @@ impl MmStruct {
         if rss_delta > 0 {
             self.sub_rss(rss_delta);
         }
+        // hp89 hunt: record this PTE-clearing pass for post-hoc #GP
+        // attribution (mm/unwatch — no printk on the record path).
+        crate::mm::unwatch::note(
+            crate::mm::unwatch::KIND_UNMAP_PAGES,
+            start.as_usize() as u64,
+            end as u64,
+            rss_delta,
+        );
 
         if mp {
             crate::dfx::mmprof::add(crate::dfx::mmprof::MU_WALK, mp_tw);
@@ -2101,6 +2061,14 @@ pub unsafe fn leaf_pte_replace(
             return false;
         }
         (*table1).set(vpn1, PageTableEntry::from_bits(new_bits));
+        // hp89 hunt: rmap-driven leaf replacement (reclaim/migration) —
+        // record for post-hoc #GP attribution (mm/unwatch).
+        crate::mm::unwatch::note(
+            crate::mm::unwatch::KIND_LEAF_REPLACE,
+            vaddr,
+            new_bits,
+            expect_pfn,
+        );
     }
     true
 }

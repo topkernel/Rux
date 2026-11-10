@@ -855,6 +855,14 @@ pub unsafe fn free_user_page_tables(
 ) {
     use crate::mm::{pfn_to_page, phys_to_pfn, phys_valid, free_pages};
     crate::dfx::memwatch::FUT_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    // hp89 hunt: dying-mm teardown is a whole-domain PTE-clearing pass
+    // (the fork-child-exit face) — record it for post-hoc #GP attribution.
+    crate::mm::unwatch::note(
+        crate::mm::unwatch::KIND_MM_TEARDOWN,
+        root_ppn,
+        0,
+        0,
+    );
     // Double-teardown detector: the same root walked twice means two
     // MmStructs ended up owning one page-table tree — the second walk
     // chases recycled frames full of foreign data. Behind the

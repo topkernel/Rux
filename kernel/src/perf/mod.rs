@@ -1546,45 +1546,62 @@ pub fn perf_mmap_handler(
             return Err(12);
         }
         addr_space.add_total_vm(ring_pages);
-        b
-    };
 
-    // Eager PTE install (binder discipline: under PTE_MODIFY_LOCK).
-    let root = addr_space.root_ppn();
-    let mut pte_flags = PageTableEntry::V | PageTableEntry::U | PageTableEntry::A | PageTableEntry::D;
-    if prot & 0x1 != 0 {
-        pte_flags |= PageTableEntry::R;
-    }
-    if prot & 0x2 != 0 {
-        pte_flags |= PageTableEntry::R | PageTableEntry::W;
-    }
-    {
-        #[cfg(feature = "x86_64")]
-        let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock();
-        #[cfg(not(feature = "x86_64"))]
-        let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
-        for i in 0..total_pages {
-            let va = vaddr + i * PAGE_SIZE;
-            let pa = pages[i];
-            // SAFETY: fresh pages, aligned, under the PTE lock.
-            unsafe {
-                map_page(
-                    root,
-                    VirtAddr::new(va as u64),
-                    crate::arch::mm::PhysAddr::new(pa as u64),
-                    pte_flags,
-                );
-            }
-            // Mapping reference (binder/io_uring discipline): munmap or
-            // process exit put_page's the PTE ref; perf_close drops the
-            // owner ref; the last drop frees.
-            let page = crate::mm::pfn_to_page_mut(crate::mm::phys_to_pfn(pa));
-            if !page.is_null() {
-                // SAFETY: descriptor of the page we just mapped.
-                unsafe { (*page).get_page(); }
+        // Eager PTE install UNDER THE SAME vma_write guard (89th session,
+        // hp88 corruption hunt): the old shape dropped the guard between
+        // the VMA insert and the install, so a same-mm munmap (mallocng /
+        // arena churn) could detach the just-inserted ring VMA in that
+        // gap and leave the 257 installed leaf PTEs on a VMA-less range —
+        // a later placement there would alias the ring frames, and the
+        // eventual unmap would free frames perf_close still owns.
+        // Placement + install is now one unit against every same-mm VMA
+        // surgeon (they all need vma_write; INV-LOCK-7 order vma → pte).
+        //
+        // The leaf section is THIS mm's PteLock (like every other
+        // same-mm leaf writer), NOT the global PTE_MODIFY_LOCK epoch: the
+        // old global-exclusive hold across the whole 257-page install
+        // stalled every PTE operation on the system behind one mm's
+        // install — including the deferred-zap chunks and demand faults
+        // of OTHER processes, synchronizing them into the ~50/50 mm-spin
+        // race that ate freshly written mallocng pages (the hp88 #GP
+        // family; see the munmap Face-B comment in arch mm_ops).
+        let root = addr_space.root_ppn();
+        let mut pte_flags = PageTableEntry::V | PageTableEntry::U | PageTableEntry::A | PageTableEntry::D;
+        if prot & 0x1 != 0 {
+            pte_flags |= PageTableEntry::R;
+        }
+        if prot & 0x2 != 0 {
+            pte_flags |= PageTableEntry::R | PageTableEntry::W;
+        }
+        {
+            #[cfg(feature = "x86_64")]
+            let _pte_guard = crate::arch::mm::mm_ops::pte_lock_for(addr_space).lock();
+            #[cfg(not(feature = "x86_64"))]
+            let _pte_guard = crate::arch::mm::mm_ops::pte_lock_for(addr_space).lock_irqsave();
+            for i in 0..total_pages {
+                let va = b + i * PAGE_SIZE;
+                let pa = pages[i];
+                // SAFETY: fresh pages, aligned, under the PTE lock.
+                unsafe {
+                    map_page(
+                        root,
+                        VirtAddr::new(va as u64),
+                        crate::arch::mm::PhysAddr::new(pa as u64),
+                        pte_flags,
+                    );
+                }
+                // Mapping reference (binder/io_uring discipline): munmap or
+                // process exit put_page's the PTE ref; perf_close drops the
+                // owner ref; the last drop frees.
+                let page = crate::mm::pfn_to_page_mut(crate::mm::phys_to_pfn(pa));
+                if !page.is_null() {
+                    // SAFETY: descriptor of the page we just mapped.
+                    unsafe { (*page).get_page(); }
+                }
             }
         }
-    }
+        b
+    };
 
     // Publish the ring into the event (metadata fields on page 0).
     {

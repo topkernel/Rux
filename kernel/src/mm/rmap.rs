@@ -474,6 +474,17 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
         crate::arch::ipi::flush_tlb_others();
     }
 
+    // hp89 hunt: rmap-driven unmap (reclaim swap-out / migration) —
+    // record for post-hoc #GP attribution (mm/unwatch).
+    if unmapped_count.get() > 0 {
+        super::unwatch::note(
+            super::unwatch::KIND_TRY_TO_UNMAP,
+            target_pfn as u64,
+            swap_entry,
+            unmapped_count.get() as u64,
+        );
+    }
+
     unmapped_count.get()
 }
 

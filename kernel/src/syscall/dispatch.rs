@@ -815,12 +815,15 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // 50th (crash-storm hunt): per-task ring of address-space edits for
     // the USEGV forensics (see Task::mm_ops for the encoding and the
     // mallocng hole-write family it adjudicates). mmap(9)/mprotect(10)/
-    // munmap(11)/brk(12)/mremap(25) — same numbers on every 64-bit arch
-    // we ship (asm-generic table). Also ungated by design: a handful of
-    // Relaxed atomics on five syscalls; the fault printer must see
-    // these on quiet boots.
+    // munmap(11)/brk(12)/mremap(25)/madvise(28) — same numbers on every
+    // 64-bit arch we ship (asm-generic table). madvise joined the ring
+    // in the hp89 hunt (op 6): MADV_DONTNEED/FREE/REMOVE zap live PTEs
+    // by design, so a covering DONTNEED is the userspace-owned face of
+    // the zeroed-mallocng-metadata signature and must be visible at #GP
+    // time. Also ungated by design: a handful of Relaxed atomics on six
+    // syscalls; the fault printer must see these on quiet boots.
     match syscall_no {
-        9 | 10 | 11 | 12 | 25 => {
+        9 | 10 | 11 | 12 | 25 | 28 => {
             if let Some(cur) = crate::sched::current() {
                 use core::sync::atomic::Ordering::Relaxed;
                 let op: u64 = match syscall_no {
@@ -828,6 +831,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
                     10 => 2,
                     11 => 3,
                     12 => 4,
+                    28 => 6,
                     _ => 5,
                 };
                 let rc: u64 = if result < 0 && result > -4096 {
@@ -840,6 +844,9 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
                 // of an already-rejected request.
                 let w0 = ((args[0] & 0x0000_ffff_ffff_ffff) << 16) | (rc << 8) | op;
                 let prot: u64 = if syscall_no == 9 || syscall_no == 10 {
+                    args[2] & 0xff
+                } else if syscall_no == 28 {
+                    // madvise: pack the advice into the prot field slot.
                     args[2] & 0xff
                 } else {
                     0

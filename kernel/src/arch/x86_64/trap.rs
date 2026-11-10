@@ -1851,6 +1851,7 @@ fn handle_general_protection(regs: &mut PtRegs) {
         // metadata would name the ring writer as the corrupting agent.
         user_segv_forensics(regs, regs.rip);
         gp_regmem_dump(regs);
+        gp_mmhistory_dump(regs);
         // Handler-first routing (same as the page-fault Segfault path):
         // debuggers/crash catchers must see the SIGSEGV; the default
         // disposition kills here. A fault inside the (blocked) SIGSEGV
@@ -2188,9 +2189,24 @@ fn gp_regmem_dump(regs: &PtRegs) {
                     unsafe { ((*pd).refcount(), (*pd).mapcount()) }
                 };
                 let inring = crate::perf::ring_frame_member(ppn as u64);
+                // hp89 hunt: the descriptor's flag set + rmap slot-0 index
+                // carry the frame's RECENT HISTORY — a freshly demand-
+                // faulted zero page is Anonymous|SwapBacked with
+                // index == this VA's vpn; a stale index (another VA, or
+                // another mm's address) is the rmap-driven stray-unmap
+                // signature; cleared flags name a reclaim/swap pass.
+                let (fl, idx) = if pd.is_null() {
+                    (0u64, 0usize)
+                } else {
+                    // SAFETY: descriptor read of the mapped frame.
+                    unsafe {
+                        ((*pd).flags().raw() as u64, (*pd).index())
+                    }
+                };
                 crate::pr_err!(
-                    "GP-PTE: {}={:#x} pte={:#x} frame={:#x} rc={} mapcount={} ring_frame={}",
-                    name, v, bits, frame, rc, mc, inring
+                    "GP-PTE: {}={:#x} pte={:#x} frame={:#x} rc={} mapcount={} ring_frame={} flags={:#x} rmapidx={:#x}(va {:#x})",
+                    name, v, bits, frame, rc, mc, inring, fl, idx,
+                    idx.wrapping_mul(0x1000)
                 );
             }
         }
@@ -2224,6 +2240,94 @@ fn gp_regmem_dump(regs: &PtRegs) {
                 }
                 crate::pr_err!("{}", line);
             }
+        }
+    }
+}
+
+/// hp89 hunt: the victim tgid's mm-syscall history at user-#GP time.
+/// The mallocng get_meta corruption needs a live PTE cleared (and its
+/// frame freed) or a live frame zeroed in place; whoever did it is
+/// either a syscall of the victim's own process (munmap/brk/mremap/
+/// madvise — the per-task mm_ops ring names it with the range) or a
+/// non-syscall path (fork-child exit teardown, reclaim, migration —
+/// the ABSENCE of a covering syscall convicts those). This dump runs
+/// AFTER the race window (post-hoc — it cannot perturb it), bounded to
+/// the first 8 user #GPs per boot.
+fn gp_mmhistory_dump(regs: &PtRegs) {
+    use core::sync::atomic::Ordering::Relaxed;
+    static GPMM_N: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
+    if GPMM_N.fetch_add(1, Relaxed) >= 8 {
+        return;
+    }
+    let Some(tk) = crate::sched::current() else { return };
+    let dump = |tag: &str, t: *const crate::process::task::Task| {
+        const N: usize = 16;
+        let cur = unsafe { (*t).mm_ops_cur.load(Relaxed) };
+        let pid = unsafe { (*t).pid() };
+        let mut shown = 0usize;
+        for k in 0..N {
+            let i = (cur + N - 1 - k) % N;
+            let w0 = unsafe { (*t).mm_ops[i * 2].load(Relaxed) };
+            let w1 = unsafe { (*t).mm_ops[i * 2 + 1].load(Relaxed) };
+            let op = w0 & 0xff;
+            if op == 0 {
+                continue;
+            }
+            let rc = (w0 >> 8) & 0xff;
+            let addr = w0 >> 16;
+            let len = w1 & 0x0000_ffff_ffff_ffff;
+            let name = match op {
+                1 => "mmap",
+                2 => "mprotect",
+                3 => "munmap",
+                4 => "brk",
+                _ => "mremap",
+            };
+            if shown < 12 {
+                crate::pr_err!(
+                    "GP-MMH: [{tag} pid={pid}] {name} addr={addr:#x} len={len:#x} rc={rc}"
+                );
+            }
+            shown += 1;
+        }
+        if shown == 0 {
+            crate::pr_err!("GP-MMH: [{tag} pid={pid}] (no mm syscalls recorded)");
+        } else if shown > 12 {
+            crate::pr_err!("GP-MMH: [{tag} pid={pid}] ... {shown}/16 events (capped)");
+        }
+    };
+    dump("self", tk as *const _);
+    let tgid = tk.tgid();
+    let self_ptr = tk as *const crate::process::task::Task;
+    let mut sibs = 0usize;
+    let _skipped = crate::sched::for_each_task_try(|t| {
+        let tp = t as *const crate::process::task::Task;
+        if unsafe { (*tp).tgid() } == tgid && tp != self_ptr {
+            sibs += 1;
+            if sibs <= 6 {
+                dump("sib", tp);
+            }
+        }
+    });
+    if sibs > 6 {
+        crate::pr_err!("GP-MMH: [sib] ... 6/{sibs} siblings shown");
+    }
+    // hp89 hunt: the global PTE-clearing ring tail — the non-syscall
+    // clearers (unmap engine calls, dying-mm teardowns, rmap walkers)
+    // around the corruption window, plus whether any recorded
+    // unmap_pages range covers the corrupted pointer VAs.
+    crate::pr_err!("GP-UNWATCH: tail of PTE-clearing ring (newest first):");
+    crate::mm::unwatch::dump_tail(120);
+    for (name, v) in [
+        ("rbx", regs.rbx),
+        ("rsi", regs.rsi),
+        ("rdi", regs.rdi),
+        ("rdx", regs.rdx),
+    ] {
+        if v > 0x1_0000 && v < 0x0000_8000_0000_0000 {
+            let hit = crate::mm::unwatch::covered_by_unmap(v & !0xfff);
+            crate::pr_err!("GP-UNWATCH: {}={:#x} covered_by_unmap={}", name, v, hit);
         }
     }
 }
@@ -2366,6 +2470,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                     2 => "mprotect",
                     3 => "munmap",
                     4 => "brk",
+                    6 => "madvise",
                     _ => "mremap",
                 };
                 let pid = unsafe { (*t).pid() };
