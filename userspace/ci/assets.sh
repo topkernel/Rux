@@ -18,7 +18,17 @@ asset_image() {  # asset_image <name> <seed-path...>  → echoes asset path
     if [ ! -f "$p" ]; then
         for s in "$@"; do [ -f "$s" ] && { cp --reflink=auto "$s" "$p"; break; }; done
     fi
-    [ -f "$p" ] || { echo "ASSET-MISSING $n (seeded-from candidates absent): $*" >&2; return 1; }
+    if [ ! -f "$p" ]; then  # last resort: GENERATE (repo-native targets)
+        case "$n" in
+        ubuntu-gui.img) make ubuntu-image >/dev/null 2>&1 && cp work/ubuntu-gui.img "$p" ;;
+        lmbench-x86.img|geekbench-x86.img)
+            make rootfs >/dev/null 2>&1 && cp work/rootfs.img "$p"   # bench injected at rig-time
+            ;;
+        oh-system.img)  # official OH x86_64 emulator release; else fail loudly
+            curl -fsSL -o "$p" "https://repo.huaweicloud.com/openharmony/os/5.0.3-Release/ohos-emulator-api12-x86_64/system.img" 2>/dev/null || true ;;
+        esac
+    fi
+    [ -f "$p" ] || { echo "ASSET-MISSING $n (no seed, generation failed — see above)": $* >&2; return 1; }
     echo "$p"
 }
 
