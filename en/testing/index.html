@@ -28,7 +28,7 @@
 
 <main>
 <div class="container doc">
-          <aside class="doc-side">
+            <aside class="doc-side">
     <div class="grp">Architecture</div>
     <a href="../architecture/design.html">Design deep-dive</a>
     <a href="../architecture/structure.html">Code layout</a>
@@ -42,6 +42,7 @@
     <a href="../security/index.html">Security & verification</a>
     <div class="grp">Testing</div>
     <a class="on" href="index.html">Overview</a>
+    <a href="ci-pipeline.html">CI pipeline</a>
     <a href="ltp.html">LTP scan</a>
     <a href="ltp-full.html">LTP full cases</a>
     <a href="ltp-timeout.html">LTP TIMEOUT audit</a>
@@ -62,7 +63,7 @@
 
   <article class="doc-main">
     <h1>Testing</h1>
-    <div class="sub">Six sub-pages: compliance scan / full case list / TIMEOUT audit / stability / stress / retrospective — data as of 2026-11-07</div>
+    <div class="sub">Seven sub-pages: compliance scan / full case list / TIMEOUT audit / CI pipeline / stability / stress / retrospective — data as of 2026-11-10</div>
 
     <h2 id="map"><span class="anchor">§1</span>Section map</h2>
     <div class="card-grid grid-2">
@@ -85,6 +86,11 @@
         <h3><span class="ico">🔥</span>Stress</h3>
         <p>The standing stress-fleet cluster (11 QEMUs): LTP sweeps ×4 + randomized testing ×2 + memstorm + fsfuzz + a control instance; root-caused classes, the watch list and the test queue.</p>
         <a class="more" href="stress.html">Open →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">⚙️</span>CI pipeline</h3>
+        <p><code>make ci</code> — one-key full regression (2026-11-10): build → suites → image → Ubuntu/OH boot regressions (marker + KERNPANIC verdicts) → lmbench/Geekbench → full LTP → the 32-class stress loop; unattended, a KERNPANIC halts with an alert.</p>
+        <a class="more" href="ci-pipeline.html">Open →</a>
       </div>
       <div class="card">
         <h3><span class="ico">⏱️</span>LTP TIMEOUT audit</h3>

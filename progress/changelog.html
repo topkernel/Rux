@@ -28,7 +28,7 @@
 
 <main>
 <div class="container doc">
-            <aside class="doc-side">
+              <aside class="doc-side">
     <div class="grp">架构设计</div>
     <a href="../architecture/design.html">架构与模块设计</a>
     <a href="../architecture/structure.html">代码结构</a>
@@ -42,6 +42,7 @@
     <a href="../security/index.html">安全与形式验证</a>
     <div class="grp">测试</div>
     <a href="../testing/index.html">测试总览</a>
+    <a href="../testing/ci-pipeline.html">CI 流水线</a>
     <a href="../testing/ltp.html">LTP 兼容扫描</a>
     <a href="../testing/ltp-full.html">LTP 全量用例</a>
     <a href="../testing/ltp-timeout.html">LTP TIMEOUT 审计</a>
@@ -63,6 +64,11 @@
   <article class="doc-main">
     <h1>更新日志(精选)</h1>
     <div class="sub">逐条全史见仓库 docs/progress/changelog.md 与 git log · 本页只收录结构性节点</div>
+
+    <h2 id="n1110"><span class="anchor">2026-11-10</span></h2>
+    <ul>
+      <li><b>make ci 一键 CI 流水线落地</b>(userspace/ci/):内核构建 → 套件编译(fio/rt-tests/futex/fsfuzz)→ guest 镜像 → Ubuntu 启动回归(脚本化串口 420 s,login/gnome 标记 + KERNPANIC 检出)与 OH 启动回归(双盘靴 600 s,SA 插入数 ≥20 判活)→ lmbench/Geekbench(资产自动获取已接,注入跑分与 CSV 解析 PENDING-RIG)→ LTP 全量 → 压力 32 类循环;daily-stress.sh 按同序每日循环,KERNPANIC 即 ALERT 停机。</li>
+    </ul>
 
     <h2 id="n1108"><span class="anchor">2026-11-08</span></h2>
     <ul>

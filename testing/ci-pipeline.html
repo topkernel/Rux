@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CI 流水线 · Rux</title>
+<link rel="stylesheet" href="../css/style.css?v=17">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">首页</a>
+      <a href="../architecture/design.html">架构设计</a>
+      <a href="../performance/index.html">性能</a>
+      <a href="../security/index.html">安全</a>
+      <a href="index.html">测试</a>
+      <a href="../guides/getting-started.html">快速入门</a>
+      <a href="../progress/roadmap.html">项目进展</a>
+      <a href="../guestbook.html">留言</a>
+      <span class="lang-sw"><a class="on" href="ci-pipeline.html">中文</a><a href="../en/testing/ci-pipeline.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">架构设计</div>
+    <a href="../architecture/design.html">架构与模块设计</a>
+    <a href="../architecture/structure.html">代码结构</a>
+    <a href="../architecture/boot.html">启动流程</a>
+    <a href="../architecture/memory.html">内存管理</a>
+    <a href="../architecture/riscv64.html">架构移植指南</a>
+    <a href="../architecture/kernel-lock.html">锁序不变量</a>
+    <div class="grp">性能</div>
+    <a href="../performance/index.html">性能测试</a>
+    <div class="grp">安全</div>
+    <a href="../security/index.html">安全与形式验证</a>
+    <div class="grp">测试</div>
+    <a href="index.html">测试总览</a>
+    <a class="on" href="ci-pipeline.html">CI 流水线</a>
+    <a href="ltp.html">LTP 兼容扫描</a>
+    <a href="ltp-full.html">LTP 全量用例</a>
+    <a href="ltp-timeout.html">LTP TIMEOUT 审计</a>
+    <a href="stability.html">稳定性</a>
+    <a href="stress.html">压力</a>
+    <a href="gnome-retrospective.html">回溯报告</a>
+    <div class="grp">开发指南</div>
+    <a href="../guides/getting-started.html">快速入门</a>
+    <a href="../guides/development.html">参与开发</a>
+    <a href="../guides/configuration.html">内核配置</a>
+    <div class="grp">项目进展</div>
+    <a href="../progress/roadmap.html">路线图</a>
+    <a href="../progress/changelog.html">更新日志</a>
+    <a href="../progress/quickref.html">命令速查</a>
+    <div class="grp">互动</div>
+    <a href="../guestbook.html">留言板</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>CI 流水线(make ci)</h1>
+    <div class="sub">一键完整回归:构建 → 套件 → 镜像 → 启动回归 + 基准 → LTP 全量 → 压力循环 —— 无人值守,无需 LLM · 实现 userspace/ci/(2026-11-10)</div>
+
+    <div class="callout"><b>定位:</b>任何人(或任何定时器)在仓库根目录运行 <code>make ci</code>,即可得到一轮完整测试;每日压力流水线(<code>daily-stress.sh</code>)以同一套阶段循环驱动。全部产物落 <code>run/ci-*.log</code> 与 <code>userspace/ci/&lt;日期&gt;/</code>;任一阶段检出 KERNPANIC 即写 ALERT 并停机 —— 这是唯一需要人工介入的条件。</div>
+
+    <h2 id="phases"><span class="anchor">§1</span>六个阶段</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>#</th><th>阶段</th><th>内容</th><th>状态</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>内核构建</td><td><code>PLATFORM=x86_64 make build</code>,产物 bzImage</td><td><span class="chip ok"><span class="dot g"></span>已接</span></td></tr>
+          <tr><td>2</td><td>套件编译</td><td>fio / rt-tests / futex-selftests / fsfuzz 静态构建(x86_64 musl)</td><td><span class="chip ok"><span class="dot g"></span>已接</span></td></tr>
+          <tr><td>3</td><td>guest 镜像</td><td>从资产库播种(缺则回退仓库原生 target 生成;镜像不可下载,只从常备镜像库 reflink 播种)</td><td><span class="chip ok"><span class="dot g"></span>已接</span></td></tr>
+          <tr><td>4a</td><td>Ubuntu 启动回归</td><td>脚本化串口靴 420 s(KVM q35 4G/4CPU,-snapshot);login / gnome-shell / Ubuntu 标记判定通过,KERNPANIC 检出即 UBUNTU-REGRESS</td><td><span class="chip ok"><span class="dot g"></span>已接</span></td></tr>
+          <tr><td>4b</td><td>OH 启动回归</td><td>双盘靴(system + userdata)600 s(KVM q35 2G/2CPU);"insert SA:" 插入数 ≥20 判活,KERNPANIC 检出即 OH-REGRESS</td><td><span class="chip ok"><span class="dot g"></span>已接</span></td></tr>
+          <tr><td>4c</td><td>lmbench / Geekbench</td><td>资产自动获取已接(lmbench 源码下载编译、Geekbench 6 tarball,入库后存在即跳过);注入跑分与 CSV 解析接入 rig 中</td><td><span class="chip warn">PENDING-RIG</span></td></tr>
+          <tr><td>5</td><td>LTP 全量扫描</td><td>1,869 项全量,setsid 脱离启动,完成后结果落行(log run/ci-ltp.log)</td><td><span class="chip ok"><span class="dot g"></span>已接</span></td></tr>
+          <tr><td>6</td><td>压力 32 类循环</td><td>3 槽 QEMU 循环(fio / futex / rt-tests / fsfuzz 类,finite pass 或每日循环直到 stop);裁决追加 rounds.log</td><td><span class="chip ok"><span class="dot g"></span>已接</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="daily"><span class="anchor">§2</span>每日循环(daily-stress.sh)</h2>
+    <p>按同一阶段序循环驱动:bootreg → bench → LTP → 压力循环(直到 <code>daily-stress.sh stop</code>);每阶段日志落 <code>userspace/ci/&lt;日期&gt;/</code>。fio/cyclictest 的性能行随轮解析。启动:<code>bash userspace/ci/daily-stress.sh start</code>,查状态:<code>status</code>,停止:<code>stop</code>。</p>
+
+    <h2 id="assets"><span class="anchor">§3</span>资产库纪律</h2>
+    <ul>
+      <li><b>位置</b>:默认 <code>~/rux-assets</code>(git 之外;<code>RUX_ASSETS</code> 可覆盖),分 images / src / bin / logs 四区。</li>
+      <li><b>只读优先</b>:脚本只读;仅当资产<b>缺失</b>时才播种/更新 —— 存在即跳过,新鲜度以存在性为准。</li>
+      <li><b>镜像不可下载</b>:从常备镜像库(/home/william/rux-images)reflink 播种;无种子且生成失败时明确报 ASSET-MISSING,不静默跳过。</li>
+      <li><b>源码按需取</b>:lmbench 从 upstream 下载编译、Geekbench 6 tarball 展开入库,产物只构建一次。</li>
+    </ul>
+
+    <h2 id="usage"><span class="anchor">§4</span>用法</h2>
+    <pre><code>make ci                            <span class="c"># 一轮完整流水线(构建→套件→镜像→启动回归→LTP→压力 finite pass)</span>
+bash userspace/ci/daily-stress.sh start   <span class="c"># 每日循环模式</span>
+bash userspace/ci/daily-stress.sh status  <span class="c"># 各阶段状态</span>
+bash userspace/ci/stress-fleet.sh log 20  <span class="c"># 压力循环尾部日志</span></code></pre>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">返回首页</a></span>
+    
+      <span class="foot-stats">本站访问 <span id="busuanzi_value_site_pv"></span> 次 · 访客 <span id="busuanzi_value_site_uv"></span> 人</span></div>
+  </div>
+</footer>
+
+<script src="../js/main.js?v=17"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>

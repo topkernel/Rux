@@ -28,7 +28,7 @@
 
 <main>
 <div class="container doc">
-            <aside class="doc-side">
+              <aside class="doc-side">
     <div class="grp">架构设计</div>
     <a href="../architecture/design.html">架构与模块设计</a>
     <a href="../architecture/structure.html">代码结构</a>
@@ -42,6 +42,7 @@
     <a href="../security/index.html">安全与形式验证</a>
     <div class="grp">测试</div>
     <a class="on" href="index.html">测试总览</a>
+    <a href="ci-pipeline.html">CI 流水线</a>
     <a href="ltp.html">LTP 兼容扫描</a>
     <a href="ltp-full.html">LTP 全量用例</a>
     <a href="ltp-timeout.html">LTP TIMEOUT 审计</a>
@@ -62,7 +63,7 @@
 
   <article class="doc-main">
     <h1>测试</h1>
-    <div class="sub">本栏目含六个子页:兼容扫描 / 全量用例 / TIMEOUT 审计 / 稳定性 / 压力 / 回溯报告 —— 数据截至 2026-11-07</div>
+    <div class="sub">本栏目含七个子页:兼容扫描 / 全量用例 / TIMEOUT 审计 / CI 流水线 / 稳定性 / 压力 / 回溯报告 —— 数据截至 2026-11-10</div>
 
     <h2 id="map"><span class="anchor">§1</span>栏目导航</h2>
     <div class="card-grid grid-2">
@@ -85,6 +86,11 @@
         <h3><span class="ico">🔥</span>压力</h3>
         <p>stress-fleet 常驻并发测试集群(11 台 QEMU):LTP 扫描 ×4 + 随机化测试 ×2 + 内存压力 + fs 模糊 + 对照实例;已根因类、在观察类与测试队列。</p>
         <a class="more" href="stress.html">进入子项 →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">⚙️</span>CI 流水线</h3>
+        <p><code>make ci</code> 一键完整回归(2026-11-10):构建 → 套件 → 镜像 → Ubuntu/OH 启动回归(标记 + KERNPANIC 判定)→ lmbench/Geekbench → LTP 全量 → 压力 32 类循环;无人值守,KERNPANIC 即停机报警。</p>
+        <a class="more" href="ci-pipeline.html">进入子项 →</a>
       </div>
       <div class="card">
         <h3><span class="ico">⏱️</span>LTP TIMEOUT 审计</h3>

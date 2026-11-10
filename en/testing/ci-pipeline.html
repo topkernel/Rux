@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CI pipeline · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=17">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">Home</a>
+      <a href="../architecture/design.html">Architecture</a>
+      <a href="../performance/index.html">Performance</a>
+      <a href="../security/index.html">Security</a>
+      <a href="index.html">Testing</a>
+      <a href="../guides/getting-started.html">Getting started</a>
+      <a href="../progress/roadmap.html">Progress</a>
+      <a href="../guestbook.html">Feedback</a>
+      <span class="lang-sw"><a class="on" href="../../testing/ci-pipeline.html">中文</a><a href="ci-pipeline.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="../architecture/design.html">Design deep-dive</a>
+    <a href="../architecture/structure.html">Code layout</a>
+    <a href="../architecture/boot.html">Boot flow</a>
+    <a href="../architecture/memory.html">Memory management</a>
+    <a href="../architecture/riscv64.html">Porting guide</a>
+    <a href="../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Performance</div>
+    <a href="../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../security/index.html">Security & verification</a>
+    <div class="grp">Testing</div>
+    <a href="index.html">Overview</a>
+    <a class="on" href="ci-pipeline.html">CI pipeline</a>
+    <a href="ltp.html">LTP scan</a>
+    <a href="ltp-full.html">LTP full cases</a>
+    <a href="ltp-timeout.html">LTP TIMEOUT audit</a>
+    <a href="stability.html">Stability</a>
+    <a href="stress.html">Stress</a>
+    <a href="gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../guides/getting-started.html">Getting started</a>
+    <a href="../guides/development.html">Contributing</a>
+    <a href="../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../progress/roadmap.html">Roadmap</a>
+    <a href="../progress/changelog.html">Changelog</a>
+    <a href="../progress/quickref.html">Commands</a>
+    <div class="grp">Community</div>
+    <a href="../guestbook.html">Guestbook</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>CI pipeline (make ci)</h1>
+    <div class="sub">One-key full regression: build → suites → image → boot regressions + benchmarks → full LTP → stress loop — unattended, no LLM required · implemented in userspace/ci/ (2026-11-10)</div>
+
+    <div class="callout"><b>What it is:</b> anyone (or any timer) runs <code>make ci</code> at the repository root for one complete test pass; the daily campaign (<code>daily-stress.sh</code>) drives the same phases in a loop. All artifacts land in <code>run/ci-*.log</code> and <code>userspace/ci/&lt;date&gt;/</code>; a KERNPANIC detected in any phase writes an ALERT and halts the pipeline — the one condition that warrants human intervention.</div>
+
+    <h2 id="phases"><span class="anchor">§1</span>The six phases</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>#</th><th>Phase</th><th>Content</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>Kernel build</td><td><code>PLATFORM=x86_64 make build</code>, producing the bzImage</td><td><span class="chip ok"><span class="dot g"></span>wired</span></td></tr>
+          <tr><td>2</td><td>Suite builds</td><td>fio / rt-tests / futex-selftests / fsfuzz, static (x86_64 musl)</td><td><span class="chip ok"><span class="dot g"></span>wired</span></td></tr>
+          <tr><td>3</td><td>Guest image</td><td>seeded from the asset store (falls back to repo-native generation; images are not downloadable — reflink-seeded from the standing image store only)</td><td><span class="chip ok"><span class="dot g"></span>wired</span></td></tr>
+          <tr><td>4a</td><td>Ubuntu boot regression</td><td>scripted-serial boot, 420 s (KVM q35 4G/4CPU, -snapshot); pass = a login / gnome-shell / Ubuntu marker; a KERNPANIC is UBUNTU-REGRESS</td><td><span class="chip ok"><span class="dot g"></span>wired</span></td></tr>
+          <tr><td>4b</td><td>OH boot regression</td><td>dual-disk boot (system + userdata), 600 s (KVM q35 2G/2CPU); liveness = "insert SA:" count ≥20; a KERNPANIC is OH-REGRESS</td><td><span class="chip ok"><span class="dot g"></span>wired</span></td></tr>
+          <tr><td>4c</td><td>lmbench / Geekbench</td><td>asset auto-fetch wired (lmbench downloaded and built, the Geekbench 6 tarball unpacked; build-once, skip-if-present); injection runs + CSV parsing being wired to the rig</td><td><span class="chip warn">PENDING-RIG</span></td></tr>
+          <tr><td>5</td><td>Full LTP scan</td><td>all 1,869 cases, launched detached (setsid), the result row lands on completion (log run/ci-ltp.log)</td><td><span class="chip ok"><span class="dot g"></span>wired</span></td></tr>
+          <tr><td>6</td><td>32-class stress loop</td><td>3-slot QEMU loop (fio / futex / rt-tests / fsfuzz classes; finite pass or the daily loop until stop); verdicts append to rounds.log</td><td><span class="chip ok"><span class="dot g"></span>wired</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="daily"><span class="anchor">§2</span>The daily loop (daily-stress.sh)</h2>
+    <p>Drives the same phase order in a loop: bootreg → bench → LTP → the stress loop (until <code>daily-stress.sh stop</code>); each phase logs into <code>userspace/ci/&lt;date&gt;/</code>. fio/cyclictest performance rows are parsed per round. Start: <code>bash userspace/ci/daily-stress.sh start</code>; status: <code>status</code>; stop: <code>stop</code>.</p>
+
+    <h2 id="assets"><span class="anchor">§3</span>Asset-store discipline</h2>
+    <ul>
+      <li><b>Location</b>: <code>~/rux-assets</code> by default (outside git; <code>RUX_ASSETS</code> overrides), split into images / src / bin / logs.</li>
+      <li><b>Read-mostly</b>: scripts only read; seeding/updating happens only when an asset is <b>missing</b> — existence implies freshness, builds skip when outputs exist.</li>
+      <li><b>Images are not downloadable</b>: reflink-seeded from the standing image store (/home/william/rux-images); no seed + failed generation raises a loud ASSET-MISSING, never a silent skip.</li>
+      <li><b>Sources on demand</b>: lmbench downloads and builds from upstream, the Geekbench 6 tarball unpacks into the store — each built once.</li>
+    </ul>
+
+    <h2 id="usage"><span class="anchor">§4</span>Usage</h2>
+    <pre><code>make ci                            <span class="c"># one full pass (build→suites→image→bootreg→LTP→finite stress)</span>
+bash userspace/ci/daily-stress.sh start   <span class="c"># daily loop mode</span>
+bash userspace/ci/daily-stress.sh status  <span class="c"># phase status</span>
+bash userspace/ci/stress-fleet.sh log 20  <span class="c"># tail of the stress loop log</span></code></pre>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to top page</a></span>
+    
+      <span class="foot-stats">Site traffic: <span id="busuanzi_value_site_pv"></span> views · <span id="busuanzi_value_site_uv"></span> visitors</span></div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=17"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>

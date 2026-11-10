@@ -28,7 +28,7 @@
 
 <main>
 <div class="container doc">
-          <aside class="doc-side">
+            <aside class="doc-side">
     <div class="grp">Architecture</div>
     <a href="../architecture/design.html">Design deep-dive</a>
     <a href="../architecture/structure.html">Code layout</a>
@@ -42,6 +42,7 @@
     <a href="../security/index.html">Security & verification</a>
     <div class="grp">Testing</div>
     <a href="../testing/index.html">Overview</a>
+    <a href="../testing/ci-pipeline.html">CI pipeline</a>
     <a href="../testing/ltp.html">LTP scan</a>
     <a href="../testing/ltp-full.html">LTP full cases</a>
     <a href="../testing/ltp-timeout.html">LTP TIMEOUT audit</a>
@@ -63,6 +64,11 @@
   <article class="doc-main">
     <h1>Changelog (highlights)</h1>
     <div class="sub">The full history: docs/progress/changelog.md and git log — this page records structural milestones only</div>
+
+    <h2 id="n1110"><span class="anchor">2026-11-10</span></h2>
+    <ul>
+      <li><b>make ci — the one-key CI pipeline landed</b> (userspace/ci/): kernel build → suite builds (fio/rt-tests/futex/fsfuzz) → guest image → the Ubuntu boot regression (scripted serial, 420 s, login/gnome markers + KERNPANIC detection) and the OH boot regression (dual-disk 600 s, SA-insert count ≥20 liveness) → lmbench/Geekbench (asset auto-fetch wired; injection runs and CSV parsing PENDING-RIG) → full LTP → the 32-class stress loop; daily-stress.sh drives the same order daily, a KERNPANIC alerts and halts.</li>
+    </ul>
 
     <h2 id="n1108"><span class="anchor">2026-11-08</span></h2>
     <ul>
