@@ -10223,12 +10223,15 @@ KERNEL_RESERVE_SIZE 0x1C0_0000, KERNEL_HEAP_PHYS/HEAP_START/buddy
 KERNEL_HEAP_PHYS 0x81a0_0000 -> 0x81c0_0000, linker ASSERT 28MB.
 The suite run on my kernel tripped a KERNPANIC in tests/execve.rs
 (map_kernel_page_noflush storing through a garbage PT window VA,
-badaddr 0xffffffd580000000, inside do_execve_elf) — parent-commit
-(218489be) suite verdict was still pending at session end; the 90th
-MUST close this before merge (if parent fails too: pre-existing; if
-parent passes: bisect my four changes, prime suspects are the
-mm_surgery syscall guard interacting with exec's direct mm calls, or
-the riscv64 munmap cursor).
+badaddr 0xffffffd580000000, inside do_execve_elf). ISOLATION DONE at
+session end: (a) the parent commit 218489be CANNOT build the test
+kernel at all (same 24MB assert — the overgrowth is the 88th's, not
+mine); (b) parent + LAYOUT-7-window-fix ALONE reproduces the IDENTICAL
+execve KERNPANIC (badaddr 0xffffffd580000000) — the panic is
+PRE-EXISTING at the 88th's tip (or earlier), NOT a regression of this
+session's four changes. The 90th inherits: bisect the execve panic on
+top of 218489be+LAYOUT-7 (prime suspects: the 88th's b73ed3c0
+instruments or older), then the standard merge gate.
 
 #### 89.6 FOR THE 90TH (priority order)
 
