@@ -186,6 +186,7 @@ const MP_DATA_SIZE: usize = 1048;
 /// much the user filled in.
 #[repr(C)]
 #[derive(Clone, Copy)]
+#[derive(Default)]
 struct AttrHead {
     type_: u32,          // offset 0
     size: u32,           // offset 4
@@ -1405,6 +1406,22 @@ fn perf_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
 
 // ==================== syscall ====================
 
+/// Bounded forensic line for rejected perf_event_open attrs (hiperf
+/// bring-up, TASK 87.10): hiperf fails with a bare "syscall
+/// perf_event_open failed (errno 22)" in its own log while exiting 0 —
+/// this names the validation arm and the full attr so one boot settles
+/// the parity gap. First 8 rejections only.
+fn perf_open_einval_diag(arm: &str, attr: &AttrHead, pid: i32, cpu: i32, group_fd: i32, flags: u64) {
+    static N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+        crate::pr_err!(
+            "PERF-EINVAL[{}]: pid={} cpu={} gfd={} flags={:#x} size={} type={:#x} config={:#x} sample_type={:#x} read_format={:#x} flags1={:#x} flags2={:#x} period={}",
+            arm, pid, cpu, group_fd, flags, attr.size, attr.type_, attr.config,
+            attr.sample_type, attr.read_format, attr.flags1, attr.flags2, attr.sample_period
+        );
+    }
+}
+
 /// sys_perf_event_open(attr, pid, cpu, group_fd, flags) — software
 /// counting + mmap-ring sampling (see the module doc for the accepted
 /// surface; everything unsupported returns EINVAL rather than
@@ -1420,6 +1437,9 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
     if flags & !(PERF_FLAG_FD_NO_GROUP | PERF_FLAG_FD_CLOEXEC) != 0 {
         // FD_OUTPUT (ring redirect) and PID_CGROUP (cgroup scoping)
         // are real ABI features we do not implement — EINVAL.
+        let a = unsafe { crate::arch::uaccess::get_user(attr_ptr as *const AttrHead) }
+            .unwrap_or_default();
+        perf_open_einval_diag("flags", &a, pid, cpu, group_fd, flags);
         return -(crate::errno::constants::EINVAL as i64);
     }
 
@@ -1434,6 +1454,7 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
         None => return -(crate::errno::constants::EFAULT as i64),
     };
     if attr.size < 64 || attr.size > 1024 {
+        perf_open_einval_diag("size", &attr, pid, cpu, group_fd, flags);
         return -(crate::errno::constants::EINVAL as i64);
     }
 
@@ -1449,6 +1470,7 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
 
     // 3. Event class: software slice only.
     if attr.type_ != PERF_TYPE_SOFTWARE {
+        perf_open_einval_diag("type", &attr, pid, cpu, group_fd, flags);
         return -(crate::errno::constants::EINVAL as i64);
     }
     if attr.config != PERF_COUNT_SW_CPU_CLOCK
@@ -1456,27 +1478,46 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
         && attr.config != PERF_COUNT_SW_PAGE_FAULTS
         && attr.config != PERF_COUNT_SW_CONTEXT_SWITCHES
     {
+        perf_open_einval_diag("config", &attr, pid, cpu, group_fd, flags);
         return -(crate::errno::constants::EINVAL as i64);
     }
 
     // 4. Sampling configuration.
     let sample_type = attr.sample_type;
     if sample_type & !SAMPLE_TYPE_KNOWN != 0 {
+        perf_open_einval_diag("sample_type", &attr, pid, cpu, group_fd, flags);
         return -(crate::errno::constants::EINVAL as i64); // bits we cannot fill
     }
     if attr.read_format & PERF_FORMAT_GROUP != 0 {
+        perf_open_einval_diag("read_format_group", &attr, pid, cpu, group_fd, flags);
         return -(crate::errno::constants::EINVAL as i64); // no group reads
     }
     if attr.read_format
         & !(PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING | PERF_FORMAT_ID)
         != 0
     {
+        perf_open_einval_diag("read_format_bits", &attr, pid, cpu, group_fd, flags);
         return -(crate::errno::constants::EINVAL as i64);
     }
     if attr.flags1 & FLAG_INHERIT != 0 {
-        return -(crate::errno::constants::EINVAL as i64); // no child inheritance
+        // hiperf's counting mode sends inherit=1 even for per-CPU
+        // system-wide events (hp87p PERF-EINVAL: flags1=0x3). For
+        // COUNTING software events inherit is a no-op: a per-CPU
+        // counter already covers every task on that CPU, children
+        // included (and per-task counting without child tracking only
+        // undercounts — tooling-visible softness, not corruption).
+        // Sampled PER-TASK events keep the strict reject — a ring
+        // inherited by untracked children has no page to land records
+        // in. Per-CPU system-wide events (pid == -1, hp87q: hiperf
+        // record sends exactly this shape) accept it: children on the
+        // CPU are already covered by the CPU scope.
+        if attr.sample_type != 0 && pid >= 0 {
+            perf_open_einval_diag("inherit_sampled_pertask", &attr, pid, cpu, group_fd, flags);
+            return -(crate::errno::constants::EINVAL as i64); // no child inheritance
+        }
     }
     if attr.flags1 & FLAG_ENABLE_ON_EXEC != 0 {
+        perf_open_einval_diag("read_format_bits", &attr, pid, cpu, group_fd, flags);
         return -(crate::errno::constants::EINVAL as i64);
     }
     if attr.flags2 & 0x1f != 0 {
@@ -1589,7 +1630,12 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
     let ev_ptr = Box::into_raw(ev);
     register(ev_ptr, starts_armed);
 
-    let file_flags = crate::fs::file::FileFlags::O_RDONLY;
+    // O_RDWR: the ring mapping is MAP_SHARED+PROT_WRITE (hiperf record,
+    // hp87r: mmap errno 13) and the generic file-backed mmap gate in
+    // sys_mmap requires a writable fd for that combination. Reference
+    // perf fds are anon-inode-like and bypass mode checks; carrying
+    // O_RDWR achieves the same through our gate.
+    let file_flags = crate::fs::file::FileFlags::O_RDWR;
     let file = Arc::new(crate::fs::File::new(
         crate::fs::file::FileFlags::new(file_flags),
     ));
