@@ -141,8 +141,8 @@ start)
     then rebuild_worktree || { echo "rebuild FAILED" >&2; exit 1; }
     fi
     build_queue > "$QUEUE_FILE"
-    if pgrep -f "stress-fleet3.sh worker" >/dev/null 2>&1; then
-        echo "fleet already running: $(pgrep -fc 'stress-fleet3.sh worker') workers"; exit 0
+    if pgrep -f "stress-fleet.sh worker" >/dev/null 2>&1; then
+        echo "fleet already running: $(pgrep -fc 'stress-fleet.sh worker') workers"; exit 0
     fi
     echo "$(date +%m%d-%H:%M:%S)|-|fleet-start|queue=$(wc -l < "$QUEUE_FILE") classes, 3 slots|-" >> "$ROUNDS"
     for s in 0 1 2; do
@@ -152,8 +152,8 @@ start)
     echo "fleet started: 3 workers, $(wc -l < "$QUEUE_FILE") classes; logs → $ROUNDS"
     ;;
 status)
-    echo "== workers: $(pgrep -fc 'stress-fleet3.sh worker' 2>/dev/null || echo 0)/3"
-    local_pids=$(pgrep -f "stress-fleet3.sh worker" 2>/dev/null || true)
+    echo "== workers: $(pgrep -fc 'stress-fleet.sh worker' 2>/dev/null || echo 0)/3"
+    local_pids=$(pgrep -f "stress-fleet.sh worker" 2>/dev/null || true)
     for p in $local_pids; do echo "  worker pid=$p alive"; done
     echo "== fleet QEMUs:"
     for p in $(pgrep -f 'qemu-system-x86_64' 2>/dev/null); do
@@ -164,7 +164,7 @@ status)
     ;;
 stop)
     touch "$STOP"
-    pkill -f "stress-fleet3.sh worker" 2>/dev/null
+    pkill -f "stress-fleet.sh worker" 2>/dev/null
     sleep 3   # workers dead first — no new QEMU launches can race past us
     for p in $(pgrep -f 'qemu-system-x86_64' 2>/dev/null); do
         cwd=$(readlink /proc/$p/cwd 2>/dev/null)
