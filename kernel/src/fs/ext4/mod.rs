@@ -1049,114 +1049,28 @@ pub fn read_file(device: *const blkdev::GenDisk, path: &str) -> Option<Vec<u8>> 
 
 /// Internal implementation, supports recursion depth limit to prevent circular symbolic links
 fn read_file_internal(device: *const blkdev::GenDisk, path: &str, depth: u32) -> Option<Vec<u8>> {
-    use alloc::vec::Vec;
-
-    // Prevent circular symbolic links, max recursion depth 8
-    if depth > 8 {
-        return None;
-    }
-
-    // SAFETY: device is a valid GenDisk pointer from the block device layer;
-    // Box::into_raw leaks the Box to make a static-lifetime pointer stored in
-    // GLOBAL_EXT4_FS; this is called once during mount and cleaned up on unmount.
-    unsafe {
-        // Create ext4 filesystem instance
-        let mut fs = Box::new(Ext4FileSystem::new(device));
-
-        // Initialize filesystem
-        if fs.init().is_err() {
-            return None;
-        }
-        // Parse path - filter out empty strings and "." (current directory)
-        let path_parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty() && *s != ".").collect();
-
-        // Start from root inode
-        let mut current_inode = match fs.get_root_inode() {
-            Ok(inode) => inode,
-            Err(_) => {
-                return None;
+    // The boot init loader runs before the VFS mount — and the fresh instance
+    // built below never resolved the Noble rootfs's indexed /sbin (its
+    // uninitialized extent walk mis-mapped the directory extents; the probe's
+    // post-mount VFS open of the SAME file worked). Use the MOUNTED
+    // filesystem — whose lookup_path walk the VFS uses, the walker the probe
+    // proved — when one exists; the fresh fallback stays for the pre-mount
+    // initramfs case.
+    let fresh = Ext4FileSystem::new(device);
+    let fs: &Ext4FileSystem = unsafe {
+        let g = GLOBAL_EXT4_FS.load(core::sync::atomic::Ordering::Acquire);
+        if g.is_null() { &fresh } else { &*g }
+    };
+    match fs.lookup_path(path) {
+        Ok((_ino, inode)) => {
+            let size = inode.get_size() as usize;
+            let mut buffer = alloc::vec![0u8; size];
+            match inode.read_data(fs, 0, &mut buffer) {
+                Ok(n) if n == size => Some(buffer),
+                _ => None,
             }
-        };
-
-        // Record current path directory part (for resolving relative path symbolic links)
-        let mut current_dir_parts: Vec<&str> = Vec::new();
-
-        // Traverse path
-        for part in path_parts.iter() {
-            let entry = match fs.lookup(&current_inode, part) {
-                Ok(e) => e,
-                Err(_) => {
-                    return None;
-                }
-            };
-
-            // Read target inode
-            let target_inode = match fs.read_inode(entry.inode) {
-                Ok(inode) => inode,
-                Err(_) => {
-                    return None;
-                }
-            };
-
-            // Check if it's a symbolic link
-            if target_inode.is_symlink() {
-                // Read symbolic link target
-                let link_target = read_symlink_target(&fs, &target_inode)?;
-
-                // Build the REPLACEMENT path: the symlink target takes the
-                // place of THIS component; remaining components must be
-                // preserved (the old code replaced the WHOLE path, losing
-                // everything after the link: "/bin/dash" with bin->usr/bin
-                // resolved to "/usr/bin" instead of "/usr/bin/dash" —
-                // returning the DIRECTORY's 8192 bytes as "file data").
-                let part_index = path_parts.iter()
-                    .position(|p| core::ptr::eq(p, part))
-                    .unwrap_or(0);
-                let mut resolved_path = if link_target.starts_with('/') {
-                    link_target
-                } else {
-                    // Relative: prepend the walked directory components
-                    let mut r = String::from("/");
-                    for dir_part in &current_dir_parts {
-                        r.push_str(dir_part);
-                        r.push('/');
-                    }
-                    r.push_str(&link_target);
-                    r
-                };
-                for remaining in path_parts.iter().skip(part_index + 1) {
-                    resolved_path.push('/');
-                    resolved_path.push_str(remaining);
-                }
-
-                // Recursively read target file
-                return read_file_internal(device, &resolved_path, depth + 1);
-            }
-
-            // If it's a directory, update current directory path
-            if target_inode.is_dir() {
-                current_dir_parts.push(part);
-            }
-
-            current_inode = target_inode;
         }
-
-        // Read file content
-        let file_size = current_inode.get_size() as usize;
-        if file_size == 0 {
-            return Some(Vec::new());
-        }
-
-        let mut buffer = Vec::with_capacity(file_size);
-        buffer.resize(file_size, 0);
-
-        match file::ext4_file_read(&fs, &current_inode, 0, &mut buffer) {
-            Ok(n) => {
-                buffer.truncate(n);
-                Some(buffer)
-            }
-            Err(_) => None,
-        }
+        Err(_) => None,
     }
 }
 
@@ -1201,6 +1115,36 @@ pub fn init() {
 /// Global ext4 filesystem instance
 pub static GLOBAL_EXT4_FS: core::sync::atomic::AtomicPtr<Ext4FileSystem> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+/// Mounted-instance-aware read helpers (the boot init loader builds a
+/// FRESH Ext4FileSystem whose uninitialized extent trees mis-map an indexed
+/// rootfs's directory extents: the noble rootfs's /sbin lookup ENOENTed
+/// on the fresh path while the mounted VFS resolved, 2026-11-11).
+pub fn mnt_or_fresh_lookup(
+    fresh: &Ext4FileSystem,
+    dir: &inode::Ext4Inode,
+    name: &str,
+) -> Result<dir::Ext4DirEntry, i32> {
+    let g = unsafe { GLOBAL_EXT4_FS.load(core::sync::atomic::Ordering::Acquire) };
+    crate::pr_warn!("MNTDBG lookup {} dir={}", if g.is_null() { "FRESH" } else { "MOUNTED" }, dir.ino);
+    if g.is_null() {
+        fresh.lookup(dir, name)
+    } else {
+        unsafe { (*g).lookup(dir, name) }
+    }
+}
+
+pub fn mnt_or_fresh_read_inode(
+    fresh: &Ext4FileSystem,
+    ino: u32,
+) -> Result<inode::Ext4Inode, i32> {
+    let g = unsafe { GLOBAL_EXT4_FS.load(core::sync::atomic::Ordering::Acquire) };
+    if g.is_null() {
+        fresh.read_inode(ino)
+    } else {
+        unsafe { (*g).read_inode(ino) }
+    }
+}
 
 /// Mount ext4 filesystem
 ///

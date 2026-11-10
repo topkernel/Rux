@@ -599,16 +599,17 @@ pub(crate) fn do_execve_elf(
         }
     }
 
-    // P2 vDSO mapping is DISABLED (data page lives outside the linear
-    // map; see vdso.rs). The block below tried to map anyway and spewed
-    // virt_to_phys warnings on every exec while AT_SYSINFO_EHDR stays
-    // commented out — skipped until the vDSO pages come from linear-mapped
-    // memory.
-    // (riscv64-only: the block encodes the riscv map_user_region ABI;
-    // x86_64 has no vDSO mapping — AT_SYSINFO_EHDR stays absent.)
-    #[cfg(feature = "riscv64")]
+    // vDSO user mapping: riscv64 since P2 (data + code pages at
+    // VDSO_BASE, aliasing the global kernel frames); x86_64 since the
+    // noble-desktop bring-up (2026-11-10): noble systemd is a PIE whose
+    // interpreter needs linux-vdso.so.1 — without the mapping ld.so
+    // fails the exec and PID1 falls to /bin/sh. The x86_64 stub vDSO
+    // exports only -ENOSYS bodies, so every clock read still takes the
+    // real syscall (semantics unchanged); the mapping itself is what the
+    // dynamic linker needs.
+    #[cfg(any(feature = "riscv64", feature = "x86_64"))]
     #[allow(unused_variables)]
-    if false {
+    {
     // P2 vDSO: map the shared time-data page (RW) and the vDSO ELF page
     // (RX) at the fixed VDSO_BASE, two pages total. The mapping aliases
     // GLOBAL kernel pages — the data page stays live (tick-refreshed) in
@@ -1076,7 +1077,7 @@ pub(crate) fn do_execve_elf(
     #[cfg(not(feature = "aarch64"))]
     const AT_HWCAP_VALUE: u64 = 0;
 
-    let auxv = &[
+    let mut auxv: alloc::vec::Vec<(u64, u64)> = alloc::vec![
         (AT_PHDR, phdr_addr),
         (AT_PHENT, phent),
         (AT_PHNUM, phnum),
@@ -1095,16 +1096,19 @@ pub(crate) fn do_execve_elf(
         (AT_SECURE, secure_exec as u64),
         (AT_RANDOM, random_vaddr),
         (AT_EXECFN, execfn_vaddr),
-        // P2 vDSO: libc resolves __vdso_clock_gettime & co. through
-        // this ELF mapping and skips the syscall for gettime paths.
-        // (AT_SYSINFO_EHDR, crate::mm::vdso::vdso_ehdr()), // P2-fix: vDSO data page is outside the linear mapping — disable until the page is allocated from linear-mapped memory
     ];
+    // vDSO (riscv64 since P2, x86_64 since noble-desktop): libc resolves
+    // __vdso_clock_gettime & co. through this ELF mapping and skips the
+    // syscall for gettime paths. aarch64: mapping stays off (no auxv
+    // entry — an entry pointing at unmapped memory breaks musl there).
+    #[cfg(any(feature = "riscv64", feature = "x86_64"))]
+    auxv.push((AT_SYSINFO_EHDR, crate::mm::vdso::vdso_ehdr()));
 
-    for (typ, val) in auxv {
-        put_u64(&mut args_buf, offset * 8, *typ);
-        put_u64(&mut args_buf, (offset + 1) * 8, *val);
-        auxv_words.push(*typ);
-        auxv_words.push(*val);
+    for &(typ, val) in &auxv {
+        put_u64(&mut args_buf, offset * 8, typ);
+        put_u64(&mut args_buf, (offset + 1) * 8, val);
+        auxv_words.push(typ);
+        auxv_words.push(val);
         offset += 2;
     }
 

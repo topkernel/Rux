@@ -40,8 +40,12 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-/// Fixed user mapping address (INTERP_BASE - 4 MiB, clear of the dynamic
-/// linker's base).
+/// Fixed user mapping address, per arch. riscv64: INTERP_BASE - 4 MiB,
+/// clear of the dynamic linker's base. x86_64: the reference's conventional
+/// vdso window just below the stack region (0x7fffc00000000).
+#[cfg(feature = "x86_64")]
+pub const VDSO_BASE: u64 = 0x7FFF_C000_0000;
+#[cfg(not(feature = "x86_64"))]
 pub const VDSO_BASE: u64 = 0x3FBE_C000_00;
 
 /// auxv AT_SYSINFO_EHDR value: the code (ELF) page.
@@ -402,9 +406,25 @@ fn build_code_page() -> [u8; 4096] {
     const F_CLOCK_GETTIME: u32 = 0x800;
     const F_GETTIMEOFDAY: u32 = 0x920;
     const F_CLOCK_GETRES: u32 = 0x9C0;
+    #[cfg(feature = "riscv64")]
     let f1 = emit_clock_gettime(F_CLOCK_GETTIME);
+    #[cfg(feature = "riscv64")]
     let f2 = emit_gettimeofday(F_GETTIMEOFDAY);
+    #[cfg(feature = "riscv64")]
     let f3 = emit_clock_getres(F_CLOCK_GETRES);
+    // x86_64/aarch64: every function is a 5-byte -ENOSYS stub
+    // (mov eax, -38; ret) — the vDSO exists and parses, ld.so is
+    // satisfied, and glibc falls back to the real clock syscalls for
+    // every entry (the riscv64 doc contract). The real x86_64
+    // seqlock bodies land as their own change.
+    #[cfg(not(feature = "riscv64"))]
+    let stub_words: [u32; 2] = [0xFFFF_DAB8u32, 0x0000_C3FFu32]; // mov eax,-38; ret
+    #[cfg(not(feature = "riscv64"))]
+    let f1: alloc::vec::Vec<u32> = stub_words.to_vec();
+    #[cfg(not(feature = "riscv64"))]
+    let f2: alloc::vec::Vec<u32> = stub_words.to_vec();
+    #[cfg(not(feature = "riscv64"))]
+    let f3: alloc::vec::Vec<u32> = stub_words.to_vec();
     let put = |page: &mut [u8; 4096], off: u32, words: &[u32]| {
         for (i, w) in words.iter().enumerate() {
             let p = off as usize + i * 4;
