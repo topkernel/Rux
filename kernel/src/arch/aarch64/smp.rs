@@ -25,7 +25,7 @@
 //! riscv64 backend runs on the tp register (small value = cpu index until
 //! the scheduler stores the task pointer).
 
-use crate::config::MAX_CPUS;
+use crate::arch::aarch64::MAX_CPUS;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 /// SMP boot stack size - from config
@@ -43,12 +43,7 @@ const _: () = assert!(
     "boot.S secondary_start parks cpu indices >= 4 (MAX_CPUS must stay <= 4)"
 );
 
-static CPU_STARTED: [AtomicU32; MAX_CPUS] = [
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-];
+static CPU_STARTED: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 
 /// Actual boot CPU ID, saved by init()
 static BOOT_CPU_ID: AtomicU32 = AtomicU32::new(u32::MAX);
@@ -99,7 +94,7 @@ pub fn cpu_id() -> usize {
             let raw = (*cpu_ptr).load(Ordering::Relaxed);
             // Defensive: clamp negative or out-of-range (see the riscv64
             // twin — initial -1 sign-extends to usize::MAX)
-            if raw < 0 || (raw as usize) >= crate::config::MAX_CPUS {
+            if raw < 0 || (raw as usize) >= crate::arch::aarch64::MAX_CPUS {
                 0
             } else {
                 raw as usize
@@ -399,12 +394,8 @@ struct BootStack([u8; STACK_SIZE]);
 
 #[no_mangle]
 #[used]
-pub static SECONDARY_BOOT_STACKS: [BootStack; MAX_CPUS] = [
-    BootStack([0u8; STACK_SIZE]),
-    BootStack([0u8; STACK_SIZE]),
-    BootStack([0u8; STACK_SIZE]),
-    BootStack([0u8; STACK_SIZE]),
-];
+pub static SECONDARY_BOOT_STACKS: [BootStack; MAX_CPUS] =
+    [const { BootStack([0u8; STACK_SIZE]) }; MAX_CPUS];
 
 /// Start secondary CPUs via PSCI CPU_ON.
 /// Must be called AFTER console + scheduler initialization.

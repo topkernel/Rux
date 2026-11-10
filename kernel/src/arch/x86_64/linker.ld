@@ -117,3 +117,12 @@ SECTIONS
         *(.comment)
     }
 }
+
+/* Layout-hunt 2026-11-10: the image grew past the static KERNEL_RESERVE_SIZE
+ * window (main.rs) with no build-time guard — riscv64/aarch64 ASSERT their
+ * windows, x86_64 silently corrupted boots (the unreserved live .bss tail
+ * was seeded into the buddy). The next outgrowth must fail HERE: grow
+ * KERNEL_RESERVE_SIZE (main.rs) and this bound together. 0x28000000 = 40MB,
+ * 2MB-aligned like kernel_image_phys_end()'s rounding. */
+ASSERT(__kernel_lma_end <= 0x28000000,
+       "x86_64 kernel image outgrew the 40MB static window: grow KERNEL_RESERVE_SIZE (main.rs) and this ASSERT together")

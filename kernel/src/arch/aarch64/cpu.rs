@@ -18,7 +18,7 @@ pub fn get_core_id() -> u64 {
 /// cross-hart protocol). Diagnostic-only.
 #[inline]
 pub fn get_thread_id_of(cpu: usize) -> u64 {
-    if cpu < crate::config::MAX_CPUS {
+    if cpu < crate::arch::aarch64::MAX_CPUS {
         crate::sched::sched::cpu_state(cpu).current as u64
     } else {
         0

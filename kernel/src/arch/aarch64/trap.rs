@@ -136,8 +136,8 @@ pub fn dfsc_class(dfsc: u64) -> FaultStatus {
 // Per-CPU PtRegs pointer (fork/exec + cross-CPU diagnostics)
 // ============================================================================
 
-static CURRENT_PT_REGS: [core::sync::atomic::AtomicU64; crate::config::MAX_CPUS] =
-    [const { core::sync::atomic::AtomicU64::new(0) }; crate::config::MAX_CPUS];
+static CURRENT_PT_REGS: [core::sync::atomic::AtomicU64; crate::arch::aarch64::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; crate::arch::aarch64::MAX_CPUS];
 
 /// Get current PtRegs pointer (trap frame; set by the entry path)
 pub fn current_pt_regs() -> *const PtRegs {
@@ -162,7 +162,7 @@ pub fn current_task_pt_regs() -> Option<&'static mut PtRegs> {
 /// RIP-equivalent (pc) of another CPU's most recent trap frame
 /// (diagnostic; riscv64 twin semantics)
 pub fn pt_regs_rip_for_cpu(cpu: usize) -> u64 {
-    if cpu >= crate::config::MAX_CPUS {
+    if cpu >= crate::arch::aarch64::MAX_CPUS {
         return 0;
     }
     let p = CURRENT_PT_REGS[cpu].load(core::sync::atomic::Ordering::Relaxed) as *const PtRegs;
