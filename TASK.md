@@ -9770,3 +9770,50 @@ conflicts expected — different files), rebuild x86_64, confirm a 4G SMP8
 boot reaches bootevent.bootanimation.finished < 60s, THEN start the
 §86.5 charter (hiperf first). The SMP8+4G rig is now unblocked — run
 everything at SMP=8 as the directive requires.
+
+### 87.7 COORDINATOR SESSION (post-quota-death, 2026-11-11 00:24-02:0x) — the hiperf frontier, three new kernel-bug leads, rig assets
+
+The 87th died at quota 00:21. Coordinator continuation findings (all
+reproducible, rigs in run/hp87/):
+
+1. **Shell stalls intermittently after a hiperf child exits** — hp87c
+   stalled after `stat` exited (echo "stat rc=" never appeared, no further
+   exec), hp87f stalled after `record` exited (no report exec), but hp87b
+   and hp87d ran the whole 4-step script to "done". Shape: fork+exec
+   hiperf -> child exit_code=0 -> parent sh never resumes => wait4/
+   SIGCHLD wakeup loss, ~50% flaky. This is the #1 blocker of the perf
+   path AND a real kernel bug (likely the openfile lost-wakeup family).
+   Discriminator ready: hp87g (system-hp87g.img) runs every step
+   sleep-anchored (child bg + sleep, no wait4 dependence) — if it
+   completes, wait4-wakeup is convicted as the stall site.
+2. **/dev/console user writes mostly LOST** — hiperf's own stdout (list
+   output) NEVER reached the serial; small sh echoes land sometimes
+   ("list rc=0" in hp87c, "done ===" in hp87d) while intermediate ones
+   vanish. Suspect our tty/console write path drops user bytes under
+   printk churn (short-write handling?). Parity bug #2.
+3. **Kernel-written ext4 is unreadable by host tools** — our writes do
+   not maintain metadata_csum (block-bitmap AND inode checksums wrong);
+   e2fsck "fixes" by DELETING the kernel-written dirs (lost /local/tmp
+   this way). Workaround rigs mount a host-mkfs'd checksum-FREE disk
+   (run/hp87-out.img, drive 7 via run/lb-boot-out.py, guest
+   /dev/block/vdg). Parity bug #3 (fs lane).
+4. **hiperf record exits early with rc=0** — requested 60s, exited
+   4.9s (hp87f); stat also cut short once (1.9s/5s) but ran full 5s in
+   hp87e/f boots. With the ring/poll deadlock fixed (commit e5f..., the
+   lock_irqsave slice), samples DO flow — the early exit is a separate
+   duration/stop condition issue. hiperf's own stderr is in
+   /data/local/tmp/record.txt on the persistent userdata copies
+   (unreadable host-side per #3 — read them via the output disk in the
+   NEXT boot or fix #3).
+
+ASSETS: run/hp87/ (hiperf binary copy, cfg+scripts, boot-*.sh);
+run/system-hp87g.img (sleep-anchored script at /system/etc/hp87-run.sh);
+run/lb-boot-out.py (7th drive = run/hp87-out.img); userdata-hp87{c..g}
+persistent copies. Inject scripts into system images via `sudo mount -o
+loop` + cp to /system/etc/hp87-run.sh (debugfs interactive cd/write
+CORRUPTS the image /etc — burned 40 min on this; loop-mount is safe).
+
+88th: start from (1) — one boot of system-hp87g.img decides the wait4
+verdict; then chase the wakeup loss with the existing FUXW/wake
+instruments. (2)/(3) are small parity fixes with big tooling payoff.
+Then the §86.5 charter continues on a working hiperf.
