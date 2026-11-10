@@ -1841,6 +1841,16 @@ fn handle_general_protection(regs: &mut PtRegs) {
         crate::process::current_pid());
 
     if regs.user_mode() {
+        // hp88 hunt (TASK 87.11): during hiperf record sampling processes
+        // die at ld-musl+0xba256 (mallocng get_meta consistency check —
+        // a non-canonical heap metadata pointer). The #PF path has rich
+        // forensics (user_segv_forensics); #GP had only this one line, so
+        // the corrupted metadata's CONTENT was never captured. Reuse the
+        // full report (bounded: 6 full dumps then one-liners) plus a
+        // register-memory dump — perf-record-shaped bytes in the heap
+        // metadata would name the ring writer as the corrupting agent.
+        user_segv_forensics(regs, regs.rip);
+        gp_regmem_dump(regs);
         // Handler-first routing (same as the page-fault Segfault path):
         // debuggers/crash catchers must see the SIGSEGV; the default
         // disposition kills here. A fault inside the (blocked) SIGSEGV
@@ -2128,6 +2138,69 @@ fn sigfpe_has_handler() -> bool {
         .and_then(|t| (*t).signal.as_ref().map(|s| s.get_action(8)))
         .map(|a| a.is_some_and(|a| a.has_handler()))
         .unwrap_or(false)
+}
+
+/// #GP register-memory dump (hp88 hunt): two u64 words at every
+/// canonical-user pointer register, read through the checked walk. The
+/// mallocng get_meta #GP dereferences a metadata pointer read from the
+/// heap — this shows what the surrounding heap words contain (perf-
+/// record-shaped bytes would name the corrupting writer directly).
+fn gp_regmem_dump(regs: &PtRegs) {
+    use core::fmt::Write;
+    let Some(tk) = crate::sched::current() else { return };
+    let Some(aspace) = tk.address_space() else { return };
+    let root = aspace.root_ppn();
+    let ptrs: [(&str, u64); 8] = [
+        ("rax", regs.rax),
+        ("rbx", regs.rbx),
+        ("rcx", regs.rcx),
+        ("rdx", regs.rdx),
+        ("rsi", regs.rsi),
+        ("rdi", regs.rdi),
+        ("r8", regs.r8),
+        ("r9", regs.r9),
+    ];
+    for (name, v) in ptrs {
+        // hp88 hunt: a corrupted heap pointer inside a live perf ring's
+        // mapping is the placement-overlap conviction.
+        if let Some((va, len, id)) = crate::perf::ring_covers(v) {
+            crate::pr_err!(
+                "GP-REGMEM: {}={:#x} INSIDE PERF RING va={:#x} len={:#x} of event {}",
+                name, v, va, len, id
+            );
+        }
+        if v > 0x1_0000 && v < 0x0000_8000_0000_0000 {
+            // SAFETY: read-only page-table walk on a live root; the
+            // checked read returns None on unmapped holes (same shape
+            // as user_segv_forensics' nested fore_read_u64).
+            let read_at = |va: u64| -> Option<u64> {
+                let phys = unsafe {
+                    crate::arch::mm::mm_ops::PageTableWalker::walk(root, va & !0xfff)?
+                };
+                let kv = crate::arch::mm::memory_layout::phys_to_virt(
+                    crate::arch::mm::memory_layout::PhysAddr::new((phys.0 << 12) | (va & 0xfff)),
+                );
+                Some(unsafe { core::ptr::read_volatile(kv.as_u64() as *const u64) })
+            };
+            let w0 = read_at(v & !0x7);
+            let w1 = read_at((v & !0x7) + 8);
+            if w0.is_some() {
+                let mut line = alloc::string::String::new();
+                let _ = write!(line, "GP-REGMEM: {}={:#x}:", name, v);
+                for w in [w0, w1] {
+                    match w {
+                        Some(x) => {
+                            let _ = write!(line, " {:#x}", x);
+                        }
+                        None => {
+                            let _ = write!(line, " ????????????????");
+                        }
+                    }
+                }
+                crate::pr_err!("{}", line);
+            }
+        }
+    }
 }
 
 /// Fatal user-mode SIGSEGV forensics: the GP register set, the VMA

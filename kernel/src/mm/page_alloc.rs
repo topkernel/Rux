@@ -335,6 +335,14 @@ pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
         }
         phys
     };
+    // Perf ring premature-free detector (hp88a hunt, TASK 87.11): one
+    // relaxed load while no perf ring exists; while one does, verify
+    // handed-out frames against the live ring set — a hit means a ring
+    // frame was returned to the allocator while its event still lists
+    // it (the sampler would write into the new owner).
+    if phys != 0 && crate::perf::ring_frames_live() {
+        crate::perf::ring_frame_check(phys, order);
+    }
     // kmem:mm_page_alloc — the reference's __alloc_pages return record
     // (fired once per allocation, pfn -1 on failure exactly like the
     // reference's page==NULL path).

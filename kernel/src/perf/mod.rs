@@ -387,12 +387,43 @@ struct PerfInner {
     head: u64,
     /// Records dropped because the ring was full (reported as LOST).
     lost: u64,
+    /// User VA of the mapping (hp88 hunt: overlap forensics).
+    va: usize,
+    /// Mapping length in bytes.
+    va_len: usize,
 }
 
 impl PerfInner {
     const fn new() -> Self {
-        PerfInner { pages: None, data_size: 0, head: 0, lost: 0 }
+        PerfInner { pages: None, data_size: 0, head: 0, lost: 0, va: 0, va_len: 0 }
     }
+}
+
+/// hp88 hunt: does any LIVE perf ring mapping cover `addr`? Called from
+/// the #GP forensics — a heap pointer inside a ring's VA range is the
+/// placement-overlap conviction.
+pub fn ring_covers(addr: u64) -> Option<(usize, usize, u64)> {
+    if RING_LIVE.load(Ordering::Relaxed) == 0 {
+        return None;
+    }
+    let reg = REGISTRY.lock_irqsave();
+    for &(_, p) in reg.iter() {
+        // SAFETY: registry membership guarantees validity.
+        let ev = unsafe { &*(p as *const PerfEvent) };
+        let inner = ev.inner.lock_irqsave();
+        if inner.va != 0
+            && (addr as usize) >= inner.va
+            && (addr as usize) < inner.va + inner.va_len
+        {
+            let hit = (inner.va, inner.va_len, ev.id);
+            drop(inner);
+            drop(reg);
+            return Some(hit);
+        }
+        drop(inner);
+    }
+    drop(reg);
+    None
 }
 
 /// id → event. Every take is lock_irqsave (module lock-order doc).
@@ -434,6 +465,164 @@ fn unregister(id: u64) -> bool {
     };
     drop(reg);
     was_armed
+}
+
+// ==================== hp88 hunt bisect knob (temporary) ====================
+//
+// Kernel cmdline `perfnode=`: "noemit" keeps the FULL armed machinery
+// (tick hooks, softirq every tick, counters, wakes' registry walk) but
+// emit_record is a no-op — no ring writes, no reader wakes; "noarm"
+// lets open + ring mmap succeed but ENABLE never arms — no tick hooks,
+// no softirq, no emit. One boot each cuts the corruption hypothesis
+// space in half twice. Remove when the corrupting path is convicted.
+
+static NODE: AtomicU8 = AtomicU8::new(u8::MAX);
+const NODE_NORMAL: u8 = 0;
+const NODE_NOEMIT: u8 = 1;
+const NODE_NOARM: u8 = 2;
+const NODE_NOPERF: u8 = 3;
+const NODE_NORING: u8 = 4;
+
+fn node() -> u8 {
+    let n = NODE.load(Ordering::Relaxed);
+    if n != u8::MAX {
+        return n;
+    }
+    #[cfg(feature = "x86_64")]
+    let v = {
+        let cl = crate::arch::boot::boot_cmdline();
+        if cl.contains("perfnode=noemit") {
+            NODE_NOEMIT
+        } else if cl.contains("perfnode=noarm") {
+            NODE_NOARM
+        } else if cl.contains("perfnode=noperf") {
+            NODE_NOPERF
+        } else if cl.contains("perfnode=noring") {
+            NODE_NORING
+        } else {
+            NODE_NORMAL
+        }
+    };
+    #[cfg(not(feature = "x86_64"))]
+    let v = NODE_NORMAL;
+    NODE.store(v, Ordering::Relaxed);
+    v
+}
+
+// ==================== Ring frame registry (premature-free detector) ====================
+//
+// hp88a hunt (TASK 87.11): during hiperf record sampling samgr's
+// mallocng heap metadata got corrupted (15 user #GPs at ld-musl
+// +0xba256 = mallocng get_meta) while the sampler was the only new
+// kernel writer on the machine. The perf module writes ONLY into its
+// ring frames (via the direct-map alias), so the corruption vector is
+// a ring frame returned to the allocator while its event still lists
+// it — the buddy re-sells the frame (samgr is the hungriest allocator
+// during the spawn storm), and every sampler tick writes a few hundred
+// bytes of perf records into the new owner's memory.
+//
+// This registry names that: every page of every live ring is hashed
+// here at mmap and removed at close. alloc_pages checks handed-out
+// frames against it (one relaxed load when no rings are live); a hit
+// is the premature free, printed before the corruption can compound.
+
+const RING_HT_BITS: usize = 13;
+const RING_HT_LEN: usize = 1 << RING_HT_BITS; // 8192 slots ≥ 16 events × 257 pages
+static RING_HT: Spinlock<[u64; RING_HT_LEN]> = Spinlock::new([0; RING_HT_LEN]);
+static RING_LIVE: AtomicUsize = AtomicUsize::new(0);
+
+#[inline]
+fn ring_ht_hash(pfn: u64) -> usize {
+    ((pfn.wrapping_mul(0x9E37_79B9_7F4A_7C15)) >> (64 - RING_HT_BITS)) as usize
+}
+
+/// Fast bail for the alloc_pages hook: nonzero while any ring exists.
+pub fn ring_frames_live() -> bool {
+    RING_LIVE.load(Ordering::Relaxed) > 0
+}
+
+fn ring_frame_insert(pfn: u64) {
+    let mut ht = RING_HT.lock_irqsave();
+    let mut i = ring_ht_hash(pfn);
+    let mut free_slot: Option<usize> = None;
+    for _ in 0..RING_HT_LEN {
+        if ht[i] == pfn {
+            drop(ht);
+            return; // already tracked
+        }
+        if ht[i] == RING_HT_TOMB && free_slot.is_none() {
+            free_slot = Some(i);
+        }
+        if ht[i] == 0 {
+            break;
+        }
+        i = (i + 1) & (RING_HT_LEN - 1);
+    }
+    let slot = free_slot.unwrap_or(i);
+    ht[slot] = pfn;
+    RING_LIVE.fetch_add(1, Ordering::Relaxed);
+    drop(ht);
+}
+
+/// Tombstone: probed past, not reusable as a stop marker.
+const RING_HT_TOMB: u64 = u64::MAX;
+
+fn ring_frame_remove(pfn: u64) {
+    let mut ht = RING_HT.lock_irqsave();
+    let mut i = ring_ht_hash(pfn);
+    for _ in 0..RING_HT_LEN {
+        let v = ht[i];
+        if v == pfn {
+            ht[i] = RING_HT_TOMB;
+            RING_LIVE.fetch_sub(1, Ordering::Relaxed);
+            break;
+        }
+        if v == 0 {
+            break; // not tracked
+        }
+        i = (i + 1) & (RING_HT_LEN - 1);
+    }
+    drop(ht);
+}
+
+/// alloc_pages hook: the allocator just handed `phys` (order `order`)
+/// out — if a live perf ring still lists that frame, the frame was
+/// freed early. Print before the sampler can compound the corruption.
+pub fn ring_frame_check(phys: usize, order: usize) {
+    if RING_LIVE.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let mut hit_pfn = 0u64;
+    {
+        let ht = RING_HT.lock_irqsave();
+        'outer: for p in 0..(1usize << order.min(4)) {
+            let pfn = ((phys >> 12) as u64) + p as u64;
+            let mut i = ring_ht_hash(pfn);
+            for _ in 0..RING_HT_LEN {
+                let v = ht[i];
+                if v == pfn {
+                    hit_pfn = pfn;
+                    break 'outer;
+                }
+                if v == 0 {
+                    break;
+                }
+                i = (i + 1) & (RING_HT_LEN - 1);
+            }
+        }
+        drop(ht);
+    }
+    if hit_pfn != 0 {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        if N.fetch_add(1, Ordering::Relaxed) < 8 {
+            crate::pr_err!(
+                "PERF-RING-RESOLD: frame {:#x} (pfn {}) re-handed by allocator while a live perf ring still lists it — premature free, sampler would write into the new owner pid {}",
+                (hit_pfn as usize) << 12,
+                hit_pfn,
+                crate::process::current_pid()
+            );
+        }
+    }
 }
 
 // ==================== Ring writes ====================
@@ -495,9 +684,40 @@ fn ring_publish_head(inner: &PerfInner) {
     core::sync::atomic::fence(Ordering::Release);
 }
 
+/// Emit-time ring audit (hp88a hunt): the listed frames must still be
+/// alive (refcount ≥ 1). Bounded to the first 64 emissions per boot —
+/// enough to catch a lifetime bug in the first seconds of sampling.
+fn ring_audit(inner: &PerfInner) {
+    static N: AtomicUsize = AtomicUsize::new(0);
+    if N.load(Ordering::Relaxed) >= 64 {
+        return;
+    }
+    N.fetch_add(1, Ordering::Relaxed);
+    let Some(pages) = inner.pages.as_ref() else { return };
+    for (i, p) in pages.iter().enumerate() {
+        let pd = crate::mm::pfn_to_page_mut(crate::mm::phys_to_pfn(*p));
+        if pd.is_null() {
+            crate::pr_err!("PERF-RING-PAGE-BAD: pages[{}] frame {:#x} has NO descriptor", i, p);
+            continue;
+        }
+        // SAFETY: descriptor of a ring frame we allocated.
+        let rc = unsafe { (*pd).refcount() };
+        if rc < 1 {
+            crate::pr_err!(
+                "PERF-RING-PAGE-BAD: pages[{}] frame {:#x} refcount {} — freed while the ring still lists it",
+                i, p, rc
+            );
+        }
+    }
+}
+
 /// Append one record; drops (+LOST counter) when it does not fit.
 /// Wakes readers if anything was written.
 fn emit_record(ev: &PerfEvent, rec: &[u8], wake: bool) {
+    // hp88 hunt bisect: noemit keeps everything armed but writes nothing.
+    if node() == NODE_NOEMIT {
+        return;
+    }
     // IRQ-safe uniformly (callers hold REGISTRY irqsave today; nested
     // irq_save is benign and blocks future call-path surprises).
     let mut inner = ev.inner.lock_irqsave();
@@ -505,6 +725,7 @@ fn emit_record(ev: &PerfEvent, rec: &[u8], wake: bool) {
     if size == 0 {
         return; // no ring (counting mode or not yet mmap'd)
     }
+    ring_audit(&inner);
     let tail = ring_read_user_tail(&inner);
     let used = inner.head.saturating_sub(tail) as usize;
     // Keep one record-size slack so head never equals a full turn
@@ -1069,17 +1290,37 @@ fn perf_close(file: &crate::fs::File) -> i32 {
         let mut inner = ev.inner.lock_irqsave();
         if let Some(pages) = inner.pages.take() {
             for p in pages {
+                // Leave the resold-detector set FIRST: from here the
+                // frames are legitimately dead; a re-sale after this
+                // point is not the premature-free bug.
+                ring_frame_remove((p >> 12) as u64);
                 // Owner reference (binder/io_uring discipline): the
-                // mapping ref went away with the PTEs (munmap or exit
-                // runs before the last fd release); the owner drop is
+                // mapping reference went away with the PTEs (munmap or
+                // exit runs before the last fd release); the owner drop is
                 // the last one — free to the buddy when it hits 0.
                 let page = crate::mm::pfn_to_page_mut(crate::mm::phys_to_pfn(p));
                 if !page.is_null() {
                     // SAFETY: descriptor of a page we allocated.
                     unsafe {
                         let r = (*page).put_page();
-                        if r <= 0 {
+                        if r == 0 {
                             crate::mm::page_alloc::free_pages(p, 0);
+                        } else if r < 0 {
+                            // Underflow refusal (refcount was already 0):
+                            // the frame has been over-put — it may already
+                            // be back in the allocator and owned by someone
+                            // else. Freeing again would hand the same frame
+                            // to two owners; leak it and name the bug
+                            // (hp88a: the old `r <= 0` freed here — a
+                            // double-free of a possibly re-sold frame).
+                            static N: AtomicUsize = AtomicUsize::new(0);
+                            if N.fetch_add(1, Ordering::Relaxed) < 8 {
+                                crate::pr_err!(
+                                    "PERF-CLOSE-UNDERFLOW: ring frame {:#x} refcount already 0 at owner drop — an extra put happened (leaking, not freeing) pid {}",
+                                    p,
+                                    crate::process::current_pid()
+                                );
+                            }
                         }
                     }
                 }
@@ -1138,6 +1379,11 @@ pub fn perf_mmap_handler(
     use crate::mm::page_alloc::{alloc_pages, free_pages};
     use crate::mm::vma::{Vma, VmaFlags};
 
+    // hp88 hunt bisect: noring — deny the ring mapping so hiperf runs
+    // long-lived with open fds but no ring mmap at all.
+    if node() == NODE_NORING {
+        return Err(12); // ENOMEM (hiperf treats as fatal for the event)
+    }
     if offset != 0 {
         return Err(22); // EINVAL
     }
@@ -1172,6 +1418,27 @@ pub fn perf_mmap_handler(
                 free_pages(q, 0);
             }
             return Err(12); // ENOMEM
+        }
+        // hp88 hunt: a FRESH allocation must be unowned and unmapped.
+        // The resold detector only catches re-sales of listed ring
+        // frames; this catches the allocator handing out a frame that
+        // is still mapped in (or owned by) someone else — the first
+        // sale of a live frame, which zeroing below would destroy.
+        // Pristine mapcount is PAGE_MAPCOUNT_BIAS (-1), not 0.
+        {
+            let pd = crate::mm::pfn_to_page_mut(crate::mm::phys_to_pfn(p));
+            if !pd.is_null() {
+                // SAFETY: descriptor of the frame alloc_pages just
+                // returned; read-only loads.
+                let (rc, mc) = unsafe { ((*pd).refcount(), (*pd).mapcount()) };
+                if rc != 1 || mc != crate::mm::page_desc::PAGE_MAPCOUNT_BIAS {
+                    crate::pr_err!(
+                        "PERF-ALLOC-DIRTY: alloc_pages returned frame {:#x} with refcount {} mapcount {} — allocator handed out a LIVE page; zeroing it would corrupt its owner pid {}",
+                        p, rc, mc,
+                        crate::process::current_pid()
+                    );
+                }
+            }
         }
         // SAFETY/zero: fresh buddy page.
         let kv = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(p as u64))
@@ -1315,7 +1582,24 @@ pub fn perf_mmap_handler(
         inner.data_size = data_size;
         inner.head = 0;
         inner.lost = 0;
-        inner.pages = Some(pages);
+        inner.pages = Some(pages.clone());
+        inner.va = vaddr;
+        inner.va_len = length;
+    }
+    // Track the frames in the premature-free detector set (hp88a hunt).
+    for p in &pages {
+        ring_frame_insert((p >> 12) as u64);
+    }
+    // hp88 hunt: name every ring placement — correlate with #GP victims.
+    {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        if N.fetch_add(1, Ordering::Relaxed) < 16 {
+            crate::pr_info!(
+                "PERF-RING-MAP: event {} ring at {:#x} len {:#x} ({} pages) pid {}",
+                ev.id, vaddr, length, total_pages,
+                crate::process::current_pid()
+            );
+        }
     }
 
     Ok(vaddr)
@@ -1335,6 +1619,11 @@ pub fn perf_file_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> Opti
 
 fn perf_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
     let Some(ev) = event_of(file) else { return -(crate::errno::constants::EBADF as i64) };
+    // hp88 hunt bisect: noarm — ENABLE/REFRESH pretend success but the
+    // event never arms (no tick hooks, no softirq, no emit).
+    if node() == NODE_NOARM && (request == IOC_ENABLE || request == IOC_REFRESH) {
+        return 0;
+    }
     match request {
         IOC_ENABLE | IOC_DISABLE => {
             let enable = request == IOC_ENABLE;
@@ -1432,6 +1721,12 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
     let cpu = args[2] as i32;
     let group_fd = args[3] as i32;
     let flags = args[4];
+
+    // hp88 hunt bisect: noperf — reject every open (hiperf's record
+    // fails fast and exits, the exact hp87p/q/r shape on today's kernel).
+    if node() == NODE_NOPERF {
+        return -(crate::errno::constants::EINVAL as i64);
+    }
 
     // 1. Flags: only the bits this slice can honor.
     if flags & !(PERF_FLAG_FD_NO_GROUP | PERF_FLAG_FD_CLOEXEC) != 0 {
@@ -1600,7 +1895,10 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
         target_cpu = -1;
     }
 
-    let starts_armed = attr.flags1 & FLAG_DISABLED == 0;
+    let mut starts_armed = attr.flags1 & FLAG_DISABLED == 0;
+    if node() == NODE_NOARM {
+        starts_armed = false;
+    }
 
     // 6. Build + install the fd.
     let Some(fdtable) = crate::sched::get_current_fdtable() else {
