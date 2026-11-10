@@ -1199,6 +1199,17 @@ pub fn rust_main_tail() -> ! {
         // ========== Enter scheduler main loop ==========
         // Note: don't use println! here — it might deadlock if printk lock is held
 
+        // dlspin synthetic-deadlock proof hook (spindeadlock=1). This
+        // LATE slot is load-bearing: the holder/waiter kthreads must be
+        // schedulable, and secondaries only join the scheduler after
+        // signal_boot_complete() above (until then they park in the
+        // secondary-entry boot-complete wfi loop — an earlier slot
+        // starves them and the wedge never forms; observed on x86_64
+        // KVM, 2026-11-08). No-op on every boot that does not ask for
+        // it; unit-test builds drive their own instance from
+        // run_all_tests instead.
+        crate::debug::dlspin::late_init();
+
         // Debug messages go to ring buffer only; use `dmesg -n 7` to show on console.
         // Console loglevel is DEFAULT_CONSOLE_LOGLEVEL (KERN_INFO = 6).
 

@@ -700,7 +700,7 @@ pub fn dump_all_tasks(reason: &str) {
     }
 }
 
-fn state_name(bits: u32) -> &'static str {
+pub(crate) fn state_name(bits: u32) -> &'static str {
     use crate::process::task::TaskState as S;
     match bits {
         S::RUNNING => "RUNNING",

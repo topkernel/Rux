@@ -229,6 +229,9 @@ pub mod lockkey;
 pub mod lockdep;
 #[cfg(feature = "unit-test")]
 pub mod sync_locks;
+/// Spinlock-deadlock last-gasp synthetic test (debug-dlspin lane).
+#[cfg(feature = "unit-test")]
+pub mod dlspin;
 
 // ===== Process management =====
 #[cfg(feature = "unit-test")]
@@ -529,6 +532,12 @@ pub fn run_all_tests() {
     test_group_start("sync_locks");
     sync_locks::test_sync_locks();
 
+    // Spinlock-deadlock last-gasp (debug-dlspin lane): the synthetic
+    // 2-CPU wedge — the bundle must fire and name both sides (the
+    // serial log is the full evidence).
+    test_group_start("dlspin");
+    dlspin::test_dlspin();
+
     test_group_start("page_allocator");
     page_allocator::test_page_allocator();
 
@@ -733,6 +742,11 @@ pub fn run_all_tests() {
     // ===== 13. Boundary (destructive, MUST be last) =====
     test_group_start("boundary");
     boundary::test_boundary();
+
+    // dlspin suite-end verdict (debug-dlspin lane): the synthetic
+    // deadlock launched at the sync_locks slot has been overlapping
+    // the suite; collect its outcome now.
+    dlspin::test_dlspin_verdict();
 
     // Print test summary
     print_test_summary();

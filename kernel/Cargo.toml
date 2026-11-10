@@ -24,7 +24,7 @@ default = ["riscv64"]
 aarch64 = []
 x86_64 = []
 riscv64 = []
-unit-test = []  # Enable unit tests (only used during testing)
+unit-test = ["debug-lock-owner"]  # Enable unit tests; pulls the spinlock-owner field so the dlspin ktest proves full holder attribution
 # debug: spinlock holder tracking (two atomic stores per lock/unlock pair).
 # Zero-cost when off; enabled when hunting lock deadlocks
 # (see test/hunt-wedge.sh and docs/guides/debugging.md).
