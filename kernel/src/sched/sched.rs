@@ -719,28 +719,10 @@ pub fn try_grq_lock() -> Option<GrqGuard<'static>> {
 }
 
 /// Per-CPU state array (indexed by cpu_id)
-static mut PER_CPU: [PerCpuState; MAX_CPUS] = [
-    PerCpuState::new(),
-    PerCpuState::new(),
-    PerCpuState::new(),
-    PerCpuState::new(),
-    PerCpuState::new(),
-    PerCpuState::new(),
-    PerCpuState::new(),
-    PerCpuState::new(),
-];
+static mut PER_CPU: [PerCpuState; MAX_CPUS] = [const { PerCpuState::new() }; MAX_CPUS];
 
 /// Per-CPU RQ initialization flags
-static RQ_INITIALIZED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
-    core::sync::atomic::AtomicBool::new(false),
-    core::sync::atomic::AtomicBool::new(false),
-    core::sync::atomic::AtomicBool::new(false),
-    core::sync::atomic::AtomicBool::new(false),
-    core::sync::atomic::AtomicBool::new(false),
-    core::sync::atomic::AtomicBool::new(false),
-    core::sync::atomic::AtomicBool::new(false),
-    core::sync::atomic::AtomicBool::new(false),
-];
+static RQ_INITIALIZED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [const { core::sync::atomic::AtomicBool::new(false) }; MAX_CPUS];
 
 // R63 (byte-scribble root cause — the R49 heal's live-window blind spot):
 // between `__schedule`'s current-slot update (this_cpu_mut().current =
@@ -916,16 +898,7 @@ pub fn stale_mark_confirm(task: *mut Task, pid: u32, threshold: u64) -> bool {
 }
 
 /// Per-CPU reschedule flags
-static mut NEED_RESCHED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
-    core::sync::atomic::AtomicBool::new(false),
-    core::sync::atomic::AtomicBool::new(false),
-    core::sync::atomic::AtomicBool::new(false),
-    core::sync::atomic::AtomicBool::new(false),
-    core::sync::atomic::AtomicBool::new(false),
-    core::sync::atomic::AtomicBool::new(false),
-    core::sync::atomic::AtomicBool::new(false),
-    core::sync::atomic::AtomicBool::new(false),
-];
+static mut NEED_RESCHED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [const { core::sync::atomic::AtomicBool::new(false) }; MAX_CPUS];
 
 /// Per-CPU polling-idle flags (closegap lane): set while the idle loop
 /// is inside its pre-halt poll window. `resched_cpu` reads this and
@@ -934,16 +907,7 @@ static mut NEED_RESCHED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
 /// clears the flag BEFORE its final recheck, so a dispatch racing the
 /// clear either takes the no-IPI path with the recheck catching the
 /// work, or takes the IPI path against a halting CPU (see cpu_idle_loop).
-static POLLING_IDLE: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
-    core::sync::atomic::AtomicBool::new(false),
-    core::sync::atomic::AtomicBool::new(false),
-    core::sync::atomic::AtomicBool::new(false),
-    core::sync::atomic::AtomicBool::new(false),
-    core::sync::atomic::AtomicBool::new(false),
-    core::sync::atomic::AtomicBool::new(false),
-    core::sync::atomic::AtomicBool::new(false),
-    core::sync::atomic::AtomicBool::new(false),
-];
+static POLLING_IDLE: [core::sync::atomic::AtomicBool; MAX_CPUS] = [const { core::sync::atomic::AtomicBool::new(false) }; MAX_CPUS];
 
 // Wakewatch (s15 A2 idle-mark/WFI hunt): per-CPU idle-loop phase stamp,
 // written by the idle loop itself at each phase transition, read by the
@@ -956,16 +920,7 @@ static POLLING_IDLE: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
 // Codes: 0 = not in the idle loop, 1 = entering schedule(), 2 = idle
 // post-schedule, idle-marked, R20-2 recheck window, 3 = pre-WFI (uart
 // poll), 4 = inside WFI, 5 = post-WFI accounting/mark clear.
-pub static WW_IDLE_PHASE: [core::sync::atomic::AtomicU32; MAX_CPUS] = [
-    core::sync::atomic::AtomicU32::new(0),
-    core::sync::atomic::AtomicU32::new(0),
-    core::sync::atomic::AtomicU32::new(0),
-    core::sync::atomic::AtomicU32::new(0),
-    core::sync::atomic::AtomicU32::new(0),
-    core::sync::atomic::AtomicU32::new(0),
-    core::sync::atomic::AtomicU32::new(0),
-    core::sync::atomic::AtomicU32::new(0),
-];
+pub static WW_IDLE_PHASE: [core::sync::atomic::AtomicU32; MAX_CPUS] = [const { core::sync::atomic::AtomicU32::new(0) }; MAX_CPUS];
 
 /// SP-5 r5 frozen-tick trap: per-CPU schedule() milestone inside the
 /// IF=0 window that opens at the GRQ acquire (sched.rs "lock the global
@@ -976,16 +931,7 @@ pub static WW_IDLE_PHASE: [core::sync::atomic::AtomicU32; MAX_CPUS] = [
 /// enqueue/pick); 3 = lock released IRQ-retained, context-switch tail
 /// (incl. the deferred-exit notify in the incoming frame); 4 = past
 /// restore (immediately cleared to 0). One relaxed store per milestone.
-pub static SCHED_CS_PHASE: [core::sync::atomic::AtomicU32; MAX_CPUS] = [
-    core::sync::atomic::AtomicU32::new(0),
-    core::sync::atomic::AtomicU32::new(0),
-    core::sync::atomic::AtomicU32::new(0),
-    core::sync::atomic::AtomicU32::new(0),
-    core::sync::atomic::AtomicU32::new(0),
-    core::sync::atomic::AtomicU32::new(0),
-    core::sync::atomic::AtomicU32::new(0),
-    core::sync::atomic::AtomicU32::new(0),
-];
+pub static SCHED_CS_PHASE: [core::sync::atomic::AtomicU32; MAX_CPUS] = [const { core::sync::atomic::AtomicU32::new(0) }; MAX_CPUS];
 
 #[inline]
 fn sched_cs_stamp(cpu: usize, phase: u32) {
@@ -999,16 +945,7 @@ fn sched_cs_stamp(cpu: usize, phase: u32) {
 // shape the R56 steal / abort-republish slot rewrites can produce).
 // Sampled by each CPU's own tick (trap.rs) — no cross-CPU register
 // reads; printed as a per-second delta next to the phase stamp.
-static WW_SLOT_MISMATCH: [core::sync::atomic::AtomicU64; MAX_CPUS] = [
-    core::sync::atomic::AtomicU64::new(0),
-    core::sync::atomic::AtomicU64::new(0),
-    core::sync::atomic::AtomicU64::new(0),
-    core::sync::atomic::AtomicU64::new(0),
-    core::sync::atomic::AtomicU64::new(0),
-    core::sync::atomic::AtomicU64::new(0),
-    core::sync::atomic::AtomicU64::new(0),
-    core::sync::atomic::AtomicU64::new(0),
-];
+static WW_SLOT_MISMATCH: [core::sync::atomic::AtomicU64; MAX_CPUS] = [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
 
 /// Wakewatch (s15): count one tp-vs-slot divergence observed at tick
 /// entry on `cpu` (called from the riscv64 timer trap path).
@@ -1178,16 +1115,7 @@ fn pick_gen_supersede(cpu: usize, task: *mut Task) {
 /// Per-CPU deferred exit-notification slot. Packs (parent_pid << 32 |
 /// child_pid) into one atomic so the parent/child PAIR is never torn
 /// (0 = no pending notification).
-static DEFERRED_EXIT_NOTIFY: [core::sync::atomic::AtomicI64; MAX_CPUS] = [
-    const { core::sync::atomic::AtomicI64::new(0) },
-    const { core::sync::atomic::AtomicI64::new(0) },
-    const { core::sync::atomic::AtomicI64::new(0) },
-    const { core::sync::atomic::AtomicI64::new(0) },
-    const { core::sync::atomic::AtomicI64::new(0) },
-    const { core::sync::atomic::AtomicI64::new(0) },
-    const { core::sync::atomic::AtomicI64::new(0) },
-    const { core::sync::atomic::AtomicI64::new(0) },
-];
+static DEFERRED_EXIT_NOTIFY: [core::sync::atomic::AtomicI64; MAX_CPUS] = [const { const { core::sync::atomic::AtomicI64::new(0) } }; MAX_CPUS];
 
 #[inline]
 fn pack_notify(parent_pid: u32, child_pid: u32) -> i64 {
@@ -1367,16 +1295,7 @@ fn process_deferred_exit_notify_cpu(cpu: usize) {
 }
 
 /// Per-CPU idle task storage
-static mut IDLE_TASK_STORAGES: [core::mem::MaybeUninit<Task>; MAX_CPUS] = [
-    core::mem::MaybeUninit::uninit(),
-    core::mem::MaybeUninit::uninit(),
-    core::mem::MaybeUninit::uninit(),
-    core::mem::MaybeUninit::uninit(),
-    core::mem::MaybeUninit::uninit(),
-    core::mem::MaybeUninit::uninit(),
-    core::mem::MaybeUninit::uninit(),
-    core::mem::MaybeUninit::uninit(),
-];
+static mut IDLE_TASK_STORAGES: [core::mem::MaybeUninit<Task>; MAX_CPUS] = [const { core::mem::MaybeUninit::uninit() }; MAX_CPUS];
 
 /// Per-CPU idle task pointers, accessed by boot.S to set tp on secondary CPUs.
 /// Written once by sched::init() on the boot CPU, read by secondary_start in

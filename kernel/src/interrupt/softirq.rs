@@ -84,16 +84,7 @@ static mut SOFTIRQ_VEC: [Option<SoftirqHandler>; NR_SOFTIRQS] = [
 
 /// Per-CPU softirq pending bitmask. Bit N is set when softirq N is pending.
 /// Each CPU only operates on its own element — no cross-CPU contention.
-static mut SOFTIRQ_PENDING: [AtomicU32; MAX_CPUS] = [
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-];
+static mut SOFTIRQ_PENDING: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 
 // ==================== Wakewatch forensics (softirq-storm hunt) ====
 //
@@ -117,16 +108,7 @@ pub static WW_SOFTIRQ_RUNS: AtomicU64 = AtomicU64::new(0);
 
 /// Per-CPU flag: is __do_softirq currently executing on this CPU?
 /// Prevents recursive softirq invocation.
-static mut SOFTIRQ_IN_PROGRESS: [AtomicU32; MAX_CPUS] = [
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-];
+static mut SOFTIRQ_IN_PROGRESS: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 
 // ==================== Softirq window progress (phantom-bits) ====
 //

@@ -27,10 +27,6 @@ static CPU_STARTED: [AtomicU32; MAX_CPUS] = [
     AtomicU32::new(0),
     AtomicU32::new(0),
     AtomicU32::new(0),
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-    AtomicU32::new(0),
 ];
 
 /// Actual boot hart ID, saved by init(). QEMU/OpenSBI may pick any hart.
