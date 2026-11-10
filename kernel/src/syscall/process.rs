@@ -6170,6 +6170,10 @@ fn shutdown_cascade(cmd: u32) {
     crate::debug::fsw::dump();
     crate::debug::cctx::dump();
     crate::debug::unixrd::dump();
+    // r18 flame refinement (nextgate hunt kernels): per-lock contention
+    // witness table — names WHICH lock the spin volume went to.
+    #[cfg(feature = "nextgate")]
+    crate::sync::spinlock::lockhist_print();
 
     // --- 1. Tell init (PID 1) to shut down (SIGTERM, systemd sequence) ---
     let my_pid = crate::sched::get_current_pid();

@@ -5098,6 +5098,15 @@ impl Task {
     ///
     /// Free current task's kernel stack (returns to cache)
     pub fn free_kernel_stack(&mut self) {
+        // r19 soak A/B: sched_detach_before_free (the r18 WIP) is
+        // DISABLED pending conviction — branch soak hit the c3c4/
+        // deadbeef graffiti panic in 2/3 boots while pristine main hit
+        // 0/3 in the same window, and FREE-DETACHED-SLOTS fired in the
+        // panic prologue (v5: n=1 pid=5346, panic on pid 5347). The
+        // slot-lie heal that made stale slots a resurrection bomb was
+        // deleted at the source (1c675745), so this free-path guard is
+        // belt-and-braces at best. DO NOT re-enable without a
+        // same-window soak A/B at parity with pristine main.
         if let Some(stack_top) = self.kernel_stack {
             // Calculate stack bottom address (stack top - stack size)
             // SAFETY: kernel_stack was set by alloc_kernel_stack() as bottom + KERNEL_STACK_SIZE,

@@ -29,6 +29,15 @@ unit-test = ["debug-lock-owner"]  # Enable unit tests; pulls the spinlock-owner 
 # Zero-cost when off; enabled when hunting lock deadlocks
 # (see test/hunt-wedge.sh and docs/guides/debugging.md).
 debug-lock-owner = []
+# debug (r17 mechanism-C hunt): validate the schedule() switch target
+# before the context switch. A `next` pointing into static storage that
+# is not this CPU's idle task, or whose switch return address is outside
+# kernel text, is a stale/freed task pointer — the family behind the GRQ
+# lost-release deadlock (switch saves scribbling static memory) and the
+# heap-jump switch panic (jump through a reused page). The gate prints
+# the full scheduler state at the trip and falls back to idle so the
+# box lives and the print convicts. Hunt kernels only.
+nextgate = []
 # debug: per-task stack backtrace lines in taskdump (read_volatile scan).
 # Off by default: the extra code shifts layout and measurably widens the
 # heap-lock race window; enable only when a wedge is being hunted.

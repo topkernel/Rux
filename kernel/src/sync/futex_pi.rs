@@ -90,6 +90,17 @@ struct PiState {
 
 const PI_WAITER_POOL_SIZE: usize = 128;
 const PI_STATE_POOL_SIZE: usize = 128;
+
+// (perf-gap-hunt r11) Count of live PiStates. futex_pi_exit_cleanup
+// scanned BOTH halves' full 128-slot pool on every exit (~us of lock
+// pairs, forkprof ex_postf phase); PI states only exist under actual
+// PI-futex contention, which none of the benchmark/workstation shapes
+// ever hit. Zero count proves no state (and therefore no linked
+// waiter — waiters only exist inside states) anywhere, so the whole
+// cleanup provably finds nothing and is skipped. Failure direction is
+// safe: a missed decrement only over-counts, which re-enables the
+// scans (exactly today's behavior).
+static PI_STATE_COUNT: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(0);
 const PI_BUCKETS: usize = 64;
 
 static PI_WAITER_POOL:
@@ -191,6 +202,7 @@ fn pi_state_get_or_create(key: &FutexKey, owner_pid: u32) -> Option<usize> {
                 owner_saved_nice: NICE_NONE,
                 waiters: None,
             });
+            PI_STATE_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             return Some(i);
         }
     }
@@ -204,6 +216,7 @@ fn pi_state_maybe_free(si: usize) {
     if let Some(ref s) = *st {
         if s.waiters.is_none() {
             *st = None;
+            PI_STATE_COUNT.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
         }
     }
 }
@@ -817,6 +830,12 @@ pub unsafe fn pi_requeue_detach(key2: &FutexKey, wi: usize) {
 /// hands the lock to its top waiter with FUTEX_OWNER_DIED latched
 /// (robust-mutex contract); the waiter's park ends OWNING the lock.
 pub fn futex_pi_exit_cleanup(task: *mut Task) {
+    // (perf-gap-hunt r11) Empty-state gate: zero PiStates anywhere means
+    // no linked waiters exist (waiters only live inside states) and no
+    // owned state exists — both scans below provably find nothing.
+    if PI_STATE_COUNT.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+        return;
+    }
     // 1. Waiter side: leave every PI queue (no wake). Bucket lock held
     // across the unlink/free (review4 H-8: the unlocked form raced a
     // concurrent futex_unlock_pi handoff on the same state — 'handed'

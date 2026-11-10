@@ -94,6 +94,137 @@ fn caller_return_address() -> usize {
     ra
 }
 
+// r18 flame refinement (`nextgate` feature, hunt kernels only):
+// contended-lock witness histogram keyed by lock ADDRESS. The GB
+// flamegraph's kernel-side top bucket (22%) is IP-only — every
+// contended lock lands on the same pause instruction — so this table
+// records WHICH lock the spin time went to. One witness per ~1M spins
+// (the TTAS inner loop), fixed 24-slot table, linear probe with CAS
+// claim; entry 0 of the count marks the address slot. Adversarial
+// collisions only merge two locks' counts — fine for target ranking.
+#[cfg(feature = "nextgate")]
+mod lockhist {
+    pub const SLOTS: usize = 24;
+    pub static ADDR: [core::sync::atomic::AtomicUsize; SLOTS] =
+        [const { core::sync::atomic::AtomicUsize::new(0) }; SLOTS];
+    pub static N: [core::sync::atomic::AtomicU32; SLOTS] =
+        [const { core::sync::atomic::AtomicU32::new(0) }; SLOTS];
+    /// r19: the first witness's caller RA per slot — names the acquire
+    /// site of heap-allocated locks (their addresses cannot be
+    /// symbolized against the ELF).
+    pub static RA: [core::sync::atomic::AtomicUsize; SLOTS] =
+        [const { core::sync::atomic::AtomicUsize::new(0) }; SLOTS];
+}
+
+/// r18 flame refinement: record one contention witness for this lock
+/// address (see `lockhist`). Called from the spin loop with IRQ state
+/// whatever the caller had — atomics only.
+#[cfg(feature = "nextgate")]
+fn lockhist_witness(addr: usize, ra: usize) {
+    for s in 0..lockhist::SLOTS {
+        let a = &lockhist::ADDR[s];
+        let cur = a.load(core::sync::atomic::Ordering::Relaxed);
+        if cur == addr {
+            lockhist::N[s].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+        if cur == 0
+            && a
+                .compare_exchange(0, addr, core::sync::atomic::Ordering::Relaxed, core::sync::atomic::Ordering::Relaxed)
+                .is_ok()
+        {
+            lockhist::N[s].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            // r19: the claimant stamps the acquire site once.
+            lockhist::RA[s].store(ra, core::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+    }
+    // table full: count into the last slot's address-less overflow by
+    // incrementing nothing — dropping witnesses is acceptable (ranking
+    // only).
+}
+
+/// r18 flame refinement: print the contention witness table
+/// (putchar_no_lock discipline; safe from any context).
+#[cfg(feature = "nextgate")]
+pub fn lockhist_print() {
+    use crate::console::putchar_no_lock as putchar;
+    for s in 0..lockhist::SLOTS {
+        let n = lockhist::N[s].load(core::sync::atomic::Ordering::Relaxed);
+        if n == 0 {
+            continue;
+        }
+        let a = lockhist::ADDR[s].load(core::sync::atomic::Ordering::Relaxed);
+        let ra = lockhist::RA[s].load(core::sync::atomic::Ordering::Relaxed);
+        const M: &[u8] = b"\nLOCKHIST addr=0x";
+        for &b in M {
+            putchar(b);
+        }
+        let mut v = a as u64;
+        for _ in 0..16 {
+            let nb = (v >> 60) as u8;
+            putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+            v <<= 4;
+        }
+        const M2: &[u8] = b" n=";
+        for &b in M2 {
+            putchar(b);
+        }
+        let mut buf = [0u8; 10];
+        let mut k = 0;
+        let mut w = n as u64;
+        if w == 0 {
+            buf[0] = b'0';
+            k = 1;
+        }
+        while w > 0 {
+            buf[k] = b'0' + (w % 10) as u8;
+            w /= 10;
+            k += 1;
+        }
+        for i in (0..k).rev() {
+            putchar(buf[i]);
+        }
+        // r19: the first witness's acquire site (heap locks' identity).
+        // r19b: for heap-allocated locks (physmap range) the address
+        // cannot be symbolized — dump the surrounding qwords instead;
+        // long-lived containers self-identify (inode names, pool
+        // counters). Advisory read of maybe-freed memory is acceptable
+        // for a hunt print.
+        if a >= 0xffff_8880_0000_0000 && a < 0xffff_9000_0000_0000 {
+            const M4: &[u8] = b" ctx=";
+            for &b in M4 {
+                putchar(b);
+            }
+            for off in [-2i64, -1, 0, 1, 2, 3, 4, 5] {
+                let p = (a as i64 + off * 8) as *const u64;
+                // SAFETY: advisory hunt print; may read freed memory.
+                let v = unsafe { core::ptr::read_volatile(p) };
+                let mut u = v;
+                if off != -2 {
+                    putchar(b' ');
+                }
+                for _ in 0..16 {
+                    let nb = (u >> 60) as u8;
+                    putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                    u <<= 4;
+                }
+            }
+        }
+        const M3: &[u8] = b" ra=0x";
+        for &b in M3 {
+            putchar(b);
+        }
+        let mut u = ra as u64;
+        for _ in 0..16 {
+            let nb = (u >> 60) as u8;
+            putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+            u <<= 4;
+        }
+    }
+    putchar(b'\n');
+}
+
 pub struct RawSpinlock {
     locked: AtomicU32,
     /// Deadlock diagnostics: holder's hart id + 1 (0 = free).  Written
@@ -182,6 +313,26 @@ impl RawSpinlock {
         0
     }
 
+    /// r17 mechanism-C hunt (`nextgate` feature): the address of the
+    /// lock word, for the DR-register write watchpoint that catches a
+    /// wild write onto it red-handed (a lost release leaves the word at
+    /// exactly 1; a scribble leaves anything else).
+    #[inline]
+    #[cfg(feature = "nextgate")]
+    pub fn locked_addr(&self) -> usize {
+        &self.locked as *const _ as usize
+    }
+
+    /// r17 mechanism-C hunt: the address of the owner word (requires
+    /// debug-lock-owner). A legitimate stamp always has cpu+1 in the
+    /// low nibble and kernel text in the high bits; anything else is a
+    /// wild write.
+    #[inline]
+    #[cfg(all(feature = "nextgate", feature = "debug-lock-owner"))]
+    pub fn owner_addr(&self) -> usize {
+        &self.owner as *const _ as usize
+    }
+
     #[inline]
     #[cfg(not(feature = "debug-lock-owner"))]
     fn clear_owner(&self) {}
@@ -228,6 +379,18 @@ impl RawSpinlock {
             }
             while self.locked.load(Ordering::Relaxed) != 0 {
                 spins = spins.wrapping_add(1);
+                #[cfg(feature = "nextgate")]
+                if spins & 0xFFFF == 0 {
+                    // r18 flame refinement: one witness per 64K spins
+                    // (≈60-250 µs contended; the spins counter RESETS per
+                    // lock() attempt, so a 1M threshold never fires on
+                    // ordinary contention — only wedges, which never
+                    // reach the shutdown dump) — a cheap per-lock
+                    // contention volume histogram for hunt kernels
+                    // (IP-only samples cannot name WHICH lock the 22%
+                    // bucket is).
+                    lockhist_witness(self as *const Self as usize, caller_ra);
+                }
                 if spins == Self::DEADLOCK_WARN_ITERS {
                     Self::deadlock_warn(self as *const Self, caller_ra);
                     spins = 0; // continue spinning (might resolve)
@@ -252,23 +415,119 @@ impl RawSpinlock {
     /// COLD PATH ONLY — the spin loop's per-iteration work is unchanged.
     fn deadlock_warn(lock_addr: *const Self, caller_ra: usize) {
         let cpu = crate::arch::smp::cpu_id();
-        // Holder word: the debug-lock-owner field when built (ra | cpu+1),
-        // 0 otherwise (dlspin prints the arming hint instead).
-        #[cfg(feature = "debug-lock-owner")]
-        // SAFETY: lock_addr is a valid RawSpinlock pointer (from lock()).
-        let owner_word = unsafe { (&*lock_addr).owner.load(Ordering::Relaxed) };
-        #[cfg(not(feature = "debug-lock-owner"))]
-        let owner_word = 0usize;
-        crate::debug::dlspin::deadlock_warn(
-            cpu as usize,
-            lock_addr as usize,
-            caller_ra,
-            owner_word,
-        );
+        let msg = b"DEADLOCK: spinlock stuck cpu=";
+        for &b in msg {
+            unsafe { crate::console::putchar_no_lock(b); }
+        }
+        // Print CPU id as decimal digit
+        if cpu < 10 {
+            unsafe { crate::console::putchar_no_lock(b'0' + cpu as u8); }
+        }
+        // Print lock address in hex
+        let msg2 = b" lock=0x";
+        for &b in msg2 {
+            unsafe { crate::console::putchar_no_lock(b); }
+        }
+        let addr = lock_addr as usize;
+        let mut shift = (core::mem::size_of::<usize>() * 8) as i32;
+        while shift > 0 {
+            shift -= 4;
+            let nibble = (addr >> (shift as usize)) & 0xF;
+            let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
+            unsafe { crate::console::putchar_no_lock(c); }
+        }
+        // r17 (mechanism-C hunt): the lock word's VALUE discriminates the
+        // lost-release shapes — 1 = a real acquire that never unlocked,
+        // any other nonzero (a stack-pointer-shaped 0xffff8880.. word,
+        // ASCII, poison) = a wild write landed on the word (e.g. context
+        // -switch register saves through a stale task pointer).
+        let msg2b = b" val=0x";
+        for &b in msg2b {
+            unsafe { crate::console::putchar_no_lock(b); }
+        }
+        let lval = unsafe { (&*lock_addr).locked.load(Ordering::Relaxed) };
+        // u32 word: 8 nibbles (the inherited 64-bit loop shifted a u32
+        // by up to 60 — debug builds panic on the overflow, which ate
+        // the first owner5 capture).
+        let mut shift = (core::mem::size_of::<u32>() * 8) as i32;
+        while shift > 0 {
+            shift -= 4;
+            let nibble = (lval >> (shift as usize)) & 0xF;
+            let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
+            unsafe { crate::console::putchar_no_lock(c); }
+        }
 
-        // debug=watchdog (frozen legacy switch): keep the historical
-        // every-boundary task-state snapshot for the lanes still hunting
-        // with it — the dlspin bundle's own dump is one-time per lock.
+        // Print caller return address (ra) for debugging
+        let msg3 = b" ra=0x";
+        for &b in msg3 {
+            unsafe { crate::console::putchar_no_lock(b); }
+        }
+        let mut shift = (core::mem::size_of::<usize>() * 8) as i32;
+        while shift > 0 {
+            shift -= 4;
+            let nibble = (caller_ra >> shift) & 0xF;
+            let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
+            unsafe { crate::console::putchar_no_lock(c); }
+        }
+
+        // Holder identity: owner = hart+1 (0 = free / mid-handoff).
+        #[cfg(feature = "debug-lock-owner")]
+        {
+            let msg4 = b" holder=";
+            for &b in msg4 {
+                unsafe { crate::console::putchar_no_lock(b); }
+            }
+            // SAFETY: lock_addr is a valid RawSpinlock pointer (from lock()).
+            let holder = unsafe { (&*lock_addr).owner.load(Ordering::Relaxed) };
+            if holder == 0 {
+                let msg5 = b"switching";
+                for &b in msg5 {
+                    unsafe { crate::console::putchar_no_lock(b); }
+                }
+            } else {
+                // r18: the owner word has been RA-stamped since r12, so
+                // the old hart-id decode printed nothing; the raw low
+                // nibble is the stamping CPU+1 (a legitimate stamp) or
+                // whatever a wild write left there — print it raw.
+                let nib = holder & 0xF;
+                unsafe {
+                    crate::console::putchar_no_lock(if nib < 10 {
+                        b'0' + nib as u8
+                    } else {
+                        b'a' + (nib - 10) as u8
+                    });
+                }
+            }
+            // r16 (GB GRQ lost-release deadlock): the owner word's HIGH
+            // bits are the LAST ACQUIRER'S RETURN ADDRESS (the r12
+            // shape) — a lock stuck "locked" with no CPU inside any
+            // longer names its lost-release site right here. Print it.
+            let msg5b = b" ow_ra=0x";
+            for &b in msg5b {
+                unsafe { crate::console::putchar_no_lock(b); }
+            }
+            let ra = holder & !0xFusize;
+            let mut shift2 = (core::mem::size_of::<usize>() * 8) as i32;
+            while shift2 > 0 {
+                shift2 -= 4;
+                let nibble = (ra >> (shift2 as usize)) & 0xF;
+                let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
+                unsafe { crate::console::putchar_no_lock(c); }
+            }
+        }
+
+        // r18 mechanism-C hunt: the per-CPU GRQ hold table discriminates
+        // "a real acquire leaked the section" (slot names the site) from
+        // "a wild write put the lock word at 1" (all slots clear).
+        #[cfg(feature = "nextgate")]
+        {
+            crate::sched::sched::grq_hold_table_print();
+        }
+
+        unsafe { crate::console::putchar_no_lock(b'\n'); }
+
+        // debug=watchdog: follow the warning with a full task-state snapshot
+        // (silent-wedge diagnosis — CPUs idle + sleepers never woken).
         if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::WatchdogDump) {
             crate::debug::taskdump::dump_all_tasks("deadlock-watchdog");
         }
