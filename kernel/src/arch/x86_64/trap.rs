@@ -2169,6 +2169,31 @@ fn gp_regmem_dump(regs: &PtRegs) {
                 name, v, va, len, id
             );
         }
+        // hp88 hunt: name the victim's PTE + frame + descriptor state —
+        // "present + zero content" is either a stray-unmap-then-refault
+        // (fresh zero frame) or an in-place zeroed frame; the frame's
+        // descriptor and ring membership separate them.
+        if v > 0x1_0000 && v < 0x0000_8000_0000_0000 {
+            // SAFETY: read-only page-table walk on a live root (same
+            // shape as the read_at closure below).
+            if let Some((ppn, bits)) = unsafe {
+                crate::arch::mm::mm_ops::PageTableWalker::walk(root, v & !0xfff)
+            } {
+                let frame = (ppn as usize) << 12;
+                let pd = crate::mm::pfn_to_page_mut(crate::mm::phys_to_pfn(frame));
+                let (rc, mc) = if pd.is_null() {
+                    (-999, -999)
+                } else {
+                    // SAFETY: descriptor read of the mapped frame.
+                    unsafe { ((*pd).refcount(), (*pd).mapcount()) }
+                };
+                let inring = crate::perf::ring_frame_member(ppn as u64);
+                crate::pr_err!(
+                    "GP-PTE: {}={:#x} pte={:#x} frame={:#x} rc={} mapcount={} ring_frame={}",
+                    name, v, bits, frame, rc, mc, inring
+                );
+            }
+        }
         if v > 0x1_0000 && v < 0x0000_8000_0000_0000 {
             // SAFETY: read-only page-table walk on a live root; the
             // checked read returns None on unmapped holes (same shape

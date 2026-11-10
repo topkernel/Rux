@@ -426,6 +426,31 @@ pub fn ring_covers(addr: u64) -> Option<(usize, usize, u64)> {
     None
 }
 
+/// hp88 hunt: is `pfn` one of a live ring's frames? Called from the #GP
+/// forensics — a VICTIM's heap frame being a ring frame convicts the
+/// eager install (or a PT page) wiring ring frames into the wrong mm.
+pub fn ring_frame_member(pfn: u64) -> bool {
+    if RING_LIVE.load(Ordering::Relaxed) == 0 {
+        return false;
+    }
+    let ht = RING_HT.lock_irqsave();
+    let mut i = ring_ht_hash(pfn);
+    let mut member = false;
+    for _ in 0..RING_HT_LEN {
+        let v = ht[i];
+        if v == pfn {
+            member = true;
+            break;
+        }
+        if v == 0 {
+            break;
+        }
+        i = (i + 1) & (RING_HT_LEN - 1);
+    }
+    drop(ht);
+    member
+}
+
 /// id → event. Every take is lock_irqsave (module lock-order doc).
 static REGISTRY: Spinlock<alloc::vec::Vec<(u64, usize)>> =
     Spinlock::new(alloc::vec::Vec::new());
