@@ -531,6 +531,22 @@ impl RawSpinlock {
         if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::WatchdogDump) {
             crate::debug::taskdump::dump_all_tasks("deadlock-watchdog");
         }
+        // dlspin handoff (branch round-20): the last-gasp bundle owns
+        // the WARN_COUNT bookkeeping the dlspin verdict test asserts on
+        // (waiter must see warn fired) plus the cross-CPU peek, all-CPU
+        // stacks and the one-time task dump. The inline print above
+        // keeps the scanner-compatible one-line format.
+        // SAFETY: lock_addr is a valid RawSpinlock pointer (from lock()).
+        #[cfg(feature = "debug-lock-owner")]
+        let owner_word = unsafe { (&*lock_addr).owner.load(Ordering::Relaxed) };
+        #[cfg(not(feature = "debug-lock-owner"))]
+        let owner_word = 0usize;
+        crate::debug::dlspin::deadlock_warn(
+            cpu as usize,
+            addr,
+            caller_ra,
+            owner_word,
+        );
     }
 
     #[inline]
