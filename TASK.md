@@ -9817,31 +9817,3 @@ CORRUPTS the image /etc — burned 40 min on this; loop-mount is safe).
 verdict; then chase the wakeup loss with the existing FUXW/wake
 instruments. (2)/(3) are small parity fixes with big tooling payoff.
 Then the §86.5 charter continues on a working hiperf.
-
-### 87.8 hp87g/h/i addendum (2026-11-11 02:2x-03:0x)
-
-- hp87g (sleep-anchored script) COMPLETED all steps past record —
-  **wait4/SIGCHLD wakeup loss CONVICTED** as the intermittent
-  shell-stall site (only variable: never wait4-ing the hiperf child).
-  ~50% flaky, hits any fork+exit waiter. Fix with the wake instruments.
-- hp87h: same rig, mountpoint moved to /data/hpout (the first attempt
-  used /mnt on the READ-ONLY root — mkdir EROFS). mount/cp/umount all
-  exec'd... and the output disk stayed empty.
-- ROOT CAUSE of the empty disk (found before hp87i): lb-boot's NOSNAP
-  only un-snapshots drive 5 (userdata); drive 6 (run/hp87-out.img) kept
-  `snapshot=on` — guest writes landed in QEMU's temp overlay, discarded
-  at teardown. lb-boot-out.py now un-snaps 5 AND 6 under NOSNAP.
-- BUT with drive 6 un-snapped the boot DIES deterministically at
-  switch_root (mount-move cascade -> /bin/init ENOENT -> power down,
-  3/3 attempts, two different userdata generations). With drive 6
-  snapshotted the same rig boots fine (hp87h). UNEXPLAINED — 88th's
-  first cheap experiment: reproduce minimal (e.g. is it the empty
-  ext4 RW-open itself, an ordering effect on vdb, or leftover locks?).
-  Fallback extraction path if drive-6-direct stays broken: fix the
-  ext4 metadata_csum writes so host tools read our userdata directly
-  (parity bug #3 in 87.7) — that unlocks ALL guest-file extraction
-  without extra disks.
-- Rig state: system-hp87h.img carries the sleep-anchored script with
-  /data/hpout mountpoint (this is the one to boot); userdata-hp87i.img
-  is a fresh copy from the f generation; hp87-out.img freshly mkfs'd
-  ^metadata_csum.
