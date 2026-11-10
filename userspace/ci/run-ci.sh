@@ -25,7 +25,7 @@ echo "[3/6] guest image" | tee -a "$SUM"
 [ -f run/rootfs-qa.img ] || cp /home/william/rux-images/testimages/ltp/rootfs-x86_64-ltp.img run/rootfs-qa.img
 echo "  image ready ($(du -h run/rootfs-qa.img | cut -f1))" | tee -a "$SUM"
 
-bash userspace/ci/assets.sh boot_ubuntu |= tee -a "$SUM" 2>&1; bash userspace/ci/assets.sh boot_oh |= tee -a "$SUM" 2>&1; bash userspace/ci/assets.sh bench_lmbench | tee -a "$SUM"; bash userspace/ci/assets.sh bench_geekbench | tee -a "$SUM"
+bash userspace/ci/assets.sh boot_ubuntu | tee -a "$SUM" 2>&1; bash userspace/ci/assets.sh boot_oh | tee -a "$SUM" 2>&1; bash userspace/ci/assets.sh bench_lmbench | tee -a "$SUM"; bash userspace/ci/assets.sh bench_geekbench | tee -a "$SUM"
 
 echo "[5/6] LTP full scan (detached; row lands on completion)" | tee -a "$SUM"
 if [ -x scripts/test/ltpscan/run1-x86.sh ]; then
