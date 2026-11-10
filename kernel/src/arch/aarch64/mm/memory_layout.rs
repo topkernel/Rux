@@ -295,6 +295,7 @@ pub mod mmap_error {
     pub const EBADF: i64 = -9;
     pub const EOPNOTSUPP: i64 = -95;
     pub const EEXIST: i64 = -17;
+    pub const EPERM: i64 = -1;
 }
 
 /// User space address range (256GB, riscv64 parity)

@@ -150,21 +150,19 @@ unsafe fn memfd_setattr(inode: &Inode, attr: u32, arg1: u64, _arg2: u64) -> i32 
     if attr == setattr_attr::ATTR_SIZE {
         let new_size = arg1 as usize;
 
-        // Seal enforcement (memfd_create(2)): F_SEAL_WRITE blocks ANY size
-        // change; F_SEAL_GROW blocks growing; F_SEAL_SHRINK blocks
-        // shrinking. EPERM like Linux memfd ftruncate.
+        // Seal enforcement (reference memfd setattr): F_SEAL_GROW blocks
+        // growing, F_SEAL_SHRINK blocks shrinking, EPERM. F_SEAL_WRITE
+        // does NOT gate ftruncate — it only blocks write() and writable
+        // shared mappings (verified on the reference host; LTP
+        // memfd_create01 ftruncates a F_SEAL_WRITE-sealed fd
+        // successfully).
         let seals = inode_seals(inode);
         let old_size = inode.get_size() as usize;
-        if seals != 0 {
-            if seals & F_SEAL_WRITE != 0 && new_size != old_size {
-                return -(errno::constants::EPERM as i32);
-            }
-            if seals & F_SEAL_GROW != 0 && new_size > old_size {
-                return -(errno::constants::EPERM as i32);
-            }
-            if seals & F_SEAL_SHRINK != 0 && new_size < old_size {
-                return -(errno::constants::EPERM as i32);
-            }
+        if seals & F_SEAL_GROW != 0 && new_size > old_size {
+            return -(errno::constants::EPERM as i32);
+        }
+        if seals & F_SEAL_SHRINK != 0 && new_size < old_size {
+            return -(errno::constants::EPERM as i32);
         }
 
         let mut guard = inode.data.lock();
@@ -294,10 +292,16 @@ pub fn memfd_create(name: &[u8], flags: u32) -> Result<usize, i32> {
     inode.ops = Some(&MEMFD_INODE_OPS);
     // Seal bookkeeping hangs off the inode (shared by dups/forks of the fd);
     // freed by memfd_destroy_inode when the last reference drops.
+    // Reference memfd_create(2): WITHOUT MFD_ALLOW_SEALING the initial
+    // seal set is F_SEAL_SEAL — sealing is permanently disabled and
+    // F_GET_SEALS reports 1 (LTP memfd_create01's "Disabled sealing"
+    // case reads exactly that).
     inode.private_data = Some(
         alloc::boxed::Box::into_raw(alloc::boxed::Box::new(MemfdState {
             allow_sealing: flags & MFD_ALLOW_SEALING != 0,
-            seals: core::sync::atomic::AtomicU32::new(0),
+            seals: core::sync::atomic::AtomicU32::new(
+                if flags & MFD_ALLOW_SEALING == 0 { F_SEAL_SEAL } else { 0 },
+            ),
         })) as *mut u8,
     );
     let inode = Arc::new(inode);
@@ -380,6 +384,15 @@ fn file_memfd_inode(file: &File) -> Option<Arc<Inode>> {
 
 /// F_GET_SEALS handler: the file's current seal set. EINVAL when the file
 /// is not a memfd (Linux: seals are only defined for shmem/memfd files).
+/// F_SEAL_WRITE enforcement hook for the mmap path: Some(true) when
+/// `file` is a memfd whose current seals include F_SEAL_WRITE (a
+/// writable MAP_SHARED mapping must fail EPERM), Some(false) when it
+/// is an unsealed memfd, None for any other file.
+pub fn seals_block_write_mmap(file: &File) -> Option<bool> {
+    let inode = file_memfd_inode(file)?;
+    Some(inode_seals(&inode) & F_SEAL_WRITE != 0)
+}
+
 pub fn get_seals(file: &File) -> Result<u32, i32> {
     let inode = file_memfd_inode(file).ok_or(-(errno::constants::EINVAL as i32))?;
     Ok(inode_seals(&inode))

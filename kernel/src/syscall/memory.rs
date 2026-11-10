@@ -1046,6 +1046,16 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                 {
                     return mmap_error::EACCES;
                 }
+                // F_SEAL_WRITE on a memfd forbids writable shared
+                // mappings even on an O_RDWR fd (reference
+                // memfd_create(2) seal semantics — LTP memfd_create01's
+                // seal-write case expects EPERM here).
+                if map_flags & map::MAP_SHARED != 0
+                    && prot_flags & prot::PROT_WRITE != 0
+                    && crate::fs::memfd::seals_block_write_mmap(&file) == Some(true)
+                {
+                    return mmap_error::EPERM;
+                }
             }
         }
     }
@@ -2353,6 +2363,16 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                             continue; // MAP_PRIVATE upgrades are legal
                         }
                         if let Some(file) = addr_space.get_vma_file(vs) {
+                            // F_SEAL_WRITE on a memfd forbids upgrading a
+                            // shared mapping to writable via mprotect too
+                            // (reference seal semantics — EPERM, not
+                            // EACCES; LTP memfd_create01's
+                            // mmap-read-only-then-mprotect case).
+                            if crate::fs::memfd::seals_block_write_mmap(&file)
+                                == Some(true)
+                            {
+                                return -1_i64; // EPERM
+                            }
                             if file.flags().is_readonly() {
                                 return -13_i64; // EACCES
                             }

@@ -1345,10 +1345,13 @@ impl Pipe {
         (b.capacity(), b.available_read())
     }
 
-    /// Resize (F_SETPIPE_SZ) with Linux's error contract
+    /// Resize (F_SETPIPE_SZ) with the reference's error contract
     /// (fs/pipe.c pipe_set_size):
     ///   - arg > 1<<31  → EINVAL
-    ///   - arg == 0     → EINVAL (round_pipe_size(0) == 0 → no slots)
+    ///   - arg == 0     → grants ONE PAGE (verified on the reference
+    ///     host: fcntl(fd, F_SETPIPE_SZ, 0) returns 4096 — the modern
+    ///     pipe_set_size clamps the slot count to a minimum; the old
+    ///     EINVAL here TBROK'd LTP pipe2_04's setup)
     ///   - growing past /proc/sys/fs/pipe-max-size without
     ///     CAP_SYS_RESOURCE → EPERM
     ///   - shrinking below the bytes already buffered → EBUSY
@@ -1356,10 +1359,14 @@ impl Pipe {
     pub fn resize_checked(&self, requested: usize) -> Result<usize, i32> {
         const PAGE: usize = 4096;
         const MAX_SIZE: usize = 1 << 31;
-        if requested == 0 || requested > MAX_SIZE {
+        if requested > MAX_SIZE {
             return Err(-(crate::errno::constants::EINVAL as i32));
         }
-        let new_cap = requested.div_ceil(PAGE) * PAGE;
+        let new_cap = if requested == 0 {
+            PAGE
+        } else {
+            requested.div_ceil(PAGE) * PAGE
+        };
         let max_pipe_size =
             crate::fs::procfs::sysctl::PIPE_MAX_SIZE.load(core::sync::atomic::Ordering::Relaxed)
                 as usize;
