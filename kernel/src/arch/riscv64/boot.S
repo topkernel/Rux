@@ -240,6 +240,24 @@ _start:
     or t4, t4, t5
     sd t4, 88(t3)
 
+    // PMD[12]: VA -> PA thirteenth 2MB (window 26MB; RUX-RISCV-LAYOUT-6,
+    // hp89: the unit-test build outgrew 24MB. 26MB is KERNEL_HEAP_PHYS —
+    // the window's last usable 2MB before the heap base.)
+    li t4, KERNEL_PHYS
+    li t6, 0x1800000             // 24MB
+    add t4, t4, t6
+    srli t4, t4, 2
+    or t4, t4, t5
+    sd t4, 96(t3)
+
+    // PMD[13] (RUX-RISCV-LAYOUT-7, hp89): fourteenth 2MB — window 28MB.
+    li t4, KERNEL_PHYS
+    li t6, 0x1A00000             // 26MB
+    add t4, t4, t6
+    srli t4, t4, 2
+    or t4, t4, t5
+    sd t4, 104(t3)
+
     // --- Create early page table (full kernel mapping) ---
     // early_pg_dir: same as trampoline but points to early_pmd
     la t2, early_pg_dir
@@ -397,6 +415,23 @@ _start:
     srli t4, t4, 2
     or t4, t4, t5
     sd t4, 88(t3)
+
+    // PMD[12] (RUX-RISCV-LAYOUT-6, hp89): thirteenth 2MB — window 26MB,
+    // matching trampoline_pmd above; 26MB is KERNEL_HEAP_PHYS.
+    li t4, KERNEL_PHYS
+    li t6, 0x1800000             // 24MB
+    add t4, t4, t6
+    srli t4, t4, 2
+    or t4, t4, t5
+    sd t4, 96(t3)
+
+    // PMD[13] (RUX-RISCV-LAYOUT-7, hp89): fourteenth 2MB — window 28MB.
+    li t4, KERNEL_PHYS
+    li t6, 0x1A00000             // 26MB
+    add t4, t4, t6
+    srli t4, t4, 2
+    or t4, t4, t5
+    sd t4, 104(t3)
 
     // --- MMIO identity mapping (UART at 0x10000000) ---
     // early_pg_dir[0] -> early_pmd_io (non-leaf, identity maps first 1GB)

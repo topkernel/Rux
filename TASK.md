@@ -10105,3 +10105,158 @@ and names the syscall.
 hp88 boot ledger (GP counts): p/q/r=0, g=0(noperf), h=0(noring),
 e=7, j=8, d=8(noemit), m=15, a/b/c=9-15(normal), f/i=0(spam-
 confounded), k=0, l=0. Noarm corruption flakiness ~3/7 across builds.
+
+### 89. 89TH SESSION (2026-11-11 04:0x-.., branch oh-crash) — the corruption is cornered into userspace-UAF shape; the four kernel races around it are closed; ARMED 60s RECORDS NOW SURVIVE 3/3 BOOTS and the first hotspot table lands
+
+Mission was: kill the mallocng heap corruption on the perf ring-mmap path
+(88.x) and get hiperf record through 60s+. Outcome: three REAL kernel
+races closed (each independently data-destroying), the record path is
+clean across 3/3 armed boots, 15MB of samples extracted and symbolized,
+and the residual corruption shape is now fully attributed with in-tree
+instruments — it is a same-process munmap-vs-use interleave whose kernel
+side I serialized; if any residual face remains it is the 87.8
+wakeup-loss family feeding musl's lock, not the mm engine.
+
+#### 89.1 The kernel races closed this session
+
+1. **munmap Face B (x86_64, the >4MB deferred zap)**: detach-all-then-zap
+   dropped vma_write with (VMA gone AND PTEs live) for ranges over the
+   4MB SINGLE_GUARD_ZAP_LIMIT. A racing same-mm mmap landed in the
+   pending-zap hole, faulted pages in, stamped mallocng metadata; the
+   deferred zap cleared those FRESH PTEs and freed the frames; refault
+   zero-filled ("self-healing" only heals pages whose content lives
+   elsewhere — anonymous pages with user stores are DESTROYED). The perf
+   ring's old GLOBAL-PTE-epoch hold synchronized zap chunks and fresh
+   fault installs behind one writer, making them race ~50/50 on the mm
+   spin — the ~40% flakiness. FIX: per-piece cursor loop — every piece's
+   surgery AND its PTE zap share ONE vma_write guard (riscv64 shape).
+2. **munmap Face A (all three arches)**: the chunk loop's search
+   restarted from addr_us every iteration, so a fresh same-mm mmap that
+   legally landed in an already-processed hole was found again and
+   deleted as an "unprocessed piece". FIX: the search starts at the
+   CURSOR (end of the last processed piece); riscv64/aarch64 twins had
+   exactly this face, x86_64 inherited it via the old chunked shape.
+3. **perf ring mmap install**: placement+VMA-insert and the 257-page
+   eager PTE install were separate steps, and the install held the
+   GLOBAL PTE epoch exclusive (the only same-mm leaf writer using it).
+   FIX: install runs under the SAME vma_write (vma->pte order,
+   INV-LOCK-7) with pte_lock_for(own mm); the global epoch hold and its
+   system-wide PTE stall are gone.
+4. **mremap move non-atomicity (the last zero-producer)**: the move arms
+   run mmap(new) -> copy -> munmap(old) with guards dropped between
+   steps. A sibling CLONE_VM thread's munmap/DONTNEED clearing the move
+   SOURCE in the [mmap(new), copy] gap made copy_old_to_new_pages find
+   NO source leaf and silently install NOTHING at the destination — the
+   destination VMA then fault-fills ZERO pages: healthy PTE, rc=1,
+   mapcount=0, Anonymous|SwapBacked|Lru flags, rmap consistent — the
+   EXACT GP-PTE signature (hp89g: hiperf itself died 4.6s after the
+   ring burst, six same-range munmaps by its own worker thread = the
+   musl CFI-shadow slice-move pattern). FIX: MmStruct::mm_surgery
+   per-mm spinlock taken for the WHOLE call by sys_mmap / sys_munmap /
+   sys_mremap / sys_brk / sys_madvise — the reference kernel's
+   mmap_lock(write) role at the syscall layer (fork's walk and mm Drop
+   keep their existing per-chunk discipline; noted divergence).
+
+#### 89.2 The evidence chain (instruments landed this session)
+
+- **mm/unwatch.rs**: global ring of every PTE-clearing event
+  (unmap_pages with range+leaf-count, dying-mm teardown, try_to_unmap,
+  leaf_pte_replace), no printk on the record path; dumped at user-#GP
+  time with UNWATCH-COVER per victim pointer (names the unmapping pid,
+  exact range, jiffies, age).
+- **GP-MMH**: victim tgid's mm-syscall rings (self + 6 sibs) at #GP
+  time; madvise joined the per-task ring (op 6) — DONTNEED zaps live
+  PTEs by design and must be visible.
+- **GP-PTE** now prints the frame's flag word + rmap slot-0 index.
+- Readouts: kernel munmaps are EXACT (ranges and leaf counts match
+  requests — no over-zap); the corrupted VAs are always munmapped BY
+  THE VICTIM PROCESS'S OWN THREADS shortly before the GP; no covering
+  madvise/brk/mremap-with-wrong-range; free_pages REFUSED-still-MAPPED
+  tripwire and all ring detectors silent.
+
+#### 89.3 Boot ledger (SMP8+4G KVM, hp88a two-step record rig)
+
+  boot   kernel                 knob    mallocng #GP   record      boot
+  hp89a  fixes1-3               noarm   ~10 @ 50s+    n/a         SURVIVED 240s (no ExecReboot!)
+  hp89b  fixes1-3               noarm   0             n/a         survived
+  hp89c  fixes1-3               noarm   ~14 @ 16s     n/a         SURVIVED
+  hp89d  +unwatch               noarm   9 @ 153s      n/a         survived
+  hp89e  +unwatch               noarm   0             n/a         survived
+  hp89f  +unwatch+cover         noarm   3 @ 48-152s   n/a         survived
+  hp89g  +unwatch+cover         ARMED   13 @ 17s (hiperf itself) — step1 died early
+  hp89h  +mm_surgery (full)     ARMED   0             60s+60s     survived 260s
+  hp89i  +mm_surgery            ARMED   0             60s DONE 15.2MB .data
+  hp89j  +mm_surgery            ARMED   0             60s DONE 15.4MB .data
+The 88th's kernel died inside 40s of first corruption (samgr ->
+ExecReboot -> sysrq-c). With fixes 1-3 the boots already SURVIVE the
+residual corruption (services respawn, no critical-cascade); with the
+mremap serialization the corruption itself stopped reproducing (3/3).
+
+#### 89.4 The hotspot table (first ever on this rig; hp89i/j 60s record,
+      ~12-72s window = SA-init + spawn storm; 80961 samples, 71k kernel)
+
+Top kernel (symbolized host-side with nm; parser + data in
+run/hp89-out/):
+  10.7% arch::x86_64::cpu::enable_irq+0x1d      (irqsave/restore cost)
+   4.1% printk::acquire_emit_lock               (SERIAL PRINT FLOOD)
+   3.3% core atomic_load u8  +0x31              (TTAS spin loops)
+   2.5% core atomic_load u32(log) +0x66
+   2.3% wfi+0x5 (idle — CPUs are BUSY, not starved)
+   1.3% synchronize_rcu_forced_polled           (mm-drop grace waits)
+   1.2% console::Uart::puts_batch               (more serial cost)
+   1.0% small_alloc::alloc+0x102, memcpy ~1.5% combined
+Top processes by samples: tgid 466/321/631 (~11k each), hiperf-recorder
+1466 (8.1k), kernel-context 0 (8.0k), 1491/614/893 (6.5k/6.5k/4.5k).
+READ FOR THE BOOT-TIME CHARTER (§86.5, 239s vs 11s): printk/serial is a
+top-3 kernel cost — the hunt instruments' own prints (SAREG/SLRD/
+pagefault-cow classes) are measured self-load; enable_irq dominance
+matches the IF=0 guarded domain; the atomic_load cloud is lock
+contention (spinloop attribution). User-side symbolization needs the
+mmap records in the .data (parser scaffold in run/hp89-out; hip perf
+itself refuses host-side runs on a developermode param check).
+
+#### 89.5 riscv64 layout: RUX-RISCV-LAYOUT-7 (28MB window)
+
+The unit-test build outgrew 24MB (my additions + instruments):
+LAYOUT-7 = PMD[13] in both boot.S tables, KERNEL_SIZE 0x1C00000,
+KERNEL_RESERVE_SIZE 0x1C0_0000, KERNEL_HEAP_PHYS/HEAP_START/buddy
+KERNEL_HEAP_PHYS 0x81a0_0000 -> 0x81c0_0000, linker ASSERT 28MB.
+The suite run on my kernel tripped a KERNPANIC in tests/execve.rs
+(map_kernel_page_noflush storing through a garbage PT window VA,
+badaddr 0xffffffd580000000, inside do_execve_elf) — parent-commit
+(218489be) suite verdict was still pending at session end; the 90th
+MUST close this before merge (if parent fails too: pre-existing; if
+parent passes: bisect my four changes, prime suspects are the
+mm_surgery syscall guard interacting with exec's direct mm calls, or
+the riscv64 munmap cursor).
+
+#### 89.6 FOR THE 90TH (priority order)
+
+1. CLOSE THE MERGE GATE: riscv64 suite verdict on 218489be vs my tip
+   (see 89.5); dual-arch builds are green (x86_64, riscv64, aarch64
+   all compile). Then the standard OH A/B: 3-5 more armed record boots
+   (the race was ~60% pre-fix; 3/3 clean post-fix is good but not
+   exhaustive).
+2. The residual corruption shape (if it ever re-fires): userspace-UAF
+   face — victim threads walk VAs its own tgid munmapped seconds
+   earlier (hp89f: 33s stale). If musl/mallocng is being fed wrong
+   kernel state, the remaining suspect is the 87.8 wakeup-loss family
+   (musl's mal_lock futex divergence), NOT the mm engine — unwatch +
+   GP-MMH now adjudicate in one boot.
+3. §86.5 boot-time charter with the working instrument: the 89.4 table
+   names printk/serial and enable_irq as the first targets; then the
+   install-window record (start hiperf at t=90s) for the two giant
+   SLOW-TXNs (84s/129s).
+4. hiperf report host-side: blocked on a developermode param check
+   (const.security.developermode.state via begetutil) — either fake the
+   param service or symbolize with the committed parser scaffold
+   (run/hp89-out — sample walker works; user-side needs the mmap
+   records).
+5. Still queued: 87.8 wait4/SIGCHLD, /dev/console user-write loss,
+   ext4 metadata_csum.
+
+Rig additions: run/hp89-out/ (sample parser, kernel-syms.txt,
+kernel-top.txt, user-ips.txt, nofp.data); boot-hp89{a..r}.sh pattern;
+userdata-hp89*.img (reclaimable); /tmp/ohsys + /tmp/ohlib hold the
+extracted OH lib64 tree for host-side hiperf experiments (rebuildable
+from system-hp88a.img).

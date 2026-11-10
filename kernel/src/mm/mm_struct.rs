@@ -165,6 +165,22 @@ pub struct MmStruct {
     /// the arch hook `arch::mm::mm_ops::pte_lock_for(&mm)`.
     pte_lock: PteLock,
 
+    /// Whole-syscall surgery lock for THIS address space (hp89 hunt, the
+    /// mremap-move race): mm syscalls that run as MULTI-STEP sequences
+    /// with dropped internal guards (mremap's mmap-new -> copy -> munmap-
+    /// old move; munmap's multi-piece cursor walk; brk's shrink; madvise's
+    /// zap; mmap's MAP_FIXED teardown+install) take this for the WHOLE
+    /// call, so sibling CLONE_VM threads can never interleave their own
+    /// surgery into the gaps. This is the reference kernel's mmap_lock
+    /// (write) role, scoped to the syscall layer; the internal vma/pte
+    /// guards stay as they are (the copy loop's pte section already
+    /// excludes same-mm leaf writers — the residual hole was the gap
+    /// BEFORE the copy, where a sibling munmap/mremap cleared the move
+    /// SOURCE and copy_old_to_new_pages then silently installed NOTHING
+    /// at the destination, fault-filling ZERO pages: the mallocng
+    /// zeroed-metadata signature).
+    mm_surgery: crate::sync::spinlock::Spinlock<()>,
+
     /// VMA manager. SLEEPABLE rwsem (the mmap_lock shape, linux-6.6
     /// kernel/locking/rwsem.c — see sync/rwsem.rs): mm paths hold
     /// this across slow work (pagefault COW under a read guard while
@@ -369,6 +385,7 @@ impl MmStruct {
             pgd,
             asid: AtomicU16::new(0),  // Will be allocated on first use
             pte_lock: PteLock::new(),
+            mm_surgery: crate::sync::spinlock::Spinlock::new(()),
             vma_manager: Rwsem::new("vma-lock", vma_manager),
             vma_files: RwSpinlock::new(alloc::collections::BTreeMap::new()),
             space_type,
@@ -535,6 +552,15 @@ impl MmStruct {
     #[inline]
     pub fn pte_lock(&self) -> &PteLock {
         &self.pte_lock
+    }
+
+    /// Whole-syscall mm-surgery section (see the field doc): acquired by
+    /// the mm syscall layer around multi-step surgery so sibling
+    /// CLONE_VM threads cannot interleave into the gaps.
+    pub fn mm_surgery_guard(
+        &self,
+    ) -> crate::sync::spinlock::SpinlockGuard<'_, ()> {
+        self.mm_surgery.lock()
     }
 
     /// Get address space type

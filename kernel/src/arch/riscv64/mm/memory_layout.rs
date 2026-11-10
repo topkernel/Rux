@@ -150,7 +150,7 @@ pub const KERNEL_ENTRY: u64 = 0x80200000;
 /// RUX-RISCV-LAYOUT-5: the LTP r27 session (pidfd subsystem, ext4 file
 /// handles, portable mincore walk) outgrew 20MB; the same set moved
 /// 20MB->24MB.
-pub const KERNEL_SIZE: u64 = 0x1800000;
+pub const KERNEL_SIZE: u64 = 0x1C00000; // 28MB (RUX-RISCV-LAYOUT-7, hp89)
 
 /// Heap start address (after kernel)
 /// RUX-RISCV-LAYOUT: must stay at/above the boot.S image-window end
@@ -159,7 +159,7 @@ pub const KERNEL_SIZE: u64 = 0x1800000;
 /// When it sat at 0x80C00000 (2MB inside the window) the grown kernel
 /// image overlapped the first heap pages — see main.rs
 /// RUX-RISCV-LAYOUT for the corruption family that produced.
-pub const HEAP_START: u64 = 0x81a00000;
+pub const HEAP_START: u64 = 0x81c00000;
 
 /// Slab start address (after heap)
 /// Note: Actual address depends on KERNEL_HEAP_SIZE config

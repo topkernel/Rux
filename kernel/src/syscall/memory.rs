@@ -53,6 +53,11 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
     // Get current process
     match sched::current() {
         Some(current_task) => {
+            // hp89: whole-call mm-surgery section (see MmStruct::
+            // mm_surgery) — shrink runs munmap, grow runs VMA surgery.
+            let _surgery = current_task
+                .address_space()
+                .map(|mm| mm.mm_surgery_guard());
             // Get current brk value
             let current_brk = current_task.get_brk();
 
@@ -292,6 +297,12 @@ fn vmap_budget_line(line: impl FnOnce()) {
 pub fn sys_mmap(args: [u64; 6]) -> i64 {
     let mp = crate::dfx::mmprof::on();
     let mp_t0 = if mp { crate::dfx::mmprof::now() } else { 0 };
+    // hp89: whole-call mm-surgery section (see MmStruct::mm_surgery) —
+    // the MAP_FIXED teardown+install arm and the perf/binder ring
+    // placement+install run as multi-step surgery.
+    let _surgery = crate::sched::current()
+        .and_then(|t| t.address_space())
+        .map(|mm| mm.mm_surgery_guard());
     let ret = sys_mmap_inner(args);
     if mp {
         crate::dfx::mmprof::add(crate::dfx::mmprof::M_TOTAL, mp_t0);
@@ -1454,6 +1465,14 @@ pub fn sys_munmap(args: [u64; 6]) -> i64 {
 
     let addr = args[0] as usize;
     let length = args[1] as usize;
+
+    // hp89: whole-call mm-surgery section (see MmStruct::mm_surgery) —
+    // the piecewise cursor walk opens consistent holes between pieces;
+    // a sibling thread's multi-step surgery must not interleave into
+    // them.
+    let _surgery = crate::sched::current()
+        .and_then(|t| t.address_space())
+        .map(|mm| mm.mm_surgery_guard());
 
     // b91-b92 forensics: big munmaps are pthread-stack teardowns (musl
     // __unmapself) or mallocng group frees — the counterparts of
@@ -2738,6 +2757,14 @@ fn mremap_carry_file_attrs(
 /// dfx=syscalltrace only: ungated this is two lines per mremap, and
 /// hilogd.rd_kmsg eats a vCPU copying them (b128/b129).
 pub fn sys_mremap(args: [u64; 6]) -> i64 {
+    // hp89: whole-call mm-surgery section — the move arms run
+    // mmap(new) -> copy -> munmap(old) as a sequence whose gaps let a
+    // sibling thread's surgery clear the move SOURCE between the
+    // destination install and the copy (zero-fill on refault, the
+    // mallocng corruption signature).
+    let _surgery = crate::sched::current()
+        .and_then(|t| t.address_space())
+        .map(|mm| mm.mm_surgery_guard());
     let ret = sys_mremap_inner(args);
     // Failure returns are rare and always interesting (CFI-shadow hunt):
     // log ungated, success only under dfx=syscalltrace.
@@ -3126,6 +3153,14 @@ pub fn sys_madvise(args: [u64; 6]) -> i64 {
     let addr = args[0] as usize;
     let length = args[1] as usize;
     let advice = args[2] as i32;
+
+    // hp89: whole-call mm-surgery section — MADV_DONTNEED/REMOVE/FREE
+    // zap live PTEs; a sibling mremap move's copy must not race the zap
+    // (missing source leaf = silently nothing installed at the move
+    // destination = zero-fill on refault).
+    let _surgery = crate::sched::current()
+        .and_then(|t| t.address_space())
+        .map(|mm| mm.mm_surgery_guard());
 
     // madvise advice types
     const MADV_NORMAL: i32 = 0;       // No special advice

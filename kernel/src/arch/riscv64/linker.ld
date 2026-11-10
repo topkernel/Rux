@@ -91,7 +91,10 @@ SECTIONS
 	 * RUX-RISCV-LAYOUT-3: 14MB->18MB so the full kernel symbol table
 	 * (~3.1MB .rodata: 2.4MB names + 0.7MB index) fits in the image
 	 * alongside the ~12.5MB image it annotates. */
-	ASSERT(_end <= 0xffffffff81800000, "kernel image outgrew the boot.S 24MB early window: extend the window (both PMD tables) and move heap+reservation together")
+	/* RUX-RISCV-LAYOUT-6 (hp89): 24MB -> 26MB (PMD[12] added to BOTH
+	 * boot.S tables). 26MB == KERNEL_HEAP_PHYS — the next extension must
+	 * move the heap base together. */
+	ASSERT(_end <= 0xffffffff81c00000, "kernel image outgrew the boot.S 28MB early window: extend the window (both PMD tables) and move heap+reservation together")
 
 	/DISCARD/ :
 	{

@@ -1282,7 +1282,7 @@ const KERNEL_RESERVE_SIZE: usize = 0x1A0_0000; // 26MB
 // documented minimum and the linker.ld ASSERT bound; grow them together.
 const KERNEL_RESERVE_SIZE: usize = 0x2800_0000; // 40MB
 #[cfg(feature = "aarch64")]
-const KERNEL_RESERVE_SIZE: usize = 0x1800_000; // 24MB static window (the aarch64 reserve arm below uses its own top)
+const KERNEL_RESERVE_SIZE: usize = 0x1C0_0000; // 28MB static window (RUX-RISCV-LAYOUT-7; the aarch64 reserve arm below uses its own top)
 /// Effective (RAM-clamped) static-region sizes computed by the early
 /// boot block from the discovered memory map (layout.rs
 /// effective_static_regions). HEAP_SIZE_EFF feeds the heap buddy's
@@ -1293,7 +1293,7 @@ static HEAP_SLAB_END_EFF: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(feature = "riscv64")]
-const KERNEL_HEAP_PHYS: usize = 0x81a0_0000;
+const KERNEL_HEAP_PHYS: usize = 0x81c0_0000;
 #[cfg(feature = "x86_64")]
 const KERNEL_HEAP_PHYS: usize = 0x4000_0000;
 // aarch64: kernel window is [0x4008_0000, 0x4280_0000) (32MB; the
