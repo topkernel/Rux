@@ -1176,6 +1176,14 @@ struct MqFdSlot {
 static MQ_FD_TABLE: Spinlock<[Option<MqFdSlot>; MQ_FDS_MAX]> =
     Spinlock::new([const { None }; MQ_FDS_MAX]);
 
+// (perf-gap-hunt r11) Count of occupied MQ fd slots. mq_fds_cleanup
+// took the global table lock and scanned all 64 slots on EVERY exit;
+// POSIX message queues are rare (none on any benchmark/workstation
+// boot). Zero count proves the scan finds nothing. Safe direction: a
+// missed decrement only over-counts, re-enabling the scan (today's
+// behavior).
+static MQ_FD_COUNT: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(0);
+
 /// Allocate a file descriptor number for a POSIX MQ and store the queue
 /// reference in one critical section (see R32 NEW-6 note in sys_mq_open).
 fn allocate_and_store_mq_fd(mq: alloc::sync::Arc<PosixMq>) -> Option<i32> {
@@ -1193,6 +1201,7 @@ fn allocate_and_store_mq_fd(mq: alloc::sync::Arc<PosixMq>) -> Option<i32> {
                 return None; // caller maps exhaustion to EMFILE
             }
             table[i] = Some(MqFdSlot { pid, mq });
+            MQ_FD_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             return Some((512 + i) as i32);
         }
     }
@@ -1230,6 +1239,10 @@ pub fn mq_fds_cleanup(task: *mut crate::process::Task) {
     if task.is_null() {
         return;
     }
+    // (perf-gap-hunt r11) Empty-table gate (see MQ_FD_COUNT).
+    if MQ_FD_COUNT.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+        return;
+    }
     // SAFETY: task was null-checked above and is a valid pointer to the exiting
     // task passed from do_exit; pid() is safe to call on it.
     let pid = unsafe { (*task).pid() as u32 };
@@ -1245,6 +1258,7 @@ pub fn mq_fds_cleanup(task: *mut crate::process::Task) {
                 if s.pid == pid {
                     let mq = s.mq.clone();
                     table[i] = None;
+                    MQ_FD_COUNT.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
                     to_free.push(mq);
                 }
             }
@@ -1292,6 +1306,7 @@ pub fn close_mq_fd(fd: i32) -> i32 {
     let mut table = MQ_FD_TABLE.lock();
     match table[idx].take() {
         Some(slot) if slot.pid == pid => {
+            MQ_FD_COUNT.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
             // R32 (NEW-7): only clear a notification registered by THIS
             // process — the old unconditional swap(0) also killed another
             // process's mq_notify registration when an unrelated fd of
