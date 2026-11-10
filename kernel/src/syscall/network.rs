@@ -3061,6 +3061,14 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
     let msg_ptr = args[1] as *const u8;
     let flags = args[2] as i32;
 
+    // A nonexistent fd is EBADF BEFORE the socket classification
+    // (reference sockfd_lookup) — musl's sendmmsg()/recvmmsg() emulate
+    // over sendmsg/recvmsg on 64-bit, so the order is directly visible
+    // to libc callers (fd=-1 must read EBADF, not ENOTSOCK).
+    if unsafe { crate::fs::file::get_file_fd(fd as usize).is_none() } {
+        return -(errno::EBADF as i64);
+    }
+
     if msg_ptr.is_null() {
         return -(errno::EFAULT as i64);
     }
@@ -3358,6 +3366,12 @@ const MSG_CTRUNC: i32 = 0x08;
 /// receive honors blocking / O_NONBLOCK / MSG_DONTWAIT / SO_RCVTIMEO.
 pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
     let fd = args[0] as i32;
+    // Same EBADF-before-ENOTSOCK order as sendmsg (musl recvmmsg
+    // emulates over recvmsg on 64-bit).
+    if unsafe { crate::fs::file::get_file_fd(fd as usize).is_none() } {
+        return -(errno::EBADF as i64);
+    }
+
     let msg_ptr = args[1] as *mut u8;
     let flags = args[2] as i32;
 
@@ -4020,6 +4034,13 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
     }
     if !crate::arch::uaccess::access_ok(msgvec as usize, vlen as usize * 64) {
         return -(errno::EFAULT as i64);
+    }
+
+    // A nonexistent fd is EBADF BEFORE any socket-ness test (reference
+    // sockfd_lookup; same order as setsockopt/sendmsg) — the old path
+    // answered ENOTSOCK for fd=-1 (LTP sendmmsg02's bad-fd case).
+    if unsafe { crate::fs::file::get_file_fd(fd as usize).is_none() } {
+        return -(errno::EBADF as i64);
     }
 
     // P0-1/P0-2: AF_UNIX / AF_NETLINK — route each mmsghdr through the
