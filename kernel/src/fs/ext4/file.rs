@@ -2652,7 +2652,6 @@ pub fn ext4_file_poll(file: &File, events: u16) -> u16 {
     let inode = unsafe { (*file.inode.get()).clone() };
     let Some(ino) = inode else { return POLLERR };
     let size = ino.get_size() as u64;
-    let at_eof = file.get_pos() >= size;
     let mut r = 0u16;
     // Post-review4 re-audit of 6a593a60: a REGULAR file is ALWAYS
     // readable in the reference — poll/select never blocks on it and
@@ -2663,9 +2662,10 @@ pub fn ext4_file_poll(file: &File, events: u16) -> u16 {
     if events & POLLIN != 0 {
         r |= POLLIN | POLLRDNORM;
     }
-    if events & POLLRDHUP != 0 && at_eof {
-        r |= POLLRDHUP;
-    }
+    // A regular file NEVER reports POLLRDHUP — the bit is a
+    // stream/socket peer-shutdown concept (reference poll_poll on
+    // regular files returns only IN/OUT/NORM bits; LTP ppoll01's
+    // revents=0x2005 vs expected 0x0005 was this line).
     if events & POLLOUT != 0 {
         r |= POLLOUT | POLLWRNORM;
     }
