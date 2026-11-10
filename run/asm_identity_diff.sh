@@ -28,6 +28,15 @@ extract() {
       keep = (sym ~ want) ? 1 : 0; next
     }
     keep && /^[0-9a-f]+:/ {
+      # PC-relative pair folding (riscv64): the linker splits one
+      # effective target between the auipc immediate and the consumer
+      # offset differently depending on 4KiB page alignment of the
+      # alignment — a whole-binary layout artifact, not a codegen
+      # choice. The symbolic comment on the consumer line carries the
+      # effective target (compared strictly below); the base line
+      # alone pins no codegen fact, so drop it and fold the consumer
+      # to mnemonic + resolved symbol.
+      if ($0 ~ /auipc/) next
       line = $0; sub(/^[0-9a-f]+:\t?/, "", line)
       # Normalize hex immediates (0x-prefixed) and branch/call target
       # addresses (raw-hex followed by the symbolic annotation).
@@ -39,6 +48,11 @@ extract() {
       gsub(/-?[0-9]+\(/, "X(", line)
       gsub(/,-?[0-9]+\)/, ",X)", line)
       gsub(/-?[0-9]+%(ra|sp|s0|t0|t1|a0)/, "X%REG", line)
+      if (match(line, /# ADDR <[^>]+>/)) {
+        op = line; sub(/[ \t].*$/, "", op)
+        tgt = substr(line, RSTART + 7)
+        line = op " " tgt
+      }
       print sym "\t" line
     }
   '
