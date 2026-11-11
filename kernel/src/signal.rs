@@ -1605,6 +1605,18 @@ unsafe fn restart_syscall_no_handler(regs: *mut crate::arch::pt_regs::PtRegs) {
         // x86_64 has no trap-cause field in PtRegs: verify the interrupted
         // rip really sits right after a `syscall` (0f 05) instruction —
         // only those frames can carry a restart sentinel in rax.
+        // A frame with rip < 2 can never sit right after a 2-byte
+        // syscall: rip=0 is exactly the NULL-function-pointer-call fault
+        // face (OS_IPC threads of a restarting SA). The unchecked
+        // `regs.rip - 2` below underflowed on that face and PANICKED the
+        // kernel during SIGSEGV delivery (debug-assertions arithmetic
+        // check, signal.rs:1613) — a userspace crash killed the whole
+        // boot (hp108o2x1: panic at 21.1s, panic path held CPU5 IF=0
+        // for 26s, soft-lockup cascade, no ladder). riscv64/aarch64
+        // already guard their `epc/pc - 4` the same way.
+        if regs.rip < 2 {
+            return;
+        }
         let mut insn = [0u8; 2];
         // SAFETY: reads 2 user bytes through the exception-table path.
         let bad = unsafe {
