@@ -2420,6 +2420,9 @@ pub fn fi_write_inode_counts() -> (usize, usize) {
     )
 }
 
+static FI_FALLBACK_CALLS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
 /// `inode` is the caller's VFS inode when it has one (the fd paths). A
 /// kernel-side writer with no VFS file description passes `None`; the
 /// cache-coherence tail then resolves the cached VFS inode through the
@@ -2503,6 +2506,28 @@ unsafe fn ext4_write_at_core(
         offset
     };
 
+    // FI-DIAG (razor-3): count fallback-path invocations and log the
+    // post-write map state for big files — distinguishes 'fallback ran
+    // 2048x but map stuck at 610' (map updates lost) from 'fallback ran
+    // ~610x' (writes stopped early).
+    if offset < 64 * 1024 * 1024 {
+        FI_FALLBACK_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if ext4_inode.size > 1_048_576 {
+            static FI_FB: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let n = FI_FB.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 30 {
+                let b = &ext4_inode.block;
+                let entries = (b[0] >> 16) as u16;
+                let e0_start = ((b[4] >> 16) as u64) << 32 | (b[5] as u64);
+                crate::pr_err!(
+                    "FI-FALLBACK call#{} ino={} off={} size={} map_entries={} e0.start={} total_calls={}",
+                    n, ext4_ino, offset, ext4_inode.size, entries, e0_start,
+                    FI_FALLBACK_CALLS.load(core::sync::atomic::Ordering::Relaxed)
+                );
+            }
+        }
+    }
     // Call internal write function
     let result = match ext4_file_write(fs, &mut ext4_inode, offset, buf) {
         Err(e) => {
