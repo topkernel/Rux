@@ -10404,3 +10404,141 @@ FOR THE 91ST (priority order):
    glacial-writeback (~300KB/s) + sync-hang + dirty-page-loss bugs
    (90.2) — the fs lane now has four separate parity/correctness
    items from this campaign.
+
+### 96. FS-INTEGRITY LANE — the sync(2) INODE LOSS: root cause found, fixed, and verified (branch fs-integrity, commit 6dd6507e)
+
+**VERDICT: the root cause is NOT the ext4 write path. The sync(2) writeback
+path resolved its target inode ONLY through the inode cache, with the
+contract "miss = skip" — and the icache is a BOUNDED, DIRECT-MAPPED cache
+(1024 single-slot buckets). The collected dirty inodes were therefore
+almost never found, and their dirty frames were never written back. The
+file lost BOTH its data and its size update.**
+
+#### 96.1 The measurement that named it (fiD1 boot, the branch's own instrument)
+
+The fiD1 boot already carried the instrument that shows it — the head
+commit's FI-COLLECT / FI-ICACHE-MISS prints:
+
+    [20.916] FI-COLLECT fs=0xffff88807d1c5810 ino=2474 pages=2048 dirty=2048
+    [20.940] FI-ICACHE-MISS fs=0xffff88807d1c5810 ino=2474 — collected dirty but NEVER flushed
+
+24/24 collected entries missed (the prints are capped at 24, and the
+lists are the SAME entries in the same order) — a 100% miss rate, not a
+race. ino=2474 is the 8 MB pattern file (2048 pages = 8 MB ✓).
+
+**CORRECTION to the handoff premise ("the DATA blocks are verifiably on
+the device, only the metadata was lost"): NOT TRUE on the current branch
+state.** Measured on the crashed images themselves:
+
+    userdata-fiD1.img (pre-fix)  raw grep "FIPATTERN": 0 hits
+    userdata-fi4.img  (pre-fix)   raw grep "FIPATTERN": 0 hits
+
+and the on-disk inode (parsed directly, run/fi-inspect/fi_inspect.py):
+
+    ino=2474  size=0  md5=d41d8cd98f00b204e9800998ecf8427e (md5-of-empty)  extents=0
+
+The on-disk inode has size 0 AND an EMPTY extent map (magic 0xF30A,
+eh_entries=1, the entry itself zeroed). So the file was CREATED and never
+grown: neither the data nor the metadata ever reached the device. The
+"2.6M raw-grep hits" figure in the earlier commit message does not
+reproduce on the images that commit measured (both grep to 0 today).
+
+#### 96.2 The fix (commit 6dd6507e)
+
+1. `ext4::resolve_writeback_inode(fs_id, ino)` — the icache first (the
+   live VFS inode, with the writer's published EOF); on a MISS the inode
+   is materialized from the ON-DISK inode. `create_vfs_inode_in` already
+   lifts that copy's size to the page cache's dirty extent, so the flush
+   sees the true EOF and does not discard the frames as "past EOF".
+   A cache miss may cost performance, never data.
+2. A live-instance registry (`ext4_instance_register/unregister/from_id`)
+   is the liveness authority for the (fs_id, ino) identity: fs_id IS the
+   Ext4FileSystem pointer, and `unmount_ext4` FREES the box — a
+   page-cache entry outliving its filesystem must not dereference it.
+3. The reclaim/writeback path (`shrink_reclaim`) had the same hole.
+4. sync(2)/syncfs(2)/shutdown now persist the flushed files'
+   INODE-TABLE BLOCKS (the new size) AFTER the buffer-cache drain that
+   carries the DATA — the discipline `ext4_sync_file_inner` already
+   applies for fsync(2), in the ordered-data order (data first,
+   metadata last).
+
+Instruments kept for the lane: FI-WRITE-ERR (the Err arm of
+ext4_write_at_core — errno + ino + offset + len + the extent state),
+the write_inode per-path counters (`wi_flush` / `wi_direct` in
+FI-SUMMARY), FI-SYNC-INOTABLE.
+
+#### 96.3 The crash-window A/B (rig fiE: HARD kill, no guest-side flush)
+
+New rig: `run/boot-fiE*.sh` + `run/system-fiE1.img` (a copy of
+system-fi4.img with a new guest script). The guest writes 8 MB of
+`FIPATTERN0123456789`, waits for the size to reach 8388608, calls
+/bin/sync, prints the markers and then PARKS — it never reboots, because
+the OH init's reboot PLUGIN does an ORDERLY shutdown (stopAllServices →
+sync → umount /data, 10 s in the fiD1 boot) which MASKS the crash-window
+loss. The driver terminates QEMU at SECS: a power cut from the guest's
+point of view.
+
+    boot   kill    sync returned?   on-disk inode                 raw grep
+    fiE1   45 s    yes (22.9 s)     size=8388608 md5=01cabbdd…4247   419430
+    fiE2   45 s    yes (21.7 s)     size=8388608 md5=01cabbdd…4247   419430
+    fiE4   90 s    yes (21.7 s)     size=8388608 md5=01cabbdd…4247   (see below)
+    fiE3   45 s    NO  (>34 s)      size=8388608 md5=cb6290ca…0f49   145202
+
+01cabbdd75d72d410fa93a5942ac4247 IS the exact md5 of the 8 MB pattern
+file (computed on the host) → byte-exact read-back, zero loss. The
+pre-fix image for the same rig: size=0, md5-of-empty, 0 grep hits.
+
+#### 96.4 What fiE3 exposes (the NEXT items, in the same discipline)
+
+(a) **sync(2) does not return in time** (the 90.2 #1 "sync hangs" item):
+    the flush finished at 10.977 s, the buffer-cache drain was still
+    running 34 s later (the machine stayed alive and busy meanwhile —
+    not a deadlock). Measured drain cost for ~2050 dirty blocks: 12.6 s
+    (fiE4), 14.0 s (fiE1), >34 s (fiE3). The drain walks the whole block
+    cache and writes every dirty buffer in HASH ORDER.
+(b) **The drain is not ORDERED, so a crash inside it leaves a file that
+    looks complete but is not**: fiE3's file has the FULL size and the
+    FULL 2048-block extent map, but only ~35 % of the data blocks reached
+    the device (145202/419430 grep hits, md5 mismatch) — the inode-table
+    block was written before the data blocks it describes. The fix needs
+    an ordered drain (data blocks first, inode-table blocks last); the
+    block cache's `sync_all` has no notion of metadata-vs-data ordering
+    (`sync_all_excluding` skips exactly ONE block).
+(c) **fdatasync/fsync parity: OK.** Both go through `do_fsync`, which
+    flushes the inode's dirty frames and then `ext4_sync_file_inner`
+    syncs the data blocks AND the inode-table block — the size IS
+    persisted by fdatasync (Linux requires the size to retrieve the
+    data). One divergence to record: our flush path also refreshes
+    mtime/ctime, which Linux's fdatasync must NOT do.
+(d) **The metadata_csum gap is much smaller than believed** — MEASURED
+    with the host-side inspector: 0 bad checksums in 2466 (pre-fix) /
+    2471 (post-fix) used inodes of the userdata image. What e2fsck
+    actually trips on is inode 12 ("/service"): the directory entry still
+    references an inode whose mode was zeroed by a FREE (i_links_count
+    0, stale checksum) → a DANGLING DIRENT (the unlink freed the inode
+    but left the entry). e2fsck -fy "deletes" kernel-written dirs
+    because of that dangling entry, not because the csum algorithm is
+    wrong. The remaining csum nit: a freed inode keeps its stale
+    checksum (the mode-zeroing must re-seal it).
+
+#### 96.5 Tools (committed with this section)
+
+- `run/fi-inspect/fi_inspect.py` — host-side ext4 inspector (superblock
+  → group descriptors → inode table → extent tree → data): the on-disk
+  size, the block map, the file md5 and the inode checksum verdict.
+  It exists because e2fsprogs REFUSES these images (the dangling-dirent
+  inode aborts e2fsck and debugfs). Two of my own offsets were wrong
+  at first (i_size_high is at 0x6C, s_desc_size at 0xFE) — the kernel's
+  on-disk structs were right both times.
+- `run/boot-fiE*.sh` + `run/system-fiE1.img` + `run/fi-inspect/hp87-run-fiE1.sh`
+  — the crash-window rig (hard kill, no guest-side flush).
+
+#### 96.6 Next hop (same lane, same discipline)
+
+1. The ordered drain (96.4b): the inode-table blocks must not reach the
+   device before the data blocks they describe. That is the only way a
+   crashed sync can leave a "complete-looking" file with partial data.
+2. The sync-hang/drain cost (96.4a): 12-34 s for 2050 blocks is ~6-16
+   ms per block — the drain's per-block cost is the thing to measure.
+3. The dangling dirent on unlink (96.4d): the entry must go when the
+   inode is freed, and a freed inode must re-seal its checksum.
