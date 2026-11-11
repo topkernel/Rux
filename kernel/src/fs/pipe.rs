@@ -877,13 +877,17 @@ fn fi_pipe_phase(site: &str, n: usize, bytes: *const u8) {
         // skipped per chunk, write-in lines healthy. Next discriminator:
         // is the loss BETWEEN chunks (each chunk internally periodic-20)
         // or INSIDE a chunk (a torn segment)? Verify the FULL chunk
-        // against its own first-byte phase.
+        // against its own rotation: a pure chunk whose SIG window STARTS
+        // at offset p satisfies buf[i] == SIG[(i + 20 - p) % 20] — the
+        // v1 formula SIG[(p+i)%20] was INVERTED for p != 0 (torn_at=0 on
+        // every shifted chunk regardless of purity; p == 0 chunks were
+        // verified correctly and came out PURE).
         let mut torn_at: Option<usize> = None;
         if anomalous && n <= 65536 {
             if let Some(p) = phase {
                 let buf = core::slice::from_raw_parts(bytes, n);
                 for i in 0..n {
-                    if buf[i] != SIG[(p + i) % 20] {
+                    if buf[i] != SIG[(i + 20 - p) % 20] {
                         torn_at = Some(i);
                         break;
                     }

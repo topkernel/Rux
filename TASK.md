@@ -10635,3 +10635,43 @@ CORRECT for what it receives — including under the full overlap.
    item 1, not on the fs: razor6's shape (write completes before sync)
    was byte-exact modulo the single EIO page, and the EIO retry now
    covers exactly that.
+
+#### 97.4 razor-8 (addendum): the pipe loss pinned to the read-out side, + the mass-EIO window
+
+Boots razor8b/8c/8d (kernel with the pipe phase probes, fi_pipe_phase
+in fs/pipe.rs — keyed to the FIPATTERN signature, silent for other
+traffic; three keying lessons recorded in the probe's comment):
+
+- WRITE-IN (yes -> pipe): every chunk a healthy 20-byte line, phase 0,
+  from first to last (heartbeats + anomaly silence).
+- READ-OUT (pipe -> head): consecutive 4096-byte chunks at signature
+  phases 0, 4, 8, 12, 16, 0, ... — an EXACT +4-per-chunk advance from
+  the first chunk pair (contiguous would advance +16): the reader's
+  stream position skips 8 bytes per 4096-byte chunk. Phase-0 chunks
+  verified FULLY periodic-20 (torn_at=None) — the loss sits BETWEEN
+  chunks (chunk boundaries), not inside. (The v1 torn_at formula was
+  inverted for phase != 0 — fixed in-tree; the p==0 verifications were
+  correct.)
+- Onset is load-dependent: razor7's drift began ~page 86 (when the
+  64KB ring first saturated), razor8b's from page 1 — the ring-full
+  writer-block/wake cycle is in frame.
+- Every cursor mutation in fs/pipe.rs was audited count-exact
+  (read/read_user/write/write_user advance by the copied count under
+  the buffer spinlock; resize is not called). The mechanism remains
+  open — remaining suspects: the read_user second-segment boundary,
+  short reads interleaving (n=40/n=360 chunks observed between the
+  4096s — healthy-shaped, invisible to the anomaly print), and a
+  lost-wakeup double-delivery shape in the wait queues.
+- razor8b ALSO hit a MASS-EIO window: every block read inside the
+  flush returned -5 for seconds (4 consecutive failures per page with
+  the retry: FI-WRITE-ERR errno=-5 + FI-FLUSH-RETRY ok=false tries=3
+  at every offset; final image: size=8388608, 939/2048 blocks, empty
+  content). blkdev_read's sync path (submit_request -> virtio
+  request_fn) FAILS instead of waiting under load — separate P0-class
+  device-path item.
+
+Acceptance status: the fs writeback machinery is proven byte-faithful
+at every layer (3-layer ext4 phase probes: buffered-src fires, block-
+write and flush-src never mismatch); the crash-window md5 gate is
+blocked on (1) the pipe 8-byte skip and (2) the mass-EIO window —
+both now carry on-branch probes that name them on any future boot.
