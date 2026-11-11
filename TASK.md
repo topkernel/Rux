@@ -11997,6 +11997,27 @@ identity md5-verified (c70129af..., run/hp100r-elf.md5). w2 = 0 bytes
   the chains for the top 5 IPs (the parser ignores frames) is the
   101st's next cheap step.
 
+FP-CHAIN WALK (done, same night — the four named engines):
+  (a) EXIT/REAP STORM: enable_irq x5,909 via
+      schedule<-release_task<-do_wait_nonblock<-sys_wait4; wrmsr
+      x2,159 via send_icr<-send_ipi<-flush_tlb_others<-munmap (TLB
+      shootdown IPIs on every exit's mm teardown, 8-CPU fanout).
+  (b) ALLOCATOR IRQ SECTIONS: enable_irq x4,830 via
+      irq_restore<-SpinlockIrqGuard<mm> drop<-kmalloc; plus
+      small_alloc alloc/free/flush_batch guard drops (~2,760
+      more) — the slab's irq-off toggle cost, per-op.
+  (c) KERNEL PRINTK FROM HOT PATHS: acquire_emit_lock x2,828 via
+      emit_to_console<-printk_ln<-send_signal_g (the KSIG/SWI dfx
+      prints ride the SIGNAL path) + x873 via kill_other_threads
+      (KOT-KILL prints) — the instrument tax, measured.
+  (d) BUDDY DEFERRED-FREE POLLS: atomic_load<usize> x~1,900 via
+      try_defer<-dealloc_direct/realloc.
+  Levers by name: TLB-shootdown batching on exit-munmap; slab
+  irq-section narrowing; dfx-print gating off hot paths (they are
+  already capped — the cap itself is the cost); hilog volume
+  (userspace). All four are downstream of the same install-storm
+  process churn the stretch family measures.
+
 #### 100.7 Gates
 
 Zero kernel-code changes this session (findings only; rigs live in
@@ -12011,12 +12032,12 @@ tiers owed by this session's diff.
    one hit decodes in minutes (RIP/RFL histogram + gdb bt).
 2. Stretch family = the common root (D-early x4, C x1, A's dried-up
    event stream, 202s ladders on hot arms): the FRESH tail record is
-   IN (100.6 addendum, run/hp100r-w1.data) and the kernel table is
-   re-ranked honestly — enable_irq + TTAS-poll + console-emit are
-   the kernel-side faces; next step is walking the record's fp
-   chains for the top-5 IPs to name the callers, then ONE lever
-   prototype (the hilog/log-pipeline volume is the both-sides
-   candidate).
+   IN and FULLY DECODED (100.6 addendum: honest table + fp-chain
+   walk, run/hp100r-w1.data). Four named kernel engines (exit/reap
+   storm incl. munmap TLB IPIs, allocator irq-sections, dfx prints
+   on signal/kill hot paths, buddy deferred-free polls). Next:
+   prototype ONE lever with a same-rig A/B — TLB-shootdown batching
+   on exit-munmap is the largest single kernel line (2.2k samples).
 3. Face E: 0/14 since the 99th's orphan-notify fix (0 reproductions
    vs the 97th's 3-in-a-day). One more quiet-arm series without a
    draw retires it as fixed-by-a38e47a5.
