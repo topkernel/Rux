@@ -1,4 +1,0 @@
-CASE[lat_proc,exec] base rep1 load=3.85 VAL=96.6334
-CASE[lat_proc,exec] fpgate rep1 load=3.85 VAL=99.9129
-CASE[lat_proc,exec] base rep2 load=3.95 VAL=88.3889
-CASE[lat_proc,exec] fpgate rep2 load=4.04 VAL=113.9452
