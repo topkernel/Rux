@@ -11227,3 +11227,21 @@ the periodic arm live. Decode (run/oh-hp95h-serial.log):
      proceeds to StartAbility(launcher), stall proceeds nowhere.
   3. hp94d's shape D remains uncaptured-with-dumps (user-key chain
      freeze pre-CompleteAddUser; bms bundles.ready never set).
+
+#### 95.7 ADDENDUM: LOGLEVEL A/B first numbers (rig-side lever)
+
+  arm            boots                      launcher.ready
+  LOGLEVEL=4     hp95e/f/g (hunt series)    46.187 / 45.311 / 51.033 s
+  LOGLEVEL=7     hp95i                      101.477 s (anim.fin itself
+                                             44.8 vs 26-30 at LL4 — the
+                                             whole ladder stretches)
+  (hp95j = second LL7 sample, lands in run/hp95-ab-ll7.log after this
+  session's quota; same kernel, same pristine userdata, same
+  leakhunt+periodic arm, SMP8+4G KVM. Kernel cmdline default stays 7 —
+  this lever lives in the RIG scripts only, per the mandate.)
+  Interim read: on the storm-fixed kernel the LL7 tax is far larger
+  than the historical +11-14s estimate (n=1, but +50s over the LL4
+  median and every ladder stage shifted late). The 94.3 table's
+  hilogd 32.9k kernel-side samples line up with a serial-heavy
+  default level. The hunt/A-B scripts already default to LOGLEVEL=4;
+  keep it that way for all perf-relevant rigs.
