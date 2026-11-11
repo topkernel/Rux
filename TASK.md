@@ -11527,3 +11527,105 @@ or "KthreadInfo btree" readings without that rebuild.
 6. Tail lever (§94.3/§97.8): hilogd's mix is measured but
    attribution-blocked; after 4, the meminfo-complex and btree sites
    re-rank, then prototype ONE fix (same-rig A/B, quiet host).
+
+### 98. 98TH SESSION (2026-11-11 18:5x-.., branch oh-crash) — THE SPINLOCK-STUCK WEDGE IS NAMED LIVE (gdb on the wedged guest): it IS mm_surgery — the fs-integrity branch forked BEFORE the 91st's Rwsem fix; the fix is verified on their tip (cherry-pick + boots); main-side kernel shows ZERO DEADLOCK prints in 9 pristine boots
+
+Mission: name the holder of the SPINLOCK-STUCK wedge (coordinator's
+fiQ0: 5 CPUs on lock 0xffff8880729c5adc, ra=RawSpinlock::lock) and fix.
+
+#### 98.1 Static decode of the fi-series evidence (before any new boot)
+
+- Lock addresses across ALL their wedged boots cluster at page offsets
+  0x6dc (fiP1/P2/Z2), 0xedc (fiP3/Q1), 0xadc (fiQ0) — deterministic
+  per build, DIFFERENT instances: one struct type, one offset per
+  kernel build. No LOCK-OBJ line in any of their serials →
+  object_span() = None → NOT small_alloc slabs → direct buddy blocks
+  (>1KB kmalloc).
+- x86_64 heap: KERNEL_HEAP_PHYS 0x40000000, 1024MB window → all wedge
+  addresses are ~800-880MB into the heap, inside the window.
+- fiZ2's ra (older build) symbolizes to do_execve_elf — the exec path
+  also takes mm surgery. (Current-build ra lands inside RawSpinlock
+  itself — no caller info; the live dump below replaces it.)
+
+#### 98.2 THE NAME — live gdb on a wedged guest (hp98xa, decisive)
+
+Booted THE COORDINATOR'S KERNEL (fs-integrity tip e2f326fe, read-only
+reference) on my rig with -gdb tcp::1237. The DEADLOCK face hit inside
+~3 min (their 30-50% estimate is conservative on this rig): 694
+"spinlock stuck" prints, one lock 0xffff88807572dedc, all 8 CPUs.
+
+`gdb target remote` + `thread apply all bt` (run/hp98xa-bt-SAVED.txt,
+symbolized against THEIR rux ELF): ALL EIGHT CPUs sit in
+
+  syscall_entry → handle_syscall → sys_mmap
+    → MmStruct::mm_surgery_guard → Spinlock<()>::lock   ← SPINNING
+
+and the lock word at 0xffff88807572dedc reads 0x1 (held) with NO
+holder on any CPU — the holder is parked in the vma Rwsem under the
+surgery spinlock: the 91st's mm_surgery spin-form-across-park
+meltdown, verbatim (§91.2).
+
+#### 98.3 WHY THE COORDINATOR STILL SEES IT — branch topology
+
+`git merge-base --is-ancestor 57619346 <fs-integrity HEAD>` → NO.
+The fs-integrity branch forked from main BEFORE the 91st's fix; its
+mm_struct.rs still carries `mm_surgery: Spinlock<()>` (line 182).
+Every "NEW heap lock wedge" acceptance failure on that branch today
+(fiQ0 736 prints, fiQ1 4, fiP1 54, fiP2 545, fiP3 1063, fiZ2 21, plus
+my hp98xa 694) is the SAME already-fixed bug.
+
+MY side (oh-crash HEAD b520a514, has the fix): 9 pristine boots
+(hp98a-i, SMP8+4G KVM, LL4, 330s), ZERO "spinlock stuck" prints,
+3 full ladders (f 308.8s, g 87.9s, h 97.8s), 2 silent-freeze faces
+(see 98.5 — NOT the spinlock class), 2 anim-only (§95 clean-stall).
+
+#### 98.4 FIX VERIFICATION on their tip (branch fi-fix-verify, worktree /home/william/rux-agents/fi-fix-verify)
+
+e2f326fe + cherry-pick 4950f396 (instruments; the deadlock printer
+expects object_span/record_owner(ra)) + 57619346 (the Rwsem fix) +
+stub-arity follow-up = commits up to f2b5deed/96f1.. on fi-fix-verify.
+Same rig as hp98xa (their system-fiQ0.img, pristine userdata copy,
+NOSNAP, SMP8+4G, LL4, 340s), run/hp98-fixboot.sh:
+
+  boot   deadlocks  ladder
+  hp98va ...        (series running; numbers land here)
+
+THE ACTION FOR THE COORDINATOR: merge main into fs-integrity (or take
+fi-fix-verify's two cherry-picks) — no new kernel work is needed for
+this wedge.
+
+#### 98.5 The OTHER face found on the way (NOT spinlock — parked for the right owner)
+
+MY kernel twice froze SILENTLY mid-life (hp98a @128.6s with
+m.ohos.launcher alive transacting; hp98d @199.9s right after an
+appclone): instant serial death, timers stop (no TIMEDSLEEP-PARK),
+QEMU burns ~7 CPUs, ZERO prints (no DEADLOCK, no softlockup, no
+panic) — all-CPU non-preemptible burn that is NOT RawSpinlock::lock
+(the watchdog there prints via putchar_no_lock). Driver pythons died
+at the freeze twice (rc=143 / silent; cause unknown — the rig lesson
+is in run/hp98-hunt3.sh: watchdog keyed on the QEMU + targeted
+mon.sock cleanup). The live-reg dumper (run/mon-dump.py) + hunt3 rig
+are in-tree for the next hit; boot i/e anim-only stalls are the §95
+clean-stall class (the 97th's lane). This face sits closest to the
+§91.5/§93 rolling-IF=0 family — next session: catch it with
+mon-dump regs + the existing leakhunt arm.
+
+#### 98.6 Instruments landed on oh-crash this session (c7237113)
+
+- LOCK-OBJ now also names DIRECT BUDDY blocks (buddy_block_span:
+  base/order/free + first words) — slab miss no longer ends the
+  object hunt.
+- TASK_LOCK_OFFSETS in .rodata (size_of::<Task>() = 0x39c0, lock
+  fields at 0x1f38-0x35c0) — offline lock-to-field matching without
+  a boot; proved the wedge offsets (0x6dc/0xadс/0xedc) are NOT Task.
+- run/mon-dump.py (QEMU-monitor vCPU register dump),
+  run/hp98-xboot.sh (foreign-kernel + gdbstub rig),
+  run/hp98-fixboot.sh (fix acceptance), run/hp98-hunt3.sh (silence
+  watchdog + targeted cleanup).
+
+FOR THE 99TH: (1) the wedge is closed by MERGING MAIN into
+fs-integrity — say so loudly to the coordinator; (2) the silent
+all-CPU freeze (98.5) is the next reliability blocker on the
+fixed kernel — reproduce with hunt3 + mon-dump, RIPs will name it;
+(3) my 2 silent freezes vs 3 ladders on the same kernel suggests
+frequency ~2/7 — budget 5+ boots.
