@@ -12367,3 +12367,148 @@ lock_holds fetch_add sit INSIDE the IF=0 window; try_defer's
 5. hp87-out.img (256MB) holds the extracted w1 record; hp100r-w2 was
    lost to the hiperf exit-path stall (0 bytes) — the 90-180s window
    of a PRISTINE lazy-mask boot is the next record worth taking.
+
+### 105. 105TH SESSION (2026-11-12 03:0x-.., branch oh-crash) — the SA-chain round-trip is DECOMPOSED and the fast path is ACQUITTED: the 103rd's "4-5ms binder RTT" class was PRINT-INDUCED (the SAREG family's emit-lock volume); print-free, ~70% of sync txns queue <256us and the residual 2-16ms tail (8.5%) is a saturation consequence (no-idle wake->run), not a scheduler-policy divergence; WORLD is healthy (mean 3.7us); a credit-gated wake-preempt experiment showed NO effect (negative-vlag hot servers never earn credit) and was REVERTED; the print family is re-gated behind cmdline binderprobe=1 leaving dfx=bindertrace a passive census
+
+Mission: SA chain +14.1s / param stall 3.0s / SA-registration
+serialization / install stream (the 103rd's ladder).
+
+#### 105.1 Instruments (commits 29bc5480 + f4ba8e3b, all bindertrace-gated)
+
+- ns-domain lifecycle stamps on every sync txn: enq_ns (build),
+  wake_ns (the enqueue's wake loops), pick_ns (server BR_TRANSACTION
+  staging). BRTT census: 16-bucket histograms of q/e/w (+ WORLD
+  acquire-wait L), 4 lines per 4096 completed sync txns.
+- QPICK (240/boot): per-instance >2ms queue-wait attribution — q2
+  (wake->pickup), q3 (wait-return->staging), elig, sched WAKE_DISP
+  latches (idle-claim+IPI / no-idle-sync / no-idle-async), idle mask,
+  nr_running.
+- cmdline binderprobe=1 now gates the SAREG/SACSA/SLTX/btx/payload-
+  head PRINT family (emit-lock volume was inflating measured RTTs);
+  plain dfx=bindertrace arms ONLY the passive census. Hunts needing
+  SAREG/SLRD pairing arm BOTH.
+
+#### 105.2 The measurement chain (boots hp105a-i, pristine ud-f2-v15
+reflink copies, SMP8 4G KVM LL4; a/b/d/e print-armed, g/i print-free)
+
+- WITH the print family armed: q cluster 2-16ms on 61-63% of sync
+  txns; "sender-build" (enq->wake) p50 ~3ms. PRINT-FREE: build ~30us,
+  ~70% of txns queue <256us, tail 8.5% at 2-16ms. The 103rd's
+  "~4-5ms fast-path RTT from SAREG pairing" and my first census
+  readings were the instrument taxing the patient. Real boots (no
+  dfx) never paid it after serialgate.
+- Print-free tail split: idle-claim handoffs (disp=1) NEVER exceed
+  2ms; the entire tail is NO-IDLE dispatch — sync no-idle q2 p50
+  4.2ms (n=96), async no-idle q2 p50 24ms (n=134; install-stream
+  daemons waiting behind exec-storm incumbents).
+- q3 = 7-19us on the same population: the reader's wait-return ->
+  staging path is instant. WORLD acquire-wait census: 308k
+  acquisitions / 1141ms total (mean 3.7us, 99.7% <32us, max 7ms).
+  The global WORLD spinlock is NOT the binder bottleneck (the ~20%
+  TTAS spin share in hiperf records lives elsewhere — emit lock,
+  GRQ, allocator).
+- 89% of slow pickups had eligible PARKED readers; multiple samgr
+  workers do pick up (no LIFO monopoly). Pool capacity, wake
+  delivery and the read path are all acquitted.
+
+#### 105.3 The wake-preempt experiment (REVERTED, nothing landed)
+
+Design: front placement at leftmost-1 for wakees with lag > 700us
+credit + recency-gate removal in preempt_check_wake (the reference's
+wakeup-preemption shape for a leftmost-pick scheduler). Census A/B:
+disp=2 q2 p50 4.2 -> 4.9ms (noise) — NO effect. Root cause of the
+null: hot IPC server threads run MORE than fair share between naps,
+so their vlag at sleep-dequeue is NEGATIVE — credit-gated boosts
+never fire for exactly the population that waits; on a fully-busy
+box the reference behaves the same (its SA chain is fast because
+its cheaper per-op work leaves idle CPUs for the idle-claim path).
+The 2-16ms tail is a SATURATION CONSEQUENCE of the storm's per-op
+cost, not a scheduler bug. Scheduler files restored untouched; no
+behavior change landed without numbers.
+
+#### 105.4 Consequences for the mission ladder
+
+- The SA-chain +14.1s is NOT binder-round-trip mechanics: e (handler
+  exec) dominates (sum 67s/4096 txns in-window, the >=256ms classes
+  are spawn-waiting handlers) and the q-tail rides box saturation
+  during exec storms. Both point at per-op cost + spawn cost (the
+  101st's exec/fork and per-syscall lanes) — the strongest remaining
+  kernel levers for the middle phases.
+- The remaining always-on serial (hilog [kmsg] writes through
+  /dev/kmsg, ~1.0MB/boot post-serialgate) is init-storm-visible but
+  small (73 init lines / 18KB in the 5.7-8.9s window): printing is
+  not the param stall.
+- The 3.0s param stall (init busy 5.8->8.8s in chown/chmod/selinux
+  walk syscalls before its epoll accepts the param sockets): syscost
+  per-syscall boot banked (105.5) — kernel lever = whichever syscall
+  class shows reference-gap cost there.
+
+#### 105.5 The wall-time and fs attribution (hp105j/k: dfx=bindertrace
+syscost=1 [fsw=1], clean-worktree kernel ff380f03 = f4ba8e3b, pristine
+ud-f2-v15, SMP8 4G KVM LL4)
+
+- SYSCALL WALL TABLE (t=60/120s cumulative): nr=202 futex 666k/787k
+  calls avg 9.6/25ms; nr=16 ioctl 60k/98k avg 67/98ms (the binder RTT
+  wall — matches census e); nr=281 epoll_pwait 405k/1.13M avg 3.2/3.9ms
+  (event-loop parking; NOT an exec storm — 281 is epoll_pwait on
+  x86_64, the 105th's first read of "405k execveat" was a decode
+  error); nr=35 unlink 5.0k/7.2k avg 182/271ms WALL.
+- THE UNLINK WALL IS PREEMPTION, NOT IO: fsw (t=90s) counts the
+  kernel-side unlink BODY at 15,749us TOTAL (~3us each, max 345us);
+  mkdir 708 calls / 3.25s total / 470ms MAX; rmdir sum 1.18s / 458ms
+  max. The provisioning fs churn (mk/rm/ul counters frozen after t=90s)
+  all lands in the boot window; the hundreds-of-ms syscall walls are
+  the SAME saturation wait the binder q-tail shows (task preempted
+  mid-syscall behind the storm), not ext4 IO. Kernel-side fs bodies
+  are healthy at these volumes.
+- KERNEL-CPU IF=0 rest-sites (t=60s): sched.rs:2938 (GRQ lock acquire
+  in schedule()) 9.1M acquires / 28.0 CPU-s (avg 3.1us) + percpu.rs:126
+  (CpuLocal::with irqsave) 41.1M / 19.0 CPU-s + slab.rs:640 23.4M
+  allocs / 14.9 CPU-s + file.rs:1137 16.7M / 9.7 CPU-s. The GRQ-spin
+  + percpu pair IS the known TTAS ~20% share — a per-schedule tax
+  under the storm, design-level (global run queue, see
+  design-divergences).
+- nr=228 clock_gettime: 21.3M calls by t=120s (~178k/s) at 3us avg =
+  ~63 CPU-s = 6.6% of box capacity, all SYSCALL-side (no vDSO; sc109
+  removed the HPET MMIO but the trap remains). Burners: FFRT runtimes
+  + hilogd. A vDSO clock_gettime is the single biggest per-op lever
+  left with a measured number on it.
+- uart: if1 5,759 emits avg 831us (4.8 CPU-s) + if0 187k bytes avg
+  23us (4.4 CPU-s incl. 193k LSR polls). Console emit is batched
+  (puts_batch); the residual is per-VM-exit register traffic on the
+  KVM 16550 — bounded by exits-per-byte, not fixable in-guest without
+  a different console device.
+
+#### 105.6 STATUS / FOR THE 106TH
+
+- LANDED (pushed, oh-crash f4ba8e3b): BRTT/QPICK/WL census + q3 + the
+  binderprobe=1 print re-gate. Dual-arch build rc=0 (x86_64 in-tree,
+  riscv64 in oh-crash-105). No kernel behavior change — nothing to
+  re-gate beyond the tier-1 note that dfx=bindertrace now costs ~2
+  rdtsc + 4 stores per sync txn.
+- ACQUITTED with numbers: binder fast-path RTT (print-free ~70% of
+  sync txns queue <256us), WORLD lock (mean 3.7us), wake delivery
+  (idle-claim handoffs <2ms), reader pools (elig>0 on 89% of slow
+  pickups, multiple pickers), the read path (q3 ~10us), fs unlink/mkdir
+  bodies (3us/4.6ms avg). The SA-chain +14.1s and install +16.7s ride
+  (a) handler-exec spawn waits (101st lane), (b) saturation wait under
+  the storm — whose root is per-op kernel cost: GRQ/percpu/slab taxes
+  + clock_gettime-without-vDSO (6.6% of capacity) + exec/fork cost.
+- The param-channel 3.0s stall: init is genuinely busy executing its
+  storm (chown/chmod/walk/spawn syscalls; only 73 hilog lines/18KB in
+  the window — printing is not the cost); no kernel-side wake or fs
+  body accounts for it. It rides the same per-op cost. No kernel
+  lever found short of making every hop cheaper.
+- HIGHEST-VALUE NEXT (all with measured numbers attached):
+  1. vDSO clock_gettime (21M calls/boot class, 6.6% capacity).
+  2. GRQ-lock / percpu-irqsave / slab-alloc per-schedule taxes
+     (28+19+15 CPU-s per minute of storm).
+  3. exec/fork spawn cost (the e-tail; 101st's active lane).
+  4. If the wake-preempt idea is ever retried: it needs a mechanism
+     that fires for NEGATIVE-vlag hot threads (credit-gating is
+     structurally wrong for IPC servers) — e.g., the reference's
+     deadline-pick. Do not re-land the 105.3 experiment.
+- Rig notes: hp105-boot.sh (reflink-per-boot, NOSNAP SMP8 LL4 320s);
+  oh-crash-105 worktree = clean f4ba8e3b build (both arches verified),
+  run/ symlinked to oh-crash/run; binderprobe=1 arms the old SAREG
+  family when a hunt needs it.
