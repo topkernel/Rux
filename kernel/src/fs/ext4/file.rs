@@ -2590,6 +2590,17 @@ pub fn ext4_flush_dirty_inode(
         }
         cache.flush_done(fs_id, ino, &done[..n]);
         total += n;
+        if total >= 100 {
+            // FI-DIAG: a BIG flush ran (eviction or sync) — name it.
+            static FI_BF: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if FI_BF.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+                crate::pr_err!(
+                    "FI-BIGFLUSH ino={} pages>= {} vfs_size={}",
+                    ino, total, inode.get_size()
+                );
+            }
+        }
         let last_idx = chunk[n - 1].0;
         if last_idx == u64::MAX {
             break;

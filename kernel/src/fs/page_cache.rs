@@ -1454,11 +1454,27 @@ impl PageCache {
                         continue;
                     }
                     let entry = unsafe { &*p };
-                    let has_dirty = {
+                    let (has_dirty, npages, ndirty) = {
                         let g = entry.lock.lock();
-                        g.iter()
-                            .any(|(_, pg)| !pg.invalidated && pg.dirty.load(Ordering::Acquire))
+                        let mut nd = 0usize;
+                        let np = g.iter().filter(|(_, pg)| !pg.invalidated).count();
+                        for (_, pg) in g.iter() {
+                            if !pg.invalidated && pg.dirty.load(Ordering::Acquire) {
+                                nd += 1;
+                            }
+                        }
+                        (nd > 0, np, nd)
                     };
+                    if npages >= 128 {
+                        static FI_C: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        if FI_C.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 10 {
+                            crate::pr_err!(
+                                "FI-CENSUS fs={:#x} ino={} pages={} dirty={}",
+                                entry.fs_id, entry.ino, npages, ndirty
+                            );
+                        }
+                    }
                     if has_dirty {
                         work[n] = (entry.fs_id, entry.ino);
                         n += 1;
@@ -1683,7 +1699,15 @@ impl PageCache {
     /// page was already cached (the caller's data did NOT land — a racing
     /// writer won the insert; re-loop through get/copy to publish it).
     pub fn insert_dirty(&self, fs_id: u64, ino: u64, page_index: u64, data: &[u8]) -> bool {
-        self.insert_ext(fs_id, ino, page_index, 0, data, true)
+        let ok = self.insert_ext(fs_id, ino, page_index, 0, data, true);
+        if ok && page_index % 512 == 0 {
+            static FI_I: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if FI_I.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
+                crate::pr_err!("FI-INSERT fs={:#x} ino={} idx={}", fs_id, ino, page_index);
+            }
+        }
+        ok
     }
 
     fn insert_ext(

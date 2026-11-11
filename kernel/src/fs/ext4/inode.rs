@@ -482,6 +482,17 @@ pub fn write_inode(
 ) -> Result<(), i32> {
     use crate::fs::bio;
     crate::dfx::fsw::note_write_inode();
+    // FI-DIAG: was the inode-table update ever WRITTEN for the flushed
+    // files before the crash? (fi-lane: sync loses size)
+    {
+        static FI_WI: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if inode.size > 1_048_576
+            && FI_WI.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24
+        {
+            crate::pr_err!("FI-WRITEINODE-BIG ino={} size={}", ino, inode.size);
+        }
+    }
 
     if ino == 0 {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());

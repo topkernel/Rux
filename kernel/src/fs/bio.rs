@@ -1065,6 +1065,28 @@ impl BlockCache {
     fn sync_all(&self) -> Result<(), i32> {
         // Phase 1: Collect dirty buffers (increment refcount to prevent eviction)
         let mut dirty_list: Vec<*mut BufferHead> = Vec::new();
+        // FI-DIAG: the standing durability point — how much work does it
+        // actually see? (fi-lane: sync(2) loses inode-table updates)
+        {
+            let mut n_dirty_probe = 0usize;
+            for i in 0..self.hash_size {
+                let bucket = self.buckets[i].lock();
+                let mut cur = bucket.head;
+                while let Some(ep) = cur {
+                    unsafe {
+                        if !(*ep).bh.is_null() && (*(*ep).bh).is_dirty() {
+                            n_dirty_probe += 1;
+                        }
+                        cur = (*ep).hash_next;
+                    }
+                }
+            }
+            static FI_D: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if FI_D.fetch_add(1, Ordering::Relaxed) < 10 {
+                crate::pr_err!("FI-SYNCALL dirty_buffers={}", n_dirty_probe);
+            }
+        }
 
         // No need to disable interrupts globally: no interrupt handler (timer,
         // virtio, softirq) ever acquires a bucket spinlock.  Per-bucket

@@ -4617,6 +4617,17 @@ pub fn sys_sync(_args: SyscallArgs) -> i64 {
             // SAFETY: the global holds a live Ext4FileSystem from mount
             // until unmount.
             let fs = unsafe { &*fs_ptr };
+            // FI-DIAG: the mount path DROPS the journal after one-shot
+            // recovery (fs.journal = None) — if this prints journal=None
+            // the h_sync commit below has never fired on any boot.
+            static FI_J: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if FI_J.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 6 {
+                crate::pr_err!(
+                    "FI-SYNC journal={:?}",
+                    fs.journal.is_some()
+                );
+            }
             if fs.journal.is_some() {
                 if let Ok(mut handle) =
                     crate::fs::ext4::journal::ext4_journal_start(fs, 0)
