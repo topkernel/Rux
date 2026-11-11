@@ -1,0 +1,202 @@
+Starting QEMU (4 cores, 2GB memory, console mode, init=/bin/sh)...
+
+OpenSBI v1.8
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name               : riscv-virtio,qemu
+Platform Features           : medeleg
+Platform HART Count         : 4
+Platform HART Protection    : pmp
+Platform IPI Device         : aclint-mswi
+Platform Timer Device       : aclint-mtimer @ 10000000Hz
+Platform Console Device     : uart8250
+Platform HSM Device         : ---
+Platform PMU Device         : ---
+Platform Reboot Device      : syscon-reboot
+Platform Shutdown Device    : syscon-poweroff
+Platform Suspend Device     : ---
+Platform CPPC Device        : ---
+Firmware Base               : 0x80000000
+Firmware Size               : 357 KB
+Firmware RW Offset          : 0x40000
+Firmware RW Size            : 101 KB
+Firmware Heap Offset        : 0x4d000
+Firmware Heap Size          : 49 KB (total), 0 KB (reserved), 12 KB (used), 35 KB (free)
+Firmware Scratch Size       : 4096 B (total), 1464 B (used), 2632 B (free)
+Runtime SBI Version         : 3.0
+Standard SBI Extensions     : ipi,pmu,srst,sse,hsm,rfnc,fwft,time,base,legacy,dbcn,dbtr
+Experimental SBI Extensions : none
+
+Domain0 Name                : root
+Domain0 Boot HART           : 0
+Domain0 HARTs               : 0*,1*,2*,3*
+Domain0 Region00            : 0x0000000080040000-0x000000008005ffff M: (F,R,W) S/U: ()
+Domain0 Region01            : 0x0000000080000000-0x000000008003ffff M: (F,R,X) S/U: ()
+Domain0 Region02            : 0x0000000000100000-0x0000000000100fff M: (I,R,W) S/U: (R,W)
+Domain0 Region03            : 0x0000000010000000-0x0000000010000fff M: (I,R,W) S/U: (R,W)
+Domain0 Region04            : 0x0000000002000000-0x000000000200ffff M: (I,R,W) S/U: ()
+Domain0 Region05            : 0x000000000c400000-0x000000000c5fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region06            : 0x000000000c000000-0x000000000c3fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region07            : 0x0000000000000000-0xffffffffffffffff M: () S/U: (R,W,X)
+Domain0 Next Address        : 0x0000000080200000
+Domain0 Next Arg1           : 0x00000000ffe00000
+Domain0 Next Mode           : S-mode
+Domain0 SysReset            : yes
+Domain0 SysSuspend          : yes
+
+Boot HART ID                : 0
+Boot HART Domain            : root
+Boot HART Priv Version      : v1.12
+Boot HART Base ISA          : rv64imafdch
+Boot HART ISA Extensions    : sstc,zicntr,zihpm,zicboz,zicbom,sdtrig,svadu
+Boot HART PMP Count         : 16
+Boot HART PMP Granularity   : 2 bits
+Boot HART PMP Address Bits  : 54
+Boot HART MHPM Info         : 16 (0x0007fff8)
+Boot HART Debug Triggers    : 2 triggers
+Boot HART MIDELEG           : 0x0000000000001666
+Boot HART MEDELEG           : 0x0000000000f4b509
+[36m[1m
+██████  ██    ██ ██   ██
+██   ██ ██    ██  ██ ██
+██████  ██    ██   ███
+██   ██ ██    ██  ██ ██
+██   ██  ██████  ██   ██
+[0m[32m  [ RISC-V 64-bit | POSIX Compatible | v0.1.0 ]
+
+[0mboot: static regions phys_end=0x100000000 heap_region_end=0x100000000 heap=0x81e00000+0x8000000 slab=0x89e00000+0x1000000
+[33mKernel starting...
+
+[0m[36mModule            Description                        Status
+----------------  --------------------------------   --------
+[0mconsole:          UART ns16550a driver               [ok]
+trap:             stvec handler installed            [ok]
+trap:             ecall syscall handler              [ok]
+mm:               Sv39 3-level page table            [ok]
+mm:               satp CSR configured                [ok]
+mm:               buddy allocator order 0-12         [ok]
+mm:               heap region 128MB @ 0x81e00000     [ok]
+mm:               slab allocator 4MB                 [ok]
+boot:             FDT/DTB parsed                     [ok]
+boot:             cmd: root=/dev/vda rw init=...     [ok]
+console:          console=ttyS0 (ns16550a uart)      [ok]
+mm:               linear mapping 2048 MB             [ok]
+mm:               vmemmap mapping initialized        [ok]
+mm:               layout: kernel=0x80200000-0x81e0   [ok]
+mm:               layout: heap=0x81e00000-0x89e000   [ok]
+mm:               524288 page descriptors (span 20   [ok]
+page_alloc: zone Normal span=524288 pages (2048 MB), seeded=463295 (1809 MB), unmanaged-in-span=60993 (238 MB)
+mm:               zone allocator initialized (5242   [ok]
+memblock:         total 2048MB, available 1809MB     [ok]
+mm:               device mappings created            [ok]
+irq:              irq_desc array initialized         [ok]
+intc:             PLIC @ 0x0C000000                  [ok]
+intc:             IRQ domain + chip registered       [ok]
+ipi:              SSIP software IRQ + bitmap multi   [ok]
+console:          UART interrupt-driven RX           [ok]
+bio:              buffer cache layer                 [ok]
+fs:               ext4 driver loaded                 [ok]
+fs:               ramfs mounted /                    [ok]
+fs:               procfs initialized                 [ok]
+fs:               procfs mounted /proc               [ok]
+fs:               sysfs mounted /sys                 [ok]
+fsw: off (cmdline fsw param = None)
+fs:               debugfs mounted /sys/kernel/debu   [ok]
+negmemo: off (cmdline negmemo param = None)
+fs:               tracefs mounted /sys/kernel/trac   [ok]
+cgroup:           v2 unified hierarchy init          [ok]
+driver:           vda virtio-blk 2621440 sectors     [ok]
+driver:           virtio-blk PCI x1                  [ok]
+driver:           GenDisk registered                 [ok]
+fs:               root /dev/vda -> vda               [done]
+fs:               ext4 mounted /                     [ok]
+fs:               procfs remounted /proc             [ok]
+mm:               swap 256 MB tail carve             [ok]
+driver:           virtio-net x1                      [ok]
+vdso:             page built; mapping off            [done]
+security:         capability LSM initialized         [ok]
+sched:            CFS scheduler v1                   [ok]
+sched:            runqueue per-CPU                   [ok]
+sched:            PID allocator init                 [ok]
+sched:            idle task (PID 0)                  [ok]
+mm:               kswapd reclaim thread              [ok]
+DEFERFREE: engaged (first MmStruct free held back 1500ms)
+dfx:              diagnostic subsystem               [ok]
+printk:           persistent log /var/log/kmsg (kl   [ok]
+ipc:              System V + POSIX MQ                [ok]
+affinity: 11 of 11 task(s) default mask -> 0xf
+smp:              4 CPUs online (boot hart 0)        [ok]
+cctx: off (cmdline cctx param = None)
+softirq:          ksoftirqd per-CPU threads          [ok]
+dfx:              khungtaskd hung-task detector      [ok]
+fs: fdreapd retire reaper started
+fs:               fdreapd fd retire reaper           [ok]
+trap:             sie.SEIE enabled                   [ok]
+PERCPU-SCRIBBLE-HEALED cpu=1 idle_slot=0
+SCHED-IRQOFF caller=kernel/src/mm/kswapd.rs:83 pid=300 pc=0x0
+driver:           virtio-gpu probed                  [ok]
+R56-SLOT-SELF-HEALED
+R74-SLOTLESS-TP cpu=1 tp_pid=0 slot_pid=0 slotw=2 tp_oncpu=0 tp_claim=1 tp_pk=0 ksp=0x429496725431981568
+
+R83-VICTIM tag=R74 jiffies=1 time=0x0000000000d9da4d by=cpu:1/pid:0 task=0xffffffff80fe6038 pid=0 comm= kstack=0xffffffd601e80000-0xffffffd601ea0000
+R83-HDR 0: 0000000000400000 ffffffd601e80000 0000000000000000 0000000f00000001
+R83-HDR 32: 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+SCHED-IRQOFF caller=kernel/src/interrupt/ksoftirqd.rs:101 pid=304 pc=0x0
+gpu:              1280x800 32bpp framebuffer         [ok]
+fs:               devfs mounted /dev                 [ok]
+PARKWALK-ARMED
+driver:           /dev/fb0 registered                [ok]
+drm: /dev/dri/card0 + renderD128 registered (crtc=40 conn=42 enc=41 plane=43)
+driver:           /dev/dri/card0 + renderD128 regi   [ok]
+fs:               tmpfs mounted /dev/shm             [ok]
+fs:               tmpfs mounted /run                 [ok]
+driver:           evdev nodes (no input hw)          [done]
+driver:           no keyboard (headless)             [done]
+driver:           no pointer (headless)              [done]
+init:             ELF /bin/sh loaded                 [ok]
+init:             init task (PID 1) enqueued         [ok]
+
+SCHED-IRQOFF caller=kernel/src/interrupt/ksoftirqd.rs:101 pid=303 pc=0x0
+SCHED-IRQOFF caller=kernel/src/interrupt/ksoftirqd.rs:101 pid=305 pc=0x0
+SCHED-IRQOFF caller=kernel/src/interrupt/ksoftirqd.rs:101 pid=306 pc=0x0
+SCHED-IRQOFF caller=kernel/src/sched/sched.rs:2384 pid=1 pc=0x0
+SCHED-IRQOFF caller=kernel/src/sched/sched.rs:2384 pid=1 pc=0x0
+open ENOENT: '/root/.mrsh_history' (pid 1)
+SCHED-IRQOFF caller=kernel/src/sched/sched.rs:2384 pid=1 pc=0x0
+SCHED-IRQOFF caller=kernel/src/sched/sched.rs:2384 pid=1 pc=0x0
+
+WAKE-HEAL-SKIP pid=1 why=c
+SCHED-IRQOFF caller=kernel/src/sched/sched.rs:2384 pid=1 pc=0x0
+SCHED-IRQOFF caller=kernel/src/sched/sched.rs:2384 pid=1 pc=0x0
+[1;32mroot[0m:[1;34m/[0m# cd /proc
+SCHED-IRQOFF caller=kernel/src/sched/sched.rs:2384 pid=1 pc=0x0
+[1;32mroot[0m:[1;34m/proc[0m# ls
+[1;34m1[0m    [1;34m306[0m        config.gz    kmsg       [1;34mnet[0m         [1;34msys[0m            vmstat
+[1;34m300[0m  [1;34m307[0m        cpuinfo      loadavg    partitions  sysrq-trigger
+[1;34m301[0m  [1;34m308[0m        diskstats    locks      schedstat   [1;34msysvipc[0m
+[1;34m302[0m  [1;34m309[0m        filerd       meminfo    [1;36mself[0m        [1;36mthread-self[0m
+[1;34m303[0m  [1;34m310[0m        filesystems  modules    softirqs    timer_list
+[1;34m304[0m  buddyinfo  interrupts   mountinfo  stat        uptime
+[1;34m305[0m  cmdline    kallsyms     mounts     swaps       version
+NOSPAWN-EXIT pid=310 comm='ls' code=0 birth:
+[1;32mroot[0m:[1;34m/proc[0m# echo REGRESSION-OK-$?-
+REGRESSION-OK-0-
+NOSPAWN-EXIT pid=311 comm='echo' code=0 birth:
+[1;32mroot[0m:[1;34m/proc[0m# poweroff -f
+setpgid: Permission denied
+unixrd: off (cmdline unixrd param = None)
+reboot: sending SIGTERM to init (pid 1)
+KSIG15: caller pid=312 comm='poweroff' -> target pid=1 group=1
+KILLTRACE: pid=312(poweroff) -> pid=1(sh) tgid=1 ppid=0 sig=15 origin=none
+DEQUEUE sig=15 pid=1 comm='sh' info=NONE (bare bitmap)
+reboot: init did not exit in time, continuing
+reboot: syncing filesystems
+reboot: Power down
+rc=0
