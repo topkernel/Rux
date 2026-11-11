@@ -57,6 +57,11 @@ pub use sched::{
     claim_idle_cpu_for,
     preempt_check_wake,
     preempt_check_wake_sync,
+    // 105th wake-dispatch census latches (bindertrace consumer).
+    WAKE_DISP,
+    WAKE_IDLE_MASK,
+    grq_idle_mask,
+    grq_nr_running_now,
     wake_up_process,
     wake_up_process_sync,
     yield_cpu,

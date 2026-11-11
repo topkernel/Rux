@@ -5822,6 +5822,35 @@ pub fn grq_diag_counts() -> (usize, u64, u64, u64) {
     )
 }
 
+/// 105th wake-dispatch census (bindertrace consumer): the LAST wake's
+/// dispatch outcome, written by Task::wake_up_impl right after the
+/// claim/poke decision. Global (per-CPU races only blur the label —
+/// the binder hunt reads it immediately after its own wake call):
+///   1 = idle CPU claimed + IPI
+///   2 = no idle; sync wake, wakee won the vruntime compare -> poke
+///   3 = no idle; sync wake, compare lost -> NO poke (park handoff)
+///   4 = no idle; async wake, preempt check poked
+///   5 = no idle; async wake, recency/compare gate -> NO poke
+pub static WAKE_DISP: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Same census: the idle-CPU mask latched at wake ENTRY (before the
+/// claim), so "idle existed but claim lost/failed" vs "no idle at all"
+/// are told apart.
+pub static WAKE_IDLE_MASK: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// 105th: idle-CPU bitmask snapshot for the same census (cheap Acquire
+/// load; diagnostic only).
+pub fn grq_idle_mask() -> u32 {
+    grq().idle_cpus.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// 105th census twin: total runnable load (all classes).
+pub fn grq_nr_running_now() -> usize {
+    GlobalRunQueue::grq_nr_running()
+}
+
 /// DFX diagnostic: per-CPU current task pid (0 = idle) + idle bit + raw task
 /// pointer, to see which CPU (if any) is executing/spinning while a queued
 /// task goes unpicked. Hash-invisible currents (post-exit spinners) are

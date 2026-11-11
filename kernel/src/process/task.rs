@@ -3691,8 +3691,16 @@ impl Task {
                 let allowed = (*task).cpus_allowed();
                 crate::dfx::cctx::add(&crate::dfx::cctx::WK_ENQ_NS, cc_t_enq);
                 let cc_t_disp = crate::dfx::cctx::now();
+                // 105th wake-dispatch census (see sched::WAKE_DISP): the
+                // dispatch outcome + idle mask at wake entry, read back by
+                // the binder QPICK hunt. Relaxed stores; diagnostic only.
+                crate::sched::WAKE_IDLE_MASK.store(
+                    crate::sched::grq_idle_mask(),
+                    core::sync::atomic::Ordering::Relaxed,
+                );
                 match crate::sched::claim_idle_cpu_for(allowed) {
                     Some(idle_cpu) => {
+                        crate::sched::WAKE_DISP.store(1, core::sync::atomic::Ordering::Relaxed);
                         crate::sched::resched_cpu(idle_cpu);
                     }
                     None => {
@@ -3716,8 +3724,12 @@ impl Task {
                         // windows (FFRT mutex unlock→waiter-recheck) the
                         // reference keeps closed for sync handoffs.
                         if sync {
+                            crate::sched::WAKE_DISP
+                                .store(2, core::sync::atomic::Ordering::Relaxed);
                             crate::sched::preempt_check_wake_sync(task);
                         } else {
+                            crate::sched::WAKE_DISP
+                                .store(3, core::sync::atomic::Ordering::Relaxed);
                             crate::sched::preempt_check_wake(task);
                         }
                     }

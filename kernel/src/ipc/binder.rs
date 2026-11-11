@@ -992,6 +992,132 @@ pub(crate) fn binder_sareg_samgr_pid() -> u32 {
     SAREG_SAMGR_PID_PUB.load(core::sync::atomic::Ordering::Relaxed)
 }
 
+/// 105th: second-level gate for the legacy binder PRINT probes
+/// (SAREG/SACSA/SLRD/SLTX/btx/payload-head). Their ~7k lines/boot of
+/// emit-lock traffic inflate the very latencies they measure — the QPICK
+/// census measured a ~3 ms sender-build window with them armed.
+/// dfx=bindertrace now arms ONLY the passive census (BRTT/QPICK stamps);
+/// the print family additionally needs cmdline `binderprobe=1`
+/// (forkprof/syscost-style cmdline key, NOT a new dfx switch).
+fn binder_probe_on() -> bool {
+    crate::cmdline::get_param("binderprobe").as_deref() == Some("1")
+}
+
+// ============================================================================
+// 105th RTT census (dfx=bindertrace) — the SA-chain round-trip split.
+//
+// The 103rd's ladder put +14.1s (89% of the boot gap with the install
+// stream) on the SA chain, with the box 46% idle: every binder
+// round-trip is a WAIT. The SAREG pairing put the fast-path RTT at
+// ~4-5 ms vs the reference's ~1 ms class, but jiffies (10 ms) cannot
+// split that. This census stamps every sync txn in the 10 MHz nominal
+// domain and buckets three components:
+//   q  enqueue -> server pickup   (kernel wake + scheduling + busy pool)
+//   e  pickup  -> reply submit    (server handler exec, incl. nesting)
+//   w  reply submit -> client BR_REPLY staging (kernel wake back)
+// One 3-line snapshot every RTT_EVERY accounted transactions, direct
+// console (SLOW-TXN discipline). Zero cost when bindertrace is off
+// beyond the two stamp stores per txn.
+// ============================================================================
+mod rtt_census {
+    /// Microsecond bucket upper bounds; index 15 = the tail (>= 512 ms).
+    const RTT_BOUNDS: [u64; 15] = [
+        32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144,
+        524288,
+    ];
+    pub const RTT_EVERY: u64 = 4096;
+
+    pub struct Comp {
+        n: core::sync::atomic::AtomicU64,
+        sum_us: core::sync::atomic::AtomicU64,
+        max_us: core::sync::atomic::AtomicU64,
+        h: [core::sync::atomic::AtomicU64; RTT_BOUNDS.len() + 1],
+    }
+
+    impl Comp {
+        pub const fn new() -> Self {
+            Self {
+                n: core::sync::atomic::AtomicU64::new(0),
+                sum_us: core::sync::atomic::AtomicU64::new(0),
+                max_us: core::sync::atomic::AtomicU64::new(0),
+                h: [const { core::sync::atomic::AtomicU64::new(0) }; RTT_BOUNDS.len() + 1],
+            }
+        }
+        pub fn add(&self, us: u64) {
+            use core::sync::atomic::Ordering::Relaxed;
+            self.n.fetch_add(1, Relaxed);
+            self.sum_us.fetch_add(us, Relaxed);
+            self.max_us.fetch_max(us, Relaxed);
+            let mut b = RTT_BOUNDS.len();
+            for (i, bound) in RTT_BOUNDS.iter().enumerate() {
+                if us < *bound {
+                    b = i;
+                    break;
+                }
+            }
+            self.h[b].fetch_add(1, Relaxed);
+        }
+        pub fn n(&self) -> u64 {
+            self.n.load(core::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    pub static Q: Comp = Comp::new();
+    pub static E: Comp = Comp::new();
+    pub static W: Comp = Comp::new();
+
+    /// Direct-console snapshot (3 lines). Called from the BC_REPLY
+    /// accumulation path with the WORLD lock held — bounded, short
+    /// lines, stack buffer only, same discipline as SLOW-TXN's
+    /// ConsoleWriter print.
+    pub fn snapshot() {
+        use core::fmt::Write as _;
+        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+        let mut line = |tag: char, c: &Comp| {
+            let n = c.n.load(core::sync::atomic::Ordering::Relaxed);
+            let ms = c.sum_us.load(core::sync::atomic::Ordering::Relaxed) / 1000;
+            let mx = c.max_us.load(core::sync::atomic::Ordering::Relaxed) / 1000;
+            // Histogram without fmt machinery: u64 decimal -> bytes.
+            let mut buf = [0u8; 400];
+            let mut pos = 0usize;
+            for (i, slot) in c.h.iter().enumerate() {
+                let v = slot.load(core::sync::atomic::Ordering::Relaxed);
+                if i != 0 {
+                    buf[pos] = b',';
+                    pos += 1;
+                }
+                let mut digits = [0u8; 20];
+                let mut dn = 0;
+                let mut x = v;
+                loop {
+                    digits[dn] = b'0' + (x % 10) as u8;
+                    dn += 1;
+                    x /= 10;
+                    if x == 0 {
+                        break;
+                    }
+                }
+                while dn > 0 {
+                    dn -= 1;
+                    buf[pos] = digits[dn];
+                    pos += 1;
+                }
+            }
+            let hist = core::str::from_utf8(&buf[..pos]).unwrap_or("?");
+            let _ = writeln!(
+                w,
+                "BRTT {tag}  n={n} sum={ms}ms max={mx}ms h(32us..512ms+)={hist}"
+            );
+        };
+        line('q', &Q);
+        line('e', &E);
+        line('w', &W);
+    }
+}
+
+/// read_time() ticks per microsecond (nominal 10 MHz domain -> 10).
+const RTT_TICKS_PER_US: u64 = crate::config::TIMER_CLOCK_FREQ_HZ / 1_000_000;
+
 // ============================================================================
 // leg-30B: AMS46 — the Gate-1 arsenal (dfx=ams46).
 //
@@ -1456,6 +1582,26 @@ struct BinderTxn {
     /// capacity signal, not a lost wake). SAFETY: written under WORLD at
     /// enqueue, read in the PICK-LATE probe under WORLD.
     enq_elig: core::cell::UnsafeCell<u8>,
+    /// 105th RTT census (dfx=bindertrace), ns-domain twins of the
+    /// jiffies stamps: enq_ns = constructor time (request: enqueue;
+    /// reply: submit), pick_ns = server BR_TRANSACTION staging time, 0
+    /// until then. Jiffies (10 ms) cannot resolve the 4-5 ms fast-path
+    /// RTT class the 103rd measured vs the reference's ~1 ms. SAFETY:
+    /// written once on the txn lifecycle path under WORLD, read at the
+    /// census accumulation points under WORLD.
+    enq_ns: u64,
+    pick_ns: core::cell::UnsafeCell<u64>,
+    /// 105th wake-dispatch census: latched right after this txn's sync
+    /// wake — bits 0-3 = sched::WAKE_DISP code (1 idle-claim+IPI, 2 no-
+    /// idle sync, 3 no-idle async), bits 4-11 = idle mask at wake entry,
+    /// bits 12-19 = min(grq nr_running, 255). Read by the QPICK print.
+    /// SAFETY: written once at the enqueue-wake point, read at pickup
+    /// under WORLD.
+    enq_disp: core::cell::UnsafeCell<u32>,
+    /// 105th: the wake-issued stamp (0 until the enqueue's wake loops
+    /// ran) — q splits into sender-build (enq_ns->wake_ns) and
+    /// server-wait (wake_ns->pick_ns). SAFETY: same contract as enq_disp.
+    wake_ns: core::cell::UnsafeCell<u64>,
 }
 
 impl BinderTxn {
@@ -8649,7 +8795,8 @@ fn binder_thread_write(
                 // the result int. Read BEFORE the world lock (uaccess).
                 if crate::dfx::switches::enabled(
                     crate::dfx::switches::DfxSwitch::BinderTrace,
-                ) && tr.data_size > 0
+                ) && binder_probe_on()
+                    && tr.data_size > 0
                     && tr.data_size <= 160
                 {
                     // Full parcel for small transactions: the
@@ -9591,6 +9738,21 @@ fn binder_transaction(
                         }
                     }
                 }
+                // 105th RTT census (bindertrace): queue/exec split for
+                // every completed sync txn (jiffies-free; the fast-path
+                // 4-5 ms class the 103rd measured is invisible to
+                // SLOW-TXN's 10 ms stamps).
+                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace) {
+                    let pick = unsafe { *t.pick_ns.get() };
+                    if pick != 0 {
+                        let now = crate::arch::cpu::read_time();
+                        rtt_census::Q.add((pick.saturating_sub(t.enq_ns)) / RTT_TICKS_PER_US);
+                        rtt_census::E.add(now.saturating_sub(pick) / RTT_TICKS_PER_US);
+                        if rtt_census::E.n() % rtt_census::RTT_EVERY == 0 {
+                            rtt_census::snapshot();
+                        }
+                    }
+                }
                 let (Some(from_proc), Some(from_tid)) = (t.from_proc.clone(), t.from_tid) else {
                     sendfail_why(8);
                     *err_cmd = BR_FAILED_REPLY;
@@ -10024,8 +10186,11 @@ fn binder_transaction(
             // dfx=bindertrace: one line per resolved transaction — the
             // HDF devmgr↔devhost handshake debugging needed the actual
             // conversation (who calls whom, which codes, oneway or not),
-            // not just the failures.
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace) {
+            // not just the failures. 105th: print family behind
+            // binderprobe=1 (see binder_probe_on).
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace)
+                && binder_probe_on()
+            {
                 crate::pr_info!(
                     "btx: #{} pid {}{} -> pid {} h{} code {} {} ds {} os {}",
                     txn_id,
@@ -10446,6 +10611,10 @@ fn binder_transaction(
         enq_j: crate::drivers::timer::get_jiffies() as u32,
         pick_j: core::cell::UnsafeCell::new(0),
         enq_elig: core::cell::UnsafeCell::new(0),
+        enq_ns: crate::arch::cpu::read_time(),
+        pick_ns: core::cell::UnsafeCell::new(0),
+        enq_disp: core::cell::UnsafeCell::new(0),
+        wake_ns: core::cell::UnsafeCell::new(0),
     });
 
     // binder:binder_transaction — the transaction was built and is about
@@ -10483,8 +10652,11 @@ fn binder_transaction(
     // pristine OH boot through acquire_emit_lock — a top-5 kernel
     // site in the SA-window hiperf record — while the hunt it served
     // (SA 501 registration) is closed. Hunts needing SAREG/SLRD
-    // pairing arm dfx=bindertrace.
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace) {
+    // pairing arm dfx=bindertrace binderprobe=1 (105th: the print
+    // family left plain bindertrace to the passive census).
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace)
+        && binder_probe_on()
+    {
         const SAMGR_ADD: u32 = 3;
         const SAMGR_REMOVE: u32 = 4;
         const SAMGR_ADD_ONDEMAND: u32 = 10;
@@ -11048,8 +11220,10 @@ fn binder_transaction(
             .unwrap_or(0);
         // OH boot lane 2026-11-12 (103rd): dfx-gated (bindertrace) with
         // the SAREG/SLRD family — the app-txn trace printed ~1.2k lines
-        // per pristine boot through the console emit lock.
+        // per pristine boot through the console emit lock. 105th: print
+        // family behind binderprobe=1.
         if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace)
+            && binder_probe_on()
             && (sender_is_app || target_child != 0)
             && SLTX_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 1500
         {
@@ -11887,6 +12061,28 @@ fn binder_transaction(
     }
     for (p, g) in wakes_child {
         wake_proc_one(&p, g);
+    }
+    // 105th wake-dispatch census: latch the dispatch outcome + machine
+    // state right after THIS txn's wake (thread-targeted sync routes or
+    // the proctodo wake_proc_one pick — the last wake issued by this
+    // enqueue; global latches are ours up to concurrent-wake blur).
+    // Decoded by the QPICK print. Non-oneway, non-reply only (the census
+    // population). wake_ns splits q into sender-build (enq->wake) vs
+    // server-wait (wake->pickup) — disp=1 rows picking up instantly
+    // (nr=0 post-wake) still showed ~5 ms q, so the sender-side build
+    // path is inside the old q.
+    if !reply && !oneway {
+        unsafe {
+            *txn.enq_disp.get() = (crate::sched::WAKE_DISP
+                .load(core::sync::atomic::Ordering::Relaxed)
+                & 0xF)
+                | (crate::sched::WAKE_IDLE_MASK
+                    .load(core::sync::atomic::Ordering::Relaxed)
+                    << 4)
+                | (((crate::sched::grq_nr_running_now() as u32).min(0xFF))
+                    << 12);
+            *txn.wake_ns.get() = crate::arch::cpu::read_time();
+        }
     }
 }
 
@@ -12946,10 +13142,12 @@ fn binder_thread_read(
                                         // OH boot lane 2026-11-12 (103rd):
                                         // dfx-gated (bindertrace) with the
                                         // SAREG send side — see the sc155
-                                        // block gate above.
+                                        // block gate above. 105th: print
+                                        // family behind binderprobe=1.
                                         if crate::dfx::switches::enabled(
                                             crate::dfx::switches::DfxSwitch::BinderTrace,
                                         )
+                                            && binder_probe_on()
                                             && (lname.starts_with("m.ohos.")
                                                 || lname.starts_with("os.")
                                                 || lname.starts_with("com.")
@@ -13061,11 +13259,103 @@ fn binder_thread_read(
                                 th.sender_pid_nr =
                                     t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0);
                             }
+                            // 105th RTT census (bindertrace): the reply txn's
+                            // enq_ns is its constructor stamp (BC_REPLY
+                            // submit on the server); this staging is the
+                            // client's pickup — the kernel's reply-wake
+                            // latency, the third leg of the round trip.
+                            if is_reply
+                                && crate::dfx::switches::enabled(
+                                    crate::dfx::switches::DfxSwitch::BinderTrace,
+                                )
+                            {
+                                rtt_census::W.add(
+                                    crate::arch::cpu::read_time().saturating_sub(t.enq_ns)
+                                        / RTT_TICKS_PER_US,
+                                );
+                            }
                             if !is_reply && t.flags & TF_ONE_WAY == 0 {
                                 // The receiver stacks it for its BC_REPLY.
                                 t.set_to_tid(thread.tid);
                                 // sc208 SLOW-TXN probe: server-pickup stamp.
                                 let nowj = crate::drivers::timer::get_jiffies() as u32;
+                                // 105th QPICK probe (bindertrace): per-instance
+                                // queue-wait attribution for the 2-16 ms cluster
+                                // the BRTT census found. elig>0 at enqueue +
+                                // ms-scale pickup = kernel wake/sched latency;
+                                // elig=0 = every reader busy (pool capacity).
+                                // Budget 240 lines/boot.
+                                if crate::dfx::switches::enabled(
+                                    crate::dfx::switches::DfxSwitch::BinderTrace,
+                                ) {
+                                    let now_ns = crate::arch::cpu::read_time();
+                                    let q_us =
+                                        now_ns.saturating_sub(t.enq_ns) / RTT_TICKS_PER_US;
+                                    if q_us >= 2000 {
+                                        static QP_N: core::sync::atomic::AtomicUsize =
+                                            core::sync::atomic::AtomicUsize::new(0);
+                                        if QP_N.fetch_add(
+                                            1,
+                                            core::sync::atomic::Ordering::Relaxed,
+                                        ) < 240
+                                        {
+                                            let from_pid = t
+                                                .from_proc
+                                                .as_ref()
+                                                .map(|p| p.pid)
+                                                .unwrap_or(0);
+                                            let picker_comm = crate::sched::find_task_by_pid(
+                                                thread.tid,
+                                            );
+                                            let picker_comm = if picker_comm.is_null() {
+                                                "?"
+                                            } else {
+                                                core::str::from_utf8(unsafe {
+                                                    (*picker_comm).comm()
+                                                })
+                                                .unwrap_or("?")
+                                                .trim_end_matches('\0')
+                                            };
+                                            let disp_word =
+                                                unsafe { *t.enq_disp.get() };
+                                            let disp_code = disp_word & 0xF;
+                                            let disp_idle =
+                                                (disp_word >> 4) & 0xFF;
+                                            let disp_nr = disp_word >> 12;
+                                            let wake_ns =
+                                                unsafe { *t.wake_ns.get() };
+                                            let q2_us = if wake_ns != 0 {
+                                                now_ns.saturating_sub(wake_ns)
+                                                    / RTT_TICKS_PER_US
+                                            } else {
+                                                0
+                                            };
+                                            crate::pr_warn!(
+                                                "QPICK txn{} code{:#x} q={}us q2={}us elig={} to pid={} tid{} from pid{} pick_comm='{}' disp={} idle_m={:#x} nr={}",
+                                                t.id,
+                                                t.code,
+                                                q_us,
+                                                q2_us,
+                                                unsafe { *t.enq_elig.get() },
+                                                proc.pid,
+                                                thread.tid,
+                                                from_pid,
+                                                picker_comm,
+                                                disp_code,
+                                                disp_idle,
+                                                disp_nr
+                                            );
+                                        }
+                                    }
+                                    unsafe {
+                                        // 105th RTT census twin (ns domain).
+                                        *t.pick_ns.get() = now_ns;
+                                    }
+                                } else {
+                                    unsafe {
+                                        *t.pick_ns.get() = crate::arch::cpu::read_time();
+                                    }
+                                }
                                 unsafe {
                                     *t.pick_j.get() = nowj;
                                 }
