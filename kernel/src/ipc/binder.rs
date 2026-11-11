@@ -3913,6 +3913,17 @@ static VMA_STICKY_TGID: [core::sync::atomic::AtomicU32; 8] =
 
 /// Dump-once ring shared by the softirq snapshot dumper and the
 /// censusd task-context dumper (see dump_latched_maps_taskctx).
+/// 97th (hp97 toxicity, round 2): hard per-boot budget on "uvma:" map
+/// lines across BOTH emit sites (the softirq inline dump and
+/// dump_latched_maps_taskctx). The DONE ring is 16 slots; a wedge that
+/// latches more tgids than that thrashes the marks (evict-insert cycle)
+/// and the taskctx dumper re-dumped the evicted maps every 250ms round —
+/// hp97i/j printed 15.5k uvma lines (~2 MB) and the guest HARD-FROZE
+/// mid-flood (serial silent from 281s, drivers blocked on read1). The
+/// dump gates now latch only wedge-shaped parks, but any future gate
+/// regression must hit this wall, not the machine.
+static UVMA_LINE_BUDGET: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(600);
 static VMA_DUMPED_DONE: [core::sync::atomic::AtomicU32; 16] =
     [const { core::sync::atomic::AtomicU32::new(0) }; 16];
 
@@ -3967,6 +3978,10 @@ pub fn dump_latched_maps_taskctx() {
         );
     }
     for &tgid in want.iter().take(nwant) {
+        // 97th: respect the global uvma line budget (see its decl).
+        if UVMA_LINE_BUDGET.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+            return;
+        }
         // The latch stores thread-group ids; the leader's pid == tgid.
         // SAFETY: sched::find_task_by_pid returns a valid Task pointer
         // from the pid hash (null when gone); we only read its aspace.
@@ -3998,6 +4013,17 @@ pub fn dump_latched_maps_taskctx() {
             if !exec && !writable_file {
                 continue;
             }
+            // 97th: the taskctx dumper's per-line budget tick (see
+            // UVMA_LINE_BUDGET's decl). Load-then-store, never
+            // fetch_sub: at zero a fetch_sub wraps to usize::MAX and
+            // the budget would never fire again. (No drop(vm) here —
+            // the guard is borrowed by the iterator; returning drops
+            // it at function exit.)
+            let left = UVMA_LINE_BUDGET.load(core::sync::atomic::Ordering::Relaxed);
+            if left == 0 {
+                return;
+            }
+            UVMA_LINE_BUDGET.store(left - 1, core::sync::atomic::Ordering::Relaxed);
             let path = aspace
                 .try_get_vma_file(v.start().as_usize())
                 .map(|f| f.path())
@@ -4276,7 +4302,17 @@ pub fn sleep_snapshot() {
                     let done = VMA_DUMPED_DONE.iter().any(|v| {
                         v.load(core::sync::atomic::Ordering::Relaxed) == my_tgid
                     });
-                    if my_tgid != 0 && (main_stack_futex || own_stack_futex || latched) && !done {
+                    // 97th (hp97 toxicity, round 2): the VMA map dump
+                    // fired for TIMED own-stack parks too (the alive cv
+                    // pools latch their tgid just by cycling) — hp97i/j
+                    // printed 15.5k uvma lines (~2 MB) for hundreds of
+                    // SA tgids whose maps carry no wedge evidence. Same
+                    // wedge shape as the walk gate below: main-stack any
+                    // timeout; own-stack/latched only when UNTIMED.
+                    if my_tgid != 0
+                        && (main_stack_futex || ((own_stack_futex || latched) && ua3 == 0))
+                        && !done
+                    {
                         // 55th: a main-stack UNTIMED park is the wedge
                         // signature — sticky-latch it so the audit churn
                         // cannot evict it before the walk-gate scan.
@@ -4318,6 +4354,17 @@ pub fn sleep_snapshot() {
                                         if !v.flags().is_executable() {
                                             continue;
                                         }
+                                        // 97th: global uvma line budget
+                                        // (see UVMA_LINE_BUDGET's decl).
+                                        let left = UVMA_LINE_BUDGET
+                                            .load(core::sync::atomic::Ordering::Relaxed);
+                                        if left == 0 {
+                                            break;
+                                        }
+                                        UVMA_LINE_BUDGET.store(
+                                            left - 1,
+                                            core::sync::atomic::Ordering::Relaxed,
+                                        );
                                         let path = aspace
                                             .try_get_vma_file(v.start().as_usize())
                                             .map(|f| f.path())
