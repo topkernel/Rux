@@ -1065,6 +1065,8 @@ mod rtt_census {
     pub static Q: Comp = Comp::new();
     pub static E: Comp = Comp::new();
     pub static W: Comp = Comp::new();
+    /// WORLD lock acquire-wait (us) — the serialization tax.
+    pub static WL: Comp = Comp::new();
 
     /// Direct-console snapshot (3 lines). Called from the BC_REPLY
     /// accumulation path with the WORLD lock held — bounded, short
@@ -1112,6 +1114,7 @@ mod rtt_census {
         line('q', &Q);
         line('e', &E);
         line('w', &W);
+        line('L', &WL);
     }
 }
 
@@ -1797,6 +1800,12 @@ struct BinderThread {
     /// while not waiting) — read atomically by the khungtaskd binder-stall
     /// scan without taking WORLD.
     read_wait_since: core::sync::atomic::AtomicU64,
+    /// 105th QPICK census: nominal-clock stamp at the LAST return of the
+    /// blocking read wait (0 before the first park). Splits a slow
+    /// enqueue->pickup into wake->wait-return (scheduler) and
+    /// wait-return->staging (the read path itself — WORLD acquire and
+    /// drain). Relaxed atomic; diagnostic only.
+    read_wake_ns: core::sync::atomic::AtomicU64,
     /// One stall report per wait episode (avoids per-scan spam).
     stall_reported: core::sync::atomic::AtomicBool,
     /// One REKICK hist record per wait episode (the re-kick itself still
@@ -1823,6 +1832,7 @@ impl BinderThread {
             tgid,
             wait: WaitQueueHead::new(),
             read_wait_since: core::sync::atomic::AtomicU64::new(0),
+            read_wake_ns: core::sync::atomic::AtomicU64::new(0),
             stall_reported: core::sync::atomic::AtomicBool::new(false),
             rekicked: core::sync::atomic::AtomicBool::new(false),
             rekick_count: core::sync::atomic::AtomicU32::new(0),
@@ -2055,7 +2065,15 @@ unsafe impl Send for BinderProc {}
 unsafe impl Sync for BinderProc {}
 
 fn world_lock() -> crate::sync::spinlock::SpinlockIrqGuard<'static, Option<World>> {
+    // 105th WORLD-wait census (bindertrace): the acquire-wait time in
+    // the nominal clock domain, bucketed like BRTT. Two relaxed loads
+    // + one rdtsc per acquisition when armed; ~2 instructions when not.
+    let armed = crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace);
+    let t0 = if armed { crate::arch::cpu::read_time() } else { 0 };
     let mut g = WORLD.lock_irqsave();
+    if armed {
+        rtt_census::WL.add(crate::arch::cpu::read_time().saturating_sub(t0) / RTT_TICKS_PER_US);
+    }
     if g.is_none() {
         *g = Some(World { next_id: 1, procs: Vec::new(), mgr_node: [None, None, None] });
     }
@@ -12700,6 +12718,12 @@ fn binder_thread_read(
                 unsafe { thread_has_work(w.as_ref().unwrap(), proc, thread) }
             });
             thread.read_wait_since.store(0, core::sync::atomic::Ordering::Release);
+            // 105th QPICK census: the wait returned — from here to
+            // BR_TRANSACTION staging is the read path's own cost (WORLD
+            // acquire + drain), not the scheduler.
+            thread
+                .read_wake_ns
+                .store(crate::arch::cpu::read_time(), core::sync::atomic::Ordering::Relaxed);
             {
                 let _w = world_lock();
                 // SAFETY: under WORLD.
@@ -13330,12 +13354,22 @@ fn binder_thread_read(
                                             } else {
                                                 0
                                             };
+                                            let rw_ns = thread
+                                                .read_wake_ns
+                                                .load(core::sync::atomic::Ordering::Relaxed);
+                                            let q3_us = if rw_ns != 0 {
+                                                now_ns.saturating_sub(rw_ns)
+                                                    / RTT_TICKS_PER_US
+                                            } else {
+                                                0
+                                            };
                                             crate::pr_warn!(
-                                                "QPICK txn{} code{:#x} q={}us q2={}us elig={} to pid={} tid{} from pid{} pick_comm='{}' disp={} idle_m={:#x} nr={}",
+                                                "QPICK txn{} code{:#x} q={}us q2={}us q3={}us elig={} to pid={} tid{} from pid{} pick_comm='{}' disp={} idle_m={:#x} nr={}",
                                                 t.id,
                                                 t.code,
                                                 q_us,
                                                 q2_us,
+                                                q3_us,
                                                 unsafe { *t.enq_elig.get() },
                                                 proc.pid,
                                                 thread.tid,
