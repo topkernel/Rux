@@ -2661,6 +2661,12 @@ pub fn ext4_flush_dirty_inode(
     first_index: u64,
     last_index: u64,
 ) -> usize {
+    // DURABILITY FIX support: the on-disk map view for the buffer sync
+    // below (materialized once per flush call).
+    let ext4_inode_map = inode
+        .private_data
+        .map(|ptr| unsafe { &*(ptr as *const crate::fs::ext4::Ext4FileSystem) })
+        .and_then(|fs| fs.read_inode(inode.ino as u32).ok());
     let fs_ptr = match inode.private_data {
         Some(ptr) => ptr as *const crate::fs::ext4::Ext4FileSystem,
         None => return 0,
@@ -2730,6 +2736,59 @@ pub fn ext4_flush_dirty_inode(
                 )
             };
             done[i] = (idx, pfn, written == n_bytes as isize);
+        }
+        // DURABILITY FIX (razor-5, P0 lane): flush_done's dirty-bit
+        // clear is a DEVICE-durability claim, but write_at_core's
+        // success only means the data reached DIRTY BUFFERS. A racing
+        // setattr invalidates the now-'clean' pages and frees the
+        // frames; a crash before the buffer drain evaporates data
+        // that sync(2) already considers persisted (the fi-lane
+        // verdict chain: ext4_setattr + flush_done cleared bits ->
+        // census-absence -> pattern 0). Sync the buffers THIS flush
+        // just wrote BEFORE clearing the bits — ordered data at the
+        // page-cache granularity.
+        // Re-read the map AFTER the writes: the pre-call snapshot is
+        // stale for the early-flush shape (empty map — the fallback
+        // allocates inside the write loop).
+        let ext4_inode_map = inode
+            .private_data
+            .map(|ptr| unsafe { &*(ptr as *const crate::fs::ext4::Ext4FileSystem) })
+            .and_then(|fs| fs.read_inode(inode.ino as u32).ok());
+        let Some(ext4_inode_map) = ext4_inode_map.as_ref() else {
+            cache.flush_done(fs_id, ino, &done[..n]);
+            total += n;
+            let last_idx0 = chunk[n - 1].0;
+            if last_idx0 == u64::MAX { break; }
+            cursor = last_idx0 + 1;
+            continue;
+        };
+        let fs_ptr = inode.private_data.unwrap() as *const crate::fs::ext4::Ext4FileSystem;
+        for i in 0..n {
+            if !done[i].2 {
+                continue; // failed write keeps its dirty bit already
+            }
+            let (idx, _pfn, _) = done[i];
+            let off = idx * crate::mm::PAGE_SIZE as u64;
+            // Resolve this page's data block through the map and sync
+            // its buffer if dirty (the map is current — write_at_core
+            // updated it above).
+            let blk = {
+                let size = inode.get_size();
+                if off >= size { continue; }
+                match ext4_inode_map.get_data_block(unsafe { &*fs_ptr }, idx) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                }
+            };
+            if blk == 0 { continue; }
+            unsafe {
+                if let Some(bh) = crate::fs::bio::bread((*fs_ptr).device, blk) {
+                    if (*bh).is_dirty() {
+                        let _ = crate::fs::bio::sync_dirty_buffer(bh);
+                    }
+                    crate::fs::bio::brelse(bh);
+                }
+            }
         }
         cache.flush_done(fs_id, ino, &done[..n]);
         total += n;
