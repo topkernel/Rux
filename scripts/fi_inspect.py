@@ -42,7 +42,19 @@ def crc32c(seed, data):
 class Ext4:
     def __init__(self, path):
         self.f = open(path, "rb")
-        self.sb = self._read(1024, 1024)
+        # Superblock source: the primary at byte 1024, else a backup.
+        # The crash-window boots can leave a TORN primary superblock on
+        # the userdata image (free-counts + checksum written over a
+        # zero-filled buffer, magic zeroed — measured razor6): the
+        # backup SBs (block-group copies, first at 128 MB for the
+        # 4096/32768 geometry) still verify.
+        self.sb = None
+        for cand in (1024, 134217728, 402653184, 671088640, 939524096):
+            sb = self._read(cand, 1024)
+            if struct.unpack_from("<H", sb, 0x38)[0] == 0xEF53:
+                self.sb = sb
+                break
+        assert self.sb is not None, "no valid ext4 superblock (primary or backups)"
         (self.inodes_count, self.blocks_lo, self.rb, self.free_b, self.free_i,
          self.first_data_block, self.log_bs, self.log_cs, self.bpg, self.cpg,
          self.ipg) = struct.unpack_from("<11I", self.sb, 0)

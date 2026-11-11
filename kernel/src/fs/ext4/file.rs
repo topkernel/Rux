@@ -836,22 +836,21 @@ pub fn ext4_file_write(
         let block_offset = (current_offset % block_size) as usize;
 
         // Get data block number (supports indirect blocks)
+        //
+        // ARM ORDER IS LOAD-BEARING (razor-6, P0 lane): `Ok(0)` MUST
+        // precede the catch-all `Ok(bn)`. With the arms reversed (the
+        // razor-6 finding — the catch-all first, the zero arm dead code
+        // that rustc only *warned* about, drowned in the warning flood),
+        // an extent file whose on-disk map was EMPTY (fresh file, map not
+        // yet persisted — the flush path resolves the inode from DISK)
+        // returned Ok(0) for EVERY logical block and the write loop put
+        // the data into BLOCK 0 — the SUPERBLOCK block: 12.8 MB of
+        // install-stream data walked over the SB buffer one page at a
+        // time (razor6's torn superblock: counters + csum stamped over
+        // install bytes, magic zeroed), and the file's own data never
+        // reached its own blocks (fix2's `FI-PLACE logical=N -> block 0`
+        // family, map_entries=0).
         let block_num = match inode.get_data_block(fs, block_index) {
-            // FI-DIAG (two-copy paradox, 84c98dd4): the placement truth —
-            // which block does the writer ACTUALLY use per logical block?
-            Ok(bn) => {
-                static FI_PB: core::sync::atomic::AtomicUsize =
-                    core::sync::atomic::AtomicUsize::new(0);
-                if inode.get_size() > 1_048_576
-                    && FI_PB.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16
-                {
-                    crate::pr_err!(
-                        "FI-PLACE ino={} logical={} off={} -> block_num={}",
-                        inode.ino, block_index, current_offset, bn
-                    );
-                }
-                bn
-            }
             Ok(0) => {
                 // Extent-mapped file: 0 here is either a hole or an
                 // UNWRITTEN fallocate-preallocated block. Unwritten blocks
@@ -987,7 +986,21 @@ pub fn ext4_file_write(
                     new_block
                 }
             }
-            Ok(b) => b,
+            // FI-DIAG (two-copy paradox, 84c98dd4): the placement truth —
+            // which block does the writer ACTUALLY use per logical block?
+            Ok(bn) => {
+                static FI_PB: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if inode.get_size() > 1_048_576
+                    && FI_PB.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16
+                {
+                    crate::pr_err!(
+                        "FI-PLACE ino={} logical={} off={} -> block_num={}",
+                        inode.ino, block_index, current_offset, bn
+                    );
+                }
+                bn
+            }
             Err(e) => partial_or_err!('block_loop, e),
         };
 
@@ -2675,6 +2688,28 @@ pub fn ext4_flush_dirty_inode(
     let ino = inode.ino as u64;
     let cache = page_cache::get_page_cache();
 
+    // FI-DIAG (razor-6): every flush of a >1MB inode prints entry+exit —
+    // the pressure flush (shrink_reclaim → ext4_flush_dirty_inode) has no
+    // other visibility (FI3-FLUSH covers only the flush_all_dirty arm),
+    // and the pattern file's flush history decides whether its dirty
+    // bits were already cleared (and its frames made evictable) before
+    // the final sync ever scanned the table.
+    let fi_watch_flush = inode.get_size() > (1 << 20);
+    if fi_watch_flush {
+        static FI_FLI: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if FI_FLI.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 100 {
+            crate::pr_err!(
+                "FI-FLUSH-INODE fs={:#x} ino={} size={} first={} last={}",
+                fs_id,
+                ino,
+                inode.get_size(),
+                first_index,
+                last_index
+            );
+        }
+    }
+
     const CHUNK: usize = 16;
     let mut chunk: [(u64, u64); CHUNK] = [(0, 0); CHUNK];
     // Per-entry write outcomes for flush_done: an entry may only go clean
@@ -2724,7 +2759,7 @@ pub fn ext4_flush_dirty_inode(
             // source of truth being persisted).
             let src = unsafe { core::slice::from_raw_parts(kva, n_bytes) };
             // SAFETY: same inode/fs resolution discipline as write_vfs.
-            let written = unsafe {
+            let mut written = unsafe {
                 ext4_write_at_core(
                     &*fs_ptr,
                     inode.ino as u32,
@@ -2735,6 +2770,49 @@ pub fn ext4_flush_dirty_inode(
                     pfn,
                 )
             };
+            // TRANSIENT-FAILURE RETRY (razor-6, P0 lane): write_at_core
+            // reports EIO when bread's device read fails under I/O
+            // pressure (blkdev submit/device error — measured razor6:
+            // ONE such failure in 2048 pages, offset 135168, left the
+            // pattern file exactly one block short of byte-exact after
+            // the crash; the failed page stayed dirty and nothing ever
+            // retried it before the power cut). A flush is a WRITE-BACK
+            // context with plenty of time budget — retry a failed page
+            // a bounded number of times; only persistent failure keeps
+            // the page dirty (the standing contract).
+            if written != n_bytes as isize {
+                let mut tries = 0u32;
+                while tries < 3 {
+                    tries += 1;
+                    // SAFETY: same discipline as the first attempt; src
+                    // still borrows the pinned frame.
+                    written = unsafe {
+                        ext4_write_at_core(
+                            &*fs_ptr,
+                            inode.ino as u32,
+                            Some(inode),
+                            off,
+                            true,
+                            src,
+                            pfn,
+                        )
+                    };
+                    if written == n_bytes as isize {
+                        break;
+                    }
+                }
+                static FI_RW: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if FI_RW.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+                    crate::pr_err!(
+                        "FI-FLUSH-RETRY ino={} idx={} ok={} tries={}",
+                        ino,
+                        idx,
+                        written == n_bytes as isize,
+                        tries
+                    );
+                }
+            }
             done[i] = (idx, pfn, written == n_bytes as isize);
         }
         // DURABILITY FIX (razor-5, P0 lane): flush_done's dirty-bit
@@ -2796,7 +2874,7 @@ pub fn ext4_flush_dirty_inode(
             // FI-DIAG: a BIG flush ran (eviction or sync) — name it.
             static FI_BF: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
-            if FI_BF.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+            if FI_BF.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 100 {
                 crate::pr_err!(
                     "FI-BIGFLUSH ino={} pages>= {} vfs_size={}",
                     ino, total, inode.get_size()
@@ -2861,6 +2939,20 @@ pub fn ext4_flush_dirty_inode(
                     }
                 }
             }
+        }
+    }
+    // FI-DIAG (razor-6): exit half of the >1MB flush watch.
+    if fi_watch_flush {
+        static FI_FLD: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if FI_FLD.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 100 {
+            crate::pr_err!(
+                "FI-FLUSH-DONE fs={:#x} ino={} flushed={} size={}",
+                fs_id,
+                ino,
+                total,
+                inode.get_size()
+            );
         }
     }
     total

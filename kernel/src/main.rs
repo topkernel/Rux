@@ -989,6 +989,13 @@ pub fn rust_main_tail() -> ! {
             print_status("dfx", "khungtaskd hung-task detector", true);
         }
 
+        // FI-WATCH (P0 data-integrity lane, razor-6): 1 Hz slot-table
+        // presence watcher — same late-boot slot as khungtaskd (its sleep
+        // loop's wakeup timer needs secondaries online).
+        {
+            crate::fs::page_cache::init_fi_watch();
+        }
+
         // fd-table retire reaper (fs/fdreap): every close/dup2
         // displacement parks the removed occupant for a post-grace
         // drop. Late-boot slot for the same reason as khungtaskd — its

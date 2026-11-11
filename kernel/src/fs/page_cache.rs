@@ -571,8 +571,10 @@ impl PageCache {
     /// then the entry stays published (that insert's page would
     /// otherwise be orphaned in a parked entry).
     fn remove_entry(&self, key: u64, claimed: &Arc<InodePageCache>) {
-        // FI-DIAG (razor-4, the remover names itself): removing a
-        // MANY-PAGE or dirty-carrying entry is the vanish suspect.
+        // FI-DIAG (razor-4/razor-6, the remover names itself): removing
+        // a MANY-PAGE or dirty-carrying entry is the vanish suspect.
+        // Pattern-shaped victims (>=256 pages or any dirty) carry a
+        // backtrace; the 126-page install-stream churn gets one line.
         {
             let g = claimed.lock.lock();
             let np = g.iter().filter(|(_, pg)| !pg.invalidated).count();
@@ -580,12 +582,14 @@ impl PageCache {
             if np >= 100 || nd > 0 {
                 static FI_RE: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
-                if FI_RE.fetch_add(1, Ordering::Relaxed) < 12 {
+                if FI_RE.fetch_add(1, Ordering::Relaxed) < 200 {
                     crate::pr_err!(
                         "FI-REMOVE-ENTRY fs={:#x} ino={} pages={} dirty={} — REMOVER:",
                         claimed.fs_id, claimed.ino, np, nd
                     );
-                    crate::dfx::backtrace::dump_stack();
+                    if nd > 0 || np >= 256 {
+                        crate::dfx::backtrace::dump_stack();
+                    }
                 }
             }
         }
@@ -1523,7 +1527,7 @@ impl PageCache {
                     if npages >= 128 {
                         static FI_C: core::sync::atomic::AtomicUsize =
                             core::sync::atomic::AtomicUsize::new(0);
-                        if FI_C.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 64 {
+                        if FI_C.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 256 {
                             crate::pr_err!(
                                 "FI-CENSUS fs={:#x} ino={} pages={} dirty={}",
                                 entry.fs_id, entry.ino, npages, ndirty
@@ -1533,11 +1537,13 @@ impl PageCache {
                     // FI-DIAG (028fb37d razor): entries with dirty>0 or
                     // >=512 pages print even below the census threshold —
                     // hypothesis (b) vanish vs (c) cleared distinguishes
-                    // by PRESENCE here at each sync.
+                    // by PRESENCE here at each sync. (razor-6: caps
+                    // 48/24/64 were cap-blind — raised to survive the
+                    // whole install storm; the razor-1 lesson applied.)
                     if ndirty > 0 || npages >= 512 {
                         static FI_RZ: core::sync::atomic::AtomicUsize =
                             core::sync::atomic::AtomicUsize::new(0);
-                        if FI_RZ.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 48 {
+                        if FI_RZ.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 256 {
                             crate::pr_err!(
                                 "FI-RAZOR fs={:#x} ino={} pages={} dirty={}",
                                 entry.fs_id, entry.ino, npages, ndirty
@@ -1553,7 +1559,7 @@ impl PageCache {
                         {
                             static FI_COL: core::sync::atomic::AtomicUsize =
                                 core::sync::atomic::AtomicUsize::new(0);
-                            if FI_COL.fetch_add(1, Ordering::Relaxed) < 24 {
+                            if FI_COL.fetch_add(1, Ordering::Relaxed) < 256 {
                                 crate::pr_err!(
                                     "FI-COLLECT fs={:#x} ino={} pages={} dirty={} slot={}",
                                     entry.fs_id, entry.ino, npages, ndirty, si
@@ -1687,12 +1693,15 @@ for i in 0..n {
                         if page.dirty.load(Ordering::Acquire) {
                             static FI_FD: core::sync::atomic::AtomicUsize =
                                 core::sync::atomic::AtomicUsize::new(0);
-                            if FI_FD.fetch_add(1, Ordering::Relaxed) < 20 {
+                            let k = FI_FD.fetch_add(1, Ordering::Relaxed);
+                            if k < 400 {
                                 crate::pr_err!(
                                     "FI-DIRTY-RELEASE fs={:#x} ino={} idx={} write_ok={} — DATA LOSS",
                                     fs_id, ino, page_index, write_ok
                                 );
-                                crate::dfx::backtrace::dump_stack();
+                                if k < 60 {
+                                    crate::dfx::backtrace::dump_stack();
+                                }
                             }
                         }
                         g.remove(&page_index);
@@ -1735,25 +1744,43 @@ for i in 0..n {
         let Some(entry) = self.lookup_claimed(key) else {
             return;
         };
-        // FI-DIAG (razor-5): invalidating an entry that holds MANY pages
-        // is the live-file reap suspect — print + backtrace BEFORE any
-        // marking destroys the evidence.
+        // FI-DIAG (razor-5/razor-6): invalidating an entry that holds
+        // MANY pages is the live-file reap suspect — print + backtrace
+        // BEFORE any marking destroys the evidence. razor-6 fix: fix2's
+        // cap of 10 was consumed EXACTLY by the install stream's 126-page
+        // setattr churn — the pattern file's own invalidation (if any) was
+        // the unprinted 11th. Pattern shape (>=256 pages or dirty>0)
+        // traces; install churn gets a line; both budgets 200.
         {
-            let g = entry.lock.lock();
-            let np = g.iter().filter(|(_, pg)| !pg.invalidated).count();
-            let nd = g.iter().filter(|(_, pg)| !pg.invalidated && pg.dirty.load(Ordering::Acquire)).count();
-            if np >= 100 {
-                static FI_IV: core::sync::atomic::AtomicUsize =
+            let (np, nd) = {
+                let g = entry.lock.lock();
+                let np = g.iter().filter(|(_, pg)| !pg.invalidated).count();
+                let nd = g
+                    .iter()
+                    .filter(|(_, pg)| {
+                        !pg.invalidated && pg.dirty.load(Ordering::Acquire)
+                    })
+                    .count();
+                (np, nd)
+            };
+            if np >= 256 || nd > 0 {
+                static FI_IV_T: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
-                if FI_IV.fetch_add(1, Ordering::Relaxed) < 10 {
-                    drop(g);
+                if FI_IV_T.fetch_add(1, Ordering::Relaxed) < 200 {
                     crate::pr_err!(
                         "FI-INVALIDATE-BIG fs={:#x} ino={} pages={} dirty={} — CALLER:",
                         fs_id, ino, np, nd
                     );
                     crate::dfx::backtrace::dump_stack();
-                } else {
-                    drop(g);
+                }
+            } else if np >= 100 {
+                static FI_IV_L: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if FI_IV_L.fetch_add(1, Ordering::Relaxed) < 200 {
+                    crate::pr_err!(
+                        "FI-INVALIDATE-SML fs={:#x} ino={} pages={} dirty={}",
+                        fs_id, ino, np, nd
+                    );
                 }
             }
         }
@@ -1798,12 +1825,15 @@ for i in 0..n {
                         if !pg.invalidated || pg.dirty.load(Ordering::Acquire) {
                             static FI_VD: core::sync::atomic::AtomicUsize =
                                 core::sync::atomic::AtomicUsize::new(0);
-                            if FI_VD.fetch_add(1, Ordering::Relaxed) < 40 {
+                            let k = FI_VD.fetch_add(1, Ordering::Relaxed);
+                            if k < 400 {
                                 crate::pr_err!(
                                     "FI-DIRTY-DROP fs={:#x} ino={} idx={} dirty={} — DATA LOSS",
                                     fs_id, ino, idx, pg.dirty.load(Ordering::Acquire)
                                 );
-                                crate::dfx::backtrace::dump_stack();
+                                if k < 60 {
+                                    crate::dfx::backtrace::dump_stack();
+                                }
                             }
                         }
                     }
@@ -1875,10 +1905,13 @@ for i in 0..n {
                 );
             }
         }
-        if ok && page_index % 512 == 0 {
+        if ok && page_index % 512 == 0 && page_index > 0 {
+            // razor-6 keying: idx=0 prints are boot noise (fix2: all 16
+            // budget slots went to a 1-page ino=18 churn line) — the
+            // pattern file's growth milestones are the idx>0 multiples.
             static FI_I: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
-            if FI_I.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
+            if FI_I.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 64 {
                 crate::pr_err!("FI-INSERT fs={:#x} ino={} idx={}", fs_id, ino, page_index);
             }
         }
@@ -2493,6 +2526,38 @@ for i in 0..n {
                                         if referenced {
                                             Victim::SecondChance
                                         } else {
+                                            // FI-DIAG (razor-6): evicting a
+                                            // page whose entry is BIG — the
+                                            // pressure-flush-then-evict
+                                            // destroyer shape (flush_done
+                                            // clears the dirty bit, the now
+                                            // clean unreferenced page becomes
+                                            // evictable, and the entry
+                                            // empties silently page by page).
+                                            {
+                                                let live = g
+                                                    .iter()
+                                                    .filter(|(_, pg)| !pg.invalidated)
+                                                    .count();
+                                                if live >= 200 {
+                                                    static FI_EV1:
+                                                        core::sync::atomic::AtomicUsize =
+                                                        core::sync::atomic::AtomicUsize::new(0);
+                                                    if FI_EV1.fetch_add(
+                                                        1,
+                                                        Ordering::Relaxed,
+                                                    ) < 48
+                                                    {
+                                                        crate::pr_err!(
+                                                            "FI-EVICT-BIGENTRY(LRU) fs={:#x} ino={} idx={} live={}",
+                                                            entry.fs_id,
+                                                            entry.ino,
+                                                            page_index,
+                                                            live
+                                                        );
+                                                    }
+                                                }
+                                            }
                                             g.remove(&page_index);
                                             if g.is_empty() {
                                                 // Whole entry gone: tombstone the
@@ -2599,6 +2664,24 @@ for i in 0..n {
                 break;
             }
             if let Some((page_idx, pfn)) = victim {
+                // FI-DIAG (razor-6): the fallback-scan twin of the LRU
+                // walk's big-entry eviction watch.
+                {
+                    let live = g.iter().filter(|(_, pg)| !pg.invalidated).count();
+                    if live >= 200 {
+                        static FI_EV2: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        if FI_EV2.fetch_add(1, Ordering::Relaxed) < 48 {
+                            crate::pr_err!(
+                                "FI-EVICT-BIGENTRY(SCAN) fs={:#x} ino={} idx={} live={}",
+                                entry.fs_id,
+                                entry.ino,
+                                page_idx,
+                                live
+                            );
+                        }
+                    }
+                }
                 g.remove(&page_idx);
                 if g.is_empty() {
                     self.slots[si]
@@ -2753,3 +2836,153 @@ pub fn fi_scanned_dirty() -> u64 { FI_SCANNED_DIRTY.load(Ordering::Relaxed) }
 
 /// FI-DIAG: total insert_dirty failures (razor-2, uncapped counter).
 pub fn fi_insertdirty_fails() -> u64 { FI_IDF_TOTAL.load(Ordering::Relaxed) }
+
+// ==================== FI-WATCH: 1 Hz slot-table presence dump ====================
+//
+// razor-6 (P0 lane): the pattern file's dirty entry vanishes between the
+// last write(2) insert (~130s) and the final sync(2) scan (~131s), and
+// every entry-level probe so far was either filtered out (np=0 after a
+// page-by-page emptying) or had its print budget eaten by boot noise
+// (the razor-1 lesson). This watcher samples PRESENCE itself once per
+// second: one line per entry with >= FI_WATCH_MIN_PAGES live pages.
+// The install stream's files plateau at ~126 pages; the pattern file
+// grows to 2048 — the threshold makes noise structurally unable to eat
+// the budget. The second a line disappears (FI-WATCH-VANISH) is the
+// second the destroyer acted; the serial context around that timestamp
+// names the actor. A >=256-page single-second drop prints
+// FI-WATCH-PLUNGE (gradual page-level removal shape).
+
+/// Watch threshold: entries this big get a presence line every second.
+const FI_WATCH_MIN_PAGES: usize = 200;
+/// Max entries tracked per sample (fixed array — no allocation).
+const FI_WATCH_MAX_TRACK: usize = 16;
+
+static FI_WATCH_ON: AtomicBool = AtomicBool::new(false);
+/// fiwatchd-private previous snapshot (fs_id, ino, pages, dirty).
+static FI_WATCH_PREV: Spinlock<[(u64, u64, usize, usize); FI_WATCH_MAX_TRACK]> =
+    Spinlock::new([(0, 0, 0, 0); FI_WATCH_MAX_TRACK]);
+
+/// Spawn the 1 Hz presence watcher (late boot, after secondaries are
+/// online — same slot discipline as khungtaskd).
+pub fn init_fi_watch() {
+    if FI_WATCH_ON.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    if crate::process::kthread::kthread_run(
+        fiwatch_fn,
+        core::ptr::null_mut(),
+        "fiwatchd",
+    )
+    .is_some()
+    {
+        crate::pr_err!("FI-WATCH-ON 1Hz slot-table presence watcher (min {} pages)", FI_WATCH_MIN_PAGES);
+    }
+}
+
+extern "C" fn fiwatch_fn(_arg: *mut core::ffi::c_void) -> i32 {
+    use crate::process::task::{Task, TaskState};
+    loop {
+        if crate::process::kthread::kthread_should_stop() {
+            break;
+        }
+        fiwatch_scan();
+        // 1 s sleep (mmprof discipline: one-shot wakeup timer +
+        // INTERRUPTIBLE schedule, re-arm IRQs so the tick reaches us).
+        let current = match crate::sched::current() {
+            Some(t) => t as *mut Task,
+            None => return 0,
+        };
+        // SAFETY: current is this kthread's own task pointer.
+        let pid = unsafe { (*current).pid() };
+        let wake_at =
+            crate::drivers::timer::get_jiffies() + crate::config::KERNEL_HZ as u64;
+        let timer_id = crate::timer::add_timer_wakeup(wake_at, pid);
+        // SAFETY: setting our own task's state.
+        unsafe {
+            (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+        }
+        crate::arch::cpu::restore_irq(true);
+        crate::sched::schedule();
+        if timer_id != 0 {
+            crate::timer::del_timer(timer_id);
+        }
+    }
+    0
+}
+
+/// One presence sample. Same wlock-scan shape as flush_all_dirty's
+/// census (prints under wlock carry flush_all_dirty's precedent).
+fn fiwatch_scan() {
+    let mut cur: [(u64, u64, usize, usize); FI_WATCH_MAX_TRACK] =
+        [(0, 0, 0, 0); FI_WATCH_MAX_TRACK];
+    let mut n = 0usize;
+    {
+        let _w = PAGE_CACHE.wlock.lock();
+        for si in 0..PC_TABLE_CAP {
+            // SAFETY: wlock excludes removal, so the slot's reference is
+            // stable and the entry is alive (flush_all_dirty's census rule).
+            let p = PAGE_CACHE.slots[si].0.load(Ordering::Acquire);
+            if p.is_null() || p as usize == PC_TOMBSTONE_BITS {
+                continue;
+            }
+            let entry = unsafe { &*p };
+            let (np, nd) = {
+                let g = entry.lock.lock();
+                let np = g.iter().filter(|(_, pg)| !pg.invalidated).count();
+                let nd = g
+                    .iter()
+                    .filter(|(_, pg)| {
+                        !pg.invalidated && pg.dirty.load(Ordering::Acquire)
+                    })
+                    .count();
+                (np, nd)
+            };
+            if np >= FI_WATCH_MIN_PAGES || nd >= FI_WATCH_MIN_PAGES {
+                crate::pr_err!(
+                    "FI-WATCH fs={:#x} ino={} pages={} dirty={}",
+                    entry.fs_id,
+                    entry.ino,
+                    np,
+                    nd
+                );
+                if n < FI_WATCH_MAX_TRACK {
+                    cur[n] = (entry.fs_id, entry.ino, np, nd);
+                    n += 1;
+                }
+            }
+        }
+    }
+    // Vanish/plunge detection against the previous sample.
+    let mut prev = FI_WATCH_PREV.lock();
+    for &(fs, ino, pp, pd) in prev.iter() {
+        if (fs, ino) == (0, 0) {
+            continue;
+        }
+        match cur[..n].iter().find(|e| e.0 == fs && e.1 == ino) {
+            None => {
+                crate::pr_err!(
+                    "FI-WATCH-VANISH fs={:#x} ino={} last_pages={} last_dirty={} — THE SECOND IT VANISHED",
+                    fs,
+                    ino,
+                    pp,
+                    pd
+                );
+            }
+            Some(&(_, _, cp, cd)) => {
+                if pp >= cp.saturating_add(256) {
+                    crate::pr_err!(
+                        "FI-WATCH-PLUNGE fs={:#x} ino={} was={} now={} dirty_was={} dirty_now={}",
+                        fs,
+                        ino,
+                        pp,
+                        cp,
+                        pd,
+                        cd
+                    );
+                }
+            }
+        }
+    }
+    *prev = cur;
+    drop(prev);
+}
