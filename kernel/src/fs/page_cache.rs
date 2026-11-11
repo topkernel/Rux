@@ -571,6 +571,24 @@ impl PageCache {
     /// then the entry stays published (that insert's page would
     /// otherwise be orphaned in a parked entry).
     fn remove_entry(&self, key: u64, claimed: &Arc<InodePageCache>) {
+        // FI-DIAG (razor-4, the remover names itself): removing a
+        // MANY-PAGE or dirty-carrying entry is the vanish suspect.
+        {
+            let g = claimed.lock.lock();
+            let np = g.iter().filter(|(_, pg)| !pg.invalidated).count();
+            let nd = g.iter().filter(|(_, pg)| !pg.invalidated && pg.dirty.load(Ordering::Acquire)).count();
+            if np >= 100 || nd > 0 {
+                static FI_RE: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if FI_RE.fetch_add(1, Ordering::Relaxed) < 12 {
+                    crate::pr_err!(
+                        "FI-REMOVE-ENTRY fs={:#x} ino={} pages={} dirty={} — REMOVER:",
+                        claimed.fs_id, claimed.ino, np, nd
+                    );
+                    crate::dfx::backtrace::dump_stack();
+                }
+            }
+        }
         let w = self.wlock.lock();
         let Some(idx) = self.table_find_ptr(key, Arc::as_ptr(claimed)) else {
             return; // already removed (evict/another put) — our Arc dies with us
