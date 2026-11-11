@@ -1272,8 +1272,18 @@ use core::arch::global_asm;
 /// memory_layout.rs, buddy_allocator.rs).
 // RUX-RISCV-LAYOUT-5: image window 20MB->24MB; reserve 22MB->26MB
 // (0x81a00000 heap base - 0x80000000 RAM base), heap phys moved together.
+// RUX-RISCV-LAYOUT-7 GAP FIX (94th session): the 89th's LAYOUT-7 moved
+// the heap 0x81a00000 -> 0x81c00000 and the window 24MB -> 28MB but
+// MISSED THIS SITE — the reserve stayed 26MB, leaving a 2MB free gap
+// [0x81a00000, 0x81c00000) between reservation end and heap start: the
+// vmemmap backing search grabbed the gap and Page::init_free walked
+// descriptors over live heap pages (the documented corruption family
+// in memory_layout.rs's HEAP_START note) — the riscv64 make-test
+// boot-panic bisected to 45fa58be. Heap now at the 28MB window end
+// (0x81e00000, the coordinator's proven layout-hunt pattern), reserve
+// 30MB = heap base - RAM base: no gap, heap at/above window end.
 #[cfg(feature = "riscv64")]
-const KERNEL_RESERVE_SIZE: usize = 0x1A0_0000; // 26MB
+const KERNEL_RESERVE_SIZE: usize = 0x1E0_0000; // 30MB
 #[cfg(feature = "x86_64")]
 // 30MB -> 40MB (layout-hunt 2026-11-10): the SMP8 const-block arrays pushed
 // the image to 31.4MB; the 30MB reserve left 368KB of live .bss unreserved
@@ -1293,7 +1303,8 @@ static HEAP_SLAB_END_EFF: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(feature = "riscv64")]
-const KERNEL_HEAP_PHYS: usize = 0x81c0_0000;
+// LAYOUT-7 GAP FIX: 0x81c0_0000 -> 0x81e0_0000 (the 28MB window end).
+const KERNEL_HEAP_PHYS: usize = 0x81e0_0000;
 #[cfg(feature = "x86_64")]
 const KERNEL_HEAP_PHYS: usize = 0x4000_0000;
 // aarch64: kernel window is [0x4008_0000, 0x4280_0000) (32MB; the

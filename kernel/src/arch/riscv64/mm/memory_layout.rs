@@ -154,12 +154,19 @@ pub const KERNEL_SIZE: u64 = 0x1C00000; // 28MB (RUX-RISCV-LAYOUT-7, hp89)
 
 /// Heap start address (after kernel)
 /// RUX-RISCV-LAYOUT: must stay at/above the boot.S image-window end
-/// (entry 0x80200000 + KERNEL_SIZE 24MB = 0x81a00000) and must match
+/// (entry 0x80200000 + KERNEL_SIZE 28MB = 0x81e00000) and must match
 /// KERNEL_RESERVE_SIZE/KERNEL_HEAP_PHYS in main.rs and buddy_allocator.rs.
 /// When it sat at 0x80C00000 (2MB inside the window) the grown kernel
 /// image overlapped the first heap pages — see main.rs
 /// RUX-RISCV-LAYOUT for the corruption family that produced.
-pub const HEAP_START: u64 = 0x81c00000;
+/// RUX-RISCV-LAYOUT-7 GAP FIX (94th session): the 89th set 0x81c00000
+/// (2MB INSIDE the 28MB window) and left main.rs's riscv64
+/// KERNEL_RESERVE_SIZE at 26MB — a 2MB free gap between reservation
+/// end and heap start, exactly the "vmemmap backing search grabs the
+/// gap" family documented above. Moved to the window end 0x81e00000
+/// with the reserve (30MB), the coordinator's proven layout-hunt
+/// pattern: no gap, heap at the window end.
+pub const HEAP_START: u64 = 0x81e00000;
 
 /// Slab start address (after heap)
 /// Note: Actual address depends on KERNEL_HEAP_SIZE config
