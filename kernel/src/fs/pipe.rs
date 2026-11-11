@@ -828,8 +828,102 @@ pub fn pipe_read_user(file: &File, dst: *mut u8, count: usize) -> isize {
     let cc_t = crate::dfx::cctx::now();
     crate::dfx::cctx::bump(&crate::dfx::cctx::PR_N);
     let r = pipe_read_common(file, dst, count, true);
+    if r > 0 {
+        fi_pipe_phase("read-out", r as usize, dst as *const u8);
+    }
     crate::dfx::cctx::add(&crate::dfx::cctx::PR_NS, cc_t);
     r
+}
+
+/// FI-DIAG (razor-7/8, P0 lane): the crash-window rig's `yes FIPATTERN…
+/// | head -c 8M > pat.bin` delivers a stream whose position drifts a few
+/// bytes per call (razor7: +4 mod 20 per 4096-byte page — the file ends
+/// up with another page's phase-perfect content in ~1600/2048 blocks;
+/// the FS layers are proven faithful by the ext4 phase probes). This
+/// probe watches the FIPATTERN signature at the pipe WRITE entry (bytes
+/// `yes` hands us — toybox yes writes one 20-byte line per call, phase
+/// 0, the healthy norm) and the pipe READ exit (bytes `head` gets).
+/// ANOMALY-KEYED (the razor-1 cap lesson applied to my own probe: the
+/// 400-line budget of v1 was consumed by the first 8 KB of healthy
+/// 20-byte chunks, long before razor7's ~350 KB corruption point): a
+/// call prints only when its chunk is NOT a whole number of pattern
+/// lines or the signature is not at offset 0 — the first such call is
+/// the exact moment the stream breaks, and `site` names the side. A
+/// heartbeat sample every 1024th call proves the probe stayed live.
+fn fi_pipe_phase(site: &str, n: usize, bytes: *const u8) {
+    const SIG: &[u8; 20] = b"FIPATTERN0123456789\n";
+    unsafe {
+        let win = 64usize.min(n);
+        let head = core::slice::from_raw_parts(bytes, win);
+        let mut phase: Option<usize> = None;
+        for i in 0..win {
+            if head[i..].len() >= SIG.len() && &head[i..i + SIG.len()] == SIG {
+                phase = Some(i % 20);
+                break;
+            }
+        }
+        // Keying (razor-8b's lesson: signature-LESS chunks are OTHER
+        // pipes' traffic — printing them ate the 40-line budget before
+        // the pattern stream's first read): only chunks CARRYING the
+        // signature participate. Healthy = a whole number of pattern
+        // lines aligned at offset 0; anything else is the anomaly.
+        let anomalous = match phase {
+            Some(0) => n % 20 != 0,
+            Some(_) => true,
+            None => return,
+        };
+        // razor-8c verdict: read-out phases advance +4 per 4096 chunk
+        // (0,4,8,12,16,0,...) from the FIRST chunk pair — 8 stream bytes
+        // skipped per chunk, write-in lines healthy. Next discriminator:
+        // is the loss BETWEEN chunks (each chunk internally periodic-20)
+        // or INSIDE a chunk (a torn segment)? Verify the FULL chunk
+        // against its own first-byte phase.
+        let mut torn_at: Option<usize> = None;
+        if anomalous && n <= 65536 {
+            if let Some(p) = phase {
+                let buf = core::slice::from_raw_parts(bytes, n);
+                for i in 0..n {
+                    if buf[i] != SIG[(p + i) % 20] {
+                        torn_at = Some(i);
+                        break;
+                    }
+                }
+            }
+        }
+        static FI_PN: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        static FI_HB_W: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        static FI_HB_R: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        static FI_TOT_W: core::sync::atomic::AtomicU64 =
+            core::sync::atomic::AtomicU64::new(0);
+        static FI_TOT_R: core::sync::atomic::AtomicU64 =
+            core::sync::atomic::AtomicU64::new(0);
+        if anomalous {
+            let k = FI_PN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if k < 12 {
+                crate::pr_err!(
+                    "FI-PIPE-ANOMALY {} n={} phase={:?} torn_at={:?}",
+                    site,
+                    n,
+                    phase,
+                    torn_at
+                );
+            }
+        }
+        // Heartbeat + running totals per side (the write-in total vs the
+        // read-out total decides who dropped the bytes).
+        let (hb, tot) = if site == "write-in" {
+            (&FI_HB_W, &FI_TOT_W)
+        } else {
+            (&FI_HB_R, &FI_TOT_R)
+        };
+        let tot = tot.fetch_add(n as u64, core::sync::atomic::Ordering::Relaxed) + n as u64;
+        if hb.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % 256 == 0 {
+            crate::pr_err!("FI-PIPE-HB {} n={} total={}", site, n, tot);
+        }
+    }
 }
 
 /// Shared pipe read core: `user` selects exception-table user copies
@@ -967,6 +1061,9 @@ pub fn pipe_write_user(file: &File, src: *const u8, count: usize) -> isize {
     // cctx probe (closegap lane): whole-op write sum for lat_pipe.
     let cc_t = crate::dfx::cctx::now();
     crate::dfx::cctx::bump(&crate::dfx::cctx::PW_N);
+    if count > 0 {
+        fi_pipe_phase("write-in", count, src);
+    }
     let r = pipe_write_common(file, src, count, true);
     crate::dfx::cctx::add(&crate::dfx::cctx::PW_NS, cc_t);
     r
