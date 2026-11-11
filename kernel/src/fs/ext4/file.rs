@@ -2338,6 +2338,25 @@ fn refresh_cached_vfs_inode(
     vi.size.store(size, core::sync::atomic::Ordering::Relaxed);
 }
 
+/// FI-DIAG (data-integrity lane, 2026-11-11): write_inode calls per PATH.
+/// The flush path (page-cache writeback: ext4_flush_dirty_inode) and the
+/// write(2)/pwrite/kernel-writer path (ext4_write_at_core with
+/// skip_update_pfn == 0) update the inode at very different rates; a boot
+/// that flushes 2048 pages but issues one inode update names the loss in
+/// one look.
+pub static FI_WI_FLUSH: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+pub static FI_WI_DIRECT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// FI-DIAG: the per-path write_inode counters (flush vs direct).
+pub fn fi_write_inode_counts() -> (usize, usize) {
+    (
+        FI_WI_FLUSH.load(core::sync::atomic::Ordering::Relaxed),
+        FI_WI_DIRECT.load(core::sync::atomic::Ordering::Relaxed),
+    )
+}
+
 /// `inode` is the caller's VFS inode when it has one (the fd paths). A
 /// kernel-side writer with no VFS file description passes `None`; the
 /// cache-coherence tail then resolves the cached VFS inode through the
@@ -2423,7 +2442,29 @@ unsafe fn ext4_write_at_core(
 
     // Call internal write function
     let result = match ext4_file_write(fs, &mut ext4_inode, offset, buf) {
-        Err(e) => e as isize,
+        Err(e) => {
+            // FI-DIAG (data-integrity lane, 2026-11-11): the Err arm
+            // SKIPS the inode update below — the on-disk inode keeps its
+            // creation size while the DATA blocks are on the device (the
+            // "size 0, md5-of-empty, data orphaned on disk" class). Name
+            // the failure: errno + inode + offset + the extent/block
+            // state the write saw.
+            static FI_ERR: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if FI_ERR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
+                crate::pr_err!(
+                    "FI-WRITE-ERR ino={} errno={} offset={} len={} disk_size={} blocks={} extent={}",
+                    ext4_ino,
+                    e,
+                    offset,
+                    buf.len(),
+                    ext4_inode.get_size(),
+                    ext4_inode.blocks,
+                    if ext4_inode.has_extent() { 1 } else { 0 }
+                );
+            }
+            e as isize
+        }
         Ok(written_bytes) => {
             // CACHE COHERENCE TAIL (the klogd lesson, 2026-10-26): the
             // cached VFS view — the sb-boxed Ext4Inode copy that bounds
@@ -2446,6 +2487,20 @@ unsafe fn ext4_write_at_core(
                 refresh_cached_vfs_inode(&vi, &ext4_inode);
             }
             // Write back inode to disk (registers with journal if handle active)
+            //
+            // FI-DIAG (data-integrity lane): count the inode updates per
+            // PATH. The flush path (page-cache writeback) passes the
+            // frame's pfn as skip_update_pfn; the write(2)/pwrite/kernel
+            // paths pass 0. Two counts that do not add up name a lost
+            // inode update in a single boot.
+            {
+                use core::sync::atomic::Ordering;
+                if skip_update_pfn != 0 {
+                    FI_WI_FLUSH.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    FI_WI_DIRECT.fetch_add(1, Ordering::Relaxed);
+                }
+            }
             match crate::fs::ext4::inode::write_inode(fs, ext4_ino, &ext4_inode) {
                 Ok(()) => {
                     // Session 25 write-through: update cached frames in the

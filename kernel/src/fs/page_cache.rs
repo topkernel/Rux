@@ -1458,13 +1458,21 @@ impl PageCache {
     ///
     /// Shape: chunked slot-table scan (fixed arrays — no allocation under
     /// wlock), NO pcache lock held across the flush I/O (R-WRITESTORM-1),
-    /// live inodes resolved via icache_lookup (miss = skip: the frames
-    /// stay dirty and coherent to every reader through the page cache),
+    /// live inodes resolved via the ext4 writeback resolver (the icache
+    /// first, then a fresh inode materialized from the on-disk inode — a
+    /// cache miss may cost performance, never data: the old "miss = skip"
+    /// contract silently DROPPED every dirty frame of an inode the
+    /// bounded icache had evicted — the sync(2) data-loss bug),
     /// single pass — pages dirtied by a racing writer after their slot
     /// was scanned remain for the next sync (the reference kernel's
     /// sync(2) is not a quiescent point either).
-    pub fn flush_all_dirty(&self) {
+    ///
+    /// Returns the (fs_id, ino) targets whose dirty pages were flushed —
+    /// the caller persists their inode-table blocks afterwards (the
+    /// ordered-data discipline: data first, metadata last).
+    pub fn flush_all_dirty(&self) -> alloc::vec::Vec<(u64, u64)> {
         const PASS: usize = 32;
+        let mut flushed_targets: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
         let mut work: [(u64, u64); PASS] = [(0, 0); PASS];
         let mut resume: usize = 0;
         loop {
@@ -1531,38 +1539,42 @@ impl PageCache {
             let guarded = WRITEBACK_GUARD
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok();
-            for i in 0..n {
+for i in 0..n {
                 let (fs_id, ino) = work[i];
-                // Liveness: same contract as sys_fsync (the icache Arc
-                // keeps the descriptor alive; private_data fs pointer is
-                // valid while the mount lives). Miss = skip.
-                let lookup = crate::fs::inode::icache_lookup(ino, fs_id);
-                if lookup.is_none() {
-                    // FI-DIAG: collected but unresolvable — its dirty pages
-                    // are NEVER flushed (the 'Miss = skip' contract) and the
-                    // data is silently lost.
-                    static FI_MISS: core::sync::atomic::AtomicUsize =
-                        core::sync::atomic::AtomicUsize::new(0);
-                    if FI_MISS.fetch_add(1, Ordering::Relaxed) < 24 {
-                        crate::pr_err!(
-                            "FI-ICACHE-MISS fs={:#x} ino={} — collected dirty but NEVER flushed",
-                            fs_id, ino
-                        );
-                    }
-                }
-                if let Some(inode) = lookup {
-                    let flushed = crate::fs::ext4::file::ext4_flush_dirty_inode(&inode, 0, u64::MAX);
-                    // FI3-DIAG (data-integrity lane): did the global sync
-                    // actually reach this inode?
-                    if flushed > 0 {
-                        static FI3N: core::sync::atomic::AtomicUsize =
+                // Liveness: the writeback resolver NEVER gives up on a
+                // collected dirty inode — the icache is a bounded cache
+                // and a miss must not cost the file its dirty frames
+                // (the fi-lane sync(2) data loss: the 8 MB pattern file's
+                // 2048 dirty pages were collected and then skipped).
+                let inode = match crate::fs::ext4::resolve_writeback_inode(fs_id, ino) {
+                    Some(i) => i,
+                    None => {
+                        // FI-DIAG: collected but unresolvable AND the
+                        // on-disk inode could not be materialized — the
+                        // frames stay dirty; the next sync retries.
+                        static FI_MISS: core::sync::atomic::AtomicUsize =
                             core::sync::atomic::AtomicUsize::new(0);
-                        if FI3N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 12 {
+                        if FI_MISS.fetch_add(1, Ordering::Relaxed) < 24 {
                             crate::pr_err!(
-                                "FI3-FLUSH ino={} pages={} vfs_size={}",
-                                ino, flushed, inode.get_size()
+                                "FI-ICACHE-MISS fs={:#x} ino={} — collected dirty but unresolvable",
+                                fs_id, ino
                             );
                         }
+                        continue;
+                    }
+                };
+                let flushed = crate::fs::ext4::file::ext4_flush_dirty_inode(&inode, 0, u64::MAX);
+                // FI3-DIAG (data-integrity lane): did the global sync
+                // actually reach this inode?
+                if flushed > 0 {
+                    flushed_targets.push((fs_id, ino));
+                    static FI3N: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    if FI3N.fetch_add(1, Ordering::Relaxed) < 12 {
+                        crate::pr_err!(
+                            "FI3-FLUSH ino={} pages={} vfs_size={}",
+                            ino, flushed, inode.get_size()
+                        );
                     }
                 }
             }
@@ -1573,6 +1585,7 @@ impl PageCache {
                 break; // table exhausted
             }
         }
+        flushed_targets
     }
 
     /// Complete a flush cycle for entries collected by `collect_dirty_range`:
@@ -2277,10 +2290,11 @@ impl PageCache {
             }
             for i in 0..n_work {
                 let (fs_id, ino, first, last) = work[i];
-                // Liveness: same contract as sys_fsync (Inode Arc keeps
-                // the descriptor alive; private_data fs pointer is valid
-                // while the mount lives). Miss = skip, retry next call.
-                if let Some(inode) = crate::fs::inode::icache_lookup(ino, fs_id) {
+                // Liveness: the writeback resolver materializes the inode
+                // from the on-disk inode when the bounded icache lost it
+                // — a cache miss must never strand dirty pages (the
+                // fi-lane sync(2) data loss).
+                if let Some(inode) = crate::fs::ext4::resolve_writeback_inode(fs_id, ino) {
                     crate::fs::ext4::file::ext4_flush_dirty_inode(
                         &inode,
                         first,

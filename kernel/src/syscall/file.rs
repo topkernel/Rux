@@ -4597,19 +4597,49 @@ pub fn sys_sync(_args: SyscallArgs) -> i64 {
     // dirty page-cache frames — drain them into the ext4 write path (and
     // thus the buffer cache) BEFORE syncing the buffer cache, or sync(2)
     // would persist nothing of every un-fsynced write.
-    crate::fs::page_cache::get_page_cache().flush_all_dirty();
+    //
+    // The drain returns the (fs, inode) targets it flushed: their
+    // inode-table blocks carry the new size, and the ordered-data
+    // discipline demands they reach the device AFTER the data blocks
+    // (below) — otherwise a crash in between leaves a file that claims
+    // 8 MB of data the device never received.
+    let flushed_targets = crate::fs::page_cache::get_page_cache().flush_all_dirty();
     // FI-DIAG: the page-cache census at the sync point.
     {
+        let (wi_flush, wi_direct) = crate::fs::ext4::file::fi_write_inode_counts();
         crate::pr_err!(
-            "FI-SUMMARY inserted_pages={} scanned_entries={} scanned_pages={} scanned_dirty={}",
+            "FI-SUMMARY inserted_pages={} scanned_entries={} scanned_pages={} scanned_dirty={} wi_flush={} wi_direct={}",
             crate::fs::page_cache::fi_inserted_pages(),
             crate::fs::page_cache::fi_scanned_entries(),
             crate::fs::page_cache::fi_scanned_pages(),
-            crate::fs::page_cache::fi_scanned_dirty()
+            crate::fs::page_cache::fi_scanned_dirty(),
+            wi_flush,
+            wi_direct
         );
     }
     // Flush all buffer cache
     let _ = crate::fs::bio::sync_buffers();
+    // INODE-TABLE BLOCKS (fi-lane data-integrity, 2026-11-11): the size
+    // the flushed files just learned lives in their inode-table blocks.
+    // fsync has always synced that block explicitly (ext4_sync_file_inner
+    // bakes the inode-table block + sync_dirty_buffer); sync(2) had NO
+    // equivalent, so the block stayed dirty in the buffer cache and a
+    // crash right after sync() returned left every synced file at its
+    // creation size (0 bytes, md5-of-empty) with its data blocks already
+    // on the device. Synced AFTER the buffer-cache drain above, so the
+    // metadata lands after the data it describes (ordered data).
+    {
+        let n = crate::fs::ext4::sync_inode_tables(&flushed_targets);
+        static FI_IT: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if FI_IT.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+            crate::pr_err!(
+                "FI-SYNC-INOTABLE targets={} blocks_synced={}",
+                flushed_targets.len(),
+                n
+            );
+        }
+    }
     // JOURNAL COMMIT (fi3/fi4 data-integrity lane, 2026-11-11): fsync's
     // own discipline — with a journal present, durability requires the
     // RUNNING TRANSACTION TO COMMIT (an h_sync handle forces the lazy
