@@ -12049,3 +12049,167 @@ tiers owed by this session's diff.
    recur on fixed-kernel boots, capture LOCK-OBJ (needs the dump to
    survive console interleave — consider lifting the deadlock dump
    to putchar_no_lock like the watchdog path).
+
+### 103. 103RD SESSION (2026-11-12 00:1x-.., branch oh-crash) — the boot ladder is DECOMPOSED (pre-installs +14.1s and install-stream +16.7s carry 89% of the 34.8s gap); the SA-window hiperf harness works (arm >= 25s or the record dies silently); the param channel is 3.0s behind its socket while init's service storm runs; heavy SA inits are 10-20x the reference; the always-on binder prints (SAREG/SACSA/SLRD/SLTX, ~0.95MB/boot) are dfx-gated behind bindertrace; THE MISSION'S "pristine" userdata-fresh2.img was found DIRTIED at 00:05 (today's 0/14 stall regime explained; Nov-5 frozen copies ud-f2-u2v9/15 are the real pristine)
+
+Mission: boot-path structural optimization + continuous sampling (the
+46.2s -> <=5.7s directive); §100.8 queue.
+
+#### 103.1 The ladder decomposition (run/hp103-ladder.py, run/hp103-ladder-all.txt)
+
+Nine existing ladder serials + the reference (oh-abref1, launcher.ready
+11.447s), phase boundaries from serial markers (host-time; UART-lag
+caveat applies to all phases equally):
+
+  phase                      ours (quiet-arm median)   reference   gap
+  boot start -> first SA          3.88s                3.17s     +0.7
+  SA chain -> installs spawn     15.3s (12.6-19.2)      1.2s    +14.1
+  install stream                 22.3s (20.1-26.3)      5.6s    +16.7
+  bundles.ready -> launcher.ready 3.9s (3.3-7.9)       1.4s     +2.5
+
+89% of the 34.8s gap sits in the two middle phases. The dfx arm
+(leakhunt+periodic) stretches the install stream ~2x on its own
+(hp100 series: stream 45-56s vs quiet 20-26s) — arm choice matters
+more than kernel deltas below ~10s. Per-spawn kernel cost is NOT the
+SA-chain story: samgr "Start dynamic proc" latencies are 4-32ms
+(reference class 8-153ms) for 17/19 SAs; only distributeddata (3670ms)
+and deviceauth (3035ms) blow up, and both ride the param/cascade gate
+below. The launch tail (bundles->ready) is a stable ~3.3s.
+
+#### 103.2 The sampling harness (proven shape; rigs untracked in run/)
+
+- system-hp103.img: system.img + /system/etc/hp103-run.sh +
+  /system/etc/init/hp103.cfg (the hpboot service cfg is REQUIRED — a
+  script-only injection never runs; the 100th documented this too).
+- HARD LIMIT FOUND: `hiperf record -a` armed before ~25s of boot
+  produces NOTHING (rc=0, no file, no stderr; synchronous AND
+  background forms both fail; hp103a/b/c/e probes). Armed at >= 28s it
+  works (hp103d landed a fresh 39.6MB w1; md5 differs from the 100th's
+  archived record — a NEW record, not the old file). The SA-chain
+  window (4-21s) is thus UNRECORDABLE with hiperf; use serial decodes
+  for it, records for the install stream and later.
+- hp103c's cp-then-umount landing failed even when cp rc=0: the
+  output-disk new-dirent writeback was LOST (the §99.2 fs-lane parity
+  family) — a record that exists only late in the boot may not persist.
+  The hp100r recipe (record exits naturally, THEN cp, bounded sync,
+  umount) is the reliable one.
+- Parsers: run/hp103-parse.py (walk + phase buckets + symbolized
+  top-25 -> run/hp103-ledger.txt; fixed an idle-continue infinite-loop
+  bug), run/hp103-phase-times.py, run/hp103-ladder.py.
+- BASELINE RECORD BANKED (hp103d, stretched boot, window 28.8-118.8s,
+  253,607 samples): kern 137,859 non-idle / 115,748 idle / 15,898 user.
+  Kernel top: syscall dispatch (x86_compat::translate — the x86_64
+  number translator on EVERY syscall, dispatch.rs:323; the name is NOT
+  32-bit compat) 21.7k = 15.7%; TTAS/atomic family ~15%; console emit
+  path top-5 (matches §100.6). Per-process kernel burn: hilogd 33.3k +
+  pid603 (sa_main hosting msdp+os_ds_service) 31.6k + multimodalinput
+  29.8k + sysevent_source 23.7k = 86% of non-idle — and ALL FOUR share
+  the SAME kernel-IP profile (dispatch + spin-poll cluster): it is
+  per-syscall cost x syscall volume, not a process-specific spin.
+  46% idle -> the install stream is ROUND-TRIP-bound, not CPU-starved.
+
+#### 103.3 The SA-chain root: init's param channel runs 3.0s behind its socket (dfx=pctlmon decode, hp103f)
+
+- hdf_devmgr.ready SET (PCTL-SEND) at 5.796; param_watcher.started
+  5.830; the boot.completed WATCH at 5.833. init's param service READS
+  them (PCTL-RECV #0-#4) at 8.803-8.823 — a 3.0s socket-queue stall
+  while init's service-start storm runs (the same shape the old
+  lb342-344 era measured at 5.1-8.3s; STILL PRESENT on a38e47a5).
+- The stall gates boot.completed handling -> the on-demand cascade:
+  distributeddata's dynamic-proc spawn waits 3.67s, deviceauth 3.04s
+  (the two outliers of 103.1). Per §"the cascade" (lb342): same chain.
+- Heavy SA inits (userspace-measured "init finished, N ms"):
+  foundation 10662ms (ref 555-624), distributeddata 14410, softbus
+  14335, media_service 9237, av_session 8822, accountmgr 7385 — the
+  heavy SAs are 10-20x the reference; simple SAs are near-parity
+  (89-676ms vs ref 17-555ms). The heavy-SA cost is nested-binder +
+  fs-op round-trips (install-window SLOW-TXNs are exec-dominated with
+  queue ~10ms; binder fast-path RTT from SAREG pairing ~4-5ms vs ref
+  ~1ms class).
+- KERNEL LEVERS here: per-syscall dispatch cost (the 15.7% site) and
+  print/emit-lock volume (103.4) shrink EVERY hop of the storm; the
+  exec/fork path itself is under concurrent work by the 101st
+  (process/exec.rs edits in this tree — NOT touched by me).
+
+#### 103.4 The console/serial lever, round 1: binder prints gated (A/B below)
+
+A NO-DFX pristine LL4 boot emits ~2.4MB of serial (hp93c/d); 0.79MB is
+the ALWAYS-ON SAREG binder-family probe (SAREG/SACSA/SLRD; ~5.8k lines
+through acquire_emit_lock), 0.15MB SLTX, 0.14MB KSIG9 + 0.24MB
+KOT-KILL/SLTX-class kill-path prints — together ~2.4x the reference's
+ENTIRE LL7 log (640KB). The KSIG/KOT-KILL gates were already added by
+the 101st (sigtrace, uncommitted in this tree 2026-11-12). MINE: the
+SAREG sc155 block + SACSA prefilter + SLRD read-side + SLTX app trace
+in ipc/binder.rs are now gated behind the EXISTING DfxSwitch
+BinderTrace ("dfx=bindertrace") — no new switch, table unchanged
+(policy-compliant). Side effect: the samgr-pid latch only latches with
+bindertrace on; all its consumers are hunt instruments (SACB tap,
+park-census rows) that no-op with pid 0. Hunts needing SAREG/SLRD
+pairing must arm dfx=bindertrace from now on.
+
+#### 103.5 THE RIG BUG THAT POISONED TODAY'S A/Bs: userdata-fresh2.img is DIRTY
+
+The mission-named pristine source
+(/home/william/rux-agents/oh-launcher/run/userdata-fresh2.img, a REAL
+file — every worktree's userdata-fresh2 symlink resolves TO IT) was
+written at 2026-11-12 00:05 (before my first boot): it now carries a
+full /data tree (app/, service/, log/, even hpout/ — someone NOSNAP-
+booted a hiperf rig on it). 14/14 boots on it today STALLED (0
+ladders) vs 5/8-6/14 on Nov 11 — a half-provisioned userdata turns
+the boot into a ~100% stretch/stall machine (faces A/C are exactly
+the provisioning-incomplete shapes; this is the strongest evidence
+yet that residual provisioning state drives the clean-stall class).
+The Nov-5 frozen copies in oh-launcher/run (ud-f2-u2v9.img,
+ud-f2-u2v15.img — verified: only lost+found) are the REAL pristine
+source. All A/B boots from 01:56 use ud-f2-u2v9.img. The coordinator
+should quarantine/re-pristine userdata-fresh2.img (or repoint the
+symlinks) so no other lane rides the dirty file.
+
+#### 103.6 A/B: binder-print gating (interleaved, pristine source, SMP8+4G KVM LL4, no dfx)
+
+ARM A = baseline 7fc96d56 (oh-crash-base worktree, byte-identical
+rebuild of a38e47a5-era binary), ARM B = 031f3cc6 (oh-crash-103
+worktree = A + binder gating only), pristine ud-f2-u2v9 source,
+interleaved pairs, n=4+4 (run/hp103-ab3.out):
+
+  boot    first_sa installs bundles  ready    serial   sareg
+  base1     9.6     27.2     78.0     81.5s    2.76MB   1087
+  gate1     8.6     24.9     76.6     78.6s    1.13MB      0
+  base2   116.6    173.2    219.5    223.4s    2.32MB   1080
+  gate2     7.9     25.9     75.4    STALL     1.02MB      0
+  base3     7.8     26.4     95.1    STALL     2.40MB   1135
+  gate3    12.8     39.7     none    STALL     0.89MB      0
+  base4   143.0    170.6    215.2    220.9s    2.47MB   1069
+  gate4     9.8     25.9     none    STALL     0.94MB      0
+
+- SERIAL VOLUME: -55..-61% in 4/4 pairs (median 2.40MB -> 0.99MB) —
+  the gate does exactly what it says, every boot.
+- MATCHED CLEAN PAIR (base1/gate1): launcher.ready 81.5 -> 78.6
+  (-2.9s, -3.6%); bundles.ready 78.0 -> 76.6.
+- EARLY-BOOT RESILIENCE: the 100-140s first_sa stall class hit base
+  2/4, gate 0/4 (the SAREG storm's emit-lock volume sits exactly in
+  that window). Suggestive at n=4, not conclusive.
+- VERDICT: a real, small ladder win + a large consistent console-load
+  cut; the change is SAFE (4 gate boots all ran the full SA chain and
+  binder with zero SAREG — registration/callbacks unaffected). Host
+  was loaded (other agents' series); the merge gate should re-run the
+  launcher.ready median on a quiet host. Commit c9b536a0 on branch
+  oh103-serialgate (pushed).
+- hp103h (gate kernel + record rig): full ladder 76.4s; the hiperf
+  record's exit write-out flaked (the known ~50% class) — the ledger's
+  kernel-table A/B rides the next landed record.
+
+#### 103.7 FOR THE 104TH
+
+1. If the A/B shows a real ladder win, stack the NEXT print gates:
+   TIMEDSLEEP-PARK (timer.rs — 101st's file, coordinate) and the
+   taskdump/APPMAPSRC/mtprobe families; then re-measure.
+2. The param-channel 3s stall (103.3): worth a dedicated instrument
+   (PCTL-SEND is send-side tap; add a wake-latency probe on init's
+   reader wake) — if our epoll wake is late vs the reference's
+   same-millisecond pickup, that is a kernel bug class; if init is
+   genuinely busy 3s, it rides per-syscall cost (101st's lane).
+3. The dirty-source discovery (103.5) needs coordinator action NOW.
+4. hiperf's <25s arm failure (103.2) — if the SA-chain window ever
+   needs a record, the fix lives in hiperf bring-up (userspace) or a
+   kernel-side perf buffer flush path; not chased further this session.
