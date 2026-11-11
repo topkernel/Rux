@@ -10897,3 +10897,181 @@ FOR THE 94TH (the hunt is now concrete):
    OURSELVES).
 3. Secondary: the dual-DEAD_REPLY delivery (two errors for one
    read — one BWR read consumed ERR at 3663 twice).
+
+### 94. 94TH SESSION (2026-11-11 13:0x-.., branch oh-crash) — THE GUARD STORM IS ROOT-CAUSED AND FIXED (dual BR_DEAD_REPLY from binder_close's two walks); riscv64 make-test GREEN 1319/1319 (LAYOUT-7 reserve gap closed); two pristine boots reach launcher.ready 47.6s/52.7s; the tail record's full 90s window decoded (244k samples)
+
+Mission was §93.6's queue. All three top items landed.
+
+#### 94.1 THE GUARD-STORM ROOT CAUSE (hp92w4 rings + binder.c 6.6 ground truth)
+
+The storm engine, decoded end-to-end from the w4 hist rings:
+
+1. j3954-4330: foundation workers send sync calls to pid 725; 725's
+   THREAD exits (j4143-4146: single DEAD_REPLY per caller — the reap
+   path), retries go PQUEUED, then the whole PROC dies at j4328.
+2. AT THE PROC DEATH, binder_close failed every pending sync txn
+   TWICE: the cross-proc stack walk pushed one BR_DEAD_REPLY per
+   involved txn AND the dying side's own drain (dead_reply_to_sender
+   over thread todos + in-flight stacks + proc todo) pushed a second
+   for the SAME txns. THREE threads (1172/1624/991) each consumed
+   ERR_RECV(29189) x2 at j4330 — the "dual DEAD_REPLY" clue of 93.11.
+3. OH libipc's completion bookkeeping desynced (it believes TWO calls
+   resolved): the next BWR is 136 bytes = TWO sync BC_TRANSACTIONs
+   (was 68). Send#1 succeeds, send#2 trips the reference-parity guard
+   (0x7211). The rejection error then interleaves with late true
+   replies -> unread reply-shaped txns at todo heads -> BOTH guard
+   shapes (why=20 own-outgoing-at-top, why=21 todo-head-txn) forever,
+   ~every 150-400ms — 80-print budget — until foundation abort()s x4
+   and init sysrq-c's the box (§93.1's whole cascade).
+
+UPSTREAM GROUND TRUTH (fetched v6.6 binder.c, not memory):
+- binder_send_failed_reply stages thread errors in FIXED SINGLE work
+  slots (thread->return_error / reply_error); a second error staged
+  while one is unconsumed is DROPPED ("Unexpected reply error...
+  Just ignore the 2nd error") — upstream CANNOT dual-deliver.
+- The write loop condition is `while (ptr < end &&
+  thread->return_error.cmd == BR_OK)` — no further write commands are
+  processed while a write-path error is unconsumed.
+- There is NO cross-proc stack walk at proc death: sender errors come
+  from the dying side's cleanup only (binder_cleanup_transaction ->
+  binder_send_failed_reply); incoming txns FROM the dying proc stay
+  on servicing threads' stacks and resolve at their own BC_REPLY
+  (replier gets BR_TRANSACTION_COMPLETE, binder.c 6.6:3806-3812).
+
+THE FIX (63dbeae4, four pieces):
+- stage_thread_error(): single-slot dedup for ALL thread-targeted
+  error staging (dead_reply_to_sender, send_failed_reply, the
+  write-path staging); drops + parity-warns a 2nd error.
+- binder_close: the cross-proc txn_stack error walk DELETED (its
+  to_proc==dying leg duplicated the dying side's drain; its
+  from_proc==dying leg eagerly errored SERVICING threads, which
+  upstream never does). Foreign-todo cleanup retained.
+- binder_thread_write: loop-gate parity (stop on a staged write
+  error; death-class errors do not gate, matching upstream's two
+  slots).
+- binder_thread_read: consuming an error frees the slot (e->cmd =
+  BR_OK parity), recomputed from the todo.
+
+VALIDATION (hp94 series, leakhunt-armed — the 92nd's storm arm —
+pristine userdata-fresh, SMP8+4G KVM, LOGLEVEL=4, 330s):
+  boot   guards  aborts  ladder
+  hp94a  2       0       anim.fin 29.9s, no launcher by 330 (clean-stall
+                            class — see §93.3's third class, NOT the storm)
+  hp94b  2       0       FULL LADDER — launcher.ready 47.6s
+  hp94c  1       0       FULL LADDER — launcher.ready 52.7s
+  hp94d  (running at write time)
+vs the 92nd's storms (w3=25/w4=80 hits -> foundation aborts -> never)
+and the 93rd's 11 no-repro boots (best 53.4s). 47.6s is the best
+pristine-boot ladder this rig has produced. The residual 1-2 hits are
+the REFERENCE-PARITY shape (an FFRT worker flushing two nested sync
+sends after receiving two incoming txns — the ring shows
+TXN_RECVx2 -> BWR(136) with NO dead-reply anywhere near): upstream
+rejects the second command identically; one rejection per boot is
+tolerable userspace behavior, the 80-hit desync loop is dead.
+dedup_drops=0 on all boots so far: no boot yet hit the
+death-with-pending-sync-callers moment (pid-725-style); the dedup is
+armed and will print "Unexpected reply error" the moment the old
+engine would have fired.
+
+#### 94.2 riscv64 make-test GREEN — the LAYOUT-7 reserve gap (8ba0e893)
+
+The 93rd's bisect said 45fa58be; the miss was NOT in the five sites
+the 89th touched but the one they DIDN'T: main.rs's riscv64
+KERNEL_RESERVE_SIZE stayed at 26MB (LAYOUT-5's value — the 0x1C0_0000
+hunk in 45fa58be landed on the AARCH64 arm) while the heap moved to
+0x81c00000: a 2MB free gap [0x81a00000, 0x81c00000) between
+reservation end and heap start — EXACTLY the "vmemmap backing search
+grabs the gap, Page::init_free walks descriptors over live heap
+pages" family documented in memory_layout.rs's own HEAP_START note.
+The boot panic right after page-descriptor init (badaddr in vmemmap
+on 45fa58be; NULL-call tp=0 face on later tips) was that corruption.
+
+Fix adopts the coordinator's proven layout-hunt pattern wholesale:
+heap at the 28MB window end 0x81e00000 (satisfies BOTH invariants —
+no gap AND heap at/above window end), KERNEL_RESERVE_SIZE 0x1E0_0000
+(30MB), KERNEL_HEAP_PHYS in main.rs + buddy_allocator.rs moved
+together. boot.S PMD tables + linker ASSERT were already correct.
+
+RESULT: `make test` boots, runs, and passes 1319/1319 (first green
+suite since the 89th; the 89th's §89.5 execve KERNPANIC did not fire
+— same corruption family). One test expectation updated (perf-record:
+byte[4] is MISC_USER=2 after 970b1b40's uapi fix, asserted
+explicitly now). THE MERGE GATE IS RE-OPENED: the 95th runs the
+coordinator's tiered gate (dual-arch builds green here: x86_64
+built + OH-booted, riscv64 suite green; aarch64 build still to
+verify, plus the perf tiers).
+
+#### 94.3 TAIL RECORD FULLY DECODED — the 90s window in one table (run/hp94-parse.py)
+
+The 93rd's v2 parser only reached ~2.5s: its find_start heuristic
+landed mid-file. The record is ONE clean stream from the header's
+data section (largest (off,size) pair; 0x130 here) — 262,582 records
+walk with ZERO resyncs: 244,516 samples, 17,806 mmap records
+(decoded: pid,tid,addr,len,pgoff @0/8/16/24, name@64), 178 comm.
+
+WINDOW 143.2-233.2s (the w1 record; hp92a pre-populated class):
+- TIME STRUCTURE: flat steady burn — ~12.4k kernel + ~1.2k user
+  samples per 5s bucket, ALL 18 buckets. No bursts, no quiet windows:
+  the tail is CONTINUOUS churn, not events.
+- TOP PROCESSES (kernel-sampled): idle 75.1k | hilogd 32.9k |
+  com.ohos.systemui 30.6k | com.ohos.settingsdata 29.0k | pid 606 =
+  os_ds_service (a sa_main-hosted SA — the "sa_main" hunch confirmed)
+  29.0k | sysevent_source 17.4k | multimodalinput 6.6k.
+- TOP USER MODULES: ld-musl (15.7k — allocator+stdio), libhilog
+  (3.1k), libc++ (1.1k), libeventhandler (0.9k), hiview, libbegetutil,
+  libuv, libruntime.
+- TOP USER SITES (leaf -> caller, chains):
+  * sysevent_source: musl+0x898b0 (mallocng) called from
+    libadft.z.so+0x5bb00 (inside the __cfi_check dispatch region) —
+    8,439 samples = 3.4% of the whole machine on ONE alloc site.
+  * libc++ __assoc_sub_state::__sub_wait (std::future wait) ->
+    musl futex paths in hilogd/os_ds_service/settingsdata/systemui
+    (the 0x11ad80/0x11a6f0 sites) — wake/park churn, not compute.
+  * libhilog internal write path (0x11400/0x1a600/0x1aa00) in every
+    log-heavy proc; param_selinux+0x2700 lookups inside hilogd.
+- KERNEL TOP (raw IPs; needs the 92nd's kernel ELF to symbolize —
+  top two: 0xffffffff80251bb5 x53.2k = 21.8%, 0xffffffff8025171d
+  x30.1k = 12.3%): consistent with the 90th's wfi/enable_irq/TTAS
+  cloud table.
+
+NEXT LEVERS this table names: (1) sysevent_source's single malloc
+site (libadft CFI dispatch — an alloc-per-event engine worth a
+userspace look), (2) the hilog write path volume (hilogd burns 13.4%
+of the machine), (3) the future-wait churn = high-frequency event
+loop wakeups. Kernel-side remains the bigger half (idle excluded:
+hilogd+systemui+settingsdata+ds_service ≈ 50% of non-idle samples).
+
+#### 94.4 Rig notes
+
+- hp93f2's records (w1/w2) RAN but landed 0 bytes: hiperf buffers in
+  memory and writes at -d exit; its exit path (fork/kill of its own
+  group, seen at 236.9s) stalled before the write hit the sync mount.
+  The wait-free rig is NOT wait-free at hiperf's exit; the hp92a
+  recovered record remains the best tail artifact.
+- The maketest wrapper's QEMU can outlive a PANIC (holds the rootfs
+  write lock); kill the stale qemu before rerunning (my-PIDs-only).
+- /mnt on this host is a REAL root fs — use a fresh mountpoint
+  (/tmp/hp94mnt) for image extraction.
+- Musl extracted to /tmp/ohlib/ld-musl-x86_64.so.1 for symbolization;
+  mallocng internals are hidden symbols — nearest-export names lie;
+  use CALLER resolution (chains) for semantics instead.
+
+#### 94.5 FOR THE 95TH (priority order)
+
+1. CLOSE THE MERGE GATE on 63dbeae4+8ba0e893+64ef1254: aarch64
+   build; the coordinator's tiered perf gate (binder/ + mm/ domains
+   touched); 2-3 more hp94-class boots to bank the storm fix (watch
+   for "Unexpected reply error" prints — first one proves the old
+   engine fired and was caught).
+2. THE CLEAN-STALL CLASS (hp94a: no guards, no abort, no launcher by
+   330s — 1-in-3 boots): the tail table's burners (hilogd/systemui/
+   settingsdata/os_ds_service steady churn) are the suspects; a
+   syscost census + the 94.3 table on a STALLING boot (record window
+   over 30-330s of a stalling pristine boot) names whether the
+   install stream simply never completes (SA-install KVS chain) or is
+   starved by the churn.
+3. Panic-reorder validation (93.6#5) rode along free: any
+   foundation-abort boot now halts all CPUs at panic time — no boots
+   aborted this session, so still unvalidated on real hardware path.
+4. Hot levers from 90.4/94.3 if time: enable_irq ~12%, spin cloud
+   ~15%, wfi 13.8% (kernel); sysevent_source malloc site (user).
