@@ -2854,8 +2854,12 @@ pub fn fi_insertdirty_fails() -> u64 { FI_IDF_TOTAL.load(Ordering::Relaxed) }
 
 /// Watch threshold: entries this big get a presence line every second.
 const FI_WATCH_MIN_PAGES: usize = 200;
-/// Max entries tracked per sample (fixed array — no allocation).
-const FI_WATCH_MAX_TRACK: usize = 16;
+/// Max entries tracked per sample (fixed array — no allocation). The
+/// storm's read-side .so caches put 30-40 entries over the threshold
+/// at peaks — 64 leaves headroom, and a saturated sample suppresses
+/// the vanish diff (a truncated cur[] would cry wolf on every entry
+/// past the slot bound: acc1's 37-entry scan at t=31s).
+const FI_WATCH_MAX_TRACK: usize = 64;
 
 static FI_WATCH_ON: AtomicBool = AtomicBool::new(false);
 /// fiwatchd-private previous snapshot (fs_id, ino, pages, dirty).
@@ -2916,6 +2920,8 @@ fn fiwatch_scan() {
     let mut cur: [(u64, u64, usize, usize); FI_WATCH_MAX_TRACK] =
         [(0, 0, 0, 0); FI_WATCH_MAX_TRACK];
     let mut n = 0usize;
+    // Total qualifying entries this scan (may exceed the tracker array).
+    let mut n_over = 0usize;
     {
         let _w = PAGE_CACHE.wlock.lock();
         for si in 0..PC_TABLE_CAP {
@@ -2945,6 +2951,7 @@ fn fiwatch_scan() {
                     np,
                     nd
                 );
+                n_over += 1;
                 if n < FI_WATCH_MAX_TRACK {
                     cur[n] = (entry.fs_id, entry.ino, np, nd);
                     n += 1;
@@ -2952,33 +2959,39 @@ fn fiwatch_scan() {
             }
         }
     }
-    // Vanish/plunge detection against the previous sample.
+    // Vanish/plunge detection against the previous sample. A SATURATED
+    // sample (more qualifying entries than tracker slots — the read-side
+    // .so caches at storm peaks) suppresses the diff: a truncated cur[]
+    // would flag every entry past the slot bound as vanished.
+    let saturated = n_over > FI_WATCH_MAX_TRACK;
     let mut prev = FI_WATCH_PREV.lock();
-    for &(fs, ino, pp, pd) in prev.iter() {
-        if (fs, ino) == (0, 0) {
-            continue;
-        }
-        match cur[..n].iter().find(|e| e.0 == fs && e.1 == ino) {
-            None => {
-                crate::pr_err!(
-                    "FI-WATCH-VANISH fs={:#x} ino={} last_pages={} last_dirty={} — THE SECOND IT VANISHED",
-                    fs,
-                    ino,
-                    pp,
-                    pd
-                );
+    if !saturated {
+        for &(fs, ino, pp, pd) in prev.iter() {
+            if (fs, ino) == (0, 0) {
+                continue;
             }
-            Some(&(_, _, cp, cd)) => {
-                if pp >= cp.saturating_add(256) {
+            match cur[..n].iter().find(|e| e.0 == fs && e.1 == ino) {
+                None => {
                     crate::pr_err!(
-                        "FI-WATCH-PLUNGE fs={:#x} ino={} was={} now={} dirty_was={} dirty_now={}",
+                        "FI-WATCH-VANISH fs={:#x} ino={} last_pages={} last_dirty={} — THE SECOND IT VANISHED",
                         fs,
                         ino,
                         pp,
-                        cp,
-                        pd,
-                        cd
+                        pd
                     );
+                }
+                Some(&(_, _, cp, cd)) => {
+                    if pp >= cp.saturating_add(256) {
+                        crate::pr_err!(
+                            "FI-WATCH-PLUNGE fs={:#x} ino={} was={} now={} dirty_was={} dirty_now={}",
+                            fs,
+                            ino,
+                            pp,
+                            cp,
+                            pd,
+                            cd
+                        );
+                    }
                 }
             }
         }

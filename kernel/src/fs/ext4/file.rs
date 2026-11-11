@@ -914,6 +914,26 @@ pub fn ext4_file_write(
                                 Ok(b) => b,
                                 Err(e) => partial_or_err!('block_loop, e),
                             };
+                            // razor-7: the writeback-time materialization
+                            // placement — cross-check against the final
+                            // on-disk map when the crash image shows
+                            // phase-perfect-but-wrong-page data.
+                            if inode.get_size() > 1_048_576 {
+                                static FI_PA: core::sync::atomic::AtomicUsize =
+                                    core::sync::atomic::AtomicUsize::new(0);
+                                if FI_PA.fetch_add(
+                                    1,
+                                    core::sync::atomic::Ordering::Relaxed,
+                                ) < 48
+                                {
+                                    crate::pr_err!(
+                                        "FI-ALLOC ino={} logical={} -> phys={}",
+                                        inode.ino,
+                                        block_index,
+                                        new_block
+                                    );
+                                }
+                            }
                             {
                                 let mut hm: u64 = 0;
                                 match crate::fs::ext4::extent::ext4_ext_insert_written(
@@ -1020,6 +1040,10 @@ pub fn ext4_file_write(
             // Write data to block
             data[block_offset..block_offset + write_in_block]
                 .copy_from_slice(&buf[buf_offset..buf_offset + write_in_block]);
+            // razor-7: verify the bytes landing in the BLOCK buffer.
+            if block_offset == 0 && write_in_block == block_size as usize {
+                fi_phase_probe("blockwrite", inode.ino as u64, block_index, data);
+            }
 
             // dfx=exthunt: the writer's (logical, phys, pattern) truth.
             crate::fs::ext4::extent::exthunt_wr_put(
@@ -2217,6 +2241,12 @@ unsafe fn ext4_buffered_write(
         let want = core::cmp::min(buf.len() - buf_start, in_page_avail);
         let src = &buf[buf_start..buf_start + want];
         let file_off = idx * ps + page_off as u64;
+        // razor-7: verify the user bytes this write is installing for
+        // page idx (covers the pin-and-copy, insert_dirty and fallback
+        // arms — the same `src` flows into all of them).
+        if src.len() == psu && page_off == 0 {
+            fi_phase_probe("buffered-src", ino, idx, src);
+        }
         let full_page = page_off == 0 && want == psu;
 
         let mut filled_once = false;
@@ -2651,6 +2681,48 @@ unsafe fn ext4_write_at_core(
     result
 }
 
+/// FI-DIAG (razor-7): the crash-window OVERLAP boot (acc1: the script's
+/// sync(2) starting while the 8MB `yes|head` writer was still mid-file)
+/// left PHASE-SHIFTED pattern bytes in the pattern file's blocks — page
+/// N's block holding ANOTHER page's phase-perfect content (deterministic
+/// class permutation, 1801/2048 blocks wrong, map and bitmap uniquely
+/// owned and consistent). This probe names the LAYER the scramble
+/// enters: called at the buffered-write copy-in, at write_at_core's
+/// block write, and at the flush's source-frame read, it verifies the
+/// 20-byte "FIPATTERN0123456789" signature's byte offset inside a FULL
+/// page matches the logical index's expected phase ((idx*4096) % 20).
+/// Silent for every other file (signature simply not present).
+pub(crate) fn fi_phase_probe(site: &str, ino: u64, idx: u64, page: &[u8]) {
+    const SIG: &[u8; 20] = b"FIPATTERN0123456789\n";
+    if page.len() < crate::mm::PAGE_SIZE {
+        return;
+    }
+    let mut off: Option<usize> = None;
+    for i in 0..20 {
+        if page[i..i + SIG.len()] == SIG[..] {
+            off = Some(i);
+            break;
+        }
+    }
+    let Some(off) = off else { return };
+    let want = ((idx * crate::mm::PAGE_SIZE as u64) % 20) as usize;
+    if off != want {
+        static FI_PH: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let n = FI_PH.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 48 {
+            crate::pr_err!(
+                "FI-PHASE-MISMATCH {} ino={} idx={} got_off={} want_off={}",
+                site,
+                ino,
+                idx,
+                off,
+                want
+            );
+        }
+    }
+}
+
 /// msync/fsync/truncate writeback (session 25): flush every DIRTY
 /// page-cache entry of this inode in the inclusive index range back to
 /// the file through the ext4 write machinery. Chunked collect → write →
@@ -2758,6 +2830,11 @@ pub fn ext4_flush_dirty_inode(
             // onto itself (self-overlap UB, and the frame is already the
             // source of truth being persisted).
             let src = unsafe { core::slice::from_raw_parts(kva, n_bytes) };
+            // razor-7: verify the FRAME bytes the flush is about to
+            // persist for page idx.
+            if n_bytes == crate::mm::PAGE_SIZE {
+                fi_phase_probe("flush-src", ino, idx, src);
+            }
             // SAFETY: same inode/fs resolution discipline as write_vfs.
             let mut written = unsafe {
                 ext4_write_at_core(
