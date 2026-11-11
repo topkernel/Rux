@@ -363,7 +363,7 @@ unsafe fn free_dead_member(member: *mut Task) {
     }
     // BOUNDED (lb125 decode): monopolist windows stalled this wait for
     // tens of seconds, freezing the exit — and every parent behind it.
-    crate::sync::rcu::synchronize_rcu_bounded_sleepy(1500, "thread-stack-free");
+    crate::sync::rcu::synchronize_rcu_bounded_pollfirst(1500, "thread-stack-free");
 
     (*member).free_kernel_stack();
 
@@ -758,7 +758,7 @@ unsafe fn release_task_storage(task: *mut Task) {
     // BOUNDED (lb125 decode): pid_hash read sections are preempt-disable
     // and microseconds long; an unbounded wait here parked init's reaping
     // behind monopolist windows. 1.5 s is ~1000x any real reader.
-    crate::sync::rcu::synchronize_rcu_bounded_sleepy(1500, "release-task");
+    crate::sync::rcu::synchronize_rcu_bounded_pollfirst(1500, "release-task");
 
     // R9 (NEW2 engine #2): do_exit sets ZOMBIE BEFORE its final schedule(),
     // so a reaping parent could scan the early ZOMBIE and free this task's

@@ -273,6 +273,39 @@ pub fn synchronize_rcu_bounded_sleepy(max_ms: u64, site: &'static str) -> bool {
     wait_qs_sleepy(gen, max_ms, site)
 }
 
+/// Snapshot-form grace wait with a bounded POLL phase before the sleepy
+/// fallback — the exit-path form (106th reap-engine fix).
+///
+/// The reap path (wait4 -> release_task -> task-memory free) and the
+/// exit path's own mm drop paid `synchronize_rcu_bounded_sleepy` per
+/// exit: when the snapshotted generation is stale (any recent
+/// `synchronize_rcu_forced*` or callback batch advanced RCU_GEN), the
+/// first check fails and the sleepy loop's next observation point is
+/// one jiffie out — every exit under a busy install stream rounded its
+/// grace wait UP to the next tick (~10 ms class; the record's largest
+/// un-attacked engine, 5.9k deferred-PMI samples in schedule <-
+/// release_task <- do_wait_nonblock <- sys_wait4). The missing reporter
+/// is almost always a CPU microseconds away from its next user-return
+/// or context switch, which is a report site; a ~100 µs pause-hinted
+/// poll (same shape as `synchronize_rcu_forced_polled`'s phase 1)
+/// covers it, and only a genuinely monopolist CPU falls through to the
+/// one-jiffy sleeping poll. Snapshot semantics unchanged (no RCU_GEN
+/// churn from the exit path).
+pub fn synchronize_rcu_bounded_pollfirst(max_ms: u64, site: &'static str) -> bool {
+    let gen = RCU_GEN.load(Ordering::Acquire);
+    RCU_WAITERS.fetch_add(1, Ordering::AcqRel);
+    rcu_note_context_switch();
+    // Poll phase: ~100 µs of pause-hinted checks (see forced_polled).
+    for _ in 0..50_000 {
+        if all_online_cpus_reported(gen) {
+            RCU_WAITERS.fetch_sub(1, Ordering::AcqRel);
+            return true;
+        }
+        core::hint::spin_loop();
+    }
+    wait_qs_sleepy(gen, max_ms, site)
+}
+
 /// TRUE bounded grace period, for callers that free objects on its
 /// strength: advance RCU_GEN first, so every quiescent-state report
 /// already recorded is BELOW the waited-for generation and cannot
