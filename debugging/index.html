@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>调试 · Rux</title>
+<link rel="stylesheet" href="../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">首页</a>
+      <a href="../architecture/design.html">架构设计</a>
+      <a href="../performance/index.html">性能</a>
+      <a href="../security/index.html">安全</a>
+      <a href="../testing/index.html">测试</a>
+      <a href="index.html">调试</a>
+      <a href="../guides/getting-started.html">快速入门</a>
+      <a href="../progress/roadmap.html">项目进展</a>
+      <a href="../guestbook.html">留言</a>
+      <span class="lang-sw"><a class="on" href="index.html">中文</a><a href="../en/debugging/index.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">架构设计</div>
+    <a href="../architecture/design.html">架构与模块设计</a>
+    <a href="../architecture/structure.html">代码结构</a>
+    <a href="../architecture/boot.html">启动流程</a>
+    <a href="../architecture/memory.html">内存管理</a>
+    <a href="../architecture/riscv64.html">架构移植指南</a>
+    <a href="../architecture/kernel-lock.html">锁序不变量</a>
+    <div class="grp">性能</div>
+    <a href="../performance/index.html">性能测试</a>
+    <div class="grp">安全</div>
+    <a href="../security/index.html">安全与形式验证</a>
+    <div class="grp">测试</div>
+    <a href="../testing/index.html">测试总览</a>
+    <a href="../testing/ci-pipeline.html">CI 流水线</a>
+    <a href="../testing/ltp.html">LTP 兼容扫描</a>
+    <a href="../testing/ltp-full.html">LTP 全量用例</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT 审计</a>
+    <a href="../testing/stability.html">稳定性</a>
+    <a href="../testing/stress.html">压力</a>
+    <a href="../testing/gnome-retrospective.html">回溯报告</a>
+    <div class="grp">调试</div>
+    <a class="on" href="index.html">调试指南</a>
+    <div class="grp">开发指南</div>
+    <a href="../guides/getting-started.html">快速入门</a>
+    <a href="../guides/development.html">参与开发</a>
+    <a href="../guides/configuration.html">内核配置</a>
+    <div class="grp">项目进展</div>
+    <a href="../progress/roadmap.html">路线图</a>
+    <a href="../progress/changelog.html">更新日志</a>
+    <a href="../progress/quickref.html">命令速查</a>
+    <div class="grp">互动</div>
+    <a href="../guestbook.html">留言板</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>调试</h1>
+    <div class="sub">日志 · panic 取证 · trace 体系 · debug 开关 · 死锁检测 · 性能调试 · 内存取证 · GDB —— 汇总仓库 docs/guides/debugging.md 与 kernel/src/debug/、kernel/src/trace/ 的全部可用手段</div>
+
+    <!-- ================= 日志 ================= -->
+    <h2 id="log"><span class="anchor">§1</span>内核日志</h2>
+    <ul>
+      <li><b>串口是首要日志</b>(<code>console=ttyS0</code>):启动期全部打印到 UART;调度器就绪后默认级别降为 emerg(只留紧急),用户态 <code>dmesg -n 7</code> 重新打开全量控制台输出。</li>
+      <li><b>日志级别 0–7</b>与参考内核一致(emerg…debug);宏:<code>pr_emerg! / pr_err! / pr_warn! / pr_info! / pr_debug!</code>(<code>println!</code> 是 pr_info! 的别名)。</li>
+      <li><b>kmsg 环形缓冲 1 MB</b>:所有消息进环,读取途径 <code>/proc/kmsg</code>、<code>syslog(2)</code>(action 2/3)、<code>dmesg</code>。</li>
+      <li><b>持久日志</b>(默认关):开启后 panic 日志跨重启幸存于 <code>/var/log/kmsg</code>(kernel/src/main.rs 中去掉一行注释即开);崩溃后可用 <code>debugfs</code> 离线抽取(见 §7)。</li>
+    </ul>
+
+    <!-- ================= panic ================= -->
+    <h2 id="panic"><span class="anchor">§2</span>panic 取证</h2>
+    <p>panic 处理器绕过日志级别直写 UART,然后 <code>wfi</code> 停机。一份完整报告包含:</p>
+    <ul>
+      <li><b>PANIC 消息 + file:line</b>(panic! 的参数与源位置)</li>
+      <li><b>CSR 四件套</b>:sstatus / scause / stval / sepc</li>
+      <li><b>全部 31 个通用寄存器</b>(在任意栈展开前由内联汇编保存)</li>
+      <li><b>调用栈回溯</b>:沿帧指针链(s0/fp)最多 32 帧 <code>Call trace:</code></li>
+    </ul>
+    <h3>怎么读</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>字段</th><th>读法</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">scause</td><td>位 63 置位 = 中断;异常码:0 非对齐取指、2 非法指令、8 U 态 ecall、12 取指缺页、13 读缺页、15 写/AMO 缺页;中断码:5 时钟、9 外部</td></tr>
+          <tr><td class="mono">sepc</td><td>引发陷入的指令地址</td></tr>
+          <tr><td class="mono">stval</td><td>缺页时 = 出错虚拟地址;非法指令时 = 指令位</td></tr>
+          <tr><td class="mono">Call trace</td><td>第一个地址是 panic 函数的返回地址(ra),其后逐层是调用者的返回地址</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h3>符号化</h3>
+    <pre><code>riscv64-linux-gnu-addr2line -e &lt;kernel.elf&gt; -f -C &lt;addr&gt;   <span class="c"># 逐地址</span>
+<span class="c"># x86_64 用 x86_64-linux-gnu-addr2line;trace 里的多地址可一条命令全喂进去</span></code></pre>
+    <p>编译期符号表(D-3)同时提供 <code>/proc/kallsyms</code>(22.6k 符号)与 Oops/回溯的原生符号化;kallsyms-smoke.sh 钉住符号覆盖。</p>
+
+    <!-- ================= trace ================= -->
+    <h2 id="trace"><span class="anchor">§3</span>trace 体系(统一 tracepoint + tracefs)</h2>
+    <p><b>新观测一律走这里</b>(观测性政策,2026-11-02)。单声明表(D-15)一行定义一个事件的全部面貌:组/名/id/逐字 print fmt/字段表/typed 记录函数/渲染器。当前 <b>61 事件 / 20 组</b>:sched(9)、ext4(7)、lock(6)、rux(5)、net(5)、binder(5)、kmem(4)、tcp(3)、raw_syscalls / jbd2 / irq / exceptions / block(各 2)、vmscan / timer / sock / signal / printk / oom(各 1)。</p>
+    <h3>文件树(/sys/kernel/tracing,对齐参考实现)</h3>
+    <pre><code>mount -t tracefs none /sys/kernel/tracing
+cd /sys/kernel/tracing
+ls
+<span class="c"># tracing_on  trace  trace_pipe  available_events  available_tracers
+<span class="c"># current_tracer  set_event  buffer_size_kb  snapshot  options/  events/…</span></span>
+ls events/sched/                       <span class="c"># 每组一个目录</span>
+cat events/sched/sched_wakeup/format   <span class="c"># 字段表 + print fmt(逐字节对齐参考实现)</span></code></pre>
+    <h3>典型用法</h3>
+    <pre><code>echo 1 &gt; tracing_on                                  <span class="c"># 总开关(两级门控的第二级)</span>
+echo 1 &gt; events/sched/sched_wakeup/enable            <span class="c"># 单事件</span>
+echo 'sched:* kmem:*' &gt; set_event                     <span class="c"># 按组批量;支持通配与否定(!event)</span>
+cat trace                                            <span class="c"># 读缓冲(读后不清空;写 1 到 trace 清空)</span>
+cat trace_pipe                                       <span class="c"># 消费式读取,无表头</span>
+echo 1 &gt; buffer_size_kb                              <span class="c"># 每 CPU 环大小(KiB)</span>
+echo 1 &gt; snapshot                                    <span class="c"># 把当前环存档到 snapshot,事后 cat snapshot</span></code></pre>
+    <p><b>成本</b>:未武装站点编译为一个 load+test+branch(release 反汇编逐点验证);启用后 +13–19 ns/记录,镜像价 +0.18%。事件禁用时调用点只付参数求值。</p>
+
+    <!-- ================= debug 开关 ================= -->
+    <h2 id="switches"><span class="anchor">§4</span>debug= 运行时开关(遗留诊断面,冻结)</h2>
+    <p>启动参数 <code>debug=开关1,开关2</code>(逗号分隔)。权威表 = <code>kernel/src/debug/switches.rs</code> 的 <code>debug_switch_table!</code>(67 项,<b>冻结不再增长</b>——新观测请走 §3 tracepoint);<code>sysrq</code>/debugfs 在 <code>/sys/kernel/debug/debug/</code> 镜像同一张表。常用项:</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>开关</th><th>用途</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">watchdog</td><td>自旋锁死锁告警后自动打印全任务快照(经 SBI 直写,不依赖 printk)</td></tr>
+          <tr><td class="mono">taskdump</td><td>按需任务快照钩子</td></tr>
+          <tr><td class="mono">memwatch</td><td>按调用点的堆/页记账(查泄漏)</td></tr>
+          <tr><td class="mono">mmforensics</td><td>mm 取证环:PTE 安装台账、双重拆卸检测、页表戳环(fork/exit 热路径有代价,仅排查用)</td></tr>
+          <tr><td class="mono">scribble / scribblepark</td><td>任务控制字逐字节涂写猎捕;命中即停靠,配 gdb watchpoint</td></tr>
+          <tr><td class="mono">schedtrace / steptrace / writetrace / syscalltrace</td><td>调度步进 / 指令步进 / 写路径 / 系统调用摘要的逐事件跟踪</td></tr>
+          <tr><td class="mono">sysforensic / sysring</td><td>逐系统调用取证(SYSCALL_RING 双录、失败环、comm 扫描钩子)——生产必须关(未门控时 p1_null 每调用多付 12 次原子)</td></tr>
+          <tr><td class="mono">sysefault</td><td>点名每个返回 -EFAULT 的系统调用(限速)</td></tr>
+          <tr><td class="mono">ohhunt</td><td>OH 图形排查探针(drm ioctl/mmap/prime-import 跟踪)</td></tr>
+          <tr><td class="mono">wwcensus</td><td>唤醒-等待普查心跳(性能门 census 启动)</td></tr>
+          <tr><td class="mono">trimq=1</td><td>brk 收缩隔离区:TRIMQ-HIT/PRESENT/FRAME 三段取证(谁、何时、收缩时页面是否活、帧内容今昔对比)</td></tr>
+          <tr><td class="mono">dlsleep / dlspin</td><td>lockdep-lite 的睡眠/自旋锁观测开关(P1 起)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h3>编译期 feature(Cargo.toml)</h3>
+    <pre><code>cargo build --target riscv64gc-unknown-none-elf --features riscv64,debug-lock-owner
+<span class="c"># debug-lock-owner:每次加/解锁一次原子存储;死锁告警带 holder=&lt;cpu&gt;</span></code></pre>
+
+    <!-- ================= 死锁 ================= -->
+    <h2 id="deadlock"><span class="anchor">§5</span>死锁与挂起检测</h2>
+    <h3>三道既有防线</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>防线</th><th>机制</th><th>覆盖面</th></tr></thead>
+        <tbody>
+          <tr><td><b>编译期栅栏</b></td><td>类型化锁键(D-11):嵌套对在 lock-ordering.md 里具名后可上键,反向嵌套不再编译</td><td>已迁移的具名对(GRQ/桶、等待槽/桶)</td></tr>
+          <tr><td><b>自旋看门狗</b></td><td><code>RawSpinlock::DEADLOCK_WARN_ITERS</code>:自旋 ~1 亿次打印告警;<code>debug=watchdog</code> 时自动全任务快照</td><td>在活 CPU 上真的长时间自旋的死锁</td></tr>
+          <tr><td><b>SPIN 模型</b></td><td><code>kernel/verify/spin/lock_ordering.pml</code>(make spin):对已文档化路径做无死锁证明</td><td>被建模的抽象路径,模型检查期</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h3>lockdep-lite(设计已采纳,P0 已落地)</h3>
+    <p>补上未覆盖类:<b>未具名锁对 + 未建模路径上的违规获取顺序</b>。不复制参考实现的形态,用 Rust 原生机制:静态锁类站点声明 + 运行期把每次持锁嵌套记为图边、新边即时查环,<b>在死锁发生前</b>带两类锁名与获取点 splat。P0(静态顺序注册表 + 启动期校验)已在主线;P1/P2(运行期记录)在实现线。<code>debug=dlsleep,dlspin</code> 是它的观测开关。</p>
+    <h3>hunt-wedge:自动捕获</h3>
+    <pre><code>./test/hunt-wedge.sh [rounds]   <span class="c"># 默认 6 轮;捕获即停。退出码 0=抓到, 2=未复现</span></code></pre>
+    <p>自动构建带 <code>debug-lock-owner</code> 的内核,循环注入 smoke + nettest + pipe-bomb 负载,盯两类挂起(A 类:锁死锁告警;B 类:管道 &gt;30 s 无输出)。命中即经 QEMU monitor 抓每 CPU 寄存器/栈/反汇编到 <code>/tmp/rux-hunt/</code>,并保留当轮 kernel.elf 供 addr2line。分析三步:从 hunt.log 分类挂起类型 → <code>addr2line -e /tmp/rux-hunt/kernel.elf -f -C</code> 符号化 hunt.dump 的 pc=/ra= → 扫栈字里的内核 ra 值还原调用链。</p>
+
+    <!-- ================= 性能 ================= -->
+    <h2 id="perf"><span class="anchor">§6</span>性能调试</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>工具</th><th>量什么</th><th>怎么用</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">syscost</td><td>启动普查:系统调用总量、census 计数(TERM-DESCHED / WAKE-REFUSED)、tick 率、每操作平均(Tier-1 门禁采集器)</td><td>启动参数 <code>syscost=1</code>;安静窗对照 perf-gate-baseline.md 的带</td></tr>
+          <tr><td class="mono">pbench</td><td>P1–P7 七组微基准(空调用/切换/缺页/fork/IPC/fs/nanosleep)(Tier-2 采集器)</td><td>guest 内 <code>/test/pbench</code>;只比中位数,锚见基线文件(SMP-8 标准)</td></tr>
+          <tr><td class="mono">census / wakewatch</td><td>调度停滞普查(WAKE-STRANDED)、唤醒→运行延迟、pick 跳过原因旁表</td><td>随 debug=wwcensus / 调度域门禁启动读数</td></tr>
+          <tr><td class="mono">if0 v3</td><td>IF=0 关中断份额与最长 cli 段(Tier-3,官方测量)</td><td>EFLAGS 对探针,已上主线</td></tr>
+          <tr><td class="mono">fsw / mmprof</td><td>fs 同步写类、内存记账核对(OOM forensics)</td><td>随门禁/排查启动读数</td></tr>
+          <tr><td class="mono">PSI</td><td>/proc/pressure/{cpu,memory,io} 停顿压力(some/full、avg10/60/300、累计 µs)</td><td>常开(D-20,采样式,不占调度热路径);cat 即读</td></tr>
+          <tr><td class="mono">lock: 事件</td><td>锁获取/竞争延迟(trace 组)</td><td><code>echo 1 &gt; /sys/kernel/tracing/events/lock/lock_acquire/enable</code></td></tr>
+          <tr><td class="mono">run/perf-gate.sh</td><td>门禁自动化(anchor JSON + Tier 调度 + 带判定)</td><td>工作树 run/ 下;基线 docs/development/perf-gate-baseline.md</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout"><b>可比性铁律:</b>比较两侧必须同加速器(KVM vs KVM);debug 与 release-strong 不跨类;TCG 下 p2 读数被宿主负载主导。census 普查带:TERM-DESCHED 8±2、WAKE-REFUSED 32±4、tick ≥99.5/s、无 1001 ms 网格类。</div>
+
+    <!-- ================= 内存取证 ================= -->
+    <h2 id="mem"><span class="anchor">§7</span>内存与文件系统取证</h2>
+    <ul>
+      <li><b>memwatch</b>(debug=):按调用点的堆/页记账,泄漏定位首选。</li>
+      <li><b>allocwatch</b>:跨 CPU 持锁者命名 —— 等待者不能自报(打印会分配,而它正卡在分配器里),由观察者点名。</li>
+      <li><b>mmforensics</b>(debug=):PTE 安装台账、双重拆卸检测、页表戳环。</li>
+      <li><b>TRIMQ</b>(boot 参数 <code>trimq=1</code>):brk 收缩隔离区,TRIMQ-HIT(谁/何时/age)+ TRIMQ-PRESENT(收缩时页面是否活)+ TRIMQ-FRAME(帧内容今昔)三段取证;GNOME 堆破坏排查的主仪器。</li>
+      <li><b>ledger</b>:OOM 时刻物理账核对(zone 余量/匿名/文件 LRU/脏页,判定是真空耗尽还是记账漂移)。</li>
+      <li><b>USEGV-FOR</b>:用户态缺页取证行(cr2 落点、vma 命中与否),shmat1 之类测试缺陷就是靠它定责的。</li>
+      <li><b>离线镜像取证</b>(不启动):<code>debugfs -R "cat /var/log/kmsg" 拷贝盘.img</code>;镜像完整性 <code>e2fsck -f</code>。</li>
+      <li><b>scribble</b>(debug=):任务控制字涂写猎捕,命中停靠配 gdb watchpoint。</li>
+    </ul>
+
+    <!-- ================= GDB ================= -->
+    <h2 id="gdb"><span class="anchor">§8</span>GDB 与 QEMU 级调试</h2>
+    <ul>
+      <li><b>GDB</b>:<code>make debug</code>(先 make build;连 QEMU 的 gdbstub,断点/单步/查内存)。</li>
+      <li><b>确定性复现</b>:<code>THREAD=single make run</code>(单线程 TCG);或 <code>ACCEL=tcg</code> 关 KVM。</li>
+      <li><b>QEMU monitor</b>:经 unix socket 挂接(oh-boot.sh 的形态),<code>screendump</code> 抓屏、寄存器/内存转储(hunt-wedge 自动用)。</li>
+      <li><b>串口落盘</b>:-serial file:xxx.log,长浸泡后离线 grep。</li>
+    </ul>
+
+    <!-- ================= 速查 ================= -->
+    <h2 id="recipes"><span class="anchor">§9</span>场景速查</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>症状</th><th>路线</th></tr></thead>
+        <tbody>
+          <tr><td>内核挂起无输出</td><td>换 THREAD=single 复现 → <code>debug=watchdog</code> 看死锁告警 → <code>./test/hunt-wedge.sh</code> 自动捕获 → addr2line 符号化</td></tr>
+          <tr><td>内核缺页/非法指令</td><td>读 panic 块(§2):scause 定类、stval 定址 → addr2line Call trace → 需要更多现场加 mmforensics</td></tr>
+          <tr><td>用户态程序崩溃</td><td>grep 串口的 USEGV-FOR 行(cr2/vma);内核侧无 panic 即优先疑用户态</td></tr>
+          <tr><td>文件系统问题</td><td>先看 fsw 计数器有无新同步写类 → 拷盘 <code>debugfs</code> 离线抽日志 → <code>e2fsck -f</code> 验完整性</td></tr>
+          <tr><td>怀疑泄漏</td><td><code>debug=memwatch</code> 按调用点记账;分配器卡死者用 allocwatch 点名</td></tr>
+          <tr><td>堆破坏(trim 类)</td><td><code>trimq=1</code> 隔离区抓首触;TRIMQ-FRAME 看帧内容今昔</td></tr>
+          <tr><td>锁竞争/顺序</td><td>trace <code>lock:*</code> 事件看延迟;<code>debug=dlsleep,dlspin</code>(lockdep-lite);命名对上键(D-11)让反向不再编译</td></tr>
+          <tr><td>性能回归</td><td>perf-gate.sh 三层判定 → syscost 普查对带 → pbench 定位组 → census/wakewatch 定位调度面</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout">更多细节:docs/guides/debugging.md(本页主源)、docs/architecture/lock-ordering.md(锁序不变量)、docs/development/lockdep-lite-design.md、docs/development/perf-gate-baseline.md。</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">返回首页</a></span>
+    
+      <span class="foot-stats">本站访问 <span id="busuanzi_value_site_pv"></span> 次 · 访客 <span id="busuanzi_value_site_uv"></span> 人</span></div>
+  </div>
+</footer>
+
+<script src="../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>

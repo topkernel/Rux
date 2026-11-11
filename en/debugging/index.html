@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Debugging · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">Home</a>
+      <a href="../architecture/design.html">Architecture</a>
+      <a href="../performance/index.html">Performance</a>
+      <a href="../security/index.html">Security</a>
+      <a href="../testing/index.html">Testing</a>
+      <a href="index.html">Debugging</a>
+      <a href="../guides/getting-started.html">Getting started</a>
+      <a href="../progress/roadmap.html">Progress</a>
+      <a href="../guestbook.html">Feedback</a>
+      <span class="lang-sw"><a class="on" href="../../debugging/index.html">中文</a><a href="index.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="../architecture/design.html">Design deep-dive</a>
+    <a href="../architecture/structure.html">Code layout</a>
+    <a href="../architecture/boot.html">Boot flow</a>
+    <a href="../architecture/memory.html">Memory management</a>
+    <a href="../architecture/riscv64.html">Porting guide</a>
+    <a href="../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Performance</div>
+    <a href="../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../security/index.html">Security & verification</a>
+    <div class="grp">Testing</div>
+    <a href="../testing/index.html">Overview</a>
+    <a href="../testing/ci-pipeline.html">CI pipeline</a>
+    <a href="../testing/ltp.html">LTP scan</a>
+    <a href="../testing/ltp-full.html">LTP full cases</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT audit</a>
+    <a href="../testing/stability.html">Stability</a>
+    <a href="../testing/stress.html">Stress</a>
+    <a href="../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Debugging</div>
+    <a class="on" href="index.html">Debugging guide</a>
+    <div class="grp">Guides</div>
+    <a href="../guides/getting-started.html">Getting started</a>
+    <a href="../guides/development.html">Contributing</a>
+    <a href="../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../progress/roadmap.html">Roadmap</a>
+    <a href="../progress/changelog.html">Changelog</a>
+    <a href="../progress/quickref.html">Commands</a>
+    <div class="grp">Community</div>
+    <a href="../guestbook.html">Guestbook</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>Debugging</h1>
+    <div class="sub">Logging · panic forensics · the trace system · debug switches · deadlock detection · performance debugging · memory forensics · GDB — consolidating docs/guides/debugging.md, kernel/src/debug/ and kernel/src/trace/</div>
+
+    <!-- ================= logging ================= -->
+    <h2 id="log"><span class="anchor">§1</span>Kernel logging</h2>
+    <ul>
+      <li><b>The serial console is the primary log</b> (<code>console=ttyS0</code>): everything prints to UART during boot; once the scheduler is up the default level drops to emerg, and userspace reopens full console output with <code>dmesg -n 7</code>.</li>
+      <li><b>Log levels 0–7</b> match the reference kernel (emerg…debug); macros: <code>pr_emerg! / pr_err! / pr_warn! / pr_info! / pr_debug!</code> (<code>println!</code> is an alias of pr_info!).</li>
+      <li><b>A 1 MB kmsg ring buffer</b> takes every message; read via <code>/proc/kmsg</code>, <code>syslog(2)</code> (actions 2/3), <code>dmesg</code>.</li>
+      <li><b>Persistent log</b> (off by default): uncomment one line in kernel/src/main.rs and panic logs survive reboots in <code>/var/log/kmsg</code>; extract offline afterwards with <code>debugfs</code> (§7).</li>
+    </ul>
+
+    <!-- ================= panic ================= -->
+    <h2 id="panic"><span class="anchor">§2</span>Panic forensics</h2>
+    <p>The panic handler bypasses the log level and writes straight to UART, then halts with <code>wfi</code>. A full report carries:</p>
+    <ul>
+      <li><b>The PANIC message + file:line</b> (the panic! arguments and source location)</li>
+      <li><b>The four CSRs</b>: sstatus / scause / stval / sepc</li>
+      <li><b>All 31 GPRs</b> (saved by inline assembly before any unwinding)</li>
+      <li><b>A backtrace</b>: up to 32 frames of the frame-pointer chain (s0/fp) as <code>Call trace:</code></li>
+    </ul>
+    <h3>How to read it</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Field</th><th>Reading</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">scause</td><td>bit 63 set = interrupt; exception codes: 0 misaligned fetch, 2 illegal instruction, 8 U-mode ecall, 12 instruction page fault, 13 load page fault, 15 store/AMO page fault; interrupt codes: 5 timer, 9 external</td></tr>
+          <tr><td class="mono">sepc</td><td>the address of the trapping instruction</td></tr>
+          <tr><td class="mono">stval</td><td>page fault = the faulting virtual address; illegal instruction = the instruction bits</td></tr>
+          <tr><td class="mono">Call trace</td><td>the first address is the panicking function's return address (ra); the rest are caller return addresses up the stack</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h3>Symbolization</h3>
+    <pre><code>riscv64-linux-gnu-addr2line -e &lt;kernel.elf&gt; -f -C &lt;addr&gt;   <span class="c"># per address</span>
+<span class="c"># x86_64: x86_64-linux-gnu-addr2line; feed a whole trace's addresses in one command</span></code></pre>
+    <p>The compile-time symbol table (D-3) also provides <code>/proc/kallsyms</code> (22.6k symbols) and native Oops/backtrace symbolization; kallsyms-smoke.sh pins the coverage.</p>
+
+    <!-- ================= trace ================= -->
+    <h2 id="trace"><span class="anchor">§3</span>The trace system (unified tracepoints + tracefs)</h2>
+    <p><b>All new observability goes here</b> (the observability policy, 2026-11-02). The single-declaration table (D-15) defines each event's whole face in one row: group/name/id/verbatim print fmt/field list/typed record function/renderer. Currently <b>61 events / 20 groups</b>: sched (9), ext4 (7), lock (6), rux (5), net (5), binder (5), kmem (4), tcp (3), raw_syscalls / jbd2 / irq / exceptions / block (2 each), vmscan / timer / sock / signal / printk / oom (1 each).</p>
+    <h3>The file tree (/sys/kernel/tracing, reference-aligned)</h3>
+    <pre><code>mount -t tracefs none /sys/kernel/tracing
+cd /sys/kernel/tracing
+ls
+<span class="c"># tracing_on  trace  trace_pipe  available_events  available_tracers
+<span class="c"># current_tracer  set_event  buffer_size_kb  snapshot  options/  events/…</span></span>
+ls events/sched/                       <span class="c"># one directory per group</span>
+cat events/sched/sched_wakeup/format   <span class="c"># field list + print fmt (byte-identical to the reference)</span></code></pre>
+    <h3>Typical usage</h3>
+    <pre><code>echo 1 &gt; tracing_on                                  <span class="c"># master switch (the 2nd of two gating levels)</span>
+echo 1 &gt; events/sched/sched_wakeup/enable            <span class="c"># one event</span>
+echo 'sched:* kmem:*' &gt; set_event                     <span class="c"># by group; wildcards and negation (!event) supported</span>
+cat trace                                            <span class="c"># read the buffer (non-consuming; write 1 to trace to clear)</span>
+cat trace_pipe                                       <span class="c"># consuming read, no header</span>
+echo 1 &gt; buffer_size_kb                              <span class="c"># per-CPU ring size (KiB)</span>
+echo 1 &gt; snapshot                                    <span class="c"># stash the current ring; later: cat snapshot</span></code></pre>
+    <p><b>Cost</b>: an unarmed site compiles to one load+test+branch (verified point by point in release disassembly); enabled costs +13–19 ns per record, image cost +0.18%. A disabled call site pays only argument evaluation.</p>
+
+    <!-- ================= switches ================= -->
+    <h2 id="switches"><span class="anchor">§4</span>debug= runtime switches (the legacy diagnostics surface, frozen)</h2>
+    <p>Boot parameter <code>debug=switch1,switch2</code> (comma-separated). The authoritative table is <code>debug_switch_table!</code> in <code>kernel/src/debug/switches.rs</code> (67 entries, <b>frozen — new observability goes through the §3 tracepoints</b>); sysrq/debugfs mirror it under <code>/sys/kernel/debug/debug/</code>. The commonly used ones:</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Switch</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">watchdog</td><td>after a spinlock-deadlock warning, automatically print a full task snapshot (written via SBI, independent of printk)</td></tr>
+          <tr><td class="mono">taskdump</td><td>on-demand task-snapshot trigger hook</td></tr>
+          <tr><td class="mono">memwatch</td><td>heap/page accounting per call-site (leak hunts)</td></tr>
+          <tr><td class="mono">mmforensics</td><td>mm forensic rings: PTE-install ledger, double-teardown detector, PT stamp rings — fork/exit hot-path cost, hunts only</td></tr>
+          <tr><td class="mono">scribble / scribblepark</td><td>byte-level scribble hunter over task control words; park on first hit for gdb watchpoints</td></tr>
+          <tr><td class="mono">schedtrace / steptrace / writetrace / syscalltrace</td><td>per-event traces (scheduler steps, instruction steps, write paths, syscall summaries)</td></tr>
+          <tr><td class="mono">sysforensic / sysring</td><td>per-syscall forensics (SYSCALL_RING double-record, failure rings, comm-scan hooks) — off in production (ungated, p1_null once paid 12 atomics/syscall)</td></tr>
+          <tr><td class="mono">sysefault</td><td>names every syscall returning -EFAULT (rate-limited)</td></tr>
+          <tr><td class="mono">ohhunt</td><td>OH graphics-hunt taps (drm ioctl/mmap/prime-import traces)</td></tr>
+          <tr><td class="mono">wwcensus</td><td>wake-wait census heartbeats (the perf-gate census boots)</td></tr>
+          <tr><td class="mono">trimq=1</td><td>brk-shrink quarantine: TRIMQ-HIT/PRESENT/FRAME forensics (who, when, whether the page was live at trim, frame content then-vs-now)</td></tr>
+          <tr><td class="mono">dlsleep / dlspin</td><td>lockdep-lite's sleep/spinlock observation switches (from P1)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h3>Compile-time features (Cargo.toml)</h3>
+    <pre><code>cargo build --target riscv64gc-unknown-none-elf --features riscv64,debug-lock-owner
+<span class="c"># debug-lock-owner: one atomic store per lock/unlock; deadlock warnings carry holder=&lt;cpu&gt;</span></code></pre>
+
+    <!-- ================= deadlock ================= -->
+    <h2 id="deadlock"><span class="anchor">§5</span>Deadlock and hang detection</h2>
+    <h3>The three standing defenses</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Defense</th><th>Mechanism</th><th>Coverage</th></tr></thead>
+        <tbody>
+          <tr><td><b>Compile-time fence</b></td><td>typed lock keys (D-11): once a nesting pair is named in lock-ordering.md it can take keys, and reverse nesting stops compiling</td><td>migrated named pairs (GRQ/bucket, waiter-slot/bucket)</td></tr>
+          <tr><td><b>Spin watchdog</b></td><td><code>RawSpinlock::DEADLOCK_WARN_ITERS</code>: ~100M spun iterations print a warning; with <code>debug=watchdog</code> an automatic full task snapshot follows</td><td>deadlocks that actually spin long enough on a live CPU</td></tr>
+          <tr><td><b>SPIN models</b></td><td><code>kernel/verify/spin/lock_ordering.pml</code> (make spin): deadlock-freedom proofs for the documented paths</td><td>the abstracted paths, at model-check time</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h3>lockdep-lite (design accepted, P0 landed)</h3>
+    <p>It closes the uncovered class: <b>an illegal acquisition order on an unkeyed pair down an unmodeled path</b>. It does not copy the reference C shape — static lock-class site declarations plus a runtime graph recording every held-lock nesting edge, cycle-checking each new edge as observed, and splatting with both class names and acquire sites <b>before</b> the deadlock happens. P0 (the static order registry + boot-time validation) is on main; P1/P2 (runtime recording) are in implementation lanes. <code>debug=dlsleep,dlspin</code> are its observation switches.</p>
+    <h3>hunt-wedge: automated capture</h3>
+    <pre><code>./test/hunt-wedge.sh [rounds]   <span class="c"># 6 rounds by default; stops on capture. exit 0=caught, 2=not reproduced</span></code></pre>
+    <p>Automatically builds a <code>debug-lock-owner</code> kernel, loops smoke + nettest + pipe-bomb workloads watching for two hang classes (type A: a lock-deadlock warning; type B: a pipe going silent &gt;30 s). On either, it captures per-CPU registers/stacks/disassembly through the QEMU monitor into <code>/tmp/rux-hunt/</code> and preserves that round's kernel.elf for addr2line. Analysis in three steps: classify the hang from hunt.log → symbolize hunt.dump's pc=/ra= via <code>addr2line -e /tmp/rux-hunt/kernel.elf -f -C</code> → scan stack words for kernel ra values to recover the call chain.</p>
+
+    <!-- ================= perf ================= -->
+    <h2 id="perf"><span class="anchor">§6</span>Performance debugging</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Tool</th><th>What it measures</th><th>How to use</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">syscost</td><td>boot census: syscall volume, census counts (TERM-DESCHED / WAKE-REFUSED), tick rate, per-op averages (the Tier-1 gate collector)</td><td>boot param <code>syscost=1</code>; compare a quiet window against perf-gate-baseline.md bands</td></tr>
+          <tr><td class="mono">pbench</td><td>the P1–P7 microbenchmark groups (null syscall/switch/fault/fork/IPC/fs/nanosleep) (Tier-2 collector)</td><td><code>/test/pbench</code> in the guest; medians only, anchors in the baseline file (SMP-8 standard)</td></tr>
+          <tr><td class="mono">census / wakewatch</td><td>scheduler-stall census (WAKE-STRANDED), wake→run latency, pick-skip reason side tables</td><td>read via debug=wwcensus / scheduler-domain gate boots</td></tr>
+          <tr><td class="mono">if0 v3</td><td>IF=0 interrupt-off share and longest cli segments (Tier-3, official)</td><td>the EFLAGS-pair probe, on main</td></tr>
+          <tr><td class="mono">fsw / mmprof</td><td>fs sync-write classes, memory accounting reconciliation (OOM forensics)</td><td>read on gate/hunt boots</td></tr>
+          <tr><td class="mono">PSI</td><td>/proc/pressure/{cpu,memory,io} stall pressure (some/full, avg10/60/300, cumulative µs)</td><td>always on (D-20, tick-sampled, no scheduler hot-path cost); just cat</td></tr>
+          <tr><td class="mono">lock: events</td><td>lock acquire/contention latency (trace group)</td><td><code>echo 1 &gt; /sys/kernel/tracing/events/lock/lock_acquire/enable</code></td></tr>
+          <tr><td class="mono">run/perf-gate.sh</td><td>gate automation (anchor JSON + tier dispatch + band verdicts)</td><td>in the worktree's run/; baseline docs/development/perf-gate-baseline.md</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout"><b>Comparability rules:</b> both sides use the same accelerator (KVM vs KVM); debug vs release-strong never cross-compared; under TCG, p2 readings are host-load-dominated. Census bands: TERM-DESCHED 8±2, WAKE-REFUSED 32±4, ticks ≥99.5/s, no 1001 ms grid class.</div>
+
+    <!-- ================= memory ================= -->
+    <h2 id="mem"><span class="anchor">§7</span>Memory and filesystem forensics</h2>
+    <ul>
+      <li><b>memwatch</b> (debug=): heap/page accounting per call-site — the first tool for leak hunts.</li>
+      <li><b>allocwatch</b>: cross-CPU lock-holder naming — the waiter cannot self-report (printing allocates, and it is stuck inside the allocator), so the observer names it.</li>
+      <li><b>mmforensics</b> (debug=): PTE-install ledger, double-teardown detector, page-table stamp rings.</li>
+      <li><b>TRIMQ</b> (boot param <code>trimq=1</code>): the brk-shrink quarantine — TRIMQ-HIT (who/when/age) + TRIMQ-PRESENT (was the page live at trim) + TRIMQ-FRAME (frame content then-vs-now); the primary instrument of the GNOME heap-corruption investigation.</li>
+      <li><b>ledger</b>: physical-accounting reconciliation at OOM (zone free/anon/file LRU/dirty — real exhaustion or bookkeeping drift).</li>
+      <li><b>USEGV-FOR</b>: the user-fault forensic line (cr2 landing, vma hit or not) — how shmat1's test defect was adjudicated.</li>
+      <li><b>Offline image forensics</b> (no boot): <code>debugfs -R "cat /var/log/kmsg" copied.img</code>; image integrity via <code>e2fsck -f</code>.</li>
+      <li><b>scribble</b> (debug=): task-control-word scribble hunter; parks on first hit for gdb watchpoints.</li>
+    </ul>
+
+    <!-- ================= gdb ================= -->
+    <h2 id="gdb"><span class="anchor">§8</span>GDB and QEMU-level debugging</h2>
+    <ul>
+      <li><b>GDB</b>: <code>make debug</code> (after make build; attaches to QEMU's gdbstub — breakpoints, single-step, memory inspection).</li>
+      <li><b>Deterministic reproduction</b>: <code>THREAD=single make run</code> (single-threaded TCG); or <code>ACCEL=tcg</code> to drop KVM.</li>
+      <li><b>QEMU monitor</b>: attach via a unix socket (the oh-boot.sh shape) — <code>screendump</code> for screens, register/memory dumps (hunt-wedge uses this automatically).</li>
+      <li><b>Serial to file</b>: -serial file:xxx.log; grep offline after long soaks.</li>
+    </ul>
+
+    <!-- ================= recipes ================= -->
+    <h2 id="recipes"><span class="anchor">§9</span>Symptom quick-reference</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Symptom</th><th>Path</th></tr></thead>
+        <tbody>
+          <tr><td>kernel hang, no output</td><td>reproduce with THREAD=single → <code>debug=watchdog</code> for the deadlock warning → <code>./test/hunt-wedge.sh</code> automated capture → addr2line symbolization</td></tr>
+          <tr><td>kernel page fault / illegal instruction</td><td>read the panic block (§2): scause classifies, stval locates → addr2line the Call trace → add mmforensics if more context is needed</td></tr>
+          <tr><td>userspace program crashes</td><td>grep the serial for USEGV-FOR lines (cr2/vma); no kernel panic → suspect userspace first</td></tr>
+          <tr><td>filesystem issue</td><td>check fsw counters for new sync-write classes → copy the image and extract logs offline with <code>debugfs</code> → <code>e2fsck -f</code> for integrity</td></tr>
+          <tr><td>suspected leak</td><td><code>debug=memwatch</code> per-call-site accounting; allocwatch names the holder when the allocator itself is stuck</td></tr>
+          <tr><td>heap corruption (trim class)</td><td><code>trimq=1</code> quarantine catches the first touch; TRIMQ-FRAME compares frame content then-vs-now</td></tr>
+          <tr><td>lock contention / ordering</td><td>trace the <code>lock:*</code> events for latency; <code>debug=dlsleep,dlspin</code> (lockdep-lite); key the named pair (D-11) so reverse nesting stops compiling</td></tr>
+          <tr><td>performance regression</td><td>perf-gate.sh three-tier verdict → syscost census against the bands → pbench to localize the group → census/wakewatch for the scheduler face</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout">Deeper reading: docs/guides/debugging.md (this page's main source), docs/architecture/lock-ordering.md (lock invariants), docs/development/lockdep-lite-design.md, docs/development/perf-gate-baseline.md.</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to top page</a></span>
+    
+      <span class="foot-stats">Site traffic: <span id="busuanzi_value_site_pv"></span> views · <span id="busuanzi_value_site_uv"></span> visitors</span></div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>

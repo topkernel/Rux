@@ -17,6 +17,7 @@
       <a href="../performance/index.html">Performance</a>
       <a href="../security/index.html">Security</a>
       <a href="../testing/index.html">Testing</a>
+      <a href="../debugging/index.html">Debugging</a>
       <a href="getting-started.html">Getting started</a>
       <a href="../progress/roadmap.html">Progress</a>
       <a href="../guestbook.html">Feedback</a>
@@ -28,7 +29,7 @@
 
 <main>
 <div class="container doc">
-            <aside class="doc-side">
+              <aside class="doc-side">
     <div class="grp">Architecture</div>
     <a href="../architecture/design.html">Design deep-dive</a>
     <a href="../architecture/structure.html">Code layout</a>
@@ -49,6 +50,8 @@
     <a href="../testing/stability.html">Stability</a>
     <a href="../testing/stress.html">Stress</a>
     <a href="../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Debugging</div>
+    <a href="../debugging/index.html">Debugging guide</a>
     <div class="grp">Guides</div>
     <a href="getting-started.html">Getting started</a>
     <a class="on" href="development.html">Contributing</a>
@@ -145,7 +148,7 @@
       <li>Long scans run detached (<code>setsid</code>); if QEMU fails to start under memory pressure, wait and retry instead of piling on.</li>
     </ul>
 
-    <h2 id="debug"><span class="anchor">§7</span>The debugging toolbox</h2>
+    <h2 id="debug"><span class="anchor">§7</span>The debugging toolbox (full treatment in the <a href="../debugging/index.html">Debugging section</a>)</h2>
     <h3>Logs and panics</h3>
     <ul>
       <li><b>The serial console is the primary log</b> (<code>console=ttyS0</code>). printk levels 0–7 match the reference; everything prints to UART during boot, dropping to emerg once the scheduler runs; userspace reopens with <code>dmesg -n 7</code>. All messages enter a 1 MB kmsg ring buffer, readable via <code>/proc/kmsg</code>, <code>syslog(2)</code>, <code>dmesg</code>.</li>
