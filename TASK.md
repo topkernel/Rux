@@ -11441,24 +11441,89 @@ policy). run/ is untracked by the 94th's rule, so the rig change lives
 on disk for every lane; this section is its ledger. All hp97 boots
 ran LOGLEVEL=4.
 
-#### 97.7 hunt5 (round-5 arm: leakhunt,periodic,sleepsnap,txnhunt,thpark @ 94a74905) — results
+#### 97.7 hunt5 + the CONTROL that settles the toxicity question (and banks the LL4 ledger)
 
-(filled below when the series lands)
+hunt5 (k-m, full arm at 94a74905, serials 8-9 MB): hp97k/l both stalled
+(guards=4/4, D-early class). Pooling the day: 0/10 ladders on the full
+sleepsnap-class arms vs the 95th's 5/8 on leakhunt+periodic — P(bad
+luck) ~ 5e-5, NOT luck. CONTROL SERIES (q-t: the 95th's EXACT arm on
+the 97th's kernel 94a74905, same rig, 2 concurrent lanes):
 
-#### 97.8 FOR THE 98TH (priority order)
+  boot  guards  aborts  launcher.ready   serial
+  q     1       0       STALL            6MB
+  r     1       0       64.978s          5MB
+  s     0       0       60.563s          5MB
+  t     0       0       62.281s          5MB
 
-1. If hunt5 (§97.7) stalls: decode with the now-safe census — the
-   wedge threads' chains + FUXWATCH verdicts decide notify-never-fires
-   vs kernel wake-drop; cross-check untimed words against §87.8.
-2. Face E repro: add dfx=pid1spin to the arm on the next face-E-shaped
-   boot (init RUNNING + zombie mass) — it names the spin site; also
-   watch SYNCSEND-GUARD counts >2 (the samgr-crash lead).
-3. The D-early attribution: hiperf record on a stalling boot (the
-   §94.4 exit-path stall caveat stands — the record may land 0 bytes;
-   the sleepsnap census at wedge time is the fallback).
-4. Face C remains uncaptured this session (needs a SetBundleQuota-
-   then-no-appclone boot); the audit (97.5) found no static smoking
-   gun — capture-first.
-5. Tail lever (§94.3): untouched this session (the toxicity rounds
-   consumed the budget); hilogd's 32.9k kernel-side samples still the
-   biggest named burner.
+3/4 ladders — the kernel is CLEAN, the class rate matches the 95th, and
+the full arm's toxicity is CONFIRMED and is CPU-side, not just UART:
+even after all volume cuts (97.2), the census's per-round page-table
+walks (every S-state task, every 5-60s round) + walk scans + txnhunt
+audits under the install storm cost enough cycles to shift the boot's
+races wholesale. The park-chain instruments stay for TARGETED boots
+(one boot, decode, kill), never for series. NOTE the concurrency tax:
+these lanes ran 2 boots concurrently on the host (plus the fs-integrity
+lane's boots); the 95th's 45-51s numbers were serial rigs — the ledger
+rows below carry that caveat. hp97q's stall had only 1 periodic dump
+(vs 8-11 on loud boots): quiet-arm stall boots dump less (the 95th's
+hp95e had 0 dumps, hp95h 3 — low counts are normal for this arm).
+
+LL4 LEDGER (mandate 3 complete): kernel 94a74905, LL4, SMP8+4G KVM,
+pristine userdata, arm leakhunt+periodic, 2 concurrent lanes:
+  hp97r 64.978s | hp97s 60.563s | hp97t 62.281s (serial-rig equivalent
+  ~46-52s class per the 95th's numbers; concurrency adds ~12-15s).
+
+#### 97.8 Tail lever: hilogd's kernel-side mix measured (and the ICF trap)
+
+The mission asked: what syscall shape dominates hilogd's 32.9k
+kernel-side samples? Re-parsed run/hp93-out/hp92a-w1.data (pid 321 =
+hilogd via exe-mmap records; kernel=32853, user=2850). Exact-IP table
+(page-matching had conflated idle; idle separated):
+  - 0xffffffff80251bb5 x53226: ALL pid-0 (the wfi idle loop — the 94th's
+    "21.8% kernel" row was idle, NOT btree).
+  - 0xffffffff8025171d x30141 (12.3% machine-wide, non-idle): labeled
+    KthreadInfo::btree-insert by addr2line — but LLVM ICF folds
+    identical monomorphizations (integer-keyed BTreeMap inserts:
+    jbd2's t_dirty_buffers among them) into one body. ATTRIBUTION
+    UNTRUSTWORTHY.
+  - The /proc/meminfo complex (~25k samples ≈ 10% machine-wide across
+    meminfo-labeled sites + float_to_exponential_common_exact<f64>):
+    the float function is REAL at that address (objdump) yet NO kernel
+    source formats f64 exponentially and no {:e} exists — the samples
+    land in an ICF-folded body that objdump labels with the float
+    symbol. Same trap.
+  - sys_socketpair x3714 (real symbol, plausible: OH connection setup).
+  - fp chains carry USER frames only (every "kernel frame" in a chain
+    resolves to folded/garbage symbols; kernel caller attribution needs
+    kernel-callchain sampling or an ICF-disabled build).
+VERDICT: the record's kernel-side symbolization is unusable at folded
+sites; the honest top non-idle kernel consumers need a rebuilt kernel
+with ICF off (or our own sampler). Do NOT chase the "float formatting"
+or "KthreadInfo btree" readings without that rebuild.
+
+#### 97.9 FOR THE 98TH (priority order)
+
+1. The stall hunt's WORKING recipe (proven this session): series boots
+   with dfx=leakhunt,periodic ONLY (3/4 ladders — the class rate is
+   intact); when a boot STALLS, reboot ONCE with the park-chain arm
+   (dfx=leakhunt,periodic,sleepsnap,txnhunt,thpark) on the SAME
+   userdata state if reproducibility allows, or accept the series-arm
+   stall's periodic dumps + a targeted re-run. NEVER run the park-chain
+   arm as the series arm (0/10 ladders — CPU toxicity, §97.7).
+2. Face E repro (init RUNNING + zombie mass): add dfx=pid1spin to the
+   TARGETED arm — it names init's spin site; watch SYNCSEND-GUARD
+   counts >=4 (hp97b/k/l all had 4; ladders 0-1).
+3. Face A/C remain uncaptured today (D-early + E dominated the draws);
+   the decode machinery is now proven on D-early (97.4).
+4. Kernel-side symbolization: rebuild with ICF disabled before trusting
+   any hiperf kernel-IP table (97.8's trap); then re-read the w1 record
+   against the honest symbols — the 12.3%-machine btree site and the
+   "float" site are the first two to re-name.
+5. Merge gate: functional tiers green at 94a74905 (x86_64 + riscv64
+   builds rc=0 this session); syscost Tier1 + pbench Tier2 still owed
+   by the coordinator (63dbeae4+8ba0e893+64ef1254+97th dfx commits —
+   the 97th's changes are dfx-gated, zero standard-boot cost, but the
+   ledger wants the tier run).
+6. Tail lever (§94.3/§97.8): hilogd's mix is measured but
+   attribution-blocked; after 4, the meminfo-complex and btree sites
+   re-rank, then prototype ONE fix (same-rig A/B, quiet host).
