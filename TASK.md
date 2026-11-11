@@ -11136,16 +11136,22 @@ AMS start-launcher):
     - APPSPAWN "App enable -1" kickdog prints continue in hp94b AFTER
       launcher.ready — noise.
 
-#### 95.3 Hunt series (leakhunt + periodic): the arm does not suppress the ladder
+#### 95.3 Hunt series (leakhunt + periodic): 3/3 full ladders, no stall this session
 
-hp95e/f both FULL LADDLES (e: 46.187s, f: launcher.ready set — see
-run/oh-hp95{e,f}-markers.txt); the 30s periodic whole-task snapshots
-land (~1700 lines/60s; pid/tgid/state/comm/lastsys(nr,a0,a1) per task).
-If g/h stall, the dump at t>60s names every parked syscall of
-foundation's threads at the wedge — that is the shape-A namer; a
-shape-D stall will instead show the StorageDaemon/huks threads parked
-somewhere in the key-generation path. Series: run/hp95-hunt.sh
-(330s each, pristine userdata-fresh, SMP8+4G KVM, LOGLEVEL=4).
+  boot  guards  aborts  launcher.ready   notes
+  hp95e 3       0       46.187s          rig best (94th best 47.6s)
+  hp95f 1       0       45.311s
+  hp95g -       0       51.033s
+  (hp95h + the LOGLEVEL A/B pair run to completion after this session's
+   quota; outcomes in run/hp95-hunt.log / run/hp95-ab-ll7.log — if an
+   A/B or h boot stalls, its serial carries the 30s periodic dumps.)
+Pooled with the 94th: 5/8 pristine boots full-ladder, 3/8 clean-stall,
+ZERO guard storms, ZERO foundation aborts, ZERO wedges on the fixed
+kernel (63dbeae4). The periodic whole-task snapshots land (~1700
+lines/60s; pid/tgid/state/comm/lastsys(nr,a0,a1) per task) — on the
+next stall they name the wedge directly (see 95.5#1). Series driver:
+run/hp95-hunt.sh (330s each, pristine userdata-fresh, SMP8+4G KVM,
+LOGLEVEL=4).
 
 #### 95.4 Hot-lever A/B: LOGLEVEL 7 vs 4 (rig-only lever, §94.5#4a)
 
