@@ -149,14 +149,18 @@ const PERF_RECORD_FORK: u32 = 7;
 pub const PERF_RECORD_SAMPLE: u32 = 9;
 const PERF_RECORD_MMAP2: u32 = 10;
 
-// perf_event_header.misc cpumode bits.
-const PERF_RECORD_MISC_USER: u16 = 1;
-const PERF_RECORD_MISC_KERNEL: u16 = 2;
+// perf_event_header.misc cpumode bits. 93rd fix (uapi, linux/
+// perf_event.h: PERF_RECORD_MISC_KERNEL=1, _USER=2): these were
+// swapped — the recovered hp92a record carries kernel-range IPs under
+// misc=2, so every uapi reader attributed kernel samples to user mode.
+const PERF_RECORD_MISC_USER: u16 = 2;
+const PERF_RECORD_MISC_KERNEL: u16 = 1;
 
-/// Callchain context marker (uapi): prefixes a user callchain.
-const PERF_CONTEXT_USER: u64 = u64::MAX - 2048 + 1;
-/// Callchain context marker (uapi): prefixes a kernel callchain.
-const PERF_CONTEXT_KERNEL: u64 = u64::MAX - 2048 + 2;
+/// Callchain context markers (uapi: PERF_CONTEXT_KERNEL=-128,
+/// PERF_CONTEXT_USER=-256). 93rd fix: the old -2047/-2046 values are
+/// not uapi markers; a uapi reader treats them as plain frames.
+const PERF_CONTEXT_USER: u64 = u64::MAX - 255;
+const PERF_CONTEXT_KERNEL: u64 = u64::MAX - 127;
 
 /// Max frames per user callchain (reference perf_max_stack default 32
 /// for hiperf's use; bounded so the softirq walk stays cheap).
