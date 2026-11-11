@@ -11968,6 +11968,35 @@ sysevent_source, hilogd.server — confirmed a third time in hp100b's
 last dump) are the userspace face; the kernel-side half (~12.4k
 samples/5s continuous) is what the fresh record attributes.
 
+ADDENDUM (00:1x, the record LANDED): run/hp100r-boot2.sh booted the
+injected image (script + hp87.cfg — the hpboot service cfg in
+system/etc/init/hp87.cfg is REQUIRED; a script-only injection never
+runs, the first attempt proved it) on pristine userdata-fresh.img.
+hp100r-w1.data = 39.6MB, 265,174 samples, 90s window 28.6-118.5s,
+flat churn (13k kernel samples/5s — same shape as hp92a's w1). ELF
+identity md5-verified (c70129af..., run/hp100r-elf.md5). w2 = 0 bytes
+(the §94.4 hiperf-exit stall class again). THE HONEST KERNEL TABLE
+(run/hp100-ksym.py; idle separated):
+  - 0xffffffff805c136d enable_irq x18,577 (12.4% of non-idle) —
+    the IRQ-off/exit cost cluster (NOT "btree-insert"; the old
+    12.3% site was a stale-ELF misattribution, as suspected).
+  - atomic_load TTAS family (u8/usize/u64/u32, ~25k combined) +
+    RawSpinlock::lock x1,060 — SPIN/POLL ~20% of non-idle kernel.
+  - acquire_emit_lock x4,444 + Uart::puts_batch x1,407 — the
+    printk/UART EMIT path: the console-storm's kernel-side bill is
+    a TOP-5 site (matches the 4-10MB serials this rig family pays).
+  - wrmsr x2,280 (APIC/timer reprogram), memcpy ~3,600 (parcels),
+    synchronize_rcu_forced_polled x780 (the kill-path pin poll).
+  Userspace side of the SAME record: sysevent_source 5,140 samples
+  at ONE site (ld-musl+0x898b0, the mallocng-inside-CFI-dispatch
+  site §94.3 named from libadft); hilogd/multimodalinput at musl
+  futex/stdio + libhilog write paths. JOINT CONCLUSION: the log
+  pipeline is the one lever paying on BOTH sides (hilogd userspace
+  burn + kernel emit-lock), and the spin-poll + IRQ-off clusters
+  are the kernel's own tax. The record carries fp chains — walking
+  the chains for the top 5 IPs (the parser ignores frames) is the
+  101st's next cheap step.
+
 #### 100.7 Gates
 
 Zero kernel-code changes this session (findings only; rigs live in
@@ -11981,11 +12010,13 @@ tiers owed by this session's diff.
    (100.1-100.2). Keep the silence watchdog armed on any series;
    one hit decodes in minutes (RIP/RFL histogram + gdb bt).
 2. Stretch family = the common root (D-early x4, C x1, A's dried-up
-   event stream, 202s ladders on hot arms): take ONE fresh hiperf
-   tail record on a stretched boot, symbolize against the same-build
-   ELF (100.6 recipe), re-rank the kernel-side table (the old
-   "float"/"btree" sites first). That record is the single highest
-   information-density boot left on the board.
+   event stream, 202s ladders on hot arms): the FRESH tail record is
+   IN (100.6 addendum, run/hp100r-w1.data) and the kernel table is
+   re-ranked honestly — enable_irq + TTAS-poll + console-emit are
+   the kernel-side faces; next step is walking the record's fp
+   chains for the top-5 IPs to name the callers, then ONE lever
+   prototype (the hilog/log-pipeline volume is the both-sides
+   candidate).
 3. Face E: 0/14 since the 99th's orphan-notify fix (0 reproductions
    vs the 97th's 3-in-a-day). One more quiet-arm series without a
    draw retires it as fixed-by-a38e47a5.
