@@ -1645,7 +1645,25 @@ impl PageCache {
                 // Remove the doomed entries while the lock still covers
                 // the map; the frames are freed right here (release does
                 // not allocate — it ran under the old global lock too).
+                // FI-DIAG (data-integrity lane): a DIRTY page must NEVER
+                // be dropped here — this free has no dirty guard (unlike
+                // evict_one_locked) and is the prime suspect for the
+                // vanishing-dirty-entry bug (fi7: 2048 dirty pages
+                // inserted, entry gone by sync, data never on disk).
                 for &(idx, pfn) in &doomed[..n] {
+                    if let Some(pg) = g.get(&idx) {
+                        if !pg.invalidated || pg.dirty.load(Ordering::Acquire) {
+                            static FI_VD: core::sync::atomic::AtomicUsize =
+                                core::sync::atomic::AtomicUsize::new(0);
+                            if FI_VD.fetch_add(1, Ordering::Relaxed) < 4 {
+                                crate::pr_err!(
+                                    "FI-DIRTY-DROP fs={:#x} ino={} idx={} dirty={} — DATA LOSS",
+                                    fs_id, ino, idx, pg.dirty.load(Ordering::Acquire)
+                                );
+                                crate::dfx::backtrace::dump_stack();
+                            }
+                        }
+                    }
                     g.remove(&idx);
                     let page_desc = pfn_to_page_mut(pfn);
                     if !page_desc.is_null() {
