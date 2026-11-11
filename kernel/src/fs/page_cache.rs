@@ -1735,6 +1735,28 @@ for i in 0..n {
         let Some(entry) = self.lookup_claimed(key) else {
             return;
         };
+        // FI-DIAG (razor-5): invalidating an entry that holds MANY pages
+        // is the live-file reap suspect — print + backtrace BEFORE any
+        // marking destroys the evidence.
+        {
+            let g = entry.lock.lock();
+            let np = g.iter().filter(|(_, pg)| !pg.invalidated).count();
+            let nd = g.iter().filter(|(_, pg)| !pg.invalidated && pg.dirty.load(Ordering::Acquire)).count();
+            if np >= 100 {
+                static FI_IV: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if FI_IV.fetch_add(1, Ordering::Relaxed) < 10 {
+                    drop(g);
+                    crate::pr_err!(
+                        "FI-INVALIDATE-BIG fs={:#x} ino={} pages={} dirty={} — CALLER:",
+                        fs_id, ino, np, nd
+                    );
+                    crate::dfx::backtrace::dump_stack();
+                } else {
+                    drop(g);
+                }
+            }
+        }
         const PASS_MAX: usize = 64;
         loop {
             let mut doomed: [(u64, usize); PASS_MAX] = [(0, 0); PASS_MAX];
