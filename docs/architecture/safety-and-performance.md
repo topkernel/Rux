@@ -402,3 +402,50 @@ absents stated plainly. Each absent names what closing looks like.
   trace_event= boot parameter landed with it (deterministic boot-time
   arming for any lane). Evidence: §3 bullet above; oh-tracepc TASK.md
   (functional + gate record).
+- OH bring-up campaign round (2026-11-10..11, oh-crash lane): the
+  corruption class struck again and was again contained by the
+  taxonomy's discipline — every row below had its fix diff inspected
+  for residency before it landed here.
+  - munmap same-mm race Face B (x86_64, 427453d5): the >4MB
+    deferred-zap window left (VMA gone AND PTEs live); a racing
+    same-mm mmap's fresh pages were zapped+freed and the refault
+    zero-filled — the classic stray-clear signature, caught as
+    mallocng heap corruption in OH services (#GP storm at
+    ld-musl+0xba256). Residency: the zap walk is unsafe interior
+    (raw PTE surgery). Fixed by the per-piece cursor loop
+    (surgery+zap under one guard).
+  - munmap Face A (all arches, same commit): chunk search restarted
+    from addr_us and ate fresh VMAs in processed holes. Same
+    residency class; cursor added everywhere.
+  - mremap move non-atomicity (45fa58be): the [mmap(new), copy] gap
+    let a sibling clear the move source; copy installed nothing and
+    the destination fault-filled zeros — the last zero-producer of
+    the hunt. Fixed with MmStruct::mm_surgery, a per-mm whole-syscall
+    Rwsem (mmap_lock(write) parity — the reference's answer to
+    exactly this family; the 91st then converted the spin form to
+    Rwsem after it produced the pristine-boot meltdown).
+  - The instrumentation itself is the receipt: REMOTE-BT (live remote
+    stack over IRQ_WORK IPI), GP-PTE frame forensics, UNWATCH-COVER
+    named the unmapping pid/range at #GP time. Same-rig A/B: armed
+    60s hiperf records 3/3 boots zero GPs (was ~60% corrupting).
+  - sys_sync metadata durability (fs-integrity lane, in flight as of
+    this round): sync(2) returns success while the on-disk inode
+    never learns the new size — after a hard reset a 32MB file reads
+    back size 0 (md5-of-empty) with its data blocks verifiably ON the
+    device (2.6M raw-grep hits of an 8MB pattern in the crashed
+    image). Classified (b)-leaning-(a): no wrong-memory access, but
+    a durability-contract violation that destroys data as surely.
+    The hunt chain (fi3/fi4/fi5/fi7/fi8 boots, FI-* instruments,
+    crash-window A/B rigs) is on branch fs-integrity; the fix and
+    its zero-loss acceptance are the lane's deliverable.
+  - Panic-path zombie face (22789bd2): the dump-then-stop ordering
+    let a hung panic report wedge CPUs one by one after
+    sysrq-c — smp_send_stop moved before the dumps. Class (c): loud
+    by design, now also terminal by design.
+  - binder dual BR_DEAD_REPLY (63dbeae4): a dying service proc
+    delivered the SAME pending sync transaction's death twice (the
+    cross-proc txn_stack walk + the dying side's own drain), which
+    desynced libipc's completion bookkeeping into a guard-storm
+    (80 BR_FAILED_REPLY hits) and aborted foundation. The reference
+    cannot dual-deliver (single-slot return_error); four-piece parity
+    fix. Class (b): protocol semantics, in-bounds.
