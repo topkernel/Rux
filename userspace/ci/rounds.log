@@ -3476,3 +3476,4 @@
 1111-15:59:13|slot2|r5-verify|res=0 failrc=0 anom=0 wedge=0 warn=0|CLEAN
 1111-15:59:33|slot2|hackbench 20 process|res=0 failrc=0 anom=0 wedge=0 warn=0|CLEAN
 1111-20:05|-|FINDING|memfd abort=root:memfd_noexec=2 at test start; kernel default=0 max-inherit OK; candidates: boot-time set|test leak|procfs read bug; probe=serial cat /proc/sys/vm/memfd_noexec|OPEN
+1111-20:11|-|FINDING|memfd=FLAKY: quiet boot rc=0 all legs, sysctl 0 before+after; earlier fleet-concurrency boot aborted seeing =2 → load-dependent sysctl read/ns-view inconsistency; repro=run memfd under 3-slot fleet load N times|OPEN
