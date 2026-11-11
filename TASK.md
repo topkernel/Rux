@@ -10959,7 +10959,7 @@ pristine userdata-fresh, SMP8+4G KVM, LOGLEVEL=4, 330s):
                             class — see §93.3's third class, NOT the storm)
   hp94b  2       0       FULL LADDER — launcher.ready 47.6s
   hp94c  1       0       FULL LADDER — launcher.ready 52.7s
-  hp94d  (running at write time)
+  hp94d  0       0       anim.fin 29.4s, no launcher by 330 (clean-stall)
 vs the 92nd's storms (w3=25/w4=80 hits -> foundation aborts -> never)
 and the 93rd's 11 no-repro boots (best 53.4s). 47.6s is the best
 pristine-boot ladder this rig has produced. The residual 1-2 hits are
