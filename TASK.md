@@ -10557,24 +10557,50 @@ stamps (any relapse prints LOCK-ACQ pid/site/age now).
   record + read PERF-OPEN lines + chain histogram) queued for the
   92nd — needs a system-hp91x.img with the record script.
 
-#### 91.5 LOGLEVEL variance (running at write time)
+#### 91.5 LOGLEVEL variance — DONE (3 boots per arm, fix kernel, same rig)
 
-Series on the FIX kernel (same rig as hp91c): =7 {hp91c,d,e},
-=4 {hp91f,g,h}, SECS=330 each, driver run/hp91-variance.sh. With the
-meltdown gone the ladder is now measurable past bootanimation — the
-=4-vs-7 question can be answered on the full marker set (incl.
-com.ohos.launcher), not just the early pair. Results to be appended
-by the series (check run/hp91?-markers.txt + wc -l of the serials).
-NOTE: hp91b (Spinlock kernel, =4) is NOT a valid variance rep (froze
-at 10s); use only fix-kernel reps.
+  metric (median of 3)   LOGLEVEL=7            LOGLEVEL=4            delta
+  bootanimation.ready    34.1s (34.6/33.6/–)   23.0s (20.3/23.0/27.0) -11.1s
+  bootanimation.finished 46.9s (47.5/46.2/–)   33.3s (30.5/33.3/34.5) -13.6s
+  serial volume          ~72k lines/boot       ~24k lines/boot        -66%
+(hp91d never printed its anim bootevents — the param write is itself
+flaky userspace-side; n=2 for the =7 medians. hp91e reached
+bootevent.launcher.ready 63.9s — the FULL ladder on a pristine first
+boot, first time ever on this rig. Serials: run/oh-hp91{c..h}-serial.log.)
+VERDICT: the 90th's single-pair direction HOLDS at n=3 — =4 buys
+~11-14s through bootanimation and 3x less serial. Recommend LOGLEVEL=4
+as the RIG default; changing the kernel/cmdline production default is
+a policy call for the coordinator (reference boots quiet).
+
+**hp91h discovery (=4 rep 3): the RESIDUAL freeze face is a rolling
+IF=0 wedge.** At 189-224s CPUs wedged ONE BY ONE (cpu0 @189.8,
+cpu1 @195.5, cpu2 @201.3, cpu7 @224.5): each prints "BUG: soft
+lockup" with "REMOTE-BT[softlockup]: cpu=N TIMEOUT (not servicing
+IPIs)" — the definitive IF=0 signature (my softlockup poke cannot
+enter; the 90th had only timer_irq counts). IRQ-OFF-WINDOW cpu6
+age=9411ms pid=1 pc=0x10000 — a task (init!) carrying a stranded
+SOFTIRQ offset with IRQs off. This is the leakorigin ssite family
+(a leaked __do_softirq/SeqLock::write SOFTIRQ bracket keeps
+irq_exit from ever restoring IF) — the 92nd's #3 hunt: arm
+dfx=leakhunt on a =4 pristine boot and read the ssite shadow when
+the first CPU wedges. Note: the early ladder (anim.done 34.5s) had
+ALREADY completed — this wedge hits the SA-install tail, not the
+spawn path, and hp91f/g did not hit it in 330s (2/3 boots clean).
 
 #### 91.6 FOR THE 92ND (priority order)
 
 1. CLOSE THE MERGE GATE on 57619346+b91e6c41: the standard OH A/B is
-   hp91c (done); add riscv64 `make test` + the coordinator's tiered
-   perf gate (mm/ + sched/ domains touched: surgery waiters now park —
-   expect ctx-switch volume + pbench P2 delta; PREEMPT-HEAL count is
-   the relapse canary, keep an eye in syscost census).
+   hp91c (done) + hp91e (full ladder, launcher.ready 63.9s); add
+   riscv64 `make test` + the coordinator's tiered perf gate (mm/ +
+   sched/ domains touched: surgery waiters now park — expect
+   ctx-switch volume + pbench P2 delta; PREEMPT-HEAL count is the
+   relapse canary, keep an eye in syscost census).
+1b. THE RESIDUAL WEDGE (hp91h): rolling IF=0 plague, one CPU at a
+   time, REMOTE-BT TIMEOUT signature, pid=1 pc=0x10000 stranded
+   SOFTIRQ count (see 91.5). Hunt with dfx=leakhunt (ssite shadow)
+   on a =4 pristine boot; ~2/3 boots are clean so budget 3+ reps.
+   This is what still stands between spawn (~46s) and
+   launcher.ready-every-boot.
 2. launcher.ready is the next marker gap (spawn 47.4s → ready
    ~239s→? on pristine): with the meltdown gone, a hp91-generation
    record (start hiperf at t=90s, system-hp91x.img via the hp88
