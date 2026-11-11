@@ -11245,3 +11245,44 @@ the periodic arm live. Decode (run/oh-hp95h-serial.log):
   hilogd 32.9k kernel-side samples line up with a serial-heavy
   default level. The hunt/A-B scripts already default to LOGLEVEL=4;
   keep it that way for all perf-relevant rigs.
+
+#### 95.8 FINAL: A/B closed + the clean-stall class has THREE captured faces
+
+LOGLEVEL A/B (same kernel, same pristine userdata, same arm, SMP8+4G):
+  arm         boot      launcher.ready
+  LL4         hp95e     46.187s
+  LL4         hp95f     45.311s
+  LL4         hp95g     51.033s
+  LL4         hp95h     STALL (shape A, captured with dumps — 95.6)
+  LL7         hp95i     101.477s
+  LL7         hp95j     STALL (guards=5, aborts=0, no ready by 330s)
+  LL7 median ~101s vs LL4 median 46.2s: the LL7 tax is ~+55s on this
+  kernel — far above the historical +11-14s estimate. Rig scripts keep
+  LOGLEVEL=4 (hp94-series/hp95-hunt/hp95-ab-ll7 all do); kernel
+  default stays 7.
+  AND: the stall reproduces at BOTH levels (h at LL4, j at LL7) — the
+  clean-stall class is NOT log-level-sensitive.
+
+hp95j decode (third face, run/oh-hp95j-serial.log):
+  CompleteAddUser 56.2 / StartUser DONE 59.3 (user chain complete);
+  AMS DID request the launcher this time — sandbox prep starts at
+  43.765 (mkdir /config/hmdfs//com.ohos.launcher etc, pid 1381) and
+  SetBundleQuota for com.ohos.launcher at 44.3 — but ZERO launcher
+  mtprobe sandbox mounts and NO launcher appclone follows; appspawn
+  keeps spawning LATER apps (76.3/82.4/85.5s) past the stuck request.
+  = SHAPE C (new): launcher spawn requested, stalls inside
+  appspawn/sandbox setup, later spawns proceed around it.
+THE THREE FACES (all zero guards-storm/zero aborts on 63dbeae4):
+  D (hp94d):  user-key chain freezes pre-CompleteAddUser; bms
+              bundles.ready never set; box binder-silent.
+  A (hp94a, hp95h): user chain + early spawns complete; foundation
+              parks forever after the dlen-280 SA fanout; every
+              thread INTERRUPTIBLE; notify-never-fires family.
+  C (hp95j):  launcher requested; sandbox mkdir done; the appclone
+              never happens; other spawns continue.
+Faces A and C both sit in the appspawn/AMS spawn path with everything
+else alive — pointing at a race in OUR spawn/clone/mount path rather
+than userspace logic alone (the reference boots these images without
+stalls). Next session: (1) thpark+periodic arm (95.6#1) for A,
+(2) for C, watch pid 1381's park site + the appspawn request queue —
+dfx=steptrace on the stuck child would name the exact park.

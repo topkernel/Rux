@@ -1,1 +1,8 @@
 === hp95i (LOGLEVEL=7) start 14:23:32 ===
+=== hp95i guards=0
+0 aborts=0
+0 launcher_ready=101.477 14:29:12 ===
+=== hp95j (LOGLEVEL=7) start 14:29:12 ===
+=== hp95j guards=5 aborts=0
+0 launcher_ready=none 14:34:53 ===
+=== ab-ll7 done 14:34:53 ===
