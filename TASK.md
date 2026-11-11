@@ -10542,3 +10542,96 @@ pre-fix image for the same rig: size=0, md5-of-empty, 0 grep hits.
    ms per block — the drain's per-block cost is the thing to measure.
 3. The dangling dirent on unlink (96.4d): the entry must go when the
    inode is freed, and a freed inode must re-seal its checksum.
+
+### 97. The 102nd (fi-fix-verify): razor-6/7 — two REAL destroyers fixed, and the "vanish" superseded by a PIPE byte-loss bug (P0 lane, 2026-11-12)
+
+Branch fi-fix-verify, commits 280de0c9 + b568ddef. Boots: razor6, acc1,
+acc2, razor7 (all pristine userdata, SMP=8, 420s power cut, phase-B
+read-back via scripts/fi_inspect.py — now with backup-SB fallback).
+
+#### 97.1 razor-6: the probe set and the two fixes
+
+Probes (all on-branch): `fiwatchd` 1 Hz slot-table presence watcher
+(>=200 live pages; FI-WATCH/-VANISH/-PLUNGE; tracker 64 entries +
+saturation gate after acc1's 37-entry scan false-vanished ino=446);
+razor-1 cap lesson applied everywhere (census 64/48/24 -> 256,
+FI-INVALIDATE-BIG's cap of 10 was consumed EXACTLY by install churn in
+fix2 — the pattern's own firing was the unprinted 11th; FI-INSERT keyed
+idx>0); FI-EVICT-BIGENTRY (both evict arms); FI-FLUSH-INODE/DONE keyed
+>1MB (the shrink_reclaim pressure flushes had NO visibility).
+
+FIX 1 (EIO retry in ext4_flush_dirty_inode): razor6 lost EXACTLY one
+page of 2048 — FI-WRITE-ERR errno=-5 at offset 135168 (a transient
+blkdev submit/device error through bread), page kept dirty, nothing
+retried it before the cut. acc1 then FIRED the fix live: two EIOs at
+page 0, FI-FLUSH-RETRY ok=true tries=2, full 2048 flush.
+
+FIX 2 (THE DEAD Ok(0) ARM — the empty-map block-0 black hole):
+ext4_file_write's match put the catch-all `Ok(bn)` BEFORE `Ok(0)`, so
+the hole/unwritten-materialize arm was UNREACHABLE (rustc unreachable-
+pattern warning, drowned in the 2753-warning flood). An extent file
+whose on-disk map was empty (fresh file, delayed allocation — the flush
+resolves the inode from DISK) returned Ok(0) for EVERY logical block
+and the write loop put the data into BLOCK 0 — the superblock:
+razor6's crashed image has a TORN primary SB (free counters + csum
+stamped over install-stream bytes, magic zeroed; GDT block 1 and backup
+SBs intact), and fix2's `FI-PLACE logical=N -> block 0` family +
+map_entries=0 walks are this bug. Arms reordered; the warning on that
+match is gone; fi_inspect learned the backup-SB fallback.
+
+razor6 also measured: the pattern entry NEVER vanished on a non-overlap
+boot (2048 pages steady, dirty 2048->1 in 16-page chunks = the flush
+CHUNK granularity, FLUSH-DONE flushed=2048; no invalidate/evict/remove
+ever touched it).
+
+#### 97.2 razor-7: the OVERLAP face is a PIPE bug, not an fs bug
+
+acc1/acc2 (first boots on the fixed kernel): sync(2) RETURNS (~30s),
+EIO retry works, full 2048-page flush — but the read-back md5 is wrong
+on ~1700/2048 blocks: every bad block contains FIPATTERN bytes of the
+WRONG PHASE — page N's block holds another page's phase-perfect
+content (deterministic per page class; acc2 additionally mapped 2
+physicals twice). Map and bitmap uniquely owned and consistent.
+
+The razor-7 phase probes (fi_phase_probe at THREE layers — buffered-src
+= user bytes entering write(2); blockwrite = bytes landing in the block
+buffer; flush-src = frame bytes the flush persists) NAMED the layer:
+ONLY buffered-src fires. The user bytes arriving from the pipe are
+already corrupt — got_off = (4*(idx-85)) mod 20 in razor7: the stream
+position drifts +4 bytes of phase per 4096-byte page (a regular ~8-16
+byte loss/duplication per read/write call). blockwrite and flush-src
+are FAITHFUL — the fs records exactly what userspace handed it.
+
+THE OVERLAP: the guest script's `sleep 15` returns after ~1.1s
+(nanosleep early-return — TIMER-LANE bug, needs its own hunt; fix2's
+sleep took 122s instead), so /bin/sync races the still-running
+`yes FIPATTERN... | head -c 8388608 > pat.bin` writer. The corruption
+window IS the write/flush overlap — but the corrupted bytes come from
+the PIPE, inbound. The fs writeback path (delayed allocation,
+writeback-time materialization, per-chunk buffer sync, EIO retry) is
+CORRECT for what it receives — including under the full overlap.
+
+#### 97.3 Open items handed to the successor (ranked)
+
+1. **PIPE BYTE LOSS (new P0, ipc guarded domain)**: `yes | head -c`
+   delivers a stream whose position drifts a few bytes per call under
+   the OH load shape (razor7: +4 mod 20 per 4096). PipeBuffer's ring
+   math is count-exact on read; suspect the user-copy paths
+   (read_user/write_user second-segment handling), the syscall return
+   counts, or copy_from/to_user itself on x86_64. Repro: the fiE1 rig
+   (any acc-class boot) or the staged pipetest (run/pipetest2.sh —
+   Ubuntu amd64 rootfs, init=/bin/sh, `yes PAT | head -c N | md5sum`).
+   Expected: 01cabbdd75d72d410fa93a5942ac4247 for 8 MB.
+2. **nanosleep early return (timer lane)**: `sleep 15` returns in
+   ~1.1s under the storm (also ran 122s late in fix2). The crash-window
+   rig's determinism depends on it; LTP clock_nanosleep02's early-
+   sample check would likely catch it in isolation.
+3. **sync(2) drain cost**: razor7's sync took 189s (flush 5-198s);
+   acc boots ~30s. The 96.4a/96.6-2 measurement stands.
+4. **metadata_csum / dangling dirent / jbd2 B1**: unchanged from 96.4.
+   The jbd2 h_sync interaction is UNTESTABLE on this image (mount
+   logs "journal inode empty, disabled" — journal=false).
+5. The crash-window acceptance (3+ byte-exact boots) is BLOCKED on
+   item 1, not on the fs: razor6's shape (write completes before sync)
+   was byte-exact modulo the single EIO page, and the EIO retry now
+   covers exactly that.
