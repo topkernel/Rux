@@ -1824,8 +1824,97 @@ pub fn ext4_ext_insert_written(
     len: u16,
     meta_sectors: &mut u64,
 ) -> Result<(), i32> {
-    // FI-DIAG (allocation-path hunt, 84c98dd4): the LAST unprobed extent
-    // writer — the per-block hole branch's insert.
+    // FI-DIAG (razor-9g, P0 lane): INSERT-DIVERGENCE tracer — the
+    // crash-window file's final on-disk map is [0,S) ∪ [2S, 2S+pages)
+    // (razor9d: S=8, razor9e: S=103: holes at [S,2S) with every later
+    // page's entry at lblk k+S, above-EOF mappings at the end) although
+    // every upstream layer (write offsets, page-cache keys, flush
+    // pairing) is proven identity. A healthy flush inserts
+    // CONTIGUOUSLY: ee_block == last entry's end. Print the first
+    // non-contiguous inserts (gap or backward) with the tree tail — the
+    // first print is the exact moment the map diverges.
+    {
+        static FI_GAP: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if len >= 1 {
+            let root =
+                unsafe { core::slice::from_raw_parts(i_block.as_ptr() as *const u8, 60) };
+            let h = node_header(root);
+            if h.eh_magic == EXT4_EXT_MAGIC {
+                let last_end: Option<u64> = if h.eh_depth == 0 {
+                    // SAFETY: root node access bounded by ROOT_NODE_CAP.
+                    let exts = unsafe {
+                        node_extents(root, h.eh_entries as usize)
+                    };
+                    exts.last().map(|e| {
+                        let r = RawExtent::from_disk(e);
+                        r.ee_block as u64 + r.len as u64
+                    })
+                } else {
+                    // Depth>=1: descend the RIGHTMOST index to the tail
+                    // leaf's last entry (buffered reads — cheap, and this
+                    // probe is boot-scoped).
+                    let mut data: Option<alloc::vec::Vec<u8>> = None;
+                    let mut depth = h.eh_depth;
+                    // SAFETY: root node access bounded by ROOT_NODE_CAP.
+                    let mut indices = unsafe {
+                        node_indices(root, h.eh_entries as usize).to_vec()
+                    };
+                    'descend: loop {
+                        let Some(last_idx) = indices.last() else { break };
+                        // SAFETY: leaf block numbers come from the node.
+                        let child = match unsafe { read_node(fs, last_idx.leaf_block()) } {
+                            Ok(c) => c,
+                            Err(_) => break 'descend,
+                        };
+                        let ch = node_header(&child);
+                        if ch.eh_magic != EXT4_EXT_MAGIC {
+                            break 'descend;
+                        }
+                        if ch.eh_depth == 0 {
+                            data = Some(child);
+                            break 'descend;
+                        }
+                        depth = ch.eh_depth;
+                        // SAFETY: child node access bounded by node cap.
+                        indices = unsafe {
+                            node_indices(&child, ch.eh_entries as usize).to_vec()
+                        };
+                        let _ = depth;
+                        if indices.is_empty() {
+                            break 'descend;
+                        }
+                    }
+                    data.and_then(|leaf| {
+                        let lh = node_header(&leaf);
+                        if lh.eh_magic != EXT4_EXT_MAGIC {
+                            return None;
+                        }
+                        // SAFETY: leaf node access bounded by node cap.
+                        unsafe { node_extents(&leaf, lh.eh_entries as usize) }
+                            .last()
+                            .map(|e| {
+                                let r = RawExtent::from_disk(e);
+                                r.ee_block as u64 + r.len as u64
+                            })
+                    })
+                };
+                if let Some(end) = last_end {
+                    if ee_block != end {
+                        let n = FI_GAP.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n < 24 {
+                            crate::pr_err!(
+                                "FI-INS-GAP ee_block={} after_end={} (entries={})",
+                                ee_block,
+                                end,
+                                h.eh_entries
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
     {
         static FI_IW: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);

@@ -10675,3 +10675,99 @@ at every layer (3-layer ext4 phase probes: buffered-src fires, block-
 write and flush-src never mismatch); the crash-window md5 gate is
 blocked on (1) the pipe 8-byte skip and (2) the mass-EIO window —
 both now carry on-branch probes that name them on any future boot.
+
+### 98. The 104th (fi-fix-verify): the PIPE SKIP was a PROBE ARTIFACT; the mass-EIO FIXED (f702e98e); the rig's pristine image was contaminated and restored (2026-11-12)
+
+Boots: razor9, 9b, 9c, 9d, 9e (v5 pipe ledger, growing regime hook),
+razor9f (CONTROL — the 102nd's exact binary 5daeaef0 rebuilt and
+booted today), razor9g (insert-divergence tracer + corrected phase
+probe), razor10+ (acceptance re-run on the RESTORED pristine image).
+All SMP=8 KVM, NOSNAP, 420s power cut. NOTE: razor9..9g booted on the
+CONTAMINATED userdata-fresh2.img (a 00:05 NOSNAP boot had written a
+pat.bin residue into it — see 98.4); the coordinator restored the
+pristine (ud-f2-u2v15.img copy, verified: no /local/tmp/pat.bin).
+
+#### 98.1 The pipe 8-byte skip: CLOSED as a probe artifact (measured, both kernels)
+
+The v3/v4 pipe probe and razor-7's fi_phase_probe shared ONE inverted
+comparison: they located the next "FIPATTERN" anchor at in-page offset
+`i` and compared `i` (the ANCHOR) against the page's expected PHASE.
+Anchor and phase are complements mod 20 (anchor = (20-phase)%20), so a
+CLEAN contiguous stream — phases 0,16,12,8,4 per 4096-chunk — prints
+anchors 0,4,8,12,16: exactly the "+4 per chunk" sequence razor8b/c
+read as "8 stream bytes skipped per chunk". razor7's buffered-src
+formula got_off = (4*(idx-85)) mod 20 is the same anchor cycle
+(4*(idx mod 5)) plus an onset misread.
+
+Evidence chain:
+- razor9d/9e (my kernel, deliberately driven INTO the razor8b/c regime
+  by a per-chunk reader stall: ring occupancy 61424-65536 sustained,
+  ~2000 consecutive full chunks per boot): the v5 RING-CONTINUITY
+  LEDGER (occupancy vs (w-r), read-side stream phase vs r, write-side
+  ring-tail phase vs w — all under the pipe buffer lock) recorded ZERO
+  divergences in both boots; the delivered file bytes are pure pattern
+  at the correct phases for every mapped page.
+- razor9f (the 102nd's exact binary, booted today): prints the same
+  "0,4,8,12,16 advancing phases" on a stream whose file content is
+  pure/correct-phased — the artifact reproduces on the old kernel.
+
+The pipe transfer path (read_user/write_user ring math) was audited
+count-exact in §97.4 and is now measured byte-exact end-to-end at full
+saturation. The v5 ledger stays in-tree as the standing guardian for
+the pipe guarded domain (signature-keyed, silent when healthy).
+
+#### 98.2 The virtio mass-EIO window: FIXED (commit f702e98e, pushed)
+
+Mechanism (two faces):
+- The PCI sync retry loops (read/write/flush_block_using_configured_
+  queue) classified descriptor exhaustion and pending-table lag as
+  device errors: 5 retries x 10k spin laps burned the budget in <1ms
+  while the queue stayed clogged for SECONDS (razor8b: 1109/2048
+  blocks never written; razor9 pre-fix: 433/2048). Fix: the four
+  pressure arms now wait — 10ms interruptible sleep slices with
+  kick+drain between, under a 5s wall budget, guarded to sleepable
+  contexts (pid!=0, preempt_count==0; early-boot/irq-guarded callers
+  keep the spin path).
+- wait_for_desc_completion (MMIO sync wait) matched completions ONLY
+  by used-ring id scan; a used ring that laps the waiter (queue_size+
+  completions between submit and scan — the batched async read-ahead
+  does this under load) starves into a false timeout. Fix: the device
+  DMA's the request's response byte BEFORE its used-ring entry
+  (dbbed246's publication order) — check resp != 0xFF first, plus the
+  late-drain.
+
+A/B on the same rig: old binary (razor9f) 24 FI-WRITE-ERR today; fixed
+kernel (razor9c/9d/9e/9g): 1/0/0/24-capped-early — but in 9g every
+retry eventually SUCCEEDED (FI-FLUSH-RETRY ok=true tries=3, live at
+150s), sync returned, flushed=2048 walked. The instant-fail cascade is
+gone; the flush now waits out the storm.
+
+#### 98.3 razor9d/9e "extent-map S-shift": contamination artifact, dismissed
+
+razor9d/9e's crash images showed [0,S) ∪ [2S, 2S+pages) maps (S=8/103)
+with above-EOF entries — read as a uniform lblk shift. The 00:05
+contamination explains it: those boots started with a PREVIOUS boot's
+pat.bin already on disk (NOSNAP), and the EIO-window failures left
+that generation's blocks/entries interleaved with the new boot's — two
+file generations torn across the crash. Supporting: the FI-INS-GAP
+insert tracer (razor9g) saw CONTIGUOUS inserts for the pattern file
+(one kernel-wide gap, another inode's legitimate retry backfill), and
+the corrected-semantics phase probes saw zero true mismatches through
+flush. razor9g's own image still showed drifted content = the residue
+of the previous generation's blocks where this boot's writes failed.
+
+#### 98.4 Rig contamination event (coordinator)
+
+userdata-fresh2.img was written at 00:05 by a NOSNAP boot and
+quarantined; the pristine restored from ud-f2-u2v15.img (verified
+clean of pat.bin). All acceptance-class boots after the restore
+(razor10+). Kernel-side conclusions (pipe artifact closure, virtio
+fix A/B) are unaffected — both sides of every A/B ran on the same
+(contaminated) input, and the pipe ledger measures runtime streams,
+not disk state.
+
+#### 98.5 Acceptance re-run
+
+razor10+ on the restored pristine, fixed kernel. Gate: 3+ boots with
+size=8388608 and md5=01cabbdd75d72d410fa93a5942ac4247 (fi_inspect on
+the crashed image). Results appended below as they land.

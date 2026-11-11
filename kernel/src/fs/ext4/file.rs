@@ -2706,16 +2706,24 @@ pub(crate) fn fi_phase_probe(site: &str, ino: u64, idx: u64, page: &[u8]) {
     }
     let Some(off) = off else { return };
     let want = ((idx * crate::mm::PAGE_SIZE as u64) % 20) as usize;
-    if off != want {
+    // `off` is the ANCHOR (in-page offset of the next "FIPATTERN" start);
+    // the CONTENT phase is its complement mod 20 (razor-9: comparing the
+    // anchor against the phase inverted the test — every clean page with
+    // phase != 0 printed as a mismatch, which is how a clean contiguous
+    // stream came to be read as "+8 bytes per chunk" through this probe
+    // and its pipe twin).
+    let phase = (20 - off) % 20;
+    if phase != want {
         static FI_PH: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         let n = FI_PH.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         if n < 48 {
             crate::pr_err!(
-                "FI-PHASE-MISMATCH {} ino={} idx={} got_off={} want_off={}",
+                "FI-PHASE-MISMATCH {} ino={} idx={} phase={} anchor={} want={}",
                 site,
                 ino,
                 idx,
+                phase,
                 off,
                 want
             );

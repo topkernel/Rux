@@ -174,6 +174,9 @@ impl PipeBuffer {
         let to_read = core::cmp::min(total_available, max);
         let first_len = core::cmp::min(to_read, self.size - read_pos);
 
+        // FI-PIPE v5: ledger checks before the copy (pipe lock held).
+        fi_read_check(self, read_pos, total_available, first_len);
+
         // SAFETY: dst is access_ok-validated for max bytes; exception-table
         // copy returns the uncopied count on fault.
         let mut done = 0usize;
@@ -188,6 +191,7 @@ impl PipeBuffer {
         }
         if done > 0 {
             self.read_pos.store((read_pos + done) % self.size, Ordering::Release);
+            fi_read_done(self, done);
         }
         done
     }
@@ -244,6 +248,9 @@ impl PipeBuffer {
         }
         let first_len = core::cmp::min(to_write, self.size - write_pos);
 
+        // FI-PIPE v5: ledger checks before the copy (pipe lock held).
+        fi_write_check(self, write_pos, src, max);
+
         // SAFETY: src is access_ok-validated for max bytes; exception-table
         // copy returns the uncopied count on fault.
         let mut done = 0usize;
@@ -258,6 +265,7 @@ impl PipeBuffer {
         }
         if done > 0 {
             self.write_pos.store((write_pos + done) % self.size, Ordering::Release);
+            fi_write_done(self, done);
         }
         done
     }
@@ -814,122 +822,6 @@ pub fn pipe_vmsplice_from(file: &File, iovs: &[(usize, usize)], nonblock: bool) 
     }
 }
 
-pub fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
-    pipe_read_common(file, buf.as_mut_ptr(), buf.len(), false)
-}
-
-/// read(2) fast path for pipes: transfer directly user↔ring.
-///
-/// The generic sys_read stages through a kernel buffer (alloc + 2 copies);
-/// for pipes that was ~half the per-op cost under TCG. Same semantics as
-/// pipe_file_read — the caller must have access_ok-validated `dst`.
-pub fn pipe_read_user(file: &File, dst: *mut u8, count: usize) -> isize {
-    // cctx probe (closegap lane): whole-op read sum for lat_pipe.
-    let cc_t = crate::dfx::cctx::now();
-    crate::dfx::cctx::bump(&crate::dfx::cctx::PR_N);
-    let r = pipe_read_common(file, dst, count, true);
-    if r > 0 {
-        fi_pipe_phase("read-out", r as usize, dst as *const u8);
-    }
-    crate::dfx::cctx::add(&crate::dfx::cctx::PR_NS, cc_t);
-    r
-}
-
-/// FI-DIAG (razor-7/8, P0 lane): the crash-window rig's `yes FIPATTERN…
-/// | head -c 8M > pat.bin` delivers a stream whose position drifts a few
-/// bytes per call (razor7: +4 mod 20 per 4096-byte page — the file ends
-/// up with another page's phase-perfect content in ~1600/2048 blocks;
-/// the FS layers are proven faithful by the ext4 phase probes). This
-/// probe watches the FIPATTERN signature at the pipe WRITE entry (bytes
-/// `yes` hands us — toybox yes writes one 20-byte line per call, phase
-/// 0, the healthy norm) and the pipe READ exit (bytes `head` gets).
-/// ANOMALY-KEYED (the razor-1 cap lesson applied to my own probe: the
-/// 400-line budget of v1 was consumed by the first 8 KB of healthy
-/// 20-byte chunks, long before razor7's ~350 KB corruption point): a
-/// call prints only when its chunk is NOT a whole number of pattern
-/// lines or the signature is not at offset 0 — the first such call is
-/// the exact moment the stream breaks, and `site` names the side. A
-/// heartbeat sample every 1024th call proves the probe stayed live.
-fn fi_pipe_phase(site: &str, n: usize, bytes: *const u8) {
-    const SIG: &[u8; 20] = b"FIPATTERN0123456789\n";
-    unsafe {
-        let win = 64usize.min(n);
-        let head = core::slice::from_raw_parts(bytes, win);
-        let mut phase: Option<usize> = None;
-        for i in 0..win {
-            if head[i..].len() >= SIG.len() && &head[i..i + SIG.len()] == SIG {
-                phase = Some(i % 20);
-                break;
-            }
-        }
-        // Keying (razor-8b's lesson: signature-LESS chunks are OTHER
-        // pipes' traffic — printing them ate the 40-line budget before
-        // the pattern stream's first read): only chunks CARRYING the
-        // signature participate. Healthy = a whole number of pattern
-        // lines aligned at offset 0; anything else is the anomaly.
-        let anomalous = match phase {
-            Some(0) => n % 20 != 0,
-            Some(_) => true,
-            None => return,
-        };
-        // razor-8c verdict: read-out phases advance +4 per 4096 chunk
-        // (0,4,8,12,16,0,...) from the FIRST chunk pair — 8 stream bytes
-        // skipped per chunk, write-in lines healthy. Next discriminator:
-        // is the loss BETWEEN chunks (each chunk internally periodic-20)
-        // or INSIDE a chunk (a torn segment)? Verify the FULL chunk
-        // against its own rotation: a pure chunk whose SIG window STARTS
-        // at offset p satisfies buf[i] == SIG[(i + 20 - p) % 20] — the
-        // v1 formula SIG[(p+i)%20] was INVERTED for p != 0 (torn_at=0 on
-        // every shifted chunk regardless of purity; p == 0 chunks were
-        // verified correctly and came out PURE).
-        let mut torn_at: Option<usize> = None;
-        if anomalous && n <= 65536 {
-            if let Some(p) = phase {
-                let buf = core::slice::from_raw_parts(bytes, n);
-                for i in 0..n {
-                    if buf[i] != SIG[(i + 20 - p) % 20] {
-                        torn_at = Some(i);
-                        break;
-                    }
-                }
-            }
-        }
-        static FI_PN: core::sync::atomic::AtomicUsize =
-            core::sync::atomic::AtomicUsize::new(0);
-        static FI_HB_W: core::sync::atomic::AtomicUsize =
-            core::sync::atomic::AtomicUsize::new(0);
-        static FI_HB_R: core::sync::atomic::AtomicUsize =
-            core::sync::atomic::AtomicUsize::new(0);
-        static FI_TOT_W: core::sync::atomic::AtomicU64 =
-            core::sync::atomic::AtomicU64::new(0);
-        static FI_TOT_R: core::sync::atomic::AtomicU64 =
-            core::sync::atomic::AtomicU64::new(0);
-        if anomalous {
-            let k = FI_PN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            if k < 12 {
-                crate::pr_err!(
-                    "FI-PIPE-ANOMALY {} n={} phase={:?} torn_at={:?}",
-                    site,
-                    n,
-                    phase,
-                    torn_at
-                );
-            }
-        }
-        // Heartbeat + running totals per side (the write-in total vs the
-        // read-out total decides who dropped the bytes).
-        let (hb, tot) = if site == "write-in" {
-            (&FI_HB_W, &FI_TOT_W)
-        } else {
-            (&FI_HB_R, &FI_TOT_R)
-        };
-        let tot = tot.fetch_add(n as u64, core::sync::atomic::Ordering::Relaxed) + n as u64;
-        if hb.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % 256 == 0 {
-            crate::pr_err!("FI-PIPE-HB {} n={} total={}", site, n, tot);
-        }
-    }
-}
-
 /// Shared pipe read core: `user` selects exception-table user copies
 /// (direct transfer) vs kernel-slice copies (FileOps path).
 ///
@@ -1055,6 +947,312 @@ fn pipe_read_common(file: &File, dst: *mut u8, count: usize, user: bool) -> isiz
     }
 }
 
+pub fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
+    pipe_read_common(file, buf.as_mut_ptr(), buf.len(), false)
+}
+
+/// read(2) fast path for pipes: transfer directly user↔ring.
+///
+/// The generic sys_read stages through a kernel buffer (alloc + 2 copies);
+/// for pipes that was ~half the per-op cost under TCG. Same semantics as
+/// pipe_file_read — the caller must have access_ok-validated `dst`.
+pub fn pipe_read_user(file: &File, dst: *mut u8, count: usize) -> isize {
+    // cctx probe (closegap lane): whole-op read sum for lat_pipe.
+    let cc_t = crate::dfx::cctx::now();
+    crate::dfx::cctx::bump(&crate::dfx::cctx::PR_N);
+    let r = pipe_read_common(file, dst, count, true);
+    crate::dfx::cctx::add(&crate::dfx::cctx::PR_NS, cc_t);
+    r
+}
+
+/// FI-PIPE v5 (razor-9, P0 lane): the RING-CONTINUITY LEDGER — run under
+/// the pipe buffer lock, it pins WHICH side of the ring loses bytes if
+/// stream divergence ever appears (razor-8's "+8 bytes per 4096 chunk"
+/// reading was a PROBE ARTIFACT — the anchor/phase complement mixup, see
+/// fi_phase_probe's fixed semantics — and the pipe is measured
+/// byte-exact at full ring saturation: razor9d/9e, occupancy 61424-65536,
+/// zero divergences across 2×2048 chunks, final file bytes pure). The
+/// ledger stays as the standing guardian for the pipe guarded domain.
+///
+/// Per pattern-carrying pipe (keyed by PipeBuffer address; the FIPATTERN
+/// signature gates registration so hilog/beget pipes never join):
+///   w — bytes the ledger saw APPENDED  (advanced by write_user's done)
+///   r — bytes the ledger saw DELIVERED (advanced by read_user's done)
+/// Checks on every op (all under the buffer spinlock):
+///   OCC    — (w - r) must equal the ring's actual occupancy (wp - rp).
+///   SKIP-R — the ring byte at read_pos must sit at stream position r.
+///   TAIL-W — the 20 bytes behind write_pos must sit at stream position
+///            w-20 (phase check).
+/// Prints are anomaly-keyed with hard per-class budgets (razor-1
+/// lesson); the ledger resyncs on each divergence so consecutive events
+/// stay readable. A heartbeat every 4096 ops proves liveness.
+const FI_SIG: &[u8; 20] = b"FIPATTERN0123456789\n";
+
+struct FiPipeLedger {
+    key: AtomicUsize,
+    w: AtomicU64,
+    r: AtomicU64,
+    occ: AtomicUsize,
+    skip_r: AtomicUsize,
+    tail_w: AtomicUsize,
+    torn: AtomicUsize,
+    hb: AtomicUsize,
+}
+
+macro_rules! fi_ledger_zero {
+    () => {
+        FiPipeLedger {
+            key: AtomicUsize::new(0),
+            w: AtomicU64::new(0),
+            r: AtomicU64::new(0),
+            occ: AtomicUsize::new(0),
+            skip_r: AtomicUsize::new(0),
+            tail_w: AtomicUsize::new(0),
+            torn: AtomicUsize::new(0),
+            hb: AtomicUsize::new(0),
+        }
+    };
+}
+
+static FI_PIPE_LEDGERS: [FiPipeLedger; 4] = [
+    fi_ledger_zero!(),
+    fi_ledger_zero!(),
+    fi_ledger_zero!(),
+    fi_ledger_zero!(),
+];
+
+/// Stream-position mod 20 of `bytes[0]`, if the window is a pure
+/// rotation of the pattern. A window ≥ 20 bytes contains a full period;
+/// the first "FIPA" anchor names the phase (a pure window has exactly
+/// one per period). Torn or pattern-less windows return None.
+fn fi_phase_of(bytes: &[u8]) -> Option<usize> {
+    let n = bytes.len();
+    if n < 20 {
+        return None;
+    }
+    for i in 0..=n - 4 {
+        if i >= 20 {
+            // A pure window's anchor sits inside the first period.
+            return None;
+        }
+        if &bytes[i..i + 4] == b"FIPA" {
+            let phase = (20 - i) % 20;
+            if (0..n).all(|t| bytes[t] == FI_SIG[(phase + t) % 20]) {
+                return Some(phase);
+            }
+            return None;
+        }
+    }
+    None
+}
+
+fn fi_ledger_of(key: usize) -> Option<&'static FiPipeLedger> {
+    FI_PIPE_LEDGERS
+        .iter()
+        .find(|l| l.key.load(Ordering::Relaxed) == key)
+}
+
+fn fi_ledger_claim(key: usize) -> &'static FiPipeLedger {
+    for l in &FI_PIPE_LEDGERS {
+        if l
+            .key
+            .compare_exchange(0, key, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return l;
+        }
+    }
+    // All 4 slots busy (only the pattern pipe is expected): reuse the
+    // hashed slot and reset it — a stale foreign ledger prints at most
+    // one false anomaly, acceptable for a debug probe.
+    let l = &FI_PIPE_LEDGERS[key & 3];
+    l.key.store(key, Ordering::Relaxed);
+    l.w.store(0, Ordering::Relaxed);
+    l.r.store(0, Ordering::Relaxed);
+    l.occ.store(0, Ordering::Relaxed);
+    l.skip_r.store(0, Ordering::Relaxed);
+    l.tail_w.store(0, Ordering::Relaxed);
+    l.torn.store(0, Ordering::Relaxed);
+    l.hb.store(0, Ordering::Relaxed);
+    l
+}
+
+fn fi_who() -> alloc::borrow::Cow<'static, str> {
+    match crate::sched::current() {
+        Some(t) => {
+            // SAFETY: the current task outlives this call; the probe
+            // only reads its comm.
+            let tref: &'static crate::process::task::Task = unsafe { &*t };
+            tref.comm_str()
+        }
+        None => alloc::borrow::Cow::Borrowed("?"),
+    }
+}
+
+/// Read-side check (pipe lock held): occupancy + stream-continuity of
+/// the byte about to be delivered. `avail` is the pre-copy occupancy,
+/// `first_len` bounds the phase window.
+fn fi_read_check(b: &PipeBuffer, rp: usize, avail: usize, first_len: usize) {
+    let key = b as *const _ as usize;
+    let Some(l) = fi_ledger_of(key) else {
+        // Unregistered: join on first pattern-carrying read (the rig's
+        // first delivered byte IS stream position 0).
+        if first_len >= 20 && fi_phase_of(&b.data[rp..rp + 20]).is_some() {
+            let l = fi_ledger_claim(key);
+            l.w.store(avail as u64, Ordering::Relaxed);
+            l.r.store(0, Ordering::Relaxed);
+        }
+        return;
+    };
+    let w = l.w.load(Ordering::Relaxed);
+    let r = l.r.load(Ordering::Relaxed);
+    let occ_expected = w.saturating_sub(r) as usize;
+    if occ_expected != avail {
+        let k = l.occ.fetch_add(1, Ordering::Relaxed);
+        if k < 6 {
+            crate::pr_err!(
+                "FI-PIPE-OCC-R occ={} ledger={} w={} r={} rp={}: cursor moved without a ledger copy ({})",
+                avail,
+                occ_expected,
+                w,
+                r,
+                rp,
+                fi_who()
+            );
+        }
+        // Resync: trust the ring occupancy, keep r as the phase anchor.
+        l.w.store(r + avail as u64, Ordering::Relaxed);
+    }
+    if first_len >= 20 {
+        match fi_phase_of(&b.data[rp..rp + 20]) {
+            Some(p) => {
+                let exp = (r % 20) as usize;
+                if p != exp {
+                    let delta = (p + 20 - exp) % 20;
+                    let k = l.skip_r.fetch_add(1, Ordering::Relaxed);
+                    if k < 6 {
+                        crate::pr_err!(
+                            "FI-PIPE-SKIP-R phase={} exp={} delta={} rp={} r={} ({})",
+                            p,
+                            exp,
+                            delta,
+                            rp,
+                            r,
+                            fi_who()
+                        );
+                    }
+                    l.r.fetch_add(delta as u64, Ordering::Relaxed);
+                }
+            }
+            None => {
+                // Torn window at the read cursor — the corruption is
+                // INSIDE the ring at this exact spot. Dump 20 bytes.
+                let k = l.torn.fetch_add(1, Ordering::Relaxed);
+                if k < 4 {
+                    crate::pr_err!(
+                        "FI-PIPE-TORN-R rp={} bytes={:?} ({})",
+                        rp,
+                        &b.data[rp..rp + 20],
+                        fi_who()
+                    );
+                }
+            }
+        }
+    }
+    if l.hb.fetch_add(1, Ordering::Relaxed) % 4096 == 0 {
+        crate::pr_err!(
+            "FI-PIPE-HB-R w={} r={} occ={}",
+            l.w.load(Ordering::Relaxed),
+            l.r.load(Ordering::Relaxed),
+            avail
+        );
+    }
+}
+
+fn fi_read_done(b: &PipeBuffer, done: usize) {
+    if let Some(l) = fi_ledger_of(b as *const _ as usize) {
+        l.r.fetch_add(done as u64, Ordering::Relaxed);
+    }
+}
+
+/// Write-side check (pipe lock held): the ring tail behind write_pos
+/// must continue the ledger stream before this op appends.
+/// `src` is the user source (raw read of an access_ok-validated
+/// pointer — same discipline the v1..v4 probe used).
+fn fi_write_check(b: &PipeBuffer, wp: usize, src: *const u8, max: usize) {
+    let key = b as *const _ as usize;
+    // Cheap signature gate on the SOURCE before touching any ledger.
+    // Pattern lines are 20 bytes; smaller writes cannot carry a full
+    // period and never join.
+    if max < 20 {
+        return;
+    }
+    let mut srcw = [0u8; 24];
+    let n = max.min(24);
+    // SAFETY: src is access_ok-validated for `max` ≥ 20 bytes by the
+    // syscall layer; a raw kernel read of user memory (the probe's
+    // documented discipline on this no-SMAP kernel).
+    unsafe {
+        core::ptr::copy_nonoverlapping(src, srcw.as_mut_ptr(), n);
+    }
+    let Some(l) = fi_ledger_of(key) else {
+        if fi_phase_of(&srcw[..n]).is_some() {
+            let l = fi_ledger_claim(key);
+            // First pattern write: the ring starts empty (yes|head's
+            // writer appends stream position 0 first). Anchor w=0, r=0;
+            // the read-side OCC resync handles a late join.
+            l.w.store(0, Ordering::Relaxed);
+            l.r.store(0, Ordering::Relaxed);
+        }
+        return;
+    };
+    let w = l.w.load(Ordering::Relaxed);
+    // Tail check: data[wp-20..wp) is the last appended period; its
+    // first byte sits at stream position w-20, so phase_of(tail) must
+    // equal w%20. (No ring wrap: wp>=20 keeps the window linear.)
+    if w >= 20 && wp >= 20 && wp <= b.data.len() {
+        let tail = &b.data[wp - 20..wp];
+        match fi_phase_of(tail) {
+            Some(p) => {
+                let exp = (w % 20) as usize;
+                if p != exp {
+                    let delta = (p + 20 - exp) % 20;
+                    let k = l.tail_w.fetch_add(1, Ordering::Relaxed);
+                    if k < 6 {
+                        crate::pr_err!(
+                            "FI-PIPE-TAIL-W phase={} exp={} delta={} wp={} w={} ({})",
+                            p,
+                            exp,
+                            delta,
+                            wp,
+                            w,
+                            fi_who()
+                        );
+                    }
+                    l.w.fetch_add(delta as u64, Ordering::Relaxed);
+                }
+            }
+            None => {
+                let k = l.torn.fetch_add(1, Ordering::Relaxed);
+                if k < 4 {
+                    crate::pr_err!(
+                        "FI-PIPE-TORN-W wp={} bytes={:?} ({})",
+                        wp,
+                        &b.data[wp - 20..wp],
+                        fi_who()
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn fi_write_done(b: &PipeBuffer, done: usize) {
+    if let Some(l) = fi_ledger_of(b as *const _ as usize) {
+        l.w.fetch_add(done as u64, Ordering::Relaxed);
+    }
+}
+
 pub fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
     pipe_write_common(file, buf.as_ptr(), buf.len(), false)
 }
@@ -1065,9 +1263,6 @@ pub fn pipe_write_user(file: &File, src: *const u8, count: usize) -> isize {
     // cctx probe (closegap lane): whole-op write sum for lat_pipe.
     let cc_t = crate::dfx::cctx::now();
     crate::dfx::cctx::bump(&crate::dfx::cctx::PW_N);
-    if count > 0 {
-        fi_pipe_phase("write-in", count, src);
-    }
     let r = pipe_write_common(file, src, count, true);
     crate::dfx::cctx::add(&crate::dfx::cctx::PW_NS, cc_t);
     r
