@@ -4600,6 +4600,33 @@ pub fn sys_sync(_args: SyscallArgs) -> i64 {
     crate::fs::page_cache::get_page_cache().flush_all_dirty();
     // Flush all buffer cache
     let _ = crate::fs::bio::sync_buffers();
+    // JOURNAL COMMIT (fi3/fi4 data-integrity lane, 2026-11-11): fsync's
+    // own discipline — with a journal present, durability requires the
+    // RUNNING TRANSACTION TO COMMIT (an h_sync handle forces the lazy
+    // batched commit; the commit's write-through persists the registered
+    // inode-table blocks). sync(2) never did this: it flushed data pages
+    // and buffers while the inode-table updates stayed registered in the
+    // uncommitted transaction — after a hard reset every synced file
+    // reverted to size 0 with its data blocks orphaned ON DISK (fi3 A/B:
+    // 32MB file, sync() returned success, crash, md5-of-empty; fi4's
+    // raw-grep found all 8MB of synced pattern data in the image — the
+    // DATA reached the device, only the metadata was lost).
+    {
+        let fs_ptr = crate::fs::ext4::GLOBAL_EXT4_FS.load(core::sync::atomic::Ordering::Acquire);
+        if !fs_ptr.is_null() {
+            // SAFETY: the global holds a live Ext4FileSystem from mount
+            // until unmount.
+            let fs = unsafe { &*fs_ptr };
+            if fs.journal.is_some() {
+                if let Ok(mut handle) =
+                    crate::fs::ext4::journal::ext4_journal_start(fs, 0)
+                {
+                    handle.h_sync = true;
+                    let _ = crate::fs::ext4::journal::ext4_journal_stop(&mut handle);
+                }
+            }
+        }
+    }
     // And persist the disk's volatile cache (see sys_fsync).
     if crate::drivers::virtio::flush_pci_blk().is_err() {
         return -(errno::EIO as i64);

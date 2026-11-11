@@ -2596,6 +2596,60 @@ pub fn ext4_flush_dirty_inode(
         }
         cursor = last_idx + 1;
     }
+    // PERSIST THE INODE ITSELF (fi3 crash-window repro, 2026-11-11): the
+    // buffered-write path advances only the in-memory size; the on-disk
+    // inode-table entry stays at its creation state until something calls
+    // write_inode. sync(2) used to flush the DATA blocks and stop — after
+    // a hard reset the file reverts to size 0 with orphaned data blocks
+    // (md5-of-empty on a 32MB file that sync() had returned success
+    // for). fsync's ext4_sync_file_inner syncs the inode-table block
+    // for exactly this reason; the global flush path must do the same.
+    // The VFS inode carries the authoritative size (the flush loop above
+    // already clamped every page against it).
+    if total > 0 {
+        let ext4_ino = inode.ino as u32;
+        // SAFETY: fs_ptr is the inode's private_data fs (validated at
+        // function entry); read_inode/write_inode take shared refs.
+        unsafe {
+            match (*fs_ptr).read_inode(ext4_ino) {
+                Ok(mut ei) => {
+                    let vfs_size = inode.get_size();
+                    if ei.size != vfs_size {
+                        // FI3-DIAG: the inode-table write the old path skipped.
+                        static FI3I: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        if FI3I.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 12 {
+                            crate::pr_err!(
+                                "FI3-INODE ino={} disk_size={} vfs_size={}",
+                                ext4_ino, ei.size, vfs_size
+                            );
+                        }
+                        ei.size = vfs_size;
+                        let sec = crate::drivers::rtc::wall_secs() as u32;
+                        ei.mtime = sec;
+                        ei.ctime = sec;
+                        match super::inode::write_inode(&*fs_ptr, ext4_ino, &ei) {
+                            Ok(()) => {}
+                            Err(e) => {
+                                static FI3E: core::sync::atomic::AtomicUsize =
+                                    core::sync::atomic::AtomicUsize::new(0);
+                                if FI3E.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 6 {
+                                    crate::pr_err!("FI3-INODE-WRITE-FAIL ino={} e={}", ext4_ino, e);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    static FI3R: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    if FI3R.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 6 {
+                        crate::pr_err!("FI3-READ-INODE-FAIL ino={} e={}", ext4_ino, e);
+                    }
+                }
+            }
+        }
+    }
     total
 }
 

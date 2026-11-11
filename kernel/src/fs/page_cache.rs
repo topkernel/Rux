@@ -1481,7 +1481,19 @@ impl PageCache {
                 // keeps the descriptor alive; private_data fs pointer is
                 // valid while the mount lives). Miss = skip.
                 if let Some(inode) = crate::fs::inode::icache_lookup(ino, fs_id) {
-                    crate::fs::ext4::file::ext4_flush_dirty_inode(&inode, 0, u64::MAX);
+                    let flushed = crate::fs::ext4::file::ext4_flush_dirty_inode(&inode, 0, u64::MAX);
+                    // FI3-DIAG (data-integrity lane): did the global sync
+                    // actually reach this inode?
+                    if flushed > 0 {
+                        static FI3N: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        if FI3N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 12 {
+                            crate::pr_err!(
+                                "FI3-FLUSH ino={} pages={} vfs_size={}",
+                                ino, flushed, inode.get_size()
+                            );
+                        }
+                    }
                 }
             }
             if guarded {
