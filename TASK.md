@@ -10771,3 +10771,61 @@ not disk state.
 razor10+ on the restored pristine, fixed kernel. Gate: 3+ boots with
 size=8388608 and md5=01cabbdd75d72d410fa93a5942ac4247 (fi_inspect on
 the crashed image). Results appended below as they land.
+
+#### 98.6 Acceptance re-run results (razor10/10b, restored pristine)
+
+razor10: INVALID as an acceptance boot — the restored image is a
+NEVER-BOOTED baseline (no /local at all), the crash script fired at
+65.9s BEFORE the first-boot population created /data/local/tmp, and
+the whole write no-op'd ("FI4-WRITTEN size=" — empty SZ; no pat.bin in
+the crashed image). NOTE for successors: the fiE1-era md5-PASS boots
+ran on a PRE-POPULATED "pristine" (population done, pat.bin-free).
+razor10's 420s boot served as the population boot; its image
+(run/userdata-razor10.img) is a clean populated base (no pat.bin ever
+existed on it). The missing 7th drive is restored: run/hp87-out.img
+symlinked from fs-integrity's run/ (drive() silently skips absent
+files — $O=/data/hpout markers were landing on userdata instead).
+
+razor10b (populated base, fixed kernel): the crash script ran FULLY —
+FI4-WRITTEN size=8388608, sync returned, FI-FLUSH-DONE flushed=2048,
+ZERO FI-FLUSH-RETRY ok=false (11 retries, ALL ok=true tries=1-2 — the
+virtio backpressure recovering transient EIOs live; contrast razor8b:
+every page ok=false tries=3, 1109 blocks lost). FI-PIPE ledger: 8
+heartbeats, zero anomalies. Crashed image: size=8388608 blocks=2048,
+md5=3f1c182b… ≠ 01cabbdd. THE GATE STILL FAILS — on a CLEAN rig, so
+the residue is REAL and is the next hunt:
+
+THE MAP FACE (razor10b, cleanest evidence yet):
+- 463 holes (contiguous runs, first at lblk 14) + 463 entries ABOVE
+  EOF (first at lblk 3170 — likely stale-leaf readout, see below);
+- FIVE DOUBLE-MAPPED PHYSICALS: (lblk 0,509,phys 9877), (389,510),
+  (184,1318), (183,3320) — and the 5 drifted pages' CONTENT matches
+  the double-mapping exactly (page 0 reads page 509's bytes: phase 4
+  = 509*16%20 ✓). Double allocation, the acc2-era family.
+- FI-INS-GAP silent: the misplaced entries did NOT flow through
+  ext4_ext_insert_written's per-page arm.
+
+PRIME SUSPECTS (ranked, for the successor):
+1. ext4_write_at_core -> ext4_file_write's PRE-ALLOCATOR:
+   `current_blocks = ceil(disk_size/4096)` vs the map that delayed
+   allocation already grew per-page — when size and map diverge under
+   the EIO-retry multi-pass regime (a failed pass persists map
+   entries but its size update is lost, or vice versa),
+   allocate_blocks_for_file allocates from a WRONG base and the
+   per-page inserts double-allocate / leave holes. Read
+   file.rs:806-810 and the retry interplay with razor-6's fix1.
+2. Deferred extent-LEAF persistence: write_node's sync is deferred
+   under the null journal; the crashed tree can be a torn mix of leaf
+   generations (the 3170+ entries are not reachable from any sane
+   insert path). Check whether sync(2)'s buffer drain covers the leaf
+   blocks and whether the rebuild path leaves orphan leaves claimed
+   by the root.
+3. The icache eviction/re-instantiation family (razor-4/5): a second
+   Ext4Inode instance with a stale map inserting divergently.
+
+The razor10b serial (run/oh-razor10b-serial.log) + image
+(run/userdata-razor10b.img) + /tmp/phasemap.py (correct anchor/phase
+math, use it — NOT the old in-kernel probe semantics) are the working
+set. The md5 gate needs this allocation family closed; with the EIO
+cascade fixed, every page now reaches the write path and the residue
+is purely this.
