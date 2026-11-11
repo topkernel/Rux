@@ -10854,3 +10854,46 @@ panic (which ALSO still needs the fix) before the suite can gate.
 - lb-boot-out.py hang: if the guest console goes quiet near SECS, the
   driver's read1 blocks forever — kill the python (the boots are
   disposable; records on the sync-mounted output disk survive).
+
+#### 93.11 ADDENDUM: THE STORM WAS CAPTURED (hp93k, 12:36-12:41)
+
+hp93k (leakhunt rep 5): 80 guard prints (budget) + 1 foundation abort,
+no launcher — the classic storm. The 93.1 instrumentation paid off:
+
+  hit 25.697 tid=1455: todo[1]: t9261=R age21 (an UNREAD REPLY-shaped
+    txn) + stack[1]: t9166 incoming (servicing, from pid403)
+  hit 25.707 tid=1455: stack[2]: t9166(servicing) + t9508 OWN outgoing
+    code0x5 age0 (sent THIS jiffy) — next send rejected
+  hit 33.538 tid=1583: todo[1]: c (deferred tcomplete) +
+    stack[1]: t13875 OWN outgoing age0 — TWO SENDS IN THE SAME JIFFY
+  hit 37.939 tid=1212 (foundation pid 718): todo[1]: c +
+    stack[1]: t15030 code0xc age1; ring tail: ERR_RECV(29189)x2@3663
+    (TWO BR_DEAD_REPLY consumed) -> BWR(136)@3692 TXN_SENT(15030,335)
+    -> samgr PICKS IT UP (SLRD 37.940) — the BWR carried TWO 68-byte
+    BC_TRANSACTIONs: send#1 (15030) succeeds, send#2 REJECTED.
+
+THE SHAPE: OH libipc batches TWO sync BC_TRANSACTIONs into ONE BWR
+(136 = 2x68) — and/or fires a second send while its first sync txn is
+age<2 unresolved. On the REFERENCE this write loop would reject the
+second command IDENTICALLY (upstream checks transaction_stack per
+command) — so the reference never sees this BWR composition: libipc
+only batches when its pending-outbound queue is non-empty, and the
+queue is non-empty because an EARLIER call's completion was mishandled
+(our read escaped or an error double-delivered — note the DUAL
+DEAD_REPLY to one thread, itself only possible with two outstanding
+syncs, which itself required an earlier escape).
+
+FOR THE 94TH (the hunt is now concrete):
+1. Find the FIRST escape: in hp93k, walk tid 1212/1583/1455's rings
+   BACKWARD from the first guard hit to the BWR that returned without
+   resolving (the dump lines + hist rings are all in
+   run/oh-hp93k-serial.log; grep 'todo\[' for the 80 blocks).
+2. Prime suspect: our write-loop processes BOTH BC_TRANSACTIONs of a
+   2-command BWR — verify our loop against upstream
+   (binder_thread_write's while + the err break semantics) for whether
+   an error on command 1 should BREAK the write loop BEFORE command 2
+   is even parsed (upstream: return_error.cmd stops the loop — if our
+   loop continues after staging an error, we CREATE the 2-send shape
+   OURSELVES).
+3. Secondary: the dual-DEAD_REPLY delivery (two errors for one
+   read — one BWR read consumed ERR at 3663 twice).
