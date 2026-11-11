@@ -850,6 +850,23 @@ pub fn ext4_file_write(
                         fs, &mut inode.block, block_index, &mut ext_meta,
                     ) {
                         Ok(Some(phys)) => {
+                            // FI-DIAG (off-by-one hunt): the unwritten->written
+                            // conversion allocates per-block — log logical vs
+                            // phys for the first N conversions of big files.
+                            {
+                                static FI_MB: core::sync::atomic::AtomicUsize =
+                                    core::sync::atomic::AtomicUsize::new(0);
+                                let n = FI_MB.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                                if inode.get_size() > 1_048_576 && n < 20 {
+                                    let b = &inode.block;
+                                    let entries = (b[0] >> 16) as u16;
+                                    let e0_start = ((b[4] >> 16) as u64) << 32 | (b[5] as u64);
+                                    crate::pr_err!(
+                                        "FI-MAT ino={} logical={} -> phys={} (node: entries={} e0.start={})",
+                                        inode.ino, block_index, phys, entries, e0_start
+                                    );
+                                }
+                            }
                             // Materialize the block contents now: the
                             // read-modify-write below breads it; an
                             // unzeroed block would splice garbage around
@@ -1212,7 +1229,38 @@ fn allocate_blocks_with_extents(
             len: run_len as u16,
             unwritten: false,
         };
+        // FI-DIAG (off-by-one hunt, e60c0e5a): bracket the append — the
+        // allocation's run_start vs what the root node holds afterwards.
+        {
+            static FI_AB: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if run_len >= 16 && FI_AB.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 12 {
+                let b = &inode.block;
+                let entries = (b[0] >> 16) as u16;
+                let e0_blk = b[3];
+                // entry words: blk@b[3], len|hi@b[4], start_lo@b[5]
+                let e0_start = ((b[4] >> 16) as u64) << 32 | (b[5] as u64);
+                crate::pr_err!(
+                    "FI-APPEND ino={} run_start={} len={} logical={} -> node(entries={}, e0.blk={}, e0.start={})",
+                    inode.ino, run_start, run_len, logical_block, entries, e0_blk, e0_start
+                );
+            }
+        }
         crate::fs::ext4::extent::ext4_ext_append(fs, &mut inode.block, &ext, &mut meta_sectors)?;
+        {
+            static FI_AA: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if run_len >= 16 && FI_AA.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 12 {
+                let b = &inode.block;
+                let entries = (b[0] >> 16) as u16;
+                let e0_blk = b[3];
+                let e0_start = ((b[4] >> 16) as u64) << 32 | (b[5] as u64);
+                crate::pr_err!(
+                    "FI-APPENDED ino={} node(entries={}, e0.blk={}, e0.start={})",
+                    inode.ino, entries, e0_blk, e0_start
+                );
+            }
+        }
         inode.blocks += sectors_per_block * run_len as u64;
         logical_block += run_len as u64;
     }

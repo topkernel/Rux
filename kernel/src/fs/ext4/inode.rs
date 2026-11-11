@@ -482,15 +482,31 @@ pub fn write_inode(
 ) -> Result<(), i32> {
     use crate::fs::bio;
     crate::dfx::fsw::note_write_inode();
-    // FI-DIAG: was the inode-table update ever WRITTEN for the flushed
-    // files before the crash? (fi-lane: sync loses size)
+    // FI-DIAG (extent off-by-one hunt, f7183857): for big files log the
+    // extent-0 state AND the caller stack — the SEQUENCE of ee_start
+    // values (19288 then 19287, or the reverse) names the stale writer.
     {
         static FI_WI: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
-        if inode.size > 1_048_576
-            && FI_WI.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24
-        {
-            crate::pr_err!("FI-WRITEINODE-BIG ino={} size={}", ino, inode.size);
+        if inode.size > 1_048_576 {
+            // block[0..3] as bytes = extent header + first entry words:
+            // header = magic,entries,max,depth (4 x u16 from block[0..2])
+            let b = &inode.block;
+            let magic = (b[0] & 0xffff) as u16;
+            let entries = (b[0] >> 16) as u16;
+            let depth = ((b[1] >> 16) as u16) & 0xffff;
+            // first extent entry words: block[3..6] (header is 12B = 3 u32)
+            let ee_block = b[3];
+            let ee_len_hi = b[4];
+            let ee_start = ((b[5] as u64) << 32 >> 32) | (((ee_len_hi >> 16) as u64) << 32);
+            let n = FI_WI.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 30 {
+                crate::pr_err!(
+                    "FI-WI ino={} size={} magic={:#x} entries={} depth={} e0(blk={},start={},w45={:#x})",
+                    ino, inode.size, magic, entries, depth, ee_block, ee_start, ee_len_hi
+                );
+                crate::dfx::backtrace::dump_stack();
+            }
         }
     }
 
