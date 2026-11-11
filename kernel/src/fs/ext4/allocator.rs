@@ -196,6 +196,19 @@ impl<'a> BlockAllocator<'a> {
         self.update_superblock_free_blocks(-(len as i32))?;
 
         let block_number = (group_idx as u64) * blocks_per_group + first;
+        // FI-DIAG: the 19287 watchpoint — every handout of THIS exact
+        // block names the double-allocating paths; bit_before tells
+        // whether the earlier owner ever set it.
+        if block_number <= 19287 + 2048 && block_number >= 19280 {
+            static FI_W87: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if FI_W87.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 12 {
+                crate::pr_err!(
+                    "FI-RUNHAND blk={}..{} (len {}) — DOUBLE if blk<=19287 seen twice",
+                    block_number, block_number + len as u64 - 1, len
+                );
+            }
+        }
         Ok(Some((block_number, len as u32)))
     }
 

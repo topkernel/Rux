@@ -477,6 +477,15 @@ fn replay_data(
     sequence: u32,
 ) {
     let data_abs = blk_offset + journal_block;
+    // FI-DIAG: name every fs block the replay overwrites — the bitmap
+    // rewind (double-allocation root cause candidate) shows here.
+    {
+        static FI_RP: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if FI_RP.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+            crate::pr_err!("FI-REPLAY-WRITE fs_block={} (from journal blk {})", fs_block, journal_block);
+        }
+    }
     // SAFETY: bio::bread returns a valid BufferHead or None (handled by returning).
     let data_bh = unsafe { match bio::bread(device, data_abs) { Some(b) => b, None => return } };
     if let Some(csum) = tag_csum {

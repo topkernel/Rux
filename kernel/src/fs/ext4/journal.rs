@@ -31,6 +31,14 @@ impl Ext4FileSystem {
     /// Reads journal inode (typically inode 8), gets its data blocks,
     /// reads journal superblock, validates, and optionally runs recovery.
     pub fn init_journal(&mut self) -> Result<(), i32> {
+        // FI-DIAG (double-allocation hunt, 4f049935): every mount runs
+        // this; a dirty journal (j_start != 0) triggers a REPLAY whose
+        // replay_data overwrites fs blocks (incl. possibly a STALE
+        // BITMAP) and syncs them to the device immediately.
+        crate::pr_err!(
+            "FI-MOUNT inst={:#x} dev={:#x} journal_ino={}",
+            self as *const _ as usize, self.device as usize, self.journal_ino
+        );
         // No journal inode — skip (filesystem without journal)
         if self.journal_ino == 0 {
             return Ok(());
@@ -182,6 +190,10 @@ impl Ext4FileSystem {
 
         // Run recovery if journal has uncommitted transactions
         if j_start != 0 {
+            crate::pr_err!(
+                "FI-REPLAY-ARMED inst={:#x} j_start={} — recovery will overwrite fs blocks",
+                self as *const _ as usize, j_start
+            );
             crate::print_status_ex("ext4", "journal recovery running", None);
             match jbd2::jbd2_journal_recover(&journal_arc) {
                 Ok(info) => {
