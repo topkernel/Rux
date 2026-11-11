@@ -2103,8 +2103,14 @@ pub mod tests {
         rec[4..6].copy_from_slice(&PERF_RECORD_MISC_USER.to_le_bytes());
         rec[6..8].copy_from_slice(&16u16.to_le_bytes());
         rec[8..16].copy_from_slice(&0x1234_5678_9abc_def0u64.to_le_bytes());
+        // 94th: byte[4] is PERF_RECORD_MISC_USER — 2 after the 93rd's
+        // uapi swap fix (970b1b40; the old expect array encoded the
+        // pre-fix 1). Assert the uapi constants explicitly so a future
+        // swap re-fails here instead of drifting silently.
+        assert_eq!(PERF_RECORD_MISC_USER, 2, "uapi PERF_RECORD_MISC_USER");
+        assert_eq!(PERF_RECORD_MISC_KERNEL, 1, "uapi PERF_RECORD_MISC_KERNEL");
         let expect: [u8; 16] = [
-            9, 0, 0, 0, 1, 0, 16, 0,
+            9, 0, 0, 0, 2, 0, 16, 0,
             0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12,
         ];
         if rec == expect {
