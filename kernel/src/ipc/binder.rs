@@ -12761,7 +12761,15 @@ fn binder_thread_read(
                                 // notify was being hunted), and decode
                                 // the OnAdd/OnRemoveSystemAbility parcels
                                 // so each code<=2 oneway names its SA id.
-                                if AR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8000 {
+                                // 97th (hp97 toxicity): full detail for
+                                // the first 400, then 1-in-16 sampling —
+                                // the LL4 rig boots measured this trace
+                                // at ~500 KB/boot (3843 lines by t=100s)
+                                // against the ~4.9 MB hp95 arm ceiling;
+                                // sampled late windows keep the BMS-notify
+                                // coverage at 1/16 the UART cost.
+                                let ar_n = AR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                                if ar_n < 400 || ar_n % 16 == 0 {
                                     let mut parcel = alloc::string::String::from("");
                                     if !is_reply
                                         && t.flags & TF_ONE_WAY != 0
