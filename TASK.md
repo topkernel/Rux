@@ -11787,3 +11787,213 @@ owed by the coordinator per §97.9#5 as before.
 4. The out-disk ext4 writeback parity (sync leaves i_size=0 on host
    reads, 99.2) belongs to the fs lane's metadata_csum/writeback bug
    family — hand them the wl99-out.img 0-byte-file capture.
+
+### 100. 100TH SESSION (2026-11-11 21:0x-.., branch oh-crash) — THE SILENT FREEZE DID NOT REPRODUCE: 0/14 pristine boots on a38e47a5 (vs 2/9 on the 98th's b520a514; p≈3.4% under an equal-rate null) with the upgraded catch rig live (double regs dump + live gdb bt) — FACE A'S KERNEL ARMS ARE ELIMINATED LIVE (the WAKE-RUN-LEAK census + WW-PROBE on the actual victim: wake links 0->1 RUNNING, reader runs on every kick, binder todos empty — nothing kernel-side is lost; the OH event chain upstream of foundation simply stops sending) — FACE C DECODED (ENOENT-driven spawn-retry loop: /data/app/el2/100/base/<bundle> never provisioned in stretched boots; AMS retries forever; kernel spawn path keeps working around it) — FACE E 0 draws on the fix kernel — THE 97TH'S ICF TRAP IS DISPROVEN FOR FRESH BUILDS (--icf=none and -Zmerge-functions=disabled are both byte-identical no-ops; the tail-lever kernel-side attribution is REOPENED)
+
+Mission: §99.8 queue — silent freeze catch (P1), faces A/C (P2),
+face E re-test (P3), tail levers (P4).
+
+#### 100.1 Rig upgrades (all in run/, untracked per the 94th's rule; this section is their ledger)
+
+- lb-boot-out.py: new env hook GDBPORT (appends `-gdb tcp::$PORT`;
+  default absent — every existing rig boots identically).
+- run/hp100-hunt.sh: the freeze-catch series — hunt3's silence
+  watchdog (QEMU-keyed, 45s zero-serial-growth) upgraded with
+  (1) DOUBLE regs dump 25s apart (identical RIPs = tight spin,
+  moving = churn), (2) live `gdb -batch thread apply all bt 30`
+  against target/.../debug/rux through the gdbstub, (3) SECS=420.
+  Boots a..n used dfx=leakhunt,periodic,watchdog (the 98th's arm).
+- run/hp100-sym.py (mon-dump regs symbolizer + regs1/regs2 RIP
+  stability diff), run/hp100-face.py (serial -> face classifier),
+  run/hp100-thpark.sh (targeted park-chain boot), run/hp100-hunt4.sh
+  (face-A naming series, see 100.3).
+- WARNING banked: build/Makefile hardcodes PROJECT_ROOT/target for
+  its cargo/gen-ksyms/mkbzimage steps — CARGO_TARGET_DIR does NOT
+  redirect them. An experimental-flag build via `make build` RETOUCHES
+  target/.../bzImage (byte-identical when rux is unchanged, verified
+  md5 this session, but a REAL flag change would have silently
+  replaced the live hunt kernel mid-series). Experimental kernel
+  builds MUST invoke cargo directly with --target-dir, never through
+  make, while any series is running.
+
+#### 100.2 P1 — the silent freeze: 0/14 (the rig is armed and proven, the face did not draw)
+
+14 pristine first boots (hp100a-n, SMP8+4G KVM, LL4, 420s window,
+NOSNAP, x86_64 built explicitly at a38e47a5):
+
+  a C-stretch | b D-early | c LADDER | d LADDER(+1 print, below) |
+  e D-early | f LADDER | g anim-stall | h FACE A1 | i D-early |
+  j LADDER | k D-early | l LADDER | m LADDER | n FACE A2
+  (+ hunt4 sleepsnap series: s1 FACE A1, s2 LADDER-stretched 202s,
+  s3 FACE A2, s4 D-early — 1/4 ladders on the hot arm vs 6/14
+  quiet; serials 8.4-10.3MB, the UART+walk tax is visible but the
+  arm is NOT the 0/10 killer the full park-chain arm was).
+
+Zero silent freezes, zero deadlocks except one transient (100.5),
+serial alive to window end on every miss. Under the 98th's 2/9 rate
+the P(0/14) ≈ 3.4% — the face is either gone (the only exit-path
+change between tips is the 99th's orphan-during-exit notify fix,
+a38e47a5) or much rarer. NOT a retirement (14 boots can't prove
+absence) — but the next series should keep the silence watchdog
+armed; if it hits, regs1/regs2 + bt decode the state in minutes.
+RIP/RFL per CPU discriminates the hypotheses in one shot: all-IF=0
+= interrupts-off spin class; RIPs in idle/hlt with no timer = tick
+class; identical RIPs across dumps = tight loop.
+
+#### 100.3 P2 — FACE A: kernel-side loss arms eliminated LIVE (hp100h, hp100n, hp100s1)
+
+hp100h (quiet arm): foundation tgid 717 main + all threads
+INTERRUPTIBLE at every dump to 392s; StartUser DONE 75.1s; ZERO
+launcher spawn request ever; timers alive at end.
+
+FACE A SPLITS INTO TWO SUB-FACES (n + s3 vs h + s1):
+- A2 (hp100n, hp100s3): at 116.0s foundation's own FFRT threads
+  (OS_FFRT_0_0 etc.) run kill_other_threads on the WHOLE thread
+  group (33/31 members, KOT-KILL cascade; one KSIG9 "caller
+  pid=1638 comm='OS_FFRT_0_0' -> target pid=723 group=1" names the
+  self-kill) — the ~30s-after-silence timing is libffrt's worker
+  watchdog killing the stalled process. Foundation DIES (0 threads
+  in every later dump); init RESTARTS it (s3: "Set process name to
+  foundation" again at 218.4/307.7/400.3s) and every restart
+  re-stalls the same way. Kernel kill/restart machinery executes
+  CORRECTLY (threads die, service restarts) — the missing event
+  persists across restarts.
+- A1 (hp100h, hp100s1): no kill ever fires; the park persists to
+  window end (36 threads at the last dump in s1).
+
+hp100s1 (dfx=leakhunt,periodic,sleepsnap — the 95.6#1 recipe; the
+"thpark" switch is DEAD CODE: no consumer in tree, the park-chain
+census rides sleepsnap): drew a clean face A WITH the census live.
+Decode (run/oh-hp100s1-serial.log):
+- Boundary EXACTLY §95.6's: foundation's last acts are the dlen-280
+  SACSA fanout (86.15-86.16s, "ohos.a..." len 0x29 SA-state-change
+  family, to pids 607/508/630/1179/455) + one inbound status-change
+  oneway at 87.2s — then NOTHING for 300s (both directions).
+- WAKE-RUN-LEAK census on foundation main (tid 719): kicked 4x,
+  age 267s, state=0x1, cfs_linked=0, on_rq=false, wok=19 wno=3 —
+  AND the in-census WW-PROBE: `ret=true linked 0->1 state=0x0`.
+  wok=19 means every kick RAN the reader (wake_ok = ran); it checks
+  its todo, finds it EMPTY, re-parks in the SAME binder read
+  (read_wait age grows, per-boot census dedup re-prints it). The
+  "leak" name is a misnomer for this shape — nothing leaks.
+- Whole-process park census: 97 futex parks at musl futex_wait
+  (0x3fbf116dea, per-thread cv words) + 31 epoll parks + 1 nanosleep
+  — the normal event-loop mix; no wedge-shaped untimed main-stack
+  chain (§97.4's D-early signature absent).
+VERDICT: every kernel arm of §95.6's "notify-never-fires family" is
+exonerated ON THE VICTIM (wake/link/run healthy, nothing held in
+kernel queues, no wait4 loss — 99.4's census silent except one
+healthy transient, 100.5; kill/restart executes correctly in A2 —
+the duplicate comms in KOT-KILL lists are unnamed worker THREADS
+sharing the parent comm, NOT cross-process kills: kill_other_threads
+walks the thread-group ring only, exit.rs 209-256). Face A is an
+OH-USERSPACE event-chain
+loss: after the SA fanout, the next event AMS waits for before
+StartAbility(launcher) never arrives. Ladder-vs-stall sender diff
+(78.9-96.5s ladder / 85.9-250s stall): ladder keeps receiving app
+oneways (pid 1567, "OHOS.Media..." dlen=188); stall receives 8 sync
+code=0x17 dlen=3396 lifecycle reports from pid 1548 then silence —
+different spawned-app neighborhoods, same conclusion: the producer
+stream into foundation dries up. Next lever is OH-side (name the
+exact expected event: decode the status-change parcel family and
+what AMS blocks on between StartUser-DONE and StartAbility) — or
+accept the §94.3 stretch-root framing (100.6).
+
+#### 100.4 P2 — FACE C decoded: ENOENT-driven spawn-retry loop (hp100a)
+
+Clean capture in the quiet arm. Timeline: launcher requested;
+sandbox walk starts in the forked child (appclone pid 2201 at
+192.515); mounts proceed /config /dev /proc /sys ... el1/bundle
+(nmounts 228); then `bindwalk: '/data/app/el2/100/base/com.ohos.
+launcher' ENOENT, resolves until '/data/app/el2/100/base' ino=859`
+— parent EXISTS, bundle subdir does NOT. The walk stops; the child
+vanishes (absent from all later dumps — appspawn's 3s watchdog
+shape); AMS re-requests: fresh fork+appclone+full walk every few
+seconds (attempts at 192/193/197/200/201/202...s; 194 launcher
+mtprobe lines vs the ladder's ~47; nmounts grows 213->313 — each
+attempt leaves its mounts behind). LATER spawns proceed around the
+loop (m.ohos.systemui's own appclone at 203.8). The LADDER boot's
+walk mounts el2/base at nmounts=270 — the dirs EXIST there because
+the provisioning (BMS install stream creating el2 storage) had
+finished; hp100a's install stream was STILL RUNNING at 414s.
+VERDICT: face C = launcher spawn requested while the el2 storage
+provisioning hasn't landed; AMS retries into the ENOENT forever;
+the kernel spawn/mount path is healthy throughout (mounts complete
+in <1s each, failures are true ENOENTs, no wedges). Same root as
+the stretch family: the install stream that provisions el2 is the
+slow/variable stage (ladder user chain 77-81s; hp100a 118-192s and
+unfinished at 420s).
+
+#### 100.5 Boot-mix ledger + two transient sightings
+
+6/14 ladders (c 78.7s, d, f 81.4s, j, l, m — the quiet-arm ladder
+class is unchanged); misses decompose: D-early stretch x4 (b/e/i/k),
+face A x2 + A-like x1 (h/n/s1 in 100.3), face C x1 (a), anim-stall
+x1 (g: bootanimation.ready 72.4 never finished).
+- hp100d: ONE "DEADLOCK: spinlock stuck cpu=2 lock=0xffff88807d396860
+  ra=RawSpinlock::lock" at 93.8s, page-offset 0x860 (not a §98.1
+  cluster offset); the dump that follows is console-interleaved
+  (§99.1 shape) and the boot RECOVERED to a full ladder — a
+  transient long hold (watchdog threshold), not a wedge. First
+  spinlock-stuck print on a fixed-kernel boot (98th: 0/9).
+- hp100g: first live WAIT4-PARK census sighting (pid=1, age 2s,
+  nz=3, pend=0x10000 SIGCHLD-pending+blocked, q=(1,0)) at 10.98s —
+  init woke and ran the ladder to bootanimation.ready: a healthy
+  transient, exactly the census's intended noise floor. The census
+  stayed silent on 13/14 boots (anomaly-gated as designed).
+- hp100s1 at 126s: a BURST of WAKE-RUN-LEAK lines (10 tids, kicked
+  2x, wok>0) = the idle-binder-reader floor population, NOT leaks
+  (same ran-and-re-parked shape as 100.3). Future decodes: only
+  victims whose wok=0 or whose park is NOT a re-parking reader are
+  real leaks.
+
+#### 100.6 P4 — the 97th's ICF trap is DISPROVEN for fresh builds; the tail lever reopens
+
+Experiment (cargo direct, --target-dir, no make): RUSTFLAGS with
+`-C link-arg=--icf=none` -> byte-identical rux (md5 c70129af...);
+`-Z merge-functions=disabled` -> byte-identical again. The debug
+profile never runs MergeFunctions and this link never folds — the
+97.8 "ICF folding makes kernel-IP attribution untrustworthy"
+conviction CANNOT explain mis-symbolization of records taken on
+freshly built kernels of this tree. What it can still explain: a
+record symbolized against a STALE ELF (the w1 record was re-parsed
+in §97.8 against "the 92nd's kernel ELF" — build identity was
+never verified). Consequence for §97.9#4: no ICF-off rebuild is
+needed; take a FRESH tail record (hiperf) on a stretched boot and
+symbolize against the EXACT ELF that booted it (checksum both).
+The stretch family — now the named common root behind D-early,
+face C, and (via 100.3) face A — is the highest-value target for
+that record: the RUNNING-set burners (os_ds_service, DB_TaskExecutor,
+sysevent_source, hilogd.server — confirmed a third time in hp100b's
+last dump) are the userspace face; the kernel-side half (~12.4k
+samples/5s continuous) is what the fresh record attributes.
+
+#### 100.7 Gates
+
+Zero kernel-code changes this session (findings only; rigs live in
+run/). x86_64 build rc=0 from a clean build/.config at a38e47a5
+(the 99th's riscv64 1319/1319 stands for this HEAD). No merge-gate
+tiers owed by this session's diff.
+
+#### 100.8 FOR THE 101ST (priority order)
+
+1. Silent freeze (§98.5): 0/14 on a38e47a5, rig ready and proven
+   (100.1-100.2). Keep the silence watchdog armed on any series;
+   one hit decodes in minutes (RIP/RFL histogram + gdb bt).
+2. Stretch family = the common root (D-early x4, C x1, A's dried-up
+   event stream, 202s ladders on hot arms): take ONE fresh hiperf
+   tail record on a stretched boot, symbolize against the same-build
+   ELF (100.6 recipe), re-rank the kernel-side table (the old
+   "float"/"btree" sites first). That record is the single highest
+   information-density boot left on the board.
+3. Face E: 0/14 since the 99th's orphan-notify fix (0 reproductions
+   vs the 97th's 3-in-a-day). One more quiet-arm series without a
+   draw retires it as fixed-by-a38e47a5.
+4. Face A's userspace lever: the missing post-fanout event + the
+   libffrt 30s-worker-watchdog kill (A2) are OH-side — cheap serial
+   diffs (100.3's sender-diff method) on the NEXT face-A draw; do
+   not spend kernel-lane budget on it.
+5. hp100d's transient long-hold (100.5): if spinlock-stuck prints
+   recur on fixed-kernel boots, capture LOCK-OBJ (needs the dump to
+   survive console interleave — consider lifting the deadlock dump
+   to putchar_no_lock like the watchdog path).
