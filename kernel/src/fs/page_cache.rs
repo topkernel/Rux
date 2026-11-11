@@ -259,6 +259,10 @@ static FI_SCANNED_ENTRIES: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 static FI_SCANNED_PAGES: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
+static FI_IDF_KEYED: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+static FI_IDF_TOTAL: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
 static FI_SCANNED_DIRTY: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 
@@ -1818,16 +1822,16 @@ for i in 0..n {
     pub fn insert_dirty(&self, fs_id: u64, ino: u64, page_index: u64, data: &[u8]) -> bool {
         let ok = self.insert_ext(fs_id, ino, page_index, 0, data, true);
         if !ok {
-            // FI-DIAG (028fb37d razor, hypothesis a): the buffered write
-            // fell back to direct write-through when this failed — count
-            // and name the failure for big files.
-            static FI_IDF: core::sync::atomic::AtomicUsize =
-                core::sync::atomic::AtomicUsize::new(0);
-            let n = FI_IDF.fetch_add(1, Ordering::Relaxed);
-            if n < 20 {
+            // FI-DIAG (razor-2): UNCAPPED counters + keyed prints (the
+            // razor-1 lesson: global caps were eaten by boot noise).
+            FI_IDF_TOTAL.fetch_add(1, Ordering::Relaxed);
+            if page_index % 512 == 0
+                && FI_IDF_KEYED.fetch_add(1, Ordering::Relaxed) < 40
+            {
                 crate::pr_err!(
-                    "FI-INSERTDIRTY-FAIL fs={:#x} ino={} idx={}",
-                    fs_id, ino, page_index
+                    "FI-INSERTDIRTY-FAIL fs={:#x} ino={} idx={} total={}",
+                    fs_id, ino, page_index,
+                    FI_IDF_TOTAL.load(Ordering::Relaxed)
                 );
             }
         }
@@ -2706,3 +2710,6 @@ pub fn fi_inserted_pages() -> u64 { FI_INSERTED_PAGES.load(Ordering::Relaxed) }
 pub fn fi_scanned_entries() -> u64 { FI_SCANNED_ENTRIES.load(Ordering::Relaxed) }
 pub fn fi_scanned_pages() -> u64 { FI_SCANNED_PAGES.load(Ordering::Relaxed) }
 pub fn fi_scanned_dirty() -> u64 { FI_SCANNED_DIRTY.load(Ordering::Relaxed) }
+
+/// FI-DIAG: total insert_dirty failures (razor-2, uncapped counter).
+pub fn fi_insertdirty_fails() -> u64 { FI_IDF_TOTAL.load(Ordering::Relaxed) }

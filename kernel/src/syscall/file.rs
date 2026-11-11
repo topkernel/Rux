@@ -4608,13 +4608,14 @@ pub fn sys_sync(_args: SyscallArgs) -> i64 {
     {
         let (wi_flush, wi_direct) = crate::fs::ext4::file::fi_write_inode_counts();
         crate::pr_err!(
-            "FI-SUMMARY inserted_pages={} scanned_entries={} scanned_pages={} scanned_dirty={} wi_flush={} wi_direct={}",
+            "FI-SUMMARY inserted_pages={} scanned_entries={} scanned_pages={} scanned_dirty={} wi_flush={} wi_direct={} insert_fails={}",
             crate::fs::page_cache::fi_inserted_pages(),
             crate::fs::page_cache::fi_scanned_entries(),
             crate::fs::page_cache::fi_scanned_pages(),
             crate::fs::page_cache::fi_scanned_dirty(),
             wi_flush,
-            wi_direct
+            wi_direct,
+            crate::fs::page_cache::fi_insertdirty_fails()
         );
     }
     // ORDERED DATA: the flushed files' DATA blocks first. The plain
