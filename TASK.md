@@ -11317,3 +11317,148 @@ fi4/8=yes|head pattern + raw grep; fi5/7/9/A-D = repeats).
 Instruments on the branch: FI-INSERT/CENSUS/COLLECT/ICACHE-MISS/
 MARKDIRTY-MISS/DIRTY-DROP/DIRTY-RELEASE/BIGFLUSH/WRITEINODE-BIG/
 SYNCALL/SYNC/SUMMARY + ext4_flush_dirty_inode's inode-persist tail.
+
+### 97. 97TH SESSION (2026-11-11 17:5x-.., branch oh-crash) — the park-chain instrument was BLIND at LOGLEVEL=4 (fixed); three toxicity rounds taught the census its volume walls (two hard freezes); the clean-stall hunt captured THREE new faces (E: samgr SIGSEGV -> init reboot-wedge + 74 frozen zombies; D-early x2 with untimed cv-park chains + a 274s-stuck BWR); LOGLEVEL=4 is now the rig default
+
+Mission: §95.5/§95.6 queue (face A thpark+periodic arm, face C spawn
+path, LOGLEVEL=4 rig default, tail lever).
+
+#### 97.1 The instrument was blind: KERN_INFO dies before the ring at LL4 (4ff5365d)
+
+The §95.7/§95.8 mandate made LOGLEVEL=4 the rig default — and printk
+drops level>console BEFORE the ring. Every park-chain instrument that
+emits at KERN_INFO went dark on exactly the boots that hunt with it:
+- binder::sleep_snapshot's bulk census flushed via pr_info — hp97a/b
+  booted the full §95.6 arm and produced ZERO census lines.
+- censusd (defer_emit_fn) drained all three rings (A-focus/focus/bulk)
+  at KERN_INFO — the ufw/uss/uvma park-chain evidence lane equally dead.
+- vfs bindrec sandbox-clone records (face-C spawn forensics) were pr_info.
+All three now emit at KERN_WARNING (4; visible at LL4). Switch-gated/
+rate-capped hunt paths only — standard boots (LL7 default) print
+identically before and after. VERIFIED on hp97c: census lines land from
+6.1s (init's wait4 park), khungtaskd cadence continues past 60s.
+
+#### 97.2 Toxicity rounds: the census is a boot-killer if left loud (b520a514, cd6fa7bc, 94a74905)
+
+Round 1 (hp97c-h, full arm at warn): serials 5.3-13.2 MB vs the proven
+hp95 arm ceiling ~4.9 MB; 6/6 boots clean-stalled. Composition of
+hp97d: 3625 census lines (1495 binder-idle ioctl parks), 2238 ufw walk
+lines (~4x the distinct-thread count), uvma repeating. UART drag
+(~87us/byte at 115200) = the sc37/sc108 lesson replayed ON OUR OWN
+INSTRUMENT. Round 2 (hp97i/j): uvma map dumps EXPLODED to 15.5k lines
+(~2 MB) — the VMA dump fired for TIMED parks too, 100+ tgids latched,
+the 16-slot VMA_DUMPED_DONE ring thrashed (evict/re-dump every 250ms
+censusd round) — and BOTH GUESTS HARD-FROZE MID-FLOOD (serial silent
+from guest 272/281s; boot drivers blocked forever in read1 on a dead
+stream — a flood severe enough to take the whole machine's console
+down). Fixes (all inside dfx= gates):
+- census skips the binder-idle shape (sys=16 + BINDER_WRITE_READ cmd).
+- ufw/uss walks: wedge-shaped parks only (main-stack any timeout — the
+  54th's named chain was main-stack TIMED; own-stack/latched only when
+  UNTIMED a3==0), once per (tid,rip) per BOOT (frozen stacks don't change).
+- uvma dump: same wedge gate + hard UVMA_LINE_BUDGET of 600 lines/boot
+  across BOTH emit sites.
+- ACCT-RECV (rides txnhunt): first 400 full, then 1-in-16 sampling
+  (was ~500KB/boot of account-SA poll chatter).
+Post-fix estimate ~5.2MB/boot vs the 4.9MB ceiling. hp97a (round-1
+arm, old kernel) is a STRETCHED boot: bundles.ready 130s (ladder: 40s),
+StartUser 154.8s, ZERO appspawn spawns by 330s — the stretch-then-stall
+mode is what a toxic arm looks like mid-degree.
+
+#### 97.3 Face E (hp97b, NEW): samgr SIGSEGV -> init reboot-path wedge; 74 zombies frozen; the §87.8 reaper link is REAL
+
+Timeline: 4 SYNCSEND-GUARD hits on telephony (pid 556) at 28.8-29.9s
+(ladder boots: 0-2); samgr (pid 335) dies with signal 11 at 52.104s
+(no USEGV forensics print — not a page-fault death; abort/CFI class);
+its threads still parked (RELEASE-DEFER #5). init receives SIGCHLD,
+classifies samgr as critical, enters the REBOOT path at 52.166s
+(BEGET fstab.c:323 "Failed to get fstab item /misc" + reboot_misc.c:89)
+— and never comes back: init RUNNING (100%-CPU silent, the 69th
+pid1spin family) at every dump to 306s; the periodic dumps show ZOMBIEs
+accumulating 2 -> 54 (61s) -> 74 (96s) then FROZEN at 74 forever —
+every service init stopped for the reboot, unreaped (resource_schedu
+x17, wifi_host/vibrator_host/user_auth_host/ui_service/ueventd/
+time_service/storage_manager x9 each). Ladder boots: 0-5 zombies total
+(hp95e/94b: 0). THE ZOMBIE MASS IS THE MISSING LINK for the 69th's
+"init 100%-CPU silent" face — init's loop is wedged in its reboot/misc
+handling while its children corpse-pile. Open: (a) why samgr segfaulted
+(guards=4 vs typical 0-2 could be our write-path desync feeding a CFI
+abort — unproven; no fault print), (b) init's spin site (dfx=pid1spin
+would name it — NOT in this session's arm; add for the next face-E
+repro). This face is NOT the clean-stall class (it has a crash).
+
+#### 97.4 Face D-early (hp97c/d): pre-bundles.ready stall, untimed cv chains + a 274s-stuck BWR — with full park-chain evidence for the first time
+
+Both boots: NO bundles.ready, NO CompleteAddUser (stalled before the
+user chain — earlier than §95.2's shape D). With the (loud) full arm:
+- foundation (tgid 704): threads 1503 + 1255 UNTIMED (a3=0) futex-
+  parked on own-thread-stack cv words, IDENTICAL chain:
+  musl futex_wait(0x3fbf116dea) <- cv wait(0x3fbf118374) <-
+  0x7ff000988e02 <- 0x7ff000721946 (two foundation libs, offsets
+  pinned; the map dump predates their dlopen — the 600-line budget +
+  wedge-only dumps in 97.2 fix map timing for the next capture). The
+  TIMED worker pools (chain via 0x7ff00063f502 = the 54th's libffrt
+  class) keep cycling = ALIVE; only the untimed pair is the wedge.
+- netmanager (pid 537) FFRT worker tid 613: parked in BINDER_WRITE_READ
+  with a 68-byte write consumed (bwr w=68/68) for 274s+ — a sync call
+  that never completed. TXN-HANG-BWR is the instrument that names this.
+- netsysnative (pid 699) main: parked on musl-internal word
+  0x3fbf13e6a8 (musl .data) — flagged sync-holder; its own threads
+  FW-wake that word thousands of times (n=3303 by 28s) then it freezes.
+- distributeddata (pid 706 tid 1659) polls accountmgr (pid 711) code
+  0x35 every 500ms to the end (retry-loop victim shape, same as §95.2
+  shape A's systemui->account residue).
+- RUNNING set at 300s: sysevent_source/os_ds_service/hilogd/mmi_service
+  (+kthreads) — exactly §94.3's tail burners; the install stream
+  ("installs" RUNNING) never finishes.
+Read: the BMS bundle scan never completes because its KVS/install
+dependency chain (settingsdata/os_ds_service) never drains; everything
+downstream untimed-parks. Same family as §95.2 shape D but EARLIER
+(pre-user-chain). Next-hop instruments: the hiperf tail record on a
+stalling boot (§95.5#2 — still the strongest attribution tool), and
+with 97.2's fixes the census now names parks without killing the boot.
+
+#### 97.5 Clone-path audit (face C prep) + steptrace verdict
+
+Reviewed with no live face-C capture this session: do_clone's unwind
+helper (fork.rs) covers every failure path past alloc; CLONE_NEWNS
+copy is a Vec clone under ns.mounts Spinlock (ns.rs:709); the sc98
+Drop contract detaches a dying private namespace's mounts (the
+historical leak that matched face C's shape is FIXED — registry
+growth can no longer stall spawns past the 3s watchdog; vfs_umount_
+object takes no ns locks, no ordering cycle with the cloner).
+STEPTRACE (§95.8's suggestion) is UNUSABLE as specified: it prints at
+pr_debug (level 7) — dropped before the ring at LL4 (invisible), and
+at LL7 it floods 2.7GB/boot and loses the races it hunts (the switch
+catalog's own note). The sleepsnap census + TXN-HANG-BWR + bindrec/
+mtprobe records cover face C's needs at LL4 instead.
+
+#### 97.6 Rig: LOGLEVEL=4 is the DEFAULT (§95.7/§95.8 mandate)
+
+run/lb-boot-out.py + run/lb-boot.py now default loglevel=4 (export
+LOGLEVEL=7 to override; kernel cmdline default stays 7 — coordinator
+policy). run/ is untracked by the 94th's rule, so the rig change lives
+on disk for every lane; this section is its ledger. All hp97 boots
+ran LOGLEVEL=4.
+
+#### 97.7 hunt5 (round-5 arm: leakhunt,periodic,sleepsnap,txnhunt,thpark @ 94a74905) — results
+
+(filled below when the series lands)
+
+#### 97.8 FOR THE 98TH (priority order)
+
+1. If hunt5 (§97.7) stalls: decode with the now-safe census — the
+   wedge threads' chains + FUXWATCH verdicts decide notify-never-fires
+   vs kernel wake-drop; cross-check untimed words against §87.8.
+2. Face E repro: add dfx=pid1spin to the arm on the next face-E-shaped
+   boot (init RUNNING + zombie mass) — it names the spin site; also
+   watch SYNCSEND-GUARD counts >2 (the samgr-crash lead).
+3. The D-early attribution: hiperf record on a stalling boot (the
+   §94.4 exit-path stall caveat stands — the record may land 0 bytes;
+   the sleepsnap census at wedge time is the fallback).
+4. Face C remains uncaptured this session (needs a SetBundleQuota-
+   then-no-appclone boot); the audit (97.5) found no static smoking
+   gun — capture-first.
+5. Tail lever (§94.3): untouched this session (the toxicity rounds
+   consumed the budget); hilogd's 32.9k kernel-side samples still the
+   biggest named burner.
