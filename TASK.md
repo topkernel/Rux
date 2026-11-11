@@ -10774,3 +10774,83 @@ panic is fixed; x86_64 OH evidence is unaffected (x86_64 boots fine).
 5. Panic-reorder validation: any sysrq-c boot should now show all
    CPUs halting at panic time (no 150s zombie window). One boot with
    the guard storm ending in foundation-abort-4 gives it for free.
+
+#### 93.7 P2 CLOSED: callchains verified end-to-end + TWO perf parity bugs found (one fixed)
+
+The 92nd's hp92a records were NOT lost after all: both landed on the
+OUTPUT disk (run/hp87-out.img) via the guest's background writeback —
+the copy-phase shell stall only killed the MARKERS, not the data
+(hp92a-w1/w2.data, 33,696,867 bytes each; w1==w2 byte-identical — the
+dirty-metadata writeback crossed them, so treat the survivor as ONE
+record). Recovered via image copy + e2fsck -fy (the replay DESTROYS
+current-session files — userdata extraction is still impossible while
+§87.7#3 metadata_csum stays open; the OLD checkpointed files survive).
+
+Parsed (run/hp93-parse.py, empirical PERFILE2 walker — hiperf's own
+file header layout, walk from the first type-9 record):
+  - KERNEL samples: chains of 1-5 frames present (kernel_callchain
+    WORKS, 91st's emission confirmed end-to-end)
+  - USER samples: chains of 2-16+ frames (fp walk works; 1267/5796
+    empty — the fp-unavailable class)
+  - timestamps 148.5-151.1s = the TAIL window start (the w2 record)
+  - only ~2.5s of samples are linearly reachable; the rest of the 33MB
+    is hyperf's per-cpu/section layout — full-window attribution needs
+    the section walker (94th; parser committed as the base)
+  - PERF-OPEN + this = 91.6#2's verification DONE: userspace asks
+    (bit set), kernel accepts, chains are IN the records.
+
+BUG 1 (FIXED, 970b1b40): PERF_RECORD_MISC_USER/KERNEL were swapped
+(USER=1/KERNEL=2; uapi: KERNEL=1/USER=2) and the context markers were
+-2047/-2046 (uapi: KERNEL=-128/USER=-255). Live proof: misc=2 samples
+carrying 0xffffffff8... IPs. Every uapi reader misattributed kernel
+samples to user mode. Both arch builds green.
+
+BUG 2 (OPEN, for the perf lane): mode attribution for USER samples —
+the empty-chain class plus hiperf's own report side still need a
+post-fix verification boot (uapi constants now in place).
+
+#### 93.8 Storm rerolls: 11 boots, no reproduction on this kernel
+
+My kernel (22789bd2: 92nd's softlockup WIP kept + guard dump + panic
+reorder — nothing that should suppress the storm): 11 pristine =4
+boots (hp93a-e no-dfx, hp93f/f2, hp93g-i leakhunt): max 6 guard hits,
+ZERO foundation aborts, ZERO wedges. Best ladders: hp93i
+launcher.ready 53.4s, hp93f 82.2s, (w5 43.9s / w3 96.7s on the 92nd's
+kernel). The 92nd's storms (w3=25/w4=80 hits, 08:2x-08:5x) ran on a
+quieter host; my series ran under 3-7 concurrent QEMUs + make-tests.
+HYPOTHESIS for the 94th: the storm is host-load sensitive (the race
+window widens when the guest runs FAST). Reroll on a quiet host before
+hunting further; the guard dump is armed and will name the producer on
+the first >=10-hit boot.
+
+#### 93.9 riscv64 make-test bisect — closed as "older than the 91st"
+
+All of: 22789bd2 (93rd tip), 99a467af, 4950f396, 5bec3357 (89th tip),
+45fa58be (LAYOUT-7 + surgery Spinlock) BOOT-PANIC identically
+(57619346 does not build — the b91e6c41 arity fix target). So the boot
+panic PREDATES the 91st's work entirely; it blocks 91.6#1's gate but
+is not a 91st/93rd regression. First fault shape differs by commit:
+  45fa58be: pfault badaddr=0xffffffc503f80060 (VMEMMAP region) epc=
+  0xffffffff804c266a ra=0xffffffff8045a38c right after page-descriptor
+  init, THEN the trap printer dies on tp=0 ("noctx NOT-A-KERNEL-TASK")
+  branch tip: badaddr=0 epc=0 (NULL call) at the same boot stage
+Both smell like the LAYOUT-7/window family (§89.5's 24MB->28MB dance).
+The 89th's claim that tests RAN to execve on this era cannot be
+reproduced today — suspect their intermediate tree (218489be+window
+patch) differed from landed 45fa58be, or the wrapper/env moved.
+94th entry: checkout 45fa58be, symbolize epc/ra (riscv64 addr2line),
+fix the vmemmap fault, then the boot should reach the OLD §89.5 execve
+panic (which ALSO still needs the fix) before the suite can gate.
+
+#### 93.10 Rig addendum
+
+- run/hp93-parse.py (committed): PERFILE2 walker (empirical start,
+  resync, chain histogram, kernel/user tops).
+- run/hp93-out/: recovered hp92a record copy.
+- run/system-hp93f.img: BOTH hp87-run.sh AND init/hp87.cfg injected
+  (the cfg is REQUIRED — service hpboot + post-init start).
+- The 90th's run/hp90-parse.py is GONE (run/ is not all committed);
+  hp93-parse.py is its successor.
+- lb-boot-out.py hang: if the guest console goes quiet near SECS, the
+  driver's read1 blocks forever — kill the python (the boots are
+  disposable; records on the sync-mounted output disk survive).
