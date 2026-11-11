@@ -11286,3 +11286,34 @@ than userspace logic alone (the reference boots these images without
 stalls). Next session: (1) thpark+periodic arm (95.6#1) for A,
 (2) for C, watch pid 1381's park site + the appspawn request queue —
 dfx=steptrace on the stuck child would name the exact park.
+
+### FS-INTEGRITY LANE — HANDOFF (coordinator, branch fs-integrity 51d94517, 2026-11-11 15:5x)
+
+NARROWED TO ONE HOP. The sync(2) data-loss chain is now:
+  write(2) -> dirty page cache (OK, FI-INSERT + counters prove it)
+  -> sync(2) flushes the DATA blocks (OK: 3130 dirty pages flushed,
+     2.6M raw-grep hits of the 8MB pattern in the crashed image)
+  -> the ON-DISK INODE never learns the new size (fi3/fi5: fileA.bin
+     size 0, md5-of-empty, after a sync() that returned SUCCESS)
+  -> because FI-WRITEINODE-BIG never fires for the pattern file, the
+     flush path does NOT reach write_inode — in ext4_write_at_core
+     the inode update lives in the Ok(written_bytes) arm, so an Err
+     from ext4_file_write skips it (data on disk, metadata not).
+
+NEXT BOOT (one hop away): print the Err arm of ext4_write_at_core on
+the flush path (errno + ext4_ino + offset) and count write_inode
+calls per path (flush vs write(2)). After the flush-path write_inode
+works, sync(2) still needs the INODE-TABLE BLOCK synced (fsync's
+ext4_sync_file_inner does exactly that: bread the inode-table block +
+sync_dirty_buffer) — sync(2) has no equivalent today.
+
+RULED OUT (measured, all negative): dirty-drop paths (only for
+genuinely unlinked inodes), flush_done's invalidated release,
+mark_dirty's bounded reader probe, the flush_all_dirty resume cursor
+(the FI-COLLECT truncation was MY print limit, not the cursor).
+
+Rigs: run/boot-fi*.sh + system-fi*.img (fi3=32MB-zero crash A/B;
+fi4/8=yes|head pattern + raw grep; fi5/7/9/A-D = repeats).
+Instruments on the branch: FI-INSERT/CENSUS/COLLECT/ICACHE-MISS/
+MARKDIRTY-MISS/DIRTY-DROP/DIRTY-RELEASE/BIGFLUSH/WRITEINODE-BIG/
+SYNCALL/SYNC/SUMMARY + ext4_flush_dirty_inode's inode-persist tail.
