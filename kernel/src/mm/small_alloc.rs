@@ -34,7 +34,9 @@
 //! the buddy while still under the class lock — no other CPU can be
 //! scanning it at that moment, so there is no use-after-reclaim race.
 //! - Per-CPU magazines (pa16) front the class locks: alloc pops / free
-//! pushes run under LOCAL irq-off only; the class lock is taken once
+//! pushes run under LOCAL preempt-off only (106th: irq-off became
+//! preempt-off — interrupt context is routed away from the rows, so
+//! the fast paths keep IRQs enabled); the class lock is taken once
 //! per batch refill/flush (see the magazine block comment below).
 //!
 //! Lock order: class lock -> buddy lock (page create/reclaim). The
@@ -256,9 +258,12 @@ static CACHES: [SmallCache; 8] = [
 //   they did before (silently for partially-free pages, taint at the
 //   full-page boundary); the magazine only defers the moment, it adds
 //   no new failure mode.
-// - Touching a magazine from IRQ context is serialized: every access
-//   sits between save_and_disable_irq/restore_irq (or under the class
-//   irqsave lock), and IRQ-context allocs/frees take the same guard.
+// - Touching a magazine from IRQ context (106th restructure): rows
+//   are ONLY ever touched in task context inside preempt-off windows
+//   (IRQs enabled). Interrupt-context allocs/frees are ROUTED to the
+//   class-lock bodies before any row access, so an IRQ can interrupt
+//   a row access but never race one; the preempt window forbids the
+//   migration that would touch a foreign row.
 // - Counters (obj_allocs/obj_frees) are bumped ONLY in the locked
 //   bodies — at page-freelist removal/insertion — so every object is
 //   counted exactly once per lifecycle; magazine-resident objects skew
@@ -303,24 +308,52 @@ pub fn alloc(size: usize, align: usize) -> *mut u8 {
     }
     let ci = class_of(size, align);
 
-    // Fast path: pop from THIS CPU's magazine. The CpuLocal guard (D-7)
-    // disables IRQs for exactly the closure body and reads cpu_id
-    // inside the window — with IF=0 the task cannot be preempted and
-    // migrated between the read and the row access.
+    // Interrupt context NEVER touches a magazine row (106th
+    // restructure): rows are only ever mutated inside task-context
+    // preempt-off windows whose IRQs stay ENABLED, so an IRQ-context
+    // alloc that popped a row would race an interrupted task-context
+    // access on the same cpu. The class lock (irqsave) serializes
+    // everything the locked body touches, and the refill below only
+    // fills the CURRENT cpu's row — an irq-context refill would write
+    // the interrupted task's row concurrently with its own pop. So the
+    // irq-context arm serves ONE object under the lock and returns,
+    // no row interaction at all.
+    if crate::interrupt::preempt::in_interrupt() {
+        let cache = &CACHES[ci];
+        let _g = cache.lock.lock_irqsave();
+        let _aw = crate::dfx::allocwatch::guard(
+            crate::dfx::allocwatch::SITE_SMALL_ALLOC,
+            ci as u8,
+        );
+        let p = alloc_locked(ci, heap_start);
+        drop(_aw);
+        drop(_g);
+        cache.lock_holds.fetch_add(1, Ordering::Relaxed);
+        return p;
+    }
+
+    // Fast path: pop from THIS CPU's magazine. The preempt guard (106th)
+    // disables preemption for exactly the closure body and reads cpu_id
+    // inside the window — the task cannot be migrated between the read
+    // and the row access, while IRQs stay enabled (interrupt-context
+    // allocs are routed above, so an IRQ can interrupt but never race
+    // the row access). Before the 106th this was a CpuLocal::with
+    // irq-off window: ~46M cli/sti pairs per boot on the fast paths
+    // alone, a top deferred-PMI (`enable_irq+0x1d`) sample producer.
     //
     // r8final guard (2026-10-25): runs/gnome-r8final died at t=515s in
     // "index out of bounds: the len is 16 but the index is 16" here and
     // in the free() snapshot loop. len > MAG_DEPTH means the row was
-    // entered by two CPUs at once (a transient cpu_id()/ti_cpu
-    // divergence — the R55/R74 scheduler hunt family; every in-tree
-    // steer is gated but residual windows remain), and the racing
+    // entered by two CPUs at once (a transient cpu_id()/ti_cpu divergence
+    // — the R55/R74 scheduler hunt family; every in-tree steer is
+    // gated but residual windows remain), and the racing
     // check-then-increment pushes both ran with len == 15, leaving len
     // == 17 with no out-of-bounds write at push time. A pop at 17 would
     // read buf[16], one past the row. Survive it: skip the fast path
     // (the locked body still serves), and let free()'s bounded drain
     // heal the row. Counted + tainted there, once per heal.
     if let Some(ptr) = MAGAZINES
-        .with(|mut row| {
+        .with_preempt(|mut row| {
             let mag = &mut row[ci];
             (mag.len > 0 && mag.len <= MAG_DEPTH).then(|| {
                 mag.len -= 1;
@@ -334,9 +367,10 @@ pub fn alloc(size: usize, align: usize) -> *mut u8 {
 
     // Slow path: ONE class-lock hold refills the magazine in batch and
     // returns the first object. The irqsave guard has IF=0 + preemption
-    // disabled; the nested CpuLocal::with is flag-correct under it (the
-    // saved state has IRQs already off) and its re-entry tripwire is
-    // vacuous here — no outer with() is live.
+    // disabled; the nested magazine access below uses the preempt form
+    // (preempt_count nesting is plain arithmetic under the already-IF=0
+    // section) and its re-entry tripwire is vacuous here — no outer
+    // window is live (the fast-path guard closed before we locked).
     let cache = &CACHES[ci];
     let mut first: *mut u8 = core::ptr::null_mut();
     let _g = cache.lock.lock_irqsave();
@@ -349,7 +383,6 @@ pub fn alloc(size: usize, align: usize) -> *mut u8 {
         ci as u8,
     );
     let _t0 = crate::arch::cpu::read_time();
-    cache.lock_holds.fetch_add(1, Ordering::Relaxed);
     let mut refill = |mag: &mut Magazine| -> bool {
         while mag.len < MAG_DEPTH {
             let p = alloc_locked(ci, heap_start);
@@ -365,12 +398,20 @@ pub fn alloc(size: usize, align: usize) -> *mut u8 {
         }
         true
     };
-    if MAGAZINES.with(|mut row| refill(&mut row[ci])).is_none() {
-        // cpu id out of bank range (divergence family): serve one
-        // object directly under the lock, no row touched.
+    if MAGAZINES.with_preempt(|mut row| refill(&mut row[ci])).is_none() {
+        // Interrupt context (routed here by the entry check's race
+        // window — an IRQ hit between the check and the lock) or cpu id
+        // out of bank range (divergence family): serve one object
+        // directly under the lock, no row touched.
         first = alloc_locked(ci, heap_start);
     }
-    // dfx=allocwatch section meter (see _t0 above).
+    // dfx=allocwatch section meter (see _t0 above). lock_holds is
+    // counted AFTER the guard drops (106th): it is a shared-line RMW —
+    // inside the irqsave window it also extended every section's IF=0
+    // span; the count itself only needs the section to have happened.
+    drop(_aw);
+    drop(_g);
+    cache.lock_holds.fetch_add(1, Ordering::Relaxed);
     if crate::dfx::allocwatch::armed() {
         let d = crate::arch::cpu::read_time().wrapping_sub(_t0);
         let prev = cache.slow_max_cyc.load(Ordering::Relaxed);
@@ -381,7 +422,6 @@ pub fn alloc(size: usize, align: usize) -> *mut u8 {
             cache.slow_over_10ms.fetch_add(1, Ordering::Relaxed);
         }
     }
-    drop(_g);
     first
 }
 
@@ -523,20 +563,31 @@ pub fn free(addr: usize) -> bool {
         return true;
     }
 
+    // Interrupt context never touches a row (106th restructure — see
+    // alloc()'s routing comment): the screen-then-push below runs in a
+    // preempt-off window with IRQs ENABLED, so an irq-context push
+    // would race an interrupted task-context access on the same cpu.
+    // Flush this one entry directly through the locked body.
+    if crate::interrupt::preempt::in_interrupt() {
+        flush_batch(core::slice::from_ref(&addr), ci_guess, heap_start);
+        return true;
+    }
+
     // Fast path: screen the pointer against the page header INSIDE the
-    // CpuLocal window (D-7: the guard IS the irq-off window — fresh
-    // magic/cls read, alignment, free_count head room), then push into
-    // THIS CPU's magazine. Anything the locked body would
-    // consume-and-taint is routed there instead — a bad pointer must
-    // never park in a magazine, because a later alloc pop on this CPU
-    // would hand it out as a live object.
+    // CpuLocal preempt window (106th: preempt-off, IRQs enabled — the
+    // fresh magic/cls read, alignment and free_count head room are the
+    // same advisory screen as before; the flush re-validates under the
+    // class lock), then push into THIS CPU's magazine. Anything the
+    // locked body would consume-and-taint is routed there instead — a
+    // bad pointer must never park in a magazine, because a later alloc
+    // pop on this CPU would hand it out as a live object.
     enum Step {
         Pushed,
         SnapFlush { snap: [usize; MAG_DEPTH], n: usize },
         Locked,
     }
     let step = MAGAZINES
-        .with(|mut row| {
+        .with_preempt(|mut row| {
             let s = CLASSES[ci_guess];
             let fo = first_off(s);
             let objs_per_page = (PAGE_SIZE - fo) / s;
@@ -612,15 +663,16 @@ pub fn free(addr: usize) -> bool {
         Step::Pushed => return true,
         Step::SnapFlush { snap, n } => {
             flush_batch(&snap[..n], ci_guess, heap_start);
-            // Push addr into the (now empty) row. A FRESH CpuLocal
+            // Push addr into the (now empty) row. A FRESH preempt
             // window reads cpu_id again: the task may have been
             // preempted and migrated during the flush, and must not
-            // touch a stale row. An IRQ-context free that ran meanwhile
-            // leaves the row with fewer than MAG_DEPTH entries — the
+            // touch a stale row. An interrupt-context free that ran
+            // meanwhile is routed to flush_batch (never a row), so the
+            // row can only hold FEWER than MAG_DEPTH entries — the
             // check still guards; the locked fallback covers the
             // impossible rest.
             let pushed = MAGAZINES
-                .with(|mut row| {
+                .with_preempt(|mut row| {
                     let mag = &mut row[ci_guess];
                     (mag.len < MAG_DEPTH).then(|| {
                         mag.buf[mag.len] = addr;
@@ -663,7 +715,6 @@ fn flush_batch(entries: &[usize], ci: usize, heap_start: usize) {
         crate::dfx::allocwatch::SITE_SMALL_ALLOC,
         ci as u8,
     );
-    cache.lock_holds.fetch_add(1, Ordering::Relaxed);
     for &addr in entries {
         let page = addr & !(PAGE_SIZE - 1);
         let hdr = hdr_of(page);
@@ -742,7 +793,11 @@ fn flush_batch(entries: &[usize], ci: usize, heap_start: usize) {
             cache.head.store(pi as usize, Ordering::Relaxed);
         }
     }
+    drop(_aw);
     drop(_g);
+    // lock_holds AFTER the window (106th): shared-line RMW out of the
+    // IF=0 section — see alloc()'s slow path.
+    cache.lock_holds.fetch_add(1, Ordering::Relaxed);
     let mut i = 0usize;
     while i < nret {
         unsafe {

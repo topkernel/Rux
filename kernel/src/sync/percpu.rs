@@ -160,6 +160,73 @@ impl<T, const N: usize> CpuLocal<T, N> {
             val: unsafe { &mut *val },
             cpu,
             flags,
+            preempt_guard: false,
+            in_use,
+            _nosend: PhantomData,
+        };
+        Some(f(guard))
+    }
+
+    /// Run `f` with this cpu's row, PREEMPTION disabled but INTERRUPTS
+    /// LEFT ENABLED, for exactly the duration of `f` (106th, the
+    /// allocator irq-toggle restructure).
+    ///
+    /// The exclusivity this guard provides is strictly weaker than
+    /// [`CpuLocal::with`]: it excludes a context switch (so the cpu id
+    /// read inside cannot go stale — no migration between the read and
+    /// the row access) but it does NOT exclude interrupt context on the
+    /// same cpu. It is therefore only correct for banks whose IRQ-context
+    /// access is ROUTED AWAY from the rows by the caller — the small_alloc
+    /// magazines: interrupt-context allocs/frees take the class-lock path
+    /// directly and never touch a row, so a task-context row access can be
+    /// interrupted but never raced. `with_preempt` returns `None` (nothing
+    /// touched) whenever the caller is NOT in task context
+    /// (`in_interrupt()` — hardirq/softirq/NMI) or on the same
+    /// out-of-range/re-entry refusals as `with`; callers keep their locked
+    /// fallback for every `None`.
+    ///
+    /// Why this exists: `with` pays a cli/sti pair per access. On the
+    /// allocation fast paths that is ~46M IF=0 windows per boot, the
+    /// second-largest surviving interrupt-off shadow (the deferred-PMI
+    /// `enable_irq+0x1d` sample class). A preempt-disable window keeps
+    /// the tick and device IRQs flowing through the access.
+    pub fn with_preempt<R>(&self, f: impl FnOnce(CpuLocalRef<'_, T>) -> R) -> Option<R> {
+        if crate::interrupt::preempt::in_interrupt() {
+            return None;
+        }
+        crate::interrupt::preempt::preempt_count_add(crate::interrupt::preempt::PREEMPT_OFFSET);
+        let cpu = crate::arch::cpu_id() as usize;
+        if cpu >= N {
+            crate::interrupt::preempt::preempt_count_sub(crate::interrupt::preempt::PREEMPT_OFFSET);
+            return None;
+        }
+        let rows = self.rows.get(); // *mut [Row<T>; N], interior-mutable
+        // SAFETY: `cpu` is bounds-checked above; the row is private to
+        // this cpu for as long as preemption stays disabled (no context
+        // switch can migrate the task between the cpu_id read and the row
+        // access — the r8final divergence family); interrupt context is
+        // excluded by the caller-side routing documented on this method.
+        // The in_use flag read/set refuses a second live guard.
+        let row = unsafe { rows.cast::<Row<T>>().add(cpu) }; // *mut Row<T>
+        let (val, in_use): (*mut T, *mut bool) = unsafe {
+            (
+                core::ptr::addr_of_mut!((*row).val),
+                core::ptr::addr_of_mut!((*row).in_use),
+            )
+        };
+        if unsafe { *in_use } {
+            // Same refusal semantics as `with` (see there).
+            REENTRY_EVENTS.fetch_add(1, Ordering::Relaxed);
+            crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
+            crate::interrupt::preempt::preempt_count_sub(crate::interrupt::preempt::PREEMPT_OFFSET);
+            return None;
+        }
+        unsafe { *in_use = true };
+        let guard = CpuLocalRef {
+            val: unsafe { &mut *val },
+            cpu,
+            flags: false,
+            preempt_guard: true,
             in_use,
             _nosend: PhantomData,
         };
@@ -168,21 +235,25 @@ impl<T, const N: usize> CpuLocal<T, N> {
 }
 
 /// The only handle to a per-CPU row. Exists solely inside a
-/// [`CpuLocal::with`] closure: it cannot be sent to another cpu
-/// (`!Send` via the raw-pointer marker) and cannot outlive the
-/// closure, so the interrupt-disabled window it depends on is its
-/// own lifetime.
+/// [`CpuLocal::with`] or [`CpuLocal::with_preempt`] closure: it cannot
+/// be sent to another cpu (`!Send` via the raw-pointer marker) and
+/// cannot outlive the closure, so the exclusivity window it depends on
+/// is its own lifetime.
 pub struct CpuLocalRef<'a, T> {
     val: &'a mut T,
     cpu: usize,
+    /// Saved IRQ flags (plain `with` guards only).
     flags: bool,
+    /// Preempt guards restore the count instead of the IRQ flags.
+    preempt_guard: bool,
     in_use: *mut bool,
     _nosend: PhantomData<*mut ()>,
 }
 
 impl<T> CpuLocalRef<'_, T> {
     /// The cpu whose row this guard owns (diagnostics; the value is
-    /// stable for the guard's lifetime — IF=0 forbids migration).
+    /// stable for the guard's lifetime — IF=0 or preempt-off forbid
+    /// migration).
     pub fn cpu(&self) -> usize {
         self.cpu
     }
@@ -206,9 +277,15 @@ impl<T> DerefMut for CpuLocalRef<'_, T> {
 impl<T> Drop for CpuLocalRef<'_, T> {
     #[inline]
     fn drop(&mut self) {
-        // SAFETY: same-cpu exclusivity still holds (IF=0 until the
-        // line below restores it); the raw store is the only writer.
+        // SAFETY: same-cpu exclusivity still holds until the restore
+        // below; the raw store is the only writer.
         unsafe { *self.in_use = false };
-        crate::arch::cpu::restore_irq(self.flags);
+        if self.preempt_guard {
+            crate::interrupt::preempt::preempt_count_sub(
+                crate::interrupt::preempt::PREEMPT_OFFSET,
+            );
+        } else {
+            crate::arch::cpu::restore_irq(self.flags);
+        }
     }
 }

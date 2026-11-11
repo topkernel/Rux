@@ -63,6 +63,13 @@ static DEFER_SIZES: [AtomicUsize; 4] = [
     AtomicUsize::new(0),
     AtomicUsize::new(0),
 ];
+/// Number of slots ever registered (Release on register, Acquire in
+/// try_defer). The size poll runs on EVERY large-object dealloc; this
+/// bounds the Acquire-load scan to the live slots instead of always
+/// walking all four (106th micro-lever; the walk was 0.8% of a boot
+/// record — most deallocs pay one load now, and the pre-registration
+/// phase pays zero).
+static DEFER_N: AtomicUsize = AtomicUsize::new(0);
 static mut POOL: [Entry; POOL_CAP] = [Entry {
     ptr: 0,
     size: 0,
@@ -87,9 +94,12 @@ pub fn register_deferred_size(size: usize) {
     // init (idle-task creation), earlier than printk bring-up on riscv64;
     // a pr_err there hung the boot at the banner (final2/final3 runs).
     // Engagement (first successful defer) is witnessed later, post-boot.
-    for slot in DEFER_SIZES.iter() {
+    for (i, slot) in DEFER_SIZES.iter().enumerate() {
         match slot.compare_exchange(0, size, Ordering::AcqRel, Ordering::Acquire) {
-            Ok(_) => return,
+            Ok(_) => {
+                DEFER_N.store(i + 1, Ordering::Release);
+                return;
+            }
             Err(v) if v == size => return, // already registered
             Err(_) => continue,
         }
@@ -112,10 +122,13 @@ pub fn try_defer(ptr: *mut u8, layout: &Layout) -> bool {
         return false;
     }
     let mut matched = false;
-    for slot in DEFER_SIZES.iter() {
-        if slot.load(Ordering::Acquire) == size {
-            matched = true;
-            break;
+    let live = DEFER_N.load(Ordering::Acquire);
+    if live > 0 {
+        for slot in DEFER_SIZES.iter().take(live) {
+            if slot.load(Ordering::Acquire) == size {
+                matched = true;
+                break;
+            }
         }
     }
     if !matched {
