@@ -227,6 +227,39 @@ impl BuddyAllocator {
         (self.heap_start.load(Ordering::Acquire), self.heap_end.load(Ordering::Acquire))
     }
 
+    /// oh-crash 98th (SPINLOCK-STUCK holder hunt): map an arbitrary
+    /// kernel-heap address to its containing DIRECT BUDDY allocation
+    /// (the >1KB kmalloc path — Task structs, large fs/ipc objects).
+    /// small_alloc::object_span names slab objects; this names the rest
+    /// of the heap. Returns `(block_base, order, meta_free)` on a live
+    /// allocated page, None outside the window / on a FREE block (a lock
+    /// address inside a free block is itself strong evidence — the
+    /// owning object was freed with the lock still referenced).
+    /// Read-only over BlockMeta WITHOUT the buddy lock: fields are
+    /// plain u8/u32 loads, worst case a torn value — acceptable for a
+    /// forensic print (same rationale as small_alloc::object_span).
+    pub fn buddy_block_span(&self, addr: usize) -> Option<(usize, u32, u8)> {
+        let heap_start = self.heap_start.load(Ordering::Acquire);
+        let heap_end = self.heap_end.load(Ordering::Acquire);
+        if heap_start == 0 || addr < heap_start || addr >= heap_end {
+            return None;
+        }
+        let idx = (addr - heap_start) / PAGE_SIZE;
+        if idx >= MAX_PAGES {
+            return None;
+        }
+        // SAFETY: read-only diagnostic access to the metadata array;
+        // idx is bounds-checked above. Concurrent mutation may tear a
+        // field but cannot make the read unsound (plain integer loads).
+        let m = unsafe { (*self.meta.data.get())[idx] };
+        if m.free != 0 {
+            return None; // free block: no containing allocation
+        }
+        let order = (m.order as u32).min(MAX_ORDER as u32);
+        let block = idx & !((1usize << order) - 1);
+        Some((heap_start + block * PAGE_SIZE, order, m.free))
+    }
+
     pub const fn new() -> Self {
         Self {
             magic: AtomicUsize::new(0xDEADBEEF),

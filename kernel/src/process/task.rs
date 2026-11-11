@@ -6433,6 +6433,25 @@ pub mod task_offsets {
     // stale again.
     pub const TASK_CHILDREN: usize = core::mem::offset_of!(Task, children);
     pub const TASK_SIBLING: usize = core::mem::offset_of!(Task, sibling);
+
+    // oh-crash 98th (SPINLOCK-STUCK holder hunt): the DEADLOCK face's
+    // wedge locks sit at page-aligned bases + 0x6dc/0xadc/0xedc inside
+    // direct-buddy allocations — Task-shaped. These offsets let a serial
+    // log's lock address be matched to its Task field OFFLINE (no boot
+    // needed). Keep the raw static in .data (#[used]) — read it from the
+    // ELF with nm + objdump. Offsets are of the FIELD; the Spinlock word
+    // inside Spinlock<T> is at +0 of the field (locked is first).
+    #[used]
+    pub static TASK_LOCK_OFFSETS: [usize; 8] = [
+        core::mem::size_of::<Task>(),
+        core::mem::offset_of!(Task, dead_threads),
+        core::mem::offset_of!(Task, mm_slot_lock),
+        core::mem::offset_of!(Task, pending),
+        core::mem::offset_of!(Task, wait_chldexit),
+        core::mem::offset_of!(Task, sem_undo),
+        core::mem::offset_of!(Task, posix_timers),
+        core::mem::offset_of!(Task, rlimits),
+    ];
 }
 
 /// Export offset constants

@@ -367,6 +367,44 @@ impl RawSpinlock {
                 }
             }
             unsafe { crate::console::putchar_no_lock(b'\n'); }
+        } else if let Some((base, order, free)) =
+            crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.buddy_block_span(lock_addr as usize)
+        {
+            // oh-crash 98th: DIRECT BUDDY blocks (>1KB kmalloc — Task
+            // structs, large fs/ipc objects). Same offline-symbolization
+            // trick on the first words; `free!=0` (a lock inside a FREE
+            // block) is itself evidence of a freed-with-lock-reference
+            // object, printed as words=FREE.
+            let msg = b"LOCK-OBJ: buddy order-";
+            for &b in msg {
+                unsafe { crate::console::putchar_no_lock(b); }
+            }
+            Self::putdec(order as u64);
+            let msg = b" base=0x";
+            for &b in msg {
+                unsafe { crate::console::putchar_no_lock(b); }
+            }
+            Self::puthex(base as u64);
+            let msg = b" free=";
+            for &b in msg {
+                unsafe { crate::console::putchar_no_lock(b); }
+            }
+            Self::putdec(free as u64);
+            let msg = b" words=";
+            for &b in msg {
+                unsafe { crate::console::putchar_no_lock(b); }
+            }
+            for i in 0..6 {
+                // SAFETY: diagnostic read of the block's first words;
+                // buddy_block_span validated the address against the
+                // heap window and the block's base alignment.
+                let w = unsafe { ((base + i * 8) as *const u64).read_unaligned() };
+                Self::puthex(w);
+                if i < 5 {
+                    unsafe { crate::console::putchar_no_lock(b','); }
+                }
+            }
+            unsafe { crate::console::putchar_no_lock(b'\n'); }
         }
 
         // One REMOTE-BT per unique lock address per boot: the IPI
@@ -408,6 +446,25 @@ impl RawSpinlock {
                     unsafe { crate::console::putchar_no_lock(b); }
                 }
                 Self::puthex(base as u64);
+                unsafe { crate::console::putchar_no_lock(b'\n'); }
+            } else if let Some((base, order, free)) =
+                crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.buddy_block_span(lock_addr as usize)
+            {
+                let msg = b"LOCK-OBJ: buddy order-";
+                for &b in msg {
+                    unsafe { crate::console::putchar_no_lock(b); }
+                }
+                Self::putdec(order as u64);
+                let msg = b" base=0x";
+                for &b in msg {
+                    unsafe { crate::console::putchar_no_lock(b); }
+                }
+                Self::puthex(base as u64);
+                let msg = b" free=";
+                for &b in msg {
+                    unsafe { crate::console::putchar_no_lock(b); }
+                }
+                Self::putdec(free as u64);
                 unsafe { crate::console::putchar_no_lock(b'\n'); }
             }
         }
