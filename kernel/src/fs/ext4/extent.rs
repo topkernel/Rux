@@ -1824,6 +1824,21 @@ pub fn ext4_ext_insert_written(
     len: u16,
     meta_sectors: &mut u64,
 ) -> Result<(), i32> {
+    // FI-DIAG (allocation-path hunt, 84c98dd4): the LAST unprobed extent
+    // writer — the per-block hole branch's insert.
+    {
+        static FI_IW: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if len >= 1 && FI_IW.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+            let b = &*i_block;
+            let entries = (b[0] >> 16) as u16;
+            let e0_start = ((b[4] >> 16) as u64) << 32 | (b[5] as u64);
+            crate::pr_err!(
+                "FI-INSWR ee_block={} phys={} len={} (node: entries={} e0.start={})",
+                ee_block, phys, len, entries, e0_start
+            );
+        }
+    }
     {
         let root = unsafe { core::slice::from_raw_parts(i_block.as_ptr() as *const u8, 60) };
         let h = node_header(root);

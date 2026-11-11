@@ -837,6 +837,21 @@ pub fn ext4_file_write(
 
         // Get data block number (supports indirect blocks)
         let block_num = match inode.get_data_block(fs, block_index) {
+            // FI-DIAG (two-copy paradox, 84c98dd4): the placement truth —
+            // which block does the writer ACTUALLY use per logical block?
+            Ok(bn) => {
+                static FI_PB: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if inode.get_size() > 1_048_576
+                    && FI_PB.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16
+                {
+                    crate::pr_err!(
+                        "FI-PLACE ino={} logical={} off={} -> block_num={}",
+                        inode.ino, block_index, current_offset, bn
+                    );
+                }
+                bn
+            }
             Ok(0) => {
                 // Extent-mapped file: 0 here is either a hole or an
                 // UNWRITTEN fallocate-preallocated block. Unwritten blocks
