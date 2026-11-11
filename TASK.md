@@ -10829,3 +10829,22 @@ math, use it — NOT the old in-kernel probe semantics) are the working
 set. The md5 gate needs this allocation family closed; with the EIO
 cascade fixed, every page now reaches the write path and the residue
 is purely this.
+
+#### 98.7 Refinement (104th, closing note): the double-alloc suspects sharpened
+
+allocate_blocks_with_extents (file.rs:1227) allocates at ee_block =
+`current_blocks` = ceil(DISK size/4096) — size-derived, not
+map-derived. Within ONE inode write the disk map and size travel
+together (write_inode_disk writes both), so in-map divergence needs a
+writer that updates them separately; the write_at_core Err arm
+skipping the inode update after the pre-allocator already marked the
+bitmap is the in-instance leak/orphan source. For the FIVE
+DOUBLE-MAPPED PHYSICALS the sharper suspect is CROSS-INSTANCE: OH's
+sandbox bind-mounts create a SECOND Ext4FileSystem instance over the
+same disk with its OWN EXT4_BIG_LOCK — two instances' block allocators
+can race the same bitmap with no common lock (check whether the crash
+script's /data path and the install stream's are the same instance:
+fs pointers in the FI-* prints, 10b: pattern file flushed under
+fs=0xffff88807d1c4b10 vs the early install files' fs=...c2910 —
+DIFFERENT POINTERS in the same boot, both on vdf?). Verify with a
+probe that stamps the allocating fs pointer into FI-APPEND lines.
