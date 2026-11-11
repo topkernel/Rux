@@ -393,3 +393,38 @@ numbers this register cites).
   depends on S-3's replay scenarios.
 - Standing rule for this section: an item leaves G only by landing a
   measured row in A-F, in the change that ships the design.
+
+## H. OH bring-up campaign additions (2026-11-10..11, evidence-backed)
+
+- **REMOTE-BT: live remote stack capture as an instrument primitive**
+  (4950f396): when every CPU spins on one heap-object lock, naming
+  the HOLDER requires reading a stack that is not yours — this port
+  does it over the IRQ_WORK IPI: the poked CPU's handler stores its
+  interrupted pt_regs plus an fp-walk into a fixed per-CPU slot, the
+  requester polls lock-free and prints raw addresses (zero
+  allocation in either path — the box is by definition at its memory
+  limit when you need this). Proven on its first live boot: named
+  the vma-lock Rwsem wait_lock inside an MmStruct and its owner's
+  munmap → mm_surgery stack — which produced the 91st's spin→Rwsem
+  fix and the first-ever pristine-boot launcher spawn (63.9s, then
+  46.2s class). This is not a port of a reference feature; the
+  reference has no equivalent one-shot remote-stack tool at this
+  granularity.
+- **Crash-window data-integrity rigs as a methodology** (fs-integrity
+  lane, fi3/fi4/fi5/fi7/fi8/fi9/fiA-D): the sync(2) durability hole
+  was chased with two-boot A/B (write+sync+hard-reset, then a fresh
+  boot reading back with md5) plus HOST-SIDE raw-grep of the crashed
+  image for a known pattern — the combination distinguishes "data
+  never reached the device" (grep=0) from "data on disk, metadata
+  lost" (grep=2.6M, file size 0) without trusting the guest. The
+  FI-* bounded instrument family (drop/release/census/collect/
+  icache-miss/markdirty-miss prints, each rate-limited, each with a
+  backtrace hook) is the reusable template.
+- **hiperf as a portability oracle** (e5f1536f + 2cf784d1 + 970b1b40):
+  building the reference's own profiler against our perf_event_open
+  exposed parity gaps no synthetic test had (inherit semantics on
+  per-CPU counting events; O_RDWR on the ring fd for MAP_SHARED+
+  PROT_WRITE; MISC cpumode byte order) — and once fixed, delivered
+  the campaign's hotspot tables (80,961 → 244,516 samples, kernel
+  1-5 / user 2-16+ frame chains). Instruments that ARE the workload
+  beat instruments that approximate it.
