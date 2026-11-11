@@ -878,9 +878,29 @@ impl VirtQueue {
         start_idx: u16,
         expected_desc_id: u32,
         queue_size: u16,
+        resp_status: *const u8,
     ) -> bool {
         if used_ring.is_null() || queue_size == 0 {
             return false;
+        }
+
+        /// The device DMA's THIS request's response byte BEFORE its
+        /// used-ring entry (the publication order the 88th's grace-spin
+        /// fix documents). A used ring that has LAPPED this request
+        /// (queue_size+ completions landed between the submit and the
+        /// scan — the batched async read-ahead windows do exactly this
+        /// under load) has overwritten our entry, and the id-match scan
+        /// below can then never see it; the response byte is the only
+        /// remaining completion proof. Checking it first turns that
+        /// starvation (a false "timeout" → EIO + leaked chain, the
+        /// mass-EIO face) into a success.
+        unsafe fn resp_done(resp_status: *const u8) -> bool {
+            if resp_status.is_null() {
+                return false;
+            }
+            // SAFETY: caller-owned response byte, device-written once;
+            // volatile so each poll re-reads DMA memory.
+            core::ptr::read_volatile(resp_status) != 0xFF
         }
 
         // Detect early boot phase (same logic as wait_for_used_interruptible)
@@ -897,6 +917,13 @@ impl VirtQueue {
         let max_iterations = if poll_only { 1_000_000 } else { 5000 };
 
         for _iteration in 0..max_iterations {
+            // Response byte first (see resp_done above): completion proof
+            // that survives a used-ring lap.
+            // SAFETY: resp_done reads the caller-owned response byte.
+            if unsafe { resp_done(resp_status) } {
+                return true;
+            }
+
             // Read the current used ring index
             core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
             let used_idx = unsafe {
@@ -943,7 +970,16 @@ impl VirtQueue {
 
             // Fast re-check after registering (lost-wakeup protection):
             // a completion that landed between the scan above and the
-            // prepare_to_wait is caught here without sleeping.
+            // prepare_to_wait is caught here without sleeping. The
+            // response byte covers the lapped-ring case here too.
+            // SAFETY: resp_done reads the caller-owned response byte.
+            if unsafe { resp_done(resp_status) } {
+                wait_queue.finish_wait(current);
+                // R36-B2 compensation (see the comment at the matching
+                // return above).
+                crate::sched::dequeue_task(&*current);
+                return true;
+            }
             let used_idx2 = unsafe {
                 let used_idx_ptr = (used_ring as usize + 2) as *const u16;
                 core::ptr::read_volatile(used_idx_ptr)

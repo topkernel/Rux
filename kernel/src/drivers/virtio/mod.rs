@@ -561,6 +561,11 @@ impl VirtIOBlkDevice {
             prev_used,
             submitted_desc_id,
             queue_sz,
+            // Response byte as completion proof (survives a used-ring lap
+            // under load — see wait_for_desc_completion).
+            // SAFETY: resp_ptr is this frame's allocation, valid until
+            // after the wait.
+            unsafe { core::ptr::addr_of!((*resp_ptr).status) as *const u8 },
         );
 
         // Phase 3: Check response
@@ -577,9 +582,18 @@ impl VirtIOBlkDevice {
             // access pattern the completion path already uses.
             let mut late = false;
             unsafe {
+                // Response byte first (the lap proof — see Phase 2).
+                if core::ptr::read_volatile(core::ptr::addr_of!((*resp_ptr).status) as *const u8)
+                    != 0xFF
+                {
+                    late = true;
+                }
                 // Same ring-scan discipline as wait_for_desc_completion:
                 // UsedRing is [flags:u16, idx:u16, ring:UsedElem[]].
                 for _ in 0..50_000_000u64 {
+                    if late {
+                        break;
+                    }
                     core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
                     let used_idx = core::ptr::read_volatile((used_ring_ptr as usize + 2) as *const u16);
                     let mut scan = prev_used;
@@ -756,6 +770,11 @@ impl VirtIOBlkDevice {
             prev_used,
             submitted_desc_id,
             queue_sz,
+            // Response byte as completion proof (survives a used-ring lap
+            // under load — see wait_for_desc_completion).
+            // SAFETY: resp_ptr is this frame's allocation, valid until
+            // after the wait.
+            unsafe { core::ptr::addr_of!((*resp_ptr).status) as *const u8 },
         );
 
         // Phase 3: Check response
@@ -772,9 +791,18 @@ impl VirtIOBlkDevice {
             // access pattern the completion path already uses.
             let mut late = false;
             unsafe {
+                // Response byte first (the lap proof — see Phase 2).
+                if core::ptr::read_volatile(core::ptr::addr_of!((*resp_ptr).status) as *const u8)
+                    != 0xFF
+                {
+                    late = true;
+                }
                 // Same ring-scan discipline as wait_for_desc_completion:
                 // UsedRing is [flags:u16, idx:u16, ring:UsedElem[]].
                 for _ in 0..50_000_000u64 {
+                    if late {
+                        break;
+                    }
                     core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
                     let used_idx = core::ptr::read_volatile((used_ring_ptr as usize + 2) as *const u16);
                     let mut scan = prev_used;

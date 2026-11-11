@@ -1221,6 +1221,9 @@ pub fn read_block_using_configured_queue(
     // Add retry mechanism to resolve VirtIO block device random timeout issues
     const MAX_RETRIES: usize = 5;
     let mut retries = 0;
+    // Mass-EIO backpressure (razor-8b): pressure-class failures wait for
+    // the rings to drain instead of burning the retry budget instantly.
+    let mut pressure_deadline: u64 = 0;
 
     loop {
         match read_block_once(pci_dev, sector, buf) {
@@ -1228,6 +1231,14 @@ pub fn read_block_using_configured_queue(
                 return Ok(size);
             }
             Err(e) => {
+                if is_ring_pressure_err(e) {
+                    if pressure_deadline == 0 {
+                        pressure_deadline = blk_pressure_deadline();
+                    }
+                    if blk_pressure_nap(slot, pressure_deadline) {
+                        continue;
+                    }
+                }
                 retries += 1;
                 if retries >= MAX_RETRIES {
                     return Err(e);
@@ -1247,6 +1258,107 @@ pub fn read_block_using_configured_queue(
             }
         }
     }
+}
+
+/// True for RING-PRESSURE errors: the descriptor table is full or the
+/// completion walker lags behind the used ring — conditions that clear
+/// by themselves as completions land, not device failures. razor-8b
+/// (fi-fix-verify lane): under the install storm the sync paths burned
+/// all 5 retries of these arms in well under a millisecond (the retry
+/// delay was 10k spin laps ≈ µs) and returned EIO while the queue
+/// stayed clogged for SECONDS — 1109/2048 pattern blocks were never
+/// written, the file read back empty. These arms must WAIT for the
+/// rings to drain, not fail.
+fn is_ring_pressure_err(e: &str) -> bool {
+    matches!(
+        e,
+        "Failed to alloc header descriptor"
+            | "Failed to alloc data descriptor"
+            | "Failed to alloc response descriptor"
+            | "Pending table lag (completion walker behind)"
+    )
+}
+
+/// Pressure-class backpressure: one 10ms interruptible nap (kicking +
+/// draining completions before it) per call. Returns true = budget
+/// remains, retry (the rings may have drained); false = the 5s wall
+/// budget is exhausted, or sleeping is impossible here (early boot /
+/// preempt-guarded / no task) and the caller falls back to the old
+/// spin-retry path. Sleeping is what lets the completion IRQs and the
+/// walker make progress on this CPU — the instant-fail loop starved
+/// exactly the machinery that would have freed the slots.
+fn blk_pressure_nap(slot: usize, deadline: u64) -> bool {
+    use crate::process::task::{Task, TaskState};
+
+    let now = crate::drivers::timer::get_jiffies();
+    if now >= deadline {
+        return false;
+    }
+    let sleepable = matches!(crate::sched::current(), Some(t) if t.pid() != 0)
+        && crate::interrupt::preempt::preempt_count() == 0;
+    if !sleepable {
+        return false;
+    }
+
+    crate::drivers::virtio::pci_blk_kick(slot);
+    crate::drivers::virtio::pci_process_async_completions();
+
+    let target = now + crate::drivers::timer::msecs_to_jiffies(10).max(1);
+    // SAFETY: current is this CPU's running task; pid() is a const read.
+    let current = match crate::sched::current() {
+        Some(c) => c as *mut Task,
+        None => return false,
+    };
+    // SAFETY: see above.
+    let pid = unsafe { (*current).pid() };
+    let timer_id = crate::timer::add_timer_wakeup(target, pid);
+    if timer_id == 0 {
+        return false;
+    }
+    loop {
+        if crate::drivers::timer::get_jiffies() >= target {
+            // SAFETY: current is the running task's pointer.
+            unsafe {
+                (*current).set_state(TaskState::new(TaskState::RUNNING));
+            }
+            // A racing wake may have enqueued us while still executing —
+            // take ourselves back off (NEW-C2 discipline).
+            // SAFETY: see above.
+            unsafe {
+                crate::sched::dequeue_task(&*current);
+            }
+            crate::timer::del_timer(timer_id);
+            return true;
+        }
+        // State-first lost-wakeup discipline (sys_nanosleep shape).
+        // SAFETY: see above.
+        unsafe {
+            (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+        }
+        if crate::drivers::timer::get_jiffies() >= target {
+            // SAFETY: see above.
+            unsafe {
+                (*current).set_state(TaskState::new(TaskState::RUNNING));
+            }
+            // SAFETY: see above.
+            unsafe {
+                crate::sched::dequeue_task(&*current);
+            }
+            crate::timer::del_timer(timer_id);
+            return true;
+        }
+        // Syscall context runs with SIE=0 — re-arm so the timer tick can
+        // reach this CPU and wake us.
+        crate::arch::cpu::restore_irq(true);
+        crate::sched::schedule();
+    }
+}
+
+/// Pressure deadline helper: 5s of wall budget from the first
+/// pressure-class failure of this call.
+fn blk_pressure_deadline() -> u64 {
+    crate::drivers::timer::get_jiffies()
+        .saturating_add(crate::drivers::timer::msecs_to_jiffies(5_000))
 }
 
 /// Single read attempt
@@ -1517,6 +1629,9 @@ pub fn write_block_using_configured_queue(
     // Add retry mechanism to resolve VirtIO block device random timeout issues
     const MAX_RETRIES: usize = 5;
     let mut retries = 0;
+    // Mass-EIO backpressure (razor-8b, the write face: 1109/2048 pattern
+    // blocks lost): pressure-class failures wait for drain, not fail.
+    let mut pressure_deadline: u64 = 0;
 
     loop {
         match write_block_once(pci_dev, sector, buf) {
@@ -1524,6 +1639,14 @@ pub fn write_block_using_configured_queue(
                 return Ok(size);
             }
             Err(e) => {
+                if is_ring_pressure_err(e) {
+                    if pressure_deadline == 0 {
+                        pressure_deadline = blk_pressure_deadline();
+                    }
+                    if blk_pressure_nap(slot, pressure_deadline) {
+                        continue;
+                    }
+                }
                 retries += 1;
                 if retries >= MAX_RETRIES {
                     return Err(e);
@@ -1774,10 +1897,20 @@ pub fn flush_block_using_configured_queue(
     let slot = pci_dev.blk_slot;
     const MAX_RETRIES: usize = 5;
     let mut retries = 0;
+    // Mass-EIO backpressure (razor-8b): same drain-wait for the flush.
+    let mut pressure_deadline: u64 = 0;
     loop {
         match flush_block_once(slot) {
             Ok(n) => return Ok(n),
             Err(e) => {
+                if is_ring_pressure_err(e) {
+                    if pressure_deadline == 0 {
+                        pressure_deadline = blk_pressure_deadline();
+                    }
+                    if blk_pressure_nap(slot, pressure_deadline) {
+                        continue;
+                    }
+                }
                 retries += 1;
                 if retries >= MAX_RETRIES {
                     return Err(e);
