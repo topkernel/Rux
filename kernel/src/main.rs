@@ -863,10 +863,13 @@ pub fn rust_main_tail() -> ! {
             // P2 vDSO: build the vDSO ELF page and prime the time-data
             // page — must run before the first execve maps it.
             crate::mm::vdso::vdso_init();
-            // The page is built, but userspace mapping is DISABLED (the
-            // map block in exec is `if false` and AT_SYSINFO_EHDR stays
-            // absent) — [ok] "clock_gettime fast path" claimed a
-            // userspace-visible feature that does not exist.
+            // 106th: on x86_64 the mapping is LIVE (real x86-64 code
+            // page + AT_SYSINFO_EHDR in every auxv — the 21.3M-calls/
+            // boot clock_gettime lever). riscv64/aarch64 keep the page
+            // built with mapping off (statics outside the linear map).
+            #[cfg(feature = "x86_64")]
+            print_status_ex("vdso", "page built; mapping ON (x86_64)", None);
+            #[cfg(not(feature = "x86_64"))]
             print_status_ex("vdso", "page built; mapping off", None);
             // P2 boot ip=a.b.c.d: override the hardcoded slirp default
             // (10.0.2.15) with the address given on the kernel command

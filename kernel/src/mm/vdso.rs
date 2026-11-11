@@ -67,6 +67,7 @@ static VDSO_SEQ: AtomicU32 = AtomicU32::new(0);
 ///
 /// Seqlock protocol: seq |= 1 (begin) → write fields → seq += 1 (end,
 /// even). Readers retry while seq is odd or changed across the read.
+#[cfg(not(feature = "x86_64"))]
 pub fn vdso_data_tick() {
     let _ = VDSO_SEQ.fetch_or(1, Ordering::Release);
     let cycles = crate::drivers::timer::read_time();
@@ -85,8 +86,51 @@ pub fn vdso_data_tick() {
     VDSO_SEQ.fetch_add(1, Ordering::Release);
 }
 
+/// x86_64 twin (106th: the vDSO lever — 21.3M clock_gettime syscalls
+/// per OH boot at ~3 µs each ≈ 6.6% of the whole box).
+///
+/// The user side reads the RAW TSC (`rdtsc`), so the published pair is
+/// (raw base_tsc, kernel mono ns at that instant) plus a TSC→ns
+/// mult/shift for the interpolation `ns = base + ((tsc - base) *
+/// mult) >> 32`. Data page x86 extensions: mult u64 @40, shift u32 @44
+/// (always 32, matching the kernel's TSC_MULSHIFT), res_ns u32 @48.
+///
+/// Known, accepted skews (same class as the reference's vDSO):
+/// - `read_time()` applies per-CPU vCPU TSC-offset corrections and a
+///   monotonic ratchet; a user `rdtsc` on another CPU than the tick's
+///   carries the inter-CPU TSC offset delta (µs-class under KVM's
+///   invariant TSC; the historical ms-class offsets were the shift-12
+///   mult bug, fixed).
+/// - base_tsc and base_mono_ns are two reads, not one atomic snapshot;
+///   the error is a per-tick constant offset well under a jiffy.
+#[cfg(feature = "x86_64")]
+pub fn vdso_data_tick() {
+    let hz = crate::drivers::intc::apic::TSC_FREQ.load(Ordering::Acquire);
+    if hz < 1_000_000 {
+        return; // TSC not calibrated yet — keep the primed snapshot
+    }
+    let mult = ((1u128 << 32) * 1_000_000_000u128 / (hz as u128)) as u64;
+    let tsc = crate::arch::cpu::read_counter();
+    let mono_ns = crate::drivers::timer::monotonic_ns_since_boot();
+    let epoch_ns = crate::syscall::time::wall_epoch_offset_ns();
+    let _ = VDSO_SEQ.fetch_or(1, Ordering::Release);
+    // SAFETY: the page is only written here under the seqlock; user
+    // readers validate via the seq word before trusting the fields.
+    unsafe {
+        let base = VDSO_DATA_PAGE.0.as_mut_ptr();
+        core::ptr::write_volatile(base.add(8) as *mut u64, tsc);
+        core::ptr::write_volatile(base.add(16) as *mut u64, mono_ns);
+        core::ptr::write_volatile(base.add(24) as *mut u64, epoch_ns);
+        core::ptr::write_volatile(base.add(40) as *mut u64, mult);
+        core::ptr::write_volatile(base.add(44) as *mut u32, 32u32);
+        core::ptr::write_volatile(base.add(48) as *mut u32, 1u32);
+    }
+    VDSO_SEQ.fetch_add(1, Ordering::Release);
+}
+
 /// Physical addresses of the two vDSO pages (data, code) for the exec
 /// mapping. `vdso_init()` must have run (code page built).
+#[cfg(not(feature = "x86_64"))]
 pub fn vdso_pages_phys() -> (u64, u64) {
     let data_va = core::ptr::addr_of!(VDSO_DATA_PAGE) as *const u8 as u64;
     let code_va = core::ptr::addr_of!(VDSO_CODE_PAGE) as *const u8 as u64;
@@ -99,6 +143,34 @@ pub fn vdso_pages_phys() -> (u64, u64) {
     (d.bits(), c.bits())
 }
 
+/// x86_64 twin: the two statics live in the kernel image mapping,
+/// whose link identity `VMA - KERNEL_LINK_BASE == LMA` holds for the
+/// whole image (the __START_KERNEL_map trick — see memory_layout.rs),
+/// so the physical address is plain arithmetic, no linear-map lookup
+/// (the riscv64 blocker — statics outside the linear map — does not
+/// exist here; see the disabled riscv block in exec.rs).
+///
+/// The frames are memblock-reserved (the boot code reserves [0, real
+/// image end] on x86_64), so every mm teardown skips them via
+/// `is_foreign_user_frame` — the same machinery that keeps the GEM/fb
+/// aliases alive. `map_page`'s LEAF-LOW-HIT scribble tripwire allows
+/// exactly these two frames (mmu_init.rs).
+#[cfg(feature = "x86_64")]
+pub fn vdso_pages_phys() -> (u64, u64) {
+    let data_va = core::ptr::addr_of!(VDSO_DATA_PAGE) as *const u8 as u64;
+    let code_va = core::ptr::addr_of!(VDSO_CODE_PAGE) as *const u8 as u64;
+    let base = crate::arch::mm::memory_layout::KERNEL_LINK_BASE as u64;
+    (data_va - base, code_va - base)
+}
+
+/// The two user-aliased vDSO physical frames (mmu_init's LEAF-LOW-HIT
+/// exclusion test).
+#[cfg(feature = "x86_64")]
+pub fn is_vdso_phys(phys: u64) -> bool {
+    let (d, c) = vdso_pages_phys();
+    phys == d || phys == c
+}
+
 // ============================================================================
 // Code page — mini RV64 assembler
 // ============================================================================
@@ -109,270 +181,502 @@ struct VdsoCodePage([u8; 4096]);
 
 static mut VDSO_CODE_PAGE: VdsoCodePage = VdsoCodePage([0; 4096]);
 
-/// Tiny two-pass label assembler (u32 words, forward/backward branches).
-struct Asm {
-    words: alloc::vec::Vec<u32>,
-    labels: [Option<u32>; 16],
-    /// (insn index, label id, is_b_type)
-    fixups: alloc::vec::Vec<(usize, usize, bool)>,
-}
+#[cfg(not(feature = "x86_64"))]
+mod rv {
+    // The original RV64 mini-assembler + function emitters. On
+    // aarch64 the vDSO mapping stays disabled, so the RV encoding
+    // rides along inert (same state as before the x86_64 port).
+    use alloc::vec::Vec;
 
-impl Asm {
-    fn new() -> Self {
-        Self {
-            words: alloc::vec::Vec::new(),
-            labels: [None; 16],
-            fixups: alloc::vec::Vec::new(),
+    /// Tiny two-pass label assembler (u32 words, forward/backward branches).
+    struct Asm {
+        words: alloc::vec::Vec<u32>,
+        labels: [Option<u32>; 16],
+        /// (insn index, label id, is_b_type)
+        fixups: alloc::vec::Vec<(usize, usize, bool)>,
+    }
+
+    impl Asm {
+        fn new() -> Self {
+            Self {
+                words: alloc::vec::Vec::new(),
+                labels: [None; 16],
+                fixups: alloc::vec::Vec::new(),
+            }
+        }
+        fn label(&mut self, l: usize) {
+            self.labels[l] = Some(self.words.len() as u32);
+        }
+        fn emit(&mut self, w: u32) {
+            self.words.push(w);
+        }
+        /// Emit a branch-format word (beq/bne skeleton) targeting `l`.
+        fn br(&mut self, w: u32, l: usize) {
+            self.fixups.push((self.words.len(), l, true));
+            self.words.push(w);
+        }
+        /// Emit a `j label` targeting `l`.
+        fn jal_rel(&mut self, l: usize) {
+            self.fixups.push((self.words.len(), l, false));
+            self.words.push((0u32 << 7) | 0x6F);
+        }
+        fn finish(mut self) -> alloc::vec::Vec<u32> {
+            for (idx, l, is_b) in self.fixups.drain(..) {
+                let target = self.labels[l].expect("vdso: undefined label") as i64;
+                let off = (target - idx as i64) as u32;
+                self.words[idx] |= if is_b { b_imm(off) } else { j_imm(off) };
+            }
+            self.words
         }
     }
-    fn label(&mut self, l: usize) {
-        self.labels[l] = Some(self.words.len() as u32);
+
+    // ---- encoders (RV64I + M) ----
+
+    fn r_type(f7: u32, rs2: u32, rs1: u32, f3: u32, rd: u32, op: u32) -> u32 {
+        (f7 << 25) | (rs2 << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7) | op
     }
-    fn emit(&mut self, w: u32) {
-        self.words.push(w);
+    fn i_type(imm: i32, rs1: u32, f3: u32, rd: u32, op: u32) -> u32 {
+        ((imm as u32 & 0xFFF) << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7) | op
     }
-    /// Emit a branch-format word (beq/bne skeleton) targeting `l`.
-    fn br(&mut self, w: u32, l: usize) {
-        self.fixups.push((self.words.len(), l, true));
-        self.words.push(w);
+    fn s_type(imm: i32, rs2: u32, rs1: u32, f3: u32, op: u32) -> u32 {
+        let imm = imm as u32 & 0xFFF;
+        ((imm >> 5) << 25) | (rs2 << 20) | (rs1 << 15) | (f3 << 12) | ((imm & 0x1F) << 7) | op
     }
-    /// Emit a `j label` targeting `l`.
-    fn jal_rel(&mut self, l: usize) {
-        self.fixups.push((self.words.len(), l, false));
-        self.words.push((0u32 << 7) | 0x6F);
+    /// B-type immediate bits to OR into a branch skeleton.
+    fn b_imm(off: u32) -> u32 {
+        ((off & 0x1000) << 19) | ((off & 0x7E0) << 20) | ((off & 0x1E) << 7) | ((off & 0x800) >> 4)
     }
-    fn finish(mut self) -> alloc::vec::Vec<u32> {
-        for (idx, l, is_b) in self.fixups.drain(..) {
-            let target = self.labels[l].expect("vdso: undefined label") as i64;
-            let off = (target - idx as i64) as u32;
-            self.words[idx] |= if is_b { b_imm(off) } else { j_imm(off) };
+    /// J-type immediate bits to OR into a jal skeleton.
+    fn j_imm(off: u32) -> u32 {
+        ((off & 0x100000) << 11) | ((off & 0x7FE) << 20) | ((off & 0x800) << 9) | (off & 0xFF000)
+    }
+    fn u_type(imm20: u32, rd: u32, op: u32) -> u32 {
+        ((imm20 & 0xFFFFF) << 12) | (rd << 7) | op
+    }
+    fn beq_skel(rs1: u32, rs2: u32) -> u32 {
+        r_type(0, rs2, rs1, 0, 0, 0x63)
+    }
+    fn bne_skel(rs1: u32, rs2: u32) -> u32 {
+        r_type(0, rs2, rs1, 1, 0, 0x63)
+    }
+
+    // registers
+    const ZERO: u32 = 0;
+    const RA: u32 = 1;
+    const T0: u32 = 5;
+    const T1: u32 = 6;
+    const T2: u32 = 7;
+    const T3: u32 = 28;
+    const T4: u32 = 29;
+    const T5: u32 = 30;
+    const T6: u32 = 31;
+    const A0: u32 = 10;
+    const A1: u32 = 11;
+    const A6: u32 = 16;
+    const A7: u32 = 17;
+    const S2: u32 = 18;
+
+    // labels (each used by exactly ONE label() site — no re-binding)
+    const L_CGI_RETRY_W: usize = 0;
+    const L_CGI_MONO: usize = 1;
+    const L_CGI_WALL: usize = 2;
+    const L_CGI_TAI: usize = 3;
+    const L_CGI_SPLIT: usize = 4;
+    const L_CGI_RETRY_M: usize = 5;
+    const L_GV_TV: usize = 6;
+    const L_GV_RETRY: usize = 7;
+    const L_GV_STORE: usize = 8;
+    const L_GV_TZ: usize = 9;
+    const L_GV_TZF: usize = 10;
+    const L_RES_OK: usize = 11;
+    const L_RES_FILL: usize = 12;
+
+    /// `li rd, imm` (any positive 32-bit value).
+    fn emit_li(a: &mut Asm, rd: u32, v: u32) {
+        let lo = ((v as i32) << 20) >> 20; // sign-extended low 12 bits
+        let hi = ((v as i64 - lo as i64) >> 12) as u32;
+        let mut used = false;
+        if hi != 0 {
+            a.emit(u_type(hi, rd, 0x37)); // lui
+            used = true;
         }
-        self.words
-    }
-}
-
-// ---- encoders (RV64I + M) ----
-
-fn r_type(f7: u32, rs2: u32, rs1: u32, f3: u32, rd: u32, op: u32) -> u32 {
-    (f7 << 25) | (rs2 << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7) | op
-}
-fn i_type(imm: i32, rs1: u32, f3: u32, rd: u32, op: u32) -> u32 {
-    ((imm as u32 & 0xFFF) << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7) | op
-}
-fn s_type(imm: i32, rs2: u32, rs1: u32, f3: u32, op: u32) -> u32 {
-    let imm = imm as u32 & 0xFFF;
-    ((imm >> 5) << 25) | (rs2 << 20) | (rs1 << 15) | (f3 << 12) | ((imm & 0x1F) << 7) | op
-}
-/// B-type immediate bits to OR into a branch skeleton.
-fn b_imm(off: u32) -> u32 {
-    ((off & 0x1000) << 19) | ((off & 0x7E0) << 20) | ((off & 0x1E) << 7) | ((off & 0x800) >> 4)
-}
-/// J-type immediate bits to OR into a jal skeleton.
-fn j_imm(off: u32) -> u32 {
-    ((off & 0x100000) << 11) | ((off & 0x7FE) << 20) | ((off & 0x800) << 9) | (off & 0xFF000)
-}
-fn u_type(imm20: u32, rd: u32, op: u32) -> u32 {
-    ((imm20 & 0xFFFFF) << 12) | (rd << 7) | op
-}
-fn beq_skel(rs1: u32, rs2: u32) -> u32 {
-    r_type(0, rs2, rs1, 0, 0, 0x63)
-}
-fn bne_skel(rs1: u32, rs2: u32) -> u32 {
-    r_type(0, rs2, rs1, 1, 0, 0x63)
-}
-
-// registers
-const ZERO: u32 = 0;
-const RA: u32 = 1;
-const T0: u32 = 5;
-const T1: u32 = 6;
-const T2: u32 = 7;
-const T3: u32 = 28;
-const T4: u32 = 29;
-const T5: u32 = 30;
-const T6: u32 = 31;
-const A0: u32 = 10;
-const A1: u32 = 11;
-const A6: u32 = 16;
-const A7: u32 = 17;
-const S2: u32 = 18;
-
-// labels (each used by exactly ONE label() site — no re-binding)
-const L_CGI_RETRY_W: usize = 0;
-const L_CGI_MONO: usize = 1;
-const L_CGI_WALL: usize = 2;
-const L_CGI_TAI: usize = 3;
-const L_CGI_SPLIT: usize = 4;
-const L_CGI_RETRY_M: usize = 5;
-const L_GV_TV: usize = 6;
-const L_GV_RETRY: usize = 7;
-const L_GV_STORE: usize = 8;
-const L_GV_TZ: usize = 9;
-const L_GV_TZF: usize = 10;
-const L_RES_OK: usize = 11;
-const L_RES_FILL: usize = 12;
-
-/// `li rd, imm` (any positive 32-bit value).
-fn emit_li(a: &mut Asm, rd: u32, v: u32) {
-    let lo = ((v as i32) << 20) >> 20; // sign-extended low 12 bits
-    let hi = ((v as i64 - lo as i64) >> 12) as u32;
-    let mut used = false;
-    if hi != 0 {
-        a.emit(u_type(hi, rd, 0x37)); // lui
-        used = true;
-    }
-    if lo != 0 || !used {
-        if used {
-            a.emit(i_type(lo, rd, 0, rd, 0x1B)); // addiw (32-bit, sign-ext)
-        } else {
-            a.emit(i_type(lo, ZERO, 0, rd, 0x13)); // addi from x0
+        if lo != 0 || !used {
+            if used {
+                a.emit(i_type(lo, rd, 0, rd, 0x1B)); // addiw (32-bit, sign-ext)
+            } else {
+                a.emit(i_type(lo, ZERO, 0, rd, 0x13)); // addi from x0
+            }
         }
     }
-}
 
-/// Prologue: compute the DATA page base into t2. `pc_off` is the emitting
-/// function's offset inside the code page (auipc reads its own PC).
-fn emit_data_base(a: &mut Asm, pc_off: u32) {
-    a.emit(u_type(0xFFFFF, T2, 0x17)); // auipc t2, -1 → data + pc_off
-    emit_li(a, T6, pc_off);
-    a.emit(r_type(0x20, T6, T2, 0, T2, 0x33)); // sub t2, t2, t6 → data base
-}
-
-/// Seqlock-read under `retry` label: t4 = base_cycles, t5 = base_mono_ns.
-/// Clobbers t3, a6.
-fn emit_seqlock_read(a: &mut Asm, retry: usize) {
-    a.label(retry);
-    a.emit(i_type(0, T2, 2, T3, 0x03)); // lw t3, 0(t2)     seq
-    a.emit(i_type(1, T3, 7, T4, 0x13)); // andi t4, t3, 1
-    a.br(bne_skel(T4, ZERO), retry); // bnez t4, retry
-    a.emit(0x0FF0_000F); // fence iorw, iorw (acquire)
-    a.emit(i_type(8, T2, 3, T4, 0x03)); // ld t4, 8(t2)    base_cycles
-    a.emit(i_type(16, T2, 3, T5, 0x03)); // ld t5, 16(t2)  base_mono_ns
-    a.emit(i_type(0, T2, 2, A6, 0x03)); // lw a6, 0(t2)    seq2
-    a.br(bne_skel(T3, A6), retry); // bne t3, a6, retry
-}
-
-/// t5 += (rdtime - t4) * 100 (ns interpolation at 10 MHz).
-///
-/// IMPORTANT: read the SAME counter the kernel snapshots into the data
-/// page (CLINT `time`, CSR 0xC01 — see vdso_data_tick). The old code used
-/// `rdcycle` (0xC00), a different counter whose rate only approximately
-/// matches the CLINT under QEMU TCG; the two drifted by seconds under
-/// host load and vdso time() ran away from kernel wall_secs() (mtime
-/// source) — LTP utime01/02/03 before/after windows failed. U-mode
-/// access is enabled by scounteren.TM set in arch init.
-fn emit_interpolate(a: &mut Asm) {
-    a.emit(i_type(0xC01, ZERO, 2, A7, 0x73)); // rdtime a7
-    a.emit(r_type(0x20, T4, A7, 0, A7, 0x33)); // sub a7, a7, t4
-    a.emit(i_type(100, ZERO, 0, T1, 0x13)); // li t1, 100
-    a.emit(r_type(1, T1, A7, 0, A7, 0x33)); // mul a7, a7, t1
-    a.emit(r_type(0, A7, T5, 0, T5, 0x33)); // add t5, t5, a7
-}
-
-fn emit_ret(a: &mut Asm) {
-    a.emit(i_type(0, RA, 0, ZERO, 0x67)); // ret
-}
-
-/// __vdso_clock_gettime(clk=a0, tp=a1).
-fn emit_clock_gettime(off: u32) -> alloc::vec::Vec<u32> {
-    let mut a = Asm::new();
-    emit_data_base(&mut a, off);
-    a.emit(i_type(0, ZERO, 0, S2, 0x13)); // li s2, 0 (TAI extra secs)
-    a.br(beq_skel(A0, ZERO), L_CGI_WALL); // REALTIME
-    a.emit(i_type(1, ZERO, 0, T0, 0x13));
-    a.br(beq_skel(A0, T0), L_CGI_MONO);
-    a.emit(i_type(4, ZERO, 0, T0, 0x13));
-    a.br(beq_skel(A0, T0), L_CGI_MONO);
-    a.emit(i_type(7, ZERO, 0, T0, 0x13));
-    a.br(beq_skel(A0, T0), L_CGI_MONO);
-    a.emit(i_type(11, ZERO, 0, T0, 0x13));
-    a.br(beq_skel(A0, T0), L_CGI_TAI);
-    a.emit(i_type(-38, ZERO, 0, A0, 0x13)); // li a0, -ENOSYS
-    emit_ret(&mut a);
-    a.label(L_CGI_TAI);
-    a.emit(i_type(37, ZERO, 0, S2, 0x13)); // li s2, 37
-    a.label(L_CGI_WALL);
-    emit_seqlock_read(&mut a, L_CGI_RETRY_W);
-    emit_interpolate(&mut a);
-    // Wall clock: add the ns-precise epoch offset to the interpolated
-    // monotonic ns BEFORE the sec/nsec split (a seconds-only epoch lost
-    // sub-second clock_settime deltas — LTP clock_settime01).
-    a.emit(i_type(24, T2, 3, A6, 0x03)); // ld a6, 24(t2) epoch ns
-    a.emit(r_type(0, A6, T5, 0, T5, 0x33)); // add t5, t5, a6
-    a.emit(r_type(0, S2, ZERO, 0, A6, 0x33)); // add a6, s2, 0 (TAI secs)
-    a.jal_rel(L_CGI_SPLIT);
-    a.label(L_CGI_MONO);
-    emit_seqlock_read(&mut a, L_CGI_RETRY_M);
-    emit_interpolate(&mut a);
-    a.emit(i_type(0, ZERO, 0, A6, 0x13)); // li a6, 0
-    a.jal_rel(L_CGI_SPLIT);
-    // L_SPLIT: ns → (sec + a6 extra, nsec), store timespec at (a1).
-    a.label(L_CGI_SPLIT);
-    emit_li(&mut a, T1, 1_000_000_000);
-    a.emit(r_type(1, T1, T5, 5, A7, 0x33)); // divu a7, t5, t1
-    a.emit(r_type(1, T1, T5, 7, T4, 0x33)); // remu t4, t5, t1
-    a.emit(r_type(0, A6, A7, 0, A7, 0x33)); // add a7, a7, a6
-    a.emit(s_type(0, A7, A1, 3, 0x23)); // sd a7, 0(a1)
-    a.emit(s_type(8, T4, A1, 3, 0x23)); // sd t4, 8(a1)
-    a.emit(i_type(0, ZERO, 0, A0, 0x13)); // li a0, 0
-    emit_ret(&mut a);
-    a.finish()
-}
-
-/// __vdso_gettimeofday(tv=a0, tz=a1).
-fn emit_gettimeofday(off: u32) -> alloc::vec::Vec<u32> {
-    let mut a = Asm::new();
-    emit_data_base(&mut a, off);
-    a.br(bne_skel(A0, ZERO), L_GV_TV);
-    a.jal_rel(L_GV_TZ);
-    a.label(L_GV_TV);
-    emit_seqlock_read(&mut a, L_GV_RETRY);
-    emit_interpolate(&mut a);
-    // Wall clock with ns-precise epoch: total ns → (sec, usec).
-    a.emit(i_type(24, T2, 3, A6, 0x03)); // ld a6, 24(t2) epoch ns
-    a.emit(r_type(0, A6, T5, 0, T5, 0x33)); // add t5, t5, a6
-    emit_li(&mut a, T1, 1_000_000_000);
-    a.emit(r_type(1, T1, T5, 5, T4, 0x33)); // divu t4, t5, t1 → sec
-    a.emit(r_type(1, T1, T5, 7, A6, 0x33)); // remu a6, t5, t1 → rem ns
-    a.emit(i_type(1000, ZERO, 0, T1, 0x13)); // li t1, 1000
-    a.emit(r_type(1, T1, A6, 5, A6, 0x33)); // divu a6, a6, t1 → usec
-    a.label(L_GV_STORE);
-    a.emit(s_type(0, A6, A0, 3, 0x23)); // sd a6, 0(a0) tv_sec
-    a.emit(s_type(8, T4, A0, 3, 0x23)); // sd t4, 8(a0) tv_usec
-    a.label(L_GV_TZ);
-    a.br(bne_skel(A1, ZERO), L_GV_TZF);
-    a.emit(i_type(0, ZERO, 0, A0, 0x13)); // li a0, 0
-    emit_ret(&mut a);
-    a.label(L_GV_TZF);
-    a.emit(i_type(32, T2, 2, T3, 0x03)); // lw t3, 32(t2) tz_minuteswest
-    a.emit(s_type(0, T3, A1, 2, 0x23)); // sw t3, 0(a1)
-    a.emit(s_type(4, ZERO, A1, 2, 0x23)); // sw x0, 4(a1)
-    a.emit(i_type(0, ZERO, 0, A0, 0x13)); // li a0, 0
-    emit_ret(&mut a);
-    a.finish()
-}
-
-/// __vdso_clock_getres(clk=a0, res=a1): {0, 100ns}.
-fn emit_clock_getres(off: u32) -> alloc::vec::Vec<u32> {
-    let mut a = Asm::new();
-    emit_data_base(&mut a, off);
-    for clk in [0u32, 1, 4, 7, 11] {
-        a.emit(i_type(clk as i32, ZERO, 0, T0, 0x13));
-        a.br(beq_skel(A0, T0), L_RES_OK);
+    /// Prologue: compute the DATA page base into t2. `pc_off` is the emitting
+    /// function's offset inside the code page (auipc reads its own PC).
+    fn emit_data_base(a: &mut Asm, pc_off: u32) {
+        a.emit(u_type(0xFFFFF, T2, 0x17)); // auipc t2, -1 → data + pc_off
+        emit_li(a, T6, pc_off);
+        a.emit(r_type(0x20, T6, T2, 0, T2, 0x33)); // sub t2, t2, t6 → data base
     }
-    a.emit(i_type(-38, ZERO, 0, A0, 0x13)); // li a0, -ENOSYS
-    emit_ret(&mut a);
-    a.label(L_RES_OK);
-    a.br(bne_skel(A1, ZERO), L_RES_FILL);
-    a.emit(i_type(0, ZERO, 0, A0, 0x13));
-    emit_ret(&mut a);
-    a.label(L_RES_FILL);
-    a.emit(s_type(0, ZERO, A1, 3, 0x23)); // sd x0, 0(a1)  tv_sec = 0
-    a.emit(i_type(100, ZERO, 0, T0, 0x13)); // li t0, 100
-    a.emit(s_type(8, T0, A1, 3, 0x23)); // sd t0, 8(a1)  tv_nsec = 100
-    a.emit(i_type(0, ZERO, 0, A0, 0x13));
-    emit_ret(&mut a);
-    a.finish()
+
+    /// Seqlock-read under `retry` label: t4 = base_cycles, t5 = base_mono_ns.
+    /// Clobbers t3, a6.
+    fn emit_seqlock_read(a: &mut Asm, retry: usize) {
+        a.label(retry);
+        a.emit(i_type(0, T2, 2, T3, 0x03)); // lw t3, 0(t2)     seq
+        a.emit(i_type(1, T3, 7, T4, 0x13)); // andi t4, t3, 1
+        a.br(bne_skel(T4, ZERO), retry); // bnez t4, retry
+        a.emit(0x0FF0_000F); // fence iorw, iorw (acquire)
+        a.emit(i_type(8, T2, 3, T4, 0x03)); // ld t4, 8(t2)    base_cycles
+        a.emit(i_type(16, T2, 3, T5, 0x03)); // ld t5, 16(t2)  base_mono_ns
+        a.emit(i_type(0, T2, 2, A6, 0x03)); // lw a6, 0(t2)    seq2
+        a.br(bne_skel(T3, A6), retry); // bne t3, a6, retry
+    }
+
+    /// t5 += (rdtime - t4) * 100 (ns interpolation at 10 MHz).
+    ///
+    /// IMPORTANT: read the SAME counter the kernel snapshots into the data
+    /// page (CLINT `time`, CSR 0xC01 — see vdso_data_tick). The old code used
+    /// `rdcycle` (0xC00), a different counter whose rate only approximately
+    /// matches the CLINT under QEMU TCG; the two drifted by seconds under
+    /// host load and vdso time() ran away from kernel wall_secs() (mtime
+    /// source) — LTP utime01/02/03 before/after windows failed. U-mode
+    /// access is enabled by scounteren.TM set in arch init.
+    fn emit_interpolate(a: &mut Asm) {
+        a.emit(i_type(0xC01, ZERO, 2, A7, 0x73)); // rdtime a7
+        a.emit(r_type(0x20, T4, A7, 0, A7, 0x33)); // sub a7, a7, t4
+        a.emit(i_type(100, ZERO, 0, T1, 0x13)); // li t1, 100
+        a.emit(r_type(1, T1, A7, 0, A7, 0x33)); // mul a7, a7, t1
+        a.emit(r_type(0, A7, T5, 0, T5, 0x33)); // add t5, t5, a7
+    }
+
+    fn emit_ret(a: &mut Asm) {
+        a.emit(i_type(0, RA, 0, ZERO, 0x67)); // ret
+    }
+
+    /// __vdso_clock_gettime(clk=a0, tp=a1).
+    pub fn emit_clock_gettime(off: u32) -> alloc::vec::Vec<u32> {
+        let mut a = Asm::new();
+        emit_data_base(&mut a, off);
+        a.emit(i_type(0, ZERO, 0, S2, 0x13)); // li s2, 0 (TAI extra secs)
+        a.br(beq_skel(A0, ZERO), L_CGI_WALL); // REALTIME
+        a.emit(i_type(1, ZERO, 0, T0, 0x13));
+        a.br(beq_skel(A0, T0), L_CGI_MONO);
+        a.emit(i_type(4, ZERO, 0, T0, 0x13));
+        a.br(beq_skel(A0, T0), L_CGI_MONO);
+        a.emit(i_type(7, ZERO, 0, T0, 0x13));
+        a.br(beq_skel(A0, T0), L_CGI_MONO);
+        a.emit(i_type(11, ZERO, 0, T0, 0x13));
+        a.br(beq_skel(A0, T0), L_CGI_TAI);
+        a.emit(i_type(-38, ZERO, 0, A0, 0x13)); // li a0, -ENOSYS
+        emit_ret(&mut a);
+        a.label(L_CGI_TAI);
+        a.emit(i_type(37, ZERO, 0, S2, 0x13)); // li s2, 37
+        a.label(L_CGI_WALL);
+        emit_seqlock_read(&mut a, L_CGI_RETRY_W);
+        emit_interpolate(&mut a);
+        // Wall clock: add the ns-precise epoch offset to the interpolated
+        // monotonic ns BEFORE the sec/nsec split (a seconds-only epoch lost
+        // sub-second clock_settime deltas — LTP clock_settime01).
+        a.emit(i_type(24, T2, 3, A6, 0x03)); // ld a6, 24(t2) epoch ns
+        a.emit(r_type(0, A6, T5, 0, T5, 0x33)); // add t5, t5, a6
+        a.emit(r_type(0, S2, ZERO, 0, A6, 0x33)); // add a6, s2, 0 (TAI secs)
+        a.jal_rel(L_CGI_SPLIT);
+        a.label(L_CGI_MONO);
+        emit_seqlock_read(&mut a, L_CGI_RETRY_M);
+        emit_interpolate(&mut a);
+        a.emit(i_type(0, ZERO, 0, A6, 0x13)); // li a6, 0
+        a.jal_rel(L_CGI_SPLIT);
+        // L_SPLIT: ns → (sec + a6 extra, nsec), store timespec at (a1).
+        a.label(L_CGI_SPLIT);
+        emit_li(&mut a, T1, 1_000_000_000);
+        a.emit(r_type(1, T1, T5, 5, A7, 0x33)); // divu a7, t5, t1
+        a.emit(r_type(1, T1, T5, 7, T4, 0x33)); // remu t4, t5, t1
+        a.emit(r_type(0, A6, A7, 0, A7, 0x33)); // add a7, a7, a6
+        a.emit(s_type(0, A7, A1, 3, 0x23)); // sd a7, 0(a1)
+        a.emit(s_type(8, T4, A1, 3, 0x23)); // sd t4, 8(a1)
+        a.emit(i_type(0, ZERO, 0, A0, 0x13)); // li a0, 0
+        emit_ret(&mut a);
+        a.finish()
+    }
+
+    /// __vdso_gettimeofday(tv=a0, tz=a1).
+    pub fn emit_gettimeofday(off: u32) -> alloc::vec::Vec<u32> {
+        let mut a = Asm::new();
+        emit_data_base(&mut a, off);
+        a.br(bne_skel(A0, ZERO), L_GV_TV);
+        a.jal_rel(L_GV_TZ);
+        a.label(L_GV_TV);
+        emit_seqlock_read(&mut a, L_GV_RETRY);
+        emit_interpolate(&mut a);
+        // Wall clock with ns-precise epoch: total ns → (sec, usec).
+        a.emit(i_type(24, T2, 3, A6, 0x03)); // ld a6, 24(t2) epoch ns
+        a.emit(r_type(0, A6, T5, 0, T5, 0x33)); // add t5, t5, a6
+        emit_li(&mut a, T1, 1_000_000_000);
+        a.emit(r_type(1, T1, T5, 5, T4, 0x33)); // divu t4, t5, t1 → sec
+        a.emit(r_type(1, T1, T5, 7, A6, 0x33)); // remu a6, t5, t1 → rem ns
+        a.emit(i_type(1000, ZERO, 0, T1, 0x13)); // li t1, 1000
+        a.emit(r_type(1, T1, A6, 5, A6, 0x33)); // divu a6, a6, t1 → usec
+        a.label(L_GV_STORE);
+        a.emit(s_type(0, A6, A0, 3, 0x23)); // sd a6, 0(a0) tv_sec
+        a.emit(s_type(8, T4, A0, 3, 0x23)); // sd t4, 8(a0) tv_usec
+        a.label(L_GV_TZ);
+        a.br(bne_skel(A1, ZERO), L_GV_TZF);
+        a.emit(i_type(0, ZERO, 0, A0, 0x13)); // li a0, 0
+        emit_ret(&mut a);
+        a.label(L_GV_TZF);
+        a.emit(i_type(32, T2, 2, T3, 0x03)); // lw t3, 32(t2) tz_minuteswest
+        a.emit(s_type(0, T3, A1, 2, 0x23)); // sw t3, 0(a1)
+        a.emit(s_type(4, ZERO, A1, 2, 0x23)); // sw x0, 4(a1)
+        a.emit(i_type(0, ZERO, 0, A0, 0x13)); // li a0, 0
+        emit_ret(&mut a);
+        a.finish()
+    }
+
+    /// __vdso_clock_getres(clk=a0, res=a1): {0, 100ns}.
+    pub fn emit_clock_getres(off: u32) -> alloc::vec::Vec<u32> {
+        let mut a = Asm::new();
+        emit_data_base(&mut a, off);
+        for clk in [0u32, 1, 4, 7, 11] {
+            a.emit(i_type(clk as i32, ZERO, 0, T0, 0x13));
+            a.br(beq_skel(A0, T0), L_RES_OK);
+        }
+        a.emit(i_type(-38, ZERO, 0, A0, 0x13)); // li a0, -ENOSYS
+        emit_ret(&mut a);
+        a.label(L_RES_OK);
+        a.br(bne_skel(A1, ZERO), L_RES_FILL);
+        a.emit(i_type(0, ZERO, 0, A0, 0x13));
+        emit_ret(&mut a);
+        a.label(L_RES_FILL);
+        a.emit(s_type(0, ZERO, A1, 3, 0x23)); // sd x0, 0(a1)  tv_sec = 0
+        a.emit(i_type(100, ZERO, 0, T0, 0x13)); // li t0, 100
+        a.emit(s_type(8, T0, A1, 3, 0x23)); // sd t0, 8(a1)  tv_nsec = 100
+        a.emit(i_type(0, ZERO, 0, A0, 0x13));
+        emit_ret(&mut a);
+        a.finish()
+    }
+}
+
+// ============================================================================
+// x86_64 code page emitters (106th vDSO lever)
+// ============================================================================
+//
+// Three position-dependent functions, hand-encoded System V AMD64:
+//   __vdso_clock_gettime(rdi=clk, rsi=tp)   -> 0 / -ENOSYS
+//   __vdso_gettimeofday (rdi=tv,  rsi=tz)   -> 0
+//   __vdso_clock_getres (rdi=clk, rsi=res)  -> 0 / -ENOSYS
+//
+// Register contract per function: r11 = data page base (RIP-relative
+// LEA, so the code page works at whatever VDSO_BASE it is mapped at),
+// r10 = TAI extra seconds, rax/rcx/rdx/r8/r9 scratch. Only
+// caller-saved registers are touched — no stack frame at all.
+//
+// Time math mirrors the kernel's TSC path (drivers/timer/x86_64.rs):
+// LFENCE;RDTSC for an ordered counter read, then
+//   ns = base_mono_ns + ((tsc - base_tsc) * mult) >> 32
+// with mult/shift published per tick in the data page (offsets 40/44;
+// shift is always 32, emitted as an immediate in SHRD).
+#[cfg(feature = "x86_64")]
+mod x86 {
+    use alloc::vec::Vec;
+
+    /// Byte assembler with rel8 label fixups (every branch in the three
+    /// functions is short — the bodies are < 200 bytes).
+    struct Asm {
+        bytes: Vec<u8>,
+        labels: [Option<usize>; 8],
+        /// (insn index, label, byte position of the rel8 slot)
+        fixups: Vec<(usize, usize, usize)>,
+    }
+
+    impl Asm {
+        fn new() -> Self {
+            Self {
+                bytes: Vec::new(),
+                labels: [None; 8],
+                fixups: Vec::new(),
+            }
+        }
+        fn b(&mut self, bytes: &[u8]) {
+            self.bytes.extend_from_slice(bytes);
+        }
+        fn label(&mut self, l: usize) {
+            self.labels[l] = Some(self.bytes.len());
+        }
+        fn jcc(&mut self, op: u8, l: usize) {
+            self.fixups.push((usize::MAX, l, self.bytes.len() + 1));
+            self.b(&[op, 0]);
+        }
+        fn finish(mut self) -> Vec<u8> {
+            for (_, l, at) in self.fixups.drain(..) {
+                let target = self.labels[l].expect("vdso x86: undefined label") as i64;
+                let rel = target - (at as i64 + 1);
+                assert!(
+                    (-128..=127).contains(&rel),
+                    "vdso x86: rel8 out of range ({rel})"
+                );
+                self.bytes[at] = rel as u8;
+            }
+            self.bytes
+        }
+    }
+
+    /// `lea r11, [rip - (0x1000 + off + 7)]` — r11 = the DATA page base
+    /// (one page below this function's page).
+    fn lea_data_base(a: &mut Asm, off: u32) {
+        let d: i32 = -((off + 7 + 0x1000) as i32);
+        a.b(&[0x4C, 0x8D, 0x1D]);
+        a.b(&d.to_le_bytes());
+    }
+
+    // ---- shared instruction fragments (see the table above) ----
+    fn seqlock_read(a: &mut Asm, retry: usize) {
+        a.label(retry);
+        a.b(&[0x41, 0x8B, 0x13]); // mov edx,[r11]      seq
+        a.b(&[0xF6, 0xC2, 0x01]); // test dl,1
+        a.jcc(0x75, retry); //     jne retry
+        a.b(&[0x4D, 0x8B, 0x43, 0x08]); // mov r8,[r11+8]   base_tsc
+        a.b(&[0x4D, 0x8B, 0x4B, 0x10]); // mov r9,[r11+16]  base_mono_ns
+        a.b(&[0x41, 0x39, 0x13]); //     cmp [r11],edx    seq recheck
+        a.jcc(0x75, retry); //     jne retry
+    }
+    /// rax = interpolated ns from (r8 base_tsc, r9 base_mono_ns).
+    fn interpolate(a: &mut Asm) {
+        a.b(&[0x0F, 0xAE, 0xE8]); // lfence (ordered rdtsc)
+        a.b(&[0x0F, 0x31]); //     rdtsc
+        a.b(&[0x48, 0xC1, 0xE2, 0x20]); // shl rdx,32
+        a.b(&[0x48, 0x09, 0xD0]); //     or rax,rdx
+        a.b(&[0x4C, 0x29, 0xC0]); //     sub rax,r8       delta tsc
+        a.b(&[0x49, 0x8B, 0x4B, 0x28]); // mov rcx,[r11+40] mult
+        a.b(&[0x48, 0xF7, 0xE1]); //     mul rcx          rdx:rax
+        a.b(&[0x48, 0x0F, 0xAC, 0xD0, 0x20]); // shrd rax,rdx,32
+        a.b(&[0x4C, 0x01, 0xC8]); //     add rax,r9       + base_mono_ns
+    }
+    /// ns in rax -> timespec {rax+r10 sec, rdx nsec} stored at rsi.
+    fn split_store(a: &mut Asm) {
+        a.b(&[0xB9, 0x00, 0xCA, 0x9A, 0x3B]); // mov ecx,1000000000
+        a.b(&[0x31, 0xD2]); //     xor edx,edx
+        a.b(&[0x48, 0xF7, 0xF1]); // div rcx
+        a.b(&[0x4C, 0x01, 0xD0]); // add rax,r10       TAI secs
+        a.b(&[0x48, 0x89, 0x06]); // mov [rsi],rax
+        a.b(&[0x48, 0x89, 0x56, 0x08]); // mov [rsi+8],rdx
+        a.b(&[0x31, 0xC0]); //     xor eax,eax
+        a.b(&[0xC3]); //     ret
+    }
+    fn dispatch(a: &mut Asm, wall: usize, mono: usize, tai: usize) {
+        a.b(&[0x48, 0x85, 0xFF]); // test rdi,rdi     REALTIME(0)
+        a.jcc(0x74, wall);
+        a.b(&[0x48, 0x83, 0xFF, 0x01]); // cmp rdi,1  MONOTONIC
+        a.jcc(0x74, mono);
+        a.b(&[0x48, 0x83, 0xFF, 0x04]); // cmp rdi,4  MONOTONIC_RAW
+        a.jcc(0x74, mono);
+        a.b(&[0x48, 0x83, 0xFF, 0x07]); // cmp rdi,7  BOOTTIME
+        a.jcc(0x74, mono);
+        a.b(&[0x48, 0x83, 0xFF, 0x0B]); // cmp rdi,11 TAI
+        a.jcc(0x74, tai);
+        a.b(&[0xB8, 0xDA, 0xFF, 0xFF, 0xFF]); // mov eax,-38
+        a.b(&[0xC3]); //     ret
+    }
+
+    const L_WALL: usize = 0;
+    const L_MONO: usize = 1;
+    const L_TAI: usize = 2;
+    const L_RETRY_W: usize = 3;
+    const L_RETRY_M: usize = 4;
+    const L_SPLIT: usize = 5;
+
+    pub fn emit_clock_gettime(off: u32) -> Vec<u8> {
+        let mut a = Asm::new();
+        lea_data_base(&mut a, off);
+        a.b(&[0x45, 0x31, 0xD2]); // xor r10d,r10d   extra secs = 0
+        dispatch(&mut a, L_WALL, L_MONO, L_TAI);
+        a.label(L_TAI);
+        a.b(&[0x41, 0xBA, 0x25, 0x00, 0x00, 0x00]); // mov r10d,37
+        a.label(L_WALL);
+        seqlock_read(&mut a, L_RETRY_W);
+        interpolate(&mut a);
+        a.b(&[0x49, 0x03, 0x43, 0x18]); // add rax,[r11+24]  + epoch ns
+        a.b(&[0xEB, 0x00]); //     jmp L_SPLIT (fixup-free: patched below)
+        // Patch the short jmp target manually (single use, no label
+        // machinery needed): displacement to the split body.
+        let split_at = a.bytes.len();
+        a.label(L_MONO);
+        seqlock_read(&mut a, L_RETRY_M);
+        interpolate(&mut a);
+        let after_mono = a.bytes.len();
+        let rel = (after_mono as i64 - split_at as i64) as i8;
+        a.bytes[split_at - 1] = rel as u8;
+        a.label(L_SPLIT);
+        split_store(&mut a);
+        a.finish()
+    }
+
+    const L_TV: usize = 0;
+    const L_RETRY: usize = 1;
+    const L_TAIL: usize = 2;
+    const L_RET0: usize = 3;
+
+    pub fn emit_gettimeofday(off: u32) -> Vec<u8> {
+        let mut a = Asm::new();
+        lea_data_base(&mut a, off);
+        a.b(&[0x48, 0x85, 0xFF]); // test rdi,rdi
+        a.jcc(0x75, L_TV); //     jne L_TV
+        // rdi == NULL: skip the tv store, do the tz tail.
+        a.b(&[0xEB, 0x00]); //     jmp L_TAIL (patched below)
+        let tail_jmp_at = a.bytes.len();
+        a.label(L_TV);
+        seqlock_read(&mut a, L_RETRY);
+        interpolate(&mut a);
+        a.b(&[0x49, 0x03, 0x43, 0x18]); // add rax,[r11+24]  + epoch ns
+        a.b(&[0xB9, 0x00, 0xCA, 0x9A, 0x3B]); // mov ecx,1000000000
+        a.b(&[0x31, 0xD2]); //     xor edx,edx
+        a.b(&[0x48, 0xF7, 0xF1]); // div rcx          sec / rem-ns
+        a.b(&[0x48, 0x89, 0x07]); // mov [rdi],rax    tv_sec
+        a.b(&[0x48, 0x89, 0xD0]); // mov rax,rdx
+        a.b(&[0x31, 0xD2]); //     xor edx,edx
+        a.b(&[0xB9, 0xE8, 0x03, 0x00, 0x00]); // mov ecx,1000
+        a.b(&[0x48, 0xF7, 0xF1]); // div rcx          usec
+        a.b(&[0x48, 0x89, 0x47, 0x08]); // mov [rdi+8],rax tv_usec
+        let tail_target = a.bytes.len();
+        let rel = (tail_target as i64 - tail_jmp_at as i64) as i8;
+        a.bytes[tail_jmp_at - 1] = rel as u8;
+        a.label(L_TAIL);
+        a.b(&[0x48, 0x85, 0xF6]); // test rsi,rsi
+        a.jcc(0x74, L_RET0); //    je L_RET0
+        a.b(&[0x48, 0xC7, 0x06, 0x00, 0x00, 0x00, 0x00]); // mov qword [rsi],0
+        a.b(&[0x48, 0xC7, 0x46, 0x08, 0x00, 0x00, 0x00, 0x00]); // mov qword [rsi+8],0
+        a.label(L_RET0);
+        a.b(&[0x31, 0xC0]); //     xor eax,eax
+        a.b(&[0xC3]); //     ret
+        a.finish()
+    }
+
+    const L_OK: usize = 0;
+    const L_RET0G: usize = 1;
+
+    pub fn emit_clock_getres(off: u32) -> Vec<u8> {
+        let mut a = Asm::new();
+        lea_data_base(&mut a, off);
+        for clk in [0u8, 1, 4, 7, 11] {
+            if clk == 0 {
+                a.b(&[0x48, 0x85, 0xFF]); // test rdi,rdi
+                a.jcc(0x74, L_OK);
+            } else {
+                a.b(&[0x48, 0x83, 0xFF, clk]); // cmp rdi,clk
+                a.jcc(0x74, L_OK);
+            }
+        }
+        a.b(&[0xB8, 0xDA, 0xFF, 0xFF, 0xFF]); // mov eax,-38
+        a.b(&[0xC3]); //     ret
+        a.label(L_OK);
+        a.b(&[0x48, 0x85, 0xF6]); // test rsi,rsi
+        a.jcc(0x74, L_RET0G); //    je L_RET0G
+        a.b(&[0x48, 0xC7, 0x06, 0x00, 0x00, 0x00, 0x00]); // mov qword [rsi],0
+        a.b(&[0x41, 0x8B, 0x43, 0x30]); // mov eax,[r11+48] res_ns
+        a.b(&[0x48, 0x89, 0x46, 0x08]); // mov [rsi+8],rax
+        a.label(L_RET0G);
+        a.b(&[0x31, 0xC0]); //     xor eax,eax
+        a.b(&[0xC3]); //     ret
+        a.finish()
+    }
 }
 
 // ============================================================================
@@ -402,18 +706,34 @@ fn build_code_page() -> [u8; 4096] {
     const F_CLOCK_GETTIME: u32 = 0x800;
     const F_GETTIMEOFDAY: u32 = 0x920;
     const F_CLOCK_GETRES: u32 = 0x9C0;
-    let f1 = emit_clock_gettime(F_CLOCK_GETTIME);
-    let f2 = emit_gettimeofday(F_GETTIMEOFDAY);
-    let f3 = emit_clock_getres(F_CLOCK_GETRES);
-    let put = |page: &mut [u8; 4096], off: u32, words: &[u32]| {
-        for (i, w) in words.iter().enumerate() {
-            let p = off as usize + i * 4;
-            page[p..p + 4].copy_from_slice(&w.to_le_bytes());
-        }
-    };
-    put(&mut page, F_CLOCK_GETTIME, &f1);
-    put(&mut page, F_GETTIMEOFDAY, &f2);
-    put(&mut page, F_CLOCK_GETRES, &f3);
+    #[cfg(not(feature = "x86_64"))]
+    {
+        let f1 = rv::emit_clock_gettime(F_CLOCK_GETTIME);
+        let f2 = rv::emit_gettimeofday(F_GETTIMEOFDAY);
+        let f3 = rv::emit_clock_getres(F_CLOCK_GETRES);
+        let put = |page: &mut [u8; 4096], off: u32, words: &[u32]| {
+            for (i, w) in words.iter().enumerate() {
+                let p = off as usize + i * 4;
+                page[p..p + 4].copy_from_slice(&w.to_le_bytes());
+            }
+        };
+        put(&mut page, F_CLOCK_GETTIME, &f1);
+        put(&mut page, F_GETTIMEOFDAY, &f2);
+        put(&mut page, F_CLOCK_GETRES, &f3);
+    }
+    #[cfg(feature = "x86_64")]
+    {
+        let f1 = x86::emit_clock_gettime(F_CLOCK_GETTIME);
+        let f2 = x86::emit_gettimeofday(F_GETTIMEOFDAY);
+        let f3 = x86::emit_clock_getres(F_CLOCK_GETRES);
+        let putb = |page: &mut [u8; 4096], off: u32, bytes: &[u8]| {
+            let p = off as usize;
+            page[p..p + bytes.len()].copy_from_slice(bytes);
+        };
+        putb(&mut page, F_CLOCK_GETTIME, &f1);
+        putb(&mut page, F_GETTIMEOFDAY, &f2);
+        putb(&mut page, F_CLOCK_GETRES, &f3);
+    }
 
     // ---- dynstr @ 0x200 ----
     const STRTAB_OFF: usize = 0x200;
@@ -452,23 +772,25 @@ fn build_code_page() -> [u8; 4096] {
     }
 
     // ---- DT_HASH @ 0x140: nbucket=2, nchain=4, bucket[2], chain[4] ----
+    // TERMINATOR IS 0, never 0xFFFFFFFF (106th fix): SysV hash lookups
+    // walk `for (i = bucket[h % nbucket]; i; i = chain[i])` — 0 (STN_UNDEF)
+    // is the empty-bucket and end-of-chain marker (musl ldso and glibc
+    // both). The first cut used u32::MAX sentinels and pid 1 segfaulted
+    // at its first vdso lookup: chain 0xFFFFFFFF * sizeof(Elf64_Sym)=24
+    // = 0x17_FFFF_FFE8 past the symtab — the exact CR2 delta decoded
+    // from the USEGV-FOR dump (ripbytes were musl's hash loop). The
+    // u32::MAX convention had never been exercised: the riscv64 mapping
+    // it was written for stayed disabled.
     const HASH_OFF: usize = 0x140;
     page[HASH_OFF..HASH_OFF + 4].copy_from_slice(&2u32.to_le_bytes());
     page[HASH_OFF + 4..HASH_OFF + 8].copy_from_slice(&4u32.to_le_bytes());
-    for i in 0..2 {
-        page[HASH_OFF + 8 + i * 4..HASH_OFF + 12 + i * 4]
-            .copy_from_slice(&u32::MAX.to_le_bytes());
-    }
-    for i in 0..4 {
-        page[HASH_OFF + 16 + i * 4..HASH_OFF + 20 + i * 4]
-            .copy_from_slice(&u32::MAX.to_le_bytes());
-    }
+    // buckets and chains stay ZERO-initialized (0 = empty/end).
     for i in 0..3 {
         let b = (elf_hash(NAMES[i].as_bytes()) % 2) as usize;
         let bucket = u32::from_le_bytes(
             page[HASH_OFF + 8 + b * 4..HASH_OFF + 12 + b * 4].try_into().unwrap(),
         );
-        if bucket == u32::MAX {
+        if bucket == 0 {
             page[HASH_OFF + 8 + b * 4..HASH_OFF + 12 + b * 4]
                 .copy_from_slice(&((i + 1) as u32).to_le_bytes());
         } else {
@@ -477,7 +799,7 @@ fn build_code_page() -> [u8; 4096] {
                 let next = u32::from_le_bytes(
                     page[HASH_OFF + 16 + cur * 4..HASH_OFF + 20 + cur * 4].try_into().unwrap(),
                 );
-                if next == u32::MAX {
+                if next == 0 {
                     page[HASH_OFF + 16 + cur * 4..HASH_OFF + 20 + cur * 4]
                         .copy_from_slice(&((i + 1) as u32).to_le_bytes());
                     break;

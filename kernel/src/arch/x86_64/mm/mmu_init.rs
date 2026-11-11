@@ -1540,8 +1540,11 @@ pub(crate) unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysA
 
     // SCRIBBLE HUNT: a leaf whose physical frame lies inside the kernel
     // image (below the 30MB reserve) is corruption — the zone starts at
-    // ~1GB and post-boot memblock never dips below the reserve.
-    if phys_addr < 0x1E0_0000 && root_ppn != root_page_table_ppn() {
+    // ~1GB and post-boot memblock never dips below the reserve. The ONE
+    // legitimate low-image alias is the vDSO pair (106th): the two
+    // memblock-reserved statics every exec maps into the user tree.
+    let is_vdso = crate::mm::vdso::is_vdso_phys(phys_addr);
+    if phys_addr < 0x1E0_0000 && root_ppn != root_page_table_ppn() && !is_vdso {
         crate::pr_err!(
             "LEAF-LOW-HIT map_page va={:#x} -> phys={:#x} flags={:#x} root={:#x}",
             virt_addr, phys_addr, flags, root_ppn

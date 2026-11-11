@@ -647,6 +647,38 @@ pub(crate) fn do_execve_elf(
 
     }
 
+    // 106th x86_64 vDSO mapping: the code page is REAL x86-64 code and
+    // the statics' physical addresses are computable (kernel image link
+    // identity), so the mapping is live on this arch. The frames are
+    // memblock-reserved (kernel image window) — fork copies the PTEs
+    // with no refcount (is_foreign_user_frame) and mm teardown skips
+    // freeing them; see mm/vdso.rs.
+    #[cfg(feature = "x86_64")]
+    {
+        let (data_paddr, code_paddr) = crate::mm::vdso::vdso_pages_phys();
+        // SAFETY: user_ppn is the freshly created page-table root; the
+        // physical frames are the aligned 4 KiB vDSO statics; flags are
+        // valid user PTE bits (data RW, code RX — executable by NOT
+        // setting NX).
+        unsafe {
+            crate::arch::mm::mm_ops::map_user_region(
+                user_ppn,
+                crate::mm::vdso::VDSO_BASE,
+                data_paddr,
+                4096,
+                PageTableEntry::P | PageTableEntry::RW | PageTableEntry::US
+                    | PageTableEntry::A | PageTableEntry::D,
+            );
+            crate::arch::mm::mm_ops::map_user_region(
+                user_ppn,
+                crate::mm::vdso::VDSO_BASE + 4096,
+                code_paddr,
+                4096,
+                PageTableEntry::P | PageTableEntry::US | PageTableEntry::A,
+            );
+        }
+    }
+
     // Load interpreter (dynamic linker) if present
     if ec2_on { ec2_tig = crate::arch::cpu::read_time(); }
     let (actual_entry, at_base) = if let Some(interp_bytes) = interp_data {        let interp_base: u64 = INTERP_BASE as u64;  // mmap_start - 16MB
@@ -1102,7 +1134,11 @@ pub(crate) fn do_execve_elf(
         (AT_EXECFN, execfn_vaddr),
         // P2 vDSO: libc resolves __vdso_clock_gettime & co. through
         // this ELF mapping and skips the syscall for gettime paths.
-        // (AT_SYSINFO_EHDR, crate::mm::vdso::vdso_ehdr()), // P2-fix: vDSO data page is outside the linear mapping — disable until the page is allocated from linear-mapped memory
+        // x86_64 (106th): the mapping is live — 21.3M clock_gettime
+        // syscalls per OH boot move to userspace (~3 µs -> ~20 ns each).
+        // riscv64 stays disabled (statics outside the linear map).
+        #[cfg(feature = "x86_64")]
+        (AT_SYSINFO_EHDR, crate::mm::vdso::vdso_ehdr()),
     ];
 
     for (typ, val) in auxv {
