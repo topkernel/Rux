@@ -1354,8 +1354,15 @@ extern "C" fn defer_emit_fn(_arg: *mut core::ffi::c_void) -> i32 {
                 }
             };
             match line {
+                // 97th (hp97): KERN_WARNING, not KERN_INFO — the rig
+                // boots run LOGLEVEL=4 (the proven +55s LL7 tax made LL4
+                // the rig default) and printk drops level>console BEFORE
+                // the ring, so every deferred census line (ufw/uss/uvma
+                // park-chain evidence included) was invisible on exactly
+                // the boots that hunt with it. Hunt-boots-only traffic;
+                // standard boots queue nothing.
                 Some(l) => crate::printk::printk_ln(
-                    crate::printk::loglevel::KERN_INFO,
+                    crate::printk::loglevel::KERN_WARNING,
                     format_args!("{}", l),
                 ),
                 None => break,
@@ -1383,8 +1390,9 @@ extern "C" fn defer_emit_fn(_arg: *mut core::ffi::c_void) -> i32 {
                 }
             };
             match line {
+                // 97th: KERN_WARNING — see the A-focus drain note above.
                 Some(l) => crate::printk::printk_ln(
-                    crate::printk::loglevel::KERN_INFO,
+                    crate::printk::loglevel::KERN_WARNING,
                     format_args!("{}", l),
                 ),
                 None => break,
@@ -1412,8 +1420,9 @@ extern "C" fn defer_emit_fn(_arg: *mut core::ffi::c_void) -> i32 {
                 }
             };
             match line {
+                // 97th: KERN_WARNING — see the A-focus drain note above.
                 Some(l) => crate::printk::printk_ln(
-                    crate::printk::loglevel::KERN_INFO,
+                    crate::printk::loglevel::KERN_WARNING,
                     format_args!("{}", l),
                 ),
                 None => break,

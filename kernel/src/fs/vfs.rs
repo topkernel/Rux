@@ -1031,7 +1031,13 @@ pub fn vfs_bind_mount(
             static BINDREC_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if BINDREC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
-                crate::pr_info!(
+                // 97th (hp97): pr_warn, not pr_info — the hunt rigs run
+                // LOGLEVEL=4 and these sandbox-clone records (the face-C
+                // spawn-path evidence: which child cloned which mounts)
+                // were dropped before the ring. Rate-capped at 200/boot;
+                // sprobe=0 silences the sibling mtprobe but not this —
+                // bindrec rides every boot by design (appclone forensics).
+                crate::pr_warn!(
                     "bindrec: cloned '/{}' under '{}' (flags {:#x})",
                     rel.join("/"),
                     target,

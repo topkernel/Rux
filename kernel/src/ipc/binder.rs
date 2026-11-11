@@ -4637,7 +4637,12 @@ pub fn sleep_snapshot() {
                 }
             }
             let (chunk, tail) = rest.split_at(cut);
-            crate::pr_info!("{}", chunk);
+            // 97th (hp97): pr_warn, not pr_info — the hunt rigs run
+            // LOGLEVEL=4 (rig default; the LL7 tax is +55s) and printk
+            // drops level>console BEFORE the ring, so the whole census
+            // was invisible on the boots that arm dfx=sleepsnap. Switch-
+            // gated path; standard boots never reach here.
+            crate::pr_warn!("{}", chunk);
             rest = tail;
         }
     }
