@@ -12213,3 +12213,157 @@ interleaved pairs, n=4+4 (run/hp103-ab3.out):
 4. hiperf's <25s arm failure (103.2) — if the SA-chain window ever
    needs a record, the fix lives in hiperf bring-up (userspace) or a
    kernel-side perf buffer flush path; not chased further this session.
+
+### 101. 101ST SESSION (2026-11-12 00:1x-02:5x, branch oh-crash) — KERNEL HOT-PATH LANES LANDED: TLB-shootdown lazy mm_cpumask (IPIs 3.94M -> 18.4K by t200 on PRISTINE, -99.5%; the ONLY ladder of the session's 15 boots, launcher.ready 41.3s under load-31 — best this rig has produced in ANY regime) + KSIG/TKSIG/KOT-KILL print gating (269+72 lines -> 0); opt-level=2 dev-profile measured DIRECTIONAL (-30% bootanim.ready median) but NOT flipped (needs a quiet-host pristine ladder A/B first); the four-engine table confirmed and two engines killed
+
+Mission: kernel hot-path levers off the 100th's four named engines.
+
+#### 101.1 What the fresh record says once symbolized against the booted ELF
+
+Re-parsed the 100th's hp100r-w1.data (265,174 samples, 28.6-118.5s,
+ELF md5-paired c70129af) symbol-by-symbol: enable_irq+0x1d is the
+`ret` AFTER `sti` — i.e. these are DEFERRED PMIs delivered through
+IF=0 windows (interrupt-off shadow time), NOT enable_irq's own cost;
+atomic_load u8/usize/u64/u32 variants (out-of-line debug-codegen
+generic bodies shared by every TTAS loop) sum to ~21% — the spin
+cloud; acquire_emit_lock 3.0%; wrmsr (LAPIC ICR) 1.5%; RawSpinlock
+lock 0.7%; synchronize_rcu_forced_polled 0.5%. The 100th's fp-chain
+walk then named the owners (TASK 100.6): exit/reap storm (wait4/
+release_task + munmap TLB IPI fanout), allocator irq-section toggles
+(kmalloc/small_alloc SpinlockIrqGuard drops), dfx prints on signal/
+kill paths, buddy defer polls. This session attacked engines 1-3.
+
+#### 101.2 LEVER A (committed 9ee8cc49): lazy mm_cpumask TLB shootdown
+
+Every user-mm shootdown site (munmap, unmap_pages/zap, mprotect,
+fork COW-downgrade, BOTH COW-fault resolutions) broadcast a
+full-TLB-flush IPI to all 8 CPUs. New MmStruct::cpu_mask tracks "CPUs
+that may hold this mm's translations": bit SET in context_switch/exec
+BEFORE the incoming CR3 write (MOV-to-CR3 is serializing — the set is
+globally performed before any cached entry exists, so a flush whose
+PTE-clear precedes its Acquire mask read sees every CPU holding old
+entries); bit CLEARED at switch-away when PCID is OFF (every plain
+CR3 write fully flushes, so the outgoing mm provably loses its
+entries there — mask tracks "CPUs currently running this mm"); with
+PCID on the mask stays grow-only (NOFLUSH entries survive switches).
+Remotes still full-flush; the mask only decides WHO gets the IPI.
+TLB_IPI_SENT counter added (send-side, /proc/interrupts TLB row).
+
+A/B (injected system copy, SMP8+4G KVM, LL4, /proc/interrupts at
+t=200/350), FIRST on the then-unknown-dirty source, then — after
+§103.5 — REPEATED on verified pristine ud-f2-u2v15:
+                         dirty-ctl  dirty-lazy   pristine-ctl  pristine-lazy
+  IPIs @t200             4,031,356     10,209      3,936,639      18,371
+  IPIs @t350             5,280,947     10,647      5,352,977      20,395
+  reduction              -99.75%                   -99.53%
+  ~20k IPIs/s sustained on control; each is a KVM-intercepted LAPIC
+  wrmsr + remote interrupt + remote FULL flush (working-set nuke ->
+  refault cascade). Grow-only-only mask (first cut) measured -20%/-
+  13% — GRQ migration saturates ever-loaded masks; the LAZY clear is
+  what collapses them (single-threaded mm -> ZERO IPIs).
+  BOOT LADDER on pristine: control boot STALLED (no launcher by 420s,
+  the half-of-regime miss), lazy-mask boot = bundles.ready 36.5 ->
+  launcher spawn 37.0 -> launcher.ready 41.26s — the session's only
+  ladder in 15 boots (13 earlier boots: 0, all on the dirty source or
+  its stall regime), under load-31 with 3 foreign QEMUs. Best this
+  rig has measured in any regime (prior: 46.2s quiet-host 95th,
+  74-105s loaded 100th).
+  Corruption watch: 10 treatment boots (8 dirty-regime + pristine
+  pair) — ZERO #GP, zero mallocng get_meta trips, zero KERNPANIC,
+  zero spinlock-stuck (the stale-TLB symptom class stays silent).
+  Commit 9ee8cc49 carries the safety-and-performance ledger entry.
+
+#### 101.3 LEVER C (committed 5cedf545): signal/kill print gating
+
+KSIG/TKSIG (SIGKILL/SIGTERM sender naming) and KOT-KILL (group-kill
+victim walk) were CLOSED hunts printing ~550-640 pr_err lines per
+pristine boot through acquire_emit_lock + polled-16550 (control
+serials: KSIG 437-526 + KOT 109-119; pristine control 269+72 within
+420s — rate differs with the stall mix). Gated behind
+dfx=sigtrace (DfxSwitch::SigTrace; budget caps stay inside). Gated
+boots: KSIG=0 KOT=0 (n=3). The 103rd independently gated the binder
+family (SAREG/SACSA/SLRD/SLTX, ~0.95MB/boot, e4bc9b13) — both gates
+rode the same treatment kernels, so the pristine-pair ladder carries
+BOTH print-gating levers plus the TLB mask (attribution: IPI effect
+is the mask's alone — prints send no IPIs; the 41.3s ladder is the
+STACK's result).
+
+#### 101.4 LEVER D (NOT committed): dev-profile opt-level — measured, directional, decision left open
+
+Found: every campaign boot runs a DEV-profile kernel (opt-level 0 —
+`make build` = plain `cargo build`); the record's 21% atomic-poll
+cloud and the inflated IF=0 windows are debug codegen (out-of-line
+atomic_load bodies with stack spills; ~35% smaller kernel at opt2).
+A/B via cargo-direct CARGO_PROFILE_DEV_OPT_LEVEL=2 (separate
+target-dir, §100.1 rule; debug-assertions + debuginfo stay ON):
+same-source interleaved series on the dirty source (regime: 100%
+stall, so early markers only): bootanimation.ready medians t2(dev)
+16.9s vs t3(opt2) 11.9s (-30%), finished 26.5 vs 22.7 (-14%),
+n=3/arm, overlapping spreads. Directionally real, not commit-grade.
+DECISION LEFT TO THE COORDINATOR: flipping [profile.dev] opt-level=2
+re-baselines every perf-gate band and every lane's binary — needs one
+quiet-host pristine ladder A/B (t2i vs t3i, n>=3) first; kernels and
+recipe are in run/ (bzImage-t2i, bzImage-t3i, hp101-build-opt2.sh,
+hp101-series2.sh).
+
+#### 101.5 Lever B (allocator irq toggles) — deferred with rationale
+
+The 7.6k-sample engine is small_alloc's per-op IF toggles (magazine
+CpuLocal::with on alloc/free fast paths + lock_irqsave slow path) —
+the toggles are per-op but the WINDOW is dev-codegen-inflated; the
+magazine already batches lock acquisitions. Restructuring the
+fast path to preempt-only (lockless per-CPU rows) is a design change
+with IRQ-context reentrancy hazards — deferred until Lever D is
+decided (opt2 shrinks every window 5-20x for free). Micro-levers
+noted for whoever goes here: kmalloc's dfx allocwatch guard call +
+lock_holds fetch_add sit INSIDE the IF=0 window; try_defer's
+2-Acquire-load size poll runs on every buddy dealloc (0.8%).
+
+#### 101.6 Closed by argument (no code): wfi and syscall-entry levers
+
+- wfi 13.8%: the GRQ has no idle-balance miss class — a CPU idles
+  only when NO task is runnable anywhere; the tail's wfi share is the
+  userspace install-stream serialization's shadow (one CPU busy in
+  the KVS chain, others genuinely empty). Not a kernel lever.
+- syscall entry/exit: audit of trap.S syscall_entry/trap_exit_syscall
+  — swapgs + GS magic check + pt_regs build + opportunistic SYSRET,
+  Linux-shaped, no per-syscall CR3 dance or extra TLB flush; the only
+  tax is dev codegen (Lever D again).
+
+#### 101.7 Rig lessons + the dirty-source forensics (feeds 103.5)
+
+- The 00:05:18 writer of userdata-fresh2.img is the 100th's hp100r/
+  hp100r2 NOSNAP=1 record boots: lb-boot-out.py's NOSNAP un-snapshots
+  BOTH drive 5 (userdata!) and drive 6 (output) — the record recipe
+  persisted a half-provisioned /data into the shared pristine source.
+  FIX SUGGESTED for the rig: NOSNAP should exempt the userdata drive
+  (add UNOSNAP=5,6 style control) or the record recipe should pass a
+  THROWAWAY userdata copy. Coordinator quarantined + restored (103.5
+  acknowledges); my post-103.5 boots used ud-f2-u2v9/15 directly.
+- My series-1 numbers (0/6 ladders, both arms) rode the dirty source:
+  internally-consistent A/B (same dirt) but NOT pristine-boot
+  evidence; the pristine pair (101.2) is the pristine record.
+- make test (riscv64) HUNG under load-31 (blocked task 308, 120s+
+  hung-task warnings, no panic) — suite verdict still owed on a quiet
+  host; dual-arch builds rc=0 (x86_64 + riscv64 with all changes).
+
+#### 101.8 FOR THE 102ND/104TH (priority order)
+
+1. QUIET-HOST PRISTINE LADDER A/B of the landed stack (t2i vs control
+   c1i, n>=3, ud-f2-u2v9/15): the 41.3s single-boot ladder needs a
+   median; if it holds ~40s under load, the quiet-host number could
+   approach the 95th's 46.2s class ALREADY -30% faster.
+2. Lever D decision run (t2i vs t3i on pristine, quiet host): if
+   opt2's -30% early-marker edge reproduces on ladders, flip
+   [profile.dev] opt-level=2 in ONE commit with re-baseline notes for
+   every perf-gate band (the 83-86% tick-mode kernel share, IF=0
+   25.7%, GRQ 5.1-6.1us, pbench rows — ALL shift).
+3. allocator irq-section restructure (101.5) only AFTER 2.
+4. The remaining named engines after tonight: exit/reap storm's
+   wait4/release_task half (5.9k enable_irq samples via schedule<-
+   release_task<-do_wait_nonblock<-sys_wait4) — the reap path itself,
+   now the largest un-attacked kernel line; and hilog volume
+   (userspace).
+5. hp87-out.img (256MB) holds the extracted w1 record; hp100r-w2 was
+   lost to the hiperf exit-path stall (0 bytes) — the 90-180s window
+   of a PRISTINE lazy-mask boot is the next record worth taking.
