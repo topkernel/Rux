@@ -10478,7 +10478,13 @@ fn binder_transaction(
     // first u32 (the int32 result). Comparing the send count/content
     // with the reference Linux run's 102 "insert SA" lines decides
     // "registrar never sent" vs "samgr rejected/lost" for SA 501.
-    {
+    // OH boot lane 2026-11-12 (103rd): the whole SAREG probe is
+    // dfx-gated (bindertrace). It printed ~5.8k lines / 0.8 MB per
+    // pristine OH boot through acquire_emit_lock — a top-5 kernel
+    // site in the SA-window hiperf record — while the hunt it served
+    // (SA 501 registration) is closed. Hunts needing SAREG/SLRD
+    // pairing arm dfx=bindertrace.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace) {
         const SAMGR_ADD: u32 = 3;
         const SAMGR_REMOVE: u32 = 4;
         const SAMGR_ADD_ONDEMAND: u32 = 10;
@@ -11040,7 +11046,11 @@ fn binder_transaction(
             .map(|n| n.reg_tgid)
             .filter(|&g| g != 0 && g != target.pid)
             .unwrap_or(0);
-        if (sender_is_app || target_child != 0)
+        // OH boot lane 2026-11-12 (103rd): dfx-gated (bindertrace) with
+        // the SAREG/SLRD family — the app-txn trace printed ~1.2k lines
+        // per pristine boot through the console emit lock.
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace)
+            && (sender_is_app || target_child != 0)
             && SLTX_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 1500
         {
             let mut pb = [0u8; 32];
@@ -12933,10 +12943,17 @@ fn binder_thread_read(
                                             .unwrap_or("")
                                             .trim_end_matches('\0');
                                         let samgr_pid = binder_sareg_samgr_pid();
-                                        if lname.starts_with("m.ohos.")
-                                            || lname.starts_with("os.")
-                                            || lname.starts_with("com.")
-                                            || (samgr_pid != 0 && tg == samgr_pid)
+                                        // OH boot lane 2026-11-12 (103rd):
+                                        // dfx-gated (bindertrace) with the
+                                        // SAREG send side — see the sc155
+                                        // block gate above.
+                                        if crate::dfx::switches::enabled(
+                                            crate::dfx::switches::DfxSwitch::BinderTrace,
+                                        )
+                                            && (lname.starts_with("m.ohos.")
+                                                || lname.starts_with("os.")
+                                                || lname.starts_with("com.")
+                                                || (samgr_pid != 0 && tg == samgr_pid))
                                         {
                                             static SLRD_N: core::sync::atomic::AtomicUsize =
                                                 core::sync::atomic::AtomicUsize::new(0);
