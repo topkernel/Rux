@@ -11178,3 +11178,52 @@ if quota cuts first). Kernel default stays 7; the lever is rig-side.
    63dbeae4+8ba0e893+64ef1254 (binder+mm domains touched).
 4. Panic-reorder validation (93.6#5) still unvalidated — no boot has
    aborted since the fix; any foundation-abort boot proves it free.
+
+#### 95.6 ADDENDUM: THE STALL WAS CAPTURED (hp95h, 14:17-14:23) — shape A confirmed with whole-task dumps
+
+hp95h (hunt boot 4/4): anim.fin 29.676s, guards=2 (parity shape),
+aborts=0, NO launcher by 330s — the clean-stall class, reproduced with
+the periodic arm live. Decode (run/oh-hp95h-serial.log):
+
+  LADDER POSITION when it died:
+  - bms.main.bundles.ready SET; CompleteAddUser 39.165; StartUser
+    DONE 43.674 ("START USER: delay 23 ms") — the whole user-100 chain
+    completed (this is shape A, NOT hp94d's shape D).
+  - appspawn spawned 7 children (27.9/30.6/37.4/45.6/55.5/63.4/63.5s,
+    flags=0x11) — NONE is com.ohos.launcher (ZERO launcher strings,
+    zero mtprobe sandbox lines).
+  - foundation (tgid 700) LAST ACTED at 64.93-64.99: a dlen-280 SACSA
+    fanout burst from OS_FFRT_5_1/5_3 to pids 508/455/603/337/1187/402
+    (parcel "ohos.a...", len 0x29 — the SA state-change notification
+    family). In the LADDER boot hp95f the SAME fanout appears at
+    41.7s right after the launcher app (pid 1600) delivered its
+    lifecycle reports (code 0x17 dlen 3396 "ohos.app...") — in hp95h
+    one of the 7 spawned apps reported, AMS fanned out, and then
+    foundation NEVER asked appspawn for the launcher.
+  PERIODIC DUMPS at the stall (>150s, >250s):
+  - EVERY foundation thread (OS_FFRT_*, OS_IPC_*, main) is
+    INTERRUPTIBLE(sleep), on_rq=0 — none RUNNING, none in D-state,
+    none spinning. The wedge is a WAIT-FOR-EVENT THAT NEVER FIRES
+    (notify-never-fires family), not a stuck syscall and not a
+    monopolist.
+  - Whole-box RUNNING set at stall: 26 tasks, dominated by exactly
+    the 94.3 tail burners: sysevent_source, os_ds_service,
+    os.settingsdata, hilogd.server (+ mmi_service). With 8 CPUs and
+    only ~26 runnable tasks, CPU starvation is NOT plausible — a lost
+    wake / missed event race is.
+  - lastsys latch prints canary garbage on x86_64 for parked threads
+    (0xC3C3... fill) — the latch is unreliable cross-arch; do not
+    trust it on x86 dumps.
+  FOR THE 96TH (concrete):
+  1. Re-arm with dfx=leakhunt,periodic,thpark (+ sleepsnap) — thpark
+     (the 54th's park-chain instrument) names the futex/wait-object
+     chain for parked threads; on the next shape-A stall it should
+     name WHICH libffrt queue foundation's launcher-decision worker
+     is parked on, turning "an event never fired" into a specific
+     producer.
+  2. Compare the 7 spawned apps' identities (they are settings/
+     systemui-adjacent; the ladder spawns the SAME apps first) — the
+     divergence is what AMS does AFTER the last fanout: ladder
+     proceeds to StartAbility(launcher), stall proceeds nowhere.
+  3. hp94d's shape D remains uncaptured-with-dumps (user-key chain
+     freeze pre-CompleteAddUser; bms bundles.ready never set).
