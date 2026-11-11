@@ -1316,7 +1316,7 @@ pub fn resolve_writeback_inode(
     Some(create_vfs_inode_in(fs_ptr, ino as u32, &ext4_inode))
 }
 
-/// Persist the inode-table blocks of the given writeback targets.
+/// Persist the INODE-TABLE BLOCKS of the given writeback targets.
 ///
 /// The ordered-data discipline: the DATA blocks of a flushed file must
 /// reach the device BEFORE the inode that describes them, otherwise a
@@ -1353,6 +1353,57 @@ pub fn sync_inode_tables(targets: &[(u64, u64)]) -> usize {
             }
         }
         let _ = Ordering::Relaxed;
+    }
+    n
+}
+
+/// Persist the DATA blocks of the given writeback targets (ordered data).
+///
+/// The plain buffer-cache drain (`bio::sync_buffers`) writes every dirty
+/// buffer in HASH ORDER: the inode-table block (the file's new size) can
+/// reach the device BEFORE the data blocks it describes. A crash in
+/// between leaves a file that CLAIMS 8 MB of data the device never
+/// received — measured in the fiE3 crash-window boot: the on-disk inode
+/// had the full size and the full 2048-block extent map, but only ~35 %
+/// of the data blocks were on the device (md5 mismatch).
+///
+/// The ordered discipline (Linux's ordered data mode): the data blocks
+/// first, the metadata last. `sync(2)` therefore syncs these data
+/// blocks BEFORE the buffer-cache drain, so whenever the inode-table
+/// block reaches the device the data it describes is already durable.
+///
+/// Returns the number of data blocks that were persisted.
+pub fn sync_flushed_data(targets: &[(u64, u64)]) -> usize {
+    let mut n = 0usize;
+    for &(fs_id, ino) in targets {
+        let Some(fs) = ext4_instance_from_id(fs_id) else {
+            continue;
+        };
+        let Ok(ext4_inode) = fs.read_inode(ino as u32) else {
+            continue;
+        };
+        // The block map as the flush left it (the buffer-cached inode
+        // table entry carries the extent map the flush wrote).
+        let Ok(blocks) = ext4_inode.get_data_blocks(fs) else {
+            continue;
+        };
+        for block in blocks {
+            if block == 0 {
+                continue; // hole
+            }
+            // SAFETY: fs.device is a valid GenDisk of a live instance;
+            // bread returns a valid BufferHead on success.
+            unsafe {
+                if let Some(bh) = crate::fs::bio::bread(fs.device, block) {
+                    let dirty = (*bh).is_dirty();
+                    if dirty {
+                        let _ = crate::fs::bio::sync_dirty_buffer(bh);
+                        n += 1;
+                    }
+                    crate::fs::bio::brelse(bh);
+                }
+            }
+        }
     }
     n
 }

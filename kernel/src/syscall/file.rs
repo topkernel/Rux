@@ -4617,6 +4617,21 @@ pub fn sys_sync(_args: SyscallArgs) -> i64 {
             wi_direct
         );
     }
+    // ORDERED DATA: the flushed files' DATA blocks first. The plain
+    // buffer-cache drain below writes every dirty buffer in HASH ORDER —
+    // the inode-table block (the file's new size) could reach the device
+    // BEFORE the data blocks it describes, and a crash in between leaves
+    // a file that claims 8 MB of data the device never received
+    // (measured: the fiE3 crash-window boot — full size, full extent
+    // map, ~35 % of the data). The data goes first; the metadata last.
+    {
+        let n = crate::fs::ext4::sync_flushed_data(&flushed_targets);
+        static FI_D: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if FI_D.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+            crate::pr_err!("FI-SYNC-DATA blocks_synced={}", n);
+        }
+    }
     // Flush all buffer cache
     let _ = crate::fs::bio::sync_buffers();
     // INODE-TABLE BLOCKS (fi-lane data-integrity, 2026-11-11): the size
