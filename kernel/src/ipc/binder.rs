@@ -4166,18 +4166,29 @@ pub fn sleep_snapshot() {
             let name = core::str::from_utf8(&comm[..])
                 .unwrap_or("")
                 .trim_end_matches('\0');
-            let _ = writeln!(
-                out,
-                "sleepsnap: {} tid {} state={:#x} sys={} rip={:#x} a0={:#x} a1={:#x} a2={:#x}",
-                name,
-                tk.pid(),
-                state.bits(),
-                sys,
-                rip,
-                a0,
-                a1,
-                a2
-            );
+            // 97th (hp97 toxicity): the BINDER-IDLE looper park — ioctl
+            // on the binder fd with the BWR arg shape — is the resting
+            // posture of every binder server thread (hundreds per
+            // census round, ~1500 of hp97d's 3625 lines) and carries no
+            // wedge signal: an ANOMALOUS BWR park (work pending, write
+            // consumed, age) is TXN-HANG-BWR's job, not the census's.
+            // Skipping the idle shape keeps the census on the
+            // futex/epoll/poll parks where the notify-never-fires
+            // verdict lives, at a fraction of the UART cost.
+            if !(sys == 16 && a1 == 0xffffffff_c030_6201) {
+                let _ = writeln!(
+                    out,
+                    "sleepsnap: {} tid {} state={:#x} sys={} rip={:#x} a0={:#x} a1={:#x} a2={:#x}",
+                    name,
+                    tk.pid(),
+                    state.bits(),
+                    sys,
+                    rip,
+                    a0,
+                    a1,
+                    a2
+                );
+            }
             // oh67: infinite-timeout poll parks are the invisible-holder
             // class (hdf_devmgr/audio_server single-fd -1 polls) — decode
             // their pollfd head + fd path into the focus (lossless) lane.
@@ -4373,7 +4384,18 @@ pub fn sleep_snapshot() {
                 if tgid_latched && sys == 202 && ua3 == 0 && a0 != 0 {
                     crate::sync::futex::fxrs_word_add(a0 as usize);
                 }
-                if main_stack_futex || own_stack_futex || tgid_latched {
+                // 97th (hp97 toxicity): the walks re-firing for TIMED
+                // own-stack parks (the alive cv-poll pools — hundreds of
+                // FFRT workers, re-walked every round) put hp97c/d/e at
+                // 10-13 MB of serial (~+5 MB over the proven hp95 arm)
+                // and the UART drag alone stalled 6/6 boots — the sc37/
+                // sc108 lesson replayed on the census. Walk now only the
+                // wedge-shaped parks: main-stack futex of ANY timeout
+                // (rare, historically decisive — the 54th's chain was a
+                // main-stack TIMED clockwait), and own-stack/latched
+                // parks only when UNTIMED (a3==0 — the forever set; a
+                // timed park that cycles is alive by construction).
+                if main_stack_futex || ((own_stack_futex || tgid_latched) && ua3 == 0) {
                     // 61st (ohw12 starvation): the old 64-slot table keyed
                     // ((tid<<44)|rip&0xfff_ffff_fff) mapped EVERY thread
                     // parking at the same musl futex rip (0x3fbf116dea —
@@ -4398,7 +4420,14 @@ pub fn sleep_snapshot() {
                     // not spam, forever parks re-print every ~90 s.
                     static UFW_SEEN_T: [core::sync::atomic::AtomicU32; 1024] =
                         [const { core::sync::atomic::AtomicU32::new(0) }; 1024];
-                    const UFW_REWALK_100MS: u32 = 300;
+                    const UFW_REWALK_100MS: u32 = u32::MAX / 2;
+                    // 97th (hp97 toxicity): effectively once per
+                    // (tid,rip) per BOOT. The 55th's 90 s re-walk was
+                    // for parks that START after a first walk — a new
+                    // park at a different rip is a new key and walks
+                    // anyway; identical keys re-printed identical frozen
+                    // stacks, pure UART volume (hp97d: 2238 walk lines,
+                    // ~4x the distinct-thread count).
                     let key = ((tk.pid() as u64) << 44) | (rip & 0xfff_ffff_fff);
                     let idx = (tk.pid() as usize) % UFW_SEEN.len();
                     let now100 = (crate::drivers::timer::get_jiffies() / 10) as u32;
