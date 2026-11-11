@@ -1258,6 +1258,53 @@ fn sendfail_reason_name(code: u64) -> &'static str {
     }
 }
 
+/// Stage a BR_*_REPLY-class error onto a thread's todo with upstream
+/// single-slot dedup (binder.c 6.6 binder_send_failed_reply: the thread's
+/// return_error/reply_error are FIXED single work slots — a second error
+/// staged while one is unconsumed is ignored: "Cannot get here for normal
+/// operation, but we can if multiple synchronous transactions are sent
+/// without blocking for responses. Just ignore the 2nd error in this
+/// case."). Returns true if the error was queued, false if dropped.
+///
+/// 94th session: without this, one service death delivered TWO
+/// BR_DEAD_REPLY to the same client thread (the close-path cross-proc
+/// stack walk + the dying side's own drain both failing the same pending
+/// txn) and OH libipc desynced into 2-command sync BWRs — the
+/// SYNCSEND-GUARD storm that aborted foundation (hp92w4).
+///
+/// `class_write` marks errors staged by the WRITE path (upstream
+/// thread->return_error): those also gate binder_thread_write's command
+/// loop until consumed by a read, exactly like upstream's
+/// `while (ptr < end && thread->return_error.cmd == BR_OK)`.
+///
+/// SAFETY: caller holds WORLD; `ft` is a pool thread of the binder world.
+unsafe fn stage_thread_error(ft: &Arc<BinderThread>, cmd: u32, class_write: bool, pid: u32) -> bool {
+    let th = ft.st();
+    if th.err_staged {
+        // Parity: drop the 2nd error (the reference pr_warns once per
+        // occurrence; budget ours — WORLD held, lockless writer).
+        static DUP_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if DUP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+            use core::fmt::Write as _;
+            let _ = writeln!(
+                w,
+                "binder: Unexpected reply error: dropped 2nd error {:#x} for pid {} tid {}",
+                cmd,
+                pid,
+                ft.tid
+            );
+        }
+        return false;
+    }
+    th.err_staged = true;
+    th.err_is_write = class_write;
+    th.todo.push_back(Work::ReturnError(cmd, 0));
+    th.process_todo = true;
+    true
+}
+
 // ============================================================================
 // POOL CENSUS (leg-33B, dfx=poolcensus) — reader-exhaustion adjudication
 //
@@ -1554,6 +1601,23 @@ struct ThreadState {
     /// sender, but ONLY when t->from was set (sync txns; the reference
     /// zeroes it for oneway/reply, binder.c:4737-4745).
     sender_pid_nr: u32,
+    /// Single-slot error dedup (94th session, hp92w4 storm root cause).
+    /// Upstream binder.c 6.6 stages thread errors in TWO fixed single
+    /// work slots (thread->return_error for write-path failures,
+    /// thread->reply_error for async/death failures): a second error
+    /// staged while one is unconsumed is DROPPED ("Unexpected reply
+    /// error" — binder_send_failed_reply). Our todo-queue model had no
+    /// such guard: a proc death that failed the SAME pending sync txn
+    /// through two cleanup walks delivered TWO BR_DEAD_REPLY to one
+    /// thread (hp92w4 rings: three threads consumed ERR_RECV(29189)
+    /// twice at j4330); OH libipc's completion bookkeeping then desynced
+    /// into 2-command sync BWRs and the SYNCSEND-GUARD storm aborted
+    /// foundation. `err_staged` = a ReturnError work is queued and
+    /// unconsumed; `err_is_write` = it came from the write path (gates
+    /// the write loop, upstream's `thread->return_error.cmd == BR_OK`
+    /// loop condition).
+    err_staged: bool,
+    err_is_write: bool,
     /// Transition ring (sc74 forensics); written under WORLD only.
     hist: [BinderEv; BHIST],
     hcur: usize,
@@ -1628,6 +1692,8 @@ impl BinderThread {
                 txn_stack: Vec::new(),
                 sender_token_pid: 0,
                 sender_pid_nr: 0,
+                err_staged: false,
+                err_is_write: false,
                 hist: [BinderEv { j: 0, ev: 0, a: 0, b: 0 }; BHIST],
                 hcur: 0,
                 live_bwr: None,
@@ -2422,42 +2488,31 @@ pub fn binder_close(file: &crate::fs::File) -> i32 {
                 }
             }
 
-            // Fail in-flight transactions of OTHER procs that involve us.
+            // 94th session (hp92w4 storm root cause): this walk used to
+            // ALSO push BR_DEAD_REPLY for every txn on OTHER procs'
+            // stacks that involved the dying proc — but every unresolved
+            // sync txn TARGETED at the dying proc is already failed
+            // EXACTLY ONCE by the dying side's own drain below (thread
+            // todos, in-flight thread stacks, proc todo — all through
+            // dead_reply_to_sender, which pops the sender's stack entry
+            // and stages the single error). The eager push here delivered
+            // a SECOND BR_DEAD_REPLY for the SAME txn (hp92w4: tids
+            // 1172/1624/991 each consumed ERR_RECV(29189) twice at
+            // j4330), and OH libipc's completion bookkeeping then
+            // desynced into 2-command sync BWRs -> SYNCSEND-GUARD storm
+            // -> foundation abort. Upstream binder.c has NO cross-proc
+            // stack walk at death: the sender's error comes from the
+            // dying side's cleanup (binder_cleanup_transaction ->
+            // binder_send_failed_reply), and incoming txns FROM the
+            // dying proc are left on the servicing threads' stacks to
+            // resolve at their own BC_REPLY (replier gets
+            // BR_TRANSACTION_COMPLETE, binder.c 6.6:3806-3812 — our
+            // reply_target_gone path). Here we only drop dead works from
+            // foreign todos.
             for p in world.procs.clone() {
                 let mut needs_wake = false;
                 for t in pm(world, &p).im().threads.clone() {
                     let th = t.st();
-                    th.txn_stack.retain(|x| {
-                        let involved = x.from_proc.as_ref().map(|fp| Arc::ptr_eq(fp, &proc)).unwrap_or(false)
-                            || Arc::ptr_eq(&x.to_proc, &proc);
-                        if involved && x.from_proc.is_some() {
-                            // Someone is waiting for a reply from us.
-                            th.todo.push_back(Work::ReturnError(BR_DEAD_REPLY, 0));
-                            th.process_todo = true;
-                            needs_wake = true;
-                            // 73rd accountmgr lane (site=procdeath): the
-                            // dying proc's teardown fails this waiter's txn.
-                            if txnhunt_on()
-                                && (is_acct(p.pid) || is_acct(proc.pid))
-                            {
-                                static RD_N: core::sync::atomic::AtomicUsize =
-                                    core::sync::atomic::AtomicUsize::new(0);
-                                if RD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
-                                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
-                                    use core::fmt::Write as _;
-                                    let _ = writeln!(
-                                        w,
-                                        "RERR-PUSH site=procdeath dying_pid={} txn{} -> pid{} tid{} BR_DEAD_REPLY",
-                                        proc.pid,
-                                        x.id,
-                                        p.pid,
-                                        t.tid
-                                    );
-                                }
-                            }
-                        }
-                        !involved
-                    });
                     if !th.todo.is_empty() {
                         needs_wake = true;
                     }
@@ -2670,8 +2725,11 @@ unsafe fn dead_reply_to_sender(
             // txn so the from-walk stops routing nested calls to the
             // vanished target (mirrors the BC_REPLY retain).
             fth.txn_stack.retain(|t| !Arc::ptr_eq(t, txn));
-            fth.todo.push_back(Work::ReturnError(BR_DEAD_REPLY, 0));
-            fth.process_todo = true;
+            // Single-slot parity: if another error is already staged
+            // and unconsumed, this one is dropped — the reference does
+            // the same (binder_send_failed_reply) and pops the stack
+            // entry regardless, so the call resolves exactly once.
+            stage_thread_error(&ft, BR_DEAD_REPLY, false, fp.pid);
             ft.hist(EV_DEAD_REPLY, txn.id as u32, ftid);
             // 73rd accountmgr lane (site=drs): a dying thread's pending
             // txn failed — name the waiter that just got BR_DEAD_REPLY.
@@ -2768,8 +2826,9 @@ unsafe fn send_failed_reply(
         if let Some(ft) = pm(world, &fp).im().threads.iter().find(|x| x.tid == ftid).cloned() {
             let fth = ft.st();
             fth.txn_stack.retain(|x| !Arc::ptr_eq(x, in_reply_to));
-            fth.todo.push_back(Work::ReturnError(err, 0));
-            fth.process_todo = true;
+            // Single-slot parity (see stage_thread_error): at most one
+            // unconsumed error per thread; a second is dropped.
+            stage_thread_error(&ft, err, false, fp.pid);
             ft.hist(EV_DEAD_REPLY, in_reply_to.id as u32, ftid);
             // 73rd accountmgr lane (site=sfr): a failed REPLY routed the
             // error to this originator thread.
@@ -8365,6 +8424,26 @@ fn binder_thread_write(
         if ptr + 4 > size {
             break;
         }
+        // Upstream parity (binder.c 6.6 binder_thread_write): the loop
+        // condition is `while (ptr < end && thread->return_error.cmd ==
+        // BR_OK)` — NO further write commands are processed while a
+        // WRITE-path error is staged but unconsumed; the thread must
+        // read the error first. Our queue-based errors carry the class
+        // in err_is_write; the gate matches the reference exactly
+        // (death-class errors do NOT gate the loop — the reference's
+        // reply_error slot does not either).
+        {
+            let w = world_lock();
+            // SAFETY: under WORLD.
+            let gated = unsafe {
+                let th = thread.st();
+                th.err_staged && th.err_is_write
+            };
+            drop(w);
+            if gated {
+                break;
+            }
+        }
         let Some(cmd) = get_user_at::<u32>(buffer, ptr) else {
             *consumed = ptr as u64;
             return -(EFAULT as i64);
@@ -8591,15 +8670,18 @@ fn binder_thread_write(
                         }
                     }
                     // Linux stops processing write commands and queues the
-                    // error as thread work for the following read.
-                    let w = world_lock();
-                    // SAFETY: under WORLD.
-                    unsafe {
-                        let th = thread.st();
-                        th.todo.push_back(Work::ReturnError(err_cmd, 0));
-                        th.process_todo = true;
+                    // error as thread work for the following read
+                    // (thread->return_error slot). Single-slot parity:
+                    // stage_thread_error drops it if another error is
+                    // already unconsumed (cannot happen for the FIRST
+                    // staged write error — the loop gate below blocks
+                    // entry — but keeps the invariant airtight).
+                    {
+                        let w = world_lock();
+                        // SAFETY: under WORLD.
+                        unsafe { stage_thread_error(thread, err_cmd, true, proc.pid) };
+                        drop(w);
                     }
-                    drop(w);
                     // 73rd accountmgr lane (site=writecmd): the write
                     // command failed and its error work is queued for the
                     // next read — for accountmgr this names the exact
@@ -12452,6 +12534,23 @@ fn binder_thread_read(
                                 staged.extend_from_slice(&(param as u32).to_ne_bytes());
                             }
                             thread.hist(EV_ERR_RECV, cmd, param as u32);
+                            // Single-slot parity: consuming the staged
+                            // error frees the slot (reference: e->cmd =
+                            // BR_OK in the BINDER_WORK_RETURN_ERROR
+                            // case). Recompute from the queue so a
+                            // second queued error (cannot happen with
+                            // the dedup, belt-and-braces) keeps the
+                            // slot marked.
+                            let still_staged = thread
+                                .st()
+                                .todo
+                                .iter()
+                                .any(|wk| matches!(wk, Work::ReturnError(..)));
+                            let th = thread.st();
+                            th.err_staged = still_staged;
+                            if !still_staged {
+                                th.err_is_write = false;
+                            }
                         }
                         Work::Node(node) => {
                             // BINDER_WORK_NODE: derive the BR_*_REFS
