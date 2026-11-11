@@ -250,6 +250,18 @@ const PC_TOMBSTONE_BITS: usize = 1;
 /// with no bound — correctness of the dedup depends on it.
 const PC_READER_PROBE_MAX: usize = 64;
 
+/// FI-DIAG counters (data-integrity lane): inserted pages vs pages the
+/// sync-time scan can actually SEE. Inserted-but-invisible = the entry is
+/// not in the slot table any more (the vanishing-dirty-entry bug).
+static FI_INSERTED_PAGES: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+static FI_SCANNED_ENTRIES: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+static FI_SCANNED_PAGES: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+static FI_SCANNED_DIRTY: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
 /// Parked-Arc batch carried out of a wlock section. Eviction may empty
 /// entries; their slot references are parked into this fixed array under
 /// wlock (Vec push would allocate — never under a pcache lock) and moved
@@ -1117,6 +1129,19 @@ impl PageCache {
     /// descriptor's eviction keys (mapping/index).
     pub fn mark_dirty_by_key(&self, key: u64, page_index: u64) {
         let Some(entry) = self.lookup_claimed(key) else {
+            // FI-DIAG: the reader probe MISSED the entry the writer
+            // published (bounded probe + stop-at-empty vs writer's
+            // tombstone-skipping unbounded publish) — the dirty bit is
+            // never set, so the page stays CLEAN and is never flushed:
+            // the data is silently lost.
+            static FI_MD: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if FI_MD.fetch_add(1, Ordering::Relaxed) < 24 {
+                crate::pr_err!(
+                    "FI-MARKDIRTY-MISS key={:#x} idx={} — dirty bit NEVER set (probe hole)",
+                    key, page_index
+                );
+            }
             return;
         };
         {
@@ -1475,7 +1500,22 @@ impl PageCache {
                             );
                         }
                     }
+                    FI_SCANNED_ENTRIES.fetch_add(1, Ordering::Relaxed);
+                    FI_SCANNED_PAGES.fetch_add(npages as u64, Ordering::Relaxed);
+                    FI_SCANNED_DIRTY.fetch_add(ndirty as u64, Ordering::Relaxed);
                     if has_dirty {
+                        // FI-DIAG: the collected set — does it CONTAIN
+                        // the file that lost its data (the pat.bin case)?
+                        {
+                            static FI_COL: core::sync::atomic::AtomicUsize =
+                                core::sync::atomic::AtomicUsize::new(0);
+                            if FI_COL.fetch_add(1, Ordering::Relaxed) < 24 {
+                                crate::pr_err!(
+                                    "FI-COLLECT fs={:#x} ino={} pages={} dirty={} slot={}",
+                                    entry.fs_id, entry.ino, npages, ndirty, si
+                                );
+                            }
+                        }
                         work[n] = (entry.fs_id, entry.ino);
                         n += 1;
                         if n == PASS {
@@ -1496,7 +1536,21 @@ impl PageCache {
                 // Liveness: same contract as sys_fsync (the icache Arc
                 // keeps the descriptor alive; private_data fs pointer is
                 // valid while the mount lives). Miss = skip.
-                if let Some(inode) = crate::fs::inode::icache_lookup(ino, fs_id) {
+                let lookup = crate::fs::inode::icache_lookup(ino, fs_id);
+                if lookup.is_none() {
+                    // FI-DIAG: collected but unresolvable — its dirty pages
+                    // are NEVER flushed (the 'Miss = skip' contract) and the
+                    // data is silently lost.
+                    static FI_MISS: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    if FI_MISS.fetch_add(1, Ordering::Relaxed) < 24 {
+                        crate::pr_err!(
+                            "FI-ICACHE-MISS fs={:#x} ino={} — collected dirty but NEVER flushed",
+                            fs_id, ino
+                        );
+                    }
+                }
+                if let Some(inode) = lookup {
                     let flushed = crate::fs::ext4::file::ext4_flush_dirty_inode(&inode, 0, u64::MAX);
                     // FI3-DIAG (data-integrity lane): did the global sync
                     // actually reach this inode?
@@ -1574,6 +1628,24 @@ impl PageCache {
                         && page.take_released_locked()
                     {
                         let pfn = page.pfn;
+                        // FI-DIAG (data-integrity lane): releasing an
+                        // INVALIDATED frame — if it was still DIRTY, its
+                        // only copy of the data dies with it (neither
+                        // invalidate_inode nor this release guards dirty).
+                        // Second candidate for the vanishing-dirty-entry
+                        // bug (fi7: 2048 dirty pages in, entry gone by
+                        // sync, data never on disk).
+                        if page.dirty.load(Ordering::Acquire) {
+                            static FI_FD: core::sync::atomic::AtomicUsize =
+                                core::sync::atomic::AtomicUsize::new(0);
+                            if FI_FD.fetch_add(1, Ordering::Relaxed) < 20 {
+                                crate::pr_err!(
+                                    "FI-DIRTY-RELEASE fs={:#x} ino={} idx={} write_ok={} — DATA LOSS",
+                                    fs_id, ino, page_index, write_ok
+                                );
+                                crate::dfx::backtrace::dump_stack();
+                            }
+                        }
                         g.remove(&page_index);
                         let page_desc = pfn_to_page_mut(pfn);
                         if !page_desc.is_null() {
@@ -1655,7 +1727,7 @@ impl PageCache {
                         if !pg.invalidated || pg.dirty.load(Ordering::Acquire) {
                             static FI_VD: core::sync::atomic::AtomicUsize =
                                 core::sync::atomic::AtomicUsize::new(0);
-                            if FI_VD.fetch_add(1, Ordering::Relaxed) < 4 {
+                            if FI_VD.fetch_add(1, Ordering::Relaxed) < 40 {
                                 crate::pr_err!(
                                     "FI-DIRTY-DROP fs={:#x} ino={} idx={} dirty={} — DATA LOSS",
                                     fs_id, ino, idx, pg.dirty.load(Ordering::Acquire)
@@ -1847,6 +1919,7 @@ impl PageCache {
                         },
                     );
                     self.total_pages.fetch_add(1, Ordering::Relaxed);
+                    FI_INSERTED_PAGES.fetch_add(1, Ordering::Relaxed);
                 }
             }
             drop(w);
@@ -2585,3 +2658,9 @@ pub fn shared_file_fault_page(file: &crate::fs::file::File, file_offset: u64) ->
     free_page(bounce_phys);
     cache.get_phys(fs_id, ino, page_index)
 }
+
+/// FI-DIAG accessors for the data-integrity lane's census.
+pub fn fi_inserted_pages() -> u64 { FI_INSERTED_PAGES.load(Ordering::Relaxed) }
+pub fn fi_scanned_entries() -> u64 { FI_SCANNED_ENTRIES.load(Ordering::Relaxed) }
+pub fn fi_scanned_pages() -> u64 { FI_SCANNED_PAGES.load(Ordering::Relaxed) }
+pub fn fi_scanned_dirty() -> u64 { FI_SCANNED_DIRTY.load(Ordering::Relaxed) }

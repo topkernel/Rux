@@ -4598,6 +4598,16 @@ pub fn sys_sync(_args: SyscallArgs) -> i64 {
     // thus the buffer cache) BEFORE syncing the buffer cache, or sync(2)
     // would persist nothing of every un-fsynced write.
     crate::fs::page_cache::get_page_cache().flush_all_dirty();
+    // FI-DIAG: the page-cache census at the sync point.
+    {
+        crate::pr_err!(
+            "FI-SUMMARY inserted_pages={} scanned_entries={} scanned_pages={} scanned_dirty={}",
+            crate::fs::page_cache::fi_inserted_pages(),
+            crate::fs::page_cache::fi_scanned_entries(),
+            crate::fs::page_cache::fi_scanned_pages(),
+            crate::fs::page_cache::fi_scanned_dirty()
+        );
+    }
     // Flush all buffer cache
     let _ = crate::fs::bio::sync_buffers();
     // JOURNAL COMMIT (fi3/fi4 data-integrity lane, 2026-11-11): fsync's
