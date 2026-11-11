@@ -549,6 +549,11 @@ pub fn timer_softirq_handler(_nr: usize) {
             // 100%-CPU silent is the sole remaining 105 cause; this
             // names the spin site via the kernel-entry frame.
             crate::dfx::taskdump::pid1spin_audit();
+            // 99th (§87.8 wait4/SIGCHLD wakeup-loss hunt): wait4-park
+            // census — self-gated 1 Hz + anomaly-gated inside (zero
+            // serial on healthy boots); a parked waiter with a reapable
+            // zombie child prints the full wake-chain verdict line.
+            crate::process::exit::wait4_park_audit();
             // stress-port SP-5: direct-reclaim gate census — names the
             // holder's phase/wait-site when the gate has been held >=2 s
             // (self-gated: one atomic load when the gate is free; zero

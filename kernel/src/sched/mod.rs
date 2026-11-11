@@ -63,6 +63,7 @@ pub use sched::{
     for_each_task,
     for_each_task_try,
     defer_exit_notify,
+    deferred_exit_notify_slots,
     // Preemptive scheduling support
     need_resched,
     set_need_resched,

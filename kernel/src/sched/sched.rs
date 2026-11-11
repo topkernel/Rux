@@ -1151,6 +1151,19 @@ pub fn defer_exit_notify(parent_pid: u32, child_pid: u32) {
     }
 }
 
+/// 99th (§87.8 wait4/SIGCHLD wakeup-loss hunt): read-only snapshot of
+/// the per-CPU deferred exit-notification slots for the wait4-park
+/// census (a nonempty slot naming a parked waiter as the parent = a
+/// child's exit notify was stored but never delivered — the deferred
+/// protocol's loss arm, see exit.rs wait4_park_audit). Fills at most
+/// `out.len()` entries; 0 = empty slot.
+pub fn deferred_exit_notify_slots(out: &mut [i64]) {
+    let n = out.len().min(MAX_CPUS);
+    for c in 0..n {
+        out[c] = DEFERRED_EXIT_NOTIFY[c].load(core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Build the Linux do_notify_parent siginfo from the (zombie) child task:
 /// si_code = CLD_EXITED/CLD_KILLED/CLD_DUMPED and si_status in waitpid
 /// WSTATUS encoding. Falls back to None when the child is already gone

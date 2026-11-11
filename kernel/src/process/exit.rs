@@ -1511,8 +1511,30 @@ pub fn do_exit(exit_code: i32) -> ! {
         // Instead, store the parent PID in a per-CPU deferred slot;
         // __schedule processes it AFTER the context switch, when this
         // task is no longer running on any CPU.
-        if parent_pid != 0 {
-            crate::sched::defer_exit_notify(parent_pid, current_pid);
+        //
+        // 99th (orphan-during-exit parity, §87.8 hunt): the reference's
+        // do_notify_parent resolves task->real_parent AT NOTIFY TIME.
+        // `parent_pid` above was captured at do_exit ENTRY — if the real
+        // parent died while this task ran its exit tail, the child was
+        // reparented (reparent_children_to_init) to a subreaper/init
+        // AFTER the capture but BEFORE our ZOMBIE store, and the
+        // reparent's own zombie-notify arm (which fires only for
+        // children ALREADY ZOMBIE at move time) never fired for us. The
+        // packed pid would then name a dead task: the delivery's
+        // pid_hash lookup fails, no SIGCHLD, no wait_chldexit wake — and
+        // if the new parent (init) is parked in wait4, the zombie
+        // strands with its waiter forever. Resolve the CURRENT parent
+        // here, inside the same preempt-guarded section: None = a racing
+        // reaper already claimed us (it is inside release_task; the
+        // notify would be noise) — skip; Some(p) = notify p (whether or
+        // not it differs from the captured pid — same pid is the
+        // identity case).
+        let notify_parent: u32 = match (*current).parent_ptr() {
+            Some(pp) if Task::is_plausible_task_ptr(pp) => unsafe { (*pp).pid() },
+            _ => 0,
+        };
+        if notify_parent != 0 {
+            crate::sched::defer_exit_notify(notify_parent, current_pid);
         }
         crate::interrupt::preempt::preempt_count_sub(1);
         if fp {
@@ -1884,6 +1906,286 @@ pub(crate) unsafe fn wake_group_chldexit(task: *mut Task) {
         if guard > 65536 {
             break;
         }
+    }
+}
+
+// ============================================================================
+// wait4-park census (99th, §87.8 wait4/SIGCHLD wakeup-loss hunt)
+// ============================================================================
+
+/// Per-arch wait-class entry syscall numbers (NATIVE numbering, same
+/// decode contract as the r41v17 TIMEDSLEEP ticktrap's NS_SYS).
+#[cfg(feature = "x86_64")]
+const WAIT_SYS: [u64; 2] = [61, 247]; // wait4, waitid
+#[cfg(feature = "riscv64")]
+const WAIT_SYS: [u64; 2] = [260, 95]; // wait4, waitid
+#[cfg(feature = "aarch64")]
+const WAIT_SYS: [u64; 2] = [260, 95]; // wait4, waitid
+
+/// Park-age tracking ring: (pid, first-seen-parked jiffy, last-reported
+/// jiffy). A row lives while its pid is observed parked under a wait
+/// syscall; one absent beat clears it (normal wait4 parks are
+/// milliseconds and never survive two 1 Hz beats).
+struct WlRow {
+    pid: core::sync::atomic::AtomicU32,
+    since: core::sync::atomic::AtomicU32,
+    reported: core::sync::atomic::AtomicU32,
+}
+const WL_RING: usize = 8;
+static WL_SEEN: [WlRow; WL_RING] = [const {
+    WlRow {
+        pid: core::sync::atomic::AtomicU32::new(0),
+        since: core::sync::atomic::AtomicU32::new(0),
+        reported: core::sync::atomic::AtomicU32::new(0),
+    }
+}; WL_RING];
+
+/// Read a parked task's kernel-entry syscall frame (nr + first arg),
+/// mirroring the TIMEDSLEEP ghost hunt's entry_sys contract. Returns
+/// (0, 0) when the stack is not mapped/sane.
+/// SAFETY: `p` is a live task pinned by the caller's pid-hash walk.
+unsafe fn wl_entry_syscall(p: *mut Task) -> (u64, u64) {
+    let tk = &*p;
+    let top = match tk.kernel_stack_top_checked() {
+        Some(t) => t,
+        None => return (0, 0),
+    };
+    #[cfg(feature = "x86_64")]
+    {
+        let regs = (top.wrapping_sub(
+            crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+        )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+        ((*regs).orig_rax as u64, (*regs).rdi as u64)
+    }
+    #[cfg(feature = "riscv64")]
+    {
+        let regs = (top.wrapping_sub(
+            crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+        )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+        ((*regs).a7 as u64, (*regs).a0 as u64)
+    }
+    #[cfg(feature = "aarch64")]
+    {
+        let regs = (top.wrapping_sub(
+            crate::arch::aarch64::pt_regs::PT_REGS_SIZE,
+        )) as *const crate::arch::aarch64::pt_regs::PtRegs;
+        ((*regs).regs[8] as u64, (*regs).regs[0] as u64)
+    }
+}
+
+/// wait4-park census — the §87.8 verdict instrument. Anomaly-gated,
+/// self-rated to 1 Hz, pid-deduped 30 s, max 2 lines/beat: zero serial
+/// on healthy boots (a normal fork+wait park is milliseconds and never
+/// survives two beats).
+///
+/// A task INTERRUPTIBLE-parked under a wait4/waitid entry frame for
+/// >= 2 s gets ONE verdict line naming every hop of the child-exit wake
+/// chain, so a capture decodes the loss site in a single read:
+///
+///   ch=[pid:st ...] nz=N ns=M  children census (ZOMBIE=0x20 bit). A
+///                             parked waiter WITH nz>0 = the condition
+///                             is true and the wake never landed.
+///   q=(entries,woken)         the waiter's wait_chldexit queue; an
+///                             entry whose woken flag is set while the
+///                             task sleeps = the one-shot token was
+///                             consumed without a running task (the
+///                             W1/sc100 sticky-token family).
+///   pend=0x.. blk=0x..        pending/blocked signal masks (bit 16 =
+///                             SIGCHLD; pend set + still parked = the
+///                             signal wake was eaten or never came).
+///   slots=cN:parent/child     nonempty DEFERRED_EXIT_NOTIFY slots; one
+///                             naming this waiter = the child's exit
+///                             notify was stored and never delivered.
+pub fn wait4_park_audit() {
+    use core::sync::atomic::Ordering as O;
+    use crate::process::task::TaskState;
+
+    // 1 Hz self-gate (one relaxed load per tick when quiet).
+    static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let now = crate::drivers::timer::get_jiffies();
+    let last = LAST.load(O::Relaxed);
+    if now.wrapping_sub(last) < 100 {
+        return;
+    }
+    if LAST
+        .compare_exchange(last, now, O::AcqRel, O::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    // Pass 1: find wait-class sleepers, refresh the age ring.
+    // (pid, ptr, age_jiffies, since_row_index)
+    let mut waiters: [(u32, *mut Task, u64); 2] = [(0, core::ptr::null_mut(), 0); 2];
+    let mut nwait = 0usize;
+    let mut observed = [false; WL_RING];
+    crate::sched::for_each_task_try(|t| {
+        if t.is_null() || nwait == 2 {
+            return;
+        }
+        // SAFETY: diagnostic reads of a task pinned by the try-walk.
+        let (sleeping, pid) = unsafe { ((*t).state().is_sleeping(), (*t).pid()) };
+        if !sleeping || pid == 0 {
+            return;
+        }
+        let (nr, _a0) = unsafe { wl_entry_syscall(t) };
+        if !WAIT_SYS.contains(&nr) {
+            return;
+        }
+        // Track park age in the ring.
+        let mut row = WL_RING;
+        for (i, r) in WL_SEEN.iter().enumerate() {
+            if r.pid.load(O::Acquire) == pid {
+                row = i;
+                observed[i] = true;
+                break;
+            }
+        }
+        if row == WL_RING {
+            for (i, r) in WL_SEEN.iter().enumerate() {
+                if r.pid.load(O::Acquire) == 0 {
+                    r.pid.store(pid, O::Release);
+                    r.since.store(now as u32, O::Release);
+                    r.reported.store(0, O::Release);
+                    row = i;
+                    observed[i] = true;
+                    break;
+                }
+            }
+        }
+        if row == WL_RING {
+            return; // ring full of other parked waiters
+        }
+        let since = WL_SEEN[row].since.load(O::Acquire) as u64;
+        let age = now.saturating_sub(since);
+        if age >= 200 {
+            waiters[nwait] = (pid, t, age);
+            nwait += 1;
+        }
+    });
+    // Clear rows whose pid was not observed parked this beat.
+    for (i, r) in WL_SEEN.iter().enumerate() {
+        if !observed[i] && r.pid.load(O::Acquire) != 0 {
+            r.pid.store(0, O::Release);
+            r.since.store(0, O::Release);
+        }
+    }
+    if nwait == 0 {
+        return;
+    }
+
+    // Pass 2 (under the process-tree try-lock so parent links are
+    // stable): classify every task whose parent is one of the waiters,
+    // and collect the waiter-side verdict fields. Skips the beat when
+    // the tree lock is contended (the next 1 Hz beat retries).
+    let tree = match crate::process::task::PROCESS_TREE_LOCK.try_lock() {
+        Some(g) => g,
+        None => return,
+    };
+    // per-waiter accumulators
+    let mut nz = [0u32; 2];
+    let mut nch = [0u32; 2];
+    let mut shown: [alloc::vec::Vec<(u32, u32)>; 2] =
+        [alloc::vec::Vec::new(), alloc::vec::Vec::new()];
+    let mut qz = [(0usize, 0usize); 2];
+    let mut found = [false; 2];
+    let mut pend = [0u64; 2];
+    let mut blk = [0u64; 2];
+    let mut st_bits = [0u32; 2];
+    let mut nr_arg = [0u64; 2];
+    crate::sched::for_each_task_try(|t| {
+        if t.is_null() {
+            return;
+        }
+        // SAFETY: reads under the tree lock (release_task's tree detach
+        // also holds it), each task pinned by the try-walk.
+        unsafe {
+            for w in 0..nwait {
+                if (*t).pid() == waiters[w].0 {
+                    found[w] = true;
+                    st_bits[w] = (*t).state().bits();
+                    let (nr, a0) = wl_entry_syscall(t);
+                    nr_arg[w] = (a0 << 32) | nr;
+                    pend[w] = (*t).pending.get_all();
+                    blk[w] = (*t).sigmask;
+                    if let Some((total, woken)) = (*t).wait_chldexit.vw_queue_census_try() {
+                        qz[w] = (total, woken);
+                    }
+                    continue;
+                }
+                if let Some(pp) = (*t).parent_ptr() {
+                    if Task::is_plausible_task_ptr(pp) && (*pp).pid() == waiters[w].0 {
+                        nch[w] += 1;
+                        let st = (*t).state().bits();
+                        if st & TaskState::ZOMBIE != 0 {
+                            nz[w] += 1;
+                        }
+                        if shown[w].len() < 6 {
+                            shown[w].push(((*t).pid(), st));
+                        }
+                    }
+                }
+            }
+        }
+    });
+    drop(tree);
+
+    // Print the verdict: only when the anomaly is real — a reapable
+    // zombie under a parked waiter (the loss, any age) or a long park
+    // (>= 10 s; the child-never-exited face). 30 s re-report dedup,
+    // 2-line budget.
+    for w in 0..nwait {
+        if !found[w] {
+            continue;
+        }
+        let idx = WL_SEEN.iter().position(|r| r.pid.load(O::Acquire) == waiters[w].0);
+        let rep = idx.map(|i| WL_SEEN[i].reported.load(O::Acquire) as u64).unwrap_or(0);
+        let anomaly = nz[w] > 0 || waiters[w].2 >= 1000;
+        if !anomaly || (rep != 0 && now.saturating_sub(rep) < 3000) {
+            continue;
+        }
+        if let Some(i) = idx {
+            WL_SEEN[i].reported.store(now as u32, O::Release);
+        }
+        let mut slots = [0i64; crate::config::MAX_CPUS];
+        crate::sched::deferred_exit_notify_slots(&mut slots);
+        let mut line: alloc::string::String = alloc::format!(
+            "WAIT4-PARK pid={} age_s={} sys={} a0={:#x} st={:#x} ch=[",
+            waiters[w].0,
+            waiters[w].2 / 100,
+            nr_arg[w] & 0xFFFF_FFFF,
+            nr_arg[w] >> 32,
+            st_bits[w],
+        );
+        for (k, (cp, cst)) in shown[w].iter().enumerate() {
+            if k > 0 {
+                line.push(' ');
+            }
+            use core::fmt::Write;
+            let _ = write!(line, "{}:{:#x}", cp, cst);
+        }
+        use core::fmt::Write;
+        let _ = write!(
+            line,
+            "] nch={} nz={} q=({},{}) pend={:#x} blk={:#x} slots=",
+            nch[w], nz[w], qz[w].0, qz[w].1, pend[w], blk[w]
+        );
+        let mut any_slot = false;
+        for (c, s) in slots.iter().enumerate() {
+            if *s != 0 {
+                if any_slot {
+                    line.push(' ');
+                }
+                any_slot = true;
+                let parent = ((*s as u64) >> 32) as u32;
+                let child = (*s as u64 & 0xFFFF_FFFF) as u32;
+                let _ = write!(line, "c{}:{}/{}", c, parent, child);
+            }
+        }
+        if !any_slot {
+            line.push('-');
+        }
+        crate::pr_warn!("{}", line);
     }
 }
 

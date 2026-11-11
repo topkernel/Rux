@@ -11637,3 +11637,153 @@ all-CPU freeze (98.5) is the next reliability blocker on the
 fixed kernel — reproduce with hunt3 + mon-dump, RIPs will name it;
 (3) my 2 silent freezes vs 3 ladders on the same kernel suggests
 frequency ~2/7 — budget 5+ boots.
+
+### 99. 99TH SESSION (2026-11-11 19:0x-.., branch oh-crash) — §87.8 wait4/SIGCHLD WAKEUP-LOSS RETIRED: the conviction is FALSIFIED (the "stalls" were console user-write losses — both original hp87c/f boots had the script shell exit code 0 seconds after the "freeze"); a reliable-channel detector stack (kmsg verdict + UART-lag drain + WAIT4-PARK census) shows 9/9 wait-dependent scripts completing; one REAL parity hole found and fixed (orphan-during-exit notify); riscv64 1319/1319 green
+
+Mission: §87.8 (the #1-connected open bug per the handoff): reproduce
+the wait4 wake loss, instrument do_exit->exit_notify->SIGCHLD->parent
+wake, fix per reference semantics.
+
+#### 99.1 The confound, convicted from our own old serials
+
+The §87.8 evidence was "echo lines stop mid-script, no further exec".
+But §87.7#2 already knew: /dev/console USER writes are mostly LOST
+under printk churn (mangled/interleaved bytes on serial). The missing
+lines were never proof of a parked shell. The discriminator that was
+never applied: init's own "[pid=1][Init] Child process hpboot(pid N)
+exit with code : 0" line (init logs every SIGCHLD; that print rides
+the KERNEL path, not the lossy user tty write).
+
+  boot    script started   last visible line    hpboot exit (init log)
+  hp87c   5.235s           "list rc=0" @17.113  code 0 @ 12.214s  <<<
+  hp87f   —                (record step)         code 0 @ 22.558s
+
+hp87c is decisive: the shell EXITED CLEANLY at 12.214s — BEFORE the
+"list rc=0" echo even drained (17.113s; ~5 s of UART queue). The whole
+4-step hiperf script ran to completion inside 7 s; every echo after
+the first was eaten by the console path. Same for hp87f. hp87g's
+"sleep-anchored completes" A/B difference is explained too: its steps
+ran at DIFFERENT times (less printk churn) so the echoes happened to
+land. Both legs of the §87.8 conviction are console-loss artifacts.
+
+#### 99.2 The verdict channel stack (rig rules for every future stall hunt)
+
+- /dev/console user writes (sh echo) are UNRELIABLE mid-storm —
+  never build a verdict on them. Mangled bytes seen live at
+  wl99s1@19.465s.
+- /dev/kmsg writes with an explicit "<4>" prefix ride the kernel
+  printk path — RELIABLE through the storm (hilogd/appspawn kickdog
+  lines always land). Default-level kmsg writes are KERN_INFO = dropped
+  before the ring at LL4 (§97.1 lesson) — the <4> prefix is required.
+- UART LAG: the 115200 stream delivers ~11.5 KB/s; MB-scale boot
+  serials lag the guest by MINUTES. A driver that kills the VM at
+  wall-SECS truncates the verdict tail (wl99c1's DONE arrived at wall
+  ~240 s for guest-time 25.6 s). run/wl-boot-out.py now DRAINS past
+  SECS (45 s quiet-cut, hard cap +300 s).
+- The output disk is NOT a durable verdict channel either: guest
+  `sync` + periodic appends left a 0-byte file (ext4 writeback/i_size
+  parity — fs lane's family); only end-of-script umount is durable.
+- Detector scripts: scripts/test/waitloss_probe.c (minimal rootfs,
+  350 wait-dependent fork/exit/waitpid iterations + load generators +
+  mmap watchdog; waitloss_boot.py judges PASS/STALL/PANIC/TIMEOUT) and
+  run/wl99c-run.sh (OH-image 300x `/system/bin/true` loop with kmsg
+  progress + /proc watchdog dumps).
+
+#### 99.3 The tally (all channels adjudicated)
+
+  rig                       boots  completed  wake-loss stalls
+  minimal-rootfs probe      18     18         0   (SMP2 idle, SMP2+6
+                                                loaders, SMP8+6 loaders)
+  OH 300-step wait loop      9      9         0   (wl99b1-3 console+
+                                                exit-code adjudicated;
+                                                wl99c1/3/5/6 kmsg+exit0)
+  original hp87c/hp87f       2      2         0   (re-adjudicated 99.1)
+
+ZERO wait4 wake-loss stalls. 2 of 6 wl99c boots never ran the detector
+at all (no ServiceStart:hpboot, no START — the post-init service-ladder
+variance family, §95.2/§97.4 adjacent, NOT wait4; those boots completed
+the launcher ladder otherwise).
+
+#### 99.4 The instrument that stays: WAIT4-PARK census (always-on)
+
+kernel/src/process/exit.rs wait4_park_audit(), called from the timer
+tick site next to pid1spin_audit. Self-gated 1 Hz (one atomic load per
+tick when quiet), anomaly-gated (a waiter parked >= 2 s WITH a reapable
+zombie child, or >= 10 s any-children), pid-deduped 30 s, max 2
+lines/beat — ZERO serial on healthy boots (validated: a deliberate
+20 s healthy park prints exactly one line at age 10 s).
+
+One line decodes every loss arm of the chain:
+  WAIT4-PARK pid=P age_s=A sys=61 a0=.. st=0x1 ch=[pid:st ..] nch=N
+             nz=Z q=(entries,woken) pend=0x.. blk=0x.. slots=cN:p/c
+  ch/nz   children census, ZOMBIE=0x20 — nz>0 under a parked waiter
+          = the condition is TRUE and the wake never landed.
+  q       wait_chldexit queue; woken>0 entries while the task sleeps =
+          the one-shot token was consumed without a run (W1/sc100
+          sticky-token family).
+  pend/blk SIGCHLD pending/blocked masks (bit 16).
+  slots   per-CPU DEFERRED_EXIT_NOTIFY contents (new accessor
+          sched::deferred_exit_notify_slots); a slot naming the waiter
+          as parent = the child's exit notify was stored and NEVER
+          DELIVERED (the deferred protocol's loss arm).
+Face E's parked-init arm (init parked in wait4 with unreaped zombies)
+trips the nz>0 gate at 2 s — if that face ever recurs, the line names
+which arm ate the wake in one read.
+
+#### 99.5 The one real hole the audit found: orphan-during-exit notify (FIXED)
+
+do_exit captured `parent_pid` at ENTRY and packed it into the deferred
+notify slot at the END of the exit tail. If the real parent died in
+between, the child was already reparented to init/subreaper (whose
+zombie-notify arm only fires for children ZOMBIE at MOVE time), and
+the packed pid named a dead task: delivery's pid_hash lookup fails ->
+no SIGCHLD, no wake_group_chldexit — a stranded zombie under a parked
+waiter. Linux resolves task->real_parent AT NOTIFY TIME
+(do_notify_parent). The defer site now re-resolves the CURRENT parent
+(sched::defer_exit_notify(notify_parent, ...)): None = a racing reaper
+already claimed the child (skip — release_task owns it); Some(p) =
+notify p. Reference parity restored for that window.
+
+#### 99.6 Wake-chain audit verdict (the three classic candidates, all closed)
+
+- (a) wait-entry UAF: R12-1 wakes under the queue lock — an un-woken
+  entry proves its task never passed finish_wait.
+- (b) SIGCHLD set but sleeper never rechecks: do_wait re-checks both
+  children AND signal_pending AFTER prepare_to_wait (exit.rs 2138-2208);
+  blocked signals still pend AND wake (signal.rs 3495).
+- (c) wake-before-park: R42 flips state to RUNNING for the
+  still-linked pre-park window (sched.rs wake_up_enqueue_opt, 5199-
+  5203); W1 clears the consumed token on refused wakes; sc100 re-issues
+  for woken-flagged sleeping entries; R11-4 inline-fires an overwritten
+  slot; newborn/idle/repick delivery sites all process the slot
+  (schedule_tail R9-2, __schedule tail 3231, repick guard 3113).
+The deferred-notify protocol itself was the only Rux-specific divergence
+left, and 99.5 closes its one known loss window.
+
+#### 99.7 Gates (mine, this session)
+
+Dual-arch build rc=0 (x86_64 explicit, riscv64 default after
+`rm build/.config`); riscv64 `make test` 1319/1319 GREEN on the census
++ fix kernel (run/wl99-riscv-test.out). Both changes are anomaly-gated
+dfx-class code: standard boots pay one atomic load/tick (census gate)
+and one parent_ptr read per exit (fix). Tier1 syscost / Tier2 pbench
+owed by the coordinator per §97.9#5 as before.
+
+#### 99.8 FOR THE 100TH (priority order)
+
+1. §87.8 is CLOSED as a wakeup-loss bug. The console user-write loss
+   (§87.7#2) is now the convicted owner of every historical "shell
+   stall" signature on this rig family — it stays open as parity bug
+   #2 (the mangled-byte captures in wl99s1 name the interleave shape:
+   two writers racing per byte, not whole-line drops).
+2. The invisible-detector boots (2/6 in wl99c: post-init hpboot never
+   starts while the ladder completes) are a fresh, cheap face of the
+   service-ladder variance family — one quiet-arm series + the
+   existing periodic dumps would name whether the start request is
+   never sent (init) or the fork fails.
+3. Face E (samgr SIGSEGV -> init reboot-wedge, 74 zombies) remains
+   uncaptured; dfx=pid1spin is the named instrument (§97.9#2) and the
+   WAIT4-PARK census now covers its PARKED arm for free.
+4. The out-disk ext4 writeback parity (sync leaves i_size=0 on host
+   reads, 99.2) belongs to the fs lane's metadata_csum/writeback bug
+   family — hand them the wl99-out.img 0-byte-file capture.
