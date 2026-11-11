@@ -75,8 +75,20 @@ pub fn send_ipi_type(target: usize, ipi_type: IpiType) {
     if lapic == u32::MAX {
         return;
     }
+    // OH boot lane 2026-11-12: TlbFlush send counter — the shootdown
+    // volume the mm_cpumask filter exists to shrink, finally countable
+    // from /proc/interrupts (user mandate: if it affects performance,
+    // measure it).
+    if matches!(ipi_type, IpiType::TlbFlush) {
+        TLB_IPI_SENT.fetch_add(1, Ordering::Relaxed);
+    }
     crate::drivers::intc::apic::send_ipi(lapic, ipi_type.vector() as u8);
 }
+
+/// Total TLB-shootdown IPIs sent since boot (x86; one per IPI, any
+/// path).  Exposed as the TLB row of /proc/interrupts.
+pub static TLB_IPI_SENT: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
 
 /// Send Reschedule IPI (interface parity with the twin).
 pub fn send_reschedule_ipi(target_cpu: usize) {
@@ -97,6 +109,44 @@ pub fn flush_tlb_others(_start: u64, _end: u64) {
             send_ipi_type(cpu, IpiType::TlbFlush);
         }
     }
+}
+
+/// Mask-filtered TLB shootdown (Linux flush_tlb_mm shape, OH boot lane
+/// 2026-11-12): IPI only the CPUs that have EVER loaded this mm's root
+/// (`MmStruct::tlb_cpu_mask`, grow-only) instead of broadcasting to
+/// every started CPU. The remote handler is unchanged (full non-global
+/// flush), so semantics are identical to the broadcast minus the IPIs
+/// to CPUs that cannot hold this mm's translations. A single-threaded
+/// process munmapping on its only-ever CPU sends ZERO IPIs (the local
+/// flush covers it); a 3-CPU thread group sends 2 instead of 7.
+///
+/// `mask` bits beyond MAX_CPUS are ignored (ANDed with started CPUs).
+pub fn flush_tlb_others_mm(mask: u64, _start: u64, _end: u64) {
+    let me = crate::arch::cpu_id() as usize;
+    // CPUs not started can neither hold entries nor receive IPIs.
+    let mut targets = mask & started_cpu_mask();
+    if targets & !(1u64 << me) == 0 {
+        // Self/nothing — the caller's local flush covers this CPU.
+        return;
+    }
+    while targets != 0 {
+        let cpu = targets.trailing_zeros() as usize;
+        targets &= targets - 1;
+        if cpu < MAX_CPUS && cpu != me {
+            send_ipi_type(cpu, IpiType::TlbFlush);
+        }
+    }
+}
+
+/// Bitmask of started CPUs (bit i set = CPU i started).
+fn started_cpu_mask() -> u64 {
+    let mut mask = 0u64;
+    for cpu in 0..MAX_CPUS.min(64) {
+        if crate::arch::smp::cpu_started(cpu) {
+            mask |= 1u64 << cpu;
+        }
+    }
+    mask
 }
 
 // ============================================================================

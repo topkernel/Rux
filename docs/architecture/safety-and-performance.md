@@ -222,6 +222,20 @@ dead-proc `expect()` replaced by a bounded warning (619bf4b6); the
   nestings (futex bucket→GRQ), and the cost side (tick-quantized
   wake→run ~10 ms behind an incumbent, both hog regimes) is banked in
   the same table — the ledger keeps the cost next to the win.
+- TLB-shootdown lazy mm_cpumask (x86_64, OH boot lane 2026-11-12):
+  every munmap/fork-COW/mprotect/COW-fault used to BROADCAST a
+  full-TLB-flush IPI to all 8 CPUs — /proc/interrupts on a pristine
+  OH boot counts 4,031,356 shootdown IPIs by t=200 s (~20k/s; each a
+  KVM-intercepted LAPIC write plus a remote full flush that destroys
+  the remote's working set). The per-mm cpu_mask (set at switch-in
+  before the serializing CR3 write, cleared at switch-away where the
+  plain CR3 write's full flush makes it sound; grow-only under PCID)
+  drops the count to 10,209 — 395x fewer, 99.7% of the shootdown
+  traffic gone — with flush semantics unchanged (remotes still
+  full-flush; the mask only decides WHO can hold entries). Safety
+  pairing: the mask's ordering argument is documented at the field
+  (MmStruct::cpu_mask) and the lazy clear is PCID-gated so the
+  NOFLUSH regime keeps the conservative grow-only mask.
 - fs metadata family (same board): stat 200.9→71.1 µs, openclose
   512.9→156.3 µs, append 657.2→77.4 µs, mkdrmdir 22,814→2,757 µs —
   the D-8/D-12/D-13 write-through jbd2 + batched-publication stack;

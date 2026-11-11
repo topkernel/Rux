@@ -898,7 +898,7 @@ impl MmStruct {
         // on the bench shape). Cleared-range visibility for user mode is
         // restored before the syscall returns (the reference batches its
         // unmapped-range flushes the same way).
-        crate::arch::ipi::flush_tlb_others(addr_us as u64, end_addr as u64);
+        crate::arch::ipi::flush_tlb_others_mm(self.tlb_cpu_mask(), addr_us as u64, end_addr as u64);
         crate::arch::mm::asid::flush_tlb_all();
 
         if mp {
@@ -1221,7 +1221,8 @@ impl MmStruct {
         }
         let mp_tt = if mp { crate::dfx::mmprof::now() } else { 0 };
         if !defer_tlb_flush {
-            crate::arch::ipi::flush_tlb_others(
+            crate::arch::ipi::flush_tlb_others_mm(
+                self.tlb_cpu_mask(),
                 start.as_usize() as u64,
                 end as u64,
             );
@@ -1513,8 +1514,9 @@ impl MmStruct {
         // of THIS mm may hold the old permissive entries — with PCID
         // those survive context switches, and even PCID-less they only
         // died at the peer's next CR3 reload (latent same-mm stale
-        // window, closed with the broadcast).
-        crate::arch::ipi::flush_tlb_others(0, 0);
+        // window, closed with the broadcast; mask-filtered to the CPUs
+        // that ever loaded this mm, 2026-11-12).
+        crate::arch::ipi::flush_tlb_others_mm(self.tlb_cpu_mask(), 0, 0);
         crate::arch::mm::asid::flush_tlb_all();
     }
 
@@ -2812,9 +2814,9 @@ pub unsafe fn copy_page_table_cow(
     // COW and land in the frame now shared with the child (a silently LOST
     // private write), and stale reads resurrect pre-fork page contents.
     // PTE permission changes on a live mm require a TLB shootdown on ALL
-    // CPUs (Linux flush_tlb_mm-style): IPI the peers (local-only during
-    // x86 bring-up), full-flush locally.
-    crate::arch::ipi::flush_tlb_others(0, 0);
+    // CPUs that ever ran the mm (Linux flush_tlb_mm shape): IPI exactly
+    // those peers (mask-filtered, 2026-11-12), full-flush locally.
+    crate::arch::ipi::flush_tlb_others_mm(parent.tlb_cpu_mask(), 0, 0);
     crate::arch::mm::asid::flush_tlb_all();
 
     Some(child_root_ppn)
@@ -2944,10 +2946,10 @@ pub unsafe fn handle_cow_fault(
         // be visible to EVERY CPU that may hold the old entry — the task
         // can migrate, and a remote stale entry turns the retry into a
         // permanent fault or serves stale page contents. Shoot the entry
-        // down on all peers (local-only during x86 bring-up; the remote
-        // handler takes no locks, so doing this under PTE_MODIFY_LOCK
-        // cannot deadlock).
-        crate::arch::ipi::flush_tlb_others(virt_addr, virt_addr + PAGE_SIZE);
+        // down on the peers that ever loaded this mm (mask-filtered,
+        // 2026-11-12; the remote handler takes no locks, so doing this
+        // under PTE_MODIFY_LOCK cannot deadlock).
+        crate::arch::ipi::flush_tlb_others_mm(mm.tlb_cpu_mask(), virt_addr, virt_addr + PAGE_SIZE);
         crate::arch::cpu::invlpg(virt_addr);
 
         return CowFaultResult::Resolved;
@@ -2992,8 +2994,9 @@ pub unsafe fn handle_cow_fault(
     // SMP coherence: this replacement (old frame → private copy) is exactly
     // the stale-entry hazard — without a shootdown, a CPU the task migrated
     // from keeps translating the VA onto the OLD frame, splitting the
-    // task's memory view.
-    crate::arch::ipi::flush_tlb_others(virt_addr, virt_addr + PAGE_SIZE);
+    // task's memory view. Mask-filtered shootdown (2026-11-12): only the
+    // CPUs that ever loaded this mm can hold the old entry.
+    crate::arch::ipi::flush_tlb_others_mm(mm.tlb_cpu_mask(), virt_addr, virt_addr + PAGE_SIZE);
     crate::arch::cpu::invlpg(virt_addr);
 
     // Now safe to release our share of the old page.

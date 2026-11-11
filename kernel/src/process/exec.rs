@@ -1508,6 +1508,14 @@ pub(crate) fn do_execve_elf(
             new_addr_space.alloc_asid().unwrap_or(0)
         };
 
+        // OH boot lane 2026-11-12: this CPU is about to run the new mm
+        // WITHOUT a context switch (exec returns straight to user) —
+        // record it in the mm's shootdown mask so a later munmap/COW
+        // flush reaches this CPU's cached entries. context_switch sets
+        // the bit on every OTHER load; exec is the one load site that
+        // bypasses it.
+        new_addr_space.note_tlb_cpu(crate::arch::cpu_id() as usize);
+
         // Switch to the NEW address space BEFORE dropping the old mm.
         // The old order (set_address_space → switch_mm) had an SMP window:
         // set_address_space drops the old mm's last Arc → teardown frees the

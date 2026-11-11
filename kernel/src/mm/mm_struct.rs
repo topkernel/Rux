@@ -314,6 +314,28 @@ pub struct MmStruct {
     /// only provides interior mutability through the Arc, never
     /// contends.
     exe_text_key: Spinlock<Option<(u64, u64)>>,
+
+    /// CPUs that may hold cached user translations of this mm (Linux
+    /// mm_cpumask shape, OH boot lane 2026-11-12) — the exact predicate
+    /// a TLB shootdown needs.
+    ///
+    /// Set in context_switch/exec BEFORE the incoming CR3 write. On
+    /// x86_64 with PCID OFF (every plain CR3 write fully flushes the
+    /// TLB), the bit is CLEARED on switching away (lazy mask): the mask
+    /// tracks "CPUs currently running this mm", so a single-threaded
+    /// process's shootdown sends ZERO IPIs. With PCID on (NOFLUSH
+    /// tagged writes keep entries alive across switches) the mask is
+    /// grow-only — over-IPIs, never under-IPIs.
+    ///
+    /// Correctness: a CPU's stale entries can only be created by an
+    /// incoming CR3 write, which is preceded by its bit-set and — MOV
+    /// to CR3 being serializing — the bit-set is globally performed
+    /// before any cached entry exists; a sender that has already
+    /// cleared the PTEs and then reads the mask with Acquire sees every
+    /// CPU that can hold old entries (single-variable coherence). The
+    /// clear runs with IRQs off before the outgoing flush-on-write, so
+    /// no translation window straddles the clear.
+    cpu_mask: AtomicU64,
 }
 
 /// MmStruct flags
@@ -425,6 +447,7 @@ impl MmStruct {
             flags: AtomicU64::new(0),
             owner_pid: AtomicI32::new(-1),
             exe_text_key: Spinlock::new(None),
+            cpu_mask: AtomicU64::new(0),
         }
     }
 
@@ -497,6 +520,50 @@ impl MmStruct {
     #[inline]
     pub fn set_asid(&self, asid: u16) {
         self.asid.store(asid, Ordering::Release);
+    }
+
+    /// Record that THIS cpu is about to load (or has loaded) this mm's
+    /// root — the TLB-shootdown mask (see `cpu_mask`). Must be called
+    /// BEFORE the CR3 write so a concurrent shootdown that has already
+    /// cleared PTEs cannot miss this CPU (see field doc).
+    #[inline]
+    pub fn note_tlb_cpu(&self, cpu: usize) {
+        if cpu >= 64 {
+            return;
+        }
+        self.cpu_mask.fetch_or(1u64 << cpu, Ordering::Release);
+    }
+
+    /// Drop THIS cpu from the shootdown mask on switching AWAY from the
+    /// mm (the mask's lazy half, x86_64 PCID-off discipline). Valid ONLY
+    /// when the switch-away's CR3 write flushes the whole TLB (PCID off:
+    /// every plain CR3 write is a full flush) — with PCID on the caller
+    /// must NOT clear (cached entries survive the switch under the mm's
+    /// PCID tag; the grow-only mask stays conservative there).
+    ///
+    /// Ordering (why a concurrently-faulting CPU cannot be missed):
+    /// - clear-side: the clear runs in context_switch with IRQs off,
+    ///   BEFORE the outgoing CR3 write; no user translation can occur
+    ///   between them, and the write itself flushes every entry.
+    /// - set-side: `note_tlb_cpu` precedes the incoming CR3 write, and
+    ///   MOV-to-CR3 is a serializing instruction (SDM Vol 3 §8.3), so
+    ///   the bit-set is globally performed before any entry the load
+    ///   caches exists; a flush whose PTE-clear precedes its Acquire
+    ///   mask read therefore sees every CPU that cached old entries.
+    #[inline]
+    pub fn clear_tlb_cpu(&self, cpu: usize) {
+        if cpu >= 64 {
+            return;
+        }
+        self.cpu_mask.fetch_and(!(1u64 << cpu), Ordering::Release);
+    }
+
+    /// Snapshot of the ever-loaded CPU mask for shootdown filtering.
+    /// Callers that have just cleared PTEs read this with Acquire: every
+    /// CPU whose CR3 write preceded the clear is guaranteed present.
+    #[inline]
+    pub fn tlb_cpu_mask(&self) -> u64 {
+        self.cpu_mask.load(Ordering::Acquire)
     }
 
     /// Allocate ASID for this address space

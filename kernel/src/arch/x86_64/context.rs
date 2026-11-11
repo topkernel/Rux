@@ -675,8 +675,30 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     // back to the untagged write, which flushes on entry — legacy
     // behavior, correct because PCID 0's entries die before reuse.
     if let Some(next_mm) = next.address_space() {
+        // OH boot lane 2026-11-12: record THIS cpu in the mm's
+        // shootdown mask BEFORE any CR3 write this switch may perform —
+        // a CPU that translates through this mm must be IPI-able by its
+        // later munmap/COW flushes (see MmStruct::cpu_mask). Redundant
+        // with the actual load when the root is already resident: the
+        // bit was set by whichever load installed it — the unconditional
+        // fetch_or keeps the invariant local to one site.
+        next_mm.note_tlb_cpu(crate::arch::cpu_id() as usize);
         let next_ppn = next_mm.root_ppn();
         if super::mm::asid::satp_to_ppn(read_cr3()) != next_ppn {
+            // LAZY MASK (PCID-off only): the outgoing root differs —
+            // the write below flushes this CPU's whole TLB (every plain
+            // CR3 write does, PCID off), so the outgoing mm loses every
+            // cached entry here: drop this CPU from ITS mask. With PCID
+            // on the tagged NOFLUSH write keeps the outgoing mm's
+            // entries cached — the mask must stay set (grow-only). See
+            // MmStruct::clear_tlb_cpu for the ordering argument.
+            if !super::mm::asid::pcid_enabled() {
+                if let Some(prev_mm) = prev.address_space() {
+                    if prev_mm.root_ppn() != next_ppn {
+                        prev_mm.clear_tlb_cpu(crate::arch::cpu_id() as usize);
+                    }
+                }
+            }
             // Resolve the mm's PCID lazily (mm creation does not draw
             // one; the first switch that runs the mm does — aarch64
             // twin's discipline).
@@ -705,6 +727,16 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         let kernel_ppn = super::mm::mmu_init::root_page_table_ppn();
         if super::mm::asid::satp_to_ppn(read_cr3()) != kernel_ppn {
             crate::dfx::cctx::bump(&crate::dfx::cctx::CW_MM_N);
+            // LAZY MASK twin of the user branch: switching to the
+            // kernel root flushes (PCID off) — drop this CPU from the
+            // outgoing user mm's mask.
+            if !super::mm::asid::pcid_enabled() {
+                if let Some(prev_mm) = prev.address_space() {
+                    if prev_mm.root_ppn() != kernel_ppn {
+                        prev_mm.clear_tlb_cpu(crate::arch::cpu_id() as usize);
+                    }
+                }
+            }
             write_cr3(super::mm::asid::build_satp(0, kernel_ppn));
         }
     }

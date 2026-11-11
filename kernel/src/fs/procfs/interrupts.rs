@@ -133,6 +133,15 @@ pub fn generate() -> Vec<u8> {
     }
     output.push_str("  RISC-V Software IPI\n");
 
+    // x86_64 TLB-shootdown IPIs SENT (any path; the mm_cpumask filter's
+    // target metric, OH boot lane 2026-11-12). Single machine-wide total
+    // — the send sites do not attribute per-CPU.
+    #[cfg(feature = "x86_64")]
+    {
+        let tlb = crate::arch::x86_64::ipi::TLB_IPI_SENT.load(Ordering::Relaxed);
+        output.push_str(&format!("TLB:      {:>10}  TLB-shootdown IPIs sent (x86)\n", tlb));
+    }
+
     // PLIC external interrupts - read from irq_desc
     let show_irqs: Vec<usize> = (1..=15).chain(32..=47).collect();
 
