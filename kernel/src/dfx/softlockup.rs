@@ -209,7 +209,30 @@ pub fn check() {
             };
             if !stuck_task.is_null() {
                 let pid = unsafe { (*stuck_task).pid() };
-                let _ = write!(w, "  CPU: {} PID: {}\n", cpu, pid);
+                let pc = unsafe { (*stuck_task).preempt_count() };
+                let _ = write!(w, "  CPU: {} PID: {} pc={:#x}\n", cpu, pid, pc);
+                // oh-crash 92nd (IF=0 wedge, hp91h residual): the wedged
+                // CPU cannot self-report — its tick is dead, so the
+                // tick-side orphan scan never fires for it. This CPU (a
+                // healthy one in timer context) reads the leakorigin
+                // booking SHADOW for the stuck task: hsite names the trap
+                // dispatch site that booked a never-released HARDIRQ bit
+                // (the pc=0x10000 face keeps irq_exit from restoring IF),
+                // ssite the SOFTIRQ booker (__do_softirq / SeqLock::write),
+                // osite the outermost preempt acquire whose release never
+                // ran. The shadow is plain atomics keyed by task pointer;
+                // the stuck task is pinned by the wedged CPU's sched slot
+                // (same read discipline as the pid above). All three are
+                // budgeted and no-op unless dfx=leakhunt is armed.
+                crate::dfx::leakorigin::report_hardirq_origin(
+                    b"LOCKUP-HARDIRQ", stuck_task,
+                );
+                crate::dfx::leakorigin::report_softirq_origin(
+                    b"LOCKUP-SOFTIRQ", stuck_task,
+                );
+                crate::dfx::leakorigin::report_outermost(
+                    b"LOCKUP-OUTER", stuck_task,
+                );
             }
 
             // Stack trace

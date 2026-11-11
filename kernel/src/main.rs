@@ -1853,14 +1853,20 @@ fn panic(info: &PanicInfo) -> ! {
     // Separator
     let _ = w.write_str("\n---[ end Kernel panic - not syncing ]---\n\n");
 
-    // Dump CSRs, registers, and stack trace via dfx
-    dfx::backtrace::dump_csrs();
-    dfx::backtrace::dump_regs_inline();
-    dfx::backtrace::dump_stack();
-
     // Stop the other CPUs (Linux panic → smp_send_stop). Without this the
     // panicking CPU halts while the others keep running — corrupting state
     // under the panic dump and stealing the UART mid-print (review批次8).
+    //
+    // 93rd reorder (hp91h evidence): this used to run AFTER the dumps.
+    // The sysrq-'c' panic's report ended mid-dump and the Stop IPIs were
+    // evidently never sent — every other CPU kept ticking for 6-45 s and
+    // then wedged one by one on state the dead CPU held (the "rolling
+    // IF=0 wedge" face: soft-lockup BUGs + REMOTE-BT TIMEOUTs for 150 s,
+    // init already dead so the boot was unsalvageable either way — the
+    // zombie face only burned the rig window). Send FIRST, print SECOND:
+    // a hang anywhere in the dump path can no longer leave the machine
+    // zombie; the report is marginally staler but no longer races a
+    // live system mutating under it.
     {
         let me = arch::cpu_id() as usize;
         for cpu in 0..crate::config::MAX_CPUS {
@@ -1869,6 +1875,11 @@ fn panic(info: &PanicInfo) -> ! {
             }
         }
     }
+
+    // Dump CSRs, registers, and stack trace via dfx
+    dfx::backtrace::dump_csrs();
+    dfx::backtrace::dump_regs_inline();
+    dfx::backtrace::dump_stack();
 
     // NOTE: no disk flush here. The old persistent_log_flush call is
     // gone by design: the panic may BE the storage stack, and a sync

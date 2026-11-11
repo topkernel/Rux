@@ -9776,6 +9776,67 @@ fn binder_transaction(
                                 "{}",
                                 hist_line_of(thread.tid, &hist_snapshot(&thread))
                             );
+                            // 93rd (hp91h decode): dump the FULL todo and
+                            // txn_stack, per item. The guard's todo-head
+                            // entry printed above only names the head;
+                            // the producer question (which discipline
+                            // leaked it — an unread REPLY-shaped txn, a
+                            // leftover ReturnError truncating a read, a
+                            // double-stacked outgoing txn) needs the whole
+                            // list. r=R(reply: target_node none, from pid),
+                            // t=txn, e=err, c=tcomplete, d=death, n=node;
+                            // ages in jiffies via enq_j (txns only).
+                            let _ = write!(w, "  todo[{}]:", st.todo.len());
+                            for wi in st.todo.iter().take(12) {
+                                match wi {
+                                    Work::Transaction(t) => {
+                                        let _ = write!(
+                                            w,
+                                            " t{}{}code{:#x}from pid{}tid{}to_tid={:?}oneway={}age{}",
+                                            t.id,
+                                            if t.target_node.is_none() { "=R" } else { "" },
+                                            t.code,
+                                            t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
+                                            t.from_tid.unwrap_or(0),
+                                            unsafe { t.to_tid() },
+                                            t.flags & TF_ONE_WAY != 0,
+                                            crate::drivers::timer::get_jiffies()
+                                                .wrapping_sub(t.enq_j as u64),
+                                        );
+                                    }
+                                    Work::TransactionComplete => {
+                                        let _ = write!(w, " c");
+                                    }
+                                    Work::ReturnError(c, p) => {
+                                        let _ = write!(w, " e{:#x}/{}", c, p);
+                                    }
+                                    Work::DeadBinder { .. } => {
+                                        let _ = write!(w, " d");
+                                    }
+                                    Work::Node(_) => {
+                                        let _ = write!(w, " n");
+                                    }
+                                    Work::ClearDeathDone { .. } => {
+                                        let _ = write!(w, " cd");
+                                    }
+                                }
+                            }
+                            let _ = write!(w, " stack[{}]:", st.txn_stack.len());
+                            for t in st.txn_stack.iter().take(8) {
+                                let _ = write!(
+                                    w,
+                                    " t{}{}code{:#x}from pid{}tid{}to_tid={:?}age{}",
+                                    t.id,
+                                    if t.target_node.is_none() { "=R" } else { "" },
+                                    t.code,
+                                    t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
+                                    t.from_tid.unwrap_or(0),
+                                    unsafe { t.to_tid() },
+                                    crate::drivers::timer::get_jiffies()
+                                        .wrapping_sub(t.enq_j as u64),
+                                );
+                            }
+                            let _ = writeln!(w, "");
                         }
                         // Unconditional reference-parity rejection.
                         sendfail_why(if todo_head_txn { 21 } else { 20 });
