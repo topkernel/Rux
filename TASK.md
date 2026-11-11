@@ -10613,3 +10613,164 @@ spawn path, and hp91f/g did not hit it in 330s (2/3 boots clean).
 4. Rig: hunt builds MUST pass --features x86_64,dfx-lock-owner; the
    variance series leaves 5 serial logs + markers in run/ for the
    report.
+
+### 93. 93RD SESSION (2026-11-11 11:0x-.., branch oh-crash) — THE "RESIDUAL IF=0 WEDGE" IS DECODED AND IT IS NOT AN IRQ BUG: foundation SIGABRTs x4 (binder sync-send guard storm), init's critical-service policy fires sysrq 'c', and the PANIC PATH (Stop IPIs sent after a hanging dump) is what wedged the CPUs one by one
+
+Mission was the 92nd's charter (wedge hunt via dfx=leakhunt ssite
+shadow). The 92nd died at 25 min leaving the softlockup leakhunt WIP
+(kept — compiles, budgeted, landed in 22789bd2) and 5 clean leakhunt
+boots (no wedge). This session decoded the hp91h artifact instead of
+rerolling blind, and the decode reframes everything.
+
+#### 93.1 The hp91h chain (all from the existing serial, no new boots)
+
+  t=51.96/93.44/120.32/159.42  foundation(pid 710/1633/2231/2438) exit
+                              with signal 6 (SIGABRT) — four times
+  t=173.98  "ServiceReap error critical service crashed foundation 4"
+            -> init reboot policy: pid 1 writes 'c' to
+            /proc/sysrq-trigger ("PANIC: sysrq 'c' — deliberate crash",
+            call trace = sys_write -> procfs_file_write ->
+            sysrq::write_trigger — init's own hand)
+  t=174.0   panic report prints, ends mid-dump_stack
+  t=184-224 the OTHER CPUs keep ticking 6-45s, then wedge one by one
+            (the "rolling IF=0 wedge": BUG: soft lockup + REMOTE-BT
+            TIMEOUT; cpu6 last, IRQ-OFF-WINDOW age=9411ms pid=1 —
+            init's corpse in ext4_file_read_cached_dst, pc=0x10000 =
+            the recovery tick's OWN in-flight bracket, base CLEAN)
+
+So the wedge face is the PANIC PATH, not preempt/IRQ discipline: the
+Stop-IPI loop ran AFTER the dumps (main.rs), the dump evidently hung,
+the IPIs were never serviced, and the machine zombied for 150s. FIX
+LANDED (22789bd2): smp_send_stop BEFORE the dumps. The boot was
+already dead (init crashed it on purpose) — the fix removes the zombie
+face and the 6 minutes of soft-lockup spam, nothing else.
+
+WHY init crashed the box: foundation aborts. WHY foundation aborts:
+its sync binder sends come back BR_FAILED_REPLY (0x7211) in storms —
+317 ERR_RECV(29201) events in hp91h — from the SYNCSEND-GUARD
+(reference-parity rejection, see 93.2).
+
+#### 93.2 The guard storm decode (hp91c/h/w4 rings; upstream verified)
+
+Upstream 6.6 binder.c has BOTH our guard conditions (verified against
+git.kernel.org v6.6 source, not memory):
+  - "new transaction not allowed when there is a transaction on thread
+    todo" (w->type == BINDER_WORK_TRANSACTION at todo head, !ONE_WAY)
+    -> BR_FAILED_REPLY -EPROTO  [our why=21]
+  - "got new transaction with bad transaction stack" (top->to_thread
+    != thread) -> BR_FAILED_REPLY  [our why=20]
+So the rejection itself is parity. The PRECONDITION is what we violate
+at volume. Two poison shapes from the rings:
+  A. stack-top-not-mine with top = the sender's OWN unresolved txn
+     (w4: top=txn16379 code0xc from pid400 tid1172, to_tid=None = the
+     server never picked it up) — the thread sends again while its
+     previous sync txn is still stacked. Rings show WAKE_RET(0)
+     everywhere — NO EINTR escapes; the reads park and wake cleanly.
+  B. todo-head-txn with EMPTY stack: an orphan REPLY-shaped txn
+     (target_node None, code 0, from pid0 — replies carry from=None by
+     construction) sits unread on the todo of a thread that has moved
+     on, and the next send trips why=21.
+The w4 ring names the trigger: the target service DIED
+(DEAD_REPLY 0x7205 arrives 2-98 jiffies after the send) and the OH
+proxy RETRIES into the dead handle; retries overlap unresolved txns,
+late true-replies land as orphans, and the guard converts a retryable
+dead-target condition into hard BR_FAILED_REPLY — OH userspace treats
+that as fatal, foundation eventually abort()s.
+
+Correlation across the 11 boots on this kernel family:
+  guard hits 0-3  -> launcher.ready 43.9-96.7s (w5/w3/hp93f clean)
+  guard hits 25-80 (print budget) -> foundation aborts 1-4x, launcher
+  NEVER or sysrq-c (hp91c/g/h, w4)
+hp91e (1 guard hit) hit the full ladder at 63.9s. The storm is THE
+identified launcher killer — and it is flaky (~4/11 boots), which is
+why it hid inside the "wedge" report.
+
+INSTRUMENT LANDED (22789bd2): the guard print now dumps the sender's
+FULL todo + txn_stack (item kind, txn id, reply-shape, from, to_tid,
+oneway, enq age). The 24-event ring cannot name the orphan-reply
+producer; the dump can. Storm-capture rerolls with dfx=leakhunt armed
+(the 92nd's w3/w4 storm conditions — leakhunt's per-acquire store
+plausibly widens the race window) in flight at write time.
+
+NOT the fix yet: candidates are (a) our delivery lets a reply land on
+a busy thread's todo (invariant break — see read-loop truncation
+shapes), (b) target-death handling should invalidate the handle the
+way the reference does so OH retries get DEAD not FAILED. Do NOT
+loosen the guard — it is reference parity.
+
+#### 93.3 Boot ledger this session (SMP8+4G KVM, pristine userdata-fresh)
+
+  boot    guards  foundation aborts  outcome
+  hp93a   0       0                  anim.fin 30.6s, no launcher by 330
+                                            (clean-stall class, like w1/w2)
+  hp93b   1       -                  no launcher
+  hp93c   3       -                  no launcher
+  hp93d   3       -                  no launcher
+  hp93e   0       0                  no launcher by 330
+  hp93f   0       0                  launcher.ready 82.2s (FULL LADDER;
+                                            rig script never ran — 93.4)
+Note the THIRD class: clean-guard boots that still never spawn the
+launcher (hp93a/e, w1/w2) — systemui alive and serving binder at 246s,
+ladder stopped after bootanimation. That stall is what the P2 tail
+record is for.
+
+#### 93.4 Rig notes (blood rules earned this session)
+
+- The 92nd's hp92a record NEVER extracted: the script stalled between
+  step2's kill (~235s) and the copy phase — the copy chain (ls/cp =
+  fork+wait) is exactly the wait4-stall diet; AND the userdata's
+  post-boot ext4 state has INVALID metadata checksums (the §87.7#3
+  open item — our kernel writes guest metadata without csum), so
+  host-side recovery (mount/e2fsck/debugfs) either refuses or — for
+  e2fsck -fy — replays to an ANCIENT checkpoint and DESTROYS the
+  files. The .data records are unrecoverable.
+- hp93f/f2 rig: inject BOTH /system/etc/hp87-run.sh AND
+  /system/etc/init/hp87.cfg (services: hpboot -> sh hp87-run.sh +
+  post-init "start hpboot") — hp93f's injection missed the cfg and the
+  script never ran (its boot then hit the full ladder at 82.2s anyway,
+  a free clean-class datapoint).
+- hp93f2 (in flight): wait-free extraction — mount the OUTPUT disk
+  ONCE at t~5 with -o sync, hiperf -o writes DIRECTLY to /data/hpout,
+  no late cp/sync/umount chain exists to stall; kill QEMU at 340s and
+  the whole files are on platter.
+- PERF-OPEN (from the 92nd's hp92a serial): sample_type=0x103e7 with
+  "CALLCHAIN bit set" on all 8 cpus — hiperf ASKS for chains and the
+  kernel ACCEPTS the bit. The attr-gap question is closed; whether
+  records CARRY chains awaits hp93f2's parser run.
+
+#### 93.5 riscv64 make test — BOOT PANIC, bisect in flight
+
+`make test` on this branch's tip boots-KERNPANICs on riscv64 BEFORE
+any test runs: pfault badaddr=0 epc=0 ra=0, tp=0x0 "NOT-A-KERNEL-TASK
+(misrouted entry?)", right after memblock init; "Attempted to kill
+the idle task!". Bisect so far (each step = build + 600s hung-boot
+wrapper):
+  22789bd2 (93rd tip)      panic
+  99a467af (91st docs tip) panic
+  57619346 (mm fix)        DOES NOT BUILD (record_owner arity — the
+                           b91e6c41 fix exists for exactly this)
+  4950f396 (91st instruments) panic
+  5bec3357 (89th tip)      RUNNING at write time
+The 89th's §89.5 execve KERNPANIC was DURING tests (boot worked), so
+the boot panic entered between the 89th's tip and 4950f396 — i.e. the
+90th's dfx commits (08e775cc/edcf2e36/2004dcf6) or the 88th's
+b73ed3c0 if 5bec3357 also panics. NOTE: this blocks the merge gate
+the 91st left open (91.6#1) — the gate CANNOT close until the boot
+panic is fixed; x86_64 OH evidence is unaffected (x86_64 boots fine).
+
+#### 93.6 FOR THE 94TH (priority order)
+
+1. THE GUARD STORM FIX: read the hp93g-series storm dump (todo/stack
+   with ages) — decide between delivery-side (orphan-reply producer)
+   vs death-side (handle invalidation) fix. The storm is the #1
+   launcher blocker: 0-3 hits -> ready in 44-97s; 25+ -> never.
+2. Close the riscv64 boot-panic bisect (93.5) and fix it; then the
+   91.6#1 merge gate can actually run (riscv64 suite + perf tiers).
+3. hp93f2 parser run (if the records landed): chains + user-side tail
+   attribution — the user's explicit ask from 91.6#2.
+4. The clean-stall class (no guards, no launcher: hp93a/e w1/w2) —
+   needs the tail record to attribute; suspect the SA-install KVS/
+   distributeddata chain, NOT binder.
+5. Panic-reorder validation: any sysrq-c boot should now show all
+   CPUs halting at panic time (no 150s zombie window). One boot with
+   the guard storm ending in foundation-abort-4 gives it for free.
