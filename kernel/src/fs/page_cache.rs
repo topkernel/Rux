@@ -1501,9 +1501,23 @@ impl PageCache {
                     if npages >= 128 {
                         static FI_C: core::sync::atomic::AtomicUsize =
                             core::sync::atomic::AtomicUsize::new(0);
-                        if FI_C.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 10 {
+                        if FI_C.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 64 {
                             crate::pr_err!(
                                 "FI-CENSUS fs={:#x} ino={} pages={} dirty={}",
+                                entry.fs_id, entry.ino, npages, ndirty
+                            );
+                        }
+                    }
+                    // FI-DIAG (028fb37d razor): entries with dirty>0 or
+                    // >=512 pages print even below the census threshold —
+                    // hypothesis (b) vanish vs (c) cleared distinguishes
+                    // by PRESENCE here at each sync.
+                    if ndirty > 0 || npages >= 512 {
+                        static FI_RZ: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        if FI_RZ.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 48 {
+                            crate::pr_err!(
+                                "FI-RAZOR fs={:#x} ino={} pages={} dirty={}",
                                 entry.fs_id, entry.ino, npages, ndirty
                             );
                         }
@@ -1803,6 +1817,20 @@ for i in 0..n {
     /// writer won the insert; re-loop through get/copy to publish it).
     pub fn insert_dirty(&self, fs_id: u64, ino: u64, page_index: u64, data: &[u8]) -> bool {
         let ok = self.insert_ext(fs_id, ino, page_index, 0, data, true);
+        if !ok {
+            // FI-DIAG (028fb37d razor, hypothesis a): the buffered write
+            // fell back to direct write-through when this failed — count
+            // and name the failure for big files.
+            static FI_IDF: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let n = FI_IDF.fetch_add(1, Ordering::Relaxed);
+            if n < 20 {
+                crate::pr_err!(
+                    "FI-INSERTDIRTY-FAIL fs={:#x} ino={} idx={}",
+                    fs_id, ino, page_index
+                );
+            }
+        }
         if ok && page_index % 512 == 0 {
             static FI_I: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
