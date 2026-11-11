@@ -220,13 +220,21 @@ pub fn kill_other_threads(current: *mut Task) {
             }
         });
     }
-    // gdm bring-up r9-r11: a silent mass SIGKILL took out the whole
-    // daemon set with no print at any loglevel; every other kernel
-    // SIGKILL fan-out path is either printed or was excluded by
-    // instrumentation. If this fires with victims OUTSIDE the caller's
-    // thread group, the thread ring is corrupt — this print names the
-    // caller and victims directly.
-    if !victims.is_empty() {
+        // gdm bring-up r9-r11: a silent mass SIGKILL took out the whole
+        // daemon set with no print at any loglevel; every other kernel
+        // SIGKILL fan-out path is either printed or was excluded by
+        // instrumentation. If this fires with victims OUTSIDE the caller's
+        // thread group, the thread ring is corrupt — this print names the
+        // caller and victims directly.
+        // OH boot lane 2026-11-12: dfx-gated (sigtrace) — the hunt is
+        // closed (the 100th decoded the KOT-KILL lists as unnamed worker
+        // THREADS sharing the parent comm, not cross-process kills), and
+        // the OH churn runs kill_other_threads on every FFRT group
+        // teardown: the victim-name walk + pr_err rode that hot path
+        // (873 samples through acquire_emit_lock in the 100th's record).
+    if !victims.is_empty()
+        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SigTrace)
+    {
         // SAFETY: current is a valid, running task.
         let ccomm = unsafe { (*current).comm_str() };
         let mut vnames: alloc::vec::Vec<alloc::string::String> =

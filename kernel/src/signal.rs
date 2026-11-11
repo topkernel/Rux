@@ -2963,7 +2963,14 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
     if sig == Signal::SIGKILL as i32 || sig == Signal::SIGTERM as i32 {
         static TK_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
-        if TK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4000 {
+        // OH boot lane 2026-11-12: dfx-gated (sigtrace). The OH churn
+        // delivers kill/term per service restart and FFRT group
+        // teardown — every one paid the emit lock + serial line for
+        // this CLOSED hunt (100th's fresh record: 3.7k samples through
+        // acquire_emit_lock on the signal/kill paths).
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SigTrace)
+            && TK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4000
+        {
             let (cp, cc) = crate::sched::current()
                 .map(|t| unsafe {
                     (
@@ -3100,7 +3107,12 @@ fn send_signal_g(pid: u32, sig: i32, group: i32) -> Result<(), i32> {
     if sig == Signal::SIGKILL as i32 || sig == Signal::SIGTERM as i32 {
         static KS_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
-        if KS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4000 {
+        // OH boot lane 2026-11-12: dfx-gated (sigtrace), same as the
+        // TKSIG twin — the OH install churn's kill/term volume put this
+        // print on the hot path of every service restart.
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SigTrace)
+            && KS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4000
+        {
             let (cp, cc) = crate::sched::current()
                 .map(|t| unsafe {
                     (
