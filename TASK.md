@@ -11583,12 +11583,20 @@ MY side (oh-crash HEAD b520a514, has the fix): 9 pristine boots
 
 e2f326fe + cherry-pick 4950f396 (instruments; the deadlock printer
 expects object_span/record_owner(ra)) + 57619346 (the Rwsem fix) +
-stub-arity follow-up = commits up to f2b5deed/96f1.. on fi-fix-verify.
-Same rig as hp98xa (their system-fiQ0.img, pristine userdata copy,
-NOSNAP, SMP8+4G, LL4, 340s), run/hp98-fixboot.sh:
+stub-arity follow-up = branch fi-fix-verify (worktree
+/home/william/rux-agents/fi-fix-verify, pushed). Same rig as hp98xa
+(their system-fiQ0.img, pristine userdata copy, NOSNAP, SMP8+4G,
+LL4, 340s), run/hp98-fixboot.sh:
 
-  boot   deadlocks  ladder
-  hp98va ...        (series running; numbers land here)
+  boot    deadlocks  launcher.ready
+  hp98va  0          FIRED
+  hp98vb  0          FIRED
+  hp98vc  0          FIRED
+  hp98vd  0          FIRED
+  = 4/4 pristine first boots: ZERO "spinlock stuck" prints, FULL
+  LADDER every boot (bootanimation.finished + launcher.ready each
+  time). Control (same rig, their tip unpatched): hp98xa wedged in
+  ~3 min with 694 prints / all 8 CPUs spinning (98.2).
 
 THE ACTION FOR THE COORDINATOR: merge main into fs-integrity (or take
 fi-fix-verify's two cherry-picks) — no new kernel work is needed for
