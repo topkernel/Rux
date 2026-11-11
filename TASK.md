@@ -11075,3 +11075,100 @@ hilogd+systemui+settingsdata+ds_service ≈ 50% of non-idle samples).
    aborted this session, so still unvalidated on real hardware path.
 4. Hot levers from 90.4/94.3 if time: enable_irq ~12%, spin cloud
    ~15%, wfi 13.8% (kernel); sysevent_source malloc site (user).
+
+### 95. 95TH SESSION (2026-11-11 14:0x-.., branch oh-crash) — MERGE GATE FUNCTIONAL TIERS ALL GREEN AT HEAD ca5b9f85 (triple-arch rc=0, riscv suite 1319/1319 rc=0, console regression clean, x86 KVM full ladder 46.2s = new rig best); the clean-stall class SPLIT into two named stall points from the hp94 serials
+
+Mission: §94.5 queue (merge gate, clean-stall class, hot levers).
+
+#### 95.1 Merge gate, functional tiers — ALL PASS at HEAD ca5b9f85
+
+  tier                                   result
+  x86_64 build (PLATFORM=x86_64)         rc=0 (run/hp95-build-x86.log)
+  riscv64 build (rm .config first)       rc=0 (run/hp95-build-riscv.log)
+  aarch64 build (rm .config first)       rc=0 (run/hp95-build-arm.log)
+  riscv64 make test                      1319/1319 ALL PASSED, rc=0
+                                         (run/hp95-maketest.log; the usual
+                                         post-halt QEMU hang was killed
+                                         (my PID) to release test/rootfs.img)
+  riscv64 minimal-rootfs console         /bin/sh interactive, cd /proc OK,
+                                         ls full listing, REGRESSION-OK-0,
+                                         ZERO panics, poweroff clean rc=0
+                                         (run/hp95-consboot.log)
+  x86 KVM smoke to the ladder            hp95e FULL LADDER:
+                                         launcher.ready 46.187s — the best
+                                         pristine-boot ladder this rig has
+                                         produced (94th best: 47.6s);
+                                         guards=3 aborts=0 no storm
+                                         (leakhunt+periodic armed!)
+PERF tiers (syscost Tier1 + pbench Tier2) stay with the coordinator per
+charter (quiet host needed; this session ran boots+builds concurrently).
+Evidence committed in a9659da9.
+
+#### 95.2 The clean-stall class = TWO distinct stall points (hp94 serial decode)
+
+Existing hp94a/d serials, decoded to the last common ladder element
+(the launcher-spawn gate chain in hp94b/c:
+bms.main.bundles.ready -> StorageDaemon CompleteAddUser/StartUser ->
+AMS start-launcher):
+
+  SHAPE D (hp94d): THE USER-KEY CHAIN FREEZES MID-FLIGHT.
+    27.96 PrepareUserDirs -> 28.25 GenerateUserKeys start, user:100 ->
+    "user key ext policy is disabled" -> NEXT StorageDaemon message is
+    64.35 (StorageRadarThd, a periodic stats thread) = a 36s+ freeze
+    inside/behind GenerateUserKeys. bootevent.bms.main.bundles.ready is
+    NEVER set (0 hits; ladder boots set it at 39.8). After 200s the box
+    is binder-SILENT (zero sends) — full wedge, not churn.
+  SHAPE A (hp94a): USER CHAIN COMPLETES, AMS NEVER PULLS THE TRIGGER.
+    bms.main.bundles.ready set; CompleteAddUser 39.34; EL2-EL5 keys +
+    StartUser all succeed by 42.08 ("START USER: delay 60 ms") — then no
+    launcher spawn ever. Residue: systemui polls the account SA
+    (pid 717, code 0x17/0x4 — os.account status) 76x each after 200s.
+    The wedge is between user-100-unlock-done and AMS's start-launcher
+    decision (foundation's AbilityManagerService wait set).
+  RED HERRINGS ELIMINATED (checked, not vibes):
+    - SA:8250 (el5_filekey_manager) stop/restart churn is IDENTICAL in
+      ladders and stalls (ondemand cycling; b restarts it a third time
+      only AFTER launcher.ready).
+    - KUFILL-MISS faults are boot noise: ladder boots have MORE
+      (b:55, c:56) than stalls (a:35, d:32).
+    - RCU-GP-BOUND sleepy rounds fire in ladder boots too (b:7, c:11,
+      hp95f:54; only hp94a reached the 4-consecutive FROZEN dump).
+    - APPSPAWN "App enable -1" kickdog prints continue in hp94b AFTER
+      launcher.ready — noise.
+
+#### 95.3 Hunt series (leakhunt + periodic): the arm does not suppress the ladder
+
+hp95e/f both FULL LADDLES (e: 46.187s, f: launcher.ready set — see
+run/oh-hp95{e,f}-markers.txt); the 30s periodic whole-task snapshots
+land (~1700 lines/60s; pid/tgid/state/comm/lastsys(nr,a0,a1) per task).
+If g/h stall, the dump at t>60s names every parked syscall of
+foundation's threads at the wedge — that is the shape-A namer; a
+shape-D stall will instead show the StorageDaemon/huks threads parked
+somewhere in the key-generation path. Series: run/hp95-hunt.sh
+(330s each, pristine userdata-fresh, SMP8+4G KVM, LOGLEVEL=4).
+
+#### 95.4 Hot-lever A/B: LOGLEVEL 7 vs 4 (rig-only lever, §94.5#4a)
+
+Queued as run/hp95-ab-ll7.sh (waits for the hunt, then 2 boots at
+LOGLEVEL=7, everything else identical, same arm). LOGLEVEL=4 arm =
+the hunt series boots. Numbers land in this section (or the 96th's,
+if quota cuts first). Kernel default stays 7; the lever is rig-side.
+
+#### 95.5 FOR THE 96TH (priority order)
+
+1. If hp95g/h (or the A/B boots) produce a STALL: read the periodic
+   dumps — shape A wants foundation's AMS threads (what syscall is the
+   start-launcher decision parked in; if it's an account-SA binder
+   read, walk pid 717's dump lines next); shape D wants the
+   StorageDaemon/huks key-gen threads. The dumps are already in the
+   serial logs under "=== DFX TASK DUMP (periodic) ===".
+2. The BMS side of shape D: bms.main.bundles.ready never set means the
+   bundle scan in foundation never finished — the 94.3 tail burners
+   (settingsdata/os_ds_service) sit exactly there. A stalled-boot
+   tail record (hiperf, 30-330s window) on top of the periodic dumps
+   would attribute shape D conclusively.
+3. Merge-gate handoff: functional tiers green (95.1); the coordinator
+   still owes syscost Tier1 + pbench Tier2 on a quiet host for
+   63dbeae4+8ba0e893+64ef1254 (binder+mm domains touched).
+4. Panic-reorder validation (93.6#5) still unvalidated — no boot has
+   aborted since the fix; any foundation-abort boot proves it free.
