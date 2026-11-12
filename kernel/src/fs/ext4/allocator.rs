@@ -945,6 +945,9 @@ impl<'a> InodeAllocator<'a> {
 
             // Update group descriptor (increment free inode count)
             self.update_group_desc_free_inodes(group_idx, free_inodes + 1)?;
+            // R109: keep bg_itable_unused consistent with the bitmap
+            // (e2fsck validates it; see refresh_bg_itable_unused).
+            let _ = self.refresh_bg_itable_unused(group_idx);
 
             // Update superblock (increment free inode count)
             self.update_superblock_free_inodes(1)?;
@@ -1071,6 +1074,94 @@ impl<'a> InodeAllocator<'a> {
 
             Ok(())
         }
+    }
+
+    /// R109 (metadata_csum interop): refresh bg_itable_unused from the
+    /// group's inode bitmap. e2fsck validates this field as
+    /// `inodes_per_group - popcount(inode bitmap)` (measured: the -fy
+    /// repair wrote exactly that; the pristine ships it consistent). Our
+    /// allocator never touched it, so a mkfs'd image kept its initial
+    /// 8181 while the kernel allocated thousands of inodes — e2fsck's
+    /// pass 0 flags "unused inode count invalid", and the -fy cascade
+    /// then treats every kernel-allocated inode past the stale boundary
+    /// as garbage and CLEARS it (2404 inodes on the fv6 image, all live
+    /// files). Called after every inode alloc (namei ext4_new_inode)
+    /// and free (free_inode). Durability-deferred like the other GD
+    /// counters (order-unconstrained; a crash window here is the same
+    /// e2fsck class as the free counters, never a data hazard).
+    pub fn refresh_bg_itable_unused(&self, group_idx: u64) -> Result<(), i32> {
+        let inodes_per_group = self.fs.inodes_per_group as u64;
+        let bitmap_block = {
+            let group_descs = self.fs.group_descs.lock();
+            if group_idx >= group_descs.len() as u64 {
+                return Err(errno::Errno::InvalidArgument.as_neg_i32());
+            }
+            let gd = &group_descs[group_idx as usize];
+            (gd.bg_inode_bitmap_lo as u64) | ((gd.bg_inode_bitmap_hi as u64) << 32)
+        };
+        // Popcount the used range of the bitmap (ipg bits, rounded up to
+        // bytes — 8192/8 = 1024 for the OH geometry).
+        let nbits = inodes_per_group as usize;
+        let nbytes = nbits.div_ceil(8);
+        let used = {
+            // SAFETY: bread returns a valid BufferHead; the read range is
+            // the bitmap block's first nbytes bytes.
+            unsafe {
+                let bh = bio::bread(self.fs.device, bitmap_block)
+                    .ok_or(errno::Errno::IOError.as_neg_i32())?;
+                let data = &(*bh).b_data;
+                let used: u32 = data[..nbytes.min(data.len())]
+                    .iter()
+                    .map(|b| b.count_ones())
+                    .sum();
+                bio::brelse(bh);
+                used
+            }
+        };
+        let unused = (inodes_per_group - used as u64) as u16;
+
+        // In-memory copy first (subsequent reads use it).
+        {
+            let mut group_descs = self.fs.group_descs.lock();
+            group_descs[group_idx as usize].bg_itable_unused_lo = unused;
+            group_descs[group_idx as usize].bg_itable_unused_hi = 0;
+        }
+
+        // On-disk descriptor: bg_itable_unused_lo at slot offset 0x1C,
+        // bg_itable_unused_hi at 0x3A (desc_size >= 64), csum re-sealed.
+        let group_desc_size = self.fs.desc_size as usize;
+        let group_desc_start_block = if self.fs.block_size == 1024 { 2 } else { 1 };
+        let desc_per_block = self.fs.block_size as u64 / group_desc_size as u64;
+        let desc_block = group_desc_start_block + (group_idx / desc_per_block);
+        let desc_offset = ((group_idx % desc_per_block) as usize) * group_desc_size;
+        // SAFETY: bread returns a valid BufferHead; the writes below are
+        // in-bounds of the descriptor slot (checked against the block).
+        unsafe {
+            let bh = bio::bread(self.fs.device, desc_block)
+                .ok_or(errno::Errno::IOError.as_neg_i32())?;
+            let data = &mut (*bh).b_data;
+            if desc_offset + 0x1E <= data.len() {
+                (data.as_mut_ptr().add(desc_offset + 0x1C) as *mut u16)
+                    .write_volatile(unused);
+            }
+            if group_desc_size >= 64 && desc_offset + 0x3C <= data.len() {
+                (data.as_mut_ptr().add(desc_offset + 0x3A) as *mut u16)
+                    .write_volatile(0);
+            }
+            if self.fs.metadata_csum {
+                let end = (desc_offset + group_desc_size).min(data.len());
+                if desc_offset < end {
+                    crate::fs::ext4::csum::group_desc_csum_set(
+                        self.fs.csum_seed,
+                        group_idx as u32,
+                        &mut data[desc_offset..end],
+                    );
+                }
+            }
+            (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+            bio::brelse(bh);
+        }
+        Ok(())
     }
 
     /// Update free inode count in superblock

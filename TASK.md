@@ -11074,3 +11074,55 @@ Known remaining windows (successor items, none fire on this rig):
 - jbd2-present boots: R108's explicit inode-table sync is the same
   bread+sync fsync already applies; with a real journal the commit
   owns ordering — verify once jbd2 B1 lands.
+
+### 98.10 The 109th (fi-fix-verify): R109 — e2fsck INTEROP CLOSED (the first kernel-written image e2fsck accepts); jbd2 B1 assessed (2026-11-12)
+
+THE MEASUREMENT (fv6's crashed image, all-R108 kernel state, host):
+- fi_inspect: 0 dangling dirents (2028 dirs / 6436 entries), 0 freed-
+  inode residue, 0 bad live-inode checksums — the two §96.4d items
+  were already healed by the current write paths.
+- e2fsck -n STILL aborted and e2fsck -fy wanted to CLEAR 2404 live
+  inodes. Two real divergences remained, both measured against the
+  pristine baseline (e2fsck -n on ud-f2-u2v15.img: NO PROBLEMS):
+
+1. **i_extra_isize = 0 on every kernel-created inode** (mkfs-written
+   ones ship 32). e2fsprogs 1.47.2 picks the 16-bit lo-only checksum
+   verify formula when i_extra_isize < 4 — the i_checksum_hi bytes
+   then count as DATA and EVERY kernel-written inode fails its
+   checksum (host-verified formula A/B: extra=32 inodes verify under
+   the hi formula and fail under no-hi; extra=0 inodes match OUR
+   formula but fail e2fsck's). FIX: ext4_new_inode stamps
+   i_extra_isize = 32 (Linux s_want_extra_isize) when
+   s_inode_size > 128.
+2. **bg_itable_unused never maintained**: the kernel allocates
+   thousands of inodes but the descriptor keeps mkfs's initial value;
+   e2fsck's pass 0 flags "unused inode count invalid" and the -fy
+   cascade then clears everything past the stale boundary (the 2404).
+   e2fsck's rule (measured from the -fy repair): unused =
+   ipg - popcount(inode bitmap). FIX: InodeAllocator::
+   refresh_bg_itable_unused() — popcount + GD write + csum re-seal,
+   called from ext4_new_inode and free_inode.
+
+THE VERIFICATION (fvi1: fresh population boot from the TRUE pristine
+with the R109 kernel, 420s power cut — every inode on the crashed
+image kernel-created): **e2fsck -n: NO PROBLEMS** (2325/1048576
+files). First kernel-written image in the campaign's history that
+e2fsprogs accepts — debugfs/e2fsck no longer refuse or delete
+kernel-written state. fi_inspect --audit on the same image: 0 stale
+claims / 0 dead-with-map / 0 double-maps (R109 did not regress
+R108). Dual-arch build rc=0.
+
+jbd2 B1 (the h_sync/commit interaction): UNTESTABLE on this rig —
+the OH userdata mounts with "journal inode empty, disabled"
+(journal=false every boot; the feature flag remains). R108's explicit
+inode-table sync is the same bread+sync pattern ext4_sync_file_inner
+already applies under journals; once a journal-enabled test image
+exists (successor: mkfs one journal-enabled scratch and run the fiE
+rig on it), re-verify that (a) the R108 sync stays idempotent next to
+commit-ordered metadata and (b) jbd2's h_sync still forces the
+lazy-batched commit at fsync.
+
+Successor queue (fs-integrity lane): extent-tree block + directory
+tail checksums (csum.rs scope note); write-path rebuild callers still
+free replaced tree meta eagerly (98.9); FI-* hunt prints → dfx
+switches at merge time.

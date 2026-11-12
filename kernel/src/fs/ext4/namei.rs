@@ -274,14 +274,35 @@ pub fn ext4_new_inode(
         }
     }
     // Fresh inodes are born "now" (wall-clock epoch seconds —
-    // drivers/rtc::wall_secs), as in Linux's ext4_new_inode.
+    // drivers::rtc::wall_secs), as in Linux's ext4_new_inode.
     let now = crate::drivers::rtc::wall_secs() as u32;
     inode.i_atime = now;
     inode.i_mtime = now;
     inode.i_ctime = now;
 
+    // R109 (metadata_csum interop): with s_inode_size > 128, e2fsprogs
+    // decides whether an inode carries the 16-bit checksum half
+    // (i_checksum_hi at 0x82) by `i_extra_isize >= 4`. Leaving it 0
+    // (Ext4InodeOnDisk::default) makes e2fsck VERIFY with the no-hi
+    // formula — the hi bytes then count as DATA and EVERY kernel-
+    // written inode fails its checksum (measured on fv6: mkfs-written
+    // inodes ship extra=32 and verify; kernel-created ones ship 0 and
+    // abort e2fsck/debugfs on the first read, and e2fsck -fy cascades
+    // into clearing thousands of live inodes). Linux stamps
+    // s_want_extra_isize (32) at create; same here.
+    if fs.inode_size > 128 {
+        inode.i_extra_isize = 32;
+    }
+
     // Update group descriptor
     update_group_descriptor_inodes(fs, group, -1)?;
+    // R109: keep bg_itable_unused consistent with the inode bitmap
+    // after the allocation below (e2fsck validates it — see
+    // InodeAllocator::refresh_bg_itable_unused).
+    {
+        let allocator = super::allocator::InodeAllocator::new(fs);
+        let _ = allocator.refresh_bg_itable_unused(group as u64);
+    }
 
     // Update superblock
     update_superblock_free_inodes(fs, -1)?;
