@@ -194,10 +194,18 @@ pub fn inode_csum_ok(seed: u32, ino: u32, raw: &[u8]) -> bool {
 /// verifies exactly { superblock, group descriptor, inode } checksums;
 /// these three `*_csum_set` helpers maintain those on the write path so
 /// a forced-rw metadata_csum mount stays self-consistent for reads.
-/// Block/inode-bitmap csums (bg_*_bitmap_csum in the descriptor),
-/// extent-tree blocks and directory tails are NOT maintained — e2fsck
-/// will flag those on a real device; the bring-up boots run under QEMU
-/// -snapshot, where nothing persists.
+/// Block/inode-bitmap csums (bg_*_bitmap_csum in the descriptor) ARE
+/// maintained at their write sites (allocator write_block_bitmap /
+/// write_inode_bitmap, namei mark_inode_used — measured matching on
+/// the fv6 crashed image). Extent-tree blocks and directory tails are
+/// NOT sealed — e2fsck will flag those on a real device; the bring-up
+/// boots run under QEMU -snapshot, where nothing persists.
+///
+/// R109 interop note (measured against e2fsprogs 1.47.2): the inode
+/// seal is only COMPATIBLE when the slot's i_extra_isize >= 4 —
+/// e2fsprogs picks the 16-bit (lo-only) verify formula otherwise and
+/// every kernel-written inode fails its checksum. ext4_new_inode
+/// stamps i_extra_isize = 32 (Linux's s_want_extra_isize) at creation.
 pub fn inode_csum_set(seed: u32, ino: u32, raw: &mut [u8]) {
     if raw.len() < INO_CSUM_LO_OFF + 2 {
         return;
