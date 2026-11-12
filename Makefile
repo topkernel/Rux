@@ -108,6 +108,25 @@ ubuntu-run: build $(UBUNTU_IMG)
 $(UBUNTU_IMG):
 	@bash scripts/test/gnome-x86/build-img.sh
 
+# ---- OpenHarmony x86_64_virt emulator image ----
+# The OH images live OUTSIDE git in the standing store (repo policy:
+# real image bytes never enter a worktree); this rule only wires
+# symlinks (OH_IMAGES overrides the store location). The boot itself
+# is the tracked scripts/test/run-oh.sh — same shape as the Ubuntu
+# flow: make oh-image && make oh-run.
+OH_IMAGES ?= /home/william/rux-images/oh
+OH_IMGDIR ?= run/oh-img
+
+.PHONY: oh-image oh-run
+oh-image:
+	@bash scripts/test/oh-link.sh "$(OH_IMAGES)" "$(OH_IMGDIR)"
+
+# Boot OpenHarmony (x86_64, TCG, GTK window; serial console on this
+# terminal). The stock image boots 135+ services to the launcher.
+oh-run: build-x86 oh-image
+	@echo "Starting OpenHarmony (x86_64, TCG, GTK window)..."
+	@bash scripts/test/run-oh.sh "$(OH_IMGDIR)" gui
+
 # Run kernel test script (PLATFORM=riscv64 default; PLATFORM=aarch64 /
 # x86_64 run the suite under that arch's QEMU; see test/run.sh)
 test: probes
