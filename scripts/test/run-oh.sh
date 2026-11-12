@@ -59,7 +59,7 @@ APPEND="$APPEND init=${INIT:-init} root=/dev/ram0 rw"
 APPEND="$APPEND ohos.boot.hardware=virt default_boot_device=10007000.virtio_mmio"
 APPEND="$APPEND ohos.boot.sn=01234567890"
 APPEND="$APPEND ohos.required_mount.system=/dev/block/vdb@/usr@ext4@ro,barrier=1@wait,required"
-APPEND="$APPEND ohos.required_mount.vendor=/dev/block/vdc@/vendor@ext4@ro,barrier=1@wait,required"
+APPEND="$APPEND ohos.required_mount.vendor=/dev/block/vdc@/vendor@ext4@ro,barrier=1@wait,required ohos.required_mount.data=/dev/block/vdf@/data@ext4@rw,barrier=1@wait,required"
 APPEND="$APPEND ${EXTRA_APPEND:-}"
 
 QEMU="${QEMU:-qemu-system-x86_64}"
