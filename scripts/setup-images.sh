@@ -46,4 +46,32 @@ if [ -d "/home/william/rux-images/testimages" ]; then
     done
 fi
 
+# Ubuntu images (gnome-gdm lineage + ubuntu-gui)
+for SRC_DIR in /home/william/rux-images/ubuntu /home/william/rux-images/ubuntu2404; do
+    if [ -d "$SRC_DIR" ]; then
+        SUB=$(basename "$SRC_DIR")
+        mkdir -p "$IMGDIR/$SUB"
+        for img in "$SRC_DIR"/*.img; do
+            [ -f "$img" ] && need_copy "$IMGDIR/$SUB/$(basename $img)" "$img"
+        done
+    fi
+done
+
+# aarch64 images
+if [ -d "/home/william/rux-images/aarch64" ]; then
+    mkdir -p "$IMGDIR/aarch64"
+    for img in /home/william/rux-images/aarch64/*.img; do
+        [ -f "$img" ] && need_copy "$IMGDIR/aarch64/$(basename $img)" "$img"
+    done
+fi
+
+# Ubuntu GNOME image (the one `make ubuntu-run` boots) — from work/ if
+# already built, or from the store
+if [ -f "$ROOT/work/gnome-x86.img" ]; then
+    :  # already built by `make ubuntu-image`
+elif [ -f "/home/william/rux-images/ubuntu/ubuntu-gui.img" ]; then
+    mkdir -p "$ROOT/work"
+    need_copy "$ROOT/work/gnome-x86.img" "/home/william/rux-images/ubuntu/ubuntu-gui.img"
+fi
+
 echo "Done. $(find $IMGDIR -name '*.img' | wc -l) images available."
