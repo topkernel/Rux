@@ -27,6 +27,10 @@
 set -euo pipefail
 
 IMGDIR="${1:?usage: run-oh.sh <oh-images-dir> [console|gui|debug]}"
+ACCEL="${ACCEL:--accel}"
+ACCEL_BACKEND="${ACCEL_BACKEND:-kvm}"
+SMP="${SMP:-8}"
+[ -e /dev/kvm ] || { ACCEL_BACKEND="tcg,thread=multi"; echo "NOTE: /dev/kvm not found — TCG fallback" >&2; }
 MODE="${2:-console}"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 KERNEL="${KERNEL:-$ROOT/target/x86_64-unknown-none/debug/bzImage}"
@@ -91,7 +95,7 @@ esac
 # file.locking=off; locking is already off per-drive above).
 # shellcheck disable=SC2086
 exec "$QEMU" \
-    -M q35 ${ACCEL_ARGS:-"-accel kvm"} -cpu max -m 4G -smp ${SMP:-8} -snapshot \
+    -M q35 ${ACCEL} ${ACCEL_BACKEND} -cpu max -m 4G -smp ${SMP} -snapshot \
     $DISP -serial mon:stdio -monitor "${MONITOR:-none}" \
     -kernel "$KERNEL" -initrd "$IMGDIR/ramdisk.img" \
     -append "$APPEND" \
