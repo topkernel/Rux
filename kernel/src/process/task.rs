@@ -4372,9 +4372,9 @@ pub unsafe fn vfork_wake_parent(task: *mut Task) {
 }
 
 /// Rate gate for the preempt_count underflow tripwire: one report per
-/// second of jiffies. Raw console only (putchar_no_lock) — the tripwire
-/// can fire from any context, including inside printk's own lock guards,
-/// so the report path must itself be lock-free and non-recursive.
+/// second of jiffies. Goes through pr_err! — printk's pre-ring filter is
+/// a single atomic load and its per-CPU re-entrancy guard makes a call
+/// from inside printk's own path a silent drop (never a recursion).
 fn preempt_underflow_report(
     pid: u32,
     prev: i32,
@@ -4394,53 +4394,26 @@ fn preempt_underflow_report(
     {
         return;
     }
-    use crate::console::putchar_no_lock as putchar;
-    fn ph(v: u32) {
-        use crate::console::putchar_no_lock as putchar;
-        for sh in (0..8).rev() {
-            let n = ((v >> (sh * 4)) & 0xF) as u8;
-            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-        }
-    }
-    const MSG: &[u8] = b"\nPREEMPT-UNDERFLOW pid=";
-    for &b in MSG {
-        putchar(b);
-    }
-    ph(pid);
-    const MSG2: &[u8] = b" count_was=";
-    for &b in MSG2 {
-        putchar(b);
-    }
-    ph(prev as u32);
-    const MSG3: &[u8] = b" sub=";
-    for &b in MSG3 {
-        putchar(b);
-    }
-    ph(sub as u32);
-    const MSG4: &[u8] = b" (unpaired decrement clamped to 0) at ";
-    for &b in MSG4 {
-        putchar(b);
-    }
-    // Drop site: file:line of the guard whose decrement underflowed.
-    for &b in loc.file().as_bytes() {
-        putchar(b);
-    }
-    const COLON: &[u8] = b":";
-    for &b in COLON {
-        putchar(b);
-    }
-    ph(loc.line());
     if site != 0 {
-        const M5: &[u8] = b" lock=0x";
-        for &b in M5 {
-            putchar(b);
-        }
-        // 16-hex lock instance address (ph is 8-hex only; print two
-        // halves).
-        ph((site >> 32) as u32);
-        ph(site as u32);
+        crate::pr_err!(
+            "PREEMPT-UNDERFLOW pid={} count_was={:#x} sub={:#x} (unpaired decrement clamped to 0) at {}:{} lock={:#x}",
+            pid,
+            prev,
+            sub,
+            loc.file(),
+            loc.line(),
+            site
+        );
+    } else {
+        crate::pr_err!(
+            "PREEMPT-UNDERFLOW pid={} count_was={:#x} sub={:#x} (unpaired decrement clamped to 0) at {}:{}",
+            pid,
+            prev,
+            sub,
+            loc.file(),
+            loc.line()
+        );
     }
-    putchar(b'\n');
     // preempt-hunt (2026-11-01): the outermost-acquire record for this
     // task names the acquire whose 1->0 release this clamp adjudicates —
     // for a post-heal underflow that is the REAL guard the heal zeroed
@@ -5852,22 +5825,11 @@ impl Task {
         // fault. Photograph the culprit before it strikes.
         if let Some(old) = (*child).parent {
             if old as *const Task != self as *const Task {
-                let msg = b"TREE: DOUBLE add_child old=0x";
-                for &b in msg { unsafe { crate::console::putchar_no_lock(b); } }
-                let mut sh = 64;
-                while sh > 0 {
-                    sh -= 4;
-                    let nb = ((old as usize >> sh) & 0xF) as u8;
-                    unsafe { crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
-                }
-                for &b in b" new=0x" { unsafe { crate::console::putchar_no_lock(b); } }
-                sh = 64;
-                while sh > 0 {
-                    sh -= 4;
-                    let nb = ((self as *const Task as usize >> sh) & 0xF) as u8;
-                    unsafe { crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
-                }
-                unsafe { crate::console::putchar_no_lock(b'\n'); }
+                crate::pr_err!(
+                    "TREE: DOUBLE add_child old={:#x} new={:#x}",
+                    old as usize,
+                    self as *const Task as usize
+                );
             }
         }
 

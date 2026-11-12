@@ -211,38 +211,40 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
     // went to Session-L/M diagnostics printing in its context. Gate the
     // prints behind `sprobe`; the strand counters above keep running.
     if print_budget_ok() && probe_prints_on() {
+        // One pr_debug! line (printk's pre-ring filter is a single
+        // atomic load, safe with the GRQ held).
+        use core::fmt::Write as _;
+        let mut line = [0u8; 512];
+        let mut cur = crate::printk::BufferWriter::new(&mut line);
         // SAFETY: diagnostic reads of stable Task fields; the task is
         // being picked (GRQ held pins it).
-        let pid = unsafe { (*task).pid() };
-        ww_msg(b"WAKE-STRANDED pid=");
-        ww_u64(pid as u64);
-        ww_msg(b" cpu=");
-        ww_u64(cpu as u64);
-        ww_msg(b" strand=");
-        ww_u64(ms);
-        ww_msg(b"ms policy=");
-        ww_u64(unsafe { (*task).policy() as u64 });
+        unsafe {
+            let _ = write!(
+                cur,
+                "WAKE-STRANDED pid={} cpu={} strand={}ms policy={}",
+                (*task).pid(),
+                cpu,
+                ms,
+                (*task).policy() as u64
+            );
+        }
         // Monster-strand forensics (launcher perf gate round 3): name
         // each CPU's incumbent and its CURRENT-activation run length so
         // the report answers "what was the CPU doing instead" directly —
         // a kernel-loop hog shows a huge activation length; a healthy
         // rotation shows small ones.
         for c in 0..crate::config::MAX_CPUS {
-            let cur = crate::sched::sched::cpu_state(c).current;
-            ww_msg(b" h");
-            ww_u64(c as u64);
-            ww_msg(b"=(");
-            if cur.is_null() {
-                ww_msg(b"nil)");
+            let cur_t = crate::sched::sched::cpu_state(c).current;
+            let _ = write!(cur, " h{}=(", c);
+            if cur_t.is_null() {
+                let _ = write!(cur, "nil)");
                 continue;
             }
             // SAFETY: init-time valid slot pointer; scalar field reads
             // tolerate a concurrent switch (diagnostic only).
             unsafe {
-                ww_u64((*cur).pid() as u64);
-                ww_msg(b"/p");
-                ww_u64((*cur).policy() as u64);
-                let se = (*cur).sched_entity();
+                let _ = write!(cur, "{}/p{}", (*cur_t).pid() as u64, (*cur_t).policy() as u64);
+                let se = (*cur_t).sched_entity();
                 let act_ns = se
                     .sum_exec_runtime
                     .load(core::sync::atomic::Ordering::Relaxed)
@@ -250,9 +252,6 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
                         se.prev_sum_exec_runtime
                             .load(core::sync::atomic::Ordering::Relaxed),
                     );
-                ww_msg(b"/");
-                ww_u64(act_ns / 1_000_000);
-                ww_msg(b"ms");
                 // Kernel-preemption round (sc65): an incumbent whose
                 // activation runs to tens of seconds is monopolizing its
                 // CPU, and with IRQ-exit preemption that is only possible
@@ -260,9 +259,12 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
                 // activation so the report names the discipline directly:
                 // 1 = a leaked PREEMPT_OFFSET (spinlock guard), 0x100 =
                 // a leaked bh, 0x4000000 = a leaked PREEMPT_ACTIVE.
-                ww_msg(b"/pc=");
-                ww_u64((*cur).preempt_count() as u32 as u64);
-                ww_msg(b")");
+                let _ = write!(
+                    cur,
+                    "/{}ms/pc={:#x})",
+                    act_ns / 1_000_000,
+                    (*cur_t).preempt_count() as u32
+                );
             }
             // leg-24 leakhunt v3: the slot incumbent can be a stale
             // identity (R55 family) — print what the ARCH tp slot says
@@ -274,15 +276,18 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
             {
                 let tp = crate::arch::cpu::get_thread_id_of(c)
                     as *mut crate::process::Task;
-                ww_msg(b" tp=");
+                let _ = write!(cur, " tp=");
                 if tp.is_null() {
-                    ww_msg(b"nil");
+                    let _ = write!(cur, "nil");
                 } else {
                     // SAFETY: diagnostic reads of stable Task fields.
                     unsafe {
-                        ww_u64((*tp).pid() as u64);
-                        ww_msg(b"/pc=");
-                        ww_u64((*tp).preempt_count() as u32 as u64);
+                        let _ = write!(
+                            cur,
+                            "{}/pc={:#x}",
+                            (*tp).pid() as u64,
+                            (*tp).preempt_count() as u32
+                        );
                     }
                 }
             }
@@ -295,31 +300,31 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
         // inflated (runaway).
         {
             let (vr, minv, leftv) = crate::sched::sched::ww_cfs_geometry(task);
-            ww_msg(b" vr=");
-            ww_u64(vr.saturating_sub(minv) / 1_000_000);
-            ww_msg(b"ms lead-lag=");
-            ww_u64(leftv.saturating_sub(vr) / 1_000_000);
-            ww_msg(b"ms");
+            let _ = write!(
+                cur,
+                " vr={}ms lead-lag={}ms",
+                vr.saturating_sub(minv) / 1_000_000,
+                leftv.saturating_sub(vr) / 1_000_000
+            );
         }
         // s16 (WW5): the two decisive census fields.
         // visits= — pick walks that ran during the strand window. High
         // with skips=0 means candidates kept being picked around the
         // victim (ordering/tie question); ~0 means picks were not
         // happening at all (slice/preemption question).
-        ww_msg(b" visits=");
-        ww_u64(
-            super::fair::ww_pick_walks().saturating_sub(walks_at_wake),
+        let _ = write!(
+            cur,
+            " visits={}",
+            super::fair::ww_pick_walks().saturating_sub(walks_at_wake)
         );
         // tie= — timeline entries keyed at or before the victim (the
         // min_vruntime tie-mass it stands behind; see ww_tie_mass).
-        ww_msg(b" tie=");
-        ww_u64(crate::sched::sched::ww_cfs_tie_mass(task));
+        let _ = write!(cur, " tie={}", crate::sched::sched::ww_cfs_tie_mass(task));
         // wtie= — the same mass as it was AT WAKE (entry-time rank-1).
         // The discriminator: wtie ~ nr_running says deep-queue service
         // latency; wtie ~ 1 with visits in the hundreds says the walk
         // passed a leftmost never-refused candidate (defect).
-        ww_msg(b" wtie=");
-        ww_u64(slot.wtie.load(Ordering::Acquire));
+        let _ = write!(cur, " wtie={}", slot.wtie.load(Ordering::Acquire));
         // phantom-bits: any CPU currently inside an __do_softirq window
         // — the monopolist face (a wedged window is untickable, so the
         // tick-side probes cannot see it; this census CAN, cross-CPU).
@@ -343,36 +348,20 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
             if age_ms < 50 {
                 continue;
             }
-            ww_msg(b" sq");
-            ww_u64(c as u64);
-            ww_msg(b"=bit:");
-            ww_u64((win >> 48) & 0xFF);
-            ww_msg(b",rst:");
-            ww_u64((win >> 40) & 0xFF);
-            ww_msg(b",pend:0x");
-            // ww_hex-ish for a 16-bit mask
-            let mut pend = win & 0xFFFF;
-            if pend == 0 {
-                ww_msg(b"0");
-            }
-            let mut nib = [0u8; 4];
-            let mut n = 0;
-            while pend > 0 && n < 4 {
-                nib[n] = b'0' + (pend & 0xF) as u8;
-                pend >>= 4;
-                n += 1;
-            }
-            while n > 0 {
-                n -= 1;
-                let ch = nib[n];
-                // SAFETY: byte write through the console writer.
-                ww_msg(&[ch]);
-            }
-            ww_msg(b",age:");
-            ww_u64(age_ms);
-            ww_msg(b"ms");
+            let _ = write!(
+                cur,
+                " sq{}=bit:{},rst:{},pend:{:#x},age:{}ms",
+                c,
+                (win >> 48) & 0xFF,
+                (win >> 40) & 0xFF,
+                win & 0xFFFF,
+                age_ms
+            );
         }
-        ww_msg(b"\n");
+        let len = cur.pos();
+        drop(cur);
+        let text = core::str::from_utf8(&line[..len]).unwrap_or("");
+        crate::pr_debug!("{}", text);
         // s14: name WHY this victim sat unpicked through the whole
         // strand window — the fair-class refusal history accumulated by
         // note_pick_skip (dfx=schedtrace). No-op when the history is
@@ -438,53 +427,6 @@ fn print_budget_ok() -> bool {
 /// (concurrent hunts still rely on the prints).
 fn probe_prints_on() -> bool {
     crate::cmdline::get_param("sprobe").map(|v| v != "0").unwrap_or(true)
-}
-
-fn ww_msg(msg: &[u8]) {
-    for &b in msg {
-        unsafe { crate::console::putchar_no_lock(b) };
-    }
-}
-
-fn ww_u64(mut v: u64) {
-    let mut buf = [0u8; 20];
-    let mut n = 0;
-    if v == 0 {
-        buf[0] = b'0';
-        n = 1;
-    } else {
-        while v > 0 && n < buf.len() {
-            buf[n] = b'0' + (v % 10) as u8;
-            v /= 10;
-            n += 1;
-        }
-    }
-    for i in (0..n).rev() {
-        unsafe { crate::console::putchar_no_lock(buf[i]) };
-    }
-}
-
-/// Hex printer (leg-33B): tick RIPs read as text are unreadable; the
-/// strand census prints them 0x-prefixed for direct addr2line use.
-fn ww_hex(v: u64) {
-    ww_msg(b"0x");
-    let mut buf = [0u8; 16];
-    let mut n = 0;
-    let mut v = v;
-    if v == 0 {
-        buf[0] = b'0';
-        n = 1;
-    } else {
-        while v > 0 && n < buf.len() {
-            let d = (v & 0xf) as u8;
-            buf[n] = if d < 10 { b'0' + d } else { b'a' + d - 10 };
-            v >>= 4;
-            n += 1;
-        }
-    }
-    for i in (0..n).rev() {
-        unsafe { crate::console::putchar_no_lock(buf[i]) };
-    }
 }
 
 // ============================================================================

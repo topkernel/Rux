@@ -29,11 +29,11 @@
 //!   (sched.rs): a victim whose header reads the paint proves the
 //!   use-after-free shape outright.
 //!
-//! Reporting discipline: raw UART only (callers may hold bucket locks /
-//! run with IRQs off), one report per distinct victim address (8-entry
-//! ring), hard cap of 16 printed reports so the console cannot flood.
+//! Reporting discipline: pr_err! records (printk's pre-ring filter is a
+//! single atomic load, safe with bucket locks held / IRQs off), one
+//! report per distinct victim address (8-entry ring), hard cap of 16
+//! printed reports so the console cannot flood.
 
-use crate::console::putchar_no_lock as putchar;
 use crate::process::task::{task_offsets as offs, Task};
 use crate::sched::sched::TASK_POISON;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -52,37 +52,6 @@ static SEEN: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
 static REPORTS: AtomicU32 = AtomicU32::new(0);
 /// Total detections (printed or suppressed) — pulse for taskdump.
 pub static DETECTED: AtomicU32 = AtomicU32::new(0);
-
-fn phex(mut v: u64) {
-    for _ in 0..16 {
-        let n = (v >> 60) as u8;
-        putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-        v <<= 4;
-    }
-}
-
-fn pdec(mut v: u64) {
-    let mut buf = [0u8; 10];
-    let mut n = 0;
-    if v == 0 {
-        putchar(b'0');
-        return;
-    }
-    while v > 0 && n < buf.len() {
-        buf[n] = b'0' + (v % 10) as u8;
-        v /= 10;
-        n += 1;
-    }
-    for i in (0..n).rev() {
-        putchar(buf[i]);
-    }
-}
-
-fn pmsg(m: &[u8]) {
-    for &b in m {
-        putchar(b);
-    }
-}
 
 /// One report per distinct victim page, capped globally at 16 prints.
 fn may_report(addr: u64) -> bool {
@@ -115,6 +84,8 @@ unsafe fn rq32(task: *mut Task, off: usize) -> u32 {
 
 /// The single reporting path: gates on the dedup ring, prints the victim
 /// identity, the implausible fields, and the first 0x40 header bytes.
+/// pr_err! (memory-corruption class): printk's pre-ring filter is a
+/// single atomic load, safe with bucket locks held / IRQs off.
 fn report(tag: &[u8], task: *mut Task, bad: &Fields) {
     if task.is_null() || (task as usize) < 0x8000_0000_0000_0000 {
         return;
@@ -124,61 +95,77 @@ fn report(tag: &[u8], task: *mut Task, bad: &Fields) {
         return;
     }
     REPORTS.fetch_add(1, Ordering::Relaxed);
-    pmsg(b"\nR83-VICTIM tag=");
-    pmsg(tag);
-    pmsg(b" jiffies=");
-    pdec(crate::drivers::timer::get_jiffies());
-    pmsg(b" time=0x");
-    phex(crate::drivers::timer::read_time());
-    pmsg(b" by=cpu:");
-    pdec(crate::arch::cpu_id() as u64);
-    pmsg(b"/pid:");
-    pdec(crate::sched::get_current_pid() as u64);
-    pmsg(b" task=0x");
-    phex(task as u64);
-    pmsg(b" pid=");
-    unsafe { pdec(rq32(task, offs::TASK_PID) as u64); }
-    pmsg(b" comm=");
+    use core::fmt::Write as _;
+    let mut line = [0u8; 288];
+    let mut cur = crate::printk::BufferWriter::new(&mut line);
+    let _ = write!(
+        cur,
+        "R83-VICTIM tag={} jiffies={} time={:#x} by=cpu:{}/pid:{} task={:#x} pid={} comm=",
+        core::str::from_utf8(tag).unwrap_or("?"),
+        crate::drivers::timer::get_jiffies(),
+        crate::drivers::timer::read_time(),
+        crate::arch::cpu_id(),
+        crate::sched::get_current_pid(),
+        task as u64,
+        // SAFETY: diagnostic volatile read of the victim header.
+        unsafe { rq32(task, offs::TASK_PID) },
+    );
+    // SAFETY: diagnostic read of the victim's comm bytes.
     unsafe {
         for &c in (*task).comm().iter() {
             if c == 0 {
                 break;
             }
-            putchar(if (0x20..0x7f).contains(&c) { c } else { b'.' });
+            let _ = write!(cur, "{}", if (0x20..0x7f).contains(&c) { c as char } else { '.' });
         }
     }
-    pmsg(b" kstack=0x");
+    // SAFETY: diagnostic reads of the victim's stack pin.
     unsafe {
         match (*task).get_kernel_stack() {
             Some(bottom) => {
-                phex(bottom as u64);
-                pmsg(b"-0x");
-                phex(bottom as u64 + crate::config::KERNEL_STACK_SIZE as u64);
+                let _ = write!(
+                    cur,
+                    " kstack={:#x}-{:#x}",
+                    bottom as u64,
+                    bottom as u64 + crate::config::KERNEL_STACK_SIZE as u64
+                );
             }
-            None => pmsg(b"none"),
+            None => {
+                let _ = write!(cur, " kstack=none");
+            }
         }
     }
     for (name, v) in bad.iter() {
         if name.is_empty() {
             break;
         }
-        pmsg(b" ");
-        pmsg(name);
-        pmsg(b"=0x");
-        phex(*v);
+        let _ = write!(
+            cur,
+            " {}={:#x}",
+            core::str::from_utf8(name).unwrap_or("?"),
+            *v
+        );
     }
-    putchar(b'\n');
+    let len = cur.pos();
+    drop(cur);
+    let text = core::str::from_utf8(&line[..len]).unwrap_or("");
+    crate::pr_err!("{}", text);
     // Header hex: 8 qwords with byte offsets — the byte-level shape of
     // the scribble (extent + alignment) identifies the writer's store.
     for row in 0..2 {
-        pmsg(b"R83-HDR ");
-        pdec((row * 0x20) as u64);
-        pmsg(b":");
+        let mut hline = [0u8; 160];
+        let mut hcur = crate::printk::BufferWriter::new(&mut hline);
+        let _ = write!(hcur, "R83-HDR {}:", row * 0x20);
         for col in 0..4 {
-            putchar(b' ');
-            unsafe { phex(rq64(task, row * 0x20 + col * 8)); }
+            // SAFETY: diagnostic volatile header read.
+            let _ = write!(hcur, " {:#x}", unsafe {
+                rq64(task, row * 0x20 + col * 8)
+            });
         }
-        putchar(b'\n');
+        let hlen = hcur.pos();
+        drop(hcur);
+        let htext = core::str::from_utf8(&hline[..hlen]).unwrap_or("");
+        crate::pr_err!("{}", htext);
     }
 }
 
@@ -326,54 +313,64 @@ pub fn waitwatch_report(task: *mut Task, old: &WatchSnap, new: &WatchSnap) {
         return;
     }
     REPORTS.fetch_add(1, Ordering::Relaxed);
-    pmsg(b"\nR83-WAITWATCH jiffies=");
-    pdec(crate::drivers::timer::get_jiffies());
-    pmsg(b" task=0x");
-    phex(task as u64);
-    pmsg(b" pid=");
-    unsafe { pdec(rq32(task, offs::TASK_PID) as u64); }
-    pmsg(b"\n  old: ksp=0x");
-    phex(old.ksp);
-    pmsg(b" user_sp=0x");
-    phex(old.user_sp);
-    pmsg(b" preempt=");
-    pdec(old.preempt as u64);
-    pmsg(b" pick=");
-    pdec(old.pick as u64);
-    pmsg(b" claim=");
-    pdec(old.claim as i64 as u64);
-    pmsg(b"\n  new: ksp=0x");
-    phex(new.ksp);
-    pmsg(b" user_sp=0x");
-    phex(new.user_sp);
-    pmsg(b" preempt=");
-    pdec(new.preempt as u64);
-    pmsg(b" pick=");
-    pdec(new.pick as u64);
-    pmsg(b" claim=");
-    pdec(new.claim as i64 as u64);
-    putchar(b'\n');
+    use core::fmt::Write as _;
+    let mut line = [0u8; 256];
+    let mut cur = crate::printk::BufferWriter::new(&mut line);
+    // SAFETY: diagnostic volatile header reads of the victim.
+    unsafe {
+        let _ = write!(
+            cur,
+            "R83-WAITWATCH jiffies={} task={:#x} pid={} old: ksp={:#x} user_sp={:#x} preempt={} pick={} claim={} new: ksp={:#x} user_sp={:#x} preempt={} pick={} claim={}",
+            crate::drivers::timer::get_jiffies(),
+            task as u64,
+            rq32(task, offs::TASK_PID),
+            old.ksp,
+            old.user_sp,
+            old.preempt,
+            old.pick,
+            old.claim,
+            new.ksp,
+            new.user_sp,
+            new.preempt,
+            new.pick,
+            new.claim
+        );
+    }
+    let len = cur.pos();
+    drop(cur);
+    let text = core::str::from_utf8(&line[..len]).unwrap_or("");
+    crate::pr_err!("{}", text);
     // Full header (0..0x40) + the eight qwords after it, so an
     // overrun's extent shows. (No pre-struct reads: Task pages are
     // page-aligned and ti_flags sits at offset 0 — reading backwards
     // would cross into the previous page; the r3 hunt run panicked in
     // this printer on the wrapped offset before that was caught.)
     for row in 0..2 {
-        pmsg(b"R83-HDR ");
-        pdec((row * 0x20) as u64);
-        pmsg(b":");
+        let mut hline = [0u8; 160];
+        let mut hcur = crate::printk::BufferWriter::new(&mut hline);
+        let _ = write!(hcur, "R83-HDR {}:", row * 0x20);
         for col in 0..4 {
-            putchar(b' ');
-            unsafe { phex(rq64(task, row * 0x20 + col * 8)); }
+            // SAFETY: diagnostic volatile header read.
+            let _ = write!(hcur, " {:#x}", unsafe {
+                rq64(task, row * 0x20 + col * 8)
+            });
         }
-        putchar(b'\n');
+        let hlen = hcur.pos();
+        drop(hcur);
+        let htext = core::str::from_utf8(&hline[..hlen]).unwrap_or("");
+        crate::pr_err!("{}", htext);
     }
-    pmsg(b"R83-AROUND +0x40:");
+    let mut aline = [0u8; 192];
+    let mut acur = crate::printk::BufferWriter::new(&mut aline);
+    let _ = write!(acur, "R83-AROUND +0x40:");
     for i in 0..8 {
-        putchar(b' ');
-        unsafe { phex(rq64(task, 0x40 + i * 8)); }
+        // SAFETY: diagnostic volatile header read.
+        let _ = write!(acur, " {:#x}", unsafe { rq64(task, 0x40 + i * 8) });
     }
-    putchar(b'\n');
+    let alen = acur.pos();
+    drop(acur);
+    let atext = core::str::from_utf8(&aline[..alen]).unwrap_or("");
+    crate::pr_err!("{}", atext);
 }
 
 // ==================== R84: producer-#2 hunt ====================
@@ -515,27 +512,37 @@ fn magic_report(addr: u64, v: u64) {
         return;
     }
     REPORTS.fetch_add(1, Ordering::Relaxed);
-    pmsg(b"\nR84-MAGIC jiffies=");
-    pdec(crate::drivers::timer::get_jiffies());
-    pmsg(b" time=0x");
-    phex(crate::drivers::timer::read_time());
-    pmsg(b" at=0x");
-    phex(addr);
-    pmsg(b" v=0x");
-    phex(v);
-    pmsg(b"\n");
+    use core::fmt::Write as _;
+    let mut line = [0u8; 160];
+    let mut cur = crate::printk::BufferWriter::new(&mut line);
+    let _ = write!(
+        cur,
+        "R84-MAGIC jiffies={} time={:#x} at={:#x} v={:#x}",
+        crate::drivers::timer::get_jiffies(),
+        crate::drivers::timer::read_time(),
+        addr,
+        v
+    );
+    let len = cur.pos();
+    drop(cur);
+    let text = core::str::from_utf8(&line[..len]).unwrap_or("");
+    crate::pr_err!("{}", text);
     let base = (addr as usize).saturating_sub(0x10) & !0xF;
     for row in 0..3 {
-        pmsg(b"R84-AROUND @0x");
-        phex((base + row * 0x20) as u64);
-        pmsg(b":");
+        let mut hline = [0u8; 176];
+        let mut hcur = crate::printk::BufferWriter::new(&mut hline);
+        let _ = write!(hcur, "R84-AROUND @{:#x}:", (base + row * 0x20) as u64);
         for col in 0..4 {
             let p = base + row * 0x20 + col * 8;
             // SAFETY: diagnostic read of the kernel heap neighborhood.
-            unsafe { phex(core::ptr::read_volatile(p as *const u64)); }
-            putchar(b' ');
+            let _ = write!(hcur, " {:#x}", unsafe {
+                core::ptr::read_volatile(p as *const u64)
+            });
         }
-        putchar(b'\n');
+        let hlen = hcur.pos();
+        drop(hcur);
+        let htext = core::str::from_utf8(&hline[..hlen]).unwrap_or("");
+        crate::pr_err!("{}", htext);
     }
 }
 
@@ -559,25 +566,25 @@ pub extern "C" fn r84_ksp_trap(site: u64, val: u64, tp: u64, sepc: u64) {
     static SEEN: [A64; 6] = [const { A64::new(0) }; 6];
     let s = (site as usize) % 6;
     if SEEN[s].swap(1, Ordering::AcqRel) != 0 {
-        return; // one report per site (raw print, no locks)
+        return; // one report per site
     }
-    pmsg(b"\nR84-KSPTRAP site=");
-    pdec(site);
-    pmsg(b" val=0x");
-    phex(val);
-    pmsg(b" tp=0x");
-    phex(tp);
-    pmsg(b" sepc=0x");
-    phex(sepc);
-    pmsg(b" jiffies=");
-    pdec(crate::drivers::timer::get_jiffies());
-    pmsg(b" time=0x");
-    phex(crate::drivers::timer::read_time());
-    if tp >= 0x8000_0000_0000_0000 {
-        // SAFETY: diagnostic pid read of the (validated kernel-half) task.
-        let pid = unsafe { rq32(tp as *mut Task, offs::TASK_PID) };
-        pmsg(b" pid=");
-        pdec(pid as u64);
-    }
-    putchar(b'\n');
+    // SAFETY: diagnostic pid read of the (validated kernel-half) task.
+    let pid = if tp >= 0x8000_0000_0000_0000 {
+        Some(unsafe { rq32(tp as *mut Task, offs::TASK_PID) })
+    } else {
+        None
+    };
+    crate::pr_err!(
+        "R84-KSPTRAP site={} val={:#x} tp={:#x} sepc={:#x} jiffies={} time={:#x} pid={}",
+        site,
+        val,
+        tp,
+        sepc,
+        crate::drivers::timer::get_jiffies(),
+        crate::drivers::timer::read_time(),
+        match pid {
+            Some(p) => alloc::format!("{}", p),
+            None => alloc::string::String::from("?"),
+        }
+    );
 }

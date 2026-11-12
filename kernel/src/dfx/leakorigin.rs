@@ -244,7 +244,6 @@ fn report_acquire_divergent(
     if N.compare_exchange(b, b - 1, Ordering::AcqRel, Ordering::Acquire).is_err() {
         return;
     }
-    use crate::console::putchar_no_lock as putchar;
     // SAFETY: diagnostic scalar reads of stable Task fields; `task` is
     // current on this CPU (pinned by execution), `slot_task` was this
     // CPU's slot content moments before (same discipline as the s14
@@ -257,88 +256,15 @@ fn report_acquire_divergent(
         } else {
             0
         };
-        for &c in b"\nACQUIRE-DIVERGENT pid=" {
-            putchar(c);
-        }
-        let mut v = pid as u64;
-        let mut buf = [0u8; 12];
-        let mut n = 0;
-        while v > 0 && n < buf.len() {
-            buf[n] = b'0' + (v % 10) as u8;
-            v /= 10;
-            n += 1;
-        }
-        if n == 0 {
-            putchar(b'0');
-        }
-        while n > 0 {
-            n -= 1;
-            putchar(buf[n]);
-        }
-        for &c in b" pc=0x" {
-            putchar(c);
-        }
-        let mut x = pc as u32 as u64;
-        for sh in (0..8).rev() {
-            let d = ((x >> (sh * 4)) & 0xF) as u8;
-            putchar(if d < 10 { b'0' + d } else { b'a' + d - 10 });
-        }
-        for &c in b" cpu=" {
-            putchar(c);
-        }
-        let mut v = cpu as u64;
-        let mut n = 0;
-        while v > 0 && n < buf.len() {
-            buf[n] = b'0' + (v % 10) as u8;
-            v /= 10;
-            n += 1;
-        }
-        if n == 0 {
-            putchar(b'0');
-        }
-        while n > 0 {
-            n -= 1;
-            putchar(buf[n]);
-        }
-        for &c in b" site=" {
-            putchar(c);
-        }
-        for &c in loc.file().as_bytes() {
-            putchar(c);
-        }
-        putchar(b':');
-        let mut v = loc.line() as u64;
-        let mut n = 0;
-        while v > 0 && n < buf.len() {
-            buf[n] = b'0' + (v % 10) as u8;
-            v /= 10;
-            n += 1;
-        }
-        if n == 0 {
-            putchar(b'0');
-        }
-        while n > 0 {
-            n -= 1;
-            putchar(buf[n]);
-        }
-        for &c in b" slotpid=" {
-            putchar(c);
-        }
-        let mut v = slot_pid as u64;
-        let mut n = 0;
-        while v > 0 && n < buf.len() {
-            buf[n] = b'0' + (v % 10) as u8;
-            v /= 10;
-            n += 1;
-        }
-        if n == 0 {
-            putchar(b'0');
-        }
-        while n > 0 {
-            n -= 1;
-            putchar(buf[n]);
-        }
-        putchar(b'\n');
+        crate::pr_debug!(
+            "ACQUIRE-DIVERGENT pid={} pc={:#x} cpu={} site={}:{} slotpid={}",
+            pid,
+            pc,
+            cpu,
+            loc.file(),
+            loc.line(),
+            slot_pid
+        );
     }
 }
 
@@ -366,7 +292,8 @@ pub fn note_release(task: *mut crate::process::Task) {
         slot.otask.store(0, Ordering::Release);
         return;
     }
-    // Split: budgeted direct console (may fire from IRQ-laden contexts).
+    // Split: budgeted (may fire from IRQ-laden contexts). printk's
+    // pre-ring filter is a single atomic load, safe from any context.
     static SPLIT_N: AtomicU32 = AtomicU32::new(40);
     let b = SPLIT_N.load(Ordering::Acquire);
     if b == 0 {
@@ -378,66 +305,23 @@ pub fn note_release(task: *mut crate::process::Task) {
     {
         return;
     }
-    use crate::console::putchar_no_lock as putchar;
-    fn ph(v: usize) {
-        use crate::console::putchar_no_lock as putchar;
-        for sh in (0..16).rev() {
-            let n = ((v >> (sh * 4)) & 0xF) as u8;
-            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-        }
-    }
-    for &c in b"\nACQUIRE-PAIR-SPLIT releaser=0x" {
-        putchar(c);
-    }
-    ph(task as usize);
-    for &c in b" recorded=0x" {
-        putchar(c);
-    }
-    ph(ot);
+    use core::fmt::Write as _;
+    let mut line = [0u8; 224];
+    let mut cur = crate::printk::BufferWriter::new(&mut line);
+    let _ = write!(
+        cur,
+        "ACQUIRE-PAIR-SPLIT releaser={:#x} recorded={:#x}",
+        task as usize, ot
+    );
     // The recorded acquire's site + cpu identify where the orphan 0->1
     // came from.
     let site = slot.osite.load(Ordering::Acquire) as *const Location;
     if !site.is_null() {
         // SAFETY: stored from a &'static Location (see note_acquire).
         let loc = unsafe { &*site };
-        for &c in b" osite=" {
-            putchar(c);
-        }
-        for &c in loc.file().as_bytes() {
-            putchar(c);
-        }
-        putchar(b':');
-        let mut v = loc.line() as u64;
-        let mut buf = [0u8; 20];
-        let mut n = 0;
-        while v > 0 {
-            buf[n] = b'0' + (v % 10) as u8;
-            v /= 10;
-            n += 1;
-        }
-        while n > 0 {
-            n -= 1;
-            putchar(buf[n]);
-        }
+        let _ = write!(cur, " osite={}:{}", loc.file(), loc.line());
     }
-    for &c in b" ocpu=" {
-        putchar(c);
-    }
-    let mut v = slot.ocpu.load(Ordering::Acquire) as u64;
-    let mut buf = [0u8; 20];
-    let mut n = 0;
-    if v == 0 {
-        putchar(b'0');
-    }
-    while v > 0 {
-        buf[n] = b'0' + (v % 10) as u8;
-        v /= 10;
-        n += 1;
-    }
-    while n > 0 {
-        n -= 1;
-        putchar(buf[n]);
-    }
+    let _ = write!(cur, " ocpu={}", slot.ocpu.load(Ordering::Acquire));
     // stress-port r8 discriminators: the RECORDED task's live state at
     // print time. The r7 forker boot saturated this print's 40-line
     // budget with osite=sched.rs:2641 pairs (including symmetric
@@ -456,41 +340,12 @@ pub fn note_release(task: *mut crate::process::Task) {
     if ot >= 0x80000000 {
         unsafe {
             let rt = ot as *mut crate::process::Task;
-            for &c in b" rpid=" {
-                putchar(c);
-            }
-            let mut v = (*rt).pid() as u64;
-            let mut n = 0;
-            if v == 0 {
-                putchar(b'0');
-            }
-            while v > 0 && n < buf.len() {
-                buf[n] = b'0' + (v % 10) as u8;
-                v /= 10;
-                n += 1;
-            }
-            while n > 0 {
-                n -= 1;
-                putchar(buf[n]);
-            }
-            for &c in b" rpc=" {
-                putchar(c);
-            }
-            let mut v = ((*rt).preempt_count()
-                & crate::interrupt::preempt::PREEMPT_MASK) as u64;
-            let mut n = 0;
-            if v == 0 {
-                putchar(b'0');
-            }
-            while v > 0 && n < buf.len() {
-                buf[n] = b'0' + (v % 10) as u8;
-                v /= 10;
-                n += 1;
-            }
-            while n > 0 {
-                n -= 1;
-                putchar(buf[n]);
-            }
+            let _ = write!(cur, " rpid={}", (*rt).pid());
+            let _ = write!(
+                cur,
+                " rpc={}",
+                (*rt).preempt_count() & crate::interrupt::preempt::PREEMPT_MASK
+            );
             // rown bit 1: some cpu's sched slot names it; bit 2: some
             // cpu is switching it out right now.
             let mut rown: u64 = 0;
@@ -502,26 +357,13 @@ pub fn note_release(task: *mut crate::process::Task) {
             if crate::sched::sched::task_is_mid_switch_out(rt) {
                 rown |= 2;
             }
-            for &c in b" rown=" {
-                putchar(c);
-            }
-            let mut v = rown;
-            let mut n = 0;
-            if v == 0 {
-                putchar(b'0');
-            }
-            while v > 0 && n < buf.len() {
-                buf[n] = b'0' + (v % 10) as u8;
-                v /= 10;
-                n += 1;
-            }
-            while n > 0 {
-                n -= 1;
-                putchar(buf[n]);
-            }
+            let _ = write!(cur, " rown={}", rown);
         }
     }
-    putchar(b'\n');
+    let len = cur.pos();
+    drop(cur);
+    let text = core::str::from_utf8(&line[..len]).unwrap_or("");
+    crate::pr_debug!("{}", text);
 }
 
 /// Record a HARDIRQ_OFFSET acquire (last wins; s14 extension — the
@@ -608,51 +450,28 @@ pub fn report_hardirq_origin(tag: &[u8], task: *mut crate::process::Task) {
     {
         return;
     }
-    use crate::console::putchar_no_lock as putchar;
-    fn putd(mut v: u64) {
-        let mut buf = [0u8; 20];
-        let mut n = 0;
-        if v == 0 {
-            putchar(b'0');
-            return;
-        }
-        while v > 0 && n < buf.len() {
-            buf[n] = b'0' + (v % 10) as u8;
-            v /= 10;
-            n += 1;
-        }
-        for i in (0..n).rev() {
-            putchar(buf[i]);
-        }
-    }
-    for &c in b"\n" {
-        putchar(c);
-    }
-    for &c in tag {
-        putchar(c);
-    }
-    for &c in b" pid=" {
-        putchar(c);
-    }
-    putd(unsafe { (*task).pid() } as u64);
+    use core::fmt::Write as _;
+    let mut line = [0u8; 160];
+    let mut cur = crate::printk::BufferWriter::new(&mut line);
+    let _ = write!(
+        cur,
+        "{} pid={}",
+        core::str::from_utf8(tag).unwrap_or("?"),
+        // SAFETY: diagnostic scalar read; `task` is pinned by the caller.
+        unsafe { (*task).pid() }
+    );
     // SAFETY: stored from a &'static Location (see note_hardirq_acquire).
     let loc = unsafe { &*site };
-    for &c in b" hsite=" {
-        putchar(c);
-    }
-    for &c in loc.file().as_bytes() {
-        putchar(c);
-    }
-    putchar(b':');
-    putd(loc.line() as u64);
-    for &c in b" hage_jif=" {
-        putchar(c);
-    }
-    putd(
-        crate::drivers::timer::get_jiffies()
-            .wrapping_sub(slot.hjif.load(Ordering::Acquire)),
+    let _ = write!(cur, " hsite={}:{}", loc.file(), loc.line());
+    let _ = write!(
+        cur,
+        " hage_jif={}",
+        crate::drivers::timer::get_jiffies().wrapping_sub(slot.hjif.load(Ordering::Acquire))
     );
-    putchar(b'\n');
+    let len = cur.pos();
+    drop(cur);
+    let text = core::str::from_utf8(&line[..len]).unwrap_or("");
+    crate::pr_debug!("{}", text);
 }
 
 /// Print the SOFTIRQ acquire record for `task` (the phantom-bits tap):
@@ -679,68 +498,38 @@ pub fn report_softirq_origin(tag: &[u8], task: *mut crate::process::Task) {
     {
         return;
     }
-    use crate::console::putchar_no_lock as putchar;
-    fn putd(mut v: u64) {
-        let mut buf = [0u8; 20];
-        let mut n = 0;
-        if v == 0 {
-            putchar(b'0');
-            return;
-        }
-        while v > 0 && n < buf.len() {
-            buf[n] = b'0' + (v % 10) as u8;
-            v /= 10;
-            n += 1;
-        }
-        for i in (0..n).rev() {
-            putchar(buf[i]);
-        }
-    }
-    for &c in b"\n" {
-        putchar(c);
-    }
-    for &c in tag {
-        putchar(c);
-    }
-    for &c in b" pid=" {
-        putchar(c);
-    }
-    putd(unsafe { (*task).pid() } as u64);
-    for &c in b" pc=0x" {
-        putchar(c);
-    }
-    let pc = unsafe { (*task).preempt_count() } as u32 as u64;
-    for sh in (0..8).rev() {
-        let n = ((pc >> (sh * 4)) & 0xF) as u8;
-        putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-    }
+    use core::fmt::Write as _;
+    let mut line = [0u8; 192];
+    let mut cur = crate::printk::BufferWriter::new(&mut line);
+    let _ = write!(
+        cur,
+        "{} pid={}",
+        core::str::from_utf8(tag).unwrap_or("?"),
+        // SAFETY: diagnostic scalar read; `task` is pinned by the caller.
+        unsafe { (*task).pid() }
+    );
     // SAFETY: stored from a &'static Location (see note_softirq_acquire).
     let loc = unsafe { &*site };
-    for &c in b" ssite=" {
-        putchar(c);
-    }
-    for &c in loc.file().as_bytes() {
-        putchar(c);
-    }
-    putchar(b':');
-    putd(loc.line() as u64);
-    for &c in b" scpu=" {
-        putchar(c);
-    }
-    putd(slot.scpu.load(Ordering::Acquire) as u64);
-    if slot.smis.load(Ordering::Acquire) != 0 {
-        for &c in b" smis=1" {
-            putchar(c);
-        }
-    }
-    for &c in b" sage_jif=" {
-        putchar(c);
-    }
-    putd(
-        crate::drivers::timer::get_jiffies()
-            .wrapping_sub(slot.sjif.load(Ordering::Acquire)),
+    let _ = write!(
+        cur,
+        " pc={:#x} ssite={}:{} scpu={}",
+        unsafe { (*task).preempt_count() },
+        loc.file(),
+        loc.line(),
+        slot.scpu.load(Ordering::Acquire)
     );
-    putchar(b'\n');
+    if slot.smis.load(Ordering::Acquire) != 0 {
+        let _ = write!(cur, " smis=1");
+    }
+    let _ = write!(
+        cur,
+        " sage_jif={}",
+        crate::drivers::timer::get_jiffies().wrapping_sub(slot.sjif.load(Ordering::Acquire))
+    );
+    let len = cur.pos();
+    drop(cur);
+    let text = core::str::from_utf8(&line[..len]).unwrap_or("");
+    crate::pr_debug!("{}", text);
 }
 
 /// User-mode return tripwire. Call at the trap-handler tail when the
@@ -794,25 +583,7 @@ pub fn report_parked_site(task: *mut crate::process::Task) {
     if !ENABLED.load(Ordering::Relaxed) {
         return;
     }
-    use crate::console::putchar_no_lock as putchar;
-    fn pd(mut v: u64) {
-        use crate::console::putchar_no_lock as putchar;
-        let mut buf = [0u8; 20];
-        let mut n = 0;
-        if v == 0 {
-            buf[0] = b'0';
-            n = 1;
-        } else {
-            while v > 0 && n < buf.len() {
-                buf[n] = b'0' + (v % 10) as u8;
-                v /= 10;
-                n += 1;
-            }
-        }
-        for i in (0..n).rev() {
-            putchar(buf[i]);
-        }
-    }
+    use core::fmt::Write as _;
     // Scan the arch tp slots for the victim.
     let mut tpcpu: i32 = -1;
     let mut tppc: i32 = 0;
@@ -825,19 +596,19 @@ pub fn report_parked_site(task: *mut crate::process::Task) {
             break;
         }
     }
-    const A: &[u8] = b"\nLEAK-ORIGIN parked-adjacent tp=";
-    for &c in A {
-        putchar(c);
-    }
-    pd(tpcpu as u64);
+    let mut line = [0u8; 224];
+    let mut cur = crate::printk::BufferWriter::new(&mut line);
+    let _ = write!(cur, "LEAK-ORIGIN parked-adjacent tp={}", tpcpu);
     if tpcpu >= 0 {
-        const B: &[u8] = b" tpc_pc=";
-        for &c in B {
-            putchar(c);
-        }
-        pd(tppc as u64);
+        let _ = write!(cur, " tpc_pc={}", tppc);
     }
-    emit(b" LEAK-ORIGIN parked", task, unsafe { (*task).preempt_count() });
+    // "LEAK-ORIGIN parked" tail from emit()'s tag.
+    let _ = write!(cur, " LEAK-ORIGIN parked");
+    emit_fields(&mut cur, task, unsafe { (*task).preempt_count() });
+    let len = cur.pos();
+    drop(cur);
+    let text = core::str::from_utf8(&line[..len]).unwrap_or("");
+    crate::pr_debug!("{}", text);
 }
 
 /// Append the recorded site for the tick-side PREEMPT-LEAK incumbent
@@ -875,144 +646,60 @@ pub fn report_outermost(tag: &[u8], task: *mut crate::process::Task) {
     {
         return;
     }
-    use crate::console::putchar_no_lock as putchar;
-    fn putd(mut v: u64) {
-        use crate::console::putchar_no_lock as putchar;
-        let mut buf = [0u8; 20];
-        let mut n = 0;
-        if v == 0 {
-            putchar(b'0');
-            return;
-        }
-        while v > 0 && n < buf.len() {
-            buf[n] = b'0' + (v % 10) as u8;
-            v /= 10;
-            n += 1;
-        }
-        for i in (0..n).rev() {
-            putchar(buf[i]);
-        }
-    }
-    for &c in b"\n" {
-        putchar(c);
-    }
-    for &c in tag {
-        putchar(c);
-    }
-    for &c in b" pid=" {
-        putchar(c);
-    }
-    putd(unsafe { (*task).pid() } as u64);
+    use core::fmt::Write as _;
+    let mut line = [0u8; 224];
+    let mut cur = crate::printk::BufferWriter::new(&mut line);
+    let _ = write!(
+        cur,
+        "{} pid={}",
+        core::str::from_utf8(tag).unwrap_or("?"),
+        // SAFETY: diagnostic scalar read; `task` is pinned by the caller.
+        unsafe { (*task).pid() }
+    );
     let site = slot.osite.load(Ordering::Acquire) as *const Location;
     if !site.is_null() {
         // SAFETY: stored from a &'static Location (see note_acquire).
         let loc = unsafe { &*site };
-        for &c in b" osite=" {
-            putchar(c);
-        }
-        for &c in loc.file().as_bytes() {
-            putchar(c);
-        }
-        putchar(b':');
-        putd(loc.line() as u64);
+        let _ = write!(cur, " osite={}:{}", loc.file(), loc.line());
     } else {
-        for &c in b" osite=?" {
-            putchar(c);
-        }
+        let _ = write!(cur, " osite=?");
     }
-    for &c in b" ocpu=" {
-        putchar(c);
-    }
-    putd(slot.ocpu.load(Ordering::Acquire) as u64);
+    let _ = write!(cur, " ocpu={}", slot.ocpu.load(Ordering::Acquire));
     let mis = slot.omis.load(Ordering::Acquire);
     if mis != 0 {
-        for &c in b" omis=" {
-            putchar(c);
-        }
-        putd(mis as u64);
+        let _ = write!(cur, " omis={}", mis);
         let osl = slot.oslot.load(Ordering::Acquire);
         if osl != 0 {
-            for &c in b" oslot=0x" {
-                putchar(c);
-            }
-            for sh in (0..16).rev() {
-                let n = ((osl >> (sh * 4)) & 0xF) as u8;
-                putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-            }
+            let _ = write!(cur, " oslot={:#x}", osl);
         }
     }
-    for &c in b" oage_jif=" {
-        putchar(c);
-    }
-    putd(
-        crate::drivers::timer::get_jiffies()
-            .wrapping_sub(slot.ojif.load(Ordering::Acquire)),
+    let _ = write!(
+        cur,
+        " oage_jif={}",
+        crate::drivers::timer::get_jiffies().wrapping_sub(slot.ojif.load(Ordering::Acquire))
     );
-    putchar(b'\n');
+    let len = cur.pos();
+    drop(cur);
+    let text = core::str::from_utf8(&line[..len]).unwrap_or("");
+    crate::pr_debug!("{}", text);
 }
 
-/// One report line: tag, pid, pc, site=<file>:<line> cnt_after=<n>
-/// age=<jiffies> for the recorded acquire.
-fn emit(tag: &[u8], task: *mut crate::process::Task, pc: i32) {
-    use crate::console::putchar_no_lock as putchar;
-    let b = BUDGET.load(Ordering::Acquire);
-    if b == 0 {
-        return;
-    }
-    BUDGET
-        .compare_exchange(b, b - 1, Ordering::AcqRel, Ordering::Acquire)
-        .ok();
-    fn put_i64(mut v: i64) {
-        use crate::console::putchar_no_lock as putchar;
-        if v < 0 {
-            putchar(b'-');
-            v = v.wrapping_neg();
-        }
-        let mut buf = [0u8; 20];
-        let mut n = 0;
-        if v == 0 {
-            buf[0] = b'0';
-            n = 1;
-        } else {
-            while v > 0 && n < buf.len() {
-                buf[n] = b'0' + (v % 10) as u8;
-                v /= 10;
-                n += 1;
-            }
-        }
-        for i in (0..n).rev() {
-            putchar(buf[i]);
-        }
-    }
+/// Append the shared report fields (pid, pc, site=..., hsite=...,
+/// ssite=..., cnt_after=..., age=..., osite=... ocpu=... omis=...
+/// oslot=...) for the recorded acquire onto `cur`.
+fn emit_fields(cur: &mut crate::printk::BufferWriter<'_>, task: *mut crate::process::Task, pc: i32) {
+    use core::fmt::Write as _;
     let slot = slot_of(task);
     let now = crate::drivers::timer::get_jiffies();
-    for &c in tag {
-        putchar(c);
-    }
-    for &c in b" pid=" {
-        putchar(c);
-    }
-    put_i64(unsafe { (*task).pid() } as i64);
-    for &c in b" pc=" {
-        putchar(c);
-    }
-    put_i64(pc as i64);
+    // SAFETY: diagnostic scalar read; `task` is pinned by the caller.
+    let _ = write!(cur, " pid={} pc={}", unsafe { (*task).pid() }, pc);
     let site = slot.site.load(Ordering::Acquire) as *const Location;
     if slot.task.load(Ordering::Acquire) == task as usize && !site.is_null() {
         // SAFETY: stored from a &'static Location (see site_of).
         let loc = unsafe { &*site };
-        for &c in b" site=" {
-            putchar(c);
-        }
-        for &c in loc.file().as_bytes() {
-            putchar(c);
-        }
-        putchar(b':');
-        put_i64(loc.line() as i64);
+        let _ = write!(cur, " site={}:{}", loc.file(), loc.line());
     } else {
-        for &c in b" site=?" {
-            putchar(c);
-        }
+        let _ = write!(cur, " site=?");
     }
     // s14: the HARDIRQ acquire shadow — names which trap bracket
     // booked the stranded 0x10000 bit on this task, and when.
@@ -1020,18 +707,13 @@ fn emit(tag: &[u8], task: *mut crate::process::Task, pc: i32) {
     if slot.task.load(Ordering::Acquire) == task as usize && !hsite.is_null() {
         // SAFETY: stored from a &'static Location (see note_hardirq_acquire).
         let loc = unsafe { &*hsite };
-        for &c in b" hsite=" {
-            putchar(c);
-        }
-        for &c in loc.file().as_bytes() {
-            putchar(c);
-        }
-        putchar(b':');
-        put_i64(loc.line() as i64);
-        for &c in b" hage_jif=" {
-            putchar(c);
-        }
-        put_i64(now.wrapping_sub(slot.hjif.load(Ordering::Acquire)) as i64);
+        let _ = write!(
+            cur,
+            " hsite={}:{} hage_jif={}",
+            loc.file(),
+            loc.line(),
+            now.wrapping_sub(slot.hjif.load(Ordering::Acquire))
+        );
     }
     // phantom-bits: the SOFTIRQ acquire shadow — names which +0x100
     // booker (__do_softirq bracket vs SeqLock::write) owns a stranded
@@ -1040,27 +722,20 @@ fn emit(tag: &[u8], task: *mut crate::process::Task, pc: i32) {
     if slot.task.load(Ordering::Acquire) == task as usize && !ssite.is_null() {
         // SAFETY: stored from a &'static Location (see note_softirq_acquire).
         let loc = unsafe { &*ssite };
-        for &c in b" ssite=" {
-            putchar(c);
-        }
-        for &c in loc.file().as_bytes() {
-            putchar(c);
-        }
-        putchar(b':');
-        put_i64(loc.line() as i64);
-        for &c in b" sage_jif=" {
-            putchar(c);
-        }
-        put_i64(now.wrapping_sub(slot.sjif.load(Ordering::Acquire)) as i64);
+        let _ = write!(
+            cur,
+            " ssite={}:{} sage_jif={}",
+            loc.file(),
+            loc.line(),
+            now.wrapping_sub(slot.sjif.load(Ordering::Acquire))
+        );
     }
-    for &c in b" cnt_after=" {
-        putchar(c);
-    }
-    put_i64(slot.cnt_after.load(Ordering::Acquire) as i64);
-    for &c in b" age_jif=" {
-        putchar(c);
-    }
-    put_i64(now.wrapping_sub(slot.jif.load(Ordering::Acquire)) as i64);
+    let _ = write!(cur, " cnt_after={}", slot.cnt_after.load(Ordering::Acquire));
+    let _ = write!(
+        cur,
+        " age_jif={}",
+        now.wrapping_sub(slot.jif.load(Ordering::Acquire))
+    );
     // Outermost-acquire tap: when the reported task is the one holding
     // the unreturned 0->1, its site is the leak's origin (stable across
     // inner 1->2->1 pairs; see LoSlot.otask).
@@ -1069,35 +744,36 @@ fn emit(tag: &[u8], task: *mut crate::process::Task, pc: i32) {
         if !osite.is_null() {
             // SAFETY: stored from a &'static Location (see note_acquire).
             let loc = unsafe { &*osite };
-            for &c in b" osite=" {
-                putchar(c);
-            }
-            for &c in loc.file().as_bytes() {
-                putchar(c);
-            }
-            putchar(b':');
-            put_i64(loc.line() as i64);
+            let _ = write!(cur, " osite={}:{}", loc.file(), loc.line());
         }
-        for &c in b" ocpu=" {
-            putchar(c);
-        }
-        put_i64(slot.ocpu.load(Ordering::Acquire) as i64);
+        let _ = write!(cur, " ocpu={}", slot.ocpu.load(Ordering::Acquire));
         if slot.omis.load(Ordering::Acquire) != 0 {
-            for &c in b" omis=" {
-                putchar(c);
-            }
-            put_i64(slot.omis.load(Ordering::Acquire) as i64);
+            let _ = write!(cur, " omis={}", slot.omis.load(Ordering::Acquire));
             let osl = slot.oslot.load(Ordering::Acquire);
             if osl != 0 {
-                for &c in b" oslot=0x" {
-                    putchar(c);
-                }
-                for sh in (0..16).rev() {
-                    let n = ((osl >> (sh * 4)) & 0xF) as u8;
-                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                }
+                let _ = write!(cur, " oslot={:#x}", osl);
             }
         }
     }
-    putchar(b'\n');
+}
+
+/// One report line: tag, pid, pc, site=<file>:<line> cnt_after=<n>
+/// age=<jiffies> for the recorded acquire.
+fn emit(tag: &[u8], task: *mut crate::process::Task, pc: i32) {
+    let b = BUDGET.load(Ordering::Acquire);
+    if b == 0 {
+        return;
+    }
+    BUDGET
+        .compare_exchange(b, b - 1, Ordering::AcqRel, Ordering::Acquire)
+        .ok();
+    use core::fmt::Write as _;
+    let mut line = [0u8; 320];
+    let mut cur = crate::printk::BufferWriter::new(&mut line);
+    let _ = write!(cur, "{}", core::str::from_utf8(tag).unwrap_or("?").trim_start_matches('\n'));
+    emit_fields(&mut cur, task, pc);
+    let len = cur.pos();
+    drop(cur);
+    let text = core::str::from_utf8(&line[..len]).unwrap_or("");
+    crate::pr_debug!("{}", text);
 }

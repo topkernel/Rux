@@ -191,44 +191,16 @@ impl RawSpinlock {
         self.record_owner(caller_ra);
     }
 
-    /// Print deadlock warning via SBI (works even with interrupts disabled).
+    /// Print deadlock warning. pr_err! (an error — stays active in
+    /// release builds): printk's pre-ring filter is a single atomic load,
+    /// and the per-CPU re-entrancy guard turns a call from inside
+    /// printk's own path into a silent drop, never a recursion — so this
+    /// is safe even with interrupts disabled or while spinning on a lock
+    /// printk itself might touch.
     fn deadlock_warn(lock_addr: *const Self, caller_ra: usize) {
-        // Use SBI putchar directly — printk might need locks we're spinning on
+        use core::fmt::Write as _;
         let cpu = crate::arch::smp::cpu_id();
-        let msg = b"DEADLOCK: spinlock stuck cpu=";
-        for &b in msg {
-            unsafe { crate::console::putchar_no_lock(b); }
-        }
-        // Print CPU id as decimal digit
-        if cpu < 10 {
-            unsafe { crate::console::putchar_no_lock(b'0' + cpu as u8); }
-        }
-        // Print lock address in hex
-        let msg2 = b" lock=0x";
-        for &b in msg2 {
-            unsafe { crate::console::putchar_no_lock(b); }
-        }
         let addr = lock_addr as usize;
-        let mut shift = (core::mem::size_of::<usize>() * 8) as i32;
-        while shift > 0 {
-            shift -= 4;
-            let nibble = (addr >> (shift as usize)) & 0xF;
-            let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
-            unsafe { crate::console::putchar_no_lock(c); }
-        }
-
-        // Print caller return address (ra) for debugging
-        let msg3 = b" ra=0x";
-        for &b in msg3 {
-            unsafe { crate::console::putchar_no_lock(b); }
-        }
-        let mut shift = (core::mem::size_of::<usize>() * 8) as i32;
-        while shift > 0 {
-            shift -= 4;
-            let nibble = (caller_ra >> shift) & 0xF;
-            let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
-            unsafe { crate::console::putchar_no_lock(c); }
-        }
 
         // Holder identity: owner = hart+1 (0 = free / mid-handoff).
         // oh-crash 91st extension (the meltdown holder hunt): the owner
@@ -237,26 +209,20 @@ impl RawSpinlock {
         // symbolization of any ops/vtable pointers), and one REMOTE-BT
         // of the holder per unique lock address per boot — the IPI
         // handler on the holder captures its live interrupted stack.
+        #[allow(unused_mut)]
+        let mut holder_cpu: Option<usize> = None;
         #[cfg(feature = "dfx-lock-owner")]
         {
-            let msg4 = b" holder=";
-            for &b in msg4 {
-                unsafe { crate::console::putchar_no_lock(b); }
-            }
             // SAFETY: lock_addr is a valid RawSpinlock pointer (from lock()).
             let holder = unsafe { (&*lock_addr).owner.load(Ordering::Relaxed) };
-            let mut holder_cpu: Option<usize> = None;
             if holder == 0 {
-                let msg5 = b"switching";
-                for &b in msg5 {
-                    unsafe { crate::console::putchar_no_lock(b); }
-                }
+                crate::pr_err!(
+                    "DEADLOCK: spinlock stuck cpu={} lock={:#x} ra={:#x} holder=switching",
+                    cpu, addr, caller_ra
+                );
             } else {
                 let h = holder - 1;
                 holder_cpu = Some(h);
-                if h < 10 {
-                    unsafe { crate::console::putchar_no_lock(b'0' + h as u8); }
-                }
                 // Holder CPU's current task: pid + comm (best-effort —
                 // an irqsave holder cannot migrate, so this is the task
                 // that acquired; plain lock() holders may have been
@@ -266,74 +232,52 @@ impl RawSpinlock {
                 // published pointer; read-only access.
                 let cur = unsafe { crate::sched::sched::cpu_state(h).current };
                 if !cur.is_null() {
-                    // SAFETY: read-only access to a live Task.
+                    // SAFETY: read-only access to a live Task; comm is a
+                    // fixed [u8;16], no allocation.
                     let pid = unsafe { (*cur).pid() };
-                    let msg_pid = b" task=";
-                    for &b in msg_pid {
-                        unsafe { crate::console::putchar_no_lock(b); }
-                    }
-                    Self::putdec(pid as u64);
-                    // SAFETY: comm is a fixed [u8;16], no allocation.
                     let comm = unsafe { (*cur).comm() };
-                    unsafe { crate::console::putchar_no_lock(b'('); }
-                    let mut any = false;
-                    for &b in comm.iter() {
-                        if b == 0 {
-                            break;
-                        }
-                        if (0x20..0x7f).contains(&b) {
-                            unsafe { crate::console::putchar_no_lock(b); }
-                            any = true;
-                        }
+                    let mut j = 0;
+                    while j < comm.len() && comm[j] != 0 {
+                        j += 1;
                     }
-                    if !any {
-                        unsafe { crate::console::putchar_no_lock(b'?'); }
-                    }
-                    unsafe { crate::console::putchar_no_lock(b')'); }
+                    let comm_str = core::str::from_utf8(&comm[..j]).unwrap_or("?");
+                    crate::pr_err!(
+                        "DEADLOCK: spinlock stuck cpu={} lock={:#x} ra={:#x} holder={} task={}({})",
+                        cpu, addr, caller_ra, h, pid, comm_str
+                    );
+                } else {
+                    crate::pr_err!(
+                        "DEADLOCK: spinlock stuck cpu={} lock={:#x} ra={:#x} holder={}",
+                        cpu, addr, caller_ra, h
+                    );
                 }
             }
 
-        unsafe { crate::console::putchar_no_lock(b'\n'); }
-
-        // Leak forensics (dfx-lock-owner): the LAST acquirer's pid,
-        // call site and acquire age — these persist past a cleared
-        // owner word, so a leaked lock names who took it and when
-        // even when the owner stamp is mid-handoff. Plus the raw
-        // locked word (1 = genuinely held; anything else is a torn
-        // or corrupted state worth seeing).
-        #[cfg(feature = "dfx-lock-owner")]
+            // Leak forensics (dfx-lock-owner): the LAST acquirer's pid,
+            // call site and acquire age — these persist past a cleared
+            // owner word, so a leaked lock names who took it and when
+            // even when the owner stamp is mid-handoff. Plus the raw
+            // locked word (1 = genuinely held; anything else is a torn
+            // or corrupted state worth seeing).
+            {
+                // SAFETY: lock_addr is a valid RawSpinlock pointer (from lock()).
+                let l = unsafe { &*lock_addr };
+                crate::pr_err!(
+                    "LOCK-ACQ: word={:#x} pid={} site={:#x} age={}j",
+                    l.locked.load(Ordering::Relaxed),
+                    l.acq_pid.load(Ordering::Relaxed),
+                    l.acq_site.load(Ordering::Relaxed),
+                    crate::drivers::timer::get_jiffies()
+                        .wrapping_sub(l.acq_jiffies.load(Ordering::Relaxed))
+                );
+            }
+        }
+        #[cfg(not(feature = "dfx-lock-owner"))]
         {
-            // SAFETY: lock_addr is a valid RawSpinlock pointer (from lock()).
-            let l = unsafe { &*lock_addr };
-            let apid = l.acq_pid.load(Ordering::Relaxed);
-            let asite = l.acq_site.load(Ordering::Relaxed);
-            let ajif = l.acq_jiffies.load(Ordering::Relaxed);
-            let wv = l.locked.load(Ordering::Relaxed);
-            let now = crate::drivers::timer::get_jiffies();
-            let msg = b"LOCK-ACQ: word=";
-            for &b in msg {
-                unsafe { crate::console::putchar_no_lock(b); }
-            }
-            Self::puthex(wv as u64);
-            let msg = b" pid=";
-            for &b in msg {
-                unsafe { crate::console::putchar_no_lock(b); }
-            }
-            Self::putdec(apid as u64);
-            let msg = b" site=0x";
-            for &b in msg {
-                unsafe { crate::console::putchar_no_lock(b); }
-            }
-            Self::puthex(asite as u64);
-            let msg = b" age=";
-            for &b in msg {
-                unsafe { crate::console::putchar_no_lock(b); }
-            }
-            Self::putdec(now.wrapping_sub(ajif));
-            let msg = b"j\n";
-            for &b in msg {
-                unsafe { crate::console::putchar_no_lock(b); }
-            }
+            crate::pr_err!(
+                "DEADLOCK: spinlock stuck cpu={} lock={:#x} ra={:#x}",
+                cpu, addr, caller_ra
+            );
         }
 
         // Containing heap object (works with or without a known holder):
@@ -341,32 +285,26 @@ impl RawSpinlock {
         // in kernel text (0xffffffff8...) symbolizes offline against
         // gen-ksyms output — that names the lock's OWNER STRUCT (ops
         // table / vtable / function pointer members).
+        #[allow(unused_mut)]
         if let Some((base, sz)) = crate::mm::small_alloc::object_span(lock_addr as usize) {
-            let msg = b"LOCK-OBJ: small kmalloc-";
-            for &b in msg {
-                unsafe { crate::console::putchar_no_lock(b); }
-            }
-            Self::putdec(sz as u64);
-            let msg = b" base=0x";
-            for &b in msg {
-                unsafe { crate::console::putchar_no_lock(b); }
-            }
-            Self::puthex(base as u64);
-            let msg = b" words=";
-            for &b in msg {
-                unsafe { crate::console::putchar_no_lock(b); }
-            }
+            let mut line = [0u8; 160];
+            let mut cur = crate::printk::BufferWriter::new(&mut line);
+            let _ = write!(
+                cur,
+                "LOCK-OBJ: small kmalloc-{} base={:#x} words=",
+                sz, base
+            );
             for i in 0..6 {
                 // SAFETY: diagnostic read of the object's first words;
                 // the span was validated by object_span (inside a live
                 // slab page, in-bounds of the object's slot).
                 let w = unsafe { ((base + i * 8) as *const u64).read_unaligned() };
-                Self::puthex(w);
-                if i < 5 {
-                    unsafe { crate::console::putchar_no_lock(b','); }
-                }
+                let _ = write!(cur, "{}{:#x}", if i == 0 { "" } else { "," }, w);
             }
-            unsafe { crate::console::putchar_no_lock(b'\n'); }
+            let len = cur.pos();
+            drop(cur);
+            let text = core::str::from_utf8(&line[..len]).unwrap_or("");
+            crate::pr_err!("{}", text);
         } else if let Some((base, order, free)) =
             crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.buddy_block_span(lock_addr as usize)
         {
@@ -375,36 +313,31 @@ impl RawSpinlock {
             // trick on the first words; `free!=0` (a lock inside a FREE
             // block) is itself evidence of a freed-with-lock-reference
             // object, printed as words=FREE.
-            let msg = b"LOCK-OBJ: buddy order-";
-            for &b in msg {
-                unsafe { crate::console::putchar_no_lock(b); }
-            }
-            Self::putdec(order as u64);
-            let msg = b" base=0x";
-            for &b in msg {
-                unsafe { crate::console::putchar_no_lock(b); }
-            }
-            Self::puthex(base as u64);
-            let msg = b" free=";
-            for &b in msg {
-                unsafe { crate::console::putchar_no_lock(b); }
-            }
-            Self::putdec(free as u64);
-            let msg = b" words=";
-            for &b in msg {
-                unsafe { crate::console::putchar_no_lock(b); }
-            }
-            for i in 0..6 {
-                // SAFETY: diagnostic read of the block's first words;
-                // buddy_block_span validated the address against the
-                // heap window and the block's base alignment.
-                let w = unsafe { ((base + i * 8) as *const u64).read_unaligned() };
-                Self::puthex(w);
-                if i < 5 {
-                    unsafe { crate::console::putchar_no_lock(b','); }
+            if free != 0 {
+                crate::pr_err!(
+                    "LOCK-OBJ: buddy order-{} base={:#x} free={} words=FREE",
+                    order, base, free
+                );
+            } else {
+                let mut line = [0u8; 160];
+                let mut cur = crate::printk::BufferWriter::new(&mut line);
+                let _ = write!(
+                    cur,
+                    "LOCK-OBJ: buddy order-{} base={:#x} free={} words=",
+                    order, base, free
+                );
+                for i in 0..6 {
+                    // SAFETY: diagnostic read of the block's first words;
+                    // buddy_block_span validated the address against the
+                    // heap window and the block's base alignment.
+                    let w = unsafe { ((base + i * 8) as *const u64).read_unaligned() };
+                    let _ = write!(cur, "{}{:#x}", if i == 0 { "" } else { "," }, w);
                 }
+                let len = cur.pos();
+                drop(cur);
+                let text = core::str::from_utf8(&line[..len]).unwrap_or("");
+                crate::pr_err!("{}", text);
             }
-            unsafe { crate::console::putchar_no_lock(b'\n'); }
         }
 
         // One REMOTE-BT per unique lock address per boot: the IPI
@@ -427,81 +360,11 @@ impl RawSpinlock {
                 }
             }
         }
-        }
-        #[cfg(not(feature = "dfx-lock-owner"))]
-        {
-            unsafe { crate::console::putchar_no_lock(b'\n'); }
-
-            // The heap-object span dump is cheap and holder-independent:
-            // keep it on default builds too (the meltdown hunts run
-            // stock feature sets as controls).
-            if let Some((base, sz)) = crate::mm::small_alloc::object_span(lock_addr as usize) {
-                let msg = b"LOCK-OBJ: small kmalloc-";
-                for &b in msg {
-                    unsafe { crate::console::putchar_no_lock(b); }
-                }
-                Self::putdec(sz as u64);
-                let msg = b" base=0x";
-                for &b in msg {
-                    unsafe { crate::console::putchar_no_lock(b); }
-                }
-                Self::puthex(base as u64);
-                unsafe { crate::console::putchar_no_lock(b'\n'); }
-            } else if let Some((base, order, free)) =
-                crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.buddy_block_span(lock_addr as usize)
-            {
-                let msg = b"LOCK-OBJ: buddy order-";
-                for &b in msg {
-                    unsafe { crate::console::putchar_no_lock(b); }
-                }
-                Self::putdec(order as u64);
-                let msg = b" base=0x";
-                for &b in msg {
-                    unsafe { crate::console::putchar_no_lock(b); }
-                }
-                Self::puthex(base as u64);
-                let msg = b" free=";
-                for &b in msg {
-                    unsafe { crate::console::putchar_no_lock(b); }
-                }
-                Self::putdec(free as u64);
-                unsafe { crate::console::putchar_no_lock(b'\n'); }
-            }
-        }
 
         // dfx=watchdog: follow the warning with a full task-state snapshot
         // (silent-wedge diagnosis — CPUs idle + sleepers never woken).
         if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WatchdogDump) {
             crate::dfx::taskdump::dump_all_tasks("deadlock-watchdog");
-        }
-    }
-
-    /// Lockless hex print (deadlock diagnostics — putchar path only).
-    fn puthex(v: u64) {
-        let mut shift: i32 = 64;
-        while shift > 0 {
-            shift -= 4;
-            let nibble = ((v >> shift) & 0xF) as u8;
-            let c = if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 };
-            unsafe { crate::console::putchar_no_lock(c); }
-        }
-    }
-
-    /// Lockless decimal print (deadlock diagnostics).
-    fn putdec(mut v: u64) {
-        let mut buf = [0u8; 20];
-        let mut i = 0;
-        loop {
-            buf[i] = b'0' + (v % 10) as u8;
-            i += 1;
-            v /= 10;
-            if v == 0 {
-                break;
-            }
-        }
-        while i > 0 {
-            i -= 1;
-            unsafe { crate::console::putchar_no_lock(buf[i]); }
         }
     }
 

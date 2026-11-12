@@ -493,31 +493,6 @@ pub fn tick_orphan_scan(cpu_id: usize) {
     {
         return;
     }
-    use crate::console::putchar_no_lock as putchar;
-    fn ph(v: u64) {
-        use crate::console::putchar_no_lock as putchar;
-        for sh in (0..8).rev() {
-            let n = ((v >> (sh * 4)) & 0xF) as u8;
-            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-        }
-    }
-    fn pd(mut v: u64) {
-        use crate::console::putchar_no_lock as putchar;
-        let mut buf = [0u8; 12];
-        let mut n = 0;
-        if v == 0 {
-            putchar(b'0');
-            return;
-        }
-        while v > 0 && n < buf.len() {
-            buf[n] = b'0' + (v % 10) as u8;
-            v /= 10;
-            n += 1;
-        }
-        for i in (0..n).rev() {
-            putchar(buf[i]);
-        }
-    }
     let pc_now = task.preempt_count();
     let pid = task.pid();
     let slot_task = crate::sched::sched::cpu_state(cpu_id).current as usize;
@@ -528,39 +503,30 @@ pub fn tick_orphan_scan(cpu_id: usize) {
     } else {
         0
     };
-    for &c in b"\nBIT-ORPHAN cpu=" {
-        putchar(c);
-    }
-    pd(cpu_id as u64);
-    for &c in b" pid=" {
-        putchar(c);
-    }
-    pd(pid as u64);
-    for &c in b" pctick=0x" {
-        putchar(c);
-    }
-    ph(entry as u32 as u64);
-    for &c in b" pcnow=0x" {
-        putchar(c);
-    }
-    ph(pc_now as u32 as u64);
+    use core::fmt::Write as _;
+    let mut line = [0u8; 96];
+    let mut cur = crate::printk::BufferWriter::new(&mut line);
+    let _ = write!(
+        cur,
+        "BIT-ORPHAN cpu={} pid={} pctick={:#x} pcnow={:#x}",
+        cpu_id,
+        pid,
+        entry,
+        pc_now
+    );
     if soft_orphan {
-        for &c in b" soft=1" {
-            putchar(c);
-        }
+        let _ = write!(cur, " soft=1");
     }
     if hard_orphan {
-        for &c in b" hard=1" {
-            putchar(c);
-        }
+        let _ = write!(cur, " hard=1");
     }
     if slot_task != task as *mut _ as usize {
-        for &c in b" slotdiv=1 slotpid=" {
-            putchar(c);
-        }
-        pd(slot_pid as u64);
+        let _ = write!(cur, " slotdiv=1 slotpid={}", slot_pid);
     }
-    putchar(b'\n');
+    let len = cur.pos();
+    drop(cur);
+    let text = core::str::from_utf8(&line[..len]).unwrap_or("");
+    crate::pr_debug!("{}", text);
     if soft_orphan {
         crate::dfx::leakorigin::report_softirq_origin(
             b"BIT-ORPHAN-SOFTIRQ",
@@ -589,7 +555,6 @@ pub fn tick_orphan_scan(cpu_id: usize) {
 /// without inventing a reference the type system cannot justify.
 #[allow(unsafe_code)]
 fn irq_pair_report(cpu: usize, enter: usize, exit: usize) {
-    use crate::console::putchar_no_lock as putchar;
     static BUDGET: core::sync::atomic::AtomicU32 =
         core::sync::atomic::AtomicU32::new(60);
     let b = BUDGET.load(core::sync::atomic::Ordering::Acquire);
@@ -599,46 +564,20 @@ fn irq_pair_report(cpu: usize, enter: usize, exit: usize) {
     BUDGET
         .compare_exchange(b, b - 1, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire)
         .ok();
-    fn phex(mut v: u64) {
-        use crate::console::putchar_no_lock as putchar;
-        for sh in (0..16).rev() {
-            let n = ((v >> (sh * 4)) & 0xF) as u8;
-            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-        }
-    }
     // SAFETY: diagnostic scalar reads of stable Task fields; both tasks
     // were current on this cpu moments ago (pinned by execution).
     let pid_e = unsafe { (*(enter as *mut crate::process::task::Task)).pid() };
     let pid_x = unsafe { (*(exit as *mut crate::process::Task)).pid() };
     let pc_e = unsafe { (*(enter as *mut crate::process::task::Task)).preempt_count() };
     let pc_x = unsafe { (*(exit as *mut crate::process::task::Task)).preempt_count() };
-    for &c in b"\nIRQ-PAIR-SPLIT cpu=" {
-        putchar(c);
-    }
-    phex(cpu as u64);
-    for &c in b" enter_pid=" {
-        putchar(c);
-    }
-    phex(pid_e as u64);
-    for &c in b" pc=" {
-        putchar(c);
-    }
-    phex(pc_e as u32 as u64);
-    for &c in b" exit_pid=" {
-        putchar(c);
-    }
-    phex(pid_x as u64);
-    for &c in b" pc=" {
-        putchar(c);
-    }
-    phex(pc_x as u32 as u64);
-    for &c in b" enter_tp=" {
-        putchar(c);
-    }
-    phex(enter as u64);
-    for &c in b" exit_tp=" {
-        putchar(c);
-    }
-    phex(exit as u64);
-    putchar(b'\n');
+    crate::pr_debug!(
+        "IRQ-PAIR-SPLIT cpu={} enter_pid={} pc={:#x} exit_pid={} pc={:#x} enter_tp={:#x} exit_tp={:#x}",
+        cpu,
+        pid_e,
+        pc_e,
+        pid_x,
+        pc_x,
+        enter,
+        exit
+    );
 }

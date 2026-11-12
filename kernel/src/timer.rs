@@ -1353,9 +1353,8 @@ fn ww_heartbeat(now_time: u64) {
     crate::sched::wakewatch::stallwatch_tick();
 }
 
-/// Rate-gated direct-console print for fire-lateness outliers (no GRQ
-/// held at the call site, but printk could interleave with GRQ-held
-/// direct writes — keep the same putchar_no_lock discipline).
+/// Rate-gate for fire-lateness outlier reports (printk interleaving is
+/// handled by the console atomicity flag; no GRQ is held here).
 fn ww_latefire_budget_ok() -> bool {
     static LAST: AtomicU64 = AtomicU64::new(0);
     let now = crate::drivers::timer::get_jiffies();

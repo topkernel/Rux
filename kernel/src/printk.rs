@@ -172,9 +172,23 @@ pub fn init() {
 // ==================== Core printk ====================
 
 /// Simple fmt::Write target that writes into a fixed-size buffer.
-struct BufferWriter<'a> {
+/// Public for diagnostic call sites that assemble one dynamic-length
+/// printk line from variable data before handing it to pr_debug!.
+pub struct BufferWriter<'a> {
     buf: &'a mut [u8],
     pos: usize,
+}
+
+impl<'a> BufferWriter<'a> {
+    /// Create a writer over `buf`; writes past the end are truncated.
+    pub fn new(buf: &'a mut [u8]) -> Self {
+        Self { buf, pos: 0 }
+    }
+
+    /// Number of bytes written so far.
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
 }
 
 impl<'a> fmt::Write for BufferWriter<'a> {
@@ -184,6 +198,84 @@ impl<'a> fmt::Write for BufferWriter<'a> {
         remaining[..to_write].copy_from_slice(&s.as_bytes()[..to_write]);
         self.pos += to_write;
         Ok(())
+    }
+}
+
+// ==================== Diagnostic line sink ====================
+
+/// Per-CPU newline-flushed KERN_DEBUG line sink for diagnostic dumpers
+/// (taskdump, scribble) that assemble output piecewise. Pieces
+/// accumulate in a per-CPU buffer; the newline byte flushes the
+/// finished line as one pr_debug! record (printk's pre-ring filter is a
+/// single atomic load; the per-CPU re-entrancy guard makes a call from
+/// inside printk's own path a silent drop, never a recursion — so the
+/// sink is safe from any context, including the deadlock watchdog).
+pub mod diagline {
+    struct LineSink {
+        buf: [u8; 256],
+        len: usize,
+    }
+
+    static mut LINE_SINKS: [LineSink; crate::config::MAX_CPUS] =
+        [const { LineSink { buf: [0; 256], len: 0 } }; crate::config::MAX_CPUS];
+
+    // SAFETY: indexed by the current CPU id; diagnostic dumps are rare
+    // one-shot events and the worst case of a race is a garbled line,
+    // never memory unsafety (each CPU touches only its own slot).
+    #[allow(static_mut_refs)]
+    fn sink() -> &'static mut LineSink {
+        unsafe {
+            &mut LINE_SINKS
+                [(crate::arch::cpu_id() as usize).min(crate::config::MAX_CPUS - 1)]
+        }
+    }
+
+    /// Append one byte; b'\\n' flushes the record.
+    pub fn putc(c: u8) {
+        let s = sink();
+        if c == b'\n' {
+            let text = core::str::from_utf8(&s.buf[..s.len]).unwrap_or("");
+            crate::pr_debug!("{}", text.trim_start_matches('\n'));
+            s.len = 0;
+            return;
+        }
+        if s.len < s.buf.len() {
+            s.buf[s.len] = c;
+            s.len += 1;
+        }
+    }
+
+    /// Append a byte-string piece.
+    pub fn puts(piece: &[u8]) {
+        for &b in piece {
+            putc(b);
+        }
+    }
+
+    /// Append `v` as hex (fixed 16 digits).
+    pub fn put_hex(v: u64) {
+        use core::fmt::Write as _;
+        let s = sink();
+        let start = s.len.min(s.buf.len());
+        let written = {
+            let mut w = crate::printk::BufferWriter::new(&mut s.buf[start..]);
+            let _ = write!(w, "{:016x}", v);
+            w.pos()
+        };
+        s.len += written;
+    }
+
+    /// Append `v` as decimal.
+    pub fn put_dec(v: u64) {
+        use core::fmt::Write as _;
+        let s = sink();
+        let start = s.len.min(s.buf.len());
+        let written = {
+            let mut w = crate::printk::BufferWriter::new(&mut s.buf[start..]);
+            let _ = write!(w, "{}", v);
+            w.pos()
+        };
+        s.len += written;
     }
 }
 

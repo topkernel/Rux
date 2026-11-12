@@ -558,7 +558,7 @@ pub extern "C" fn scribble_seed_park(_task: u64) {}
 pub extern "C" fn scribble_switch_park(_bad: u64, _which: u64) {}
 
 // ---------------------------------------------------------------------------
-// Raw console helpers (lock-free, usable from any context)
+// Console helpers (line sink: newline flushes one pr_debug! record)
 // ---------------------------------------------------------------------------
 
 fn putc(c: u8) {
@@ -573,8 +573,7 @@ fn putc(c: u8) {
             buf[p] = c;
         }
     }
-    // SAFETY: raw console byte, no locking, no allocation.
-    unsafe { crate::console::putchar_no_lock(c) };
+    crate::printk::diagline::putc(c);
 }
 
 fn puts(s: &[u8]) {
@@ -584,30 +583,11 @@ fn puts(s: &[u8]) {
 }
 
 fn put_hex(v: u64) {
-    let mut shift = 64;
-    while shift > 0 {
-        shift -= 4;
-        let nibble = (v >> shift) & 0xF;
-        let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
-        putc(c);
-    }
+    crate::printk::diagline::put_hex(v);
 }
 
-fn put_dec(mut v: u64) {
-    let mut buf = [0u8; 20];
-    let mut i = buf.len();
-    if v == 0 {
-        putc(b'0');
-        return;
-    }
-    while v > 0 {
-        i -= 1;
-        buf[i] = b'0' + (v % 10) as u8;
-        v /= 10;
-    }
-    for &b in &buf[i..] {
-        putc(b);
-    }
+fn put_dec(v: u64) {
+    crate::printk::diagline::put_dec(v);
 }
 
 /// Hex-dump `n` qwords at `base`, 4 per line, tagged.

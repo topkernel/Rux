@@ -352,103 +352,25 @@ pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) ->
             // the whole boot). The freed-context dangers are exactly
             // top==0 and is_dead; a merely-exiting task has neither.
             if !is_static && (top == 0 || (*next).state().is_dead()) {
-                use crate::console::putchar_no_lock as putchar;
-                const M: &[u8] = b"\nSWITCHIN-DEAD-TASK task=0x";
-                for &b in M {
-                    putchar(b);
-                }
-                let mut v = next as u64;
-                for _ in 0..16 {
-                    let n = (v >> 60) as u8;
-                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                    v <<= 4;
-                }
-                const M2: &[u8] = b" pid=";
-                for &b in M2 {
-                    putchar(b);
-                }
                 // SAFETY: header read of the task we refuse to resume.
-                let mut v = unsafe { (*next).pid() } as u64;
-                for _ in 0..8 {
-                    // One NIBBLE per iteration: (v >> 28) spans bits 28-35
-                    // of the u64, so the u8 cast grabs EIGHT bits — any pid
-                    // byte >= 0xA9 then overflow-panicked the 'a'+n-10 arm
-                    // from inside the context-switch path (r41v4/v5/v6:
-                    // "attempt to add with overflow" at this line, guest
-                    // dead). Mask to 4 bits like the >>60 pointer loops.
-                    let n = ((v >> 28) as u8) & 0xF;
-                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                    v <<= 4;
-                }
-                const M3: &[u8] = b" top=0x";
-                for &b in M3 {
-                    putchar(b);
-                }
-                let mut v = top as u64;
-                for _ in 0..16 {
-                    let n = (v >> 60) as u8;
-                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                    v <<= 4;
-                }
-                const M4: &[u8] = b" sp=0x";
-                for &b in M4 {
-                    putchar(b);
-                }
-                let mut v = sp as u64;
-                for _ in 0..16 {
-                    let n = (v >> 60) as u8;
-                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                    v <<= 4;
-                }
-                const M5: &[u8] = b" dead-resume aborted\n";
-                for &b in M5 {
-                    putchar(b);
-                }
+                let pid = unsafe { (*next).pid() };
+                crate::pr_err!(
+                    "SWITCHIN-DEAD-TASK task={:#x} pid={} top={:#x} sp={:#x} dead-resume aborted",
+                    next as u64,
+                    pid,
+                    top,
+                    sp
+                );
                 return 1;
             }
             if !is_static && top != 0 && !(sp > bottom && sp <= top) {
-                use crate::console::putchar_no_lock as putchar;
-                const M: &[u8] = b"\nSWITCHIN-FOREIGN-SP task=0x";
-                for &b in M {
-                    putchar(b);
-                }
-                let mut v = next as u64;
-                for _ in 0..16 {
-                    let n = (v >> 60) as u8;
-                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                    v <<= 4;
-                }
-                const M2: &[u8] = b" sp=0x";
-                for &b in M2 {
-                    putchar(b);
-                }
-                let mut v = sp as u64;
-                for _ in 0..16 {
-                    let n = (v >> 60) as u8;
-                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                    v <<= 4;
-                }
-                const M3: &[u8] = b" kstack=[0x";
-                for &b in M3 {
-                    putchar(b);
-                }
-                let mut v = bottom as u64;
-                for _ in 0..16 {
-                    let n = (v >> 60) as u8;
-                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                    v <<= 4;
-                }
-                putchar(b',');
-                let mut v = top as u64;
-                for _ in 0..16 {
-                    let n = (v >> 60) as u8;
-                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                    v <<= 4;
-                }
-                const M4: &[u8] = b") report-only\n";
-                for &b in M4 {
-                    putchar(b);
-                }
+                crate::pr_err!(
+                    "SWITCHIN-FOREIGN-SP task={:#x} sp={:#x} kstack=[{:#x},{:#x}) report-only",
+                    next as u64,
+                    sp,
+                    bottom,
+                    top
+                );
                 // Report-only (SCRIBBLE2 lesson): the AP idles legitimately
                 // run on the static AP boot stacks (their kstack fields are
                 // never used), so a "foreign" sp here is not automatically
@@ -522,61 +444,13 @@ pub unsafe extern "C" fn x86_update_rsp0(task: *mut Task) {
     // stack was freed, every later user entry on this CPU lands on
     // recycled memory (the stale-rsp0 engine). Name it.
     if !task.is_null() && top == 0 {
-        use crate::console::putchar_no_lock as putchar;
-        const MSG: &[u8] = b"\nR64-NOTOP-SKIP task=0x";
-        // SAFETY: raw console write; no locks, no allocation.
-        unsafe {
-            for &b in MSG {
-                putchar(b);
-            }
-            let mut v = task as u64;
-            for _ in 0..16 {
-                let n = (v >> 60) as u8;
-                putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                v <<= 4;
-            }
-            const M2: &[u8] = b" pid=";
-            for &b in M2 {
-                putchar(b);
-            }
-            let mut v = (*task).pid() as u64;
-            for _ in 0..8 {
-                // Nibble mask — same overflow class as the dead-resume
-                // guard's pid loop (see the comment there).
-                let n = ((v >> 28) as u8) & 0xF;
-                putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                v <<= 4;
-            }
-            putchar(b'\n');
-        }
+        // SAFETY: header read of the task being skipped.
+        let pid = unsafe { (*task).pid() };
+        crate::pr_err!("R64-NOTOP-SKIP task={:#x} pid={}", task as u64, pid);
         return; // keep the previous rsp0
     }
     if top != 0 && (top < HEAP_LO || top >= HEAP_HI || top & 0xF != 0) {
-        use crate::console::putchar_no_lock as putchar;
-        const MSG: &[u8] = b"\nR64-BAD-RSP0 task=0x";
-        // SAFETY: raw console write, no locks, no allocation.
-        unsafe {
-            for &b in MSG {
-                putchar(b);
-            }
-            let mut v = task as u64;
-            for _ in 0..16 {
-                let n = (v >> 60) as u8;
-                putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                v <<= 4;
-            }
-            const M2: &[u8] = b" top=0x";
-            for &b in M2 {
-                putchar(b);
-            }
-            let mut v = top;
-            for _ in 0..16 {
-                let n = (v >> 60) as u8;
-                putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                v <<= 4;
-            }
-            putchar(b'\n');
-        }
+        crate::pr_err!("R64-BAD-RSP0 task={:#x} top={:#x}", task as u64, top);
         return; // keep the previous (valid) rsp0
     }
     super::trap::set_tss_rsp0(top);

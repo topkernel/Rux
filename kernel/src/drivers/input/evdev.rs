@@ -445,8 +445,8 @@ fn evdev_file_poll(file: &File, events: u16) -> u16 {
         if device.has_event() {
             ready |= POLLIN | POLLRDNORM;
         }
-        // dfx=inputtrace (leg-9 epoll hunt): one line per POLL dispatch,
-        // raw-console (loglevel-proof; pr_info is dropped at loglevel=3).
+        // dfx=inputtrace (leg-9 epoll hunt): one line per POLL dispatch
+        // (KERN_DEBUG — raise the loglevel to see them).
         // The r13ep2/r13ep3 A/B proved the virtqueues ARE drained during
         // an epoll-only boot (14 INPTRC) yet epoll_wait returned idle —
         // this line ties every dispatch to its caller's file and result,
@@ -458,17 +458,14 @@ fn evdev_file_poll(file: &File, events: u16) -> u16 {
             static PL_N: AtomicU64 = AtomicU64::new(0);
             let n = PL_N.fetch_add(1, Ordering::Relaxed);
             if n < 600 || n % 50 == 0 {
-                it_msg(b"INPPL[");
-                it_u64(n);
-                it_msg(b"] file=");
-                it_u64(file.file_id);
-                it_msg(b" mask=");
-                it_u64(events as u64);
-                it_msg(b" ready=");
-                it_u64(ready as u64);
-                it_msg(b" has=");
-                it_u64(if device.has_event() { 1 } else { 0 });
-                it_msg(b"\n");
+                crate::pr_debug!(
+                    "INPPL[{}] file={} mask={} ready={} has={}",
+                    n,
+                    file.file_id,
+                    events,
+                    ready,
+                    device.has_event() as u8
+                );
             }
         }
     }
@@ -1012,12 +1009,8 @@ pub fn push_input_event(is_pointer: bool, event: InputEvent) {
     // every event with a monotonically increasing ordinal so serial-log
     // frequency analysis works; rate-limited so a flooding stream cannot
     // wedge the serial console; gated by a runtime switch (default OFF).
-    // Writes go through the raw console path (putchar_no_lock), NOT
-    // pr_info!: session boots run loglevel=3, and printk's pre-ring
-    // filter drops KERN_INFO whole — the first deployment of this trace
-    // (leg-6 r6win/r8win runs, kernel with b3af8cfc) silently produced
-    // zero INPTRC lines for exactly that reason. Raw bytes are the same
-    // convention as sched/wakewatch's ww_msg. EV_SYN (type 0) is the
+    // KERN_DEBUG records: raise the console loglevel (loglevel=7) to see
+    // them. EV_SYN (type 0) is the
     // high-rate filler: first 200 then 1-in-1000. Payload events
     // (type != 0) carry the actual signal: first 500 then 1-in-100,
     // enough to survive a phantom flood while keeping full detail in
@@ -1042,24 +1035,18 @@ pub fn push_input_event(is_pointer: bool, event: InputEvent) {
             } else {
                 TRACE_SEQ.load(Ordering::Relaxed)
             };
-            // Hand-rolled formatting on the raw console path (same shape
-            // as sched/wakewatch's ww_msg/ww_u64): this can fire from the
-            // virtio-input IRQ context and must not touch printk locks.
-            it_msg(b"INPTRC[");
-            it_u64(n);
-            it_msg(b"] dev=");
-            it_msg(match tag {
-                "syn" => b"syn",
-                "ptr" => b"ptr",
-                _ => b"kbd",
-            });
-            it_msg(b" type=");
-            it_u64(event.type_ as u64);
-            it_msg(b" code=");
-            it_u64(event.code as u64);
-            it_msg(b" value=");
-            it_i64(event.value as i64);
-            it_msg(b"\n");
+            // pr_debug!: printk's pre-ring filter is a single atomic load
+            // (safe from the virtio-input IRQ context); enable with
+            // loglevel=7 — the trace is a dfx hunt instrument, not
+            // default output.
+            crate::pr_debug!(
+                "INPTRC[{}] dev={} type={} code={} value={}",
+                n,
+                tag,
+                event.type_,
+                event.code,
+                event.value
+            );
         }
     }
     // Keyboard events feed the Ctrl-Alt-Del detector (SA_CAD semantics):
@@ -1099,47 +1086,6 @@ pub fn push_input_event(is_pointer: bool, event: InputEvent) {
                 dev.push_event(event);
             }
         }
-    }
-}
-
-// Raw-console writers for the dfx=inputtrace path (same shape as
-// sched/wakewatch's ww_msg/ww_u64): printk is unusable here because the
-// trace must survive loglevel=3 boots, and the callers can be in IRQ
-// context, so no printk locks.
-fn it_msg(msg: &[u8]) {
-    if !cfg!(debug_assertions) { return; } // release: diag output off
-
-    for &b in msg {
-        crate::console::putchar_no_lock(b);
-    }
-}
-
-fn it_u64(mut v: u64) {
-    if !cfg!(debug_assertions) { return; } // release: diag output off
-
-    let mut buf = [0u8; 20];
-    let mut n = 0;
-    if v == 0 {
-        buf[0] = b'0';
-        n = 1;
-    } else {
-        while v > 0 && n < buf.len() {
-            buf[n] = b'0' + (v % 10) as u8;
-            v /= 10;
-            n += 1;
-        }
-    }
-    for i in (0..n).rev() {
-        crate::console::putchar_no_lock(buf[i]);
-    }
-}
-
-fn it_i64(v: i64) {
-    if v < 0 {
-        it_msg(b"-");
-        it_u64(v.unsigned_abs());
-    } else {
-        it_u64(v as u64);
     }
 }
 

@@ -748,29 +748,7 @@ impl BlockCache {
                                 };
                                 static DUPR: AtomicUsize = AtomicUsize::new(0);
                                 if DUPR.fetch_add(1, Ordering::Relaxed) < 20 {
-                                    let msg = b"EXT-HUNT-BHDUP blk=";
-                                    unsafe {
-                                        for &b in msg {
-                                            crate::console::putchar_no_lock(b);
-                                        }
-                                        let mut v = blocknr;
-                                        let mut digs = [0u8; 20];
-                                        let mut n = 0;
-                                        if v == 0 {
-                                            digs[0] = b'0';
-                                            n = 1;
-                                        }
-                                        while v > 0 {
-                                            digs[n] = b'0' + (v % 10) as u8;
-                                            n += 1;
-                                            v /= 10;
-                                        }
-                                        while n > 0 {
-                                            n -= 1;
-                                            crate::console::putchar_no_lock(digs[n]);
-                                        }
-                                        crate::console::putchar_no_lock(b'\n');
-                                    }
+                                    crate::pr_debug!("EXT-HUNT-BHDUP blk={}", blocknr);
                                 }
                             }
                         }
@@ -781,17 +759,10 @@ impl BlockCache {
                         // slice panic). Report via SBI (safe under any lock)
                         // and treat as a miss so the caller re-reads.
                         if unsafe { entry.bh.is_null() || (*entry.bh).b_data.len() != self.block_size as usize } {
-                            let msg = b"bio: dead bh in chain blk=";
-                            unsafe {
-                                for &b in msg { crate::console::putchar_no_lock(b); }
-                                let mut v = blocknr;
-                                let mut digs = [0u8; 20];
-                                let mut n = 0;
-                                if v == 0 { digs[0] = b'0'; n = 1; }
-                                while v > 0 { digs[n] = b'0' + (v % 10) as u8; n += 1; v /= 10; }
-                                while n > 0 { n -= 1; crate::console::putchar_no_lock(digs[n]); }
-                                crate::console::putchar_no_lock(b'\n');
-                            }
+                            // Dead buffer head in the chain: freed-and-reused
+                            // memory. printk's pre-ring filter is a single
+                            // atomic load, safe with the bucket lock held.
+                            crate::pr_err!("bio: dead bh in chain blk={}", blocknr);
                             prev = Some(entry_ptr);
                             current = entry.hash_next;
                             continue;

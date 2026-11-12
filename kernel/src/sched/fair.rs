@@ -145,10 +145,10 @@ pub fn note_pick_skip(task: *mut Task, reason: u8) {
     s.n.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Print (direct console, GRQ-held discipline) and clear the recorded
-/// skip history of `task`. Called from wakewatch's strand report.
+/// Print (via pr_debug!) and clear the recorded skip history of `task`.
+/// Called from wakewatch's strand report (printk's pre-ring filter is a
+/// single atomic load, safe from any context).
 pub fn print_skip_history(task: *mut Task) {
-    use crate::console::putchar_no_lock as putchar;
     let s = skip_hist_of(task);
     if s.task.load(Ordering::Acquire) != task as usize as u64 {
         // s16: the 256-slot table is keyed by Task address and msgstress
@@ -157,10 +157,7 @@ pub fn print_skip_history(task: *mut Task) {
         // colliding task". Name the collision explicitly — the census
         // needs the distinction (a stolen slot cannot exonerate the
         // walk).
-        for &c in b"\nSKIPHIST coll=1" {
-            putchar(c);
-        }
-        putchar(b'\n');
+        crate::pr_debug!("SKIPHIST coll=1");
         return;
     }
     let n = s.n.swap(0, Ordering::AcqRel);
@@ -175,48 +172,30 @@ pub fn print_skip_history(task: *mut Task) {
         whys[i] = w.swap(0, Ordering::AcqRel);
     }
     s.task.store(0, Ordering::Release);
-    fn pu(mut v: u64) {
-        use crate::console::putchar_no_lock as putchar;
-        let mut buf = [0u8; 20];
-        let mut k = 0;
-        if v == 0 {
-            putchar(b'0');
-            return;
+    let mut line = [0u8; 128];
+    {
+        use core::fmt::Write as _;
+        let mut cur = crate::printk::BufferWriter::new(&mut line);
+        let _ = write!(cur, "SKIPHIST skips={}", n);
+        for (i, cnt) in whys.iter().enumerate() {
+            if *cnt == 0 {
+                continue;
+            }
+            let _ = write!(cur, " why{}={}", i + 1, cnt);
         }
-        while v > 0 && k < buf.len() {
-            buf[k] = b'0' + (v % 10) as u8;
-            v /= 10;
-            k += 1;
-        }
-        while k > 0 {
-            k -= 1;
-            putchar(buf[k]);
+        // s16: span only meaningful with at least one recorded refusal
+        // (first_jif is never set on a refusal-free episode).
+        if n > 0 {
+            let _ = write!(
+                cur,
+                " span_ms={}",
+                now.wrapping_sub(first) * 1000 / crate::config::KERNEL_HZ as u64
+            );
         }
     }
-    for &c in b"\nSKIPHIST skips=" {
-        putchar(c);
-    }
-    pu(n);
-    for (i, cnt) in whys.iter().enumerate() {
-        if *cnt == 0 {
-            continue;
-        }
-        for &c in b" why" {
-            putchar(c);
-        }
-        pu((i + 1) as u64);
-        putchar(b'=');
-        pu(*cnt);
-    }
-    // s16: span only meaningful with at least one recorded refusal
-    // (first_jif is never set on a refusal-free episode).
-    if n > 0 {
-        for &c in b" span_ms=" {
-            putchar(c);
-        }
-        pu(now.wrapping_sub(first) * 1000 / crate::config::KERNEL_HZ as u64);
-    }
-    putchar(b'\n');
+    let text = core::str::from_utf8(&line).unwrap_or("");
+    let text = text.split('\0').next().unwrap_or("");
+    crate::pr_debug!("{}", text);
 }
 
 /// 60th (RUNQ-STRAND census): NON-destructive peek of `task`'s recorded
@@ -917,9 +896,10 @@ impl CfsRunQueue {
             // removal path decremented again. The one historical producer
             // was the 2b092c49 discarded-guard GRQ unlock (every critical
             // section unexcluded — see the GlobalRunQueue doc note); with
-            // mutual exclusion intact this must never fire. Rate-limited
-            // direct console (may run under the GRQ); names the offending
-            // caller site via #[track_caller].
+            // mutual exclusion intact this must never fire. Rate-limited;
+            // names the offending caller site via #[track_caller].
+            // printk's pre-ring filter is a single atomic load, safe
+            // under the GRQ.
             static LAST: core::sync::atomic::AtomicU64 =
                 core::sync::atomic::AtomicU64::new(0);
             let now = crate::drivers::timer::get_jiffies();
@@ -929,28 +909,14 @@ impl CfsRunQueue {
             {
                 let loc = core::panic::Location::caller();
                 let pid = crate::sched::get_current_pid();
-                use crate::console::putchar_no_lock as putchar;
-                for &b in b"\nNRUN-DOUBLE-DEC pid=0x" { putchar(b); }
-                let mut v = pid as u64;
-                for _ in 0..8 {
-                    putchar(b'0' + ((v >> 28) & 0xF) as u8);
-                    v <<= 4;
-                }
-                for &b in b" at " { putchar(b); }
                 let f = loc.file();
                 let base = f.rfind('/').map(|i| i + 1).unwrap_or(0);
-                for &b in f.as_bytes()[base..].iter() {
-                    putchar(b);
-                }
-                putchar(b':');
-                let mut ln = loc.line() as u64;
-                let mut buf = [0u8; 10];
-                let mut n = 0;
-                if ln == 0 { putchar(b'0'); } else {
-                    while ln > 0 && n < 10 { buf[n] = b'0' + (ln % 10) as u8; ln /= 10; n += 1; }
-                    while n > 0 { n -= 1; putchar(buf[n]); }
-                }
-                putchar(b'\n');
+                crate::pr_err!(
+                    "NRUN-DOUBLE-DEC pid={:#x} at {}:{}",
+                    pid,
+                    core::str::from_utf8(&f.as_bytes()[base..]).unwrap_or(f),
+                    loc.line()
+                );
             }
         }
     }
@@ -965,7 +931,8 @@ impl CfsRunQueue {
     /// 0xfd79-class values, init unpicked from t=53s — with no instrument
     /// to localize the write). Armed on dfx=fuxstuck|schedtrace (same gate
     /// as the pick/wake history); zero cost otherwise (one switch load).
-    /// GRQ-held callers only; prints via putchar_no_lock (R34 discipline).
+    /// GRQ-held callers only; printk's pre-ring filter is a single atomic
+    /// load, safe from any context.
     pub fn vr_canary(&self, task: *mut crate::process::Task, site: &[u8; 3], vr: u64) {
         if !crate::sched::sched::sched_hist_armed() {
             return;
@@ -991,111 +958,76 @@ impl CfsRunQueue {
             return;
         }
         VR_TRIP_LAST_JIF.store(now, Ordering::Release);
-        use crate::console::putchar_no_lock as putchar;
-        fn ph(mut v: u64) {
-            use crate::console::putchar_no_lock as putchar;
-            putchar(b'0');
-            putchar(b'x');
-            let mut buf = [0u8; 16];
-            let mut n = 0;
-            while n < 16 {
-                buf[n] = (v & 0xF) as u8;
-                v >>= 4;
-                n += 1;
-            }
-            while n > 0 {
-                n -= 1;
-                putchar(if buf[n] < 10 { b'0' + buf[n] as u8 } else { b'a' + buf[n] as u8 - 10 });
-            }
-        }
-        fn pd(mut v: u64) {
-            use crate::console::putchar_no_lock as putchar;
-            let mut buf = [0u8; 20];
-            let mut n = 0;
-            if v == 0 {
-                putchar(b'0');
-                return;
-            }
-            while v > 0 {
-                buf[n] = b'0' + (v % 10) as u8;
-                v /= 10;
-                n += 1;
-            }
-            while n > 0 {
-                n -= 1;
-                putchar(buf[n]);
-            }
-        }
-        fn ps(s: &[u8]) {
-            for &b in s {
-                crate::console::putchar_no_lock(b);
-            }
-        }
-        ps(b"\nVRTRIP site=");
-        ps(site);
-        ps(b" trip=");
-        pd(trip);
+        use core::fmt::Write as _;
+        let mut line = [0u8; 192];
+        let mut cur = crate::printk::BufferWriter::new(&mut line);
+        let _ = write!(
+            cur,
+            "VRTRIP site={} trip={}",
+            core::str::from_utf8(site).unwrap_or("?"),
+            trip
+        );
         if !task.is_null() {
             // SAFETY: diagnostic read of a Task the caller holds under the
             // GRQ (linked on this queue, or being placed by enqueue).
             let t = unsafe { &*task };
-            ps(b" tid=");
-            pd(t.pid() as u64);
             let comm = t.comm();
-            ps(b"(");
             let mut j = 0;
             while j < comm.len() && comm[j] != 0 && j < 12 {
-                putchar(comm[j]);
                 j += 1;
             }
-            ps(b")");
+            let _ = write!(
+                cur,
+                " tid={}({})",
+                t.pid(),
+                core::str::from_utf8(&comm[..j]).unwrap_or("")
+            );
         }
-        ps(b" vr=");
-        ph(vr);
-        ps(b" min=");
-        ph(min_vr);
+        let _ = write!(cur, " vr={:#x} min={:#x}", vr, min_vr);
         if up > VR_CANARY_SPAN_NS {
-            ps(b" up=");
-            pd(up / 1_000_000);
-            ps(b"ms");
+            let _ = write!(cur, " up={}ms", up / 1_000_000);
         } else {
-            ps(b" dn=");
-            pd(dn / 1_000_000);
-            ps(b"ms");
+            let _ = write!(cur, " dn={}ms", dn / 1_000_000);
         }
-        ps(b" j=");
-        pd(now);
+        let _ = write!(cur, " j={}", now);
         // The last 3 pick-ring events (63rd instrument; entry layout
         // kind:4 | why:8 | jiffies:30 | aux:22).
         if !task.is_null() {
             // SAFETY: as above.
             let t = unsafe { &*task };
             let seq = t.pick_ring_seq.load(Ordering::Relaxed);
-            ps(b" ring=");
+            let _ = write!(cur, " ring=");
             for k in 1..=3u64 {
                 let idx = (seq.wrapping_sub(k) & 15) as usize;
                 let v = t.pick_ring[idx].load(Ordering::Relaxed);
                 let kind = (v >> 60) & 0xF;
                 let why = (v >> 52) & 0xFF;
                 let jif = (v >> 22) & 0x3FFF_FFFF;
-                putchar(match kind {
-                    1 => b'L',
-                    2 => b'R',
-                    3 => b'P',
-                    4 | 5 => b'H',
-                    _ => b'?',
-                });
-                putchar(b'0' + (why & 0xF) as u8);
-                putchar(b'@');
-                pd(jif);
-                putchar(b' ');
+                let _ = write!(
+                    cur,
+                    "{}{}@{} ",
+                    match kind {
+                        1 => 'L',
+                        2 => 'R',
+                        3 => 'P',
+                        4 | 5 => 'H',
+                        _ => '?',
+                    },
+                    why & 0xF,
+                    jif
+                );
             }
-            ps(b"pk=");
-            pd(t.pick_n.load(Ordering::Relaxed));
-            ps(b" wk=");
-            pd(t.wake_n.load(Ordering::Relaxed));
+            let _ = write!(
+                cur,
+                "pk={} wk={}",
+                t.pick_n.load(Ordering::Relaxed),
+                t.wake_n.load(Ordering::Relaxed)
+            );
         }
-        putchar(b'\n');
+        let len = cur.pos();
+        drop(cur);
+        let text = core::str::from_utf8(&line[..len]).unwrap_or("");
+        crate::pr_debug!("{}", text);
     }
 
     /// Same no-wrap discipline for the aggregated weight: a wrapped
@@ -1117,14 +1049,12 @@ impl CfsRunQueue {
                 && LASTW.compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire).is_ok()
             {
                 let loc = core::panic::Location::caller();
-                use crate::console::putchar_no_lock as putchar;
-                for &b in b"\nLWEIGHT-UNDERFLOW at " { putchar(b); }
                 let f = loc.file();
                 let base = f.rfind('/').map(|i| i + 1).unwrap_or(0);
-                for &b in f.as_bytes()[base..].iter() {
-                    putchar(b);
-                }
-                putchar(b'\n');
+                crate::pr_err!(
+                    "LWEIGHT-UNDERFLOW at {}",
+                    core::str::from_utf8(&f.as_bytes()[base..]).unwrap_or(f)
+                );
             }
         }
     }
@@ -1595,42 +1525,30 @@ impl CfsRunQueue {
             .is_ok()
     }
 
-    /// One heal line prefix: TAG by_cpu=N pid=P from_claim=C[ pk=K] (no
-    /// trailing newline — callers append their context tail first).
+    /// One heal line: TAG by_cpu=N pid=P from_claim=C[ pk=K] (printk's
+    /// pre-ring filter is a single atomic load, safe with the GRQ held).
     fn stale_heal_line(tag: &[u8], cpu_id: usize, pid: u32, was: i32, pk: u32) {
-        use crate::console::putchar_no_lock as putchar;
-        for &b in tag {
-            putchar(b);
-        }
-        const MB: &[u8] = b" by_cpu=";
-        for &b in MB {
-            putchar(b);
-        }
-        Self::put_dec(cpu_id as u64);
-        const M2: &[u8] = b" pid=";
-        for &b in M2 {
-            putchar(b);
-        }
-        Self::put_dec(pid as u64);
-        const M3: &[u8] = b" from_claim=";
-        for &b in M3 {
-            putchar(b);
-        }
-        if (was as i64) < 0 {
-            putchar(b'-');
-        }
-        Self::put_dec((was as i64).unsigned_abs());
         if pk != u32::MAX {
-            const M4: &[u8] = b" pk=";
-            for &b in M4 {
-                putchar(b);
-            }
-            Self::put_dec(pk as u64);
+            crate::pr_debug!(
+                "{} by_cpu={} pid={} from_claim={} pk={}",
+                core::str::from_utf8(tag).unwrap_or("?"),
+                cpu_id,
+                pid,
+                was,
+                pk
+            );
+        } else {
+            crate::pr_debug!(
+                "{} by_cpu={} pid={} from_claim={}",
+                core::str::from_utf8(tag).unwrap_or("?"),
+                cpu_id,
+                pid,
+                was
+            );
         }
     }
 
-    /// GNOME-wedge report for the stale-claim heal inside pick_next_cpu
-    /// (R34: GRQ-held callers, direct console writes only).
+    /// GNOME-wedge report for the stale-claim heal inside pick_next_cpu.
     /// 63rd: `task` added for the persistent ring (the print can be
     /// budget-swallowed; the ring cannot).
     fn stale_claim_healed(cpu_id: usize, pid: u32, was: i32, task: *mut crate::process::Task) {
@@ -1647,7 +1565,6 @@ impl CfsRunQueue {
             return;
         }
         Self::stale_heal_line(b"STALE-CLAIM-RESET", cpu_id, pid, was, u32::MAX);
-        crate::console::putchar_no_lock(b'\n');
     }
 
     /// R85 (tail-phase PICK-SKIP wedge): always-on, rate-limited report
@@ -1657,8 +1574,8 @@ impl CfsRunQueue {
     /// (pid, state word, ti_cpu), the pre-heal claim, the advisory
     /// pick-state and the owner masks, so a capture can tell a lost
     /// release (slot=0 swout=0) from a lying-slot double-run fight
-    /// (marks flipping between two cpus' claims). Same R34 discipline
-    /// and 2s system-wide budget as the claim twin.
+    /// (marks flipping between two cpus' claims). Same 2s system-wide
+    /// budget as the claim twin.
     fn stale_oncpu_healed(tag: &[u8], cpu_id: usize, task: *mut crate::process::Task, claim: i32, pk: u32) {
         WW_ONCPU_HEALS.fetch_add(1, Ordering::Relaxed);
         // 63rd: the heal event goes on the task's ring BEFORE the print
@@ -1679,65 +1596,22 @@ impl CfsRunQueue {
         // linked on this queue (pinned by the GRQ lock the caller holds).
         unsafe {
             let pid = (*task).pid();
-            let st = (*task).state().bits();
-            let tcpu = (*task).ti_cpu() as i64;
-            let slot = crate::sched::sched::owner_slot_mask(task);
-            let swout = crate::sched::sched::switching_out_mask(task);
-            Self::stale_heal_line(tag, cpu_id, pid, claim, pk);
             // Context tail: st= state word, tcpu= ti_cpu, slot=/swout=
             // owner masks at heal time (both must be 0 — that is the
             // adjudication's precondition; a nonzero mask here names a
             // racing owner).
-            use crate::console::putchar_no_lock as putchar;
-            const M: &[u8] = b" st=0x";
-            for &b in M {
-                putchar(b);
-            }
-            let mut v = st as u64;
-            for sh in (0..8u32).rev() {
-                let nb = ((v >> (sh * 4)) & 0xF) as u8;
-                putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-            }
-            const M2: &[u8] = b" tcpu=";
-            for &b in M2 {
-                putchar(b);
-            }
-            if tcpu < 0 {
-                putchar(b'-');
-            }
-            Self::put_dec(tcpu.unsigned_abs());
-            const M3: &[u8] = b" slot=";
-            for &b in M3 {
-                putchar(b);
-            }
-            Self::put_dec(slot as u64);
-            const M4: &[u8] = b" swout=";
-            for &b in M4 {
-                putchar(b);
-            }
-            Self::put_dec(swout as u64);
-            putchar(b'\n');
-        }
-    }
-
-    /// Decimal printer for the heal reports (R34: direct console writes).
-    fn put_dec(v: u64) {
-        use crate::console::putchar_no_lock as putchar;
-        if v == 0 {
-            putchar(b'0');
-            return;
-        }
-        let mut buf = [0u8; 20];
-        let mut n = 0;
-        let mut v = v;
-        while v > 0 {
-            buf[n] = b'0' + (v % 10) as u8;
-            v /= 10;
-            n += 1;
-        }
-        while n > 0 {
-            n -= 1;
-            putchar(buf[n]);
+            crate::pr_debug!(
+                "{} by_cpu={} pid={} from_claim={} pk={} st={:#x} tcpu={} slot={} swout={}",
+                core::str::from_utf8(tag).unwrap_or("?"),
+                cpu_id,
+                pid,
+                claim,
+                pk,
+                (*task).state().bits(),
+                (*task).ti_cpu(),
+                crate::sched::sched::owner_slot_mask(task),
+                crate::sched::sched::switching_out_mask(task)
+            );
         }
     }
 
@@ -1914,7 +1788,6 @@ impl CfsRunQueue {
                 WW_CLAIM_HEALS.fetch_add(1, Ordering::Relaxed);
                 if Self::heal_report_budget_ok() {
                     Self::stale_heal_line(b"SWEEP-CLAIM-RESET", cpu_id, (*task).pid(), claim, u32::MAX);
-                    crate::console::putchar_no_lock(b'\n');
                 }
             }
         }
@@ -2294,36 +2167,14 @@ impl CfsRunQueue {
         // write discipline (R34): we hold the GRQ lock here.
         if result.is_none() && skip_count > 0 {
             PICK_SKIP_ALL.fetch_add(1, Ordering::Relaxed);
-            use crate::console::putchar_no_lock as putchar;
-            fn pd(mut v: u64) {
-                use crate::console::putchar_no_lock as putchar;
-                let mut buf = [0u8; 20];
-                let mut n = 0;
-                if v == 0 {
-                    putchar(b'0');
-                    return;
-                }
-                while v > 0 {
-                    buf[n] = b'0' + (v % 10) as u8;
-                    v /= 10;
-                    n += 1;
-                }
-                while n > 0 {
-                    n -= 1;
-                    putchar(buf[n]);
-                }
-            }
-            fn ps(s: &[u8]) {
-                for &b in s {
-                    crate::console::putchar_no_lock(b);
-                }
-            }
             static LAST_REPORT: core::sync::atomic::AtomicU64 =
                 core::sync::atomic::AtomicU64::new(0);
             let now = crate::drivers::timer::get_jiffies();
             let last = LAST_REPORT.load(core::sync::atomic::Ordering::Acquire);
             // serial-clean: this canary fires on benign mid-switch-out
-            // transients too — print only behind dfx=schedtrace.
+            // transients too — print only behind dfx=schedtrace. printk's
+            // pre-ring filter is a single atomic load, safe with the GRQ
+            // held.
             if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace)
                 && now.wrapping_sub(last) >= 100
                 && LAST_REPORT
@@ -2335,11 +2186,7 @@ impl CfsRunQueue {
                     )
                     .is_ok()
             {
-                ps(b"\nPICK-SKIP-ALL cpu=");
-                pd(cpu_id as u64);
-                ps(b" skipped=");
-                pd(skip_count as u64);
-                ps(b"\n");
+                crate::pr_debug!("PICK-SKIP-ALL cpu={} skipped={}", cpu_id, skip_count);
                 for i in 0..skip_count {
                     let (_, task, reason) = skipped[i];
                     // SAFETY: diagnostic read of stable Task fields of a task
@@ -2347,27 +2194,16 @@ impl CfsRunQueue {
                     // hold).
                     unsafe {
                         let claim = (*task).running_on_cpu.load(Ordering::Relaxed);
-                        ps(b"  pid=");
-                        pd((*task).pid() as u64);
                         // R76: WHY the decision refused — captured at scan
                         // time, immune to the switch-out release racing the
                         // print. The oncpu/claim/pk fields below are the
                         // print-time snapshot (kept for continuity with the
                         // older captures).
-                        ps(b" why=");
-                        pd(reason as u64);
-                        ps(b" oncpu=");
-                        putchar(b'0' + (*task).on_cpu() as u8);
-                        ps(b" claim=");
-                        if (claim as i64) < 0 {
-                            putchar(b'-');
-                        }
-                        pd((claim as i64).unsigned_abs());
+                        //
                         // R57: pick-state word (0=PICKED 1=LIVE 2=REVOKED) —
                         // with oncpu/claim it names the exact protocol leg
                         // that refused the candidate.
-                        ps(b" pk=");
-                        pd((*task).pick_state() as u64);
+                        //
                         // R85 (tail-phase wedge hunt): the ownership
                         // ADJUDICATION fields — st= the state word (the
                         // harvester only heals RUNNING orphans; a wedged
@@ -2377,27 +2213,23 @@ impl CfsRunQueue {
                         // slot=0 swout=0 persisting across reports is the
                         // un-owned stale mark the R85 pick-side heal
                         // releases (STALE-ONCPU-RESET).
-                        ps(b" st=0x");
-                        let st = (*task).state().bits();
-                        let mut v = st as u64;
-                        for sh in (0..8u32).rev() {
-                            let nb = ((v >> (sh * 4)) & 0xF) as u8;
-                            putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-                        }
-                        ps(b" slot=");
-                        pd(crate::sched::sched::owner_slot_mask(task) as u64);
-                        ps(b" swout=");
-                        pd(crate::sched::sched::switching_out_mask(task) as u64);
-                        ps(b" aff=0x");
-                        let mut v = (*task).cpus_allowed() as u64;
-                        for sh in (0..8u32).rev() {
-                            let nb = ((v >> (sh * 4)) & 0xF) as u8;
-                            putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-                        }
-                        if crate::sched::cgroup::task_cgroup_throttled(task) {
-                            ps(b" THROTTLED");
-                        }
-                        putchar(b'\n');
+                        crate::pr_debug!(
+                            "  pid={} why={} oncpu={} claim={} pk={} st={:#x} slot={} swout={} aff={:#x}{}",
+                            (*task).pid(),
+                            reason,
+                            (*task).on_cpu() as u8,
+                            claim,
+                            (*task).pick_state(),
+                            (*task).state().bits(),
+                            crate::sched::sched::owner_slot_mask(task),
+                            crate::sched::sched::switching_out_mask(task),
+                            (*task).cpus_allowed(),
+                            if crate::sched::cgroup::task_cgroup_throttled(task) {
+                                " THROTTLED"
+                            } else {
+                                ""
+                            }
+                        );
                         // R76 (fast-pace starvation hunt): per-pid skip
                         // counting. The full3 wedge showed freshly spawned
                         // tasks named in PICK-SKIP-ALL reports for minutes;
@@ -2427,39 +2259,17 @@ impl CfsRunQueue {
                             let dumped_at = entry.dumped_at.load(Rel::Relaxed);
                             if count >= 1000 && count / 1000 > dumped_at {
                                 entry.dumped_at.store(count / 1000, Rel::Relaxed);
-                                ps(b"  SKIP-DEEP pid=");
-                                pd(pid as u64);
-                                ps(b" n=");
-                                pd(count as u64);
-                                ps(b" state=");
-                                let st = (*task).state().bits();
-                                let mut v = st as u64;
-                                for sh in (0..8u32).rev() {
-                                    let nb = ((v >> (sh * 4)) & 0xF) as u8;
-                                    putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-                                }
-                                ps(b" onrq=");
-                                putchar(b'0' + (*task).sched_entity().is_on_rq() as u8);
-                                ps(b" ti_cpu=");
-                                if ((*task).ti_cpu() as i64) < 0 {
-                                    putchar(b'-');
-                                }
-                                pd(((*task).ti_cpu() as i64).unsigned_abs() as u64);
-                                ps(b" ksp=0x");
-                                let mut v = (*task).ti_kernel_sp() as u64;
-                                for sh in (0..16u32).rev() {
-                                    let nb = ((v >> (sh * 4)) & 0xF) as u8;
-                                    putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-                                }
-                                ps(b" thsp=0x");
-                                let mut v = (*task).thread().sp;
-                                for sh in (0..16u32).rev() {
-                                    let nb = ((v >> (sh * 4)) & 0xF) as u8;
-                                    putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-                                }
-                                ps(b" vrun=");
-                                pd((*task).sched_entity().get_vruntime());
-                                putchar(b'\n');
+                                crate::pr_debug!(
+                                    "  SKIP-DEEP pid={} n={} state={:#x} onrq={} ti_cpu={} ksp={:#x} thsp={:#x} vrun={}",
+                                    pid,
+                                    count,
+                                    (*task).state().bits(),
+                                    (*task).sched_entity().is_on_rq() as u8,
+                                    (*task).ti_cpu(),
+                                    (*task).ti_kernel_sp(),
+                                    (*task).thread().sp,
+                                    (*task).sched_entity().get_vruntime()
+                                );
                             }
                         }
                     }

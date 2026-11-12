@@ -654,8 +654,8 @@ pub fn kernel_task_ptr_range_ok(p: *const u8) -> bool {
 }
 
 /// Rate-limited one-line report for a poisoned runqueue entry (see
-/// kernel_ptr_canonical). Called with the GRQ lock held — the R34
-/// no-lock console discipline applies.
+/// kernel_ptr_canonical). Called with the GRQ lock held — printk's
+/// pre-ring filter is a single atomic load, safe under any lock.
 pub fn report_poisoned_rq_entry(cpu: usize, raw: usize) {
     static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
     let now = crate::drivers::timer::get_jiffies();
@@ -669,43 +669,7 @@ pub fn report_poisoned_rq_entry(cpu: usize, raw: usize) {
     {
         return;
     }
-    use crate::console::putchar_no_lock as putchar;
-    fn ph(mut v: u64) {
-        let mut buf = [0u8; 16];
-        let mut n = 0;
-        while v > 0 && n < 16 {
-            let d = (v & 0xF) as u8;
-            buf[n] = if d < 10 { b'0' + d } else { b'a' + d - 10 };
-            v >>= 4;
-            n += 1;
-        }
-        for i in (0..n).rev() {
-            putchar(buf[i]);
-        }
-    }
-    for &b in b"sched: POISONED rq entry raw=0x" {
-        putchar(b);
-    }
-    ph(raw as u64);
-    for &b in b" on cpu " {
-        putchar(b);
-    }
-    let mut c = cpu;
-    let mut cb = [0u8; 8];
-    let mut n = 0;
-    if c == 0 {
-        cb[0] = b'0';
-        n = 1;
-    }
-    while c > 0 {
-        cb[n] = b'0' + (c % 10) as u8;
-        c /= 10;
-        n += 1;
-    }
-    for i in (0..n).rev() {
-        putchar(cb[i]);
-    }
-    putchar(b'\n');
+    crate::pr_err!("sched: POISONED rq entry raw={:#x} on cpu {}", raw, cpu);
 }
 
 /// Scribble hunter (dfx=scribble): trylock the GRQ for the diagnostic
@@ -2057,19 +2021,10 @@ pub fn free_task_slot(task_ptr: *mut Task) {
                 );
             }
             if unlinked > 0 {
-                use crate::console::putchar_no_lock as putchar;
-                const MSG: &[u8] = b"\nFREED-WHILE-LINKED-UNLINKED task=0x";
-                for &b in MSG {
-                    putchar(b);
-                }
-                let mut v = task_ptr as usize;
-                for _ in 0..16 {
-                    let n = (v >> 60) as u8;
-                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                    v <<= 4;
-                }
-                putchar(b'0' + unlinked as u8);
-                putchar(b'\n');
+                crate::pr_err!(
+                    "FREED-WHILE-LINKED-UNLINKED task={:#x} queues={}",
+                    task_ptr as usize, unlinked
+                );
             }
         }
         // Scribble hunter (dfx=scribble): stop tracking before the page
@@ -2093,32 +2048,10 @@ pub fn free_task_slot(task_ptr: *mut Task) {
                 };
                 let flagged = unsafe { (*task_ptr).pid() } == TASK_POISON;
                 if linked || flagged {
-                    use crate::console::putchar_no_lock as putchar;
-                    const MSG: &[u8] = b"\nFREED-WHILE-LINKED task=0x";
-                    for &b in MSG {
-                        putchar(b);
-                    }
-                    let mut v = task_ptr as usize;
-                    for _ in 0..16 {
-                        let n = (v >> 60) as u8;
-                        putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                        v <<= 4;
-                    }
-                    const M2: &[u8] = b" linked=0x";
-                    for &b in M2 {
-                        putchar(b);
-                    }
-                    putchar(b'0' + linked as u8);
-                    const M3: &[u8] = b" poison=0x";
-                    for &b in M3 {
-                        putchar(b);
-                    }
-                    let p = unsafe { (*task_ptr).pid() } as usize;
-                    for sh in (0..8u32).rev() {
-                        let n = ((p >> (sh * 4)) & 0xF) as u8;
-                        putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                    }
-                    putchar(b'\n');
+                    crate::pr_debug!(
+                        "FREED-WHILE-LINKED task={:#x} linked={} poison={:#x}",
+                        task_ptr as usize, linked as u8, unsafe { (*task_ptr).pid() }
+                    );
                 }
                 drop(grq_guard);
                 let _ = O::Relaxed;
@@ -2576,12 +2509,11 @@ unsafe fn __schedule() {
             static PCDATA_HIT: [core::sync::atomic::AtomicBool; MAX_CPUS] =
                 [const { core::sync::atomic::AtomicBool::new(false) }; MAX_CPUS];
             if !PCDATA_HIT[cpu_id].swap(true, core::sync::atomic::Ordering::AcqRel) {
-                r56_print_pid(
-                    b"PERCPU-SCRIBBLE-HEALED cpu=",
-                    cpu_id as u32,
-                    b" idle_slot=",
+                crate::pr_debug!(
+                    "PERCPU-SCRIBBLE-HEALED cpu={} idle_slot={:#x}",
+                    cpu_id,
+                    pcpu.idle as usize
                 );
-                r56_print_pid(b"", pcpu.idle as usize as u32, b"\n");
             }
             pcpu.idle = static_idle;
         }
@@ -2667,12 +2599,11 @@ unsafe fn __schedule() {
                         .compare_exchange(last, now, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire)
                         .is_ok()
                 {
-                    r56_print_pid(
-                        b"R55-RESYNC-STALE tcpu_was=",
-                        (*tp).ti_cpu() as u32,
-                        b" home=",
+                    crate::pr_debug!(
+                        "R55-RESYNC-STALE tcpu_was={} home={}",
+                        (*tp).ti_cpu(),
+                        home
                     );
-                    r56_print_pid(b"", home as u32, b"\n");
                 }
             }
             // The sched:sched_migrate_task tracepoint for the heal path —
@@ -2714,10 +2645,7 @@ unsafe fn __schedule() {
             // r11: the lying name's generation (if any was in flight) is
             // superseded by this resync.
             pick_gen_supersede(cpu_id, tp);
-            const MSG: &[u8] = b"R56-SLOT-SELF-HEALED\n";
-            for &b in MSG {
-                crate::console::putchar_no_lock(b);
-            }
+            crate::pr_debug!("R56-SLOT-SELF-HEALED");
         }
         // home == MAX otherwise: tp has no slot at all.
         //
@@ -2751,28 +2679,18 @@ unsafe fn __schedule() {
                 // (tags: 1=pick 2=R56d 3=R56c 4=steal 5=abort-republish)
                 // plus tp's own ownership word — the R74 family needs a
                 // producer, not another symptom line.
-                r56_print_pid(
-                    b"R74-SLOTLESS-TP cpu=",
-                    cpu_id as u32,
-                    b" tp_pid=",
-                );
-                r56_print_pid(b"", unsafe { (*tp).pid() }, b" slot_pid=");
-                r56_print_pid(b"", unsafe { (*prev).pid() }, b" slotw=");
-                r56_print_pid(
-                    b"",
-                    SLOT_WRITER[cpu_id].load(core::sync::atomic::Ordering::Relaxed),
-                    b" tp_oncpu=",
-                );
                 let tpclaim = unsafe { (*tp).running_on_cpu.load(core::sync::atomic::Ordering::Acquire) };
-                r56_print_pid(b"", unsafe { (*tp).on_cpu() as u32 }, b" tp_claim=");
-                if (tpclaim as i64) < 0 {
-                    r56_print_pid(b"", (-tpclaim) as u32, b" tp_pk=");
-                } else {
-                    r56_print_pid(b"", tpclaim as u32, b" tp_pk=");
-                }
-                r56_print_pid(b"", unsafe { (*tp).pick_state() }, b" ksp=0x");
-                r56_print_pid(b"", unsafe { ((*tp).ti_kernel_sp() >> 32) as u32 }, b"");
-                r56_print_pid(b"", unsafe { ((*tp).ti_kernel_sp() & 0xFFFF_FFFF) as u32 }, b"\n");
+                crate::pr_debug!(
+                    "R74-SLOTLESS-TP cpu={} tp_pid={} slot_pid={} slotw={} tp_oncpu={} tp_claim={} tp_pk={} ksp={:#x}",
+                    cpu_id,
+                    unsafe { (*tp).pid() },
+                    unsafe { (*prev).pid() },
+                    SLOT_WRITER[cpu_id].load(core::sync::atomic::Ordering::Relaxed),
+                    unsafe { (*tp).on_cpu() as u8 },
+                    tpclaim,
+                    unsafe { (*tp).pick_state() },
+                    unsafe { (*tp).ti_kernel_sp() }
+                );
                 // R83: byte-level header dump of the victim — the scribble
                 // shape (extent + alignment) names the writer's store.
                 crate::dfx::r83hunt::dump_victim(b"R74", tp);
@@ -2886,36 +2804,11 @@ unsafe fn __schedule() {
                 crate::dfx::switches::DfxSwitch::LostParkTrace,
             ) && LPP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120
             {
-                use crate::console::putchar_no_lock as putchar;
-                fn pdec3(mut v: u64) {
-                    use crate::console::putchar_no_lock as putchar;
-                    let mut buf = [0u8; 20];
-                    let mut n = 0;
-                    if v == 0 {
-                        putchar(b'0');
-                        return;
-                    }
-                    while v > 0 {
-                        buf[n] = b'0' + (v % 10) as u8;
-                        v /= 10;
-                        n += 1;
-                    }
-                    while n > 0 {
-                        n -= 1;
-                        putchar(buf[n]);
-                    }
-                }
-                const M: &[u8] = b"\nLP-PARK-IRQBITS-ZEROED pid=";
-                for &b in M {
-                    putchar(b);
-                }
-                pdec3((*prev).pid() as u64);
-                const M2: &[u8] = b" was_pc=0x";
-                for &b in M2 {
-                    putchar(b);
-                }
-                pdec3(pc as u32 as u64);
-                putchar(b'\n');
+                crate::pr_debug!(
+                    "LP-PARK-IRQBITS-ZEROED pid={} was_pc={:#x}",
+                    (*prev).pid(),
+                    pc as u32
+                );
             }
         }
     }
@@ -3466,13 +3359,15 @@ unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
             // after a legitimate switch-out (the release store does not
             // reset it). Only a foreign slot or a foreign claim convicts.
             if owner_slot >= 0 || (claim != -1 && claim as usize != me) {
-                r56_print_pid(
-                    b"R74-DOUBLE-SEED cpu=", me as u32, b" pid=");
-                r56_print_pid(b"", (*task).pid(), b" owner_slot=");
-                r56_print_pid(b"", owner_slot as u32, b" claim=");
-                r56_print_pid(b"", claim as u32, b" pick_st=");
-                r56_print_pid(b"", pick_st, b" tp_is_task=");
-                r56_print_pid(b"", tp_is_task as u32, b"\n");
+                crate::pr_debug!(
+                    "R74-DOUBLE-SEED cpu={} pid={} owner_slot={} claim={} pick_st={} tp_is_task={}",
+                    me,
+                    (*task).pid(),
+                    owner_slot,
+                    claim,
+                    pick_st,
+                    tp_is_task as u8
+                );
             }
         }
         // Scribble hunter: record the pick (dfx=scribble).
@@ -3512,8 +3407,7 @@ unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
             static PICK_LIVE_FORCED_SEEN: core::sync::atomic::AtomicBool =
                 core::sync::atomic::AtomicBool::new(false);
             if !PICK_LIVE_FORCED_SEEN.swap(true, core::sync::atomic::Ordering::AcqRel) {
-                r56_print_pid(b"PICK-LIVE-FORCED cpu=", me as u32, b" pid=");
-                r56_print_pid(b"", (*task).pid(), b"\n");
+                crate::pr_debug!("PICK-LIVE-FORCED cpu={} pid={}", me, (*task).pid());
             }
         }
         // leg-26 (PICK-PC-ZERO): a task being picked FRESH (not live on
@@ -3552,12 +3446,11 @@ unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
                         )
                         .is_ok()
                 {
-                    r56_print_pid(
-                        b"PICK-PC-ZERO pid=",
+                    crate::pr_debug!(
+                        "PICK-PC-ZERO pid={} was={:#x}",
                         (*task).pid(),
-                        b" was=0x",
+                        pc
                     );
-                    r56_print_pid(b"", pc as u32, b"\n");
                 }
             }
         }
@@ -3623,21 +3516,11 @@ unsafe fn ensure_linked_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> boo
     }
 
     // Stale on_rq=true on an unlinked task — the wedge precursor. Report
-    // (SBI direct write: we hold the GRQ lock — R34 discipline), clear the
-    // stale flag, and re-insert through the normal path.
+    // (printk's pre-ring filter is a single atomic load, safe under the
+    // GRQ lock), clear the stale flag, and re-insert through the normal
+    // path.
     {
-        const MSG: &[u8] = b"R41-STALE-ONRQ healed pid=0x";
-        for &b in MSG {
-            crate::console::putchar_no_lock(b);
-        }
-        let v = (*task).pid() as u64;
-        let mut sh = 64;
-        while sh > 0 {
-            sh -= 4;
-            let nb = ((v >> sh) & 0xF) as u8;
-            crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-        }
-        crate::console::putchar_no_lock(b'\n');
+        crate::pr_debug!("R41-STALE-ONRQ healed pid={:#x}", (*task).pid());
     }
     match policy {
         SchedPolicy::Fifo | SchedPolicy::Rr => {
@@ -3713,20 +3596,9 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
         // freed-page detector.
         let pid = (*task).pid();
         if pid == TASK_POISON {
-            // R34: SBI direct write — this probe fires while the GRQ lock is
-            // held; console::putchar would take the UART lock under GRQ
-            // (same discipline as RawSpinlock::deadlock_warn and the buddy
-            // double-free tripwire).
-            const MSG: &[u8] = b"ENQ-POISONED-TASK dropped pid=0x";
-            for &b in MSG { crate::console::putchar_no_lock(b); }
-            let mut sh = 64;
-            let v = pid as u64;
-            while sh > 0 {
-                sh -= 4;
-                let nb = ((v >> sh) & 0xF) as u8;
-                crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-            }
-            crate::console::putchar_no_lock(b'\n');
+            // printk's pre-ring filter is a single atomic load — safe with
+            // the GRQ lock held (was the R34 direct-console write).
+            crate::pr_err!("ENQ-POISONED-TASK dropped pid={:#x}", pid);
             return false;
         }
     }
@@ -3745,10 +3617,7 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
     {
         let st = (*task).state();
         if st.is_dead() {
-            // R34: SBI direct write — under the GRQ lock (was console::putchar,
-            // which nests the UART lock inside GRQ).
-            const MSG: &[u8] = b"ENQ-DEAD-TASK dropped\n";
-            for &b in MSG { crate::console::putchar_no_lock(b); }
+            crate::pr_err!("ENQ-DEAD-TASK dropped");
             return false;
         }
     }
@@ -3808,52 +3677,23 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
                 // table full / timer lost), the task parks forever in
                 // exactly the census shape (INTERRUPTIBLE ∧ unlinked ∧
                 // slotless, "kicked Nx" forever). Name each refusal
-                // live, rate-limited. R34 discipline: GRQ is held, so
-                // the report uses the direct console path (no printk
-                // wake under GRQ).
+                // live, rate-limited. printk's pre-ring filter is safe
+                // with the GRQ held (single atomic load).
                 static DLDEF_N: core::sync::atomic::AtomicU32 =
                     core::sync::atomic::AtomicU32::new(0);
                 if DLDEF_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
-                    use crate::console::putchar_no_lock as putchar;
-                    fn pdec(mut v: u64) {
-                        use crate::console::putchar_no_lock as putchar;
-                        let mut buf = [0u8; 20];
-                        let mut n = 0;
-                        if v == 0 {
-                            putchar(b'0');
-                            return;
-                        }
-                        while v > 0 {
-                            buf[n] = b'0' + (v % 10) as u8;
-                            v /= 10;
-                            n += 1;
-                        }
-                        while n > 0 {
-                            n -= 1;
-                            putchar(buf[n]);
-                        }
-                    }
-                    for &b in b"DL-ENQ-DEFERRED pid=" {
-                        putchar(b);
-                    }
-                    pdec((*task).pid() as u64);
-                    for &b in b" delta_ms=" {
-                        putchar(b);
-                    }
-                    pdec((deadline.saturating_sub(now)) / 1_000_000);
                     let id = dl.replenish_timer.load(core::sync::atomic::Ordering::Acquire);
-                    for &b in b" timer=" {
-                        putchar(b);
-                    }
-                    pdec(id);
-                    let tail: &[u8] = if id != 0 && crate::timer::timer_pending(id) {
-                        b" pending\n"
-                    } else {
-                        b" LOST\n"
-                    };
-                    for &b in tail {
-                        putchar(b);
-                    }
+                    crate::pr_debug!(
+                        "DL-ENQ-DEFERRED pid={} delta_ms={} timer={} {}",
+                        (*task).pid(),
+                        (deadline.saturating_sub(now)) / 1_000_000,
+                        id,
+                        if id != 0 && crate::timer::timer_pending(id) {
+                            "pending"
+                        } else {
+                            "LOST"
+                        }
+                    );
                 }
                 return false;
             }
@@ -4670,11 +4510,7 @@ pub fn wake_up_enqueue_opt(
                     // is the frozen exec clock, so the threshold matures
                     // at ANY observer cadence — the old [50,60]-jiffy
                     // window could never open for 15-s-apart rekicks.)
-                    r56_print_pid(
-                        b"R80-LIVE-PHANTOM-CLEARED pid=",
-                        (*task).pid(),
-                        b"\n",
-                    );
+                    crate::pr_debug!("R80-LIVE-PHANTOM-CLEARED pid={}", (*task).pid());
                     // Fall through to the release + insert below.
                 } else if ps == crate::process::task::PICK_PICKED
                     && !(*task).revoke_pending_pick()
@@ -4683,20 +4519,10 @@ pub fn wake_up_enqueue_opt(
                     // the task right now) — not healable.
                     return false;
                 }
-                // R34: SBI direct write — we hold the GRQ lock here.
+                // printk's pre-ring filter is a single atomic load — safe
+                // with the GRQ lock held (was the R34 direct-console write).
                 {
-                    const MSG: &[u8] = b"R49-ONCPU-ORPHAN healed pid=0x";
-                    for &b in MSG {
-                        crate::console::putchar_no_lock(b);
-                    }
-                    let v = (*task).pid() as u64;
-                    let mut sh = 64;
-                    while sh > 0 {
-                        sh -= 4;
-                        let nb = ((v >> sh) & 0xF) as u8;
-                        crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-                    }
-                    crate::console::putchar_no_lock(b'\n');
+                    crate::pr_debug!("R49-ONCPU-ORPHAN healed pid={:#x}", (*task).pid());
                 }
                 // No CPU owns this mark (curr_on == false under the lock AND
                 // no in-flight switch names it): clearing it cannot break the
@@ -4708,113 +4534,68 @@ pub fn wake_up_enqueue_opt(
                 // with a live claimer that reset double-ran the task (r74a).
                 (*task).release_pick_ownership();
             }
-            // R34: SBI direct write — we hold the GRQ lock here.
+            // printk's pre-ring filter is a single atomic load — safe with
+            // the GRQ lock held (was the R34 direct-console write).
+            //
+            // R76 (phantom producer hunt): name the victim's context —
+            // pick/claim word, cpu, exit flags, and the top kernel-text
+            // words of its parked stack. The R46 family needs the
+            // PRODUCER (which path left a RUNNING task unlinked and
+            // slotless); the parked stack symbolizes to exactly the
+            // wait/exit/spawn site that orphaned it. sw= is a CPU mask.
             {
-                const MSG: &[u8] = b"R46-RUNNING-PHANTOM healed pid=0x";
-                for &b in MSG {
-                    crate::console::putchar_no_lock(b);
+                use core::fmt::Write as _;
+                let claim = (*task).running_on_cpu.load(core::sync::atomic::Ordering::Relaxed);
+                let exiting = (*task)
+                    .ti_flags()
+                    & crate::process::task::task_flags::TaskFlags::PF_EXITING.bits()
+                    != 0;
+                let mut sw_mask: u64 = 0;
+                for c in 0..MAX_CPUS {
+                    if SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire) == task as u64 {
+                        sw_mask |= 1 << c;
+                    }
                 }
-                let v = (*task).pid() as u64;
-                let mut sh = 64;
-                while sh > 0 {
-                    sh -= 4;
-                    let nb = ((v >> sh) & 0xF) as u8;
-                    crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-                }
-                // R76 (phantom producer hunt): name the victim's context —
-                // pick/claim word, cpu, exit flags, and the top kernel-text
-                // words of its parked stack. The R46 family needs the
-                // PRODUCER (which path left a RUNNING task unlinked and
-                // slotless); the parked stack symbolizes to exactly the
-                // wait/exit/spawn site that orphaned it.
-                {
-                    use crate::console::putchar_no_lock as putchar;
-                    fn pdec(mut v: u64) {
-                        use crate::console::putchar_no_lock as putchar;
-                        let mut buf = [0u8; 20];
-                        let mut n = 0;
-                        if v == 0 {
-                            putchar(b'0');
-                            return;
-                        }
-                        while v > 0 {
-                            buf[n] = b'0' + (v % 10) as u8;
-                            v /= 10;
-                            n += 1;
-                        }
-                        while n > 0 {
-                            n -= 1;
-                            putchar(buf[n]);
-                        }
-                    }
-                    fn phex(v: u64) {
-                        use crate::console::putchar_no_lock as putchar;
-                        for sh in (0..16u32).rev() {
-                            let nb = ((v >> (sh * 4)) & 0xF) as u8;
-                            putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-                        }
-                    }
-                    let claim = (*task).running_on_cpu.load(core::sync::atomic::Ordering::Relaxed);
-                    let exiting = (*task)
-                        .ti_flags()
-                        & crate::process::task::task_flags::TaskFlags::PF_EXITING.bits()
-                        != 0;
-                    putchar(b' ');
-                    putchar(b'o');
-                    putchar(b'0' + (*task).on_cpu() as u8);
-                    const C: &[u8] = b" cl=";
-                    for &b in C { putchar(b); }
-                    if (claim as i64) < 0 { putchar(b'-'); }
-                    pdec((claim as i64).unsigned_abs() as u64);
-                    const P: &[u8] = b" pk=";
-                    for &b in P { putchar(b); }
-                    pdec((*task).pick_state() as u64);
-                    const T: &[u8] = b" cpu=";
-                    for &b in T { putchar(b); }
-                    pdec((*task).ti_cpu() as i64 as u64);
-                    const E: &[u8] = b" exiting=";
-                    for &b in E { putchar(b); }
-                    putchar(b'0' + exiting as u8);
-                    const SW: &[u8] = b" sw=";
-                    for &b in SW { putchar(b); }
-                    let mut any_sw = false;
-                    for c in 0..MAX_CPUS {
-                        if SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire) == task as u64 {
-                            putchar(b'0' + c as u8);
-                            any_sw = true;
-                        }
-                    }
-                    if !any_sw { putchar(b'-'); }
-                    const K: &[u8] = b" ksp=0x";
-                    for &b in K { putchar(b); }
-                    phex((*task).ti_kernel_sp());
-                    let thsp = (*task).thread().sp;
-                    if (thsp >> 48) == 0xffff && (thsp & 7) == 0 && thsp > 0x1000 {
-                        const S: &[u8] = b" stk=0x";
-                        for &b in S { putchar(b); }
-                        phex(thsp);
-                        // Caller frames of the victim's parked chain — scan
-                        // UPWARD from sp (stacks grow down; below-sp words
-                        // are the shared switch machinery and name nothing).
-                        let base = thsp as *const u64;
-                        let mut shown = 0;
-                        for k in 0..64 {
+                let mut line = [0u8; 192];
+                let mut cur = crate::printk::BufferWriter::new(&mut line);
+                let _ = write!(
+                    cur,
+                    "R46-RUNNING-PHANTOM healed pid={:#x} o{} cl={} pk={} cpu={} exiting={} sw={:#x} ksp={:#x}",
+                    (*task).pid(),
+                    (*task).on_cpu() as u8,
+                    claim as i64,
+                    (*task).pick_state(),
+                    (*task).ti_cpu(),
+                    exiting as u8,
+                    sw_mask,
+                    (*task).ti_kernel_sp()
+                );
+                let thsp = (*task).thread().sp;
+                if (thsp >> 48) == 0xffff && (thsp & 7) == 0 && thsp > 0x1000 {
+                    let _ = write!(cur, " stk={:#x}", thsp);
+                    // Caller frames of the victim's parked chain — scan
+                    // UPWARD from sp (stacks grow down; below-sp words
+                    // are the shared switch machinery and name nothing).
+                    let base = thsp as *const u64;
+                    let mut shown = 0;
+                    for k in 0..64 {
                         // SAFETY: diagnostic read of the task's own
                         // kernel-stack pages (the Task pins them).
                         let w = core::ptr::read_volatile(base.add(k));
                         let (lo, hi) = kernel_text_window();
                         if w >= lo && w < hi && (w & 1) == 0 {
-                                putchar(b' ');
-                                phex(w);
-                                shown += 1;
-                                if shown >= 6 {
-                                    break;
-                                }
+                            let _ = write!(cur, " {:#x}", w);
+                            shown += 1;
+                            if shown >= 6 {
+                                break;
                             }
                         }
                     }
                 }
-                crate::console::putchar_no_lock(b'\n');
+                let len = cur.pos();
+                drop(cur);
+                let text = core::str::from_utf8(&line[..len]).unwrap_or("");
+                crate::pr_debug!("{}", text);
             }
             // Fall through: enqueue_task_locked links the task (its
             // set_state(RUNNING) is a no-op re-write; nr_running pairs with
@@ -4979,37 +4760,19 @@ pub fn wake_up_enqueue_opt(
                     static WH_N: core::sync::atomic::AtomicU32 =
                         core::sync::atomic::AtomicU32::new(0);
                     if WH_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 300 {
-                        // R34 discipline: GRQ is held — direct console,
-                        // no printk/UART lock under GRQ.
-                        use crate::console::putchar_no_lock as putchar;
-                        fn ph(v: u64) {
-                            use crate::console::putchar_no_lock as putchar;
-                            for sh in (0..16).rev() {
-                                let n = ((v >> (sh * 4)) & 0xF) as u8;
-                                putchar(if n < 10 {
-                                    b'0' + n
-                                } else {
-                                    b'a' + n - 10
-                                });
-                            }
-                        }
-                        const M: &[u8] = b"\nWAKE-HEAL pid=";
-                        for &b in M {
-                            putchar(b);
-                        }
-                        ph((*task).pid() as u64);
-                        const M2: &[u8] = b" was=";
-                        for &b in M2 {
-                            putchar(b);
-                        }
-                        ph(pc as u32 as u64);
-                        putchar(b'\n');
+                        // printk's pre-ring filter is a single atomic load
+                        // — safe with the GRQ held (was the R34
+                        // direct-console write).
+                        crate::pr_debug!(
+                            "WAKE-HEAL pid={} was={:#x}",
+                            (*task).pid(),
+                            pc as u32
+                        );
                         // preempt-hunt (2026-11-01): name the acquire
                         // site whose 1->0 release never ran — the
                         // outermost-acquire tap. This is the producer's
                         // home site, printed at the moment the phantom
-                        // count is adjudicated (still the direct-console
-                        // discipline: GRQ held).
+                        // count is adjudicated.
                         crate::dfx::leakorigin::report_outermost(
                             b"WAKE-HEAL-ORIGIN",
                             task,
@@ -5030,44 +4793,13 @@ pub fn wake_up_enqueue_opt(
                             crate::dfx::switches::DfxSwitch::Schb,
                         )
                     {
-                        use crate::console::putchar_no_lock as putchar;
-                        fn pdec(mut v: u64) {
-                            use crate::console::putchar_no_lock as putchar;
-                            let mut buf = [0u8; 20];
-                            let mut n = 0;
-                            if v == 0 {
-                                putchar(b'0');
-                                return;
-                            }
-                            while v > 0 {
-                                buf[n] = b'0' + (v % 10) as u8;
-                                v /= 10;
-                                n += 1;
-                            }
-                            while n > 0 {
-                                n -= 1;
-                                putchar(buf[n]);
-                            }
-                        }
-                        const M: &[u8] = b"\nWAKE-HEAL-SKIP pid=";
-                        for &b in M {
-                            putchar(b);
-                        }
-                        pdec((*task).pid() as u64);
-                        const R1: &[u8] = b" why=";
-                        for &b in R1 {
-                            putchar(b);
-                        }
-                        if exiting {
-                            putchar(b'e');
-                        }
-                        if mid_switch {
-                            putchar(b's');
-                        }
-                        if curr_on {
-                            putchar(b'c');
-                        }
-                        putchar(b'\n');
+                        crate::pr_debug!(
+                            "WAKE-HEAL-SKIP pid={} why={}{}{}",
+                            (*task).pid(),
+                            if exiting { "e" } else { "" },
+                            if mid_switch { "s" } else { "" },
+                            if curr_on { "c" } else { "" }
+                        );
                         // r10 (lmbench lat_udp/bw_tcp strand handoff): the
                         // why=c refusal is exactly the shape the heal's
                         // origin report exists for — a task still carrying
@@ -5104,55 +4836,29 @@ pub fn wake_up_enqueue_opt(
                                 < 96
                             {
                                 lp_observed = true;
-                                fn pdec2(mut v: u64) {
-                                    use crate::console::putchar_no_lock as putchar;
-                                    let mut buf = [0u8; 20];
-                                    let mut n = 0;
-                                    if v == 0 {
-                                        putchar(b'0');
-                                        return;
-                                    }
-                                    while v > 0 {
-                                        buf[n] = b'0' + (v % 10) as u8;
-                                        v /= 10;
-                                        n += 1;
-                                    }
-                                    while n > 0 {
-                                        n -= 1;
-                                        putchar(buf[n]);
-                                    }
-                                }
-                                const M: &[u8] = b"LP-WAKE-SKIP-EMPTY pid=";
-                                for &b in M {
-                                    putchar(b);
-                                }
-                                pdec2((*task).pid() as u64);
+                                use core::fmt::Write as _;
+                                let mut line = [0u8; 192];
+                                let mut cur = crate::printk::BufferWriter::new(&mut line);
+                                let _ = write!(
+                                    cur,
+                                    "LP-WAKE-SKIP-EMPTY pid={}",
+                                    (*task).pid()
+                                );
                                 for c in 0..MAX_CPUS {
                                     if cpu_state(c).current == task {
-                                        const MC: &[u8] = b" naming_cpu=";
-                                        for &b in MC {
-                                            putchar(b);
-                                        }
-                                        pdec2(c as u64);
-                                        const MW: &[u8] = b" slotw=";
-                                        for &b in MW {
-                                            putchar(b);
-                                        }
-                                        pdec2(
-                                            SLOT_WRITER[c]
-                                                .load(core::sync::atomic::Ordering::Relaxed)
-                                                as u64,
-                                        );
                                         let bit = grq()
                                             .idle_cpus
                                             .load(core::sync::atomic::Ordering::Acquire)
                                             & (1u32 << c)
                                             != 0;
-                                        const MI: &[u8] = b" idlebit=";
-                                        for &b in MI {
-                                            putchar(b);
-                                        }
-                                        pdec2(bit as u64);
+                                        let _ = write!(
+                                            cur,
+                                            " naming_cpu={} slotw={} idlebit={}",
+                                            c,
+                                            SLOT_WRITER[c]
+                                                .load(core::sync::atomic::Ordering::Relaxed),
+                                            bit as u8
+                                        );
                                         // r11: the pick-generation verdict on
                                         // this lying slot. LOST convicts the
                                         // R49 losing switch — the tag-1
@@ -5168,44 +4874,29 @@ pub fn wake_up_enqueue_opt(
                                                 1,
                                                 core::sync::atomic::Ordering::Relaxed,
                                             );
-                                            const PL: &[u8] = b" pickgen=LOST gen=";
-                                            for &b in PL {
-                                                putchar(b);
-                                            }
-                                            pdec2(
-                                                PICK_GEN[c]
-                                                    .load(core::sync::atomic::Ordering::Relaxed),
-                                            );
-                                            const PDD: &[u8] = b" done=";
-                                            for &b in PDD {
-                                                putchar(b);
-                                            }
-                                            pdec2(
-                                                PICK_GEN_DONE[c]
-                                                    .load(core::sync::atomic::Ordering::Relaxed),
-                                            );
-                                            const PJ: &[u8] = b" pub_jif=";
-                                            for &b in PJ {
-                                                putchar(b);
-                                            }
                                             let pj = PICK_GEN_JIF[c]
                                                 .load(core::sync::atomic::Ordering::Relaxed);
-                                            pdec2(pj);
-                                            const PA: &[u8] = b" age=";
-                                            for &b in PA {
-                                                putchar(b);
-                                            }
-                                            pdec2(nowj.wrapping_sub(pj));
+                                            let _ = write!(
+                                                cur,
+                                                " pickgen=LOST gen={} done={} pub_jif={} age={}",
+                                                PICK_GEN[c]
+                                                    .load(core::sync::atomic::Ordering::Relaxed),
+                                                PICK_GEN_DONE[c]
+                                                    .load(core::sync::atomic::Ordering::Relaxed),
+                                                pj,
+                                                nowj.wrapping_sub(pj)
+                                            );
                                         } else {
-                                            const PO: &[u8] = b" pickgen=retired";
-                                            for &b in PO {
-                                                putchar(b);
-                                            }
+                                            let _ = write!(cur, " pickgen=retired");
                                         }
                                         break;
                                     }
                                 }
-                                putchar(b'\n');
+                                let len = cur.pos();
+                                drop(cur);
+                                let text = core::str::from_utf8(&line[..len])
+                                    .unwrap_or("");
+                                crate::pr_debug!("{}", text);
                             }
                         }
                     }
@@ -5222,25 +4913,15 @@ pub fn wake_up_enqueue_opt(
             true
         } else {
             // W2 twin: both the insert and the heal refused — name the
-            // shape (sc78: the reply-delivery lost-wake hunt). R34
-            // discipline: GRQ is held, so the report uses the direct
-            // console path (no printk/console lock under GRQ).
+            // shape (sc78: the reply-delivery lost-wake hunt). printk's
+            // pre-ring filter is safe with the GRQ held.
             static W2B_N: core::sync::atomic::AtomicU32 =
                 core::sync::atomic::AtomicU32::new(0);
             if W2B_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
-                use crate::console::putchar_no_lock as putchar;
-                const MSG: &[u8] = b"W2-ENQUEUE-HEAL-REFUSED pid=";
-                for &b in MSG {
-                    putchar(b);
-                }
-                let v = (*task).pid() as u64;
-                let mut sh = 64;
-                while sh > 0 {
-                    sh -= 4;
-                    let nb = ((v >> sh) & 0xF) as u8;
-                    putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-                }
-                putchar(b'\n');
+                crate::pr_debug!(
+                    "W2-ENQUEUE-HEAL-REFUSED pid={:#x}",
+                    (*task).pid()
+                );
             }
             false
         };
@@ -5251,31 +4932,16 @@ pub fn wake_up_enqueue_opt(
         // printed above, name the FINAL outcome — the enqueue below is
         // the step the LP protocol analysis says cannot drop the wake;
         // woken=0 here convicts it, woken=1 acquits the wake path
-        // entirely. Same gate and budget discipline as the LP print
-        // (LostParkTrace already checked; 16-line boot budget, GRQ held
-        // so direct console).
+        // entirely. Same gate and budget discipline as the LP print.
         if lp_observed {
             static LPO_N: core::sync::atomic::AtomicU32 =
                 core::sync::atomic::AtomicU32::new(0);
             if LPO_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
-                use crate::console::putchar_no_lock as putchar;
-                const MSG: &[u8] = b"LP-WAKE-OUTCOME pid=";
-                for &b in MSG {
-                    putchar(b);
-                }
-                let v = (*task).pid() as u64;
-                let mut sh = 64;
-                while sh > 0 {
-                    sh -= 4;
-                    let nb = ((v >> sh) & 0xF) as u8;
-                    putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-                }
-                const W: &[u8] = b" woken=";
-                for &b in W {
-                    putchar(b);
-                }
-                putchar(if woken { b'1' } else { b'0' });
-                putchar(b'\n');
+                crate::pr_debug!(
+                    "LP-WAKE-OUTCOME pid={:#x} woken={}",
+                    (*task).pid(),
+                    woken as u8
+                );
             }
         }
         // The sched:sched_wakeup tracepoint — the reference's
@@ -6437,73 +6103,40 @@ pub fn scheduler_tick() {
                                         core::sync::atomic::Ordering::Acquire)
                                     .is_ok()
                             {
-                                use crate::console::putchar_no_lock as putchar;
-                                fn ph(v: u64) {
-                                    use crate::console::putchar_no_lock as putchar;
-                                    for sh in (0..16).rev() {
-                                        let n = ((v >> (sh * 4)) & 0xF) as u8;
-                                        putchar(if n < 10 {
-                                            b'0' + n
-                                        } else {
-                                            b'a' + n - 10
-                                        });
-                                    }
-                                }
-                                const M: &[u8] = b"\nPREEMPT-LEAK cpu=";
-                                for &b in M {
-                                    putchar(b);
-                                }
-                                ph(cpu_id as u64);
-                                const M2: &[u8] = b" pid=";
-                                for &b in M2 {
-                                    putchar(b);
-                                }
-                                ph(unsafe { (*cur).pid() } as u64);
-                                const M3: &[u8] = b" pc=";
-                                for &b in M3 {
-                                    putchar(b);
-                                }
-                                ph(pc as u32 as u64);
-                                const M4: &[u8] =
-                                    b" held_nonzero_for=";
-                                for &b in M4 {
-                                    putchar(b);
-                                }
-                                ph(now.wrapping_sub(t0));
-                                const M5: &[u8] = b"jiffies rip=";
-                                for &b in M5 {
-                                    putchar(b);
-                                }
                                 // The interrupted kernel instruction at
                                 // tick time: a leaked-count task poll-
                                 // loops in the wait whose schedule()
-                                // keeps being refused — this RIP names
+                                // keeps being refused — the RIP names
                                 // that loop directly (symbolize with
                                 // addr2line).
-                                {
+                                let rip = {
                                     use crate::arch::pt_regs::PtRegs;
                                     let pr = crate::arch::trap::current_pt_regs()
                                         as *const PtRegs;
-                                    if !pr.is_null() {
-                                        ph(unsafe { (*pr).instruction_pointer() });
+                                    if pr.is_null() {
+                                        0
+                                    } else {
+                                        unsafe { (*pr).instruction_pointer() }
                                     }
-                                }
-                                // pctick: the interrupted task's own count
-                                // at tick ENTRY (snapshot taken in the
-                                // timer trap path before irq_enter books
-                                // the tick's offset) — 0x1 means the
-                                // reportable bit is a leaked PREEMPT
-                                // disable; >=0x10000 means a hardirq bit
-                                // was already stranded on the task.
-                                const M6: &[u8] = b" pctick=";
-                                for &b in M6 {
-                                    putchar(b);
-                                }
-                                ph(crate::interrupt::preempt::TICK_ENTRY_PC
-                                    [cpu_id]
-                                    .load(core::sync::atomic::Ordering::Relaxed)
-                                    as u64);
-                                putchar(b'\n');
+                                };
+                                crate::pr_debug!(
+                                    "PREEMPT-LEAK cpu={} pid={} pc={:#x} held_nonzero_for={}jiffies rip={:#x} pctick={:#x}",
+                                    cpu_id,
+                                    unsafe { (*cur).pid() },
+                                    pc as u32,
+                                    now.wrapping_sub(t0),
+                                    rip,
+                                    // pctick: the interrupted task's own count
+                                    // at tick ENTRY (snapshot taken in the
+                                    // timer trap path before irq_enter books
+                                    // the tick's offset) — 0x1 means the
+                                    // reportable bit is a leaked PREEMPT
+                                    // disable; >=0x10000 means a hardirq bit
+                                    // was already stranded on the task.
+                                    crate::interrupt::preempt::TICK_ENTRY_PC
+                                        [cpu_id]
+                                        .load(core::sync::atomic::Ordering::Relaxed)
+                                );
                                 // dfx=leakhunt: the acquire site of the
                                 // leaked count (last PREEMPT_OFFSET
                                 // acquire on the incumbent).
@@ -6579,59 +6212,21 @@ pub fn scheduler_tick() {
                             w.task.store(0, core::sync::atomic::Ordering::Relaxed);
                             w.first.store(0, core::sync::atomic::Ordering::Relaxed);
                             w.last.store(0, core::sync::atomic::Ordering::Relaxed);
-                            use crate::console::putchar_no_lock as putchar;
-                            fn ph(v: u64) {
-                                use crate::console::putchar_no_lock as putchar;
-                                for sh in (0..16).rev() {
-                                    let n = ((v >> (sh * 4)) & 0xF) as u8;
-                                    putchar(if n < 10 {
-                                        b'0' + n
-                                    } else {
-                                        b'a' + n - 10
-                                    });
-                                }
-                            }
-                            const M: &[u8] = b"\nPREEMPT-HEAL cpu=";
-                            for &b in M {
-                                putchar(b);
-                            }
-                            ph(cpu_id as u64);
-                            const M2: &[u8] = b" pid=";
-                            for &b in M2 {
-                                putchar(b);
-                            }
-                            ph(unsafe { (*cur).pid() } as u64);
-                            const M3: &[u8] = b" was=";
-                            for &b in M3 {
-                                putchar(b);
-                            }
-                            ph(pc as u32 as u64);
-                            const M4: &[u8] = b" held_jiffies=";
-                            for &b in M4 {
-                                putchar(b);
-                            }
-                            ph(now.wrapping_sub(t0));
                             // stress-port r3: name the bars that fired
                             // (window age is bookkeeping; the RUNS are
                             // the proof — a post-heal storm shows
                             // run=1..3 with held=0, a true phantom shows
                             // 200+).
-                            const M4B: &[u8] = b" prun=";
-                            for &b in M4B {
-                                putchar(b);
-                            }
-                            ph(unsafe { (*cur).ti_pc_pirq_present_run() });
-                            const M4C: &[u8] = b" srun=";
-                            for &b in M4C {
-                                putchar(b);
-                            }
-                            ph(unsafe { (*cur).ti_pc_sirq_present_run() });
-                            const M4D: &[u8] = b" hrun=";
-                            for &b in M4D {
-                                putchar(b);
-                            }
-                            ph(unsafe { (*cur).ti_pc_hirq_present_run() });
-                            putchar(b'\n');
+                            crate::pr_debug!(
+                                "PREEMPT-HEAL cpu={} pid={} was={:#x} held_jiffies={} prun={} srun={} hrun={}",
+                                cpu_id,
+                                unsafe { (*cur).pid() },
+                                pc as u32,
+                                now.wrapping_sub(t0),
+                                unsafe { (*cur).ti_pc_pirq_present_run() },
+                                unsafe { (*cur).ti_pc_sirq_present_run() },
+                                unsafe { (*cur).ti_pc_hirq_present_run() }
+                            );
                             // preempt-hunt (2026-11-01): the
                             // outermost-acquire record is guaranteed
                             // intact here — the incumbent's base never
@@ -6678,44 +6273,14 @@ pub fn scheduler_tick() {
                             w.task.store(0, core::sync::atomic::Ordering::Relaxed);
                             w.first.store(0, core::sync::atomic::Ordering::Relaxed);
                             w.last.store(0, core::sync::atomic::Ordering::Relaxed);
-                            use crate::console::putchar_no_lock as putchar;
-                            fn ph(v: u64) {
-                                use crate::console::putchar_no_lock as putchar;
-                                for sh in (0..16).rev() {
-                                    let n = ((v >> (sh * 4)) & 0xF) as u8;
-                                    putchar(if n < 10 {
-                                        b'0' + n
-                                    } else {
-                                        b'a' + n - 10
-                                    });
-                                }
-                            }
-                            const M: &[u8] = b"\nPREEMPT-HEAL-FIELD cpu=";
-                            for &b in M {
-                                putchar(b);
-                            }
-                            ph(cpu_id as u64);
-                            const M2: &[u8] = b" pid=";
-                            for &b in M2 {
-                                putchar(b);
-                            }
-                            ph(unsafe { (*cur).pid() } as u64);
-                            const M3: &[u8] = b" was=";
-                            for &b in M3 {
-                                putchar(b);
-                            }
-                            ph(pc as u32 as u64);
-                            const M4: &[u8] = b" held_jiffies=";
-                            for &b in M4 {
-                                putchar(b);
-                            }
-                            ph(now.wrapping_sub(t0));
-                            const M5: &[u8] = b" face=";
-                            for &b in M5 {
-                                putchar(b);
-                            }
-                            putchar(if h_stale { b'H' } else { b'S' });
-                            putchar(b'\n');
+                            crate::pr_debug!(
+                                "PREEMPT-HEAL-FIELD cpu={} pid={} was={:#x} held_jiffies={} face={}",
+                                cpu_id,
+                                unsafe { (*cur).pid() },
+                                pc as u32,
+                                now.wrapping_sub(t0),
+                                if h_stale { 'H' } else { 'S' }
+                            );
                             if s_stale {
                                 crate::dfx::leakorigin::report_softirq_origin(
                                     b"PREEMPT-HEAL-SOFTIRQ",
@@ -6794,10 +6359,7 @@ pub fn scheduler_tick() {
                 .is_ok()
         {
             if !PARKWALK_ARMED.swap(true, core::sync::atomic::Ordering::AcqRel) {
-                const MSG: &[u8] = b"PARKWALK-ARMED\n";
-                for &b in MSG {
-                    crate::console::putchar_no_lock(b);
-                }
+                crate::pr_debug!("PARKWALK-ARMED");
             }
             // Walk epoch: a slot not refreshed for 2+ walks belongs to a
             // dead/exited task and may be reclaimed for new tasks.
@@ -6985,34 +6547,12 @@ pub fn scheduler_tick() {
                         } else if now.wrapping_sub(bad0) >= 400 {
                             unsafe { (**task).ti_preempt_count_zero(); }
                             s.bad_since.store(0, core::sync::atomic::Ordering::Relaxed);
-                            use crate::console::putchar_no_lock as putchar;
-                            fn ph(v: u64) {
-                                use crate::console::putchar_no_lock as putchar;
-                                for sh in (0..16).rev() {
-                                    let n = ((v >> (sh * 4)) & 0xF) as u8;
-                                    putchar(if n < 10 {
-                                        b'0' + n
-                                    } else {
-                                        b'a' + n - 10
-                                    });
-                                }
-                            }
-                            const M: &[u8] = b"\nPARKED-HEAL pid=";
-                            for &b in M {
-                                putchar(b);
-                            }
-                            ph(unsafe { (**task).pid() } as u64);
-                            const M2: &[u8] = b" was=";
-                            for &b in M2 {
-                                putchar(b);
-                            }
-                            ph(*pc as u32 as u64);
-                            const M3: &[u8] = b" held_jiffies=";
-                            for &b in M3 {
-                                putchar(b);
-                            }
-                            ph(now.wrapping_sub(bad0));
-                            putchar(b'\n');
+                            crate::pr_debug!(
+                                "PARKED-HEAL pid={} was={:#x} held_jiffies={}",
+                                unsafe { (**task).pid() },
+                                *pc as u32,
+                                now.wrapping_sub(bad0)
+                            );
                         }
                     } else {
                         s.bad_since.store(0, core::sync::atomic::Ordering::Relaxed);
@@ -7020,45 +6560,22 @@ pub fn scheduler_tick() {
                 }
                 if wildwrite_shape {
                     // Report immediately, not rate-gated: this is the
-                    // proof event.
-                    use crate::console::putchar_no_lock as putchar;
-                    fn ph(v: u64) {
-                        use crate::console::putchar_no_lock as putchar;
-                        for sh in (0..16).rev() {
-                            let n = ((v >> (sh * 4)) & 0xF) as u8;
-                            putchar(if n < 10 {
-                                b'0' + n
-                            } else {
-                                b'a' + n - 10
-                            });
-                        }
-                    }
-                    const M: &[u8] = b"\nPARKED-WILDWRITE pid=";
-                    for &b in M {
-                        putchar(b);
-                    }
-                    ph(unsafe { (**task).pid() } as u64);
-                    const M2: &[u8] = b" pc=";
-                    for &b in M2 {
-                        putchar(b);
-                    }
-                    ph(*pc as u32 as u64);
-                    // stress-port r8: tpexec=1 => the sample caught the
-                    // task EXECUTING (its own park in flight — the
-                    // slot-based classification is the artifact);
+                    // proof event. stress-port r8: tpexec=1 => the sample
+                    // caught the task EXECUTING (its own park in flight —
+                    // the slot-based classification is the artifact);
                     // tpexec=0 => genuinely parked at sample time.
-                    const M2b: &[u8] = b" tpexec=";
-                    for &b in M2b {
-                        putchar(b);
-                    }
-                    ph(*tp_named as u64);
-                    putchar(b'\n');
+                    crate::pr_debug!(
+                        "PARKED-WILDWRITE pid={} pc={:#x} tpexec={}",
+                        unsafe { (**task).pid() },
+                        *pc as u32,
+                        *tp_named as u8
+                    );
                 }
                 if *running || *pc == 0 {
                     continue;
                 }
                 // Parked with a live count: report, rate-gated to one
-                // line per 2 s (direct console — IRQ context).
+                // line per 2 s.
                 let lp = PARKWALK_PRINT.load(core::sync::atomic::Ordering::Acquire);
                 if now.wrapping_sub(lp) >= 20
                     && PARKWALK_PRINT
@@ -7070,44 +6587,14 @@ pub fn scheduler_tick() {
                         )
                         .is_ok()
                 {
-                    use crate::console::putchar_no_lock as putchar;
-                    fn ph(v: u64) {
-                        use crate::console::putchar_no_lock as putchar;
-                        for sh in (0..16).rev() {
-                            let n = ((v >> (sh * 4)) & 0xF) as u8;
-                            putchar(if n < 10 {
-                                b'0' + n
-                            } else {
-                                b'a' + n - 10
-                            });
-                        }
-                    }
-                    const M: &[u8] = b"\nPARKED-LEAK pid=";
-                    for &b in M {
-                        putchar(b);
-                    }
-                    ph(unsafe { (**task).pid() } as u64);
-                    const M2: &[u8] = b" pc=";
-                    for &b in M2 {
-                        putchar(b);
-                    }
-                    ph(*pc as u32 as u64);
-                    const M3: &[u8] = b" state=";
-                    for &b in M3 {
-                        putchar(b);
-                    }
-                    ph(unsafe { (**task).state().bits() } as u64);
-                    const M4: &[u8] = b" tcpu=";
-                    for &b in M4 {
-                        putchar(b);
-                    }
-                    ph(unsafe { (**task).ti_cpu() } as u32 as u64);
-                    const M4b: &[u8] = b" tpexec=";
-                    for &b in M4b {
-                        putchar(b);
-                    }
-                    ph(*tp_named as u64);
-                    putchar(b'\n');
+                    crate::pr_debug!(
+                        "PARKED-LEAK pid={} pc={:#x} state={:#x} tcpu={} tpexec={}",
+                        unsafe { (**task).pid() },
+                        *pc as u32,
+                        unsafe { (**task).state().bits() },
+                        unsafe { (**task).ti_cpu() },
+                        *tp_named as u8
+                    );
                     // dfx=leakhunt: name the acquire site of the leaked
                     // count (last PREEMPT_OFFSET acquire on this task).
                     crate::dfx::leakorigin::report_parked_site(*task);
@@ -7129,43 +6616,17 @@ pub fn scheduler_tick() {
                 }
             }
             // stress-port r3 census print: every 1000 walks while
-            // dfx=leakhunt is armed (direct console — IRQ context).
+            // dfx=leakhunt is armed.
             if crate::dfx::leakorigin::ENABLED
                 .load(core::sync::atomic::Ordering::Relaxed)
                 && epoch % 1000 == 0
             {
-                use crate::console::putchar_no_lock as putchar;
-                fn pdec(mut v: u64) {
-                    use crate::console::putchar_no_lock as putchar;
-                    let mut buf = [0u8; 20];
-                    let mut n = 0;
-                    if v == 0 {
-                        putchar(b'0');
-                        return;
-                    }
-                    while v > 0 {
-                        buf[n] = b'0' + (v % 10) as u8;
-                        v /= 10;
-                        n += 1;
-                    }
-                    while n > 0 {
-                        n -= 1;
-                        putchar(buf[n]);
-                    }
-                }
-                for &b in b"\nPARKWALK-CENSUS walks=" {
-                    putchar(b);
-                }
-                pdec(PARKWALK_CENSUS[0].load(core::sync::atomic::Ordering::Relaxed));
-                for &b in b" obs=" {
-                    putchar(b);
-                }
-                pdec(PARKWALK_CENSUS[1].load(core::sync::atomic::Ordering::Relaxed));
-                for &b in b" parkednz=" {
-                    putchar(b);
-                }
-                pdec(PARKWALK_CENSUS[2].load(core::sync::atomic::Ordering::Relaxed));
-                putchar(b'\n');
+                crate::pr_debug!(
+                    "PARKWALK-CENSUS walks={} obs={} parkednz={}",
+                    PARKWALK_CENSUS[0].load(core::sync::atomic::Ordering::Relaxed),
+                    PARKWALK_CENSUS[1].load(core::sync::atomic::Ordering::Relaxed),
+                    PARKWALK_CENSUS[2].load(core::sync::atomic::Ordering::Relaxed)
+                );
             }
         }
     }
@@ -7508,7 +6969,7 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     // here with a live count means a DISCIPLINE-BYPASSING switch just
     // happened — the exact event whose guard then drops in another task's
     // context (the leak producer's other half). One compare + rare print;
-    // rate-gated direct console.
+    // rate-gated.
     {
         let pc = (*prev).preempt_count();
         if pc != 0 && !(*prev).state().is_dead() {
@@ -7526,34 +6987,12 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
                     )
                     .is_ok()
             {
-                use crate::console::putchar_no_lock as putchar;
-                fn ph(v: u64) {
-                    use crate::console::putchar_no_lock as putchar;
-                    for sh in (0..16).rev() {
-                        let n = ((v >> (sh * 4)) & 0xF) as u8;
-                        putchar(if n < 10 {
-                            b'0' + n
-                        } else {
-                            b'a' + n - 10
-                        });
-                    }
-                }
-                const M: &[u8] = b"\nSWITCH-COUNT-LEAK prev_pid=";
-                for &b in M {
-                    putchar(b);
-                }
-                ph((*prev).pid() as u64);
-                const M2: &[u8] = b" pc=";
-                for &b in M2 {
-                    putchar(b);
-                }
-                ph(pc as u32 as u64);
-                const M3: &[u8] = b" next_pid=";
-                for &b in M3 {
-                    putchar(b);
-                }
-                ph((*next).pid() as u64);
-                putchar(b'\n');
+                crate::pr_debug!(
+                    "SWITCH-COUNT-LEAK prev_pid={} pc={:#x} next_pid={}",
+                    (*prev).pid(),
+                    pc as u32,
+                    (*next).pid()
+                );
             }
         }
     }
@@ -7946,47 +7385,6 @@ fn cpu_tick_stale_ms(cpu: usize) -> u64 {
     now.saturating_sub(last) / 1_000_000
 }
 
-fn r56_print_msg(msg: &[u8]) {
-    // R34 discipline: callers may hold the GRQ and/or a PID-hash bucket
-    // lock here — SBI/direct console writes only.
-    for &b in msg {
-        unsafe { crate::console::putchar_no_lock(b); }
-    }
-}
-
-fn r56_print_pid(prefix: &[u8], pid: u32, suffix: &[u8]) {
-    r56_print_msg(prefix);
-    let v = pid as u64;
-    // R81 (printer hardening, from the bigalloc8 adjudication): this
-    // printer is called from heal paths that read POSSIBLY CORRUPTED
-    // words (the R80 legs print a garbage claim; the integration
-    // branch's capture hit a >=9-digit value from a corrupted pid field
-    // and PANICKED here — index out of bounds len 8 index 8 — turning a
-    // contained heal into a kernel panic inside the diagnostic itself).
-    // u32::MAX is 10 digits; size for that and never index past it.
-    let mut buf = [0u8; 10];
-    let mut n = 0;
-    if v == 0 {
-        buf[0] = b'0';
-        n = 1;
-    } else {
-        let mut x = v;
-        // Bound the digit count: a corrupted (>=9-digit) pid value must
-        // not panic the heal-path printer itself (bigalloc8: index 8 vs
-        // len 8 immediately after the R74-SLOTLESS-TP capture) — truncate
-        // the garbage rather than losing the diagnostic line.
-        while x > 0 && n < buf.len() {
-            buf[n] = b'0' + (x % 10) as u8;
-            x /= 10;
-            n += 1;
-        }
-    }
-    for i in (0..n).rev() {
-        unsafe { crate::console::putchar_no_lock(buf[i]); }
-    }
-    r56_print_msg(suffix);
-}
-
 /// R80 (diag): one parked-context line for a harvested orphan, rate-limited
 /// to one per 25 jiffies system-wide (the v2 storm healed ~3 victims/s; the
 /// console must not become the bottleneck). Mirrors the R76 parked-stack
@@ -7995,7 +7393,6 @@ fn r56_print_pid(prefix: &[u8], pid: u32, suffix: &[u8]) {
 /// GRQ held — reads are volatile and diagnostic-only; the task is pinned by
 /// the caller's try_pin.
 fn harvest_print_parked(task: *mut Task, pid: u32) {
-    use crate::console::putchar_no_lock as putchar;
     static LAST: core::sync::atomic::AtomicU64 =
         core::sync::atomic::AtomicU64::new(0);
     let now = crate::drivers::timer::get_jiffies();
@@ -8009,57 +7406,24 @@ fn harvest_print_parked(task: *mut Task, pid: u32) {
     {
         return;
     }
-    fn pdec(mut v: u64) {
-        use crate::console::putchar_no_lock as putchar;
-        let mut buf = [0u8; 20];
-        let mut n = 0;
-        if v == 0 {
-            putchar(b'0');
-            return;
-        }
-        while v > 0 {
-            buf[n] = b'0' + (v % 10) as u8;
-            v /= 10;
-            n += 1;
-        }
-        while n > 0 {
-            n -= 1;
-            putchar(buf[n]);
-        }
-    }
-    fn phex(v: u64) {
-        use crate::console::putchar_no_lock as putchar;
-        for sh in (0..16u32).rev() {
-            let nb = ((v >> (sh * 4)) & 0xF) as u8;
-            putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-        }
-    }
+    use core::fmt::Write as _;
+    let mut line = [0u8; 192];
+    let mut cur = crate::printk::BufferWriter::new(&mut line);
     unsafe {
-        const M: &[u8] = b"  ORPHAN-CTX pid=";
-        for &b in M { putchar(b); }
-        pdec(pid as u64);
-        const O: &[u8] = b" o=";
-        for &b in O { putchar(b); }
-        putchar(b'0' + (*task).on_cpu() as u8);
         let claim = (*task).running_on_cpu.load(core::sync::atomic::Ordering::Relaxed);
-        const C: &[u8] = b" cl=";
-        for &b in C { putchar(b); }
-        if (claim as i64) < 0 { putchar(b'-'); }
-        pdec((claim as i64).unsigned_abs() as u64);
-        const P: &[u8] = b" pk=";
-        for &b in P { putchar(b); }
-        pdec((*task).pick_state() as u64);
-        const T: &[u8] = b" ti_cpu=";
-        for &b in T { putchar(b); }
-        pdec((*task).ti_cpu() as i64 as u64);
+        let _ = write!(
+            cur,
+            "  ORPHAN-CTX pid={} o={} cl={} pk={} ti_cpu={} ksp={:#x}",
+            pid,
+            (*task).on_cpu() as u8,
+            claim,
+            (*task).pick_state(),
+            (*task).ti_cpu(),
+            (*task).ti_kernel_sp()
+        );
         let thsp = (*task).thread().sp;
-        const K: &[u8] = b" ksp=0x";
-        for &b in K { putchar(b); }
-        phex((*task).ti_kernel_sp());
         if (thsp >> 48) == 0xffff && (thsp & 7) == 0 && thsp > 0x1000 {
-            const S: &[u8] = b" stk=0x";
-            for &b in S { putchar(b); }
-            phex(thsp);
+            let _ = write!(cur, " stk={:#x}", thsp);
             // Caller frames above the saved sp (stacks grow down).
             let base = thsp as *const u64;
             let mut shown = 0;
@@ -8069,8 +7433,7 @@ fn harvest_print_parked(task: *mut Task, pid: u32) {
                 let w = core::ptr::read_volatile(base.add(k));
                 let (lo, hi) = kernel_text_window();
                 if w >= lo && w < hi && (w & 1) == 0 {
-                    putchar(b' ');
-                    phex(w);
+                    let _ = write!(cur, " {:#x}", w);
                     shown += 1;
                     if shown >= 6 {
                         break;
@@ -8078,8 +7441,11 @@ fn harvest_print_parked(task: *mut Task, pid: u32) {
                 }
             }
         }
-        putchar(b'\n');
     }
+    let len = cur.pos();
+    drop(cur);
+    let text = core::str::from_utf8(&line[..len]).unwrap_or("");
+    crate::pr_debug!("{}", text);
 }
 
 /// R56 round 2: authoritative GRQ-locked heal for the two orphan shapes
@@ -8251,17 +7617,12 @@ pub fn harvest_relink(task: *mut Task) -> bool {
                         return false;
                     }
                     (*task).release_pick_ownership();
-                    r56_print_pid(
-                        b"R80-LIVE-MARK-CLEARED pid=",
+                    crate::pr_debug!(
+                        "R80-LIVE-MARK-CLEARED pid={} was_claim={}",
                         pid,
-                        b" was_claim=",
-                    );
-                    r56_print_pid(
-                        b"",
                         (*task).running_on_cpu.load(
                             core::sync::atomic::Ordering::Acquire,
-                        ).unsigned_abs(),
-                        b"\n",
+                        )
                     );
                     outcome = true;
                 } else {
@@ -8271,11 +7632,7 @@ pub fn harvest_relink(task: *mut Task) -> bool {
                         return false;
                     }
                     (*task).release_pick_ownership();
-                    r56_print_pid(
-                        b"R56-QUEUED-MARK-CLEARED pid=",
-                        pid,
-                        b"\n",
-                    );
+                    crate::pr_debug!("R56-QUEUED-MARK-CLEARED pid={}", pid);
                     outcome = true;
                 }
             } else if linked {
@@ -8347,12 +7704,11 @@ pub fn harvest_relink(task: *mut Task) -> bool {
                             // superseded (the aborted switch-in's
                             // republish would supersede again — harmless).
                             pick_gen_supersede(c, idle_task);
-                            r56_print_pid(
-                                b"R56-SLOT-CAPTURE-HEALED cpu=",
-                                c as u32,
-                                b" pid=",
+                            crate::pr_debug!(
+                                "R56-SLOT-CAPTURE-HEALED cpu={} pid={}",
+                                c,
+                                pid
                             );
-                            r56_print_pid(b"", pid, b"\n");
                         }
                     }
                 }
@@ -8365,10 +7721,13 @@ pub fn harvest_relink(task: *mut Task) -> bool {
                 (*task).release_pick_ownership();
                 outcome = enqueue_task_locked(&mut g, task);
                 // R56-STEAL diagnostics tail: st/sw/rq on ONE line.
-                r56_print_pid(b"R56-STEAL pid=", pid, b" st=");
-                r56_print_pid(b"", _pre_state, b" sw=");
-                r56_print_pid(b"", _sw_mask, b" rq=");
-                r56_print_pid(b"", if outcome { 1 } else { 0 }, b"\n");
+                crate::pr_debug!(
+                    "R56-STEAL pid={} st={} sw={} rq={}",
+                    pid,
+                    _pre_state,
+                    _sw_mask,
+                    outcome as u8
+                );
             }
         }
     }
@@ -8437,8 +7796,7 @@ pub fn r56_report_switch_abort(cpu: usize, pid: u32) {
     {
         return;
     }
-    r56_print_pid(b"R56-SWITCH-ABORTED cpu=", cpu as u32, b" pid=");
-    r56_print_pid(b"", pid, b"\n");
+    crate::pr_debug!("R56-SWITCH-ABORTED cpu={} pid={}", cpu, pid);
 }
 
 /// R56: re-link picked-but-lost tasks (multi-mode emulator-race orphan).
@@ -8544,7 +7902,7 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
                         // printed hundreds of anonymous harvest lines while
                         // the actual blocker (a LIVE-mark phantom) was
                         // refused elsewhere and never named.
-                        r56_print_pid(b"R56-ORPHAN-HARVESTED pid=", pid, b"\n");
+                        crate::pr_debug!("R56-ORPHAN-HARVESTED pid={}", pid);
                         // R80 (diag, producer hunt): the v2 storm showed
                         // pids 306/336/338 cycling orphan -> heal -> orphan
                         // every ~200ms through THIS plain-insert path (no
@@ -8570,7 +7928,7 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
                             if crate::dfx::switches::enabled(
                                 crate::dfx::switches::DfxSwitch::SchedTrace,
                             ) {
-                                r56_print_pid(b"R56-ORPHAN-HARVESTED pid=", pid, b"\n");
+                                crate::pr_debug!("R56-ORPHAN-HARVESTED pid={}", pid);
                             }
                         }
                     } else if (*t).preempt_count() == 0
@@ -8626,10 +7984,8 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
 /// Lost-park idle-lie report (fix-lostpark lane, dfx=lostpark): called
 /// from the idle loop when the CPU's own slot names a real task after
 /// schedule() returned. Rate-limited to one line per CPU per 10 jiffies
-/// with a global budget, direct-console (R34 discipline — the caller may
-/// not hold the GRQ, but the diag path must stay lock-free anyway).
+/// with a global budget.
 fn lp_idle_lie_report(cpu: usize) {
-    use crate::console::putchar_no_lock as putchar;
     static LP_N: core::sync::atomic::AtomicU32 =
         core::sync::atomic::AtomicU32::new(0);
     static LP_LAST: [core::sync::atomic::AtomicU64; MAX_CPUS] =
@@ -8654,95 +8010,24 @@ fn lp_idle_lie_report(cpu: usize) {
         return;
     }
     LP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    fn pdec(mut v: u64) {
-        use crate::console::putchar_no_lock as putchar;
-        let mut buf = [0u8; 20];
-        let mut n = 0;
-        if v == 0 {
-            putchar(b'0');
-            return;
-        }
-        while v > 0 {
-            buf[n] = b'0' + (v % 10) as u8;
-            v /= 10;
-            n += 1;
-        }
-        while n > 0 {
-            n -= 1;
-            putchar(buf[n]);
-        }
-    }
-    fn phex(v: u64) {
-        use crate::console::putchar_no_lock as putchar;
-        for sh in (0..16u32).rev() {
-            let nb = ((v >> (sh * 4)) & 0xF) as u8;
-            putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-        }
-    }
     // SAFETY: diagnostic reads of the slot-named task; the slot pins it
     // as this CPU's published current (it cannot be freed while named).
     unsafe {
         let curr = cpu_state(cpu).current;
-        const M: &[u8] = b"\nLP-IDLE-LIE cpu=";
-        for &b in M {
-            putchar(b);
-        }
-        pdec(cpu as u64);
-        const M2: &[u8] = b" slot_pid=";
-        for &b in M2 {
-            putchar(b);
-        }
-        pdec((*curr).pid() as u64);
-        const M3: &[u8] = b" st=0x";
-        for &b in M3 {
-            putchar(b);
-        }
-        phex((*curr).state().bits() as u64);
-        const M4: &[u8] = b" pc=0x";
-        for &b in M4 {
-            putchar(b);
-        }
-        phex((*curr).preempt_count() as u64);
-        const M5: &[u8] = b" oncpu=";
-        for &b in M5 {
-            putchar(b);
-        }
-        pdec((*curr).on_cpu() as u64);
-        let claim = (*curr).running_on_cpu.load(core::sync::atomic::Ordering::Relaxed);
-        const M6: &[u8] = b" cl=";
-        for &b in M6 {
-            putchar(b);
-        }
-        if (claim as i64) < 0 {
-            putchar(b'-');
-        }
-        pdec((claim as i64).unsigned_abs() as u64);
-        const M7: &[u8] = b" pk=";
-        for &b in M7 {
-            putchar(b);
-        }
-        pdec((*curr).pick_state() as u64);
-        const M8: &[u8] = b" onrq=";
-        for &b in M8 {
-            putchar(b);
-        }
-        pdec(task_onrq_flag(curr) as u64);
-        const M9: &[u8] = b" slotw=";
-        for &b in M9 {
-            putchar(b);
-        }
-        pdec(SLOT_WRITER[cpu].load(core::sync::atomic::Ordering::Relaxed) as u64);
-        const M10: &[u8] = b" wtask=0x";
-        for &b in M10 {
-            putchar(b);
-        }
-        phex(SLOT_WRITER_TASK[cpu].load(core::sync::atomic::Ordering::Relaxed));
-        const M11: &[u8] = b" nr=";
-        for &b in M11 {
-            putchar(b);
-        }
-        pdec(GlobalRunQueue::grq_nr_running() as u64);
-        putchar(b'\n');
+        crate::pr_debug!(
+            "LP-IDLE-LIE cpu={} slot_pid={} st={:#x} pc={:#x} oncpu={} cl={} pk={} onrq={} slotw={} wtask={:#x} nr={}",
+            cpu,
+            (*curr).pid(),
+            (*curr).state().bits(),
+            (*curr).preempt_count(),
+            (*curr).on_cpu() as u8,
+            (*curr).running_on_cpu.load(core::sync::atomic::Ordering::Relaxed),
+            (*curr).pick_state(),
+            task_onrq_flag(curr) as u8,
+            SLOT_WRITER[cpu].load(core::sync::atomic::Ordering::Relaxed),
+            SLOT_WRITER_TASK[cpu].load(core::sync::atomic::Ordering::Relaxed),
+            GlobalRunQueue::grq_nr_running()
+        );
     }
 }
 
@@ -9003,35 +8288,13 @@ pub fn cpu_idle_loop() -> ! {
         sp
     }
     fn idle_guard_report(cpu: usize, sp: u64, floor: u64) {
-        use crate::console::putchar_no_lock as putchar;
-        fn ph(mut v: u64) {
-            for _ in 0..16 {
-                let n = (v >> 60) as u8;
-                putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                v <<= 4;
-            }
-        }
-        const M: &[u8] = b"\nIDLE-DEPTH-DROP cpu=";
-        for &b in M {
-            putchar(b);
-        }
-        ph(cpu as u64);
-        const M2: &[u8] = b" sp=0x";
-        for &b in M2 {
-            putchar(b);
-        }
-        ph(sp);
-        const M3: &[u8] = b" floor=0x";
-        for &b in M3 {
-            putchar(b);
-        }
-        ph(floor);
-        const M4: &[u8] = b" delta=0x";
-        for &b in M4 {
-            putchar(b);
-        }
-        ph(floor.wrapping_sub(sp));
-        putchar(b'\n');
+        crate::pr_debug!(
+            "IDLE-DEPTH-DROP cpu={} sp={:#x} floor={:#x} delta={:#x}",
+            cpu,
+            sp,
+            floor,
+            floor.wrapping_sub(sp)
+        );
         #[cfg(feature = "x86_64")]
         crate::dfx::scribble::ring_dump();
     }

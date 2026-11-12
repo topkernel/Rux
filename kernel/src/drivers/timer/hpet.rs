@@ -150,9 +150,9 @@ static LAST_GOOD: [AtomicU64; crate::config::MAX_CPUS] =
 const SMALL_BACKWARD_CLAMP_TICKS: u64 =
     50 * crate::config::TIMER_CLOCK_FREQ_HZ / 1000;
 
-/// Direct-console heal report, rate-gated to one line per 25 jiffies
-/// (callers may hold the TIMERS lock — R34 discipline: putchar_no_lock
-/// only, never printk from the clock read path).
+/// Heal report, rate-gated to one line per 25 jiffies. Callers may hold
+/// the TIMERS lock — printk's pre-ring filter is a single atomic load,
+/// safe from the clock read path.
 fn heal_report(prefix: &[u8], bad: u64, good: u64) {
     static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
     let now = crate::drivers::timer::get_jiffies();
@@ -166,24 +166,12 @@ fn heal_report(prefix: &[u8], bad: u64, good: u64) {
     {
         return;
     }
-    for &b in prefix {
-        crate::console::putchar_no_lock(b);
-    }
-    let mut v = bad;
-    for _ in 0..16 {
-        let nb = (v >> 60) as u8;
-        crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-        v <<= 4;
-    }
-    crate::console::putchar_no_lock(b'-');
-    crate::console::putchar_no_lock(b'>');
-    let mut v = good;
-    for _ in 0..16 {
-        let nb = (v >> 60) as u8;
-        crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-        v <<= 4;
-    }
-    crate::console::putchar_no_lock(b'\n');
+    crate::pr_err!(
+        "{}{:#x}->{:#x}",
+        core::str::from_utf8(prefix).unwrap_or(""),
+        bad,
+        good
+    );
 }
 
 /// Validate the locked base against its complement copy. Returns the

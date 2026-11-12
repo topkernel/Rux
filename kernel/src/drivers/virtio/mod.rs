@@ -1125,58 +1125,13 @@ fn pci_blk_acquire_site() -> usize {
     ra
 }
 
-/// Lock-free console byte (the holder may be wedged holding printk's
-/// lock — same discipline as RawSpinlock::deadlock_warn).
-#[inline]
-fn wedge_put(b: u8) {
-    // SAFETY: putchar_no_lock is a byte-wise polling UART write usable
-    // from any context, including with interrupts disabled.
-    unsafe { crate::console::putchar_no_lock(b) }
-}
-
-/// Lock-free hex printer (usize, no leading zeros beyond the top nibble
-/// set — keeps forensics lines short).
-fn wedge_hex(mut v: usize) {
-    let mut started = false;
-    let mut shift = (core::mem::size_of::<usize>() * 4) as i32;
-    while shift > 0 {
-        shift -= 4;
-        let nibble = (v >> shift as usize) & 0xF;
-        if nibble != 0 || started || shift == 0 {
-            let c = if nibble < 10 {
-                b'0' + nibble as u8
-            } else {
-                b'a' + (nibble - 10) as u8
-            };
-            wedge_put(c);
-            started = true;
-        }
-    }
-}
-
-/// Lock-free decimal printer (u64).
-fn wedge_dec(mut v: u64) {
-    let mut buf = [0u8; 20];
-    let mut n = 0;
-    if v == 0 {
-        wedge_put(b'0');
-        return;
-    }
-    while v > 0 && n < buf.len() {
-        buf[n] = b'0' + (v % 10) as u8;
-        v /= 10;
-        n += 1;
-    }
-    while n > 0 {
-        n -= 1;
-        wedge_put(buf[n]);
-    }
-}
-
-/// Print one contended-acquire forensics line through the lock-free
-/// console: who holds `slot`, since when, from which site — plus the
-/// waiter's own site. Rate-limited per slot (>= 2 s apart).
+/// Print one contended-acquire forensics line: who holds `slot`, since
+/// when, from which site — plus the waiter's own site. Rate-limited per
+/// slot (>= 2 s apart). pr_err! (an error): printk's pre-ring filter is
+/// a single atomic load and its per-CPU re-entrancy guard turns a call
+/// from inside printk's own path into a silent drop, never a recursion.
 fn pci_blk_contended_forensics(slot: usize, waiter_site: usize) {
+    use core::fmt::Write as _;
     let now = crate::drivers::timer::get_jiffies();
     let last = PCI_BLK_SPIN_PRINT_AT[slot].load(core::sync::atomic::Ordering::Acquire);
     if last != 0 && now.saturating_sub(last) < 2 {
@@ -1184,49 +1139,10 @@ fn pci_blk_contended_forensics(slot: usize, waiter_site: usize) {
     }
     PCI_BLK_SPIN_PRINT_AT[slot].store(now, core::sync::atomic::Ordering::Release);
 
-    for &b in b"PCI-BLK-CONTEND slot=" {
-        wedge_put(b);
-    }
-    wedge_dec(slot as u64);
-    for &b in b" holder_cpu=" {
-        wedge_put(b);
-    }
     let hcpu = PCI_BLK_HOLDER_CPU[slot].load(core::sync::atomic::Ordering::Acquire);
-    if hcpu == 0 {
-        wedge_put(b'?');
-    } else {
-        wedge_dec((hcpu - 1) as u64);
-    }
-    for &b in b" pid=" {
-        wedge_put(b);
-    }
-    wedge_dec(PCI_BLK_HOLDER_PID[slot].load(core::sync::atomic::Ordering::Acquire) as u64);
-    for &b in b" ra=0x" {
-        wedge_put(b);
-    }
-    wedge_hex(PCI_BLK_HOLDER_RA[slot].load(core::sync::atomic::Ordering::Acquire));
-    for &b in b" ctx=" {
-        wedge_put(b);
-    }
-    wedge_dec(PCI_BLK_HOLDER_CTX[slot].load(core::sync::atomic::Ordering::Acquire) as u64);
-    for &b in b" held_ms=" {
-        wedge_put(b);
-    }
     let at = PCI_BLK_HOLDER_AT[slot].load(core::sync::atomic::Ordering::Acquire);
     let held_ms = crate::drivers::timer::jiffies_to_msecs(now.saturating_sub(at).min(0xFFFF));
-    wedge_dec(held_ms);
-    for &b in b" waiter_cpu=" {
-        wedge_put(b);
-    }
-    wedge_dec(crate::arch::smp::cpu_id() as u64);
-    for &b in b" waiter_site=0x" {
-        wedge_put(b);
-    }
-    wedge_hex(waiter_site);
     // Ring state (all atomics / RAM reads — safe under any wedge).
-    for &b in b" used=" {
-        wedge_put(b);
-    }
     let used = match get_pci_device_queue_at(slot) {
         Some(q) => {
             // SAFETY: same idx read as the walker's fast path.
@@ -1236,18 +1152,31 @@ fn pci_blk_contended_forensics(slot: usize, waiter_site: usize) {
         }
         None => 0,
     };
-    wedge_dec(used);
-    for &b in b" walked=" {
-        wedge_put(b);
+    let mut line = [0u8; 192];
+    let mut cur = crate::printk::BufferWriter::new(&mut line);
+    let _ = write!(cur, "PCI-BLK-CONTEND slot={} holder_cpu=", slot);
+    if hcpu == 0 {
+        let _ = write!(cur, "?");
+    } else {
+        let _ = write!(cur, "{}", hcpu - 1);
     }
-    wedge_dec(
-        PCI_BLK_PENDING_LAST[slot].load(core::sync::atomic::Ordering::Acquire) as u64,
+    let _ = write!(
+        cur,
+        " pid={} ra={:#x} ctx={} held_ms={} waiter_cpu={} waiter_site={:#x} used={} walked={} expected={}",
+        PCI_BLK_HOLDER_PID[slot].load(core::sync::atomic::Ordering::Acquire),
+        PCI_BLK_HOLDER_RA[slot].load(core::sync::atomic::Ordering::Acquire),
+        PCI_BLK_HOLDER_CTX[slot].load(core::sync::atomic::Ordering::Acquire),
+        held_ms,
+        crate::arch::smp::cpu_id(),
+        waiter_site,
+        used,
+        PCI_BLK_PENDING_LAST[slot].load(core::sync::atomic::Ordering::Acquire),
+        PCI_BLK_EXPECTED_USED_IDX[slot].load(core::sync::atomic::Ordering::Acquire)
     );
-    for &b in b" expected=" {
-        wedge_put(b);
-    }
-    wedge_dec(PCI_BLK_EXPECTED_USED_IDX[slot].load(core::sync::atomic::Ordering::Acquire) as u64);
-    wedge_put(b'\n');
+    let len = cur.pos();
+    drop(cur);
+    let text = core::str::from_utf8(&line[..len]).unwrap_or("");
+    crate::pr_err!("{}", text);
 }
 
 /// RAII guard for a per-slot BLK lock acquire: records holder forensics
@@ -2370,48 +2299,29 @@ pub fn vw_blk_intx_bump() {
     VW_BLK_INTX.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
 }
 
-/// One-line direct-console virtio ring snapshot (VW-SNAP): the same
-/// fields as the watchdog's VW-WEDGE, printed through putchar_no_lock —
-/// pr_err-based reports were silently dropped from the audit context on
-/// the OH boots (lb70/lb71: dump printed, VW-REPORT never landed).
-/// Called from the txn-hang-20s trigger.
+/// One-line virtio ring snapshot (VW-SNAP): the same fields as the
+/// watchdog's VW-WEDGE. printk's pre-ring filter is a single atomic
+/// load and the per-CPU re-entrancy guard makes a call from inside
+/// printk's own path a silent drop, never a recursion — safe from the
+/// audit context. Called from the txn-hang-20s trigger.
 pub fn vw_snap_direct() {
-    use crate::console::putchar_no_lock as putchar;
-    fn pd(mut v: u64) {
-        use crate::console::putchar_no_lock as putchar;
-        let mut b = [0u8; 20];
-        let mut n = 0usize;
-        if v == 0 {
-            putchar(b'0');
-            return;
-        }
-        while v > 0 && n < b.len() {
-            b[n] = b'0' + (v % 10) as u8;
-            v /= 10;
-            n += 1;
-        }
-        let mut i = n;
-        while i > 0 {
-            i -= 1;
-            putchar(b[i]);
-        }
-    }
-    fn ps(s: &[u8]) {
-        use crate::console::putchar_no_lock as putchar;
-        for &c in s {
-            putchar(c);
-        }
-    }
-    ps(b"\nVW-SNAP pending=0x");
-    pd(crate::interrupt::softirq::softirq_pending_raw(0) as u64);
-    putchar(b'/');
-    pd(crate::interrupt::softirq::softirq_pending_raw(1) as u64);
-    ps(b" walks=");
-    pd(VW_WALKS.load(core::sync::atomic::Ordering::Acquire));
+    use core::fmt::Write as _;
+    let mut line = [0u8; 256];
+    let mut cur = crate::printk::BufferWriter::new(&mut line);
+    let _ = write!(
+        cur,
+        "VW-SNAP pending={:#x}/{} walks={}",
+        crate::interrupt::softirq::softirq_pending_raw(0),
+        crate::interrupt::softirq::softirq_pending_raw(1),
+        VW_WALKS.load(core::sync::atomic::Ordering::Acquire)
+    );
     #[cfg(feature = "x86_64")]
     {
-        ps(b" intx=");
-        pd(VW_BLK_INTX.load(core::sync::atomic::Ordering::Acquire));
+        let _ = write!(
+            cur,
+            " intx={}",
+            VW_BLK_INTX.load(core::sync::atomic::Ordering::Acquire)
+        );
     }
     for disk in 0..MAX_PCI_BLK_DISKS {
         if !PCI_BLK_READY[disk].load(core::sync::atomic::Ordering::Acquire) {
@@ -2425,22 +2335,23 @@ pub fn vw_snap_direct() {
         let used_idx = unsafe {
             core::ptr::read_volatile((used_ring as usize + 2) as *const u16)
         };
-        ps(b" | d");
-        pd(disk as u64);
-        ps(b" used=");
-        pd(used_idx as u64);
-        ps(b" last=");
-        pd(PCI_BLK_PENDING_LAST[disk].load(core::sync::atomic::Ordering::Acquire) as u64);
-        ps(b" shadow=");
-        pd(get_pci_device_queue_at(disk)
-            .map(|q| q.avail_shadow_snapshot())
-            .unwrap_or(0) as u64);
-        ps(b" unkicked=");
-        pd(PCI_BLK_UNKICKED[disk].load(core::sync::atomic::Ordering::Acquire) as u64);
-        ps(b" irqs=");
-        pd(VW_IRQS[disk].load(core::sync::atomic::Ordering::Acquire));
+        let _ = write!(
+            cur,
+            " | d{} used={} last={} shadow={} unkicked={} irqs={}",
+            disk,
+            used_idx,
+            PCI_BLK_PENDING_LAST[disk].load(core::sync::atomic::Ordering::Acquire),
+            get_pci_device_queue_at(disk)
+                .map(|q| q.avail_shadow_snapshot())
+                .unwrap_or(0),
+            PCI_BLK_UNKICKED[disk].load(core::sync::atomic::Ordering::Acquire),
+            VW_IRQS[disk].load(core::sync::atomic::Ordering::Acquire)
+        );
     }
-    putchar(b'\n');
+    let len = cur.pos();
+    drop(cur);
+    let text = core::str::from_utf8(&line[..len]).unwrap_or("");
+    crate::pr_err!("{}", text);
 }
 
 /// Timer-cadence lag watchdog: called once per jiffy from the Timer

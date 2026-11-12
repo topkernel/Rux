@@ -320,7 +320,6 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                         static KF_N: core::sync::atomic::AtomicUsize =
                             core::sync::atomic::AtomicUsize::new(0);
                         if KF_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
-                            use crate::console::putchar_no_lock as putchar;
                             let mut s = alloc::string::String::new();
                             use core::fmt::Write;
                             let _ = write!(
@@ -346,10 +345,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                                     let _ = write!(s, "vma=NONE");
                                 }
                             }
-                            for &c in s.as_bytes() {
-                                putchar(c);
-                            }
-                            putchar(b'\n');
+                            crate::pr_debug!("{}", s);
                         }
                     }
                 }
@@ -360,18 +356,11 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                 static KFM_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
                 if KFM_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
-                    use crate::console::putchar_no_lock as putchar;
-                    let mut s = alloc::string::String::new();
-                    use core::fmt::Write;
-                    let _ = write!(
-                        s,
-                        "KUFILL-MISS pid={} addr={:#x} — no VMA, no growable stack\n",
+                    crate::pr_debug!(
+                        "KUFILL-MISS pid={} addr={:#x} — no VMA, no growable stack",
                         current.pid(),
                         fault_addr.bits()
                     );
-                    for &c in s.as_bytes() {
-                        putchar(c);
-                    }
                 }
             }
         }
@@ -407,52 +396,39 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
             // instruction and adjudicates the classification offline.
             let kb = current.kernel_stack_bottom();
             let kt = current.kernel_stack_top();
-            // One-shot census (allocation-free, raw UART): every CPU slot
-            // and every task's stack ownership vs the faulting rsp, so a
-            // lying slot / stale-kstack task / freed-stack resume is
-            // adjudicated directly from the dump.
+            // One-shot census: every CPU slot and every task's stack
+            // ownership vs the faulting rsp, so a lying slot / stale-kstack
+            // task / freed-stack resume is adjudicated directly from the
+            // dump. pr_err! (pre-panic forensics — stays visible in
+            // release builds).
             {
-                use crate::console::putchar_no_lock as putchar;
-                fn phex(mut v: u64) {
-                    use crate::console::putchar_no_lock as putchar;
-                    for sh in (0..16).rev() {
-                        let n = ((v >> (sh * 4)) & 0xF) as u8;
-                        putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                    }
-                }
-                fn ptag(m: &[u8]) {
-                    use crate::console::putchar_no_lock as putchar;
-                    for &b in m {
-                        putchar(b);
-                    }
-                }
-                ptag(b"\nKSO-CENSUS cpu=");
-                phex(crate::arch::cpu_id() as u64);
+                use core::fmt::Write as _;
+                let mut line = [0u8; 256];
+                let mut cur = crate::printk::BufferWriter::new(&mut line);
+                let _ = write!(cur, "KSO-CENSUS cpu={}", crate::arch::cpu_id());
                 for c in 0..crate::config::MAX_CPUS {
-                    let cur = crate::sched::sched::cpu_state(c).current as usize as u64;
-                    if cur != 0 {
-                        ptag(b" slot");
-                        phex(c as u64);
-                        ptag(b"=pid:");
+                    let cur_t = crate::sched::sched::cpu_state(c).current as usize as u64;
+                    if cur_t != 0 {
                         // SAFETY: header reads only.
-                        unsafe {
-                            phex((*(cur as *mut crate::process::Task)).pid() as u64);
-                        }
+                        let pid = unsafe { (*(cur_t as *mut crate::process::Task)).pid() };
+                        let _ = write!(cur, " slot{}=pid:{}", c, pid);
                     }
                 }
-                ptag(b"\n");
+                let len = cur.pos();
+                drop(cur);
+                let text = core::str::from_utf8(&line[..len]).unwrap_or("");
+                crate::pr_err!("{}", text);
                 // DFX: adjudicate the freed-stack execution engine — is
                 // the faulting rsp inside a recently FREED stack?
                 if let Some((top, fpid, age)) =
                     crate::process::task::freed_stack_containing(regs.rsp as usize)
                 {
-                    ptag(b"KSO-FREED-STACK rsp in freed kstack top=");
-                    phex(top as u64);
-                    ptag(b" freed_by_pid=");
-                    phex(fpid as u64);
-                    ptag(b" age_jiffies=");
-                    phex(age);
-                    ptag(b"\n");
+                    crate::pr_err!(
+                        "KSO-FREED-STACK rsp in freed kstack top={:#x} freed_by_pid={} age_jiffies={}",
+                        top as u64,
+                        fpid,
+                        age
+                    );
                 }
                 // DFX: live TSS.rsp0 per CPU — a kernel-mode fault whose
                 // rsp sits just below a CPU's rsp0 inside non-stack memory
@@ -462,18 +438,15 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                         .tss_rsp0
                         .load(core::sync::atomic::Ordering::Acquire);
                     if r0 != 0 {
-                        ptag(b"KSO-RSP0 cpu");
-                        phex(c as u64);
-                        ptag(b"=");
-                        phex(r0);
-                        ptag(b"\n");
+                        crate::pr_err!("KSO-RSP0 cpu{}={:#x}", c, r0);
                     }
                 }
                 // DFX: dump surviving kernel-text return addresses from the
                 // fault rsp up through the overflow zone into the legal
                 // stack (the deep recursion's frame chain names itself).
                 {
-                    let mut a = regs.rsp as usize & !7;
+                    let base_rsp = regs.rsp as usize & !7;
+                    let mut a = base_rsp;
                     let end = (kb + 0x400).min(kt);
                     let mut shown = 0u32;
                     while a < end && shown < 200 {
@@ -482,11 +455,11 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                         // map is fully mapped) — raw read.
                         let v = unsafe { core::ptr::read_volatile(a as *const u64) };
                         if v >= 0xffff_ffff_8000_0000u64 && v <= 0xffff_ffff_ffff_f000u64 {
-                            ptag(b"KSO-F +");
-                            phex((a - (regs.rsp as usize & !7)) as u64);
-                            ptag(b" ra=");
-                            phex(v);
-                            ptag(b"\n");
+                            crate::pr_err!(
+                                "KSO-F +{:#x} ra={:#x}",
+                                a - base_rsp,
+                                v
+                            );
                             shown += 1;
                         }
                         a += 8;
@@ -507,18 +480,15 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                             || dead
                             || (rsp + 0x400000 > bottom && rsp < bottom + 0x400000)
                         {
-                            ptag(b"KSO-T pid=");
-                            phex((*task).pid() as u64);
-                            ptag(b" dead=");
-                            ptag(if dead { b"Y" } else { b"N" });
-                            ptag(b" kstack=[");
-                            phex(bottom);
-                            ptag(b", ");
-                            phex(top);
-                            ptag(b"] sp=");
-                            phex(sp as u64);
-                            ptag(if hit { b" <RSP-IN-THIS-STACK" } else { b"" });
-                            ptag(b"\n");
+                            crate::pr_err!(
+                                "KSO-T pid={} dead={} kstack=[{:#x}, {:#x}] sp={:#x}{}",
+                                (*task).pid(),
+                                if dead { "Y" } else { "N" },
+                                bottom,
+                                top,
+                                sp,
+                                if hit { " <RSP-IN-THIS-STACK" } else { "" }
+                            );
                         }
                         // keep walking
                     });

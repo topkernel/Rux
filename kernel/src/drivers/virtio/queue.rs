@@ -387,12 +387,13 @@ impl VirtQueue {
         self.avail_shadow.load(core::sync::atomic::Ordering::Acquire)
     }
 
-    /// Direct-console one-line snapshot of a stalling poller's world (the
-    /// VW-POLLSTALL family): the poller's own response byte, the device's
-    /// used-ring index, the caller's prev_used ordinal, the walker's
-    /// position, the submission shadow, and the un-kicked chain count.
-    /// Direct console (putchar_no_lock) because pr_err is silently dropped
-    /// on the OH boots (lb70/lb71 lesson).
+    /// One-line snapshot of a stalling poller's world (the VW-POLLSTALL
+    /// family): the poller's own response byte, the device's used-ring
+    /// index, the caller's prev_used ordinal, the walker's position, the
+    /// submission shadow, and the un-kicked chain count. pr_err! —
+    /// printk's pre-ring filter is a single atomic load and the per-CPU
+    /// re-entrancy guard turns a call from inside printk's own path into
+    /// a silent drop, never a recursion.
     ///
     /// Class split, one line:
     /// - used > prev_used, resp still 0xFF: the device completed entries
@@ -410,36 +411,6 @@ impl VirtQueue {
         prev_used: u16,
         tag: &[u8],
     ) {
-        use crate::console::putchar_no_lock as putchar;
-        fn pdec(mut v: u64) {
-            use crate::console::putchar_no_lock as putchar;
-            let mut buf = [0u8; 20];
-            let mut n = 0usize;
-            if v == 0 {
-                putchar(b'0');
-                return;
-            }
-            while v > 0 && n < buf.len() {
-                buf[n] = b'0' + (v % 10) as u8;
-                v /= 10;
-                n += 1;
-            }
-            let mut i = n;
-            while i > 0 {
-                i -= 1;
-                putchar(buf[i]);
-            }
-        }
-        for &c in b"\nVW-" {
-            putchar(c);
-        }
-        for &c in tag {
-            putchar(c);
-        }
-        for &c in b" slot=" {
-            putchar(c);
-        }
-        pdec(blk_slot as u64);
         let rv = if resp_status.is_null() {
             0xFFu8
         } else {
@@ -447,45 +418,28 @@ impl VirtQueue {
             // response byte.
             unsafe { core::ptr::read_volatile(resp_status) }
         };
-        for &c in b" resp=0x" {
-            putchar(c);
-        }
-        pdec(rv as u64);
         // SAFETY: used_ring offset 2 is the idx field (same read as the
         // poll loop).
         let used_idx = unsafe {
             core::ptr::read_volatile((used_ring as usize + 2) as *const u16)
         };
-        for &c in b" used=" {
-            putchar(c);
-        }
-        pdec(used_idx as u64);
-        for &c in b" prev_used=" {
-            putchar(c);
-        }
-        pdec(prev_used as u64);
         let (walker_last, unkicked) =
             crate::drivers::virtio::pci_blk_lag_snapshot(blk_slot);
-        for &c in b" walker=" {
-            putchar(c);
-        }
-        pdec(walker_last as u64);
         let shadow = crate::drivers::virtio::get_pci_device_queue_at(blk_slot)
             .map(|q| q.avail_shadow_snapshot())
             .unwrap_or(0);
-        for &c in b" shadow=" {
-            putchar(c);
-        }
-        pdec(shadow as u64);
-        for &c in b" unkicked=" {
-            putchar(c);
-        }
-        pdec(unkicked as u64);
-        for &c in b" pc=0x" {
-            putchar(c);
-        }
-        pdec(crate::interrupt::preempt::preempt_count() as u32 as u64);
-        putchar(b'\n');
+        crate::pr_err!(
+            "VW-{} slot={} resp={:#x} used={} prev_used={} walker={} shadow={} unkicked={} pc={:#x}",
+            core::str::from_utf8(tag).unwrap_or("?"),
+            blk_slot,
+            rv,
+            used_idx,
+            prev_used,
+            walker_last,
+            shadow,
+            unkicked,
+            crate::interrupt::preempt::preempt_count()
+        );
     }
 
     /// Wait for device to complete request using interrupt-driven sleep.

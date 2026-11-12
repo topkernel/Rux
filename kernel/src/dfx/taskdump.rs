@@ -4,57 +4,40 @@
 //!
 //! Task-state snapshot for wedge diagnosis.
 //!
-//! Prints one line per task (pid, state, policy, comm) over the SBI
-//! console — deliberately NOT printk, because the usual caller is the
-//! spinlock deadlock watchdog spinning with local IRQs off and possibly
-//! with locks the printk path itself needs.
+//! Prints one line per task (pid, state, policy, comm) through pr_debug!
+//! records: pieces accumulate in a per-CPU line buffer and the newline
+//! flushes one record. printk's pre-ring filter is a single atomic load
+//! and its per-CPU re-entrancy guard turns a call from inside printk's
+//! own path into a silent drop, never a recursion — safe from the
+//! deadlock-watchdog context this dump runs in.
 //!
 //! Gated by the `dfx=watchdog` / `dfx=taskdump` runtime switches (see
 //! switches.rs); also available on demand through the UART trigger when
-//! `taskdump` is on.
+//! `taskdump` is on. Records are KERN_DEBUG: raise the console loglevel
+//! (loglevel=7) to see them on the serial console.
 
 use core::sync::atomic::Ordering;
 
+use crate::printk::diagline;
+
 fn putc(c: u8) {
-    // SAFETY: SBI legacy console_putchar is safe to call from any context.
-    unsafe { crate::console::putchar_no_lock(c); }
+    diagline::putc(c);
 }
 
 fn puts(s: &str) {
-    for &b in s.as_bytes() {
-        putc(b);
-    }
+    diagline::puts(s.as_bytes());
 }
 
 fn put_hex(v: u64) {
-    let mut shift = 64;
-    while shift > 0 {
-        shift -= 4;
-        let nibble = (v >> shift) & 0xF;
-        let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
-        putc(c);
-    }
+    diagline::put_hex(v);
 }
 
-fn put_dec(mut v: u64) {
-    let mut buf = [0u8; 20];
-    let mut n = 0;
-    loop {
-        buf[n] = b'0' + (v % 10) as u8;
-        n += 1;
-        v /= 10;
-        if v == 0 {
-            break;
-        }
-    }
-    while n > 0 {
-        n -= 1;
-        putc(buf[n]);
-    }
+fn put_dec(v: u64) {
+    diagline::put_dec(v);
 }
 
-/// DFX raw diagnostic line (SBI console, no locks) for other subsystems'
-/// one-shot probes — same discipline as the dump itself.
+/// DFX diagnostic line pieces for other subsystems' one-shot probes —
+/// they flow through the same line sink (flush at the trailing b"\n").
 pub fn taskdump_raw_line(s: &[u8]) {
     for &b in s {
         putc(b);
