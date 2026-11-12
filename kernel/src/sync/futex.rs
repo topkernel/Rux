@@ -11,14 +11,29 @@
 //! - Wake uses `Task::wake_up()` (enqueue + resched) for correct scheduling
 //! - Wait inserts into chain then sets INTERRUPTIBLE under lock to prevent lost wakeup
 //!
-//! # Futex key semantics (Linux parity)
+//! # Futex key semantics (Linux parity — get_futex_key, FWK round)
 //! - PRIVATE futexes key on (mm identity, uaddr): the second key component is
 //!   the address of the task's `AddressSpace` Arc allocation. All CLONE_VM
 //!   threads share one Arc → one key; a forked child COWs a NEW AddressSpace
 //!   → different key (exactly Linux's `&mm->mm` key). Kernel threads (no mm)
 //!   key on 0.
-//! - SHARED futexes key on the virtual address only (see R31-9 note; a
-//!   physical-frame key needs page pinning infrastructure).
+//! - SHARED-SEMANTIC ops on an ANON word (a PRIVATE VMA — .data, heap,
+//!   thread stacks) key on (mm identity, uaddr) as well: reference
+//!   `get_futex_key` keys PageAnon words on (current->mm, address)
+//!   (FUT_OFF_MMSHARED), never on the physical frame. A frame-keyed anon
+//!   word LOSES wakes to fork-COW: fork marks the parent PTE RO+COW, the
+//!   next store COW-breaks the page to a fresh frame, and a waiter parked
+//!   keyed on the old frame sits in a bucket the waker (resolving the new
+//!   frame) never scans — the lostwake.c group-strand (FWK: same-mm
+//!   wake-miss, waiter phys 0x7ffc7xxx vs waker phys changing every kill
+//!   cycle, 8/8 parkers stuck with a live re-waking waker and zero
+//!   scheduler diagnostics).
+//! - SHARED-SEMANTIC ops on a SHARED VMA word (MAP_SHARED — the genuine
+//!   cross-process case) key on the PHYSICAL word identity
+//!   (frame << 12 | offset). Those frames are stable: fork's COW walk
+//!   exempts SHARED VMAs (mm_ops.rs cow_exempt), so the frame IS the
+//!   shared object (reference: inode/page-index key; Rux's MAP_SHARED
+//!   pages are single cache frames aliased in every mapper).
 
 use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::AtomicU32;
@@ -345,6 +360,14 @@ pub struct FutexKey {
     /// the waiter. Rux's MAP_SHARED file pages are single cache frames
     /// aliased in every mapper, so the frame number IS the identity.
     pub phys: usize,
+    /// Object identity (FWK, reference FUT_OFF_MMSHARED parity): true
+    /// only for SHARED-VMA words with a resolved phys — those key (and
+    /// bucket) on `phys`, the stable shared object. Every anon word
+    /// (PRIVATE VMA, any op flags) carries object=false and keys on
+    /// (mm, uaddr): the word's frame is a COW transient (fork re-marks
+    /// the PTE RO; the next store swaps the frame), so the frame can
+    /// never be the identity of an anon futex.
+    pub object: bool,
 }
 
 /// Resolve the physical word identity of `uaddr` in the CURRENT task's
@@ -415,13 +438,48 @@ fn resolve_futex_phys(uaddr: usize) -> usize {
 
 impl FutexKey {
     pub fn new(uaddr: usize, mm: usize, flags: u32) -> Self {
-        Self { uaddr, mm, flags, phys: 0 }
+        Self { uaddr, mm, flags, phys: 0, object: false }
     }
 
-    /// Production constructor: resolves the physical word identity from
-    /// the current page tables (see `phys`).
+    /// Does the VMA covering `uaddr` in the CURRENT task's address space
+    /// carry MAP_SHARED? FWK: only SHARED-VMA words may key on the
+    /// physical frame — their frames are exempt from fork's COW marking
+    /// and are therefore a stable object identity. Anon words (PRIVATE
+    /// VMA) key on (mm, uaddr) whatever their frame currently is (the
+    /// reference's PageAnon → FUT_OFF_MMSHARED rule). false on any
+    /// lookup failure — the fallback keys (mm, uaddr), which is
+    /// self-consistent on both sides of a wake.
+    fn vma_is_shared(uaddr: usize) -> bool {
+        let task = match crate::sched::current() {
+            Some(t) => t,
+            None => return false,
+        };
+        // SAFETY: read-only AddressSpace accessor on the current task.
+        let mm = match unsafe { (*task).address_space() } {
+            Some(m) => m,
+            None => return false,
+        };
+        let vma = match mm.find_vma(crate::mm::page::VirtAddr::new(uaddr)) {
+            Some(v) => v,
+            None => return false,
+        };
+        vma.flags().is_shared()
+    }
+
+    /// Production constructor (FWK keying, reference get_futex_key parity):
+    /// - PRIVATE op: (mm, uaddr), no page walk, no VMA lookup (the
+    ///   reference returns before any GUP) — the hot path gets cheaper.
+    /// - SHARED-semantic op: object identity only when the word's VMA is
+    ///   MAP_SHARED and the physical word resolved (frame-stable words);
+    ///   every anon word keys (mm, uaddr), immune to COW frame swaps.
     pub fn new_user(uaddr: usize, mm: usize, flags: u32) -> Self {
-        let k = Self { uaddr, mm, flags, phys: resolve_futex_phys(uaddr) };
+        let k = if flags & FLAGS_SHARED == 0 {
+            Self { uaddr, mm, flags, phys: 0, object: false }
+        } else {
+            let shared_vma = Self::vma_is_shared(uaddr);
+            let phys = if shared_vma { resolve_futex_phys(uaddr) } else { 0 };
+            Self { uaddr, mm, flags, phys, object: shared_vma && phys != 0 }
+        };
         // FXK (r23 setpgid03 hunt): name every futex key construction —
         // uaddr AND the resolved physical identity — so a lost cross-
         // process wake (parent WAIT vs exec'd child WAKE on a MAP_SHARED
@@ -441,13 +499,14 @@ impl FutexKey {
                     })
                     .unwrap_or_else(|| alloc::string::String::from("?"));
                 crate::pr_warn!(
-                    "FXK #{} pid={}({}) uaddr={:#x} phys={:#x} shared={}",
+                    "FXK #{} pid={}({}) uaddr={:#x} phys={:#x} shared={} object={}",
                     n,
                     pid,
                     comm,
                     uaddr,
                     k.phys,
-                    k.flags & FLAGS_SHARED != 0
+                    k.flags & FLAGS_SHARED != 0,
+                    k.object
                 );
             }
         }
@@ -456,17 +515,21 @@ impl FutexKey {
 
     /// Check if two keys match
     pub fn matches(&self, other: &FutexKey) -> bool {
-        if (self.flags & FLAGS_SHARED != 0) && self.phys != 0 && other.phys != 0 {
-            // Shared waiter: physical-word identity (any mapping of the
-            // same word matches — cross-address after exec/fresh mmap).
-            // Also covers the musl cleartid interop (shared waiter vs
-            // private waker on the SAME word) strictly more precisely
-            // than the old uaddr equality.
+        if self.object && other.object {
+            // Two object-keyed (SHARED-VMA) keys: physical-word identity
+            // (any mapping of the same word matches — cross-address after
+            // exec/fresh mmap, the tst_checkpoint protocol).
             self.phys == other.phys
-        } else if !(self.flags & FLAGS_SHARED != 0) {
+        } else if !self.object && !other.object {
+            // Anon/private identity: (mm, uaddr). Covers the musl
+            // cleartid interop (shared-semantics waiter vs private
+            // waker on the same word of one process) by construction —
+            // both key (mm, uaddr) — and is immune to COW frame swaps.
             self.uaddr == other.uaddr && self.mm == other.mm
         } else {
-            self.uaddr == other.uaddr
+            // Object identity vs (mm, uaddr) identity: different words
+            // (reference: inode key never matches a private key).
+            false
         }
     }
 }
@@ -6166,28 +6229,20 @@ fn pool_full_backoff() {
 
 /// Calculate futex hash value
 pub(crate) fn futex_hash(key: &FutexKey) -> usize {
-    // Hash by the PHYSICAL word identity when resolved (both private and
-    // shared keys), else by uaddr. matches() compares the physical word
-    // for shared keys — a parent waiting on a MAP_SHARED page at vaddr A
-    // and an exec'd child waking from a fresh mmap at vaddr B MUST share
-    // a bucket (the LTP tst_checkpoint protocol; the old uaddr-only
-    // bucketing put them in different chains and the wake never reached
-    // the waiter — waitid08 ETIMEDOUT). Phys-keyed bucketing also keeps
-    // the musl interop below inside one bucket: a shared waiter and a
-    // private waker on the SAME word resolve the same frame.
-    //
-    // R31-9 fixed only the shared↔shared direction (mm excluded for
-    // shared keys); the 4-thread hang hunt caught the remaining
-    // shared-waiter ↔ private-waker split: musl's __thread_list_lock
-    // waiters park with priv=0 (shared key), while the kernel's
-    // CLONE_CHILD_CLEARTID exit wake (musl pthread_exit relies on it to
-    // "unlock" the list lock — it passes &__thread_list_lock as the
-    // clone ctid) hashed the private key (uaddr+mm) → a DIFFERENT bucket
-    // → the wake scanned an empty chain (woken=0 with three parked
-    // waiters) → every later exiter/joiner parked on the never-released
-    // lock word forever. Linux solves the same interop with
-    // FLAG_IMMUTABLE (the cleartid wake matches both key variants);
-    // same-word bucketing gives this kernel the same reach.
+    // FWK (reference get_futex_key parity): object-keyed (SHARED-VMA)
+    // words hash by the PHYSICAL word identity — a parent waiting on a
+    // MAP_SHARED page at vaddr A and an exec'd child waking from a fresh
+    // mmap at vaddr B share a bucket (the LTP tst_checkpoint protocol;
+    // waitid08). Every anon word — PRIVATE-flag op or SHARED-semantic op
+    // on a PRIVATE VMA — hashes (mm, uaddr): the musl cleartid interop
+    // (priv=0 waiters vs the kernel's CLONE_CHILD_CLEARTID exit wake on
+    // __thread_list_lock) lands both sides in ONE bucket by
+    // construction, replacing the old phys-for-all bucketing. That old
+    // scheme made anon keys frame-DEPENDENT: fork re-marks the page
+    // RO+COW, the next store swaps the frame, and a parked waiter keyed
+    // on the old frame became unreachable to every later wake — the
+    // lostwake.c group strand (same-mm wake-miss with phys differing per
+    // kill cycle; 8/8 parkers lost with a live waker).
     //
     // F12: the raw `uaddr % HASH_SIZE` clustered EVERY thread-stack
     // futex into ONE bucket. musl hands out 1 MB pthread stacks with a
@@ -6196,10 +6251,16 @@ pub(crate) fn futex_hash(key: &FutexKey) -> usize {
     // landed in the same bucket: pth_str02's 1000-thread join chain
     // serialised on a single spinlock (all 256 pool slots chained in one
     // bucket, every wake/alloc walking 256 entries under that lock).
-    // Fibonacci-multiply the byte offset so any fixed stride spreads
+    // Fibonacci-multiply the identity so any fixed stride spreads
     // across the buckets.
-    let id = if key.phys != 0 { key.phys } else { key.uaddr };
-    let x = (id >> 2) as u64;
+    let x = if key.object {
+        (key.phys >> 2) as u64
+    } else {
+        // mm: Arc allocation address (≥8-aligned); uaddr: 4-aligned.
+        // Rotate the mm so its low entropy bits spread before the
+        // Fibonacci multiply.
+        (((key.mm as u64) >> 3).rotate_left(21)) ^ ((key.uaddr as u64) >> 2)
+    };
     let mixed = x.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     // Take the high bits (multiplicative hashing) modulo HASH_SIZE.
     let bits = HASH_SIZE.trailing_zeros();
@@ -6450,15 +6511,15 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
             while let Some(i) = idx {
                 // SAFETY: the slot index came from a chain link under the
                 // bucket lock; slots are freed only under both locks.
-                let (task, next, mismatch) = {
+                let (task, next, mismatch, w_phys) = {
                     let slot = WAITER_POOL[i].lock_irqsave();
                     match *slot {
                         Some(ref w) => {
                             let mismatch = w.key.uaddr == uaddr
                                 && (!w.key.matches(&key) || (w.bitset & bitset) == 0);
-                            (w.task, w.next, mismatch)
+                            (w.task, w.next, mismatch, w.key.phys)
                         }
-                        None => (core::ptr::null_mut(), None, false),
+                        None => (core::ptr::null_mut(), None, false, 0),
                     }
                 };
                 if mismatch {
@@ -6479,13 +6540,20 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
                             // SAFETY: diagnostic identity read.
                             task_futex_mm_id(task)
                         };
+                        // FWK (futex-lostwake lane): phys on BOTH sides — a
+                        // COW frame swap between the waiter's park and this
+                        // wake shows waiter-phys != waker-phys with the same
+                        // uaddr: the phys-keyed bucket moved and the wake
+                        // scanned the waker's bucket only.
                         crate::pr_warn!(
-                            "futex-wake-miss: uaddr={:#x} waker pid {} key(mm={:#x},shared={}) found waiter pid-key mm={:#x} bucket {} waiter-comm {}",
+                            "futex-wake-miss: uaddr={:#x} waker pid {} key(mm={:#x},shared={},phys={:#x}) found waiter pid-key mm={:#x} phys={:#x} bucket {} waiter-comm {}",
                             uaddr,
                             waker_pid,
                             mm,
                             flags & FLAGS_SHARED != 0,
+                            key.phys,
                             wmm,
+                            w_phys,
                             bi,
                             name
                         );

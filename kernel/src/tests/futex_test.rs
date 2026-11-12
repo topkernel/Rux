@@ -77,6 +77,51 @@ pub fn test_futex() {
     // Test 12: futex_to_flags with PRIVATE
     let flags = futex_to_flags(FUTEX_PRIVATE_FLAG as u32);
     test_assert!(true, "futex_to_flags(PRIVATE) compiles");
+
+    // Test 13 (FWK): object-keyed identity — two SHARED-VMA keys with the
+    // same phys match even across different uaddr/mm (the tst_checkpoint
+    // cross-mmap protocol); different phys never matches.
+    let obj1 = FutexKey { uaddr: 0x1000, mm: 7, flags: 0x10, phys: 0x555001000, object: true };
+    let obj2 = FutexKey { uaddr: 0x9000, mm: 9, flags: 0x10, phys: 0x555001000, object: true };
+    let obj3 = FutexKey { uaddr: 0x1000, mm: 7, flags: 0x10, phys: 0x555009000, object: true };
+    test_assert!(obj1.matches(&obj2), "object keys match on phys across mappings");
+    test_assert!(!obj1.matches(&obj3), "object keys with different phys never match");
+
+    // Test 14 (FWK): anon identity is (mm, uaddr) — IMMUNE to COW frame
+    // swaps. A waiter parked when the word resolved phys=P and a waker
+    // resolving phys=Q (post-COW-break, same word) still match: the keys
+    // are equal regardless of frame. Shared-semantic and private keys on
+    // the same anon word unify (the musl cleartid interop).
+    let mut anon_wait = FutexKey::new(0x40d2c0, 42, 0x10); // shared semantics
+    anon_wait.phys = 0x7ffc72c0; // stale frame from park time
+    let mut anon_wake = FutexKey::new(0x40d2c0, 42, 0x10);
+    anon_wake.phys = 0x2c05c2c0; // fresh frame after the COW break
+    test_assert!(anon_wait.matches(&anon_wake),
+        "anon keys match across a COW frame swap");
+    let priv_wake = FutexKey::new(0x40d2c0, 42, 0);
+    test_assert!(anon_wait.matches(&priv_wake),
+        "anon shared-semantics key matches a private key on the same word");
+    let other_mm = FutexKey::new(0x40d2c0, 43, 0x10);
+    test_assert!(!anon_wait.matches(&other_mm), "anon keys differ across mm");
+
+    // Test 15 (FWK): object identity never matches (mm, uaddr) identity —
+    // a MAP_SHARED word's inode-style key is a different word class than
+    // a private key (reference: inode key vs private key).
+    let obj = FutexKey { uaddr: 0x1000, mm: 7, flags: 0x10, phys: 0x555001000, object: true };
+    let anon = FutexKey::new(0x1000, 7, 0x10);
+    test_assert!(!obj.matches(&anon), "object key never matches anon key");
+    test_assert!(!anon.matches(&obj), "anon key never matches object key");
+
+    // Test 16 (FWK): futex_hash stability under COW — equal anon keys
+    // hash equal regardless of the phys field (bucket identity is
+    // (mm, uaddr) for object=false keys), and object keys hash by phys.
+    let h1 = crate::sync::futex::futex_hash(&anon_wait);
+    let h2 = crate::sync::futex::futex_hash(&anon_wake);
+    test_assert_eq!(h1, h2, "anon keys with different phys hash equal");
+    let h3 = crate::sync::futex::futex_hash(&obj1);
+    let h4 = crate::sync::futex::futex_hash(&obj2);
+    test_assert_eq!(h3, h4, "object keys with same phys hash equal");
+    test_assert!(h3 < crate::config::FUTEX_HASH_SIZE, "hash within bucket count");
 }
 
 /// FUTEX_WAKE_OP operand decode vs the reference ABI
