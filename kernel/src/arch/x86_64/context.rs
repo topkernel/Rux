@@ -888,5 +888,10 @@ pub unsafe extern "C" fn x86_switch_abort(
 
     // `next` needs no repair here: the steal already re-linked it (or a
     // foreign picker owns it); its context was never touched by us.
-    let _ = next;
+    // pick→switch ledger (wake-fastrepro): the abort IS a pick
+    // termination — consume the publication so a heal-side read cannot
+    // name an aborted pick as switchless.
+    if !next.is_null() {
+        crate::sched::sched::psledger_consume(next);
+    }
 }

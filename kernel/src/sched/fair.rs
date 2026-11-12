@@ -1647,6 +1647,65 @@ impl CfsRunQueue {
             return;
         }
         Self::stale_heal_line(b"STALE-CLAIM-RESET", cpu_id, pid, was, u32::MAX);
+        // wake-fastrepro correlation: the victim's runtime so far (0 =
+        // never scheduled: recycle-residue class) and the jiffy stamp —
+        // pairs with ENQ-CLAIMED-SLOTBK jif= lines (same pid+claim).
+        if !task.is_null() {
+            use crate::console::putchar_no_lock as putchar;
+            fn pdec5(mut v: u64) {
+                use crate::console::putchar_no_lock as p;
+                let mut buf = [0u8; 20];
+                let mut n = 0;
+                if v == 0 {
+                    p(b'0');
+                    return;
+                }
+                while v > 0 && n < buf.len() {
+                    buf[n] = b'0' + (v % 10) as u8;
+                    v /= 10;
+                    n += 1;
+                }
+                for i in (0..n).rev() {
+                    p(buf[i]);
+                }
+            }
+            const M: &[u8] = b" ticks=";
+            for &b in M {
+                putchar(b);
+            }
+            pdec5(unsafe {
+                (*task).utime_ticks.load(Ordering::Relaxed)
+                    + (*task).stime_ticks.load(Ordering::Relaxed)
+            });
+            const M2: &[u8] = b" jif=";
+            for &b in M2 {
+                putchar(b);
+            }
+            pdec5(crate::drivers::timer::get_jiffies());
+            // pick→switch ledger: an intact publication record for this
+            // victim = the claim came from a pick that was never
+            // affirmed (switched to) NOR aborted — the switchless pick,
+            // named with its publisher and age.
+            if let Some((pcpu, ppk, pjif)) =
+                crate::sched::sched::psledger_peek(task)
+            {
+                const A: &[u8] = b" PSLEDGER=SWITCHLESS pub_cpu=";
+                for &b in A {
+                    putchar(b);
+                }
+                pdec5(pcpu as u64);
+                const B: &[u8] = b" pub_pk=";
+                for &b in B {
+                    putchar(b);
+                }
+                pdec5(ppk as u64);
+                const C: &[u8] = b" age_jif=";
+                for &b in C {
+                    putchar(b);
+                }
+                pdec5(crate::drivers::timer::get_jiffies().wrapping_sub(pjif));
+            }
+        }
         crate::console::putchar_no_lock(b'\n');
     }
 
@@ -2101,7 +2160,32 @@ impl CfsRunQueue {
                 } else if (*task).ownership_pickable(cpu_id) {
                     true
                 } else {
-                    let claim = (*task).running_on_cpu.load(Ordering::Acquire);
+                    // WAKE-FASTREPRO (orphan-mark root cause, protocol
+                    // fix): the refusal branch used to consume TWO
+                    // separate loads — the claim half here, the on_cpu
+                    // byte again inside the branch conditions below —
+                    // with the owner scan between them. A task completing
+                    // a legitimate switch-out on another CPU transitions
+                    // its qword {true,X} -> {false,-1} and clears its
+                    // SWITCHING_OUT marker WITHOUT holding this GRQ, so
+                    // the split loads could assemble {on_cpu=false,
+                    // claim=X} — the "protocol-impossible" orphan pair —
+                    // out of a transient that never existed atomically
+                    // (12/12 captured STALE-CLAIM-RESET lines on the
+                    // fpns rig showed whole=0xffffffff00000000: the
+                    // qword was clean the whole time). Read the qword
+                    // ONCE, atomically, and decide on the decoded pair:
+                    // a mid-switch-out task reads {true,X} and lands on
+                    // the why=1 leg; only an ATOMIC {false, X-foreign}
+                    // reaches the stale-claim heal.
+                    let whole_qword = unsafe {
+                        core::ptr::read_volatile(
+                            core::ptr::addr_of!((*task).ti_on_cpu) as *const u64,
+                        )
+                    };
+                    let split_oncpu = (whole_qword & 0xFF) != 0;
+                    let claim = (whole_qword >> 32) as i32;
+                    let _ = split_oncpu;
                     // R85 (tail-phase PICK-SKIP wedge): adjudicate every
                     // refusal against SCHEDULER TRUTH instead of the
                     // advisory bits. pick_owner_live (sched.rs) scans the
@@ -2128,7 +2212,7 @@ impl CfsRunQueue {
                     // all phases.
                     let owner_live =
                         crate::sched::sched::pick_owner_live(task);
-                    if !(*task).on_cpu()
+                    if !split_oncpu
                         && claim != -1
                         && claim as usize != cpu_id
                     {
@@ -2147,9 +2231,59 @@ impl CfsRunQueue {
                         // no slot and no in-flight switch is a byte-clear
                         // residue or scribble garbage — reset it.
                         if !owner_live {
-                            (*task).running_on_cpu.store(-1, Ordering::Release);
-                            Self::stale_claim_healed(cpu_id, (*task).pid(), claim, task);
-                            skip_reason = 5;
+                            // WAKE-FASTREPRO contradiction key: the
+                            // branch condition decoded the pair from ONE
+                            // atomic qword load, but the owner scan that
+                            // followed takes time — the (GRQ-free) asm
+                            // switch-out release can still land
+                            // {false,X} -> {false,-1} under it. Re-read
+                            // the qword atomically and heal ONLY if it
+                            // still shows the exact observed pair: any
+                            // motion means the state was a transient, not
+                            // an orphan — refuse (the release already
+                            // healed it).
+                            let whole = unsafe {
+                                core::ptr::read_volatile(
+                                    core::ptr::addr_of!((*task).ti_on_cpu)
+                                        as *const u64,
+                                )
+                            };
+                            let w_oncpu = (whole & 0xFF) != 0;
+                            let w_claim = (whole >> 32) as i32;
+                            if w_oncpu || w_claim != claim {
+                                // TORN VIEW: the qword moved between the
+                                // split loads and this atomic re-read. The
+                                // split-read pair never existed atomically
+                                // — healing it would corrupt a live pick
+                                // (claim-only store over {true,X}).
+                                static TORN_N: core::sync::atomic::AtomicU32 =
+                                    core::sync::atomic::AtomicU32::new(0);
+                                if TORN_N.fetch_add(1, Ordering::Relaxed) < 40 {
+                                    use crate::console::putchar_no_lock as putchar;
+                                    fn ph6(mut v: u64) {
+                                        use crate::console::putchar_no_lock as p;
+                                        for sh in (0..16).rev() {
+                                            let n = ((v >> (sh * 4)) & 0xF) as u8;
+                                            p(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                                        }
+                                    }
+                                    const M: &[u8] = b"\nSTALE-CLAIM-TORN pid=";
+                                    for &b in M { putchar(b); }
+                                    ph6((*task).pid() as u64);
+                                    const M2: &[u8] = b" split_claim=";
+                                    for &b in M2 { putchar(b); }
+                                    ph6(claim.unsigned_abs() as u64);
+                                    const M3: &[u8] = b" whole=0x";
+                                    for &b in M3 { putchar(b); }
+                                    ph6(whole);
+                                    putchar(b'\n');
+                                }
+                                skip_reason = 2; // treat as foreign-live: refuse
+                            } else {
+                                (*task).running_on_cpu.store(-1, Ordering::Release);
+                                Self::stale_claim_healed(cpu_id, (*task).pid(), claim, task);
+                                skip_reason = 5;
+                            }
                         } else {
                             skip_reason = 2;
                         }

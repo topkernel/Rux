@@ -1987,6 +1987,62 @@ pub fn free_task_slot(task_ptr: *mut Task) {
     if task_ptr.is_null() {
         return;
     }
+    // ORPHAN-MARK residue check (wake-fastrepro final-boss): a Task page
+    // entering the free pool with a dirty ownership qword hands its
+    // residue to whatever recycles the page (the constructors reset the
+    // qword, so this is belt-and-braces — but a set mark here names a
+    // lifecycle that never released, upstream of every later
+    // STALE-CLAIM-RESET on the recycled page). Budgeted, direct console.
+    {
+        // SAFETY: pre-poison header reads; the caller owns the final
+        // reference.
+        unsafe {
+            let oncpu = (*task_ptr).on_cpu();
+            let claim = (*task_ptr)
+                .running_on_cpu
+                .load(core::sync::atomic::Ordering::Acquire);
+            if (oncpu || claim != -1) && (*task_ptr).pid() != 0 {
+                static FREEC_N: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                if FREEC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+                    use crate::console::putchar_no_lock as putchar;
+                    fn pdec3(mut v: u64) {
+                        use crate::console::putchar_no_lock as p;
+                        let mut buf = [0u8; 20];
+                        let mut n = 0;
+                        if v == 0 {
+                            p(b'0');
+                            return;
+                        }
+                        while v > 0 && n < buf.len() {
+                            buf[n] = b'0' + (v % 10) as u8;
+                            v /= 10;
+                            n += 1;
+                        }
+                        for i in (0..n).rev() {
+                            p(buf[i]);
+                        }
+                    }
+                    const M: &[u8] = b"\nFREE-CLAIMED pid=";
+                    for &b in M {
+                        putchar(b);
+                    }
+                    pdec3((*task_ptr).pid() as u64);
+                    const M2: &[u8] = b" oncpu=";
+                    for &b in M2 {
+                        putchar(b);
+                    }
+                    pdec3(oncpu as u64);
+                    const M3: &[u8] = b" claim=";
+                    for &b in M3 {
+                        putchar(b);
+                    }
+                    pdec3(claim.unsigned_abs() as u64);
+                    putchar(b'\n');
+                }
+            }
+        }
+    }
     // The sched:sched_process_free tracepoint — the reference records
     // it at the final put (delayed_put_task_struct → trace →
     // put_task_struct), i.e. right here at the last-reference free,
@@ -3398,6 +3454,77 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
     pcpu.idle
 }
 
+// ==================== pick→switch handoff ledger (wake-fastrepro) ====================
+//
+// ORPHAN-MARK hunt: exactly ONE site publishes the ownership qword
+// (mark_picked_on_cpu) and exactly TWO terminations consume a pick (the
+// switch-in affirm CAS and the switch-in abort). A pick whose
+// publication has neither termination is a SWITCHLESS PICK — the R56
+// slot-capture orphan at its creation moment. This side table (no Task
+// layout change) records the last publish per task and is cleared by
+// both terminations; the stale-claim heal reads it: an intact entry at
+// heal time names the publisher CPU, the published pick-state and the
+// publish's age — the creation interleaving on one line.
+
+pub static PSLEDGER_TASK: [core::sync::atomic::AtomicUsize; 1024] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; 1024];
+pub static PSLEDGER_CPU: [core::sync::atomic::AtomicU32; 1024] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; 1024];
+pub static PSLEDGER_JIF: [core::sync::atomic::AtomicU64; 1024] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 1024];
+pub static PSLEDGER_PK: [core::sync::atomic::AtomicU32; 1024] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; 1024];
+
+#[inline]
+fn psl_slot(task: *mut Task) -> usize {
+    ((task as usize) >> 4) & 1023
+}
+
+/// Record a pick publication (GRQ held; single writer per task).
+/// dfx=leakhunt-gated: the unconditional cost is one relaxed load.
+pub fn psledger_note_publish(task: *mut Task, cpu: usize, pk: u32) {
+    if !crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let s = psl_slot(task);
+    PSLEDGER_TASK[s].store(task as usize, core::sync::atomic::Ordering::Release);
+    PSLEDGER_CPU[s].store(cpu as u32, core::sync::atomic::Ordering::Release);
+    PSLEDGER_PK[s].store(pk, core::sync::atomic::Ordering::Release);
+    PSLEDGER_JIF[s]
+        .store(crate::drivers::timer::get_jiffies(), core::sync::atomic::Ordering::Release);
+}
+
+/// Consume the ledger at a pick termination (affirm or abort). Returns
+/// the consumed entry for the caller's reporting.
+pub fn psledger_consume(task: *mut Task) -> bool {
+    if !crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    let s = psl_slot(task);
+    PSLEDGER_TASK[s]
+        .compare_exchange(
+            task as usize,
+            0,
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Acquire,
+        )
+        .is_ok()
+}
+
+/// Read the ledger without consuming (heal-side diagnostic).
+pub fn psledger_peek(task: *mut Task) -> Option<(u32, u32, u64)> {
+    let s = psl_slot(task);
+    if PSLEDGER_TASK[s].load(core::sync::atomic::Ordering::Acquire) == task as usize {
+        Some((
+            PSLEDGER_CPU[s].load(core::sync::atomic::Ordering::Acquire),
+            PSLEDGER_PK[s].load(core::sync::atomic::Ordering::Acquire),
+            PSLEDGER_JIF[s].load(core::sync::atomic::Ordering::Acquire),
+        ))
+    } else {
+        None
+    }
+}
+
 /// Mark a picked task on-CPU (R8-1b). Called under the GRQ lock; __switch_to
 /// clears it after the task's outgoing context is saved. Other CPUs' picks
 /// skip on-CPU tasks, so a RUNNING-but-unsaved task can never be picked
@@ -3406,6 +3533,11 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
 #[inline]
 unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
     if !task.is_null() {
+        // Wakewatch ring (118th): the PICK unlink edge — the pick removes
+        // the task from its class queue HERE; if the switch-in is later
+        // abandoned (revoked / no affirm), this event plus the missing A
+        // names the strand. Single site covers the DL/RT/CFS pick arms.
+        ww_record(task, WW_EV_UNLINK_PICK);
         // Wakewatch forensics: consume the wake stamp and classify the
         // wake→pick latency (direct-console prints follow the R34
         // discipline — we hold the GRQ lock here).
@@ -3562,6 +3694,14 @@ unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
             }
         }
         (*task).publish_pick_ownership(crate::arch::cpu_id() as i32, live);
+        // pick→switch ledger: record the publication; the switch-in
+        // affirm/abort consume it. An intact record at a later stale
+        // heal = switchless pick.
+        psledger_note_publish(
+            task,
+            crate::arch::cpu_id() as usize,
+            if live { crate::process::task::PICK_LIVE } else { crate::process::task::PICK_PICKED },
+        );
     }
 }
 
@@ -3688,7 +3828,9 @@ unsafe fn requeue_prev_locked(grq: &mut GlobalRunQueue, prev: *mut Task) {
 /// task's state is left untouched (SLEEPING stays wakeable; a prev that was
 /// already RUNNING stays RUNNING — it is on_cpu, so the divergence is the
 /// pre-existing stale-on_rq form, not manufactured here).
+#[track_caller]
 unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool {
+    let ENQ_CALLER: &'static core::panic::Location<'static> = core::panic::Location::caller();
     if task.is_null() {
         return false;
     }
@@ -3897,6 +4039,158 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
         // the queue membership (R39 ordering, see above).
         (*task).set_state(TaskState::new(TaskState::RUNNING));
         grq.nr_running.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        // ORPHAN-MARK creation tripwire (wake-fastrepro final-boss): the
+        // task is being LINKED right now — under the GRQ, no pick or
+        // switch can be in flight on it. If its ownership qword shows a
+        // claim ({on_cpu=false, claim=X}) or a live pick-state, the marks
+        // did NOT come from this task's own lifecycle in progress — they
+        // arrived with the page (recycle residue) or survived a lost
+        // release. ticks= names whether the task has EVER been scheduled
+        // (0 = born with the marks: recycle residue; >0 = mid-life
+        // contamination). Direct console (GRQ held), budgeted.
+        {
+            let oncpu = (*task).on_cpu();
+            let claim = (*task)
+                .running_on_cpu
+                .load(core::sync::atomic::Ordering::Acquire);
+            // Skip the legitimate windows: (a) __schedule re-linking a
+            // preempted prev whose context is still being saved (the
+            // SWITCHING_OUT marker names it — the R63 discipline), and
+            // (b) the preempt-requeue window BEFORE that marker is set —
+            // the requeued prev is still the claim CPU's published
+            // current (slot-backed, the pick_owner_live discipline). A
+            // link whose marks are backed by NEITHER is the orphan-mark
+            // creation shape.
+            let mid_swout = task_is_mid_switch_out(task);
+            let slot_backed = claim >= 0
+                && (claim as usize) < MAX_CPUS
+                && cpu_state(claim as usize).current == task;
+            if slot_backed && !mid_swout {
+                // The pick-in-flight relink: the task is linked while its
+                // claim's slot still names it (the picker has not reached
+                // its context switch). Tagged separately, small budget —
+                // a later STALE-CLAIM-RESET with the SAME pid+claim
+                // convicts this window as the orphan producer.
+                static ENQSB_N: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                if (*task).pid() > 1
+                    && ENQSB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200
+                {
+                    use crate::console::putchar_no_lock as putchar;
+                    fn pdec4(mut v: u64) {
+                        use crate::console::putchar_no_lock as p;
+                        let mut buf = [0u8; 20];
+                        let mut n = 0;
+                        if v == 0 {
+                            p(b'0');
+                            return;
+                        }
+                        while v > 0 && n < buf.len() {
+                            buf[n] = b'0' + (v % 10) as u8;
+                            v /= 10;
+                            n += 1;
+                        }
+                        for i in (0..n).rev() {
+                            p(buf[i]);
+                        }
+                    }
+                    const M: &[u8] = b"\nENQ-CLAIMED-SLOTBK pid=";
+                    for &b in M {
+                        putchar(b);
+                    }
+                    pdec4((*task).pid() as u64);
+                    const M2: &[u8] = b" claim=";
+                    for &b in M2 {
+                        putchar(b);
+                    }
+                    pdec4(claim.unsigned_abs() as u64);
+                    const M3: &[u8] = b" pk=";
+                    for &b in M3 {
+                        putchar(b);
+                    }
+                    pdec4((*task).pick_state() as u64);
+                    const M4: &[u8] = b" jif=";
+                    for &b in M4 {
+                        putchar(b);
+                    }
+                    pdec4(crate::drivers::timer::get_jiffies());
+                    const M5: &[u8] = b" from=";
+                    for &b in M5 {
+                        putchar(b);
+                    }
+                    for &b in ENQ_CALLER.file().as_bytes() {
+                        putchar(b);
+                    }
+                    putchar(b':');
+                    pdec4(ENQ_CALLER.line() as u64);
+                    putchar(b'\n');
+                }
+            }
+            if (oncpu || claim != -1) && !mid_swout && !slot_backed && (*task).pid() != 0 {
+                static ENQC_N: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                if ENQC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+                    use crate::console::putchar_no_lock as putchar;
+                    fn pdec2(mut v: u64) {
+                        use crate::console::putchar_no_lock as p;
+                        let mut buf = [0u8; 20];
+                        let mut n = 0;
+                        if v == 0 {
+                            p(b'0');
+                            return;
+                        }
+                        while v > 0 && n < buf.len() {
+                            buf[n] = b'0' + (v % 10) as u8;
+                            v /= 10;
+                            n += 1;
+                        }
+                        for i in (0..n).rev() {
+                            p(buf[i]);
+                        }
+                    }
+                    const M: &[u8] = b"\nENQ-CLAIMED pid=";
+                    for &b in M {
+                        putchar(b);
+                    }
+                    pdec2((*task).pid() as u64);
+                    const M2: &[u8] = b" oncpu=";
+                    for &b in M2 {
+                        putchar(b);
+                    }
+                    pdec2(oncpu as u64);
+                    const M3: &[u8] = b" claim=";
+                    for &b in M3 {
+                        putchar(b);
+                    }
+                    pdec2(claim.unsigned_abs() as u64);
+                    const M4: &[u8] = b" pk=";
+                    for &b in M4 {
+                        putchar(b);
+                    }
+                    pdec2((*task).pick_state() as u64);
+                    const M5: &[u8] = b" ticks=";
+                    for &b in M5 {
+                        putchar(b);
+                    }
+                    pdec2(
+                        (*task).utime_ticks.load(core::sync::atomic::Ordering::Relaxed)
+                            + (*task)
+                                .stime_ticks
+                                .load(core::sync::atomic::Ordering::Relaxed),
+                    );
+                    const M6: &[u8] = b" st=0x";
+                    for &b in M6 {
+                        putchar(b);
+                    }
+                    pdec2((*task).state().bits() as u64);
+                    putchar(b'\n');
+                }
+            }
+        }
+        // Wakewatch ring (118th): the LINK edge — pairs with W so the dump
+        // distinguishes "wake verdict ok but never linked" from
+        // "linked then unlinked before running".
+        ww_record(task, WW_EV_LINK);
         // Wakewatch forensics: stamp every successful link (wake, fork,
         // heal re-insert) so the pick side can measure wake→run latency.
         crate::sched::wakewatch::note_wake(task);
@@ -4075,7 +4369,32 @@ static WW_TASK: [core::sync::atomic::AtomicUsize; WW_RING] =
     [const { core::sync::atomic::AtomicUsize::new(0) }; WW_RING];
 static WW_DATA: [core::sync::atomic::AtomicU64; WW_RING] =
     [const { core::sync::atomic::AtomicU64::new(0) }; WW_RING];
+/// Caller attribution per ring slot (118th unlink-without-run hunt): the
+/// SOURCE LINE of the event site, captured via #[track_caller] on
+/// `ww_record` (the debug build outlines it, so an asm ra capture lands
+/// inside ww_record itself — Location::caller() is exact regardless of
+/// inlining). All event sites live in sched.rs except WW_EV_AFFIRM
+/// (task.rs); the dump token reads `P@12j:L2990` = "unlinked at pick 12
+/// jiffies ago at sched.rs:2990".
+static WW_RA: [core::sync::atomic::AtomicUsize; WW_RING] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; WW_RING];
 static WW_IX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// 118th: PER-WATCHED-TASK mini-rings. The global 1024-slot ring rolls in
+/// SECONDS once 64 tasks are watched (timer-class watchers emit
+/// wake/park/pick/affirm pairs at jiffy rates), so a victim's stranding
+/// event is overwritten before the next binder census reads it — the
+/// boot-3 capture showed only single-jiffy probe bursts (many victims × 5
+/// events in one instant) and never the quiet stranding unlinks. Each
+/// watch slot now carries its own 8-event tail: written under the same
+/// GRQ hold as the global ring, immune to other tasks' churn.
+const WW_TAIL: usize = 8;
+static WW_TAIL_IX: [core::sync::atomic::AtomicUsize; 64] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; 64];
+static WW_TAIL_DATA: [core::sync::atomic::AtomicU64; 64 * WW_TAIL] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 64 * WW_TAIL];
+static WW_TAIL_LINE: [core::sync::atomic::AtomicUsize; 64 * WW_TAIL] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; 64 * WW_TAIL];
 /// Census-populated watch list: once the binder-stall scan flags a
 /// WAKE-RUN-LEAK victim, its Task pointer lands here and ww_record
 /// retains its events — otherwise the system's timer churn (VSync
@@ -4110,7 +4429,11 @@ pub fn ww_watch_add(task: *mut Task) {
     }
 }
 
+/// Capture the calling event site's source line (wakewatch caller
+/// attribution, 118th unlink-without-run hunt) — thin wrapper so each
+/// event token in the dump names its exact origin line.
 #[inline]
+#[track_caller]
 pub fn ww_record(task: *mut Task, code: u32) {
     if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
         return;
@@ -4118,24 +4441,80 @@ pub fn ww_record(task: *mut Task, code: u32) {
     // Watch-list filter: a 64-way cached-atomic scan per event is
     // nothing next to the GRQ the caller already holds.
     let t = task as usize;
-    let mut watched = false;
-    for w in WW_WATCH.iter() {
+    let mut watch_ix: Option<usize> = None;
+    for (i, w) in WW_WATCH.iter().enumerate() {
         let cur = w.load(core::sync::atomic::Ordering::Relaxed);
         if cur == t {
-            watched = true;
+            watch_ix = Some(i);
             break;
         }
     }
-    if !watched {
-        return;
-    }
+    let watch_ix = match watch_ix {
+        Some(i) => i,
+        None => return,
+    };
+    let loc = core::panic::Location::caller();
     let j = crate::drivers::timer::get_jiffies();
+    // Global ring (context; rolls fast under churn).
     let ix = WW_IX.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % WW_RING;
     WW_TASK[ix].store(t, core::sync::atomic::Ordering::Relaxed);
     WW_DATA[ix].store(
         ((code as u64) << 56) | (j & 0x00FF_FFFF_FFFF_FFFF),
         core::sync::atomic::Ordering::Relaxed,
     );
+    WW_RA[ix].store(loc.line() as usize, core::sync::atomic::Ordering::Relaxed);
+    // Per-task mini-ring (the capture that survives churn): the recording
+    // context holds the GRQ, and each task's tail index advances only from
+    // its own events, so the 8 newest events for THIS task are always
+    // complete regardless of other watchers' volume.
+    let tix = WW_TAIL_IX[watch_ix].fetch_add(1, core::sync::atomic::Ordering::Relaxed) % WW_TAIL;
+    WW_TAIL_DATA[watch_ix * WW_TAIL + tix].store(
+        ((code as u64) << 56) | (j & 0x00FF_FFFF_FFFF_FFFF),
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    WW_TAIL_LINE[watch_ix * WW_TAIL + tix].store(loc.line() as usize, core::sync::atomic::Ordering::Relaxed);
+    // 118th pipeline bisect: a watched task's WAKE_OK must be observable
+    // in the serial stream (rate-limited) — if the re-kicks of stranded
+    // victims never produce a WWTICK line, the funnel's W record never
+    // ran for them and their kicks' true-return came from a different
+    // leg. Direct console (GRQ held).
+    if code == WW_EV_WAKE_OK {
+        static WWT_N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        if WWT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+            use crate::console::putchar_no_lock as putchar;
+            const M: &[u8] = b"\nWWTICK pid=";
+            for &b in M {
+                putchar(b);
+            }
+            let v = unsafe { (*task).pid() } as u64;
+            let mut sh = 64;
+            while sh > 0 {
+                sh -= 4;
+                let nb = ((v >> sh) & 0xF) as u8;
+                putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+            }
+            const M2: &[u8] = b" jif=";
+            for &b in M2 {
+                putchar(b);
+            }
+            let mut v = j;
+            let mut buf = [0u8; 20];
+            let mut n = 0;
+            while v > 0 {
+                buf[n] = b'0' + (v % 10) as u8;
+                v /= 10;
+                n += 1;
+            }
+            if n == 0 {
+                putchar(b'0');
+            }
+            while n > 0 {
+                n -= 1;
+                putchar(buf[n]);
+            }
+            putchar(b'\n');
+        }
+    }
 }
 
 /// Append `task`'s last few ring events (oldest first) to `out` as one
@@ -4158,9 +4537,48 @@ pub fn ww_append_dump<W: core::fmt::Write>(out: &mut W, task: *mut Task, now: u6
         (WW_EV_WAKE_REFUSED, 'R'),
         (WW_EV_AFFIRM, 'A'),
     ];
+    // 118th: read the PER-TASK mini-ring (survives global churn — see
+    // WW_TAIL_DATA). Fall back to the global ring walk when the task is
+    // not in the watch list (should not happen: census adds before dump).
+    let t = task as usize;
+    let mut watch_ix: Option<usize> = None;
+    for (i, w) in WW_WATCH.iter().enumerate() {
+        if w.load(core::sync::atomic::Ordering::Relaxed) == t {
+            watch_ix = Some(i);
+            break;
+        }
+    }
+    if let Some(wi) = watch_ix {
+        let n0 = WW_TAIL_IX[wi].load(core::sync::atomic::Ordering::Relaxed);
+        let filled = WW_TAIL.min(n0);
+        let _ = write!(out, "binder-stall:  ww=[");
+        let mut printed = 0usize;
+        for k in 0..filled {
+            // oldest-first: the mini-ring wraps mod 8; slot order for the
+            // `filled` valid entries is (n0 - filled + k) % 8.
+            let slot = (n0.wrapping_sub(filled) + k) % WW_TAIL;
+            let d = WW_TAIL_DATA[wi * WW_TAIL + slot].load(core::sync::atomic::Ordering::Relaxed);
+            let line = WW_TAIL_LINE[wi * WW_TAIL + slot].load(core::sync::atomic::Ordering::Relaxed);
+            let code = (d >> 56) as u32;
+            let jif = d & 0x00FF_FFFF_FFFF_FFFF;
+            let tag = TAGS
+                .iter()
+                .find(|(c, _)| *c == code)
+                .map(|(_, t)| *t)
+                .unwrap_or('?');
+            if printed != 0 {
+                let _ = write!(out, " ");
+            }
+            let _ = write!(out, "{}@{}j:L{}", tag, now.saturating_sub(jif), line);
+            printed += 1;
+        }
+        let _ = writeln!(out, "]");
+        return;
+    }
+    // Global-ring fallback (task not on the watch list).
     let ix0 = WW_IX.load(core::sync::atomic::Ordering::Relaxed);
     // Collect the NEWEST events for this task by walking the ring back.
-    let mut events: [(char, u64); 8] = [('-', 0); 8];
+    let mut events: [(char, u64, usize); 8] = [('-', 0, 0); 8];
     let mut n = 0usize;
     for k in 0..WW_RING.min(ix0) {
         let slot = (ix0.wrapping_sub(1 + k)) % WW_RING;
@@ -4170,25 +4588,29 @@ pub fn ww_append_dump<W: core::fmt::Write>(out: &mut W, task: *mut Task, now: u6
         let d = WW_DATA[slot].load(core::sync::atomic::Ordering::Relaxed);
         let code = (d >> 56) as u32;
         let jif = d & 0x00FF_FFFF_FFFF_FFFF;
+        let ra = WW_RA[slot].load(core::sync::atomic::Ordering::Relaxed);
         let tag = TAGS
             .iter()
             .find(|(c, _)| *c == code)
             .map(|(_, t)| *t)
             .unwrap_or('?');
-        events[n] = (tag, now.saturating_sub(jif));
+        events[n] = (tag, now.saturating_sub(jif), ra);
         n += 1;
         if n == 8 {
             break;
         }
     }
     // events[0..n) is newest-first; print oldest-first for readability.
+    // 118th: each token carries the event site's source line (WW_RA,
+    // via #[track_caller]) — `S@3j:L2990` reads "unlinked-by-schedule
+    // 3 jiffies ago at sched.rs:2990" (A tokens are task.rs lines).
     let _ = write!(out, "binder-stall:  ww=[");
     for i in (0..n).rev() {
-        let (t, ago) = events[i];
+        let (t, ago, line) = events[i];
         if i != n - 1 {
             let _ = write!(out, " ");
         }
-        let _ = write!(out, "{}@{}j", t, ago);
+        let _ = write!(out, "{}@{}j:L{}", t, ago, line);
     }
     let _ = writeln!(out, "]");
 }
@@ -5014,6 +5436,59 @@ pub fn wake_up_enqueue_opt(
                             b"WAKE-HEAL-ORIGIN",
                             task,
                         );
+                        // wake-fastrepro (leak hunt): the ORIGIN tap is
+                        // collision-churned on OH boots (2048 slots vs
+                        // thousands of tasks — both control boots printed
+                        // WAKE-HEAL with zero ORIGIN lines). The victim's
+                        // own last_calls syscall ring (dfx=sysforensic,
+                        // 96 deep, per-task) survives churn by
+                        // construction: dump its tail here so the pc=1
+                        // face names the syscall path it rides in.
+                        {
+                            use crate::console::putchar_no_lock as putchar2;
+                            fn pd2(mut v: u64) {
+                                use crate::console::putchar_no_lock as p;
+                                let mut buf = [0u8; 12];
+                                let mut n = 0;
+                                if v == 0 {
+                                    p(b'0');
+                                    return;
+                                }
+                                while v > 0 && n < buf.len() {
+                                    buf[n] = b'0' + (v % 10) as u8;
+                                    v /= 10;
+                                    n += 1;
+                                }
+                                for i in (0..n).rev() {
+                                    p(buf[i]);
+                                }
+                            }
+                            const M: &[u8] = b"\nWAKE-HEAL-CALLS pid=";
+                            for &b in M {
+                                putchar2(b);
+                            }
+                            pd2((*task).pid() as u64);
+                            const M2: &[u8] = b" last12=";
+                            for &b in M2 {
+                                putchar2(b);
+                            }
+                            let cur = (*task)
+                                .last_calls_cur
+                                .load(core::sync::atomic::Ordering::Relaxed);
+                            for k in 0..12usize {
+                                let idx = (cur + crate::process::task::LAST_CALLS_LEN
+                                    - 1
+                                    - k)
+                                    % crate::process::task::LAST_CALLS_LEN;
+                                let nr = (*task).last_calls[idx]
+                                    .load(core::sync::atomic::Ordering::Relaxed);
+                                if k > 0 {
+                                    putchar2(b',');
+                                }
+                                pd2(nr as u64);
+                            }
+                            putchar2(b'\n');
+                        }
                     }
                 } else {
                     // Skip-reason census (budgeted): names which guard
