@@ -503,10 +503,10 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
     // post-lookup; name what the lookup found.
     // sc109/sc112: these lines fire in the LAUNCHER's own context and
     // drain to the busy-poll UART (~87us/byte charged as launcher
-    // stime) — `sprobe=0` silences both prints, counters stay.
-    if full_path.starts_with("/dev/")
-        && crate::cmdline::get_param("sprobe").map(|v| v != "0").unwrap_or(true)
-    {
+    // stime). 110th: default flipped — the probe block (a second
+    // path_lookup + String formatting per /dev open, ~227 lines/boot)
+    // arms only via dfx=ohhunt (or legacy sprobe=1).
+    if full_path.starts_with("/dev/") && crate::dfx::switches::oh_hunt_prints_on() {
         let root = crate::sched::current()
             .and_then(|t| unsafe { (*t).fs_arc() })
             .map(|fs| fs.get_root())
@@ -1274,7 +1274,8 @@ pub fn sys_getdents64(args: SyscallArgs) -> i64 {
     // getdents that returns no entries (or errors) leaves the loop empty
     // and the composer reports "can't open drm card device" with no drm
     // ioctl ever issued. Name the /dev/dri getdents result directly.
-    {
+    // 110th: rides the ohhunt gate with the drm census.
+    if crate::dfx::switches::oh_hunt_prints_on() {
         let path = crate::sched::get_current_fdtable()
             .and_then(|ft| ft.get_file(fd))
             .and_then(|f| {
@@ -2298,7 +2299,9 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
     let t0 = crate::arch::cpu::read_counter();
     let mut ph = MntPhases::new();
     let r = sys_mount_inner(args, &mut ph);
-    if crate::cmdline::get_param("sprobe").map(|v| v != "0").unwrap_or(true) {
+    // 110th: mntslow rides the ohhunt gate (was sprobe-default-on,
+    // ~120 lines in the early mount phase of every perf boot).
+    if crate::dfx::switches::oh_hunt_prints_on() {
         let dt = crate::arch::cpu::read_counter().saturating_sub(t0);
         // >2 ms at a ~2.5 GHz TSC. TSC_CYCLES_PER_MS would be nicer but
         // the timer lane owns the calibration; 5M cycles is a floor that

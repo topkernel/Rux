@@ -238,7 +238,12 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
         // field separates the parent's fork (SIGCHLD, no CLONE_VM) from
         // the child's engine thread creation (CLONE_VM|CLONE_THREAD).
         let is_spawn = comm == "appspawn";
-        if is_app || is_spawn {
+        // 110th: the whole census block (print + the binder-tracer child
+        // registration, which only feeds dfx=bindertrace print filters)
+        // rides the ohhunt gate — ~120 lines per perf boot; the
+        // fall-through below does the identical do_clone + parent-ns
+        // translation.
+        if (is_app || is_spawn) && crate::dfx::switches::oh_hunt_prints_on() {
             static N3: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if N3.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
@@ -6876,7 +6881,8 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
             || comm.contains("systemui")
             || comm.contains("dataability");
         let is_spawn = comm == "appspawn";
-        if is_app || is_spawn {
+        // 110th: rides the ohhunt gate with the sys_clone census above.
+        if (is_app || is_spawn) && crate::dfx::switches::oh_hunt_prints_on() {
             static N4: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if N4.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {

@@ -1396,8 +1396,11 @@ unsafe fn devfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
     // open("/dev/dri/card0"), the gralloc's is open("/dev/dri/renderD128")
     // — neither produces hilog output, so this is the only on-serial
     // visibility into their startup.
-    if entry.devno == crate::drivers::drm::DEV_DRM_CARD0
-        || entry.devno == crate::drivers::drm::DEV_DRM_RENDER
+    // 110th: rides the ohhunt gate with the drm census (~13 lines per
+    // perf boot).
+    if (entry.devno == crate::drivers::drm::DEV_DRM_CARD0
+        || entry.devno == crate::drivers::drm::DEV_DRM_RENDER)
+        && crate::dfx::switches::oh_hunt_prints_on()
     {
         static DRM_OPENS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
         let n = DRM_OPENS.fetch_add(1, Ordering::Relaxed);

@@ -1521,6 +1521,11 @@ fn app_child_pids_contains(pid: u32) -> bool {
 /// context-manager target, dead target proc) so "never tried" separates
 /// from "tried and failed silently".
 fn app_txn_fail_print(proc: &BinderProc, why: &str, handle: u64, code: u64) {
+    // 110th: rides dfx=bindertrace with the APPTXN tracer (skip the
+    // comm scan entirely on standard boots).
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace) {
+        return;
+    }
     let comm = crate::sched::current()
         .map(|t| unsafe { (*t).comm() })
         .map(|c| core::str::from_utf8(c).unwrap_or(""))
@@ -2569,6 +2574,9 @@ pub fn binder_close(file: &crate::fs::File) -> i32 {
             // serving (UnlockUser logs minutes later), so the close is the
             // event to localize: who closed, what died with it. Rate-
             // limited budget so a chatty boot cannot flood the UART.
+            // 110th: rides dfx=bindertrace (the whole-registry victim
+            // scan + print ran on every fd close of every perf boot).
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace)
             {
                 use core::sync::atomic::Ordering::Relaxed;
                 static CLOSE_PROBE_N: core::sync::atomic::AtomicU32 =
@@ -2629,10 +2637,16 @@ pub fn binder_close(file: &crate::fs::File) -> i32 {
                     // carries dozens of armed refs across holder procs;
                     // see the DRS tap note). Collected (desc, cookie)
                     // pairs print AFTER the qim borrow ends.
+                    // 110th: rides dfx=bindertrace — the foundation
+                    // crash-restart loop printed ~167 of these on every
+                    // perf boot (emit + hilogd drain each).
                     static NOTICE_N: core::sync::atomic::AtomicUsize =
                         core::sync::atomic::AtomicUsize::new(0);
                     let mut printed = Vec::new();
-                    if NOTICE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
+                    if crate::dfx::switches::enabled(
+                        crate::dfx::switches::DfxSwitch::BinderTrace,
+                    ) && NOTICE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200
+                    {
                         printed = deaths.clone();
                     }
                     for (desc, cookie) in printed {
@@ -3129,19 +3143,24 @@ pub fn binder_task_died(dying_pid: u32, dying_tgid: u32, dying_tid: u32) {
             // SERVICING (txn stacked) or with undrained work leaks its
             // userspace locks permanently (pthread mutexes are not robust).
             // This detector names every such victim at death time.
-            if let Some(t) = proc.im().threads.iter().find(|t| t.tid == dying_tid) {
-                let th = t.st();
-                if !th.txn_stack.is_empty() || !th.todo.is_empty() {
-                    crate::pr_warn!(
-                        "binder: THREAD-DIED-SERVICING pid {} tid {} stack={} todo={} top=txn{} from pid {} tid {}",
-                        proc.pid,
-                        dying_tid,
-                        th.txn_stack.len(),
-                        th.todo.len(),
-                        th.txn_stack.last().map(|x| x.id).unwrap_or(0),
-                        th.txn_stack.last().and_then(|x| x.from_proc.as_ref()).map(|p| p.pid).unwrap_or(0),
-                        th.txn_stack.last().and_then(|x| x.from_tid).unwrap_or(0)
-                    );
+            // 110th: rides dfx=bindertrace (~17 lines on the crash-
+            // restart loops of every perf boot).
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace)
+            {
+                if let Some(t) = proc.im().threads.iter().find(|t| t.tid == dying_tid) {
+                    let th = t.st();
+                    if !th.txn_stack.is_empty() || !th.todo.is_empty() {
+                        crate::pr_warn!(
+                            "binder: THREAD-DIED-SERVICING pid {} tid {} stack={} todo={} top=txn{} from pid {} tid {}",
+                            proc.pid,
+                            dying_tid,
+                            th.txn_stack.len(),
+                            th.todo.len(),
+                            th.txn_stack.last().map(|x| x.id).unwrap_or(0),
+                            th.txn_stack.last().and_then(|x| x.from_proc.as_ref()).map(|p| p.pid).unwrap_or(0),
+                            th.txn_stack.last().and_then(|x| x.from_tid).unwrap_or(0)
+                        );
+                    }
                 }
             }
             wakes = binder_reap_thread(world, &proc, dying_tid);
@@ -3567,9 +3586,13 @@ pub fn binder_on_tgid_exit(tgid: u32) {
                                     // (reg_tgid exit path) — same class as
                                     // the proc-exit notice. lb51: lockless
                                     // writer + budget (under WORLD).
+                                    // 110th: rides dfx=bindertrace.
                                     static CNOTICE_N: core::sync::atomic::AtomicUsize =
                                         core::sync::atomic::AtomicUsize::new(0);
-                                    if CNOTICE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                                    if crate::dfx::switches::enabled(
+                                        crate::dfx::switches::DfxSwitch::BinderTrace,
+                                    ) && CNOTICE_N
+                                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
                                         < 120
                                     {
                                         let mut w = crate::dfx::backtrace::ConsoleWriter::new();
@@ -11304,7 +11327,14 @@ fn binder_transaction(
                 .map(|c| core::str::from_utf8(c).unwrap_or(""))
                 .unwrap_or("")
                 .trim_end_matches('\0');
-            if comm_now.starts_with("render_servi") {
+            // 110th: the RS tracer sub-block (32-byte parcel copy +
+            // hex format + ~112 print lines per perf boot) rides
+            // dfx=bindertrace.
+            if comm_now.starts_with("render_servi")
+                && crate::dfx::switches::enabled(
+                    crate::dfx::switches::DfxSwitch::BinderTrace,
+                )
+            {
                 let prev = SACMP_RS_PID
                     .swap(proc.pid, core::sync::atomic::Ordering::Relaxed);
                 if prev != proc.pid {
@@ -11375,7 +11405,15 @@ fn binder_transaction(
             0x64, 0x69, 0x73, 0x70, 0x6c, 0x61, 0x79, 0x5f, 0x63, 0x6f,
         ];
         let mut name_hit = false;
-        if !reply && tr.data_buffer != 0 && data_size >= 4 {
+        // 110th: the 192-byte parcel copy + name match ran on EVERY
+        // transaction of every perf boot; rides dfx=bindertrace (the
+        // devmgr SAREG latch above stays live — the FXDV tracer in
+        // futex.rs keys on it).
+        if !reply
+            && tr.data_buffer != 0
+            && data_size >= 4
+            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace)
+        {
             let mut buf = [0u8; 192];
             let n = core::cmp::min(buf.len(), data_size);
             if unsafe {
@@ -11813,7 +11851,11 @@ fn binder_transaction(
                         }
                     }
                     // sc140: oneway half of the APPTXN tracer (see the
-                    // sync branch below for the rationale).
+                    // sync branch below for the rationale). 110th: the
+                    // whole block (comm scan + print, ~320 lines in the
+                    // 9-12s spawn window of every perf boot) rides the
+                    // dfx=bindertrace gate like the rest of the tracer.
+                    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace)
                     {
                         let comm = crate::sched::current()
                             .map(|t| unsafe { (*t).comm() })
@@ -11981,7 +12023,9 @@ fn binder_transaction(
                 // them (or was never sent). One line per transaction
                 // whose sender is app-family or whose target pid is a
                 // registered forked appspawn child: names the last hop
-                // that ever targeted a parked child.
+                // that ever targeted a parked child. 110th: rides the
+                // dfx=bindertrace gate with the oneway half above.
+                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace)
                 {
                     let comm = crate::sched::current()
                         .map(|t| unsafe { (*t).comm() })

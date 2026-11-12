@@ -1339,8 +1339,12 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
         // si_code/si_pid distinguish a real sender (SI_USER/SI_TKILL
         // carry one) from a bare/stale bitmap bit (empty queue). The
         // storm's SIGKILLs bypassed every send-path print; this is the
-        // delivery-side ground truth.
-        if sig == 9 || sig == 15 {
+        // delivery-side ground truth. 110th: rides dfx=sigtrace (the
+        // kill-storm census printed on the crash-restart loops of every
+        // perf boot).
+        if (sig == 9 || sig == 15)
+            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SigTrace)
+        {
             static DQ_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if DQ_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {

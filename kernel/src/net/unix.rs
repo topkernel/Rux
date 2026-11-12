@@ -2582,7 +2582,10 @@ pub fn unix_recv(
                 // parses as a ParamMessage, print it — client-send lines
                 // without a matching PCTL-RECV name where the installs
                 // ctl sets die (queue stall vs server epoll wake loss).
-                if copied >= 12 && crate::process::current_pid() == 1 {
+                // 110th: gated behind dfx=pctlmon (the switch built for
+                // exactly this tap) — ~132 lines rode every perf boot,
+                // each costing UART emit + hilogd drain.
+                if copied >= 12 && crate::process::current_pid() == 1 && pctlmon_on() {
                     let mtype = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
                     if mtype <= 5 && buf[12] >= b'a' && buf[12] <= b'z' {
                         static PCTL_R_N: core::sync::atomic::AtomicUsize =

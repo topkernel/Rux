@@ -253,11 +253,15 @@ pub fn epoll_notify_file(file_id: u64) {
     // shard), not O(total registry); the leak symptom the original hunt
     // chased (dead processes' epolls growing the registry) now shows up
     // as the TOTAL counter. Name sizes BEFORE taking the lock (printk
-    // discipline).
+    // discipline). 110th: the census print rides dfx=epolltrace (~57
+    // lines per perf boot in the spawn window).
     {
         static EPN_N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
         let n = EPN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if n < 400 && (n < 40 || n % 10 == 0) {
+        if n < 400
+            && (n < 40 || n % 10 == 0)
+            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::EpollTrace)
+        {
             crate::pr_warn!(
                 "epollnotify#{}: registry_total={} this_fid={:#x}",
                 n,
@@ -4150,7 +4154,10 @@ pub fn sys_timerfd_create(args: SyscallArgs) -> i64 {
         }
         WIN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16
     } else {
-        tfdc_i < 60
+        // 110th: the unconditional boot-start budget is gone — the
+        // census arms only via dfx=tfdcensus (113 lines rode the
+        // pre-launcher window of every perf boot).
+        false
     };
     if tfdc_log {
         let comm = crate::sched::current()

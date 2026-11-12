@@ -850,6 +850,13 @@ pub fn vfs_bind_mount(
                 // part of the IRQ-OFF storm that trips foundation's
                 // XCollie. First 300 carry the diagnosis; the rest are
                 // repeats of the same paths.
+                // 110th: the walk + print now ride the ohhunt gate
+                // (~229 lines on every perf boot, each costing UART
+                // emit + hilogd drain; the prefix probe walk itself
+                // allocates and re-lookups paths).
+                if !crate::dfx::switches::oh_hunt_prints_on() {
+                    return Err(e);
+                }
                 static BINDWALK_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
                 if BINDWALK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 300 {
@@ -936,7 +943,9 @@ pub fn vfs_bind_mount(
     // every pivoted process — print the resolved source dentry's GLOBAL
     // path so the captured tree is unambiguous. Rate-limited alongside
     // bindrec (sc37: per-spawn prints x retry storms flooded the UART).
-    if sbx_want(target) {
+    // 110th: rides the ohhunt gate with the rest of the mount hunt
+    // family (build_path walks the dentry chain per line).
+    if sbx_want(target) && crate::dfx::switches::oh_hunt_prints_on() {
         if let Some(ref sd) = src.dentry {
             static SBXBIND_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
@@ -1037,12 +1046,17 @@ pub fn vfs_bind_mount(
                 // were dropped before the ring. Rate-capped at 200/boot;
                 // sprobe=0 silences the sibling mtprobe but not this —
                 // bindrec rides every boot by design (appclone forensics).
-                crate::pr_warn!(
-                    "bindrec: cloned '/{}' under '{}' (flags {:#x})",
-                    rel.join("/"),
-                    target,
-                    flags.bits()
-                );
+                // 110th: "by design" reversed — ~90 lines on every perf
+                // boot, each costing UART emit + hilogd drain; rides the
+                // ohhunt gate with the rest of the mount hunt family.
+                if crate::dfx::switches::oh_hunt_prints_on() {
+                    crate::pr_warn!(
+                        "bindrec: cloned '/{}' under '{}' (flags {:#x})",
+                        rel.join("/"),
+                        target,
+                        flags.bits()
+                    );
+                }
             }
             bind_clone_attach(&fresh_root, &rel, &root, flags);
         }
@@ -1056,8 +1070,9 @@ pub fn vfs_bind_mount(
             // ~150-byte line burns ~13ms of stime in the MOUNTING task's
             // context; the post-exec launcher child mounts its sandbox
             // and paid its whole 3s appspawn watchdog to this probe (the
-            // sc37 bindrec lesson, replayed). `sprobe=0` silences.
-            if crate::cmdline::get_param("sprobe").map(|v| v != "0").unwrap_or(true)
+            // sc37 bindrec lesson, replayed). 110th: default flipped —
+            // arms only via dfx=ohhunt (or legacy sprobe=1).
+            if crate::dfx::switches::oh_hunt_prints_on()
                 && MTPROBE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400
             {
                 crate::pr_warn!(
@@ -1859,7 +1874,11 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     if normalized.as_ref() == "/storage/media" || normalized.as_ref() == "/mnt/sandbox" {
         static WALKPRB_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
-        if WALKPRB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 6 {
+        // 110th: rides the ohhunt gate (the probe takes VFS_STATE +
+        // walks root children per hit).
+        if WALKPRB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 6
+            && crate::dfx::switches::oh_hunt_prints_on()
+        {
             let (vfs_root_ptr, vfs_root_has_storage, vfs_root_has_mnt) = {
                 let st = VFS_STATE.lock();
                 let r = st.root_dentry.clone();

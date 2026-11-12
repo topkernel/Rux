@@ -327,8 +327,11 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
     // whose fd is already CLOSED at park-dump time, so APPMAP printed
     // '?'. Print fd + path + filesz for EVERY file-backed mmap of the
     // appspawn family — the offline map (ret -> lib -> fileoff) then
-    // symbolizes the park chain.
-    if ret > 0 {
+    // symbolizes the park chain. 110th: rides the ohhunt gate — the
+    // comm scan + fdtable path lookup + print ran on EVERY appspawn-
+    // family mmap (~456 lines in the pre-launcher window alone, each
+    // costing UART emit + hilogd drain).
+    if ret > 0 && crate::dfx::switches::oh_hunt_prints_on() {
         let comm = crate::sched::current()
             .map(|t| unsafe { (*t).comm() })
             .map(|c| core::str::from_utf8(c).unwrap_or(""))
@@ -448,8 +451,13 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     }
     // bring-up trace: every MAP_SHARED file mapping with the raw args —
     // the DRM/dumb-buffer mapping failures need the kernel-side view of
-    // what userspace actually passed.
-    if fd >= 0 && map_flags & map::MAP_ANONYMOUS == 0 && map_flags & map::MAP_TYPE_MASK == map::MAP_SHARED {
+    // what userspace actually passed. 110th: rides the ohhunt gate
+    // (~31 lines per perf boot).
+    if fd >= 0
+        && map_flags & map::MAP_ANONYMOUS == 0
+        && map_flags & map::MAP_TYPE_MASK == map::MAP_SHARED
+        && crate::dfx::switches::oh_hunt_prints_on()
+    {
         static SHARED_FILE_MMAPS: core::sync::atomic::AtomicU32 =
             core::sync::atomic::AtomicU32::new(0);
         let n = SHARED_FILE_MMAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
