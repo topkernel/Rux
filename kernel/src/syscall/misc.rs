@@ -135,6 +135,16 @@ struct EpollFile {
     owner_pid: u32,
     /// dfx=socksnap (b16): total completed wait syscalls on this instance.
     wait_count: u64,
+    /// In-flight `epoll_notify_file` sections holding a raw pointer to this
+    /// instance (UAF close of the 3d5f24f11 window — see
+    /// `epoll_notify_file`). Incremented ONLY inside a wake-shard critical
+    /// section in which a binding for this instance still exists (that
+    /// proves `epoll_file_close` has not yet freed the box: the free runs
+    /// strictly after `epoll_wake_unregister_all` removed the binding under
+    /// the same shard lock). `epoll_file_close` drains this to zero before
+    /// `Box::from_raw`. fetch_sub is Release / the drain load is Acquire so
+    /// the notify's entries/wait_queue work happens-before the free.
+    notify_pins: core::sync::atomic::AtomicUsize,
 }
 
 // ============================================================================
@@ -233,10 +243,16 @@ fn epoll_wake_shard(file_id: u64) -> &'static crate::sync::spinlock::Spinlock<Ep
 /// Lock order: registry → per-epoll `entries`. Every other site that
 /// touches both takes them one at a time (ctl drops `entries` before
 /// calling the registry helpers), so this nesting cannot deadlock.
+/// (3d5f24f11 note: the notify path itself no longer nests the two — it
+/// collects targets under the shard lock, releases it, then takes
+/// `entries` bare.)
 ///
-/// Safe against stale pointers: bindings for an epoll instance are removed
-/// in its close op, which only runs on the last Arc reference — no
-/// epoll_wait can still be blocked on the instance at that point.
+/// Safe against stale pointers: each collected target is PINNED
+/// (`notify_pins`, taken under the shard lock where the binding proves
+/// liveness) and `epoll_file_close` drains the pin count to zero after
+/// `epoll_wake_unregister_all` and before `Box::from_raw` — a pointer
+/// collected here stays alive through the entries pass and the wake even
+/// if the owning epoll's last fd closes concurrently.
 pub fn epoll_notify_file(file_id: u64) {
     // leg-36 lock-free empty-shard fast path: with no epoll bound in
     // this file's shard (pbench pairs, pipe-only processes, most
@@ -277,41 +293,101 @@ pub fn epoll_notify_file(file_id: u64) {
     // wanted entries; thread B (close) held entries and wanted shard.
     //
     // Fix: collect the epoll pointers under the shard lock, RELEASE
-    // the shard lock, THEN touch entries and wake. Pointer lifetime is
-    // safe: close unregisters the binding (under the shard lock) BEFORE
-    // freeing, so any pointer we collect here remains valid until the
-    // next shard-lock acquisition — and we already dropped it.
-    // Fixed-size stack array — NO allocation under the shard lock
-    // (allocating there AB-BAs with any close-path allocation that
-    // holds the allocator lock and wants a shard lock).
+    // the shard lock, THEN touch entries and wake. Fixed-size stack
+    // arrays — NO allocation under the shard lock (allocating there
+    // AB-BAs with any close-path allocation that holds the allocator
+    // lock and wants a shard lock).
+    //
+    // USE-AFTER-FREE FIX (114th audit, 2026-11-12): releasing the shard
+    // lock before dereferencing the collected pointer opened a window —
+    // CPU A (notify) collects `ep` and drops the shard lock; CPU B
+    // (last-Arc close) runs epoll_wake_unregister_all (takes the same
+    // shard lock, removes the binding) and Box::from_raw FREES the
+    // instance; CPU A then locks `ep.entries` on freed (possibly
+    // reallocated) memory. The notify path holds no Arc — the R20-5
+    // last-reference discipline does not cover it — so the fix is a pin
+    // count: take a pin on each target INSIDE the shard critical section
+    // (the binding's presence proves the box is alive: the free runs
+    // strictly after the unregister sweep of this very shard), and
+    // epoll_file_close drains `notify_pins` to zero after unregister_all
+    // before freeing. Pin hold time is one entries pass + one wake (no
+    // allocation, no blocking on other locks than `entries`), so the
+    // close-side drain is bounded.
     const MAX_TARGETS: usize = 32;
-    let mut targets: [*mut EpollFile; MAX_TARGETS] = [core::ptr::null_mut(); MAX_TARGETS];
-    let mut n_targets = 0usize;
-    {
-        let registry = epoll_wake_shard(file_id).lock_irqsave();
-        for (id, ep) in registry.bindings.iter() {
-            if *id == file_id && n_targets < MAX_TARGETS {
-                targets[n_targets] = *ep;
-                n_targets += 1;
-            }
-        }
-    }
-    // SAFETY: each  was collected while holding the shard lock; the
-    // close path removes the binding under the same lock before Box::free,
-    // so the pointer is valid (the binding existed at collect time).
-    for &ep in targets[..n_targets].iter() {
-        let epoll = unsafe { &*ep };
+    // Retry bound: the batch loop below re-scans the shard until every
+    // watcher of `file_id` has been processed (the old pre-shard code
+    // woke ALL of them; silently stopping at 32 would swallow the ET
+    // re-arm for watchers 33+ — a lost-edge wedge). 4 passes cover 128
+    // distinct instances on one description, far beyond any real load;
+    // beyond that, warn once and rely on the direct file-queue wakes.
+    const MAX_PASSES: usize = 4;
+    let mut done: [*mut EpollFile; MAX_TARGETS * MAX_PASSES] =
+        [core::ptr::null_mut(); MAX_TARGETS * MAX_PASSES];
+    let mut n_done = 0usize;
+    loop {
+        let mut targets: [*mut EpollFile; MAX_TARGETS] = [core::ptr::null_mut(); MAX_TARGETS];
+        let mut n_targets = 0usize;
         {
-            let mut entries = epoll.entries.lock();
-            for entry in entries.iter_mut() {
-                if entry.file_id == file_id && entry.events & epoll_events::EPOLLET != 0 {
-                    // New arrival = a fresh readiness edge, even if the
-                    // previous one was reported and never observed idle.
-                    entry.last_reported = 0;
+            let registry = epoll_wake_shard(file_id).lock_irqsave();
+            for (id, ep) in registry.bindings.iter() {
+                if *id != file_id {
+                    continue;
+                }
+                if done[..n_done].contains(ep) {
+                    continue; // already woken in an earlier pass
+                }
+                if n_targets < MAX_TARGETS {
+                    // SAFETY: the binding exists under this shard lock, so
+                    // epoll_file_close has not freed the instance yet (its
+                    // free runs after unregister_all took this lock and
+                    // removed this binding). Touching the pin field is
+                    // therefore in-bounds live memory.
+                    unsafe {
+                        (**ep).notify_pins.fetch_add(1, core::sync::atomic::Ordering::Acquire);
+                    }
+                    targets[n_targets] = *ep;
+                    n_targets += 1;
                 }
             }
         }
-        epoll.wait_queue.wake_up_all();
+        if n_targets == 0 {
+            break; // every watcher of this file_id has been processed
+        }
+        // SAFETY: each target is pinned (see the pin block above); the box
+        // cannot be freed until the matching fetch_sub drops the last pin.
+        for &ep in targets[..n_targets].iter() {
+            let epoll = unsafe { &*ep };
+            {
+                let mut entries = epoll.entries.lock();
+                for entry in entries.iter_mut() {
+                    if entry.file_id == file_id && entry.events & epoll_events::EPOLLET != 0 {
+                        // New arrival = a fresh readiness edge, even if the
+                        // previous one was reported and never observed idle.
+                        entry.last_reported = 0;
+                    }
+                }
+            }
+            epoll.wait_queue.wake_up_all();
+            // Release the pin AFTER the last touch of the instance.
+            epoll.notify_pins.fetch_sub(1, core::sync::atomic::Ordering::Release);
+            if n_done < done.len() {
+                done[n_done] = ep;
+                n_done += 1;
+            }
+        }
+        if n_done >= done.len() {
+            static MANY_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            let n = MANY_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 8 {
+                crate::pr_warn!(
+                    "epollnotify: {} watchers of fid={:#x} exceed the retry bound; excess rely on file-queue wakes",
+                    n_done,
+                    file_id
+                );
+            }
+            break;
+        }
     }
 }
 
@@ -525,6 +601,18 @@ fn epoll_file_close(file: &crate::fs::File) -> i32 {
         unsafe {
             let epoll = &mut *(ptr as *mut EpollFile);
             epoll_wake_unregister_all(ptr as *mut EpollFile);
+            // UAF drain (114th audit): a concurrent epoll_notify_file may
+            // have collected this pointer under a shard lock just before
+            // the unregister sweep removed the binding, and may still be
+            // in its entries/wake section holding no shard lock. The pin
+            // count it took under the shard lock is the only thing keeping
+            // the box alive — wait for it to drain before freeing. No
+            // locks are held here (unregister_all released every shard),
+            // so this wait cannot deadlock; its duration is bounded by one
+            // entries pass + one wake_up_all per pinned notify section.
+            while epoll.notify_pins.load(core::sync::atomic::Ordering::Acquire) != 0 {
+                core::hint::spin_loop();
+            }
             let _ = alloc::boxed::Box::from_raw(ptr as *mut EpollFile);
         }
         unsafe { *file.private_data.get() = None; }
@@ -1860,6 +1948,7 @@ pub fn sys_epoll_create(args: SyscallArgs) -> i64 {
         wait_queue: crate::process::wait::WaitQueueHead::new(),
         owner_pid: crate::process::current_pid(),
         wait_count: 0,
+        notify_pins: core::sync::atomic::AtomicUsize::new(0),
     });
     let epoll_ptr = alloc::boxed::Box::into_raw(epoll) as *mut u8;
 
