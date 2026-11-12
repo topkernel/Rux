@@ -20,6 +20,10 @@
 #             MONITOR=unix:/tmp/oh-mon.sock,server,nowait to drive
 #             screendumps for the headless geometry check while console
 #             mode runs.
+#   ACCEL_ARGS — accelerator (default KVM; the OH rig standard is
+#             KVM + 8 CPUs). Override with "-accel tcg,thread=multi"
+#             only when KVM is unavailable.
+#   SMP — vCPU count (default 8, the OH rig standard).
 set -euo pipefail
 
 IMGDIR="${1:?usage: run-oh.sh <oh-images-dir> [console|gui|debug]}"
@@ -87,7 +91,7 @@ esac
 # file.locking=off; locking is already off per-drive above).
 # shellcheck disable=SC2086
 exec "$QEMU" \
-    -M q35 -accel tcg,thread=multi -cpu max -m 4G -smp 2 -snapshot \
+    -M q35 ${ACCEL_ARGS:-"-accel kvm"} -cpu max -m 4G -smp ${SMP:-8} -snapshot \
     $DISP -serial mon:stdio -monitor "${MONITOR:-none}" \
     -kernel "$KERNEL" -initrd "$IMGDIR/ramdisk.img" \
     -append "$APPEND" \
