@@ -1100,6 +1100,62 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                             .unwrap_or(0) as u32,
                         core::sync::atomic::Ordering::Relaxed,
                     );
+                    // 118th monopolist capture: count consecutive ticks
+                    // whose current task carries preempt_count >= 2 (a
+                    // REAL leaked base pair — one base is any in-kernel
+                    // spin section; two held across >= 50 ticks = 0.5 s is
+                    // the unpreemptible incumbent shape). Diagnostic print
+                    // only — no state is rewritten (the 29c2acba/393c04cf8
+                    // ban is on wake-path heals and time-based slot
+                    // CONVICTIONS, not on naming). One-shot per boot.
+                    {
+                        static MONO_TICKS: [core::sync::atomic::AtomicU32; 8] =
+                            [const { core::sync::atomic::AtomicU32::new(0) }; 8];
+                        static MONO_PID: [core::sync::atomic::AtomicU32; 8] =
+                            [const { core::sync::atomic::AtomicU32::new(0) }; 8];
+                        static MONO_DONE: core::sync::atomic::AtomicBool =
+                            core::sync::atomic::AtomicBool::new(false);
+                        let ci = (cpu_id & 7) as usize;
+                        if let Some(t) = crate::sched::current() {
+                            // SAFETY: read-only diagnostic access to the
+                            // interrupted current task.
+                            let (pc, pid) = unsafe { ((*t).preempt_count(), (*t).pid()) };
+                            if pc >= 2 {
+                                let prev_pid =
+                                    MONO_PID[ci].load(core::sync::atomic::Ordering::Relaxed);
+                                if prev_pid != pid as u32 {
+                                    MONO_PID[ci].store(pid as u32, core::sync::atomic::Ordering::Relaxed);
+                                    MONO_TICKS[ci].store(1, core::sync::atomic::Ordering::Relaxed);
+                                } else {
+                                    let n = MONO_TICKS[ci]
+                                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                                    if n == 50
+                                        && !MONO_DONE.swap(true, core::sync::atomic::Ordering::AcqRel)
+                                    {
+                                        // SAFETY: read-only comm access.
+                                        let cb = unsafe { (*t).comm() };
+                                        let cl = cb.iter().position(|&b| b == 0).unwrap_or(16);
+                                        let comm =
+                                            core::str::from_utf8(&cb[..cl]).unwrap_or("?");
+                                        crate::pr_warn!(
+                                            "MONOPOLIST-TICK pid={} ({}) preempt={} cpu={} last_rip={:#x} — remote bt follows",
+                                            pid,
+                                            comm,
+                                            pc,
+                                            cpu_id,
+                                            regs_ref.rip
+                                        );
+                                        let _ = crate::arch::ipi::remote_backtrace(
+                                            cpu_id as usize,
+                                            "monopolist-tick",
+                                        );
+                                    }
+                                }
+                            } else {
+                                MONO_TICKS[ci].store(0, core::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                    }
                     // leg-33B: the interrupted RIP rides the same slot —
                     // the strand census's incumbent attribution
                     // (TICK_ENTRY_RIP).

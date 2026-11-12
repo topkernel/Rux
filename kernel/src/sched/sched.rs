@@ -3406,6 +3406,11 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
 #[inline]
 unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
     if !task.is_null() {
+        // Wakewatch ring (118th): the PICK unlink edge — the pick removes
+        // the task from its class queue HERE; if the switch-in is later
+        // abandoned (revoked / no affirm), this event plus the missing A
+        // names the strand. Single site covers the DL/RT/CFS pick arms.
+        ww_record(task, WW_EV_UNLINK_PICK);
         // Wakewatch forensics: consume the wake stamp and classify the
         // wake→pick latency (direct-console prints follow the R34
         // discipline — we hold the GRQ lock here).
@@ -3897,6 +3902,10 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
         // the queue membership (R39 ordering, see above).
         (*task).set_state(TaskState::new(TaskState::RUNNING));
         grq.nr_running.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        // Wakewatch ring (118th): the LINK edge — pairs with W so the dump
+        // distinguishes "wake verdict ok but never linked" from
+        // "linked then unlinked before running".
+        ww_record(task, WW_EV_LINK);
         // Wakewatch forensics: stamp every successful link (wake, fork,
         // heal re-insert) so the pick side can measure wake→run latency.
         crate::sched::wakewatch::note_wake(task);
@@ -4075,7 +4084,32 @@ static WW_TASK: [core::sync::atomic::AtomicUsize; WW_RING] =
     [const { core::sync::atomic::AtomicUsize::new(0) }; WW_RING];
 static WW_DATA: [core::sync::atomic::AtomicU64; WW_RING] =
     [const { core::sync::atomic::AtomicU64::new(0) }; WW_RING];
+/// Caller attribution per ring slot (118th unlink-without-run hunt): the
+/// SOURCE LINE of the event site, captured via #[track_caller] on
+/// `ww_record` (the debug build outlines it, so an asm ra capture lands
+/// inside ww_record itself — Location::caller() is exact regardless of
+/// inlining). All event sites live in sched.rs except WW_EV_AFFIRM
+/// (task.rs); the dump token reads `P@12j:L2990` = "unlinked at pick 12
+/// jiffies ago at sched.rs:2990".
+static WW_RA: [core::sync::atomic::AtomicUsize; WW_RING] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; WW_RING];
 static WW_IX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// 118th: PER-WATCHED-TASK mini-rings. The global 1024-slot ring rolls in
+/// SECONDS once 64 tasks are watched (timer-class watchers emit
+/// wake/park/pick/affirm pairs at jiffy rates), so a victim's stranding
+/// event is overwritten before the next binder census reads it — the
+/// boot-3 capture showed only single-jiffy probe bursts (many victims × 5
+/// events in one instant) and never the quiet stranding unlinks. Each
+/// watch slot now carries its own 8-event tail: written under the same
+/// GRQ hold as the global ring, immune to other tasks' churn.
+const WW_TAIL: usize = 8;
+static WW_TAIL_IX: [core::sync::atomic::AtomicUsize; 64] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; 64];
+static WW_TAIL_DATA: [core::sync::atomic::AtomicU64; 64 * WW_TAIL] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 64 * WW_TAIL];
+static WW_TAIL_LINE: [core::sync::atomic::AtomicUsize; 64 * WW_TAIL] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; 64 * WW_TAIL];
 /// Census-populated watch list: once the binder-stall scan flags a
 /// WAKE-RUN-LEAK victim, its Task pointer lands here and ww_record
 /// retains its events — otherwise the system's timer churn (VSync
@@ -4110,7 +4144,11 @@ pub fn ww_watch_add(task: *mut Task) {
     }
 }
 
+/// Capture the calling event site's source line (wakewatch caller
+/// attribution, 118th unlink-without-run hunt) — thin wrapper so each
+/// event token in the dump names its exact origin line.
 #[inline]
+#[track_caller]
 pub fn ww_record(task: *mut Task, code: u32) {
     if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
         return;
@@ -4118,24 +4156,80 @@ pub fn ww_record(task: *mut Task, code: u32) {
     // Watch-list filter: a 64-way cached-atomic scan per event is
     // nothing next to the GRQ the caller already holds.
     let t = task as usize;
-    let mut watched = false;
-    for w in WW_WATCH.iter() {
+    let mut watch_ix: Option<usize> = None;
+    for (i, w) in WW_WATCH.iter().enumerate() {
         let cur = w.load(core::sync::atomic::Ordering::Relaxed);
         if cur == t {
-            watched = true;
+            watch_ix = Some(i);
             break;
         }
     }
-    if !watched {
-        return;
-    }
+    let watch_ix = match watch_ix {
+        Some(i) => i,
+        None => return,
+    };
+    let loc = core::panic::Location::caller();
     let j = crate::drivers::timer::get_jiffies();
+    // Global ring (context; rolls fast under churn).
     let ix = WW_IX.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % WW_RING;
     WW_TASK[ix].store(t, core::sync::atomic::Ordering::Relaxed);
     WW_DATA[ix].store(
         ((code as u64) << 56) | (j & 0x00FF_FFFF_FFFF_FFFF),
         core::sync::atomic::Ordering::Relaxed,
     );
+    WW_RA[ix].store(loc.line() as usize, core::sync::atomic::Ordering::Relaxed);
+    // Per-task mini-ring (the capture that survives churn): the recording
+    // context holds the GRQ, and each task's tail index advances only from
+    // its own events, so the 8 newest events for THIS task are always
+    // complete regardless of other watchers' volume.
+    let tix = WW_TAIL_IX[watch_ix].fetch_add(1, core::sync::atomic::Ordering::Relaxed) % WW_TAIL;
+    WW_TAIL_DATA[watch_ix * WW_TAIL + tix].store(
+        ((code as u64) << 56) | (j & 0x00FF_FFFF_FFFF_FFFF),
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    WW_TAIL_LINE[watch_ix * WW_TAIL + tix].store(loc.line() as usize, core::sync::atomic::Ordering::Relaxed);
+    // 118th pipeline bisect: a watched task's WAKE_OK must be observable
+    // in the serial stream (rate-limited) — if the re-kicks of stranded
+    // victims never produce a WWTICK line, the funnel's W record never
+    // ran for them and their kicks' true-return came from a different
+    // leg. Direct console (GRQ held).
+    if code == WW_EV_WAKE_OK {
+        static WWT_N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        if WWT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+            use crate::console::putchar_no_lock as putchar;
+            const M: &[u8] = b"\nWWTICK pid=";
+            for &b in M {
+                putchar(b);
+            }
+            let v = unsafe { (*task).pid() } as u64;
+            let mut sh = 64;
+            while sh > 0 {
+                sh -= 4;
+                let nb = ((v >> sh) & 0xF) as u8;
+                putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+            }
+            const M2: &[u8] = b" jif=";
+            for &b in M2 {
+                putchar(b);
+            }
+            let mut v = j;
+            let mut buf = [0u8; 20];
+            let mut n = 0;
+            while v > 0 {
+                buf[n] = b'0' + (v % 10) as u8;
+                v /= 10;
+                n += 1;
+            }
+            if n == 0 {
+                putchar(b'0');
+            }
+            while n > 0 {
+                n -= 1;
+                putchar(buf[n]);
+            }
+            putchar(b'\n');
+        }
+    }
 }
 
 /// Append `task`'s last few ring events (oldest first) to `out` as one
@@ -4158,9 +4252,48 @@ pub fn ww_append_dump<W: core::fmt::Write>(out: &mut W, task: *mut Task, now: u6
         (WW_EV_WAKE_REFUSED, 'R'),
         (WW_EV_AFFIRM, 'A'),
     ];
+    // 118th: read the PER-TASK mini-ring (survives global churn — see
+    // WW_TAIL_DATA). Fall back to the global ring walk when the task is
+    // not in the watch list (should not happen: census adds before dump).
+    let t = task as usize;
+    let mut watch_ix: Option<usize> = None;
+    for (i, w) in WW_WATCH.iter().enumerate() {
+        if w.load(core::sync::atomic::Ordering::Relaxed) == t {
+            watch_ix = Some(i);
+            break;
+        }
+    }
+    if let Some(wi) = watch_ix {
+        let n0 = WW_TAIL_IX[wi].load(core::sync::atomic::Ordering::Relaxed);
+        let filled = WW_TAIL.min(n0);
+        let _ = write!(out, "binder-stall:  ww=[");
+        let mut printed = 0usize;
+        for k in 0..filled {
+            // oldest-first: the mini-ring wraps mod 8; slot order for the
+            // `filled` valid entries is (n0 - filled + k) % 8.
+            let slot = (n0.wrapping_sub(filled) + k) % WW_TAIL;
+            let d = WW_TAIL_DATA[wi * WW_TAIL + slot].load(core::sync::atomic::Ordering::Relaxed);
+            let line = WW_TAIL_LINE[wi * WW_TAIL + slot].load(core::sync::atomic::Ordering::Relaxed);
+            let code = (d >> 56) as u32;
+            let jif = d & 0x00FF_FFFF_FFFF_FFFF;
+            let tag = TAGS
+                .iter()
+                .find(|(c, _)| *c == code)
+                .map(|(_, t)| *t)
+                .unwrap_or('?');
+            if printed != 0 {
+                let _ = write!(out, " ");
+            }
+            let _ = write!(out, "{}@{}j:L{}", tag, now.saturating_sub(jif), line);
+            printed += 1;
+        }
+        let _ = writeln!(out, "]");
+        return;
+    }
+    // Global-ring fallback (task not on the watch list).
     let ix0 = WW_IX.load(core::sync::atomic::Ordering::Relaxed);
     // Collect the NEWEST events for this task by walking the ring back.
-    let mut events: [(char, u64); 8] = [('-', 0); 8];
+    let mut events: [(char, u64, usize); 8] = [('-', 0, 0); 8];
     let mut n = 0usize;
     for k in 0..WW_RING.min(ix0) {
         let slot = (ix0.wrapping_sub(1 + k)) % WW_RING;
@@ -4170,25 +4303,29 @@ pub fn ww_append_dump<W: core::fmt::Write>(out: &mut W, task: *mut Task, now: u6
         let d = WW_DATA[slot].load(core::sync::atomic::Ordering::Relaxed);
         let code = (d >> 56) as u32;
         let jif = d & 0x00FF_FFFF_FFFF_FFFF;
+        let ra = WW_RA[slot].load(core::sync::atomic::Ordering::Relaxed);
         let tag = TAGS
             .iter()
             .find(|(c, _)| *c == code)
             .map(|(_, t)| *t)
             .unwrap_or('?');
-        events[n] = (tag, now.saturating_sub(jif));
+        events[n] = (tag, now.saturating_sub(jif), ra);
         n += 1;
         if n == 8 {
             break;
         }
     }
     // events[0..n) is newest-first; print oldest-first for readability.
+    // 118th: each token carries the event site's source line (WW_RA,
+    // via #[track_caller]) — `S@3j:L2990` reads "unlinked-by-schedule
+    // 3 jiffies ago at sched.rs:2990" (A tokens are task.rs lines).
     let _ = write!(out, "binder-stall:  ww=[");
     for i in (0..n).rev() {
-        let (t, ago) = events[i];
+        let (t, ago, line) = events[i];
         if i != n - 1 {
             let _ = write!(out, " ");
         }
-        let _ = write!(out, "{}@{}j", t, ago);
+        let _ = write!(out, "{}@{}j:L{}", t, ago, line);
     }
     let _ = writeln!(out, "]");
 }

@@ -325,6 +325,26 @@ impl WaitQueueHead {
         self.wake_up(WakeUpHint::Normal, 0)
     }
 
+    /// 118th kick forensics: the queue's true state (waiters counter,
+    /// per-entry task pid/state/woken/on_cpu) for the binder kick dump.
+    /// Diagnostic only; takes the irqsave list lock briefly.
+    pub fn debug_entries(&self) -> (usize, Vec<(u32, u32, bool, bool)>) {
+        let list = self.list.lock_irqsave();
+        let mut out = Vec::new();
+        for e in list.iter() {
+            let t = e.task();
+            if t.is_null() {
+                out.push((0, 0xFFFF_FFFF, e.is_woken(), false));
+                continue;
+            }
+            // SAFETY: read-only diagnostic snapshot of a queued entry's
+            // task; the entry keeps the task alive on this queue.
+            let (pid, st, oncpu) = unsafe { ((*t).pid(), (*t).state().bits(), (*t).on_cpu()) };
+            out.push((pid as u32, st, e.is_woken(), oncpu));
+        }
+        (self.waiters.load(Ordering::Acquire), out)
+    }
+
     /// Wake one process (exclusive)
     pub fn wake_up_one(&self) -> usize {
         self.wake_up(WakeUpHint::Normal, 1)

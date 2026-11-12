@@ -2158,6 +2158,82 @@ fn wake_thread_hint(t: &BinderThread, sync: bool) {
     } else {
         t.kick_wake_refused.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     }
+    // 118th kick forensics (rate-limited): the queue's TRUE state at the
+    // kick — waiters counter, entry count, each entry's task pid/state/
+    // woken flag. The wakewatch ring proved the victim's own W/R events
+    // never fire for counted kicks, so something else on this queue (or
+    // the queue's view of the thread) is off; this names it directly.
+    {
+        static KF_N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        if KF_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
+            use crate::console::putchar_no_lock as putchar;
+            fn phex(mut v: u64) {
+                use crate::console::putchar_no_lock as putchar;
+                for sh in (0..16).rev() {
+                    let nb = ((v >> (sh * 4)) & 0xF) as u8;
+                    putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                }
+            }
+            fn pdec(mut v: u64) {
+                use crate::console::putchar_no_lock as putchar;
+                let mut buf = [0u8; 20];
+                let mut n = 0;
+                if v == 0 {
+                    putchar(b'0');
+                    return;
+                }
+                while v > 0 {
+                    buf[n] = b'0' + (v % 10) as u8;
+                    v /= 10;
+                    n += 1;
+                }
+                while n > 0 {
+                    n -= 1;
+                    putchar(buf[n]);
+                }
+            }
+            const M: &[u8] = b"\nKICK tid=";
+            for &b in M {
+                putchar(b);
+            }
+            pdec(t.tid as u64);
+            const M2: &[u8] = b" n=";
+            for &b in M2 {
+                putchar(b);
+            }
+            pdec(n as u64);
+            let (qlen, qdump) = t.wait.debug_entries();
+            const M3: &[u8] = b" waiters_cnt=";
+            for &b in M3 {
+                putchar(b);
+            }
+            pdec(qlen as u64);
+            for (pid, st, woken, oncpu) in qdump.iter().take(4) {
+                const M4: &[u8] = b" [pid=";
+                for &b in M4 {
+                    putchar(b);
+                }
+                pdec(*pid as u64);
+                const M5: &[u8] = b" st=";
+                for &b in M5 {
+                    putchar(b);
+                }
+                phex(*st as u64);
+                const M6: &[u8] = b" w=";
+                for &b in M6 {
+                    putchar(b);
+                }
+                putchar(if *woken { b'1' } else { b'0' });
+                const M7: &[u8] = b" oncpu=";
+                for &b in M7 {
+                    putchar(b);
+                }
+                putchar(if *oncpu { b'1' } else { b'0' });
+                putchar(b']');
+            }
+            putchar(b'\n');
+        }
+    }
 }
 
 /// sc163: post a transaction aimed at a forked-child node directly onto
@@ -7623,10 +7699,17 @@ pub fn stall_report() {
                                     .dl_entity()
                                     .dl_throttled
                                     .load(core::sync::atomic::Ordering::Acquire);
+                                // 118th: name the victim (the census lines
+                                // were anonymous tids — the pk=1 monopolist
+                                // and the stranded readers both need comms).
+                                let comm_bytes = tk.comm();
+                                let comm_len = comm_bytes.iter().position(|&b| b == 0).unwrap_or(16);
+                                let comm = core::str::from_utf8(&comm_bytes[..comm_len]).unwrap_or("?");
                                 let _ = writeln!(
                                     out,
-                                    "binder-stall: WAKE-RUN-LEAK tid {} kicked {}x age {}s state={:#x} cfs_linked={} on_cpu={} pick_state={} cpu={} pol={} on_rq={} dl_thr={} wok={} wno={}",
+                                    "binder-stall: WAKE-RUN-LEAK tid {} ({}) kicked {}x age {}s state={:#x} cfs_linked={} on_cpu={} pick_state={} cpu={} pol={} on_rq={} dl_thr={} wok={} wno={} exec_ns={}",
                                     t.tid,
+                                    comm,
                                     kicks + 1,
                                     age / hz,
                                     tk.state().bits(),
@@ -7639,6 +7722,9 @@ pub fn stall_report() {
                                     if dlthr { 1 } else { 0 },
                                     t.kick_wake_ok.load(core::sync::atomic::Ordering::Relaxed),
                                     t.kick_wake_refused.load(core::sync::atomic::Ordering::Relaxed),
+                                    tk.sched_entity()
+                                        .sum_exec_runtime
+                                        .load(core::sync::atomic::Ordering::Relaxed),
                                 );
                                 let _ = writeln!(out, "binder-stall:{}", slots);
                                 // Watch this victim from now on — the ring
