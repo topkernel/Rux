@@ -24,7 +24,7 @@ set -euo pipefail
 
 IMGDIR="${1:?usage: run-oh.sh <oh-images-dir> [console|gui|debug]}"
 MODE="${2:-console}"
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 KERNEL="${KERNEL:-$ROOT/target/x86_64-unknown-none/debug/bzImage}"
 
 for f in ramdisk.img system.img vendor.img; do
