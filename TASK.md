@@ -12894,3 +12894,149 @@ in a read loop — every always-on hunt print (mtprobe 376/boot,
 bindwalk 233, devopen-probe 118, bindrec 90, PCTL-RECV 97) costs TWICE
 (emit + hilogd drain). Gating that ~950-line family is the 109th's
 cheapest ladder lever after this session's flip.
+
+### 110. 110TH SESSION (2026-11-12 09:0x-.., branch oh-crash) — THE HUNT-PRINT FAMILIES ARE GATED (26 families across 12 files, ~2.1k lines/boot silenced behind dfx switches, verified 0-line boots, zero panics 5/5); the honest-table questions ANSWERED with numbers (hilogd's cost is NOT kmsg: hilogd.server recvmsg'd 10.68M datagrams / 810MB by t=120 — the userspace log fabric at 89k msg/s — while hilogd.rd_kmsg read /proc/kmsg only 8.2k times / 1.1MB, blocking with 10ms poll-sleeps, poll() exists on BOTH kmsg nodes); the dgram-peer Arc cache built (bzImage-hp110b, unix.rs: connected DGRAM sends re-resolved the peer NAME through UNIX_TABLE per send — table lock + String hash + memcmp + a String clone alloc per message of the 89k/s fabric); BUT the day's STALL REGIME blocked the launcher.ready A/B: g 0/3 vs b 2/3 (yesterday the same b was 4/4), and the all-prints-armed control boots (ga) ALSO went 0/2 — the prints themselves do not cause or prevent the stalls; every stall (both arms) wedges at the same points (post-SA:403 StorageDaemon/install chain, or the early distributeddata OS_IPC NULL-jump face), i.e. binary-timing-sensitive userspace races, the same class the 108th documented between the opt0/opt2 arms
+
+Mission: the 16.31s → 5.7s push. Priority 1 (hunt-print gating) was
+built and verified print-free; the A/B at the deciding metric could not
+complete in the day's stall regime — documented here with the numbers
+that exist.
+
+#### 110.1 P1 — the print census went FAR beyond the 108th's five
+
+A whole-boot frequency count on oh-hp108o2x5-serial.log (the 16.31s
+boot), split pre-/post-launcher.ready, found the named five were the
+tip: 26 always-on families, ~2.1k lines/boot (pre-16.4s alone ~1.9k):
+
+  pre-launcher.ready: APPMAPSRC 456(!), drm census 370, APPTXN 315,
+  mtprobe 200, TFDC 113, SACMP-RS 112, mntslow 120, devopen-probe 100,
+  PCTL-RECV 85, bindwalk 81, USEGV-FOR 69 (kept — fault forensics),
+  appclone 67, bindrec 65, epollnotify# 57, WAKE-HEAL-SKIP 56,
+  KUFILL-MISS 30 (kept), mmap census 31, DEQUEUE 27, dri-getdents 24
+  whole boot adds: mtprobe 386 total, bindwalk 229, devopen 227,
+  binder death family 202, binder-stall 1013 (all ≥120s — NOT on the
+  launcher path, prints kept: the scan is the heal engine)
+
+Gates (all default-OFF, precedent sigtrace/binderprobe):
+  dfx=ohhunt (or legacy sprobe=1): mtprobe, bindwalk, bindrec, sbxbind,
+    devopen-probe/fail, mntslow, appclone/appclone3, APPMAPSRC, the
+    mmap MAP_SHARED census, WALKPROBE, dri-getdents, the drm census
+    (trace_seq/trace_ioctl/addfb#/atom#/node-mmap#/drm open) — plus the
+    drm flip# content probe (1M+ volatile reads per armed flip!) and
+    the bindwalk prefix walk / APPMAPSRC fdtable-path lookups
+  dfx=bindertrace: APPTXN (both halves), APPTXN-FAIL, binder CLOSE
+    probe, death notice, child-node death notice, THREAD-DIED-
+    SERVICING, SACMP-RS + the SACMP 192B parcel scan
+  dfx=pctlmon: PCTL-RECV (the switch built for exactly this tap)
+  dfx=tfdcensus: TFDC (was unconditional first-60)
+  dfx=epolltrace: epollnotify# registry census
+  dfx=schb: WAKE-HEAL-SKIP census
+  dfx=sigtrace: DEQUEUE sig-9/15 census
+Kept always-on deliberately: USEGV-FOR/KUFILL-MISS (fault forensics),
+SCHED-IRQOFF (IF=0-in-schedule invariant canary), clone-fail and the
+binder dead-proc membership warning (correctness canaries), binder-stall
+(120s+ only, and its scan is the re-kick heal engine).
+Verified: hp110gx1 boot = ZERO lines of every gated family; devtools/
+per-op probes that were gating-relevant (mntslow phase timers, TFDC
+counters, epoll shard counters) keep running — only prints and probe
+WORK are gated.
+
+#### 110.2 P2 ANSWERED — the hilogd channel is NOT /dev/kmsg
+
+pa-hp108sc syscost: hilogd.rd_kmsg reads /PROC/kmsg (not /dev/kmsg):
+n=8188 reads / 1,114,489 bytes by t=120 — one ~132B record per read,
+blocking via the 10ms timer poll-sleep (kmsg_poll_sleep; the waitqueue
+was removed for the printk ABBA, R12-era), ~10ms-class slow reads are
+those sleeps. poll() exists on both /proc/kmsg and /dev/kmsg
+(proc_kmsg_poll / kmsg_file_poll) — hilogd simply does not need it at
+this volume. THE BURNER IS hilogd.server: recvmsg/recvfrom
+10,681,950 calls / 810MB by t=120 (89k msg/s, eagain=0) — the userspace
+HiLog fabric: every daemon's log line is a unix dgram. mmi_service
+recvfrom 900k, sysevent_source 763k. Per message the kernel does one
+skb alloc + one copy each way — the per-op taxes of 108.3 ride this
+VOLUME. Kernel cannot reduce the volume (userspace logs); the cheap
+per-op win landed instead is the dgram-peer cache (110.4).
+
+#### 110.3 P3 ANSWERED — the top kernel functions, nm-paired (no addr2line)
+
+run/hp110-pids.py (nm outer-symbol pairing) on hp108r-w1.data:
+  1. RawSpinlock::lock 10318 (generic — spans GRQ/slab/unix/fdtable)
+  2. SpinlockIrqGuard<SlabCache> drop 6055 (slab free)
+  3. trap_handler 5950 (fault/syscall entry)
+  4. memcpy 5190 + memcmp 4218 (copy/hash fabrics)
+  5. buddy alloc 4370 / dealloc 3563; preempt_count_sub2 3574;
+     __schedule 3515; read_time(TSC) 2905; sys_recvmsg 2392
+Per-pid: pid612(os_ds) = lock 3225 + slab-drop 2653 + memcmp 2155 +
+unix::lookup 1225 — the unix-send fabric. pid463(mmi) same shape +
+unix_send 950. pid323(hilogd) = recvmsg 2392 + memcpy 2323 + dealloc
+1946 + recvfrom 1737. The 79% trio's kernel time IS the log fabric's
+per-op taxes × the 89k msg/s volume. No single killer site; the
+attackable named site was unix::lookup (per-send table re-resolution)
+→ 110.4.
+
+#### 110.4 The dgram-peer Arc cache (unix.rs, bzImage-hp110b, A/B owed)
+
+Connected DGRAM sockets stored the destination as a NAME and unix_send
+re-resolved it per send: UNIX_TABLE lock + String hash + memcmp + Arc
+clone + a String clone ALLOC per message. Now connect() primes
+dgram_peer_sock (Arc<UnixSocket>) and the send fast path validates it
+against the close markers (dead/Closed — both set at unix_close BEFORE
+the table entry is removed), falling back to the name re-resolution on
+a dead peer: the name-follow semantics (a restarted daemon's
+replacement socket receives) are preserved by construction. Built as
+bzImage-hp110b (md5 31ee7218...); the day's stall regime ate the A/B
+budget — LADDER A/B OWED to the next session (or a calm window).
+
+#### 110.5 The stall regime that ate the A/B (both arms, numbers)
+
+Series hp110 (SMP8 4G LL4 420s pristine reflink, interleaved):
+  g (bzImage-hp110, gated):   gx1 stall@10.3s, gx3 stall, gx5 stall = 0/3
+  b (bzImage-hp108-o2):       bx2 anim-only-stall, bx4 LADDER 18.84,
+                              bx6 LADDER 23.88 = 2/3 (yesterday 4/4)
+  ga (gated + ALL gated switches ARMED via cmdline — prints back):
+                              gap1 anim-fin stall, gap2 spawn-not-ready
+                              = 0/2  → prints ON does not restore it
+Every stall wedges at the same two points, both arms: (a) post-SA:403
+StorageDaemon chain (GenerateUserKeys done, powermgr publish / install
+stream never runs), (b) the early distributeddata OS_IPC NULL-jump
+face (gx1/gx5: cr2=0x7ff10049a1f1 — just past the mmap arena top,
+same pid re-faulting ~10Hz = an FFRT SEGV-handler retry loop; arena
+0x7ff1 class appeared ONLY in the two pre-anim g stalls). Known-old
+faces: usb_host NULL crash loop is in ALL boots incl. yesterday's
+ladders (background noise, NOT the wedge). CONCLUSION: the stalls are
+binary-timing-sensitive userspace races (the 108th saw the same class
+flip 1/4↔4/4 between opt0/opt2); the print gating changes codegen and
+lands on the unlucky side TODAY, with ga proving the prints themselves
+are not the cause. Merge decision for the gating commit is therefore
+NOT taken by ladder medians today — it is pushed on the branch with
+functional gates green and this caveat explicit; the ladder A/B (plus
+the peer-cache A/B) re-runs in a calmer window. Best today: b 18.84s
+(anim 5.43 → spawn 11.54 → ready 18.84; spawn follows anim.fin by
+0.3-0.9s in every ladder — the anim.ready→ready gap of 10.6-13.4s is
+animation-wait + launcher init (spawn→ready 4.2-7.3s), NOT a spawn
+delay — the 103rd's install-stream contributor no longer delays the
+spawn on the flipped kernel).
+
+#### 110.6 Gates on the gated tree
+
+x86_64 build (bzImage-hp110/hp110b) + 5 boots zero panics; riscv64
+build rc=0; aarch64 build rc=0; riscv64 make test ALL TESTS PASSED
+(run/hp110-maketest.log).
+
+#### 110.7 FOR THE 111TH
+
+1. The ladder A/B for BOTH commits in a calm window (the regime flips
+   across hours — yesterday 4/4 on the same b): g vs b n>=4, and
+   hp110b (peer cache) vs g n>=4. If g stays 0/N while b ladders in a
+   calm window, bisect the 12-file gating by half (the ohhunt family
+   is the bulk; bindertrace second).
+2. The OS_IPC arena-boundary fault loop (0x7ff10049a1f1, gx1/gx5):
+   reproduce under GDBPORT (driver supports it) — if FFRT's SEGV
+   handler mmap fails where Linux succeeds, that is a kernel-side
+   mmap address-policy bug worth finding regardless of gating.
+3. The stall wedge point (a): after GenerateUserKeys, the powermgr
+   publish + install chain never runs — taskdump (debug=taskdump)
+   at the wedge would name the parked chain.
+4. hilog fabric per-op: the 24µs-class recvmsg tax × 89k msg/s — the
+   skb alloc per message is the last per-op item before allocator
+   work (Tier 3 territory).
