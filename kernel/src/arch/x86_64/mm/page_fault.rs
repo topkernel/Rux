@@ -526,8 +526,7 @@ pub fn handle_mm_fault(
             // per 25 jiffies while keeping the first occurrence with the
             // access mode, so the anomaly stays visible without killing
             // the machine.
-            static COW_PRINT_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-    static LAST_COW_PAGE: core::sync::atomic::AtomicU64 =
+            static LAST_COW_PAGE: core::sync::atomic::AtomicU64 =
                 core::sync::atomic::AtomicU64::new(u64::MAX);
             static LAST_COW_JIFFY: core::sync::atomic::AtomicU64 =
                 core::sync::atomic::AtomicU64::new(0);
@@ -536,7 +535,7 @@ pub fn handle_mm_fault(
             let last_page = LAST_COW_PAGE.load(core::sync::atomic::Ordering::Relaxed);
             let last_j = LAST_COW_JIFFY.load(core::sync::atomic::Ordering::Relaxed);
             let repeat = last_page == page && now.saturating_sub(last_j) < 25;
-            if !repeat && COW_PRINT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
+            if !repeat {
                 LAST_COW_PAGE.store(page, core::sync::atomic::Ordering::Relaxed);
                 LAST_COW_JIFFY.store(now, core::sync::atomic::Ordering::Relaxed);
                 crate::pr_debug!(

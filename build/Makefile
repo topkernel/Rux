@@ -99,6 +99,9 @@ build-x86:
 	@$(MAKE) -C $(PROJECT_ROOT)/build PLATFORM=x86_64 build
 
 # aarch64 convenience alias — equivalent to `PLATFORM=aarch64 make build`
+build-x86-release:
+	@$(MAKE) -C $(PROJECT_ROOT)/build PLATFORM=x86_64 build-release
+
 build-aarch64:
 	@$(MAKE) -C $(PROJECT_ROOT)/build PLATFORM=aarch64 build
 

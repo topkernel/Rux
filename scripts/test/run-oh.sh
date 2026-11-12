@@ -33,7 +33,13 @@ SMP="${SMP:-8}"
 [ -e /dev/kvm ] || { ACCEL_BACKEND="tcg,thread=multi"; echo "NOTE: /dev/kvm not found — TCG fallback" >&2; }
 MODE="${2:-console}"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-KERNEL="${KERNEL:-$ROOT/target/x86_64-unknown-none/debug/bzImage}"
+# Release build by default (user rule: make oh-run is the production
+# boot). Debug build: KERNEL=target/.../debug/bzImage
+if [ -f "$ROOT/target/x86_64-unknown-none/release/bzImage" ]; then
+    KERNEL="${KERNEL:-$ROOT/target/x86_64-unknown-none/release/bzImage}"
+else
+    KERNEL="${KERNEL:-$ROOT/target/x86_64-unknown-none/debug/bzImage}"
+fi
 
 for f in ramdisk.img system.img vendor.img; do
     [ -f "$IMGDIR/$f" ] || { echo "missing $IMGDIR/$f" >&2; exit 1; }

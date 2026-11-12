@@ -1064,7 +1064,28 @@ fn read_file_internal(device: *const blkdev::GenDisk, path: &str, depth: u32) ->
     // Box::into_raw leaks the Box to make a static-lifetime pointer stored in
     // GLOBAL_EXT4_FS; this is called once during mount and cleaned up on unmount.
     unsafe {
-        // Create ext4 filesystem instance
+        // The boot init loader runs before the VFS mount — and the fresh
+        // instance's uninitialized extent walk mis-mapped the noble rootfs's
+        // indexed directory extents (/sbin lookup ENOENTed while the
+        // post-mount VFS resolved). Route through the MOUNTED instance
+        // (whose lookup_path walk the VFS uses) when one exists; the fresh
+        // fallback stays for the pre-mount initramfs case.
+        let g = GLOBAL_EXT4_FS.load(core::sync::atomic::Ordering::Acquire);
+        if !g.is_null() {
+            let fs_ref: &Ext4FileSystem = unsafe { &*g };
+            return match fs_ref.lookup_path(path) {
+                Ok((_ino, inode)) => {
+                    let size = inode.get_size() as usize;
+                    let mut buffer = alloc::vec![0u8; size];
+                    match inode.read_data(fs_ref, 0, &mut buffer) {
+                        Ok(n) if n == size => Some(buffer),
+                        _ => None,
+                    }
+                }
+                Err(_) => None,
+            };
+        }
+        // Create ext4 filesystem instance (pre-mount fallback)
         let mut fs = Box::new(Ext4FileSystem::new(device));
 
         // Initialize filesystem

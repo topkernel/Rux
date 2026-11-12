@@ -4165,8 +4165,8 @@ pub fn sys_timerfd_create(args: SyscallArgs) -> i64 {
             .map(|c| core::str::from_utf8(c).unwrap_or(""))
             .unwrap_or("")
             .trim_end_matches('\0');
-        crate::pr_warn!(
-            "TFDC[{}] clockid={} flags={:#x} comm='{}' pid={}",
+        crate::pr_debug!(
+                "TFDC[{}] clockid={} flags={:#x} comm='{}' pid={}",
             tfdc_i,
             args[0] as i32,
             args[1] as i32,
@@ -4176,7 +4176,8 @@ pub fn sys_timerfd_create(args: SyscallArgs) -> i64 {
     }
     let rc = sys_timerfd_create_inner(args);
     if tfdc_log {
-        crate::pr_warn!("TFDC[{}] -> {}", tfdc_i, rc);
+        crate::pr_debug!(
+                "TFDC[{}] -> {}", tfdc_i, rc);
     }
     rc
 }

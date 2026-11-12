@@ -249,8 +249,8 @@ pub fn kill_other_threads(current: *mut Task) {
                 }
             }
         }
-        crate::pr_err!(
-            "KOT-KILL: pid={} comm='{}' kills {} group members: {:?}",
+        crate::pr_debug!(
+                            "KOT-KILL: pid={} comm='{}' kills {} group members: {:?}",
             unsafe { (*current).pid() },
             ccomm,
             victims.len(),

@@ -357,8 +357,8 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
                         })
                         .map(|f| f.path())
                         .unwrap_or_else(|| alloc::string::String::from("?"));
-                    crate::pr_warn!(
-                        "APPMAPSRC {:?} ret={:#x} len={:#x} prot={:#x} flags={:#x} fd={} off={:#x} {}",
+                    crate::pr_debug!(
+                "APPMAPSRC {:?} ret={:#x} len={:#x} prot={:#x} flags={:#x} fd={} off={:#x} {}",
                         comm,
                         ret,
                         args[1],
@@ -375,8 +375,8 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
                 static NA: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
                 if NA.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
-                    crate::pr_warn!(
-                        "APPMAPSRC {:?} ret={:#x} len={:#x} prot={:#x} flags={:#x} fd={} off={:#x} -",
+                    crate::pr_debug!(
+                "APPMAPSRC {:?} ret={:#x} len={:#x} prot={:#x} flags={:#x} fd={} off={:#x} -",
                         comm,
                         ret,
                         args[1],

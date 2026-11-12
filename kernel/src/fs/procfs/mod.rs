@@ -1195,7 +1195,8 @@ pub fn read_file(path: &str) -> Option<Vec<u8>> {
         }
     }
 
-    get_procfs_sb()?.read_file(path)
+    let sb_path = path.strip_prefix("/proc").unwrap_or(path);
+    get_procfs_sb()?.read_file(sb_path)
 }
 
 /// Check if procfs is mounted

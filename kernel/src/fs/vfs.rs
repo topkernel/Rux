@@ -877,8 +877,8 @@ pub fn vfs_bind_mount(
                     }
                     comps.pop();
                 }
-                crate::pr_warn!(
-                    "bindwalk: '{}' ENOENT, resolves until '{}' ino={}",
+                crate::pr_debug!(
+                "bindwalk: '{}' ENOENT, resolves until '{}' ino={}",
                     source,
                     ok_until,
                     ok_ino
@@ -1075,8 +1075,8 @@ pub fn vfs_bind_mount(
             if crate::dfx::switches::oh_hunt_prints_on()
                 && MTPROBE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400
             {
-                crate::pr_warn!(
-                    "mtprobe: bind '{}' -> '{}': lookup+attach={}cyc clone-scan={}cyc clone-attach={}cyc nmounts={} nclones={}",
+                crate::pr_debug!(
+                "mtprobe: bind '{}' -> '{}': lookup+attach={}cyc clone-scan={}cyc clone-attach={}cyc nmounts={} nclones={}",
                     source,
                     target,
                     t2 - t0,

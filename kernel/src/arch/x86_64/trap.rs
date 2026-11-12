@@ -2165,8 +2165,8 @@ fn gp_regmem_dump(regs: &PtRegs) {
         // hp88 hunt: a corrupted heap pointer inside a live perf ring's
         // mapping is the placement-overlap conviction.
         if let Some((va, len, id)) = crate::perf::ring_covers(v) {
-            crate::pr_err!(
-                "GP-REGMEM: {}={:#x} INSIDE PERF RING va={:#x} len={:#x} of event {}",
+            crate::pr_debug!(
+                            "GP-REGMEM: {}={:#x} INSIDE PERF RING va={:#x} len={:#x} of event {}",
                 name, v, va, len, id
             );
         }
@@ -2203,8 +2203,8 @@ fn gp_regmem_dump(regs: &PtRegs) {
                         ((*pd).flags().raw() as u64, (*pd).index())
                     }
                 };
-                crate::pr_err!(
-                    "GP-PTE: {}={:#x} pte={:#x} frame={:#x} rc={} mapcount={} ring_frame={} flags={:#x} rmapidx={:#x}(va {:#x})",
+                crate::pr_debug!(
+                            "GP-PTE: {}={:#x} pte={:#x} frame={:#x} rc={} mapcount={} ring_frame={} flags={:#x} rmapidx={:#x}(va {:#x})",
                     name, v, bits, frame, rc, mc, inring, fl, idx,
                     idx.wrapping_mul(0x1000)
                 );
@@ -2285,16 +2285,18 @@ fn gp_mmhistory_dump(regs: &PtRegs) {
                 _ => "mremap",
             };
             if shown < 12 {
-                crate::pr_err!(
-                    "GP-MMH: [{tag} pid={pid}] {name} addr={addr:#x} len={len:#x} rc={rc}"
+                crate::pr_debug!(
+                            "GP-MMH: [{tag} pid={pid}] {name} addr={addr:#x} len={len:#x} rc={rc}"
                 );
             }
             shown += 1;
         }
         if shown == 0 {
-            crate::pr_err!("GP-MMH: [{tag} pid={pid}] (no mm syscalls recorded)");
+            crate::pr_debug!(
+                            "GP-MMH: [{tag} pid={pid}] (no mm syscalls recorded)");
         } else if shown > 12 {
-            crate::pr_err!("GP-MMH: [{tag} pid={pid}] ... {shown}/16 events (capped)");
+            crate::pr_debug!(
+                            "GP-MMH: [{tag} pid={pid}] ... {shown}/16 events (capped)");
         }
     };
     dump("self", tk as *const _);
@@ -2311,13 +2313,15 @@ fn gp_mmhistory_dump(regs: &PtRegs) {
         }
     });
     if sibs > 6 {
-        crate::pr_err!("GP-MMH: [sib] ... 6/{sibs} siblings shown");
+        crate::pr_debug!(
+                            "GP-MMH: [sib] ... 6/{sibs} siblings shown");
     }
     // hp89 hunt: the global PTE-clearing ring tail — the non-syscall
     // clearers (unmap engine calls, dying-mm teardowns, rmap walkers)
     // around the corruption window, plus whether any recorded
     // unmap_pages range covers the corrupted pointer VAs.
-    crate::pr_err!("GP-UNWATCH: tail of PTE-clearing ring (newest first):");
+    crate::pr_debug!(
+                            "GP-UNWATCH: tail of PTE-clearing ring (newest first):");
     crate::mm::unwatch::dump_tail(120);
     for (name, v) in [
         ("rbx", regs.rbx),
@@ -2327,7 +2331,8 @@ fn gp_mmhistory_dump(regs: &PtRegs) {
     ] {
         if v > 0x1_0000 && v < 0x0000_8000_0000_0000 {
             let hit = crate::mm::unwatch::covered_by_unmap(v & !0xfff);
-            crate::pr_err!("GP-UNWATCH: {}={:#x} covered_by_unmap={}", name, v, hit);
+            crate::pr_debug!(
+                            "GP-UNWATCH: {}={:#x} covered_by_unmap={}", name, v, hit);
         }
     }
 }

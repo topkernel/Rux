@@ -160,8 +160,8 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                 use crate::arch::uaccess::get_user;
                 let w1 = unsafe { get_user(0x7fffffffc754 as *const u32) };
                 let w2 = unsafe { get_user(0x7fffffffc7f4 as *const u32) };
-                crate::pr_warn!(
-                    "forkgate: appspawn fork flags={:#x} word@c754={:?} word@c7f4={:?}",
+                crate::pr_debug!(
+                "forkgate: appspawn fork flags={:#x} word@c754={:?} word@c7f4={:?}",
                     flags,
                     w1,
                     w2
@@ -183,8 +183,8 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                         .trim_end_matches('\0');
                     let nr = tk.last_syscall_nr.load(core::sync::atomic::Ordering::Relaxed);
                     let running = tk.state().is_running();
-                    crate::pr_warn!(
-                        "forkgate:  sib tid {} comm='{}' lastsys={} {}",
+                    crate::pr_debug!(
+                "forkgate:  sib tid {} comm='{}' lastsys={} {}",
                         tk.pid(),
                         nc,
                         nr,

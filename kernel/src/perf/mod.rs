@@ -1798,8 +1798,8 @@ fn perf_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
 fn perf_open_einval_diag(arm: &str, attr: &AttrHead, pid: i32, cpu: i32, group_fd: i32, flags: u64) {
     static N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
     if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
-        crate::pr_err!(
-            "PERF-EINVAL[{}]: pid={} cpu={} gfd={} flags={:#x} size={} type={:#x} config={:#x} sample_type={:#x} read_format={:#x} flags1={:#x} flags2={:#x} period={}",
+        crate::pr_debug!(
+                            "PERF-EINVAL[{}]: pid={} cpu={} gfd={} flags={:#x} size={} type={:#x} config={:#x} sample_type={:#x} read_format={:#x} flags1={:#x} flags2={:#x} period={}",
             arm, pid, cpu, group_fd, flags, attr.size, attr.type_, attr.config,
             attr.sample_type, attr.read_format, attr.flags1, attr.flags2, attr.sample_period
         );

@@ -10853,8 +10853,8 @@ fn binder_transaction(
                             hex.push(HEXC[(b & 0xf) as usize] as char);
                         }
                     }
-                    crate::pr_warn!(
-                        "SACSA txn{} from pid={} comm-check={} -> samgr pid={} dlen={} parcel={}",
+                    crate::pr_debug!(
+                "SACSA txn{} from pid={} comm-check={} -> samgr pid={} dlen={} parcel={}",
                         txn.id,
                         proc.pid,
                         crate::sched::current()
@@ -10929,8 +10929,8 @@ fn binder_transaction(
                 } else {
                     alloc::string::String::from("-")
                 };
-                crate::pr_warn!(
-                    "SAREG {} txn{} code={} from pid={} tgid={} comm='{}' -> pid={} dlen={} parcel={}",
+                crate::pr_debug!(
+                "SAREG {} txn{} code={} from pid={} tgid={} comm='{}' -> pid={} dlen={} parcel={}",
                     if reply { "reply" } else { "send " },
                     t_id,
                     if reply {
@@ -11005,8 +11005,8 @@ fn binder_transaction(
                         parcel = s;
                     }
                 }
-                crate::pr_warn!(
-                    "SACB txn{} code={} flags={:#x}{} comm='{}' -> pid={} tid={} dlen={} parcel={}",
+                crate::pr_debug!(
+                "SACB txn{} code={} flags={:#x}{} comm='{}' -> pid={} tid={} dlen={} parcel={}",
                     txn.id,
                     tr.code,
                     tr.flags,
@@ -11282,7 +11282,7 @@ fn binder_transaction(
             } else {
                 alloc::string::String::from("-")
             };
-            crate::pr_warn!(
+            crate::pr_debug!(
                 "SLTX {} tgid={} pid={} -> pid={} child={} code={:#x} oneway={} dlen={} parcel={}",
                 if sender_is_app { "out" } else { "in " },
                 sender_tgid,
@@ -13240,8 +13240,8 @@ fn binder_thread_read(
                                                 let name = core::str::from_utf8(unsafe { (*cur).comm() })
                                                     .unwrap_or("")
                                                     .trim_end_matches('\0');
-                                                crate::pr_warn!(
-                                                    "SLRD tgid={} tid={} comm='{}' read txn id={} code={:#x} reply={}",
+                                                crate::pr_debug!(
+                "SLRD tgid={} tid={} comm='{}' read txn id={} code={:#x} reply={}",
                                                     tg,
                                                     thread.tid,
                                                     name,

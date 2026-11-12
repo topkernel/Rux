@@ -541,8 +541,8 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
             static PROBE_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if PROBE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400 {
-                crate::pr_warn!(
-                    "devopen-probe '{}' flags {:#x} root='{}' {} (pid {})",
+                crate::pr_debug!(
+                "devopen-probe '{}' flags {:#x} root='{}' {} (pid {})",
                     full_path,
                     flags,
                     root_str,
@@ -555,8 +555,8 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
                     core::sync::atomic::AtomicUsize::new(0);
                 let n = DEVOPEN_FAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 if n < 200 {
-                    crate::pr_warn!(
-                        "devopen-fail[{}] '{}' flags {:#x} -> errno {} root='{}' (pid {})",
+                    crate::pr_debug!(
+                "devopen-fail[{}] '{}' flags {:#x} -> errno {} root='{}' (pid {})",
                         n,
                         full_path,
                         flags,
@@ -4136,7 +4136,29 @@ pub fn sys_openat2(args: SyscallArgs) -> i64 {
     // semantics must apply to creation too: LTP openat202 passes
     // O_RDONLY|O_CREAT with every resolve flag, and IN_ROOT's
     // "/tmp/<tmpdir>/proc/version" must ENOENT (no intermediate "proc"),
-    // not silently create/resolve the caller's original absolute path.
+
+    // /proc read-only shortcut (same as sys_openat_impl): systemd's
+    // fopen() uses openat2, which goes straight to vfs::file_open and
+    // ENOENTs on /proc/cmdline — the "Failed to fix up PID 1
+    // environment" freeze (noble-desktop, 2026-11-12).
+    if (how.flags as u32 & 0x3) == 0
+        && (how.flags as u32 & 0o100) == 0
+        && !crate::fs::vfs::process_rooted()
+        && cleaned.starts_with("/proc/")
+    {
+        if let Some(content) = crate::fs::procfs::read_file(&cleaned) {
+            return match crate::fs::vfs::open_mem_file(content, how.flags as u32) {
+                Ok(fd) => {
+                    if (how.flags as u32 & 0o2000000) != 0 {
+                        crate::fs::set_cloexec_fd(fd, true);
+                    }
+                    fd as i64
+                }
+                Err(e) => e as i64,
+            };
+        }
+    }
+        // not silently create/resolve the caller's original absolute path.
     match crate::fs::vfs::file_open(&cleaned, how.flags as u32, how.mode as u32) {
         Ok(fd) => {
             if (how.flags as u32 & 0o2000000 /*O_CLOEXEC*/) != 0 {

@@ -162,7 +162,8 @@ pub fn try_defer(ptr: *mut u8, layout: &Layout) -> bool {
     // silently deferred nothing).
     static ENGAGED: AtomicUsize = AtomicUsize::new(0);
     if ENGAGED.fetch_add(1, Ordering::Relaxed) == 0 {
-        crate::pr_err!("DEFERFREE: engaged (first MmStruct free held back {}ms)", DEFER_MS);
+        crate::pr_debug!(
+                            "DEFERFREE: engaged (first MmStruct free held back {}ms)", DEFER_MS);
     }
     true
 }

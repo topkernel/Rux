@@ -3139,8 +3139,8 @@ fn send_signal_g(pid: u32, sig: i32, group: i32) -> Result<(), i32> {
                     )
                 })
                 .unwrap_or((0, alloc::string::String::from("kernel")));
-            crate::pr_err!(
-                "KSIG{}: caller pid={} comm='{}' -> target pid={} group={}",
+            crate::pr_debug!(
+                            "KSIG{}: caller pid={} comm='{}' -> target pid={} group={}",
                 sig,
                 cp,
                 cc,

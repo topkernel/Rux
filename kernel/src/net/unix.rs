@@ -45,7 +45,7 @@ use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use crate::fs::file::{File, FileFlags, FileOps};
 use crate::net::socket::{SocketOptions, SOCK_CLOEXEC_FLAG, SOCK_NONBLOCK_FLAG, SOCK_TYPE_MASK};
@@ -169,6 +169,42 @@ pub struct UnixSocket {
     /// Cached tap classification (TAP_* bits). Maintained by
     /// refresh_name_caches().
     tap_class: AtomicU8,
+    /// 111st hot-path mirrors (passcred_flag/perf-r3 discipline): the
+    /// per-message DGRAM send/recv paths — the 89k msg/s hilog fabric —
+    /// took the options Spinlock twice per send (sndtimeo in the write
+    /// path + sndbuf cap) and once per recv (rcvtimeo), plus the
+    /// bound_name / peer / dead / state / eof / shut_wr Spinlock pairs
+    /// just to READ one-way latches. The fp-chain record (hp108r-w1)
+    /// priced the family: sndtimeo_deadline alone 1.4k samples, the
+    /// unix_send lock sites ~3.6k. Mirrors are one-way or config
+    /// values; writers store BEFORE (latches) or after (config) the
+    /// authoritative Spinlock write, hot readers skip the locked read
+    /// when the mirror says "not set" — every skip direction is the
+    /// benign half of the race Linux already has against concurrent
+    /// setsockopt/shutdown/close.
+    sndtimeo_us_m: AtomicU64,
+    rcvtimeo_us_m: AtomicU64,
+    sndbuf_m: AtomicU32,
+    /// True once bound_name has EVER been Some (bind / accept-inherit /
+    /// autobind — every assignment runs refresh_name_caches, which
+    /// maintains this). Skips the bound_name lock pair on the per-send
+    /// autobind check.
+    has_bound_name_m: AtomicBool,
+    /// True once a peer Weak has EVER been stored (accept / socketpair).
+    /// A name-connected DGRAM socket never has one: the send path skips
+    /// the peer lock pair when clear.
+    has_peer_m: AtomicBool,
+    /// One-way close latch: stored BEFORE the state=Closed / dead=true
+    /// writes in unix_close. The per-send EPIPE gate and the 110th
+    /// dgram-peer-cache validation load this instead of the dead+state
+    /// lock pair per message.
+    closed_m: AtomicBool,
+    /// One-way EOF latch (RCV_SHUTDOWN view): stored before every
+    /// `*eof.lock() = true` write (shutdown both legs, peer close).
+    eof_m: AtomicBool,
+    /// One-way SHUT_WR latch: stored before the shut_wr write in
+    /// unix_shutdown. Skips the shut_wr lock pair on every send.
+    shut_wr_m: AtomicBool,
     /// Name-table registration key. For abstract sockets this is the
     /// abstract name (== bound_name); for filesystem sockets it is the
     /// socket node's inode identity "#<fs_id>:<ino>" (see fs_reg_key) —
@@ -307,6 +343,14 @@ impl UnixSocket {
             pending_anc: Spinlock::new(Vec::new()),
             pending_anc_n: AtomicUsize::new(0),
             passcred_flag: AtomicBool::new(false),
+            sndtimeo_us_m: AtomicU64::new(0),
+            rcvtimeo_us_m: AtomicU64::new(0),
+            sndbuf_m: AtomicU32::new(212992), // SocketOptions::new() default
+            has_bound_name_m: AtomicBool::new(false),
+            has_peer_m: AtomicBool::new(false),
+            closed_m: AtomicBool::new(false),
+            eof_m: AtomicBool::new(false),
+            shut_wr_m: AtomicBool::new(false),
             eof: Spinlock::new(false),
             dead: Spinlock::new(false),
             shut_wr: Spinlock::new(false),
@@ -328,13 +372,17 @@ impl UnixSocket {
     }
 
     /// W3: SO_RCVTIMEO as an absolute jiffies deadline (None = infinite).
+    /// 111st: mirror read — per-recv on the hilog fabric (89k msg/s);
+    /// setsockopt publishes rcvtimeo_us_m after the options write.
     pub fn rcvtimeo_deadline(&self) -> Option<u64> {
-        timeout_to_deadline(self.options.lock().rcvtimeo_us)
+        timeout_to_deadline(self.rcvtimeo_us_m.load(Ordering::Relaxed))
     }
 
     /// W3: SO_SNDTIMEO as an absolute jiffies deadline (None = infinite).
+    /// 111st: mirror read — per-send on the hilog fabric (the record's
+    /// 1.4k-sample sndtimeo_deadline line).
     pub fn sndtimeo_deadline(&self) -> Option<u64> {
-        timeout_to_deadline(self.options.lock().sndtimeo_us)
+        timeout_to_deadline(self.sndtimeo_us_m.load(Ordering::Relaxed))
     }
 
     /// Bytes currently queued for the receiver.
@@ -423,6 +471,13 @@ impl UnixSocket {
     /// one lock, one Arc allocation when a name exists.
     fn refresh_name_caches(&self) {
         let name = self.bound_name.lock().clone();
+        // 111st: has_bound_name_m — the per-send autobind check skips
+        // the bound_name lock pair once a name (any name) is published.
+        // Refresh runs at every bound_name assignment, so the latch
+        // covers bind / accept-inherit / autobind alike.
+        if name.is_some() {
+            self.has_bound_name_m.store(true, Ordering::Release);
+        }
         let mut cls: u8 = 0;
         if let Some(n) = name.as_ref() {
             if n.ends_with("hilogInput") || n.ends_with("hilogd.server") {
@@ -460,7 +515,13 @@ impl UnixSocket {
             return true;
         }
         // EOF (peer closed) is a readable condition — read returns 0.
-        *self.eof.lock() || *self.state.lock() == UnixState::Closed
+        // 111st: one-way latch mirrors — both stored BEFORE their locked
+        // writes, so false PROVES the underlying flag is unset (a
+        // completing writer's wake re-triggers every re-checking
+        // reader; the transient is the same concurrent-close window the
+        // reference exposes).
+        self.eof_m.load(Ordering::Acquire)
+            || self.closed_m.load(Ordering::Acquire)
     }
 
     /// Can send() accept more bytes now (or fail with a real error)?
@@ -1196,7 +1257,10 @@ fn unix_recvmsg_empty_tail(sock: &Arc<UnixSocket>) -> Result<UnixRecvResult, i32
             return Err(v);
         }
     }
-    if *sock.eof.lock() || *sock.state.lock() == UnixState::Closed {
+    // 111st: one-way latch mirrors — both stored BEFORE their locked
+    // writes, so false PROVES neither is set; true = closing/EOF is
+    // imminent (the closer's wake re-triggers the blocking re-check).
+    if sock.eof_m.load(Ordering::Acquire) || sock.closed_m.load(Ordering::Acquire) {
         return Ok(unix_recv_eof());
     }
     match sock.kind {
@@ -1470,6 +1534,7 @@ pub fn unix_connect(
             let child = Arc::new(UnixSocket::new(sock.kind));
             *child.state.lock() = UnixState::Connected;
             *child.peer.lock() = Some(Arc::downgrade(sock));
+            child.has_peer_m.store(true, Ordering::Release);
             // The child inherits the server's bound name for
             // getsockname/recvfrom reporting.
             *child.bound_name.lock() = server.bound_name.lock().clone();
@@ -1482,6 +1547,7 @@ pub fn unix_connect(
             // Client side: point at the child. The child's Arc is owned by
             // the server's accept queue until accept() installs it as an fd.
             *sock.peer.lock() = Some(Arc::downgrade(&child));
+            sock.has_peer_m.store(true, Ordering::Release);
             *sock.state.lock() = UnixState::Connected;
             server.accept_queue.lock().push_back(child);
             // 66th (dfx=pctlmon): a client just queued itself onto the
@@ -1707,10 +1773,15 @@ pub fn unix_send(
     nonblock: bool,
     deadline: Option<u64>,
 ) -> Result<usize, i32> {
-    if *sock.shut_wr.lock() {
+    // 111st: shut_wr_m / sndbuf_m mirror reads (one-way latch + config
+    // mirror) — this entry runs once per message on the hilog fabric.
+    // shut_wr_m is stored BEFORE the shut_wr write, so false proves the
+    // flag is unset; a concurrent shutdown's transient is the same race
+    // Linux has (SHUT_WR is immediate for concurrent senders).
+    if sock.shut_wr_m.load(Ordering::Acquire) {
         return Err(-32); // EPIPE
     }
-    let cap = sock.options.lock().sndbuf as usize;
+    let cap = sock.sndbuf_m.load(Ordering::Relaxed) as usize;
 
     // sc102 spin detector: a sender whose rip parks in the writev wrapper
     // while stime runs away (183-190 ticks, utime ~0) is LOOPING here —
@@ -1760,8 +1831,12 @@ pub fn unix_send(
             }
             UnixKind::Dgram => {
                 // Linux autobinds an unbound DGRAM sender so the receiver
-                // has a reply address.
-                if sock.bound_name.lock().is_none() {
+                // has a reply address. 111st: has_bound_name_m skips the
+                // bound_name lock pair (latch set in refresh_name_caches
+                // at every assignment).
+                if !sock.has_bound_name_m.load(Ordering::Acquire)
+                    && sock.bound_name.lock().is_none()
+                {
                     autobind(sock);
                 }
                 if let Some(a) = dest {
@@ -1775,9 +1850,15 @@ pub fn unix_send(
                         Some(t) => t,
                         None => return Err(-111), // ECONNREFUSED
                     }
-                } else if let Some(p) = sock.peer_arc() {
-                    // socketpair DGRAM: the peer link is the destination.
-                    p
+                } else if sock.has_peer_m.load(Ordering::Acquire) {
+                    // 111st: a DGRAM socket with a peer Weak is a
+                    // socketpair — no peer Weak can ever exist on a
+                    // name-connected DGRAM socket, so the latch lets the
+                    // fabric skip the peer lock pair per message.
+                    match sock.peer_arc() {
+                        Some(p) => p,
+                        None => return Err(-32), // EPIPE — peer closed
+                    }
                 } else if let Some(cached) = sock.dgram_peer_sock.lock().clone() {
                     // 110th fast path: the connect()-resolved Arc, validated
                     // against the close markers. A dead cached peer falls
@@ -1785,7 +1866,10 @@ pub fn unix_send(
                     // semantics (a restarted daemon's replacement socket
                     // receives) are keyed by NAME, and the cache is only an
                     // accelerator, never an identity.
-                    if *cached.dead.lock() || *cached.state.lock() == UnixState::Closed {
+                    // 111st: closed_m replaces the dead+state lock pair in
+                    // the validation (stored BEFORE both writes at
+                    // unix_close — false proves both are unset).
+                    if cached.closed_m.load(Ordering::Acquire) {
                         if let Some(key) = sock.dgram_peer.lock().clone() {
                             match lookup(&key) {
                                 Some(t) => {
@@ -1814,7 +1898,11 @@ pub fn unix_send(
             }
         };
 
-        if *target.state.lock() == UnixState::Closed {
+        // 111st: closed_m fast gate (one-way latch stored before the
+        // state=Closed/dead writes at unix_close; false proves not yet
+        // closed, true = the close began — EPIPE either way, the same
+        // concurrent-close race the reference exposes).
+        if target.closed_m.load(Ordering::Acquire) {
             return Err(-32); // EPIPE
         }
         // RCV_SHUTDOWN parity (reference unix_dgram_sendmsg /
@@ -1822,7 +1910,8 @@ pub fn unix_send(
         // EPIPE`): the target's read side is shut (peer SHUT_WR toward it,
         // or its peer closed). eof also releases a blocked sender: unix_wait_for_peer
         // re-evaluates RCV_SHUTDOWN after every wake.
-        if *target.eof.lock() {
+        // 111st: eof_m mirror (stored before every eof write).
+        if target.eof_m.load(Ordering::Acquire) {
             return Err(-32); // EPIPE
         }
 
@@ -2743,7 +2832,10 @@ pub fn unix_recv(
             return Err(v);
         }
     }
-    if *sock.eof.lock() || *sock.state.lock() == UnixState::Closed {
+    // 111st: one-way latch mirrors — both stored BEFORE their locked
+    // writes, so false PROVES neither is set; true = closing/EOF is
+    // imminent (the closer's wake re-triggers the blocking re-check).
+    if sock.eof_m.load(Ordering::Acquire) || sock.closed_m.load(Ordering::Acquire) {
         return Ok(unix_recv_eof());
     }
     match sock.kind {
@@ -2764,9 +2856,12 @@ pub fn unix_shutdown(sock: &Arc<UnixSocket>, how: i32) -> Result<(), i32> {
         return Err(-22); // EINVAL
     }
     if how >= 1 {
+        // 111st: latch first (see the mirror docs on UnixSocket).
+        sock.shut_wr_m.store(true, Ordering::Release);
         *sock.shut_wr.lock() = true;
         // Tell the peer its recvs will EOF (after draining).
         if let Some(peer) = sock.peer_arc() {
+            peer.eof_m.store(true, Ordering::Release);
             *peer.eof.lock() = true;
             peer.wait_queue.wake_up_all();
             // EOF is a readability edge for the peer's watchers too.
@@ -2778,6 +2873,7 @@ pub fn unix_shutdown(sock: &Arc<UnixSocket>, how: i32) -> Result<(), i32> {
     }
     if how == 0 || how == 2 {
         // SHUT_RD: subsequent recvs return EOF once the queue drains.
+        sock.eof_m.store(true, Ordering::Release);
         *sock.eof.lock() = true;
     }
     // sk_state_change(sk) (sock_def_wakeup = wake_all on sk_sleep): our
@@ -2815,6 +2911,9 @@ pub fn unix_close(sock: &Arc<UnixSocket>) {
             );
         }
     }
+    // 111st: closed_m latch FIRST — the send fast path and the dgram-peer
+    // cache validation prove "not closing" from this store alone.
+    sock.closed_m.store(true, Ordering::Release);
     *sock.state.lock() = UnixState::Closed;
     // Peer's poll() starts reporting POLLHUP (Linux SHUTDOWN_MASK on peer
     // release) — set before the wake below so a racing poll sees it.
@@ -2842,6 +2941,7 @@ pub fn unix_close(sock: &Arc<UnixSocket>) {
     }
     // Peer gets drain-then-EOF semantics.
     if let Some(peer) = sock.peer_arc() {
+        peer.eof_m.store(true, Ordering::Release);
         *peer.eof.lock() = true;
         // Reference unix_release_sock: when a SOCK_STREAM/SOCK_SEQPACKET
         // socket closes with UNREAD data still in its receive queue, the
@@ -3364,7 +3464,8 @@ fn unix_recv_stream_user(
         }
         // Nothing queued. Empty-queue semantics (mirror of unix_recv's
         // tail): EOF, ENOTCONN, EAGAIN, or one blocking wait round.
-        if *sock.eof.lock() || *sock.state.lock() == UnixState::Closed {
+        // 111st: one-way latch mirrors (see unix_recvmsg_empty_tail).
+        if sock.eof_m.load(Ordering::Acquire) || sock.closed_m.load(Ordering::Acquire) {
             return 0; // EOF after drain
         }
         let state = *sock.state.lock();
@@ -3674,6 +3775,8 @@ pub fn unix_socketpair(type_: i32) -> Result<(usize, usize), i32> {
     // (EOF/EPIPE) without a reference cycle.
     *a.peer.lock() = Some(Arc::downgrade(&b));
     *b.peer.lock() = Some(Arc::downgrade(&a));
+    a.has_peer_m.store(true, Ordering::Release);
+    b.has_peer_m.store(true, Ordering::Release);
     // DGRAM pairs deliver through the peer link too (unix_send checks the
     // peer before the connected name).
 
@@ -3798,8 +3901,14 @@ pub fn unix_setsockopt(
             let mut opts = sock.options.lock();
             if optname == SO_RCVTIMEO {
                 opts.rcvtimeo_us = us;
+                drop(opts);
+                // 111st mirror publish (per-recv hot read).
+                sock.rcvtimeo_us_m.store(us, Ordering::Release);
             } else {
                 opts.sndtimeo_us = us;
+                drop(opts);
+                // 111st mirror publish (per-send hot read).
+                sock.sndtimeo_us_m.store(us, Ordering::Release);
             }
             0
         }
@@ -3820,6 +3929,9 @@ pub fn unix_setsockopt(
             let doubled = (v.saturating_mul(2).max(2048)) as u32;
             if optname == SO_SNDBUF {
                 opts.sndbuf = doubled;
+                drop(opts);
+                // 111st mirror publish (per-send cap read).
+                sock.sndbuf_m.store(doubled, Ordering::Release);
             } else {
                 opts.rcvbuf = doubled;
             }

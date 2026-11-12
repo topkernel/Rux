@@ -783,8 +783,8 @@ pub fn timer_softirq_handler(_nr: usize) {
                         }
                         printed += 1;
                         if r.ghost {
-                            crate::pr_err!(
-                                "TIMEDSLEEP-GHOST pid={} sys={} no-shadow stk={:#x} {:#x} {:#x} {:#x}",
+                            crate::pr_debug!(
+                            "TIMEDSLEEP-GHOST pid={} sys={} no-shadow stk={:#x} {:#x} {:#x} {:#x}",
                                 r.pid,
                                 r.ghost_sys,
                                 r.stk[0],
@@ -821,10 +821,7 @@ pub fn timer_softirq_handler(_nr: usize) {
                             let d = current as i64 - r.deadline as i64;
                             (d.abs() * 1000 / crate::config::KERNEL_HZ as i64, if d >= 0 { "past" } else { "future" })
                         };
-                        static TS_PARK_N: core::sync::atomic::AtomicUsize =
-                            core::sync::atomic::AtomicUsize::new(0);
-                        if TS_PARK_N.fetch_add(1, Ordering::Relaxed) < 20 {
-                        crate::pr_err!(
+                        crate::pr_debug!(
                             "TIMEDSLEEP-PARK pid={} kind={} age_s={} dur_ms={} deadline_{}ms_{} wheel={} timer_id={:#x}",
                             r.pid,
                             domain,
@@ -835,7 +832,6 @@ pub fn timer_softirq_handler(_nr: usize) {
                             wheel,
                             r.timer_id
                         );
-                        } // TS_PARK_N cap
                     }
                 }
             }
@@ -865,7 +861,8 @@ pub fn timer_softirq_handler(_nr: usize) {
     {
         let n = crate::sched::sched::dfx_claim_inject();
         if n > 0 {
-            crate::pr_err!("CLAIM-INJECT poisoned={}", n);
+            crate::pr_debug!(
+                            "CLAIM-INJECT poisoned={}", n);
         }
     }
 
@@ -881,7 +878,8 @@ pub fn timer_softirq_handler(_nr: usize) {
     {
         let n = crate::sched::sched::dfx_oncpu_inject();
         if n > 0 {
-            crate::pr_err!("ONCPU-INJECT poisoned={}", n);
+            crate::pr_debug!(
+                            "ONCPU-INJECT poisoned={}", n);
         }
     }
 

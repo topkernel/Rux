@@ -123,7 +123,7 @@ oh-image:
 
 # Boot OpenHarmony (x86_64, TCG, GTK window; serial console on this
 # terminal). The stock image boots 135+ services to the launcher.
-oh-run: build-x86 oh-image
+oh-run: build-x86-release oh-image
 	@echo "Starting OpenHarmony (x86_64, TCG, GTK window)..."
 	@bash scripts/test/run-oh.sh "$(OH_IMGDIR)" gui
 
