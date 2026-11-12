@@ -270,15 +270,37 @@ pub fn epoll_notify_file(file_id: u64) {
             );
         }
     }
-    let registry = epoll_wake_shard(file_id).lock_irqsave();
-    for (id, ep) in registry.bindings.iter() {
-        if *id != file_id {
-            continue;
+    // DEADLOCK FIX (AB-BA, 2026-11-12): the old code held the shard
+    // lock while taking epoll.entries.lock and calling wake_up_all —
+    // while epoll_file_close holds entries and takes ALL shard locks
+    // (epoll_wake_unregister_all). Thread A (notify) held shard and
+    // wanted entries; thread B (close) held entries and wanted shard.
+    //
+    // Fix: collect the epoll pointers under the shard lock, RELEASE
+    // the shard lock, THEN touch entries and wake. Pointer lifetime is
+    // safe: close unregisters the binding (under the shard lock) BEFORE
+    // freeing, so any pointer we collect here remains valid until the
+    // next shard-lock acquisition — and we already dropped it.
+    // Fixed-size stack array — NO allocation under the shard lock
+    // (allocating there AB-BAs with any close-path allocation that
+    // holds the allocator lock and wants a shard lock).
+    const MAX_TARGETS: usize = 32;
+    let mut targets: [*mut EpollFile; MAX_TARGETS] = [core::ptr::null_mut(); MAX_TARGETS];
+    let mut n_targets = 0usize;
+    {
+        let registry = epoll_wake_shard(file_id).lock_irqsave();
+        for (id, ep) in registry.bindings.iter() {
+            if *id == file_id && n_targets < MAX_TARGETS {
+                targets[n_targets] = *ep;
+                n_targets += 1;
+            }
         }
-        // SAFETY: `ep` came from Box::into_raw in sys_epoll_create and its
-        // close op unregisters the binding before freeing, so it is alive
-        // while we hold the registry lock.
-        let epoll = unsafe { &**ep };
+    }
+    // SAFETY: each  was collected while holding the shard lock; the
+    // close path removes the binding under the same lock before Box::free,
+    // so the pointer is valid (the binding existed at collect time).
+    for &ep in targets[..n_targets].iter() {
+        let epoll = unsafe { &*ep };
         {
             let mut entries = epoll.entries.lock();
             for entry in entries.iter_mut() {
