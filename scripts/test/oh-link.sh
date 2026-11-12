@@ -50,8 +50,28 @@ for f in $REQUIRED $OPTIONAL; do
         echo "missing image: $STORE/$f" >&2
         MISSING=1; continue
     fi
-    rm -f "$LINKDIR/$f"
-    ln -s "$STORE_ABS/$f" "$LINKDIR/$f"
+    # A REAL FILE already sits in the link dir (a copied image, or a
+    # link the filesystem refused to replace): keep it and only replace
+    # it with a symlink when the copy is byte-identical to the store
+    # entry. `rm` on an immutable/protected file aborts the whole
+    # make target — so never rm blindly.
+    if [ ! -L "$LINKDIR/$f" ] && [ -f "$LINKDIR/$f" ]; then
+        if cmp -s "$LINKDIR/$f" "$STORE/$f"; then
+            echo "  $f: real file already present (identical to store) — keeping"
+            continue
+        fi
+        echo "  $f: real file DIFFERS from store — replacing with symlink"
+        rm -f "$LINKDIR/$f" 2>/dev/null || {
+            echo "  $f: cannot remove (immutable?) — leaving the local copy" >&2
+            continue
+        }
+    fi
+    rm -f "$LINKDIR/$f" 2>/dev/null || true
+    ln -s "$STORE_ABS/$f" "$LINKDIR/$f" 2>/dev/null || {
+        # symlink creation refused (protected dir) — the real file is fine
+        echo "  $f: symlink refused — keeping the local copy" >&2
+        continue
+    }
 done
 [ "$MISSING" = 0 ] || { echo "oh-image incomplete (see above)." >&2; exit 1; }
 
