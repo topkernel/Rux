@@ -90,8 +90,25 @@ const EPOLL_RECHECK_JIFFIES: u64 = {
     if j == 0 { 1 } else { j }
 };
 
-/// Epoll monitored fd entry
+/// Epoll monitored fd entry. `list` is the FIRST field so a node pointer
+/// doubles as its `ListHead` pointer (the container_of cast is then a
+/// no-op) — same intrusive-list trick as `EpollWakeNode`.
+///
+/// ALLOCATION-FREE LIST BODY (117th, allocator-under-entries-lock hunt):
+/// the per-epoll interest set is an intrusive list of `EpollEntry`s —
+/// linking and unlinking are two pointer writes, and the node is
+/// Box-allocated / freed OUTSIDE the `entries` lock section. The previous
+/// `Vec<EpollEntry>` body pushed (and on capacity growth, ALLOCATED)
+/// inside the lock: an allocation whose per-CPU magazine row was empty
+/// takes the small_alloc class lock and can walk pages / touch the buddy
+/// under it — sections measured at 300 ms of real KVM time under OH-boot
+/// churn (dfx=allocwatch, lb268, same evidence class as the shard-registry
+/// fix). For that whole window every other thread touching that epoll's
+/// entries spins; that stall was the terminal wedge of the failing OH
+/// boots (CPU frozen at pc=0x103 spinning on an EpollFile.entries lock).
+#[repr(C)]
 struct EpollEntry {
+    list: crate::list::ListHead,
     fd: i32,
     /// Opaque identity of the open file description captured at ADD time
     /// (R32-B9, R36-B1): the File's monotonic generation id. Compared for
@@ -123,9 +140,30 @@ struct EpollEntry {
     reports: u64,
 }
 
+/// Sentinel-headed intrusive list of `EpollEntry` nodes (see the
+/// `EpollEntry` doc for the allocation discipline). The sentinel cannot
+/// self-reference in a const initializer, so it is lazily `init()`ed on
+/// first acquisition (`init_once`, under the `entries` lock) — same
+/// pattern as `EpollWakeShard`.
+struct EpollEntryList {
+    head: crate::list::ListHead,
+}
+
+impl EpollEntryList {
+    /// Return the sentinel pointer, self-linking it on first use. Must be
+    /// called with the `entries` lock held.
+    #[inline]
+    fn init_once(&mut self) -> *mut crate::list::ListHead {
+        if self.head.next.is_null() {
+            self.head.init();
+        }
+        &mut self.head as *mut crate::list::ListHead
+    }
+}
+
 /// Epoll file structure (stored as File private_data)
 struct EpollFile {
-    entries: crate::sync::spinlock::Spinlock<alloc::vec::Vec<EpollEntry>>,
+    entries: crate::sync::spinlock::Spinlock<EpollEntryList>,
     /// Waiters blocked in epoll_wait (P1: busy-yield elimination). Woken by
     /// the re-check timer, signal delivery, or `epoll_notify_file` once
     /// fd-side producers (pipe/socket/...) are wired to call it.
@@ -413,7 +451,19 @@ pub fn epoll_notify_file(file_id: u64) {
             let epoll = unsafe { &*ep };
             {
                 let mut entries = epoll.entries.lock();
-                for entry in entries.iter_mut() {
+                // Intrusive-list walk (117th): read-modify pass, no
+                // allocation — the re-arm cannot stall behind the
+                // allocator while every other thread on this epoll spins.
+                let head = entries.init_once();
+                // SAFETY: every node reachable from the sentinel is linked
+                // under this entries lock, and nodes are only unlinked
+                // under it.
+                let mut cur = unsafe { (*head).next };
+                while cur != head {
+                    // SAFETY: cur is a linked EpollEntry's `list` field
+                    // (first field — the cast IS the container_of).
+                    let entry = unsafe { &mut *(cur as *mut EpollEntry) };
+                    cur = unsafe { (*cur).next };
                     if entry.file_id == file_id && entry.events & epoll_events::EPOLLET != 0 {
                         // New arrival = a fresh readiness edge, even if the
                         // previous one was reported and never observed idle.
@@ -623,21 +673,31 @@ pub fn epoll_dump_for_file(file_id: u64) {
             let epoll = unsafe { &*ep };
             let owner = epoll.owner_pid;
             let waits = epoll.wait_count;
-            let entries = epoll.entries.lock();
-            let mut row: alloc::vec::Vec<(i32, u32, u64, u32, u64)> = alloc::vec::Vec::new();
-            for entry in entries.iter() {
-                if row.len() >= 24 {
-                    break;
+            let mut row: alloc::vec::Vec<(i32, u32, u64, u32, u64)> =
+                alloc::vec::Vec::with_capacity(24);
+            {
+                let mut entries = epoll.entries.lock();
+                // Intrusive-list walk (117th): read-only pass, no
+                // allocation under the entries lock (row is pre-sized).
+                let head = entries.init_once();
+                // SAFETY: read-only walk of nodes linked under this lock.
+                let mut cur = unsafe { (*head).next };
+                while cur != head {
+                    // SAFETY: cur is a linked EpollEntry's `list` (first
+                    // field).
+                    let entry = unsafe { &*(cur as *mut EpollEntry) };
+                    cur = unsafe { (*cur).next };
+                    if row.len() < 24 {
+                        row.push((
+                            entry.fd,
+                            entry.events,
+                            entry.file_id,
+                            entry.last_reported,
+                            entry.reports,
+                        ));
+                    }
                 }
-                row.push((
-                    entry.fd,
-                    entry.events,
-                    entry.file_id,
-                    entry.last_reported,
-                    entry.reports,
-                ));
             }
-            drop(entries);
             out.push((ep_usize, owner, waits, row));
         }
     }
@@ -705,22 +765,34 @@ pub fn epoll_interest_snapshot() {
                 let epoll = unsafe { &*ep };
                 let owner = epoll.owner_pid;
                 let waits = epoll.wait_count;
-                let entries = epoll.entries.lock();
-                let mut row: alloc::vec::Vec<(i32, u32, u64, u32, u64)> = alloc::vec::Vec::new();
-                for entry in entries.iter() {
-                    if row.len() >= 24 {
-                        break;
+                let mut row: alloc::vec::Vec<(i32, u32, u64, u32, u64)> =
+                    alloc::vec::Vec::with_capacity(24);
+                let mut total: usize = 0;
+                {
+                    let mut entries = epoll.entries.lock();
+                    // Intrusive-list walk (117th): read-only pass, no
+                    // allocation under the entries lock (row is pre-sized;
+                    // `total` counts every entry, past the 24-row cap).
+                    let head = entries.init_once();
+                    // SAFETY: read-only walk of nodes linked under this lock.
+                    let mut cur = unsafe { (*head).next };
+                    while cur != head {
+                        // SAFETY: cur is a linked EpollEntry's `list`
+                        // (first field).
+                        let entry = unsafe { &*(cur as *mut EpollEntry) };
+                        cur = unsafe { (*cur).next };
+                        total += 1;
+                        if row.len() < 24 {
+                            row.push((
+                                entry.fd,
+                                entry.events,
+                                entry.file_id,
+                                entry.last_reported,
+                                entry.reports,
+                            ));
+                        }
                     }
-                    row.push((
-                        entry.fd,
-                        entry.events,
-                        entry.file_id,
-                        entry.last_reported,
-                        entry.reports,
-                    ));
                 }
-                let total = entries.len();
-                drop(entries);
                 out.push((ep_usize, owner, waits, row));
                 if total > 24 {
                     crate::pr_warn!("socksnap: ep={:#x} has {} entries (truncated)", ep_usize, total);
@@ -777,6 +849,61 @@ fn epoll_file_close(file: &crate::fs::File) -> i32 {
             // entries pass + one wake_up_all per pinned notify section.
             while epoll.notify_pins.load(core::sync::atomic::Ordering::Acquire) != 0 {
                 core::hint::spin_loop();
+            }
+            // 117th: the interest nodes are separately-boxed `EpollEntry`s
+            // now — unlink and free every one before the instance box
+            // itself. Uncontended by construction (last Arc reference +
+            // pin drain above), but the FREES still run OUTSIDE the
+            // entries lock in bounded batches: a free can hit the
+            // allocator's slow path, and a preempt-off section of
+            // hundreds of frees is exactly the monopolist window shape
+            // that stalls every concurrent RCU grace round (the storm
+            // family this port eliminates elsewhere).
+            {
+                const CLOSE_BATCH: usize = 32;
+                let mut batch: [*mut EpollEntry; CLOSE_BATCH] =
+                    [core::ptr::null_mut(); CLOSE_BATCH];
+                loop {
+                    let mut n_batch = 0usize;
+                    let mut hit_end;
+                    {
+                        let mut entries = epoll.entries.lock();
+                        let head = entries.init_once();
+                        // SAFETY: walk under the entries lock; `next` is
+                        // captured before the unlink, and an unlinked node
+                        // is unreachable to every other CPU once `del`
+                        // lands under this lock.
+                        let mut cur = unsafe { (*head).next };
+                        hit_end = true;
+                        while cur != head {
+                            let next = unsafe { (*cur).next };
+                            // SAFETY: cur is a linked EpollEntry's `list`
+                            // (first field); the node was Box::into_raw'd
+                            // in sys_epoll_ctl and is reachable only
+                            // through this list.
+                            let node = unsafe { &mut *(cur as *mut EpollEntry) };
+                            if n_batch < CLOSE_BATCH {
+                                unsafe { node.list.del(); }
+                                batch[n_batch] = node as *mut EpollEntry;
+                                n_batch += 1;
+                            } else {
+                                hit_end = false;
+                                break;
+                            }
+                            cur = next;
+                        }
+                    }
+                    // Free the batch with NO entries lock held.
+                    // SAFETY: each node was unlinked under the lock above;
+                    // interest nodes are never shared.
+                    for i in 0..n_batch {
+                        unsafe { drop(alloc::boxed::Box::from_raw(batch[i])); }
+                        batch[i] = core::ptr::null_mut();
+                    }
+                    if hit_end {
+                        break;
+                    }
+                }
             }
             let _ = alloc::boxed::Box::from_raw(ptr as *mut EpollFile);
         }
@@ -2109,7 +2236,9 @@ pub fn sys_epoll_create(args: SyscallArgs) -> i64 {
     };
 
     let epoll = alloc::boxed::Box::new(EpollFile {
-        entries: crate::sync::spinlock::Spinlock::new(alloc::vec::Vec::new()),
+        entries: crate::sync::spinlock::Spinlock::new(EpollEntryList {
+            head: crate::list::ListHead::new(),
+        }),
         wait_queue: crate::process::wait::WaitQueueHead::new(),
         owner_pid: crate::process::current_pid(),
         wait_count: 0,
@@ -2191,13 +2320,42 @@ fn epoll_watches_epoll(
     // EpollFile pointers, alive while their Files exist — the fdtable Arc
     // pins every member we resolve below for the duration of the walk).
     let root_ref = unsafe { &*root };
-    let members: alloc::vec::Vec<(i32, u64)> = root_ref
-        .entries
-        .lock()
-        .iter()
-        .map(|e| (e.fd, e.file_id))
-        .collect();
-    for (fd, file_id) in members {
+    // Cold path (nested-epoll ADD only, LTP epoll_ctl04/05 — never in OH
+    // boots): collect the member list under the entries lock into a
+    // BOUNDED stack array, release, then walk — the fdtable lookups and
+    // the recursion stay OUT of the lock, and nothing inside the lock
+    // section touches the allocator (the old Vec collect allocated under
+    // the lock; a wedge there freezes every other thread on this epoll).
+    // Overflow (>MAX_NEST_MEMBERS interests on ONE nested instance while
+    // cycling is being checked) answers TRUE — the conservative side: the
+    // ADD is refused with ELOOP instead of letting a possibly-cyclic
+    // membership through unexamined.
+    const MAX_NEST_MEMBERS: usize = 256;
+    let mut members: [(i32, u64); MAX_NEST_MEMBERS] = [(0, 0); MAX_NEST_MEMBERS];
+    let mut n_members = 0usize;
+    let mut overflow = false;
+    {
+        let mut entries = root_ref.entries.lock();
+        let head = entries.init_once();
+        // SAFETY: read-only walk of nodes linked under this lock.
+        let mut cur = unsafe { (*head).next };
+        while cur != head {
+            // SAFETY: cur is a linked EpollEntry's `list` (first field).
+            let e = unsafe { &*(cur as *mut EpollEntry) };
+            cur = unsafe { (*cur).next };
+            if n_members < MAX_NEST_MEMBERS {
+                members[n_members] = (e.fd, e.file_id);
+                n_members += 1;
+            } else {
+                overflow = true;
+                break;
+            }
+        }
+    }
+    if overflow {
+        return true; // conservative: refuse the possibly-cyclic ADD
+    }
+    for &(fd, file_id) in members[..n_members].iter() {
         if let Some(f) = fdtable.get_file(fd as usize) {
             if f.file_id == file_id
                 && f.get_ops()
@@ -2227,14 +2385,38 @@ fn epoll_chain_depth(
     }
     // SAFETY: same ops-identity discipline as epoll_watches_epoll.
     let root_ref = unsafe { &*root };
-    let members: alloc::vec::Vec<(i32, u64)> = root_ref
-        .entries
-        .lock()
-        .iter()
-        .map(|e| (e.fd, e.file_id))
-        .collect();
+    // Cold path — same bounded collect-then-walk shape as
+    // epoll_watches_epoll (no allocation under the entries lock). Overflow
+    // answers the nesting bound (6) — the conservative side: the ADD is
+    // refused with EINVAL instead of under-counting a possibly-deep
+    // chain.
+    const MAX_NEST_MEMBERS: usize = 256;
+    let mut members: [(i32, u64); MAX_NEST_MEMBERS] = [(0, 0); MAX_NEST_MEMBERS];
+    let mut n_members = 0usize;
+    let mut overflow = false;
+    {
+        let mut entries = root_ref.entries.lock();
+        let head = entries.init_once();
+        // SAFETY: read-only walk of nodes linked under this lock.
+        let mut cur = unsafe { (*head).next };
+        while cur != head {
+            // SAFETY: cur is a linked EpollEntry's `list` (first field).
+            let e = unsafe { &*(cur as *mut EpollEntry) };
+            cur = unsafe { (*cur).next };
+            if n_members < MAX_NEST_MEMBERS {
+                members[n_members] = (e.fd, e.file_id);
+                n_members += 1;
+            } else {
+                overflow = true;
+                break;
+            }
+        }
+    }
+    if overflow {
+        return 6; // conservative: the nesting limit refuses the ADD
+    }
     let mut best = 1;
-    for (fd, file_id) in members {
+    for &(fd, file_id) in members[..n_members].iter() {
         if let Some(f) = fdtable.get_file(fd as usize) {
             if f.file_id == file_id
                 && f.get_ops()
@@ -2383,74 +2565,121 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                     core::mem::size_of::<EPollEvent>(),
                 );
             }
-            let mut entries = epoll.entries.lock();
+            // 117th (allocator-under-entries-lock hunt): the entry node is
+            // Box-allocated BEFORE the entries lock is taken and freed
+            // AFTER it is released on every path that does not link it —
+            // nothing inside the lock section can touch the allocator.
+            // The old `Vec::push` allocated on capacity growth under the
+            // lock (see the EpollEntry doc for the measured stall); this
+            // was the terminal wedge of the failing OH boots.
+            // SAFETY: node is uniquely owned here; it is linked only under
+            // the entries lock below (or freed outside it, still uniquely
+            // owned).
+            let node = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(EpollEntry {
+                list: crate::list::ListHead::new(),
+                fd,
+                file_id,
+                events: event.events,
+                data: event.data,
+                last_reported: 0,
+                oneshot_fired: false,
+                reports: 0,
+            }));
+            let mut linked = false;
             enum Reg {
                 Add(u64),
                 Rebind(u64, u64),
+                Exists,
             }
-            let reg = match entries.iter_mut().find(|e| e.fd == fd) {
-                Some(existing) => {
-                    if existing.file_id == file_id {
-                        drop(entries);
-                        return -(errno::EEXIST as i64);
+            let reg = {
+                let mut entries = epoll.entries.lock();
+                let head = entries.init_once();
+                // SAFETY: nodes are linked and unlinked only under this
+                // entries lock.
+                let mut cur = unsafe { (*head).next };
+                let mut existing: *mut EpollEntry = core::ptr::null_mut();
+                while cur != head {
+                    // SAFETY: cur is a linked EpollEntry's `list` field
+                    // (first field — the cast IS the container_of).
+                    let e = unsafe { &mut *(cur as *mut EpollEntry) };
+                    if e.fd == fd {
+                        existing = e;
+                        break;
                     }
-                    // The fd number was closed and reused between the old
-                    // ADD and this one: the old open file description is
-                    // gone from this fd — rebind the entry to the new one
-                    // instead of returning EEXIST for a file that is not
-                    // actually registered.
-                    let old_id = existing.file_id;
-                    existing.file_id = file_id;
-                    existing.events = event.events;
-                    existing.data = event.data;
-                    existing.last_reported = 0;
-                    existing.oneshot_fired = false;
-                    // 79th (ohw124): a rebind rewrites an fd-number-keyed
-                    // entry onto a NEW description — if the old description
-                    // is still open elsewhere this is bookkeeping drift the
-                    // dark-child hunt needs named.
-                    if crate::dfx::switches::enabled(
-                        crate::dfx::switches::DfxSwitch::Pid1Spin,
-                    ) {
-                        static REB_N: core::sync::atomic::AtomicUsize =
-                            core::sync::atomic::AtomicUsize::new(0);
-                        let n = REB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                        if n < 300 {
-                            crate::pr_warn!(
-                                "EPREBIND #{} pid={} epfd={} fd={} old_fid={:#x} new_fid={:#x}",
-                                n,
-                                crate::process::current_pid(),
-                                epfd,
-                                fd,
-                                old_id,
-                                file_id
-                            );
-                        }
-                    }
-                    Reg::Rebind(old_id, file_id)
+                    cur = unsafe { (*cur).next };
                 }
-                None => {
-                    entries.push(EpollEntry {
-                        fd,
-                        file_id,
-                        events: event.events,
-                        data: event.data,
-                        last_reported: 0,
-                        oneshot_fired: false,
-                        reports: 0,
-                    });
+                if existing.is_null() {
+                    // The link itself is two pointer writes under the lock.
+                    // SAFETY: node's list is initialized (fresh) and
+                    // unlinked; head is this epoll's sentinel, held under
+                    // the lock.
+                    unsafe { (*node).list.add_tail(head); }
+                    linked = true;
                     Reg::Add(file_id)
+                } else {
+                    // SAFETY: existing was derived from a linked node
+                    // under this lock.
+                    let existing = unsafe { &mut *existing };
+                    if existing.file_id == file_id {
+                        Reg::Exists
+                    } else {
+                        // The fd number was closed and reused between the
+                        // old ADD and this one: the old open file
+                        // description is gone from this fd — rebind the
+                        // entry to the new one instead of returning EEXIST
+                        // for a file that is not actually registered.
+                        let old_id = existing.file_id;
+                        existing.file_id = file_id;
+                        existing.events = event.events;
+                        existing.data = event.data;
+                        existing.last_reported = 0;
+                        existing.oneshot_fired = false;
+                        // 79th (ohw124): a rebind rewrites an
+                        // fd-number-keyed entry onto a NEW description —
+                        // if the old description is still open elsewhere
+                        // this is bookkeeping drift the dark-child hunt
+                        // needs named.
+                        if crate::dfx::switches::enabled(
+                            crate::dfx::switches::DfxSwitch::Pid1Spin,
+                        ) {
+                            static REB_N: core::sync::atomic::AtomicUsize =
+                                core::sync::atomic::AtomicUsize::new(0);
+                            let n = REB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                            if n < 300 {
+                                crate::pr_warn!(
+                                    "EPREBIND #{} pid={} epfd={} fd={} old_fid={:#x} new_fid={:#x}",
+                                    n,
+                                    crate::process::current_pid(),
+                                    epfd,
+                                    fd,
+                                    old_id,
+                                    file_id
+                                );
+                            }
+                        }
+                        Reg::Rebind(old_id, file_id)
+                    }
                 }
             };
+            // EEXIST and Rebind both leave the fresh node unlinked: reclaim
+            // it OUTSIDE the lock (the free can hit the allocator's slow
+            // path, which must never run under the entries lock).
+            // SAFETY: never linked; still uniquely owned.
+            if !linked {
+                unsafe { drop(alloc::boxed::Box::from_raw(node)); }
+            }
+            if matches!(reg, Reg::Exists) {
+                return -(errno::EEXIST as i64);
+            }
             // Registry helpers are called WITHOUT holding `entries` — the
             // lock order is always registry → entries (see epoll_notify_file).
-            drop(entries);
             match reg {
                 Reg::Add(id) => epoll_wake_register(id, epoll_ptr),
                 Reg::Rebind(old, new) => {
                     epoll_wake_unregister(old, epoll_ptr);
                     epoll_wake_register(new, epoll_ptr);
                 }
+                Reg::Exists => unreachable!(),
             }
             // rux:epoll_ctl_insert — the interest is live (a Rebind is an
             // insert onto the reused fd number; the mask reported is the
@@ -2465,10 +2694,33 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
             }
         }
         EPOLL_CTL_DEL => {
-            let mut entries = epoll.entries.lock();
-            if let Some(pos) = entries.iter().position(|e| e.fd == fd) {
-                let removed = entries.remove(pos);
-                drop(entries);
+            // Intrusive-list unlink (117th): find by fd, unlink under the
+            // lock (two pointer writes — the old Vec::remove memmoved the
+            // tail), free the node OUTSIDE the lock.
+            let mut dead: core::option::Option<*mut EpollEntry> = None;
+            let mut removed_id: u64 = 0;
+            {
+                let mut entries = epoll.entries.lock();
+                let head = entries.init_once();
+                // SAFETY: nodes are linked and unlinked only under this
+                // entries lock.
+                let mut cur = unsafe { (*head).next };
+                while cur != head {
+                    let next = unsafe { (*cur).next };
+                    // SAFETY: cur is a linked EpollEntry's `list` (first
+                    // field).
+                    let e = unsafe { &mut *(cur as *mut EpollEntry) };
+                    if e.fd == fd {
+                        // SAFETY: e.list is linked in this epoll's list.
+                        unsafe { e.list.del(); }
+                        removed_id = e.file_id;
+                        dead = Some(e as *mut EpollEntry);
+                        break;
+                    }
+                    cur = next;
+                }
+            }
+            if let Some(node) = dead {
                 // 79th (ohw124): init's paramservice child fd 21 lost its
                 // epoll interest between two snapshots with no purge print
                 // — attribute EVERY interest removal (pid, fd, file_id,
@@ -2493,12 +2745,12 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                             crate::process::current_pid(),
                             epfd,
                             fd,
-                            removed.file_id,
+                            removed_id,
                             live
                         );
                     }
                 }
-                epoll_wake_unregister(removed.file_id, epoll_ptr);
+                epoll_wake_unregister(removed_id, epoll_ptr);
                 // rux:epoll_ctl_remove — the interest is gone.
                 if crate::trace::EVENT_EPOLL_CTL_REMOVE.armed() {
                     crate::trace::trace_epoll_ctl_remove(
@@ -2507,6 +2759,12 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                         fd,
                     );
                 }
+                // Free the unlinked node with NO entries lock held (117th
+                // allocation discipline).
+                // SAFETY: unlinked above under the lock; nodes are
+                // reachable only through the epoll's entries list, and
+                // interest nodes are never shared.
+                unsafe { drop(alloc::boxed::Box::from_raw(node)); }
             } else {
                 return -(errno::ENOENT as i64);
             }
@@ -2522,16 +2780,34 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                     core::mem::size_of::<EPollEvent>(),
                 );
             }
-            let mut entries = epoll.entries.lock();
-            if let Some(entry) = entries.iter_mut().find(|e| e.fd == fd) {
-                entry.events = event.events;
-                entry.data = event.data;
-                // Re-arming via MOD resets the edge-triggered snapshot
-                // (Linux: MOD re-injects the fd into the ready list) and
-                // re-arms a fired EPOLLONESHOT registration.
-                entry.last_reported = 0;
-                entry.oneshot_fired = false;
-            } else {
+            // Intrusive-list walk (117th): mutate in place, no allocation.
+            let mut found = false;
+            {
+                let mut entries = epoll.entries.lock();
+                let head = entries.init_once();
+                // SAFETY: nodes are linked and unlinked only under this
+                // entries lock.
+                let mut cur = unsafe { (*head).next };
+                while cur != head {
+                    // SAFETY: cur is a linked EpollEntry's `list` (first
+                    // field).
+                    let entry = unsafe { &mut *(cur as *mut EpollEntry) };
+                    cur = unsafe { (*cur).next };
+                    if entry.fd == fd {
+                        entry.events = event.events;
+                        entry.data = event.data;
+                        // Re-arming via MOD resets the edge-triggered
+                        // snapshot (Linux: MOD re-injects the fd into the
+                        // ready list) and re-arms a fired EPOLLONESHOT
+                        // registration.
+                        entry.last_reported = 0;
+                        entry.oneshot_fired = false;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if !found {
                 return -(errno::ENOENT as i64);
             }
         }
@@ -2590,17 +2866,35 @@ pub fn pid1_epoll_interest_dump(pid: crate::process::task::Pid) {
         // SAFETY: epoll_ptr came from Box::into_raw in sys_epoll_create;
         // valid while the fdtable holds this Arc (cloned above).
         let epoll = unsafe { &*epoll_ptr };
-        let entries = epoll.entries.lock();
+        let mut entries = epoll.entries.lock();
+        // Intrusive-list walk (117th): count first for the header, then
+        // the per-entry rows (diagnostic path, dfx=pid1spin-gated).
+        let head = entries.init_once();
+        // SAFETY: read-only counting walk of nodes linked under this lock.
+        let mut total: usize = 0;
+        {
+            let mut cur = unsafe { (*head).next };
+            while cur != head {
+                total += 1;
+                cur = unsafe { (*cur).next };
+            }
+        }
         crate::pr_warn!(
             "PID1EPOLL pid={} epfd={} entries={} wait_count={}",
             pid,
             epfd,
-            entries.len(),
+            total,
             epoll.wait_count
         );
         // fd numbers covered by an interest (for the fdtable diff below).
         let mut watched_fds: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
-        for entry in entries.iter() {
+        // SAFETY: read-only walk of linked EpollEntry nodes; nodes are
+        // unlinked only under this same lock (the loop body only reads).
+        let mut cur = unsafe { (*head).next };
+        while cur != head {
+            // SAFETY: cur is a linked EpollEntry's `list` (first field).
+            let entry = unsafe { &*(cur as *mut EpollEntry) };
+            cur = unsafe { (*cur).next };
             watched_fds.push(entry.fd as usize);
             let target = fdtable.get_file(entry.fd as usize);
             let (fid_ok, unix_line, ops_id) = match &target {
@@ -2759,9 +3053,12 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
     // schedule the intermediate re-check sleeps.
     let deadline_ns = poll_deadline_ns(timeout_ms as i64 * 1_000_000);
 
-        // Allocation discipline (s2-a review finding P2): these scratch
-        // buffers were allocated UNDER the entries lock on every wake
-        // round; hoisted out and reused. The reference has NO small
+        // Allocation discipline (s2-a review finding P2, hardened by the
+        // 117th intrusive-list port): every scratch buffer used INSIDE the
+        // entries-locked scan is hoisted out here and pre-sized, so the
+        // lock section is allocation-free on the ungated hot path (with
+        // tracing off and no dead interests, nothing below can touch the
+        // allocator while the lock is held). The reference has NO small
         // maxevents cap (EP_MAX_EVENTS = INT_MAX/sizeof); readiness is
         // bounded by the INTEREST COUNT, not maxevents, so the capacity
         // is clamped for allocation safety and the Vec grows if a huge
@@ -2769,17 +3066,35 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
         let alloc_cap = (maxevents as usize).min(4096);
         let mut ready_events: alloc::vec::Vec<EPollEvent> =
             alloc::vec::Vec::with_capacity(alloc_cap);
-        let mut trace_fds: alloc::vec::Vec<(i32, u32, *const ())> = alloc::vec::Vec::new();
-        let mut dead_fds: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
+        // dfx=epolltrace: identity of each ready fd (fd, file ops table) so
+        // the trace line can be symbolized against the kernel ELF. Pushed
+        // only while tracing is armed (diagnostic boots accept the alloc).
+        let mut trace_fds: alloc::vec::Vec<(i32, u32, *const ())> =
+            alloc::vec::Vec::with_capacity(32);
+        // Unlinked dead-interest nodes (117th): the scan unlinks dead
+        // entries as it walks (the old code collected fd numbers and ran
+        // Vec::retain after the loop); the node frees run OUTSIDE the
+        // lock. Capped: a scan round with more than 128 dead interests
+        // leaves the excess linked — they are re-detected (and unlinked)
+        // by the next round, so removal stays correct, just deferred.
+        let mut dead_nodes: alloc::vec::Vec<*mut EpollEntry> =
+            alloc::vec::Vec::with_capacity(128);
+        // P3 wiring set (see the event-driven wait block below): hoisted
+        // so the per-round build never allocates under the entries lock.
+        // EPOLL_WIRE_CAP bounds it — an interest set larger than the cap
+        // falls back to the 10ms re-check slice instead of growing the
+        // Vec inside the lock.
+        const EPOLL_WIRE_CAP: usize = 512;
+        let mut watched: alloc::vec::Vec<(
+            alloc::sync::Arc<crate::fs::File>,
+            u16,
+            core::option::Option<u32>,
+        )> = alloc::vec::Vec::with_capacity(EPOLL_WIRE_CAP);
         loop {
         let mut entries = epoll.entries.lock();
         ready_events.clear();
         trace_fds.clear();
-        dead_fds.clear();
-        // dfx=epolltrace: identity of each ready fd (fd, file ops table) so
-        // the trace line can be symbolized against the kernel ELF.
-        let mut trace_fds: alloc::vec::Vec<(i32, u32, *const ())> =
-            alloc::vec::Vec::new();
+        dead_nodes.clear();
         // Dead interests found during the scan (fd number no longer
         // resolves to the registered description). Linux removes an
         // epoll interest at close(2) (eventpoll_release); the wait path
@@ -2789,7 +3104,19 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
         // common case; this catches anything that slips past (fd-number
         // reuse without EPOLL_CTL_DEL).
         let mut nent: usize = 0;
-        for entry in entries.iter_mut() {
+        // Intrusive-list walk (117th): `next` is captured before the body
+        // so the dead-interest arm can unlink in place. Nodes are linked
+        // and unlinked only under this entries lock.
+        // SAFETY: every node reachable from the sentinel is linked under
+        // this lock.
+        let head = entries.init_once();
+        let mut cur = unsafe { (*head).next };
+        while cur != head {
+            let next = unsafe { (*cur).next };
+            // SAFETY: cur is a linked EpollEntry's `list` field (first
+            // field — the cast IS the container_of).
+            let entry = unsafe { &mut *(cur as *mut EpollEntry) };
+            cur = next;
             nent += 1;
             // Linux epoll_wait never consumes readiness it does not deliver:
             // events beyond `maxevents` stay on the ready list and are
@@ -2862,7 +3189,17 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                             );
                         }
                     }
-                    dead_fds.push(entry.fd as usize);
+                    // 117th: unlink the dead node NOW (its `next` was
+                    // captured before this body — the walk stays valid)
+                    // and defer the free to after the lock; past the
+                    // dead_nodes cap the entry stays linked and is
+                    // re-detected next round.
+                    if dead_nodes.len() < dead_nodes.capacity() {
+                        // SAFETY: entry.list is linked in this epoll's
+                        // list (walked under this lock).
+                        unsafe { entry.list.del(); }
+                        dead_nodes.push(entry as *mut EpollEntry);
+                    }
                     continue;
                 }
             };
@@ -2937,13 +3274,18 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                 entry.last_reported = 0;
             }
         }
-        if !dead_fds.is_empty() {
-            // Still under the entries lock here: remove the dead interests.
-            // One entry per fd number (ADD dedups), so matching by number is
-            // exact.
-            entries.retain(|e| !dead_fds.contains(&(e.fd as usize)));
-        }
         drop(entries);
+        // Free the dead-interest nodes the scan unlinked — OUTSIDE the
+        // entries lock (117th allocation discipline: a free can hit the
+        // allocator's slow path, which must never run under the lock).
+        // SAFETY: each node was unlinked under the entries lock above;
+        // nodes are reachable only through the epoll's entries list, and
+        // interest nodes are never shared.
+        if !dead_nodes.is_empty() {
+            for node in dead_nodes.drain(..) {
+                unsafe { drop(alloc::boxed::Box::from_raw(node)); }
+            }
+        }
 
         // rux:epoll_wait_scan — the scan round's census (the epollscan
         // hunt's datum: the scan RAN and what it collected). One record
@@ -3105,15 +3447,25 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
         // the readiness scan (and epoll_notify_file for unix sockets), not
         // by how the waiter slept.
         {
-            let mut watched: alloc::vec::Vec<(
-                alloc::sync::Arc<crate::fs::File>,
-                u16,
-                Option<u32>,
-            )> = alloc::vec::Vec::new();
+            // 117th: `watched` is the hoisted, pre-sized buffer (see the
+            // scan's scratch-buffer block) — the old per-round Vec::new()
+            // allocated INSIDE the entries lock on its first push. Beyond
+            // the cap the round degrades to the 10ms slice path (correct,
+            // latency-degraded only for interest sets > EPOLL_WIRE_CAP).
+            watched.clear();
             let mut wired = true;
             {
-                let entries = epoll.entries.lock();
-                for entry in entries.iter() {
+                let mut entries = epoll.entries.lock();
+                // Intrusive-list walk (117th): read-only pass, no
+                // allocation under the entries lock.
+                let head = entries.init_once();
+                // SAFETY: read-only walk of nodes linked under this lock.
+                let mut cur = unsafe { (*head).next };
+                while cur != head {
+                    // SAFETY: cur is a linked EpollEntry's `list` (first
+                    // field).
+                    let entry = unsafe { &*(cur as *mut EpollEntry) };
+                    cur = unsafe { (*cur).next };
                     match fdtable.get_file(entry.fd as usize) {
                         Some(f) if f.file_id == entry.file_id => {
                             let mut poll_mask: u16 = 0;
@@ -3124,6 +3476,13 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                             } else {
                                 None
                             };
+                            if watched.len() >= EPOLL_WIRE_CAP {
+                                // Slice fallback (same contract as a dead
+                                // interest below): never grow under the
+                                // lock.
+                                wired = false;
+                                break;
+                            }
                             watched.push((f, poll_mask, et_last));
                         }
                         // Dead interest: the slice path (and the next scan's
@@ -3175,10 +3534,19 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                     &quick_ready,
                 ) {
                     PollEventWait::Interrupted => return -(errno::EINTR as i64),
-                    PollEventWait::Woken => continue,
+                    PollEventWait::Woken => {
+                        // Drop the Arc clones before the next round (the
+                        // old block-scoped Vec dropped them here too).
+                        watched.clear();
+                        continue;
+                    }
                     PollEventWait::NotWired => {} // fall through to the slice
                 }
             }
+            // Drop the Arc clones before the P1 slice sleep (the old
+            // block-scoped Vec dropped them at this point — the buffer
+            // itself is retained for reuse).
+            watched.clear();
         }
 
         // P1 (busy-yield elimination, fallback): block for one re-check
@@ -5113,16 +5481,32 @@ pub fn epoll_purge_closed_fd(fd: usize, dying_file_id: u64) {
         // the fd table we just scanned; the box is freed only in its close
         // op, which cannot run while that Arc exists).
         let epoll = unsafe { &*ep };
-        let mut removed_ids: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+        // At most ONE entry can match (fd, dying_file_id): entries are
+        // unique per fd number (ADD dedups) and file_id is never reused —
+        // so a node pointer + its id replace the old removed_ids Vec.
+        let mut dead: core::option::Option<*mut EpollEntry> = None;
+        let mut removed_id: u64 = 0;
         {
             let mut entries = epoll.entries.lock();
-            entries.retain(|e| {
+            // Intrusive-list walk (117th): unlink the matching dead
+            // interest under the lock (two pointer writes — the old
+            // Vec::retain compacted the whole set); the node free runs
+            // OUTSIDE the lock.
+            let head = entries.init_once();
+            // SAFETY: nodes are linked and unlinked only under this lock.
+            let mut cur = unsafe { (*head).next };
+            while cur != head {
+                let next = unsafe { (*cur).next };
+                // SAFETY: cur is a linked EpollEntry's `list` (first
+                // field).
+                let e = unsafe { &mut *(cur as *mut EpollEntry) };
+                cur = next;
                 // 79th: remove ONLY the dying description's entries. A
                 // same-numbered entry for a DIFFERENT description (the
                 // fork-shared instance's foreign owner — see the function
                 // doc) must survive this close untouched.
                 if e.fd as usize != fd || e.file_id != dying_file_id {
-                    return true;
+                    continue;
                 }
                 // The fd slot is empty at this point (close_fd cleared it
                 // before we run). If it somehow resolves again to the SAME
@@ -5132,33 +5516,42 @@ pub fn epoll_purge_closed_fd(fd: usize, dying_file_id: u64) {
                     .get_file(fd)
                     .map_or(false, |f| f.file_id == e.file_id);
                 if !live {
-                    removed_ids.push(e.file_id);
+                    // SAFETY: e.list is linked in this epoll's list.
+                    unsafe { e.list.del(); }
+                    removed_id = e.file_id;
+                    dead = Some(e as *mut EpollEntry);
                 }
-                live
-            });
-        }
-        // Registry lock only after the entries lock is released (the
-        // documented nesting rule — registry helpers never nest entries).
-        // 79th (ohw124): attribute every purge removal — the paramservice
-        // dark-child hunt needs the closer's pid/fd/file_id triad.
-        if !removed_ids.is_empty()
-            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Pid1Spin)
-        {
-            static PURGE2_N: core::sync::atomic::AtomicUsize =
-                core::sync::atomic::AtomicUsize::new(0);
-            let n = PURGE2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            if n < 300 {
-                crate::pr_warn!(
-                    "EPPURGE #{} pid={} fd={} fids={:#x}",
-                    n,
-                    crate::process::current_pid(),
-                    fd,
-                    removed_ids.iter().fold(0u64, |a, id| a ^ id)
-                );
+                break; // fd-number-unique: no further match can exist
             }
         }
-        for id in removed_ids {
-            epoll_wake_unregister(id, ep);
+        if let Some(node) = dead {
+            // Free the unlinked node with NO entries lock held (117th
+            // allocation discipline — the free can hit the allocator's
+            // slow path, which must never run under the lock).
+            // SAFETY: unlinked above under the lock; interest nodes are
+            // reachable only through the epoll's entries list.
+            unsafe { drop(alloc::boxed::Box::from_raw(node)); }
+            // Registry lock only after the entries lock is released (the
+            // documented nesting rule — registry helpers never nest
+            // entries).
+            // 79th (ohw124): attribute every purge removal — the
+            // paramservice dark-child hunt needs the closer's pid/fd/
+            // file_id triad.
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Pid1Spin) {
+                static PURGE2_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                let n = PURGE2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 300 {
+                    crate::pr_warn!(
+                        "EPPURGE #{} pid={} fd={} fids={:#x}",
+                        n,
+                        crate::process::current_pid(),
+                        fd,
+                        removed_id
+                    );
+                }
+            }
+            epoll_wake_unregister(removed_id, ep);
         }
     }
 }
