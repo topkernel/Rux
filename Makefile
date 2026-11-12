@@ -114,7 +114,7 @@ $(UBUNTU_IMG):
 # symlinks (OH_IMAGES overrides the store location). The boot itself
 # is the tracked scripts/test/run-oh.sh — same shape as the Ubuntu
 # flow: make oh-image && make oh-run.
-OH_IMAGES ?= /home/william/rux-images/oh
+OH_IMAGES ?= images/oh
 OH_IMGDIR ?= run/oh-img
 
 .PHONY: oh-image oh-run
