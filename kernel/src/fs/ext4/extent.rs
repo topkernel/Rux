@@ -1561,6 +1561,54 @@ unsafe fn gather_node(
     Ok(())
 }
 
+/// R108 (fi-fix-verify, crash-ordering): collect the tree's metadata
+/// block numbers WITHOUT freeing them. The truncate/punch paths must not
+/// clear an old tree's bitmap bits while the on-disk root still points
+/// at that tree — the free is deferred until the rebuilt root is durable
+/// (see ext4_ext_rebuild_deferred).
+pub fn ext4_ext_collect_index_blocks(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    i_block: &[u32; 15],
+    deferred: &mut alloc::vec::Vec<u64>,
+) -> Result<(), i32> {
+    let root = unsafe { core::slice::from_raw_parts(i_block.as_ptr() as *const u8, 60) };
+    let h = node_header(root);
+    if h.eh_magic != EXT4_EXT_MAGIC || h.eh_depth == 0 {
+        return Ok(());
+    }
+    // SAFETY: root node access bounded by ROOT_NODE_CAP.
+    unsafe { collect_index_node(fs, root, ROOT_NODE_CAP, h.eh_depth, deferred) }
+}
+
+/// Collecting twin of free_index_node (same walk, no allocator free).
+/// SAFETY: data holds cap 12-byte entries after the header.
+unsafe fn collect_index_node(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    data: &[u8],
+    cap: usize,
+    depth: u16,
+    deferred: &mut alloc::vec::Vec<u64>,
+) -> Result<(), i32> {
+    let h = node_header(data);
+    let n = h.eh_entries as usize;
+    if n > cap {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+    for idx in node_indices(data, n) {
+        let child_blk = idx.leaf_block();
+        if depth >= 2 {
+            let child = read_node(fs, child_blk)?;
+            let ch = node_header(&child);
+            if ch.eh_magic != EXT4_EXT_MAGIC {
+                return Err(errno::Errno::IOError.as_neg_i32());
+            }
+            collect_index_node(fs, &child, external_node_cap(fs), ch.eh_depth, deferred)?;
+        }
+        deferred.push(child_blk);
+    }
+    Ok(())
+}
+
 /// Free every index/leaf METADATA block of the tree (not the data
 /// extents). `freed_sectors` accumulates their 512-byte sectors.
 pub fn ext4_ext_free_index_blocks(
@@ -1618,6 +1666,41 @@ pub fn ext4_ext_rebuild(
 ) -> Result<i64, i32> {
     let mut freed: u64 = 0;
     ext4_ext_free_index_blocks(fs, i_block, &mut freed)?;
+    init_node_header(
+        // SAFETY: i_block is 60 bytes; header write is in-bounds.
+        unsafe { core::slice::from_raw_parts_mut(i_block.as_mut_ptr() as *mut u8, 60) },
+        0,
+        ROOT_NODE_CAP as u16,
+    );
+    let mut added: u64 = 0;
+    for e in exts {
+        ext4_ext_append(fs, i_block, e, &mut added)?;
+    }
+    Ok(added as i64 - freed as i64)
+}
+
+/// R108 (fi-fix-verify, crash-ordering): deferred-meta twin of
+/// ext4_ext_rebuild for the truncate/punch paths. The OLD tree's
+/// metadata blocks are COLLECTED into `deferred_meta` instead of freed:
+/// clearing their bitmap bits while the on-disk root still points at the
+/// old tree is the same re-free poison window as the data-block free
+/// (crash → stale root walks reallocated tree blocks → garbage map →
+/// re-free of live blocks). The caller frees the collected blocks only
+/// after the rebuilt root is durably published (write_inode +
+/// sync_inode_table_block). The `freed` accounting keeps counting them —
+/// if the caller's drain is skipped (sync failure), i_blocks merely
+/// undercounts a leaked tree (advisory field, benign).
+pub fn ext4_ext_rebuild_deferred(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    i_block: &mut [u32; 15],
+    exts: &[RawExtent],
+    deferred_meta: &mut alloc::vec::Vec<u64>,
+) -> Result<i64, i32> {
+    let mut freed: u64 = 0;
+    ext4_ext_collect_index_blocks(fs, i_block, deferred_meta)?;
+    // Count the deferred blocks as freed for the i_blocks delta (the
+    // caller drains them right after the root goes durable).
+    freed = deferred_meta.len() as u64 * (fs.block_size / 512) as u64;
     init_node_header(
         // SAFETY: i_block is 60 bytes; header write is in-bounds.
         unsafe { core::slice::from_raw_parts_mut(i_block.as_mut_ptr() as *mut u8, 60) },

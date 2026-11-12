@@ -1746,6 +1746,9 @@ pub(crate) fn ext4_reap_unlinked(
         inode.i_dtime = 1;
         super::inode::write_inode_disk(fs, ino, &inode)?;
         free_inode_blocks(fs, ino, &inode)?;
+        // R107: erase the stale map (see erase_dead_inode_map) so no
+        // later reader of this dead inode can re-free the blocks.
+        erase_dead_inode_map(fs, ino, &mut inode)?;
         free_inode(fs, ino)
     })();
     // SAFETY: clear_current_handle resets the thread-local journal handle
@@ -2255,6 +2258,8 @@ fn ext4_rmdir_inner(
 
     // Free data blocks
     free_inode_blocks(fs, target_ino, &target)?;
+    // R107: erase the stale map (see erase_dead_inode_map).
+    erase_dead_inode_map(fs, target_ino, &mut target)?;
     let p5 = crate::drivers::timer::monotonic_ns_since_boot();
 
     crate::dfx::fsw::note_rmdir_phases(
@@ -2481,6 +2486,29 @@ fn revoke_freed_block(fs: &Ext4FileSystem, block: u64) {
     }
 }
 
+/// R107 (fi-fix-verify, P0 data-integrity): erase a dead inode's on-disk
+/// block map AFTER its blocks are freed.
+///
+/// Every free path (deferred reap, rmdir, rename-overwrite) frees the
+/// map's blocks but used to leave the map bytes in the on-disk inode. A
+/// later reader of that dead inode — measured in the fv2 probe boot:
+/// ftruncate() on a descriptor that survived the unlink — re-gathered
+/// the STALE map and re-freed blocks that had since been REALLOCATED to
+/// other files (the double-mapped-physicals corruption: two file pages,
+/// one disk block, the later page's bytes overwriting the earlier's).
+/// Zeroing i_block in the same generation as the free makes every later
+/// gather of the inode find an empty map. One extra inode-table write
+/// per file deletion.
+fn erase_dead_inode_map(
+    fs: &Ext4FileSystem,
+    ino: u32,
+    inode: &mut Ext4InodeOnDisk,
+) -> Result<(), i32> {
+    inode.i_block = [0; 15];
+    inode.i_blocks = 0;
+    super::inode::write_inode_disk(fs, ino, inode)
+}
+
 /// Free all blocks associated with an inode
 pub(crate) fn free_inode_blocks(
     fs: &Ext4FileSystem,
@@ -2495,6 +2523,28 @@ pub(crate) fn free_inode_blocks(
     // inode) — review EXT4-C3.
     if inode.is_symlink() && inode.i_size <= 60 {
         return Ok(());
+    }
+
+    // R108 (fi-fix-verify, P0 crash-window data integrity): durably
+    // publish an EMPTIED block map BEFORE clearing any bitmap bit. The
+    // allocator's free path syncs the block bitmap synchronously
+    // (write_block_bitmap), so freeing first leaves a window in which the
+    // crash image carries FREE bits + a STALE on-disk map still claiming
+    // them — the next boot's allocator hands those blocks to a new owner
+    // and the stale map's next reader (ftruncate via a surviving fd, a
+    // second reap, reuse) re-frees LIVE blocks: two file pages, one disk
+    // block (the fvpop→fvset→fv1/2/3 poison chain, measured 2026-11-12).
+    // Publishing the erased map first inverts the crash window into a
+    // benign leak (map empty, bits still set — space loss only, never
+    // aliasing). write_inode_disk syncs the inode-table block inline. The
+    // gathers below keep walking the CALLER's (original, unmodified)
+    // struct; the call-site erase_dead_inode_map calls become idempotent
+    // re-writes of this same empty state.
+    {
+        let mut erased = *inode;
+        erased.i_block = [0; 15];
+        erased.i_blocks = 0;
+        super::inode::write_inode_disk(fs, ino, &erased)?;
     }
 
     // Check if using extents
@@ -2690,6 +2740,8 @@ fn ext4_rename_inner(
             super::inode::write_inode_disk(fs, target_ino, &target_mut)?;
             free_inode(fs, target_ino)?;
             free_inode_blocks(fs, target_ino, &target_mut)?;
+            // R107: erase the stale map (see erase_dead_inode_map).
+            erase_dead_inode_map(fs, target_ino, &mut target_mut)?;
         } else {
             // Decrement link count of replaced file
             if target_mut.i_links_count > 0 {
@@ -2705,6 +2757,8 @@ fn ext4_rename_inner(
             super::inode::write_inode_disk(fs, target_ino, &target_mut)?;
             if target_mut.i_links_count == 0 {
                 free_inode_blocks(fs, target_ino, &target_mut)?;
+                // R107: erase the stale map (see erase_dead_inode_map).
+                erase_dead_inode_map(fs, target_ino, &mut target_mut)?;
                 free_inode(fs, target_ino)?;
             }
         }
