@@ -615,6 +615,23 @@ impl VirtQueue {
         let mut deadline = 0u64;
         let mut deadline_timer = 0u64; // 0 = not armed
         let mut poll_fallback = false; // timer budget exhausted: 1-jiffy re-arms
+        // SLEEP-PATH RECOVER LEG (oh-speed, the bistable 10s boot cliff):
+        // the waiter-side rescue below only runs when a WAKE arrives; a
+        // fully lost interrupt (device completed, no wake ever comes)
+        // left the sleeper stranded until the 10s deadline — measured on
+        // the OH boots as one 10.00s EXT4-BIGLOCK hold (holder blocked in
+        // a single sync read while EVERY other ext4 op queued behind the
+        // global lock; samgr InitProfile spent 10037ms locked out; the
+        // face hits ~1/8-1/14 boots and turns a 4.5s boot into 14.5s).
+        // The poll path got a 10ms re-kick+walk leg (lb66); the sleep
+        // path now gets the same discipline at a coarser cadence: a
+        // periodic recover WAKE (timer) so the kick/walk/rescue below
+        // runs every SLEEP_RECOVER_MS instead of only at the 10s edge.
+        // The timer is armed per sleep and deleted on wake — a healthy
+        // completion (interrupt wake in µs/ms) never observes it.
+        const SLEEP_RECOVER_MS: u64 = 250;
+        let mut recover_at = u64::MAX; // gate: only the !poll_only path arms it
+        let mut wait_started = 0u64;
         if !poll_only {
             deadline = crate::drivers::timer::get_jiffies()
                 .saturating_add(crate::drivers::timer::msecs_to_jiffies(10_000));
@@ -623,6 +640,10 @@ impl VirtQueue {
             if deadline_timer == 0 {
                 poll_fallback = true;
             }
+            let now = crate::drivers::timer::get_jiffies();
+            wait_started = now;
+            recover_at = now
+                .saturating_add(crate::drivers::timer::msecs_to_jiffies(SLEEP_RECOVER_MS));
         }
 
         let result = 'wait_done: {
@@ -724,6 +745,42 @@ impl VirtQueue {
                     };
                 }
 
+                // SLEEP-PATH RECOVER PASS (see the SLEEP_RECOVER_MS block
+                // above): the completion has NOT landed and the recover
+                // gate is due — re-kick the device (a lost/quiet kick's
+                // completion never arrives no matter how long we sleep)
+                // and run the completion walker in this task's context
+                // (covers a used ring the deferred softirq never consumed
+                // AND the lagged-completion freeze the waiter-side rescue
+                // below handles per-wake — here it runs even with no wake
+                // at all, because the recover TIMER woke us). Mirrors the
+                // poll path's 10ms leg at this path's coarser cadence.
+                // The forensic print fires only for waits already >=1s
+                // outstanding (a genuinely anomalous IO under this rig's
+                // µs-ms completion class) so a host-load hiccup cannot
+                // spam the serial.
+                if crate::drivers::timer::get_jiffies() >= recover_at {
+                    let now = crate::drivers::timer::get_jiffies();
+                    if now >= wait_started
+                        + crate::drivers::timer::msecs_to_jiffies(1_000)
+                    {
+                        crate::drivers::virtio::vw_report("sync-recover");
+                    }
+                    crate::drivers::virtio::pci_blk_kick(blk_slot);
+                    crate::drivers::virtio::pci_process_async_completions_slot(blk_slot);
+                    // SAFETY: resp_done reads the caller-owned response byte.
+                    if unsafe { resp_done(resp_status) } {
+                        // SAFETY: used_ring offset 2 is the idx field.
+                        break 'wait_done unsafe {
+                            let used_idx_ptr = (used_ring as usize + 2) as *const u16;
+                            core::ptr::read_volatile(used_idx_ptr)
+                        };
+                    }
+                    recover_at = now.saturating_add(
+                        crate::drivers::timer::msecs_to_jiffies(SLEEP_RECOVER_MS),
+                    );
+                }
+
                 // Register on the wait queue with the task state set to
                 // INTERRUPTIBLE under the queue lock (prepare_to_wait), then
                 // re-check the response and truly sleep in schedule().
@@ -820,8 +877,29 @@ impl VirtQueue {
                 } else {
                     // Sleep until woken by interrupt
                     // R54: schedule() now restores the caller's SIE state; wait-path callers re-arm explicitly (semaphore.rs discipline) so ticks/IPIs reach this CPU across the wait loop.
+                    //
+                    // SLEEP-PATH RECOVER WAKE (see the SLEEP_RECOVER_MS
+                    // block): with ONLY the wait-queue as a wake source, a
+                    // fully lost interrupt meant schedule() never returned
+                    // until the 10s deadline timer. Arm a short one-shot
+                    // wakeup so the recover pass above runs every
+                    // SLEEP_RECOVER_MS even with no interrupt at all; the
+                    // timer is deleted on wake (a healthy completion in
+                    // µs/ms never observes it). Timer-table exhaustion
+                    // degrades to the old behavior (wait-queue + 10s
+                    // deadline) — never worse than before.
+                    let rid = {
+                        let pid = crate::sched::get_current_pid();
+                        let at = crate::drivers::timer::get_jiffies().saturating_add(
+                            crate::drivers::timer::msecs_to_jiffies(SLEEP_RECOVER_MS),
+                        );
+                        crate::timer::add_timer_wakeup(at, pid)
+                    };
                     crate::arch::cpu::restore_irq(true);
                     crate::sched::schedule();
+                    if rid != 0 {
+                        crate::timer::del_timer(rid);
+                    }
                 }
 
                 // Remove from wait queue and restore RUNNING state, then loop
