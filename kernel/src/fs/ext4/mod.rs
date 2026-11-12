@@ -1017,6 +1017,7 @@ unsafe extern "C" fn ext4_mount(fc: &FsContext) -> Result<*mut SuperBlock, i32> 
     // Set private data
     let fs_ptr = Box::into_raw(fs) as *mut u8;
     sb.set_fs_info(fs_ptr);
+    ext4_instance_register(fs_ptr as *mut Ext4FileSystem);
 
     Ok(Box::into_raw(sb) as *mut SuperBlock)
 }
@@ -1026,6 +1027,9 @@ unsafe extern "C" fn ext4_mount(fc: &FsContext) -> Result<*mut SuperBlock, i32> 
 // s_fs_info contains a valid Ext4FileSystem pointer from Box::into_raw.
 unsafe extern "C" fn ext4_kill_sb(sb: *mut SuperBlock) {
     if let Some(fs_info) = (*sb).s_fs_info {
+        // Unregister BEFORE the free (the writeback resolver's liveness
+        // authority).
+        ext4_instance_unregister(fs_info as *mut Ext4FileSystem);
         let _fs = Box::from_raw(fs_info as *mut Ext4FileSystem);
         // Box will be automatically freed
     }
@@ -1202,6 +1206,206 @@ pub fn init() {
 pub static GLOBAL_EXT4_FS: core::sync::atomic::AtomicPtr<Ext4FileSystem> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
+// ============================================================================
+// Live-instance registry (writeback inode resolution)
+// ============================================================================
+//
+// The page cache identifies a file by `(fs_id, ino)`, and for ext4-backed
+// entries `fs_id` IS the `Ext4FileSystem` instance pointer (that is the
+// identity `ext4_buffered_write` and `writeback_populate_range` use). The
+// writeback path therefore has to turn that pointer back into a usable
+// instance — and it must NOT trust it blindly: `unmount_ext4` FREES the
+// instance box, so a page-cache entry that outlived its filesystem would
+// be a use-after-free.
+//
+// This registry is the liveness authority: an instance is registered when
+// it is mounted and unregistered BEFORE its box is freed.
+
+const EXT4_INSTANCE_SLOTS: usize = 8;
+static EXT4_INSTANCES: [core::sync::atomic::AtomicPtr<Ext4FileSystem>; EXT4_INSTANCE_SLOTS] =
+    [const { core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()) }; EXT4_INSTANCE_SLOTS];
+
+/// Register a live ext4 instance (called right after the instance is
+/// created and its pointer published).
+pub fn ext4_instance_register(fs_ptr: *mut Ext4FileSystem) {
+    use core::sync::atomic::Ordering;
+    if fs_ptr.is_null() {
+        return;
+    }
+    for slot in EXT4_INSTANCES.iter() {
+        if slot.load(Ordering::Acquire).is_null() {
+            slot.store(fs_ptr, Ordering::Release);
+            return;
+        }
+    }
+    // Registry full: the instance stays usable through the pointer paths
+    // (the mount table keeps it alive); the writeback resolver will simply
+    // refuse to materialize an inode for it rather than risk a stale
+    // dereference.
+    crate::pr_warn!("ext4: instance registry full ({} slots)", EXT4_INSTANCE_SLOTS);
+}
+
+/// Unregister an instance BEFORE its box is freed.
+pub fn ext4_instance_unregister(fs_ptr: *mut Ext4FileSystem) {
+    use core::sync::atomic::Ordering;
+    for slot in EXT4_INSTANCES.iter() {
+        if slot.load(Ordering::Acquire) == fs_ptr {
+            slot.store(core::ptr::null_mut(), Ordering::Release);
+            return;
+        }
+    }
+}
+
+/// Resolve a page-cache `fs_id` (the instance pointer) to a LIVE instance.
+///
+/// Returns None for an id that is not a registered instance — a stale
+/// page-cache entry must never dereference a freed filesystem.
+pub fn ext4_instance_from_id(fs_id: u64) -> Option<&'static Ext4FileSystem> {
+    use core::sync::atomic::Ordering;
+    if fs_id == 0 {
+        return None;
+    }
+    for slot in EXT4_INSTANCES.iter() {
+        let p = slot.load(Ordering::Acquire);
+        if !p.is_null() && p as u64 == fs_id {
+            // SAFETY: the registry entry is published only for instances
+            // whose Box was leaked (static lifetime) and is cleared before
+            // any free, so the pointer stays valid while it is listed.
+            return Some(unsafe { &*p });
+        }
+    }
+    None
+}
+
+/// Resolve the VFS inode a page-cache writeback target refers to.
+///
+/// THE sync(2) DATA-LOSS FIX (data-integrity lane, 2026-11-11): the old
+/// contract was "resolve through the icache; a miss means skip". The
+/// icache is a BOUNDED, DIRECT-MAPPED cache (1024 single-slot buckets): an
+/// inode evicted from it — or overwritten by a hash collision — was silently
+/// never flushed, and its dirty frames were lost at the next crash. The
+/// measured victim: an 8 MB file whose 2048 dirty pages were COLLECTED by
+/// the sync-time scan and then SKIPPED ("miss = skip"), so neither the data
+/// nor the size update ever reached the device.
+///
+/// Resolution order:
+/// 1. the icache (the live VFS inode — its cached size is the writer's
+///    published EOF), and
+/// 2. otherwise materialize a fresh VFS inode from the ON-DISK inode.
+///    `create_vfs_inode_in` lifts that copy's size to the page cache's
+///    dirty extent, so the flush still sees the true EOF and does not
+///    discard the frames as "past EOF".
+///
+/// The writeback path must never depend on a cache for correctness: losing
+/// an inode from a cache may cost performance, never data.
+pub fn resolve_writeback_inode(
+    fs_id: u64,
+    ino: u64,
+) -> Option<alloc::sync::Arc<crate::fs::inode::Inode>> {
+    if let Some(inode) = crate::fs::inode::icache_lookup(ino, fs_id) {
+        return Some(inode);
+    }
+    let fs = ext4_instance_from_id(fs_id)?;
+    // SAFETY: `fs` is a live registered instance (the registry is the
+    // liveness authority); read_inode takes a shared reference.
+    let ext4_inode = fs.read_inode(ino as u32).ok()?;
+    let fs_ptr = fs as *const Ext4FileSystem as *mut Ext4FileSystem;
+    // The materialized copy is NOT inserted into the icache: it is a
+    // writeback-scoped view, and publishing it would fight the icache's
+    // own eviction policy for slots.
+    Some(create_vfs_inode_in(fs_ptr, ino as u32, &ext4_inode))
+}
+
+/// Persist the inode-table blocks of the given writeback targets.
+///
+/// The ordered-data discipline: the DATA blocks of a flushed file must
+/// reach the device BEFORE the inode that describes them, otherwise a
+/// crash in between leaves a file whose size says 8 MB but whose blocks
+/// are still unwritten. `sync(2)` therefore syncs the buffer cache (data)
+/// first and only then these metadata blocks — the same discipline
+/// `ext4_sync_file_inner` applies for fsync(2).
+///
+/// Returns the number of inode-table blocks that were persisted.
+pub fn sync_inode_tables(targets: &[(u64, u64)]) -> usize {
+    let mut n = 0usize;
+    for &(fs_id, ino) in targets {
+        let Some(fs) = ext4_instance_from_id(fs_id) else {
+            continue;
+        };
+        let Some(tbl_blk) = inode::inode_table_block_of(fs, ino as u32) else {
+            continue;
+        };
+        // SAFETY: fs.device is a valid GenDisk of a live instance; bread
+        // returns a valid BufferHead on success.
+        unsafe {
+            if let Some(bh) = crate::fs::bio::bread(fs.device, tbl_blk) {
+                let dirty = (*bh).is_dirty();
+                let res = if dirty {
+                    crate::fs::bio::sync_dirty_buffer(bh)
+                } else {
+                    Ok(())
+                };
+                crate::fs::bio::brelse(bh);
+                if res.is_ok() && dirty {
+                    n += 1;
+                }
+            }
+        }
+    }
+    n
+}
+
+/// Persist the DATA blocks of the given writeback targets (ordered data).
+///
+/// The plain buffer-cache drain (`bio::sync_buffers`) writes every dirty
+/// buffer in HASH ORDER: the inode-table block (the file's new size) can
+/// reach the device BEFORE the data blocks it describes. A crash in
+/// between leaves a file that CLAIMS 8 MB of data the device never
+/// received — measured in the fiE3 crash-window boot: the on-disk inode
+/// had the full size and the full 2048-block extent map, but only ~35 %
+/// of the data blocks were on the device (md5 mismatch).
+///
+/// The ordered discipline (Linux's ordered data mode): the data blocks
+/// first, the metadata last. `sync(2)` therefore syncs these data
+/// blocks BEFORE the buffer-cache drain, so whenever the inode-table
+/// block reaches the device the data it describes is already durable.
+///
+/// Returns the number of data blocks that were persisted.
+pub fn sync_flushed_data(targets: &[(u64, u64)]) -> usize {
+    let mut n = 0usize;
+    for &(fs_id, ino) in targets {
+        let Some(fs) = ext4_instance_from_id(fs_id) else {
+            continue;
+        };
+        let Ok(ext4_inode) = fs.read_inode(ino as u32) else {
+            continue;
+        };
+        // The block map as the flush left it (the buffer-cached inode
+        // table entry carries the extent map the flush wrote).
+        let Ok(blocks) = ext4_inode.get_data_blocks(fs) else {
+            continue;
+        };
+        for block in blocks {
+            if block == 0 {
+                continue; // hole
+            }
+            // SAFETY: fs.device is a valid GenDisk of a live instance;
+            // bread returns a valid BufferHead on success.
+            unsafe {
+                if let Some(bh) = crate::fs::bio::bread(fs.device, block) {
+                    let dirty = (*bh).is_dirty();
+                    if dirty {
+                        let _ = crate::fs::bio::sync_dirty_buffer(bh);
+                        n += 1;
+                    }
+                    crate::fs::bio::brelse(bh);
+                }
+            }
+        }
+    }
+    n
+}
+
 /// Mount ext4 filesystem
 ///
 /// # Parameters
@@ -1243,6 +1447,8 @@ pub fn mount_ext4_flags(
     // Save to global variable
     let fs_ptr = Box::into_raw(fs);
     GLOBAL_EXT4_FS.store(fs_ptr, Ordering::Release);
+    // The writeback path resolves (fs_id, ino) through this registry.
+    ext4_instance_register(fs_ptr);
 
     Ok(())
 }
@@ -1354,10 +1560,21 @@ pub fn ext4_shutdown_sync() -> Result<(), i32> {
     // in dirty page-cache frames — drain them into the ext4 write path
     // BEFORE the buffer-cache sync, or reboot/halt would drop every
     // un-fsynced write (write-through used to make this a no-op need).
-    crate::fs::page_cache::get_page_cache().flush_all_dirty();
+    // The drain returns the (fs, inode) targets it flushed — their data
+    // blocks sync first and their inode-table blocks last (ordered data,
+    // see sys_sync).
+    let flushed_targets = crate::fs::page_cache::get_page_cache().flush_all_dirty();
 
-    // 1. All dirty data/metadata buffers.
+    // 1. The flushed files' DATA blocks (ordered data: data before the
+    // metadata that describes it — see sync_flushed_data).
+    let _ = sync_flushed_data(&flushed_targets);
+
+    // 1a. All dirty data/metadata buffers.
     crate::fs::bio::sync_buffers()?;
+
+    // 1b. The flushed files' inode-table blocks (their new size) — AFTER
+    // the data (ordered data), the same discipline fsync/sync(2) use.
+    let _ = sync_inode_tables(&flushed_targets);
 
     // 2. Superblock clean marking (block 0, byte offset 1024 + 58).
     let fs_ptr = GLOBAL_EXT4_FS.load(Ordering::Acquire);
@@ -1420,6 +1637,9 @@ pub fn unmount_ext4() {
 
     let fs_ptr = GLOBAL_EXT4_FS.swap(core::ptr::null_mut(), Ordering::AcqRel);
     if !fs_ptr.is_null() {
+        // Unregister BEFORE the free: a page-cache entry that outlived this
+        // filesystem must not dereference the freed box.
+        ext4_instance_unregister(fs_ptr);
         // SAFETY: global pointer is valid once initialized via mount_ext4
         unsafe {
             let _ = Box::from_raw(fs_ptr);
@@ -3162,6 +3382,9 @@ pub fn mount_loop_instance(
         fs.journal = None;
     }
     let fs_ptr = alloc::boxed::Box::into_raw(fs) as *mut Ext4FileSystem;
+    // The writeback path resolves (fs_id, ino) through this registry
+    // (fs_id IS the instance pointer for ext4-backed page-cache entries).
+    ext4_instance_register(fs_ptr);
     // SAFETY: fs_ptr is a leaked, valid instance pointer.
     let fs_ref = unsafe { &*fs_ptr };
     match fs_ref.read_inode(2) {
@@ -3169,6 +3392,8 @@ pub fn mount_loop_instance(
         Err(_) => {
             // Not a filesystem root (bad magic / inode 2): fail the mount
             // and reclaim the instance.
+            // Unregister BEFORE the reclaim (same invariant as unmount).
+            ext4_instance_unregister(fs_ptr);
             // SAFETY: reclaiming the just-leaked box.
             unsafe { drop(alloc::boxed::Box::from_raw(fs_ptr)) };
             Err(errno::Errno::InvalidArgument.as_neg_i32())

@@ -1433,13 +1433,22 @@ impl PageCache {
     ///
     /// Shape: chunked slot-table scan (fixed arrays — no allocation under
     /// wlock), NO pcache lock held across the flush I/O (R-WRITESTORM-1),
-    /// live inodes resolved via icache_lookup (miss = skip: the frames
-    /// stay dirty and coherent to every reader through the page cache),
+    /// live inodes resolved via the ext4 writeback resolver (the icache
+    /// first, then a fresh inode materialized from the on-disk inode — a
+    /// cache miss may cost performance, never data: the old "miss = skip"
+    /// contract silently DROPPED every dirty frame of an inode the
+    /// bounded icache had evicted — the sync(2) data-loss bug),
     /// single pass — pages dirtied by a racing writer after their slot
     /// was scanned remain for the next sync (the reference kernel's
     /// sync(2) is not a quiescent point either).
-    pub fn flush_all_dirty(&self) {
+    ///
+    /// Returns the (fs_id, ino) targets whose dirty pages were flushed —
+    /// the caller persists their data blocks first and their inode-table
+    /// blocks afterwards (the ordered-data discipline: data first,
+    /// metadata last).
+    pub fn flush_all_dirty(&self) -> alloc::vec::Vec<(u64, u64)> {
         const PASS: usize = 32;
+        let mut flushed_targets: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
         let mut work: [(u64, u64); PASS] = [(0, 0); PASS];
         let mut resume: usize = 0;
         loop {
@@ -1477,11 +1486,18 @@ impl PageCache {
                 .is_ok();
             for i in 0..n {
                 let (fs_id, ino) = work[i];
-                // Liveness: same contract as sys_fsync (the icache Arc
-                // keeps the descriptor alive; private_data fs pointer is
-                // valid while the mount lives). Miss = skip.
-                if let Some(inode) = crate::fs::inode::icache_lookup(ino, fs_id) {
-                    crate::fs::ext4::file::ext4_flush_dirty_inode(&inode, 0, u64::MAX);
+                // Liveness: the writeback resolver NEVER gives up on a
+                // collected dirty inode — the icache is a bounded cache
+                // and a miss must not cost the file its dirty frames
+                // (the fi-lane sync(2) data loss: an 8 MB file's 2048
+                // dirty pages were collected and then skipped because
+                // the icache had evicted the inode).
+                if let Some(inode) = crate::fs::ext4::resolve_writeback_inode(fs_id, ino) {
+                    let flushed =
+                        crate::fs::ext4::file::ext4_flush_dirty_inode(&inode, 0, u64::MAX);
+                    if flushed > 0 {
+                        flushed_targets.push((fs_id, ino));
+                    }
                 }
             }
             if guarded {
@@ -1491,6 +1507,7 @@ impl PageCache {
                 break; // table exhausted
             }
         }
+        flushed_targets
     }
 
     /// Complete a flush cycle for entries collected by `collect_dirty_range`:
@@ -2054,12 +2071,13 @@ impl PageCache {
     ///   ext4_flush_dirty_inode does its own chunked collect → write →
     ///   complete cycle.
     /// - The filesystem is reached through a LIVE VFS Inode resolved by
-    ///   icache_lookup (fs_id of an ext4 Inode IS the fs pointer, ext4
-    ///   mod.rs inode setup) — the same liveness contract sys_fsync
-    ///   uses. An inode no longer in icache is skipped: its dirty pages
-    ///   stay as they were (bounded, coherent to every reader through
-    ///   the frame); the next open() re-caches the inode and a later
-    ///   retry can flush them.
+    ///   the ext4 writeback resolver (icache first, then a fresh inode
+    ///   materialized from the on-disk inode; fs_id of an ext4 Inode IS
+    ///   the fs pointer, ext4 mod.rs inode setup, validated against the
+    ///   live-instance registry) — the same liveness contract sys_fsync
+    ///   uses. A resolver failure skips the entry: its dirty pages stay
+    ///   as they were (bounded, coherent to every reader through the
+    ///   frame); a later retry can flush them.
     /// - WRITEBACK_GUARD stops re-entry: ext4's write path allocates
     ///   memory, and a nested reclaim arriving inside our own flush
     ///   must not start another flush (it degrades to clean-only).
@@ -2150,10 +2168,14 @@ impl PageCache {
             }
             for i in 0..n_work {
                 let (fs_id, ino, first, last) = work[i];
-                // Liveness: same contract as sys_fsync (Inode Arc keeps
-                // the descriptor alive; private_data fs pointer is valid
-                // while the mount lives). Miss = skip, retry next call.
-                if let Some(inode) = crate::fs::inode::icache_lookup(ino, fs_id) {
+                // Liveness: the same writeback resolver flush_all_dirty
+                // uses (icache first, then a fresh inode materialized
+                // from the on-disk inode via the live-instance registry).
+                // The old "miss = skip" contract silently dropped the
+                // dirty frames of any inode the bounded icache had
+                // evicted — a cache miss may cost performance, never
+                // data.
+                if let Some(inode) = crate::fs::ext4::resolve_writeback_inode(fs_id, ino) {
                     crate::fs::ext4::file::ext4_flush_dirty_inode(
                         &inode,
                         first,

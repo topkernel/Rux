@@ -4600,9 +4600,32 @@ pub fn sys_sync(_args: SyscallArgs) -> i64 {
     // dirty page-cache frames — drain them into the ext4 write path (and
     // thus the buffer cache) BEFORE syncing the buffer cache, or sync(2)
     // would persist nothing of every un-fsynced write.
-    crate::fs::page_cache::get_page_cache().flush_all_dirty();
+    //
+    // The drain returns the (fs, inode) targets it flushed: their DATA
+    // blocks must reach the device BEFORE the inode-table blocks that
+    // describe them (ordered data), or a crash in between leaves a file
+    // that claims 8 MB of data the device never received.
+    let flushed_targets = crate::fs::page_cache::get_page_cache().flush_all_dirty();
+    // ORDERED DATA: the flushed files' DATA blocks first. The plain
+    // buffer-cache drain below writes every dirty buffer in HASH ORDER —
+    // the inode-table block (the file's new size) could reach the device
+    // BEFORE the data blocks it describes, and a crash in between leaves
+    // a file that claims 8 MB of data the device never received
+    // (measured: the fiE3 crash-window boot — full size, full extent
+    // map, ~35 % of the data). The data goes first; the metadata last.
+    let _ = crate::fs::ext4::sync_flushed_data(&flushed_targets);
     // Flush all buffer cache
     let _ = crate::fs::bio::sync_buffers();
+    // INODE-TABLE BLOCKS (data-integrity lane, 2026-11-11): the size the
+    // flushed files just learned lives in their inode-table blocks.
+    // fsync has always synced that block explicitly (ext4_sync_file_inner
+    // bakes the inode-table block + sync_dirty_buffer); sync(2) had NO
+    // equivalent, so the block stayed dirty in the buffer cache and a
+    // crash right after sync() returned left every synced file at its
+    // creation size (0 bytes, md5-of-empty) with its data blocks already
+    // on the device. Synced AFTER the buffer-cache drain above, so the
+    // metadata lands after the data it describes (ordered data).
+    let _ = crate::fs::ext4::sync_inode_tables(&flushed_targets);
     // And persist the disk's volatile cache (see sys_fsync).
     if crate::drivers::virtio::flush_pci_blk().is_err() {
         return -(errno::EIO as i64);

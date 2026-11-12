@@ -6284,8 +6284,13 @@ pub fn sys_unshare(args: SyscallArgs) -> i64 {
 pub fn sys_syncfs(_args: SyscallArgs) -> i64 {
     // Delayed allocation (2026-11): dirty page-cache frames first (see
     // sys_sync), then the buffer cache (simplified: sync everything).
-    crate::fs::page_cache::get_page_cache().flush_all_dirty();
+    // The flushed targets' DATA blocks sync before the buffer-cache drain
+    // and their inode-table blocks after it — the same ordered-data
+    // discipline sync(2) uses.
+    let flushed_targets = crate::fs::page_cache::get_page_cache().flush_all_dirty();
+    let _ = crate::fs::ext4::sync_flushed_data(&flushed_targets);
     let _ = crate::fs::bio::sync_buffers();
+    let _ = crate::fs::ext4::sync_inode_tables(&flushed_targets);
     0
 }
 
