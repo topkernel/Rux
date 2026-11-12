@@ -13064,3 +13064,35 @@ build rc=0; aarch64 build rc=0; riscv64 make test ALL TESTS PASSED
 4. hilog fabric per-op: the 24µs-class recvmsg tax × 89k msg/s — the
    skb alloc per message is the last per-op item before allocator
    work (Tier 3 territory).
+
+#### 110.8 Final diagnostic boots (d1/d2) — the wedge forensics banked
+
+  d1 = b + debug=taskdump: LADDER 22.14s (anim 8.22/fin 16.44/spawn
+       17.65) — the taskdump print volume coincided with a ladder
+       (more print-pacing evidence, n=1).
+  d2 = hp110b (gates+peer cache) + debug=taskdump: stalled (gated
+       binary 0/9 on the day) and the dumps captured the wedge:
+
+  - task 312 blocked >120s state=0x2 (D-state, KERNEL wait),
+    HUNG-STK outermost = ___schedule+0x2e46, next word decodes to a
+    stale core::str::contains frame (kernel-stack residue, not a
+    live chain — the real parked-in syscall is not recoverable from
+    these words; lastsys=13669303 is a sentinel/garbage value).
+  - RWFRZ-HIGH x5 at the wedge: tgid 746 / 561 / 1851 / 609 / 1693,
+    each word=0x2 (WRITE-locked) readers=2 waiters=1 — the sc81
+    frozen-rwlock terminal web (samgr abilityMapLock_ shape): one
+    daemon holds a write lock and parked/died; dependents pile up;
+    the install/bundle chain waits on one of them. THIS is the
+    stall-regime face: userspace rwlock wedges, not kernel locks.
+  - mmi_service died at 148.9s (USEGV at rip=0x3fbf089ac6 — the
+    vDSO region, i.e. clock_gettime storing to a bad caller pointer
+    0x7ff040fc06d0, then a PROT_NONE arena page) — a casualty of the
+    wedge, and a second data point that FFRT passes bad timespec
+    pointers when its arena state desyncs (the 0x7ff1 arena class of
+    110.5 is the same family).
+
+Day totals: baseline 3/7 ladders (18.84 / 23.88 / 22.14 — the 22.14
+with taskdump prints), gated binary 0/9 (prints off 0/3, all-armed
+0/2, ohhunt 0/2, peer-cache 0/2). The gating + peer-cache commits
+stay on the branch with functional gates green; the main-merge
+decision waits for the calm-window ladder A/B (TASK 110.7).
