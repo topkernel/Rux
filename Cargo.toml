@@ -27,6 +27,29 @@ serde_json = "1.0"
 [profile.dev]
 panic = "abort"
 debug-assertions = true
+# opt-level=2 (108th, FLIPPED): the full-stack pristine ladder A/B met
+# the 106th's >=20% launcher.ready bar. Same source (HEAD 6a2f4053 +
+# signal rip<2 guard d040a988), cargo-direct arms, md5s:
+#   opt0 c8 = a20f0f4754272c8193b1b2206a3002a6
+#   opt2 o2 = 7e58eb7c9967ad74235eae0665d7b904
+# Interleaved series, pristine ud-f2-u2v15 reflink per boot, SMP8 4G
+# KVM LL4 420s (run/hp108-series*.out):
+#   opt2: 4/4 ladders 31.19/21.31/16.31/22.33 -> median 21.82s
+#   opt0: 1/4 ladders (single 30.94s; 3 stalls incl. a foundation
+#         crash-restart loop) - median-of-ladders gap -29.5%, Fisher
+#         p~0.02 on the ladder rate alone
+# The 106th's no-flip verdict was measured WITHOUT the vDSO/alloc/rcu
+# levers (1 ladder/arm, no separation); on the full stack opt2's
+# codegen compounding shows at the deciding metric.
+# RE-BASELINES EVERY PERF-GATE BAND (merge-gate rule): IF=0 share
+# 20.4+-3pp, GRQ 1200-7320ns, pbench P1-P7 rows, tick-mode kernel
+# share, small_alloc REST wall, syscost per-op averages and the Tier-1
+# volume bands all shift toward faster kernel bodies; the dev-codegen
+# record families (the 21% atomic-poll cloud, allocator IF=0 windows)
+# shrink 5-20x. Re-bank the baseline table in the merge that adopts
+# this, not before. debug-assertions + debuginfo stay ON (the
+# arithmetic checks remain live - they caught the signal.rs rip<2
+# kernel-killer this session).
 
 [profile.release]
 panic = "abort"
