@@ -4180,3 +4180,10 @@ pub fn unix_park_audit() {
         }
     }
 }
+
+/// 118th param-sender hunt: resolve the connected PEER of a unix-socket
+/// File as a strong Arc (None = not a unix socket / no live peer). Read
+/// diag contract: own locks only, no allocation.
+pub fn unix_peer_of_file(file: &crate::fs::File) -> Option<alloc::sync::Arc<UnixSocket>> {
+    unix_of_file_diag(file).and_then(|s| s.peer_arc())
+}

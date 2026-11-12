@@ -2906,6 +2906,108 @@ pub fn param_stall_dump() {
     crate::pr_warn!("PARAM-STALL trace-tail begin");
     crate::pr_warn!("{}", tail);
     crate::pr_warn!("PARAM-STALL trace-tail end");
+    param_sender_dump();
+}
+
+/// 118th sender-naming pass (second half of the param-stall conviction):
+/// walk EVERY task for unix sockets whose PEER is a socket owned by pid 1
+/// — the would-be senders into init's param pipeline — plus every
+/// param/beget-family comm. Each row carries the sender's scheduler
+/// wake/pick state (pk mark, claim, on_cpu, CFS linkage, on_rq via the
+/// entity, preempt count, parked-syscall latches) so an orphan-marked or
+/// wake-refused sender is visible on the line itself.
+pub fn param_sender_dump() {
+    use crate::process::task::{SchedPolicy, Task, TaskState};
+    // init's unix socket identities (Arc raw pointers), one fdtable pass.
+    let init_task = unsafe { crate::sched::find_task_by_pid(1) };
+    if init_task.is_null() {
+        return;
+    }
+    let mut init_socks: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
+    if let Some(ft) = unsafe { &*init_task }.try_fdtable() {
+        ft.for_each_file(|_fd, f| {
+            if let Some(s) = crate::net::unix::unix_of_file_diag(f) {
+                init_socks.push(alloc::sync::Arc::into_raw(s) as usize);
+            }
+        });
+    }
+    let mut rows = 0usize;
+    crate::pr_warn!(
+        "PARAM-SENDERS init_socks={} — tasks connected to init + param/beget comms:",
+        init_socks.len()
+    );
+    // SAFETY: read-only diagnostic iteration (pid_hash try contract).
+    unsafe {
+        crate::process::pid_hash::pid_hash_for_each_task_try(|t| {
+            if rows >= 40 {
+                return;
+            }
+            let tk = &*t;
+            let pid = tk.pid();
+            if pid == 0 {
+                return;
+            }
+            let comm = tk.comm();
+            let comm_len = comm.iter().position(|&b| b == 0).unwrap_or(16);
+            let comm_s = core::str::from_utf8(&comm[..comm_len]).unwrap_or("?");
+            let family = comm_s.contains("param") || comm_s.contains("beget") || comm_s.contains("watcher");
+            // connected-to-init scan
+            let mut conn: Option<(usize, usize, usize)> = None; // (fd, own_segs, own_bytes)
+            if !init_socks.is_empty() {
+                if let Some(ft) = tk.try_fdtable() {
+                    ft.for_each_file(|fd, f| {
+                        if conn.is_some() {
+                            return;
+                        }
+                        if let Some(s) = crate::net::unix::unix_of_file_diag(f) {
+                            if let Some(peer) = crate::net::unix::unix_peer_of_file(f) {
+                                let p = alloc::sync::Arc::into_raw(peer) as usize;
+                                if init_socks.contains(&p) {
+                                    let (segs, qb, ..) = s.diag_stream_pair();
+                                    conn = Some((fd, segs, qb));
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+            if !family && conn.is_none() {
+                return;
+            }
+            rows += 1;
+            let linked = match crate::sched::sched::grq_diag_cfs_linked(t) {
+                Some(true) => "1",
+                Some(false) => "0",
+                None => "?",
+            };
+            let onrq = match tk.policy() {
+                SchedPolicy::Fifo | SchedPolicy::Rr => tk.rt_entity().is_on_rq(),
+                SchedPolicy::Deadline => tk.dl_entity().is_on_rq(),
+                _ => tk.sched_entity().is_on_rq(),
+            };
+            let nr = tk.last_syscall_nr.load(core::sync::atomic::Ordering::Relaxed);
+            let a0 = tk.last_syscall_a0.load(core::sync::atomic::Ordering::Relaxed);
+            crate::pr_warn!(
+                "PARAM-SENDER pid={} ({}) st={:#x} preempt={} pk={} claim={} on_cpu={} linked={} on_rq={} conn={} lastsys={}(a0={:#x})",
+                pid,
+                comm_s,
+                tk.state().bits(),
+                tk.preempt_count(),
+                tk.pick_state(),
+                tk.running_on_cpu.load(core::sync::atomic::Ordering::Acquire),
+                tk.on_cpu(),
+                linked,
+                onrq,
+                match conn {
+                    Some((fd, s, b)) => alloc::format!("fd={}:segs={}:bytes={}", fd, s, b),
+                    None => alloc::string::String::from("none-but-family"),
+                },
+                nr,
+                a0
+            );
+        });
+    }
+    crate::pr_warn!("PARAM-SENDERS end rows={}", rows);
 }
 
 pub fn pid1_epoll_interest_dump(pid: crate::process::task::Pid) {
