@@ -12856,3 +12856,41 @@ PASSED (run/hp108-maketest.log). Branch pushed through ac48dde4.
    escape it 4/4 while opt0 hits 3/4 is open — codegen timing races.
    The kickdog/el2 faces (100th) unchanged.
 5. hiperf <25s arm limit still blocks SA-chain records (103rd note).
+
+#### 108.8 P3 re-measure + the volume story (hp108sc, syscost boot on the flipped kernel, killed at t~250 after both tables banked)
+
+PER-OP TAXES (the 105th measured these at t=60 on opt0; same sites,
+t=120/t=240 on opt2 + alloc-fast + vDSO):
+
+  site                    105th (opt0, t=60)        108th (opt2, t=120)
+  sched.rs:2938 GRQ lock  9.1M acq / 28.0 CPU-s     73.3M / 10.35 CPU-s
+                          (avg 3.1us)               (avg 140ns, max 12ms)
+  percpu.rs:126 irqsave   41.1M / 19.0 CPU-s        GONE from top-8
+                                                    (the 106th preempt-
+                                                    guard removed the
+                                                    section entirely)
+  slab.rs:640             23.4M / 14.9 CPU-s        348.1M / 9.75 CPU-s
+                          (avg 640ns)               (avg 27ns)
+  file.rs:1137            16.7M / 9.7 CPU-s         159.0M / 3.2 CPU-s
+                                                    (avg 20ns)
+
+Per-op cost collapsed 20-100x; the IF=0 share with it (cpu1 tot 15.4s
+per 120s ~= 13% vs the 17.6s/60s opt0 class). The VOLUMES grew 4-15x
+(the daemons complete more loop iterations on a faster kernel —
+spin-poll timers re-poll sooner), so totals fell only ~2-3x. Clock:
+nr=228 n=209M by t=240 at avg 70ns (6.4 CPU-s/120s = 0.7% of box; was
+21.3M at 3us = 63 CPU-s class on the 105th's stack) — the clock tax is
+dead regardless of who still traps; flood names OS_FFRT_2_0 (192k
+listed), OS_DfxWatchdog, hilogd.rd_kmsg, init. FFRT spin-poll loops
+bypass libc (own syscall stubs) — vDSO cannot catch them without the
+trap; 0.7% of box is not worth chasing. clkprobe-dyn stays unrun.
+
+THE POST-BOOT VOLUME STORY (record pid cross-tab, 108.3): mmi_service
+(pid463, 26.6k kern samples) + os_ds_service (pid612, 26.8k) +
+hilogd.rd_kmsg (pid323, 26.6k) = 79% of ALL non-idle kernel samples in
+the 28-118s window; their RawSpinlock+SlabGuard+buddy+preempt rows are
+per-op taxes riding their syscall volume. hilogd.rd_kmsg drains /dev/kmsg
+in a read loop — every always-on hunt print (mtprobe 376/boot,
+bindwalk 233, devopen-probe 118, bindrec 90, PCTL-RECV 97) costs TWICE
+(emit + hilogd drain). Gating that ~950-line family is the 109th's
+cheapest ladder lever after this session's flip.
