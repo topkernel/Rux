@@ -13017,6 +13017,23 @@ animation-wait + launcher init (spawn→ready 4.2-7.3s), NOT a spawn
 delay — the 103rd's install-stream contributor no longer delays the
 spawn on the flipped kernel).
 
+#### 110.5b Directional A/B signal from the stalled boots (SA-chain speed)
+
+Even without ladders, the SA chain measures the gating's effect (the
+milestone = the Nth 'StartSystemAbilityTask ... init finished' kmsg):
+
+  checkpoint   g (gated, 3 boots)     b (baseline, 3 boots)
+  SA#20        4.10 / 4.22 / 4.28     4.63 / 4.53 / 4.59
+  SA#40        4.45 / 4.48 / 4.53     5.09 / 5.03 / 5.00
+  SA#60        8.34 / 8.39 / 7.92     9.78 / 6.75 / 11.22
+  SA#79        10.22 / 10.19 / 10.38  14.05 / 9.85 / 14.05
+
+The gated kernel reaches every checkpoint faster or equal AND with
+3-5x lower spread — the hunt prints were injecting ~0.5-4s of UART
+jitter into the SA spawn chain. This is the gating's claimed effect,
+measured; what is NOT yet measured at the deciding metric is the
+launcher.ready median (the stall regime owns that question).
+
 #### 110.6 Gates on the gated tree
 
 x86_64 build (bzImage-hp110/hp110b) + 5 boots zero panics; riscv64
