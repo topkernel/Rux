@@ -30,6 +30,9 @@ build:
 build-x86:
 	@$(MAKE) -C build build-x86
 
+build-x86-release:
+	@$(MAKE) -C build build-x86-release
+
 # Boot x86_64 kernel in QEMU (q35, serial console)
 run-x86: build-x86
 	@echo "Starting QEMU (x86_64 q35)..."
