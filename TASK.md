@@ -12996,6 +12996,13 @@ Series hp110 (SMP8 4G LL4 420s pristine reflink, interleaved):
   ga (gated + ALL gated switches ARMED via cmdline — prints back):
                               gap1 anim-fin stall, gap2 spawn-not-ready
                               = 0/2  → prints ON does not restore it
+  gh (gated + dfx=ohhunt):   ghp4 spawn-stall, ghp5 pre-anim stall = 0/2
+  FINAL DAY TALLY: gated-binary 0/7 (g 0/3 + ga 0/2 + gh 0/2) vs
+  baseline 2/5 (bx4 18.84, bx6 23.88; bx2/bp3/bp6 stalled) — Fisher
+  p~0.13, and the baseline's own rate collapsed from 4/4 (yesterday
+  07-08h) to 2/5 through the morning, so the window's regime owns
+  most of the signal; still, ZERO gated-binary ladders in 7 tries
+  blocks any main merge until the calm-window A/B says otherwise.
 Every stall wedges at the same two points, both arms: (a) post-SA:403
 StorageDaemon chain (GenerateUserKeys done, powermgr publish / install
 stream never runs), (b) the early distributeddata OS_IPC NULL-jump
