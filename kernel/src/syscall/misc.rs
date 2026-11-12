@@ -2830,6 +2830,84 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
 /// (own queue segs/bytes, EOF/dead, peer truesize vs sndbuf cap). For
 /// other files the line names the ops table identity. Diagnostic-only
 /// cross-task fdtable walk (same contract as the taskdump path).
+/// 118th param-stall conviction instrument (timed at ~300 s by the tick
+/// hook in trap.rs): the ladder-stall verdict reduced to "init handles
+/// zero param-set messages while samgr publishes readiness into a void".
+/// This dump discriminates the three seed hypotheses directly:
+///   H1 (EPOLLET edge loss on the param unix socket): a unix socket fd of
+///      pid 1 with PENDING queue data whose epoll interest row shows an
+///      ET entry with last_reported already set to the current readiness
+///      (edge swallowed), or the socket missing from every interest set.
+///   H2 (always-ready fd spinning init's loop): an interest row whose
+///      file polls permanently ready without queue data.
+///   H3 (sender-side userspace wedge): every unix socket of pid 1 (and
+///      its peers) EMPTY — no data ever arrived; blame moves to the image.
+/// Prints: pid 1's fd inventory (epoll / unix / pipe / other), every unix
+/// socket's queue depth + peer state, the full epoll interest dump
+/// (fd/events/fid/ET snapshot/reports per row), and the trace-ring tail.
+pub fn param_stall_dump() {
+    let task = unsafe { crate::sched::find_task_by_pid(1) };
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: read-only diagnostic walk of pid 1's fdtable.
+    let tk = unsafe { &*task };
+    let fdtable = match tk.try_fdtable_mut() {
+        Some(f) => f,
+        None => return,
+    };
+    // ---- fd inventory + per-socket queue depths (incl. fds NOT in any
+    // epoll interest set — H1's dead-fd face) ----
+    let mut n_total = 0usize;
+    let mut n_epoll = 0usize;
+    let mut unix_rows: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+    fdtable.for_each_file(|fd, f| {
+        n_total += 1;
+        let ops = f.get_ops().map(|o| o as *const _ as usize).unwrap_or(0);
+        if core::ptr::eq(f.get_ops().unwrap(), &EPOLL_OPS as *const _) {
+            n_epoll += 1;
+        }
+        // Unix sockets: queue depth + peer liveness (diag contract —
+        // read-only, own locks).
+        if let Some(d) = crate::net::unix::unix_of_file_diag(f) {
+            let (segs, qb, eof, dead, peer_alive, peer_ts, sndcap, acceptq) =
+                d.diag_stream_pair();
+            if segs > 0 || eof || acceptq > 0 {
+                unix_rows.push(alloc::format!(
+                    "  unix fd={} segs={} bytes={} eof={} dead={} peer_alive={} peer_ts={} sndcap={} acceptq={}",
+                    fd, segs, qb, eof as u8, dead as u8, peer_alive as u8, peer_ts, sndcap, acceptq
+                ));
+            }
+        }
+    });
+    crate::pr_warn!(
+        "PARAM-STALL pid1 fds={} epoll={} unix-with-data-or-eof={} ops_self={:#x}",
+        n_total,
+        n_epoll,
+        unix_rows.len(),
+        &EPOLL_OPS as *const _ as usize
+    );
+    for r in unix_rows.iter().take(24) {
+        crate::pr_warn!("PARAM-STALL {}", r);
+    }
+    // ---- full epoll interest dump (fd/events/fid/ET snapshot/reports) ----
+    pid1_epoll_interest_dump(1);
+    // ---- trace-ring tail (newest records; EPOLL_CTL/DELIVERY/WAIT_SCAN
+    // rows for pid 1 name the last scheduler-visible epoll activity) ----
+    let snap = crate::trace::render_snapshot();
+    let tail: alloc::string::String = snap
+        .chars()
+        .rev()
+        .take(2400)
+        .collect::<alloc::vec::Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    crate::pr_warn!("PARAM-STALL trace-tail begin");
+    crate::pr_warn!("{}", tail);
+    crate::pr_warn!("PARAM-STALL trace-tail end");
+}
+
 pub fn pid1_epoll_interest_dump(pid: crate::process::task::Pid) {
     // SAFETY: diagnostic lookup of the target task (find_task_by_pid
     // contract); read-only walks of its fdtable below.

@@ -1163,6 +1163,27 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                         regs_ref.rip,
                         core::sync::atomic::Ordering::Relaxed,
                     );
+                    // 118th param-stall conviction dump (one-shot once
+                    // jiffies >= 30 000 = 300 s, dfx=schedtrace-gated): the
+                    // OH ladder stall reduces to init handling zero
+                    // param-set messages — this dumps init's fd inventory +
+                    // socket queue depths + epoll interest sets + the trace
+                    // tail, naming which hypothesis owns it (ET edge loss /
+                    // always-ready fd / empty-queue sender wedge). Diagnostic
+                    // prints only; one per boot.
+                    {
+                        static PS_DONE: core::sync::atomic::AtomicBool =
+                            core::sync::atomic::AtomicBool::new(false);
+                        if !PS_DONE.load(core::sync::atomic::Ordering::Relaxed)
+                            && crate::drivers::timer::get_jiffies() >= 30_000
+                            && crate::dfx::switches::enabled(
+                                crate::dfx::switches::DfxSwitch::SchedTrace,
+                            )
+                            && !PS_DONE.swap(true, core::sync::atomic::Ordering::AcqRel)
+                        {
+                            crate::syscall::misc::param_stall_dump();
+                        }
+                    }
                     crate::interrupt::preempt::irq_enter();
                     // LAPIC EOI FIRST (same discipline as the PIC path):
                     // the scheduler call below can switch tasks, and the
