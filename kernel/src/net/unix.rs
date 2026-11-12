@@ -185,6 +185,18 @@ pub struct UnixSocket {
     peer: Spinlock<Option<Weak<UnixSocket>>>,
     /// Connected default destination name (DGRAM connected via connect())
     pub dgram_peer: Spinlock<Option<String>>,
+    /// 110th: resolved-Arc cache for `dgram_peer`. The send path used to
+    /// re-resolve the NAME through UNIX_TABLE (lock + String hash +
+    /// memcmp + Arc clone) on EVERY connected datagram send — the hilog
+    /// fabric (every OH daemon's log line) made that the top unix-path
+    /// sample family. The cached Arc is validated per use against the
+    /// close markers (`dead`/`Closed`, both set under their own locks at
+    /// unix_close BEFORE the name-table entry is removed); a dead cached
+    /// peer re-resolves the name — preserving the name-follow behavior
+    /// (a restarted daemon's new socket transparently receives; keying
+    /// by name, not by Arc identity, is the existing Rux semantics this
+    /// cache must not change).
+    dgram_peer_sock: Spinlock<Option<Arc<UnixSocket>>>,
     /// Listener accept queue (children created by client connect())
     accept_queue: Spinlock<VecDeque<Arc<UnixSocket>>>,
     /// listen() backlog cap
@@ -285,6 +297,7 @@ impl UnixSocket {
             node_inode: Spinlock::new(None),
             peer: Spinlock::new(None),
             dgram_peer: Spinlock::new(None),
+            dgram_peer_sock: Spinlock::new(None),
             accept_queue: Spinlock::new(VecDeque::new()),
             backlog: Spinlock::new(16),
             recv_queue: Spinlock::new(RecvQueue {
@@ -1561,15 +1574,18 @@ pub fn unix_connect(
                     Err(e) => return Err(e), // lookup errno (ENOENT, ...)
                 }
             };
-            if lookup(&lookup_key).is_none() {
-                return Err(-111); // ECONNREFUSED
-            }
+            let target = match lookup(&lookup_key) {
+                Some(t) => t,
+                None => return Err(-111), // ECONNREFUSED
+            };
             // Autobind an abstract name if unbound (Linux semantics: a
             // connected DGRAM socket needs a reply address).
             if sock.bound_name.lock().is_none() {
                 autobind(sock);
             }
+            // 110th: prime the resolved-Arc cache alongside the name.
             *sock.dgram_peer.lock() = Some(lookup_key);
+            *sock.dgram_peer_sock.lock() = Some(target);
             *sock.state.lock() = UnixState::Connected;
             Ok(())
         }
@@ -1762,9 +1778,34 @@ pub fn unix_send(
                 } else if let Some(p) = sock.peer_arc() {
                     // socketpair DGRAM: the peer link is the destination.
                     p
+                } else if let Some(cached) = sock.dgram_peer_sock.lock().clone() {
+                    // 110th fast path: the connect()-resolved Arc, validated
+                    // against the close markers. A dead cached peer falls
+                    // through to the name re-resolution — the name-follow
+                    // semantics (a restarted daemon's replacement socket
+                    // receives) are keyed by NAME, and the cache is only an
+                    // accelerator, never an identity.
+                    if *cached.dead.lock() || *cached.state.lock() == UnixState::Closed {
+                        if let Some(key) = sock.dgram_peer.lock().clone() {
+                            match lookup(&key) {
+                                Some(t) => {
+                                    *sock.dgram_peer_sock.lock() = Some(t.clone());
+                                    t
+                                }
+                                None => return Err(-111), // ECONNREFUSED
+                            }
+                        } else {
+                            return Err(-89); // EDESTADDRREQ
+                        }
+                    } else {
+                        cached
+                    }
                 } else if let Some(key) = sock.dgram_peer.lock().clone() {
                     match lookup(&key) {
-                        Some(t) => t,
+                        Some(t) => {
+                            *sock.dgram_peer_sock.lock() = Some(t.clone());
+                            t
+                        }
                         None => return Err(-111), // ECONNREFUSED
                     }
                 } else {
