@@ -193,6 +193,19 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     if crate::trace::EVENT_SYS_EXIT.armed() {
         crate::trace::trace_sys_exit(sc_nr as i64, syscall_get_return(regs) as i64);
     }
+    // 118th EIO hunt (dfx=eiotrace rides DfxSwitch::EpollTrace): name the
+    // EXACT syscall returning -EIO ('init_hisysevent.c:140 Failed to write
+    // event ret -5' — the write(2) path logger never fired, so the -5 rides
+    // a different syscall). Budgeted direct-console line: nr, args head,
+    // pid, comm. Reentrancy-guarded (this is every syscall's exit).
+    {
+        let rv = syscall_get_return(regs);
+        if rv == -5
+            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::EpollTrace)
+        {
+            crate::syscall::io::syscall_eio_line(sc_nr, syscall_get_arguments(regs));
+        }
+    }
     crate::dfx::syscost::exit(sc_nr, sc_t0);
     // pa15 recv-family fd census (hilogd.server dual-drain evidence for
     // the ipc lane; fd/flags/ret profile per (comm, nr), zero cost when
