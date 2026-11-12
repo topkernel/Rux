@@ -162,6 +162,12 @@ impl<'a> BlockAllocator<'a> {
         let Some(first) = find_free_bit(&bitmap, start, blocks_per_group) else {
             return Ok(None);
         };
+        // FI-DIAG (107th): the pre-mark bit state of the handed-out run —
+        // a set bit here means the allocator's view is stale (the block
+        // already has an owner). find_free_bit returning a SET bit is the
+        // double-alloc smoking gun.
+        let fi98_first_set =
+            bitmap[(first as usize / 8)] & (1 << (first as usize % 8)) != 0;
         let max_run = core::cmp::min(want as u64, free_blocks as u64);
         let mut len: u64 = 1;
         while len < max_run {
@@ -209,6 +215,22 @@ impl<'a> BlockAllocator<'a> {
                 );
             }
         }
+        // FI-DIAG (107th, fv1): the razor10b/fv1 double-mapped phys live
+        // at 9877/9883/9886 — the same phys duplicated across boots on
+        // the same base. Watch EVERY handout in that neighborhood; a
+        // handout of an already-set bit names the stale-view producer
+        // (bit_before) and the run shape.
+        if (9800..9950).contains(&block_number) {
+            static FI_W98: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let n = FI_W98.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 60 {
+                crate::pr_err!(
+                    "FI-RUNHAND98 blk={} len={} bit_before={} free_cnt={}",
+                    block_number, len, fi98_first_set, free_blocks
+                );
+            }
+        }
         Ok(Some((block_number, len as u32)))
     }
 
@@ -247,6 +269,21 @@ impl<'a> BlockAllocator<'a> {
         // Find free bit using buddy-aligned scan (order=0 = single block)
         if let Some(block_offset) = find_free_bit(&bitmap, start, blocks_per_group) {
             let block_number = (group_idx as u64) * blocks_per_group + block_offset;
+
+            // FI-DIAG (107th): single-block twin of the run watchpoint.
+            if (9800..9950).contains(&block_number) {
+                let bit_before =
+                    bitmap[(block_offset as usize / 8)] & (1 << (block_offset as usize % 8)) != 0;
+                static FI_W98S: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                let n = FI_W98S.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 60 {
+                    crate::pr_err!(
+                        "FI-SINGLEHAND98 blk={} bit_before={}",
+                        block_number, bit_before
+                    );
+                }
+            }
 
             // Mark block as used IN PLACE (no second read)
             let byte_idx = block_offset as usize / 8;
@@ -336,6 +373,27 @@ impl<'a> BlockAllocator<'a> {
         if end_bit.div_ceil(8) > bitmap.len() {
             return Err(errno::Errno::InvalidArgument.as_neg_i32());
         }
+        // FI-DIAG (107th): every FREE touching the watched 9800..9950
+        // window — a free of an already-CLEAR bit or a free racing the
+        // pattern file's allocations names the stale-free producer.
+        if len > 0
+            && ((9800..9950).contains(&start) || (9800..9950).contains(&(start + len - 1)))
+        {
+            let first_set =
+                bitmap[(block_offset as usize / 8)] & (1 << (block_offset as usize % 8)) != 0;
+            static FI_F98: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let n = FI_F98.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 60 {
+                crate::pr_err!(
+                    "FI-FREE98 blk={}..{} len={} first_bit_set={}",
+                    start,
+                    start + len - 1,
+                    len,
+                    first_set
+                );
+            }
+        }
         for bit in block_offset as usize..end_bit {
             bitmap[bit / 8] &= !(1 << (bit % 8));
         }
@@ -379,6 +437,18 @@ impl<'a> BlockAllocator<'a> {
             let bh = bio::bread(self.fs.device, bitmap_block)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
             let bitmap = (*bh).b_data.to_vec();
+            // FI-DIAG (107th, fvset hunt): the group-0 bitmap byte that
+            // owns bit 18567 (the run the quiet fvset boot handed to the
+            // pattern file THREE times). Every read/write of the byte
+            // names the moment a mark appears or vanishes.
+            if bitmap_block == 1027 && bitmap.len() > 2320 {
+                static FI_BR: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                let n = FI_BR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 80 {
+                    crate::pr_err!("FI-BMPREAD byte2320={:#04x}", bitmap[2320]);
+                }
+            }
             bio::brelse(bh);
             Ok(bitmap)
         }
@@ -400,6 +470,15 @@ impl<'a> BlockAllocator<'a> {
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
             (*bh).b_data.copy_from_slice(bitmap);
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+            // FI-DIAG (107th, fvset hunt): see read_block_bitmap.
+            if bitmap_block == 1027 && bitmap.len() > 2320 {
+                static FI_BW: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                let n = FI_BW.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 80 {
+                    crate::pr_err!("FI-BMPWRITE byte2320={:#04x}", bitmap[2320]);
+                }
+            }
             let sync_res = bio::sync_dirty_buffer(bh);
             bio::brelse(bh);
             sync_res?;

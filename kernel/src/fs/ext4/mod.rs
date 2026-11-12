@@ -1858,15 +1858,26 @@ pub fn ext4_fallocate_on(
             let punch_first = offset / block_size;
             let punch_last = (file_end - offset).div_ceil(block_size) + punch_first; // exclusive
 
+            // R108: punch frees collected by the extent branch, drained
+            // after the tail write_inode_disk publishes the punched map.
+            let mut r108_punch_drain: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
+            let mut r108_punch_meta: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+
             if ext4_inode.has_extent() {
                 // Any-depth punch via gather/classify/rebuild (the old
                 // inline-root-only walker refused deep trees and could
                 // not represent more than 4 surviving fragments).
                 let hdr = &*(ext4_inode.block.as_ptr() as *const Ext4ExtentHeader);
                 if hdr.eh_magic == EXT4_EXT_MAGIC {
-                    let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
                     let all = crate::fs::ext4::extent::ext4_ext_gather(fs, &ext4_inode.block)?;
                     let mut kept: alloc::vec::Vec<crate::fs::ext4::extent::RawExtent> =
+                        alloc::vec::Vec::new();
+                    // R108 (crash-ordering, see ext4_setattr): the punch
+                    // frees are DEFERRED until the punched map is durably
+                    // published (write_inode_disk at the tail of this path
+                    // syncs) — freeing against the still-stale on-disk map
+                    // is the re-free poison window.
+                    let mut r108_punch_runs: alloc::vec::Vec<(u64, u64)> =
                         alloc::vec::Vec::new();
                     let mut freed_sectors: u64 = 0;
                     for e in &all {
@@ -1879,8 +1890,9 @@ pub fn ext4_fallocate_on(
                             // Entirely inside the punch range: free it all
                             // (one bitmap pass for the contiguous run —
                             // see free_inode_blocks for why per-block
-                            // frees are untenable for big extents).
-                            let _ = allocator.free_block_run(phys, ext_len);
+                            // frees are untenable for big extents). R108:
+                            // freed after the punched map is durable.
+                            r108_punch_runs.push((phys, ext_len));
                             freed_sectors += ext_len * (block_size / 512);
                         } else if ext_first < punch_last && ext_last > punch_first {
                             // Partially covered: ZERO the overlapped blocks in
@@ -1911,13 +1923,18 @@ pub fn ext4_fallocate_on(
                             kept.push(*e);
                         }
                     }
-                    let meta_delta = crate::fs::ext4::extent::ext4_ext_rebuild(
-                        fs, &mut ext4_inode.block, &kept,
+                    let meta_delta = crate::fs::ext4::extent::ext4_ext_rebuild_deferred(
+                        fs, &mut ext4_inode.block, &kept, &mut r108_punch_meta,
                     )?;
                     ext4_inode.blocks = ext4_inode
                         .blocks
                         .saturating_sub(freed_sectors)
                         .saturating_add_signed(meta_delta);
+                    // R108: the punched map (rebuilt above) is published
+                    // durably by the write_inode_disk at the tail of this
+                    // path; only then do the collected runs free. The
+                    // frees are stashed here and drained at the tail.
+                    r108_punch_drain = r108_punch_runs;
                 }
             } else {
                 // Indirect-block files: zero the covered direct blocks in
@@ -1949,6 +1966,20 @@ pub fn ext4_fallocate_on(
             // write_inode_disk expects the on-disk layout; convert.
             let on_disk = ext4_inode.to_on_disk();
             inode::write_inode_disk(fs, ino, &on_disk)?;
+            // R108: the punched map is now DURABLE (write_inode_disk
+            // syncs) — drain the deferred punch frees (data runs and the
+            // replaced tree's metadata blocks). A failure above (the `?`
+            // on write_inode_disk) skips the frees: leaked blocks (bits
+            // set, unclaimed) instead of re-free poison.
+            if !r108_punch_drain.is_empty() || !r108_punch_meta.is_empty() {
+                let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
+                for (phys, len) in &r108_punch_drain {
+                    let _ = allocator.free_block_run(*phys, *len);
+                }
+                for blk in &r108_punch_meta {
+                    let _ = allocator.free_block(*blk);
+                }
+            }
             return Ok(());
         }
 
@@ -2440,6 +2471,29 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
         Err(e) => return e,
     };
 
+    // R108 (fi-fix-verify, P0 crash-window data integrity): the truncate
+    // path DEFERS its bitmap frees until the shrunk map is durably
+    // published. The old order — free_block_run's synchronous BITMAP
+    // write first, the inode-table write riding the lazy buffer
+    // writeback (write_inode does not sync without a journal handle) —
+    // left a crash window in which the image carried FREE bits + a
+    // STALE map still claiming them. On the next boot the allocator
+    // handed those blocks to a new owner and the stale map's next
+    // truncate re-freed LIVE blocks: two file pages, one disk block
+    // (the fvpop→fvset→fv1/2/3 poison chain — every crash-window boot
+    // re-manufactured the taint it then suffered from; measured
+    // 2026-11-12). The vectors are filled by the ATTR_SIZE truncate
+    // classification below and drained in the write-back success arm
+    // AFTER sync_inode_table_block; a crash in between leaves the
+    // benign leak direction (map shrunk, bits still set).
+    let mut r108_drop_runs: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
+    let mut r108_drop_blocks: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+    // Old extent-TREE metadata blocks replaced by the rebuild (same
+    // deferred-free rule: their bits clear only after the rebuilt root
+    // is durable — a stale root pointing at freed tree blocks walks
+    // garbage on the next boot).
+    let mut r108_drop_meta: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+
     // SP-2 (stress-port r1, 2026-11-02): metadata-only setattr (chmod/
     // chown/utime/atime) must NOT write back the stale disk size. The
     // disk-read Ext4Inode lags pending writeback (write() updates the
@@ -2510,8 +2564,9 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
             }
             let new_size = arg1;
             if new_size < ext4_inode.get_size() {
-                // Truncate: free blocks beyond new_size
-                let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
+                // Truncate: free blocks beyond new_size. The frees are
+                // R108-deferred (see r108_drop_runs at the top of this
+                // function); classification only.
                 let block_size = fs.block_size as u64;
                 let new_blocks = (new_size + block_size - 1) / block_size;
                 let old_blocks = (ext4_inode.get_size() + block_size - 1) / block_size;
@@ -2540,17 +2595,44 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                             let phys_start = e.phys;
                             let ext_len = e.len as u64;
 
+                            // FI-DIAG (107th): truncate-side twin of
+                            // FI-UNLINKFREE — name the truncating inode
+                            // when the freed range touches the watched
+                            // 9800..9950 window.
+                            if ext_len > 0
+                                && ((9800..9950).contains(&phys_start)
+                                    || (9800..9950).contains(&(phys_start + ext_len - 1)))
+                            {
+                                static FI_T98: core::sync::atomic::AtomicUsize =
+                                    core::sync::atomic::AtomicUsize::new(0);
+                                let n =
+                                    FI_T98.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                                if n < 40 {
+                                    crate::pr_err!(
+                                        "FI-TRUNCFREE ino={} new_blocks={} ext=lblk{}..{} phys={}..{}",
+                                        ext4_ino,
+                                        new_blocks,
+                                        logical_start,
+                                        logical_start + ext_len - 1,
+                                        phys_start,
+                                        phys_start + ext_len - 1
+                                    );
+                                }
+                            }
                             if logical_start >= new_blocks {
                                 // Entirely beyond the new EOF: drop it.
-                                let _ = allocator.free_block_run(phys_start, ext_len);
+                                // R108: freed after the shrunk map is
+                                // durable (see r108_drop_runs above).
+                                r108_drop_runs.push((phys_start, ext_len));
                                 freed_sectors += ext_len * (block_size / 512);
                             } else if logical_start + ext_len > new_blocks {
                                 // Straddles: shrink to the new EOF, free the tail.
                                 let keep_len = new_blocks - logical_start;
-                                let _ = allocator.free_block_run(
+                                // R108: deferred free (see r108_drop_runs).
+                                r108_drop_runs.push((
                                     phys_start + keep_len,
                                     ext_len - keep_len,
-                                );
+                                ));
                                 freed_sectors += (ext_len - keep_len) * (block_size / 512);
                                 // Preserve the unwritten flag on the kept
                                 // head (see the punch-path note above).
@@ -2565,8 +2647,8 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                                 kept.push(*e);
                             }
                         }
-                        let meta_delta = match crate::fs::ext4::extent::ext4_ext_rebuild(
-                            fs, &mut ext4_inode.block, &kept,
+                        let meta_delta = match crate::fs::ext4::extent::ext4_ext_rebuild_deferred(
+                            fs, &mut ext4_inode.block, &kept, &mut r108_drop_meta,
                         ) {
                             Ok(d) => d,
                             Err(e) => return e,
@@ -2581,13 +2663,18 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                     for i in new_blocks as usize..old_blocks as usize {
                         if i < 12 {
                             if ext4_inode.block[i] != 0 {
-                                let _ = allocator.free_block(ext4_inode.block[i] as u64);
+                                // R108: deferred free (see r108_drop_blocks).
+                                r108_drop_blocks.push(ext4_inode.block[i] as u64);
                                 ext4_inode.block[i] = 0;
                             }
                         } else {
                             match indirect::ext4_get_block(fs, &ext4_inode.block, i as u64) {
                                 Ok(block_num) if block_num != 0 => {
-                                    let _ = allocator.free_block(block_num);
+                                    // R108: deferred free (see
+                                    // r108_drop_blocks) — the data block's
+                                    // bit clears only after the root
+                                    // pointers are durable.
+                                    r108_drop_blocks.push(block_num);
                                     // Clear the freed block's indirect slot: a
                                     // stale pointer outlives the free, and after
                                     // a later grow the hole range would resolve
@@ -2596,7 +2683,9 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                                     // foreign bytes for reads and writing
                                     // through dead mappings (the reference
                                     // kernel clears each pointer as it frees,
-                                    // ext4_free_branches).
+                                    // ext4_free_branches). clear_indirect_entry
+                                    // syncs the slot inline — the slot clear is
+                                    // already durable before the deferred free.
                                     let _ = indirect::clear_indirect_entry(
                                         fs, &ext4_inode.block, i as u64,
                                     );
@@ -2607,11 +2696,13 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                     }
                     // Clean up indirect block pointers if truncating below 12 blocks
                     if new_blocks < 12 && ext4_inode.block[12] != 0 {
-                        let _ = allocator.free_block(ext4_inode.block[12] as u64);
+                        // R108: deferred free (see r108_drop_blocks).
+                        r108_drop_blocks.push(ext4_inode.block[12] as u64);
                         ext4_inode.block[12] = 0;
                     }
                     if new_blocks < 12 + (block_size / 4) as u64 && ext4_inode.block[13] != 0 {
-                        let _ = allocator.free_block(ext4_inode.block[13] as u64);
+                        // R108: deferred free (see r108_drop_blocks).
+                        r108_drop_blocks.push(ext4_inode.block[13] as u64);
                         ext4_inode.block[13] = 0;
                     }
                     // Triple-indirect (block[14]) was never freed here —
@@ -2624,7 +2715,8 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                     // survive (regression round 5, HIGH: double-free).
                     let p = (block_size / 4) as u64;
                     if new_blocks < 12 + p + p * p && ext4_inode.block[14] != 0 {
-                        let _ = allocator.free_block(ext4_inode.block[14] as u64);
+                        // R108: deferred free (see r108_drop_blocks).
+                        r108_drop_blocks.push(ext4_inode.block[14] as u64);
                         ext4_inode.block[14] = 0;
                     }
                 }
@@ -2708,6 +2800,44 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                     fs as *const Ext4FileSystem as u64,
                     inode.ino,
                 );
+            }
+            // R108: the truncating ATTR_SIZE path publishes the shrunk
+            // map HERE. write_inode marked the inode-table block dirty
+            // WITHOUT syncing (no journal handle); sync it now so the
+            // shrunk map is durable BEFORE the deferred bitmap frees.
+            // On sync failure the frees are skipped entirely — a leaked
+            // run (bits stay set, map no longer claims them) is benign,
+            // while freeing against an unpublishable map is exactly the
+            // re-free poison window this ordering exists to close.
+            if attr == setattr_attr::ATTR_SIZE
+                && (!r108_drop_runs.is_empty()
+                    || !r108_drop_blocks.is_empty()
+                    || !r108_drop_meta.is_empty())
+            {
+                if inode::sync_inode_table_block(fs, ext4_ino).is_ok() {
+                    let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
+                    for (phys, len) in &r108_drop_runs {
+                        let _ = allocator.free_block_run(*phys, *len);
+                    }
+                    for blk in &r108_drop_blocks {
+                        let _ = allocator.free_block(*blk);
+                    }
+                    for blk in &r108_drop_meta {
+                        let _ = allocator.free_block(*blk);
+                    }
+                } else {
+                    static R108_SKIP: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    if R108_SKIP.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 10 {
+                        crate::pr_err!(
+                            "R108-FREE-SKIPPED ino={} runs={} blocks={} meta={} (map not durable; leaked, not aliased)",
+                            ext4_ino,
+                            r108_drop_runs.len(),
+                            r108_drop_blocks.len(),
+                            r108_drop_meta.len()
+                        );
+                    }
+                }
             }
             0
         }

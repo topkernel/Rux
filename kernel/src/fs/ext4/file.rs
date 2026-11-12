@@ -1286,6 +1286,22 @@ fn allocate_blocks_with_extents(
         {
             static FI_AB: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
+            // 107th: receiver-side twin of FI-RUNHAND98 — which (ino,
+            // logical) received the watched 9800..9950 phys.
+            if (9800..9950).contains(&run_start) {
+                static FI_R98: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if FI_R98.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
+                    crate::pr_err!(
+                        "FI-EXTRECV98 ino={} logical={}..{} phys={} len={}",
+                        inode.ino,
+                        logical_block,
+                        logical_block + run_len as u64 - 1,
+                        run_start,
+                        run_len
+                    );
+                }
+            }
             if run_len >= 16 && FI_AB.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 12 {
                 let b = &inode.block;
                 let entries = (b[0] >> 16) as u16;

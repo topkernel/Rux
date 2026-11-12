@@ -10848,3 +10848,229 @@ fs pointers in the FI-* prints, 10b: pattern file flushed under
 fs=0xffff88807d1c4b10 vs the early install files' fs=...c2910 —
 DIFFERENT POINTERS in the same boot, both on vdf?). Verify with a
 probe that stamps the allocating fs pointer into FI-APPEND lines.
+
+### 98.8 The 107th (fi-fix-verify): the double-alloc CLOSED — the re-free of stale DEAD-INODE maps (measured, fixed); plus a bio eviction-window fix and a host-tool walker fix (2026-11-12)
+
+THE 104th's suspect list resolved as follows. The cross-instance
+EXT4_BIG_LOCK theory is DEAD: EXT4_BIG_LOCK is one GLOBAL static (all
+four Ext4FileSystem instances of an OH boot serialize on it), and the
+buffer cache is keyed (major, minor, blocknr) so every instance over
+the same GenDisk shares one bitmap buffer — the instance count cannot
+fork the allocator's view. All userdata flushes in razor10b ran under
+ONE instance (fs=0x...7d1c4b10, serial-grepped). Suspect 2 (the
+size-derived prealloc base) is also dead: allocate_blocks_for_file
+caps its base at needed_blocks, so the append path CANNOT stamp
+ee_block past the write's own end — no above-EOF entries were ever
+inserted (FI-INS-GAP silent all boot).
+
+FIRST: the "463 holes + 463 above-EOF entries" of §98.6 was a HOST
+TOOL ARTIFACT. fi_inspect.py's _walk_extent added the index entry's
+ei_block onto leaf ee_blocks, but leaf ee_blocks are ABSOLUTE (the
+kernel's own search compares logical_block >= ext.ee_block directly).
+With a 3-index-entry tree every second+ leaf read back base-shifted:
+razor10b's REAL map is COMPLETE (2048/2048 lblks, no holes) with
+exactly FIVE double-mapped physicals: 9877(352/495), 9883(375/496),
+9886(0/499), 10815(169/1735), 11169(170/1304) — content analysis
+proves the LATER page owns the bytes (phase matches the twin, not the
+label). fi_inspect.py fixed in-tree (walker + comment).
+
+THE REAL MECHANISM (probe chain, fv2 instrumented boot —
+FI-RUNHAND98/SINGLEHAND98/EXTRECV98/FREE98/UNLINKFREE/TRUNCFREE over
+phys 9800..9950):
+
+1. The razor10 population boot (PRE-FIX kernel) left DEAD inodes on
+   the base image whose on-disk extent maps still listed blocks whose
+   bitmap bits were FREE — e.g. ino 413: lblk0->9877, lblk1..4->9883..
+   9886 on the BASE (verified directly on userdata-razor10.img). Every
+   free path (deferred reap, rmdir, rename-overwrite) frees the map's
+   blocks but the map BYTES stay in the dead inode.
+2. In the acceptance boot the OH file churn (KVS/log compaction)
+   allocates those blocks live (pattern file pages 336/376 got 9877/
+   9883) — then an OLD file (ino 413) is ftruncate(fd,0)'d:
+   ext4_setattr gathers the STALE map and FREES BLOCKS THE FILE NEVER
+   OWNED in this boot (FI-TRUNCFREE ino=413 phys=9877 + 9883..9886
+   while the pattern file owned them; same class: ino 451 freeing
+   9881..9937 = the pattern file's early pages' phys neighborhood).
+3. The freed bits are immediately re-handed to the pattern file's
+   later pages (9877->p434, 9883->p439...) — TWO FILE PAGES, ONE
+   DISK BLOCK, the later page's bytes overwrite the earlier's. This
+   is byte-for-byte the razor10b/fv1 signature, and it explains the
+   CROSS-BOOT PHYS DETERMINISM (same base = same stale maps = the
+   same phys duplicated).
+
+FIX A (the double-alloc, namei.rs): erase_dead_inode_map() — after
+free_inode_blocks at ALL FOUR free sites (ext4_reap_unlinked, rmdir,
+rename-overwrite-dir, rename-overwrite-file) the dead inode's i_block
++ i_blocks are zeroed and persisted: no later reader (ftruncate via a
+surviving fd, second reap, reuse) can gather a free list from a dead
+inode again. One extra inode-table write per deletion.
+
+FIX B (a real but SECONDARY window, bio.rs R12): evict_one used to
+UNHASH the victim before its Phase-4 sync — a same-key bread in that
+window fabricated a fresh buffer from STALE disk (inline metadata
+syncs are deferred under the active null-journal handle), and a
+sync-FAILURE freed the only copy of the dirty marks. Both produce the
+same double-alloc family under EIO storms (razor10b's era). Now the
+victim stays HASHED (unpinnable) through its sync; get()/bread_async
+WAIT on same-key mid-eviction entries (EVICT_WQ) instead of
+fabricating; a failed sync RE-LINKS the victim; get()/get_zero_impl/
+bread_async/sync_all/sync_all_excluding/invalidate skip or guard
+evicting entries. fv1 (fix B alone, poisoned base) still had 3
+double-maps — fix B alone was not sufficient on this rig; fv2's probe
+chain then named fix A's mechanism.
+
+CONSEQUENCE FOR THE RIG: the razor10 populated base is TAINTED (its
+map-vs-bitmap divergence was produced by the pre-fix kernel and
+re-fires every boot — the same OH service truncates the same old
+file). The gate must run on a base POPULATED BY THE FIXED KERNEL:
+fvpop = never-booted pristine (oh-launcher ud-f2-u2v15.img) + fixed
+kernel, then fv1/fv2/fv3 crash-window boots on copies of fvpop's
+image. Gate unchanged: size=8388608, md5=01cabbdd75d72d410fa93a5942ac
+4247 (fi_inspect, fixed walker) on every crashed image, 3+ boots.
+Results appended below.
+
+RESULTS (appended by the 109th — the 107th died of quota before
+recording them): fixes A+B did NOT close the double-alloc. The chain
+ran fvpop (populate from pristine; crash script no-op'd on the
+never-booted base — image verified pat.bin-free) → fv1 → fvset
+(settling boot; its own crash script ran) → fv1/fv2/fv3 re-run on
+copies of the SETTLED fvset image:
+
+    boot   md5 (fi_inspect)         map face (fixed walker)
+    fv1    01cabbdd…4247 PASS       2048/2048, THREE DOUBLE-MAPPED
+    fv2    01cabbdd…4247 PASS       2048/2048, THREE DOUBLE-MAPPED
+    fv3    a084c1e2… FAIL           2048/2048, THREE DOUBLE-MAPPED
+
+The double-mapped physicals are IDENTICAL in all three boots: 9908,
+9909, 9929 — mapped at lblk 0/1/2 AND at lblk 635 (fv1), 560 (fv2),
+192 (fv3). fv1/fv2 passed the md5 gate by pure phase luck: a page k'
+sharing a block with page k reads byte-identical when (k'-k)*4096 ≡ 0
+mod 20, i.e. k' ≡ k mod 5 — 635 and 560 are ≡0 mod 5, 192 is ≡2, so
+only fv3's overwrite became VISIBLE (pages 0/1/2 read pages 192/193/
+194's bytes: drift +12 measured by phasemap). The md5 gate alone is
+NOT sufficient for this family; the map-uniqueness check is now part
+of the gate (fi_inspect --audit, added by the 109th).
+
+The instruments named the mechanism in-boot (fv3 serial): 9908/9909/
+9929 handed to the pattern file at 11.79s (FI-RUNHAND98
+bit_before=false, legitimately free), then FI-TRUNCFREE ino=384 at
+24.185s "freed" 9908..9909 + 9929 — first_bit_set=true: a LIVE inode
+(links=1, dtime=0, an OH KVS/log file) whose ON-DISK MAP still claimed
+those blocks while the bitmap said FREE. The fvset base carries that
+divergence baked in (verified host-side: fvset.img ino 384 map claims
+9908/9909/9929, bits 0; fvpop.img ino 384 claims 18512/18566..18569,
+bits 0 — and 18566+ ARE fvset's pat.bin double-mapped set). Every
+crash-window boot re-manufactures the taint it then suffers from: the
+poison is the CRASH WINDOW ITSELF, not a fixed base defect — see 98.9
+for the ordering root cause and the R108 fix. fi_inspect --audit on
+fvset.img: 34 stale map-claims across multiple LIVE inodes (384, 472,
+…), 8 within-file double-maps.
+
+### 98.9 The 109th (fi-fix-verify): R108 — the crash-ordering root cause FIXED (map durable BEFORE bitmap free); the audit-based gate (2026-11-12)
+
+THE ROOT CAUSE of the surviving double-alloc (98.8 results): the free
+paths cleared BLOCK-BITMAP BITS SYNCHRONOUSLY while the owning inode's
+SHRUNK/ERASED map rode the LAZY buffer writeback. Two halves:
+
+- allocator.rs free_block_run_single_group: write_block_bitmap marks
+  the bitmap buffer dirty and syncs it INLINE (sync_dirty_buffer) —
+  the free is durable the moment the syscall runs.
+- inode.rs write_inode (the Ext4Inode-format writer ext4_setattr
+  uses): "Without a handle … the buffer is now left DIRTY instead of
+  synced inline" — the inode-table block with the shrunk map persists
+  only at eviction / sync(2) / fsync.
+
+Crash (or 420s power cut) between the two → the image carries FREE
+bits + a STALE map claiming them. Next boot: the allocator hands
+those blocks to a new owner (pat.bin's head pages got 9908/9909/9929,
+bit_before=false — legitimate at that moment); the stale map's owner
+truncates again (the OH KVS churn truncates the same ino 384 every
+boot) and re-frees the NEW owner's blocks (first_bit_set=true); the
+freed bits are re-handed to the same file's later pages — two file
+pages, one disk block, cross-boot deterministic on the same base.
+Measured end-to-end in the fv chain (98.8 results); NOTE the map
+divergence was measured on bases produced by the FIXED-generation
+kernel too (fvpop, fvset — both R107 builds): fix A/B could not stop
+it because the LIVE-inode truncate path was never A's target, and B's
+eviction protocol is irrelevant when the divergence is produced by
+plain write ordering, no eviction race involved.
+
+R108 (this round; the general rule: ANY metadata op that clears bits
+an inode's map claims must publish the shrunk/emptied map DURABLY
+before the bits clear; the inverted crash window is then a benign
+leak — map empty, bits set):
+
+1. inode.rs sync_inode_table_block(fs, ino): bread the inode-table
+   block + sync_dirty_buffer if dirty (the same pattern
+   ext4_sync_file_inner applies at fsync).
+2. namei.rs free_inode_blocks (all four deletion sites — reap, rmdir,
+   rename-overwrite x2): writes an ERASED map (i_block=0, i_blocks=0)
+   via write_inode_disk (syncs inline) BEFORE the first bit clears.
+   The R107 erase_dead_inode_map call-sites become idempotent
+   re-writes of the same empty state.
+3. mod.rs ext4_setattr ATTR_SIZE truncate: classification collects
+   drop runs/blocks WITHOUT freeing; the tail write-back success arm
+   syncs the inode table block FIRST, then frees (on sync failure the
+   frees are skipped: R108-FREE-SKIPPED, leak-not-alias).
+4. mod.rs fallocate PUNCH_HOLE: same restructure (rebuild +
+   write_inode_disk durable, then the collected runs free).
+5. extent.rs ext4_ext_rebuild_deferred + ext4_ext_collect_index_blocks:
+   the old extent-TREE metadata blocks are collected, not freed —
+   their bits clear in the same post-publication drain (a stale root
+   pointing at freed tree blocks walks garbage on the next boot).
+   The write-path rebuild callers (insert_written /
+   convert-unwritten, extent.rs) still free old meta eagerly — known
+   remaining window, same rule applies, successor item below.
+
+GATE UPGRADE: fi_inspect.py --audit (host, new): walks every extent
+inode, flags (a) claims on CLEAR bitmap bits — the poison signature,
+(b) dead inodes still carrying maps, (c) within-file duplicate
+physicals. The md5 gate alone passed fv1/fv2 while carrying three
+double-maps each (phase-luck); acceptance now requires md5 byte-exact
+AND --audit clean AND phasemap drift-free.
+
+RIG (all boots R108 kernel, x86_64/KVM, SMP=8, LOGLEVEL=4, 420s
+power cut, NOSNAP): fvpop2 = population boot from the TRUE pristine
+(oh-launcher ud-f2-u2v15.img, reflink) — the crash script no-ops
+(no /local/tmp yet); fvset2 = settling boot on a copy; fv4/fv5/fv6 =
+acceptance boots on copies of fvset2. Results:
+
+RESULTS (all boots x86_64/KVM SMP=8, 420s power cut, R108 kernel;
+fv4/fv5/fv6 are copies of the SAME settled fvset2 base — pristine
+crash-window acceptance):
+
+    boot    role                 md5                    drift  audit
+    fvpop2  population (pristine 1st boot)   — no pat.bin —      0/0/0 CLEAN
+    fvset2  settle + crash script   01cabbdd…4247 PASS   0 bad  0/0/0 CLEAN
+    fv4     acceptance #1            01cabbdd…4247 PASS   0 bad  0/0/0 CLEAN
+    fv5     acceptance #2            01cabbdd…4247 PASS   0 bad  0/0/0 CLEAN
+    fv6     acceptance #3            01cabbdd…4247 PASS   0 bad  0/0/0 CLEAN
+
+audit columns: stale_map_claims / dead_with_map / double_mapped
+(fi_inspect --audit; ~2265-2268 extent inodes scanned per image).
+R108-FREE-SKIPPED=0 in every boot (no sync failures deferred frees).
+Zero kernel panics (the one "panic" grep hit per log is OH init's
+'/log/reliability/bbox/panic_log' mkdir string). The rewrite-
+truncate path was EXERCISED in every acceptance boot (FI-TRUNCFREE
+ino=2359 lblk0..8 at ~5s — the crash script's `>` truncating the
+previous boot's pat.bin — the exact scenario that manufactured the
+poison chain; fv4 shows 18 truncate/unlink free events total).
+
+ACCEPTANCE MET: 3+ pristine crash-window boots, byte-exact phase-B
+md5 01cabbdd75d72d410fa93a5942ac4247, AND map-uniqueness clean on
+every crashed image, AND no crash-window residue on the bases the
+chain itself produces (fvpop2 → fvset2 verified clean before the
+acceptance copies were made). THE EXT4 P0 (5 double-mapped blocks +
+463 extent holes) IS CLOSED: the holes were a host-tool artifact
+(98.8), the double-maps the crash-ordering window fixed here.
+
+Known remaining windows (successor items, none fire on this rig):
+- extent.rs write-path rebuild callers (insert_written /
+  convert-unwritten) still free replaced tree meta eagerly; same
+  R108 rule applies (collect + free after the root is durable).
+- The FI-* diag prints (107th's hunt instruments, capped) are
+  unconditional; move them behind a dfx switch or tracepoint at
+  merge time per the observability policy.
+- jbd2-present boots: R108's explicit inode-table sync is the same
+  bread+sync fsync already applies; with a real journal the commit
+  owns ordering — verify once jbd2 B1 lands.

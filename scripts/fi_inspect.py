@@ -102,6 +102,16 @@ class Ext4:
     def inode_table(self, group):
         return self.gdesc(group)
 
+    def block_bitmap(self, group):
+        """Block number of `group`'s block bitmap (bg_block_bitmap_lo at
+        descriptor offset 0, hi at 0x28 — s_desc_size>=64 layout)."""
+        if self._gd is None:
+            self.gdesc(group)  # populate the cached descriptor blocks
+        off = group * self.desc_size
+        lo = struct.unpack_from("<I", self._gd, off + 0x00)[0]
+        hi = struct.unpack_from("<I", self._gd, off + 0x28)[0]
+        return lo | (hi << 32)
+
     def group_of(self, ino):
         return (ino - 1) // self.ipg
 
@@ -146,6 +156,15 @@ class Ext4:
         return out
 
     def _walk_extent(self, node, base, out):
+        # `base` (the index entry's ei_block) is only the coverage hint the
+        # kernel uses to pick a child; leaf ee_block values are ABSOLUTE
+        # logical blocks (the same on-disk contract as the kernel's extent
+        # search in extent.rs: `if logical_block >= ext.ee_block`). This
+        # walker used to add base onto the absolute ee_block, so any file
+        # with 2+ index entries read back with a base-shifted map —
+        # razor10b's "463 holes + 463 above-EOF entries" was entirely that
+        # artifact (the real map was complete; the REAL damage was the 5
+        # double-mapped physicals from the bio eviction window).
         eh_magic, eh_entries, eh_max, eh_depth = struct.unpack_from("<HHHH", node, 0)
         if eh_magic != 0xF30A:
             return
@@ -156,7 +175,7 @@ class Ext4:
                     "<IHHI", node, off)
                 length = ee_len if ee_len <= 32768 else ee_len - 32768
                 phys = ee_start_lo | (ee_start_hi << 32)
-                out.append((base + ee_block, phys, length))
+                out.append((ee_block, phys, length))
         else:
             for i in range(eh_entries):
                 off = 12 + i * 12
@@ -223,6 +242,57 @@ def main():
         return 2
     img = sys.argv[1]
     fs = Ext4(img)
+    if "--audit" in sys.argv:
+        # R108 taint detector: map-vs-bitmap divergence + within-file
+        # double-mapped physicals. The crash-window poison signature is
+        # an inode whose on-disk extent map claims blocks whose bitmap
+        # bits are CLEAR — the next boot's allocator hands those blocks
+        # to a new owner and the stale map's next truncate/unlink
+        # re-frees them (two file pages, one disk block). Also flags
+        # dead inodes (dtime != 0) still carrying a map — the
+        # pre-erase_dead_inode_map shape — and per-file duplicate
+        # physicals (the read-side face of a double allocation).
+        bitmaps = {}
+        def bit(b):
+            g = b // fs.bpg
+            bm = bitmaps.get(g)
+            if bm is None:
+                bm = fs.block(fs.block_bitmap(g))
+                bitmaps[g] = bm
+            return (bm[(b % fs.bpg) // 8] >> ((b % fs.bpg) % 8)) & 1
+        stale = []   # (ino, phys, links, dtime, kind)
+        dup = []     # (ino, phys, lblks)
+        scanned = 0
+        for ino in range(11, fs.inodes_count + 1):
+            raw = fs.raw_inode(ino)
+            mode = struct.unpack_from("<H", raw, 0)[0]
+            if mode == 0:
+                continue
+            dtime = struct.unpack_from("<I", raw, 0x14)[0]  # i_dtime
+            links = struct.unpack_from("<H", raw, 0x1A)[0]  # i_links_count
+            exts = fs.extents(ino, raw)
+            if not exts:
+                continue
+            scanned += 1
+            claims = {}
+            for (lb, ph, n) in exts:
+                for k in range(n):
+                    claims.setdefault(ph + k, []).append(lb + k)
+            for ph, lblks in claims.items():
+                if bit(ph) == 0:
+                    stale.append((ino, ph, links, dtime, "claim-free-bit"))
+            for ph, lblks in claims.items():
+                if len(lblks) > 1:
+                    dup.append((ino, ph, lblks))
+        print("FS %s: inodes_with_extents=%d stale_map_claims=%d dead_with_map=%d double_mapped=%d" %
+              (img, scanned, len([s for s in stale if s[4] == "claim-free-bit"]),
+               len([s for s in stale if s[3] != 0 and s[2] == 0]),
+               len(dup)))
+        for s in stale[:15]:
+            print("  STALE ino=%d phys=%d links=%d dtime=%d %s" % s)
+        for d in dup[:15]:
+            print("  DUP ino=%d phys=%d lblks=%s" % d)
+        return 0
     if "--csum" in sys.argv:
         bad = 0
         total = 0

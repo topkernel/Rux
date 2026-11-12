@@ -462,23 +462,46 @@ impl BlockCache {
 
     /// Evict one entry from the LRU tail.
     ///
-    /// Scans LRU tail for an entry with refcount == 0, removes it from
-    /// both the hash chain and LRU list, then syncs to disk **after**
-    /// releasing all locks. Does not hold any bucket lock during I/O.
+    /// Scans LRU tail for an entry with refcount == 0, marks it
+    /// `evicting` (unpinnable but STILL HASHED), syncs its dirty data to
+    /// disk, and only then unhashes and frees it. No bucket lock is held
+    /// during I/O.
     fn evict_one(&self) -> bool {
         // R7-C1 restructuring (supersedes the VFS-H13 two-phase fix, which
         // still raced: a get() landing between the LRU unlink and the
         // bucket lock re-inserted/pinned the victim and Phase 2 then freed
         // a buffer the caller held — or, with the re-insert guard, freed an
-        // entry still linked in the LRU). New order:
+        // entry still linked in the LRU). Order:
         //   Phase 1 (LRU lock): PICK a victim (count==0, not already
         //     evicting) but do not unlink anything.
-        //   Phase 2 (bucket lock): re-verify count==0, set `evicting`,
-        //     unlink from the hash chain. Once the flag is set under this
-        //     lock, get() (which takes the same lock) can no longer pin
-        //     the entry; with count==0 there are no existing holders.
+        //   Phase 2 (bucket lock): re-verify presence and count==0, set
+        //     `evicting`. The entry STAYS in the hash chain. Once the flag
+        //     is set under this lock, get() (which takes the same lock) can
+        //     no longer pin the entry; with count==0 there are no existing
+        //     holders.
         //   Phase 3 (LRU lock): unlink from the LRU.
-        //   Phase 4 (no locks): sync if dirty, free.
+        //   Phase 4 (no locks): sync if dirty.
+        //   Phase 5 (bucket lock): unhash, then free outside the lock.
+        //
+        // R12 (fi-fix-verify, P0 data-integrity lane): the victim used to
+        // be UNHASHED at Phase 2, before its Phase-4 sync — the
+        // "unhashed-victim window". A concurrent get()/bread_async() for
+        // the same key missed, fabricated a fresh buffer from the DISK
+        // copy, and (when the inline metadata syncs had been deferred by
+        // an active journal handle — the whole ext4 write path runs under
+        // one) that disk copy was arbitrarily STALE. The ext4 block
+        // allocator then read free bits that were already handed out and
+        // allocated the SAME physical block twice — razor10b's crashed
+        // image: a complete extent tree with FIVE double-mapped physical
+        // blocks (two file pages, one disk block, the later page's bytes
+        // overwriting the earlier's). Keeping the victim hashed through
+        // the sync lets same-key lookups FIND it (evicting flag) and WAIT
+        // (bounded spin in wait_inflight_eviction) until the data has
+        // landed, instead of fabricating
+        // over stale disk. A sync FAILURE no longer frees the victim
+        // either — freeing an unsynced dirty buffer silently dropped the
+        // only copy of the marks (the same double-alloc, storm flavor):
+        // the victim is re-linked and retried by a later eviction.
         let victim = {
             let mut lru = self.lru.lock_irqsave();
             let mut current = lru.tail;
@@ -519,20 +542,13 @@ impl BlockCache {
             // that no longer found the victim (no abort!), wrote
             // remove_from_lru into the reused block, CAS'd b_state on
             // NULL+0x30 (the observed kernel panic) and double-freed.
-            let mut prev: Option<*mut CacheEntry> = None;
-            let mut current = bucket.head;
             let mut present = false;
+            let mut current = bucket.head;
             while let Some(cp) = current {
                 if cp == victim {
-                    if let Some(pp) = prev {
-                        (*pp).hash_next = (*cp).hash_next;
-                    } else {
-                        bucket.head = (*cp).hash_next;
-                    }
                     present = true;
                     break;
                 }
-                prev = Some(cp);
                 current = (*cp).hash_next;
             }
             if !present {
@@ -543,22 +559,48 @@ impl BlockCache {
             // Alive (presence under the lock): now the pin/flag rechecks
             // are reads of valid memory.
             if (*(*victim).bh).count() != 0 {
-                // Pinned between Phase 1 and Phase 2 — but we already
-                // unlinked it! Re-link at the head and abort.
-                (*victim).hash_next = bucket.head;
-                bucket.head = Some(victim);
+                // Pinned between Phase 1 and Phase 2 — nothing has been
+                // unlinked yet; abort clean.
+                return false;
+            }
+            // R12 double-evict guard: the old protocol unhashed the victim
+            // right here, so a SECOND CPU that picked the same LRU-tail
+            // entry failed its presence walk and aborted. Keeping the
+            // victim hashed (for the same-key wait) removes that guard —
+            // without this recheck both CPUs set evicting and BOTH free
+            // at Phase 5 (the fvpop double panic at 133.6 s: a UAF walk
+            // on the freed entry). `evicting` is only ever set under this
+            // bucket lock, so check-and-set here is atomic: the loser
+            // aborts.
+            if (*victim).evicting {
                 return false;
             }
             (*victim).evicting = true;
         }
-        // bucket lock released; entry is unpinnable and unhashed
+        // bucket lock released; entry is unpinnable but STILL HASHED (R12)
 
-        // dfx=exthunt: the victim left the hash — from here until the
-        // Phase-4 sync lands, every lookup of this key misses and may
-        // fabricate a fresh entry over stale disk (the unhashed-victim
-        // window; see the tracers in ext4/extent.rs).
+        // dfx=exthunt: the victim is now unpinnable — same-key lookups
+        // will WAIT for it instead of fabricating over stale disk (the
+        // R12 protocol; see the tracers in ext4/extent.rs).
         let vkey = unsafe { (*victim).key };
         let v_dirty = unsafe { (*(*victim).bh).is_dirty() };
+        // FI-DIAG (107th): every eviction of the GROUP-0 BITMAP block —
+        // with the dirty bit (the marks) and the watched byte.
+        if vkey.2 == 1027 {
+            static FI_EV: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let n = FI_EV.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 40 {
+                let byte = unsafe {
+                    let d = &(*(*victim).bh).b_data;
+                    if d.len() > 2320 { d[2320] } else { 0 }
+                };
+                crate::pr_err!(
+                    "BIO-EVICT1027 dirty={} byte2320={:#04x}",
+                    v_dirty, byte
+                );
+            }
+        }
         if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt)
             && crate::fs::ext4::extent::exthunt_phys_watched(vkey.2)
         {
@@ -573,8 +615,9 @@ impl BlockCache {
         }
 
         // Phase 4: Sync if dirty (NO locks held — I/O is safe)
-        // SAFETY: victim is unhashed, unlinked and unpinnable; its bh field
-        // points to a valid BufferHead owned by this entry.
+        // SAFETY: victim is unlinked from the LRU and unpinnable; its bh
+        // field points to a valid BufferHead owned by this entry.
+        let mut sync_failed = false;
         unsafe {
             if v_dirty {
                 // Ordered-publication guard: if this block is a pending
@@ -597,14 +640,151 @@ impl BlockCache {
                 {
                     crate::fs::ext4::extent::exthunt_evict_done(vkey.2, sync_rc);
                 }
+                if sync_rc != 0 {
+                    sync_failed = true;
+                    // R12 observability: a dirty victim we could NOT
+                    // persist — re-linked below and retried later (the
+                    // pre-R12 code freed it here, silently dropping the
+                    // only copy of the dirty bytes).
+                    static EVICT_RELINK: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    if EVICT_RELINK.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
+                        crate::pr_err!(
+                            "BIO-EVICT-RELINK blk={} rc={} (dirty data kept, eviction retried)",
+                            vkey.2,
+                            sync_rc
+                        );
+                    }
+                }
                 crate::dfx::fsw::note_evict(true);
             } else {
                 crate::dfx::fsw::note_evict(false);
             }
+        }
+        if sync_failed {
+            // Re-link the victim (still hashed, evicting) so the dirty
+            // data survives: clear `evicting` under the bucket lock (the
+            // flag is bucket-lock-protected state; an unlocked clear would
+            // race every Phase-1 scan), then put it back at the LRU head.
+            // Same-key waiters wake and find the LIVE entry again.
+            unsafe {
+                let mut bucket = self.buckets[bucket_idx].lock();
+                (*victim).evicting = false;
+            }
+            {
+                let mut lru = self.lru.lock_irqsave();
+                // SAFETY: victim is a valid CacheEntry pointer; LRU lock held.
+                unsafe { Self::move_to_lru_head(&mut lru, victim); }
+            }
+            return false;
+        }
+
+        // Phase 5 (R12): unhash AFTER the data has landed (or was clean).
+        // SAFETY: victim is unlinked from the LRU, unpinnable and its
+        // data (if dirty) is on disk; the bucket lock serializes the
+        // unlink against every lookup/insert.
+        unsafe {
+            let mut bucket = self.buckets[bucket_idx].lock();
+            let mut prev: Option<*mut CacheEntry> = None;
+            let mut current = bucket.head;
+            let mut present = false;
+            while let Some(cp) = current {
+                if cp == victim {
+                    if let Some(pp) = prev {
+                        (*pp).hash_next = (*cp).hash_next;
+                    } else {
+                        bucket.head = (*cp).hash_next;
+                    }
+                    present = true;
+                    break;
+                }
+                prev = Some(cp);
+                current = (*cp).hash_next;
+            }
+            if !present {
+                // Freed by another path meanwhile (drop_block raced the
+                // same key) — do not double-free.
+                return false;
+            }
+        }
+        // SAFETY: victim is now unhashed, LRU-unlinked and unpinnable; the
+        // Box owns it.
+        unsafe {
             let _ = Box::from_raw(victim);
         }
         self.count.fetch_sub(1, Ordering::Release);
         true
+    }
+
+    /// True when a same-key entry in the bucket chain is mid-eviction
+    /// (unpinnable, its data possibly still in flight to disk). Caller
+    /// must NOT hold the bucket lock — this takes it.
+    fn key_is_evicting(
+        &self,
+        device_major: u32,
+        device_minor: u32,
+        blocknr: u64,
+        bucket_idx: usize,
+    ) -> bool {
+        let bucket = self.buckets[bucket_idx].lock();
+        let mut current = bucket.head;
+        while let Some(cp) = current {
+            // SAFETY: chain pointers are valid under the bucket lock.
+            unsafe {
+                if (*cp).evicting
+                    && (*cp).key == (device_major, device_minor, blocknr)
+                {
+                    return true;
+                }
+                current = (*cp).hash_next;
+            }
+        }
+        false
+    }
+
+    /// Wait for an in-flight eviction of (mj, mi, blocknr) to complete.
+    ///
+    /// Returns true when the key is no longer mid-eviction (the caller
+    /// must RE-RUN its lookup: the entry is either live again — sync
+    /// failure re-link — or gone, and any fabrication now reads the
+    /// just-synced disk bytes). Returns false when the bounded spin ran
+    /// out: the caller falls back to the pre-R12 fabrication path.
+    ///
+    /// Bounded SPIN, deliberately no sleep/wake: the first cut of this
+    /// used a WaitQueueHead + schedule() and the fvpop population boot
+    /// (1040-page flush under full-cache eviction churn) died at 133 s
+    /// in a double panic whose stuck lock resolved to the wait queue's
+    /// list spinlock — the sleep/wake machinery is not worth the risk
+    /// here. The eviction's remaining work is normally ONE synchronous
+    /// block write (sub-millisecond under KVM); a generous spin budget
+    /// covers it. Under an EIO-storm-budget stall the spin gives up and
+    /// the pre-R12 fabrication behavior stands (the storm-era window is
+    /// the SECONDARY double-alloc source; the primary one — the stale
+    /// dead-inode map re-free — is fixed in namei.rs).
+    fn wait_inflight_eviction(
+        &self,
+        device_major: u32,
+        device_minor: u32,
+        blocknr: u64,
+        bucket_idx: usize,
+    ) -> bool {
+        // ~250ms of wall clock, re-checked in coarse slices: the loop
+        // reads jiffies through the per-CPU timer (no IRQ requirement).
+        let deadline = crate::drivers::timer::get_jiffies()
+            + crate::drivers::timer::msecs_to_jiffies(250).max(1);
+        loop {
+            if !self.key_is_evicting(device_major, device_minor, blocknr, bucket_idx) {
+                return true;
+            }
+            if crate::drivers::timer::get_jiffies() >= deadline {
+                return false;
+            }
+            // Re-check cadence: a tight loop would hammer the bucket
+            // spinlock; spin a bit between probes.
+            for _ in 0..64 {
+                core::hint::spin_loop();
+            }
+        }
     }
 
     /// Discard ONE dirty buffer without writing it (freed-block forget).
@@ -695,6 +875,7 @@ impl BlockCache {
         // SAFETY: device is a valid GenDisk pointer passed from the block device layer;
         // all CacheEntry pointers in the hash chain were created by Box::into_raw.
         unsafe {
+            'retry: loop {
             let (device_major, device_minor) = ((*device).major, (*device).first_minor);
             let index = self.hash_index(device_major, device_minor, blocknr);
 
@@ -827,6 +1008,28 @@ impl BlockCache {
                 }
             }
 
+            // R12 (fi-fix-verify): a same-key entry is mid-eviction — its
+            // dirty data is still in flight to disk. Fabricating now would
+            // read the STALE pre-sync disk bytes: the ext4 allocator then
+            // saw free bits that were already handed out and allocated the
+            // same physical block twice (razor10b: five double-mapped
+            // blocks, the later page's bytes overwriting the earlier's).
+            // Wait for the eviction, then restart the lookup — the entry
+            // is live again (sync-failure re-link) or gone and the disk is
+            // current.
+            if skipped_evicting {
+                if self.wait_inflight_eviction(
+                    device_major,
+                    device_minor,
+                    blocknr,
+                    index,
+                ) {
+                    continue 'retry;
+                }
+                // Non-sleepable context (early boot): fall through to the
+                // fabrication path — the pre-R12 behavior.
+            }
+
             // Phase 1.5: Evict if cache is full (soft limit — wedge fix).
             // evict_one() SYNCS dirty victims: one synchronous block write
             // per eviction. Under a dirty-metadata storm (LTP inode02/
@@ -847,6 +1050,17 @@ impl BlockCache {
             // Phase 2: Read from disk (no locks held)
             // dfx=exthunt: fresh-entry fabrication, sync path.
             crate::fs::ext4::extent::exthunt_fab(blocknr, skipped_evicting, true);
+            // FI-DIAG (107th): a fresh fabrication of the GROUP-0 BITMAP
+            // block — the read-back byte for bit 18567 names whether the
+            // disk copy the allocator is about to trust is current.
+            if blocknr == 1027 {
+                static FI_FAB: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                let n = FI_FAB.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 40 {
+                    crate::pr_err!("BIO-FAB1027 waited={}", skipped_evicting);
+                }
+            }
             let mut bh = Box::new(BufferHead::new(blocknr, self.block_size));
 
             if let Err(_) = blkdev::blkdev_read(
@@ -855,6 +1069,17 @@ impl BlockCache {
                 &mut bh.b_data,
             ) {
                 return None;
+            }
+            if blocknr == 1027 {
+                static FI_FABD: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                let n = FI_FABD.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 40 {
+                    crate::pr_err!(
+                        "BIO-FAB1027-DISK byte2320={:#04x}",
+                        bh.b_data[2320.min(bh.b_data.len() - 1)]
+                    );
+                }
             }
             crate::dfx::fsw::note_dev_read();
 
@@ -872,6 +1097,15 @@ impl BlockCache {
                 // Double-check for duplicate inserted by another thread
                 let mut current = bucket.head;
                 while let Some(cp) = current {
+                    // R12: a mid-eviction entry stays in the chain until
+                    // its dirty data lands — it is NOT pinnable and must
+                    // never be handed out here (UAF: the evictor frees it
+                    // at Phase 5). Skip it; our fresh entry takes its
+                    // place at the head and the victim unhashes below us.
+                    if (*cp).evicting {
+                        current = (*cp).hash_next;
+                        continue;
+                    }
                     if (*cp).key == (device_major, device_minor, blocknr) {
                         // R9-8: apply the same integrity guard as Phase 1 —
                         // a dead (freed/reused) duplicate entry must not be
@@ -907,7 +1141,8 @@ impl BlockCache {
             }
 
             self.count.fetch_add(1, Ordering::Release);
-            Some((*entry_ptr).bh)
+            return Some((*entry_ptr).bh);
+            }
         }
     }
 
@@ -1012,6 +1247,12 @@ impl BlockCache {
                 let mut bucket = self.buckets[index].lock();
                 let mut current = bucket.head;
                 while let Some(cp) = current {
+                    // R12: mid-eviction entries are unpinnable — never
+                    // hand them out (the evictor frees them at Phase 5).
+                    if (*cp).evicting {
+                        current = (*cp).hash_next;
+                        continue;
+                    }
                     if (*cp).key == (device_major, device_minor, blocknr) {
                         if (*cp).bh.is_null()
                             || (*(*cp).bh).b_data.len() != self.block_size as usize
@@ -1101,6 +1342,14 @@ impl BlockCache {
                 // bucket lock is held so the entry cannot be freed concurrently.
                 unsafe {
                     let entry = &*entry_ptr;
+                    // R12: an entry mid-eviction stays hashed until its own
+                    // Phase-4 sync lands — the evictor owns that write;
+                    // pinning it here would race the Phase-5 free. Skip it:
+                    // its data is being persisted by the eviction itself.
+                    if entry.evicting {
+                        current = entry.hash_next;
+                        continue;
+                    }
                     // Leg-52 (route-1 exposure): a linked entry with a null
                     // bh has been observed (evict_one Phase 1 guards the
                     // same shape; R11-1's family ends in exactly this
@@ -1165,6 +1414,13 @@ impl BlockCache {
                 // concurrently.
                 unsafe {
                     let entry = &*entry_ptr;
+                    // R12: skip mid-eviction entries — the evictor is
+                    // syncing them; pinning races the Phase-5 free (same
+                    // guard as sync_all).
+                    if entry.evicting {
+                        current = entry.hash_next;
+                        continue;
+                    }
                     // Leg-52: same null-bh guard as sync_all (the pa92nj
                     // crash chain faulted HERE first).
                     if entry.bh.is_null() {
@@ -1206,17 +1462,34 @@ impl BlockCache {
         for i in 0..self.hash_size {
             let mut bucket = self.buckets[i].lock();
             let mut current = bucket.head;
+            let mut prev: Option<*mut CacheEntry> = None;
             while let Some(entry_ptr) = current {
                 // SAFETY: entry_ptr is from the hash chain (created by Box::into_raw);
                 // we hold the bucket lock and are draining the entire chain, so
                 // Box::from_raw reclaims the CacheEntry and its BufferHead.
                 unsafe {
                     let next = (*entry_ptr).hash_next;
-                    let _ = Box::from_raw(entry_ptr);
+                    // R12: a mid-eviction entry is owned by its evictor
+                    // (it stays hashed through its Phase-4 sync) — freeing
+                    // it here would race the evictor's Phase-5 unhash walk.
+                    // Unlink-and-keep: the evictor frees (or re-links) it.
+                    // At worst a few entries outlive the teardown drain.
+                    if !(*entry_ptr).evicting {
+                        let _ = Box::from_raw(entry_ptr);
+                    } else {
+                        match prev {
+                            Some(pp) => (*pp).hash_next = Some(entry_ptr),
+                            None => bucket.head = Some(entry_ptr),
+                        }
+                        prev = Some(entry_ptr);
+                    }
                     current = next;
                 }
             }
-            bucket.head = None;
+            match prev {
+                Some(pp) => unsafe { (*pp).hash_next = None },
+                None => bucket.head = None,
+            }
         }
 
         let mut lru = self.lru.lock();
@@ -1253,6 +1526,13 @@ impl BlockCache {
                     let entry = &mut *entry_ptr;
                     let next = entry.hash_next;
                     if entry.key.0 == device_major && entry.key.1 == device_minor {
+                        // R12: mid-eviction entries are owned by their
+                        // evictor — same double-free guard as evict_one
+                        // Phase 2.
+                        if entry.evicting {
+                            current = next;
+                            continue;
+                        }
                         if (*entry.bh).count() == 0 {
                             // Unlink from the chain; the LRU link is
                             // removed under the lru lock below.
@@ -1468,6 +1748,7 @@ pub fn bread_async(
     // SAFETY: device is a valid GenDisk pointer from the block device layer;
     // all CacheEntry pointers in the hash chain were created by Box::into_raw.
     unsafe {
+        'retry: loop {
         let (device_major, device_minor) = ((*device).major, (*device).first_minor);
         let cache = get_block_cache();
         let index = cache.hash_index(device_major, device_minor, blocknr);
@@ -1566,6 +1847,21 @@ pub fn bread_async(
                 prev = Some(entry_ptr);
                 current = entry.hash_next;
             }
+        }
+
+        // R12 (fi-fix-verify): same-key mid-eviction — wait for the
+        // victim's dirty data to land instead of submitting an async read
+        // of the stale pre-sync disk bytes, then restart the lookup.
+        if skipped_evicting {
+            if cache.wait_inflight_eviction(
+                device_major,
+                device_minor,
+                blocknr,
+                index,
+            ) {
+                continue 'retry;
+            }
+            // Non-sleepable fallback: fabricate as before (pre-R12).
         }
 
         // Phase 1.5: Evict if cache is full (soft limit — see the
@@ -1683,7 +1979,8 @@ pub fn bread_async(
             }
 
             cache.count.fetch_add(1, Ordering::Release);
-            Some((*entry_ptr).bh)
+            return Some((*entry_ptr).bh);
+        }
         }
     }
 }

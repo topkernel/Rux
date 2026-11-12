@@ -646,6 +646,46 @@ pub fn write_inode(
     Ok(())
 }
 
+/// R108 (fi-fix-verify, P0 crash-window data integrity): durably publish
+/// the inode-table block holding `ino`.
+///
+/// The crash-ordering rule for any metadata operation that CLEARS bitmap
+/// bits an inode's map used to claim: the shrunk/emptied map must be
+/// DURABLE before the freed bits are durable. The other order — bitmap
+/// free persisted, map shrink still sitting dirty in the buffer cache —
+/// leaves a stale on-disk map claiming FREE blocks; the next boot's
+/// allocator hands those blocks to a new owner and the stale map's next
+/// truncate/unlink RE-FREES them (two file pages, one disk block; the
+/// fvpop→fvset→fv1/2/3 poison chain, measured 2026-11-12). The block
+/// bitmap is synced synchronously by the allocator (write_block_bitmap);
+/// the inode-table block is NOT (write_inode leaves it dirty without a
+/// journal handle). This helper closes that window: bread (cache hit on
+/// the just-dirtied buffer) + sync if dirty. Idempotent when the block
+/// is already clean or the journal already committed it — the same
+/// bread+sync pattern ext4_sync_file_inner applies at fsync.
+pub fn sync_inode_table_block(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    ino: u32,
+) -> Result<(), i32> {
+    use crate::fs::bio;
+    if let Some(tbl_blk) = inode_table_block_of(fs, ino) {
+        // SAFETY: bio::bread returns a valid BufferHead on success; the
+        // inode-table block is a plain metadata block.
+        unsafe {
+            if let Some(bh) = bio::bread(fs.device, tbl_blk) {
+                let sync_res = if (*bh).is_dirty() {
+                    bio::sync_dirty_buffer(bh)
+                } else {
+                    Ok(())
+                };
+                bio::brelse(bh);
+                sync_res?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Block number of the on-disk inode-table block holding `ino` (the
 /// write_inode_disk target block). Used by ext4_sync_file to persist the
 /// inode slot directly — fsync's own metadata obligation — without a
