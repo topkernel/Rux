@@ -2575,7 +2575,7 @@ pub fn ext4_flush_dirty_inode(
             // source of truth being persisted).
             let src = unsafe { core::slice::from_raw_parts(kva, n_bytes) };
             // SAFETY: same inode/fs resolution discipline as write_vfs.
-            let written = unsafe {
+            let mut written = unsafe {
                 ext4_write_at_core(
                     &*fs_ptr,
                     inode.ino as u32,
@@ -2586,6 +2586,38 @@ pub fn ext4_flush_dirty_inode(
                     pfn,
                 )
             };
+            // TRANSIENT-FAILURE RETRY (fi-fix-verify razor-6, P0 lane):
+            // write_at_core reports EIO when bread's device read fails
+            // under I/O pressure (blkdev submit/device error — measured
+            // razor6: ONE such failure in 2048 pages left the pattern
+            // file exactly one block short of byte-exact after the
+            // crash; the failed page stayed dirty and nothing ever
+            // retried it before the power cut). A flush is a WRITE-BACK
+            // context with plenty of time budget — retry a failed page
+            // a bounded number of times; only persistent failure keeps
+            // the page dirty (the standing contract).
+            if written != n_bytes as isize {
+                let mut tries = 0u32;
+                while tries < 3 {
+                    tries += 1;
+                    // SAFETY: same discipline as the first attempt; src
+                    // still borrows the pinned frame.
+                    written = unsafe {
+                        ext4_write_at_core(
+                            &*fs_ptr,
+                            inode.ino as u32,
+                            Some(inode),
+                            off,
+                            true,
+                            src,
+                            pfn,
+                        )
+                    };
+                    if written == n_bytes as isize {
+                        break;
+                    }
+                }
+            }
             done[i] = (idx, pfn, written == n_bytes as isize);
         }
         cache.flush_done(fs_id, ino, &done[..n]);
