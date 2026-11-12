@@ -231,9 +231,3 @@ help:
 	@echo "  scripts/    - Host-side scripts"
 	@echo "  docs/      - Documentation"
 
-# ---- Disk images (project-local, untracked) ----
-# One-command setup: populates images/ from the central store or build tree.
-# Boot scripts reference images via relative paths from the project root.
-images:
-	@bash scripts/setup-images.sh
-	@echo "Images ready at images/ (untracked by git)"
