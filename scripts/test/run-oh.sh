@@ -58,7 +58,7 @@ DISKS="$(qemu_drive 0 "$IMGDIR/updater.img")$(qemu_drive 1 "$IMGDIR/system.img")
 # ohos.required_mount.* IS the "fstab from command line" first-stage init
 # reads (init_mount.c "Cannot load fstab from command line" without them);
 # device names match the vda..vdf drive order above.
-APPEND="ip=dhcp loglevel=7 console=ttyS0,115200"
+APPEND="ip=dhcp loglevel=${LOGLEVEL:-4} console=ttyS0,115200"
 APPEND="$APPEND init=${INIT:-init} root=/dev/ram0 rw"
 APPEND="$APPEND ohos.boot.hardware=virt default_boot_device=10007000.virtio_mmio"
 APPEND="$APPEND ohos.boot.sn=01234567890"
