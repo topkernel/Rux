@@ -469,6 +469,54 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
         };
         // SAFETY: current is this task's own pointer.
         let my_pid = unsafe { (*current).pid() };
+        // r16 (mechanism B — the GB lost-wake-mid-exit, re-landed): the
+        // one-shot wake below is keyed by PID, and a group member's
+        // do_exit used to free its pid BEFORE its opportunistic sweep, so
+        // this sleepy wait ran with a pid already returned to the
+        // allocator. The expiry then resolved the pid to nothing
+        // (WAKE-PID-MISS — silently dropped) or to a REUSED task — either
+        // way this waiter parked at the schedule() below and the deadline
+        // line under it never ran, because the bound is only re-checked
+        // on wake: the "bounded" wait became permanent (GB worker
+        // 312/313, both wedged mid-exit; the drain's rescue wake,
+        // addressed by task pointer, is what finally moved them). The
+        // exit path now frees the pid only AFTER the sweep, but keep the
+        // independent guard here: validate the pid->task mapping before
+        // arming, and when it is broken (any future pid-then-sleep
+        // order), fall back to a yield-poll that enforces its own
+        // deadline and never depends on a wake token. Rate-limited
+        // report: every firing names a producer of the order.
+        let pid_resolves = {
+            let t = crate::process::pid_hash::pid_hash_lookup_pinned(my_pid);
+            if t.is_null() {
+                false
+            } else {
+                let ok = t as *const crate::process::task::Task
+                    == current as *const crate::process::task::Task;
+                // Release the lookup pin in both cases (unmatched or
+                // matched): the pinned refcount is the lookup's own.
+                crate::process::task::Task::task_put(t);
+                ok
+            }
+        };
+        if !pid_resolves {
+            static PIDFREE_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if PIDFREE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
+                crate::pr_warn!(
+                    "RCU-SLEEPY-PID-FREE pid={} site={} — yield-poll round (pid-keyed timer wake would be lost)",
+                    my_pid,
+                    site
+                );
+            }
+            // Cooperative yield round: state stays RUNNING (no park, no
+            // wake token), the schedule() itself reports this CPU's QS
+            // and lets peers run; the loop top re-checks completion and
+            // the deadline on every return.
+            crate::arch::cpu::restore_irq(true);
+            crate::sched::schedule();
+            continue;
+        }
         let target = crate::drivers::timer::get_jiffies() + 1;
         let timer_id = crate::timer::add_timer_wakeup(target, my_pid);
         if timer_id != 0 {

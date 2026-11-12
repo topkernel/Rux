@@ -1365,16 +1365,34 @@ pub fn do_exit(exit_code: i32) -> ! {
             // the mm drop and the dead-list park.
             let leader = Task::thread_group_leave(current);
 
-            // PID + hash bookkeeping now: the tid disappears immediately
-            // (gettid/tgkill on it → ESRCH, no zombie window).
-            crate::process::pid_hash::pid_hash_remove(current_pid);
-            crate::process::pid::free_pid(current_pid);
+            // r16 (mechanism B, re-landed on the RELEASE-DEFER drain): the
+            // sweep below can SLEEP — free_dead_member ->
+            // synchronize_rcu_bounded_pollfirst/_sleepy arms a PID-keyed
+            // one-shot timer wake for every 1-jiffy poll round (and the
+            // deferred-release finisher at the sweep's tail parks the same
+            // way). Freeing our pid BEFORE the sweep made each such wake
+            // unresolvable: the expiry hit a freed (possibly reused) pid,
+            // WAKE-PID-MISS dropped the token, and the waiter parked past
+            // its own deadline — the bound is only re-checked on wake, so
+            // the "bounded" wait became a permanent mid-exit sleep (the GB
+            // worker wedges; the OH SIGKILL storms reproduce the class).
+            // The hash remove + free now run AFTER the sweep: the tid
+            // lingers only across the sweep, the task never returns to
+            // userspace, and a tgkill/gettid racing this window observes a
+            // PF_EXITING task — the reference's own pre-reap shape.
+            // rcu.rs keeps an independent guard (RCU-SLEEPY-PID-FREE) for
+            // any future pid-then-sleep order.
 
             // Opportunistically reclaim older dead members (frees stacks of
             // previously-joined threads; `current` is skipped — on_cpu).
             if !leader.is_null() {
                 sweep_dead_threads(leader);
             }
+
+            // PID + hash bookkeeping: the tid disappears now (gettid/tgkill
+            // on it → ESRCH, no zombie window).
+            crate::process::pid_hash::pid_hash_remove(current_pid);
+            crate::process::pid::free_pid(current_pid);
 
             // R9-3 discipline: no preempt window between DEAD and the
             // final schedule.
