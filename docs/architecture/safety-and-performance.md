@@ -463,3 +463,26 @@ absents stated plainly. Each absent names what closing looks like.
     (80 BR_FAILED_REPLY hits) and aborted foundation. The reference
     cannot dual-deliver (single-slot return_error); four-piece parity
     fix. Class (b): protocol semantics, in-bounds.
+  - futex COW-rekey lost wakes (190301611, futex-lostwake lane): the
+    futex key hashed EVERY word — private and shared — by the physical
+    frame. An anon word's frame is a COW transient (fork marks the
+    parent PTE RO; the next store swaps the frame), so any waiter
+    parked across a fork+write cycle became unreachable: the waker
+    hashed the fresh frame and scanned an empty bucket, the waiter
+    slept in the old frame's bucket forever — 8/8 parkers lost as a
+    group with a live re-waking waker and ZERO scheduler forensics
+    (lostwake.c fpns surface, 5/5 pre-fix). Same-mechanism evidence:
+    run/lostwake-prefix-d1.log wake-miss lines show waiter phys
+    0x7ffc7xxx pinned at park vs waker phys changing every kill cycle
+    (0x7ff29xxx → 0x2c05cxxx → 0x7ff23xxx), same mm, same uaddr. The
+    class also ate PRIVATE-flag futexes (musl ctid/join words under
+    fork churn — a candidate slice of the OH storm's stranded-thread
+    third). Fix is reference get_futex_key parity: anon words key
+    (mm, uaddr) — Linux's PageAnon/FUT_OFF_MMSHARED rule — and only
+    MAP_SHARED words key the stable frame; the private hot path also
+    got cheaper (no page-table walk per key). Class (b): protocol
+    semantics, in-bounds; bug-class elimination (frame-transient keys).
+    Gate: fpns wedge futex=0 across 5 debug + 2 release legs
+    (run/lostwake-gate-d*.log, run/lostwake-fix2-r*.log), make test
+    green, pbench P5 rows at/below baseline bands (p5a_pipe 1.84 µs
+    vs 2.1-2.3 band, tcg smp2 rig).
