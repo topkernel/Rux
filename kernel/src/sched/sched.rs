@@ -1987,6 +1987,62 @@ pub fn free_task_slot(task_ptr: *mut Task) {
     if task_ptr.is_null() {
         return;
     }
+    // ORPHAN-MARK residue check (wake-fastrepro final-boss): a Task page
+    // entering the free pool with a dirty ownership qword hands its
+    // residue to whatever recycles the page (the constructors reset the
+    // qword, so this is belt-and-braces — but a set mark here names a
+    // lifecycle that never released, upstream of every later
+    // STALE-CLAIM-RESET on the recycled page). Budgeted, direct console.
+    {
+        // SAFETY: pre-poison header reads; the caller owns the final
+        // reference.
+        unsafe {
+            let oncpu = (*task_ptr).on_cpu();
+            let claim = (*task_ptr)
+                .running_on_cpu
+                .load(core::sync::atomic::Ordering::Acquire);
+            if (oncpu || claim != -1) && (*task_ptr).pid() != 0 {
+                static FREEC_N: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                if FREEC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+                    use crate::console::putchar_no_lock as putchar;
+                    fn pdec3(mut v: u64) {
+                        use crate::console::putchar_no_lock as p;
+                        let mut buf = [0u8; 20];
+                        let mut n = 0;
+                        if v == 0 {
+                            p(b'0');
+                            return;
+                        }
+                        while v > 0 && n < buf.len() {
+                            buf[n] = b'0' + (v % 10) as u8;
+                            v /= 10;
+                            n += 1;
+                        }
+                        for i in (0..n).rev() {
+                            p(buf[i]);
+                        }
+                    }
+                    const M: &[u8] = b"\nFREE-CLAIMED pid=";
+                    for &b in M {
+                        putchar(b);
+                    }
+                    pdec3((*task_ptr).pid() as u64);
+                    const M2: &[u8] = b" oncpu=";
+                    for &b in M2 {
+                        putchar(b);
+                    }
+                    pdec3(oncpu as u64);
+                    const M3: &[u8] = b" claim=";
+                    for &b in M3 {
+                        putchar(b);
+                    }
+                    pdec3(claim.unsigned_abs() as u64);
+                    putchar(b'\n');
+                }
+            }
+        }
+    }
     // The sched:sched_process_free tracepoint — the reference records
     // it at the final put (delayed_put_task_struct → trace →
     // put_task_struct), i.e. right here at the last-reference free,
@@ -3398,6 +3454,77 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
     pcpu.idle
 }
 
+// ==================== pick→switch handoff ledger (wake-fastrepro) ====================
+//
+// ORPHAN-MARK hunt: exactly ONE site publishes the ownership qword
+// (mark_picked_on_cpu) and exactly TWO terminations consume a pick (the
+// switch-in affirm CAS and the switch-in abort). A pick whose
+// publication has neither termination is a SWITCHLESS PICK — the R56
+// slot-capture orphan at its creation moment. This side table (no Task
+// layout change) records the last publish per task and is cleared by
+// both terminations; the stale-claim heal reads it: an intact entry at
+// heal time names the publisher CPU, the published pick-state and the
+// publish's age — the creation interleaving on one line.
+
+pub static PSLEDGER_TASK: [core::sync::atomic::AtomicUsize; 1024] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; 1024];
+pub static PSLEDGER_CPU: [core::sync::atomic::AtomicU32; 1024] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; 1024];
+pub static PSLEDGER_JIF: [core::sync::atomic::AtomicU64; 1024] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 1024];
+pub static PSLEDGER_PK: [core::sync::atomic::AtomicU32; 1024] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; 1024];
+
+#[inline]
+fn psl_slot(task: *mut Task) -> usize {
+    ((task as usize) >> 4) & 1023
+}
+
+/// Record a pick publication (GRQ held; single writer per task).
+/// dfx=leakhunt-gated: the unconditional cost is one relaxed load.
+pub fn psledger_note_publish(task: *mut Task, cpu: usize, pk: u32) {
+    if !crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let s = psl_slot(task);
+    PSLEDGER_TASK[s].store(task as usize, core::sync::atomic::Ordering::Release);
+    PSLEDGER_CPU[s].store(cpu as u32, core::sync::atomic::Ordering::Release);
+    PSLEDGER_PK[s].store(pk, core::sync::atomic::Ordering::Release);
+    PSLEDGER_JIF[s]
+        .store(crate::drivers::timer::get_jiffies(), core::sync::atomic::Ordering::Release);
+}
+
+/// Consume the ledger at a pick termination (affirm or abort). Returns
+/// the consumed entry for the caller's reporting.
+pub fn psledger_consume(task: *mut Task) -> bool {
+    if !crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    let s = psl_slot(task);
+    PSLEDGER_TASK[s]
+        .compare_exchange(
+            task as usize,
+            0,
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Acquire,
+        )
+        .is_ok()
+}
+
+/// Read the ledger without consuming (heal-side diagnostic).
+pub fn psledger_peek(task: *mut Task) -> Option<(u32, u32, u64)> {
+    let s = psl_slot(task);
+    if PSLEDGER_TASK[s].load(core::sync::atomic::Ordering::Acquire) == task as usize {
+        Some((
+            PSLEDGER_CPU[s].load(core::sync::atomic::Ordering::Acquire),
+            PSLEDGER_PK[s].load(core::sync::atomic::Ordering::Acquire),
+            PSLEDGER_JIF[s].load(core::sync::atomic::Ordering::Acquire),
+        ))
+    } else {
+        None
+    }
+}
+
 /// Mark a picked task on-CPU (R8-1b). Called under the GRQ lock; __switch_to
 /// clears it after the task's outgoing context is saved. Other CPUs' picks
 /// skip on-CPU tasks, so a RUNNING-but-unsaved task can never be picked
@@ -3567,6 +3694,14 @@ unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
             }
         }
         (*task).publish_pick_ownership(crate::arch::cpu_id() as i32, live);
+        // pick→switch ledger: record the publication; the switch-in
+        // affirm/abort consume it. An intact record at a later stale
+        // heal = switchless pick.
+        psledger_note_publish(
+            task,
+            crate::arch::cpu_id() as usize,
+            if live { crate::process::task::PICK_LIVE } else { crate::process::task::PICK_PICKED },
+        );
     }
 }
 
@@ -3693,7 +3828,9 @@ unsafe fn requeue_prev_locked(grq: &mut GlobalRunQueue, prev: *mut Task) {
 /// task's state is left untouched (SLEEPING stays wakeable; a prev that was
 /// already RUNNING stays RUNNING — it is on_cpu, so the divergence is the
 /// pre-existing stale-on_rq form, not manufactured here).
+#[track_caller]
 unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool {
+    let ENQ_CALLER: &'static core::panic::Location<'static> = core::panic::Location::caller();
     if task.is_null() {
         return false;
     }
@@ -3902,6 +4039,154 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
         // the queue membership (R39 ordering, see above).
         (*task).set_state(TaskState::new(TaskState::RUNNING));
         grq.nr_running.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        // ORPHAN-MARK creation tripwire (wake-fastrepro final-boss): the
+        // task is being LINKED right now — under the GRQ, no pick or
+        // switch can be in flight on it. If its ownership qword shows a
+        // claim ({on_cpu=false, claim=X}) or a live pick-state, the marks
+        // did NOT come from this task's own lifecycle in progress — they
+        // arrived with the page (recycle residue) or survived a lost
+        // release. ticks= names whether the task has EVER been scheduled
+        // (0 = born with the marks: recycle residue; >0 = mid-life
+        // contamination). Direct console (GRQ held), budgeted.
+        {
+            let oncpu = (*task).on_cpu();
+            let claim = (*task)
+                .running_on_cpu
+                .load(core::sync::atomic::Ordering::Acquire);
+            // Skip the legitimate windows: (a) __schedule re-linking a
+            // preempted prev whose context is still being saved (the
+            // SWITCHING_OUT marker names it — the R63 discipline), and
+            // (b) the preempt-requeue window BEFORE that marker is set —
+            // the requeued prev is still the claim CPU's published
+            // current (slot-backed, the pick_owner_live discipline). A
+            // link whose marks are backed by NEITHER is the orphan-mark
+            // creation shape.
+            let mid_swout = task_is_mid_switch_out(task);
+            let slot_backed = claim >= 0
+                && (claim as usize) < MAX_CPUS
+                && cpu_state(claim as usize).current == task;
+            if slot_backed && !mid_swout {
+                // The pick-in-flight relink: the task is linked while its
+                // claim's slot still names it (the picker has not reached
+                // its context switch). Tagged separately, small budget —
+                // a later STALE-CLAIM-RESET with the SAME pid+claim
+                // convicts this window as the orphan producer.
+                static ENQSB_N: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                if (*task).pid() > 1
+                    && ENQSB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200
+                {
+                    use crate::console::putchar_no_lock as putchar;
+                    fn pdec4(mut v: u64) {
+                        use crate::console::putchar_no_lock as p;
+                        let mut buf = [0u8; 20];
+                        let mut n = 0;
+                        if v == 0 {
+                            p(b'0');
+                            return;
+                        }
+                        while v > 0 && n < buf.len() {
+                            buf[n] = b'0' + (v % 10) as u8;
+                            v /= 10;
+                            n += 1;
+                        }
+                        for i in (0..n).rev() {
+                            p(buf[i]);
+                        }
+                    }
+                    const M: &[u8] = b"\nENQ-CLAIMED-SLOTBK pid=";
+                    for &b in M {
+                        putchar(b);
+                    }
+                    pdec4((*task).pid() as u64);
+                    const M2: &[u8] = b" claim=";
+                    for &b in M2 {
+                        putchar(b);
+                    }
+                    pdec4(claim.unsigned_abs() as u64);
+                    const M3: &[u8] = b" pk=";
+                    for &b in M3 {
+                        putchar(b);
+                    }
+                    pdec4((*task).pick_state() as u64);
+                    const M4: &[u8] = b" jif=";
+                    for &b in M4 {
+                        putchar(b);
+                    }
+                    pdec4(crate::drivers::timer::get_jiffies());
+                    const M5: &[u8] = b" from=";
+                    for &b in M5 {
+                        putchar(b);
+                    }
+                    for &b in ENQ_CALLER.file().as_bytes() {
+                        putchar(b);
+                    }
+                    putchar(b':');
+                    pdec4(ENQ_CALLER.line() as u64);
+                    putchar(b'\n');
+                }
+            }
+            if (oncpu || claim != -1) && !mid_swout && !slot_backed && (*task).pid() != 0 {
+                static ENQC_N: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                if ENQC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+                    use crate::console::putchar_no_lock as putchar;
+                    fn pdec2(mut v: u64) {
+                        use crate::console::putchar_no_lock as p;
+                        let mut buf = [0u8; 20];
+                        let mut n = 0;
+                        if v == 0 {
+                            p(b'0');
+                            return;
+                        }
+                        while v > 0 && n < buf.len() {
+                            buf[n] = b'0' + (v % 10) as u8;
+                            v /= 10;
+                            n += 1;
+                        }
+                        for i in (0..n).rev() {
+                            p(buf[i]);
+                        }
+                    }
+                    const M: &[u8] = b"\nENQ-CLAIMED pid=";
+                    for &b in M {
+                        putchar(b);
+                    }
+                    pdec2((*task).pid() as u64);
+                    const M2: &[u8] = b" oncpu=";
+                    for &b in M2 {
+                        putchar(b);
+                    }
+                    pdec2(oncpu as u64);
+                    const M3: &[u8] = b" claim=";
+                    for &b in M3 {
+                        putchar(b);
+                    }
+                    pdec2(claim.unsigned_abs() as u64);
+                    const M4: &[u8] = b" pk=";
+                    for &b in M4 {
+                        putchar(b);
+                    }
+                    pdec2((*task).pick_state() as u64);
+                    const M5: &[u8] = b" ticks=";
+                    for &b in M5 {
+                        putchar(b);
+                    }
+                    pdec2(
+                        (*task).utime_ticks.load(core::sync::atomic::Ordering::Relaxed)
+                            + (*task)
+                                .stime_ticks
+                                .load(core::sync::atomic::Ordering::Relaxed),
+                    );
+                    const M6: &[u8] = b" st=0x";
+                    for &b in M6 {
+                        putchar(b);
+                    }
+                    pdec2((*task).state().bits() as u64);
+                    putchar(b'\n');
+                }
+            }
+        }
         // Wakewatch ring (118th): the LINK edge — pairs with W so the dump
         // distinguishes "wake verdict ok but never linked" from
         // "linked then unlinked before running".

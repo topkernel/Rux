@@ -3658,19 +3658,34 @@ impl Task {
                     // is RUNNING-but-not-yet-executing and flips on_cpu
                     // between the gate and the marshal.)
                     if (*task).state().is_sleeping() {
-                    // FWK (futex-lostwake): a target that is no longer
-                    // SLEEPING at the recheck is the benign redundant
-                    // re-wake class — an earlier wake (or signal) already
-                    // made it runnable (state RUNNING, executing or
-                    // enqueued), so this wake's information is delivered;
-                    // skip the report so the hunt line stays strand-only.
-                    // (on_cpu alone was not enough: a just-enqueued task
-                    // is RUNNING-but-not-yet-executing and flips on_cpu
-                    // between the gate and the marshal.)
-                    if (*task).state().is_sleeping() {
+                        // wake-fastrepro gate tightening: a target that is
+                        // MID-PICK (on_cpu set and a live busy slot backs
+                        // the claim) is about to be switched to — the
+                        // in-flight pick delivers this wake's information
+                        // by resuming the task. The refusal here is the
+                        // enqueue's double-insert guard doing its job, not
+                        // a lost wake; printing it floods the census with
+                        // boot-settle races (gate-r1: pid 314 at jif 11,
+                        // leg otherwise clean, max_gap 1 ms over 6060
+                        // parks). Pre-check the two census discriminators
+                        // before the budgeted report.
+                        let mid_pick = (*task).on_cpu() && {
+                            let mut backed = false;
+                            for c in 0..crate::config::MAX_CPUS {
+                                if crate::sched::sched::cpu_state(c).current
+                                    == task
+                                {
+                                    backed = true;
+                                    break;
+                                }
+                            }
+                            backed
+                        };
                         static W2_N: core::sync::atomic::AtomicU32 =
                             core::sync::atomic::AtomicU32::new(0);
-                        if W2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
+                        if !mid_pick
+                            && W2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16
+                        {
                             let w2 = crate::sched::w2_refusal_census(task);
                             // 118th: name the target (the pk=1 monopolist
                             // census lines were anonymous).
@@ -5087,6 +5102,11 @@ impl Task {
                 crate::sched::sched::ww_record(
                     self as *const Task as *mut Task,
                     crate::sched::sched::WW_EV_AFFIRM,
+                );
+                // pick→switch ledger (wake-fastrepro): the pick
+                // terminated — consume its publication record.
+                crate::sched::sched::psledger_consume(
+                    self as *const Task as *mut Task,
                 );
                 Ok(())
             }
