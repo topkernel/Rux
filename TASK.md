@@ -12512,3 +12512,347 @@ ud-f2-v15, SMP8 4G KVM LL4)
   oh-crash-105 worktree = clean f4ba8e3b build (both arches verified),
   run/ symlinked to oh-crash/run; binderprobe=1 arms the old SAREG
   family when a hunt needs it.
+
+### 106. 106TH SESSION (2026-11-12 03:2x-.., branch oh-crash) — SECOND HOT-PATH WAVE: the x86_64 vDSO is LIVE and SWEEPS its A/B (3/3 ladders median 36.5s vs control 1/3 at 38.1s, bootanimation.ready -27%; commit ff904630 after THREE real bugs caught before any valid A/B — two AMD64 encoding bugs by offline objdump replay, one SysV-hash 0xFFFFFFFF terminator that segfaulted pid 1, decoded from the USEGV-FOR dump); the opt2 decision is ANSWERED (pristine interleaved 8-boot series, kernels md5-identical to the 101st's t2i/t3i: launcher.ready 32.6 vs 33.9s — the dirty-source -30% shrinks to -15..-16% EARLY-MARKER-ONLY, flip prepared on branch oh106-opt2-flip and NOT merged); allocator preempt-guard fast path landed (3ab2b70a); reap-path poll-first RCU landed (6692a1d0); the P1 quiet-host TLB-fix median became the STALL-RATE story (1/5 ladders on the landed stack, best ladder 32.57s)
+
+Mission: P1 TLB-fix median, P2 opt-level decision, P3 allocator irq
+restructure, P4 reap-path engine. Coordinator mid-session redirect added
+the vDSO lever as P0 (105th's census: 21.3M clock_gettime/boot ~3us =
+6.6% of the box). Worktrees: oh106k (clean HEAD builds + all A/B rigs),
+oh106flip (opt2 side branch). The 105th's live WIP (binder RTT census)
+shares oh-crash untouched; every git add explicit-file.
+
+#### 106.1 P1 — the TLB-fix quiet-host median (the honest news: the STALL REGIME, not the median, is the story)
+
+8-boot pristine series (hp106-series.sh): reflink copy of ud-f2-u2v15
+per boot, SMP8, LL4, 420s, system.img snapshot, host load recorded per
+boot (3.5-20 across the series, 1-3 foreign QEMUs — the 104th/105th
+ran concurrently; "quiet" is relative). Kernel arm a0 =
+bzImage-hp106-a0, md5 9fd045dc601a97c1cb09708fce333661 — BYTE-IDENTICAL
+to the 101st's t2i (clean-worktree rebuild is reproducible).
+
+  arm a0 (landed stack, 5 boots):  a0x1 STALL, a0x3 STALL,
+      a0x5 LADDER 32.569s, a0x7 STALL, a0x8 STALL (anim 34.8/43.2)
+      bootanimation.ready medians: [11.1 14.4 16.4 16.8 34.8] -> 16.4s
+  arm a2 (opt2, 3 boots):          a2x2 LADDER 33.892s, a2x4 STALL,
+      a2x6 STALL
+      bootanimation.ready [8.6 13.9 14.6] -> 13.9s
+
+The 101st's single 41.26s ladder (load-31) now has a sibling: 32.57s at
+load ~15 — the TLB-fix stack's best two boots are 32.6-41.3s. But the
+MEDIAN cannot form: 1/5 ladders on the landed stack. The stall face is
+the same class the 100th/103rd documented (appspawn kickdog "App enable
+-1" forever; the el2-provisioning chain stalls; a0x7's HUNG-CTX showed
+a vfork child parked in context_switch). The P1 deliverable is honest
+both ways: the ladder TIME improved (41.3 -> 32.6 best), the ladder
+RATE (20%) is the binding constraint on launcher.ready medians — every
+future perf lane on this rig fights the stall regime first.
+
+#### 106.2 P2 — the opt-level=2 decision: NO FLIP (early-marker-only gain)
+
+Same series as 106.1, arm a2 = bzImage-hp106-a2 md5 c340dab072ba4eea
+(= 101st t3i, byte-identical). Verdict against the mission's >=20%
+launcher.ready bar:
+
+  launcher.ready ladders: opt0 32.569s (n=1) vs opt2 33.892s (n=1)
+      -> NO opt2 advantage; both arms stall-dominated
+  bootanimation.ready:  median 16.4 -> 13.9s (-15%)
+  bootanimation.finished: median 23.7 -> 19.9s (-16%)
+  101st dirty-source series2 was: anim.ready 16.9 vs 11.9 (-30%)
+
+The -30% was real but dirty-source + early-marker; on pristine boots
+the gain halves and the deciding metric shows nothing (n too small to
+separate, and the point estimate favors opt0). FLIP NOT LANDED on
+oh-crash. Prepared as branch oh106-opt2-flip (commit d2e4aa83): the
+one-line Cargo.toml flip + the full re-baseline list (every perf-gate
+band, the dev-codegen record families) + the merge-gate implications,
+so the coordinator can merge without redoing the work IF they accept
+early-marker evidence or gather more ladders.
+
+#### 106.3 P3 — allocator irq-toggle restructure (commit 3ab2b70a)
+
+Audit answers to the mission's questions:
+- WHERE the guard fired per allocation: EVERY magazine fast-path
+  alloc/free paid CpuLocal::with's cli/sti pair (~46M/boot across
+  allocs+frees); the class-lock irqsave sections (the 19.7M/boot
+  baseline band) fired once per refill/flush batch, PLUS the
+  allocwatch enabled() double lookup and the lock_holds shared-line
+  RMW INSIDE the IF=0 window.
+- CAN the common allocation stay magazine-local without the guard:
+  YES against the lock — it already did — and now yes against the IF
+  toggle too: with_preempt (preempt-count guard, IRQs enabled) +
+  in_interrupt() routing (IRQ-context allocs/frees take the class-lock
+  bodies directly, NEVER touch a row — an irq-context row access would
+  race an interrupted task-context window whose IRQs are now enabled).
+  The scheduler honors preempt_count at every preempt point
+  (sched.rs:1347, trap.rs:1602, __schedule refuses count!=0), so the
+  cpu_id()/row divergence family (r8final) stays excluded.
+- Micro-levers landed in the same commit: lock_holds fetch_add AFTER
+  the window; try_defer's size poll bounded by DEFER_N (the registered
+  count) instead of a fixed 4-Acquire-load walk per large dealloc.
+- Magazine hit-rate question (why 19.7M sections serve ~46M ops = 2.3x
+  amortization, not 16x): NOT re-measured this session (needs a census
+  boot; the pristine ladder rig does not print SMALLALLOC). Open item
+  for the 107th: one debug=taskdump pristine boot, locks= vs a=/f=.
+
+Verification: x86_64+riscv64+aarch64 builds rc=0; make test green;
+smoke 0 panics. Install-window A/B: bzImage-hp106-alloc built and
+script ready (hp106-alloc-series.sh) — NOT RUN this session (the vDSO
+redirect consumed the boot budget; every fix's A/B remains owed before
+merge per the gate).
+
+#### 106.4 P4 — reap-path engine (commit 6692a1d0) + the per-exit probe (NOT yet run)
+
+Code reading of the 5.9k-sample engine (schedule <- release_task <-
+do_wait_nonblock <- sys_wait4):
+- release_task's drain loop yields via schedule() only for live
+  stragglers / lock contention (rare for single-threaded installs);
+- the DOMINANT cost is the TWO snapshot-form sleepy RCU grace waits
+  per single-threaded exit (mm-drop in the dying task's exit_mm +
+  release-task in the reaper), each of which rounds UP to the next
+  jiffy whenever the snapshotted RCU_GEN is stale — under the install
+  stream that is the common case (any forced wait / callback batch
+  advances the gen). ~10ms/exit class; ~200+ exits/boot.
+- FIX LANDED: synchronize_rcu_bounded_pollfirst (same shape as the
+  fd-close forced_polled form: ~100us pause-hinted poll, then the
+  existing bounded sleepy fallback) at all three exit-path sites
+  (release-task, mm-drop, thread-stack-free). Snapshot semantics
+  unchanged — no RCU_GEN churn from the exit path. The reference's
+  full call_rcu deferral (release_task NEVER waits) remains the
+  follow-on if forkprof still shows per-exit dominance.
+- AUDIT FINDING (not changed, for the record): mm-drop/release-task
+  are LIFETIME frees served by the SNAPSHOT grace form — the
+  synchronize_rcu docs say lifetime callers need the FORCED form; the
+  current design leans on the documented belt-and-braces (vma walker
+  exclusion + deferred_free's 1.5s hold). pollfirst does not change
+  this; a future lane should adjudicate snapshot-vs-forced there.
+- PROBE: forkprof=1 rides the reboot(2) shutdown cascade
+  (syscall/process.rs:6121); hp106-p4run.sh + hp106-p4boot.sh inject
+  the guest script that reboots at t=300 to dump the phase table
+  (P_EX_TOTAL / P_EX_MMDROP / P_DROP_RCU / P_DROP_PTFREE / P_WT_REAP).
+  Script ready; boot NOT run this session (budget).
+
+#### 106.5 P0 (coordinator redirect) — x86_64 vDSO LIVE (commit ff904630)
+
+The 105th's census made this the biggest single lever: 21.3M
+clock_gettime syscalls/boot at ~3us = ~6.6% of the box. State found:
+vDSO was riscv64-only AND disabled ("mapping off" — statics outside the
+riscv64 linear map); x86_64 had none; the ELF scaffolding (DT_HASH +
+dynsym + PT_LOAD) was already arch-neutral and musl-shaped, and the OH
+image's ld-musl-x86_64.so.1 HAS __vdso_clock_gettime support
+(strings-verified).
+
+Landed (x86_64 only; riscv64/aarch64 keep mapping-off):
+- hand-encoded AMD64 code page: __vdso_clock_gettime (REALTIME/
+  MONOTONIC/MONOTONIC_RAW/BOOTTIME/TAI dispatch, seqlock retry,
+  LFENCE;RDTSC + ((tsc-base)*mult)>>32 interpolation, -ENOSYS fallback
+  for other clocks), __vdso_gettimeofday, __vdso_clock_getres;
+- vdso_data_tick (x86): publishes (raw base_tsc, kernel mono ns, epoch
+  ns, mult/shift/res) per tick; mult derived from the calibrated
+  TSC_FREQ (refresh skipped pre-calibration);
+- exec.rs: data page RW + code page RX mapped at VDSO_BASE
+  (INTERP_BASE-4MB) in every execve + AT_SYSINFO_EHDR in auxv;
+- mmu_init map_page: LEAF-LOW-HIT tripwire allows exactly the two vDSO
+  frames (the one legitimate low-image user alias);
+- frame-safety argument: boot reserves [0, image end] in memblock ->
+  fork copies the PTEs with NO refcount and mm teardown skips the
+  frames (is_foreign_user_frame — the GEM/fb machinery); pa =
+  va - KERNEL_LINK_BASE (image link identity) — the riscv64 blocker
+  does not exist on x86_64.
+
+THREE BUGS before any valid A/B (the session's sharpest edge — and the
+method that caught them):
+1+2. AMD64 encoding bugs: cmp rdi,imm8 used ModRM 0xF9 (compared RCX)
+   and the seqlock base loads used REX 0x49 (landed base_tsc/base_mono
+   in RAX/RCX instead of R8/R9). Caught by replaying the emitter in
+   Python and objdump-ing the exact bytes — BEFORE the second boot.
+3. SysV-hash terminator: DT_HASH buckets/chains were initialized to
+   u32::MAX; musl's walk `for (i=bucket[h]; i; i=chain[i])` followed
+   chain[0xFFFFFFFF], and 0xFFFFFFFF * sizeof(Elf64_Sym)=24 =
+   0x17_FFFF_FFE8 past the symtab — pid 1 segfaulted at t=1.27s at its
+   FIRST vdsodso lookup (USEGV-FOR: CR2 0x57bec011e8, ripbytes were
+   musl's hash loop, r12/r13 held code_page+0x180/+0x140). Terminator
+   is 0 (STN_UNDEF) — the u32::MAX convention was never exercised
+   because the riscv64 mapping it was written for stayed disabled.
+   Both buggy boots masqueraded as ordinary regime stalls (the box
+   zombie-walked after init died) — "boots" is NOT proof a vDSO works.
+Method: disassemble hand-encoded blobs offline BEFORE burning a boot,
+and read the USEGV-FOR forensics on every early "stall".
+
+Functional validation boot (hp106vd2, injected date probe): the vDSO
+mono clock is rate- and value-correct (date advanced 60.000s over
+60.000s; matched /proc/uptime to the second). REALTIME shows epoch-0
+(1970) because the KERNEL's wall epoch is 0 — control boots print the
+same "Set time of day failed, err=14" from OH init; the vDSO faithfully
+mirrors the kernel clock (and would track settimeofday through the
+epoch-refresh call in set_wall_epoch_offset_ns).
+
+A/B (hp106-vdso-series.sh: v1=vdso vs v0=a0 control, interleaved
+v1,v0,v1,v0,v1,v0, pristine reflink-per-boot, SMP8 LL4 420s; host load
+17-29 with 5-6 foreign QEMUs — the heaviest window of the session):
+
+  boot    anim.ready  anim.finished  launcher.ready
+  v1x9    11.945      19.218         34.166   LADDER
+  v0x10   17.327      25.935         STALL
+  v1x11   15.871      24.756         44.061   LADDER
+  v0x12   17.151      26.897         STALL
+  v1x13   12.697      21.606         36.468   LADDER
+  v0x14   17.541      26.210         38.132   LADDER
+
+  launcher.ready: v1 3/3 ladders, median 36.468 | v0 1/3, 38.132
+  (with the 106.1 series: control a0 total 2/8 ladders vs vdso 3/3 —
+  Fisher p~0.14, suggestive; the mechanism + marker deltas carry it)
+  anim.ready median:     12.697 vs 17.327   (-27%)
+  anim.finished median:  21.606 vs 26.210   (-18%)
+  zero panics on all six boots; zero KERNPANIC/OOM classes
+
+The -27% bootanimation and the 3/3 ladder rate under the HEAVIEST host
+load of the session are consistent with removing ~21M x ~3us = ~63s of
+serialized syscall work from the boot path. ENGAGEMENT PROOF (syscost
+clock_gettime volume collapse) + the P1b owed gate boot: syscost pair
+in flight at TASK-write time (tok109 lineage asset is GONE — dangling
+symlinks in both worktrees; the pair runs on pristine ud-f2-u2v15
+reflink copies via UD_SRC, so the 126M volume band is NOT directly
+comparable; the a0-vs-vdso DELTA is).
+
+#### 106.6 What remains owed (for the 107th / coordinator)
+
+1. vDSO A/B medians + one syscost boot pair (a0 vs vdso): the
+   engagement proof is the clock_gettime syscall volume collapse in
+   the syscost table (21.3M -> ~0) plus the ladder deltas.
+2. P3 install-window A/B (bzImage-hp106-alloc vs a0, n>=3 interleaved;
+   script ready). Then the perf-gate domain check (small_alloc REST
+   wall, sections band) on the winner.
+3. P4 forkprof probe boot (script ready) + per-exit A/B for the
+   pollfirst fix; reference ~0.1ms class comparison.
+4. The 106.2 flip decision (branch oh106-opt2-flip): more ladders or
+   an explicit early-marker acceptance.
+5. Dual-arch + make test re-run on the FINAL stack (make test this
+   session covered commits 3ab2b70a+6692a1d0, not the vdso commit).
+
+### 108. 108TH SESSION (2026-11-12 07:0x-.., branch oh-crash) — THE OPT2 FLIP IS LANDED ON THE FULL STACK (4/4 ladders median 21.82s vs 1/4 at 30.94s, -29.5% at the deciding metric; commit ac48dde4) after a live-decoded KERNEL KILLER was fixed first (signal.rs rip<2: a userspace NULL-call fault panicked the kernel via the unchecked `rip - 2` in restart_syscall_no_handler — d040a988); the vDSO engagement question is ANSWERED (all common clock ids serve at 66-74ns incl. COARSE/TAI/CPUTIME; the 106th syscost pair's non-collapse is a DYNAMIC-path/burner question, probe banked); fresh honest table on the flipped kernel: the lock/alloc/preempt/schedule cluster is now ~28% of kernel samples, syscall-dispatch and console-emit are GONE from top-25; dual-arch rc=0 + riscv64 make test ALL PASSED on the flip; TWO rig bugs fixed (silent-guest serial hang, stale-page-cache extraction)
+
+Mission: the 27s -> 5.7s push. Priority order from the coordinator:
+opt2 flip, honest-table re-record, per-schedule taxes, exec/fork, param
+stall. Arms built cargo-direct from identical source (md5s in the
+Cargo.toml comment), interleaved, pristine ud-f2-u2v15 reflink per boot.
+
+#### 108.1 The kernel killer found on the FIRST o2 boot (fix d040a988)
+
+hp108o2x1 (pre-fix): USEGV-L pid=1756 comm='OS_IPC_2_1756' rip=0x0 at
+21.1s (an OS_IPC thread of the restarting distributeddata jumped to
+NULL) -> "PANIC: attempt to subtract with overflow, Location
+kernel/src/signal.rs:1613" -> panic path held CPU5 IF=0 for 26s
+(panic_policy::apply + core::fmt bodies symbolized from the WW print),
+soft-lockup cascade across all 8 CPUs, boot dead at 34-57s. The bug:
+restart_syscall_no_handler's x86_64 block computes (regs.rip - 2) for
+the syscall-byte probe BEFORE any bounds check; rip=0 underflows; with
+debug-assertions ON the arithmetic check converts a userspace crash
+into a kernel panic. riscv64/aarch64 blocks already guard their
+epc/pc-4; x86_64 guarded only the later rip -= 2. Fix: early return
+for rip < 2 (such a frame can never sit right after a 2-byte syscall).
+Search of all prior stall serials: only this boot shows the rip=0x0
+face (the historical kickdog/el2 stall faces are a different class) —
+a real, rare, boot-killing bug, now closed.
+
+#### 108.2 P1 — the opt-level=2 flip A/B (commit ac48dde4, LANDED)
+
+Interleaved series on d040a988 (signal fix in BOTH arms), SMP8 4G KVM
+LL4 420s, host load 7-32 recorded per boot (run/hp108-series*.out):
+
+  arm    boot                  anim.ready  anim.fin  spawn   launcher.ready
+  o2     hp108o2x1 (load17-31)   11.254    19.674   22.233    31.191  LADDER
+  c8     hp108c8x2 (load31)      16.159    24.901      —      STALL
+  o2     hp108o2x3 (load11)      11.524    16.807   20.447    21.309  LADDER
+  c8     hp108c8x4 (load9)        9.350    17.991      —      STALL
+  o2     hp108o2x5 (load11)       5.724    11.508   11.965    16.305  LADDER
+  c8     hp108c8x6 (load12-14)    8.788    17.318   24.819    30.941  LADDER
+  c8     hp108c8x1e (load9)       9.360    16.336      —      STALL (foundation crash-restart loop x3, silent wedge at window end)
+  o2     hp108o2x2 (load7)        8.544    16.861   17.676    22.330  LADDER
+
+  o2: 4/4 ladders, median 21.82s (range 16.31-31.19), zero panics.
+  c8: 1/4 ladders (single 30.94s), 3 stalls.
+  Median-of-ladders -29.5%; ladder-rate Fisher p~0.02. The 106th's
+  no-flip verdict was measured on the pre-vDSO stack (1 ladder/arm);
+  on the full stack opt2's codegen compounding shows at launcher.ready.
+  Flip = [profile.dev] opt-level = 2, debug-assertions + debuginfo ON
+  (the arithmetic checks just paid for themselves — 108.1). Re-baseline
+  notes for every perf-gate band are in the commit + Cargo.toml.
+
+#### 108.3 P2 — the fresh honest table (hp108r record, flipped kernel)
+
+Window 28.5-118.5s (hiperf's <25s-arm hard limit stands; the 5-20s
+SA-chain window remains serial-only), 214,523 samples, ELF nm-paired.
+CAUTION: the 103rd parser's addr2line mislabeled two sites (dump_tail
+was actually __x64_copy_to/from_user) — nm outer-symbol check is the
+reliable read; parser fix owed to the next lane. Corrected top cluster:
+
+  lock/alloc/preempt/schedule ~28% of non-idle kernel samples:
+    SpinlockIrqGuard<SlabCache> drop 6055 + RawSpinlock::lock 5953+3096
+    + buddy alloc 3603/dealloc 2840 + preempt_count sub/sub2 4082
+    + __schedule 2665
+  uaccess copy_to/from_user ~1.9k (re-labeled) + memcpy ~4k + memcmp 3.4k
+  unix socket path: lookup 1412 + sndtimeo_deadline 1164 (hilog family)
+  read_time (TSC) ~2k; wake_up 891; FdTable::get_file 870;
+  fdreap::retire_complete 651
+  GONE from top-25 vs the 100th's table: syscall dispatch translate
+  (was 15.7%), the TTAS atomic-poll debug-cloud (21% -> the remaining
+  lock sites are real work), console emit path, clock_gettime.
+  Burners unchanged: pid612(?) + multimodalinput + hilogd + sysevent
+  share the top kernel-sample rows (same per-op x volume shape).
+
+#### 108.4 The vDSO engagement answer (clkprobe, banked in the record boot)
+
+Static-musl probe (200k calls/id, ns/call; syscall class is >=300ns
+under KVM): REALTIME 70, MONOTONIC 67, MONO_RAW 67, BOOTTIME 68,
+RT_COARSE 68, MONO_COARSE 66, PROC_CPUTIME 55, THR_CPUTIME 73, TAI 74
+— ALL vDSO-served, AT_SYSINFO_EHDR present; alarm clocks + id 9 fail
+in 50ns without a syscall (our vdso returns -EINVAL for them).
+musl routing disassembled from the image's ldso: vdso!=0 -> 0 = done,
+-EINVAL = errno, anything else -> real syscall. OPEN: the 106th syscost
+pair still showed 62M clock_gettime syscalls by t=720 on a vdsO-ON
+kernel — either dynamic-musl lookup fails for OH daemons (clkprobe-dyn
+compiled, NOT yet run) or the burners bypass libc clock_gettime.
+hp108sc (syscost boot on the flipped kernel, in flight at write time)
+names the burners via the per-process flood.
+
+#### 108.5 Gates on the flipped stack (ac48dde4)
+
+x86_64 = the o2 arm itself (4/4 ladders, record boot, zero panics);
+riscv64 build rc=0; aarch64 build rc=0; riscv64 make test ALL TESTS
+PASSED (run/hp108-maketest.log). Branch pushed through ac48dde4.
+
+#### 108.6 Rig fixes (both mine, in oh-crash/run)
+
+- lb-boot-out.py: the serial reader blocked forever on a fully silent
+  (hard-wedged) guest — read1() never returned and the 420s window
+  check never ran (hp108c8x1 hung ~10min past window). Reader now
+  select()-bounded at 1s.
+- hp87-out.img extraction: after a NOSNAP record boot the host loop
+  mount can serve STALE PAGE CACHE (the 100th's old filesystem showed
+  instead of the fresh mkfs + new record). losetup -D + drop_caches
+  before the extraction mount. The record was intact the whole time.
+
+#### 108.7 FOR THE 109TH (priority order, numbers attached)
+
+1. The lock/alloc/preempt/schedule cluster (~28%): RawSpinlock::lock's
+   9k needs fp-chain attribution (a chain-extracting parser variant;
+   the leaf parser mislabels inlines) — if it is the GRQ, sharding or
+   lock-free reads is the 105th's open design question; if it is the
+   emit/serial path, the always-on print families (mtprobe 376/boot,
+   bindwalk 233, devopen-probe 118, bindrec 90, PCTL-RECV 97 — all
+   rate-capped hunt probes riding every perf boot at LL4) are a
+   documented ~140KB/~0.5-1s lever (sc108's 13ms/line class).
+2. The clock_gettime residual: read hp108sc's flood lines (who still
+   traps 62M times); run clkprobe-dyn (compiled, in run/hp108-probe/)
+   for the dynamic-musl answer; if burners bypass libc, the fix is
+   userspace (hilog/FFRT clock calls) or a COARSE-class vDSO audit.
+3. The reap-path engine re-check: the 100th's wait4/release_task line
+   is NOT in the new top-25 — fdreap::retire_complete (651) + the
+   101.4 forkprof probe boot (script ready, never run) would confirm
+   whether 6692a1d0's poll-first killed it.
+4. Stall regime on c8 remains (3/4): the foundation crash-restart
+   loop face is userspace (exit code 0 cycling), but WHY opt2 boots
+   escape it 4/4 while opt0 hits 3/4 is open — codegen timing races.
+   The kickdog/el2 faces (100th) unchanged.
+5. hiperf <25s arm limit still blocks SA-chain records (103rd note).
