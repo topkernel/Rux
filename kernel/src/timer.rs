@@ -821,6 +821,9 @@ pub fn timer_softirq_handler(_nr: usize) {
                             let d = current as i64 - r.deadline as i64;
                             (d.abs() * 1000 / crate::config::KERNEL_HZ as i64, if d >= 0 { "past" } else { "future" })
                         };
+                        static TS_PARK_N: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        if TS_PARK_N.fetch_add(1, Ordering::Relaxed) < 20 {
                         crate::pr_err!(
                             "TIMEDSLEEP-PARK pid={} kind={} age_s={} dur_ms={} deadline_{}ms_{} wheel={} timer_id={:#x}",
                             r.pid,
@@ -832,6 +835,7 @@ pub fn timer_softirq_handler(_nr: usize) {
                             wheel,
                             r.timer_id
                         );
+                        } // TS_PARK_N cap
                     }
                 }
             }
