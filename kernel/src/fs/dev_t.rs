@@ -141,3 +141,8 @@ pub const DEV_EVDEV_KEYBOARD: DevNo = DevNo::new(INPUT_MAJOR, EVDEV_MINOR_BASE);
 
 /// /dev/input/event1 (mouse/pointer)
 pub const DEV_EVDEV_POINTER: DevNo = DevNo::new(INPUT_MAJOR, EVDEV_MINOR_BASE + 1);
+
+/// Touchscreen evdev (event2): the pointer device's coordinates
+/// re-published with touch protocol (BTN_TOUCH + ABS_MT_POSITION_X/Y)
+/// for OH's multimodalinput framework.
+pub const DEV_EVDEV_TOUCHSCREEN: DevNo = DevNo::new(INPUT_MAJOR, EVDEV_MINOR_BASE + 2);

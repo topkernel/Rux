@@ -243,6 +243,10 @@ pub static mut EVDEV_KEYBOARD: Option<EvdevDevice> = None;
 /// Pointer evdev device
 pub static mut EVDEV_POINTER: Option<EvdevDevice> = None;
 
+/// Touchscreen evdev device (event2): mirrors pointer coordinates with
+/// touch protocol for OH multimodalinput.
+pub static mut EVDEV_TOUCHSCREEN: Option<EvdevDevice> = None;
+
 /// Resolve the EvdevDevice a file was opened against. Returns None for
 /// non-evdev files (caller falls through to other ioctl handlers).
 // SAFETY: EVDEV_KEYBOARD / EVDEV_POINTER are initialized by init_evdev()
@@ -258,6 +262,8 @@ unsafe fn device_of_file(file: &File) -> Option<&'static EvdevDevice> {
         EVDEV_KEYBOARD.as_ref()
     } else if devno == DEV_EVDEV_POINTER {
         EVDEV_POINTER.as_ref()
+    } else if devno == crate::fs::dev_t::DEV_EVDEV_TOUCHSCREEN {
+        EVDEV_TOUCHSCREEN.as_ref()
     } else {
         None
     }
@@ -858,17 +864,52 @@ pub fn init_evdev() {
         }
     }
 
+    // Touchscreen device: same coordinates as the pointer, but with
+    // touch protocol (BTN_TOUCH + ABS_MT_POSITION_X/Y). OH's
+    // multimodalinput framework only recognizes touch input from
+    // devices carrying these capabilities — the launcher's swipe
+    // gesture needs it.
+    unsafe {
+        let ts = EvdevDevice::new(b"VirtIO Touchscreen", true);
+        EVDEV_TOUCHSCREEN = Some(ts);
+        if let Some(ref mut dev) = EVDEV_TOUCHSCREEN {
+            // KEY bitmap: BTN_TOUCH = 0x14a, BTN_LEFT = 0x110 (keep both
+            // so single-touch and multi-touch consumers both bind).
+            let mut key_bits = [0u8; 96];
+            key_bits[0x14a / 8] |= 1 << (0x14a % 8); // BTN_TOUCH
+            key_bits[0x110 / 8] |= 1 << (0x110 % 8); // BTN_LEFT
+            dev.set_ev_bits(1, &key_bits); // EV_KEY
+            // ABS bitmap: ABS_MT_POSITION_X=0x35, ABS_MT_POSITION_Y=0x36
+            let mut abs_bits = [0u8; 96];
+            abs_bits[0x35 / 8] |= 1 << (0x35 % 8); // ABS_MT_POSITION_X
+            abs_bits[0x36 / 8] |= 1 << (0x36 % 8); // ABS_MT_POSITION_Y
+            abs_bits[0x00 / 8] |= 1 << (0x00 % 8); // ABS_X
+            abs_bits[0x01 / 8] |= 1 << (0x01 % 8); // ABS_Y
+            dev.set_ev_bits(3, &abs_bits); // EV_ABS
+            // Copy axis ranges from the pointer device
+            dev.set_absinfo(0, 0, 32767, 0, 0, 0);  // ABS_X
+            dev.set_absinfo(1, 0, 32767, 0, 0, 0);  // ABS_Y
+        }
+    }
+
     // Register device operations
     devfs::registry::register_char_device(DEV_EVDEV_KEYBOARD, &EVDEV_OPS)
         .expect("Failed to register keyboard evdev");
     devfs::registry::register_char_device(DEV_EVDEV_POINTER, &EVDEV_OPS)
         .expect("Failed to register pointer evdev");
+    devfs::registry::register_char_device(
+        crate::fs::dev_t::DEV_EVDEV_TOUCHSCREEN,
+        &EVDEV_OPS,
+    )
+    .expect("Failed to register touchscreen evdev");
 
     // Create device nodes
     devfs::mknod("/input/event0", DEV_EVDEV_KEYBOARD, 0o666)
         .expect("Failed to create /dev/input/event0");
     devfs::mknod("/input/event1", DEV_EVDEV_POINTER, 0o666)
         .expect("Failed to create /dev/input/event1");
+    devfs::mknod("/input/event2", crate::fs::dev_t::DEV_EVDEV_TOUCHSCREEN, 0o666)
+        .expect("Failed to create /dev/input/event2");
 
     // U3: registration-time sysfs entries + "add" uevents. The
     // two-kobject layout (inputN/eventM) mirrors Linux input_register_dev:
@@ -1016,6 +1057,23 @@ pub fn push_input_event(is_pointer: bool, event: InputEvent) {
         if is_pointer {
             if let Some(ref dev) = EVDEV_POINTER {
                 dev.push_event(event);
+            }
+            // Mirror to the touchscreen: translate pointer events to
+            // touch protocol (OH multimodalinput). BTN_LEFT(0x110) ->
+            // BTN_TOUCH(0x14a); ABS_X/Y -> also ABS_MT_POSITION_X/Y.
+            if let Some(ref ts) = EVDEV_TOUCHSCREEN {
+                let ev_type = event.type_;
+                let ev_code = event.code;
+                let mut ts_event = event;
+                if ev_type == 1 && ev_code == 0x110 {
+                    // EV_KEY / BTN_LEFT -> BTN_TOUCH
+                    ts_event.code = 0x14a;
+                } else if ev_type == 3 && (ev_code == 0x00 || ev_code == 0x01) {
+                    // EV_ABS / ABS_X(0) or ABS_Y(1) -> also emit
+                    // ABS_MT_POSITION_X(0x35) or ABS_MT_POSITION_Y(0x36)
+                    ts_event.code = if ev_code == 0x00 { 0x35 } else { 0x36 };
+                }
+                ts.push_event(ts_event);
             }
         } else {
             if let Some(ref dev) = EVDEV_KEYBOARD {
