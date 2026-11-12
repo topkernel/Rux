@@ -191,16 +191,59 @@ unsafe impl Send for EpollWakeRegistry {}
 
 const EPOLL_WAKE_SHARDS: usize = 64;
 
+/// One (file_id → epoll instance) binding. `list` is the FIRST field so a
+/// node pointer doubles as its `ListHead` pointer (the container_of cast
+/// is then a no-op) — same trick as `RcuHead`.
+#[repr(C)]
+struct EpollWakeNode {
+    list: crate::list::ListHead,
+    file_id: u64,
+    ep: *mut EpollFile,
+}
+// SAFETY: same contract as EpollWakeRegistry: `ep` is only dereferenced
+// while the binding is linked (shard lock held or pinned per notify_pins),
+// and the node is unlinked before the epoll's close op frees the box.
+unsafe impl Send for EpollWakeNode {}
+
+/// ALLOCATION-FREE SHARD BODY (115th, allocator-under-shard-lock hunt):
+/// the shard is an intrusive list of `EpollWakeNode`s — linking and
+/// unlinking are two pointer writes, and the NODE is Box-allocated /
+/// freed OUTSIDE the shard's irqsave section. The previous
+/// `Vec<(u64, *mut EpollFile)>` body pushed (and on capacity growth,
+/// ALLOCATED) inside the lock: an allocation whose per-CPU magazine row
+/// was empty takes the small_alloc class lock and can walk pages / touch
+/// the buddy under it — sections measured at 300 ms of real KVM time
+/// under OH-boot churn (dfx=allocwatch, lb268). For that whole window
+/// every producer mapping to the shard spins IRQs-off in
+/// epoll_notify_file's lock_irqsave, no CPU on the box reports a
+/// quiescent state, and the fdreap grace round prints
+/// RCU-GP-BOUND site=fdreap-close — the exact print that fires
+/// immediately before the OH boot deadlock wedge (DEADLOCK: spinlock
+/// stuck ... EPOLL_WAKE_SHARDED + soft lockups). The sentinel cannot
+/// self-reference in a const initializer, so it is lazily `init()`ed on
+/// first acquisition (`init_once`, under the shard lock).
 struct EpollWakeShard {
-    bindings: alloc::vec::Vec<(u64, *mut EpollFile)>,
+    head: crate::list::ListHead,
 }
 // SAFETY: same contract as EpollWakeRegistry (now the per-shard type).
 unsafe impl Send for EpollWakeShard {}
 
+impl EpollWakeShard {
+    /// Return the sentinel pointer, self-linking it on first use. Must be
+    /// called with the shard lock held.
+    #[inline]
+    fn init_once(&mut self) -> *mut crate::list::ListHead {
+        if self.head.next.is_null() {
+            self.head.init();
+        }
+        &mut self.head as *mut crate::list::ListHead
+    }
+}
+
 static EPOLL_WAKE_SHARDED: [crate::sync::spinlock::Spinlock<EpollWakeShard>; EPOLL_WAKE_SHARDS] =
     [const {
         crate::sync::spinlock::Spinlock::new(EpollWakeShard {
-            bindings: alloc::vec::Vec::new(),
+            head: crate::list::ListHead::new(),
         })
     }; EPOLL_WAKE_SHARDS];
 
@@ -328,12 +371,23 @@ pub fn epoll_notify_file(file_id: u64) {
         let mut targets: [*mut EpollFile; MAX_TARGETS] = [core::ptr::null_mut(); MAX_TARGETS];
         let mut n_targets = 0usize;
         {
-            let registry = epoll_wake_shard(file_id).lock_irqsave();
-            for (id, ep) in registry.bindings.iter() {
-                if *id != file_id {
+            let mut registry = epoll_wake_shard(file_id).lock_irqsave();
+            // Intrusive-list walk (115th): read-only pass, no allocation,
+            // no unlink — the scan cannot stall behind the allocator.
+            // SAFETY: every node reachable from the sentinel is linked
+            // under this shard lock, and nodes are only unlinked under it.
+            let head = registry.init_once();
+            let mut cur = unsafe { (*head).next };
+            while cur != head {
+                // SAFETY: cur is a linked node's `list` field (first
+                // field of EpollWakeNode — the cast IS the container_of).
+                let node = unsafe { &*(cur as *mut EpollWakeNode) };
+                cur = unsafe { (*cur).next };
+                if node.file_id != file_id {
                     continue;
                 }
-                if done[..n_done].contains(ep) {
+                let ep = node.ep;
+                if done[..n_done].contains(&ep) {
                     continue; // already woken in an earlier pass
                 }
                 if n_targets < MAX_TARGETS {
@@ -343,9 +397,9 @@ pub fn epoll_notify_file(file_id: u64) {
                     // removed this binding). Touching the pin field is
                     // therefore in-bounds live memory.
                     unsafe {
-                        (**ep).notify_pins.fetch_add(1, core::sync::atomic::Ordering::Acquire);
+                        (*ep).notify_pins.fetch_add(1, core::sync::atomic::Ordering::Acquire);
                     }
-                    targets[n_targets] = *ep;
+                    targets[n_targets] = ep;
                     n_targets += 1;
                 }
             }
@@ -392,45 +446,142 @@ pub fn epoll_notify_file(file_id: u64) {
 }
 
 /// Bind (file_id → epoll instance). Idempotent per pair.
+///
+/// ALLOCATION DISCIPLINE (115th): the node is Box-allocated BEFORE the
+/// shard lock is taken and (on the idempotent re-add path) freed AFTER it
+/// is released — nothing inside the irqsave section can touch the
+/// allocator. The previous Vec::push allocated on capacity growth under
+/// the lock; when the magazine row was empty that put the whole
+/// class-lock refill (page walk, buddy) inside an IRQ-off section.
 fn epoll_wake_register(file_id: u64, ep: *mut EpollFile) {
     let shard = epoll_shard_index(file_id);
-    let mut registry = EPOLL_WAKE_SHARDED[shard].lock_irqsave();
-    if !registry.bindings.iter().any(|(id, e)| *id == file_id && *e == ep) {
-        registry.bindings.push((file_id, ep));
-        EPOLL_WAKE_TOTAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        // In-section publish (see EPOLL_SHARD_N): before the lock
-        // release, so a concurrent notify's fast-path load pairs with
-        // this increment.
-        EPOLL_SHARD_N[shard].fetch_add(1, core::sync::atomic::Ordering::Release);
+    // SAFETY: node is uniquely owned here; linked only under the shard
+    // lock below (or freed on the idempotent path, still uniquely owned).
+    let node = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(EpollWakeNode {
+        list: crate::list::ListHead::new(),
+        file_id,
+        ep,
+    }));
+    let mut linked = false;
+    {
+        let mut registry = EPOLL_WAKE_SHARDED[shard].lock_irqsave();
+        let head = registry.init_once();
+        let mut exists = false;
+        // SAFETY: read-only walk of linked nodes under the shard lock.
+        let mut cur = unsafe { (*head).next };
+        while cur != head {
+            // SAFETY: cur is a linked EpollWakeNode's `list` (first field).
+            let n = unsafe { &*(cur as *mut EpollWakeNode) };
+            if n.file_id == file_id && n.ep == ep {
+                exists = true;
+                break;
+            }
+            cur = unsafe { (*cur).next };
+        }
+        if !exists {
+            // SAFETY: node's list is initialized (fresh) and unlinked;
+            // head is this shard's sentinel, held under the lock.
+            unsafe { (*node).list.add_tail(head); }
+            EPOLL_WAKE_TOTAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            // In-section publish (see EPOLL_SHARD_N): before the lock
+            // release, so a concurrent notify's fast-path load pairs with
+            // this increment.
+            EPOLL_SHARD_N[shard].fetch_add(1, core::sync::atomic::Ordering::Release);
+            linked = true;
+        }
+    }
+    if !linked {
+        // Idempotent re-add: reclaim the spare node OUTSIDE the lock.
+        // SAFETY: never linked; still uniquely owned.
+        unsafe { drop(alloc::boxed::Box::from_raw(node)); }
     }
 }
 
 /// Drop every binding for `ep` (epoll instance teardown). An instance may
 /// watch many file_ids across shards, so sweep them all (cold path: runs
 /// once per epoll close).
+///
+/// Unlinked nodes are freed OUTSIDE the shard sections (batched): the free
+/// can hit the allocator's slow path, which must never run under one of
+/// these irqsave locks (see epoll_wake_register).
 fn epoll_wake_unregister_all(ep: *mut EpollFile) {
+    const BATCH: usize = 32;
+    let mut batch: [*mut EpollWakeNode; BATCH] = [core::ptr::null_mut(); BATCH];
     for (shard, registry) in EPOLL_WAKE_SHARDED.iter().enumerate() {
-        let mut registry = registry.lock_irqsave();
-        let before = registry.bindings.len();
-        registry.bindings.retain(|(_, e)| *e != ep);
-        let dropped = before - registry.bindings.len();
-        if dropped > 0 {
-            EPOLL_WAKE_TOTAL.fetch_sub(dropped, core::sync::atomic::Ordering::Relaxed);
-            EPOLL_SHARD_N[shard].fetch_sub(dropped, core::sync::atomic::Ordering::Release);
+        loop {
+            let mut n_batch = 0usize;
+            let mut hit_end;
+            {
+                let mut registry = registry.lock_irqsave();
+                let head = registry.init_once();
+                // SAFETY: walk under the shard lock; unlinking captures
+                // `next` before `del`, and unlinked nodes are unreachable
+                // to every other CPU once `del` lands under this lock.
+                let mut cur = unsafe { (*head).next };
+                hit_end = true;
+                while cur != head {
+                    let next = unsafe { (*cur).next };
+                    // SAFETY: cur is a linked EpollWakeNode's `list`.
+                    let n = unsafe { &mut *(cur as *mut EpollWakeNode) };
+                    if n.ep == ep && n_batch < BATCH {
+                        // SAFETY: n.list is linked in this shard's list.
+                        unsafe { n.list.del(); }
+                        batch[n_batch] = cur as *mut EpollWakeNode;
+                        n_batch += 1;
+                        EPOLL_WAKE_TOTAL.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+                        EPOLL_SHARD_N[shard].fetch_sub(1, core::sync::atomic::Ordering::Release);
+                    } else if n.ep == ep && n_batch >= BATCH {
+                        // More matches than the batch holds: stop at the
+                        // sentinel and re-lock for another pass.
+                        hit_end = false;
+                        break;
+                    }
+                    cur = next;
+                }
+            }
+            // Free the unlinked nodes with NO shard lock held.
+            // SAFETY: each was unlinked under the shard lock above; nodes
+            // are reachable only through the shard lists.
+            for i in 0..n_batch {
+                unsafe { drop(alloc::boxed::Box::from_raw(batch[i])); }
+                batch[i] = core::ptr::null_mut();
+            }
+            if hit_end {
+                break; // this shard has no bindings left for `ep`
+            }
         }
     }
 }
 
-/// Drop bindings for (file_id, ep) (epoll_ctl DEL).
+/// Drop bindings for (file_id, ep) (epoll_ctl DEL). At most one node
+/// matches (register dedups per pair).
 fn epoll_wake_unregister(file_id: u64, ep: *mut EpollFile) {
     let shard = epoll_shard_index(file_id);
-    let mut registry = EPOLL_WAKE_SHARDED[shard].lock_irqsave();
-    let before = registry.bindings.len();
-    registry.bindings.retain(|(id, e)| !(*id == file_id && *e == ep));
-    let dropped = before - registry.bindings.len();
-    if dropped > 0 {
-        EPOLL_WAKE_TOTAL.fetch_sub(dropped, core::sync::atomic::Ordering::Relaxed);
-        EPOLL_SHARD_N[shard].fetch_sub(dropped, core::sync::atomic::Ordering::Release);
+    let mut dead: core::option::Option<*mut EpollWakeNode> = None;
+    {
+        let mut registry = EPOLL_WAKE_SHARDED[shard].lock_irqsave();
+        let head = registry.init_once();
+        // SAFETY: walk under the shard lock; the matching node is unlinked
+        // and freed after the lock is released.
+        let mut cur = unsafe { (*head).next };
+        while cur != head {
+            let next = unsafe { (*cur).next };
+            // SAFETY: cur is a linked EpollWakeNode's `list`.
+            let n = unsafe { &mut *(cur as *mut EpollWakeNode) };
+            if n.file_id == file_id && n.ep == ep {
+                // SAFETY: n.list is linked in this shard's list.
+                unsafe { n.list.del(); }
+                dead = Some(cur as *mut EpollWakeNode);
+                EPOLL_WAKE_TOTAL.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+                EPOLL_SHARD_N[shard].fetch_sub(1, core::sync::atomic::Ordering::Release);
+                break;
+            }
+            cur = next;
+        }
+    }
+    if let Some(n) = dead {
+        // SAFETY: unlinked above; reachable only through the shard list.
+        unsafe { drop(alloc::boxed::Box::from_raw(n)); }
     }
 }
 
@@ -451,18 +602,25 @@ pub fn epoll_dump_for_file(file_id: u64) {
     let mut out: alloc::vec::Vec<(usize, u32, u64, alloc::vec::Vec<(i32, u32, u64, u32, u64)>)> =
         alloc::vec::Vec::new();
     {
-        let registry = epoll_wake_shard(file_id).lock_irqsave();
-        for (id, ep) in registry.bindings.iter() {
-            if *id != file_id {
+        let mut registry = epoll_wake_shard(file_id).lock_irqsave();
+        // SAFETY: read-only walk of linked nodes under the shard lock.
+        let head = registry.init_once();
+        let mut cur = unsafe { (*head).next };
+        while cur != head {
+            // SAFETY: cur is a linked EpollWakeNode's `list` (first field).
+            let node = unsafe { &*(cur as *mut EpollWakeNode) };
+            cur = unsafe { (*cur).next };
+            if node.file_id != file_id {
                 continue;
             }
-            let ep_usize = *ep as usize;
+            let ep = node.ep;
+            let ep_usize = ep as usize;
             if out.iter().any(|(p, _, _, _)| *p == ep_usize) {
                 continue; // one line per instance, not per binding
             }
             // SAFETY: `ep` is alive while we hold the registry lock (see
             // epoll_interest_snapshot).
-            let epoll = unsafe { &**ep };
+            let epoll = unsafe { &*ep };
             let owner = epoll.owner_pid;
             let waits = epoll.wait_count;
             let entries = epoll.entries.lock();
@@ -528,38 +686,45 @@ pub fn epoll_interest_snapshot() {
         // (never nested — same release-before-next discipline as the
         // original single-lock pass). Diagnostic-only path (socksnap).
         for shard in EPOLL_WAKE_SHARDED.iter() {
-            let registry = shard.lock_irqsave();
-            for (_, ep) in registry.bindings.iter() {
-            let ep_usize = *ep as usize;
-            if out.iter().any(|(p, _, _, _)| *p == ep_usize) {
-                continue; // one line per instance, not per binding
-            }
-            // SAFETY: `ep` came from Box::into_raw in sys_epoll_create and
-            // its close op unregisters the binding before freeing, so it is
-            // alive while we hold the registry lock.
-            let epoll = unsafe { &**ep };
-            let owner = epoll.owner_pid;
-            let waits = epoll.wait_count;
-            let entries = epoll.entries.lock();
-            let mut row: alloc::vec::Vec<(i32, u32, u64, u32, u64)> = alloc::vec::Vec::new();
-            for entry in entries.iter() {
-                if row.len() >= 24 {
-                    break;
+            let mut registry = shard.lock_irqsave();
+            // SAFETY: read-only walk of linked nodes under the shard lock.
+            let head = registry.init_once();
+            let mut cur = unsafe { (*head).next };
+            while cur != head {
+                // SAFETY: cur is a linked EpollWakeNode's `list`.
+                let node = unsafe { &*(cur as *mut EpollWakeNode) };
+                cur = unsafe { (*cur).next };
+                let ep = node.ep;
+                let ep_usize = ep as usize;
+                if out.iter().any(|(p, _, _, _)| *p == ep_usize) {
+                    continue; // one line per instance, not per binding
                 }
-                row.push((
-                    entry.fd,
-                    entry.events,
-                    entry.file_id,
-                    entry.last_reported,
-                    entry.reports,
-                ));
-            }
-            let total = entries.len();
-            drop(entries);
-            out.push((ep_usize, owner, waits, row));
-            if total > 24 {
-                crate::pr_warn!("socksnap: ep={:#x} has {} entries (truncated)", ep_usize, total);
-            }
+                // SAFETY: `ep` came from Box::into_raw in sys_epoll_create and
+                // its close op unregisters the binding before freeing, so it is
+                // alive while we hold the registry lock.
+                let epoll = unsafe { &*ep };
+                let owner = epoll.owner_pid;
+                let waits = epoll.wait_count;
+                let entries = epoll.entries.lock();
+                let mut row: alloc::vec::Vec<(i32, u32, u64, u32, u64)> = alloc::vec::Vec::new();
+                for entry in entries.iter() {
+                    if row.len() >= 24 {
+                        break;
+                    }
+                    row.push((
+                        entry.fd,
+                        entry.events,
+                        entry.file_id,
+                        entry.last_reported,
+                        entry.reports,
+                    ));
+                }
+                let total = entries.len();
+                drop(entries);
+                out.push((ep_usize, owner, waits, row));
+                if total > 24 {
+                    crate::pr_warn!("socksnap: ep={:#x} has {} entries (truncated)", ep_usize, total);
+                }
             }
         }
     }

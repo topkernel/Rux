@@ -934,23 +934,41 @@ pub fn lock() -> SpinlockIrqGuard<'static, Uart> {
 }
 
 /// Interrupt-safe character output (no lock)
+/// RAW DIAGNOSTIC OUTPUT GATE (user rule 2026-11-12): all hunt/trace
+/// instruments that write directly through putchar_no_lock / puts_no_lock
+/// bypass printk's loglevel filter. In release builds these are compiled
+/// to no-ops — diagnostic output exists only in debug builds. The
+/// panic/crash path writes through its own Uart::new().putc() calls,
+/// NOT through these functions, so it is unaffected.
+#[cfg(debug_assertions)]
 pub fn putchar_no_lock(c: u8) {
     let uart = Uart::new();
     uart.putc(c);
 }
 
+#[cfg(not(debug_assertions))]
+pub fn putchar_no_lock(_c: u8) {}
+
 /// Interrupt-safe string output (no lock) — batched TX (leg-54 item C).
+#[cfg(debug_assertions)]
 pub fn puts_no_lock(s: &str) {
     let uart = Uart::new();
     uart.puts_batch(s.as_bytes());
 }
 
+#[cfg(not(debug_assertions))]
+pub fn puts_no_lock(_s: &str) {}
+
 /// Interrupt-safe byte output (no lock) — batched TX, `puts_no_lock`
 /// for byte slices (crash-context writers stage expanded bytes).
+#[cfg(debug_assertions)]
 pub fn puts_bytes_no_lock(bytes: &[u8]) {
     let uart = Uart::new();
     uart.puts_batch(bytes);
 }
+
+#[cfg(not(debug_assertions))]
+pub fn puts_bytes_no_lock(_bytes: &[u8]) {}
 
 // ============================================================================
 // Public API — input

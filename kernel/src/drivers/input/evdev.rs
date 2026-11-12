@@ -138,6 +138,8 @@ const EVENT_QUEUE_SIZE: usize = crate::config::EVDEV_EVENT_QUEUE_SIZE;
 pub struct EvdevDevice {
     /// Device name
     pub name: [u8; 32],
+    /// devfs file_id for epoll notify
+    pub file_id: u64,
     /// Device ID
     pub id: InputId,
     /// Whether it is a pointer device
@@ -171,6 +173,7 @@ impl EvdevDevice {
 
         Self {
             name: name_arr,
+            file_id: 0,
             id: InputId {
                 bustype: 0x0019, // BUS_VIRTIO
                 vendor: 0x1AF4,  // Red Hat
@@ -906,6 +909,20 @@ pub fn init_evdev() {
     // Create device nodes
     devfs::mknod("/input/event0", DEV_EVDEV_KEYBOARD, 0o666)
         .expect("Failed to create /dev/input/event0");
+    // Set file_id for epoll notify: devfs assigns file_id from the
+    // device number at open time; using the same encoding here means
+    // epoll_notify_file(this_id) matches the File's file_id.
+    unsafe {
+        if let Some(ref mut dev) = EVDEV_KEYBOARD {
+            dev.file_id = DEV_EVDEV_KEYBOARD.to_u64();
+        }
+        if let Some(ref mut dev) = EVDEV_POINTER {
+            dev.file_id = DEV_EVDEV_POINTER.to_u64();
+        }
+        if let Some(ref mut dev) = EVDEV_TOUCHSCREEN {
+            dev.file_id = crate::fs::dev_t::DEV_EVDEV_TOUCHSCREEN.to_u64();
+        }
+    }
     devfs::mknod("/input/event1", DEV_EVDEV_POINTER, 0o666)
         .expect("Failed to create /dev/input/event1");
     devfs::mknod("/input/event2", crate::fs::dev_t::DEV_EVDEV_TOUCHSCREEN, 0o666)
@@ -989,6 +1006,8 @@ fn fill_capabilities(
 
 /// Push event to evdev device
 pub fn push_input_event(is_pointer: bool, event: InputEvent) {
+    if !cfg!(debug_assertions) { return; } // release: diag output off
+
     // dfx=inputtrace: payload trace to hunt phantom event streams. Prints
     // every event with a monotonically increasing ordinal so serial-log
     // frequency analysis works; rate-limited so a flooding stream cannot
@@ -1088,12 +1107,16 @@ pub fn push_input_event(is_pointer: bool, event: InputEvent) {
 // trace must survive loglevel=3 boots, and the callers can be in IRQ
 // context, so no printk locks.
 fn it_msg(msg: &[u8]) {
+    if !cfg!(debug_assertions) { return; } // release: diag output off
+
     for &b in msg {
         crate::console::putchar_no_lock(b);
     }
 }
 
 fn it_u64(mut v: u64) {
+    if !cfg!(debug_assertions) { return; } // release: diag output off
+
     let mut buf = [0u8; 20];
     let mut n = 0;
     if v == 0 {
