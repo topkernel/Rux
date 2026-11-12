@@ -133,7 +133,9 @@ ACCEL=tcg make ubuntu-run  <span class="c"># 关 KVM(默认 KVM)</span>
 THREAD=single make ubuntu-run <span class="c"># 单线程 TCG,确定性调试用</span></code></pre>
     <div class="callout warn"><b>注意:</b>GUI 入口是 <code>make ubuntu-run</code>(部分旧文档提到的 <code>make gui</code> 已不作为入口)。另:共享镜像一律以 <code>-snapshot</code> + <code>file.locking=off</code> 启动,不写坏镜像本体。</div>
     <h3>OpenHarmony</h3>
-    <p>OH 启动走专用驱动脚本 <code>scripts/test/debug/oh-boot.sh</code>(q35 + virtio-gpu,7 张 OH 镜像,串口落盘、QEMU monitor 走 unix socket 供截图)。相关移植计划见仓库 <code>docs/development/openharmony-port-plan.md</code>。</p>
+    <pre><code>make oh-image   <span class="c"># 从镜像仓装配 OH 镜像(symlink,OH_IMAGES 可覆盖)</span>
+make oh-run     <span class="c"># 构建 + GTK 窗口启动 OpenHarmony launcher</span></code></pre>
+    <p>OH 启动与 Ubuntu 同形:<code>make oh-image && make oh-run</code>(跟踪驱动 <code>scripts/test/run-oh.sh</code>);无人值守形态是 <code>scripts/test/debug/oh-boot.sh</code>(串口落盘、QEMU monitor 走 unix socket 供截图)。移植计划见 <code>docs/development/openharmony-port-plan.md</code>。</p>
 
     <h2 id="flags"><span class="anchor">§5</span>启动成功的标志</h2>
     <p>最小系统启动,串口应依次出现:</p>

@@ -133,7 +133,9 @@ ACCEL=tcg make ubuntu-run  <span class="c"># disable KVM (KVM by default)</span>
 THREAD=single make ubuntu-run <span class="c"># single-threaded TCG for deterministic debugging</span></code></pre>
     <div class="callout warn"><b>Note:</b> the GUI entry point is <code>make ubuntu-run</code>. Shared images boot only with <code>-snapshot</code> + <code>file.locking=off</code> — the image itself is never written.</div>
     <h3>OpenHarmony</h3>
-    <p>OH boots through the dedicated driver script <code>scripts/test/debug/oh-boot.sh</code> (q35 + virtio-gpu, 7 OH images, serial to file, the QEMU monitor on a unix socket for screenshots). The porting plan: docs/development/openharmony-port-plan.md.</p>
+    <pre><code>make oh-image   <span class="c"># wire the OH images from the store (symlinks, OH_IMAGES overrides)</span>
+make oh-run     <span class="c"># build + boot the OpenHarmony launcher in a GTK window</span></code></pre>
+    <p>OH boots with the same shape as Ubuntu: <code>make oh-image && make oh-run</code> (the tracked driver <code>scripts/test/run-oh.sh</code>); the unattended form is <code>scripts/test/debug/oh-boot.sh</code> (serial to file, the QEMU monitor on a unix socket for screenshots). Porting plan: docs/development/openharmony-port-plan.md.</p>
 
     <h2 id="flags"><span class="anchor">§5</span>Markers of a successful boot</h2>
     <p>Minimal system, in order on serial:</p>
