@@ -294,7 +294,10 @@ impl Ext4FileSystem {
                         | features::ro_compat::BIGALLOC | features::ro_compat::METADATA_CSUM
                         | features::ro_compat::REPLICA | features::ro_compat::QUOTA
                         | features::ro_compat::SNAPSHOT | features::ro_compat::GDT_CSUM
-                        | features::ro_compat::BTREE_DIR);
+                        | features::ro_compat::BTREE_DIR
+                        // 0x10000 (e4defrag/shared_blocks): read-compatible
+                        // (noble-desktop rootfs mkfs sets it; 2026-11-13)
+                        | 0x10000);
                 if unknown_ro != 0 {
                     crate::pr_err!("ext4: unknown ro_compat features {:#x} — refusing mount", unknown_ro);
                     bio::brelse(sb_bh);

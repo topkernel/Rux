@@ -426,7 +426,19 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
     // Shortcut: /proc/[pid]/xxx paths go through procfs read_file
     // because VFS inode lookup doesn't support PID subdirectories.
     // (P1 chroot: global-namespace shortcut, non-chrooted tasks only.)
-    if !crate::fs::vfs::process_rooted() && (flags & O_CREAT) == 0 && (flags & O_DIRECTORY) == 0 {
+    // Read-only opens only: a WRITABLE open (oom_score_adj, sysrq-trigger)
+    // must reach the real procfs open, whose node carries the write
+    // handler. The mem-file shortcut has no write op, so every dbus
+    // activation child died writing /proc/self/oom_score_adj (EINVAL,
+    // "writing oom_score_adj error" → exit 206/OOM_ADJUST → dbus.service
+    // start-limit-hit → the whole session chain stalled; noble-desktop,
+    // 2026-11-13 re-fix — the original fix at 63188882 was carried into
+    // the wrong gate during the oh-crash merge).
+    if !crate::fs::vfs::process_rooted()
+        && (flags & O_CREAT) == 0
+        && (flags & O_DIRECTORY) == 0
+        && (flags & 0x3 /* O_ACCMODE */) == 0 /* O_RDONLY */
+    {
         // ptrace_may_access gate for environ BEFORE generating content
         // (review 5.7): self or CAP_SYS_PTRACE.
         // (perf-syscall lane) starts_with gate FIRST — same reason as
