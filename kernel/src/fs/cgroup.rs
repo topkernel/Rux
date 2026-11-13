@@ -480,6 +480,18 @@ pub fn mount_cgroupfs(target: &str) -> Result<(), i32> {
     // Mount-state visibility: /proc/[pid]/cgroup now reports the
     // hierarchy (reference lists mounted hierarchies only).
     CGROUP2_MOUNTED.store(true, core::sync::atomic::Ordering::Release);
+
+    // ALSO link the tree at the canonical /sys/fs/cgroup path — systemd's
+    // mount uses fd-based targets (/proc/self/fd/N) that leave the tree
+    // unreachable at /sys/fs/cgroup (noble-desktop, 2026-11-13).
+    if target != "/sys/fs/cgroup" {
+        if let Some(rootfs_sb) = crate::fs::rootfs::get_rootfs_sb() {
+            unsafe {
+                let _ = (*rootfs_sb).create_dir("/sys/fs/cgroup/systemd", 0o755);
+                let _ = (*rootfs_sb).create_dir("/sys/fs/cgroup/unified", 0o755);
+            }
+        }
+    }
     Ok(())
 }
 

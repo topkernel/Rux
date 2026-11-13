@@ -343,6 +343,19 @@ pub fn epoll_notify_file(file_id: u64) {
     if EPOLL_SHARD_N[epoll_shard_index(file_id)]
         .load(core::sync::atomic::Ordering::Acquire) == 0
     {
+        // 120th input hunt: an empty shard for this file means NO epoll
+        // ever bound this file id — the exact datum for the opened-but-
+        // never-read face.
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace)
+            && file_id != 0
+        {
+            static MISS_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            let mn = MISS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if mn < 24 {
+                crate::pr_warn!("IN-NOTIFY-MISS #{} fid={:#x} (no epoll bound)", mn, file_id);
+            }
+        }
         return;
     }
     // sc103: every unix-socket enqueue runs this IRQ-save scan —
@@ -2444,6 +2457,31 @@ fn epoll_chain_depth(
 /// # Returns
 /// Returns 0 on success, negative error code on failure
 pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
+    // 120th input hunt: evdev-backed fds entering/leaving an epoll — the
+    // datum that says whether the input framework's reader is armed.
+    {
+        static EC_N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        let n = EC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 400 && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
+            let fd = args[1] as usize;
+            let op = args[2] as i32;
+            let fid = crate::sched::get_current_fdtable()
+                .and_then(|t| t.get_file(fd))
+                .map(|f| f.file_id)
+                .unwrap_or(0);
+            let is_input = crate::drivers::input::evdev::file_id_is_input(fid);
+            if is_input {
+                crate::pr_warn!(
+                    "IN-EPCTL #{} pid={} op={} fd={} fid={:#x}",
+                    n,
+                    crate::process::current_pid(),
+                    op,
+                    fd,
+                    fid
+                );
+            }
+        }
+    }
     use epoll_ctl_ops::*;
 
     let epfd = args[0] as i32;

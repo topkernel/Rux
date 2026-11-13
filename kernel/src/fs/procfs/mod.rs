@@ -560,6 +560,13 @@ impl ProcFSSuperBlock {
         self.create_dynamic_file("version", version::generate);
         self.create_dynamic_file("uptime", uptime::generate);
         self.create_dynamic_file("cmdline", cmdline::generate);
+        // /proc/cgroups — cgroup v2 controller list. systemd reads this
+        // at boot to discover available controllers ("Cannot determine
+        // cgroup" freeze without it, noble-desktop 2026-11-13).
+        self.create_dynamic_file("cgroups", || {
+            b"#subsys_name\thierarchy\tnum_cgroups\tenabled\n              cpu\t0\t1\t1\n              memory\t0\t1\t1\n              io\t0\t1\t1\n\n"
+                .to_vec()
+        });
         // IKCONFIG-style embedded config (LTP tst_kconfig reads this).
         self.create_dynamic_file("config.gz", configgz::generate);
         self.create_dynamic_file("loadavg", loadavg::generate);

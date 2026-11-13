@@ -848,7 +848,7 @@ impl Ext4FileSystem {
         let size = inode.get_size() as usize;
 
         // Fast symlink: target stored in block array (<= 60 bytes)
-        if size <= 60 {
+        if size <= 60 && inode.blocks == 0 {
             let bytes = unsafe {
                 core::slice::from_raw_parts(
                     &inode.block[0] as *const _ as *const u8,
@@ -1200,7 +1200,7 @@ fn read_symlink_target(fs: &Ext4FileSystem, inode: &inode::Ext4Inode) -> Option<
 
     // Short symbolic link: data stored in block array (inline data)
     // ext4 short symbolic link threshold is usually 60 bytes
-    if size <= 60 && !inode.has_extent() {
+    if size <= 60 && inode.blocks == 0 {
         // Read directly from block array
         let block_data = unsafe {
             core::slice::from_raw_parts(inode.block.as_ptr() as *const u8, 60)

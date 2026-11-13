@@ -4158,6 +4158,28 @@ pub fn sys_openat2(args: SyscallArgs) -> i64 {
             };
         }
     }
+    
+    // /proc read-only shortcut (same as sys_openat_impl): systemd's
+    // fopen() uses openat2, which goes straight to vfs::file_open and
+    // ENOENTs on /proc/cmdline — the "Failed to fix up PID 1
+    // environment" freeze (noble-desktop, 2026-11-12).
+    if (how.flags as u32 & 0x3) == 0
+        && (how.flags as u32 & 0o100) == 0
+        && !crate::fs::vfs::process_rooted()
+        && cleaned.starts_with("/proc/")
+    {
+        if let Some(content) = crate::fs::procfs::read_file(&cleaned) {
+            return match crate::fs::vfs::open_mem_file(content, how.flags as u32) {
+                Ok(fd) => {
+                    if (how.flags as u32 & 0o2000000) != 0 {
+                        crate::fs::set_cloexec_fd(fd, true);
+                    }
+                    fd as i64
+                }
+                Err(e) => e as i64,
+            };
+        }
+    }
         // not silently create/resolve the caller's original absolute path.
     match crate::fs::vfs::file_open(&cleaned, how.flags as u32, how.mode as u32) {
         Ok(fd) => {

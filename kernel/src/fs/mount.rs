@@ -368,9 +368,13 @@ pub fn do_mount(
             crate::fs::vfs::vfs_mount(target, crate::fs::sysfs::create_root_inode(), mnt_flags);
             register_mount("sysfs", target, "sysfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
         }
-        "cgroup2" => {
+        "cgroup2" | "cgroup" => {
             // U1b: cgroup v2 unified hierarchy. init is idempotent;
             // mount_cgroupfs links the dentry tree at the target.
+            // "cgroup" (v1) mounts share the same tree — systemd's named
+            // hierarchy "name=systemd" is the only v1 consumer on this
+            // rootfs, and it just needs the mount to succeed so the
+            // cgroup.procs interface works (noble-desktop, 2026-11-13).
             crate::fs::cgroup::init_cgroupfs()
                 .map_err(|e| e as i32)?;
             crate::fs::cgroup::mount_cgroupfs(target)

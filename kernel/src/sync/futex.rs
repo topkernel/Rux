@@ -10700,7 +10700,7 @@ fn rwfz_neighbor_dump(tgid: u32, frozen_uaddr: usize) {
 
 /// sc82: one tgid's full park-stack dump (comm/state/syscall/rip + 8
 /// byte-verified user-stack frames per thread). Pure diagnostics.
-fn rwfz_dump_tgid(tgid: u32, max_tasks: usize, prio: bool) -> usize {
+pub(crate) fn rwfz_dump_tgid(tgid: u32, max_tasks: usize, prio: bool) -> usize {
     let count_cell: core::cell::Cell<usize> = core::cell::Cell::new(0);
     crate::sched::for_each_task(|t| {
         // SAFETY: same contract as sleep_snapshot.

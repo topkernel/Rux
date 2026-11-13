@@ -156,9 +156,13 @@ pub struct EvdevDevice {
     /// Code bitmaps for EV_SYN(0)/EV_KEY(1)/EV_REL(2)/EV_ABS(3), read from
     /// the virtio device config (VIRTIO_INPUT_CFG_EV_BITS) at init.
     ev_bits: [[u8; BITS_LEN]; BIT_TYPES],
-    /// ABS axis info for ABS_X/ABS_Y (min/max/fuzz/flat/res from
-    /// VIRTIO_INPUT_CFG_ABS_INFO) — reported through EVIOCGABS.
-    absinfo: [InputAbsinfo; 2],
+    /// ABS axis info (min/max/fuzz/flat/res from VIRTIO_INPUT_CFG_ABS_INFO)
+    /// — reported through EVIOCGABS. Slots: 0=ABS_X, 1=ABS_Y,
+    /// 2=ABS_MT_POSITION_X(0x35), 3=ABS_MT_POSITION_Y(0x36). A device that
+    /// ADVERTISES an MT axis must also answer a real range for it —
+    /// libinput rejects whole devices whose MT axes report minimum==
+    /// maximum (the silent device-drop face: probed, never read).
+    absinfo: [InputAbsinfo; 4],
     /// EVIOCGRAB state (device-level; we have a single client in practice).
     grabbed: AtomicBool,
     /// LED state bitmap (bit N = LED_N), maintained from EV_LED writes the
@@ -193,7 +197,7 @@ impl EvdevDevice {
             },
             is_pointer,
             ev_bits: [[0u8; BITS_LEN]; BIT_TYPES],
-            absinfo: [InputAbsinfo::default(); 2],
+            absinfo: [InputAbsinfo::default(); 4],
             grabbed: AtomicBool::new(false),
             led_state: AtomicU32::new(0),
             event_queue: Spinlock::new(VecDeque::with_capacity(EVENT_QUEUE_SIZE)),
@@ -208,18 +212,25 @@ impl EvdevDevice {
         }
     }
 
-    /// Install ABS axis info for ABS_X (0) / ABS_Y (1).
+    /// Install ABS axis info. `axis` is the evdev ABS code: ABS_X(0),
+    /// ABS_Y(1) map to slots 0/1; ABS_MT_POSITION_X(0x35)/Y(0x36) map to
+    /// 2/3. Any other axis is ignored (no slot for it).
     pub fn set_absinfo(&mut self, axis: usize, min: i32, max: i32, fuzz: i32, flat: i32, res: i32) {
-        if axis < 2 {
-            self.absinfo[axis] = InputAbsinfo {
-                value: 0,
-                minimum: min,
-                maximum: max,
-                fuzz,
-                flat,
-                resolution: res,
-            };
-        }
+        let slot = match axis {
+            0 => 0,
+            1 => 1,
+            0x35 => 2,
+            0x36 => 3,
+            _ => return,
+        };
+        self.absinfo[slot] = InputAbsinfo {
+            value: 0,
+            minimum: min,
+            maximum: max,
+            fuzz,
+            flat,
+            resolution: res,
+        };
     }
 
     /// Register an open file description on this device so event
@@ -343,6 +354,21 @@ pub static mut EVDEV_POINTER: Option<EvdevDevice> = None;
 /// Touchscreen evdev device (event2): mirrors pointer coordinates with
 /// touch protocol for OH multimodalinput.
 pub static mut EVDEV_TOUCHSCREEN: Option<EvdevDevice> = None;
+
+/// Whether a file id belongs to one of the three open evdev file
+/// descriptions (the epoll_ctl probe uses this to filter).
+pub fn file_id_is_input(fid: u64) -> bool {
+    unsafe {
+        [EVDEV_KEYBOARD.as_ref(), EVDEV_POINTER.as_ref(), EVDEV_TOUCHSCREEN.as_ref()]
+            .iter()
+            .flatten()
+            .any(|d| {
+                let ids = d.open_file_ids.lock_irqsave();
+                let n = d.open_file_count.load(Ordering::Acquire) as usize;
+                ids.iter().take(n.min(ids.len())).any(|&x| x == fid)
+            })
+    }
+}
 
 /// Resolve an EvdevDevice by its devfs device number (the devfs open
 /// path uses this to stamp the device with the new file description).
@@ -479,6 +505,33 @@ fn evdev_file_read(file: &File, buf: &mut [u8]) -> isize {
 
         match device.pop_event() {
             Some(event) => {
+                // dfx=inputtrace: the userspace READ hop — pid, which node,
+                // how many events remained after this one. If this prints
+                // during a gesture the delivery chain is complete and any
+                // remaining failure is consumer-side semantics.
+                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
+                    static RD_N: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    let rn = RD_N.fetch_add(1, Ordering::Relaxed);
+                    if rn < 40 {
+                        let nm: alloc::vec::Vec<u8> = device
+                            .name
+                            .iter()
+                            .take_while(|&&c| c != 0)
+                            .copied()
+                            .collect();
+                        crate::pr_warn!(
+                            "IN-READ #{} pid={} name={} type={} code={} val={} remain={}",
+                            rn,
+                            crate::process::current_pid(),
+                            alloc::string::String::from_utf8_lossy(&nm),
+                            event.type_,
+                            event.code,
+                            event.value,
+                            device.has_event() as u8
+                        );
+                    }
+                }
                 // Copy event to buffer
                 let src = &event as *const InputEvent as *const u8;
                 // SAFETY: src points to a valid InputEvent on the stack; buf is
@@ -518,7 +571,7 @@ pub fn trace_open(dev: &EvdevDevice, file: &File) {
         .take_while(|&&c| c != 0)
         .copied()
         .collect();
-    let mut s = alloc::format!("IN-OPEN name={} file_id={}\n", String::from_utf8_lossy(&nm), file.file_id);
+    let mut s = alloc::format!("IN-OPEN pid={} name={} file_id={}\n", crate::process::current_pid(), String::from_utf8_lossy(&nm), file.file_id);
     for b in s.as_bytes() {
         crate::console::uart_putc_raw(*b);
     }
@@ -714,6 +767,35 @@ pub fn evdev_file_ioctl(file: &File, cmd: u32, arg: usize) -> Option<i64> {
         return None;
     }
 
+    // dfx=inputtrace: the capability probe — what we hand to the input
+    // framework for classification. A device whose EVIOCGBIT(0) misses
+    // EV_SYN/EV_KEY/EV_ABS, or whose name/id ioctls return garbage, is
+    // rejected by consumers after open (opened-but-never-read is the
+    // signature). Budgeted, first 30 ioctls per boot.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
+        static IO_N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        let n = IO_N.fetch_add(1, Ordering::Relaxed);
+        if n < 400 && (cmd >> 30) == 2 {
+            // _IOR reads: EVIOCG* family
+            let nm: alloc::vec::Vec<u8> = unsafe { device_of_file(file) }
+                .map(|d| {
+                    d.name
+                        .iter()
+                        .take_while(|&&c| c != 0)
+                        .copied()
+                        .collect()
+                })
+                .unwrap_or_default();
+            crate::pr_warn!(
+                "IN-IOCTL #{} pid={} name={} cmd={:#x}",
+                n,
+                crate::process::current_pid(),
+                alloc::string::String::from_utf8_lossy(&nm),
+                cmd
+            );
+        }
+    }
+
     // SAFETY: the EVDEV_* statics are initialized by init_evdev() before
     // any file operations can occur; device_of_file validates the DevNo.
     let device = match unsafe { device_of_file(file) } {
@@ -843,6 +925,26 @@ pub fn evdev_file_ioctl(file: &File, cmd: u32, arg: usize) -> Option<i64> {
                 let ev = (nr - NR_BIT_BASE) as usize;
                 if ev == 0 {
                     let types = evtype_bitmap(&device.ev_bits);
+                    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
+                        static TY_N: core::sync::atomic::AtomicU32 =
+                            core::sync::atomic::AtomicU32::new(0);
+                        let tn = TY_N.fetch_add(1, Ordering::Relaxed);
+                        if tn < 12 {
+                            let nm: alloc::vec::Vec<u8> = device
+                                .name
+                                .iter()
+                                .take_while(|&&c| c != 0)
+                                .copied()
+                                .collect();
+                            crate::pr_warn!(
+                                "IN-TYPEBITS #{} pid={} name={} types={:#04x}",
+                                tn,
+                                crate::process::current_pid(),
+                                alloc::string::String::from_utf8_lossy(&nm),
+                                types[0]
+                            );
+                        }
+                    }
                     copy_out(arg, cmd, &types)
                 } else if ev < BIT_TYPES {
                     copy_out(arg, cmd, &device.ev_bits[ev])
@@ -857,10 +959,15 @@ pub fn evdev_file_ioctl(file: &File, cmd: u32, arg: usize) -> Option<i64> {
             } else if (NR_ABS_BASE..NR_ABS_BASE + 8).contains(&nr) && dir == IOC_READ {
                 // EVIOCGABS(abs)
                 let abs = (nr - NR_ABS_BASE) as usize;
-                let info = if abs < 2 {
-                    device.absinfo[abs]
-                } else {
-                    InputAbsinfo::default()
+                let slot = match abs {
+                    0 | 1 => Some(abs),
+                    0x35 => Some(2),
+                    0x36 => Some(3),
+                    _ => None,
+                };
+                let info = match slot {
+                    Some(k) => device.absinfo[k],
+                    None => InputAbsinfo::default(),
                 };
                 let mut b = [0u8; 24];
                 b[0..4].copy_from_slice(&info.value.to_ne_bytes());

@@ -220,7 +220,12 @@ pub fn generate_comm(pid: u64) -> Vec<u8> {
 /// layout for a systemd-managed box; the strip keeps the arithmetic
 /// correct with runit as PID 1 too).
 pub fn generate_cgroup(pid: u64) -> Vec<u8> {
-    if !crate::fs::cgroup::cgroup2_mounted() {
+    let mounted = crate::fs::cgroup::cgroup2_mounted();
+    if pid == 1 {
+        crate::pr_warn!("NOBLEDBG generate_cgroup pid=1 mounted={} returning {}",
+            mounted, if mounted { "content" } else { "EMPTY" });
+    }
+    if !mounted {
         return Vec::new();
     }
     if pid == 1 {

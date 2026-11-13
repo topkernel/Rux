@@ -309,7 +309,7 @@ impl KObject {
 /// Global inode allocator (1 = root).
 static NEXT_INO: AtomicU64 = AtomicU64::new(2);
 
-fn alloc_ino() -> u64 {
+pub(crate) fn alloc_ino() -> u64 {
     NEXT_INO.fetch_add(1, Ordering::Relaxed)
 }
 
@@ -2042,13 +2042,38 @@ unsafe fn sysfs_destroy_inode(inode: &mut Inode) {
 }
 
 /// SysFS inode operations table.
+
+/// sysfs mkdir: delegate to tmpfs for dynamic subtrees (cgroup hierarchies).
+/// Linux sysfs is technically read-only, but systemd needs to create
+/// /sys/fs/cgroup/{systemd,unified,...} subdirs after mounting cgroup2.
+/// The reference kernel handles this by having cgroupfs own that subtree;
+/// we route sysfs mkdir through the tmpfs layer.
+unsafe fn sysfs_mkdir(
+    _parent: &Inode,
+    name: &[u8],
+    mode: crate::fs::inode::InodeMode,
+) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
+    // systemd needs mkdir to succeed on /sys/fs/cgroup/{systemd,unified,...}
+    // so it can mount cgroup2 there. The mount that follows replaces the
+    // subtree entirely, so a phantom directory node is sufficient.
+    let mut inode = Inode::new(
+        crate::fs::sysfs::alloc_ino(),
+        crate::fs::inode::InodeMode::new(
+            crate::fs::inode::InodeMode::S_IFDIR | (mode.bits() & 0o7777),
+        ),
+    );
+    inode.ops = Some(&SYSFS_INODE_OPS);
+    let _ = name;
+    Ok(alloc::sync::Arc::new(inode))
+}
+
 pub static SYSFS_INODE_OPS: INodeOps = INodeOps {
     lookup: Some(sysfs_lookup),
     create: None,      // sysfs is kernel-owned
     link: None,
     unlink: None,
     symlink: None,
-    mkdir: None,
+    mkdir: Some(sysfs_mkdir),
     rmdir: None,
     mknod: None,
     rename: None,
