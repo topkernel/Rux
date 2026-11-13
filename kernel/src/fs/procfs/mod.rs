@@ -1117,6 +1117,9 @@ pub fn get_procfs_sb() -> Option<&'static ProcFSSuperBlock> {
 /// Read file from /proc
 pub fn read_file(path: &str) -> Option<Vec<u8>> {
     use crate::process::current_pid;
+    if (path.contains("cgroup") || path.contains("self/")) && current_pid() == 1 {
+        crate::pr_warn!("NOBLEDBG free read_file({}) called", path);
+    }
 
     // (perf-syscall lane) prefix gate before the components Vec — this
     // runs on EVERY non-O_DIRECTORY openat (sys_openat's procfs

@@ -4146,6 +4146,9 @@ pub fn sys_openat2(args: SyscallArgs) -> i64 {
         && !crate::fs::vfs::process_rooted()
         && cleaned.starts_with("/proc/")
     {
+        if cleaned.contains("cgroup") && crate::process::current_pid() == 1 {
+            crate::pr_warn!("NOBLEDBG openat2 shortcut path={}", cleaned);
+        }
         if let Some(content) = crate::fs::procfs::read_file(&cleaned) {
             return match crate::fs::vfs::open_mem_file(content, how.flags as u32) {
                 Ok(fd) => {

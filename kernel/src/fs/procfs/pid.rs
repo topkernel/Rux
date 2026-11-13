@@ -220,12 +220,13 @@ pub fn generate_comm(pid: u64) -> Vec<u8> {
 /// layout for a systemd-managed box; the strip keeps the arithmetic
 /// correct with runit as PID 1 too).
 pub fn generate_cgroup(pid: u64) -> Vec<u8> {
-    let mounted = crate::fs::cgroup::cgroup2_mounted();
-    if pid == 1 {
-        crate::pr_warn!("NOBLEDBG generate_cgroup pid=1 mounted={} returning {}",
-            mounted, if mounted { "content" } else { "EMPTY" });
-    }
-    if !mounted {
+    // The cgroup2 mount flag is only set after systemd mounts it, but
+    // systemd reads /proc/self/cgroup BEFORE its own mount (to determine
+    // the unified mode). The cgroup hierarchy is initialized at boot
+    // (init_cgroupfs runs from the boot path), so the content is valid
+    // from the start — don't gate on the mount flag (noble-desktop
+    // "Cannot determine cgroup" freeze, 2026-11-13).
+    if false {
         return Vec::new();
     }
     if pid == 1 {

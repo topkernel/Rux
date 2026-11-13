@@ -481,16 +481,22 @@ pub fn mount_cgroupfs(target: &str) -> Result<(), i32> {
     // hierarchy (reference lists mounted hierarchies only).
     CGROUP2_MOUNTED.store(true, core::sync::atomic::Ordering::Release);
 
-    // ALSO link the tree at the canonical /sys/fs/cgroup path — systemd's
-    // mount uses fd-based targets (/proc/self/fd/N) that leave the tree
-    // unreachable at /sys/fs/cgroup (noble-desktop, 2026-11-13).
+    // MOUNT the cgroup filesystem at /sys/fs/cgroup regardless of the
+    // caller's fd-based target — systemd mounts via /proc/self/fd/N which
+    // leaves /sys/fs/cgroup pointing at read-only sysfs. The canonical
+    // mount makes the cgroup tree (cgroup.procs, subtree_control, etc.)
+    // reachable at the path systemd walks (noble-desktop, 2026-11-13).
     if target != "/sys/fs/cgroup" {
         if let Some(rootfs_sb) = crate::fs::rootfs::get_rootfs_sb() {
             unsafe {
-                let _ = (*rootfs_sb).create_dir("/sys/fs/cgroup/systemd", 0o755);
-                let _ = (*rootfs_sb).create_dir("/sys/fs/cgroup/unified", 0o755);
+                let _ = (*rootfs_sb).create_dir("/sys", 0o755);
+                let _ = (*rootfs_sb).create_dir("/sys/fs", 0o755);
+                let _ = (*rootfs_sb).create_dir("/sys/fs/cgroup", 0o755);
+                let _ = (*rootfs_sb).create_dir("/sys/fs/cgroup/init.scope", 0o755);
             }
         }
+        // Re-link the cgroup dentry tree at /sys/fs/cgroup
+        let _ = mount_cgroupfs("/sys/fs/cgroup");
     }
     Ok(())
 }
