@@ -953,6 +953,25 @@ fn unix_wait_round(
         None => return Err(-11), // no task context — behave non-blocking
     };
 
+    // 123rd (final hop): name the socket whose queue the reader parks on.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+        static WQ_N: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        let n = WQ_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 24 {
+            let sock_of_queue = (queue as *const _ as usize)
+                .wrapping_sub(core::mem::offset_of!(UnixSocket, wait_queue));
+            let q = unsafe { &*(sock_of_queue as *const UnixSocket) };
+            crate::pr_warn!(
+                "WQ-PARK #{} pid={} sock={:#x} segs={} kind={:?}",
+                n,
+                crate::process::current_pid(),
+                sock_of_queue,
+                q.recv_queue.lock().segs.len(),
+                q.kind
+            );
+        }
+    }
     queue.prepare_to_wait(current, exclusive, true);
 
     // Re-check AFTER registering: if the condition was met between our
