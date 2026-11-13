@@ -1172,6 +1172,23 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                     // always-ready fd / empty-queue sender wedge). Diagnostic
                     // prints only; one per boot.
                     {
+                        // Arm the LASTSYS latch from the first tick on
+                        // hunt boots (see dispatch.rs lastsys_latch_arm).
+                        crate::syscall::dispatch::lastsys_latch_arm();
+                        // 118th PID-1 WATCH: the ladder break is init's
+                        // main thread parked in a never-returning
+                        // epoll_pwait(5,-1) while a sibling thread iterates
+                        // the SAME epoll instance (721 scans) — the wake
+                        // reaches one waiter and not the other. Put pid 1
+                        // on the wakewatch from tick one so its ring names
+                        // which stage (wake/link/pick) eats its events.
+                        if crate::sched::current().is_none() {
+                            // tick context: watch via find_task_by_pid
+                            let t = unsafe { crate::sched::find_task_by_pid(1) };
+                            if !t.is_null() {
+                                crate::sched::sched::ww_watch_add(t);
+                            }
+                        }
                         static PS_DONE: core::sync::atomic::AtomicBool =
                             core::sync::atomic::AtomicBool::new(false);
                         if !PS_DONE.load(core::sync::atomic::Ordering::Relaxed)

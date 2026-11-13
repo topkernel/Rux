@@ -3729,10 +3729,9 @@ impl Task {
                                         );
                                         let _ = crate::arch::ipi::remote_backtrace(cpu, "monopolist-w2");
                                     }
+                                }
+                            }
                         }
-                    }
-                        }
-                    }
                     return false;
                 }
 

@@ -2906,6 +2906,48 @@ pub fn param_stall_dump() {
     crate::pr_warn!("PARAM-STALL trace-tail begin");
     crate::pr_warn!("{}", tail);
     crate::pr_warn!("PARAM-STALL trace-tail end");
+    // 118th: pid 1's own threads' parked syscalls (the LASTSYS latch is
+    // armed from the first tick on hunt boots — see dispatch.rs), plus
+    // fd-table file identities for fd 0-8 of the main thread. The ladder
+    // break is "which syscall is init's main thread parked in" — this
+    // answers it directly at 300 s.
+    unsafe {
+        crate::process::pid_hash::pid_hash_for_each_task_try(|t| {
+            let tk = &*t;
+            if tk.tgid() != 1 {
+                return;
+            }
+            let nr = tk.last_syscall_nr.load(core::sync::atomic::Ordering::Relaxed);
+            let a0 = tk.last_syscall_a0.load(core::sync::atomic::Ordering::Relaxed);
+            let a1 = tk.last_syscall_a1.load(core::sync::atomic::Ordering::Relaxed);
+            let cb: &[u8; 16] = tk.comm();
+            let cl = cb.iter().position(|&b| b == 0).unwrap_or(16);
+            let comm = core::str::from_utf8(&cb[..cl]).unwrap_or("?");
+            crate::pr_warn!(
+                "PARAM-INIT pid={} ({}) st={:#x} pk={} lastsys={}(a0={:#x},a1={:#x})",
+                tk.pid(),
+                comm,
+                tk.state().bits(),
+                tk.pick_state(),
+                nr,
+                a0,
+                a1
+            );
+            // 118th: dump this thread's wakewatch mini-ring — for pid 1's
+            // main thread this names which scheduler stage last touched
+            // it (W wake-ok / L link / P pick-unlink / K publish /
+            // A affirm) while it sits in the never-returning pwait.
+            let mut wws = alloc::string::String::new();
+            crate::sched::sched::ww_append_dump(
+                &mut wws,
+                t,
+                crate::drivers::timer::get_jiffies(),
+            );
+            if !wws.is_empty() {
+                crate::pr_warn!("PARAM-INIT-WW{}", wws);
+            }
+        });
+    }
     param_sender_dump();
 }
 
@@ -3077,13 +3119,34 @@ pub fn pid1_epoll_interest_dump(pid: crate::process::task::Pid) {
             cur = unsafe { (*cur).next };
             watched_fds.push(entry.fd as usize);
             let target = fdtable.get_file(entry.fd as usize);
-            let (fid_ok, unix_line, ops_id) = match &target {
+            let (fid_ok, unix_line, ops_id, ops_tag) = match &target {
                 Some(f) => {
                     let fid_ok = f.file_id == entry.file_id;
                     let ops_id = f
                         .get_ops()
                         .map(|o| o as *const _ as usize)
                         .unwrap_or(0);
+                    // 118th ladder hunt: name the fd TYPE for the
+                    // known OPS statics — the loop's timerfd/eventfd/
+                    // signalfd members are the job-timer suspects.
+                    let ops_tag: &str = f
+                        .get_ops()
+                        .map(|o| {
+                            if core::ptr::eq(o, &TIMERFD_OPS as *const _) {
+                                " timerfd"
+                            } else if core::ptr::eq(o, &EVENTFD_OPS as *const _) {
+                                " eventfd"
+                            } else if core::ptr::eq(o, &SIGNALFD_OPS as *const _) {
+                                " signalfd"
+                            } else if core::ptr::eq(o, &EPOLL_OPS as *const _) {
+                                " epoll"
+                            } else if core::ptr::eq(o, &crate::fs::pipe::PIPE_OPS as *const _) {
+                                " pipe"
+                            } else {
+                                ""
+                            }
+                        })
+                        .unwrap_or("");
                     let unix_line = crate::net::unix::unix_of_file_diag(f)
                         .map(|s| {
                             let (segs, qb, eof, dead, peer_alive, peer_ts, sndcap, acceptq) =
@@ -3102,12 +3165,12 @@ pub fn pid1_epoll_interest_dump(pid: crate::process::task::Pid) {
                             )
                         })
                         .unwrap_or_default();
-                    (fid_ok, unix_line, ops_id)
+                    (fid_ok, unix_line, ops_id, ops_tag)
                 }
-                None => (false, alloc::string::String::new(), 0),
+                None => (false, alloc::string::String::new(), 0, ""),
             };
             crate::pr_warn!(
-                "PID1EPOLL  fd={} mask={:#x} et={} oneshot={} reports={} file_id_match={} ops={:#x}{}{}",
+                "PID1EPOLL  fd={} mask={:#x} et={} oneshot={} reports={} file_id_match={} ops={:#x}{}{}{}",
                 entry.fd,
                 entry.events,
                 (entry.events & epoll_events::EPOLLET != 0) as u8,
@@ -3115,6 +3178,7 @@ pub fn pid1_epoll_interest_dump(pid: crate::process::task::Pid) {
                 entry.reports,
                 fid_ok as u8,
                 ops_id,
+                ops_tag,
                 if target.is_none() { " FD-GONE" } else { "" },
                 unix_line
             );
