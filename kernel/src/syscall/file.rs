@@ -417,7 +417,10 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
     // yields a namespace fd usable by setns(2). Handled before the generic
     // procfs read_file shortcut (which would follow the "uts:[N]" target).
     // (Global-namespace shortcut, non-chrooted tasks only.)
-    if !crate::fs::vfs::process_rooted() && (flags & O_CREAT) == 0 {
+    // (perf-gap-hunt port) not_rooted reuse: the chroot verdict cannot
+    // change within one syscall — the re-probe here (sched::current + fs
+    // deref per call) ran on every open of every task.
+    if not_rooted && (flags & O_CREAT) == 0 {
         if let Some(rv) = crate::process::ns::try_open_ns_path(&full_path, flags) {
             return rv;
         }
@@ -434,7 +437,8 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
     // start-limit-hit → the whole session chain stalled; noble-desktop,
     // 2026-11-13 re-fix — the original fix at 63188882 was carried into
     // the wrong gate during the oh-crash merge).
-    if !crate::fs::vfs::process_rooted()
+    // (perf-gap-hunt port) not_rooted reuse — same verdict, no re-probe.
+    if not_rooted
         && (flags & O_CREAT) == 0
         && (flags & O_DIRECTORY) == 0
         && (flags & 0x3 /* O_ACCMODE */) == 0 /* O_RDONLY */

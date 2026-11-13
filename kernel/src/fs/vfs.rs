@@ -268,7 +268,18 @@ pub fn mount_flags_for_path(abs_path: &str) -> Option<crate::fs::mount::MntFlags
 }
 
 /// True when the absolute path lives on a mount currently flagged read-only.
+/// (perf-gap-hunt) Empty-registry fast gate: dentry vfsmount stamps and the
+/// mount registry are updated in lockstep at every mount/umount site, so an
+/// empty registry implies the component walk below could never cross a
+/// mount — its verdict is `None` (not readonly) by construction.  On
+/// mountless rigs (lmbench/pbench probes, single-rootfs boots) every write
+/// open / creat / mkdir / rmdir / unlink previously paid a full component
+/// dentry walk here just to learn there is no read-only mount; now they pay
+/// one registry probe.  Rigs with mounts keep the exact walk semantics.
 pub fn path_on_readonly_mount(abs_path: &str) -> bool {
+    if VFS_STATE.lock().mounts.is_empty() {
+        return false;
+    }
     mount_flags_for_path(abs_path)
         .map(|f| f.is_readonly())
         .unwrap_or(false)

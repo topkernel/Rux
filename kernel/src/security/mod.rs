@@ -30,7 +30,11 @@ pub use lsm::{security_capable, security_hook_call, security_signal_send, HookAr
 ///     return -errno::EPERM as u64;
 /// }
 /// ```
-#[inline]
+// (perf-gap-hunt) inline(never): keeping this inline grew the syscall
+// dispatch neighborhood's .text and cost the null row 3ns (measured,
+// bisected with the DAC fast path); the call site count makes the body
+// growth outweigh the call overhead.
+#[inline(never)]
 pub fn capable(cap: u32) -> bool {
     match crate::sched::current() {
         Some(task) => {
