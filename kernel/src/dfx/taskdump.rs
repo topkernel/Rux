@@ -17,7 +17,14 @@ use core::sync::atomic::Ordering;
 
 fn putc(c: u8) {
     // SAFETY: SBI legacy console_putchar is safe to call from any context.
-    unsafe { crate::console::putchar_no_lock(c); }
+    //
+    // Release visibility (119th loglevel hunt): the console.rs wrapper is
+    // compiled to a no-op in release builds, which blinded every taskdump
+    // on production-config boots — exactly the legs we need stacks from.
+    // Write the UART directly here instead; the taskdump path is already
+    // dfx-gated and budgeted, so this only re-enables an explicitly
+    // requested diagnostic, not general console noise.
+    unsafe { crate::console::uart_putc_raw(c); }
 }
 
 fn puts(s: &str) {
@@ -67,7 +74,6 @@ pub fn taskdump_dec(v: u64) {
 }
 
 /// DFX: replay the forensic syscall ring for one pid (last 48 entries).
-#[cfg(feature = "dfx-futex-trace")]
 pub fn dump_syscall_ring_for(pid: u32) {    use crate::syscall::dispatch::{SYSCALL_CURSOR, SYSCALL_RING};
     let cur = SYSCALL_CURSOR.load(core::sync::atomic::Ordering::Relaxed);
     let len = SYSCALL_RING.len();

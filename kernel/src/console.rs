@@ -949,6 +949,16 @@ pub fn putchar_no_lock(c: u8) {
 #[cfg(not(debug_assertions))]
 pub fn putchar_no_lock(_c: u8) {}
 
+/// Raw single-character UART write that is NOT compiled out in release.
+///
+/// Reserved for explicitly dfx-gated diagnostics (taskdump and friends)
+/// that must be readable on production-config boots — the same legs the
+/// putchar_no_lock no-op gate blinded. Not for general console output.
+pub fn uart_putc_raw(c: u8) {
+    let uart = Uart::new();
+    uart.putc(c);
+}
+
 /// Interrupt-safe string output (no lock) — batched TX (leg-54 item C).
 #[cfg(debug_assertions)]
 pub fn puts_no_lock(s: &str) {

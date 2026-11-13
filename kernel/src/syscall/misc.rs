@@ -2850,6 +2850,15 @@ pub fn param_stall_dump() {
     if task.is_null() {
         return;
     }
+    // 120th (loglevel hunt): the direct question — WHERE is init's main
+    // thread parked and what does its stack say? Full tgid-1 dump with
+    // kernel + user stack frames (VMA/file-mapped) via the RWFRZ
+    // forensics path (ConsoleWriter = direct UART, release-visible).
+    let dumped = crate::sync::futex::rwfz_dump_tgid(1, 8, true);
+    crate::pr_warn!("PARAM-STALL tgid1-stackdump tasks={}", dumped);
+    // …and the last 48 syscalls of pid 1 — the userspace loop's actual
+    // behavior at the stall (needs dfx=sysforensic to be recording).
+    crate::dfx::taskdump::dump_syscall_ring_for(1);
     // SAFETY: read-only diagnostic walk of pid 1's fdtable.
     let tk = unsafe { &*task };
     let fdtable = match tk.try_fdtable_mut() {
@@ -3979,6 +3988,22 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
 /// # Returns
 /// Returns number of ready events on success, 0 on timeout, negative error code on failure
 pub fn sys_epoll_pwait(args: SyscallArgs) -> i64 {
+    // 120th (loglevel hunt): pid 1's pwait park signature — the timeout
+    // argument separates an infinite wait (-1) from a long-poll retry
+    // (huge ms). Budgeted, first 12 then 1-in-2000.
+    {
+        use core::sync::atomic::{AtomicU64, Ordering as Rel};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Rel::Relaxed);
+        if crate::process::current_pid() == 1 && (n < 12 || n % 2000 == 0) {
+            crate::pr_warn!(
+                "P1PWAIT epfd={} timeout={} events_ptr={:#x}",
+                args[0],
+                args[3] as i64,
+                args[1]
+            );
+        }
+    }
     // P3 LTP round 3: epoll_pwait's sigmask argument REPLACES the blocked
     // mask for the duration of the wait (Linux semantics). Validate the
     // pointer (EFAULT) and size (EINVAL), apply, wait, restore. Without
