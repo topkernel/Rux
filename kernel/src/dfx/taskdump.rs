@@ -416,7 +416,16 @@ pub fn dump_all_tasks(reason: &str) {
             put_hex(t as u64);
             {
                 let sp = unsafe { (*t).thread().sp };
-                if (sp >> 48) == 0xffff && (sp & 7) == 0 && sp > 0x1000 {
+                // Bounded readability (kernel_va_readable): the old
+                // kernel-half-only guard accepted the 64TB unmapped
+                // window above RAM — a stale sp there faulted the dump
+                // itself from the timer softirq (the OH taskdump panic,
+                // "Fatal exception in interrupt").
+                if (sp >> 48) == 0xffff
+                    && (sp & 7) == 0
+                    && sp > 0x1000
+                    && crate::dfx::memwatch::kernel_va_readable(sp as usize)
+                {
                     puts(" sp=");
                     put_hex(sp);
                     let base = sp as *const u64;
@@ -646,7 +655,12 @@ pub fn dump_all_tasks(reason: &str) {
                     }
                 }
                 let sp = t.thread().sp;
-                if (sp >> 48) == 0xffff && (sp & 7) == 0 && sp > 0x1000 {
+                // Same bounded-readability guard as the per-CPU walk.
+                if (sp >> 48) == 0xffff
+                    && (sp & 7) == 0
+                    && sp > 0x1000
+                    && crate::dfx::memwatch::kernel_va_readable(sp as usize)
+                {
                     puts("     sp=");
                     put_hex(sp);
                     let base = sp as *const u64;

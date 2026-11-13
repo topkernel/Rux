@@ -118,17 +118,54 @@ static RSITES: [Site; 64] = [const {
 /// that value made the diagnostic walk itself page-fault with no fixup
 /// (alloc-crash a1: kernel fault addr=0xffffffffffffff78, rip inside
 /// walk_fp_chain, from the alloc_page_table memwatch hook).
-#[cfg(feature = "x86_64")]
-pub fn plausible_fp(fp: u64) -> bool {
-    crate::arch::x86_64::mm::is_linear_mapping(fp as usize)
-        || (0xffff_ffff_8000_0000..0xffff_ffff_8200_0000).contains(&(fp as usize))
+/// Bounded linear-map predicate for DFX diagnostic walkers: the direct
+/// map only covers DISCOVERED RAM (e820 descriptors, config fallback
+/// before parsing). The architectural `is_linear_mapping` window is
+/// 1<<46 (64 TB) on x86_64 / KERN_VIRT_SIZE on riscv64 — every byte
+/// above phys_end inside that window is UNMAPPED, and a stale or
+/// scribbled frame pointer landing there passed the old range-only
+/// gate and page-faulted the diagnostic walk itself. The speed lane
+/// double-confirmed the shape on OH: dfx=memwatch panicked with
+/// "Fatal exception in interrupt" at t=7.9s — the allocator hook runs
+/// from softirq, and the fault arrives with IRQ context set. Shared
+/// by memwatch's fp walk and taskdump's kernel-stack word walks so
+/// every DFX reader agrees on what is actually dereferenceable.
+pub fn kernel_va_readable(va: usize) -> bool {
+    #[cfg(feature = "x86_64")]
+    {
+        // kernel image window first (static .bss boot stacks live here)
+        if (0xffff_ffff_8000_0000..0xffff_ffff_8200_0000).contains(&va) {
+            return true;
+        }
+        let po = crate::arch::x86_64::mm::PAGE_OFFSET;
+        if va >= po {
+            let phys = va - po;
+            return phys < crate::mm::page_desc::max_pfn() * 4096;
+        }
+        false
+    }
+    #[cfg(feature = "riscv64")]
+    {
+        // The kernel image is linked inside the linear region on
+        // riscv64 (PAGE_OFFSET + phys), so the RAM-bounded leg covers
+        // both the image and the direct map — nothing above phys_end.
+        let po = crate::arch::mm::PAGE_OFFSET;
+        if va >= po {
+            let phys = va.wrapping_sub(po);
+            return phys < crate::mm::page_desc::max_pfn() * 4096;
+        }
+        false
+    }
+    #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+    {
+        let _ = va;
+        false
+    }
 }
 
-#[cfg(feature = "riscv64")]
+#[cfg(any(feature = "x86_64", feature = "riscv64"))]
 pub fn plausible_fp(fp: u64) -> bool {
-    // The kernel image is linked inside the linear region on riscv64
-    // (PAGE_OFFSET + phys), so the linear-map check covers both.
-    crate::arch::riscv64::mm::is_linear_mapping(fp as usize)
+    kernel_va_readable(fp as usize)
 }
 
 #[cfg(feature = "aarch64")]
