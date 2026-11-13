@@ -217,6 +217,20 @@ pub fn printk(level: u8, args: fmt::Arguments) {
 /// record was dropped before the ring — OH's boot markers written to
 /// /dev/kmsg never reached any hilog consumer (pa9 correctness fix).
 fn printk_ring_always(level: u8, args: fmt::Arguments) {
+    printk_ring_always_ex(level, args, true);
+}
+
+/// printk variant with an explicit console-emission policy.
+///
+/// `echo_console == false` records the message in the printk ring (so every
+/// hilog consumer reading /dev/kmsg sees it) but does NOT echo it to the
+/// console. That split is what the reference's `printk_devkmsg` policy
+/// knob exists for: the ring is the log, the console is a view of it.
+///
+/// With `echo_console == true` the historical behavior applies — the record
+/// enters the ring unconditionally and the console copy is gated by
+/// CONSOLE_LOGLEVEL.
+fn printk_ring_always_ex(level: u8, args: fmt::Arguments, echo_console: bool) {
     // Re-entrancy guard: if already in printk, discard
     let _guard = match PrintkGuard::try_new() {
         Some(g) => g,
@@ -253,7 +267,7 @@ fn printk_ring_always(level: u8, args: fmt::Arguments) {
 
     // Console emit (level gated here: printk() pre-filtered already,
     // printk_ring_always callers pass user-chosen levels).
-    if level <= CONSOLE_LOGLEVEL.load(Ordering::Relaxed) {
+    if echo_console && level <= CONSOLE_LOGLEVEL.load(Ordering::Relaxed) {
         emit_to_console(&buf[..text_len]);
     }
 }
@@ -1386,6 +1400,89 @@ fn kmsg_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
     }
 }
 
+/// Console-echo policy for userspace writes to /dev/kmsg.
+///
+/// The reference exposes the same choice as the `printk_devkmsg` knob
+/// (`on` / `ratelimit` / `off`); the modes here keep the reference's
+/// meaning: the printk RING always records every line, and this setting
+/// only decides how much of it the CONSOLE shows.
+pub mod kmsg_console {
+    /// Every write is echoed to the console (subject to CONSOLE_LOGLEVEL).
+    /// Reference parity — the default.
+    pub const ON: u8 = 0;
+    /// The console shows a bounded trickle; the rest is recorded in the
+    /// ring only. The reference's devkmsg ratelimit spirit: the log keeps
+    /// everything, the console stays readable.
+    pub const RATELIMIT: u8 = 1;
+    /// Nothing is echoed; the ring is the only sink.
+    pub const OFF: u8 = 2;
+
+    /// Burst allowance per window in RATELIMIT mode.
+    pub const BURST: u32 = 20;
+    /// Window length in jiffies (5 s at the 250 Hz tick).
+    pub const WINDOW_JIFFIES: u64 = 1250;
+}
+
+/// Active /dev/kmsg console-echo policy (see `kmsg_console`).
+static KMSG_CONSOLE_MODE: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(kmsg_console::ON);
+
+/// Rate-limiter state for the RATELIMIT mode: the window start (jiffies)
+/// and how many lines the console has already shown inside it.
+static KMSG_RL_WINDOW: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+static KMSG_RL_COUNT: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Set the /dev/kmsg console-echo policy. Unknown values are rejected so a
+/// typo cannot silently disable the console view.
+pub fn set_kmsg_console_mode(mode: u8) -> bool {
+    if mode > kmsg_console::OFF {
+        return false;
+    }
+    KMSG_CONSOLE_MODE.store(mode, Ordering::Relaxed);
+    true
+}
+
+/// Current /dev/kmsg console-echo policy.
+pub fn kmsg_console_mode() -> u8 {
+    KMSG_CONSOLE_MODE.load(Ordering::Relaxed)
+}
+
+/// Parse a policy name (`on` / `ratelimit` / `off`) into its mode value.
+pub fn kmsg_console_mode_from_str(name: &str) -> Option<u8> {
+    match name {
+        "on" => Some(kmsg_console::ON),
+        "ratelimit" => Some(kmsg_console::RATELIMIT),
+        "off" => Some(kmsg_console::OFF),
+        _ => None,
+    }
+}
+
+/// Decide whether the next userspace /dev/kmsg line may be echoed to the
+/// console. In ON mode the answer is always yes; in RATELIMIT mode the
+/// console gets `BURST` lines per window; in OFF mode never.
+fn kmsg_console_allows_echo() -> bool {
+    match kmsg_console_mode() {
+        kmsg_console::ON => true,
+        kmsg_console::OFF => false,
+        _ => {
+            let now = crate::drivers::timer::get_jiffies();
+            // Start a new window when the previous one expired (or when
+            // the limiter was never armed yet).
+            let window = KMSG_RL_WINDOW.load(Ordering::Relaxed);
+            if window == 0 || now.wrapping_sub(window) >= kmsg_console::WINDOW_JIFFIES {
+                KMSG_RL_WINDOW.store(now, Ordering::Relaxed);
+                KMSG_RL_COUNT.store(1, Ordering::Relaxed);
+                true
+            } else {
+                let n = KMSG_RL_COUNT.fetch_add(1, Ordering::Relaxed);
+                n < kmsg_console::BURST
+            }
+        }
+    }
+}
+
 /// Write handler for /dev/kmsg — userspace passthrough (OH's init and
 /// services log boot markers this way). The line lands in the printk
 /// ring (so /dev/kmsg readers see it) unconditionally — Linux devkmsg
@@ -1395,6 +1492,13 @@ fn kmsg_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
 /// < 6 (pa9: OH's boot markers never reached any hilog consumer).
 /// An optional `<N>` level prefix (N = 0..7) is honored like Linux;
 /// without one the record logs at KERN_INFO.
+///
+/// The console copy of userspace writes follows the `printk.devkmsg`
+/// policy (see kmsg_console_mode): `on` (reference parity — every write
+/// is echoed subject to CONSOLE_LOGLEVEL), `ratelimit` (the console sees
+/// a bounded trickle — the reference's own devkmsg ratelimit spirit) and
+/// `off` (ring only). The RING always records every line in all three
+/// modes, so hilog consumers lose nothing.
 fn kmsg_file_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
     let text = core::str::from_utf8(buf).unwrap_or("<binary>");
     let (level, text) = match text.as_bytes() {
@@ -1403,7 +1507,8 @@ fn kmsg_file_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
         }
         _ => (loglevel::KERN_INFO, text),
     };
-    printk_ring_always(level, format_args!("[kmsg] {}", text));
+    let echo = kmsg_console_allows_echo();
+    printk_ring_always_ex(level, format_args!("[kmsg] {}", text), echo);
     buf.len() as isize
 }
 

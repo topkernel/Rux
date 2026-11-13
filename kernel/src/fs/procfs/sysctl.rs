@@ -404,6 +404,35 @@ pub fn write_printk(input: &[u8]) -> i32 {
     }
 }
 
+/// /proc/sys/kernel/printk_devkmsg — the console-echo policy for userspace
+/// writes to /dev/kmsg: "on" (reference parity), "ratelimit" or "off".
+/// The printk ring always records every line; this knob only decides how
+/// much of the guest's log volume reaches the serial console.
+pub fn generate_printk_devkmsg() -> Vec<u8> {
+    let name = match crate::printk::kmsg_console_mode() {
+        crate::printk::kmsg_console::RATELIMIT => "ratelimit",
+        crate::printk::kmsg_console::OFF => "off",
+        _ => "on",
+    };
+    alloc::format!("{}\n", name).into_bytes()
+}
+
+/// Write side: accepts "on", "ratelimit" or "off" (trailing newline
+/// allowed, like sysctl(8)); anything else is EINVAL.
+pub fn write_printk_devkmsg(input: &[u8]) -> i32 {
+    let text = match core::str::from_utf8(input) {
+        Ok(t) => t.trim(),
+        Err(_) => return -(crate::errno::constants::EINVAL as i32),
+    };
+    match crate::printk::kmsg_console_mode_from_str(text) {
+        Some(mode) => {
+            crate::printk::set_kmsg_console_mode(mode);
+            0
+        }
+        None => -(crate::errno::constants::EINVAL as i32),
+    }
+}
+
 /// /proc/sys/kernel/shmmax — max segment size. Live: the shmget size
 /// check and shmctl(IPC_INFO) both consult it (writable; LTP shmget02
 /// lowers it to 8192, shmctl03 asserts IPC_INFO equality).

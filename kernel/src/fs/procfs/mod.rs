@@ -755,6 +755,17 @@ impl ProcFSSuperBlock {
             sysctl::write_printk,
             self.alloc_ino(),
         )));
+        // printk_devkmsg — the console-echo policy for userspace writes to
+        // /dev/kmsg ("on" / "ratelimit" / "off"). The printk ring always
+        // records every line; this knob only decides how much of it the
+        // console shows, which is how a guest's own log volume is kept
+        // off the serial line during a normal boot.
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"printk_devkmsg".to_vec(),
+            sysctl::generate_printk_devkmsg,
+            sysctl::write_printk_devkmsg,
+            self.alloc_ino(),
+        )));
         // Core dump file name pattern (consumed by process::coredump).
         kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
             b"core_pattern".to_vec(),

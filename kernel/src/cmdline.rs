@@ -709,6 +709,18 @@ fn install(cmdline: &'static str) {
     if has_param("quietcon") {
         crate::fs::tty::set_console_sink_quiet(true);
     }
+
+    // `printk.devkmsg=<on|ratelimit|off>` — the console-echo policy for
+    // userspace writes to /dev/kmsg (the reference exposes the same
+    // choice as its printk_devkmsg knob). The printk RING always records
+    // every line, so hilog consumers see the whole log either way; this
+    // only decides how much of it reaches the serial console. Default is
+    // the reference behavior (`on`).
+    if let Some(mode) = get_param("printk.devkmsg") {
+        if let Some(m) = crate::printk::kmsg_console_mode_from_str(mode.as_str()) {
+            crate::printk::set_kmsg_console_mode(m);
+        }
+    }
 }
 
 /// Get command line argument string (returns static reference to avoid allocation)
