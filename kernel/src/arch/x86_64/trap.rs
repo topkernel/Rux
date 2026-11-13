@@ -1182,11 +1182,26 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                         // reaches one waiter and not the other. Put pid 1
                         // on the wakewatch from tick one so its ring names
                         // which stage (wake/link/pick) eats its events.
-                        if crate::sched::current().is_none() {
-                            // tick context: watch via find_task_by_pid
+                        // 119th conviction fix: the old guard required
+                        // current().is_none(), but a timer tick interrupts
+                        // a live task — current() is Some — so the add
+                        // NEVER RAN and the first capture's empty ring was
+                        // an artifact of the guard, not evidence. Add
+                        // unconditionally (once); ww_watch_add is
+                        // idempotent anyway.
+                        static WW_P1_DONE: core::sync::atomic::AtomicBool =
+                            core::sync::atomic::AtomicBool::new(false);
+                        if !WW_P1_DONE.load(core::sync::atomic::Ordering::Relaxed) {
+                            // SAFETY: read-only lookup in the pid hash.
                             let t = unsafe { crate::sched::find_task_by_pid(1) };
                             if !t.is_null() {
                                 crate::sched::sched::ww_watch_add(t);
+                                WW_P1_DONE.store(true, core::sync::atomic::Ordering::Release);
+                                crate::pr_warn!(
+                                    "WW-P1-WATCH-ADD task={:#x} landed at jiffies={}",
+                                    t as usize,
+                                    crate::drivers::timer::get_jiffies()
+                                );
                             }
                         }
                         static PS_DONE: core::sync::atomic::AtomicBool =
