@@ -958,7 +958,7 @@ fn unix_wait_round(
         static WQ_N: core::sync::atomic::AtomicU32 =
             core::sync::atomic::AtomicU32::new(0);
         let n = WQ_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if n < 24 {
+        if n < 24 || n % 200 == 0 {
             let sock_of_queue = (queue as *const _ as usize)
                 .wrapping_sub(core::mem::offset_of!(UnixSocket, wait_queue));
             let q = unsafe { &*(sock_of_queue as *const UnixSocket) };
