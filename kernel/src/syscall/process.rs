@@ -1613,6 +1613,35 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
         };
         let r = match crate::process::exit::do_wait(wait_pid, wstatus, options) {
             Ok(child_pid) => {
+                // 125th: the app death reason at the reaper — the launcher
+                // cycle dies young with no init-side exit line (appspawn
+                // reaps it); this names code-vs-signal per reap.
+                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+                    static RP_N: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    let rn = RP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if rn < 40 {
+                        let st = if wstatus.is_null() {
+                            0
+                        } else {
+                            // SAFETY: access_ok-validated in the prologue.
+                            unsafe { crate::arch::uaccess::get_user(wstatus as *const i32) }
+                                .unwrap_or(0)
+                        };
+                        crate::pr_warn!(
+                            "REAP #{} reaper={} child={} wstatus={:#x} {}",
+                            rn,
+                            crate::process::current_pid(),
+                            child_pid,
+                            st,
+                            if st & 0x7f != 0 {
+                                "SIGNALED"
+                            } else {
+                                "EXITCODE"
+                            }
+                        );
+                    }
+                }
                 fill_rusage();
                 Ok(report_wait_pid(child_pid))
             }

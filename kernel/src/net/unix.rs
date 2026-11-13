@@ -1394,7 +1394,7 @@ pub fn unix_recvmsg_user_ctl(
 /// bind(): register this socket under a name.
 pub fn unix_bind(sock: &Arc<UnixSocket>, addr: &UnixAddr) -> Result<(), i32> {
     // UNIXBIND trace (noble-desktop dbus hunt)
-    if let Ok(path_str) = core::str::from_utf8(sun_path_bytes) { if path_str.contains("/run/") { crate::pr_warn!("UNIXBIND: {}", path_str); } }
+    if addr.key.len() > 1 && !addr.key.starts_with("\0") { if addr.key.contains("/run/") { crate::pr_warn!("UNIXBIND: {}", addr.key); } }
     if sock.bound_name.lock().is_some() || sock.reg_name.lock().is_some() {
         return Err(-22); // EINVAL — already bound
     }
@@ -1528,6 +1528,11 @@ pub fn unix_connect(
     addr: &UnixAddr,
     nonblock: bool,
 ) -> Result<(), i32> {
+    if addr.key.len() > 1 && !addr.key.starts_with(' ') {
+        if addr.key.contains("/run/") {
+            crate::pr_warn!("UNIXCONNECT: {}", addr.key);
+        }
+    }
     if *sock.shut_wr.lock() {
         return Err(-32); // EPIPE
     }
