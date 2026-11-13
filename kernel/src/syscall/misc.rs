@@ -2972,11 +2972,16 @@ pub fn param_stall_dump() {
             }
             // SAFETY: read-only diagnostic fd walk of the found leader.
             let tk = unsafe { &*leader };
+            // Collect rows under the walk (diag takes recv_queue inside
+            // the fdtable walk's callback context; printing there also
+            // nests console locks) — print AFTER, from a plain Vec.
+            let mut rows: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
             let _ = tk.try_fdtable().map(|fdt| {
                 fdt.for_each_file(|fd, f| {
                     if fd > 15 {
                         return;
                     }
+                    let ops_addr = f.get_ops().map(|o| o as *const _ as usize).unwrap_or(0);
                     let unix_line = crate::net::unix::unix_of_file_diag(f)
                         .map(|d| {
                             let (segs, qb, eof, dead, peer_alive, peer_ts, sndcap, acceptq, self_ptr, peer_raw, charge_v, err_v) =
@@ -2987,16 +2992,15 @@ pub fn param_stall_dump() {
                             )
                         })
                         .unwrap_or_default();
-                    crate::pr_warn!(
+                    rows.push(alloc::format!(
                         "APP-FD {} tgid={} fd={} ops={:#x}{}",
-                        label,
-                        tgid,
-                        fd,
-                        f.get_ops().map(|o| o as *const _ as usize).unwrap_or(0),
-                        unix_line
-                    );
+                        label, tgid, fd, ops_addr, unix_line
+                    ));
                 })
             });
+            for r in rows.iter() {
+                crate::pr_warn!("{}", r);
+            }
         }
     }
     // …and the last 48 syscalls of pid 1 — the userspace loop's actual
