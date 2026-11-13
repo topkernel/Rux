@@ -1206,6 +1206,18 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                         }
                         static PS_DONE: core::sync::atomic::AtomicBool =
                             core::sync::atomic::AtomicBool::new(false);
+                        static PS_DONE2: core::sync::atomic::AtomicBool =
+                            core::sync::atomic::AtomicBool::new(false);
+                        if !PS_DONE2.load(core::sync::atomic::Ordering::Relaxed)
+                            && crate::drivers::timer::get_jiffies() >= 24_000
+                            && crate::dfx::switches::enabled(
+                                crate::dfx::switches::DfxSwitch::SchedTrace,
+                            )
+                            && !PS_DONE2.swap(true, core::sync::atomic::Ordering::AcqRel)
+                        {
+                            crate::pr_warn!("=== SECOND DUMP (240s trend) ===");
+                            crate::syscall::misc::param_stall_dump();
+                        }
                         if !PS_DONE.load(core::sync::atomic::Ordering::Relaxed)
                             && crate::drivers::timer::get_jiffies() >= 18_000
                             && crate::dfx::switches::enabled(

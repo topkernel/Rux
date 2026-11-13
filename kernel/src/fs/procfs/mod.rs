@@ -1117,7 +1117,7 @@ pub fn get_procfs_sb() -> Option<&'static ProcFSSuperBlock> {
 /// Read file from /proc
 pub fn read_file(path: &str) -> Option<Vec<u8>> {
     use crate::process::current_pid;
-    if (path.contains("cgroup") || path.contains("self/")) && current_pid() == 1 {
+    if (path.contains("cgroup") || path.contains("self/") || path.contains("mountinfo")) && current_pid() == 1 {
         crate::pr_warn!("NOBLEDBG free read_file({}) called", path);
     }
 

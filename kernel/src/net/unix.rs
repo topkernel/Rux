@@ -412,7 +412,7 @@ impl UnixSocket {
     /// (peer truesize vs own sndbuf cap), so a dump line decides
     /// "writable" exactly like unix_file_poll's POLLOUT leg. Locks are
     /// taken one at a time (own queue, flags, peer queue, options).
-    pub fn diag_stream_pair(&self) -> (usize, usize, bool, bool, bool, usize, usize, usize) {
+    pub fn diag_stream_pair(&self) -> (usize, usize, bool, bool, bool, usize, usize, usize, usize, usize, usize, usize) {
         let (segs, qb) = {
             let q = self.recv_queue.lock();
             (
@@ -433,9 +433,19 @@ impl UnixSocket {
             Some(p) => (true, p.queued_truesize()),
             None => (false, 0),
         };
+        let _ = peer; // (diag extensions below use raw addresses)
+        let peer_raw = self
+            .peer
+            .lock()
+            .as_ref()
+            .map(|w| w as *const _ as usize)
+            .unwrap_or(0);
         let sndcap = self.options.lock().sndbuf as usize;
         let acceptq = self.accept_queue.lock().len();
-        (segs, qb, eof, dead, peer_alive, peer_ts, sndcap, acceptq)
+        let self_ptr = self as *const UnixSocket as usize;
+        let charge = self.recv_queue.lock().charge;
+        let err_latch = *self.err.lock() as usize;
+        (segs, qb, eof, dead, peer_alive, peer_ts, sndcap, acceptq, self_ptr, peer_raw, charge, err_latch)
     }
 
     /// Kernel-heap cost of the receive queue (Linux `sk_wmem_alloc` /

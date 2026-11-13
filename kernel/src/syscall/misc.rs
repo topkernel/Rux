@@ -2894,6 +2894,111 @@ pub fn param_stall_dump() {
     // forensics path (ConsoleWriter = direct UART, release-visible).
     let dumped = crate::sync::futex::rwfz_dump_tgid(1, 8, true);
     crate::pr_warn!("PARAM-STALL tgid1-stackdump tasks={}", dumped);
+    // 122nd (sandboxed-app hang): dump the live launcher/appspawn
+    // process — the app cycle spawns, sandboxes, pivots, then hangs
+    // silently; this names where its threads park.
+    {
+        let mut launcher_tgid: u32 = 0;
+        let mut appspawn_tgid: u32 = 0;
+        crate::sched::for_each_task_try(|task| {
+            let tk = unsafe { &*task };
+            let cb: &[u8; 16] = tk.comm();
+            let cl = cb.iter().position(|&b| b == 0).unwrap_or(16);
+            let comm = core::str::from_utf8(&cb[..cl]).unwrap_or("");
+            if launcher_tgid == 0 && comm.contains("auncher") {
+                launcher_tgid = tk.tgid() as u32;
+            }
+            if appspawn_tgid == 0 && comm.contains("ppspawn") {
+                appspawn_tgid = tk.tgid() as u32;
+            }
+        });
+        if launcher_tgid != 0 {
+            let n = crate::sync::futex::rwfz_dump_tgid(launcher_tgid, 10, true);
+            crate::pr_warn!("APP-DUMP launcher tgid={} tasks={}", launcher_tgid, n);
+        } else {
+            crate::pr_warn!("APP-DUMP launcher: no live launcher task at dump");
+        }
+        if appspawn_tgid != 0 {
+            let n = crate::sync::futex::rwfz_dump_tgid(appspawn_tgid, 6, true);
+            crate::pr_warn!("APP-DUMP appspawn tgid={} tasks={}", appspawn_tgid, n);
+        }
+        // hilogd — the reader that drains the sockets apps writev to; if
+        // it is dead or its reader is starved, every app's logger jams.
+        {
+            let mut hilog_tgid: u32 = 0;
+            crate::sched::for_each_task_try(|task| {
+                let tk = unsafe { &*task };
+                let cb: &[u8; 16] = tk.comm();
+                let cl = cb.iter().position(|&b| b == 0).unwrap_or(16);
+                let comm = core::str::from_utf8(&cb[..cl]).unwrap_or("");
+                if hilog_tgid == 0 && comm.contains("hilog") {
+                    hilog_tgid = tk.tgid() as u32;
+                }
+            });
+            if hilog_tgid != 0 {
+                let n = crate::sync::futex::rwfz_dump_tgid(hilog_tgid, 10, true);
+                crate::pr_warn!("APP-DUMP hilogd tgid={} tasks={}", hilog_tgid, n);
+            } else {
+                crate::pr_warn!("APP-DUMP hilogd: NO LIVE TASK");
+            }
+        }
+        // Full fd tables for hilogd and the live launcher: the busy pair is
+        // writev(fd=3) on one side, recvmsg(fd=9) on the other — name every
+        // fd's identity so the jammed pair is confirmed and its counters
+        // (segs/bytes on both ends) read directly.
+        for (label, needle) in [("hilogd", "hilog"), ("launcher", "auncher")] {
+            let mut tgid: u32 = 0;
+            crate::sched::for_each_task_try(|task| {
+                let tk = unsafe { &*task };
+                let cb: &[u8; 16] = tk.comm();
+                let cl = cb.iter().position(|&b| b == 0).unwrap_or(16);
+                let comm = core::str::from_utf8(&cb[..cl]).unwrap_or("");
+                if tgid == 0 && comm.contains(needle) {
+                    tgid = tk.tgid() as u32;
+                }
+            });
+            if tgid == 0 {
+                continue;
+            }
+            let mut leader: *mut crate::process::task::Task = core::ptr::null_mut();
+            crate::sched::for_each_task_try(|task| {
+                let tk = unsafe { &*task };
+                if leader.is_null() && tk.tgid() as u32 == tgid && tk.pid() as u32 == tgid {
+                    leader = task;
+                }
+            });
+            if leader.is_null() {
+                continue;
+            }
+            // SAFETY: read-only diagnostic fd walk of the found leader.
+            let tk = unsafe { &*leader };
+            let _ = tk.try_fdtable().map(|fdt| {
+                fdt.for_each_file(|fd, f| {
+                    if fd > 15 {
+                        return;
+                    }
+                    let unix_line = crate::net::unix::unix_of_file_diag(f)
+                        .map(|d| {
+                            let (segs, qb, eof, dead, peer_alive, peer_ts, sndcap, acceptq, self_ptr, peer_raw, charge_v, err_v) =
+                                d.diag_stream_pair();
+                            alloc::format!(
+                                " unix[segs={} bytes={} eof={} dead={} peer_alive={} peer_ts={} sndcap={} accq={} self={:#x} charge={} err={} peerW={:#x}]",
+                                segs, qb, eof as u8, dead as u8, peer_alive as u8, peer_ts, sndcap, acceptq, self_ptr, peer_raw, charge_v, err_v
+                            )
+                        })
+                        .unwrap_or_default();
+                    crate::pr_warn!(
+                        "APP-FD {} tgid={} fd={} ops={:#x}{}",
+                        label,
+                        tgid,
+                        fd,
+                        f.get_ops().map(|o| o as *const _ as usize).unwrap_or(0),
+                        unix_line
+                    );
+                })
+            });
+        }
+    }
     // …and the last 48 syscalls of pid 1 — the userspace loop's actual
     // behavior at the stall (needs dfx=sysforensic to be recording).
     crate::dfx::taskdump::dump_syscall_ring_for(1);
@@ -2917,7 +3022,7 @@ pub fn param_stall_dump() {
         // Unix sockets: queue depth + peer liveness (diag contract —
         // read-only, own locks).
         if let Some(d) = crate::net::unix::unix_of_file_diag(f) {
-            let (segs, qb, eof, dead, peer_alive, peer_ts, sndcap, acceptq) =
+            let (segs, qb, eof, dead, peer_alive, peer_ts, sndcap, acceptq, _sp, _pr, _ch, _ev) =
                 d.diag_stream_pair();
             if segs > 0 || eof || acceptq > 0 {
                 unix_rows.push(alloc::format!(
@@ -3232,7 +3337,7 @@ pub fn pid1_epoll_interest_dump(pid: crate::process::task::Pid) {
                         .unwrap_or("");
                     let unix_line = crate::net::unix::unix_of_file_diag(f)
                         .map(|s| {
-                            let (segs, qb, eof, dead, peer_alive, peer_ts, sndcap, acceptq) =
+                            let (segs, qb, eof, dead, peer_alive, peer_ts, sndcap, acceptq, _sp, _pr, _ch, _ev) =
                                 s.diag_stream_pair();
                             alloc::format!(
                                 " unix[segs={} bytes={} eof={} dead={} peer_alive={} peer_ts={} sndcap={} wr={} accq={}]",
@@ -3294,7 +3399,7 @@ pub fn pid1_epoll_interest_dump(pid: crate::process::task::Pid) {
                 return;
             }
             if let Some(s) = crate::net::unix::unix_of_file_diag(f) {
-                let (segs, qb, eof, dead, peer_alive, peer_ts, sndcap, acceptq) =
+                let (segs, qb, eof, dead, peer_alive, peer_ts, sndcap, acceptq, _sp, _pr, _ch, _ev) =
                     s.diag_stream_pair();
                 // Only sockets that look connected-and-live matter for
                 // the diff; listeners show up too (accq>0 is itself a
