@@ -534,6 +534,15 @@ impl RawSpinlock {
 
 // ==================== Spinlock<T> ====================
 
+impl Spinlock<i32> {
+    /// Offset of the data word inside this Spinlock layout (the compiler
+    /// reorders raw/data — diagnostic watchpoints must use this, never
+    /// fixed arithmetic).
+    pub fn data_offset() -> usize {
+        core::mem::offset_of!(Spinlock<i32>, data)
+    }
+}
+
 pub struct Spinlock<T: ?Sized> {
     raw: RawSpinlock,
     data: UnsafeCell<T>,

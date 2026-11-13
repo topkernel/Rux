@@ -2885,14 +2885,22 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
 /// (fd/events/fid/ET snapshot/reports per row), and the trace-ring tail.
 pub fn err_offset_probe() {
     crate::pr_warn!(
-        "ERR-OFFSET sizeof(UnixSocket)={} err_at={:#x}",
+        "ERR-OFFSET sizeof(UnixSocket)={} err_at={:#x} data_at={:#x}",
         core::mem::size_of::<crate::net::unix::UnixSocket>(),
-        crate::net::unix::err_field_offset()
+        crate::net::unix::err_field_offset(),
+        crate::net::unix::err_data_offset()
     );
 }
 
 pub fn param_stall_dump() {
     err_offset_probe();
+    {
+        let st = crate::net::unix::RECVSTATS.lock();
+        crate::pr_warn!(
+            "RECVSTATS dgram pop={} fault={} trunc={} empty={}",
+            st.pop, st.fault, st.trunc, st.empty
+        );
+    }
     let task = unsafe { crate::sched::find_task_by_pid(1) };
     if task.is_null() {
         return;

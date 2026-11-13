@@ -1137,6 +1137,20 @@ impl<'a> UserIovCursor<'a> {
 /// tail queued for the retry (reference unix_stream_read_generic:
 /// UNIXCB(skb).consumed advances, the skb stays until fully drained).
 /// Ancillary data rides first-touch exactly like unix_recv.
+/// 124th: dgram recvmsg outcome counters (the hilogd jam adjudicator).
+pub struct RecvStats {
+    pub pop: u64,
+    pub fault: u64,
+    pub trunc: u64,
+    pub empty: u64,
+}
+pub static RECVSTATS: Spinlock<RecvStats> = Spinlock::new(RecvStats {
+    pop: 0,
+    fault: 0,
+    trunc: 0,
+    empty: 0,
+});
+
 fn unix_recvmsg_user(
     sock: &Arc<UnixSocket>,
     iovs: &[(usize, usize)],
@@ -1153,6 +1167,7 @@ fn unix_recvmsg_user(
                 seg
             };
             let Some(seg) = popped else {
+                RECVSTATS.lock().empty += 1;
                 return unix_recvmsg_empty_tail(sock);
             };
             // Copy OUTSIDE the queue lock (fault discipline above).
@@ -1164,7 +1179,15 @@ fn unix_recvmsg_user(
                 // Reference __unix_dgram_recvmsg: skb_copy_datagram_msg
                 // error -> out_free — the record is consumed, the data is
                 // lost, EFAULT is reported.
+                RECVSTATS.lock().fault += 1;
                 return Err(-14);
+            }
+            {
+                let mut st = RECVSTATS.lock();
+                st.pop += 1;
+                if take < orig_len {
+                    st.trunc += 1;
+                }
             }
             // Record consumed: reference wakes the receive queue's
             // peer_wait ONCE per freed record (wq_has_sleeper-guarded).
@@ -1370,6 +1393,8 @@ pub fn unix_recvmsg_user_ctl(
 
 /// bind(): register this socket under a name.
 pub fn unix_bind(sock: &Arc<UnixSocket>, addr: &UnixAddr) -> Result<(), i32> {
+    // UNIXBIND trace (noble-desktop dbus hunt)
+    if let Ok(path_str) = core::str::from_utf8(sun_path_bytes) { if path_str.contains("/run/") { crate::pr_warn!("UNIXBIND: {}", path_str); } }
     if sock.bound_name.lock().is_some() || sock.reg_name.lock().is_some() {
         return Err(-22); // EINVAL — already bound
     }
@@ -1827,6 +1852,14 @@ impl ErrLatch {
 
 pub fn err_field_offset() -> usize {
     core::mem::offset_of!(UnixSocket, err)
+}
+
+/// Offset of the ErrLatch's DATA word (the i32) from the UnixSocket base:
+/// struct offset of `err` + offset of the data inside Spinlock<i32>.
+/// RawSpinlock and data get reordered by the compiler — never assume +8.
+pub fn err_data_offset() -> usize {
+    core::mem::offset_of!(UnixSocket, err) + core::mem::offset_of!(ErrLatch, inner)
+        + crate::sync::spinlock::Spinlock::<i32>::data_offset()
 }
 
 fn seg_charge(len: usize) -> usize {
