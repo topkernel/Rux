@@ -3496,6 +3496,9 @@ impl Task {
         sync: bool,
     ) -> bool {
         if task.is_null() {
+            { static RF: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+              let rn = RF.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+              if rn < 12 { crate::pr_warn!("WAKE-REFUSE-PT1 tid={}", unsafe { (*task).pid() }); } }
             return false;
         }
 
@@ -3532,6 +3535,9 @@ impl Task {
                 v <<= 4;
             }
             unsafe { putchar(b'\n'); }
+            { static RF: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+              let rn = RF.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+              if rn < 12 { crate::pr_warn!("WAKE-REFUSE-PT2 tid={}", unsafe { (*task).pid() }); } }
             return false;
         }
 
@@ -3549,6 +3555,9 @@ impl Task {
                 use crate::console::putchar;
                 const MSG: &[u8] = b"WAKE-POISONED-TASK dropped\n";
                 for &b in MSG { unsafe { putchar(b); } }
+                { static RF: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                  let rn = RF.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                  if rn < 12 { crate::pr_warn!("WAKE-REFUSE-PT3 tid={}", unsafe { (*task).pid() }); } }
                 return false;
             }
         }
@@ -3681,6 +3690,26 @@ impl Task {
                             }
                             backed
                         };
+                        // 121st (user-GUI storm): the first refusal raced
+                        // a TRANSIENT of the double-insert guard's window —
+                        // the census WW-PROBE has proven that a re-issued
+                        // wake in exactly this state links 0->1 instantly.
+                        // Retry ONCE, bounded, before reporting: on link,
+                        // the wake is delivered (nudge its last CPU like
+                        // the requeue path at wake_up_enqueue_opt's call
+                        // below); only a refused retry is a real W2.
+                        if !mid_pick {
+                            let retry_n =
+                                crate::sched::wake_up_enqueue_opt(task, bucket);
+                            if retry_n {
+                                crate::sched::resched_cpu((*task).ti_cpu() as usize);
+                                crate::pr_debug!(
+                                    "W2-RETRY-LINKED pid={} (transient guard window)",
+                                    pid
+                                );
+                                return true;
+                            }
+                        }
                         static W2_N: core::sync::atomic::AtomicU32 =
                             core::sync::atomic::AtomicU32::new(0);
                         if !mid_pick
@@ -3732,6 +3761,13 @@ impl Task {
                                 }
                             }
                         }
+                    {
+                        static RF4: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                        let rn = RF4.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if rn < 12 {
+                            crate::pr_warn!("WAKE-REFUSE-PT4 tid={} state={:#x}", unsafe { (*task).pid() }, unsafe { (*task).state().bits() });
+                        }
+                    }
                     return false;
                 }
 
@@ -3878,6 +3914,13 @@ impl Task {
                         // picked promptly instead of waiting for the
                         // next idle tick.
                         crate::sched::resched_cpu((*task).ti_cpu() as usize);
+                    }
+                    {
+                        static RF5: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                        let rn = RF5.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if rn < 12 {
+                            crate::pr_warn!("WAKE-REFUSE-PT5 tid={} state={:#x}", unsafe { (*task).pid() }, unsafe { (*task).state().bits() });
+                        }
                     }
                     return false;
                 }
