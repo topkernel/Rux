@@ -209,7 +209,7 @@ fn stuck_report(
         n,
         site,
         class,
-        (now - first) * 10
+        now.saturating_sub(first) * 10
     );
 }
 
@@ -221,7 +221,7 @@ fn tick_stuck_scan(now: u64) {
             let first = s.load(Ordering::Relaxed);
             if first == 0 {
                 s.store(now, Ordering::Relaxed);
-            } else if now - first >= 20 {
+            } else if now.saturating_sub(first) >= 20 {
                 stuck_report(now, "small_alloc", i as u8, first);
                 // keep the run (no re-arm) — the word is still stuck;
                 // the global throttle paces the re-reports.
@@ -237,7 +237,7 @@ fn tick_stuck_scan(now: u64) {
             let first = s.load(Ordering::Relaxed);
             if first == 0 {
                 s.store(now, Ordering::Relaxed);
-            } else if now - first >= 20 {
+            } else if now.saturating_sub(first) >= 20 {
                 stuck_report(now, "slab", i as u8, first);
             }
         } else {
@@ -248,7 +248,7 @@ fn tick_stuck_scan(now: u64) {
         let first = BUDDY_STUCK.load(Ordering::Relaxed);
         if first == 0 {
             BUDDY_STUCK.store(now, Ordering::Relaxed);
-        } else if now - first >= 20 {
+        } else if now.saturating_sub(first) >= 20 {
             stuck_report(now, "buddy", 0, first);
         }
     } else {

@@ -1100,6 +1100,62 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                             .unwrap_or(0) as u32,
                         core::sync::atomic::Ordering::Relaxed,
                     );
+                    // 118th monopolist capture: count consecutive ticks
+                    // whose current task carries preempt_count >= 2 (a
+                    // REAL leaked base pair — one base is any in-kernel
+                    // spin section; two held across >= 50 ticks = 0.5 s is
+                    // the unpreemptible incumbent shape). Diagnostic print
+                    // only — no state is rewritten (the 29c2acba/393c04cf8
+                    // ban is on wake-path heals and time-based slot
+                    // CONVICTIONS, not on naming). One-shot per boot.
+                    {
+                        static MONO_TICKS: [core::sync::atomic::AtomicU32; 8] =
+                            [const { core::sync::atomic::AtomicU32::new(0) }; 8];
+                        static MONO_PID: [core::sync::atomic::AtomicU32; 8] =
+                            [const { core::sync::atomic::AtomicU32::new(0) }; 8];
+                        static MONO_DONE: core::sync::atomic::AtomicBool =
+                            core::sync::atomic::AtomicBool::new(false);
+                        let ci = (cpu_id & 7) as usize;
+                        if let Some(t) = crate::sched::current() {
+                            // SAFETY: read-only diagnostic access to the
+                            // interrupted current task.
+                            let (pc, pid) = unsafe { ((*t).preempt_count(), (*t).pid()) };
+                            if pc >= 2 {
+                                let prev_pid =
+                                    MONO_PID[ci].load(core::sync::atomic::Ordering::Relaxed);
+                                if prev_pid != pid as u32 {
+                                    MONO_PID[ci].store(pid as u32, core::sync::atomic::Ordering::Relaxed);
+                                    MONO_TICKS[ci].store(1, core::sync::atomic::Ordering::Relaxed);
+                                } else {
+                                    let n = MONO_TICKS[ci]
+                                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                                    if n == 50
+                                        && !MONO_DONE.swap(true, core::sync::atomic::Ordering::AcqRel)
+                                    {
+                                        // SAFETY: read-only comm access.
+                                        let cb = unsafe { (*t).comm() };
+                                        let cl = cb.iter().position(|&b| b == 0).unwrap_or(16);
+                                        let comm =
+                                            core::str::from_utf8(&cb[..cl]).unwrap_or("?");
+                                        crate::pr_warn!(
+                                            "MONOPOLIST-TICK pid={} ({}) preempt={} cpu={} last_rip={:#x} — remote bt follows",
+                                            pid,
+                                            comm,
+                                            pc,
+                                            cpu_id,
+                                            regs_ref.rip
+                                        );
+                                        let _ = crate::arch::ipi::remote_backtrace(
+                                            cpu_id as usize,
+                                            "monopolist-tick",
+                                        );
+                                    }
+                                }
+                            } else {
+                                MONO_TICKS[ci].store(0, core::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                    }
                     // leg-33B: the interrupted RIP rides the same slot —
                     // the strand census's incumbent attribution
                     // (TICK_ENTRY_RIP).
@@ -1107,6 +1163,59 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                         regs_ref.rip,
                         core::sync::atomic::Ordering::Relaxed,
                     );
+                    // 118th param-stall conviction dump (one-shot once
+                    // jiffies >= 30 000 = 300 s, dfx=schedtrace-gated): the
+                    // OH ladder stall reduces to init handling zero
+                    // param-set messages — this dumps init's fd inventory +
+                    // socket queue depths + epoll interest sets + the trace
+                    // tail, naming which hypothesis owns it (ET edge loss /
+                    // always-ready fd / empty-queue sender wedge). Diagnostic
+                    // prints only; one per boot.
+                    {
+                        // Arm the LASTSYS latch from the first tick on
+                        // hunt boots (see dispatch.rs lastsys_latch_arm).
+                        crate::syscall::dispatch::lastsys_latch_arm();
+                        // 118th PID-1 WATCH: the ladder break is init's
+                        // main thread parked in a never-returning
+                        // epoll_pwait(5,-1) while a sibling thread iterates
+                        // the SAME epoll instance (721 scans) — the wake
+                        // reaches one waiter and not the other. Put pid 1
+                        // on the wakewatch from tick one so its ring names
+                        // which stage (wake/link/pick) eats its events.
+                        // 119th conviction fix: the old guard required
+                        // current().is_none(), but a timer tick interrupts
+                        // a live task — current() is Some — so the add
+                        // NEVER RAN and the first capture's empty ring was
+                        // an artifact of the guard, not evidence. Add
+                        // unconditionally (once); ww_watch_add is
+                        // idempotent anyway.
+                        static WW_P1_DONE: core::sync::atomic::AtomicBool =
+                            core::sync::atomic::AtomicBool::new(false);
+                        if !WW_P1_DONE.load(core::sync::atomic::Ordering::Relaxed) {
+                            // SAFETY: read-only lookup in the pid hash.
+                            let t = unsafe { crate::sched::find_task_by_pid(1) };
+                            if !t.is_null() {
+                                crate::sched::sched::ww_watch_add(t);
+                                WW_P1_DONE.store(true, core::sync::atomic::Ordering::Release);
+                                crate::pr_warn!(
+                                    "WW-P1-WATCH-ADD task={:#x} landed at jiffies={}",
+                                    t as usize,
+                                    crate::drivers::timer::get_jiffies()
+                                );
+                            }
+                        }
+                        static PS_DONE: core::sync::atomic::AtomicBool =
+                            core::sync::atomic::AtomicBool::new(false);
+                        if !PS_DONE.load(core::sync::atomic::Ordering::Relaxed)
+                            && crate::drivers::timer::get_jiffies() >= 30_000
+                            && crate::dfx::switches::enabled(
+                                crate::dfx::switches::DfxSwitch::SchedTrace,
+                            )
+                            && !PS_DONE.swap(true, core::sync::atomic::Ordering::AcqRel)
+                        {
+                            crate::syscall::misc::param_stall_dump();
+                        }
+                    }
                     crate::interrupt::preempt::irq_enter();
                     // LAPIC EOI FIRST (same discipline as the PIC path):
                     // the scheduler call below can switch tasks, and the
@@ -2386,32 +2495,21 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
             return;
         }
     }
-    // ONE pr_err per crash (the identity line); the multi-line
-    // forensics body below is pr_debug — compiled out in release and
-    // printk-filtered below loglevel 7 (sc160: the crash-retry loop's
-    // serial storm manufactured the IRQ-OFF windows that killed
-    // foundation; LL4 boots keep exactly this line per crash).
+    if let Some((proc_id, owner_pid, base, size)) = binder_hit.as_ref() {
+        crate::pr_err!(
+            "USEGV-FOR: cr2 {:#x} INSIDE BINDER BUFFER of proc {} (owner pid {}) base {:#x} size {:#x} — stale daemon mapping dropped at fork (DONTFORK)",
+            fault_addr, proc_id, owner_pid, base, size
+        );
+    }
     crate::pr_err!(
-        "USEGV-FOR: pid={} comm='{}' rip={:#x} cr2={:#x} rsp={:#x} rbp={:#x}{}",
-        pid,
-        comm,
-        regs.rip,
-        fault_addr,
-        regs.rsp,
-        regs.rbp,
-        match binder_hit.as_ref() {
-            Some((proc_id, owner_pid, base, size)) => alloc::format!(
-                " BINDERBUF cr2 INSIDE BINDER BUFFER of proc {} (owner pid {}) base {:#x} size {:#x} — stale daemon mapping dropped at fork (DONTFORK)",
-                proc_id, owner_pid, base, size
-            ),
-            None => alloc::string::String::new(),
-        }
+        "USEGV-FOR: pid={} comm='{}' rip={:#x} cr2={:#x} rsp={:#x} rbp={:#x}",
+        pid, comm, regs.rip, fault_addr, regs.rsp, regs.rbp
     );
-    crate::pr_debug!(
+    crate::pr_err!(
         "USEGV-FOR: rax={:#x} rbx={:#x} rcx={:#x} rdx={:#x} rsi={:#x} rdi={:#x}",
         regs.rax, regs.rbx, regs.rcx, regs.rdx, regs.rsi, regs.rdi
     );
-    crate::pr_debug!(
+    crate::pr_err!(
         "USEGV-FOR: r8={:#x} r9={:#x} r10={:#x} r11={:#x} r12={:#x} r13={:#x} r14={:#x} r15={:#x}",
         regs.r8, regs.r9, regs.r10, regs.r11, regs.r12, regs.r13, regs.r14, regs.r15
     );
@@ -2453,7 +2551,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
             tk.last_syscall_a0.load(Relaxed),
             tk.last_syscall_a1.load(Relaxed)
         );
-        crate::pr_debug!("{}", s);
+        crate::pr_err!("{}", s);
     }
 
     // 50th (crash-storm hunt): the faulting task's address-space edit
@@ -2491,7 +2589,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                 };
                 let pid = unsafe { (*t).pid() };
                 if shown < 12 {
-                    crate::pr_debug!(
+                    crate::pr_err!(
                         "USEGV-FOR: mm[{tag} pid={}] {} addr={:#x} len={:#x} prot/arg2={:#x} rc={}",
                         pid, name, addr, len, prot, rc
                     );
@@ -2499,7 +2597,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                 shown += 1;
             }
             if shown > 12 {
-                crate::pr_debug!("USEGV-FOR: mm[{tag}] ... {}/16 events (capped)", shown);
+                crate::pr_err!("USEGV-FOR: mm[{tag}] ... {}/16 events (capped)", shown);
             }
         }
         if let Some(tk) = crate::sched::current() {
@@ -2517,10 +2615,10 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                 }
             });
             if sibs > 6 {
-                crate::pr_debug!("USEGV-FOR: mm[sib] ... {}/{} siblings shown", 6, sibs);
+                crate::pr_err!("USEGV-FOR: mm[sib] ... {}/{} siblings shown", 6, sibs);
             }
             if skipped > 0 {
-                crate::pr_debug!("USEGV-FOR: mm[sib] {} pid-hash buckets skipped (try-walk)", skipped);
+                crate::pr_err!("USEGV-FOR: mm[sib] {} pid-hash buckets skipped (try-walk)", skipped);
             }
         }
     }
@@ -2535,7 +2633,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
         // would name a clobbered stack). Print-path only.
         for &probe in &[regs.rip, fault_addr, regs.rax, regs.rsp] {
             match vmas.find(crate::mm::page::VirtAddr::new(probe as usize)) {
-                Some(v) => crate::pr_debug!(
+                Some(v) => crate::pr_err!(
                     "USEGV-FOR: vma({:#x}) = {:#x}-{:#x} flags={:#x} type={:?} fd={} off={:#x} origin={}{}",
                     probe,
                     v.start().as_usize(),
@@ -2547,7 +2645,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                     v.origin().creator_name(),
                     if v.origin().is_forked() { "+FORK" } else { "" }
                 ),
-                None => crate::pr_debug!("USEGV-FOR: vma({:#x}) = NONE", probe),
+                None => crate::pr_err!("USEGV-FOR: vma({:#x}) = NONE", probe),
             }
         }
         // File path + module-relative fault offset for the rip VMA, so a
@@ -2563,7 +2661,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                 let path = unsafe { crate::fs::file::get_file_fd(fd as usize) }
                     .map(|f| f.path())
                     .unwrap_or_else(|| alloc::string::String::from("?"));
-                crate::pr_debug!(
+                crate::pr_err!(
                     "USEGV-FOR: ripfile {} voff {:#x}",
                     path,
                     v.offset() + (regs.rip as usize - v.start().as_usize())
@@ -2622,7 +2720,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                         }
                         va += 8;
                     }
-                    crate::pr_debug!("{}", line);
+                    crate::pr_err!("{}", line);
                 }
             }
         }
@@ -2643,7 +2741,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                 }
             }
             if ok {
-                crate::pr_debug!(
+                crate::pr_err!(
                     "USEGV-FOR: ripbytes {:02x?}",
                     bytes
                 );
@@ -2665,10 +2763,10 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                     continue;
                 }
                 if shown >= 12 {
-                    crate::pr_debug!("USEGV-FOR: nearvma ... (capped)");
+                    crate::pr_err!("USEGV-FOR: nearvma ... (capped)");
                     break;
                 }
-                crate::pr_debug!(
+                crate::pr_err!(
                     "USEGV-FOR: nearvma {:#x}-{:#x} flags={:#x} type={:?} fd={} off={:#x} origin={}{}",
                     v.start().as_usize(),
                     v.end().as_usize(),
@@ -2709,7 +2807,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
             use core::fmt::Write;
             let _ = write!(line, " {}:{}", i, val);
         }
-        crate::pr_debug!("USEGV-FOR: stack@rsp:{}", line);
+        crate::pr_err!("USEGV-FOR: stack@rsp:{}", line);
         // leg-31B: name the VMA (+origin) behind each stack word that
         // looks like a user code pointer — the faulting frame's return
         // addresses name the CALLER library without a guest-side
@@ -2755,7 +2853,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                                     v.file_fd()
                                 );
                             }
-                            crate::pr_debug!(
+                            crate::pr_err!(
                                 "USEGV-FOR: stkva[{}] {:#x} = {:#x}-{:#x} r-x off={:#x}{} origin={}{}",
                                 i,
                                 val,
@@ -2785,7 +2883,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                                     }
                                 }
                             }
-                            crate::pr_debug!("{}", cb);
+                            crate::pr_err!("{}", cb);
                         }
                     }
                 }
