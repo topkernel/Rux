@@ -334,6 +334,22 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             syscall_set_return_value(regs, signal::sys_pause(args));
             return;
         }
+        131 => {
+            // sigaltstack(ss, old_ss) — x86_64 native number. Unhandled,
+            // it fell through to the generic table where 131 is tgkill
+            // and the (ptr, ptr) arguments were parsed as a kill triple.
+            syscall_set_return_value(regs, signal::sys_sigaltstack(args));
+            return;
+        }
+        132 => {
+            // utime(path, utimbuf*) — legacy x86_64 ABI (no asm-generic
+            // number). Unhandled, 132 fell through to the generic table
+            // where 132 is SIGALTSTACK, so every utime(2) caller silently
+            // no-op'd (LTP utime01: stamps read back 0, not the set
+            // values).
+            syscall_set_return_value(regs, file::sys_utime(args));
+            return;
+        }
         139 => {
             // sysfs(2): query the registered filesystem list. No
             // asm-generic number (riscv64/aarch64 never issue it);

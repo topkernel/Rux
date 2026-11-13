@@ -3146,6 +3146,47 @@ pub fn sys_futimesat(args: SyscallArgs) -> i64 {
     }
 }
 
+/// sys_utime — legacy utime(2), x86_64 native NR 132 (no asm-generic
+/// number; dispatched from the x86_64 legacy arm). utimbuf carries
+/// plain seconds, and NEGATIVE time_t is legal (pre-epoch stamps —
+/// LTP utime01): the seconds pass to the inode's u64 field by two's
+/// complement and read back through the same cast.
+pub fn sys_utime(args: SyscallArgs) -> i64 {
+    const AT_FDCWD: i32 = -100;
+    let pathname_ptr = args[0] as *const u8;
+    let buf_ptr = args[1] as *const u8;
+    if pathname_ptr.is_null() {
+        return -(errno::EFAULT as i64);
+    }
+    let (atime, mtime, explicit): (Option<u64>, Option<u64>, bool) = if buf_ptr.is_null() {
+        // NULL times: both stamps to now (POSIX utime).
+        let now = current_time_secs();
+        (Some(now), Some(now), false)
+    } else {
+        if !crate::arch::uaccess::access_ok(buf_ptr as usize, 16) {
+            return -(errno::EFAULT as i64);
+        }
+        let mut b = [0u8; 16];
+        // SAFETY: buf_ptr validated with access_ok(16); exception-table copy.
+        let uncopied = unsafe {
+            crate::arch::uaccess::copy_from_user(b.as_mut_ptr(), buf_ptr, 16)
+        };
+        if uncopied > 0 {
+            return -(errno::EFAULT as i64);
+        }
+        let rd = |i: usize| i64::from_le_bytes(b[i * 8..i * 8 + 8].try_into().unwrap());
+        (Some(rd(0) as u64), Some(rd(1) as u64), true)
+    };
+    let full_path = match resolve_user_path(AT_FDCWD, pathname_ptr) {
+        Ok(p) => p,
+        Err(e) => return e as i64,
+    };
+    match crate::fs::vfs::vfs_utimensat_ex(&full_path, atime, mtime, explicit) {
+        Ok(()) => 0,
+        Err(e) => e as i64,
+    }
+}
+
 /// Current wall-clock time in whole seconds (for UTIME_NOW).
 fn current_time_secs() -> u64 {
     crate::drivers::rtc::wall_secs()
