@@ -3687,17 +3687,51 @@ impl Task {
                             && W2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16
                         {
                             let w2 = crate::sched::w2_refusal_census(task);
+                            // 118th: name the target (the pk=1 monopolist
+                            // census lines were anonymous).
+                            let cb = (*task).comm();
+                            let cl = cb.iter().position(|&b| b == 0).unwrap_or(16);
+                            let comm = core::str::from_utf8(&cb[..cl]).unwrap_or("?");
                             crate::pr_warn!(
-                                "W2-WAKE-REFUSED-SLEEPING pid={} state={:#x} on_cpu={} pk={} cpu={} {}",
+                                "W2-WAKE-REFUSED-SLEEPING pid={} ({}) state={:#x} on_cpu={} pk={} cpu={} {}",
                                 pid,
+                                comm,
                                 (*task).state().bits(),
                                 (*task).on_cpu(),
                                 (*task).pick_state(),
                                 (*task).ti_cpu(),
                                 w2
                             );
+                                // 118th monopolist capture: a RUNNING+on_cpu refusal
+                                // target with preempt_count>=2 is a REAL leaked-base
+                                // incumbent (the sysevent_source shape — userspace
+                                // last rip, honest busy slot, every blocking syscall
+                                // degenerating into the park-refusal poll). One-shot
+                                // per boot: IPI its CPU for the interrupted RIP +
+                                // live stack — that names the kernel loop the leak
+                                // rides in.
+                                #[cfg(feature = "x86_64")]
+                                {
+                                    static MONO_DONE: core::sync::atomic::AtomicBool =
+                                        core::sync::atomic::AtomicBool::new(false);
+                                    let pc = (*task).preempt_count();
+                                    if pc >= 2
+                                        && (*task).on_cpu()
+                                        && !MONO_DONE.swap(true, core::sync::atomic::Ordering::AcqRel)
+                                    {
+                                        let cpu = (*task).ti_cpu().max(0) as usize;
+                                        crate::pr_warn!(
+                                            "MONOPOLIST-CAPTURE pid={} ({}) preempt={} cpu={} — remote bt follows",
+                                            pid,
+                                            comm,
+                                            pc,
+                                            cpu
+                                        );
+                                        let _ = crate::arch::ipi::remote_backtrace(cpu, "monopolist-w2");
+                                    }
+                                }
+                            }
                         }
-                    }
                     return false;
                 }
 

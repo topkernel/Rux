@@ -724,6 +724,19 @@ fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, bu
         if result <= 0 {
             if result < 0 && total == 0 {
                 first_err = result as i32;
+                // 118th EIO hunt (dfx=eiotrace): 'Failed to write event
+                // ret -5' from init_hisysevent — name the exact file the
+                // write failed on (ops identity + file_id + first bytes),
+                // pid + comm, budgeted. Direct console (no printk/console
+                // recursion through this very path) with a reentrancy
+                // guard; direct prints are release no-ops.
+                if first_err == -5
+                    && crate::dfx::switches::enabled(
+                        crate::dfx::switches::DfxSwitch::EpollTrace,
+                    )
+                {
+                    eio_report(fd, file, &kernel_buf[..core::cmp::min(chunk, 24)]);
+                }
             }
             break;
         }
@@ -2725,4 +2738,176 @@ pub fn sys_sendfile(args: SyscallArgs) -> i64 {
 
         total_transferred as i64
     }
+}
+
+/// 118th EIO hunt, syscall-exit face (dfx=eiotrace rides EpollTrace): the
+/// write(2)-path logger never fired while 'Failed to write event ret -5'
+/// prints — so the -5 rides a DIFFERENT syscall. One budgeted line per
+/// -EIO syscall exit: nr, args head, pid, comm. Direct console, guarded.
+pub fn syscall_eio_line(nr: usize, args: [u64; 6]) {
+    use crate::console::putchar_no_lock as putchar;
+    static N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 60 {
+        return;
+    }
+    fn phex(mut v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        for sh in (0..16).rev() {
+            let b = ((v >> (sh * 4)) & 0xF) as u8;
+            putchar(if b < 10 { b'0' + b } else { b'a' + b - 10 });
+        }
+    }
+    fn pdec(mut v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        let mut buf = [0u8; 20];
+        let mut n = 0;
+        if v == 0 {
+            putchar(b'0');
+            return;
+        }
+        while v > 0 {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        while n > 0 {
+            n -= 1;
+            putchar(buf[n]);
+        }
+    }
+    const M: &[u8] = b"\nSYSCALL-EIO nr=";
+    for &b in M {
+        putchar(b);
+    }
+    pdec(nr as u64);
+    let pid = crate::process::current_pid();
+    const M2: &[u8] = b" pid=";
+    for &b in M2 {
+        putchar(b);
+    }
+    pdec(pid as u64);
+    let mut comm = [0u8; 16];
+    if let Some(t) = crate::sched::current() {
+        let c: &[u8; 16] = (*t).comm();
+        comm.copy_from_slice(c);
+    }
+    putchar(b'(');
+    for &b in comm.iter() {
+        if b == 0 {
+            break;
+        }
+        if (0x20..0x7f).contains(&b) {
+            putchar(b);
+        }
+    }
+    putchar(b')');
+    for i in 0..3 {
+        const M3: &[u8] = b" a";
+        for &b in M3 {
+            putchar(b);
+        }
+        putchar(b'0' + i as u8);
+        putchar(b'=');
+        phex(args[i]);
+    }
+    putchar(b'\n');
+}
+
+/// 118th EIO hunt (dfx=eiotrace rides DfxSwitch::EpollTrace): one budgeted
+/// line per failing write — pid, comm, fd, ops identity (symbolizes against
+/// the kernel ELF), file_id, and the first bytes of the payload (names the
+/// protocol — e.g. a hisysevent frame). Direct console with a reentrancy
+/// guard: this runs on the write error path, printk here could re-enter
+/// console write and print forever.
+fn eio_report(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, head: &[u8]) {
+    use crate::console::putchar_no_lock as putchar;
+    static IN_EIO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    static N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    if IN_EIO.swap(true, core::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+        fn phex(mut v: u64) {
+            use crate::console::putchar_no_lock as putchar;
+            for sh in (0..16).rev() {
+                let b = ((v >> (sh * 4)) & 0xF) as u8;
+                putchar(if b < 10 { b'0' + b } else { b'a' + b - 10 });
+            }
+        }
+        const M: &[u8] = b"\nWRITE-EIO pid=";
+        for &b in M {
+            putchar(b);
+        }
+        let pid = crate::process::current_pid();
+        let mut d = [0u8; 10];
+        let mut n = 0;
+        let mut v = pid as u64;
+        if v == 0 {
+            d[0] = b'0';
+            n = 1;
+        }
+        while v > 0 {
+            d[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        while n > 0 {
+            n -= 1;
+            putchar(d[n]);
+        }
+        let mut comm = [0u8; 16];
+        if let Some(t) = crate::sched::current() {
+            let c: &[u8; 16] = (*t).comm();
+            comm.copy_from_slice(c);
+        }
+        putchar(b'(');
+        for &b in comm.iter() {
+            if b == 0 {
+                break;
+            }
+            if (0x20..0x7f).contains(&b) {
+                putchar(b);
+            }
+        }
+        putchar(b')');
+        const M2: &[u8] = b" fd=";
+        for &b in M2 {
+            putchar(b);
+        }
+        let mut v = fd as u64;
+        n = 0;
+        if v == 0 {
+            d[0] = b'0';
+            n = 1;
+        }
+        while v > 0 {
+            d[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        while n > 0 {
+            n -= 1;
+            putchar(d[n]);
+        }
+        const M3: &[u8] = b" ops=";
+        for &b in M3 {
+            putchar(b);
+        }
+        phex(file.get_ops().map(|o| o as *const _ as usize).unwrap_or(0) as u64);
+        const M4: &[u8] = b" fid=";
+        for &b in M4 {
+            putchar(b);
+        }
+        phex(file.file_id);
+        const M5: &[u8] = b" head=";
+        for &b in M5 {
+            putchar(b);
+        }
+        for &b in head.iter().take(24) {
+            let c = if (0x20..0x7f).contains(&b) { b } else { b'.' };
+            putchar(c);
+        }
+        putchar(b'\n');
+    }
+    IN_EIO.store(false, core::sync::atomic::Ordering::Release);
 }

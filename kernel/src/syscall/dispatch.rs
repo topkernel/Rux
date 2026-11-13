@@ -103,6 +103,26 @@ fn strace1_line(nr: u32, args: &SyscallArgs, result: i64) {
         221 => Some(("execve", Some(0))),
         222 => Some(("mmap", None)),          // fd/off shown numerically
         226 => Some(("mprotect", None)),
+        // 118th ladder hunt: the loop/event family — where does init's
+        // job engine diverge from the reference (eventfd/timerfd/epoll/
+        // signalfd/rt_sigreturn + the usual wait family).
+        9 => Some(("mmap", None)),            // mmap legacy
+        10 => Some(("mprotect", None)),       // mprotect legacy
+        11 => Some(("munmap", None)),         // munmap legacy
+        232 => Some(("epoll_wait", None)),
+        281 => Some(("epoll_pwait", None)),
+        233 => Some(("epoll_ctl", None)),
+        291 => Some(("epoll_create1", None)),
+        290 => Some(("eventfd2", None)),
+        283 => Some(("timerfd_create", None)),
+        286 => Some(("timerfd_settime", None)),
+        126 => Some(("sigaltstack", None)),
+        34 => Some(("rt_sigprocmask", None)),
+        13 => Some(("rt_sigaction", None)),
+        135 => Some(("rt_sigprocmask", None)), // legacy sigprocmask
+        431 => Some(("clone3", None)),        // modern spawn path
+        437 => Some(("clock_nanosleep", None)),
+        230 => Some(("clock_nanosleep", None)),
         _ => None,
     };
     let (name, path_arg) = match entry {
@@ -150,7 +170,7 @@ fn strace1_line(nr: u32, args: &SyscallArgs, result: i64) {
         },
     }
     line.push_str(&alloc::format!(") = {}", result));
-    crate::pr_info!("{}", line);
+    crate::pr_warn!("{}", line);
 }
 
 /// System call entry function
@@ -167,6 +187,16 @@ fn strace1_line(nr: u32, args: &SyscallArgs, result: i64) {
 /// by taskdump / dfx when a dump is requested; off = zero cost.
 static LASTSYS_LATCH_ON: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
+
+/// 118th ladder-stall hunt: arm the LASTSYS latch from the first syscall
+/// when schedtrace is armed (debug hunt boots only — the per-syscall cost
+/// is 3 stores, acceptable under dfx) so EVERY parked task's true syscall
+/// is visible at dump time. Without this, pid 1 parks BEFORE the first
+/// taskdump runs and its row reads lastsys=? — and the ladder break is
+/// exactly "which syscall is init's main thread parked in".
+pub fn lastsys_latch_arm() {
+    LASTSYS_LATCH_ON.store(true, core::sync::atomic::Ordering::Release);
+}
 
 pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     let sc_nr = syscall_get_nr(regs) as usize;
@@ -192,6 +222,19 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     // The return value: a0 (riscv64) / rax (x86_64).
     if crate::trace::EVENT_SYS_EXIT.armed() {
         crate::trace::trace_sys_exit(sc_nr as i64, syscall_get_return(regs) as i64);
+    }
+    // 118th EIO hunt (dfx=eiotrace rides DfxSwitch::EpollTrace): name the
+    // EXACT syscall returning -EIO ('init_hisysevent.c:140 Failed to write
+    // event ret -5' — the write(2) path logger never fired, so the -5 rides
+    // a different syscall). Budgeted direct-console line: nr, args head,
+    // pid, comm. Reentrancy-guarded (this is every syscall's exit).
+    {
+        let rv = syscall_get_return(regs);
+        if rv == -5
+            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::EpollTrace)
+        {
+            crate::syscall::io::syscall_eio_line(sc_nr, syscall_get_arguments(regs));
+        }
     }
     crate::dfx::syscost::exit(sc_nr, sc_t0);
     // pa15 recv-family fd census (hilogd.server dual-drain evidence for
