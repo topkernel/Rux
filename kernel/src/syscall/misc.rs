@@ -3215,7 +3215,7 @@ pub fn pid1_epoll_interest_dump(pid: crate::process::task::Pid) {
                 None => (false, alloc::string::String::new(), 0, ""),
             };
             crate::pr_warn!(
-                "PID1EPOLL  fd={} mask={:#x} et={} oneshot={} reports={} file_id_match={} ops={:#x}{}{}{}",
+                "PID1EPOLL  fd={} mask={:#x} et={} oneshot={} reports={} file_id_match={} ops={:#x}{}{}{}{}",
                 entry.fd,
                 entry.events,
                 (entry.events & epoll_events::EPOLLET != 0) as u8,
@@ -3225,7 +3225,22 @@ pub fn pid1_epoll_interest_dump(pid: crate::process::task::Pid) {
                 ops_id,
                 ops_tag,
                 if target.is_none() { " FD-GONE" } else { "" },
-                unix_line
+                unix_line,
+                // 120th: the fd's path — names the listener (paramservice
+                // class) vs the client sockets, the datum that identifies
+                // which registered fd never saw a connection arrive.
+                {
+                    let t1 = unsafe { crate::sched::find_task_by_pid(1) };
+                    let tk1 = if t1.is_null() { None } else { Some(unsafe { &*t1 }) };
+                    let p = tk1
+                        .and_then(|tk| {
+                            tk.try_fdtable().and_then(|fdt| {
+                                fdt.get_file(entry.fd as usize).map(|file| file.path())
+                            })
+                        })
+                        .unwrap_or_default();
+                    p
+                }
             );
         }
         drop(entries);
