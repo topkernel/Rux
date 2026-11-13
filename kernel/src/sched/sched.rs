@@ -4405,8 +4405,7 @@ pub static WW_WATCH: [core::sync::atomic::AtomicUsize; 64] =
     [const { core::sync::atomic::AtomicUsize::new(0) }; 64];
 
 /// Census side: add a victim to the watch list (idempotent).
-pub fn ww_watch_add(task: *mut Task) {
-    if task.is_null() {
+pub fn ww_watch_add(task: *mut Task) {    if task.is_null() {
         return;
     }
     let t = task as usize;
@@ -4427,6 +4426,16 @@ pub fn ww_watch_add(task: *mut Task) {
             return;
         }
     }
+}
+
+/// 119th conviction: raw fill count of watch slot `ix`'s per-task mini-ring
+/// (the monotonic event counter, saturating at u64 — the dump prints it so
+/// "watched but zero events" is provable). 0 = the slot recorded nothing.
+pub fn ww_tail_fill(ix: usize) -> u64 {
+    if ix >= WW_TAIL_IX.len() {
+        return 0;
+    }
+    WW_TAIL_IX[ix].load(core::sync::atomic::Ordering::Relaxed) as u64
 }
 
 /// Capture the calling event site's source line (wakewatch caller
@@ -4825,6 +4834,80 @@ pub fn wake_up_enqueue_opt(
                             // r11: the healed-away pick never reached its
                             // switch — supersede its generation.
                             pick_gen_supersede(c, idle_task);
+                        }
+                    }
+                }
+            }
+            // 119th (epoll-pwait conviction — WAKE side): the
+            // contradiction-keyed guard, NARROWED by measurement.
+            //
+            // MEASURED FACT (119th, boot 3/4/5 PARAM-INIT + PARAM-SENDER
+            // dumps): `pk == PICK_LIVE` is NOT a contradiction — it is the
+            // NORMAL value for every task that has ever run (the pick
+            // publishes LIVE at the switch-in affirm and nothing resets
+            // it on the way out; all 20+ sampled tasks — sleeping OS_IPC
+            // workers included — carry pk=1). A woken-but-not-yet-picked
+            // task therefore always shows {pk=1, on_cpu=0, claim=-1} and
+            // is still PICKABLE (ownership_pickable: !oncpu && claim==-1
+            // → true), so clearing that mark would be a wake-path state
+            // write on EVERY wake with no strand to remove — the r74a
+            // double-run recipe for nothing.
+            //
+            // The shape that IS a strand: a RUNNING task with a LIVE
+            // mark that NO run queue holds (linked == false) and no CPU
+            // owns (no slot names it, no SWITCHING_OUT mark, claim==-1,
+            // on_cpu==0). Such a task is on no timeline → no pick can
+            // ever take it → its wake is refused forever. Under this GRQ
+            // hold no pick can be in flight (a pick publishes the mark
+            // and the slot in ONE hold), so the combination cannot be a
+            // transient. Clear the stale mark so the pick-skip protocol
+            // cannot veto it, and let the insert below link it.
+            {
+                let pk = (*task).pick_state();
+                let claim = (*task).running_on_cpu.load(core::sync::atomic::Ordering::Relaxed);
+                let mid_sw = task_is_mid_switch_out(task);
+                if !linked
+                    && pk == crate::process::task::PICK_LIVE
+                    && !curr_on
+                    && !mid_sw
+                    && claim == -1
+                    && !(*task).on_cpu()
+                {
+                    (*task).release_pick_ownership();
+                    (*task).ti_pick_state.store(
+                        crate::process::task::PICK_PICKED,
+                        core::sync::atomic::Ordering::Release,
+                    );
+                    // Budgeted report (direct console — the GRQ is held
+                    // and printk may re-enter the scheduler).
+                    {
+                        use crate::console::putchar_no_lock as putchar;
+                        fn pd(mut v: u64) {
+                            use crate::console::putchar_no_lock as p;
+                            let mut buf = [0u8; 20];
+                            let mut n = 0;
+                            while v > 0 {
+                                buf[n] = b'0' + (v % 10) as u8;
+                                v /= 10;
+                                n += 1;
+                            }
+                            if n == 0 {
+                                p(b'0');
+                            }
+                            while n > 0 {
+                                n -= 1;
+                                p(buf[n]);
+                            }
+                        }
+                        static S_N: core::sync::atomic::AtomicU32 =
+                            core::sync::atomic::AtomicU32::new(0);
+                        if S_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+                            const M: &[u8] = b"\nR119-STALE-LIVE-MARK-CLEARED pid=";
+                            for &b in M {
+                                putchar(b);
+                            }
+                            pd((*task).pid() as u64);
+                            putchar(b'\n');
                         }
                     }
                 }
@@ -8289,6 +8372,14 @@ struct OrphanWatchSlot {
     seen_at: core::sync::atomic::AtomicU64,
     /// sum_exec_runtime at the sighting (R81 progress-conviction).
     exec: core::sync::atomic::AtomicU64,
+    /// 119th: the record's exec clock has NOT advanced since the
+    /// sighting — the task is not running, so this record is AGING
+    /// toward confirmation. The eviction policy must not drop such a
+    /// record (that is exactly what it did: the oldest seen_at IS the
+    /// record closest to confirmation, so every new orphan evicted the
+    /// very entry that was about to mature — the reason the R80/R85
+    /// heals NEVER fired on a busy box: 299 WAKE-RUN-LEAKs, 0 heals).
+    aging: core::sync::atomic::AtomicBool,
 }
 
 const EMPTY_ORPHAN_WATCH: OrphanWatchSlot = OrphanWatchSlot {
@@ -8296,6 +8387,7 @@ const EMPTY_ORPHAN_WATCH: OrphanWatchSlot = OrphanWatchSlot {
     pid: core::sync::atomic::AtomicU32::new(0),
     seen_at: core::sync::atomic::AtomicU64::new(0),
     exec: core::sync::atomic::AtomicU64::new(0),
+    aging: core::sync::atomic::AtomicBool::new(false),
 };
 
 static ORPHAN_WATCH: [OrphanWatchSlot; 16] =
@@ -8334,6 +8426,12 @@ fn orphan_watch_confirm(task: *mut Task, pid: u32, now: u64, threshold: u64) -> 
     let mut free_idx: usize = usize::MAX;
     let mut oldest_idx = 0usize;
     let mut oldest_at = u64::MAX;
+    // 119th: an AGING record (exec clock frozen across sightings) is
+    // one jiffy away from confirming — evicting it resets the whole
+    // conviction. Prefer a non-aging slot for eviction; among the
+    // non-aging ones take the oldest.
+    let mut evict_idx = usize::MAX;
+    let mut evict_at = u64::MAX;
     for i in 0..ORPHAN_WATCH.len() {
         let s = &ORPHAN_WATCH[i];
         let t = s.task.load(Ordering::Acquire);
@@ -8354,6 +8452,12 @@ fn orphan_watch_confirm(task: *mut Task, pid: u32, now: u64, threshold: u64) -> 
                 if first == 0 || now < first || exec != first_exec {
                     s.seen_at.store(now, Ordering::Release);
                     s.exec.store(exec, Ordering::Release);
+                    s.aging.store(false, Ordering::Release);
+                } else {
+                    // The exec clock is frozen: this record is AGING
+                    // toward confirmation. Mark it so the eviction
+                    // policy leaves it alone.
+                    s.aging.store(true, Ordering::Release);
                 }
                 return false;
             }
@@ -8362,6 +8466,7 @@ fn orphan_watch_confirm(task: *mut Task, pid: u32, now: u64, threshold: u64) -> 
             s.pid.store(pid, Ordering::Release);
             s.seen_at.store(now, Ordering::Release);
             s.exec.store(exec, Ordering::Release);
+            s.aging.store(false, Ordering::Release);
             return false;
         }
         if t == 0 && free_idx == usize::MAX {
@@ -8372,12 +8477,23 @@ fn orphan_watch_confirm(task: *mut Task, pid: u32, now: u64, threshold: u64) -> 
             oldest_at = at;
             oldest_idx = i;
         }
+        if !s.aging.load(Ordering::Acquire) && at < evict_at {
+            evict_at = at;
+            evict_idx = i;
+        }
     }
-    let i = if free_idx != usize::MAX { free_idx } else { oldest_idx };
+    let i = if free_idx != usize::MAX {
+        free_idx
+    } else if evict_idx != usize::MAX {
+        evict_idx
+    } else {
+        oldest_idx
+    };
     ORPHAN_WATCH[i].task.store(raw, Ordering::Release);
     ORPHAN_WATCH[i].pid.store(pid, Ordering::Release);
     ORPHAN_WATCH[i].seen_at.store(now, Ordering::Release);
     ORPHAN_WATCH[i].exec.store(exec, Ordering::Release);
+    ORPHAN_WATCH[i].aging.store(false, Ordering::Release);
     false
 }
 

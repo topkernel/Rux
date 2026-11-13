@@ -2830,6 +2830,264 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
 /// (own queue segs/bytes, EOF/dead, peer truesize vs sndbuf cap). For
 /// other files the line names the ops table identity. Diagnostic-only
 /// cross-task fdtable walk (same contract as the taskdump path).
+/// 118th param-stall conviction instrument (timed at ~300 s by the tick
+/// hook in trap.rs): the ladder-stall verdict reduced to "init handles
+/// zero param-set messages while samgr publishes readiness into a void".
+/// This dump discriminates the three seed hypotheses directly:
+///   H1 (EPOLLET edge loss on the param unix socket): a unix socket fd of
+///      pid 1 with PENDING queue data whose epoll interest row shows an
+///      ET entry with last_reported already set to the current readiness
+///      (edge swallowed), or the socket missing from every interest set.
+///   H2 (always-ready fd spinning init's loop): an interest row whose
+///      file polls permanently ready without queue data.
+///   H3 (sender-side userspace wedge): every unix socket of pid 1 (and
+///      its peers) EMPTY — no data ever arrived; blame moves to the image.
+/// Prints: pid 1's fd inventory (epoll / unix / pipe / other), every unix
+/// socket's queue depth + peer state, the full epoll interest dump
+/// (fd/events/fid/ET snapshot/reports per row), and the trace-ring tail.
+pub fn param_stall_dump() {
+    let task = unsafe { crate::sched::find_task_by_pid(1) };
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: read-only diagnostic walk of pid 1's fdtable.
+    let tk = unsafe { &*task };
+    let fdtable = match tk.try_fdtable_mut() {
+        Some(f) => f,
+        None => return,
+    };
+    // ---- fd inventory + per-socket queue depths (incl. fds NOT in any
+    // epoll interest set — H1's dead-fd face) ----
+    let mut n_total = 0usize;
+    let mut n_epoll = 0usize;
+    let mut unix_rows: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+    fdtable.for_each_file(|fd, f| {
+        n_total += 1;
+        let ops = f.get_ops().map(|o| o as *const _ as usize).unwrap_or(0);
+        if core::ptr::eq(f.get_ops().unwrap(), &EPOLL_OPS as *const _) {
+            n_epoll += 1;
+        }
+        // Unix sockets: queue depth + peer liveness (diag contract —
+        // read-only, own locks).
+        if let Some(d) = crate::net::unix::unix_of_file_diag(f) {
+            let (segs, qb, eof, dead, peer_alive, peer_ts, sndcap, acceptq) =
+                d.diag_stream_pair();
+            if segs > 0 || eof || acceptq > 0 {
+                unix_rows.push(alloc::format!(
+                    "  unix fd={} segs={} bytes={} eof={} dead={} peer_alive={} peer_ts={} sndcap={} acceptq={}",
+                    fd, segs, qb, eof as u8, dead as u8, peer_alive as u8, peer_ts, sndcap, acceptq
+                ));
+            }
+        }
+    });
+    crate::pr_warn!(
+        "PARAM-STALL pid1 fds={} epoll={} unix-with-data-or-eof={} ops_self={:#x}",
+        n_total,
+        n_epoll,
+        unix_rows.len(),
+        &EPOLL_OPS as *const _ as usize
+    );
+    for r in unix_rows.iter().take(24) {
+        crate::pr_warn!("PARAM-STALL {}", r);
+    }
+    // ---- full epoll interest dump (fd/events/fid/ET snapshot/reports) ----
+    pid1_epoll_interest_dump(1);
+    // ---- trace-ring tail (newest records; EPOLL_CTL/DELIVERY/WAIT_SCAN
+    // rows for pid 1 name the last scheduler-visible epoll activity) ----
+    let snap = crate::trace::render_snapshot();
+    let tail: alloc::string::String = snap
+        .chars()
+        .rev()
+        .take(2400)
+        .collect::<alloc::vec::Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    crate::pr_warn!("PARAM-STALL trace-tail begin");
+    // 119th conviction: the verification print the first capture lacked —
+    // dump the WW_WATCH slot table itself (slot, task ptr, pid/comm, and
+    // the per-task mini-ring fill index) so an empty PARAM-INIT-WW ring is
+    // PROVABLY "watched but zero events" vs "never watched" (the 118th's
+    // watch-add was guarded by current().is_none() which never fires in
+    // tick context — see trap.rs WW-P1-WATCH-ADD).
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+        let mut p1_watched = false;
+        for (i, w) in crate::sched::sched::WW_WATCH.iter().enumerate() {
+            let t = w.load(core::sync::atomic::Ordering::Relaxed);
+            if t == 0 {
+                continue;
+            }
+            // SAFETY: read-only pid/comm read of a watched task; the slot
+            // was pinned by ww_watch_add and tasks on the watch list are
+            // never freed past a note_task_freed barrier (sched.rs).
+            let (pid, comm) = unsafe { ((*(t as *mut crate::process::task::Task)).pid(), (*(t as *mut crate::process::task::Task)).comm()) };
+            let cl = comm.iter().position(|&b| b == 0).unwrap_or(16);
+            let comm_str = core::str::from_utf8(&comm[..cl]).unwrap_or("?");
+            let n0 = crate::sched::sched::ww_tail_fill(i);
+            if pid == 1 {
+                p1_watched = true;
+            }
+            crate::pr_warn!(
+                "WW-WATCH-SLOT #{} task={:#x} pid={} ({}) ring_events={}",
+                i,
+                t,
+                pid,
+                comm_str,
+                n0
+            );
+        }
+        if !p1_watched {
+            crate::pr_warn!("WW-WATCH-SLOT pid 1 NOT on the watch list (watch-add failed?)");
+        }
+    }
+    crate::pr_warn!("{}", tail);
+    crate::pr_warn!("PARAM-STALL trace-tail end");
+    // 118th: pid 1's own threads' parked syscalls (the LASTSYS latch is
+    // armed from the first tick on hunt boots — see dispatch.rs), plus
+    // fd-table file identities for fd 0-8 of the main thread. The ladder
+    // break is "which syscall is init's main thread parked in" — this
+    // answers it directly at 300 s.
+    unsafe {
+        crate::process::pid_hash::pid_hash_for_each_task_try(|t| {
+            let tk = &*t;
+            if tk.tgid() != 1 {
+                return;
+            }
+            let nr = tk.last_syscall_nr.load(core::sync::atomic::Ordering::Relaxed);
+            let a0 = tk.last_syscall_a0.load(core::sync::atomic::Ordering::Relaxed);
+            let a1 = tk.last_syscall_a1.load(core::sync::atomic::Ordering::Relaxed);
+            let cb: &[u8; 16] = tk.comm();
+            let cl = cb.iter().position(|&b| b == 0).unwrap_or(16);
+            let comm = core::str::from_utf8(&cb[..cl]).unwrap_or("?");
+            crate::pr_warn!(
+                "PARAM-INIT pid={} ({}) st={:#x} pk={} lastsys={}(a0={:#x},a1={:#x})",
+                tk.pid(),
+                comm,
+                tk.state().bits(),
+                tk.pick_state(),
+                nr,
+                a0,
+                a1
+            );
+            // 118th: dump this thread's wakewatch mini-ring — for pid 1's
+            // main thread this names which scheduler stage last touched
+            // it (W wake-ok / L link / P pick-unlink / K publish /
+            // A affirm) while it sits in the never-returning pwait.
+            let mut wws = alloc::string::String::new();
+            crate::sched::sched::ww_append_dump(
+                &mut wws,
+                t,
+                crate::drivers::timer::get_jiffies(),
+            );
+            if !wws.is_empty() {
+                crate::pr_warn!("PARAM-INIT-WW{}", wws);
+            }
+        });
+    }
+    param_sender_dump();
+}
+
+/// 118th sender-naming pass (second half of the param-stall conviction):
+/// walk EVERY task for unix sockets whose PEER is a socket owned by pid 1
+/// — the would-be senders into init's param pipeline — plus every
+/// param/beget-family comm. Each row carries the sender's scheduler
+/// wake/pick state (pk mark, claim, on_cpu, CFS linkage, on_rq via the
+/// entity, preempt count, parked-syscall latches) so an orphan-marked or
+/// wake-refused sender is visible on the line itself.
+pub fn param_sender_dump() {
+    use crate::process::task::{SchedPolicy, Task, TaskState};
+    // init's unix socket identities (Arc raw pointers), one fdtable pass.
+    let init_task = unsafe { crate::sched::find_task_by_pid(1) };
+    if init_task.is_null() {
+        return;
+    }
+    let mut init_socks: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
+    if let Some(ft) = unsafe { &*init_task }.try_fdtable() {
+        ft.for_each_file(|_fd, f| {
+            if let Some(s) = crate::net::unix::unix_of_file_diag(f) {
+                init_socks.push(alloc::sync::Arc::into_raw(s) as usize);
+            }
+        });
+    }
+    let mut rows = 0usize;
+    crate::pr_warn!(
+        "PARAM-SENDERS init_socks={} — tasks connected to init + param/beget comms:",
+        init_socks.len()
+    );
+    // SAFETY: read-only diagnostic iteration (pid_hash try contract).
+    unsafe {
+        crate::process::pid_hash::pid_hash_for_each_task_try(|t| {
+            if rows >= 40 {
+                return;
+            }
+            let tk = &*t;
+            let pid = tk.pid();
+            if pid == 0 {
+                return;
+            }
+            let comm = tk.comm();
+            let comm_len = comm.iter().position(|&b| b == 0).unwrap_or(16);
+            let comm_s = core::str::from_utf8(&comm[..comm_len]).unwrap_or("?");
+            let family = comm_s.contains("param") || comm_s.contains("beget") || comm_s.contains("watcher");
+            // connected-to-init scan
+            let mut conn: Option<(usize, usize, usize)> = None; // (fd, own_segs, own_bytes)
+            if !init_socks.is_empty() {
+                if let Some(ft) = tk.try_fdtable() {
+                    ft.for_each_file(|fd, f| {
+                        if conn.is_some() {
+                            return;
+                        }
+                        if let Some(s) = crate::net::unix::unix_of_file_diag(f) {
+                            if let Some(peer) = crate::net::unix::unix_peer_of_file(f) {
+                                let p = alloc::sync::Arc::into_raw(peer) as usize;
+                                if init_socks.contains(&p) {
+                                    let (segs, qb, ..) = s.diag_stream_pair();
+                                    conn = Some((fd, segs, qb));
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+            if !family && conn.is_none() {
+                return;
+            }
+            rows += 1;
+            let linked = match crate::sched::sched::grq_diag_cfs_linked(t) {
+                Some(true) => "1",
+                Some(false) => "0",
+                None => "?",
+            };
+            let onrq = match tk.policy() {
+                SchedPolicy::Fifo | SchedPolicy::Rr => tk.rt_entity().is_on_rq(),
+                SchedPolicy::Deadline => tk.dl_entity().is_on_rq(),
+                _ => tk.sched_entity().is_on_rq(),
+            };
+            let nr = tk.last_syscall_nr.load(core::sync::atomic::Ordering::Relaxed);
+            let a0 = tk.last_syscall_a0.load(core::sync::atomic::Ordering::Relaxed);
+            crate::pr_warn!(
+                "PARAM-SENDER pid={} ({}) st={:#x} preempt={} pk={} claim={} on_cpu={} linked={} on_rq={} conn={} lastsys={}(a0={:#x})",
+                pid,
+                comm_s,
+                tk.state().bits(),
+                tk.preempt_count(),
+                tk.pick_state(),
+                tk.running_on_cpu.load(core::sync::atomic::Ordering::Acquire),
+                tk.on_cpu(),
+                linked,
+                onrq,
+                match conn {
+                    Some((fd, s, b)) => alloc::format!("fd={}:segs={}:bytes={}", fd, s, b),
+                    None => alloc::string::String::from("none-but-family"),
+                },
+                nr,
+                a0
+            );
+        });
+    }
+    crate::pr_warn!("PARAM-SENDERS end rows={}", rows);
+}
+
 pub fn pid1_epoll_interest_dump(pid: crate::process::task::Pid) {
     // SAFETY: diagnostic lookup of the target task (find_task_by_pid
     // contract); read-only walks of its fdtable below.
@@ -2897,13 +3155,34 @@ pub fn pid1_epoll_interest_dump(pid: crate::process::task::Pid) {
             cur = unsafe { (*cur).next };
             watched_fds.push(entry.fd as usize);
             let target = fdtable.get_file(entry.fd as usize);
-            let (fid_ok, unix_line, ops_id) = match &target {
+            let (fid_ok, unix_line, ops_id, ops_tag) = match &target {
                 Some(f) => {
                     let fid_ok = f.file_id == entry.file_id;
                     let ops_id = f
                         .get_ops()
                         .map(|o| o as *const _ as usize)
                         .unwrap_or(0);
+                    // 118th ladder hunt: name the fd TYPE for the
+                    // known OPS statics — the loop's timerfd/eventfd/
+                    // signalfd members are the job-timer suspects.
+                    let ops_tag: &str = f
+                        .get_ops()
+                        .map(|o| {
+                            if core::ptr::eq(o, &TIMERFD_OPS as *const _) {
+                                " timerfd"
+                            } else if core::ptr::eq(o, &EVENTFD_OPS as *const _) {
+                                " eventfd"
+                            } else if core::ptr::eq(o, &SIGNALFD_OPS as *const _) {
+                                " signalfd"
+                            } else if core::ptr::eq(o, &EPOLL_OPS as *const _) {
+                                " epoll"
+                            } else if core::ptr::eq(o, &crate::fs::pipe::PIPE_OPS as *const _) {
+                                " pipe"
+                            } else {
+                                ""
+                            }
+                        })
+                        .unwrap_or("");
                     let unix_line = crate::net::unix::unix_of_file_diag(f)
                         .map(|s| {
                             let (segs, qb, eof, dead, peer_alive, peer_ts, sndcap, acceptq) =
@@ -2922,12 +3201,12 @@ pub fn pid1_epoll_interest_dump(pid: crate::process::task::Pid) {
                             )
                         })
                         .unwrap_or_default();
-                    (fid_ok, unix_line, ops_id)
+                    (fid_ok, unix_line, ops_id, ops_tag)
                 }
-                None => (false, alloc::string::String::new(), 0),
+                None => (false, alloc::string::String::new(), 0, ""),
             };
             crate::pr_warn!(
-                "PID1EPOLL  fd={} mask={:#x} et={} oneshot={} reports={} file_id_match={} ops={:#x}{}{}",
+                "PID1EPOLL  fd={} mask={:#x} et={} oneshot={} reports={} file_id_match={} ops={:#x}{}{}{}",
                 entry.fd,
                 entry.events,
                 (entry.events & epoll_events::EPOLLET != 0) as u8,
@@ -2935,6 +3214,7 @@ pub fn pid1_epoll_interest_dump(pid: crate::process::task::Pid) {
                 entry.reports,
                 fid_ok as u8,
                 ops_id,
+                ops_tag,
                 if target.is_none() { " FD-GONE" } else { "" },
                 unix_line
             );
@@ -3079,6 +3359,14 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
         // by the next round, so removal stays correct, just deferred.
         let mut dead_nodes: alloc::vec::Vec<*mut EpollEntry> =
             alloc::vec::Vec::with_capacity(128);
+        // 119th (epoll-pwait conviction): the per-round readiness probe
+        // for init's main thread (pid 1). Stack buffers — no allocation
+        // under the entries lock.
+        const PROBE_CAP: usize = 48;
+        let mut probe_fds: [i32; PROBE_CAP] = [0; PROBE_CAP];
+        let mut probe_rev: [u16; PROBE_CAP] = [0; PROBE_CAP];
+        let probe_n = core::sync::atomic::AtomicUsize::new(0);
+        let probe_armed = crate::process::current_pid() == 1;
         // P3 wiring set (see the event-driven wait block below): hoisted
         // so the per-round build never allocates under the entries lock.
         // EPOLL_WIRE_CAP bounds it — an interest set larger than the cap
@@ -3222,6 +3510,23 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
             // to the same epoll event bits the old mask-echo did).
             let revents = file.poll_dispatch(poll_mask);
 
+            // 119th (epoll-pwait conviction): the readiness PROBE for
+            // init's main thread. The waiter is woken hundreds of
+            // times per second and never sees a ready fd — the probe
+            // names, per scan round, WHICH fds report readiness and
+            // what the readiness bits are, so the verdict separates
+            // "a ready fd the scan failed to report" (a mapping bug)
+            // from "nothing is ready" (the event was consumed by the
+            // sibling waiter before this scan).
+            if probe_armed {
+                let n = probe_n.load(core::sync::atomic::Ordering::Relaxed);
+                if n < PROBE_CAP {
+                    probe_fds[n] = entry.fd;
+                    probe_rev[n] = revents;
+                    probe_n.store(n + 1, core::sync::atomic::Ordering::Relaxed);
+                }
+            }
+
             if revents != 0 {
                 let mut ep_events: u32 = 0;
                 if revents & (POLLIN | POLLRDNORM | POLLHUP) != 0 { ep_events |= EPOLLIN; }
@@ -3275,6 +3580,28 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
             }
         }
         drop(entries);
+        // 119th (epoll-pwait conviction): the per-round readiness
+        // summary for init's main thread. Printed AFTER the entries lock
+        // is dropped (printk may allocate) and only for pid 1.
+        if probe_armed {
+            let n = probe_n.load(core::sync::atomic::Ordering::Relaxed).min(PROBE_CAP);
+            use core::sync::atomic::{AtomicU32, Ordering as Rel};
+            static PROBE_ROUNDS: AtomicU32 = AtomicU32::new(0);
+            let r = PROBE_ROUNDS.fetch_add(1, Rel::Relaxed);
+            if r < 20 || r % 500 == 0 {
+                let mut s = alloc::format!("EPPROBE round={} nfd={} ready=[", r, n);
+                let mut nonzero = 0usize;
+                for i in 0..n {
+                    if probe_rev[i] != 0 {
+                        nonzero += 1;
+                        s.push_str(&alloc::format!("{}:{:#x} ", probe_fds[i], probe_rev[i]));
+                    }
+                }
+                s.push_str(&alloc::format!("] nonzero={} events={}", nonzero, ready_events.len()));
+                crate::pr_warn!("{}", s);
+            }
+            probe_n.store(0, Rel::Relaxed);
+        }
         // Free the dead-interest nodes the scan unlinked — OUTSIDE the
         // entries lock (117th allocation discipline: a free can hit the
         // allocator's slow path, which must never run under the lock).
