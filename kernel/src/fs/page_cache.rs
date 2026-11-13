@@ -720,6 +720,73 @@ impl PageCache {
         out
     }
 
+    /// Tmpfs coherence twin of `get` (fsx-linux FXW family): identical
+    /// pinning lookup, but an INVALIDATED entry is served, not refused.
+    /// Rux's invalidate never zaps PTEs (documented deviation), so a
+    /// tmpfs frame that is invalidated-but-still-mapped/pinned remains a
+    /// LIVE face of the file — a mapper's stores land in it directly and
+    /// nothing copies them to the node pages, so an fd read that skips
+    /// the frame reads stale node bytes (FXW FD-MISMATCH). For ext4 the
+    /// refused-on-invalidated contract stays: an invalidated frame there
+    /// is retired data the disk supersedes, never a fresher face.
+    pub fn get_stale(&self, fs_id: u64, ino: u64, page_index: u64) -> Option<*const u8> {
+        let key = cache_key(fs_id, ino);
+        let entry = self.lookup_claimed(key)?;
+        let out = {
+            let mut g = entry.lock.lock();
+            let page = g.get_mut(&page_index)?;
+            STAT_HITS.fetch_add(1, Ordering::Relaxed);
+            page.pin_locked();
+            let page_desc = pfn_to_page_mut(page.pfn);
+            if !page_desc.is_null() {
+                unsafe {
+                    (*page_desc).set_flag(PageFlag::Referenced);
+                }
+            }
+            let phys = pfn_to_phys(page.pfn);
+            Some(phys_to_virt_ptr(phys) as *const u8)
+        };
+        drop(entry);
+        out
+    }
+
+    /// REVIVE twin of `get_stale` (tmpfs fault path, fsx-linux FXW): same
+    /// pinned lookup that serves invalidated entries, but a hit on an
+    /// invalidated frame also CLEARS the mark — the frame comes back as a
+    /// full citizen of the cache. Why revive: Rux never zaps PTEs, so an
+    /// invalidated-but-mapped tmpfs frame remains the page's live face; a
+    /// regrow (ftruncate) plus a fresh mapper's write fault must reuse
+    /// that frame (mapper stores never reach the node pages), and without
+    /// the revive the final put at munmap would remove+free the entry —
+    /// evaporating the newly written data (FXW regression, truncate-evict
+    /// family). The caller faults only at offsets inside the current file
+    /// size (the fault-path EOF gate), so reviving cannot resurrect
+    /// past-EOF data: truncate's force-zero pass already blanked the
+    /// frame's cut range. ext4 keeps the strict contract — it never calls
+    /// this.
+    pub fn get_stale_revive(&self, fs_id: u64, ino: u64, page_index: u64) -> Option<u64> {
+        let key = cache_key(fs_id, ino);
+        let entry = self.lookup_claimed(key)?;
+        let out = {
+            let mut g = entry.lock.lock();
+            let page = g.get_mut(&page_index)?;
+            if page.invalidated {
+                page.invalidated = false;
+            }
+            STAT_HITS.fetch_add(1, Ordering::Relaxed);
+            page.pin_locked();
+            let page_desc = pfn_to_page_mut(page.pfn);
+            if !page_desc.is_null() {
+                unsafe {
+                    (*page_desc).set_flag(PageFlag::Referenced);
+                }
+            }
+            Some(pfn_to_phys(page.pfn) as u64)
+        };
+        drop(entry);
+        out
+    }
+
     /// Pin up to `out.len()` consecutive cached pages starting at
     /// `page_index`, filling `out` with (index, pointer) pairs.
     ///
@@ -1184,6 +1251,37 @@ impl PageCache {
         data: &[u8],
         skip_pfn: u64,
     ) {
+        self.writeback_update_range_impl(fs_id, ino, file_off, data, skip_pfn, false);
+    }
+
+    /// Authoritative-repopulation twin of `writeback_update_range` (tmpfs
+    /// truncate coherence): identical body except STALE-BUT-MAPPED frames
+    /// are updated too. An invalidated entry whose frame still backs a
+    /// live PTE is normally untouchable (a write "resurrects" data the
+    /// invalidation promised to retire), but a truncate's zero-fill is
+    /// exactly the promise-keeper: [old_size, new_size) must read as
+    /// zeros on EVERY face of the file, including a mapper's still-live
+    /// alias of a page an earlier shrink marked. Reachable only from
+    /// TmpfsNode::truncate (single authoritative writer of that range).
+    pub fn writeback_update_range_stale(
+        &self,
+        fs_id: u64,
+        ino: u64,
+        file_off: u64,
+        data: &[u8],
+    ) {
+        self.writeback_update_range_impl(fs_id, ino, file_off, data, 0, true);
+    }
+
+    fn writeback_update_range_impl(
+        &self,
+        fs_id: u64,
+        ino: u64,
+        file_off: u64,
+        data: &[u8],
+        skip_pfn: u64,
+        force_stale: bool,
+    ) {
         if data.is_empty() {
             return;
         }
@@ -1199,9 +1297,11 @@ impl PageCache {
                 let Some(page) = g.get(&idx) else {
                     continue;
                 };
-                if page.invalidated {
+                if page.invalidated && !force_stale {
                     // Stale-pinned entry: serves misses, dies on its last put —
                     // leave it alone (its frame is invisible to new faults).
+                    // (force_stale: tmpfs truncate zero-fill — see
+                    // writeback_update_range_stale.)
                     continue;
                 }
                 if skip_pfn != 0 && page.pfn as u64 == skip_pfn {
@@ -1660,6 +1760,78 @@ impl PageCache {
         drop(entry);
     }
 
+    /// Range-bounded twin of `invalidate_inode` (tmpfs truncate, fsx-linux
+    /// family): identical doom/invalidation discipline, but only pages at
+    /// index >= `from_page` are touched — a byte-granular ftruncate keeps
+    /// every page index < ceil(new_size/PAGE) (its partial last page's
+    /// tail is zeroed in-frame by the caller via
+    /// `writeback_update_range_stale`, mirroring the node-side tail zero).
+    /// Same invariants as the whole-entry form: unreferenced frames are
+    /// freed here; pinned/mapped ones are marked and die on their final
+    /// put/eviction; no allocation under any lock (fixed 64-entry doom
+    /// list, multi-pass loop).
+    pub fn invalidate_inode_range(&self, fs_id: u64, ino: u64, from_page: u64) {
+        let key = cache_key(fs_id, ino);
+        let Some(entry) = self.lookup_claimed(key) else {
+            return;
+        };
+        const PASS_MAX: usize = 64;
+        loop {
+            let mut doomed: [(u64, usize); PASS_MAX] = [(0, 0); PASS_MAX];
+            let mut n = 0usize;
+            let emptied = {
+                let mut g = entry.lock.lock();
+                for (&idx, page) in g.iter_mut() {
+                    if idx < from_page {
+                        continue; // kept by the truncate: not this call's business
+                    }
+                    if n == PASS_MAX {
+                        break;
+                    }
+                    // PCACHE_RO alias guard (perf-gap-hunt): a MAPPED frame
+                    // with no pin must die exactly like a PINNED one —
+                    // invalidated now, reclaimed by the eviction walk's
+                    // mapcount check once the last mapping drops.
+                    let mapped = {
+                        let pd = pfn_to_page_mut(page.pfn);
+                        // SAFETY: vmemmap descriptor of a live cache frame;
+                        // read-only is_mapped check under the inode lock.
+                        !pd.is_null() && unsafe { (*pd).is_mapped() }
+                    };
+                    if page.ref_count.load(Ordering::Acquire) == 0 && !mapped {
+                        page.invalidated = true; // marker; removed below
+                        doomed[n] = (idx, page.pfn);
+                        n += 1;
+                    } else {
+                        page.invalidated = true; // pinned/mapped: dies on its final put/eviction
+                    }
+                }
+                for &(idx, pfn) in &doomed[..n] {
+                    g.remove(&idx);
+                    let page_desc = pfn_to_page_mut(pfn);
+                    if !page_desc.is_null() {
+                        unsafe {
+                            lru::page_remove_lru(&*page_desc);
+                        }
+                    }
+                    release_page_frame(pfn);
+                }
+                if n > 0 {
+                    self.total_pages.fetch_sub(n as u32, Ordering::Relaxed);
+                }
+                g.is_empty()
+            };
+            if emptied {
+                self.remove_entry(key, &entry);
+            }
+            if n < PASS_MAX {
+                break;
+            }
+            // Full pass — more unreferenced pages may remain. Loop.
+        }
+        drop(entry);
+    }
+
     // ==================== writer-side ops (wlock) ====================
 
     /// Insert a newly-read page into the cache.
@@ -1767,6 +1939,51 @@ impl PageCache {
                 // do). Skip caching this read; the old entry dies via
                 // its refcount. The pre-allocated frame is unused on
                 // both paths — returned below.
+                //
+                // LAZY REAP (FXW-SQUAT, fsx-linux ext4 face): an entry
+                // retired by an earlier invalidate whose frame was
+                // pinned/mapped BACK THEN can outlive its last
+                // reference — put()'s per-page fallback removes such an
+                // entry only when a put actually runs, and a frame whose
+                // pins all evaporated through entry-replacement paths
+                // never sees one. The retired entry then squats the page
+                // index: every later insert (fd write populate, fault
+                // bounce, zero fill) dedups against it and frees its own
+                // fresh frame — the page can NEVER be cached again, and
+                // the fault path falls to the private-copy arm (mapper
+                // data invisible to every other face of the file). A
+                // fresh insert is the natural reaper: a retired entry
+                // with NO pin and NO live mapping is removed here (frame
+                // freed exactly like invalidate's doomed path) so this
+                // insert installs the new frame.
+                if g.contains_key(&page_index) {
+                    let reap = {
+                        let stale = g.get(&page_index).expect("contains_key");
+                        if !stale.invalidated {
+                            false
+                        } else {
+                            let mapped = {
+                                let pd = pfn_to_page_mut(stale.pfn);
+                                !pd.is_null() && unsafe { (*pd).is_mapped() }
+                            };
+                            stale.ref_count.load(Ordering::Acquire) == 0 && !mapped
+                        }
+                    };
+                    if reap {
+                        let stale = g.remove(&page_index).expect("contains_key");
+                        let page_desc = pfn_to_page_mut(stale.pfn);
+                        if !page_desc.is_null() {
+                            unsafe {
+                                lru::page_remove_lru(&*page_desc);
+                            }
+                        }
+                        release_page_frame(stale.pfn);
+                        self.total_pages.fetch_sub(1, Ordering::Relaxed);
+                        // fall through: the fresh frame installs below
+                    } else {
+                        duplicate = true;
+                    }
+                }
                 if g.contains_key(&page_index) {
                     duplicate = true;
                 } else {
@@ -1984,14 +2201,41 @@ impl PageCache {
                         // fresh entry is left alone (no frame clobber/leak);
                         // an invalidated-but-pinned one (R8-3) is skipped
                         // too. The frame was popped from the zone — release
-                        // it right away.
+                        // it right away. LAZY REAP (FXW-SQUAT, see
+                        // insert_ext): a retired entry with no pin and no
+                        // live mapping is removed here so the batch's frame
+                        // installs instead of being dropped against a
+                        // squatter.
                         if g.contains_key(&page_index) {
-                            // Duplicate index: the frame was already filled
-                            // and described in the unlocked stage above —
-                            // release it exactly as the old in-lock order
-                            // did (no clobber, no leak).
-                            free_page(phys);
-                            continue;
+                            let reap = {
+                                let stale = g.get(&page_index).expect("contains_key");
+                                if !stale.invalidated {
+                                    false
+                                } else {
+                                    let pd = pfn_to_page_mut(stale.pfn);
+                                    let mapped = !pd.is_null() && unsafe { (*pd).is_mapped() };
+                                    stale.ref_count.load(Ordering::Acquire) == 0 && !mapped
+                                }
+                            };
+                            if reap {
+                                let stale = g.remove(&page_index).expect("contains_key");
+                                let pd = pfn_to_page_mut(stale.pfn);
+                                if !pd.is_null() {
+                                    unsafe {
+                                        lru::page_remove_lru(&*pd);
+                                    }
+                                }
+                                release_page_frame(stale.pfn);
+                                self.total_pages.fetch_sub(1, Ordering::Relaxed);
+                                // fall through: install the batch frame below
+                            } else {
+                                // Duplicate index: the frame was already filled
+                                // and described in the unlocked stage above —
+                                // release it exactly as the old in-lock order
+                                // did (no clobber, no leak).
+                                free_page(phys);
+                                continue;
+                            }
                         }
                         let page_desc = pfn_to_page_mut(pfn);
                         if !page_desc.is_null() {
@@ -2514,7 +2758,11 @@ pub fn shared_file_fault_page(file: &crate::fs::file::File, file_offset: u64) ->
     let cache = get_page_cache();
     let page_index = file_offset / PAGE_SIZE as u64;
 
-    if let Some(phys) = cache.get_phys(fs_id, ino, page_index) {
+    // REVIVE lookup (tmpfs-only caller): an invalidated-but-mapped frame
+    // is still the page's live face — reuse it (and un-invalidate it) so
+    // regrow-then-remap keeps serving the same frame instead of falling
+    // to the private-copy fallback (FXW squat family).
+    if let Some(phys) = cache.get_stale_revive(fs_id, ino, page_index) {
         return Some(phys);
     }
 

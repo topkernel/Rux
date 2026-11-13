@@ -261,30 +261,67 @@ impl TmpfsNode {
 
     /// Read up to `buf.len()` bytes at `offset`. Never-written pages read as
     /// zeros (sparse); reads past EOF return short.
+    ///
+    /// Cache-frame-first, PER PAGE (fsx-linux MAP_SHARED coherence): a
+    /// SHARED mapper's stores land directly in PAGE-CACHE alias frames
+    /// (PCACHE_SHARED — the fault arm maps the cache frame writable), so
+    /// a cached frame is the FRESHEST face of that page; the node copy
+    /// only mirrors what the fd path wrote. Each page is served from its
+    /// pinned frame when one is cached, else from the node pages — a
+    /// missing page does NOT stop later pages from using their frames
+    /// (a prefix-only pass served whole-node data past the first gap:
+    /// the FXW "exp='o' got='O'" family). This cannot recurse into the
+    /// fault path: `shared_file_fault_page` reaches read_at only on a
+    /// cache MISS, and every get_stale here that HITS means no bounce
+    /// read happens for that page.
     pub fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
         let size = self.size.load(Ordering::Acquire) as usize;
         if offset >= size || buf.is_empty() {
             return 0;
         }
         let avail = size - offset;
-        let to_read = buf.len().min(avail);
+        let total = buf.len().min(avail);
 
-        let pages = self.pages.lock();
+        let cache = crate::fs::page_cache::get_page_cache();
         let mut done = 0usize;
-        while done < to_read {
+        while done < total {
             let off = offset + done;
             let page_idx = off / PAGE_SIZE;
             let page_off = off % PAGE_SIZE;
-            let chunk = (to_read - done).min(PAGE_SIZE - page_off);
+            let chunk = (total - done).min(PAGE_SIZE - page_off);
+            // Frame face first. get_stale: an invalidated-but-mapped
+            // frame is still a live face for tmpfs (mapper stores live
+            // in it and never reach the node pages) — refusing it reads
+            // stale NODE bytes (FXW FD-MISMATCH family).
+            if let Some(frame) = cache.get_stale(self.fs_id, self.ino, page_idx as u64) {
+                // SAFETY: `frame` is the pinned cache page's kernel VA —
+                // PAGE_SIZE readable bytes for the pin's lifetime;
+                // page_off + chunk <= PAGE_SIZE and done + chunk <=
+                // total by construction.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        frame.add(page_off),
+                        buf.as_mut_ptr().add(done),
+                        chunk,
+                    );
+                }
+                cache.put(self.fs_id, self.ino, page_idx as u64);
+                done += chunk;
+                continue;
+            }
+            // Node face for this page (zero-fill holes). The pages lock
+            // is taken per page and released before the next cache
+            // lookup — never nested with a pcache lock.
+            let pages = self.pages.lock();
             if let Some(page) = pages.get(&page_idx) {
                 buf[done..done + chunk].copy_from_slice(&page.data[page_off..page_off + chunk]);
             } else {
                 // Hole: zero-fill.
                 buf[done..done + chunk].fill(0);
             }
+            drop(pages);
             done += chunk;
         }
-        drop(pages);
 
         self.atime.store(wall_secs(), Ordering::Release);
         done
@@ -342,6 +379,26 @@ impl TmpfsNode {
             }
         }
 
+        // MAP_SHARED alias bridge (fsx-linux coherence): the node copy
+        // above is the fd-read face, but SHARED mappers alias PAGE-CACHE
+        // frames — push the same bytes into every live frame so both
+        // faces stay one file (read_at prefers the frames; a frame not
+        // yet cached simply doesn't exist, and the next fault populates
+        // it from the fresh node state written above). Runs AFTER the
+        // pages lock: pcache locks and the node pages lock never nest.
+        if done > 0 {
+            // _stale (force through invalidated entries): a mapper's
+            // still-live alias of an invalidated frame keeps serving its
+            // PTE — skipping it here made fd writes invisible to old
+            // mappers (FXW MAP-MISMATCH family).
+            crate::fs::page_cache::get_page_cache().writeback_update_range_stale(
+                self.fs_id,
+                self.ino,
+                offset as u64,
+                &data[..done],
+            );
+        }
+
         self.mtime.store(wall_secs(), Ordering::Release);
         done
     }
@@ -350,31 +407,85 @@ impl TmpfsNode {
     /// zero the tail of the (kept) partial last page so a later re-extend
     /// exposes zeros, not stale data. Dropping a `TmpfsPage` returns it
     /// to the mount's page budget automatically.
+    ///
+    /// MAP_SHARED alias coherence (execl01 / fsx-linux family), node side
+    /// FIRST then cache side: a racing fault between the two stages
+    /// re-populates a frame from the NEW node state (zero tail, dropped
+    /// pages), which the cache-side pass then either re-zeroes or
+    /// invalidates — the reverse order would let such a fault capture a
+    /// stale tail that nothing afterwards corrects. Cache side:
+    /// (a) shrink — zero the partial last page's tail IN every live frame
+    /// (`writeback_update_range_stale` reaches stale-but-mapped aliases
+    /// too: mapped PTEs keep pointing at those frames), then drop every
+    /// frame fully beyond the new size (`invalidate_inode_range`;
+    /// mapped frames die on their final put — documented deviation,
+    /// ext4-class); (b) grow — zero every frame covering
+    /// [old_size, new_size): frames dropped by an earlier shrink (but
+    /// still mapped) would otherwise resurrect pre-truncate bytes inside
+    /// the now-valid range on re-extend.
     pub fn truncate(&self, new_size: usize) {
-        // MAP_SHARED alias coherence (execl01 family): a truncate
-        // invalidates the page-cache alias entries — mapped PTEs keep
-        // their pinned frames (documented deviation, ext4-class), and a
-        // later fault re-populates from the (zero-extended) node pages.
-        crate::fs::page_cache::get_page_cache().invalidate_inode(self.fs_id, self.ino);
-        let mut pages = self.pages.lock();
-        if new_size == 0 {
-            // A 0-size file keeps NO pages. The old `idx <= new_size /
-            // PAGE_SIZE` retained page 0 for new_size == 0 — a leaked page
-            // (and, with the size= budget, a leaked budget charge that
-            // never returned; caught by the tmpfs-budget unit test).
-            pages.clear();
-        } else {
-            let last_kept_page = new_size / PAGE_SIZE;
-            let tail = new_size % PAGE_SIZE;
-            pages.retain(|&idx, _| idx <= last_kept_page);
-            if tail != 0 {
-                if let Some(page) = pages.get_mut(&last_kept_page) {
-                    page.data[tail..PAGE_SIZE].fill(0);
+        let old_size = self.size.load(Ordering::Acquire) as usize;
+        // Node side (unchanged semantics).
+        {
+            let mut pages = self.pages.lock();
+            if new_size == 0 {
+                // A 0-size file keeps NO pages. The old `idx <= new_size /
+                // PAGE_SIZE` retained page 0 for new_size == 0 — a leaked page
+                // (and, with the size= budget, a leaked budget charge that
+                // never returned; caught by the tmpfs-budget unit test).
+                pages.clear();
+            } else {
+                let last_kept_page = new_size / PAGE_SIZE;
+                let tail = new_size % PAGE_SIZE;
+                pages.retain(|&idx, _| idx <= last_kept_page);
+                if tail != 0 {
+                    if let Some(page) = pages.get_mut(&last_kept_page) {
+                        page.data[tail..PAGE_SIZE].fill(0);
+                    }
                 }
             }
         }
-        drop(pages);
         self.size.store(new_size as u64, Ordering::Release);
+
+        // Cache side (fsx-linux FXW family: MAP-MISMATCH/FD-MISMATCH after
+        // byte-granular truncates). ZERO_PAGE lives in .rodata — a 4 KiB
+        // stack array on the syscall path is avoidable weight.
+        const ZERO_PAGE: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
+        let cache = crate::fs::page_cache::get_page_cache();
+        if new_size < old_size {
+            // Zero EVERY live frame byte in [new_size, old_size) — not
+            // just the partial tail: fully-dropped pages' frames can
+            // survive as invalidated-but-mapped aliases, and a later
+            // regrow's fault REVIVES exactly those frames
+            // (get_stale_revive); they must read as zeros then, not as
+            // pre-truncate data.
+            {
+                let mut off = new_size as u64;
+                let end = old_size as u64;
+                while off < end {
+                    let n = (end - off).min(PAGE_SIZE as u64) as usize;
+                    cache.writeback_update_range_stale(
+                        self.fs_id,
+                        self.ino,
+                        off,
+                        &ZERO_PAGE[..n],
+                    );
+                    off += n as u64;
+                }
+            }
+            let first_dropped =
+                (new_size + PAGE_SIZE - 1) / PAGE_SIZE; // ceil: pages fully beyond new_size
+            cache.invalidate_inode_range(self.fs_id, self.ino, first_dropped as u64);
+        } else if new_size > old_size {
+            let mut off = old_size as u64;
+            let end = new_size as u64;
+            while off < end {
+                let n = (end - off).min(PAGE_SIZE as u64) as usize;
+                cache.writeback_update_range_stale(self.fs_id, self.ino, off, &ZERO_PAGE[..n]);
+                off += n as u64;
+            }
+        }
+
         self.mtime.store(wall_secs(), Ordering::Release);
     }
 

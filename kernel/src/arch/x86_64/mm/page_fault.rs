@@ -736,7 +736,28 @@ pub fn handle_mm_fault(
         // Uses the entry-time captures (vma_start / vm_file /
         // file_offset / effective_size) — see the dedup comment above.
         {
-            if file_offset >= effective_size {
+            // Page-granular EOF gate (fsx-linux FXW family, filemap_fault
+            // parity): a fault on the file's LAST PARTIAL page serves (the
+            // tail past i_size reads as zeros downstream — the fill arm
+            // clamps at effective_size); only a page FULLY past i_size
+            // raises SIGBUS, which keeps mmap13's post-truncate cut-page
+            // SIGBUS intact (the cut page is fully past). A WRITE fault on
+            // a SHARED writable TMPFS mapping never SIGBUSes here even
+            // fully past EOF: the reference lets a mapper's store land in
+            // the alias frame beyond i_size (the size itself moves only on
+            // write(2)/ftruncate — the store is invisible to fd reads,
+            // same as the reference). Other files keep the strict form —
+            // the ext4 writeback machinery is not built for past-EOF
+            // dirty tails.
+            let file_pages = effective_size.div_ceil(PAGE_SIZE_USIZE);
+            let fully_past = file_offset >= file_pages * PAGE_SIZE_USIZE;
+            let tmpfs_shared_write = is_write
+                && vma_flags.is_writable()
+                && vma_flags.contains(crate::mm::vma::VmaFlags::SHARED)
+                && vm_file
+                    .as_ref()
+                    .is_some_and(|f| crate::fs::tmpfs::is_tmpfs_file(f.as_ref()));
+            if fully_past && !tmpfs_shared_write {
                 crate::pr_err!(
                     "pagefault: SIGBUS forensics: addr {:#x} vma_start {:#x} vma_off {:#x} file_off {:#x} eff_size {:#x} mmap_snap_size {:#x} fd {} pid {} path {}",
                     page_virt_addr.as_usize(),
@@ -1274,7 +1295,10 @@ pub fn handle_mm_fault(
                             return MmFaultResult::Handled;
                         }
                         if mapped_total > 0 {
-                            if want_w && crate::fs::ext4::file::is_ext4_file(file.as_ref()) {
+                            if want_w
+                                && (crate::fs::ext4::file::is_ext4_file(file.as_ref())
+                                    || crate::fs::tmpfs::is_tmpfs_file(file.as_ref()))
+                            {
                                 // Conservative v1 dirty mark (the
                                 // single-page arm's rule, applied to the
                                 // prefetched window): a writable mapping
@@ -1359,7 +1383,10 @@ pub fn handle_mm_fault(
                         // belong to the page cache.
                         filemap_bookkeep_mapped_cache_page(cache_phys);
                     }
-                    if want_w && crate::fs::ext4::file::is_ext4_file(file.as_ref()) {
+                    if want_w
+                        && (crate::fs::ext4::file::is_ext4_file(file.as_ref())
+                            || crate::fs::tmpfs::is_tmpfs_file(file.as_ref()))
+                    {
                         // Conservative v1 dirty mark, AFTER the mapping
                         // is installed (a failed/raced attempt leaves no
                         // phantom dirty): a writable mapping MAY write;
