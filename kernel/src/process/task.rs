@@ -4665,6 +4665,60 @@ impl Task {
         }
     }
 
+    /// Read the pid of a task pointer WITHOUT dereferencing it in the
+    /// caller's context (the 119th IRQ-bracket release names the
+    /// booked task; the pointer may be a freed page, so the read is
+    /// guarded by the refcount check inside the release helper).
+    pub fn task_pid_of(task: *mut Task) -> u32 {
+        if task.is_null() {
+            return 0;
+        }
+        // SAFETY: the pointer came from the current task at irq_enter;
+        // the read is a single u32 load and the value is only a
+        // diagnostic label.
+        unsafe { (*task).pid() }
+    }
+
+    /// Release a hardirq base booked on `task` from a context where the
+    /// current task is a different one (the 119th epoll-pwait
+    /// conviction: a guard's release must act on the task that took
+    /// it). Returns false when the task page is already freed (the
+    /// write is then skipped — a freed task's count is meaningless).
+    pub fn release_hardirq_base_on(
+        task: *mut Task,
+        val: i32,
+        loc: &'static core::panic::Location<'static>,
+    ) -> bool {
+        if task.is_null() {
+            return false;
+        }
+        // SAFETY: the pointer was a live task at irq_enter; the
+        // refcount check inside the method rejects a freed page.
+        unsafe { (*task).release_hardirq_base_remote(val, loc) }
+    }
+
+    /// Release a HARDIRQ base that was booked on THIS task by
+    /// `irq_enter`, from a context where the current task is a DIFFERENT
+    /// one (the bracket spanned a context switch — the 119th
+    /// epoll-pwait conviction: the release used to land on whatever
+    /// task was current at irq_exit, stranding the 0x10000 base on the
+    /// interrupted task forever and underflowing the incoming one).
+    ///
+    /// SAFE: the liveness check rejects a freed page (the refcount is
+    /// zero once the task was freed) — the count of a freed task is
+    /// meaningless, so skipping it is correct.
+    pub fn release_hardirq_base_remote(
+        &self,
+        val: i32,
+        loc: &'static core::panic::Location<'static>,
+    ) -> bool {
+        if self.task_refcnt.load(core::sync::atomic::Ordering::Acquire) == 0 {
+            return false;
+        }
+        self.sub_preempt_count_at(val, loc);
+        true
+    }
+
     /// As `sub_preempt_count_at` with the guard's lock instance for the
     /// underflow report (0 = caller had no lock to name).
     #[inline]
