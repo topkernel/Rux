@@ -906,7 +906,7 @@ pub fn do_exit(exit_code: i32) -> ! {
                 let a0 = unsafe { (*current).birth_a0[i].load(Relaxed) };
                 let _ = write!(line, " {}:{:#x}", nr & 0xffff, a0);
             }
-            crate::pr_err!("{}", line);
+            crate::pr_debug!("{}", line);
         }
     }
 
