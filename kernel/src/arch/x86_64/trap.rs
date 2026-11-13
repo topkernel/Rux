@@ -1207,7 +1207,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                         static PS_DONE: core::sync::atomic::AtomicBool =
                             core::sync::atomic::AtomicBool::new(false);
                         if !PS_DONE.load(core::sync::atomic::Ordering::Relaxed)
-                            && crate::drivers::timer::get_jiffies() >= 30_000
+                            && crate::drivers::timer::get_jiffies() >= 18_000
                             && crate::dfx::switches::enabled(
                                 crate::dfx::switches::DfxSwitch::SchedTrace,
                             )
