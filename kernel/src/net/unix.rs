@@ -280,7 +280,7 @@ pub struct UnixSocket {
     /// WRITE_ONCE(skpair->sk_err, ECONNRESET)`). A reader drains the
     /// queued data first, then the NEXT recv reports -ECONNRESET
     /// instead of a clean EOF — the peer lost data it never read.
-    err: Spinlock<i32>,
+    err: ErrLatch,
     /// W3-style wait queue for blocking recv/accept — the data-arrival
     /// queue. Reference shape: sk_sleep(sk) / sk_receive_queue.wq. Waiters:
     /// blocking recv callers (DGRAM/SEQPACKET register EXCLUSIVE —
@@ -354,7 +354,7 @@ impl UnixSocket {
             eof: Spinlock::new(false),
             dead: Spinlock::new(false),
             shut_wr: Spinlock::new(false),
-            err: Spinlock::new(0),
+            err: ErrLatch::new(),
             wait_queue: WaitQueueHead::new(),
             peer_wait: WaitQueueHead::new(),
             options: Spinlock::new(SocketOptions::new()),
@@ -444,7 +444,7 @@ impl UnixSocket {
         let acceptq = self.accept_queue.lock().len();
         let self_ptr = self as *const UnixSocket as usize;
         let charge_v = self.recv_queue.lock().charge;
-        let err_v = *self.err.lock() as i32 as usize;
+        let err_v = self.err.load() as i32 as usize;
         (segs, qb, eof, dead, peer_alive, peer_ts, sndcap, acceptq, self_ptr, peer_raw, charge_v, err_v)
     }
 
@@ -521,7 +521,7 @@ impl UnixSocket {
         }
         // A pending socket error is a readable condition (the reference
         // surfaces it from the wait loop's sock_error check).
-        if *self.err.lock() != 0 {
+        if self.err.load() != 0 {
             return true;
         }
         // EOF (peer closed) is a readable condition — read returns 0.
@@ -1263,7 +1263,7 @@ fn err_latch_watchdog(sock: &Arc<UnixSocket>) {
     }
     static LAST: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
     static N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-    let v = *sock.err.lock();
+    let v = sock.err.load();
     let prev = LAST.swap(v, core::sync::atomic::Ordering::Relaxed);
     if v != prev {
         let n = N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -1286,11 +1286,10 @@ fn unix_recvmsg_empty_tail(sock: &Arc<UnixSocket>) -> Result<UnixRecvResult, i32
     // a clean EOF when the peer closed with unread data. sock_error()
     // CLEARS on read — one delivery, then the next recv reports EOF.
     {
-        let mut e = sock.err.lock();
-        if *e != 0 {
-            let v = *e;
-            *e = 0;
-            return Err(v);
+        let e = sock.err.load();
+        if e != 0 {
+            sock.err.store(0);
+            return Err(e);
         }
     }
     // 111st: one-way latch mirrors — both stored BEFORE their locked
@@ -1762,6 +1761,49 @@ pub fn unix_peer_bound_name(sock: &Arc<UnixSocket>) -> Option<String> {
 /// ~hundreds of messages, absorbing bursts while still capping total
 /// queued bytes ≈ real heap cost (the r8 1-byte-storm hole stays closed
 /// — the charge still exceeds the true per-segment allocation).
+
+/// 122nd err-write trap (dfx=schedtrace): UnixSocket.err is being
+/// scribbled with a truesize-class counter at the message rate; the
+/// jammed-hilogd reader chain is fully explained by it. This wrapper
+/// names every WRITER: a store whose new value differs logs the new
+/// value and the caller's return address.
+pub struct ErrLatch {
+    inner: Spinlock<i32>,
+}
+
+impl ErrLatch {
+    pub fn new() -> Self {
+        Self { inner: Spinlock::new(0) }
+    }
+    pub fn load(&self) -> i32 {
+        *self.inner.lock()
+    }
+    pub fn store(&self, v: i32) {
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+            let prev = *self.inner.lock();
+            if prev != v {
+                static WN: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                let n = WN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 40 {
+                    crate::pr_warn!(
+                        "ERR-WRITE sock={:#x} {} -> {} ra={:#x}",
+                        self as *const _ as usize,
+                        prev,
+                        v,
+                        crate::dfx::backtrace::caller_return_address() as usize
+                    );
+                }
+            }
+        }
+        *self.inner.lock() = v;
+    }
+}
+
+pub fn err_field_offset() -> usize {
+    core::mem::offset_of!(UnixSocket, err)
+}
+
 fn seg_charge(len: usize) -> usize {
     const SEG_OVERHEAD: usize = core::mem::size_of::<UnixSeg>() + 512;
     len + SEG_OVERHEAD
@@ -2861,11 +2903,10 @@ pub fn unix_recv(
     // read-and-clear (reference sock_error semantics — one delivery,
     // then EOF).
     {
-        let mut e = sock.err.lock();
-        if *e != 0 {
-            let v = *e;
-            *e = 0;
-            return Err(v);
+        let e = sock.err.load();
+        if e != 0 {
+            sock.err.store(0);
+            return Err(e);
         }
     }
     // 111st: one-way latch mirrors — both stored BEFORE their locked
@@ -2988,7 +3029,7 @@ pub fn unix_close(sock: &Arc<UnixSocket>) {
         if matches!(sock.kind, UnixKind::Stream | UnixKind::Seqpacket)
             && !sock.recv_queue.lock().segs.is_empty()
         {
-            *peer.err.lock() = -104; // ECONNRESET
+            peer.err.store(-104); // ECONNRESET
         }
         // skpair->sk_state_change(skpair) (sock_def_wakeup = wake_all on
         // the PEER's sk_sleep): the peer's readers/acceptors/pollers see
@@ -3592,7 +3633,7 @@ fn unix_file_poll(file: &File, events: u16) -> u16 {
     }
     // Pending socket error (peer closed with unread data — the reference
     // sk_err): POLLERR is reported regardless of the requested mask.
-    if *socket.err.lock() != 0 {
+    if socket.err.load() != 0 {
         ready |= POLLERR;
     }
     // Peer of a connection-mode socket fully CLOSED (or its fd dropped):
@@ -4007,11 +4048,10 @@ pub fn unix_getsockopt(sock: &Arc<UnixSocket>, level: i32, optname: i32) -> Resu
             // sock_error semantics): the ECONNRESET a stream peer sees
             // after the other end closed with unread data, or the
             // options-level error slot.
-            let mut e = sock.err.lock();
-            if *e != 0 {
-                let v = *e;
-                *e = 0;
-                return Ok(v);
+            let e = sock.err.load();
+            if e != 0 {
+                sock.err.store(0);
+                return Ok(e);
             }
             Ok(sock.options.lock().error)
         }

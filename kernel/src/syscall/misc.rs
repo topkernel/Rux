@@ -2883,7 +2883,16 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
 /// Prints: pid 1's fd inventory (epoll / unix / pipe / other), every unix
 /// socket's queue depth + peer state, the full epoll interest dump
 /// (fd/events/fid/ET snapshot/reports per row), and the trace-ring tail.
+pub fn err_offset_probe() {
+    crate::pr_warn!(
+        "ERR-OFFSET sizeof(UnixSocket)={} err_at={:#x}",
+        core::mem::size_of::<crate::net::unix::UnixSocket>(),
+        crate::net::unix::err_field_offset()
+    );
+}
+
 pub fn param_stall_dump() {
+    err_offset_probe();
     let task = unsafe { crate::sched::find_task_by_pid(1) };
     if task.is_null() {
         return;
