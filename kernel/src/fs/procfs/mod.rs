@@ -1156,6 +1156,7 @@ pub fn read_file(path: &str) -> Option<Vec<u8>> {
                 "comm" => Some(pid::generate_comm(pid)),
                 "cgroup" => Some(pid::generate_cgroup(pid)),
                 "mounts" => Some(mounts::generate()),
+                "mountinfo" => Some(mounts::generate_mountinfo()),
                 _ => None,
             };
         }
