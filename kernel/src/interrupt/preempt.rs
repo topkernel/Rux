@@ -265,9 +265,32 @@ pub fn preempt_count_reset() {
 /// shadow records `Location::caller()` — without this attribute every
 /// acquire would name this line; with it, the trap dispatch site
 /// (timer/soft/ext bracket) is recorded.
+///
+/// 119th (epoll-pwait conviction): the bracket's release must act on
+/// the task that TOOK it. The +HARDIRQ_OFFSET base is charged to the
+/// interrupted task, but the bracket can span a context switch (the
+/// tick handler switches inside the bracket), and the release at
+/// irq_exit used to land on whatever task was CURRENT at exit — so the
+/// interrupted task kept its 0x10000 base FOREVER (the leaked-base
+/// face: LEAK-ORIGIN pc=65536 on a parked init) and the task the
+/// switch brought in was charged a decrement it never took (the
+/// unpaired-decrement face: UNDERFLOW-ORIGIN). The per-CPU booked-task
+/// stack below makes the bracket's owner explicit: irq_enter books the
+/// current task, irq_exit releases on the BOOKED task.
 #[inline]
 #[track_caller]
 pub fn irq_enter() {
+    // 119th: book the task that takes the base (per-CPU depth stack).
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu < crate::config::MAX_CPUS {
+        let cur = crate::sched::current()
+            .map(|t| t as *mut crate::process::task::Task as usize)
+            .unwrap_or(0);
+        let depth = IRQ_BOOK_DEPTH_CNT[cpu].fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+        if depth < IRQ_BOOK_DEPTH {
+            IRQ_BOOKED[cpu][depth].store(cur, core::sync::atomic::Ordering::Release);
+        }
+    }
     preempt_count_add(HARDIRQ_OFFSET);
     // s14 IRQ-PAIR booking check (dfx=leakhunt): remember which task
     // THIS cpu's bracket booked +HARDIRQ_OFFSET on; irq_exit verifies
@@ -291,6 +314,26 @@ pub fn irq_enter() {
     }
     crate::dfx::syscost::zone_hardirq_enter(); // syscost probe (no-op when off)
 }
+
+/// Per-CPU stack of the tasks that booked +HARDIRQ_OFFSET, one slot per
+/// nesting depth (119th). The depth stack (not a single token) is what
+/// makes an overwrite visible: with one token per CPU a second booking
+/// overwrote the first and the exit side could not see the split.
+const IRQ_BOOK_DEPTH: usize = 8;
+
+/// Booked-task stack (119th): [cpu][depth] holds the task pointer that
+/// took the +HARDIRQ_OFFSET base at that depth (0 = no task).
+static IRQ_BOOKED: [[core::sync::atomic::AtomicUsize; IRQ_BOOK_DEPTH];
+    crate::config::MAX_CPUS] =
+    [const {
+        [const {
+            core::sync::atomic::AtomicUsize::new(0)
+        }; IRQ_BOOK_DEPTH]
+    }; crate::config::MAX_CPUS];
+
+/// Current booking depth per CPU (119th).
+static IRQ_BOOK_DEPTH_CNT: [core::sync::atomic::AtomicUsize; crate::config::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; crate::config::MAX_CPUS];
 
 /// Per-CPU token of the task the in-flight outermost hardirq bracket
 /// booked +HARDIRQ_OFFSET on (s14 IRQ-PAIR probe; see irq_enter).
@@ -327,7 +370,99 @@ pub fn irq_exit() {
             }
         }
     }
-    preempt_count_sub(HARDIRQ_OFFSET);
+    // 119th (epoll-pwait conviction): release the base on the task that
+    // BOOKED it. The bracket can span a context switch (the tick
+    // handler switches inside it), so the release used to land on
+    // whatever task was current at exit — stranding the 0x10000 base
+    // on the interrupted task forever and underflowing the task the
+    // switch brought in. The per-CPU booked-task stack names the owner.
+    let cpu = crate::arch::cpu_id() as usize;
+    let mut booked: usize = 0;
+    if cpu < crate::config::MAX_CPUS {
+        let depth = IRQ_BOOK_DEPTH_CNT[cpu].load(core::sync::atomic::Ordering::Acquire);
+        if depth > 0 {
+            IRQ_BOOK_DEPTH_CNT[cpu].store(depth - 1, core::sync::atomic::Ordering::Release);
+            let idx = depth - 1;
+            if idx < IRQ_BOOK_DEPTH {
+                booked = IRQ_BOOKED[cpu][idx].load(core::sync::atomic::Ordering::Acquire);
+                IRQ_BOOKED[cpu][idx].store(0, core::sync::atomic::Ordering::Release);
+            }
+        }
+    }
+    if booked != 0 {
+        let cur = crate::sched::current()
+            .map(|t| t as *mut crate::process::task::Task as usize)
+            .unwrap_or(0);
+        if cur == booked {
+            preempt_count_sub(HARDIRQ_OFFSET);
+        } else {
+            // The bracket spanned a switch: release on the BOOKED task.
+            // The task may have exited and been freed inside the
+            // bracket (it ran on another CPU) — the safe accessor
+            // keeps the write off a freed page; the count of a freed
+            // task is meaningless anyway.
+            let bpid = crate::process::task::Task::task_pid_of(booked as *mut crate::process::task::Task);
+            let released = crate::process::task::Task::release_hardirq_base_on(
+                booked as *mut crate::process::task::Task,
+                HARDIRQ_OFFSET,
+                core::panic::Location::caller(),
+            );
+            // 119th conviction print: the bracket spanned a switch — the
+            // release landed on a task that never took the base. This
+            // is the producer of the leaked 0x10000 face. Budgeted.
+            {
+                static SPLIT_N: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                if SPLIT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+                    use crate::console::putchar_no_lock as putchar;
+                    const M: &[u8] = b"\nIRQ-BOOK-SPLIT cpu=";
+                    for &b in M {
+                        putchar(b);
+                    }
+                    fn pd(mut v: u64) {
+                        use crate::console::putchar_no_lock as p;
+                        let mut buf = [0u8; 20];
+                        let mut n = 0;
+                        while v > 0 {
+                            buf[n] = b'0' + (v % 10) as u8;
+                            v /= 10;
+                            n += 1;
+                        }
+                        if n == 0 {
+                            p(b'0');
+                        }
+                        while n > 0 {
+                            n -= 1;
+                            p(buf[n]);
+                        }
+                    }
+                    pd(cpu as u64);
+                    const M2: &[u8] = b" booked_pid=";
+                    for &b in M2 {
+                        putchar(b);
+                    }
+                    pd(bpid as u64);
+                    const M3: &[u8] = b" cur_pid=";
+                    for &b in M3 {
+                        putchar(b);
+                    }
+                    let cpid = crate::sched::get_current_pid();
+                    pd(cpid as u64);
+                    const M4: &[u8] = b" released=";
+                    for &b in M4 {
+                        putchar(b);
+                    }
+                    pd(released as u64);
+                    putchar(b'\n');
+                }
+            }
+        }
+    } else {
+        // No booking on the stack (early boot, or a bracket whose
+        // entry ran before the stack existed): release on the current
+        // task — the legacy behaviour.
+        preempt_count_sub(HARDIRQ_OFFSET);
+    }
 
     // If we are no longer in hardirq context (outermost irq_exit),
     // check for and process pending softirqs.
