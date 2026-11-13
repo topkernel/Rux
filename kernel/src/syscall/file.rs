@@ -4587,6 +4587,16 @@ fn do_fsync(args: SyscallArgs, datasync: i32) -> i64 {
                     // returned EINVAL for every ext4 directory fd.
                     if !inode.mode.is_regular_file()
                         && !(inode.mode.is_directory() && is_ext4)
+                        // Block devices DO have an fsync method in the
+                        // reference (blkdev_operations .fsync = blkdev_
+                        // fsync) — mke2fs's close path fsyncs the DEVICE
+                        // fd and its "Invalid argument while writing out
+                        // and closing file system" failure killed every
+                        // LTP loop-backed mkfs test once the devfs node's
+                        // mode became a proper S_IFBLK. Route to the
+                        // generic flush below. (Transplanted from 6a4d6733,
+                        // which was lost in a later force-push.)
+                        && !inode.mode.is_block_device()
                     {
                         return -(errno::EINVAL as i64);
                     }
