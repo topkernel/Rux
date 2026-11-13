@@ -398,6 +398,14 @@ impl VirtioInputDevice {
             let used_idx = core::ptr::read_volatile(&used.idx) as usize;
             let last_used = self.last_used as usize;
 
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
+                static DBG_N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                let n = DBG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 8 || used_idx != 0 {
+                    let nm: alloc::vec::Vec<u8> = self.name_bytes_vec();
+                    crate::pr_warn!("IN-RDBG used_idx={} last_used={} qs={} ptr={} name={}", used_idx, last_used, queue.queue_size, self.is_pointer, alloc::string::String::from_utf8_lossy(&nm));
+                }
+            }
             if used_idx == last_used {
                 return None;
             }
@@ -435,6 +443,14 @@ impl VirtioInputDevice {
     }
 
     /// Check if there are events
+    pub fn name_bytes_vec(&self) -> alloc::vec::Vec<u8> {
+        self.name
+            .iter()
+            .take_while(|&&c| c != 0)
+            .copied()
+            .collect()
+    }
+
     pub fn has_event(&self) -> bool {
         if let Some(queue) = &self.event_queue {
             unsafe {

@@ -246,6 +246,17 @@ impl VirtioGpuDevice {
             return None;
         }
 
+        // The device's queue count tells us whether an INPUT (events)
+        // queue exists at all — the virtio-gpu spec puts absolute pointer
+        // events on queue 2, and a driver that never services that queue
+        // silently drops every gesture.
+        unsafe {
+            let qnum = read_volatile(
+                (common_cfg + offset::COMMON_CFG_QUEUE_NUM as u64) as *const u16
+            );
+            crate::pr_debug!("virtio-gpu: device queue count = {}", qnum);
+        }
+
         // Step 8: Initialize control queue
         unsafe {
             write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_SELECT as u64) as *mut u16, CTRL_QUEUE);

@@ -1416,9 +1416,18 @@ unsafe fn devfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
     // one ever wired: reads returned EBADF before reaching the queue).
     if entry.devno == crate::fs::dev_t::DEV_EVDEV_KEYBOARD
         || entry.devno == crate::fs::dev_t::DEV_EVDEV_POINTER
+        || entry.devno == crate::fs::dev_t::DEV_EVDEV_TOUCHSCREEN
     {
         let b = alloc::boxed::Box::new(entry.devno);
         file.set_private_data(alloc::boxed::Box::into_raw(b) as *mut u8);
+        // Stamp the device with this file description's identity so event
+        // arrivals re-arm its epoll watchers (the evdel devices are read
+        // through epoll by OH's input stack). Without it the events sit
+        // in the queue: the UI renders but no gesture ever arrives.
+        if let Some(dev) = crate::drivers::input::evdev::device_of_devno(entry.devno) {
+            dev.register_open_file(file.file_id);
+            crate::drivers::input::evdev::trace_open(dev, file);
+        }
     }
     // VT nodes (4, 0..=NR_VT): stash the DevNo (the ioctl layer reads
     // the VT number from it) and mark the VT in use — VT_OPENQRY skips

@@ -21,6 +21,10 @@ pub const CONFIG_GENERATION: u32 = 21;       // VIRTIO_PCI_COMMON_CFGGENERATION
 
 /// Queue-related registers
 pub const COMMON_CFG_QUEUE_SELECT: u32 = 22; // VIRTIO_PCI_COMMON_Q_SELECT
+/// VIRTIO_PCI_COMMON_Q_NUM — the number of queues the device offers.
+/// For virtio-gpu this is 3 (control, cursor, events/input): a driver
+/// that only sets up control+cursor never sees the input queue.
+pub const COMMON_CFG_QUEUE_NUM: u32 = 18; // VIRTIO_PCI_COMMON_Q_NUM (0x12)
 pub const COMMON_CFG_QUEUE_SIZE: u32 = 24;   // VIRTIO_PCI_COMMON_Q_SIZE
 pub const COMMON_CFG_QUEUE_MSIX_VECTOR: u32 = 26;  // VIRTIO_PCI_COMMON_Q_MSIX
 pub const COMMON_CFG_QUEUE_ENABLE: u32 = 28; // VIRTIO_PCI_COMMON_Q_ENABLE

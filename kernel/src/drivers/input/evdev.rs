@@ -138,8 +138,17 @@ const EVENT_QUEUE_SIZE: usize = crate::config::EVDEV_EVENT_QUEUE_SIZE;
 pub struct EvdevDevice {
     /// Device name
     pub name: [u8; 32],
-    /// devfs file_id for epoll notify
-    pub file_id: u64,
+    /// The file ids of the open file descriptions for this device.
+    /// epoll notification targets a FILE (File.file_id — a per-open
+    /// generation counter, NOT the device number), so the device has to
+    /// remember which files are open on it: an epoll-based reader that
+    /// opened this node is only re-armed when the event notification
+    /// carries ITS file id.
+    pub open_file_ids: Spinlock<[u64; 4]>,
+    /// Number of valid entries in `open_file_ids`.
+    pub open_file_count: core::sync::atomic::AtomicU32,
+    /// Events pushed since boot (dfx=inputtrace counter).
+    pub events_pushed: core::sync::atomic::AtomicU32,
     /// Device ID
     pub id: InputId,
     /// Whether it is a pointer device
@@ -173,7 +182,9 @@ impl EvdevDevice {
 
         Self {
             name: name_arr,
-            file_id: 0,
+            open_file_ids: Spinlock::new([0u64; 4]),
+            open_file_count: core::sync::atomic::AtomicU32::new(0),
+            events_pushed: core::sync::atomic::AtomicU32::new(0),
             id: InputId {
                 bustype: 0x0019, // BUS_VIRTIO
                 vendor: 0x1AF4,  // Red Hat
@@ -211,8 +222,72 @@ impl EvdevDevice {
         }
     }
 
+    /// Register an open file description on this device so event
+    /// arrivals can re-arm its epoll watchers.
+    pub fn register_open_file(&self, file_id: u64) {
+        if file_id == 0 {
+            return;
+        }
+        let mut ids = self.open_file_ids.lock_irqsave();
+        let n = self.open_file_count.load(Ordering::Acquire) as usize;
+        for slot in ids.iter_mut() {
+            if *slot == 0 {
+                *slot = file_id;
+                self.open_file_count.store((n + 1) as u32, Ordering::Release);
+                return;
+            }
+        }
+    }
+
+    /// Forget a closed file description (its epoll watchers are gone).
+    pub fn unregister_open_file(&self, file_id: u64) {
+        let mut ids = self.open_file_ids.lock_irqsave();
+        let mut n = self.open_file_count.load(Ordering::Acquire) as usize;
+        let mut i = 0;
+        while i < n && i < ids.len() {
+            if ids[i] == file_id {
+                for j in i + 1..n {
+                    ids[j - 1] = ids[j];
+                }
+                ids[n - 1] = 0;
+                n -= 1;
+                i = 0;
+                continue;
+            }
+            i += 1;
+        }
+        self.open_file_count.store(n as u32, Ordering::Release);
+    }
+
     /// Push event (called from softirq context)
     pub fn push_event(&self, event: InputEvent) {
+        {
+            // dfx=inputtrace: the input arrival trace (release-visible via
+            // the raw UART path — this is the datum that says whether the
+            // guest's event source reaches the device at all).
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
+                let n = self.events_pushed.fetch_add(1, Ordering::Relaxed);
+                if n < 24 {
+                    let nm: alloc::vec::Vec<u8> = self
+                        .name
+                        .iter()
+                        .take_while(|&&c| c != 0)
+                        .copied()
+                        .collect();
+                    let line = alloc::format!(
+                        "IN-EV n={} name={} type={} code={} val={}\n",
+                        n,
+                        String::from_utf8_lossy(&nm),
+                        event.type_,
+                        event.code,
+                        event.value
+                    );
+                    for b in line.as_bytes() {
+                        crate::console::uart_putc_raw(*b);
+                    }
+                }
+            }
+        }
         {
             let mut queue = self.event_queue.lock_irqsave();
             if queue.len() >= EVENT_QUEUE_SIZE {
@@ -223,6 +298,25 @@ impl EvdevDevice {
         // Wake poll/select waiters OUTSIDE the event_queue lock (INV-LOCK-6
         // discipline: never nest a wait-queue wake inside a held spinlock).
         self.poll_waitq.wake_up_all();
+        // …and wake the EPOLL waiters: an epoll-based reader (OH's
+        // multimodalinput reads /dev/input/eventN through epoll) that is
+        // blocked in epoll_wait() is parked on the EPOLL wait queue, not
+        // on this device's poll queue — the device wake above never
+        // reaches it. Without this notification the event sits in the
+        // queue and the UI never sees the gesture (the launcher swipe
+        // stays dead while the screen renders fine).
+        //
+        // Notify each open file description on this device: the epoll
+        // wake registry is keyed by File.file_id.
+        let n = self.open_file_count.load(Ordering::Acquire) as usize;
+        if n > 0 {
+            let ids = self.open_file_ids.lock_irqsave();
+            for &fid in ids.iter().take(n.min(ids.len())) {
+                if fid != 0 {
+                    crate::syscall::misc::epoll_notify_file(fid);
+                }
+            }
+        }
     }
 
     /// Read event
@@ -249,6 +343,20 @@ pub static mut EVDEV_POINTER: Option<EvdevDevice> = None;
 /// Touchscreen evdev device (event2): mirrors pointer coordinates with
 /// touch protocol for OH multimodalinput.
 pub static mut EVDEV_TOUCHSCREEN: Option<EvdevDevice> = None;
+
+/// Resolve an EvdevDevice by its devfs device number (the devfs open
+/// path uses this to stamp the device with the new file description).
+pub fn device_of_devno(devno: DevNo) -> Option<&'static EvdevDevice> {
+    if devno == DEV_EVDEV_KEYBOARD {
+        unsafe { EVDEV_KEYBOARD.as_ref() }
+    } else if devno == DEV_EVDEV_POINTER {
+        unsafe { EVDEV_POINTER.as_ref() }
+    } else if devno == crate::fs::dev_t::DEV_EVDEV_TOUCHSCREEN {
+        unsafe { EVDEV_TOUCHSCREEN.as_ref() }
+    } else {
+        None
+    }
+}
 
 /// Resolve the EvdevDevice a file was opened against. Returns None for
 /// non-evdev files (caller falls through to other ioctl handlers).
@@ -399,6 +507,23 @@ fn evdev_file_read(file: &File, buf: &mut [u8]) -> isize {
 /// Backstop poll interval for the blocking read sleep.
 const EVDEV_READ_POLL_MS: u64 = 10;
 
+/// dfx=inputtrace: announce which node the guest opened.
+pub fn trace_open(dev: &EvdevDevice, file: &File) {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
+        return;
+    }
+    let nm: alloc::vec::Vec<u8> = dev
+        .name
+        .iter()
+        .take_while(|&&c| c != 0)
+        .copied()
+        .collect();
+    let mut s = alloc::format!("IN-OPEN name={} file_id={}\n", String::from_utf8_lossy(&nm), file.file_id);
+    for b in s.as_bytes() {
+        crate::console::uart_putc_raw(*b);
+    }
+}
+
 /// evdev close function
 fn evdev_file_close(file: &File) -> i32 {
     // Release a grab held through this fd and free the DevNo boxed by
@@ -407,6 +532,11 @@ fn evdev_file_close(file: &File) -> i32 {
     unsafe {
         if let Some(ptr) = *file.private_data.get() {
             let devno = *(ptr as *const DevNo);
+            // The file description is going away — drop its epoll
+            // notification registration.
+            if let Some(dev) = device_of_devno(devno) {
+                dev.unregister_open_file(file.file_id);
+            }
             if devno == DEV_EVDEV_KEYBOARD {
                 if let Some(ref d) = EVDEV_KEYBOARD {
                     d.grabbed.store(false, Ordering::Release);
@@ -889,9 +1019,16 @@ pub fn init_evdev() {
             abs_bits[0x00 / 8] |= 1 << (0x00 % 8); // ABS_X
             abs_bits[0x01 / 8] |= 1 << (0x01 % 8); // ABS_Y
             dev.set_ev_bits(3, &abs_bits); // EV_ABS
-            // Copy axis ranges from the pointer device
+            // Copy axis ranges from the pointer device. The MT axes
+            // (0x35/0x36) MUST carry the same range as ABS_X/Y: consumers
+            // (OH multimodalinput) read each axis's min/max via EVIOCGABS
+            // to map events into screen space — an MT axis with no absinfo
+            // reads as min=max=0 and every MT position clamps to (0,0),
+            // killing the swipe gesture even though the events flow.
             dev.set_absinfo(0, 0, 32767, 0, 0, 0);  // ABS_X
             dev.set_absinfo(1, 0, 32767, 0, 0, 0);  // ABS_Y
+            dev.set_absinfo(0x35, 0, 32767, 0, 0, 0); // ABS_MT_POSITION_X
+            dev.set_absinfo(0x36, 0, 32767, 0, 0, 0); // ABS_MT_POSITION_Y
         }
     }
 
@@ -909,20 +1046,6 @@ pub fn init_evdev() {
     // Create device nodes
     devfs::mknod("/input/event0", DEV_EVDEV_KEYBOARD, 0o666)
         .expect("Failed to create /dev/input/event0");
-    // Set file_id for epoll notify: devfs assigns file_id from the
-    // device number at open time; using the same encoding here means
-    // epoll_notify_file(this_id) matches the File's file_id.
-    unsafe {
-        if let Some(ref mut dev) = EVDEV_KEYBOARD {
-            dev.file_id = DEV_EVDEV_KEYBOARD.to_u64();
-        }
-        if let Some(ref mut dev) = EVDEV_POINTER {
-            dev.file_id = DEV_EVDEV_POINTER.to_u64();
-        }
-        if let Some(ref mut dev) = EVDEV_TOUCHSCREEN {
-            dev.file_id = crate::fs::dev_t::DEV_EVDEV_TOUCHSCREEN.to_u64();
-        }
-    }
     devfs::mknod("/input/event1", DEV_EVDEV_POINTER, 0o666)
         .expect("Failed to create /dev/input/event1");
     devfs::mknod("/input/event2", crate::fs::dev_t::DEV_EVDEV_TOUCHSCREEN, 0o666)
@@ -949,6 +1072,18 @@ pub fn init_evdev() {
         crate::fs::sysfs::register_input_event(&reg);
     }
     if let Some(reg) = ptr_reg {
+        crate::fs::sysfs::register_input_event(&reg);
+    }
+    // The touchscreen needs the same sysfs presence: OH's input stack
+    // enumerates devices through /sys/class/input (ID_INPUT_TOUCHSCREEN +
+    // the uevent), so a touchscreen with a /dev node but no sysfs entry
+    // is invisible to multimodalinput — the swipe gesture never starts.
+    let ts_reg = unsafe {
+        EVDEV_TOUCHSCREEN
+            .as_ref()
+            .map(|d| sysfs_registration("input2", "event2", crate::fs::dev_t::DEV_EVDEV_TOUCHSCREEN, d))
+    };
+    if let Some(reg) = ts_reg {
         crate::fs::sysfs::register_input_event(&reg);
     }
 }
@@ -1006,7 +1141,14 @@ fn fill_capabilities(
 
 /// Push event to evdev device
 pub fn push_input_event(is_pointer: bool, event: InputEvent) {
-    if !cfg!(debug_assertions) { return; } // release: diag output off
+
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
+        static PN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        let pn = PN.fetch_add(1, Ordering::Relaxed);
+        if pn < 10 {
+            crate::pr_warn!("IN-PUSH enter #{} is_ptr={}", pn, is_pointer);
+        }
+    }
 
     // dfx=inputtrace: payload trace to hunt phantom event streams. Prints
     // every event with a monotonically increasing ordinal so serial-log

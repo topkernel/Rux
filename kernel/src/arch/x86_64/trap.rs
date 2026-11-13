@@ -1216,6 +1216,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                             crate::syscall::misc::param_stall_dump();
                         }
                     }
+                    crate::drivers::input::input_debug_tick();
                     crate::interrupt::preempt::irq_enter();
                     // LAPIC EOI FIRST (same discipline as the PIC path):
                     // the scheduler call below can switch tasks, and the

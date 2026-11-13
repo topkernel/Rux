@@ -74,6 +74,27 @@ static INPUT_ISR_BARS: [core::sync::atomic::AtomicU64; 2] =
 /// avail ring, so the device can keep streaming — and pushed into the
 /// evdev buffers (which wakes the poll/select/epoll waiters) only after
 /// every device lock is dropped.
+/// dfx=inputtrace tick probe: drain both event queues from timer
+/// context. If IN-EV prints here while no hard IRQ ever scheduled the
+/// tasklet, the INTx wiring is the break; if the queues are empty, the
+/// device never wrote (QEMU-side drop).
+pub fn input_debug_tick() {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
+        return;
+    }
+    static TICKS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let n = TICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if n % 100 != 7 {
+        return; // ~once a second at 100 Hz
+    }
+    input_bh_run(core::ptr::null_mut());
+    static BEAT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let b = BEAT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if b < 3 {
+        crate::pr_warn!("IN-TICK beat={} ptr={:?}", b, INPUT_POINTER.lock().is_some());
+    }
+}
+
 fn input_bh_run(_t: *mut crate::interrupt::tasklet::TaskletStruct) {
     const BURST: usize = 16;
     const ROUNDS: usize = 8;
@@ -116,6 +137,11 @@ fn input_bh_run(_t: *mut crate::interrupt::tasklet::TaskletStruct) {
         }
         if n_kbd == 0 && n_ptr == 0 {
             break; // both queues drained
+        }
+        if (n_kbd + n_ptr) > 0
+            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace)
+        {
+            crate::pr_warn!("IN-BH kbd={} ptr={}", n_kbd, n_ptr);
         }
         for e in &kbd[..n_kbd] {
             evdev::push_input_event(false, *e);
