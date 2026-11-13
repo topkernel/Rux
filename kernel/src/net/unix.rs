@@ -962,13 +962,19 @@ fn unix_wait_round(
             let sock_of_queue = (queue as *const _ as usize)
                 .wrapping_sub(core::mem::offset_of!(UnixSocket, wait_queue));
             let q = unsafe { &*(sock_of_queue as *const UnixSocket) };
+            static LAST_J: core::sync::atomic::AtomicU64 =
+                core::sync::atomic::AtomicU64::new(0);
+            let now = crate::drivers::timer::get_jiffies();
+            let prev_j = LAST_J.swap(now, core::sync::atomic::Ordering::Relaxed);
             crate::pr_warn!(
-                "WQ-PARK #{} pid={} sock={:#x} segs={} kind={:?}",
+                "WQ-PARK #{} pid={} sock={:#x} segs={} kind={:?} jif={} dt={}",
                 n,
                 crate::process::current_pid(),
                 sock_of_queue,
                 q.recv_queue.lock().segs.len(),
-                q.kind
+                q.kind,
+                now,
+                now.wrapping_sub(prev_j)
             );
         }
     }
