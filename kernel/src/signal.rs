@@ -2832,7 +2832,7 @@ pub fn send_signal_from_user(pid: u32, sig: i32) -> Result<(), i32> {
                 .map(|c| core::str::from_utf8(c).unwrap_or(""))
                 .unwrap_or("")
                 .trim_end_matches('\0');
-            crate::pr_warn!(
+            crate::pr_debug!(
                 "SIGKILL-SEND from pid={} comm='{}' -> target pid={}",
                 sender_pid,
                 scomm,
@@ -3052,7 +3052,7 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
                 .map(|c| core::str::from_utf8(c).unwrap_or(""))
                 .unwrap_or("")
                 .trim_end_matches('\0');
-            crate::pr_warn!(
+            crate::pr_debug!(
                 "SIGKILL-TKILL from pid={} comm='{}' -> target tid={}",
                 sender_pid,
                 scomm,
@@ -3609,7 +3609,7 @@ pub fn send_signal_with_info(pid: u32, info: SigInfo) -> Result<(), i32> {
                     )
                 })
                 .unwrap_or((0, alloc::string::String::from("kernel")));
-            crate::pr_err!(
+            crate::pr_debug!(
                 "SWI{}: caller pid={}({}) -> pid={} info signo={} code={:#x} sipid={} siuid={}",
                 info.si_signo, cp, cc, pid,
                 info.si_signo, info.si_code, info.si_pid, info.si_uid

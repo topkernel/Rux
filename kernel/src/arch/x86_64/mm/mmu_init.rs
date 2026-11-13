@@ -572,7 +572,7 @@ impl PtLedger {
                         if owner != pid && task_pid_alive(owner) {
                             static EARLY_REPORTS: AtomicUsize = AtomicUsize::new(0);
                             if EARLY_REPORTS.fetch_add(1, Relaxed) < 8 {
-                                crate::pr_err!(
+                                crate::pr_debug!(
                                     "EARLY-ROOT-FREE root={:#x} owner pid={} ALIVE, freed in pid={} context",
                                     ppn, owner, pid
                                 );

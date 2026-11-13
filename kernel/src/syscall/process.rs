@@ -1364,7 +1364,7 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
                 .map(|fs| fs.get_root())
                 .unwrap_or_default();
             let root_str = core::str::from_utf8(&root).unwrap_or("?");
-            crate::pr_warn!(
+            crate::pr_debug!(
                 "execfail[{}] '{}' -> {} root='{}' (pid {})",
                 n,
                 pathname_str,
@@ -1392,7 +1392,7 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
                 .map(|c| core::str::from_utf8(c).unwrap_or(""))
                 .unwrap_or("")
                 .trim_end_matches('\0');
-            crate::pr_warn!(
+            crate::pr_debug!(
                 "execfail2[{}] '{}' -> {} comm='{}' (pid {})",
                 n,
                 pathname_str,
@@ -3334,7 +3334,7 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
             static UNK_PRCTL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
             let n = UNK_PRCTL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if n < 32 {
-                crate::pr_warn!(
+                crate::pr_debug!(
                     "prctl: unimplemented option {} arg2={:#x} (pid {})",
                     option,
                     arg2,

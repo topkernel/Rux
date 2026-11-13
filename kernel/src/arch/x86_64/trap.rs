@@ -2386,21 +2386,32 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
             return;
         }
     }
-    if let Some((proc_id, owner_pid, base, size)) = binder_hit.as_ref() {
-        crate::pr_err!(
-            "USEGV-FOR: cr2 {:#x} INSIDE BINDER BUFFER of proc {} (owner pid {}) base {:#x} size {:#x} — stale daemon mapping dropped at fork (DONTFORK)",
-            fault_addr, proc_id, owner_pid, base, size
-        );
-    }
+    // ONE pr_err per crash (the identity line); the multi-line
+    // forensics body below is pr_debug — compiled out in release and
+    // printk-filtered below loglevel 7 (sc160: the crash-retry loop's
+    // serial storm manufactured the IRQ-OFF windows that killed
+    // foundation; LL4 boots keep exactly this line per crash).
     crate::pr_err!(
-        "USEGV-FOR: pid={} comm='{}' rip={:#x} cr2={:#x} rsp={:#x} rbp={:#x}",
-        pid, comm, regs.rip, fault_addr, regs.rsp, regs.rbp
+        "USEGV-FOR: pid={} comm='{}' rip={:#x} cr2={:#x} rsp={:#x} rbp={:#x}{}",
+        pid,
+        comm,
+        regs.rip,
+        fault_addr,
+        regs.rsp,
+        regs.rbp,
+        match binder_hit.as_ref() {
+            Some((proc_id, owner_pid, base, size)) => alloc::format!(
+                " BINDERBUF cr2 INSIDE BINDER BUFFER of proc {} (owner pid {}) base {:#x} size {:#x} — stale daemon mapping dropped at fork (DONTFORK)",
+                proc_id, owner_pid, base, size
+            ),
+            None => alloc::string::String::new(),
+        }
     );
-    crate::pr_err!(
+    crate::pr_debug!(
         "USEGV-FOR: rax={:#x} rbx={:#x} rcx={:#x} rdx={:#x} rsi={:#x} rdi={:#x}",
         regs.rax, regs.rbx, regs.rcx, regs.rdx, regs.rsi, regs.rdi
     );
-    crate::pr_err!(
+    crate::pr_debug!(
         "USEGV-FOR: r8={:#x} r9={:#x} r10={:#x} r11={:#x} r12={:#x} r13={:#x} r14={:#x} r15={:#x}",
         regs.r8, regs.r9, regs.r10, regs.r11, regs.r12, regs.r13, regs.r14, regs.r15
     );
@@ -2442,7 +2453,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
             tk.last_syscall_a0.load(Relaxed),
             tk.last_syscall_a1.load(Relaxed)
         );
-        crate::pr_err!("{}", s);
+        crate::pr_debug!("{}", s);
     }
 
     // 50th (crash-storm hunt): the faulting task's address-space edit
@@ -2480,7 +2491,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                 };
                 let pid = unsafe { (*t).pid() };
                 if shown < 12 {
-                    crate::pr_err!(
+                    crate::pr_debug!(
                         "USEGV-FOR: mm[{tag} pid={}] {} addr={:#x} len={:#x} prot/arg2={:#x} rc={}",
                         pid, name, addr, len, prot, rc
                     );
@@ -2488,7 +2499,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                 shown += 1;
             }
             if shown > 12 {
-                crate::pr_err!("USEGV-FOR: mm[{tag}] ... {}/16 events (capped)", shown);
+                crate::pr_debug!("USEGV-FOR: mm[{tag}] ... {}/16 events (capped)", shown);
             }
         }
         if let Some(tk) = crate::sched::current() {
@@ -2506,10 +2517,10 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                 }
             });
             if sibs > 6 {
-                crate::pr_err!("USEGV-FOR: mm[sib] ... {}/{} siblings shown", 6, sibs);
+                crate::pr_debug!("USEGV-FOR: mm[sib] ... {}/{} siblings shown", 6, sibs);
             }
             if skipped > 0 {
-                crate::pr_err!("USEGV-FOR: mm[sib] {} pid-hash buckets skipped (try-walk)", skipped);
+                crate::pr_debug!("USEGV-FOR: mm[sib] {} pid-hash buckets skipped (try-walk)", skipped);
             }
         }
     }
@@ -2524,7 +2535,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
         // would name a clobbered stack). Print-path only.
         for &probe in &[regs.rip, fault_addr, regs.rax, regs.rsp] {
             match vmas.find(crate::mm::page::VirtAddr::new(probe as usize)) {
-                Some(v) => crate::pr_err!(
+                Some(v) => crate::pr_debug!(
                     "USEGV-FOR: vma({:#x}) = {:#x}-{:#x} flags={:#x} type={:?} fd={} off={:#x} origin={}{}",
                     probe,
                     v.start().as_usize(),
@@ -2536,7 +2547,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                     v.origin().creator_name(),
                     if v.origin().is_forked() { "+FORK" } else { "" }
                 ),
-                None => crate::pr_err!("USEGV-FOR: vma({:#x}) = NONE", probe),
+                None => crate::pr_debug!("USEGV-FOR: vma({:#x}) = NONE", probe),
             }
         }
         // File path + module-relative fault offset for the rip VMA, so a
@@ -2552,7 +2563,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                 let path = unsafe { crate::fs::file::get_file_fd(fd as usize) }
                     .map(|f| f.path())
                     .unwrap_or_else(|| alloc::string::String::from("?"));
-                crate::pr_err!(
+                crate::pr_debug!(
                     "USEGV-FOR: ripfile {} voff {:#x}",
                     path,
                     v.offset() + (regs.rip as usize - v.start().as_usize())
@@ -2611,7 +2622,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                         }
                         va += 8;
                     }
-                    crate::pr_err!("{}", line);
+                    crate::pr_debug!("{}", line);
                 }
             }
         }
@@ -2632,7 +2643,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                 }
             }
             if ok {
-                crate::pr_err!(
+                crate::pr_debug!(
                     "USEGV-FOR: ripbytes {:02x?}",
                     bytes
                 );
@@ -2654,10 +2665,10 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                     continue;
                 }
                 if shown >= 12 {
-                    crate::pr_err!("USEGV-FOR: nearvma ... (capped)");
+                    crate::pr_debug!("USEGV-FOR: nearvma ... (capped)");
                     break;
                 }
-                crate::pr_err!(
+                crate::pr_debug!(
                     "USEGV-FOR: nearvma {:#x}-{:#x} flags={:#x} type={:?} fd={} off={:#x} origin={}{}",
                     v.start().as_usize(),
                     v.end().as_usize(),
@@ -2698,7 +2709,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
             use core::fmt::Write;
             let _ = write!(line, " {}:{}", i, val);
         }
-        crate::pr_err!("USEGV-FOR: stack@rsp:{}", line);
+        crate::pr_debug!("USEGV-FOR: stack@rsp:{}", line);
         // leg-31B: name the VMA (+origin) behind each stack word that
         // looks like a user code pointer — the faulting frame's return
         // addresses name the CALLER library without a guest-side
@@ -2744,7 +2755,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                                     v.file_fd()
                                 );
                             }
-                            crate::pr_err!(
+                            crate::pr_debug!(
                                 "USEGV-FOR: stkva[{}] {:#x} = {:#x}-{:#x} r-x off={:#x}{} origin={}{}",
                                 i,
                                 val,
@@ -2774,7 +2785,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                                     }
                                 }
                             }
-                            crate::pr_err!("{}", cb);
+                            crate::pr_debug!("{}", cb);
                         }
                     }
                 }

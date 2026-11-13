@@ -2398,7 +2398,7 @@ pub fn schedule() {
             core::sync::atomic::AtomicU64::new(0);
         if IRQOFF_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 12 {
             let loc = core::panic::Location::caller();
-            crate::pr_warn!(
+            crate::pr_debug!(
                 "SCHED-IRQOFF caller={}:{} pid={} pc={:#x}",
                 loc.file(),
                 loc.line(),

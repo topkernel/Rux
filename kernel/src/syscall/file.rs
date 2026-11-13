@@ -2500,7 +2500,7 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
             static MSMV_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if MSMV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
-                crate::pr_warn!(
+                crate::pr_debug!(
                     "MSMOVE[{}] '{}' -> '{}' (pid {})",
                     MSMV_N.load(core::sync::atomic::Ordering::Relaxed),
                     source_abs,
