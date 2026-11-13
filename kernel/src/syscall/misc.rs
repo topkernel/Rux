@@ -2904,6 +2904,42 @@ pub fn param_stall_dump() {
         .rev()
         .collect();
     crate::pr_warn!("PARAM-STALL trace-tail begin");
+    // 119th conviction: the verification print the first capture lacked —
+    // dump the WW_WATCH slot table itself (slot, task ptr, pid/comm, and
+    // the per-task mini-ring fill index) so an empty PARAM-INIT-WW ring is
+    // PROVABLY "watched but zero events" vs "never watched" (the 118th's
+    // watch-add was guarded by current().is_none() which never fires in
+    // tick context — see trap.rs WW-P1-WATCH-ADD).
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+        let mut p1_watched = false;
+        for (i, w) in crate::sched::sched::WW_WATCH.iter().enumerate() {
+            let t = w.load(core::sync::atomic::Ordering::Relaxed);
+            if t == 0 {
+                continue;
+            }
+            // SAFETY: read-only pid/comm read of a watched task; the slot
+            // was pinned by ww_watch_add and tasks on the watch list are
+            // never freed past a note_task_freed barrier (sched.rs).
+            let (pid, comm) = unsafe { ((*(t as *mut crate::process::task::Task)).pid(), (*(t as *mut crate::process::task::Task)).comm()) };
+            let cl = comm.iter().position(|&b| b == 0).unwrap_or(16);
+            let comm_str = core::str::from_utf8(&comm[..cl]).unwrap_or("?");
+            let n0 = crate::sched::sched::ww_tail_fill(i);
+            if pid == 1 {
+                p1_watched = true;
+            }
+            crate::pr_warn!(
+                "WW-WATCH-SLOT #{} task={:#x} pid={} ({}) ring_events={}",
+                i,
+                t,
+                pid,
+                comm_str,
+                n0
+            );
+        }
+        if !p1_watched {
+            crate::pr_warn!("WW-WATCH-SLOT pid 1 NOT on the watch list (watch-add failed?)");
+        }
+    }
     crate::pr_warn!("{}", tail);
     crate::pr_warn!("PARAM-STALL trace-tail end");
     // 118th: pid 1's own threads' parked syscalls (the LASTSYS latch is
@@ -3323,6 +3359,14 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
         // by the next round, so removal stays correct, just deferred.
         let mut dead_nodes: alloc::vec::Vec<*mut EpollEntry> =
             alloc::vec::Vec::with_capacity(128);
+        // 119th (epoll-pwait conviction): the per-round readiness probe
+        // for init's main thread (pid 1). Stack buffers — no allocation
+        // under the entries lock.
+        const PROBE_CAP: usize = 48;
+        let mut probe_fds: [i32; PROBE_CAP] = [0; PROBE_CAP];
+        let mut probe_rev: [u16; PROBE_CAP] = [0; PROBE_CAP];
+        let probe_n = core::sync::atomic::AtomicUsize::new(0);
+        let probe_armed = crate::process::current_pid() == 1;
         // P3 wiring set (see the event-driven wait block below): hoisted
         // so the per-round build never allocates under the entries lock.
         // EPOLL_WIRE_CAP bounds it — an interest set larger than the cap
@@ -3466,6 +3510,23 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
             // to the same epoll event bits the old mask-echo did).
             let revents = file.poll_dispatch(poll_mask);
 
+            // 119th (epoll-pwait conviction): the readiness PROBE for
+            // init's main thread. The waiter is woken hundreds of
+            // times per second and never sees a ready fd — the probe
+            // names, per scan round, WHICH fds report readiness and
+            // what the readiness bits are, so the verdict separates
+            // "a ready fd the scan failed to report" (a mapping bug)
+            // from "nothing is ready" (the event was consumed by the
+            // sibling waiter before this scan).
+            if probe_armed {
+                let n = probe_n.load(core::sync::atomic::Ordering::Relaxed);
+                if n < PROBE_CAP {
+                    probe_fds[n] = entry.fd;
+                    probe_rev[n] = revents;
+                    probe_n.store(n + 1, core::sync::atomic::Ordering::Relaxed);
+                }
+            }
+
             if revents != 0 {
                 let mut ep_events: u32 = 0;
                 if revents & (POLLIN | POLLRDNORM | POLLHUP) != 0 { ep_events |= EPOLLIN; }
@@ -3519,6 +3580,28 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
             }
         }
         drop(entries);
+        // 119th (epoll-pwait conviction): the per-round readiness
+        // summary for init's main thread. Printed AFTER the entries lock
+        // is dropped (printk may allocate) and only for pid 1.
+        if probe_armed {
+            let n = probe_n.load(core::sync::atomic::Ordering::Relaxed).min(PROBE_CAP);
+            use core::sync::atomic::{AtomicU32, Ordering as Rel};
+            static PROBE_ROUNDS: AtomicU32 = AtomicU32::new(0);
+            let r = PROBE_ROUNDS.fetch_add(1, Rel::Relaxed);
+            if r < 20 || r % 500 == 0 {
+                let mut s = alloc::format!("EPPROBE round={} nfd={} ready=[", r, n);
+                let mut nonzero = 0usize;
+                for i in 0..n {
+                    if probe_rev[i] != 0 {
+                        nonzero += 1;
+                        s.push_str(&alloc::format!("{}:{:#x} ", probe_fds[i], probe_rev[i]));
+                    }
+                }
+                s.push_str(&alloc::format!("] nonzero={} events={}", nonzero, ready_events.len()));
+                crate::pr_warn!("{}", s);
+            }
+            probe_n.store(0, Rel::Relaxed);
+        }
         // Free the dead-interest nodes the scan unlinked — OUTSIDE the
         // entries lock (117th allocation discipline: a free can hit the
         // allocator's slow path, which must never run under the lock).
