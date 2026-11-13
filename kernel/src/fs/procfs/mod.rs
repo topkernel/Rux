@@ -563,7 +563,16 @@ impl ProcFSSuperBlock {
         // /proc/cgroups — cgroup v2 controller list. systemd reads this
         // at boot to discover available controllers ("Cannot determine
         // cgroup" freeze without it, noble-desktop 2026-11-13).
-        self.create_dynamic_file("cgroups", || {
+        self.create_dynamic_file("sys/kernel/domainname", || b"(none)\n".to_vec());
+        self.create_dynamic_file("sys/kernel/hostname", || {
+            let hn = crate::process::ns::current_uts_ns().get_hostname();
+            let mut v = hn.to_vec();
+            v.push(b'\n');
+            v
+        });
+        self.create_dynamic_file("sys/kernel/osrelease", || b"6.8.0-rux\n".to_vec());
+        self.create_dynamic_file("sys/kernel/ostype", || b"Linux\n".to_vec());
+self.create_dynamic_file("cgroups", || {
             b"#subsys_name\thierarchy\tnum_cgroups\tenabled\n              cpu\t0\t1\t1\n              memory\t0\t1\t1\n              io\t0\t1\t1\n\n"
                 .to_vec()
         });

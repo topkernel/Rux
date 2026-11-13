@@ -125,7 +125,7 @@ pub fn current_frame_pointer() -> u64 {
 
 /// Return address of the calling function (for "current" trace entries).
 #[inline]
-fn caller_return_address() -> u64 {
+pub(crate) fn caller_return_address() -> u64 {
     let ra: u64;
     #[cfg(feature = "riscv64")]
     // SAFETY: pure register read, no memory access or side effects.

@@ -443,9 +443,9 @@ impl UnixSocket {
         let sndcap = self.options.lock().sndbuf as usize;
         let acceptq = self.accept_queue.lock().len();
         let self_ptr = self as *const UnixSocket as usize;
-        let charge = self.recv_queue.lock().charge;
-        let err_latch = *self.err.lock() as usize;
-        (segs, qb, eof, dead, peer_alive, peer_ts, sndcap, acceptq, self_ptr, peer_raw, charge, err_latch)
+        let charge_v = self.recv_queue.lock().charge;
+        let err_v = *self.err.lock() as i32 as usize;
+        (segs, qb, eof, dead, peer_alive, peer_ts, sndcap, acceptq, self_ptr, peer_raw, charge_v, err_v)
     }
 
     /// Kernel-heap cost of the receive queue (Linux `sk_wmem_alloc` /
@@ -1254,7 +1254,33 @@ fn unix_recvmsg_user(
 
 /// Empty-queue tail shared by the direct path's kinds (mirror of
 /// unix_recv's tail): EOF, ENOTCONN, or EAGAIN.
+// 122nd err-latch watchdog: the app-hang root is a growing non-errno
+// value in a live socket's err field; log the caller whenever a change
+// is observed at the recv gate (rate-limited). dfx=schedtrace-gated.
+fn err_latch_watchdog(sock: &Arc<UnixSocket>) {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+        return;
+    }
+    static LAST: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
+    static N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    let v = *sock.err.lock();
+    let prev = LAST.swap(v, core::sync::atomic::Ordering::Relaxed);
+    if v != prev {
+        let n = N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 40 {
+            crate::pr_warn!(
+                "ERR-LATCH sock={:#x} {} -> {} ra={:#x}",
+                sock as *const _ as usize,
+                prev,
+                v,
+                crate::dfx::backtrace::caller_return_address() as usize
+            );
+        }
+    }
+}
+
 fn unix_recvmsg_empty_tail(sock: &Arc<UnixSocket>) -> Result<UnixRecvResult, i32> {
+    err_latch_watchdog(sock);
     // Pending socket error first (reference __skb_wait_for_more_packets
     // checks sock_error before the shutdown/EOF legs): ECONNRESET beats
     // a clean EOF when the peer closed with unread data. sock_error()
