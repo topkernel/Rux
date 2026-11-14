@@ -905,10 +905,19 @@ pub fn do_exit(exit_code: i32) -> ! {
             let segv = crate::arch::x86_64::trap::segv_hist_age(dying_pid);
             #[cfg(not(feature = "x86_64"))]
             let segv: Option<(u64, u64)> = None;
+            // Edge B (114th): the txnhunt LIVE OWING arm — a thread (or
+            // any thread of a tgid) the audit last saw owing a sync
+            // binder reply. The frozen-word arm below is blind for the
+            // first 60 s of a wedge; this arm catches the silent
+            // deaths the 113rd could not see. Snapshot read is
+            // lock-free (see binder::txn_owing_of).
+            let (owing_n, owing_txn, owing_stid) =
+                crate::ipc::binder::txn_owing_of(my_tgid, dying_pid);
             let hit = (owner_tid != 0 && dying_pid == owner_tid)
                 || (park_tgid != 0 && my_tgid == park_tgid)
                 || (!is_leader && frozen)
-                || segv.is_some();
+                || segv.is_some()
+                || owing_n > 0;
             if hit {
                 let comm_b = unsafe { (*current).comm() };
                 let comm = core::str::from_utf8(comm_b.as_slice())
@@ -945,7 +954,7 @@ pub fn do_exit(exit_code: i32) -> ! {
                     (0, 0)
                 };
                 crate::pr_warn!(
-                    "HW-EXIT-OF-HOLDER tid={} comm='{}' tgid={} code={:#x} cause={} sig={} sender={} sicode={:#x} leader={} grpexit={} lastsys={} pend={:#x} segv_age_j={} segv_cr2lo={:#x} ownerlatch={} parklatch={}",
+                    "HW-EXIT-OF-HOLDER tid={} comm='{}' tgid={} code={:#x} cause={} sig={} sender={} sicode={:#x} leader={} grpexit={} lastsys={} pend={:#x} segv_age_j={} segv_cr2lo={:#x} ownerlatch={} parklatch={} owing_n={} owing_txn={} owing_stid={}",
                     dying_pid,
                     comm,
                     my_tgid,
@@ -961,7 +970,10 @@ pub fn do_exit(exit_code: i32) -> ! {
                     segv.map(|s| s.0).unwrap_or(0),
                     segv.map(|s| s.1).unwrap_or(0),
                     owner_tid,
-                    park_tgid
+                    park_tgid,
+                    owing_n,
+                    owing_txn,
+                    owing_stid
                 );
             }
         }

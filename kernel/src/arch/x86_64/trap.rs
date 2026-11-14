@@ -2559,7 +2559,22 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
     {
         static SEGVD_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
-        if SEGVD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 6 {
+        // huks-wedge 114th: the NULL-deref storm class (usb_host's
+        // handled UBSAN family, cr2=0/low) burns the 6-decode budget in
+        // the first seconds and the POOL-FAMILY faults (cr2 >= 0x7f00...
+        // — the FFRT slab/guard geometry, the Edge-A root-cause sample)
+        // then land as one-liners with no adjvma (hw8: three such faults
+        // lost). Split the budget: low faults keep the 6-decode cap;
+        // high-userspace faults get their own 8-decode budget.
+        static SEGVD_HI_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let hi_fault = fault_addr >= 0x7f00_0000_0000;
+        let over = if hi_fault {
+            SEGVD_HI_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 8
+        } else {
+            SEGVD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 6
+        };
+        if over {
             crate::pr_err!(
                 "USEGV-L pid={} comm='{}' rip={:#x} cr2={:#x} {}",
                 pid,
@@ -2863,6 +2878,66 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                     if v.origin().is_forked() { "+FORK" } else { "" }
                 );
                 shown += 1;
+            }
+        }
+        // Edge A root-cause (114th, stack-layout lead): the ±16MB
+        // window above caps out long before cr2 in the densely-mapped
+        // huks region (the pool base sits ~0x31000 above the linker
+        // mapping chain). A tight ±256KB "adjvma" pass prints EVERY
+        // slice/guard around the fault with sizes spelled out — the
+        // pooled-stack geometry (repeating RW-slice/guard units, their
+        // origins) that decides whether the straddling copy could ever
+        // have been readable under a different placement. Capped at 24
+        // entries; runs in the same budgeted full-forensics branch.
+        {
+            let lo = (fault_addr as usize).saturating_sub(0x4_0000);
+            let hi = (fault_addr as usize).saturating_add(0x4_0000);
+            let mut shown = 0usize;
+            for v in vmas.iter() {
+                if v.end().as_usize() <= lo || v.start().as_usize() >= hi {
+                    continue;
+                }
+                if shown >= 24 {
+                    crate::pr_err!("USEGV-FOR: adjvma ... (capped)");
+                    break;
+                }
+                crate::pr_err!(
+                    "USEGV-FOR: adjvma {:#x}-{:#x} sz={:#x} flags={:#x} type={:?} fd={} off={:#x} origin={}{}",
+                    v.start().as_usize(),
+                    v.end().as_usize(),
+                    v.end().as_usize() - v.start().as_usize(),
+                    v.flags().bits(),
+                    v.vma_type(),
+                    v.file_fd(),
+                    v.offset(),
+                    v.origin().creator_name(),
+                    if v.origin().is_forked() { "+FORK" } else { "" }
+                );
+                shown += 1;
+            }
+            // Altstack membership: OH musl reserves a per-thread signal
+            // stack; if rsp sits inside it, the fault happened in a
+            // signal handler and the KERNEL's frame placement (top of
+            // ss region minus SIGNAL_FRAME_SIZE) is in the causal chain.
+            if let Some(tk) = crate::sched::current() {
+                // SAFETY: read-only fields of the current task.
+                let (ss_sp, ss_size, ss_on) = unsafe {
+                    let ss = &(*tk).sigstack;
+                    let on = !ss.is_disabled() && ss.ss_sp != 0;
+                    (ss.ss_sp, ss.ss_size, on)
+                };
+                let rsp_in = ss_on
+                    && (regs.rsp as u64) >= ss_sp
+                    && (regs.rsp as u64) < ss_sp.saturating_add(ss_size);
+                let cr2_in = ss_on && fault_addr >= ss_sp && fault_addr < ss_sp.saturating_add(ss_size);
+                crate::pr_err!(
+                    "USEGV-FOR: altstack on={} sp={:#x} sz={:#x} rsp_in={} cr2_in={}",
+                    ss_on as u8,
+                    ss_sp,
+                    ss_size,
+                    rsp_in as u8,
+                    cr2_in as u8
+                );
             }
         }
     }
