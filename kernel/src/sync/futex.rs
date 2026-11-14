@@ -307,7 +307,11 @@ static RWFRZ_WATCH_CNT: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 // sc186: 64 lines died on arena churn before the wedge window; 192 keeps
 // the same worst-case UART bound as one parkdump stack dump.
-const RWFRZ_WATCH_BUDGET: usize = 192;
+// glib-mutex: rwfrzbudget=N raises the cap (the garepro repro drives
+// thousands of ops/min through the watched word; the default cap goes
+// dark long before a freeze could form). Default unchanged.
+static RWFRZ_WATCH_BUDGET: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(192);
 
 /// rwlock-livelock: tgid whose THREAD EXITS are traced (the exit-path
 /// forensics in do_exit read this). Latched at the FIRST plain-mutex
@@ -1385,6 +1389,14 @@ pub fn fuxwatch_parse() {
                     RWFRZ_WATCH[0].store(addr as usize, core::sync::atomic::Ordering::Relaxed);
                     crate::pr_warn!("rwfrzwatch armed {:#x}", addr);
                 }
+            }
+        }
+    }
+    if let Some(v) = crate::cmdline::get_param("rwfrzbudget") {
+        if let Ok(b) = v.parse::<usize>() {
+            if b > 0 && b <= 200000 {
+                RWFRZ_WATCH_BUDGET.store(b, core::sync::atomic::Ordering::Relaxed);
+                crate::pr_warn!("rwfrzbudget {}", b);
             }
         }
     }
@@ -7805,7 +7817,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
             let wa = w.load(Relaxed);
             if wa != 0 && wa == uaddr {
                 let c = RWFRZ_WATCH_CNT.fetch_add(1, Relaxed);
-                if c < RWFRZ_WATCH_BUDGET {
+                if c < RWFRZ_WATCH_BUDGET.load(core::sync::atomic::Ordering::Relaxed) {
                     let (tid, tgid) = match crate::sched::current() {
                         Some(t) => unsafe { ((*t).pid(), (*t).tgid()) },
                         None => (0, 0),
@@ -8147,7 +8159,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
             let wa = w.load(Relaxed);
             if wa != 0 && wa == uaddr {
                 let c = RWFRZ_WATCH_CNT.fetch_add(1, Relaxed);
-                if c < RWFRZ_WATCH_BUDGET {
+                if c < RWFRZ_WATCH_BUDGET.load(core::sync::atomic::Ordering::Relaxed) {
                     let (tid, tgid) = match crate::sched::current() {
                         Some(t) => unsafe { ((*t).pid(), (*t).tgid()) },
                         None => (0, 0),
