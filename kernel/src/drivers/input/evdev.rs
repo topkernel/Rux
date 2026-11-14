@@ -536,11 +536,14 @@ fn evdev_file_read(file: &File, buf: &mut [u8]) -> isize {
                     static RD_ECHO_N: AtomicU64 = AtomicU64::new(0);
                     let n = RD_ECHO_N.fetch_add(1, Ordering::Relaxed);
                     if input_echo_budget(n) {
+                        let (pid, tgid) = current_pid_tgid();
                         itt_msg(b"INRD[");
                         itt_u64(n);
                         itt_msg(b"] pid=");
-                        itt_u64(crate::process::current_pid() as u64);
-                        itt_msg(b" node=event");
+                        itt_u64(pid);
+                        itt_msg(b"(");
+                        itt_u64(tgid);
+                        itt_msg(b") node=event");
                         itt_u64(node.saturating_sub(64) as u64);
                         itt_msg(b" type=");
                         itt_u64(event.type_ as u64);
@@ -619,11 +622,14 @@ pub fn trace_open(dev: &EvdevDevice, file: &File, node: u32) {
         static OP_ECHO_N: AtomicU64 = AtomicU64::new(0);
         let n = OP_ECHO_N.fetch_add(1, Ordering::Relaxed);
         if n < 64 {
+            let (pid, tgid) = current_pid_tgid();
             itt_msg(b"INOP[");
             itt_u64(n);
             itt_msg(b"] pid=");
-            itt_u64(crate::process::current_pid() as u64);
-            itt_msg(b" node=event");
+            itt_u64(pid);
+            itt_msg(b"(");
+            itt_u64(tgid);
+            itt_msg(b") node=event");
             itt_u64(node.saturating_sub(64) as u64);
             itt_msg(b" file_id=");
             itt_u64(file.file_id);
@@ -1500,6 +1506,18 @@ fn itt_i64(v: i64) {
         itt_u64(v.unsigned_abs());
     } else {
         itt_u64(v as u64);
+    }
+}
+
+/// The current task's (tid, tgid) for the echo lines — the boot-5 hunt
+/// spent a whole taskdump roundtrip to learn that the evdev opener
+/// (pid 618) was audio_server's thread inside tgid 408; carrying the
+/// tgid in the echo names the process at read/open time directly.
+fn current_pid_tgid() -> (u64, u64) {
+    match crate::sched::current() {
+        // SAFETY: cur is the running task; pid/tgid are const reads.
+        Some(cur) => unsafe { ((*cur).pid() as u64, (*cur).tgid() as u64) },
+        None => (0, 0),
     }
 }
 
