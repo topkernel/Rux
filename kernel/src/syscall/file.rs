@@ -5954,9 +5954,13 @@ pub fn sys_copy_file_range(args: SyscallArgs) -> i64 {
     let fd_out = args[2] as i32;
     let off_out_ptr = args[3] as *mut i64;
     let len = args[4] as usize;
-    let _flags = args[5] as u32;
+    let flags = args[5] as u32;
 
     if len == 0 { return 0; }
+    // Linux validates flags before anything else: only 0 is defined.
+    if flags != 0 {
+        return -(errno::EINVAL as i64);
+    }
 
     // off_in/off_out semantics: when non-NULL the offsets are read from and
     // written back through the pointers and the file positions are NOT
@@ -6008,8 +6012,82 @@ pub fn sys_copy_file_range(args: SyscallArgs) -> i64 {
             None => return -(errno::EBADF as i64),
         };
 
+        // Pre-copy validation (Linux generic_copy_file_checks /
+        // generic_file_rw_checks): every one of these is refused BEFORE
+        // any byte moves. The old loop copied first and asked never —
+        // LTP copy_file_range02's "max length"/"max file size" cases
+        // (off_out = max LFS size = i64::MAX) then overflowed the
+        // i64 cursor accumulation at `cur_out += written` and PANICKED
+        // the kernel ("attempt to add with overflow", file.rs).
+        {
+            use crate::fs::file::FileFlags;
+            let in_flags = in_file.flags();
+            let out_flags = out_file.flags();
+            // Access modes: in must be readable, out writable (EBADF).
+            if in_flags.is_writeonly() {
+                return -(errno::EBADF as i64);
+            }
+            if out_flags.is_readonly() {
+                return -(errno::EBADF as i64);
+            }
+            // copy_file_range honors explicit offsets; an O_APPEND
+            // destination cannot (Linux refuses with EBADF).
+            if out_flags.bits() & FileFlags::O_APPEND != 0 {
+                return -(errno::EBADF as i64);
+            }
+            // File-type gates: directories EISDIR; block/char devices,
+            // FIFOs and sockets EINVAL on either side.
+            if let (Some(ii), Some(oi)) = (in_file.get_inode(), out_file.get_inode()) {
+                if ii.mode.is_directory() || oi.mode.is_directory() {
+                    return -(errno::EISDIR as i64);
+                }
+                let bad_ty = |m: &crate::fs::inode::InodeMode| {
+                    m.is_block_device() || m.is_char_device() || m.is_fifo() || m.is_socket()
+                };
+                if bad_ty(&ii.mode) || bad_ty(&oi.mode) {
+                    return -(errno::EINVAL as i64);
+                }
+            }
+        }
+
         let mut cur_in = off_in.unwrap_or_else(|| in_file.get_pos() as i64);
         let mut cur_out = off_out.unwrap_or_else(|| out_file.get_pos() as i64);
+
+        // Offset-range validation. cur_in/cur_out are >= 0 here (the
+        // off_ptr readers above rejected negatives; file positions are
+        // unsigned). (a) A range whose end wraps the unsigned domain is
+        // EOVERFLOW (LTP "max length": off_out = i64::MAX, len =
+        // usize::MAX). (b) A range past the maximum file offset is EFBIG
+        // ("max file size": off_out = i64::MAX, len = 64 KiB — no wrap,
+        // but past the LFS ceiling).
+        {
+            let len_u = len as u64;
+            if (cur_in as u64).wrapping_add(len_u) < cur_in as u64
+                || (cur_out as u64).wrapping_add(len_u) < cur_out as u64
+            {
+                return -(errno::EOVERFLOW as i64);
+            }
+            if (cur_in as u128 + len_u as u128) > i64::MAX as u128
+                || (cur_out as u128 + len_u as u128) > i64::MAX as u128
+            {
+                return -(errno::EFBIG as i64);
+            }
+        }
+        // Same-inode overlapping ranges: the copy would corrupt its own
+        // source (LTP "overlaping range"; Linux rejects with EINVAL).
+        if let (Some(ii), Some(oi)) = (in_file.get_inode(), out_file.get_inode()) {
+            if alloc::sync::Arc::ptr_eq(ii, oi) {
+                let len_u = len as u64;
+                let (a0, a1) = (cur_in as u64, (cur_in as u64) + len_u);
+                let (b0, b1) = (cur_out as u64, (cur_out as u64) + len_u);
+                if a0 < b1 && b0 < a1 {
+                    return -(errno::EINVAL as i64);
+                }
+            }
+        }
+        // Linux caps a single copy at MAX_RW_COUNT instead of erroring.
+        const MAX_RW_COUNT: usize = 0x7fff_f000;
+        let len = len.min(MAX_RW_COUNT);
 
         let mut total = 0usize;
         let mut remaining = len;
