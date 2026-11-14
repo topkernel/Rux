@@ -6255,6 +6255,39 @@ pub fn vfs_fallocate(fd: usize, mode: i32, offset: u64, len: u64) -> Result<(), 
         return Err(errno::Errno::DeviceOrResourceBusy.as_neg_i32());
     }
 
+    // tmpfs: fallocate(2) grows the file (shmem semantics -- allocated
+    // ranges read as zeros; tmpfs pages materialize on write fault).
+    // journald v255 preallocates its seqnum sidecar file with
+    // fallocate(fd, 0, 0, len) before mmapping it MAP_SHARED; the file
+    // lives on /run (tmpfs), and the old ext4-only routing answered
+    // ENOSYS -- journald treats that as fatal ("Failed to map main
+    // seqnum file") and the whole journal stack died on every boot.
+    // PUNCH_HOLE stays EOPNOTSUPP (no partial-zero support yet).
+    if core::ptr::eq(
+        inode.ops.unwrap_or(&crate::fs::ext4::EXT4_INODE_OPS) as *const _,
+        &crate::fs::tmpfs::TMPFS_INODE_OPS as *const _,
+    ) {
+        if mode & crate::fs::ext4::FALLOC_FL_PUNCH_HOLE != 0 {
+            return Err(errno::Errno::OperationNotSupported.as_neg_i32());
+        }
+        if mode & crate::fs::ext4::FALLOC_FL_KEEP_SIZE == 0 {
+            let end = (offset as u64).saturating_add(len as u64);
+            if end > inode.size.load(core::sync::atomic::Ordering::Acquire) {
+                // SAFETY: private_data holds an Arc<TmpfsNode> placed by
+                // tmpfs_make_inode; ManuallyDrop borrows the strong count
+                // without claiming it.
+                let node = core::mem::ManuallyDrop::new(unsafe {
+                    alloc::sync::Arc::from_raw(
+                        inode.private_data.unwrap() as *const crate::fs::tmpfs::TmpfsNode,
+                    )
+                });
+                node.truncate(end as usize);
+                inode.size.store(end, core::sync::atomic::Ordering::Release);
+            }
+        }
+        return Ok(());
+    }
+
     // Route to the filesystem implementation (ext4).
     let fs_ptr = inode.private_data
         .ok_or(errno::Errno::FunctionNotImplemented.as_neg_i32())?;
