@@ -1238,6 +1238,13 @@ static FUXWATCH_HITS: core::sync::atomic::AtomicUsize =
 // marker would lose one thread's #DB → SIGTRAP → thread killed.
 static FUXWATCH_STEP_TIDS: [core::sync::atomic::AtomicU32; 4] =
     [const { core::sync::atomic::AtomicU32::new(0) }; 4];
+// huks-wedge lane (hw2): the stepped PAGE per marker. The #DB hook used
+// to re-protect slot 1's CURRENT page whatever page was stepped — after
+// a slot move that W-cleared the WRONG page (an armed-but-idle one) and
+// left the stepped page writable. The pair (tid, page) makes the
+// retirement land on the page the store actually executed on.
+static FUXWATCH_STEP_PAGES: [core::sync::atomic::AtomicU64; 4] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 4];
 static FUXWATCH_MM_DONE: [core::sync::atomic::AtomicU64; 128] =
     [const { core::sync::atomic::AtomicU64::new(0) }; 128];
 const FUXWATCH_BUDGET: usize = 4096;
@@ -1353,6 +1360,14 @@ pub fn fuxpark_latch(word: u64, tid: u32, tgid: u32) {
         // a PAGE move (a same-page shift is already covered by the RO
         // page plus the FW-PG page-mate log).
         if (s1 & !0xfff) != (word & !0xfff) {
+            // huks-wedge lane (hw2): retire the page being abandoned
+            // BEFORE reopening the done-set (the done-set entries are
+            // the armed-root ledger retire walks). hw4w1 flipped slot 1
+            // across four same-tgid words every 5 s census round; each
+            // flip left the old page W-cleared and the next legitimate
+            // store to it faulted SEGV_ACCERR (hw4 t=116.349, foundation
+            // tid 1470's musl release store on slot 2's abandoned page).
+            fuxwatch_retire_page(s1);
             FUXWATCH_ADDR.store(word, Relaxed);
             reopen_done_set();
             arm_print(1, word);
@@ -1373,9 +1388,78 @@ pub fn fuxpark_latch(word: u64, tid: u32, tgid: u32) {
             arm_print(2, word);
         }
     } else if s2_t == tgid && (s2 & !0xfff) != (word & !0xfff) {
+        fuxwatch_retire_page(s2);
         FUXWATCH2_ADDR.store(word, Relaxed);
         reopen_done_set();
         arm_print(2, word);
+    }
+}
+
+/// huks-wedge lane (hw2): retire a watched page — restore the W bit in
+/// every mm the arm round had cleared it in (the done-set). MUST run
+/// before the done-set is reopened (its entries are the ledger of armed
+/// roots). Without this, a slot re-target abandons the old page with W
+/// still cleared; `fuxwatch_page_matches` then answers false for it and
+/// the next legitimate userspace store falls through to do_page_fault →
+/// present-RO PTE → SEGV_ACCERR. hw1w1 t=68.057: distributeddata tid
+/// 1068's musl mutex RELEASE store (rip 0x3fbf11bd83) took exactly that
+/// fault 0.35 s after slot 1 moved off the word's page at t=67.704 —
+/// the mutex froze at 0x80000010 for the rest of the boot and the whole
+/// daemon wedged. Only PTEs that are present, user and W-CLEAR are
+/// touched, so genuine userspace read-only pages are never made
+/// writable: a PROT_READ mapping in an armed root keeps its bits.
+#[cfg(feature = "x86_64")]
+pub fn fuxwatch_retire_page(page: u64) {
+    if page == 0 {
+        return;
+    }
+    let va = page & !0xfff;
+    let mut touched = 0usize;
+    let g = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock();
+    for d in FUXWATCH_MM_DONE.iter() {
+        let root = d.load(core::sync::atomic::Ordering::Relaxed);
+        if root == 0 {
+            continue;
+        }
+        // SAFETY: read-only diagnostic walk of an armed root.
+        match unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, va) } {
+            // Present + user + W-clear = a page WE armed (the arm round
+            // wrote 0x1); restore RW.
+            Some((_, bits)) if bits & 0x1 != 0 && bits & 0x4 != 0 && bits & 0x2 == 0 => {
+                // SAFETY: same live root the arm round modified; one
+                // page, RW.
+                unsafe {
+                    crate::arch::mm::mm_ops::mprotect_pte_range(root, va, 1, 0x3);
+                }
+                touched += 1;
+            }
+            _ => {}
+        }
+    }
+    drop(g);
+    if touched > 0 {
+        crate::arch::x86_64::mm::asid::flush_tlb_all();
+        crate::pr_warn!("FUXWATCH-RETIRE page={:#x} restored W in {} mms", va, touched);
+    }
+}
+
+/// Non-x86 stub: the W-bit watch is x86_64-only (see fuxwatch_arm_round).
+#[cfg(not(feature = "x86_64"))]
+pub fn fuxwatch_retire_page(_page: u64) {}
+
+/// huks-wedge lane (hw2): full watch shutdown (budget trip). Retire
+/// BOTH slot pages and clear the slot addresses so the fault hook,
+/// the #DB hook and the arm rounds all stop matching. After this the
+/// instrument is inert and every page it ever touched is writable.
+pub fn fuxwatch_retire_all() {
+    let a = FUXWATCH_ADDR.load(core::sync::atomic::Ordering::Relaxed);
+    let b = FUXWATCH2_ADDR.load(core::sync::atomic::Ordering::Relaxed);
+    fuxwatch_retire_page(a);
+    fuxwatch_retire_page(b);
+    FUXWATCH_ADDR.store(0, core::sync::atomic::Ordering::Relaxed);
+    FUXWATCH2_ADDR.store(0, core::sync::atomic::Ordering::Relaxed);
+    for d in FUXWATCH_MM_DONE.iter() {
+        d.store(0, core::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -1622,16 +1706,21 @@ pub fn fuxwatch_over_budget() -> bool {
 pub fn fuxwatch_log_write(tid: u32, rip: u64, exact: bool, old_word: u32, fault_addr: u64) -> bool {
     let w2 = FUXWATCH2_ADDR.load(core::sync::atomic::Ordering::Relaxed);
     let claim = |tid: u32| {
-        for s in FUXWATCH_STEP_TIDS.iter() {
+        for (i, s) in FUXWATCH_STEP_TIDS.iter().enumerate() {
             if s.load(core::sync::atomic::Ordering::Relaxed) == tid {
-                return; // already stepping
+                // already stepping: refresh the page so a same-tid
+                // second fault (signal-handler interleave) retires the
+                // page its store will land on
+                FUXWATCH_STEP_PAGES[i].store(fault_addr & !0xfff, core::sync::atomic::Ordering::Relaxed);
+                return;
             }
         }
-        for s in FUXWATCH_STEP_TIDS.iter() {
+        for (i, s) in FUXWATCH_STEP_TIDS.iter().enumerate() {
             if s
                 .compare_exchange(0, tid, core::sync::atomic::Ordering::Relaxed, core::sync::atomic::Ordering::Relaxed)
                 .is_ok()
             {
+                FUXWATCH_STEP_PAGES[i].store(fault_addr & !0xfff, core::sync::atomic::Ordering::Relaxed);
                 return;
             }
         }
@@ -1649,6 +1738,18 @@ pub fn fuxwatch_log_write(tid: u32, rip: u64, exact: bool, old_word: u32, fault_
         FUXWATCH2_HITS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     }
     if n >= FUXWATCH_BUDGET {
+        // huks-wedge lane (hw2): the budget used to only stop logging —
+        // the arm rounds stopped too, but the page stayed W-cleared, so
+        // the NEXT write fell through the (now-skipped) fault hook to
+        // do_page_fault → SEGV_ACCERR. Retire the whole watch once: both
+        // pages restored, slots cleared — the instrument goes inert
+        // instead of arming a trap nobody handles.
+        static RETIRED: core::sync::atomic::AtomicBool =
+            core::sync::atomic::AtomicBool::new(false);
+        if !RETIRED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+            crate::pr_warn!("FUXWATCH budget reached — retiring watch");
+            fuxwatch_retire_all();
+        }
         return false;
     }
     // 70th: page-mate writes (the mutex cluster shares the watched page —
@@ -1961,23 +2062,64 @@ pub fn fuxwatch_read_word(root_ppn: u64) -> u32 {
     }
 }
 
-/// #DB hook: true when this trap is our single step (marker consumed).
+/// #DB hook: Some(page) when this trap is our single step (marker
+/// consumed) — the page the stepped store executed on. huks-wedge lane
+/// (hw2): the retirement must land on THAT page; re-protecting whichever
+/// page slot 1 currently points at (the old behavior) W-clears the wrong
+/// page after a slot move and leaves the stepped one writable.
 #[inline]
-pub fn fuxwatch_take_step(tid: u32) -> bool {
-    for s in FUXWATCH_STEP_TIDS.iter() {
+pub fn fuxwatch_take_step(tid: u32) -> Option<u64> {
+    for (i, s) in FUXWATCH_STEP_TIDS.iter().enumerate() {
         if s
             .compare_exchange(tid, 0, core::sync::atomic::Ordering::Relaxed, core::sync::atomic::Ordering::Relaxed)
             .is_ok()
         {
-            return true;
+            let p = FUXWATCH_STEP_PAGES[i].swap(0, core::sync::atomic::Ordering::Relaxed);
+            return Some(p);
         }
     }
-    false
+    None
+}
+
+/// huks-wedge lane (hw2): is this page still watched (either slot)? The
+/// #DB retirement only re-protects pages the watch still owns; a page
+/// retired by a slot move must stay writable.
+#[inline]
+pub fn fuxwatch_page_watched(page: u64) -> bool {
+    if page == 0 {
+        return false;
+    }
+    let a = FUXWATCH_ADDR.load(core::sync::atomic::Ordering::Relaxed);
+    let b = FUXWATCH2_ADDR.load(core::sync::atomic::Ordering::Relaxed);
+    (a != 0 && (a & !0xfff) == page) || (b != 0 && (b & !0xfff) == page)
+}
+
+/// huks-wedge lane (hw2): read the u32 at `addr` (cr2 precision) through
+/// the given root — the fault hook's `old_word` must describe the WORD
+/// THAT FAULTED, not slot 1's word (slot-2 writes logged with slot 1's
+/// old value before).
+pub fn fuxwatch_read_word_at(root_ppn: u64, addr: u64) -> u32 {
+    // SAFETY: read-only walk of the current mm.
+    match unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root_ppn, addr) } {
+        Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
+            let kv = crate::arch::mm::memory_layout::phys_to_virt(
+                crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (addr & 0xfff)),
+            );
+            // SAFETY: linear-mapped RAM word.
+            unsafe { core::ptr::read_volatile(kv.as_usize() as *const u32) }
+        }
+        _ => 0xffff_ffff,
+    }
 }
 
 #[inline]
 pub fn fuxwatch_addr() -> u64 {
     FUXWATCH_ADDR.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+#[inline]
+pub fn fuxwatch2_addr() -> u64 {
+    FUXWATCH2_ADDR.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 /// sc57 (57th): one-shot region scan — a SUSPENDED FFRT coroutine's
@@ -9094,6 +9236,16 @@ struct HighWord {
     tgid: u32,
     lastv: u32,
     at: u64,
+}
+
+/// huks-wedge lane (hw2): does this tgid own a standing frozen word in
+/// the census table? The holder-exit print (exit.rs) fires for any
+/// thread of such a tgid — the holder that froze the word is exactly
+/// the thread whose death must be decoded.
+pub fn rwfrz_tgid_frozen(tgid: u32) -> bool {
+    let hl = RWFRZ_HIGHTAB.lock_irqsave();
+    let (hn, htab) = &*hl;
+    (0..*hn).any(|i| htab[i].tgid == tgid && htab[i].uaddr != 0)
 }
 static RWFRZ_HIGHTAB: Spinlock<(usize, [HighWord; 8])> = Spinlock::new((
     0,

@@ -575,7 +575,8 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
     let _ =
         crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGILL as i32);
     if !sigill_has_handler() {
-        crate::process::exit::do_exit(-(crate::signal::Signal::SIGILL as i32));
+        // huks-wedge lane (hw5): group death (Linux do_group_exit).
+        crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGILL as i32));
     }
 }
 
@@ -640,7 +641,10 @@ fn fault_sigsegv_route(code: i32, addr: u64) {
         return;
     }
     let _ = crate::signal::send_signal_with_info_directed(pid, info);
-    crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
+    // huks-wedge lane (hw5): group death (Linux do_group_exit) — a
+    // fault-path default death kills the whole process; the thread-only
+    // exit orphaned the dead thread's userspace locks.
+    crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
 }
 
 // (aarch64_bad_user_frame lives below, with the signal-routing helpers)
@@ -666,7 +670,9 @@ pub extern "C" fn aarch64_bad_user_frame(regs_x0: u64) -> ! {
     } else {
         crate::pr_err!("trap: BADFRAME (no current task)");
     }
-    crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
+    // huks-wedge lane (hw5): group death — Linux fixup_bad_iret class
+    // terminates the process, not just the faulting thread.
+    crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
     // do_exit schedules away and never returns; park defensively.
     loop {
         // SAFETY: wfi halts the core until an interrupt; safe in a dead
@@ -768,7 +774,8 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
                     ),
                 );
                 if !sigbus_has_handler() {
-                    crate::process::exit::do_exit(-(crate::signal::Signal::SIGBUS as i32));
+                    // huks-wedge lane (hw5): group death (Linux do_group_exit).
+                    crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGBUS as i32));
                 } else {
                     crate::signal::force_unblock_current(crate::signal::Signal::SIGBUS as i32);
                 }

@@ -825,7 +825,11 @@ pub extern "C" fn x86_bad_frame_exit(regs: *mut PtRegs) -> ! {
     }
     // Route the owner out like any fatal-user-fault: SIGSEGV, default
     // disposition kills. do_exit never returns.
-    crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
+    // huks-wedge lane (hw5): GROUP death — Linux's fixup_bad_iret
+    // delivers a fatal SIGSEGV whose default action terminates the
+    // whole process; a thread-only exit left the process alive with
+    // the dead thread's userspace locks orphaned.
+    crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
     unreachable!("do_exit returned from bad-frame exit");
 }
 
@@ -1928,7 +1932,9 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
             return;
         }
         let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGILL as i32);
-        crate::process::exit::do_exit(-(crate::signal::Signal::SIGILL as i32));
+        // huks-wedge lane (hw5): fault-path default deaths are GROUP
+        // deaths (Linux: fatal default action → do_group_exit).
+        crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGILL as i32));
         // Do NOT advance rip — the task is ZOMBIE and will not resume
     } else {
         // A kernel-mode #UD is always a kernel bug; skipping it would
@@ -1995,7 +2001,8 @@ fn handle_general_protection(regs: &mut PtRegs) {
             return;
         }
         let _ = crate::signal::send_signal_with_info_directed(pid, gp_info);
-        crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
+        // huks-wedge lane (hw5): group death (Linux do_group_exit).
+        crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
     } else {
         #[cfg(feature = "x86_64")]
         crate::dfx::scribble::crash_report(b"#GP", regs);
@@ -2015,7 +2022,8 @@ fn handle_arith_exception(regs: &mut PtRegs, vector: u64) {
         let pid = crate::process::current_pid();
         let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGFPE as i32);
         if !sigfpe_has_handler() {
-            crate::process::exit::do_exit(-(crate::signal::Signal::SIGFPE as i32));
+            // huks-wedge lane (hw5): group death (Linux do_group_exit).
+            crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGFPE as i32));
         }
     } else {
         panic!("trap: arith exception {:#x} in kernel mode at rip={:#x}", vector, regs.rip);
@@ -2028,7 +2036,8 @@ fn handle_alignment_check(regs: &mut PtRegs) {
         let pid = crate::process::current_pid();
         let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGBUS as i32);
         if !sigbus_has_handler() {
-            crate::process::exit::do_exit(-(crate::signal::Signal::SIGBUS as i32));
+            // huks-wedge lane (hw5): group death (Linux do_group_exit).
+            crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGBUS as i32));
         }
     } else {
         panic!("trap: #AC in kernel mode at rip={:#x}", regs.rip);
@@ -2070,11 +2079,13 @@ fn handle_debug(regs: &mut PtRegs) {
         // sc57: fuxwatch single-step retirement — the store completed;
         // re-protect the watched page (W off again for the next write)
         // and continue silently.
+        // huks-wedge lane (hw2): re-protect the page the STEP recorded
+        // (the store's own page), and only while the watch still owns it
+        // — after a slot move the retired page must stay writable.
         let tid = crate::sched::get_current_pid() as u32;
-        if crate::sync::futex::fuxwatch_take_step(tid) {
+        if let Some(page) = crate::sync::futex::fuxwatch_take_step(tid) {
             regs.rflags &= !(TF | RF);
-            let addr = crate::sync::futex::fuxwatch_addr();
-            if addr != 0 {
+            if crate::sync::futex::fuxwatch_page_watched(page) {
                 if let Some(tk) = crate::sched::current() {
                     // SAFETY: current task accessor.
                     if let Some(aspace) = unsafe { (*tk).address_space() } {
@@ -2084,13 +2095,13 @@ fn handle_debug(regs: &mut PtRegs) {
                         unsafe {
                             crate::arch::mm::mm_ops::mprotect_pte_range(
                                 root,
-                                addr & !0xfff,
+                                page,
                                 1,
                                 0x1,
                             );
                         }
                         drop(g);
-                        super::mm::asid::flush_tlb_page(addr);
+                        super::mm::asid::flush_tlb_page(page);
                     }
                 }
             }
@@ -2466,6 +2477,59 @@ fn gp_mmhistory_dump(regs: &PtRegs) {
     }
 }
 
+// huks-wedge lane (hw2): SEGV-history ring — (tid, fault jiffies) for
+// the last 64 delivered user SIGSEGVs. The holder-exit print in do_exit
+// reads it: a thread that took a HANDLED SIGSEGV (FFRT's arena/stack
+// handler consumed it) and then exits "cleanly" is the wedge's first
+// face (hw4 tid 477: boundary-SEGV at 9.0 s, thread gone by 34 s with
+// the process alive), and without this ring the exit looks voluntary.
+static SEGV_HIST_TID: [core::sync::atomic::AtomicU32; 64] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; 64];
+static SEGV_HIST_J: [core::sync::atomic::AtomicU64; 64] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 64];
+static SEGV_HIST_IX: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+fn segv_hist_note(fault_addr: u64) {
+    let tid = crate::sched::get_current_pid() as u32;
+    if tid == 0 {
+        return;
+    }
+    let i = SEGV_HIST_IX.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % 64;
+    SEGV_HIST_TID[i].store(tid, core::sync::atomic::Ordering::Relaxed);
+    // Upper 32 bits carry cr2's low 32 (page id for correlation); lower
+    // 32 carry jiffies (age at exit-print time).
+    SEGV_HIST_J[i].store(
+        ((fault_addr & 0xffff_ffff) << 32) | (crate::drivers::timer::get_jiffies() & 0xffff_ffff),
+        core::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// Age (in jiffies) of this tid's most recent delivered SIGSEGV, plus
+/// that fault's cr2, if the tid ever took one.
+pub fn segv_hist_age(tid: u32) -> Option<(u64, u64)> {
+    let now = crate::drivers::timer::get_jiffies();
+    let mut best_j = 0u64;
+    let mut best_addr = 0u64;
+    let mut found = false;
+    for i in 0..64 {
+        if SEGV_HIST_TID[i].load(core::sync::atomic::Ordering::Relaxed) == tid {
+            let w = SEGV_HIST_J[i].load(core::sync::atomic::Ordering::Relaxed);
+            let j = w & 0xffff_ffff;
+            if !found || j >= best_j {
+                found = true;
+                best_j = j;
+                best_addr = w >> 32;
+            }
+        }
+    }
+    if found {
+        Some((now.saturating_sub(best_j), best_addr))
+    } else {
+        None
+    }
+}
+
 /// Fatal user-mode SIGSEGV forensics: the GP register set, the VMA
 /// covering the faulting rip, and the first stack qwords (return
 /// addresses) — enough to identify which mapping jumped through a
@@ -2473,6 +2537,7 @@ fn gp_mmhistory_dump(regs: &PtRegs) {
 /// fault == 0x010102464c457f == LE bytes "\x7fELF\x02\x01\x01\x00").
 /// Diagnostic only: every read is checked through the page-table walk.
 fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
+    segv_hist_note(fault_addr);
     let pid = crate::sched::get_current_pid();
     // sc112: name the crashing process — the memfd USB DDK PnP NULL-walk
     // kills an unnamed samgr SA host; comm decides which image cfg to cut.
@@ -2999,9 +3064,13 @@ fn handle_page_fault(regs: &mut PtRegs) {
     // system_error and the daemons SIGABRT'd (ohw156 t=161.5 installs,
     // ohw157/158 t=33.9 telecom — the instrument was killing its own
     // subject). No TF single-step for kernel writers.
+    // huks-wedge lane (hw2): the over-budget check moved INSIDE — an
+    // over-budget skip left the W-cleared PTE with no handler and the
+    // write fell to do_page_fault → SEGV_ACCERR. Every fault on a page
+    // WE armed gets W restored and retried; only the log/step respects
+    // the budget (fuxwatch_log_write retires the watch at the trip).
     if access & crate::arch::mm::page_fault::FaultFlags::WRITE != 0
         && crate::sync::futex::fuxwatch_page_matches(fault_addr)
-        && !crate::sync::futex::fuxwatch_over_budget()
     {
         let is_user = access & crate::arch::mm::page_fault::FaultFlags::USER != 0;
         let tid = crate::sched::get_current_pid() as u32;
@@ -3027,8 +3096,14 @@ fn handle_page_fault(regs: &mut PtRegs) {
             }
             drop(g);
             super::mm::asid::flush_tlb_page(fault_addr);
-            let exact = (fault_addr & !0x3) == (crate::sync::futex::fuxwatch_addr() & !0x3);
-            let old_word = crate::sync::futex::fuxwatch_read_word(root);
+            // hw2: exact/old_word describe the WORD THAT FAULTED (either
+            // slot) — slot-2 writes used to log with slot 1's exact=false
+            // and slot 1's old value.
+            let w1 = crate::sync::futex::fuxwatch_addr();
+            let w2 = crate::sync::futex::fuxwatch2_addr();
+            let exact = (w1 != 0 && (fault_addr & !0x3) == (w1 & !0x3))
+                || (w2 != 0 && (fault_addr & !0x3) == (w2 & !0x3));
+            let old_word = crate::sync::futex::fuxwatch_read_word_at(root, fault_addr & !0x3);
             if !is_user {
                 // Kernel writer (put_user on the watched page): named
                 // via a budgeted line, retried with W present.
@@ -3096,7 +3171,16 @@ fn handle_page_fault(regs: &mut PtRegs) {
                     return;
                 }
                 let _ = crate::signal::send_signal_with_info_directed(pid, info);
-                crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
+                // huks-wedge lane (hw5): GROUP death — a synchronous
+                // SIGSEGV with default disposition terminates the whole
+                // process under Linux (do_group_exit from get_signal);
+                // the old thread-only do_exit left the process alive
+                // with the dead thread's userspace locks orphaned —
+                // hw5w1 t=5.44: huks_service tid 486 died alone of
+                // SIGSEGV (grpexit=false), the process survived, FOUR
+                // musl __lock words froze, every client parked forever
+                // (softbus/accountmgr/foundation/distributeddata/mmi).
+                crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
             } else {
                 #[cfg(feature = "x86_64")]
                 crate::dfx::scribble::crash_report(b"#PF-segv", regs);
@@ -3135,7 +3219,9 @@ fn handle_page_fault(regs: &mut PtRegs) {
                     return;
                 }
                 let _ = crate::signal::send_signal_with_info_directed(pid, info);
-                crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
+                // huks-wedge lane (hw5): group death (Linux do_group_exit)
+                // — see the SEGV_MAPERR arm above for the full rationale.
+                crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
             } else {
                 #[cfg(feature = "x86_64")]
                 crate::dfx::scribble::crash_report(b"#PF-perm", regs);
@@ -3170,7 +3256,8 @@ fn handle_page_fault(regs: &mut PtRegs) {
                     ),
                 );
                 if !sigbus_has_handler() {
-                    crate::process::exit::do_exit(-(crate::signal::Signal::SIGBUS as i32));
+                    // huks-wedge lane (hw5): group death (Linux do_group_exit).
+                    crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGBUS as i32));
                 } else {
                     crate::signal::force_unblock_current(crate::signal::Signal::SIGBUS as i32);
                 }
