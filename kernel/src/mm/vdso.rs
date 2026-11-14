@@ -811,10 +811,21 @@ fn build_code_page() -> [u8; 4096] {
 
     // ---- PT_DYNAMIC @ 0xC0 (6 entries × 16B = 96B) ----
     const DYN_OFF: usize = 0xC0;
+    // DT_STRTAB/DT_SYMTAB values were SWAPPED until 2026-11-14
+    // (arena-mmap lane): DT_SYMTAB pointed at the string table, so
+    // every consumer that resolves symbols through the dynamic table
+    // (musl __vdsosym — clock_gettime/gettimeofday fast paths) parsed
+    // string bytes as Elf64_Sym entries, matched nothing, and silently
+    // fell back to the real syscalls. The clock_gettime fallback turned
+    // the FFRT arena pattern's user-mode vDSO store (SEGV → handler
+    // installs the page → retry succeeds, reference-kernel behavior)
+    // into a plain syscall EFAULT instead — one root of the OH mmi
+    // service death family (rip inside the libc time path storing to a
+    // PROT_NONE arena page).
     let dyn_entries: [(u64, u64); 6] = [
         (4, HASH_OFF as u64),   // DT_HASH
-        (5, SYMTAB_OFF as u64), // DT_STRTAB
-        (6, STRTAB_OFF as u64), // DT_SYMTAB
+        (5, STRTAB_OFF as u64), // DT_STRTAB
+        (6, SYMTAB_OFF as u64), // DT_SYMTAB
         (10, strtab_len as u64), // DT_STRSZ
         (11, 24),               // DT_SYMENT
         (0, 0),                 // DT_NULL
