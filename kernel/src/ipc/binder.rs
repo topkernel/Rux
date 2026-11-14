@@ -6674,17 +6674,15 @@ pub fn bwr_park_audit() {
             // chain-walk closure (ohw130: the accountmgr tid-1188 park's
             // walk returned None — the decode never ran; the sweep's
             // task labels + ctx+224 parkw name the suspended task by
-            // construction). Once per burst.
-            {
-                static H68P_LAST_J: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(0);
-                let lj = H68P_LAST_J.load(core::sync::atomic::Ordering::Relaxed);
-                if now.wrapping_sub(lj) >= 500 {
-                    H68P_LAST_J.store(now, core::sync::atomic::Ordering::Relaxed);
-                    let t = crate::sync::futex::oh68_holder_decode_tgid(s.pid as u32);
-                    if !t.is_empty() {
-                        let _ = writeln!(w, "OH68-PARK{}", t);
-                    }
+            // construction). Once per burst. hw1 (huks-wedge): per-TGID
+            // gate — the single global gate let the first stalled tgid's
+            // row monopolize every 5 s window (hw1w1: 73 decodes for
+            // huks, zero for foundation/distributeddata whose words were
+            // the frozen ones).
+            if census_tgid_due(0, s.pid as u32, now, 500) {
+                let t = crate::sync::futex::oh68_holder_decode_tgid(s.pid as u32);
+                if !t.is_empty() {
+                    let _ = writeln!(w, "OH68-PARK{}", t);
                 }
             }
             // 81st: the waiter's own user stack, once the park is
@@ -6692,11 +6690,7 @@ pub fn bwr_park_audit() {
             // the frames above the futex syscall name the FFRT wait
             // primitive and the handler that parked.
             if park_age_ms > 30_000 {
-                static PSTACK_LAST_J: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(0);
-                let lj = PSTACK_LAST_J.load(core::sync::atomic::Ordering::Relaxed);
-                if now.wrapping_sub(lj) >= 600 {
-                    PSTACK_LAST_J.store(now, core::sync::atomic::Ordering::Relaxed);
+                if census_tgid_due(1, s.pid as u32, now, 600) {
                     if !task.is_null() {
                         unsafe { user_task_park_stack_w(task, &mut w) };
                         // 81st: if the parked word is a FROZEN rwlock
@@ -6705,11 +6699,21 @@ pub fn bwr_park_audit() {
                         // tgid's stacks for the word address: each hit is
                         // a READER holding its critical section, and its
                         // own park word/shape prints inline.
+                        // hw1 (huks-wedge): the rwlock-shape gate (bit31)
+                        // hid the musl-MUTEX face of the same freeze: the
+                        // futex-watch decode of hw1w1 proved the words
+                        // are pthread-mutex lock words (acquire CAS
+                        // musl+0x11b8d7 0->0x10, release musl+0x11bd83)
+                        // and __lock words (0x2 = locked+waiters) —
+                        // huks's whole -224 family parks at val 0x2 and
+                        // never got the scan. Any nonzero holder count
+                        // with a live waiter now qualifies; the
+                        // park-standing gate above does the filtering.
                         if let Some(v) =
                             unsafe { crate::sync::futex::read_park_word_via_task(task, a0 as u64) }
                         {
                             let readers = v & 0x7fff_ffff;
-                            if v & 0x8000_0000 != 0 && readers >= 1 && readers < 0x4000_0000 {
+                            if readers >= 1 && readers < 0x4000_0000 {
                                 crate::sync::futex::rwfrz_reader_scan(s.pid as u32, a0 as u64);
                                 // 82nd: deep freeze (8+ readers) — the
                                 // read-holders are yielded coroutines no
@@ -6753,28 +6757,19 @@ pub fn bwr_park_audit() {
             && now.wrapping_sub(s.read_wait_since as u32) > 300
             && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck)
         {
-            {
-                static H68B_LAST_J: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(0);
-                let lj = H68B_LAST_J.load(core::sync::atomic::Ordering::Relaxed);
-                if now.wrapping_sub(lj) >= 500 {
-                    H68B_LAST_J.store(now, core::sync::atomic::Ordering::Relaxed);
-                    let t = crate::sync::futex::oh68_holder_decode_tgid(s.pid as u32);
-                    if !t.is_empty() {
-                        let _ = writeln!(w, "OH68-BWRPARK{}", t);
-                    }
+            // hw1: per-tgid gates (see census_tgid_due) — same
+            // starvation class as the FUTEX twin above.
+            if census_tgid_due(2, s.pid as u32, now, 500) {
+                let t = crate::sync::futex::oh68_holder_decode_tgid(s.pid as u32);
+                if !t.is_empty() {
+                    let _ = writeln!(w, "OH68-BWRPARK{}", t);
                 }
             }
-            if now.wrapping_sub(s.read_wait_since as u32) > 3000 {
-                static PSTK2_LAST_J: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(0);
-                let lj = PSTK2_LAST_J.load(core::sync::atomic::Ordering::Relaxed);
-                if now.wrapping_sub(lj) >= 600 {
-                    PSTK2_LAST_J.store(now, core::sync::atomic::Ordering::Relaxed);
-                    if !task.is_null() {
-                        unsafe { user_task_park_stack_w(task, &mut w) };
-                    }
-                }
+            if now.wrapping_sub(s.read_wait_since as u32) > 3000
+                && census_tgid_due(3, s.pid as u32, now, 600)
+                && !task.is_null()
+            {
+                unsafe { user_task_park_stack_w(task, &mut w) };
             }
         }
         let _ = writeln!(
@@ -7320,6 +7315,48 @@ unsafe fn user_park_stack_dump(t: &Arc<BinderThread>) {
 unsafe fn user_task_park_stack(task: *mut crate::process::Task) {
     let mut w = crate::dfx::backtrace::ConsoleWriter::new();
     user_task_park_stack_w(task, &mut w);
+}
+
+// hw1 (huks-wedge lane): per-tgid rate gate for the census deep-dives
+// (OH68-PARK / park-stack / OH68-BWR / BWR park-stack). The 81st used
+// ONE global last-jiffy static per gate, so with several stalled tgids
+// the first row of each window monopolized the decode (hw1w1: OH68-PARK
+// ran 73x for huks, 0x for foundation/distributeddata — the tgids whose
+// words were actually frozen). 8 tgid slots per gate; the interval is
+// jiffies. Gates: 0=OH68-PARK, 1=park-stack (futex), 2=OH68-BWR,
+// 3=park-stack (BWR).
+static CENSUS_GATE_TGIDS: [core::sync::atomic::AtomicU32; 32] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; 32];
+static CENSUS_GATE_LASTJ: [core::sync::atomic::AtomicU32; 32] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; 32];
+
+fn census_tgid_due(gate: usize, tgid: u32, now: u32, interval: u32) -> bool {
+    use core::sync::atomic::Ordering::Relaxed;
+    if tgid == 0 || gate >= 4 {
+        return false;
+    }
+    let base = gate * 8;
+    let mut free = None;
+    for i in 0..8 {
+        let t = CENSUS_GATE_TGIDS[base + i].load(Relaxed);
+        if t == tgid {
+            let lj = CENSUS_GATE_LASTJ[base + i].load(Relaxed);
+            if now.wrapping_sub(lj) >= interval {
+                CENSUS_GATE_LASTJ[base + i].store(now, Relaxed);
+                return true;
+            }
+            return false;
+        }
+        if t == 0 && free.is_none() {
+            free = Some(i);
+        }
+    }
+    if let Some(i) = free {
+        CENSUS_GATE_TGIDS[base + i].store(tgid, Relaxed);
+        CENSUS_GATE_LASTJ[base + i].store(now, Relaxed);
+        return true;
+    }
+    false
 }
 
 unsafe fn user_task_park_stack_w(

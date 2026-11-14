@@ -157,6 +157,17 @@ pub fn get_jiffies() -> u64 {
     JIFFIES.load(Ordering::Acquire)
 }
 
+/// Test-only deterministic jiffy advance (unit-test harness): the tests
+/// run with the timer interrupt disabled and — since R87 keeps secondary
+/// harts interrupt-less until boot_complete — nothing increments JIFFIES
+/// during the suite. Tests that need "time has passed" semantics (e.g.
+/// the tcp-karn RTT-sampling control) bump the counter explicitly
+/// instead of relying on incidental ticks.
+#[cfg(feature = "unit-test")]
+pub fn test_advance_jiffies(n: u64) {
+    JIFFIES.fetch_add(n, core::sync::atomic::Ordering::Release);
+}
+
 /// Floor-map an absolute timebase value onto the jiffy grid — the
 /// read side of increment_jiffies_from_timebase's
 /// `floor((now - base) / period)` derivation (0 before the grid origin
@@ -195,6 +206,17 @@ pub const fn msecs_to_jiffies(msecs: u64) -> u64 {
 #[inline]
 pub fn monotonic_ns_since_boot() -> u64 {
     ((read_time() as u128) * 1_000_000_000u128 / (CLOCK_FREQ as u128)) as u64
+}
+
+/// The TSC→ns slope the kernel mapping actually uses (×100: the mapping
+/// yields 100 ns nominal ticks, the vDSO wants ns directly). Publishing
+/// THIS as the vDSO mult — instead of one re-derived from the APIC's
+/// TSC_FREQ — makes the user-side interpolation slope identical to the
+/// kernel's, so extrapolation error cannot grow between publications
+/// even if the two calibrations disagree slightly.
+#[inline]
+pub fn tsc_mult_ns_for_vdso() -> u64 {
+    TSC_MULT.load(Ordering::Acquire).wrapping_mul(100)
 }
 
 /// Read current time in the nominal CLOCK_FREQ clock domain.

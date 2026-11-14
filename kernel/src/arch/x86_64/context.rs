@@ -886,12 +886,16 @@ pub unsafe extern "C" fn x86_switch_abort(
     crate::sched::sched::republish_current_after_abort(cpu, prev);
     crate::sched::sched::r56_report_switch_abort(cpu, (*prev).pid());
 
-    // `next` needs no repair here: the steal already re-linked it (or a
-    // foreign picker owns it); its context was never touched by us.
-    // pick→switch ledger (wake-fastrepro): the abort IS a pick
+    // `next` (smp8 orphan-race): the "the steal already re-linked it"
+    // assumption holds only for REVOKED aborts. A LIVE-published pick
+    // that aborts here leaves next unlinked with this CPU's marks and no
+    // owner anywhere — adjudicate and re-link it (no-op when a steal or
+    // a racing wake already handled it). Its context was never touched
+    // by us. pick→switch ledger (wake-fastrepro): the abort IS a pick
     // termination — consume the publication so a heal-side read cannot
     // name an aborted pick as switchless.
     if !next.is_null() {
+        crate::sched::sched::abort_next_release_orphans(cpu, next);
         crate::sched::sched::psledger_consume(next);
     }
 }

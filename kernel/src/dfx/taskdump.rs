@@ -15,16 +15,152 @@
 
 use core::sync::atomic::Ordering;
 
+// ============================================================================
+// Line-atomic staging (obs-hygiene round)
+// ============================================================================
+//
+// Every dump byte used to go out through uart_putc_raw with no lock (the
+// crash-context discipline), so on SMP8 the OH kmsg flood — printk
+// records holding CONSOLE_EMIT_LOCK ~0.4-17 ms per line — spliced dump
+// bytes into flood records and vice versa: dump lines arrived mangled or
+// "missing" (the dhardware lane's detour; two lanes lost time to it).
+// The wake-drop lane fixed its own serial echoes the same way (b80f76a55,
+// HuntLine: stage the full line, one write).
+//
+// Discipline now: every byte STAGES into a PER-CPU buffer under an
+// irqsave stage lock; a '\n' (or a full buffer — long lines continue as
+// whole chunks) copies the line out, DROPS the stage guard, and flushes
+// the bytes in ONE batched TX pass under the printk console-emit lock,
+// so a dump line and a printk record can never splice mid-line and two
+// CPUs' dump lines can never splice with each other. The guard is
+// dropped before the emit-lock wait so the wait never extends an
+// IRQ-off window (the r2 boot's rcu-gp-frozen-cpu lesson). On
+// emit-lock timeout (wedged holder) the line still goes out locklessly
+// — readable at any cost beats atomic in a wedge.
+//
+// The stage is PER-CPU, not one shared buffer: a shared stage locked
+// per-BYTE (the first cut of this round) still byte-mixed two
+// CONCURRENT dumpers — the OH smoke boot caught a periodic dump and a
+// rcu-gp-frozen-cpu dump interleaving inside the stage ("linke|dE=0N
+// Q..." — both writers' bytes in one flushed line). Per-CPU stages
+// make each dumper's line assembly private; flushes remain line-atomic
+// per CPU. Same-CPU nested dumps (a dump interrupted by another dump's
+// trigger on this CPU) can still mix within the one CPU's stage — that
+// class predates this round and is accepted (the alternative, a
+// whole-dump mutex, cannot be honored from the trap/NMI contexts the
+// dumps exist for).
+//
+// All taskdump-family writers funnel here (putc/puts/put_hex/put_dec,
+// taskdump_raw_line, taskdump_dec): hung-task FTX stacks, WQLEAK,
+// memwatch census, small_alloc census lines, schb, the trap printers —
+// no call site changes, only the write discipline changed.
+
+struct DumpStage {
+    buf: [u8; 512],
+    n: usize,
+}
+
+static DUMP_STAGES: [crate::sync::spinlock::Spinlock<DumpStage>; crate::config::MAX_CPUS] =
+    [const {
+        crate::sync::spinlock::Spinlock::new(DumpStage { buf: [0; 512], n: 0 })
+    }; crate::config::MAX_CPUS];
+
+/// ONE atomic console burst for pre-staged bytes: bounded acquire of
+/// printk's console-emit lock (100 µs — `try_console_emit_lock`'s
+/// crash-context budget; the callers — evdev hunt echoes — run from
+/// softirq/irq contexts where a longer IRQ-off wait is not
+/// acceptable), one `puts_batch` pass, release. On timeout the same
+/// bytes go out locklessly (the wedge fallback).
+///
+/// pstore visibility is unchanged: `puts_batch` sinks every byte to the
+/// persistent record exactly like the per-byte `uart_putc_raw` did.
+pub fn line_atomic_write(bytes: &[u8]) {
+    flush_stage(bytes, EmitBudget::Brief);
+}
+
 fn putc(c: u8) {
-    // SAFETY: SBI legacy console_putchar is safe to call from any context.
-    //
-    // Release visibility (119th loglevel hunt): the console.rs wrapper is
-    // compiled to a no-op in release builds, which blinded every taskdump
-    // on production-config boots — exactly the legs we need stacks from.
-    // Write the UART directly here instead; the taskdump path is already
-    // dfx-gated and budgeted, so this only re-enables an explicitly
-    // requested diagnostic, not general console noise.
-    unsafe { crate::console::uart_putc_raw(c); }
+    staged_putc(c, EmitBudget::Full)
+}
+
+/// The brief-budget variant for sched-path hunt prints that run with
+/// the GRQ (or another scheduler-critical lock) HELD: same per-CPU
+/// staging, but the flush acquires the console-emit lock with
+/// `try_console_emit_lock`'s 100 µs crash-context budget — the GRQ hold
+/// time must never grow to the dump funnel's 50 ms wait class. When the
+/// flood holds the emit lock longer than the budget the flush falls
+/// back to the staged lockless burst (still one whole line at the
+/// UART, vs the per-byte char-by-char interleave the raw writes had).
+///
+/// Side effect of routing through the funnel: these prints stay
+/// VISIBLE in release builds (putchar_no_lock compiles to a no-op
+/// there — the 119th-loglevel lesson; the taskdump funnel is raw on
+/// purpose). Every routed printer is boot-budgeted, so the extra
+/// release-build output is bounded.
+pub fn putc_brief(c: u8) {
+    staged_putc(c, EmitBudget::Brief)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum EmitBudget {
+    /// 50 ms — dump contexts that hold no scheduler-critical lock and
+    /// run with interrupts ENABLED (the stage guard is dropped before
+    /// the flush wait; see `staged_putc`).
+    Full,
+    /// 100 µs — sched-path prints under the GRQ and irq-context echoes.
+    Brief,
+}
+
+fn staged_putc(c: u8, budget: EmitBudget) {
+    // cpu_id is clamped defensively: trap printers can run before the
+    // per-CPU publish on bringup (R87's window) — a wrong-but-in-range
+    // stage is harmless (still per-CPU-private for every published CPU).
+    let cpu = (crate::arch::cpu_id() as usize) % crate::config::MAX_CPUS;
+    // Stage the byte under the irqsave guard (a short critical section),
+    // COPY the completed line out, and only then drop the guard and
+    // flush. The emit-lock wait (up to 50 ms on a flooded console) must
+    // never run inside the IRQ-off window: the r2 OH smoke boot tripped
+    // rcu-gp-frozen-cpu exactly once per boot with the wait under the
+    // guard — a dump flush spinning IRQs-off for the flood's record
+    // time looks like a frozen CPU to the GP detector (and blows the
+    // closed-cli-segment guard class). With the guard dropped first,
+    // the wait runs with the CALLER's interrupt state (dumps: on).
+    let mut line = [0u8; 512];
+    let llen;
+    {
+        let mut st = DUMP_STAGES[cpu].lock_irqsave();
+        let at = st.n;
+        st.buf[at] = c;
+        st.n = at + 1;
+        if c == b'\n' || st.n == st.buf.len() {
+            line[..st.n].copy_from_slice(&st.buf[..st.n]);
+            llen = st.n;
+            st.n = 0;
+        } else {
+            return;
+        }
+    }
+    flush_stage(&line[..llen], budget);
+}
+
+/// ONE atomic console burst for pre-staged bytes; the emit-lock budget
+/// is caller-chosen (see `EmitBudget`). On timeout the same bytes go
+/// out locklessly (the wedge fallback — a torn line beats a missing
+/// one in exactly the contexts these prints exist for).
+fn flush_stage(bytes: &[u8], budget: EmitBudget) {
+    if bytes.is_empty() {
+        return;
+    }
+    let uart = crate::console::Uart::new();
+    let locked = match budget {
+        EmitBudget::Full => crate::printk::try_console_emit_lock_ms(50),
+        EmitBudget::Brief => crate::printk::try_console_emit_lock(),
+    };
+    if locked {
+        uart.puts_batch(bytes);
+        crate::printk::console_emit_unlock();
+    } else {
+        uart.puts_batch(bytes);
+    }
 }
 
 fn puts(s: &str) {
@@ -60,8 +196,8 @@ fn put_dec(mut v: u64) {
     }
 }
 
-/// DFX raw diagnostic line (SBI console, no locks) for other subsystems'
-/// one-shot probes — same discipline as the dump itself.
+/// DFX raw diagnostic line for other subsystems' one-shot probes — same
+/// discipline as the dump itself (line-atomic staging, see `putc`).
 pub fn taskdump_raw_line(s: &[u8]) {
     for &b in s {
         putc(b);

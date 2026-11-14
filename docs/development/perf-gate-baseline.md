@@ -50,7 +50,7 @@ main lands, do not cherry-pick rows.
 | WAKE-STRANDED | 23–31 organic, 1–2 s family (pa109dbg/pa112tok/pa113tok), max 32–107 s; seed-vehicle reads 0–65 organic, max 297 s (pa-116 series, 2026-11-04) with the same no-grid verdict | no 1001ms-grid class |
 | tick rate per CPU | 99.74–99.98 /s (pre-2026-11-01 semantics); 104–124+/s class on the current arc (hooks fire beyond jiffies — pa116 series reads 104–107/s) | ≥99.5 sustained (quiet window; one-CPU marginal misses under heavy foreign-QEMU load are the documented flake class) |
 | kernel panics / new OOM classes | 0 | 0 |
-| total syscall volume (780s boot) | 126.0M (pa115debt1, 2026-11-01, main@afc41b8b, tok lineage) | ±10% IN A COMPARABLE HOST-LOAD WINDOW AND THE SAME LINEAGE CLASS — re-banked 2026-11-01: 6394e8ee un-quantizes ms-class sleeps and the boot goes ~36% deeper in the same wall (pa113 92.4M → 126.0M, same-depth pace corroborated by debt3 8.0M@60s→18.1M@120s). Enforce only in a load-gated window (load1 ≤9, qemus ≤8); the superseded 107.5M/85–107M families and their load-coupling history are documented in the refresh sections below. 2026-11-04: the SEED vehicle is workload-unstable without a cooked /data (1.5M parked ↔ 18.5M/173.9M deep on identical bytes) — volume enforcement stays tok-anchored until a cooked-lineage board re-banks it (see the 2026-11-04 refresh) |
+| total syscall volume (780s boot) | 15.36M (girebank1, 2026-11-14, main@f5416e8a4 release, tok-r4fix lineage) | ±10% IN A COMPARABLE HOST-LOAD WINDOW AND THE SAME LINEAGE CLASS — re-banked 2026-11-14 on the tok-r4fix vehicle (tok109 lineage + the Nov 9 r4fix gate boot): the 126.0M pa115debt1 bank was tok109-lineage depth; tok-r4fix is one boot deeper and the volume plateaus at ~15.3M regardless of build profile (release f5416e8a4 15,359,337 @t=120s; debug 95b5e61fb sysrep1 15,253,824 @t=720s — 0.7% apart). Vehicle-bound: a fresh tok lineage or seed cook needs its own bank. The superseded 126M/107.5M/85–107M families and their history live in the refresh sections below; 2026-11-04 seed-vehicle instability note (1.5M parked ↔ 173.9M deep) still applies to any non-tok vehicle |
 | clock_gettime avg | 3–4 µs | ±20% or better |
 | nanosleep avg | 203 ms (pa50main, n=26,945); family 158–222 ms through 2026-11-01 (pa115debt1 read 158.4 ms, n=29.5k) | ≤244 ms (one-sided; 203 ms +20% top). 2026-11-04: SEED-vehicle populations (n=3.0–5.2k, long-sleep dominated) read 529–927 ms — population artifact, not sleep cost: the p7_sleep1ms overshoot probe reads 15.8 µs on the same kernel (TCG family 54.4 µs); enforce the avg row only on tok-class populations |
 
@@ -402,6 +402,68 @@ ms family) remains a TCG-class finding for its owning lane, but on KVM
 the whole p4 family sits at sub-millisecond — re-adjudicate the open
 regression against a KVM p4 anchor before spending more on it.
 Board log: run/116pb1-boot.log, serial work/pbench-116pb1-serial.log.
+
+## Tier-1 volume re-bank on the tok-r4fix vehicle + vehicle protection (2026-11-14, gate-infra lane, main@f5416e8a4)
+
+The syscost-repair lane (2026-11-14) established that the Nov 14
+"instrument silent" scare was vehicle loss, not an arming break: the
+tok109 master vanished (second loss), pa-boot.sh's silent fallback
+switched Tier 1 to the 17G deep-cooked central-store seed, and that
+lineage exhausts the 1G kernel heap by t≈30–60 s (ALLOCTHROW cascade,
+alloc panics) before the first syscost dump. They rebuilt the master as
+`run/oh-userdata-tok-r4fix.img` (tok109 lineage + exactly the one rc=0
+r4fix gate boot of Nov 9). This lane made that protection durable and
+re-banked the volume band on the new vehicle:
+
+- **Store-protected master**: the master now lives at
+  `/home/william/rux-images/oh/userdata-tok-r4fix.img`
+  (1,395,130,368 bytes, md5 `ae9cde56be0b683fe5a6b32ca6aa97f6`,
+  cmp-verified byte-identical to the run/ original, `chattr +i` set —
+  `rm`/`touch` on it are refused). run/pa-boot.sh prefers the store
+  copy; the run/ original stays as an unprotected second choice.
+- **Loud fallback**: pa-boot.sh ABORTS (rc=3, explicit FATAL text) when
+  both masters are missing — the silent seed fallback is removed and
+  booting the seed now requires passing `UD_SRC=<path>` deliberately.
+  A userdata image >4G is likewise refused without `UD_ALLOW_OVERSIZE=1`
+  (that is the heap-killing deep-cooked class; the check applies to the
+  file QEMU actually boots, so stale 17G per-tag copies are caught too).
+- **Volume re-bank**: fresh 780s pa-boot, fresh reflink copy of the
+  store master, kernel = release build of main@f5416e8a4 (tag
+  `girebank1`): **15,359,337 calls** (summary at t=120s; the volume
+  then plateaus). Corroboration across profile and kernel: debug build
+  of main@95b5e61fb on the identical vehicle bytes (sysrep1, t=720s)
+  read 15,253,824 — 0.7% apart. The old 126M bank (pa115debt1,
+  tok109-depth, 2026-11-01) is superseded; VOLUME_BASE in
+  run/perf-gate.sh now defaults to 15359337 (±10% = 13.8M–16.9M).
+
+Fresh-board Tier-1 rows (girebank1, release, KVM q35 smp2 4G, quiet
+window, 2 foreign QEMUs, rc=0 at 780s, machine alive at window end):
+panics 0, OOM 0, ALLOCTHROW 0, census TERM-DESCHED 8 / WAKE-REFUSED 32
+(dead-center), tick rate cpu0 527.9/s cpu1 533.3/s, small_alloc REST
+share 0.0%. Two rows behave differently on this board class and are
+NOT re-banked here:
+
+1. **Per-op rows SKIP** (clock_gettime/nanosleep): the boot reaches the
+   known image-side binder-stall family (SLOW-TXN exec≈5s,
+   DB_TaskExecutor→OS_IPC_2) early on the release profile — the wedge
+   suppresses the per-nr rows in the later dumps (the release kernel
+   runs the same workload ~4–6x faster in wall time; sysrep1/debug hit
+   the same total volume by t=720s instead). The last nr=35 nanosleep
+   read on this vehicle remains sysrep1's 151.1 ms (n=29,858, in band).
+   The syscost dump cadence also stops after t=180s on the wedged
+   release board (3 dumps ≥ the gate's 2-dump floor; boot-death vs
+   wedge distinguished by the ALLOCTHROW/panic rows, both 0).
+2. **GRQ avg hold reads 557ns** (sched.rs REST site, same code as the
+   banked 2994-line site shifted +8 by the R87 `__schedule()` diff) vs
+   the 1200–7320ns band — a debug→release profile-class delta (debug
+   sysrep1: 5166ns). The GRQ band stays debug-anchored; the coordinator
+   should decide whether Tier-1 domain rows get a release-profile
+   anchor before the gate's default kernel moves off debug.
+
+Evidence: run/pa-girebank1-serial.log (raw), run/pa-girebank1-driver.log,
+run/perf-gate-girebank1-parse.txt, run/GATE-INFRA.md (this lane's
+deliverable, incl. the pa-boot before/after fallback behavior);
+syscost-repair lane: run/SYSCOST-REPAIR-FINDINGS.md, run/pa-sysrep1-serial.log.
 
 ## Guarded hot-path domains (user mandate: allocation/reclaim, scheduling, filesystem)
 

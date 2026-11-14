@@ -451,5 +451,9 @@ pub unsafe extern "C" fn aarch64_switch_abort(prev: *mut Task, next: *mut Task) 
     crate::sched::sched::republish_current_after_abort(cpu, prev);
     crate::sched::sched::r56_report_switch_abort(cpu, (*prev).pid());
 
-    let _ = next;
+    // 3. `next` (smp8 orphan-race): a LIVE-published pick that aborts here
+    // leaves next unlinked with this CPU's marks and no owner anywhere —
+    // adjudicate and re-link it (no-op when a steal or a racing wake
+    // already handled it).
+    crate::sched::sched::abort_next_release_orphans(cpu, next);
 }

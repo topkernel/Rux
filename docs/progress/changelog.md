@@ -4,6 +4,91 @@ This document records important changes and fixes to the Rux kernel.
 
 ## [Unreleased]
 
+### 2026-11-14 — Merge day: signal/epoll parity, OH lock screen, Ubuntu 24.04 at graphical.target
+
+Twelve merges landed in one day; the evidence records
+(safety-and-performance.md merge-day round, rust-native-register.md
+section I) carry the full taxonomy classification and artifact
+pointers.
+
+- **Signal fault semantics (arena-mmap, 94e1338b7)**: SIGSEGV/SIGBUS
+  siginfo carries the real fault address and class on all three
+  arches (was the SI_KERNEL placeholder with si_addr reading the
+  sender pid — the engine behind the FFRT 0x7ff1 fault loop and the
+  mmi_service 148.9 s death; zero loop occurrences across 3 OH boots
+  after); vDSO DT_STRTAB/DT_SYMTAB swap fixed (musl resolves
+  __vdso_clock_gettime again); unaligned MAP_FIXED returns EINVAL.
+  Arena demand-paging probe: 19/19 (was an infinite fault loop on
+  the handler checks)
+- **Program break is per-mm (uboot-campaign, 28b880495)**: port of
+  the riscv fix to main; 24-boot KVM A/B — GNOME shell SIGSEGV boots
+  3/12 → 0/12, campaign success 11/12 → 12/12, timings unchanged
+- **epoll fds implement ep_poll semantics (hilog-flood, 7415622ea)**:
+  nested epoll fds were permanently readable under the regular-file
+  poll fallback, spinning every FFRT/libinput service loop — OH
+  writev fabric 63-102k/s → 1.7-3.7k/s (25-50x), appspawn fork
+  130-272 ms → 85-90 ms, guest CPU 579% of 800% at baseline vs the
+  reference's 17.5% on the same image (post-fix the fabric syscall
+  burn is gone; residual CPU is boot-dependent)
+- **Ubuntu 24.04 bring-up (ub2404, 6770963ea)**: unix setsockopt
+  errno family (ENOPROTOOPT, not EAFNOSUPPORT — journald-fatal),
+  tmpfs fallocate (journald seqnum), securityfs/ramfs/mqueue/
+  debugfs/tracefs mount arms — systemd 255 reaches multi-user.target
+  AND graphical.target (journald, logind, dbus, udisks2,
+  network-online live; ~1 min 40 s userspace)
+- **R87 secondary-bringup window (riscv-smp8-panic, f5416e8a4)**: no
+  timer interrupts on secondaries until PER_CPU is published (was:
+  ticks on zeroed slots → mixed-context resumes → "kill the idle
+  task" panics); trap.S MAX_CPUS clamps from config; the hunted
+  "ksp smear" family was a print-format ghost (two decimals, no
+  separator — every "garbage" value re-splits to a legal stack
+  address); smp/mem matrix 13/16 clean, previously-failing cells
+  clean, residual ~1/3 race handed to the sched lane
+- **Fault-path default deaths are group deaths (huks-wedge,
+  5fb35cba7)**: Linux force_sig_fault → do_group_exit parity at 15
+  sites × 3 arches — a faulting worker no longer leaves the daemon
+  alive with orphaned locks; live-verified end to end on hw7 (group
+  death, init SIGCHLD reap, service respawn, zero TXN-HANG for the
+  dead tgid); exit-cause print + SEGV history ring; fuxwatch
+  page-retire fix (the instrument itself was spraying SEGVs from
+  abandoned watch pages)
+- **R127 wait-queue hardening (wake-drop, f4c57e7c6)**: task-keyed
+  entries with stale-eviction and a WQLEAK exit report (a recycled
+  Task page can no longer silently strip a leaked entry and wake a
+  wrong task); input:* tracepoints; the wake→run edge exonerated —
+  8 verdicted wakes: 4 DELIVERED (all ran), 4 REFUSED-benign, ~880
+  EMPTY; the OH input chain dies userspace-side (samgr kills
+  dhardware; the audio_server reader never re-polls)
+- **vDSO version tables (rwlock-livelock, 95b5e61fb)**:
+  DT_VERDEF/DT_VERDEFNUM/DT_VERSYM with the LINUX_2.6 chain — fixes
+  Go runtimes (snapd died at vdsoFindVersion); the Ubuntu 24.04
+  freeze decoded to a GLib gthreadpool mutex left locked with no
+  owner and the kernel exculpated at the futex-word level (zero ops
+  on the word after formation; the one pre-freeze wake was
+  delivered)
+- **Reaper probe (reaper-waitid, 537f9e6ed)**: waitid is never used
+  on the OH image (0 events in ~1700 s); wait4-WNOHANG reaps in the
+  same 0.1 s tick; 788/788 leader exits reaped, zero lingering
+  zombies; the systemui incarnation cycle is a userspace
+  exit_group(-2) race, not kernel reap machinery
+- **Observability (obs-hygiene, 8f4a4a259)**: taskdump line-atomic
+  staging (per-line batched TX under printk's console-emit lock,
+  per-CPU stages — mangled task lines 1.7% → 0, ENQ hunt lines
+  240/240 whole) and hilogcensus/spinwatch migrated to unified
+  tracepoints (events 57-60; old dfx= tokens as aliases; live
+  set_event arming)
+- **Gate/infra**: Tier-1 volume baseline re-banked at 15.36M on the
+  tok-r4fix vehicle (gate-infra, d8476534e); run-oh.sh/run-x86-ub.sh
+  unified at KVM SMP8 8G (the ≥3G PCI-hole wall did not reproduce);
+  pbench.c path fix (1342fb78f) unblocked the Tier-2 gate
+
+Boot-state changes: the OH image reaches the lock screen
+(ohos.boot.time.lockscreen.ready set, first post-flood-fix boot);
+the input chain is mapped end to end — kernel evdev exonerated
+per-hop, the break is multimodalinput's device-manager init (image
+side) plus the stranded-reader wake family; Ubuntu 24.04 systemd
+reaches graphical.target; the riscv64 smp/mem matrix is 13/16 clean.
+
 ### 2026-10-30 — AArch64 platform support merged to main
 
 - QEMU virt (cortex-a72) boots to an interactive root shell with

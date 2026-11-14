@@ -1786,12 +1786,14 @@ fn find_covering_leaf_blk(
 /// in place when it has room; a FULL node falls back to a whole-tree
 /// gather/splice/rebuild (the old inline-only path returned EIO for a
 /// 4-entry root — writes into fragmented preallocations failed).
-/// Returns the physical block.
+/// Returns the physical block. `meta_delta` accumulates the SIGNED
+/// 512-byte-sector delta of tree metadata (a rebuild can FREE more than
+/// it adds); the caller applies it to i_blocks with saturation.
 pub fn ext4_ext_materialize_block(
     fs: &crate::fs::ext4::Ext4FileSystem,
     i_block: &mut [u32; 15],
     logical_block: u64,
-    meta_sectors: &mut u64,
+    meta_delta: &mut i64,
 ) -> Result<Option<u64>, i32> {
     // Resolve the covering node: the inline root (depth 0) or the
     // external leaf reached through the index walk.
@@ -1892,20 +1894,27 @@ pub fn ext4_ext_materialize_block(
             return Err(errno::Errno::IOError.as_neg_i32());
         }
         let delta = ext4_ext_rebuild(fs, i_block, &all)?;
-        *meta_sectors = (*meta_sectors as i64 + delta) as u64;
+        // SIGNED accumulation: a shrinking rebuild has delta < 0. The
+        // old u64 form folded a negative delta into ~u64::MAX and the
+        // caller's `i_blocks += hm` then overflow-panicked the kernel
+        // (dio_read on a fragmented ext4: "attempt to add with
+        // overflow" at ext4/file.rs).
+        *meta_delta += delta;
         Ok(Some(raw.phys + prefix as u64))
     }
 }
 
 /// Insert a WRITTEN extent (any tree depth): inline root keeps the sorted
 /// fast path; deep trees insert into the covering leaf (rebuild fallback).
+/// `meta_delta` accumulates the SIGNED metadata-sector delta (see
+/// ext4_ext_materialize_block).
 pub fn ext4_ext_insert_written(
     fs: &crate::fs::ext4::Ext4FileSystem,
     i_block: &mut [u32; 15],
     ee_block: u64,
     phys: u64,
     len: u16,
-    meta_sectors: &mut u64,
+    meta_delta: &mut i64,
 ) -> Result<(), i32> {
     {
         let root = unsafe { core::slice::from_raw_parts(i_block.as_ptr() as *const u8, 60) };
@@ -1929,7 +1938,9 @@ pub fn ext4_ext_insert_written(
                 .unwrap_or(all.len());
             all.insert(pos, RawExtent { ee_block: ee_block as u32, phys, len, unwritten: false });
             let delta = ext4_ext_rebuild(fs, i_block, &all)?;
-            *meta_sectors = (*meta_sectors as i64 + delta) as u64;
+            // SIGNED accumulation — see the rebuild-fallback note in
+            // ext4_ext_materialize_block above.
+            *meta_delta += delta;
             return Ok(());
         }
     }
@@ -2002,7 +2013,9 @@ pub fn ext4_ext_insert_written(
             .unwrap_or(all.len());
         all.insert(pos, RawExtent { ee_block: ee_block as u32, phys, len, unwritten: false });
         let delta = ext4_ext_rebuild(fs, i_block, &all)?;
-        *meta_sectors = (*meta_sectors as i64 + delta) as u64;
+        // SIGNED accumulation — see the rebuild-fallback note in
+        // ext4_ext_materialize_block above.
+        *meta_delta += delta;
         Ok(())
     }
 }

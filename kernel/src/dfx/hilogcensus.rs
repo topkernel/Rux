@@ -20,15 +20,21 @@
 //!   counts of /dev/kmsg writes plus the last line head (init's
 //!   LoopEvent-warning channel).
 //!
-//! Arming: cmdline `hilogcensus=1` (NOT `hilogtap`, which arms the
-//! existing per-record content tap in net/unix.rs — that scanner costs
-//! ~seconds of CPU/s at storm rates), the unixrd tri-state pattern — one
-//! relaxed load per call when armed, zero when off. Dumped on the
-//! syscost periodic cadence (and the shutdown cascade): top senders,
-//! one bounded line each. A `rux:hilog_top` tracepoint carries each
-//! dumped top-emitter row into the unified trace framework (the
-//! aggregate-as-event shape — a per-message tracepoint at 10^6/s would
-//! cost more than it observes).
+//! Arming (obs-hygiene migration): the unified-framework tracepoint
+//! `rux:hilog_census` IS the switch — arm it via `trace_event=` on the
+//! cmdline or `set_event` at runtime; one relaxed load per hook when
+//! armed, zero when off. Each dumped row also records into the framework
+//! (`rux:hilog_census` per unix sender, `rux:hilog_kmsg` per kmsg
+//! writer; the old `rux:hilog_top` top-row event keeps firing for the
+//! hilog-flood lane's tooling). NOT `hilogtap`, which arms the existing
+//! per-record content tap in net/unix.rs — that scanner costs ~seconds
+//! of CPU/s at storm rates. The bespoke cmdline token `hilogcensus=1`
+//! survives as a compatibility ALIAS that arms the same events at boot
+//! (existing hunt rigs keep working; the frozen dfx= switch table is
+//! untouched — this module was never in it). Dumped on the syscost
+//! periodic cadence (and the shutdown cascade): top senders, one
+//! bounded line each. Aggregate-as-event throughout — a per-message
+//! tracepoint at 10^6/s would cost more than it observes.
 //!
 //! Table honesty notes: unix slots are DIRECT-MAPPED by
 //! `sender_pid & (SLOTS-1)`; a colliding/reused pid resets the slot
@@ -43,26 +49,28 @@
 use core::sync::atomic::Ordering::Relaxed;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8};
 
-static ARMED8: AtomicU8 = AtomicU8::new(0);
-
+/// The census gate: the unified-framework event switch (live — arming
+/// through tracefs `set_event` at runtime takes effect immediately,
+/// which the old cached tri-state could not do).
 #[inline]
 pub fn on() -> bool {
-    match ARMED8.load(Relaxed) {
-        2 => true,
-        1 => false,
-        _ => {
-            let v = match crate::cmdline::get_cmdline() {
-                None => return false,
-                Some(_) => crate::cmdline::get_param("hilogcensus").as_deref() == Some("1"),
-            };
-            ARMED8.store(if v { 2 } else { 1 }, Relaxed);
-            crate::pr_warn!(
-                "hilogcensus: {} (cmdline hilogcensus param = {:?})",
-                if v { "armed" } else { "off" },
-                crate::cmdline::get_param("hilogcensus")
-            );
-            v
-        }
+    crate::trace::EVENT_HILOG_CENSUS.armed()
+}
+
+/// Compatibility arm (boot, before trace_event= is applied): the old
+/// bespoke cmdline token `hilogcensus=1` now just flips the unified
+/// events' enable switches — same running state as
+/// `trace_event=rux:hilog_census,rux:hilog_kmsg`.
+pub fn compat_arm() {
+    if crate::cmdline::get_cmdline().is_none() {
+        return;
+    }
+    if crate::cmdline::get_param("hilogcensus").as_deref() == Some("1") {
+        crate::trace::EVENT_HILOG_CENSUS.enabled.store(true, Relaxed);
+        crate::trace::EVENT_HILOG_KMSG.enabled.store(true, Relaxed);
+        crate::pr_warn!(
+            "hilogcensus: compat token hilogcensus=1 armed (rux:hilog_census + rux:hilog_kmsg)"
+        );
     }
 }
 
@@ -455,6 +463,25 @@ pub fn dump() {
             "HILOGTAP   c0='{}'",
             s.tags[0].content_str(),
         );
+        // obs-hygiene migration: the same row records into the unified
+        // framework (rux:hilog_census — the event is also the census's
+        // arm switch, so it is armed by construction here).
+        {
+            let mut c16 = [0u8; crate::trace::COMM_LEN];
+            for j in 0..crate::trace::COMM_LEN.min(COMM) {
+                c16[j] = s.comm[j].load(Relaxed);
+            }
+            crate::trace::trace_hilog_census(
+                s.pid.load(Relaxed) as i32,
+                &c16,
+                n,
+                ea,
+                s.err.load(Relaxed),
+                bytes,
+                s.relay.load(Relaxed),
+                s.miss.load(Relaxed),
+            );
+        }
         // Aggregate-as-event: the top row rides the unified framework.
         if k == 0 && crate::trace::EVENT_HILOG_TOP.armed() {
             crate::trace::trace_hilog_top(
@@ -480,25 +507,42 @@ pub fn dump() {
             continue;
         }
         let hl = s.head_len.load(Relaxed) as usize;
-        let mut head = alloc::string::String::new();
+        let mut head = [0u8; 32];
+        let mut hn = 0usize;
         for j in 0..hl.min(32) {
             let b = s.head[j].load(Relaxed);
             if b == b'\n' || b == 0 {
                 break;
             }
             if (0x20..0x7f).contains(&b) {
-                head.push(b as char);
+                head[hn] = b;
             } else {
-                head.push('.');
+                head[hn] = b'.';
             }
+            hn += 1;
         }
         crate::pr_warn!(
             "HILOGTAP kmsg pid={} {} n={} head='{}'",
             s.pid.load(Relaxed),
             comm_str(&s.comm),
             n,
-            head
+            alloc::string::String::from_utf8_lossy(&head[..hn])
         );
+        // obs-hygiene migration: the kmsg writer row records into the
+        // unified framework (rux:hilog_kmsg carries the 32-byte head
+        // sample — the repeating-pattern evidence).
+        if crate::trace::EVENT_HILOG_KMSG.armed() {
+            let mut c16 = [0u8; crate::trace::COMM_LEN];
+            for j in 0..crate::trace::COMM_LEN.min(COMM) {
+                c16[j] = s.comm[j].load(Relaxed);
+            }
+            crate::trace::trace_hilog_kmsg(
+                s.pid.load(Relaxed) as i32,
+                &c16,
+                n,
+                &head,
+            );
+        }
         shown += 1;
         if shown >= 6 {
             break;

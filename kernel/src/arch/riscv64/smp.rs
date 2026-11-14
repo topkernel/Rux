@@ -236,12 +236,13 @@ pub extern "C" fn secondary_cpu_entry(hart_id: usize) -> ! {
     // spin-wait can detect us and proceed.
     mark_cpu_started(hart_id);
 
-    // Set up trap handling and enable timer interrupts.
+    // Set up trap handling (stvec). Timer interrupts stay OFF until
+    // init_secondary() has published this CPU's PER_CPU slot — see the
+    // boot-complete wait below for why.
     // Following the Linux model, tp was set to the idle task pointer by
     // boot.S before entering this function.  This means current() is valid
     // and the trap handler can safely access the task_struct.
     crate::arch::trap::init();
-    crate::arch::trap::enable_timer_interrupt();
 
     // Per-hart counter access for U mode (see arch::init on the BSP —
     // scounteren must be programmed on every hart for the vDSO's
@@ -253,13 +254,46 @@ pub extern "C" fn secondary_cpu_entry(hart_id: usize) -> ! {
     }
 
     // Wait for boot CPU to finish ALL single-CPU initialization.
-    // WFI yields the CPU in QEMU tcg single-threaded mode.
+    //
+    // R87 (smp8 panic lane, the secondary pre-init scheduling window):
+    // this wait used to run with the timer ALREADY ENABLED and wfi.
+    // Every tick during the whole BSP tail (fs mounts, drivers, init
+    // spawn — the tail scales with -m, which is why the failure matrix
+    // was memory-dependent: 8G boots sit here for seconds of wall time)
+    // could exit through irq_exit_maybe_preempt_kernel into
+    // __schedule() on this hart while PER_CPU[hart] was still
+    // {current=0, idle=0} (only the boot CPU's slot is published by
+    // sched::init; init_secondary below is the writer for this one).
+    // The zeroed slot forced the PERCPU-SCRIBBLE-HEALED /
+    // R74-SLOTLESS-TP heal chain, the hart left its boot stack inside
+    // secondary_cpu_entry and executed enqueued tasks, and the slot
+    // fights between this half-onlined hart and the BSP's bookkeeping
+    // (R56 heals, steals, ENQ-CLAIMED/STALE-ONCPU-RESET) eventually
+    // booked the wrong prev on a context switch — a mixed-context save
+    // (one task's registers written into another's thread record),
+    // which detonated later as a resume with tp from one task, sp from
+    // a second and ra pointing into a third task's kernel stack
+    // (KERNPANIC scause=2 illegal instruction, sepc=0xffffffd6xxxxxxx
+    // stack address, "Attempted to kill the idle task"). Linux parity:
+    // a secondary hart never takes interrupts until its per-CPU state
+    // is fully initialized and it has entered the idle loop.
+    //
+    // wfi cannot be used to wait with sie=0: QEMU's wfi only wakes on
+    // an ENABLED pending interrupt, so the hart would sleep through the
+    // boot_complete flag forever. Spin instead — the wait is bounded by
+    // the BSP's init tail and secondaries have nothing useful to do
+    // until then anyway.
     while !is_boot_complete() {
-        unsafe { crate::arch::cpu::wfi(); }
+        core::hint::spin_loop();
     }
 
     // Boot CPU has finished init — safe to call kmalloc now.
     crate::sched::init_secondary(hart_id);
+
+    // Now that PER_CPU[hart] is published, this hart may take
+    // interrupts and enter the scheduler (R87: enabling the timer
+    // before init_secondary was the pre-init scheduling window).
+    crate::arch::trap::enable_timer_interrupt();
 
     // Enable external interrupts (sie.SEIE) for this hart
     crate::arch::trap::enable_external_interrupt();

@@ -733,9 +733,16 @@ impl MmStruct {
     }
 
     /// Get current brk value
+    ///
+    /// EXACT bytes, never page-masked: the reference kernel keeps
+    /// mm->brk at the byte address the last brk() request named (pages
+    /// are rounded at fault time), and brk(2) must read back exactly
+    /// what it stored — LTP brk01 sets the break to pagesize*2-1 past
+    /// the current one and fails the test on any masked read-back
+    /// (VirtAddr::new masks low bits; the tuple constructor does not).
     #[inline]
     pub fn brk(&self) -> VirtAddr {
-        VirtAddr::new(self.brk.load(Ordering::Acquire))
+        VirtAddr(self.brk.load(Ordering::Acquire))
     }
 
     /// Set brk value

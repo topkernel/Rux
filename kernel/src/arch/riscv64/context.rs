@@ -581,7 +581,11 @@ pub unsafe extern "C" fn riscv_switch_abort(prev: *mut Task, next: *mut Task) {
     crate::sched::sched::republish_current_after_abort(cpu, prev);
     crate::sched::sched::r56_report_switch_abort(cpu, (*prev).pid());
 
-    // `next` needs no repair here: the steal already re-linked it (or a
-    // foreign picker owns it); its context was never touched by us.
-    let _ = next;
+    // 3. `next` (smp8 orphan-race): the "the steal already re-linked it"
+    // assumption holds only for REVOKED aborts. A LIVE-published pick
+    // that aborts here leaves next unlinked with this CPU's marks and no
+    // owner anywhere — adjudicate and re-link it (no-op when a steal or
+    // a racing wake already handled it). Its context was never touched
+    // by us.
+    crate::sched::sched::abort_next_release_orphans(cpu, next);
 }

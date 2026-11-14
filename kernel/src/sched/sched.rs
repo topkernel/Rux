@@ -691,7 +691,7 @@ pub fn report_poisoned_rq_entry(cpu: usize, raw: usize) {
     {
         return;
     }
-    use crate::console::putchar_no_lock as putchar;
+    use crate::dfx::taskdump::putc_brief as putchar;
     fn ph(mut v: u64) {
         let mut buf = [0u8; 16];
         let mut n = 0;
@@ -2048,9 +2048,9 @@ pub fn free_task_slot(task_ptr: *mut Task) {
                 static FREEC_N: core::sync::atomic::AtomicU32 =
                     core::sync::atomic::AtomicU32::new(0);
                 if FREEC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
-                    use crate::console::putchar_no_lock as putchar;
+                    use crate::dfx::taskdump::putc_brief as putchar;
                     fn pdec3(mut v: u64) {
-                        use crate::console::putchar_no_lock as p;
+                        use crate::dfx::taskdump::putc_brief as p;
                         let mut buf = [0u8; 20];
                         let mut n = 0;
                         if v == 0 {
@@ -2156,7 +2156,7 @@ pub fn free_task_slot(task_ptr: *mut Task) {
                 );
             }
             if unlinked > 0 {
-                use crate::console::putchar_no_lock as putchar;
+                use crate::dfx::taskdump::putc_brief as putchar;
                 const MSG: &[u8] = b"\nFREED-WHILE-LINKED-UNLINKED task=0x";
                 for &b in MSG {
                     putchar(b);
@@ -2192,7 +2192,7 @@ pub fn free_task_slot(task_ptr: *mut Task) {
                 };
                 let flagged = unsafe { (*task_ptr).pid() } == TASK_POISON;
                 if linked || flagged {
-                    use crate::console::putchar_no_lock as putchar;
+                    use crate::dfx::taskdump::putc_brief as putchar;
                     const MSG: &[u8] = b"\nFREED-WHILE-LINKED task=0x";
                     for &b in MSG {
                         putchar(b);
@@ -2815,7 +2815,7 @@ unsafe fn __schedule() {
             pick_gen_supersede(cpu_id, tp);
             const MSG: &[u8] = b"R56-SLOT-SELF-HEALED\n";
             for &b in MSG {
-                crate::console::putchar_no_lock(b);
+                crate::dfx::taskdump::putc_brief(b);
             }
         }
         // home == MAX otherwise: tp has no slot at all.
@@ -2870,7 +2870,15 @@ unsafe fn __schedule() {
                     r56_print_pid(b"", tpclaim as u32, b" tp_pk=");
                 }
                 r56_print_pid(b"", unsafe { (*tp).pick_state() }, b" ksp=0x");
-                r56_print_pid(b"", unsafe { ((*tp).ti_kernel_sp() >> 32) as u32 }, b"");
+                // R87 note: print the halves with a ':' separator. The old
+                // separator-less concatenation of the two decimal prints
+                // ("4294967254" + "31981568") reads as one number whose
+                // natural 9/9-digit split decodes to hi32=0x19999995 —
+                // the "ksp smear" ghost family (R83/R84 hunted a
+                // corruption that never existed; every captured value,
+                // re-split at the correct 10/8 digits, is a legal kernel
+                // stack address).
+                r56_print_pid(b"", unsafe { ((*tp).ti_kernel_sp() >> 32) as u32 }, b":");
                 r56_print_pid(b"", unsafe { ((*tp).ti_kernel_sp() & 0xFFFF_FFFF) as u32 }, b"\n");
                 // R83: byte-level header dump of the victim — the scribble
                 // shape (extent + alignment) names the writer's store.
@@ -2985,9 +2993,9 @@ unsafe fn __schedule() {
                 crate::dfx::switches::DfxSwitch::LostParkTrace,
             ) && LPP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120
             {
-                use crate::console::putchar_no_lock as putchar;
+                use crate::dfx::taskdump::putc_brief as putchar;
                 fn pdec3(mut v: u64) {
-                    use crate::console::putchar_no_lock as putchar;
+                    use crate::dfx::taskdump::putc_brief as putchar;
                     let mut buf = [0u8; 20];
                     let mut n = 0;
                     if v == 0 {
@@ -3818,16 +3826,16 @@ unsafe fn ensure_linked_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> boo
     {
         const MSG: &[u8] = b"R41-STALE-ONRQ healed pid=0x";
         for &b in MSG {
-            crate::console::putchar_no_lock(b);
+            crate::dfx::taskdump::putc_brief(b);
         }
         let v = (*task).pid() as u64;
         let mut sh = 64;
         while sh > 0 {
             sh -= 4;
             let nb = ((v >> sh) & 0xF) as u8;
-            crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+            crate::dfx::taskdump::putc_brief(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
         }
-        crate::console::putchar_no_lock(b'\n');
+        crate::dfx::taskdump::putc_brief(b'\n');
     }
     match policy {
         SchedPolicy::Fifo | SchedPolicy::Rr => {
@@ -3910,15 +3918,15 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
             // (same discipline as RawSpinlock::deadlock_warn and the buddy
             // double-free tripwire).
             const MSG: &[u8] = b"ENQ-POISONED-TASK dropped pid=0x";
-            for &b in MSG { crate::console::putchar_no_lock(b); }
+            for &b in MSG { crate::dfx::taskdump::putc_brief(b); }
             let mut sh = 64;
             let v = pid as u64;
             while sh > 0 {
                 sh -= 4;
                 let nb = ((v >> sh) & 0xF) as u8;
-                crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                crate::dfx::taskdump::putc_brief(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
             }
-            crate::console::putchar_no_lock(b'\n');
+            crate::dfx::taskdump::putc_brief(b'\n');
             return false;
         }
     }
@@ -3940,7 +3948,7 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
             // R34: SBI direct write — under the GRQ lock (was console::putchar,
             // which nests the UART lock inside GRQ).
             const MSG: &[u8] = b"ENQ-DEAD-TASK dropped\n";
-            for &b in MSG { crate::console::putchar_no_lock(b); }
+            for &b in MSG { crate::dfx::taskdump::putc_brief(b); }
             return false;
         }
     }
@@ -4006,9 +4014,9 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
                 static DLDEF_N: core::sync::atomic::AtomicU32 =
                     core::sync::atomic::AtomicU32::new(0);
                 if DLDEF_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
-                    use crate::console::putchar_no_lock as putchar;
+                    use crate::dfx::taskdump::putc_brief as putchar;
                     fn pdec(mut v: u64) {
-                        use crate::console::putchar_no_lock as putchar;
+                        use crate::dfx::taskdump::putc_brief as putchar;
                         let mut buf = [0u8; 20];
                         let mut n = 0;
                         if v == 0 {
@@ -4126,9 +4134,9 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
                 if (*task).pid() > 1
                     && ENQSB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200
                 {
-                    use crate::console::putchar_no_lock as putchar;
+                    use crate::dfx::taskdump::putc_brief as putchar;
                     fn pdec4(mut v: u64) {
-                        use crate::console::putchar_no_lock as p;
+                        use crate::dfx::taskdump::putc_brief as p;
                         let mut buf = [0u8; 20];
                         let mut n = 0;
                         if v == 0 {
@@ -4180,9 +4188,9 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
                 static ENQC_N: core::sync::atomic::AtomicU32 =
                     core::sync::atomic::AtomicU32::new(0);
                 if ENQC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
-                    use crate::console::putchar_no_lock as putchar;
+                    use crate::dfx::taskdump::putc_brief as putchar;
                     fn pdec2(mut v: u64) {
-                        use crate::console::putchar_no_lock as p;
+                        use crate::dfx::taskdump::putc_brief as p;
                         let mut buf = [0u8; 20];
                         let mut n = 0;
                         if v == 0 {
@@ -4540,7 +4548,7 @@ pub fn ww_record(task: *mut Task, code: u32) {
     if code == WW_EV_WAKE_OK {
         static WWT_N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
         if WWT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
-            use crate::console::putchar_no_lock as putchar;
+            use crate::dfx::taskdump::putc_brief as putchar;
             const M: &[u8] = b"\nWWTICK pid=";
             for &b in M {
                 putchar(b);
@@ -4931,9 +4939,9 @@ pub fn wake_up_enqueue_opt(
                     // Budgeted report (direct console — the GRQ is held
                     // and printk may re-enter the scheduler).
                     {
-                        use crate::console::putchar_no_lock as putchar;
+                        use crate::dfx::taskdump::putc_brief as putchar;
                         fn pd(mut v: u64) {
-                            use crate::console::putchar_no_lock as p;
+                            use crate::dfx::taskdump::putc_brief as p;
                             let mut buf = [0u8; 20];
                             let mut n = 0;
                             while v > 0 {
@@ -5242,16 +5250,16 @@ pub fn wake_up_enqueue_opt(
                 {
                     const MSG: &[u8] = b"R49-ONCPU-ORPHAN healed pid=0x";
                     for &b in MSG {
-                        crate::console::putchar_no_lock(b);
+                        crate::dfx::taskdump::putc_brief(b);
                     }
                     let v = (*task).pid() as u64;
                     let mut sh = 64;
                     while sh > 0 {
                         sh -= 4;
                         let nb = ((v >> sh) & 0xF) as u8;
-                        crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                        crate::dfx::taskdump::putc_brief(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
                     }
-                    crate::console::putchar_no_lock(b'\n');
+                    crate::dfx::taskdump::putc_brief(b'\n');
                 }
                 // No CPU owns this mark (curr_on == false under the lock AND
                 // no in-flight switch names it): clearing it cannot break the
@@ -5267,14 +5275,14 @@ pub fn wake_up_enqueue_opt(
             {
                 const MSG: &[u8] = b"R46-RUNNING-PHANTOM healed pid=0x";
                 for &b in MSG {
-                    crate::console::putchar_no_lock(b);
+                    crate::dfx::taskdump::putc_brief(b);
                 }
                 let v = (*task).pid() as u64;
                 let mut sh = 64;
                 while sh > 0 {
                     sh -= 4;
                     let nb = ((v >> sh) & 0xF) as u8;
-                    crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                    crate::dfx::taskdump::putc_brief(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
                 }
                 // R76 (phantom producer hunt): name the victim's context —
                 // pick/claim word, cpu, exit flags, and the top kernel-text
@@ -5283,9 +5291,9 @@ pub fn wake_up_enqueue_opt(
                 // slotless); the parked stack symbolizes to exactly the
                 // wait/exit/spawn site that orphaned it.
                 {
-                    use crate::console::putchar_no_lock as putchar;
+                    use crate::dfx::taskdump::putc_brief as putchar;
                     fn pdec(mut v: u64) {
-                        use crate::console::putchar_no_lock as putchar;
+                        use crate::dfx::taskdump::putc_brief as putchar;
                         let mut buf = [0u8; 20];
                         let mut n = 0;
                         if v == 0 {
@@ -5303,7 +5311,7 @@ pub fn wake_up_enqueue_opt(
                         }
                     }
                     fn phex(v: u64) {
-                        use crate::console::putchar_no_lock as putchar;
+                        use crate::dfx::taskdump::putc_brief as putchar;
                         for sh in (0..16u32).rev() {
                             let nb = ((v >> (sh * 4)) & 0xF) as u8;
                             putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
@@ -5369,7 +5377,7 @@ pub fn wake_up_enqueue_opt(
                         }
                     }
                 }
-                crate::console::putchar_no_lock(b'\n');
+                crate::dfx::taskdump::putc_brief(b'\n');
             }
             // Fall through: enqueue_task_locked links the task (its
             // set_state(RUNNING) is a no-op re-write; nr_running pairs with
@@ -5530,9 +5538,9 @@ pub fn wake_up_enqueue_opt(
                     if WH_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 300 {
                         // R34 discipline: GRQ is held — direct console,
                         // no printk/UART lock under GRQ.
-                        use crate::console::putchar_no_lock as putchar;
+                        use crate::dfx::taskdump::putc_brief as putchar;
                         fn ph(v: u64) {
-                            use crate::console::putchar_no_lock as putchar;
+                            use crate::dfx::taskdump::putc_brief as putchar;
                             for sh in (0..16).rev() {
                                 let n = ((v >> (sh * 4)) & 0xF) as u8;
                                 putchar(if n < 10 {
@@ -5572,9 +5580,9 @@ pub fn wake_up_enqueue_opt(
                         // construction: dump its tail here so the pc=1
                         // face names the syscall path it rides in.
                         {
-                            use crate::console::putchar_no_lock as putchar2;
+                            use crate::dfx::taskdump::putc_brief as putchar2;
                             fn pd2(mut v: u64) {
-                                use crate::console::putchar_no_lock as p;
+                                use crate::dfx::taskdump::putc_brief as p;
                                 let mut buf = [0u8; 12];
                                 let mut n = 0;
                                 if v == 0 {
@@ -5632,9 +5640,9 @@ pub fn wake_up_enqueue_opt(
                             crate::dfx::switches::DfxSwitch::Schb,
                         )
                     {
-                        use crate::console::putchar_no_lock as putchar;
+                        use crate::dfx::taskdump::putc_brief as putchar;
                         fn pdec(mut v: u64) {
-                            use crate::console::putchar_no_lock as putchar;
+                            use crate::dfx::taskdump::putc_brief as putchar;
                             let mut buf = [0u8; 20];
                             let mut n = 0;
                             if v == 0 {
@@ -5707,7 +5715,7 @@ pub fn wake_up_enqueue_opt(
                             {
                                 lp_observed = true;
                                 fn pdec2(mut v: u64) {
-                                    use crate::console::putchar_no_lock as putchar;
+                                    use crate::dfx::taskdump::putc_brief as putchar;
                                     let mut buf = [0u8; 20];
                                     let mut n = 0;
                                     if v == 0 {
@@ -5830,7 +5838,7 @@ pub fn wake_up_enqueue_opt(
             static W2B_N: core::sync::atomic::AtomicU32 =
                 core::sync::atomic::AtomicU32::new(0);
             if W2B_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
-                use crate::console::putchar_no_lock as putchar;
+                use crate::dfx::taskdump::putc_brief as putchar;
                 const MSG: &[u8] = b"W2-ENQUEUE-HEAL-REFUSED pid=";
                 for &b in MSG {
                     putchar(b);
@@ -5860,7 +5868,7 @@ pub fn wake_up_enqueue_opt(
             static LPO_N: core::sync::atomic::AtomicU32 =
                 core::sync::atomic::AtomicU32::new(0);
             if LPO_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
-                use crate::console::putchar_no_lock as putchar;
+                use crate::dfx::taskdump::putc_brief as putchar;
                 const MSG: &[u8] = b"LP-WAKE-OUTCOME pid=";
                 for &b in MSG {
                     putchar(b);
@@ -7039,9 +7047,9 @@ pub fn scheduler_tick() {
                                         core::sync::atomic::Ordering::Acquire)
                                     .is_ok()
                             {
-                                use crate::console::putchar_no_lock as putchar;
+                                use crate::dfx::taskdump::putc_brief as putchar;
                                 fn ph(v: u64) {
-                                    use crate::console::putchar_no_lock as putchar;
+                                    use crate::dfx::taskdump::putc_brief as putchar;
                                     for sh in (0..16).rev() {
                                         let n = ((v >> (sh * 4)) & 0xF) as u8;
                                         putchar(if n < 10 {
@@ -7181,9 +7189,9 @@ pub fn scheduler_tick() {
                             w.task.store(0, core::sync::atomic::Ordering::Relaxed);
                             w.first.store(0, core::sync::atomic::Ordering::Relaxed);
                             w.last.store(0, core::sync::atomic::Ordering::Relaxed);
-                            use crate::console::putchar_no_lock as putchar;
+                            use crate::dfx::taskdump::putc_brief as putchar;
                             fn ph(v: u64) {
-                                use crate::console::putchar_no_lock as putchar;
+                                use crate::dfx::taskdump::putc_brief as putchar;
                                 for sh in (0..16).rev() {
                                     let n = ((v >> (sh * 4)) & 0xF) as u8;
                                     putchar(if n < 10 {
@@ -7280,9 +7288,9 @@ pub fn scheduler_tick() {
                             w.task.store(0, core::sync::atomic::Ordering::Relaxed);
                             w.first.store(0, core::sync::atomic::Ordering::Relaxed);
                             w.last.store(0, core::sync::atomic::Ordering::Relaxed);
-                            use crate::console::putchar_no_lock as putchar;
+                            use crate::dfx::taskdump::putc_brief as putchar;
                             fn ph(v: u64) {
-                                use crate::console::putchar_no_lock as putchar;
+                                use crate::dfx::taskdump::putc_brief as putchar;
                                 for sh in (0..16).rev() {
                                     let n = ((v >> (sh * 4)) & 0xF) as u8;
                                     putchar(if n < 10 {
@@ -7398,7 +7406,7 @@ pub fn scheduler_tick() {
             if !PARKWALK_ARMED.swap(true, core::sync::atomic::Ordering::AcqRel) {
                 const MSG: &[u8] = b"PARKWALK-ARMED\n";
                 for &b in MSG {
-                    crate::console::putchar_no_lock(b);
+                    crate::dfx::taskdump::putc_brief(b);
                 }
             }
             // Walk epoch: a slot not refreshed for 2+ walks belongs to a
@@ -7587,9 +7595,9 @@ pub fn scheduler_tick() {
                         } else if now.wrapping_sub(bad0) >= 400 {
                             unsafe { (**task).ti_preempt_count_zero(); }
                             s.bad_since.store(0, core::sync::atomic::Ordering::Relaxed);
-                            use crate::console::putchar_no_lock as putchar;
+                            use crate::dfx::taskdump::putc_brief as putchar;
                             fn ph(v: u64) {
-                                use crate::console::putchar_no_lock as putchar;
+                                use crate::dfx::taskdump::putc_brief as putchar;
                                 for sh in (0..16).rev() {
                                     let n = ((v >> (sh * 4)) & 0xF) as u8;
                                     putchar(if n < 10 {
@@ -7623,9 +7631,9 @@ pub fn scheduler_tick() {
                 if wildwrite_shape {
                     // Report immediately, not rate-gated: this is the
                     // proof event.
-                    use crate::console::putchar_no_lock as putchar;
+                    use crate::dfx::taskdump::putc_brief as putchar;
                     fn ph(v: u64) {
-                        use crate::console::putchar_no_lock as putchar;
+                        use crate::dfx::taskdump::putc_brief as putchar;
                         for sh in (0..16).rev() {
                             let n = ((v >> (sh * 4)) & 0xF) as u8;
                             putchar(if n < 10 {
@@ -7672,9 +7680,9 @@ pub fn scheduler_tick() {
                         )
                         .is_ok()
                 {
-                    use crate::console::putchar_no_lock as putchar;
+                    use crate::dfx::taskdump::putc_brief as putchar;
                     fn ph(v: u64) {
-                        use crate::console::putchar_no_lock as putchar;
+                        use crate::dfx::taskdump::putc_brief as putchar;
                         for sh in (0..16).rev() {
                             let n = ((v >> (sh * 4)) & 0xF) as u8;
                             putchar(if n < 10 {
@@ -7736,9 +7744,9 @@ pub fn scheduler_tick() {
                 .load(core::sync::atomic::Ordering::Relaxed)
                 && epoch % 1000 == 0
             {
-                use crate::console::putchar_no_lock as putchar;
+                use crate::dfx::taskdump::putc_brief as putchar;
                 fn pdec(mut v: u64) {
-                    use crate::console::putchar_no_lock as putchar;
+                    use crate::dfx::taskdump::putc_brief as putchar;
                     let mut buf = [0u8; 20];
                     let mut n = 0;
                     if v == 0 {
@@ -8128,9 +8136,9 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
                     )
                     .is_ok()
             {
-                use crate::console::putchar_no_lock as putchar;
+                use crate::dfx::taskdump::putc_brief as putchar;
                 fn ph(v: u64) {
-                    use crate::console::putchar_no_lock as putchar;
+                    use crate::dfx::taskdump::putc_brief as putchar;
                     for sh in (0..16).rev() {
                         let n = ((v >> (sh * 4)) & 0xF) as u8;
                         putchar(if n < 10 {
@@ -8460,6 +8468,13 @@ static ORPHAN_WATCH: [OrphanWatchSlot; 16] =
 /// clock refreshes the record (the shape is fresh again; a healthy
 /// mid-switch-out transient ran between sightings and must not pre-age a
 /// later genuine orphan), replacing the 60-jiffy re-record rule.
+/// NEVER-RAN EXEMPTION (smp8 orphan-race): a sighting with exec == 0 can
+/// never confirm — see the in-body comment; frozen-at-zero is definition,
+/// not evidence.
+/// CLAIMER-LIVENESS GATE (smp8 orphan-race): even a matured frozen-nonzero
+/// record refuses while the claim CPU is demonstrably ALIVE (R57 pair:
+/// tick + IRQ both frozen >= 5 s required) — frozen exec only proves the
+/// TASK did not run, not that its pick's owner is gone.
 fn orphan_watch_confirm(task: *mut Task, pid: u32, now: u64, threshold: u64) -> bool {
     use core::sync::atomic::Ordering;
     let raw = task as u64;
@@ -8483,11 +8498,184 @@ fn orphan_watch_confirm(task: *mut Task, pid: u32, now: u64, threshold: u64) -> 
             if s.pid.load(Ordering::Acquire) == pid {
                 let first = s.seen_at.load(Ordering::Acquire);
                 let first_exec = s.exec.load(Ordering::Acquire);
+                // smp8 orphan-race (never-ran exemption): a task whose
+                // exec clock reads 0 has NEVER RUN. The R81 frozen-exec
+                // conviction ("exec frozen across two sightings
+                // `threshold` jiffies apart proves nobody ran it, so the
+                // marks' owner is gone") is the lost-release theory — it
+                // presumes the task HAS run, carried true marks into a
+                // switch-out, and lost that release. For a never-ran task
+                // the theory is vacuous: its clock is frozen at 0 BY
+                // DEFINITION, frozen exec cannot distinguish stale marks
+                // from a still-legitimate pick — a starved picker between
+                // its slot publish and its affirm, or a hart mid-switch-in
+                // that has not taken its first tick, both present
+                // {marks, no owner slot, no SWITCHING_OUT, exec==0} for as
+                // long as TCG starvation stretches the window, because
+                // `now` is a GLOBAL jiffy count advanced by OTHER harts
+                // while the owning hart takes no ticks. Both smp8 captures
+                // died exactly here: a parked-before-first-run kthread
+                // (fdreapd, ticks=0, exec==0) convicted on first maturity,
+                // its marks released while a hart was still inside the
+                // switch protocol toward it, then a mixed-context resume
+                // killed the box. Never confirm while exec == 0: treat
+                // every never-ran sighting as fresh evidence. When the
+                // task first runs, exec advances past 0, the record
+                // re-bases at the nonzero clock (exec != first_exec
+                // re-records), and the frozen-exec rule governs from there
+                // — a task that HAS run and then frozen is the sound
+                // lost-release shape and still convicts.
+                if exec == 0 {
+                    if first != 0 && now >= first && now - first >= threshold {
+                        // This sighting would have matured under the old
+                        // rule — name the exempted population (budgeted,
+                        // once per threshold window per task because the
+                        // refresh below re-bases seen_at) so the producer
+                        // of never-ran orphan marks stays observable for
+                        // the follow-up hunt.
+                        static NR_N: core::sync::atomic::AtomicU32 =
+                            core::sync::atomic::AtomicU32::new(0);
+                        if NR_N.fetch_add(1, Ordering::Relaxed) < 40 {
+                            use crate::console::putchar_no_lock as putchar;
+                            fn pdec(mut v: u64) {
+                                use crate::console::putchar_no_lock as p;
+                                let mut buf = [0u8; 20];
+                                let mut n = 0;
+                                if v == 0 {
+                                    p(b'0');
+                                    return;
+                                }
+                                while v > 0 && n < buf.len() {
+                                    buf[n] = b'0' + (v % 10) as u8;
+                                    v /= 10;
+                                    n += 1;
+                                }
+                                for k in (0..n).rev() {
+                                    p(buf[k]);
+                                }
+                            }
+                            const M: &[u8] = b"\nORPHAN-WATCH-NEVERRAN pid=";
+                            for &b in M {
+                                putchar(b);
+                            }
+                            pdec(pid as u64);
+                            const M2: &[u8] = b" age=";
+                            for &b in M2 {
+                                putchar(b);
+                            }
+                            pdec(now - first);
+                            putchar(b'\n');
+                        }
+                    }
+                    s.seen_at.store(now, Ordering::Release);
+                    s.exec.store(0, Ordering::Release);
+                    s.aging.store(false, Ordering::Release);
+                    return false;
+                }
                 if first != 0
                     && now >= first
                     && now - first >= threshold
                     && exec == first_exec
                 {
+                    // smp8 orphan-race (claimer-liveness gate, the R57
+                    // discipline at the conviction choke point): a matured
+                    // frozen-exec record is NOT sufficient evidence that
+                    // the marks' owner is gone. sum_exec_runtime advances
+                    // only on the TASK's own ticks and switch-outs, while
+                    // `now` is a global jiffy count advanced by every
+                    // other hart — so under TCG starvation a pick whose
+                    // owner is ALIVE (starved between its slot publish
+                    // and its affirm, or resuming the task before its
+                    // first charge) presents {marks, no owner slot (the
+                    // boot-tail R56/R74 slot fights rewrote it), no
+                    // SWITCHING_OUT, exec frozen} for as long as the
+                    // starvation lasts, at ANY exec value — the sub-tick
+                    // park of fdreapd/ksoftirqd-class kthreads shows the
+                    // same frozen clock a lost-release orphan shows
+                    // (orx84-4/orx88-1: STALE-ONCPU-RESET matured on a
+                    // parked, sub-tick-ran kthread whose claimer was
+                    // alive and printing; the release made the poisoned
+                    // task pickable and a fresh resumer died instantly in
+                    // a crossed context). Demand the R57 positive-death
+                    // pair before releasing: the claim CPU's scheduler
+                    // touch AND its timer-IRQ count both frozen >= 5 s —
+                    // the n1-organic lesson (a starved-but-alive hart
+                    // serviced 3-10 IRQs/s for 1600 s; the IRQ count is
+                    // the aliveness witness). While the claimer lives,
+                    // refuse: the record is NOT refreshed, so the next
+                    // pass re-adjudicates against fresh liveness data.
+                    // Cost: shapes whose marks ARE stale garbage stay
+                    // unconvicted while their (innocent, alive) claimer
+                    // runs — a soft wedge (the R80 strand-heal latency
+                    // grows) — accepted because releasing under a live
+                    // claimer is the observed box-killer; a wedge never
+                    // executes a second hart on one stack.
+                    let claim = unsafe {
+                        (*task).running_on_cpu.load(Ordering::Acquire)
+                    };
+                    if claim >= 0 && (claim as usize) < MAX_CPUS {
+                        let c = claim as usize;
+                        let tick_ms = cpu_tick_stale_ms(c);
+                        let irq_ms =
+                            crate::dfx::softlockup::cpu_irq_frozen_ms(c);
+                        if tick_ms < 5000 || irq_ms < 5000 {
+                            static LC_N: core::sync::atomic::AtomicU32 =
+                                core::sync::atomic::AtomicU32::new(0);
+                            static LC_LAST: core::sync::atomic::AtomicU64 =
+                                core::sync::atomic::AtomicU64::new(0);
+                            // Once matured this refusal repeats on every
+                            // observer pass — print at most one line per
+                            // 25 jiffies system-wide, budget 40 total.
+                            let last = LC_LAST.load(Ordering::Relaxed);
+                            if now >= last
+                                && now - last >= 25
+                                && LC_N.fetch_add(1, Ordering::Relaxed) < 40
+                            {
+                                LC_LAST.store(now, Ordering::Release);
+                                use crate::console::putchar_no_lock as putchar;
+                                fn pdec3(mut v: u64) {
+                                    use crate::console::putchar_no_lock as p;
+                                    let mut buf = [0u8; 20];
+                                    let mut n = 0;
+                                    if v == 0 {
+                                        p(b'0');
+                                        return;
+                                    }
+                                    while v > 0 && n < buf.len() {
+                                        buf[n] = b'0' + (v % 10) as u8;
+                                        v /= 10;
+                                        n += 1;
+                                    }
+                                    for k in (0..n).rev() {
+                                        p(buf[k]);
+                                    }
+                                }
+                                const M: &[u8] =
+                                    b"\nORPHAN-WATCH-LIVECLAIM pid=";
+                                for &b in M {
+                                    putchar(b);
+                                }
+                                pdec3(pid as u64);
+                                const M2: &[u8] = b" claim=";
+                                for &b in M2 {
+                                    putchar(b);
+                                }
+                                pdec3(claim as u64);
+                                const M3: &[u8] = b" tick_ms=";
+                                for &b in M3 {
+                                    putchar(b);
+                                }
+                                pdec3(tick_ms);
+                                const M4: &[u8] = b" irq_ms=";
+                                for &b in M4 {
+                                    putchar(b);
+                                }
+                                pdec3(irq_ms);
+                                putchar(b'\n');
+                            }
+                            return false;
+                        }
+                    }
                     return true;
                 }
                 // Re-record when the task RAN between sightings (exec
@@ -8585,7 +8773,7 @@ fn r56_print_msg(msg: &[u8]) {
     // R34 discipline: callers may hold the GRQ and/or a PID-hash bucket
     // lock here — SBI/direct console writes only.
     for &b in msg {
-        unsafe { crate::console::putchar_no_lock(b); }
+        unsafe { crate::dfx::taskdump::putc_brief(b); }
     }
 }
 
@@ -8617,7 +8805,7 @@ fn r56_print_pid(prefix: &[u8], pid: u32, suffix: &[u8]) {
         }
     }
     for i in (0..n).rev() {
-        unsafe { crate::console::putchar_no_lock(buf[i]); }
+        unsafe { crate::dfx::taskdump::putc_brief(buf[i]); }
     }
     r56_print_msg(suffix);
 }
@@ -8630,7 +8818,7 @@ fn r56_print_pid(prefix: &[u8], pid: u32, suffix: &[u8]) {
 /// GRQ held — reads are volatile and diagnostic-only; the task is pinned by
 /// the caller's try_pin.
 fn harvest_print_parked(task: *mut Task, pid: u32) {
-    use crate::console::putchar_no_lock as putchar;
+    use crate::dfx::taskdump::putc_brief as putchar;
     static LAST: core::sync::atomic::AtomicU64 =
         core::sync::atomic::AtomicU64::new(0);
     let now = crate::drivers::timer::get_jiffies();
@@ -8645,7 +8833,7 @@ fn harvest_print_parked(task: *mut Task, pid: u32) {
         return;
     }
     fn pdec(mut v: u64) {
-        use crate::console::putchar_no_lock as putchar;
+        use crate::dfx::taskdump::putc_brief as putchar;
         let mut buf = [0u8; 20];
         let mut n = 0;
         if v == 0 {
@@ -8663,7 +8851,7 @@ fn harvest_print_parked(task: *mut Task, pid: u32) {
         }
     }
     fn phex(v: u64) {
-        use crate::console::putchar_no_lock as putchar;
+        use crate::dfx::taskdump::putc_brief as putchar;
         for sh in (0..16u32).rev() {
             let nb = ((v >> (sh * 4)) & 0xF) as u8;
             putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
@@ -9055,6 +9243,117 @@ pub fn republish_current_after_abort(cpu: usize, prev: *mut Task) {
     }
 }
 
+/// smp8 orphan-race (sched-orphan-race lane): the abort-side twin of the
+/// steal's re-link. Both arch switch-abort handlers assumed "the steal
+/// already re-linked next (or a foreign picker owns it)" — true for every
+/// REVOKED abort, but an abort can also fire on a LIVE-published pick
+/// (mark_picked_on_cpu's owned_here leg publishes LIVE for a task whose
+/// stale claim names this CPU; the wrapper's early check then reads
+/// pick_state != PICK_PICKED and aborts) where NO steal is involved:
+/// nothing revoked the pick, so nothing re-links the task. The pick
+/// unlinked it and published its marks {on_cpu=1, claim=cpu} plus this
+/// CPU's slot; the abort repairs the slot back to prev, leaving the task
+/// UNLINKED, marked as this CPU's, named by no slot and no SWITCHING_OUT
+/// — executing nowhere, invisible to every pick-side heal (they scan the
+/// class timelines) and refused by the harvester (a LIVE pick-state is
+/// never stolen). It strands until a wake survives the R80 50-jiffy
+/// orphan-watch confirmation — and the stranded marks are exactly the
+/// stale-claim/stale-oncpu food the pick-side adjudications then race
+/// (the smp8 matrix panics: ENQ-CLAIMED on a linked-marked kthread,
+/// STALE-ONCPU-RESET by a foreign CPU, mixed-context resume).
+///
+/// Adjudicate under the GRQ (same discipline as
+/// member_release_stale_ownership): when `next` still carries THIS cpu's
+/// full ownership marks ({on_cpu=1, claim=cpu}), is linked on no class
+/// queue, and is named by no slot and no in-flight switch-out, the
+/// abort's own publish is the marks' only author and nobody else can be
+/// resuming the task — release the marks with the exact store the switch
+/// protocol would have made ("explicitly not-own") and re-link it through
+/// the normal enqueue. Idempotent by construction: when a steal handled
+/// the pick its marks are already released and the task already linked,
+/// so every condition below is false and the function is a no-op.
+///
+/// Called from the arch abort handlers (riscv_switch_abort /
+/// x86_switch_abort) with IRQs disabled and no scheduler locks held;
+/// takes the GRQ alone.
+pub fn abort_next_release_orphans(cpu: usize, next: *mut Task) {
+    if next.is_null() || cpu >= MAX_CPUS {
+        return;
+    }
+    let cpus_allowed;
+    {
+        let mut g = grq().lock_irqsave();
+        // SAFETY: next was this CPU's just-aborted pick: the pick's GRQ
+        // hold unlinked it and published its marks, and the abort repairs
+        // the slot before this runs — under this GRQ hold the picture
+        // below cannot move (no pick, no wake, no steal can interleave).
+        unsafe {
+            if (*next).pid() == 0 || (*next).pid() == TASK_POISON {
+                return; // idle is never marked; poison is not ours to fix
+            }
+            // Only OUR OWN publication is repairable here: the marks must
+            // still name this CPU as the claimer with on_cpu set. A steal
+            // that revoked the pick released the marks (claim=-1) and
+            // re-linked the task already; a foreign owner never carries
+            // our claim.
+            let whole = core::ptr::read_volatile(
+                core::ptr::addr_of!((*next).ti_on_cpu) as *const u64,
+            );
+            let oncpu = (whole & 0xFF) != 0;
+            let claim = (whole >> 32) as i32;
+            if !oncpu || claim != cpu as i32 {
+                return;
+            }
+            // Belt and braces (the marks' owner scan): if any slot or
+            // in-flight switch-out still names the task, some path owns
+            // it — leave it to that path.
+            if pick_owner_live(next) {
+                return;
+            }
+            // A dying task leaves through its own final schedule(); no
+            // heal may re-offer it (R57).
+            if task_is_dying(next) {
+                return;
+            }
+            let linked = match (*next).policy() {
+                SchedPolicy::Fifo | SchedPolicy::Rr => g.rt_rq.is_linked(next),
+                SchedPolicy::Deadline => g.dl_rq.is_linked(next),
+                SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
+                    g.cfs_rq.is_linked(next)
+                }
+            };
+            if linked {
+                return; // a racing wake already re-linked it: not an orphan
+            }
+            cpus_allowed = (*next).cpus_allowed();
+            let pk = (*next).pick_state();
+            // Explicitly not-own: the exact store __switch_to would have
+            // made for a switch-out that will never happen.
+            (*next).release_pick_ownership();
+            let rq = enqueue_task_locked(&mut g, next);
+            static SWABORT_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            let n = SWABORT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 8 {
+                crate::pr_warn!(
+                    "SWITCH-ABORT-RELINK cpu={} pid={} claim={} pk={} rq={}",
+                    cpu,
+                    (*next).pid(),
+                    claim,
+                    pk,
+                    rq as u8
+                );
+            }
+        }
+    }
+    // Nudge an idle CPU outside the lock (mirrors enqueue_task's tail) so
+    // the just-relinked task does not wait for this CPU's next pass.
+    if let Some(idle_cpu) = grq().find_idle_cpu(cpus_allowed) {
+        grq().clear_idle(idle_cpu);
+        resched_cpu(idle_cpu);
+    }
+}
+
 /// R56-heal: rate-limited tripwire for switch-in aborts (at most one
 /// line per jiffy system-wide — a pathological steal/abort ping-pong
 /// must not flood the serial console).
@@ -9264,7 +9563,7 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
 /// with a global budget, direct-console (R34 discipline — the caller may
 /// not hold the GRQ, but the diag path must stay lock-free anyway).
 fn lp_idle_lie_report(cpu: usize) {
-    use crate::console::putchar_no_lock as putchar;
+    use crate::dfx::taskdump::putc_brief as putchar;
     static LP_N: core::sync::atomic::AtomicU32 =
         core::sync::atomic::AtomicU32::new(0);
     static LP_LAST: [core::sync::atomic::AtomicU64; MAX_CPUS] =
@@ -9290,7 +9589,7 @@ fn lp_idle_lie_report(cpu: usize) {
     }
     LP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     fn pdec(mut v: u64) {
-        use crate::console::putchar_no_lock as putchar;
+        use crate::dfx::taskdump::putc_brief as putchar;
         let mut buf = [0u8; 20];
         let mut n = 0;
         if v == 0 {
@@ -9308,7 +9607,7 @@ fn lp_idle_lie_report(cpu: usize) {
         }
     }
     fn phex(v: u64) {
-        use crate::console::putchar_no_lock as putchar;
+        use crate::dfx::taskdump::putc_brief as putchar;
         for sh in (0..16u32).rev() {
             let nb = ((v >> (sh * 4)) & 0xF) as u8;
             putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
@@ -9638,7 +9937,7 @@ pub fn cpu_idle_loop() -> ! {
         sp
     }
     fn idle_guard_report(cpu: usize, sp: u64, floor: u64) {
-        use crate::console::putchar_no_lock as putchar;
+        use crate::dfx::taskdump::putc_brief as putchar;
         fn ph(mut v: u64) {
             for _ in 0..16 {
                 let n = (v >> 60) as u8;
