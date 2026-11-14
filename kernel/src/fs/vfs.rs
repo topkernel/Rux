@@ -337,10 +337,10 @@ pub fn vfs_remount(mountpoint: &str, new_flags: crate::fs::mount::MntFlags) -> R
     let vfs_root = VFS_STATE.lock().root_dentry.clone()
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
     let mut current = vfs_root;
-    let mut found: Option<alloc::sync::Arc<VfsMountInternal>> = None;
+    let mut crossed: Option<alloc::sync::Arc<VfsMountInternal>> = None;
     for component in mountpoint.split('/').filter(|s| !s.is_empty()) {
         if let Some(mnt) = current.get_mount() {
-            found = Some(mnt.clone());
+            crossed = Some(mnt.clone());
             current = mnt.root.clone();
         }
         current = match current.lookup_child(component) {
@@ -348,11 +348,16 @@ pub fn vfs_remount(mountpoint: &str, new_flags: crate::fs::mount::MntFlags) -> R
             None => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
         };
     }
-    if found.is_none() {
-        if let Some(mnt) = current.get_mount() {
-            found = Some(mnt);
-        }
-    }
+    // The TOPMOST mount covering the path wins: a mount attached AT the
+    // terminal dentry (a bind of a FILE, e.g. systemd's ProtectHostname
+    // step mount(NULL, /proc/sys/kernel/domainname, MS_BIND|MS_REMOUNT|
+    // MS_RDONLY)) shadows whatever mount was crossed on the way down.
+    // The old walk only consulted the terminal dentry when NO mount had
+    // been crossed, so the remount flags landed on the ENCLOSING mount
+    // (the whole procfs) instead of the bind. Linux __do_loopback/
+    // do_remount semantics: flags apply to the last-mounted covering
+    // mount of the path.
+    let found = current.get_mount().or(crossed);
     match found {
         Some(mnt) => {
             *mnt.flags.lock() = new_flags;
