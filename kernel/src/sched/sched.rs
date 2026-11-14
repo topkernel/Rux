@@ -391,13 +391,31 @@ pub struct GrqGuard<'a> {
 impl<'a> GrqGuard<'a> {
     /// Release the spinlock but keep interrupts disabled.
     /// Returns the saved IRQ flags. Caller must call restore_irq() later.
+    ///
+    /// ORDER FIX (glib-mutex lane, 2026-11-14): the preempt_count sub runs
+    /// BEFORE the raw unlock. The old order (unlock, then sub) left a
+    /// two-instruction window in which the GRQ was observable-free while
+    /// the switching task still carried its +1 — and in __schedule that
+    /// window sits AFTER the sched-slot flip to `next` (sched.rs:3113), so
+    /// a concurrent waker's WAKE-HEAL adjudication saw the task as
+    /// "count=1, owned by no slot" and zeroed the LIVE guard count. Under
+    /// KVM with a loaded host the vCPU can be descheduled anywhere,
+    /// stretching the window to milliseconds — captured live (garepro26,
+    /// +252.1 s): WAKE-HEAL-ORIGIN pid=328 osite=sched.rs:2994 ocpu=5
+    /// oage_jif=0 (the heal zeroing the in-flight guard), then 5 ms later
+    /// PREEMPT-UNDERFLOW "count_was=0 sub=1" at sched.rs:397 (this
+    /// function's own sub arriving late) with UNDERFLOW-ORIGIN naming the
+    /// same acquire. With the sub first, a waker entering after the raw
+    /// unlock always observes count==0 and the heal predicate never fires
+    /// on a live guard. Safe: preempt_enable here is a bare sub (no
+    /// resched), IF stays 0 across the whole bracket.
     pub fn unlock_irqretain(self) -> bool {
         let flags = self.flags;
-        // SAFETY: we hold the GRQ lock via this guard, so the unlock is valid.
-        unsafe { (*self.grq).lock.unlock() };
         crate::interrupt::preempt::preempt_count_sub(
             crate::interrupt::preempt::PREEMPT_OFFSET,
         );
+        // SAFETY: we hold the GRQ lock via this guard, so the unlock is valid.
+        unsafe { (*self.grq).lock.unlock() };
         core::mem::forget(self);
         flags
     }
@@ -420,10 +438,14 @@ impl core::ops::DerefMut for GrqGuard<'_> {
 
 impl Drop for GrqGuard<'_> {
     fn drop(&mut self) {
-        unsafe { (*self.grq).lock.unlock() };
+        // ORDER FIX (glib-mutex lane): sub before unlock — see
+        // GrqGuard::unlock_irqretain; same rationale for the plain drop
+        // path (the [unlock..sub] gap must never be observable with the
+        // count still elevated).
         crate::interrupt::preempt::preempt_count_sub(
             crate::interrupt::preempt::PREEMPT_OFFSET,
         );
+        unsafe { (*self.grq).lock.unlock() };
         crate::arch::cpu::restore_irq(self.flags);
     }
 }
@@ -749,6 +771,27 @@ static RQ_INITIALIZED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [const { cor
 // coroutine switch), so the waker's under-lock read is race-free.
 static SWITCHING_OUT: [core::sync::atomic::AtomicU64; MAX_CPUS] =
     [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+
+/// glib-mutex lane (2026-11-14): jiffies at the moment SWITCHING_OUT[c]
+/// was LAST SET (stored together with the marker, under the GRQ). The
+/// WAKE-HEAL's stale-marker adjudication uses MARKER AGE from this
+/// stamp — the previous sighting-to-sighting test could not tell a
+/// wedged leftover (marker set long ago, its switch never completing)
+/// from a FRESH marker on a fast-cycling task whose previous mid-switch
+/// sighting was naturally >50 jiffies earlier, and so ignored fresh
+/// markers exactly for the futex/yield worker class — the garepro26
+/// capture (WAKE-HEAL zeroing pid=328's in-flight GRQ guard count, then
+/// the PREEMPT-UNDERFLOW of the same guard 5 ms later). A marker whose
+/// age exceeds the threshold is a wedged leftover and may be ignored;
+/// a fresh one is honored unconditionally.
+static SWITCHING_OUT_JIF: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+
+/// Age (jiffies) beyond which a SWITCHING_OUT marker is adjudicated a
+/// wedged leftover of an aborted/lost switch (the original WM constant;
+/// a legitimate switch completes in microseconds, so 50 jiffies is
+/// generous by three orders of magnitude).
+const SWITCHING_OUT_STALE_JIF: u64 = 50;
 
 /// R63: whether `task` is the prev of a context switch in flight on any
 /// CPU. Called with the GRQ lock held (same discipline as the R49
@@ -3115,6 +3158,13 @@ unsafe fn __schedule() {
     let switching = next != prev && !next.is_null();
     if switching {
         SWITCHING_OUT[cpu_id].store(prev as u64, core::sync::atomic::Ordering::Release);
+        // glib-mutex lane: stamp the marker's birth (under the same GRQ
+        // hold) so the WAKE-HEAL adjudicates staleness by MARKER AGE,
+        // not by the sighting history of the target task.
+        SWITCHING_OUT_JIF[cpu_id].store(
+            crate::drivers::timer::get_jiffies(),
+            core::sync::atomic::Ordering::Release,
+        );
     }
 
     // Update per-CPU current under lock
@@ -5430,47 +5480,41 @@ pub fn wake_up_enqueue_opt(
                         .bits()
                     != 0;
                 let mut mid_switch = task_is_mid_switch_out(task);
-                // Stale-marker confirmation: a real context switch-out is
-                // microseconds and the marker is cleared on the same CPU
-                // right after the coroutine switch. A marker that names
-                // this task across wake attempts 50+ jiffies apart (same
-                // discipline as orphan_watch_confirm) is a wedged leftover
-                // of an aborted switch — no CPU is saving this context,
-                // the task is parked, and treating the marker as live
-                // would poison every future wake-heal of this task (the
-                // same per-task forever-skip the parkwalk's mid-switch
-                // skip produces). Time-confirm, then ignore.
+                // Stale-marker confirmation (glib-mutex rewrite,
+                // 2026-11-14): a real context switch-out is microseconds
+                // and the marker is cleared on the same CPU right after
+                // the coroutine switch. A marker whose AGE (from
+                // SWITCHING_OUT_JIF, stamped at marker-set time under the
+                // GRQ) exceeds SWITCHING_OUT_STALE_JIF is a wedged
+                // leftover of an aborted/lost switch — no CPU is saving
+                // this context, the task is parked, and treating the
+                // marker as live would poison every future wake-heal of
+                // this task. Time-confirm by AGE, then ignore.
+                //
+                // The ORIGINAL form compared SIGHTING-to-SIGHTING
+                // distance per task (the WM table): a wake only sees the
+                // marker when it lands inside the microseconds-wide
+                // switch window, so for fast-cycling tasks (futex/yield
+                // workers — the garepro class) sightings are naturally
+                // hundreds of jiffies apart and every FRESH marker was
+                // declared stale. That disabled the mid-switch guard
+                // exactly for the tasks that park/wake hardest, letting
+                // the heal zero a task's LIVE in-flight guard count
+                // (captured: garepro26 +252.1 s, pid=328, WAKE-HEAL
+                // zeroing the GRQ guard booked at sched.rs:2994 on cpu5,
+                // then the guard's own release underflowing 5 ms later).
                 if mid_switch {
-                    const WMS: usize = 8;
-                    static WM_TASK: [core::sync::atomic::AtomicUsize; WMS] =
-                        [const { core::sync::atomic::AtomicUsize::new(0) }; WMS];
-                    static WM_JIF: [core::sync::atomic::AtomicU64; WMS] =
-                        [const { core::sync::atomic::AtomicU64::new(0) }; WMS];
-                    let key = task as usize;
                     let jif = crate::drivers::timer::get_jiffies();
                     let mut stale = false;
-                    for s in 0..WMS {
-                        let prev = WM_TASK[s].load(core::sync::atomic::Ordering::Relaxed);
-                        if prev == key {
-                            let prev_jif =
-                                WM_JIF[s].load(core::sync::atomic::Ordering::Relaxed);
-                            if jif.wrapping_sub(prev_jif) >= 50 {
+                    for c in 0..MAX_CPUS {
+                        if SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire)
+                            == task as u64
+                        {
+                            let set_jif =
+                                SWITCHING_OUT_JIF[c].load(core::sync::atomic::Ordering::Acquire);
+                            if jif.wrapping_sub(set_jif) >= SWITCHING_OUT_STALE_JIF {
                                 stale = true;
                             }
-                            WM_JIF[s].store(jif, core::sync::atomic::Ordering::Relaxed);
-                            break;
-                        }
-                        if prev == 0
-                            && WM_TASK[s]
-                                .compare_exchange(
-                                    0,
-                                    key,
-                                    core::sync::atomic::Ordering::Relaxed,
-                                    core::sync::atomic::Ordering::Relaxed,
-                                )
-                                .is_ok()
-                        {
-                            WM_JIF[s].store(jif, core::sync::atomic::Ordering::Relaxed);
                             break;
                         }
                     }
