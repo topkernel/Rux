@@ -839,6 +839,31 @@ pub fn do_exit(exit_code: i32) -> ! {
     let dying_pid = unsafe { (*current).pid() };
     crate::mm::page_alloc::reclaim_gate_exit_release(dying_pid);
 
+    // R127 wake-drop hunt: the exit-leak detector. A nonzero wq_regs at
+    // exit means this task is going away with wait-queue entries still
+    // naming it — the park was never unwound (no remove/finish_wait
+    // ran). Those entries go stale the moment the Task page is freed
+    // and become the pointer-recycling theft / wrong-task-wake class
+    // the R127 screen in wait.rs evicts. Gated by the hunt's tracepoint
+    // (input:evdev_wake armed via trace_event=); raw-console, budgeted.
+    {
+        let regs = unsafe { (*current).wq_regs.load(core::sync::atomic::Ordering::Relaxed) };
+        if regs != 0 && crate::trace::EVENT_EVDEV_WAKE.armed() {
+            use core::sync::atomic::{AtomicU32, Ordering as Rel};
+            static WQL_N: AtomicU32 = AtomicU32::new(0);
+            let n = WQL_N.fetch_add(1, Rel::Relaxed);
+            if n < 64 {
+                let comm = unsafe { (*current).comm_str() };
+                let mut line: alloc::string::String =
+                    alloc::format!("WQLEAK[{}] pid={} regs={} comm='{}'\n", n, dying_pid, regs, comm);
+                // Raw UART, one write per line: readable at any loglevel.
+                for b in line.as_bytes() {
+                    crate::console::uart_putc_raw(*b);
+                }
+            }
+        }
+    }
+
     // perf EXIT sideband (hiperf process tracking; no-op unless a perf
     // event is armed).
     crate::perf::hook_exit(unsafe { (*current).tgid() }, dying_pid);

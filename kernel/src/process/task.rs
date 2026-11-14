@@ -928,6 +928,18 @@ pub struct Task {
     /// exceed MAX_TASKS, so the table silently skipped every real task.
     pub hung_task_since: core::sync::atomic::AtomicU64,
 
+    /// Live wait-queue registrations naming this task (R127 wake-drop
+    /// hunt): incremented by WaitQueueHead::add, decremented by every
+    /// removal path (remove_count and the R127 stale eviction). A task
+    /// exiting with this nonzero parked somewhere without unwinding —
+    /// the exit-leak class the evdev poller showed on the OH hunts
+    /// (thread gone, its poll entries still queued on /dev/input
+    /// nodes, later stripped by a recycled-page remove). Maintained
+    /// unconditionally (one atomic per park/unpark, against the
+    /// irqsave lock pair those paths already pay); the diagnostic
+    /// print at exit is hunt-gated.
+    pub wq_regs: core::sync::atomic::AtomicU32,
+
     /// Timed-sleep shadow (ticktrap, r41v17): the deadline of the timed
     /// wait this task is currently parked in, if any. Set by the wait
     /// site at timer-arm time and cleared at scope exit (guard Drop);
@@ -1750,6 +1762,7 @@ impl Task {
             ti_cpu: core::sync::atomic::AtomicI32::new(-1),
             cpus_allowed: core::sync::atomic::AtomicU32::new(Self::default_cpus_allowed()),
             hung_task_since: core::sync::atomic::AtomicU64::new(0),
+            wq_regs: core::sync::atomic::AtomicU32::new(0),
             timed_sleep_deadline: core::sync::atomic::AtomicU64::new(0),
             timed_sleep_kind: core::sync::atomic::AtomicU32::new(0),
             timed_sleep_timer_id: core::sync::atomic::AtomicU64::new(0),
@@ -2006,6 +2019,12 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, hung_task_since)) as *mut core::sync::atomic::AtomicU64,
             core::sync::atomic::AtomicU64::new(0),
+        );
+        // R127 wake-drop hunt: same recycled-page class — a fresh task
+        // must not inherit the previous incarnation's wq_regs count.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, wq_regs)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(0),
         );
         // ticktrap shadow (same R68a recycled-page class): a fresh task
         // must not inherit a stale timed-sleep shadow.
@@ -2746,6 +2765,12 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, hung_task_since)) as *mut core::sync::atomic::AtomicU64,
             core::sync::atomic::AtomicU64::new(0),
+        );
+        // R127 wake-drop hunt: same recycled-page class — a fresh task
+        // must not inherit the previous incarnation's wq_regs count.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, wq_regs)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(0),
         );
         // ticktrap shadow (same R68a recycled-page class): a fresh task
         // must not inherit a stale timed-sleep shadow.
