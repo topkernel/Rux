@@ -925,11 +925,122 @@ fn epoll_file_close(file: &crate::fs::File) -> i32 {
     0
 }
 
-/// Epoll file operations (D-6 builder form: epoll carries ONLY close —
-/// no read/write/seek/poll capability; read() on an epoll fd takes the
-/// central EINVAL path, the §1 incident's fd family).
+/// Read-only "would this epoll deliver an event NOW" — the same
+/// decision the wait scan makes (LT: poll verdict != 0; ET: verdict
+/// differs from the last-reported snapshot; oneshot-fired: never),
+/// WITHOUT consuming anything (no `last_reported` mutation, no dead
+/// unlinks — the next real wait does both). Resolves interests against
+/// the CURRENT task's fdtable, exactly like the wait scan (the epoll
+/// model's approximation; the nesting ADD-time ELOOP/depth-5 checks
+/// keep this recursion acyclic and bounded).
+fn epoll_has_ready_events(epoll: &EpollFile) -> bool {
+    use epoll_events::*;
+    use poll_events::*;
+    let fdtable = match crate::sched::get_current_fdtable() {
+        Some(f) => f,
+        None => return false,
+    };
+    let mut entries = epoll.entries.lock();
+    let head = entries.init_once();
+    // SAFETY: read-only walk of nodes linked under this lock.
+    let mut cur = unsafe { (*head).next };
+    while cur != head {
+        // SAFETY: cur is a linked EpollEntry's `list` (first field).
+        let entry = unsafe { &*(cur as *const EpollEntry) };
+        // SAFETY: read-only walk.
+        cur = unsafe { (*cur).next };
+        if entry.events & EPOLLONESHOT != 0 && entry.oneshot_fired {
+            continue;
+        }
+        let Some(f) = fdtable.get_file(entry.fd as usize) else {
+            continue; // dead interest: delivers nothing (scan purges it)
+        };
+        if f.file_id != entry.file_id {
+            continue;
+        }
+        let mut poll_mask: u16 = 0;
+        if entry.events & EPOLLIN != 0 {
+            poll_mask |= POLLIN;
+        }
+        if entry.events & EPOLLOUT != 0 {
+            poll_mask |= POLLOUT;
+        }
+        if entry.events & EPOLLRDHUP != 0 {
+            poll_mask |= POLLRDHUP;
+        }
+        let revents = f.poll_dispatch(poll_mask);
+        if revents == 0 {
+            continue;
+        }
+        let mut ep_events: u32 = 0;
+        if revents & (POLLIN | POLLRDNORM | POLLHUP) != 0 {
+            ep_events |= EPOLLIN;
+        }
+        if revents & (POLLOUT | POLLWRNORM) != 0 {
+            ep_events |= EPOLLOUT;
+        }
+        if revents & POLLRDHUP != 0 {
+            ep_events |= EPOLLRDHUP;
+        }
+        if revents & POLLERR != 0 {
+            ep_events |= EPOLLERR;
+        }
+        if revents & POLLHUP != 0 {
+            ep_events |= EPOLLHUP;
+        }
+        if entry.events & EPOLLET != 0 && ep_events == entry.last_reported {
+            continue; // same edge — already reported
+        }
+        let report_mask = entry.events | EPOLLERR | EPOLLHUP;
+        if ep_events & report_mask != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// poll(2)/nested-epoll readiness for an epoll fd — the reference's
+/// ep_poll: POLLIN|POLLRDNORM iff an epoll_wait NOW would deliver at
+/// least one event; never writable, no ERR/HUP of its own.
+///
+/// The hilog-flood root cause: EPOLL_OPS previously carried NO poll
+/// fn, so File::poll_dispatch's D-6 fallback (regular-file semantics)
+/// reported every epoll fd PERMANENTLY readable — any process that
+/// nested an epoll fd in its wait set (libinput_get_fd inside mmi's
+/// EventLoop, FFRT's EpollManager inside every OH service, ...) had a
+/// wait that NEVER blocked: the outer epoll_wait returned that fd as a
+/// ready event on every round, userspace drained the inner epoll,
+/// found nothing, logged the empty pass, and looped at 10-60k rounds/s
+/// — the ~100k msg/s hilog fabric and the 5.8/8-CPU burn, versus the
+/// reference kernel's 17% idle posture on the same image (the LoopEvent
+/// / "in WaitTimeout" / "End to OnEventHandler" debug lines ARE those
+/// empty passes made visible).
+fn epoll_file_poll(file: &crate::fs::file::File, events: u16) -> u16 {
+    use poll_events::*;
+    if events & POLLIN == 0 {
+        return 0;
+    }
+    // SAFETY: ops identity (EPOLL_OPS) was verified by the dispatch that
+    // selected this fn; private_data holds the EpollFile installed by
+    // sys_epoll_create. Read-only probe below.
+    let epoll = match unsafe { *file.private_data.get() } {
+        Some(p) => unsafe { &*(p as *const EpollFile) },
+        None => return 0,
+    };
+    if epoll_has_ready_events(epoll) {
+        POLLIN | POLLRDNORM
+    } else {
+        0
+    }
+}
+
+/// Epoll file operations (D-6 builder form: epoll carries close + poll
+/// — no read/write/seek; read() on an epoll fd takes the central EINVAL
+/// path, the §1 incident's fd family. poll is the reference's ep_poll
+/// semantics — see epoll_file_poll).
 static EPOLL_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
     .close(epoll_file_close)
+    .poll(epoll_file_poll)
     .build();
 
 /// D-6 shape-test accessors: expose the (otherwise private) converted
@@ -3470,6 +3581,82 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
     ret
 }
 
+/// spinwatch (cmdline spinwatch=1): dump this epoll's interest set with
+/// each fd's CURRENT poll verdict — the stuck-ready fd inside a spinner's
+/// wait set shows itself. Rate-limited by dfx::spinwatch::record().
+fn spinwatch_dump_interest(epoll: &EpollFile, epfd: i32) {
+    use alloc::format;
+    let pid = crate::process::current_pid();
+    let comm = match crate::sched::current() {
+        // SAFETY: read-only comm access on the current task.
+        Some(t) => {
+            let c = unsafe { (*t).comm() };
+            let end = c.iter().position(|&b| b == 0).unwrap_or(16);
+            alloc::string::String::from_utf8_lossy(&c[..end]).into_owned()
+        }
+        None => return,
+    };
+    let fdtable = match crate::sched::get_current_fdtable() {
+        Some(f) => f,
+        None => return,
+    };
+    crate::pr_warn!(
+        "SPINWATCH pid={} {} epfd={} interest set (fd, want, now-ready, ops):",
+        pid,
+        comm,
+        epfd
+    );
+    let mut entries = epoll.entries.lock();
+    let head = entries.init_once();
+    // SAFETY: read-only walk of nodes linked under this lock (same shape
+    // as the wait path's P3 wiring walk).
+    let mut cur = unsafe { (*head).next };
+    let mut shown = 0;
+    while cur != head {
+        // SAFETY: cur is a linked EpollEntry's `list` (first field — the
+        // cast IS the container_of).
+        let entry = unsafe { &*(cur as *const EpollEntry) };
+        // SAFETY: read-only walk.
+        cur = unsafe { (*cur).next };
+        let Some(f) = fdtable.get_file(entry.fd as usize) else {
+            continue;
+        };
+        let want = entry.events;
+        // Current readiness verdict (POLLIN|POLLOUT capability probe —
+        // the same dispatch the scan uses; at once-per-5s per task the
+        // cost is fine).
+        let mask = {
+            use epoll_events::{EPOLLIN, EPOLLOUT};
+            use poll_events::{POLLIN, POLLOUT};
+            let mut m = 0u16;
+            if want & EPOLLIN != 0 {
+                m |= POLLIN;
+            }
+            if want & EPOLLOUT != 0 {
+                m |= POLLOUT;
+            }
+            if m == 0 {
+                m = POLLIN | POLLOUT;
+            }
+            f.poll_dispatch(m)
+        };
+        let ops = f.get_ops().map(|o| o as *const _ as usize).unwrap_or(0);
+        crate::pr_warn!(
+            "SPINWATCH   fd={} want={:#06x} ready={:#06x} ops={:#x}",
+            entry.fd,
+            want,
+            mask,
+            ops
+        );
+        shown += 1;
+        if shown >= 64 {
+            crate::pr_warn!("SPINWATCH   (interest set truncated at 64)");
+            break;
+        }
+    }
+    drop(entries);
+}
+
 fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
     use epoll_events::*;
     use poll_events::*;
@@ -3892,6 +4079,11 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                 }
             }
             let count = ready_events.len().min(maxevents as usize);
+            // spinwatch: a fast EVENT-carrying return round (a permanently
+            // ready fd spins the waiter just as hard as a broken timeout).
+            if crate::dfx::spinwatch::record() {
+                spinwatch_dump_interest(epoll, epfd);
+            }
             // SAFETY: events_ptr validated with access_ok; copy_to_user is
             // the exception-table copy path (SUM=0 safe). A fault (e.g. a
             // read-only page) must fail with EFAULT, not silently succeed
@@ -3920,6 +4112,9 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                 .map(|dl| crate::drivers::timer::monotonic_ns_since_boot() >= dl)
                 .unwrap_or(true);
             if expired {
+                if crate::dfx::spinwatch::record() {
+                    spinwatch_dump_interest(epoll, epfd);
+                }
                 return 0;
             }
         }
