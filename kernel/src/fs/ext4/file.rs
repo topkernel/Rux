@@ -777,6 +777,23 @@ fn drain_batch(
     }
 }
 
+/// Apply a SIGNED extent-tree metadata-sector delta to i_blocks.
+///
+/// `ext4_ext_insert_written`/`ext4_ext_materialize_block` report the
+/// rebuild delta as i64 (a compact rebuild frees more metadata than it
+/// allocates). The old u64 protocol folded a negative delta into
+/// ~u64::MAX and the plain `+=` then overflow-panicked in release
+/// builds; saturate at both ends instead (i_blocks accounting is
+/// advisory — a clamp under-counts a tree, never corrupts one).
+#[inline]
+fn apply_meta_delta(blocks: u64, delta: i64) -> u64 {
+    if delta >= 0 {
+        blocks.saturating_add(delta as u64)
+    } else {
+        blocks.saturating_sub(delta.unsigned_abs())
+    }
+}
+
 pub fn ext4_file_write(
     fs: &crate::fs::ext4::Ext4FileSystem,
     inode: &mut crate::fs::ext4::inode::Ext4Inode,
@@ -845,11 +862,14 @@ pub fn ext4_file_write(
                 // genuine holes still fail honestly below (extent insertion
                 // is not implemented — review EXT4-C4).
                 if inode.has_extent() {
-                    let mut ext_meta: u64 = 0;
+                    // SIGNED metadata delta (a rebuild can free more tree
+                    // blocks than it adds) — applied with saturation below.
+                    let mut ext_meta: i64 = 0;
                     match crate::fs::ext4::extent::ext4_ext_materialize_block(
                         fs, &mut inode.block, block_index, &mut ext_meta,
                     ) {
                         Ok(Some(phys)) => {
+                            inode.blocks = apply_meta_delta(inode.blocks, ext_meta);
                             // Materialize the block contents now: the
                             // read-modify-write below breads it; an
                             // unzeroed block would splice garbage around
@@ -884,12 +904,17 @@ pub fn ext4_file_write(
                                 Err(e) => partial_or_err!('block_loop, e),
                             };
                             {
-                                let mut hm: u64 = 0;
+                                // SIGNED delta: a shrinking rebuild returns
+                                // hm < 0. The old u64 fold turned that into
+                                // ~u64::MAX and `inode.blocks += hm`
+                                // overflow-panicked (dio_read's 128 MB
+                                // buffered write on a fragmented ext4).
+                                let mut hm: i64 = 0;
                                 match crate::fs::ext4::extent::ext4_ext_insert_written(
                                     fs, &mut inode.block, block_index, new_block, 1, &mut hm,
                                 ) {
                                     Ok(()) => {
-                                        inode.blocks += hm;
+                                        inode.blocks = apply_meta_delta(inode.blocks, hm);
                                     }
                                     Err(e) => partial_or_err!('block_loop, e),
                                 }

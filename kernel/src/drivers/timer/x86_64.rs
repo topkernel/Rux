@@ -208,6 +208,17 @@ pub fn monotonic_ns_since_boot() -> u64 {
     ((read_time() as u128) * 1_000_000_000u128 / (CLOCK_FREQ as u128)) as u64
 }
 
+/// The TSC→ns slope the kernel mapping actually uses (×100: the mapping
+/// yields 100 ns nominal ticks, the vDSO wants ns directly). Publishing
+/// THIS as the vDSO mult — instead of one re-derived from the APIC's
+/// TSC_FREQ — makes the user-side interpolation slope identical to the
+/// kernel's, so extrapolation error cannot grow between publications
+/// even if the two calibrations disagree slightly.
+#[inline]
+pub fn tsc_mult_ns_for_vdso() -> u64 {
+    TSC_MULT.load(Ordering::Acquire).wrapping_mul(100)
+}
+
 /// Read current time in the nominal CLOCK_FREQ clock domain.
 ///
 /// TSC-derived first (fast: RDTSC, no VM exit) once calibrated — against
