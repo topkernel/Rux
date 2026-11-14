@@ -340,11 +340,22 @@ fn test_karn_filter() {
         "tcp-karn retransmitted segment ACK samples no RTT"
     );
 
-    // Control: never-retransmitted segment with the same ancient
-    // tx_time DOES sample (boot jiffies are far in the past → srtt > 0).
+    // Control: never-retransmitted segment with an ancient tx_time DOES
+    // sample (now - tx_time > 0 → srtt > 0). R87 note: the old comment
+    // assumed "boot jiffies are far in the past" — an accident of the
+    // pre-R87 bring-up, where secondary harts kept ticking through their
+    // boot-complete wait while the BSP ran the suite with its own timer
+    // disabled. Since R87 secondaries stay interrupt-less until
+    // boot_complete, NOTHING advances jiffies during the suite: the
+    // sample delta was 0 and this control failed. Advance the counter
+    // deterministically instead — the karn-filter semantics under test
+    // (retries == 0 samples, retries > 0 does not) need a positive delta,
+    // not wall-clock luck.
+    crate::drivers::timer::test_advance_jiffies(8);
+    let ancient = crate::drivers::timer::get_jiffies() - 8;
     let mut s = established();
     s.snd_nxt = 3000;
-    s.retrans_queue.push_back(rseg(1000, 600, 0, 0));
+    s.retrans_queue.push_back(rseg(1000, 600, 0, ancient));
     let mut tx = tx_batch();
     let _ = s.handle_packet(&hdr(1500, 1600, ACK, 8192), &[], &[], &mut tx);
     test_assert!(

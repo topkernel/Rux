@@ -2827,7 +2827,15 @@ unsafe fn __schedule() {
                     r56_print_pid(b"", tpclaim as u32, b" tp_pk=");
                 }
                 r56_print_pid(b"", unsafe { (*tp).pick_state() }, b" ksp=0x");
-                r56_print_pid(b"", unsafe { ((*tp).ti_kernel_sp() >> 32) as u32 }, b"");
+                // R87 note: print the halves with a ':' separator. The old
+                // separator-less concatenation of the two decimal prints
+                // ("4294967254" + "31981568") reads as one number whose
+                // natural 9/9-digit split decodes to hi32=0x19999995 —
+                // the "ksp smear" ghost family (R83/R84 hunted a
+                // corruption that never existed; every captured value,
+                // re-split at the correct 10/8 digits, is a legal kernel
+                // stack address).
+                r56_print_pid(b"", unsafe { ((*tp).ti_kernel_sp() >> 32) as u32 }, b":");
                 r56_print_pid(b"", unsafe { ((*tp).ti_kernel_sp() & 0xFFFF_FFFF) as u32 }, b"\n");
                 // R83: byte-level header dump of the victim — the scribble
                 // shape (extent + alignment) names the writer's store.

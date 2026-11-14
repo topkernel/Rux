@@ -30,6 +30,10 @@ core::arch::global_asm!(
     // R85 ksp gates: stack-top repair reads the task's own stack record.
     task_kstack_bottom = const crate::process::task::task_offsets::TASK_KERNEL_STACK_BOTTOM,
     kernel_stack_size = const crate::config::KERNEL_STACK_SIZE,
+    // R86 (smp8 panic): the CPU-id clamps in trap.S (interrupt-stack
+    // selection + trap_handler's cpu_id argument) must track MAX_CPUS —
+    // their stale literal 4 redirected every hart 4..7 onto CPU 0.
+    max_cpus = const crate::config::MAX_CPUS,
 );
 
 /// Get pt_regs for current task

@@ -35,15 +35,19 @@ static KTHREAD_MAP: Spinlock<BTreeMap<u32, KthreadInfo>> = Spinlock::new(BTreeMa
 // Kernel thread creation
 // ============================================================================
 
-/// Create a kernel thread.
+/// Create a kernel thread (without making it runnable).
 ///
-/// Allocates a new task, sets it up as a kernel thread with
-/// `ret_from_fork_kernel_asm` as entry point, and enqueues it.
+/// Allocates a new task and sets it up as a kernel thread with
+/// `ret_from_fork_kernel_asm` as entry point, but does NOT enqueue it:
+/// the task stays TASK_NEW and invisible to every scheduler pick. Use
+/// this when the caller must finish setup (e.g. `kthread_bind`) before
+/// the thread becomes runnable — enqueue with [`kthread_enqueue`].
+///
+/// `kthread_run_on_cpu` is the packaged create+bind+enqueue form.
 ///
 /// # Arguments
-/// - `fn_ptr`: Thread function (`extern "C" fn(*mut c_void) -> i32`)
+/// - `fn_ptr`: Thread function (`extern "C" fn(*mut core::ffi::c_void) -> i32`)
 /// - `arg`: Argument passed to the thread function
-/// - `flags`: Creation flags (reserved, pass 0)
 /// - `name`: Human-readable name (stored in KthreadInfo for debugging)
 ///
 /// # Returns
@@ -51,11 +55,10 @@ static KTHREAD_MAP: Spinlock<BTreeMap<u32, KthreadInfo>> = Spinlock::new(BTreeMa
 ///
 /// # Safety
 /// Must be called from process context (after scheduler init).
-pub fn kernel_thread(
+pub fn kernel_thread_create(
     fn_ptr: extern "C" fn(*mut core::ffi::c_void) -> i32,
     arg: *mut core::ffi::c_void,
-    _flags: u32,
-    _name: &'static str,
+    name: &'static str,
 ) -> Option<&'static mut Task> {
     // 1. Allocate a task slot (includes kernel stack allocation)
     let task_ptr = sched::alloc_task_slot()?;
@@ -177,26 +180,39 @@ pub fn kernel_thread(
         // task_struct->comm) — the DFX task dumps and /proc then agree with
         // the KTHREAD_MAP name instead of printing empty comm= lines.
         let mut name_buf = [0u8; 16];
-        let len = core::cmp::min(_name.len(), 15);
-        name_buf[..len].copy_from_slice(&_name.as_bytes()[..len]);
+        let len = core::cmp::min(name.len(), 15);
+        name_buf[..len].copy_from_slice(&name.as_bytes()[..len]);
         task.set_comm(&name_buf);
         let mut map = KTHREAD_MAP.lock();
         map.insert(pid, KthreadInfo {
             should_stop: AtomicBool::new(false),
             result: AtomicI32::new(0),
-            name: _name,
+            name: name,
         });
     }
 
-    // 8. Enqueue the task (makes it visible to scheduler)
-    //    enqueue_task consumes the mutable reference, so we re-borrow via raw pointer.
-    //    R52: CHECK the insert — a refused enqueue must unwind the kthread
-    //    (hash/pid/slot + the KTHREAD_MAP entry), never leave a
-    //    constructed-but-unschedulable task behind (fork.rs has the twin).
+    // SAFETY: task_ptr still points to the valid Task allocated above;
+    // the task is NOT enqueued — callers finish setup (e.g. bind), then
+    // make it runnable via kthread_enqueue.
+    Some(unsafe { &mut *task_ptr })
+}
+
+/// Enqueue a kthread created by [`kernel_thread_create`].
+///
+/// Makes the task visible to the scheduler (TASK_NEW -> RUNNING happens
+/// atomically with the class insert inside enqueue_task). On a refused
+/// insert the half-built kthread is unwound exactly like an in-line
+/// enqueue refusal (R52 tripwire) and None is returned.
+pub fn kthread_enqueue(task: &'static mut Task) -> Option<&'static mut Task> {
+    let pid = task.pid();
+    let task_ptr = task as *mut Task;
+    // R52: CHECK the insert — a refused enqueue must unwind the kthread
+    // (hash/pid/slot + the KTHREAD_MAP entry), never leave a
+    // constructed-but-unschedulable task behind (fork.rs has the twin).
     if !sched::enqueue_task(task) {
         crate::pr_warn!(
-            "kthread '{}': enqueue refused for pid={} — unwinding (R52 tripwire)",
-            _name, pid
+            "kthread: enqueue refused for pid={} — unwinding (R52 tripwire)",
+            pid
         );
         {
             let mut map = KTHREAD_MAP.lock();
@@ -213,11 +229,41 @@ pub fn kernel_thread(
         }
         return None;
     }
-
-
-    // SAFETY: task_ptr still points to the valid Task allocated above;
-    // enqueue_task consumed the mutable borrow but the allocation persists.
+    // SAFETY: task_ptr still points to the valid Task; the enqueue consumed
+    // the mutable borrow but the allocation persists.
     Some(unsafe { &mut *task_ptr })
+}
+
+/// Create a kernel thread and enqueue it (the historical single-call form).
+///
+/// Equivalent to [`kernel_thread_create`] followed by [`kthread_enqueue`];
+/// the task becomes pickable the moment this returns.
+pub fn kernel_thread(
+    fn_ptr: extern "C" fn(*mut core::ffi::c_void) -> i32,
+    arg: *mut core::ffi::c_void,
+    _flags: u32,
+    name: &'static str,
+) -> Option<&'static mut Task> {
+    kernel_thread_create(fn_ptr, arg, name).and_then(kthread_enqueue)
+}
+
+/// Create a CPU-bound kernel thread: create (not runnable) -> bind ->
+/// enqueue. Binding BEFORE the first enqueue is the only race-free
+/// shape once secondaries are online: they take timer interrupts from
+/// the moment secondary_cpu_entry() runs, so a task that is linked
+/// into the runqueue and then dequeued / re-bound / re-enqueued races
+/// their picks — the smp8 ksoftirqd bring-up corruption (R74
+/// SLOTLESS-TP storm, R83 ti_kernel_sp smears, idle-slot splits).
+/// Linux parity: kthread_create + kthread_bind + wake_up_process.
+pub fn kthread_run_on_cpu(
+    fn_ptr: extern "C" fn(*mut core::ffi::c_void) -> i32,
+    arg: *mut core::ffi::c_void,
+    name: &'static str,
+    cpu: usize,
+) -> Option<&'static mut Task> {
+    let task = kernel_thread_create(fn_ptr, arg, name)?;
+    kthread_bind(task, cpu);
+    kthread_enqueue(task)
 }
 
 /// Create and immediately wake a kernel thread.

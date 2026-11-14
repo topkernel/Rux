@@ -169,20 +169,31 @@ pub fn init() {
             _ => "ksoftirqd/?",
         };
 
-        let task = crate::process::kthread::kthread_run(
+        // R86 (smp8 panic): the old form ran kthread_run (which enqueues,
+        // making the task pickable) and THEN dequeued / kthread_bind /
+        // re-enqueued it here, on the assumption that "timer interrupts
+        // are not yet enabled, no concurrency" — false since
+        // start_secondaries(): every secondary enables its timer in
+        // secondary_cpu_entry() and is already scheduling by this point.
+        // A secondary could pick the kthread in the enqueue->dequeue
+        // window, mark/claim it, and then fight this CPU's bind +
+        // re-enqueue — the R74 SLOTLESS-TP storm, R83 ti_kernel_sp
+        // smears and PER_CPU slot corruption that killed smp>=5 boots
+        // (and even raced smp2, healed there). kthread_run_on_cpu binds
+        // BEFORE the first enqueue, so the task only ever becomes
+        // visible with its final CPU identity. Linux parity:
+        // kthread_create + kthread_bind + wake_up_process.
+        let task = crate::process::kthread::kthread_run_on_cpu(
             ksoftirqd_fn,
             cpu as *mut core::ffi::c_void,
             name,
+            cpu,
         );
 
         if let Some(t) = task {
             let t_ptr = t as *mut _;
-            // kthread_run enqueued on boot CPU's RQ; migrate to target CPU.
-            // Safe: timer interrupts not yet enabled, no concurrency.
-            crate::sched::dequeue_task(t);
-            crate::process::kthread::kthread_bind(t, cpu);
-            crate::sched::enqueue_task(t);
-            // SAFETY: timer interrupts not yet enabled; no concurrent access to KSOFTIRQD_TASK.
+            // SAFETY: single-threaded BSP boot context; KSOFTIRQD_TASK[cpu]
+            // has no other accessor until this loop publishes it.
             unsafe {
                 KSOFTIRQD_TASK[cpu] = t_ptr;
             }
