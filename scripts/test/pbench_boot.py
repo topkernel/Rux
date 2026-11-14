@@ -47,7 +47,9 @@ def foreign_qemus():
 
 def build_probe(out, src=None):
     if src is None:
-        src = os.path.join(HERE, "pbench.c")
+        # pbench.c lives in test/ (the 2026-11-11 probe re-org moved it
+        # out of scripts/test/; HERE/../.. is the repo root).
+        src = os.path.join(HERE, "..", "..", "test", "pbench.c")
     cmd = [MUSL_CC, "-static", "-O2", "-Wall", "-pthread", "-o", out, src]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
