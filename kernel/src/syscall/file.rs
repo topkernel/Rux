@@ -2708,7 +2708,10 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
             // The old n<24 gate made appspawn's DoSandboxRootFolderCreate
             // failure (systemui spawn, hook stage 31) invisible — sandbox
             // mounts happen thousands of mounts into the boot.
-            if ret != 0 || n < 12 || always {
+            // ub2404 bring-up: full-budget tap (debug builds) -- the
+            // 24.04 boot runs hundreds of mounts; the old n<12 gate hid
+            // the tmp.mount/dev-mqueue.mount unit mounts entirely.
+            if ret != 0 || n < 400 || always {
                 crate::pr_info!(
                     "mount[{}] '{}' -> '{}' type '{}' flags {:#x}: {}",
                     n,

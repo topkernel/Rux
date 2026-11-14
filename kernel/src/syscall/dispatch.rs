@@ -835,6 +835,25 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         }
     }
 
+    // ub2404 bring-up: budgeted ENOSYS tracer -- every syscall that
+    // answers ENOSYS gets one line (pid, generic nr, first two args).
+    // journald's "Failed to map main seqnum file: Function not
+    // implemented" needs exactly this attribution; the generic nr maps
+    // through syscall/x86_compat.rs comments.
+    if result == -(38i64) {
+        static ENOSYS_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if ENOSYS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
+            crate::pr_info!(
+                "ENOSYS-TRACE: pid={} nr={} a0={:#x} a1={:#x}",
+                crate::process::current_pid(),
+                syscall_no,
+                args[0],
+                args[1]
+            );
+        }
+    }
+
     // STRACE1 (loader hunts, dfx=strace1): one line per file/memory
     // syscall of PID 1, with the pathname decoded for path-taking calls.
     // musl ld.so's "Error loading shared library" carries no errno — this
