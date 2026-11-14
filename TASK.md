@@ -13096,3 +13096,56 @@ with taskdump prints), gated binary 0/9 (prints off 0/3, all-armed
 0/2, ohhunt 0/2, peer-cache 0/2). The gating + peer-cache commits
 stay on the branch with functional gates green; the main-merge
 decision waits for the calm-window ladder A/B (TASK 110.7).
+
+### 113. 113RD SESSION (2026-11-14 20:1x-21:4x, branch huks-wedge, resume after quota wall) — THE HOLDER-EXIT FACE IS DECODED AND FIXED: a huks/foundation FFRT worker dies THREAD-ONLY of a stack-boundary SIGSEGV (our fault paths killed the thread where Linux kills the process), the daemon survives with orphaned musl locks and every client parks forever; fault-path default deaths are now do_exit_group on all three arches and the Edge-A wedge is ELIMINATED LIVE (hw7: group death, init reaps status:11, service respawns, ZERO parked loopers where hw5 had four frozen words and 60-370s park chains); SECOND kernel bug fixed: the fuxwatch write-watch itself was wedging its subject (slot moves/budget abandoned W-cleared pages -> SEGV_ACCERR on innocent release stores — hw1's distributeddata freeze at 68.057 was instrument-induced); new HW-EXIT-OF-HOLDER decode print (cause/sender/grpexit/segv-age) answers "who exits the holder and why" from one line
+
+Full findings, evidence and boot indices: run/HUKS-FINDINGS.md (the
+deliverable). Headlines:
+
+1. hw5w1 exit-print row (the decode this lane was built for):
+   `HW-EXIT-OF-HOLDER tid=486 comm='huks_service' code=-11 cause=signal
+   grpexit=false segv_age_j=5 segv_cr2lo=0x4a0000` — the "holder
+   vanished" face is a worker thread dying of SIGSEGV 50ms after a
+   DELIVERED (handled) stack-boundary fault, THREAD-ONLY, process
+   alive. The boundary fault itself is an image-side behavior (a
+   936-byte name-carrying copy straddling a 28KB FFRT worker-stack
+   top into the PROT_NONE guard; identical in hw1 12.6s / hw4 9.0s /
+   hw5 5.4s / hw7 5.4s, absent in hw2/hw3/hw6 — boot-timing race).
+2. The kernel edge (ours, FIXED): Linux's fault-path default
+   disposition terminates the whole process (force_sig_fault ->
+   do_group_exit; our own signal.rs fatal list already does this for
+   async kills); our trap paths called do_exit thread-only. 15 sites
+   across x86_64/riscv64/aarch64 now call do_exit_group(-sig);
+   handler-first routing untouched (LTP mmap05/mmap13). Under the old
+   behavior the orphaned-locks daemon keeps "serving" parked clients
+   forever; under the fix the daemon dies, init reaps (status 11) and
+   respawns — the recovery Linux gives this image.
+3. Live verification (hw7, same kernel as hw6): boundary SEGV at
+   5.421 -> grpexit=TRUE at 5.457 -> init "huks_service SIGCHLD
+   pid:436 status:11" -> respawn -> the new instance faults again at
+   246.7 and is reaped again (pid:2447 status:11). TXN-HANG rows for
+   the dead tgid: ZERO. The huks-hub wedge (softbus/accountmgr/mmi
+   downstream cascade, the mouse-endgame input stall) lost its
+   bootstrap.
+4. fuxwatch instrument safety (FIXED): slot re-targets and the budget
+   trip abandoned W-cleared pages; the next legitimate store fell
+   through the fault hook to SEGV_ACCERR. hw1's distributeddata
+   "holder vanished" at 68.057 was OUR release-store fault 0.35s
+   after the slot moved at 67.704 (the mutex froze at 0x80000010 for
+   the rest of that boot). retire-before-move + budget shutdown +
+   step-page recording landed; hw5/hw6/hw7: zero SEGV-on-watched-page
+   events. PRIOR CORRECTION: pre-hw5 boots with fuxwatch armed carry
+   instrument-induced SEGVs in their timelines — re-adjudicate any
+   freeze attributed to those windows.
+5. Edge B remains OPEN: no-fault boots (hw2/hw3/hw6/hw7's remaining
+   parks: telephony/accountmgr/tgid-729/foundation-734) still wedge
+   silently — the FFRT never-sent class (111st adjudication stands).
+   Next-session instrument: extend the exit print to txnhunt's live
+   OWING set so silent holder deaths are caught before the 60s freeze
+   table latches.
+
+Gates: triple-arch builds rc=0 (x86_64 twice, riscv64, aarch64 via
+PLATFORM=aarch64); riscv64 make test ALL TESTS PASSED
+(run/hw6-maketest.log, ROOTFS_IMG from riscv-smp8-panic). Commit
+584c83e7a on huks-wedge. Boots this session: hw5w1, hw6w1, hw7w1
+(KVM SMP8 8G, 420s, 0 panics each).

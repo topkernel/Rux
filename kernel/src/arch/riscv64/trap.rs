@@ -1524,7 +1524,10 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                     }
                 }
                 let _ = crate::signal::send_signal_with_info_directed(pid, segv_info);
-                crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
+                // huks-wedge lane (hw5): group death (Linux do_group_exit)
+                // — a fault-path default death kills the whole process;
+                // the thread-only exit orphaned the dead thread's locks.
+                crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
             } else {
                 crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, ra={:#x}, sp={:#x}, t6={:#x}, pid={}, mode={}",
                     fault_addr, regs.epc, regs.ra, regs.sp, regs.t6,
@@ -1558,7 +1561,8 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                 }
                 crate::pr_err!("pagefault: Permission denied at {:#x}", fault_addr);
                 let _ = crate::signal::send_signal_with_info_directed(pid, acc_info);
-                crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
+                // huks-wedge lane (hw5): group death (Linux do_group_exit).
+                crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGSEGV as i32));
             } else {
                 crate::pr_err!("pagefault: Permission denied at {:#x}", fault_addr);
             }
@@ -1582,7 +1586,8 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                 );
                 if !sigbus_has_handler() {
                     crate::pr_err!("pagefault: Bus error (past EOF) at {:#x}", fault_addr);
-                    crate::process::exit::do_exit(-(crate::signal::Signal::SIGBUS as i32));
+                    // huks-wedge lane (hw5): group death (Linux do_group_exit).
+                    crate::process::exit::do_exit_group(-(crate::signal::Signal::SIGBUS as i32));
                 } else {
                     crate::signal::force_unblock_current(crate::signal::Signal::SIGBUS as i32);
                 }

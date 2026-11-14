@@ -868,6 +868,105 @@ pub fn do_exit(exit_code: i32) -> ! {
     // event is armed).
     crate::perf::hook_exit(unsafe { (*current).tgid() }, dying_pid);
 
+    // huks-wedge lane (hw2): death-while-holding decode. The wedge's
+    // recurring shape ends with a lock-holder thread that VANISHES from
+    // every later taskdump while the frozen word keeps its locked value
+    // (hw1w1: distributeddata tid 1068 acquired 0x7ff0005f7d94 at
+    // 66.8 s and was gone by ~88 s; hw4w1: huks_service tid 477 took a
+    // handled stack-boundary SEGV at 9.0 s and was gone by 34 s while
+    // two musl __lock words sat at 0x2 forever). The EXIT CAUSE decides
+    // the verdict — decode it per holder-class thread:
+    //   exit_code < 0            -> death by signal (-exit_code); the
+    //                              queued siginfo names the SENDER.
+    //   group_exiting && code>=0 -> exit_group(n) (n = code>>8), the
+    //                              leader or a fatal group kill.
+    //   !leader && !group_exiting-> a single worker/thread exit
+    //                              (SYS_exit, status code>>8) — the
+    //                              "clean exit that skipped the unlock"
+    //                              face, incl. post-SEGV handler unwind
+    //                              (see the segv_age field).
+    // Fires for: the fuxwatch acquire-latched owner, threads of the
+    // park-latched tgid, threads of a tgid with a standing frozen word,
+    // and any thread with a delivered-SIGSEGV history. FuxStuck-gated,
+    // 96/boot.
+    {
+        use core::sync::atomic::Ordering::Relaxed as Relaxed2;
+        static HWEXIT_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck)
+            && HWEXIT_N.fetch_add(1, Relaxed2) < 96
+        {
+            let owner_tid = crate::sync::futex::FUXWATCH_OWNER_TID.load(Relaxed2);
+            let park_tgid = crate::sync::futex::FUXPARK_TGID.load(Relaxed2);
+            let my_tgid = unsafe { (*current).tgid() } as u32;
+            let is_leader = dying_pid == my_tgid;
+            let frozen = crate::sync::futex::rwfrz_tgid_frozen(my_tgid);
+            #[cfg(feature = "x86_64")]
+            let segv = crate::arch::x86_64::trap::segv_hist_age(dying_pid);
+            #[cfg(not(feature = "x86_64"))]
+            let segv: Option<(u64, u64)> = None;
+            let hit = (owner_tid != 0 && dying_pid == owner_tid)
+                || (park_tgid != 0 && my_tgid == park_tgid)
+                || (!is_leader && frozen)
+                || segv.is_some();
+            if hit {
+                let comm_b = unsafe { (*current).comm() };
+                let comm = core::str::from_utf8(comm_b.as_slice())
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                let lastsys = unsafe { (*current).last_syscall_nr.load(Relaxed2) };
+                let pending = unsafe { (*current).pending.signal.load(Relaxed2) };
+                // Group-exit state: distinguishes exit_group/fatal-group
+                // (do_exit_group publishes it) from a single thread exit.
+                let (group_exiting, _group_code) = unsafe { (*current).signal_arc() }
+                    .map(|ss| {
+                        (
+                            ss.group_exiting.load(Relaxed2),
+                            ss.group_exit_code.load(Relaxed2),
+                        )
+                    })
+                    .unwrap_or((false, 0));
+                let cause = if exit_code < 0 {
+                    "signal"
+                } else if group_exiting {
+                    "exit_group"
+                } else if !is_leader {
+                    "thread-exit"
+                } else {
+                    "exit"
+                };
+                // Sender forensics for signal deaths (kill/tgkill carry
+                // si_pid; kernel-originated faults print si_code).
+                let (sender, sicode) = if exit_code < 0 {
+                    unsafe { (*current).pending.peek_info(-exit_code) }
+                        .map(|si| (si.si_pid, si.si_code))
+                        .unwrap_or((0, 0))
+                } else {
+                    (0, 0)
+                };
+                crate::pr_warn!(
+                    "HW-EXIT-OF-HOLDER tid={} comm='{}' tgid={} code={:#x} cause={} sig={} sender={} sicode={:#x} leader={} grpexit={} lastsys={} pend={:#x} segv_age_j={} segv_cr2lo={:#x} ownerlatch={} parklatch={}",
+                    dying_pid,
+                    comm,
+                    my_tgid,
+                    exit_code,
+                    cause,
+                    if exit_code < 0 { -exit_code } else { 0 },
+                    sender,
+                    sicode,
+                    is_leader,
+                    group_exiting,
+                    lastsys as i64,
+                    pending,
+                    segv.map(|s| s.0).unwrap_or(0),
+                    segv.map(|s| s.1).unwrap_or(0),
+                    owner_tid,
+                    park_tgid
+                );
+            }
+        }
+    }
+
     // sc57 (57th session): thread-exit forensics for the OH wedge —
     // an FFRT/binder worker that exits while holding a userspace
     // ffrt::mutex leaves every later locker parked forever with no
