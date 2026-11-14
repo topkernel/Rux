@@ -60,8 +60,22 @@ struct VdsoDataPage([u8; 4096]);
 
 static mut VDSO_DATA_PAGE: VdsoDataPage = VdsoDataPage([0; 4096]);
 
-/// Seqlock word (offset 0 of the data page). Odd = writer in progress.
-static VDSO_SEQ: AtomicU32 = AtomicU32::new(0);
+/// The seqlock word IS data-page offset 0 (odd = write in progress).
+///
+/// It must be accessed THROUGH the page pointer, never through a
+/// separate static: the user-side vDSO code reads page[0] and retries
+/// while it is odd or changed across the read. The original separate
+/// VDSO_SEQ static never aliased the page, so page[0] stayed 0 forever,
+/// no reader ever retried, and a reader descheduled between its
+/// base_tsc and base_mono_ns loads paired a stale tsc with a fresh mono
+/// — a vDSO clock AHEAD of the syscall clock by the whole preemption
+/// gap (LTP clock_gettime04: "Time travelled backwards (-454618735 ns)"
+/// on every clock, only on loads noisy enough to deschedule the reader
+/// for hundreds of ms).
+// SAFETY: only written from the timer-tick refresh paths below.
+unsafe fn vdso_seq() -> &'static AtomicU32 {
+    unsafe { &*(VDSO_DATA_PAGE.0.as_ptr() as *const AtomicU32) }
+}
 
 /// Refresh the data page snapshot (timer tick / clock-set paths).
 ///
@@ -69,7 +83,6 @@ static VDSO_SEQ: AtomicU32 = AtomicU32::new(0);
 /// even). Readers retry while seq is odd or changed across the read.
 #[cfg(not(feature = "x86_64"))]
 pub fn vdso_data_tick() {
-    let _ = VDSO_SEQ.fetch_or(1, Ordering::Release);
     let cycles = crate::drivers::timer::read_time();
     // 10 MHz source: 100 ns per cycle, exact.
     let mono_ns = cycles.saturating_mul(100);
@@ -77,13 +90,15 @@ pub fn vdso_data_tick() {
     // SAFETY: the page is only written here under the seqlock; user
     // readers validate via the seq word before trusting the fields.
     unsafe {
+        let seq = vdso_seq();
+        seq.fetch_or(1, Ordering::Release);
         let base = VDSO_DATA_PAGE.0.as_mut_ptr();
         core::ptr::write_volatile(base.add(8) as *mut u64, cycles);
         core::ptr::write_volatile(base.add(16) as *mut u64, mono_ns);
         core::ptr::write_volatile(base.add(24) as *mut u64, epoch_ns);
         // tz fields (32/36) stay zero.
+        seq.fetch_add(1, Ordering::Release);
     }
-    VDSO_SEQ.fetch_add(1, Ordering::Release);
 }
 
 /// x86_64 twin (106th: the vDSO lever — 21.3M clock_gettime syscalls
@@ -113,10 +128,11 @@ pub fn vdso_data_tick() {
     let tsc = crate::arch::cpu::read_counter();
     let mono_ns = crate::drivers::timer::monotonic_ns_since_boot();
     let epoch_ns = crate::syscall::time::wall_epoch_offset_ns();
-    let _ = VDSO_SEQ.fetch_or(1, Ordering::Release);
     // SAFETY: the page is only written here under the seqlock; user
     // readers validate via the seq word before trusting the fields.
     unsafe {
+        let seq = vdso_seq();
+        seq.fetch_or(1, Ordering::Release);
         let base = VDSO_DATA_PAGE.0.as_mut_ptr();
         core::ptr::write_volatile(base.add(8) as *mut u64, tsc);
         core::ptr::write_volatile(base.add(16) as *mut u64, mono_ns);
@@ -124,8 +140,8 @@ pub fn vdso_data_tick() {
         core::ptr::write_volatile(base.add(40) as *mut u64, mult);
         core::ptr::write_volatile(base.add(44) as *mut u32, 32u32);
         core::ptr::write_volatile(base.add(48) as *mut u32, 1u32);
+        seq.fetch_add(1, Ordering::Release);
     }
-    VDSO_SEQ.fetch_add(1, Ordering::Release);
 }
 
 /// Physical addresses of the two vDSO pages (data, code) for the exec
@@ -535,17 +551,20 @@ mod x86 {
         a.jcc(0x75, retry); //     jne retry
         a.b(&[0x4D, 0x8B, 0x43, 0x08]); // mov r8,[r11+8]   base_tsc
         a.b(&[0x4D, 0x8B, 0x4B, 0x10]); // mov r9,[r11+16]  base_mono_ns
+        a.b(&[0x49, 0x8B, 0x4B, 0x28]); // mov rcx,[r11+40] mult (inside the
+        //                              seq window: mult can change when the
+        //                              TSC is re-calibrated; a stale-mult
+        //                              pairing is a torn read)
         a.b(&[0x41, 0x39, 0x13]); //     cmp [r11],edx    seq recheck
         a.jcc(0x75, retry); //     jne retry
     }
-    /// rax = interpolated ns from (r8 base_tsc, r9 base_mono_ns).
+    /// rax = interpolated ns from (r8 base_tsc, r9 base_mono_ns, rcx mult).
     fn interpolate(a: &mut Asm) {
         a.b(&[0x0F, 0xAE, 0xE8]); // lfence (ordered rdtsc)
         a.b(&[0x0F, 0x31]); //     rdtsc
         a.b(&[0x48, 0xC1, 0xE2, 0x20]); // shl rdx,32
         a.b(&[0x48, 0x09, 0xD0]); //     or rax,rdx
         a.b(&[0x4C, 0x29, 0xC0]); //     sub rax,r8       delta tsc
-        a.b(&[0x49, 0x8B, 0x4B, 0x28]); // mov rcx,[r11+40] mult
         a.b(&[0x48, 0xF7, 0xE1]); //     mul rcx          rdx:rax
         a.b(&[0x48, 0x0F, 0xAC, 0xD0, 0x20]); // shrd rax,rdx,32
         a.b(&[0x4C, 0x01, 0xC8]); //     add rax,r9       + base_mono_ns
