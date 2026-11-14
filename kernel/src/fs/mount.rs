@@ -412,6 +412,14 @@ pub fn do_mount(
         // answer ENOSYS on their own); an empty tmpfs instance satisfies
         // dev-mqueue.mount so sysinit does not fail. mqueue(7) users that
         // actually open a queue surface the syscall gap unchanged.
+        // securityfs: same empty-instance treatment -- sysinit's
+        // sys-kernel-security.mount must not fail local-fs.
+        "securityfs" => {
+            crate::fs::tmpfs::ensure_registered();
+            let root_inode = crate::fs::tmpfs::create_mount_instance(data);
+            crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
+            register_mount("securityfs", target, "securityfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+        }
         "mqueue" => {
             crate::fs::tmpfs::ensure_registered();
             let root_inode = crate::fs::tmpfs::create_mount_instance(data);
