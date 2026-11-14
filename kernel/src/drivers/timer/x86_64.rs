@@ -197,38 +197,6 @@ pub fn monotonic_ns_since_boot() -> u64 {
     ((read_time() as u128) * 1_000_000_000u128 / (CLOCK_FREQ as u128)) as u64
 }
 
-/// Nanoseconds since boot for a caller-supplied RAW TSC snapshot — the
-/// pair-coherent twin of `monotonic_ns_since_boot`.
-///
-/// The vDSO data page publishes (base_tsc, base_mono_ns) as a PAIR the
-/// user side extrapolates from; reading the two separately (read_counter,
-/// then monotonic_ns_since_boot's own internal read) pairs a base_mono
-/// captured DELAYED — any IRQ/preemption/vCPU-deschedule between the two
-/// reads puts the whole vDSO track ahead of the syscall clock by that
-/// delay (LTP clock_gettime04 read it as −454 ms / −557 ms "time
-/// travelled backwards" on load-noisy boots). Computing both ends from
-/// ONE counter read makes the pair consistent by construction. Per-CPU
-/// corrections and the monotonic ratchet are deliberately NOT applied:
-/// the user side cannot reproduce them, and µs-class cross-CPU skew is
-/// the documented, accepted vDSO contract.
-#[inline]
-pub fn monotonic_ns_from_raw_tsc(raw: u64) -> u64 {
-    if TSC_ACTIVE.load(Ordering::Acquire) != 0 {
-        let mult = TSC_MULT.load(Ordering::Acquire);
-        let base = TSC_BASE.load(Ordering::Acquire);
-        let ticks = tsc_delta_nominal(raw.wrapping_sub(base), mult)
-            .wrapping_add(TSC_CONTINUITY_OFFSET.load(Ordering::Acquire));
-        ((ticks as u128) * 1_000_000_000u128 / (CLOCK_FREQ as u128)) as u64
-    } else if crate::drivers::timer::hpet::ready() {
-        // Pre-promotion: no TSC mapping to derive from; the caller's
-        // snapshot cannot be converted coherently. Serve the direct
-        // read — the window is early boot and the page re-primes.
-        monotonic_ns_since_boot()
-    } else {
-        0
-    }
-}
-
 /// The TSC→ns slope the kernel mapping actually uses (×100: the mapping
 /// yields 100 ns nominal ticks, the vDSO wants ns directly). Publishing
 /// THIS as the vDSO mult — instead of one re-derived from the APIC's
