@@ -5013,6 +5013,79 @@ pub fn sleep_snapshot() {
     }
 }
 
+/// huks-wedge Edge B (114th): the audit's LIVE OWING set — the lock-free
+/// POD snapshot txnhunt publishes every pass for exit.rs. The
+/// HW-EXIT-OF-HOLDER print's frozen-word arm is blind before the 60 s
+/// freeze-table latch, so a worker that dies while owing a sync reply
+/// (the silent no-fault wedge face) vanished unprinted. exit.rs reads
+/// this without any binder lock: entries are (spid, stid, txn)
+/// triples updated under WORLD by the audit; a reader may see a torn
+/// generation (a slot mid-update) — acceptable for a decode print
+/// (worst case one stale/false-negative row between 5 s passes).
+pub static TXN_OWING_SPID: [core::sync::atomic::AtomicU32; 16] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; 16];
+pub static TXN_OWING_STID: [core::sync::atomic::AtomicU32; 16] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; 16];
+pub static TXN_OWING_TXN: [core::sync::atomic::AtomicU64; 16] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 16];
+static TXN_OWING_IX: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// Publish one pass entry (called where the Hung set is built, inside
+/// the WORLD walk). Round-robin over 16 slots; the pass re-zeros from a
+/// fresh index each round (txn_owing_pass_reset) so stale rows from a
+/// shorter previous pass cannot survive.
+fn txn_owing_publish(spid: u32, stid: u32, txn: u64) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let n = TXN_OWING_IX.fetch_add(1, Relaxed) % 16;
+    TXN_OWING_SPID[n].store(spid, Relaxed);
+    TXN_OWING_STID[n].store(stid, Relaxed);
+    TXN_OWING_TXN[n].store(txn, Relaxed);
+}
+
+/// Clear the snapshot at the start of each pass (the caller publishes
+/// fresh entries right after, under the same WORLD hold).
+fn txn_owing_pass_reset() {
+    use core::sync::atomic::Ordering::Relaxed;
+    for i in 0..16 {
+        TXN_OWING_SPID[i].store(0, Relaxed);
+    }
+    TXN_OWING_IX.store(0, Relaxed);
+}
+
+/// exit.rs arm: is this (tgid, tid) — or any thread of this tgid — in
+/// the live OWING set? Returns (entries for this tgid, first txn id of
+/// an exact-tid match, first owing stid). Lock-free; snapshot-consistent
+/// enough for a decode print.
+pub fn txn_owing_of(tgid: u32, tid: u32) -> (usize, u64, u32) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let mut n = 0usize;
+    let mut own_txn = 0u64;
+    let mut own_tid = 0u32;
+    let mut any_txn = 0u64;
+    for i in 0..16 {
+        let sp = TXN_OWING_SPID[i].load(Relaxed);
+        if sp == 0 || sp != tgid {
+            continue;
+        }
+        n += 1;
+        let st = TXN_OWING_STID[i].load(Relaxed);
+        let tx = TXN_OWING_TXN[i].load(Relaxed);
+        if any_txn == 0 {
+            any_txn = tx;
+        }
+        if st == tid && own_txn == 0 {
+            own_txn = tx;
+            own_tid = st;
+        }
+    }
+    if own_txn == 0 {
+        own_txn = any_txn;
+        own_tid = 0;
+    }
+    (n, own_txn, own_tid)
+}
+
 /// dfx=txnhunt (leg-27): in-flight sync-txn hang audit, called at the
 /// ~1 Hz timer heartbeat. The 15 s samgr code-7 family (SLOW-TXN census,
 /// queue=0 exec=15020ms) only becomes visible at REPLY time — 15 s too
@@ -5113,6 +5186,11 @@ pub fn txn_hang_audit() {
             fn is_hung_proc(pids: &[u32], pid: u32) -> bool {
                 pids.iter().any(|&p| p == pid)
             }
+            // Edge B (114th): fresh OWING generation for this pass —
+            // every server-owing entry >= 1 s lands in the lock-free
+            // snapshot (round-robin 16 slots) whether or not the print
+            // side keeps it (the Hung set caps at 8).
+            txn_owing_pass_reset();
             // Pass 1: server-side txn-stack entries executing >= 1 s.
             for p in &world.procs {
                 let proc = pm(world, p);
@@ -5125,6 +5203,9 @@ pub fn txn_hang_audit() {
                             continue;
                         }
                         let exec = now.wrapping_sub(pick);
+                        if exec >= 100 {
+                            txn_owing_publish(proc.pid, t.tid, x.id);
+                        }
                         if exec >= 100 && hung.len() < 8 {
                             // leg-36B: hung-server forensics, all under
                             // WORLD (outstanding_from_tid contract).
@@ -5593,9 +5674,37 @@ pub fn txn_hang_audit() {
             if h.exec_ms >= 15000 {
                 latch_park_walk_tgid(h.spid);
             }
+            // Edge B (114th): per-txn first-seen exec clock — the dx
+            // between bursts answers "does the debtor thread EVER get
+            // scheduled again" in one line (dx=0 across bursts = the
+            // owed completion never ran; this is the periodic OWING-set
+            // dump's progress column). 16 slots, round-robin.
+            use core::sync::atomic::Ordering::Relaxed;
+            static DX_TXN: [core::sync::atomic::AtomicU64; 16] =
+                [const { core::sync::atomic::AtomicU64::new(0) }; 16];
+            static DX_EXEC0: [core::sync::atomic::AtomicU64; 16] =
+                [const { core::sync::atomic::AtomicU64::new(0) }; 16];
+            static DX_IX: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let mut dx_ms: u64 = 0;
+            let mut dx_known = false;
+            for i in 0..16 {
+                if DX_TXN[i].load(Relaxed) == h.id {
+                    dx_ms = exec_ns
+                        .saturating_sub(DX_EXEC0[i].load(Relaxed))
+                        / 1_000_000;
+                    dx_known = true;
+                    break;
+                }
+            }
+            if !dx_known {
+                let i = DX_IX.fetch_add(1, Relaxed) % 16;
+                DX_TXN[i].store(h.id, Relaxed);
+                DX_EXEC0[i].store(exec_ns, Relaxed);
+            }
             let _ = writeln!(
                 w,
-                "TXN-HANG-SRV txn{} tid{} st={:#x} linked={} on_rq={} on_cpu={} claim={} cpu={} slot={} swout={} pc={:#x} exec_ms={}",
+                "TXN-HANG-SRV txn{} tid{} st={:#x} linked={} on_rq={} on_cpu={} claim={} cpu={} slot={} swout={} pc={:#x} exec_ms={} exec_dx_ms={}",
                 h.id,
                 h.stid,
                 tk.state().bits(),
@@ -5612,6 +5721,7 @@ pub fn txn_hang_audit() {
                 swout,
                 tk.preempt_count() as u32,
                 exec_ns / 1_000_000,
+                dx_ms,
             );
         }
         // leg-36B: kernel-vs-image discriminator for the hung server

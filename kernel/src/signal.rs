@@ -783,15 +783,31 @@ pub struct SigContext {
     /// RISC-V uapi sigcontext has NO sstatus field between them; the old
     /// extra sc_status shifted the FP state 8 bytes off the ABI (review
     /// M-03). sstatus is stashed in SignalFrame.reserved[3] instead.
+    /// Width note: the reference union __riscv_fp_state is sized by
+    /// __riscv_q_ext_state (f[64] + fcsr + reserved = 528 bytes), but
+    /// the KERNEL and glibc both access the D layout — fcsr at
+    /// sc+512 — which this field order keeps (see the q_tail below).
     pub sc_fpregs: [u64; 32],
-    /// Floating-point control and status register
+    /// Floating-point control and status register (D-layout position:
+    /// sc+512, where save_fp_state/glibc both put it)
     pub sc_fcsr: u64,
+    /// Q-extension tail (264 bytes) — RESERVED, never written by Rux.
+    /// The reference sigcontext is 784 bytes (256 regs + the
+    /// q-sized FP union); sc_fcsr above ends at 520, so this tail
+    /// grows the rt_sigframe to the reference's footprint. This is
+    /// the riscv64 twin of the x86_64 fpstate reservation: the frame
+    /// must reserve every byte Linux reserves below ss_top or a
+    /// signal handler runs closer to the sigaltstack top than the ABI
+    /// promises (the huks-wedge Edge-B class — a handler's over-read
+    /// past ss_top that lands harmlessly inside Linux's reserved FP
+    /// bytes faults under a short frame).
+    pub sc_q_tail: [u8; 264],
 }
 
 #[cfg(feature = "riscv64")]
 impl Default for SigContext {
     fn default() -> Self {
-        Self { sc_regs: [0u64; 32], sc_fpregs: [0u64; 32], sc_fcsr: 0 }
+        Self { sc_regs: [0u64; 32], sc_fpregs: [0u64; 32], sc_fcsr: 0, sc_q_tail: [0; 264] }
     }
 }
 
@@ -801,6 +817,17 @@ impl SigContext {
         Self::default()
     }
 }
+
+// Layout assertions (riscv64 ABI): regs at 0, f0..f31 at 256, fcsr at
+// 512 (the D layout the reference kernel's save_fp_state and glibc
+// both use), sigcontext 784 bytes — the reference footprint (256 +
+// q-sized FP union 528), reached via the reserved q tail.
+#[cfg(feature = "riscv64")]
+const _: () = {
+    assert!(core::mem::offset_of!(SigContext, sc_fpregs) == 256);
+    assert!(core::mem::offset_of!(SigContext, sc_fcsr) == 512);
+    assert!(core::mem::size_of::<SigContext>() == 784);
+};
 
 /// aarch64 sigcontext — arm64 uapi shape: fault_address, the 31 GPRs,
 /// sp, pc, pstate, then the 4KB extension-record block.
@@ -2421,19 +2448,77 @@ unsafe fn setup_frame_x86_64(
     let user_sp = regs.user_stack_pointer();
     const SIGNAL_FRAME_SIZE: u64 = SignalFrame::size() as u64;
 
-    // Decide which stack to use based on flags
-    let frame_addr = if use_altstack {
+    // Full-frame stack placement — reference get_sigframe order
+    // (arch/x86/kernel/signal.c), Edge-B root-cause fix (huks-wedge
+    // 114th): the frame reserve must count the fpstate area Linux
+    // always places below the ucontext. Our old placement reserved
+    // only the 600-byte rt_sigframe itself, so a handler entered
+    // ~3.3KB closer to the altstack top than under Linux; OH's DFX
+    // signal handler then did a 936-byte read at rsp+0x478 that
+    // crossed ss_top and SEGV'd — deterministically, 4/4 boots —
+    // while under Linux the same over-read lands inside the reserved
+    // (mapped, RW) fpstate bytes and never faults. Mirror the
+    // reference arithmetic exactly:
+    //   1. redzone: 64-bit ABI keeps 128 bytes below the interrupted
+    //      rsp for the interrupted leaf function.
+    //   2. altstack select (SA_ONSTACK): replaces sp with ss_top —
+    //      unless sp is already inside the altstack (nested delivery
+    //      continues BELOW the running handler's sp; rebasing to
+    //      ss_top would overwrite the outer frame at the same
+    //      address, the pre-fix behavior).
+    //   3. fpstate area: round_down(sp - xstate_sigframe_size, 64)
+    //      (fpu__alloc_mathframe). The bytes stay unwritten (Rux
+    //      does not save FP state through signal frames yet; see the
+    //      SigContext fpstate_ptr bring-up note) — but they are
+    //      RESERVED, which is the ABI contract handlers rely on.
+    //   4. subtract the rt_sigframe itself.
+    //   5. alignment (as-if-called rule, below).
+    let fpstate_area = crate::arch::x86_64::thread::xstate_sigframe_size();
+    let mut frame_addr = user_sp - 128; // (1) redzone (64-bit only)
+    if use_altstack {
         let sigstack = &(*task).sigstack;
-        if sigstack.is_disabled() || sigstack.ss_sp == 0 {
-            user_sp - SIGNAL_FRAME_SIZE
+        let ss_top = sigstack.ss_sp.saturating_add(sigstack.ss_size);
+        let on_altstack = !sigstack.is_disabled()
+            && sigstack.ss_sp != 0
+            && user_sp >= sigstack.ss_sp
+            && user_sp < ss_top;
+        if on_altstack {
+            // (2a) nested on the altstack: keep the interrupted sp.
+        } else if sigstack.is_disabled() || sigstack.ss_sp == 0 {
+            // (2b) altstack selected but not installed: normal stack.
         } else {
-            sigstack.ss_sp + sigstack.ss_size - SIGNAL_FRAME_SIZE
+            // (2c) altstack selected and installed: the FULL frame
+            // (fpstate area + rt_sigframe + alignment) must fit
+            // inside the altstack — the reference counts every byte
+            // of it when sizing the frame against sas_ss_size
+            // (frame-size checks, and since 6.9 sigaltstack_check_size
+            // force-SIGSEGVs). Placing a frame that crosses ss_top is
+            // exactly the Edge-B bug; placing below ss_sp writes
+            // outside the stack entirely. The bound counts the exact
+            // placement arithmetic below: 63 = fpstate round-down
+            // slack, 8+15 = the alignment step.
+            let full_frame = fpstate_area + 63 + SIGNAL_FRAME_SIZE + 8 + 15;
+            if sigstack.ss_size < full_frame {
+                crate::pr_err!(
+                    "sigframe: altstack sp={:#x} sz={:#x} < full frame {:#x} (sig={} pid={}) -> force SIGSEGV",
+                    sigstack.ss_sp,
+                    sigstack.ss_size,
+                    full_frame,
+                    sig,
+                    (*task).pid()
+                );
+                handle_default_signal(11);
+                return false;
+            }
+            frame_addr = ss_top;
         }
-    } else {
-        user_sp - SIGNAL_FRAME_SIZE
-    };
-
-    // SysV ABI as-if-called rule: at handler entry rsp must be ≡ 8
+    }
+    // (3) fpstate area, 64-byte aligned like fpu__alloc_mathframe.
+    frame_addr = frame_addr.wrapping_sub(fpstate_area) & !63;
+    // (4) the rt_sigframe.
+    frame_addr -= SIGNAL_FRAME_SIZE;
+    let frame_addr = frame_addr;
+    // (5) SysV ABI as-if-called rule: at handler entry rsp must be ≡ 8
     // (mod 16) — exactly as if the handler had been CALLed (the return
     // address slot at rsp+0 makes up the other 8 bytes). Linux x86_64
     // does this in align_sigframe (`sp -= 8; sp &= -16`). Entering with
@@ -2443,8 +2528,9 @@ unsafe fn setup_frame_x86_64(
     // SIGSEGV with si_code 0 — the x86 LTP X3 crash storm (91 riscv-PASS
     // tests dying in alarm_handler/heartbeat_handler/test handlers).
     // Round DOWN first, then subtract 8: the result is always ≡ 8
-    // (mod 16) and always ≤ (sp - 600) - 8, so the frame's tail can
-    // never cover the qword AT the interrupted user_sp. (Plain +8 after
+    // (mod 16) and always ≤ (sp - full_reserve) - 8, so the frame's
+    // tail can never cover the qword AT the interrupted user_sp.
+    // (Plain +8 after
     // the mask — the obvious reading of "as-if-called" — lets frame_end
     // reach user_sp+8 when (sp-600) ≡ 0 (mod 16); retcode[8..16] then
     // clobbers the interrupted function's return-address slot with 5

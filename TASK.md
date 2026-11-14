@@ -13149,3 +13149,55 @@ PLATFORM=aarch64); riscv64 make test ALL TESTS PASSED
 (run/hw6-maketest.log, ROOTFS_IMG from riscv-smp8-panic). Commit
 584c83e7a on huks-wedge. Boots this session: hw5w1, hw6w1, hw7w1
 (KVM SMP8 8G, 420s, 0 panics each).
+
+### 2026-11-15, round 115 (edge-b-never-sent) — Edge-B root cause: missing xsave fpstate reservation in the x86_64 signal frame; FIXED, huks fault 4/4 -> 0/3; mouse data point collected
+
+Root cause (finish of the 114th's decode): the ~5.4s deterministic
+huks fault is NOT FFRT worker-stack exhaustion — the dying looper runs
+ON its 28KB sigaltstack (rsp = ss_top - 0x478) inside OH's
+DFX_SignalHandler, whose 936-byte read at rsp+0x478 exits the
+altstack. Linux reserves ~3.3KB below ss_top (siginfo + ucontext +
+CPUID-sized xsave fpstate area; get_sigframe -> fpu__alloc_mathframe)
+so the same over-read lands in reserved RW bytes and never faults —
+matching the reference boot's zero huks exits. Our frame reserved
+exactly 600 bytes and no fpstate.
+
+Fix (kernel/src/signal.rs + arch/x86_64/thread.rs):
+- fpu_init stores CPUID.0xD.0:EBX (post-xsetbv) and exposes
+  xstate_sigframe_size() (EBX+4; 512 fxsr fallback); boot print
+  "xsave area 0x980 = rt_sigframe fpstate reserve" (2432 on this
+  host; host EBX 2440 = ours + PKRU, which our XCR0 does not enable).
+- setup_frame_x86_64 mirrors reference get_sigframe order: redzone
+  128, altstack select WITH the on_sig_stack nested arm (old code
+  rebased nested deliveries to ss_top — outer-frame clobber), fpstate
+  round_down(sp-xstate,64), rt_sigframe, as-if-called alignment.
+  Altstack bounds math counts the FULL frame (fpstate+frame+align);
+  too-small installed altstack force-SIGSEGVs (never fired: 0 prints
+  in 4 boots; OH musl altstacks are 28KB).
+- riscv64 twin: SigContext q-tail (+264B, fcsr offset unchanged at
+  sc+512 D-layout; frame 856 -> 1120 vs reference ~912). aarch64
+  audited: SigContext 0x1120 >= reference 2136 — no change needed.
+
+Verification (hw10w1-w3, KVM q35 SMP8 8G 540s,
+dfx=txnhunt,fuxstuck,periodic,parkdump trace_event=input):
+boundary-SEGV face 0/3 (was 4/4); signal-11 huks deaths 0/3;
+HW-EXIT-OF-HOLDER 0/3; panics 0/3; huks healthy 2/3 boots (w3 hit
+the INTERMITTENT pre-existing SIGABRT face 32-34s — different class,
+still open). make test 1328/1328 (run/hw10-maketest.log); triple-arch
+builds rc=0.
+
+Mouse data point (hw10-inject.py, QMP taps/swipe/keys): hop-1 kernel
+input chain WORKS (INEV 99/122/120 across boots — every event reaches
+input core); hop-2 NO consumer (INOP=2 audio_server only; mmi
+SA:3101 inits OK then DIES SILENTLY at ~171-190s in both tracked
+boots — no fault rows, no SIGCHLD kmsg; the exit print's arms miss
+clean exit_group deaths); hop-3 impossible (screen black 0-540s,
+bootanimation wedged vs pid 336, launcher markers 0/3). The mouse
+endgame is NOT huks and NOT the kernel input path — next targets:
+mmi's ~180s silent exit, sensors(733)->SA:2902(704) txn3119 wedge,
+bootanimation BWR parks. Full detail: run/HUKS-FINDINGS.md §8-§9.
+
+Edge-B instruments landed this round (from the 114th, now committed):
+txnhunt lock-free OWING snapshot (binder.rs) + exit-print owing arm
+(exit.rs), SEGV high-fault budget split + adjvma/altstack forensics
+(trap.rs).

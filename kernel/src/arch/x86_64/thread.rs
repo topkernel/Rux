@@ -352,6 +352,17 @@ pub unsafe fn fpu_init() {
             // Only now may the switch paths use the xsave/xrstor pair
             // (they #UD while OSXSAVE is clear).
             XSAVE_READY.store(true, core::sync::atomic::Ordering::Release);
+            // User XSAVE area size for the components just enabled —
+            // CPUID.0xD.0:EBX reports it as a function of the LIVE XCR0,
+            // so this MUST be queried after the xsetbv above. This is
+            // the size Linux's fpu__alloc_mathframe reserves below the
+            // ucontext of every rt_sigframe (the fpstate area), and
+            // signal.rs uses it for the same reservation (huks-wedge
+            // Edge-B: without it a handler's 936-byte read at
+            // rsp+0x478 walked off the sigaltstack top and SEGV'd where
+            // the reference kernel's reserve absorbs it).
+            let (_, d_ebx, _, _) = crate::arch::x86_64::cpu::cpuid(0xd, 0);
+            USER_XSTATE_SIZE.store(d_ebx, core::sync::atomic::Ordering::Release);
             // b143 verification: the AVX #UD family (hdcd/processdump
             // vmovaps) only dies when XCR0[AVX] failed to land — print
             // the live register so a regression is one grep away.
@@ -367,7 +378,7 @@ pub unsafe fn fpu_init() {
                 );
             }
             crate::pr_info!(
-                "fpu: OSXSAVE+XCR0={:#x}{} (cpu feature mask {:#x})",
+                "fpu: OSXSAVE+XCR0={:#x}{} (cpu feature mask {:#x}, xsave area {:#x} = rt_sigframe fpstate reserve)",
                 ((hi as u64) << 32) | lo as u64,
                 if (((hi as u64) << 32) | lo as u64) & 4 != 0 {
                     " AVX"
@@ -375,6 +386,7 @@ pub unsafe fn fpu_init() {
                     " NO-AVX"
                 },
                 mask,
+                d_ebx,
             );
         } else {
             crate::pr_warn!(
@@ -412,6 +424,24 @@ static AVX_ENABLED: core::sync::atomic::AtomicBool =
 /// fxsave/fxrstor pair instead. Monotonic: once set it never clears.
 static XSAVE_READY: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
+
+/// User XSAVE area size for the components XCR0 enables (CPUID.0xD.0:EBX,
+/// captured by fpu_init right after programming XCR0 — the leaf reports
+/// the size as a function of the live register). 0 until fpu_init ran.
+static USER_XSTATE_SIZE: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// fpstate area size an x86_64 rt_sigframe must reserve below the
+/// ucontext — Linux `xstate_sigframe_size()` parity: the enabled user
+/// components' XSAVE area plus FP_XSTATE_MAGIC2 (the trailing u32 a
+/// user restore walks to validate the fpstate blob). Parts without
+/// XSAVE reserve the 512-byte FXSAVE image (Linux's use_fxsr sizing).
+pub fn xstate_sigframe_size() -> u64 {
+    match USER_XSTATE_SIZE.load(core::sync::atomic::Ordering::Relaxed) {
+        0 => 512,
+        n => n as u64 + 4,
+    }
+}
 
 /// XSAVEOPT available (CPUID.0xD.1:EAX[0]): fpu_save_for_switch uses
 /// xsaveopt64, which skips writing components the task has not touched
