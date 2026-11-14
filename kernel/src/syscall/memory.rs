@@ -53,13 +53,54 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
     // Get current process
     match sched::current() {
         Some(current_task) => {
+            // ===== The break is PER-MM, not per-task =====
+            // (GNOME trim face, 2026-11-07, fixed on the gnome-riscv
+            // lane as c127e4bc1; ported to main 2026-11-14 after the
+            // uboot campaign's boot-01 reproduced it on x86: gnome-shell
+            // pid 390 and its gdbus thread pid 394 both SIGSEGV'd on the
+            // same heap page 0x555555e13000, one fault with
+            // insys nr=12 — a brk() — from a stale per-task copy.)
+            // The reference kernel keeps mm->brk — ONE break per address
+            // space, shared by every thread. Rux kept the authoritative
+            // value in Task::brk (per-task), with the mm value demoted
+            // to a mirror. A thread therefore carried a SNAPSHOT of the
+            // break from its clone() onwards: when the main thread grew
+            // the heap, the other thread's copy stayed behind, and its
+            // malloc_trim -> brk(-N) shrank "the heap" by the band
+            // between its STALE break and the requested one — releasing
+            // pages the main thread had already handed out. The mm
+            // value is now the single authority; Task::brk is kept in
+            // sync for the readers that still use it (fork's copy,
+            // exec's init).
+            //
+            // Serialize the whole break read-modify-write per address
+            // space (the reference's mmap_lock discipline): a concurrent
+            // grow in another thread must not interleave with a shrink's
+            // value store, or the break value falls behind the heap VMA
+            // and the NEXT shrink releases live pages. Lock order:
+            // brk_lock is OUTERMOST (before the mm-surgery section and
+            // the VMA write lock); nothing else takes brk_lock.
+            let _brk_guard = current_task
+                .address_space()
+                .map(|aspace| aspace.brk_lock().lock_irqsave());
+
             // hp89: whole-call mm-surgery section (see MmStruct::
             // mm_surgery) — shrink runs munmap, grow runs VMA surgery.
             let _surgery = current_task
                 .address_space()
                 .map(|mm| mm.mm_surgery_guard());
-            // Get current brk value
-            let current_brk = current_task.get_brk();
+            // Current break: the SHARED mm value (fallback to the task
+            // copy only when there is no address space).
+            let mm_brk_now = |task: &crate::process::Task| -> u64 {
+                if let Some(addr_space) = task.address_space() {
+                    let v = addr_space.brk().as_usize() as u64;
+                    if v != 0 {
+                        return v;
+                    }
+                }
+                task.get_brk()
+            };
+            let current_brk = mm_brk_now(&current_task);
 
             // If brk is not initialized, get or set default value from address space
             if current_brk == 0 {
@@ -71,27 +112,28 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                     crate::arch::mm::user_addr::BRK_DEFAULT as u64
                 };
                 current_task.set_brk(default_brk);
+                if let Some(addr_space) = current_task.address_space() {
+                    addr_space.set_brk_val(default_brk as usize);
+                }
 
                 if new_brk == 0 {
                     return default_brk as i64;
                 }
             }
 
-            // Keep the ADDRESS-SPACE brk mirror in sync with the task's
-            // authoritative break at every mutation below. The mm-side
-            // value is what MmStruct::mmap's brk-conflict guard and
-            // procfs read; without the sync it stays at the exec-time
-            // image end forever and the live heap looks empty (the
-            // MAP_FIXED live-heap guard then lets mappings land on
-            // malloc's storage — session-15 probe MF6).
+            // Publish every mutation to BOTH the shared mm break (the
+            // single authority, what MmStruct::mmap's brk-conflict guard
+            // and procfs read) and the per-task copy (what fork clones
+            // and exec re-initializes).
             let sync_mm_brk = |v: u64| {
                 if let Some(addr_space) = current_task.address_space() {
                     addr_space.set_brk_val(v as usize);
                 }
+                current_task.set_brk(v);
             };
 
             // Re-get current brk (may have been updated)
-            let current_brk = current_task.get_brk();
+            let current_brk = mm_brk_now(&current_task);
 
             // If new_brk is 0, return current brk
             if new_brk == 0 {

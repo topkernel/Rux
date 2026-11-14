@@ -119,7 +119,12 @@ atomicity (MAP_FIXED piece drop, munmap zap window — thread stacks
 lost VMAs while PTEs stayed live; 56b2baebf6cf); ext4 stale extents
 aliasing reallocated blocks + symlink inline string freed as bitmap
 bits + inode alloc off-by-one (on-disk corruption; 2f9763fc9e10,
-f4b67f669f0d F1).
+f4b67f669f0d F1); the program break kept per-TASK instead of per-mm —
+a thread's stale snapshot made its malloc_trim brk shrink munmap live
+heap pages of the same process (x86 GNOME campaign boot-01: shell +
+gdbus thread SIGSEGV on one heap page, one fault inside brk itself;
+riscv face was pango/FcInit, c127e4bc1 — per-mm authority + per-mm
+brk_lock, A/B 3/12 boots hit -> 0/12, f6e3b8837).
 
 **The statistic, corrected from the draft claim.** The draft said
 "every memory-corruption-class bug found lived inside an
