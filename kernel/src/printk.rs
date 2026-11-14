@@ -1500,6 +1500,8 @@ fn kmsg_console_allows_echo() -> bool {
 /// `off` (ring only). The RING always records every line in all three
 /// modes, so hilog consumers lose nothing.
 fn kmsg_file_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
+    // hilogcensus (cmdline hilogcensus=1): per-caller /dev/kmsg volume.
+    crate::dfx::hilogcensus::kmsg_write(buf);
     let text = core::str::from_utf8(buf).unwrap_or("<binary>");
     let (level, text) = match text.as_bytes() {
         [b'<', d, b'>', rest @ ..] if (b'0'..=b'7').contains(d) => {

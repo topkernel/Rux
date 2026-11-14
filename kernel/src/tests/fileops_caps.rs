@@ -85,10 +85,22 @@ fn check_errno_matrix() {
         return;
     }
 
-    // poll_dispatch fallback: no poll capability -> always-ready mask.
-    let r = epoll_file.poll_dispatch(0x0001 | 0x0004); // POLLIN|POLLOUT
+    // poll_dispatch fallback: no poll capability -> always-ready mask
+    // (regular-file semantics). Specimen: a poll-less table (watchdog —
+    // read/write, no poll slot). Epoll LOST this specimen to the
+    // hilog-flood fix: its poll now reports real readiness (0 on an
+    // empty epoll), NOT the fallback mask.
+    let watchdog_file = mk(Some(&crate::drivers::watchdog::WATCHDOG_OPS));
+    let r = watchdog_file.poll_dispatch(0x0001 | 0x0004); // POLLIN|POLLOUT
     if r != (0x0001 | 0x0040 | 0x0004 | 0x0100) {
         test_fail("errno-matrix", "poll fallback: want POLLIN|POLLRDNORM|POLLOUT|POLLWRNORM");
+        return;
+    }
+    // ...and epoll's own poll verdict on an EMPTY interest set is 0
+    // (ep_poll parity), never the fallback mask.
+    let r2 = epoll_file.poll_dispatch(0x0001); // POLLIN
+    if r2 != 0 {
+        test_fail("errno-matrix", "epoll poll: want 0 on empty epoll (ep_poll parity)");
         return;
     }
 
@@ -98,12 +110,16 @@ fn check_errno_matrix() {
 pub fn test_fileops_caps() {
     test_group_start("fileops-caps");
 
-    // The §1 incident family: epoll carries ONLY close. Every other
-    // capability absent — read() takes the central EINVAL path.
+    // The §1 incident family: epoll carries close + poll (hilog-flood
+    // fix c1d9ff6c9: poll is the reference's ep_poll — POLLIN iff a
+    // wait would deliver now; the old no-poll shape made every epoll fd
+    // permanently readable through the always-ready fallback and spun
+    // every nested-epoll waiter). read/write/lseek/pread stay absent —
+    // read() takes the central EINVAL path.
     check(
         "epoll caps",
         crate::syscall::misc::caps_shape::epoll_ops(),
-        Expect { read: false, write: false, lseek: false, close: true, poll: false, read_at: false },
+        Expect { read: false, write: false, lseek: false, close: true, poll: true, read_at: false },
     );
 
     check(

@@ -1419,6 +1419,31 @@ tracepoints! {
             args[0] as i32, args[1] as i32, args[2] as u32, ps_render(args[3])
         )
     };
+
+    /// rux:hilog_top — the top row of the hilogtap census dump (aggregate-
+    /// as-event: the OH log fabric runs at up to 10^6 msg/s, so the
+    /// unified-framework event carries the 30-60 s AGGREGATE, not the
+    /// per-message stream). pid/comm identify the top unix-dgram log
+    /// sender; n/ea are the cumulative delivered / EAGAIN counts.
+    EVENT_HILOG_TOP / hilog_top_fmt / trace_hilog_top :
+        "rux", "hilog_top", 52,
+    print: "\"pid=%d comm=%s delivered=%llu eagain=%llu\", REC->pid, REC->comm, REC->delivered, REC->eagain",
+    fields: "\tfield:int pid;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:char comm[16];\toffset:16;\tsize:16;\tsigned:0;\n\
+             \tfield:unsigned long long delivered;\toffset:32;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long long eagain;\toffset:40;\tsize:8;\tsigned:0;\n",
+    call (pid: i32, comm: &[u8; COMM_LEN], delivered: u64, eagain: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let comm = comm_from_words(args[1], args[2]);
+        let end = comm.iter().position(|&b| b == 0).unwrap_or(COMM_LEN);
+        format!(
+            "pid={} comm={} delivered={} eagain={}",
+            args[0] as i32,
+            core::str::from_utf8(&comm[..end]).unwrap_or("?"),
+            args[3],
+            args[4]
+        )
+    };
 }
 
 /// The trace_marker pseudo-event. NOT in EVENTS on purpose: a marker
