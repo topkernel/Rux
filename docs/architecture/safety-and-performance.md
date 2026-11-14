@@ -491,3 +491,238 @@ absents stated plainly. Each absent names what closing looks like.
     (run/lostwake-gate-d*.log, run/lostwake-fix2-r*.log), make test
     green, pbench P5 rows at/below baseline bands (p5a_pipe 1.84 µs
     vs 2.1-2.3 band, tcg smp2 rig).
+- Merge-day round (2026-11-14, twelve first-parent merges,
+  94e1338b7..8f4a4a259): every fix classified against the §2 taxonomy
+  before it landed here; two instrument families were convicted by
+  their own measurements in the same round (honesty notes inline).
+  - Signal-fault semantics parity (arena-mmap, merge 94e1338b7,
+    commits 4c96c783/8bb0f731/065e7dd6): SIGSEGV/SIGBUS siginfo now
+    carries the real fault address and class on all three arches
+    (was: info-less send falling back to the SI_KERNEL placeholder,
+    whose si_pid lands at the sigfault._addr offset — observed
+    si_addr=0x1 from pid 1, si_code=128; class (b), signal-ABI
+    parity). Safety property: an SA_SIGINFO handler can compute the
+    faulting page — the FFRT 0x7ff1 fault-loop family (~10 Hz under
+    OH load, the mmi_service 148.9 s death) is gone: zero loop
+    occurrences across 3 OH boots, mmi received its two historical
+    fault faces once each with correct si_addr, installed the page,
+    and survived (SIGDEATH 0). With the vDSO DT_STRTAB/DT_SYMTAB
+    swap fixed (musl resolves __vdso_clock_gettime,
+    found=0x3fbec01800 under AT_SYSINFO_EHDR) the arena
+    demand-paging pattern runs reference-identical end to end: 19/19
+    probe checks (userspace probes archive :: test/arena.c; host
+    ground truth 19/19, serial 19/19). Unaligned MAP_FIXED /
+    MAP_FIXED_NOREPLACE now returns EINVAL (was silent truncation
+    through VirtAddr masking). riscv64 make test 1328/1328. Artifacts:
+    arena-mmap lane run/ARENA-FINDINGS.md + run/arena-rux-serial.log.
+  - Program break per-mm on x86_64 (uboot-campaign, merge 28b880495,
+    commit d47c73a3f): the §2.1 boundary row's fix ported to main
+    with its own A/B on the unified KVM SMP8 8G rig — 24 boots:
+    shell-SIGSEGV boots 3/12 -> 0/12, campaign success 11/12 ->
+    12/12, guest-true shell-up median 6 s and desktop frame 9.1 s
+    unchanged (zero timing cost; one uncontended per-mm brk_lock
+    acquire per call). make test 1329/1329. The boundary row above
+    was updated by the same commit. Artifacts: uboot-campaign lane
+    run/CAMPAIGN.md + run/boots/ (per-boot serial/result/png sets).
+  - epoll fds implement real ep_poll semantics (hilog-flood, merge
+    7415622ea, commits 41281d207/c1d9ff6c9/deea2dd6): EPOLL_OPS files
+    carried no poll fn, so the regular-file fallback reported every
+    nested epoll fd POLLIN|POLLRDNORM forever — every
+    FFRT/libinput-based OH service loop spun 10-60k rounds/s logging
+    empty passes (the hilog flood fabric). Class (b) poll parity;
+    Linux ep_poll reports POLLIN iff a wait would deliver now.
+    Measured (same rig, same instruments, pre -> post): writev
+    attempted 63-102k/s -> 1.7-3.7k/s (25-50x down), EAGAIN flow
+    control frozen at 72.5k from t=60 (zero new for 4 min),
+    clock_gettime volume 157k/s -> ~15k/s, appspawn fork 130-272 ms
+    -> 85-90 ms; guest CPU 579% of 800% at baseline vs the reference
+    kernel's 17.5% on the same images (post-fix CPU is
+    boot-dependent — the fabric syscall burn is gone, per the lane's
+    honest note). Hang-class elimination: the permanently-readable-
+    nested-epoll spin family. Two in-tree tests pinning the old
+    no-poll shape were updated to the parity shape. Artifacts:
+    hilog-flood lane run/HILOG-FINDINGS.md + run/oh-b*.log census
+    dumps.
+  - Ubuntu 24.04 systemd to graphical.target (ub2404, merge
+    6770963ea, commits 3019e35e1/2449a4d89): unix setsockopt errno
+    family (SO_TIMESTAMP/SO_PASSSEC/SO_TIMESTAMPNS(+_NEW,
+    TIMESTAMPING) accepted; ENOPROTOOPT not EAFNOSUPPORT — journald
+    treats the old errno as fatal at boot #1); tmpfs fallocate
+    (journald v255 fallocates its seqnum sidecar on /run before
+    MAP_SHARED mmap — ENOSYS was fatal; this is the fix that made
+    journald start); securityfs/ramfs/mqueue/debugfs/tracefs mount
+    arms (dev-mqueue + sys-kernel-{debug,tracing,security} mounts
+    succeed kernel-side). systemd 255 as PID 1 now reaches
+    multi-user.target AND graphical.target (~1 min 40 s userspace)
+    with journald, logind, dbus, udisks2 and network-online live.
+    Class (b) throughout. Artifacts: ub2404 lane run/UB2404-STATUS.md
+    + run/serial-121527.log.
+  - Fault-path default death is a GROUP death (huks-wedge, merge
+    5fb35cba7, commit 584c83e7a): Linux force_sig_fault ->
+    do_group_exit parity at 15 fault sites x 3 arches (x86_64 8,
+    riscv64 3, aarch64 4; was thread-only do_exit(-SIGSEGV) — a
+    faulting worker left the daemon alive holding orphaned userspace
+    locks). Safety property (signal semantics parity) AND hang-class
+    elimination, live-verified on hw7: the identical huks_service
+    boundary SEGV (936-byte copy straddling a 28 KB FFRT
+    worker-stack guard, 0x478 bytes left) that wedged hw5 (four
+    frozen musl __lock words; 60-370 s park chains through
+    softbus/accountmgr/foundation/mmi) now dies as a group
+    (grpexit=TRUE), init reaps it (SIGCHLD, status 11), the service
+    respawns and is reaped again on its next fault — and TXN-HANG
+    rows for the dead tgid are ZERO (no orphaned locks, no parked
+    loopers). The orphaned-mutex wedge bootstrap (Edge A) is
+    eliminated; the no-fault silent-stop class (Edge B) remains
+    open. Artifacts: huks-wedge lane run/HUKS-FINDINGS.md +
+    run/oh-hw5w1/hw7w1-serial.log.
+  - R127 wait-queue hardening + wake-path exoneration (wake-drop,
+    merge f4c57e7c6, commits 69f5d128e/857418948/765979874/b80f76a55/
+    fecbd8ccc): wait entries keyed by (task, registration pid) with
+    a wake-time staleness screen that evicts entries naming freed or
+    recycled Task pages — closing the one silent remover the old
+    kernel had (remove-by-pointer on a recycled page could strip a
+    dead reader's leaked entry and wake a wrong task; corruption-
+    class consequence made unreachable); WQLEAK names any future
+    exit-without-unwind at exit time (live wq_regs counter,
+    re-zeroed on page reuse). The class did not fire in the verdict
+    boots (stE=0, WQLEAK=0) — banked as defense-in-depth. Exoneration
+    with receipts: 8 verdicted wakes across 4 injected boots — 4
+    DELIVERED (state transition INTERRUPTIBLE->RUNNING, GRQ linkage
+    observed, target read within microseconds), 4 REFUSED (target
+    already running, the legitimate W1 token return), ~880 EMPTY
+    pushes (no waiter). The input-chain death is OH userspace (samgr
+    kills dhardware mid-boot; audio_server's node-reader never
+    re-polls the input fds). Artifacts: wake-drop lane
+    run/WAKE-DROP-FINDINGS.md + run/serial-boot-r8..r11.log.
+  - Reaper machinery exonerated (reaper-waitid, merge 537f9e6ed,
+    commit adc67c975): ~1700 s of probed OH uptime across 5 boots —
+    waitid is NEVER used (0 events, 0 polls of any kind); wait4
+    (WNOHANG from appspawn, blocking from init's rc scripts) is the
+    only channel; 788/788 leader exits reaped, zero zombies older
+    than 10 s (ZLINGER=0), worst linger 1.6 s, appspawn reaps land
+    in the same 0.1 s tick as the exit. The systemui incarnation
+    cycle is a timing-sensitive userspace race (exit_group(-2) mid
+    IPC handshake on fd 3, FFRT-arena address family, with
+    clock_gettime -1 and writev EAGAIN in the tail) — the kernel
+    reap/wait machinery is fully behaved. Negative result with
+    receipts, kept per the honesty rule. Artifacts: reaper-waitid
+    lane run/REAPER-FINDINGS.md + run/serial*.log, table-boot*.txt.
+  - R87 secondary-bringup window closed (riscv-smp8-panic, merge
+    f5416e8a4, commits 23c649335/1915f975c/5d2427802): secondaries
+    enabled the timer interrupt BEFORE sched::init_secondary()
+    published PER_CPU[hart] — during the memory-scaling BSP init
+    tail, ticks scheduled on zeroed per-CPU slots and the ensuing
+    slot-ownership fight produced mixed-context resumes (tp from one
+    task, sp on another's stack, pc on a third's — row 17's family,
+    the (a)-consequence class, caught loudly as KERNPANIC illegal
+    instruction). Linux-parity fix: no interrupts on a secondary
+    until per-CPU state is published (timer after init_secondary;
+    the boot-complete wait spins with sie=0). smp2/8G boots with zero
+    detector lines (previously 3 at jiffies 1-2). Post-fix matrix
+    (minimal-rootfs ls/proc gate, 16 smp/mem cells): 13/16 clean;
+    the previously-failing 5/1G, 7/1G, 8/1G, 8/2G cells are now
+    clean; the residual ~1/3 timing race on smp8-class cells (the
+    fair.rs orphan-sweep ownership fight) is handed to the sched lane
+    with named entry points. trap.S MAX_CPUS clamps now derive from
+    config (the stale literal 4 made harts 4-7 take CPU0's interrupt
+    stack); ksoftirqd bring-up is create->bind->enqueue (Linux
+    parity). make test green (one tcp RTT test needed a
+    determinism fix — the pre-fix suite had been riding accidental
+    secondary ticks). Artifacts: riscv-smp8-panic lane
+    run/PANIC-FINDINGS.md + run/mx3-*.log matrix.
+  - Honesty note — the R74/R83/R85 "ksp smear" never existed: the
+    ksp tripwire printed the qword as TWO decimal numbers with no
+    separator; read as one number and split at the "natural" 9/9
+    digits, legal stack addresses decode to the hunted signature
+    (429496725431981568 re-split at 10/8 is 0xffffffd601e80000 =
+    idle[1]'s kernel stack top; the "hi32=0x19999995 magic" was an
+    artifact of the mis-split). Hardware watchpoints on the words
+    AND their identity/direct-map aliases (hunt13/14/15) never saw a
+    garbage store while the tripwire still printed "garbage" in the
+    same boots. §2.1's trap.S ti_user_sp/ti_kernel_sp rows
+    (c1539f6e/8b8bdd16) are untouched — different bugs, convicted by
+    their fix diffs. The R85 ksp repair gates in trap.S stay
+    inert-but-harmless (they repair values that were never broken);
+    r83hunt.rs's 0x19999995 fingerprint scan can never match —
+    cleanup recommended, deliberately not in this round. Instruments
+    get convicted too (PTGUARD/FREEGUARD precedent).
+  - vDSO DT_VERDEF chain + kernel exculpated at the frozen word
+    (rwlock-livelock, merge 95b5e61fb, commits
+    a668e77ff/ac33690d2/1d0ed59ab): Go runtimes dereference
+    DT_VERDEF unconditionally — snapd died at runtime.vdsoFindVersion
+    +0x33 (cr2=0x2, nil section pointer) on a verdef-less vDSO. The
+    vDSO now publishes DT_VERDEF/DT_VERDEFNUM/DT_VERSYM with the
+    LINUX_2.6 chain (mirroring arch/x86/entry/vdso); glibc is
+    indifferent, Go requires it; verified by boots I/J/K (snapd runs
+    past its clock reads). The Ubuntu 24.04 mid-boot freeze decoded
+    to a glibc pthread_mutex (GLib gthreadpool's
+    spawn_thread_queue->mutex) left locked with no owner — and the
+    kernel is exculpated AT THE WORD: across boots F/G/J/K/L/M the
+    word goes silent forever after formation (zero futex ops on it),
+    the one pre-freeze WAKE(val=1, ret=1) was DELIVERED (the woken
+    waiter's WAIT returned ret=0 immediately), no kernel code writes
+    user futex words on the WAIT/WAKE paths, and no runnable task
+    was stranded (tgid dumps: all parked). Verdict (a) of the
+    a/b/c ladder: the unlock that would free the waiter is never
+    issued by userspace. The terminal shape is word=2 (glibc waiters
+    bit — every future unlock MUST futex_wake, and none ever does);
+    word=1 stalls can self-heal and are invisible to the census
+    heuristic (registered as a follow-up). Artifacts: rwlock-livelock
+    lane run/LIVELOCK-FINDINGS.md + run/serial-F..M.log.
+  - Honesty note — the fuxwatch instrument was wedging its own
+    subject (huks-wedge): the futex write-watch left abandoned watch
+    pages W-cleared, spraying SEGV_ACCERR into innocent userspace —
+    hw1's "holder vanished" face was the instrument's fault (a
+    distributeddata mutex-RELEASE store took the abandoned page's
+    fault; the mutex froze for the rest of the boot), not a
+    userspace bug. Fixed by fuxwatch_retire_page before every slot
+    move + clean shutdown at budget trip + unconditional W-restore
+    in the fault hook; hw5 (fixed kernel): zero
+    SEGV-on-watched-page events across 420 s. Every pre-hw5 boot
+    that armed fuxwatch on a later-abandoned page carries
+    instrument-induced SEGVs in its timeline — hunt priors
+    re-weighted accordingly. Artifacts: huks-wedge lane
+    run/HUKS-FINDINGS.md §3.
+  - Tier-1 volume baseline re-banked (gate-infra, merge d8476534e):
+    total syscall volume moved from the superseded 126.0M
+    tok109-depth family to 15.36M on the tok-r4fix vehicle (release
+    f5416e8a4: 15,359,337 @t=120s; debug 95b5e61fb sysrep1:
+    15,253,824 @t=720s — 0.7% apart, build-profile-independent);
+    dated section and vehicle-protection rules in
+    docs/development/perf-gate-baseline.md. Docs-only change.
+  - Dump line-atomicity + hilogcensus/spinwatch tracepoint migration
+    (obs-hygiene, merge 8f4a4a259, commits 3f87a9ee6/a77685745):
+    hunt dumps were per-byte raw UART writes that spliced with the
+    /dev/kmsg flood — 115/6783 task lines destroyed (1.7%) on the
+    before boot. Per-line staging under printk's console-emit lock
+    with PER-CPU stages: 1506/1506 well-formed (r2), 881/883 (r3 —
+    both residual splices came from the deliberately-lockless
+    preempt-underflow crash printer, not the funnel), ENQ hunt lines
+    240/240 whole (was char-mangled). Two in-round defects found by
+    the smoke boots themselves and fixed: the shared stage
+    byte-mixed under concurrent dumpers (per-CPU stages), and the
+    emit-lock wait ran IRQs-off inside the irqsave guard and tripped
+    the RCU detector once per boot (the flush now copies the line to
+    the stack, drops the guard, flushes with the caller's interrupt
+    state; Full budget 50 ms irqs-on for dumps, Brief 100 µs for
+    GRQ-held/IRQ-context hunt prints). hilogcensus/spinwatch moved
+    to unified tracepoints (events 57-60: rux:hilog_census,
+    hilog_kmsg, spinwatch, spinwatch_fd) with the old dfx= tokens as
+    boot-time aliases; set_event arming now takes effect live (the
+    cached tri-state froze the verdict until reboot). Known residual
+    (documented, follow-up lane): brief-budget fallbacks can append
+    line-granular onto a long kmsg record's tail (14/238 ENQ refs in
+    r2 — whole line visible, no char mixing); the deferred-ring
+    design that kills the class is specified in the lane record.
+    Artifacts: obs-hygiene lane run/OBS-HYGIENE.md +
+    oh-before/r2/r3-serial.log.
+  - Rig and gate repairs (same day): run-oh.sh / run-x86-ub.sh
+    unified at KVM SMP8 8G (8b21a8440, 2f2c236ee; doc sweep
+    27ee22415; the stale ">=3G hits the q35 PCI hole" wall did not
+    reproduce — every 8G boot probes all virtio devices clean, the
+    above-4G BARs ioremap through the modern path); pbench.c path
+    fix after the 2026-11-11 probe re-org (1342fb78f — Tier-2 gate
+    runs had been dying at probe build, rc=2); pa-boot.sh census
+    token fix (untracked run/ script — note only; with the token
+    fixed the census reads return to band, TERM 8 / REFUSED 31 on
+    the merged 6770963ea kernel).
