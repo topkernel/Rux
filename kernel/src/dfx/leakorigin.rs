@@ -208,6 +208,102 @@ pub fn note_acquire(
             2
         };
         slot.omis.store(mis, Ordering::Release);
+        // glib-mutex lane (2026-11-14): PHANTOM-BOOKING formation trap.
+        // A base 0->1 landing on a task owned by NO cpu slot and NOT
+        // mid-switch-out is phantom BY CONSTRUCTION — sc265 convicted
+        // the invariant ("ZERO guards are ever booked on a task current
+        // on no CPU"; the WAKE-HEAL block cites it for the wake side,
+        // this is the acquire side of the same invariant). Guards live
+        // on the executing task: the pre-park window's task is still in
+        // its CPU's current slot, the mid-switch-out shape carries the
+        // SWITCHING_OUT marker, and a picked task is slot-named from
+        // its pick publish — all skipped by pick_owner_live, mirroring
+        // the heal's adjudication. Covers both faces: the SLEEPING
+        // parker booked post-freeze, and the RUNNING-but-unowned
+        // freshly-woken/enqueued task booked inside the wake path
+        // before the heal point (the state-only face missed bookings
+        // that land after the wake flips state RUNNING). Dead targets
+        // are skipped (teardown). This is the WAKE-HEAL producer caught
+        // at the moment of booking instead of at the wake, naming the
+        // acquire site directly. pid 0 (idle/static tasks) is skipped:
+        // the AP-bringup window books printk/rcu guards on idle tasks
+        // before their slots publish (boot25: 19 early lines, all
+        // pid=0, budget gone before the runtime window). Budgeted
+        // direct console (R34): the acquire path may run with IRQs on
+        // and locks held.
+        if !unsafe { (*task).state().is_dead() }
+            && unsafe { (*task).pid() } != 0
+            && !crate::sched::sched::pick_owner_live(task)
+        {
+            static PB_N: AtomicU32 = AtomicU32::new(120);
+            let b = PB_N.load(Ordering::Acquire);
+            if b != 0
+                && PB_N
+                    .compare_exchange(b, b - 1, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+            {
+                use crate::console::putchar_no_lock as putchar;
+                fn phex(v: usize) {
+                    use crate::console::putchar_no_lock as putchar;
+                    for sh in (0..16).rev() {
+                        let n = ((v >> (sh * 4)) & 0xF) as u8;
+                        putchar(if n < 10 {
+                            b'0' + n
+                        } else {
+                            b'a' + n - 10
+                        });
+                    }
+                }
+                fn pdec(mut v: u64) {
+                    use crate::console::putchar_no_lock as putchar;
+                    let mut buf = [0u8; 12];
+                    let mut n = 0;
+                    if v == 0 {
+                        putchar(b'0');
+                        return;
+                    }
+                    while v > 0 && n < buf.len() {
+                        buf[n] = b'0' + (v % 10) as u8;
+                        v /= 10;
+                        n += 1;
+                    }
+                    for i in (0..n).rev() {
+                        putchar(buf[i]);
+                    }
+                }
+                for &c in b"\nPHANTOM-BOOKING task=0x" {
+                    putchar(c);
+                }
+                phex(task as usize);
+                for &c in b" pid=" {
+                    putchar(c);
+                }
+                pdec(unsafe { (*task).pid() } as u64);
+                for &c in b" cpu=" {
+                    putchar(c);
+                }
+                pdec(cpu as u64);
+                for &c in b" state=0x" {
+                    putchar(c);
+                }
+                phex(unsafe { (*task).state().bits() } as usize);
+                // SAFETY: stored from a &'static Location above.
+                let site = loc;
+                for &c in b" site=" {
+                    putchar(c);
+                }
+                for &c in site.file().as_bytes() {
+                    putchar(c);
+                }
+                putchar(b':');
+                pdec(site.line() as u64);
+                for &c in b" mis=" {
+                    putchar(c);
+                }
+                pdec(mis as u64);
+                putchar(b'\n');
+            }
+        }
     }
 }
 

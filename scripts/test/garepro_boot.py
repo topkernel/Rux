@@ -20,6 +20,9 @@ Verdicts (probe exit code on serial):
   GAREPRO-OWNER-PARKED          -> rc 1  (holder parked 15s+ per ledger)
   GAREPRO-STALL                 -> rc 1  (no M traffic 30s)
   GAREPRO-CANARY / -DOUBLE...   -> rc 1
+  GAREPRO-REG-REWIND            -> rc 1 (monitor resumed from a stale
+                                    context snapshot: page shadow and/or
+                                    witness contradict its registers)
   TSLEEP-DEAD-G<n> / -DEAD-ALL  -> rc 1  (a timed-wait group froze)
   TSLEEP-SIG-WATCHDOG           -> rc 1  (monitor itself wedged)
   kernel wedge lines            -> rc 2
@@ -47,7 +50,8 @@ MKFS = "/usr/sbin/mkfs.ext4"
 
 PASS_LINE = re.compile(rb"(GAREPRO|TSLEEP)-PASS")
 FAIL_LINE = re.compile(
-    rb"GAREPRO-(PHANTOM|OWNER-PARKED|STALL|CANARY|DOUBLE-HOLD|FAIL)"
+    rb"GAREPRO-(PHANTOM|OWNER-PARKED|STALL|CANARY|DOUBLE-HOLD|FAIL"
+    rb"|REG-REWIND)"
     rb"|TSLEEP-(DEAD-G\d|DEAD-ALL|SIG-WATCHDOG|FAIL)")
 WEDGE_LINE = re.compile(rb"DEADLOCK: spinlock stuck|BUG: soft lockup|Kernel panic|panic: ")
 
@@ -110,7 +114,7 @@ def main():
         check=True)
 
     tag = args.tag or args.probe
-    img = os.path.join(WT, "work", f"{args.probe}-x86.img")
+    img = os.path.join(WT, "work", f"{tag}-x86.img")
     build_image(img, binp, args.probe)
 
     if args.probe == "tsleep":
