@@ -11,7 +11,9 @@ KERNEL_BIN ?= target/riscv64gc-unknown-none-elf/debug/rux
 # The distro QEMU build has the SDL display backend; the custom 10.2.2 in
 # /usr/local/bin is compiled without display backends (none/dbus only).
 UBUNTU_QEMU ?= /usr/bin/qemu-system-riscv64
-# CPU count (GUI verified 23/23 on -smp 4; override with SMP=1 make ubuntu-run)
+# CPU count for the legacy riscv64 GUI flow (make gui); the x86 flows
+# carry their own unified-rig defaults in scripts/test/run-x86-ub.sh
+# (KVM SMP8 8G since 2026-11-14) and no longer read this variable.
 SMP ?= 4
 # TCG threading: multi = MTTCG (2.1x faster, verified 23/23 on both QEMU
 # builds with zero regressions); THREAD=single restores the deterministic

@@ -63,10 +63,10 @@ rm -f "$LOG"
     sleep "$TIMEOUT"
 } | timeout "$TIMEOUT" qemu-system-x86_64 \
     -M q35 \
-    -accel tcg,thread=multi \
+    -accel ${ACCEL:-kvm} \
     -cpu max \
-    -m 2G \
-    -smp 2 \
+    -m ${MEM:-8G} \
+    -smp ${SMP:-8} \
     -display none \
     -serial stdio \
     -snapshot \

@@ -7,8 +7,9 @@
 # mkfs -d over a staging dir holding the static probe; the host gcc
 # targets the amd64 guest directly).
 #
-# -m 2G: the x86 layout's kernel heap starts at the 1 GiB mark (see
-# test/pstore-x86-smoke.sh for the ALLOCTHROW-at-1G failure mode).
+# -m: unified rig 2026-11-14 (KVM SMP8 8G). The old -m 2G floor note still
+# holds as a MINIMUM: the x86 layout's kernel heap starts at the 1 GiB mark
+# (see test/pstore-x86-smoke.sh for the ALLOCTHROW-at-1G failure mode).
 #
 # Usage: test/dfx-x86-probe.sh   (env: LEG_X86_KERNEL, LEG_TIMECAP)
 
@@ -47,8 +48,8 @@ rm -f "$IMG"
 
 rm -f "$LOG"
 sleep "$LEG_TIMECAP" | timeout "$LEG_TIMECAP" qemu-system-x86_64 \
-    -M q35 -accel tcg,thread=multi -cpu max \
-    -m 2G -smp 2 -display none -serial stdio \
+    -M q35 -accel ${ACCEL:-kvm} -cpu max \
+    -m ${MEM:-8G} -smp ${SMP:-8} -display none -serial stdio \
     -snapshot \
     -drive file="$IMG",if=none,id=rootfs,format=raw,file.locking=off \
     -device virtio-blk-pci,drive=rootfs \

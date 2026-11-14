@@ -9,7 +9,7 @@
 # never touches the shared original).
 #
 # Usage: oh-boot-faultlat.sh <tag> [kernel]
-# Env: ACCEL (default kvm), SMP (2), MEM (4G), EXTRA_APPEND (dfx= flags)
+# Env: ACCEL (default kvm), SMP (8), MEM (8G) — unified rig 2026-11-14, EXTRA_APPEND (dfx= flags)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -45,12 +45,12 @@ DISKS="$(qemu_drive 0 "$IMGDIR/updater.img")$(qemu_drive 1 "$IMGDIR/system.img")
 RAMDISK="$IMGDIR/ramdisk-x64.img"
 [ -f "$RAMDISK" ] || RAMDISK="$IMGDIR/ramdisk.img"
 
-SMPN="${SMP:-2}"
+SMPN="${SMP:-8}"
 ACCEL_ARGS="${ACCEL:-kvm}"
 
 # shellcheck disable=SC2086
 exec qemu-system-x86_64 \
-    -M q35 -accel "$ACCEL_ARGS" -cpu max -m "${MEM:-4G}" -smp "$SMPN" -snapshot \
+    -M q35 -accel "$ACCEL_ARGS" -cpu max -m "${MEM:-8G}" -smp "$SMPN" -snapshot \
     -display none \
     -vga none \
     -device virtio-gpu-pci,id=ohgpu,xres=720,yres=1280 \

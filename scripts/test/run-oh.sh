@@ -3,8 +3,9 @@
 #
 # Bring the six virtio disks, the initrd ramdisk, and the ohos.* cmdline
 # tokens up under our kernel on QEMU q35, mirroring the reference qemu_run
-# scripts in the OH tree (qemu_run_user.sh / qemu_run_bridge.sh) minus KVM
-# (bring-up runs under TCG first; KVM is a later perf step).
+# scripts in the OH tree (qemu_run_user.sh / qemu_run_bridge.sh). KVM is
+# the default (unified rig 2026-11-14: KVM SMP8 8G); ACCEL_BACKEND=tcg
+# only when KVM is unavailable or for deterministic debugging.
 #
 # Usage:
 #   ./test/run-oh.sh <oh-images-dir> [mode]
