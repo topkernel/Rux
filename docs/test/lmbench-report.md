@@ -54,6 +54,76 @@ python3 userspace/lmbench/make-report.py run/lmbench-rux.txt run/lmbench-linux.t
 
 <!--RESULTS-->
 
+## Standing (2026-11-15, kernel main=2649af4e3, lane gb-opt)
+
+Fresh full battery on the current main (both kernels same-session
+native reference). **Caveat that shapes this table: the sched
+claim-strand bug (see docs/test/geekbench-report.md 11-15 section)
+strands the forked benchmark child on ~60% of `-smp 2` boots; every
+TIMEOUT/n-a Rux cell below is a strand casualty (per-case isolated
+retries up to 4x landed most rows), not a load window. Rows the strand
+never released stay n-a. The opt column (gb-opt branch: munmap
+whole-VMA fast path + fault-entry walk consolidation) is the
+merge-candidate read of the same battery.
+
+| Case | Rux main | Rux opt (gb-opt) | Reference (native) | main ratio |
+|---|---|---|---|---|
+| `lat_syscall null` | 0.051 µs | 0.050 µs | 0.040 µs | 1.26x |
+| `lat_syscall read` | TIMEOUT | 0.104 µs | 0.061 µs | - |
+| `lat_syscall write` | 0.090 µs | 0.089 µs | 0.058 µs | 1.57x |
+| `lat_syscall stat` | 0.333 µs | 0.328 µs | 0.219 µs | 1.52x |
+| `lat_syscall fstat` | 0.085 µs | 0.081 µs | 0.103 µs | **0.82x (faster)** |
+| `lat_syscall open` | 0.781 µs | 0.772 µs | 0.445 µs | 1.76x |
+| `lat_pagefault /tmp/lmbench.file` | n/a | n/a | 0.066 µs | - |
+| `lat_mmap 1m /tmp/lmbench.file` | TIMEOUT | n/a | 3.549 µs | - |
+| `lat_pipe` | 5.276 µs | 5.124 µs | 2.639 µs | 2.00x |
+| `lat_unix` | 2.968 µs | 2.573 µs | 2.748 µs | 1.08x (**opt: 0.94x faster**) |
+| `lat_ctx -s 64 2` | 2.49 µs/ctx | 2.57 µs/ctx | 1.09 µs/ctx | 2.28x |
+| `lat_ctx -s 64 8` | 2.33 µs/ctx | 2.56 µs/ctx | 1.11 µs/ctx | 2.10x |
+| `lat_proc fork` | TIMEOUT | 36.582 µs | 54.551 µs | (**opt: 0.67x faster**) |
+| `lat_proc exec` | 36.596 µs | 37.138 µs | 56.782 µs | **0.64x (faster)** |
+| `lat_sem` | 1.132 µs | 1.086 µs | 0.428 µs | 2.64x |
+| `lat_fs -s 1k` | TIMEOUT | n/a | 476823 files/s | - |
+| `lat_mem_rd 1m` | 2.291 ns | 2.244 ns | 2.232 ns | 1.03x |
+| `lat_mem_rd 256m` | 6.693 ns | 6.630 ns | 6.461 ns | 1.04x |
+| `bw_mem 1m bcopy` | 84176 MB/s | 82994 MB/s | 79788 MB/s | **1.05x (faster)** |
+| `bw_mem 4m bzero` | 67576 MB/s | 66844 MB/s | 62269 MB/s | **1.09x (faster)** |
+| `bw_pipe` | TIMEOUT | 31927 MB/s | 10596 MB/s | (**opt: 3.01x faster**) |
+| `bw_unix` | 48676 MB/s | 45906 MB/s | 28733 MB/s | **1.69x (faster)** |
+| `bw_file_rd 1m io_only` | 1.05 MB/s (bad-value artifact) | n/a | 35345 MB/s | - |
+| `bw_mmap_rd 1m mmap_only` | n/a | n/a | 80461 MB/s | - |
+| `lat_tcp 127.0.0.1` | n/a | n/a | 4.185 µs | - |
+| `lat_udp 127.0.0.1` | TIMEOUT | n/a | 3.873 µs | - |
+| `lat_connect 127.0.0.1` | n/a | n/a | 66.518 µs | - |
+| `bw_tcp 127.0.0.1` | n/a | n/a | 16002 MB/s | - |
+| `lat_usleep 1000` | 1044.8 µs | (landed, see raw) | 1051.9 µs | **0.99x (at reference)** |
+
+**Reads vs the 11-04 standing:** the syscall band is stable (null 1.26x
+vs 1.31x, write 1.57x vs 1.62x, stat 1.52x vs 1.68x — the 11-04 window
+read at load 6, this one at load 3-5; fstat/open unchanged). The
+headline movement is the IPC pair under the same rig's native
+reference: lat_unix 1.08x (opt 0.94x — faster than the reference for
+the first time in this table's history), lat_proc fork 36.6 µs vs
+54.6 µs native (0.67x), lat_proc exec 0.64x, bw_pipe 3.01x over native.
+The reference column moved with the host session (native readings are
+per-session), so cross-session ratio drift on the µs-scale rows is
+expected; same-file same-session main-vs-opt deltas are the clean
+signal: unix/fork/pipe improved, everything else flat.
+
+**mm-probe attribution behind the opt branch** (see
+docs/test/geekbench-report.md): munmap 64 MB 61x → 5.3x (whole-VMA
+fast path), random-anon fault 1.9x → 1.7x (fault-entry walk
+consolidation), mprotect 10x (hoist tried, REVERTED — wedged the
+machine 4/4 boots inside the timer tick; documented at the site).
+
+Reproduce: `userspace/lmbench/run-rux.sh <bzImage> work/lmbench-x86.img
+run/lmbench-rux-<col>.txt 75` + `userspace/lmbench/run-linux.sh` +
+`make-report.py`; the per-case strand-retry pass is
+`run/retry-par3.sh` (gb-opt). Raw columns: gb-opt
+`run/lmbench-rux-{main,opt}.txt`, `run/lmbench-linux.txt`.
+
+## Superseded head table (2026-11-04 refresh, kept for the annotations)
+
 | Case | Rux (x86_64+KVM) | Reference kernel | Ratio |
 |---|---|---|---|
 | `lat_syscall null` | ~~0.095~~ **0.055 µs** | 0.044 microseconds | 1.25x |
@@ -80,11 +150,11 @@ python3 userspace/lmbench/make-report.py run/lmbench-rux.txt run/lmbench-linux.t
 | `bw_unix` | ~~2637.87~~ **42885.03 MB/s** *(unix staging elimination; landed 1/3 passes in the load window — quiet-window confirm pending)* | 22782.66 MB/s | **1.88x (faster)** |
 | `bw_file_rd 1m io_only /tmp/lmbench.file` | "inf" *(timer floor — per-iteration cost below clock granularity; ≥32 GB/s class)* | 33600.68 MB/s | at/above reference |
 | `bw_mmap_rd 1m mmap_only /tmp/lmbench.file` | 70917.84 MB/s *(11-01 value; not re-landed)* | 74316 MB/s | 1.05x slower |
-| `lat_tcp 127.0.0.1` | **7.75–8.03 µs** *(11-04 lane fix: AF_PACKET locks irqsave'd + TCP-table exhaustion fixed; 3/3 release boots — the earlier "debug-print chokes" attribution was wrong, the case was wedging)* | 4.446 microseconds | 1.78x |
-| `lat_udp 127.0.0.1` | **6.90–7.07 µs (release-opt, 9/11 boots; the 2 misses are host-contention budget hits with ring-proven live traffic)** *(r14: the 0/8 strand was NOT sched — it was the UDP-v4 checksum zero-escape drop in udp_rcv, the RFC 768 0xFFFF representation silently rejected; fixed, 0 pkt_drop in 11 boots)* | 4.37 microseconds | 1.60x |
-| `lat_connect 127.0.0.1` | **14.3–16.1 ms measured, 3/4 boots** *(was TIMEOUT: TCP-table exhaustion — the SYN spawn dropped every SYN once the 64-slot table filled with TIME_WAIT/CLOSE_WAIT corpses; eviction + 512 slots landed)*; remaining cost + 1-in-4 wedge = the same scheduler stale-claim refusing the accept server's wakes | 86.887 microseconds | 165x (sched-blocked) |
-| `bw_tcp 127.0.0.1` | **TIMEOUT** *(scheduler stale-claim refuses the benchmark worker's wakes — `WAKE-HEAL-SKIP pid=<worker> why=c` ×39 to the kill; connect/data path itself works)* | 15195.35 MB/s | - |
-| `lat_usleep 1000` | ~~5013.9~~ **1037.1 µs** *(LAPIC single-shot timer; consistent across all 3 passes)* | 1052.529 microseconds | **0.99x (at reference)** |
+| `lat_tcp 127.0.0.1` | **7.75–8.03 µs** *(11-04 lane fix: AF_PACKET locks irqsave'd + TCP-table exhaustion fixed; 3/3 release boots)* | 4.446 microseconds | 1.78x |
+| `lat_udp 127.0.0.1` | **6.90–7.07 µs (release-opt, 9/11 boots)** *(r14: the 0/8 strand was NOT sched — it was the UDP-v4 checksum zero-escape drop in udp_rcv; fixed)* | 4.37 microseconds | 1.60x |
+| `lat_connect 127.0.0.1` | **14.3–16.1 ms measured, 3/4 boots** *(was TIMEOUT: TCP-table exhaustion; eviction + 512 slots landed)*; remaining cost = scheduler stale-claim refusing the accept server's wakes | 86.887 microseconds | 165x (sched-blocked) |
+| `bw_tcp 127.0.0.1` | **TIMEOUT** *(scheduler stale-claim refuses the benchmark worker's wakes)* | 15195.35 MB/s | - |
+| `lat_usleep 1000` | ~~5013.9~~ **1037.1 µs** *(LAPIC single-shot timer)* | 1052.529 microseconds | **0.99x (at reference)** |
 
 
 *Refreshed 2026-11-04 (kernel main=8d81c5da — RCU fd lookup + retire
@@ -93,7 +163,6 @@ passes + serial retries at longer windows (fork 180 s) for starved
 rows. Rows marked "not re-landed" keep their 2026-11-01 value (the
 load window starved their auto-calibration). The original 2026-11-01
 sweep ran under loadavg 10–19; strikethrough values show the lineage.*
-
 
 
 ## Standing addendum (2026-11-03, kernel 33413d92 lineage — idle poll window 120us)

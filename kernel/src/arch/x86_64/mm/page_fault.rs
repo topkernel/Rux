@@ -467,15 +467,23 @@ pub fn handle_mm_fault(
     // PermissionDenied without ever consulting the covering VMA (the oh
     // service-kill family). Markers now fall through to the VMA layer,
     // which re-presents the leaf when the VMA grants the access.
-    let already_mapped = unsafe {
-        PageTableWalker::walk(root_ppn, fault_addr.bits() as u64).map_or(false, |(_ppn, bits)| {
-            (bits & PageTableEntry::P) != 0 && (bits & PageTableEntry::U) != 0
-        })
-    };
+    // One-walk entry read (gb-opt lane, 2026-11-15): the entry used a
+    // PageTableWalker::walk() for the mapped check plus a read_pte_raw()
+    // for the swap/migration block — two full leaf walks per fault where
+    // one suffices. read_pte_raw already returns every shape the entry
+    // needs: Some(raw) for P=1 leaves (P&U decides mapped), Some(raw) for
+    // P=0 non-zero leaves (swap/migration entries), Some(bits) for
+    // upper-level leaves (mapped), None for absent chains / zero leaves.
+    // The same raw also serves the PROT_NONE-marker re-present arm below,
+    // which used to re-walk. Two of the five per-fault leaf walks gone.
+    let entry_raw = read_pte_raw(root_ppn, fault_addr);
+    let already_mapped = entry_raw.map_or(false, |bits| {
+        (bits & PageTableEntry::P) != 0 && (bits & PageTableEntry::U) != 0
+    });
 
     // If not mapped, check for a swap entry in the PTE (P=0 but non-zero bits)
     if !already_mapped {
-        if let Some(entry) = read_pte_raw(root_ppn, fault_addr) {
+        if let Some(entry) = entry_raw {
             // Migration entry: compaction is relocating the page that
             // lived here. Wait for the migration window to close instead
             // of installing a zero page that the remap would then
@@ -654,8 +662,11 @@ pub fn handle_mm_fault(
     // mprotect history; the stale marker is advisory PTE state, not a
     // protection decision.
     {
+        // The marker read reuses the entry walk's raw (see the entry
+        // comment): same address, same leaf. page_base stays for the
+        // re-present write below.
         let page_base = VirtAddr::new(fault_addr.bits() & !(PAGE_SIZE as u64 - 1));
-        if let Some(raw) = read_pte_raw(root_ppn, page_base) {
+        if let Some(raw) = entry_raw {
             if is_protnone_marker(raw) {
                 let mut flags = PageTableEntry::P
                     | PageTableEntry::U
