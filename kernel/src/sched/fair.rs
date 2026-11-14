@@ -1930,9 +1930,29 @@ impl CfsRunQueue {
                     if !owner_live
                         && crate::sched::sched::stale_mark_confirm(task, (*task).pid(), 50)
                     {
+                        // TORN re-read guard (the why=2 pick-walk twin's
+                        // discipline, smp8 orphan-race): decode the pair
+                        // from ONE atomic qword load, re-read it after the
+                        // owner scan + orphan-watch confirmation, and heal
+                        // ONLY if it still shows the exact same pair — the
+                        // GRQ-free asm switch-out release store can land
+                        // under this scan, and releasing on a moved qword
+                        // would wipe evidence a live owner just published.
+                        let whole = core::ptr::read_volatile(
+                            core::ptr::addr_of!((*task).ti_on_cpu) as *const u64,
+                        );
+                        let w_oncpu = (whole & 0xFF) != 0;
+                        let claim = (whole >> 32) as i32;
+                        if !w_oncpu {
+                            // The mark cleared under us (a real switch-out
+                            // release landed): already healed, nothing to do.
+                            oncpu_marked += 1;
+                            if let Some(slot) = oncpu_pids.iter_mut().find(|p| **p == 0) {
+                                *slot = (*task).pid();
+                            }
+                            continue;
+                        }
                         let was_pk = (*task).pick_state();
-                        let claim =
-                            (*task).running_on_cpu.load(Ordering::Acquire);
                         (*task).release_pick_ownership();
                         stale_reset += 1;
                         Self::stale_oncpu_healed(
@@ -2185,7 +2205,6 @@ impl CfsRunQueue {
                     };
                     let split_oncpu = (whole_qword & 0xFF) != 0;
                     let claim = (whole_qword >> 32) as i32;
-                    let _ = split_oncpu;
                     // R85 (tail-phase PICK-SKIP wedge): adjudicate every
                     // refusal against SCHEDULER TRUTH instead of the
                     // advisory bits. pick_owner_live (sched.rs) scans the
@@ -2306,10 +2325,68 @@ impl CfsRunQueue {
                                 50,
                             )
                         {
-                            let was_pk = (*task).pick_state();
-                            (*task).release_pick_ownership();
-                            Self::stale_oncpu_healed(b"STALE-ONCPU-RESET", cpu_id, task, claim, was_pk);
-                            skip_reason = 5;
+                            // TORN re-read guard (the why=2 twin's
+                            // discipline, smp8 orphan-race): the branch
+                            // condition decoded the pair from ONE atomic
+                            // qword load, but the owner scan and the
+                            // orphan-watch confirmation that followed take
+                            // time — the (GRQ-free) asm switch-out release
+                            // store can still land under them, and no
+                            // future divergence may be healed on evidence
+                            // the qword no longer supports. Re-read the
+                            // qword atomically and heal ONLY if it still
+                            // shows the exact observed pair (on_cpu bit
+                            // AND claim unchanged); any motion means the
+                            // state was a transient, not an orphan —
+                            // refuse (a real release already healed it; a
+                            // fresh publish means a live owner exists and
+                            // the next pass re-adjudicates).
+                            let whole = unsafe {
+                                core::ptr::read_volatile(
+                                    core::ptr::addr_of!((*task).ti_on_cpu)
+                                        as *const u64,
+                                )
+                            };
+                            let w_oncpu = (whole & 0xFF) != 0;
+                            let w_claim = (whole >> 32) as i32;
+                            if w_oncpu != split_oncpu || w_claim != claim {
+                                // TORN VIEW: the qword moved between the
+                                // split read and this atomic re-read. The
+                                // observed pair never existed atomically
+                                // at the heal moment — releasing on it
+                                // could wipe a live pick's fresh marks.
+                                static TORN1_N: core::sync::atomic::AtomicU32 =
+                                    core::sync::atomic::AtomicU32::new(0);
+                                if TORN1_N.fetch_add(1, Ordering::Relaxed) < 40 {
+                                    use crate::console::putchar_no_lock as putchar;
+                                    fn ph6(mut v: u64) {
+                                        use crate::console::putchar_no_lock as p;
+                                        for sh in (0..16).rev() {
+                                            let n = ((v >> (sh * 4)) & 0xF) as u8;
+                                            p(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                                        }
+                                    }
+                                    const M: &[u8] = b"\nSTALE-ONCPU-TORN pid=";
+                                    for &b in M { putchar(b); }
+                                    ph6((*task).pid() as u64);
+                                    const M2: &[u8] = b" split_oncpu=";
+                                    for &b in M2 { putchar(b); }
+                                    ph6(split_oncpu as u64);
+                                    const M2b: &[u8] = b" split_claim=";
+                                    for &b in M2b { putchar(b); }
+                                    ph6(claim.unsigned_abs() as u64);
+                                    const M3: &[u8] = b" whole=0x";
+                                    for &b in M3 { putchar(b); }
+                                    ph6(whole);
+                                    putchar(b'\n');
+                                }
+                                skip_reason = 1; // treat as owned/transient: refuse
+                            } else {
+                                let was_pk = (*task).pick_state();
+                                (*task).release_pick_ownership();
+                                Self::stale_oncpu_healed(b"STALE-ONCPU-RESET", cpu_id, task, claim, was_pk);
+                                skip_reason = 5;
+                            }
                         } else {
                             skip_reason = 1;
                         }

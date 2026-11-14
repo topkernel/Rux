@@ -8424,6 +8424,13 @@ static ORPHAN_WATCH: [OrphanWatchSlot; 16] =
 /// clock refreshes the record (the shape is fresh again; a healthy
 /// mid-switch-out transient ran between sightings and must not pre-age a
 /// later genuine orphan), replacing the 60-jiffy re-record rule.
+/// NEVER-RAN EXEMPTION (smp8 orphan-race): a sighting with exec == 0 can
+/// never confirm — see the in-body comment; frozen-at-zero is definition,
+/// not evidence.
+/// CLAIMER-LIVENESS GATE (smp8 orphan-race): even a matured frozen-nonzero
+/// record refuses while the claim CPU is demonstrably ALIVE (R57 pair:
+/// tick + IRQ both frozen >= 5 s required) — frozen exec only proves the
+/// TASK did not run, not that its pick's owner is gone.
 fn orphan_watch_confirm(task: *mut Task, pid: u32, now: u64, threshold: u64) -> bool {
     use core::sync::atomic::Ordering;
     let raw = task as u64;
@@ -8447,11 +8454,184 @@ fn orphan_watch_confirm(task: *mut Task, pid: u32, now: u64, threshold: u64) -> 
             if s.pid.load(Ordering::Acquire) == pid {
                 let first = s.seen_at.load(Ordering::Acquire);
                 let first_exec = s.exec.load(Ordering::Acquire);
+                // smp8 orphan-race (never-ran exemption): a task whose
+                // exec clock reads 0 has NEVER RUN. The R81 frozen-exec
+                // conviction ("exec frozen across two sightings
+                // `threshold` jiffies apart proves nobody ran it, so the
+                // marks' owner is gone") is the lost-release theory — it
+                // presumes the task HAS run, carried true marks into a
+                // switch-out, and lost that release. For a never-ran task
+                // the theory is vacuous: its clock is frozen at 0 BY
+                // DEFINITION, frozen exec cannot distinguish stale marks
+                // from a still-legitimate pick — a starved picker between
+                // its slot publish and its affirm, or a hart mid-switch-in
+                // that has not taken its first tick, both present
+                // {marks, no owner slot, no SWITCHING_OUT, exec==0} for as
+                // long as TCG starvation stretches the window, because
+                // `now` is a GLOBAL jiffy count advanced by OTHER harts
+                // while the owning hart takes no ticks. Both smp8 captures
+                // died exactly here: a parked-before-first-run kthread
+                // (fdreapd, ticks=0, exec==0) convicted on first maturity,
+                // its marks released while a hart was still inside the
+                // switch protocol toward it, then a mixed-context resume
+                // killed the box. Never confirm while exec == 0: treat
+                // every never-ran sighting as fresh evidence. When the
+                // task first runs, exec advances past 0, the record
+                // re-bases at the nonzero clock (exec != first_exec
+                // re-records), and the frozen-exec rule governs from there
+                // — a task that HAS run and then frozen is the sound
+                // lost-release shape and still convicts.
+                if exec == 0 {
+                    if first != 0 && now >= first && now - first >= threshold {
+                        // This sighting would have matured under the old
+                        // rule — name the exempted population (budgeted,
+                        // once per threshold window per task because the
+                        // refresh below re-bases seen_at) so the producer
+                        // of never-ran orphan marks stays observable for
+                        // the follow-up hunt.
+                        static NR_N: core::sync::atomic::AtomicU32 =
+                            core::sync::atomic::AtomicU32::new(0);
+                        if NR_N.fetch_add(1, Ordering::Relaxed) < 40 {
+                            use crate::console::putchar_no_lock as putchar;
+                            fn pdec(mut v: u64) {
+                                use crate::console::putchar_no_lock as p;
+                                let mut buf = [0u8; 20];
+                                let mut n = 0;
+                                if v == 0 {
+                                    p(b'0');
+                                    return;
+                                }
+                                while v > 0 && n < buf.len() {
+                                    buf[n] = b'0' + (v % 10) as u8;
+                                    v /= 10;
+                                    n += 1;
+                                }
+                                for k in (0..n).rev() {
+                                    p(buf[k]);
+                                }
+                            }
+                            const M: &[u8] = b"\nORPHAN-WATCH-NEVERRAN pid=";
+                            for &b in M {
+                                putchar(b);
+                            }
+                            pdec(pid as u64);
+                            const M2: &[u8] = b" age=";
+                            for &b in M2 {
+                                putchar(b);
+                            }
+                            pdec(now - first);
+                            putchar(b'\n');
+                        }
+                    }
+                    s.seen_at.store(now, Ordering::Release);
+                    s.exec.store(0, Ordering::Release);
+                    s.aging.store(false, Ordering::Release);
+                    return false;
+                }
                 if first != 0
                     && now >= first
                     && now - first >= threshold
                     && exec == first_exec
                 {
+                    // smp8 orphan-race (claimer-liveness gate, the R57
+                    // discipline at the conviction choke point): a matured
+                    // frozen-exec record is NOT sufficient evidence that
+                    // the marks' owner is gone. sum_exec_runtime advances
+                    // only on the TASK's own ticks and switch-outs, while
+                    // `now` is a global jiffy count advanced by every
+                    // other hart — so under TCG starvation a pick whose
+                    // owner is ALIVE (starved between its slot publish
+                    // and its affirm, or resuming the task before its
+                    // first charge) presents {marks, no owner slot (the
+                    // boot-tail R56/R74 slot fights rewrote it), no
+                    // SWITCHING_OUT, exec frozen} for as long as the
+                    // starvation lasts, at ANY exec value — the sub-tick
+                    // park of fdreapd/ksoftirqd-class kthreads shows the
+                    // same frozen clock a lost-release orphan shows
+                    // (orx84-4/orx88-1: STALE-ONCPU-RESET matured on a
+                    // parked, sub-tick-ran kthread whose claimer was
+                    // alive and printing; the release made the poisoned
+                    // task pickable and a fresh resumer died instantly in
+                    // a crossed context). Demand the R57 positive-death
+                    // pair before releasing: the claim CPU's scheduler
+                    // touch AND its timer-IRQ count both frozen >= 5 s —
+                    // the n1-organic lesson (a starved-but-alive hart
+                    // serviced 3-10 IRQs/s for 1600 s; the IRQ count is
+                    // the aliveness witness). While the claimer lives,
+                    // refuse: the record is NOT refreshed, so the next
+                    // pass re-adjudicates against fresh liveness data.
+                    // Cost: shapes whose marks ARE stale garbage stay
+                    // unconvicted while their (innocent, alive) claimer
+                    // runs — a soft wedge (the R80 strand-heal latency
+                    // grows) — accepted because releasing under a live
+                    // claimer is the observed box-killer; a wedge never
+                    // executes a second hart on one stack.
+                    let claim = unsafe {
+                        (*task).running_on_cpu.load(Ordering::Acquire)
+                    };
+                    if claim >= 0 && (claim as usize) < MAX_CPUS {
+                        let c = claim as usize;
+                        let tick_ms = cpu_tick_stale_ms(c);
+                        let irq_ms =
+                            crate::dfx::softlockup::cpu_irq_frozen_ms(c);
+                        if tick_ms < 5000 || irq_ms < 5000 {
+                            static LC_N: core::sync::atomic::AtomicU32 =
+                                core::sync::atomic::AtomicU32::new(0);
+                            static LC_LAST: core::sync::atomic::AtomicU64 =
+                                core::sync::atomic::AtomicU64::new(0);
+                            // Once matured this refusal repeats on every
+                            // observer pass — print at most one line per
+                            // 25 jiffies system-wide, budget 40 total.
+                            let last = LC_LAST.load(Ordering::Relaxed);
+                            if now >= last
+                                && now - last >= 25
+                                && LC_N.fetch_add(1, Ordering::Relaxed) < 40
+                            {
+                                LC_LAST.store(now, Ordering::Release);
+                                use crate::console::putchar_no_lock as putchar;
+                                fn pdec3(mut v: u64) {
+                                    use crate::console::putchar_no_lock as p;
+                                    let mut buf = [0u8; 20];
+                                    let mut n = 0;
+                                    if v == 0 {
+                                        p(b'0');
+                                        return;
+                                    }
+                                    while v > 0 && n < buf.len() {
+                                        buf[n] = b'0' + (v % 10) as u8;
+                                        v /= 10;
+                                        n += 1;
+                                    }
+                                    for k in (0..n).rev() {
+                                        p(buf[k]);
+                                    }
+                                }
+                                const M: &[u8] =
+                                    b"\nORPHAN-WATCH-LIVECLAIM pid=";
+                                for &b in M {
+                                    putchar(b);
+                                }
+                                pdec3(pid as u64);
+                                const M2: &[u8] = b" claim=";
+                                for &b in M2 {
+                                    putchar(b);
+                                }
+                                pdec3(claim as u64);
+                                const M3: &[u8] = b" tick_ms=";
+                                for &b in M3 {
+                                    putchar(b);
+                                }
+                                pdec3(tick_ms);
+                                const M4: &[u8] = b" irq_ms=";
+                                for &b in M4 {
+                                    putchar(b);
+                                }
+                                pdec3(irq_ms);
+                                putchar(b'\n');
+                            }
+                            return false;
+                        }
+                    }
                     return true;
                 }
                 // Re-record when the task RAN between sightings (exec
@@ -9016,6 +9196,117 @@ pub fn republish_current_after_abort(cpu: usize, prev: *mut Task) {
             // cleared (idempotent with the idle loop's own mark_idle).
             grq().mark_idle(cpu);
         }
+    }
+}
+
+/// smp8 orphan-race (sched-orphan-race lane): the abort-side twin of the
+/// steal's re-link. Both arch switch-abort handlers assumed "the steal
+/// already re-linked next (or a foreign picker owns it)" — true for every
+/// REVOKED abort, but an abort can also fire on a LIVE-published pick
+/// (mark_picked_on_cpu's owned_here leg publishes LIVE for a task whose
+/// stale claim names this CPU; the wrapper's early check then reads
+/// pick_state != PICK_PICKED and aborts) where NO steal is involved:
+/// nothing revoked the pick, so nothing re-links the task. The pick
+/// unlinked it and published its marks {on_cpu=1, claim=cpu} plus this
+/// CPU's slot; the abort repairs the slot back to prev, leaving the task
+/// UNLINKED, marked as this CPU's, named by no slot and no SWITCHING_OUT
+/// — executing nowhere, invisible to every pick-side heal (they scan the
+/// class timelines) and refused by the harvester (a LIVE pick-state is
+/// never stolen). It strands until a wake survives the R80 50-jiffy
+/// orphan-watch confirmation — and the stranded marks are exactly the
+/// stale-claim/stale-oncpu food the pick-side adjudications then race
+/// (the smp8 matrix panics: ENQ-CLAIMED on a linked-marked kthread,
+/// STALE-ONCPU-RESET by a foreign CPU, mixed-context resume).
+///
+/// Adjudicate under the GRQ (same discipline as
+/// member_release_stale_ownership): when `next` still carries THIS cpu's
+/// full ownership marks ({on_cpu=1, claim=cpu}), is linked on no class
+/// queue, and is named by no slot and no in-flight switch-out, the
+/// abort's own publish is the marks' only author and nobody else can be
+/// resuming the task — release the marks with the exact store the switch
+/// protocol would have made ("explicitly not-own") and re-link it through
+/// the normal enqueue. Idempotent by construction: when a steal handled
+/// the pick its marks are already released and the task already linked,
+/// so every condition below is false and the function is a no-op.
+///
+/// Called from the arch abort handlers (riscv_switch_abort /
+/// x86_switch_abort) with IRQs disabled and no scheduler locks held;
+/// takes the GRQ alone.
+pub fn abort_next_release_orphans(cpu: usize, next: *mut Task) {
+    if next.is_null() || cpu >= MAX_CPUS {
+        return;
+    }
+    let cpus_allowed;
+    {
+        let mut g = grq().lock_irqsave();
+        // SAFETY: next was this CPU's just-aborted pick: the pick's GRQ
+        // hold unlinked it and published its marks, and the abort repairs
+        // the slot before this runs — under this GRQ hold the picture
+        // below cannot move (no pick, no wake, no steal can interleave).
+        unsafe {
+            if (*next).pid() == 0 || (*next).pid() == TASK_POISON {
+                return; // idle is never marked; poison is not ours to fix
+            }
+            // Only OUR OWN publication is repairable here: the marks must
+            // still name this CPU as the claimer with on_cpu set. A steal
+            // that revoked the pick released the marks (claim=-1) and
+            // re-linked the task already; a foreign owner never carries
+            // our claim.
+            let whole = core::ptr::read_volatile(
+                core::ptr::addr_of!((*next).ti_on_cpu) as *const u64,
+            );
+            let oncpu = (whole & 0xFF) != 0;
+            let claim = (whole >> 32) as i32;
+            if !oncpu || claim != cpu as i32 {
+                return;
+            }
+            // Belt and braces (the marks' owner scan): if any slot or
+            // in-flight switch-out still names the task, some path owns
+            // it — leave it to that path.
+            if pick_owner_live(next) {
+                return;
+            }
+            // A dying task leaves through its own final schedule(); no
+            // heal may re-offer it (R57).
+            if task_is_dying(next) {
+                return;
+            }
+            let linked = match (*next).policy() {
+                SchedPolicy::Fifo | SchedPolicy::Rr => g.rt_rq.is_linked(next),
+                SchedPolicy::Deadline => g.dl_rq.is_linked(next),
+                SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
+                    g.cfs_rq.is_linked(next)
+                }
+            };
+            if linked {
+                return; // a racing wake already re-linked it: not an orphan
+            }
+            cpus_allowed = (*next).cpus_allowed();
+            let pk = (*next).pick_state();
+            // Explicitly not-own: the exact store __switch_to would have
+            // made for a switch-out that will never happen.
+            (*next).release_pick_ownership();
+            let rq = enqueue_task_locked(&mut g, next);
+            static SWABORT_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            let n = SWABORT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 8 {
+                crate::pr_warn!(
+                    "SWITCH-ABORT-RELINK cpu={} pid={} claim={} pk={} rq={}",
+                    cpu,
+                    (*next).pid(),
+                    claim,
+                    pk,
+                    rq as u8
+                );
+            }
+        }
+    }
+    // Nudge an idle CPU outside the lock (mirrors enqueue_task's tail) so
+    // the just-relinked task does not wait for this CPU's next pass.
+    if let Some(idle_cpu) = grq().find_idle_cpu(cpus_allowed) {
+        grq().clear_idle(idle_cpu);
+        resched_cpu(idle_cpu);
     }
 }
 
