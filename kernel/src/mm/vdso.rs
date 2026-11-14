@@ -124,9 +124,17 @@ pub fn vdso_data_tick() {
     if hz < 1_000_000 {
         return; // TSC not calibrated yet — keep the primed snapshot
     }
-    let mult = ((1u128 << 32) * 1_000_000_000u128 / (hz as u128)) as u64;
+    // PAIR-COHERENT publication: base_mono_ns is derived from the SAME
+    // raw TSC read as base_tsc (a second, separate mono read pairs a
+    // base_mono delayed by any IRQ/preemption gap between the two —
+    // the vDSO then ran ahead of the syscall clock by that gap; LTP
+    // clock_gettime04's "time travelled backwards" at −454/−557 ms).
     let tsc = crate::arch::cpu::read_counter();
-    let mono_ns = crate::drivers::timer::monotonic_ns_since_boot();
+    let mono_ns = crate::drivers::timer::x86_64::monotonic_ns_from_raw_tsc(tsc);
+    let mult = crate::drivers::timer::x86_64::tsc_mult_ns_for_vdso();
+    if mult == 0 {
+        return; // TSC mapping not promoted yet — keep the primed snapshot
+    }
     let epoch_ns = crate::syscall::time::wall_epoch_offset_ns();
     // SAFETY: the page is only written here under the seqlock; user
     // readers validate via the seq word before trusting the fields.
