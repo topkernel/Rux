@@ -735,8 +735,8 @@ fn build_code_page() -> [u8; 4096] {
         putb(&mut page, F_CLOCK_GETRES, &f3);
     }
 
-    // ---- dynstr @ 0x200 ----
-    const STRTAB_OFF: usize = 0x200;
+    // ---- dynstr @ 0x240 ----
+    const STRTAB_OFF: usize = 0x240;
     const NAMES: [&str; 3] = [
         "__vdso_clock_gettime",
         "__vdso_gettimeofday",
@@ -744,6 +744,10 @@ fn build_code_page() -> [u8; 4096] {
     ];
     let mut name_offs = [0usize; 3];
     let mut strtab_len = 1usize; // leading NUL (null symbol name)
+    // rwlock-livelock (Go vdso crash): the version strings live in the
+    // same strtab — vda_name offsets into it.
+    let mut vda_soname_off = 0usize;
+    let mut vda_linux26_off = 0usize;
     {
         page[STRTAB_OFF] = 0;
         let mut p = STRTAB_OFF + 1;
@@ -756,11 +760,86 @@ fn build_code_page() -> [u8; 4096] {
             page[p] = 0;
             p += 1;
         }
+        vda_soname_off = p - STRTAB_OFF;
+        for &b in b"linux-vdso.so.1" {
+            page[p] = b;
+            p += 1;
+        }
+        page[p] = 0;
+        p += 1;
+        vda_linux26_off = p - STRTAB_OFF;
+        for &b in b"LINUX_2.6" {
+            page[p] = b;
+            p += 1;
+        }
+        page[p] = 0;
+        p += 1;
         strtab_len = p - STRTAB_OFF;
     }
 
-    // ---- dynsym @ 0x180: null + 3 STT_GLOBAL FUNC syms (24B each) ----
-    const SYMTAB_OFF: usize = 0x180;
+    // ---- SHT_GNU_versym @ 0x2A0: null sym -> 0, the 3 funcs -> ndx 2 ----
+    // (LINUX_2.6, the only symbol version; mirrors the reference vDSO's
+    // version-scripted dynsym.)
+    const VERSYM_OFF: usize = 0x2A0;
+    page[VERSYM_OFF..VERSYM_OFF + 2].copy_from_slice(&0u16.to_le_bytes());
+    for i in 0..3 {
+        let p = VERSYM_OFF + (i + 1) * 2;
+        page[p..p + 2].copy_from_slice(&2u16.to_le_bytes());
+    }
+
+    // ---- SHT_GNU_verdef @ 0x2C0 (Go vdso crash fix, 2026-11-14) ----
+    // Without DT_VERDEF, Go's runtime.vdsoFindVersion walks a NULL
+    // verdef pointer and dies at its first clock read (snapd on the
+    // ub2404 image: SEGV at vdsoFindVersion+0x33, cr2=0x2 — the
+    // vd_flags load off def==nil). glibc is fine either way (an absent
+    // DT_VERSYM makes check_match accept the symbol unversioned), but
+    // Go REQUIRES the section to exist. Two entries, mirroring Linux
+    // (arch/x86/entry/vdso): ndx 1 = BASE soname, ndx 2 = LINUX_2.6 —
+    // the version vdsoFindVersion matches for its symbol lookups.
+    const VERDEF_OFF: usize = 0x2C0;
+    let h_linux26 = elf_hash(b"LINUX_2.6");
+    let h_soname = elf_hash(b"linux-vdso.so.1");
+    let mut put_vd = |page: &mut [u8; 4096], at: usize, ver: u16, flags: u16, ndx: u16, cnt: u16, hash: u32, aux: u32, next: u32, name: u32| {
+        page[at..at + 2].copy_from_slice(&ver.to_le_bytes());
+        page[at + 2..at + 4].copy_from_slice(&flags.to_le_bytes());
+        page[at + 4..at + 6].copy_from_slice(&ndx.to_le_bytes());
+        page[at + 6..at + 8].copy_from_slice(&cnt.to_le_bytes());
+        page[at + 8..at + 12].copy_from_slice(&hash.to_le_bytes());
+        page[at + 12..at + 16].copy_from_slice(&aux.to_le_bytes());
+        page[at + 16..at + 20].copy_from_slice(&next.to_le_bytes());
+        let vd_aux_at = at + aux as usize;
+        page[vd_aux_at..vd_aux_at + 4].copy_from_slice(&name.to_le_bytes());
+        page[vd_aux_at + 4..vd_aux_at + 8].copy_from_slice(&0u32.to_le_bytes());
+    };
+    // Entry 1 @ +0: BASE soname; aux (Verdaux) at +20; next entry at +28.
+    put_vd(
+        &mut page,
+        VERDEF_OFF,
+        1,    // vd_version
+        1,    // vd_flags = VER_FLG_BASE
+        1,    // vd_ndx
+        1,    // vd_cnt
+        h_soname,
+        20,   // vd_aux: Verdaux directly after this Verdef
+        28,   // vd_next: entry2 follows aux (20 + 8)
+        vda_soname_off as u32,
+    );
+    // Entry 2 @ +28: LINUX_2.6 (the matchable version), last in chain.
+    put_vd(
+        &mut page,
+        VERDEF_OFF + 28,
+        1, // vd_version
+        0, // vd_flags: no BASE — vdsoFindVersion matches this one
+        2, // vd_ndx (what DT_VERSYM words above reference)
+        1, // vd_cnt
+        h_linux26,
+        20, // vd_aux
+        0,  // vd_next: end of chain
+        vda_linux26_off as u32,
+    );
+
+    // ---- dynsym @ 0x1C0: null + 3 STT_GLOBAL FUNC syms (24B each) ----
+    const SYMTAB_OFF: usize = 0x1C0;
     let sym_values = [F_CLOCK_GETTIME, F_GETTIMEOFDAY, F_CLOCK_GETRES];
     for i in 0..3 {
         let p = SYMTAB_OFF + (i + 1) * 24;
@@ -781,7 +860,7 @@ fn build_code_page() -> [u8; 4096] {
     // from the USEGV-FOR dump (ripbytes were musl's hash loop). The
     // u32::MAX convention had never been exercised: the riscv64 mapping
     // it was written for stayed disabled.
-    const HASH_OFF: usize = 0x140;
+    const HASH_OFF: usize = 0x180;
     page[HASH_OFF..HASH_OFF + 4].copy_from_slice(&2u32.to_le_bytes());
     page[HASH_OFF + 4..HASH_OFF + 8].copy_from_slice(&4u32.to_le_bytes());
     // buckets and chains stay ZERO-initialized (0 = empty/end).
@@ -809,7 +888,9 @@ fn build_code_page() -> [u8; 4096] {
         }
     }
 
-    // ---- PT_DYNAMIC @ 0xC0 (6 entries × 16B = 96B) ----
+    // ---- PT_DYNAMIC @ 0xC0 (9 entries + NULL × 16B = 160B) ----
+    // 0xC0+160 = 0x160, clear of HASH @ 0x180 (the 3 added version
+    // tags pushed the old 96-byte table into the hash table's slot).
     const DYN_OFF: usize = 0xC0;
     // DT_STRTAB/DT_SYMTAB values were SWAPPED until 2026-11-14
     // (arena-mmap lane): DT_SYMTAB pointed at the string table, so
@@ -822,13 +903,29 @@ fn build_code_page() -> [u8; 4096] {
     // into a plain syscall EFAULT instead — one root of the OH mmi
     // service death family (rip inside the libc time path storing to a
     // PROT_NONE arena page).
-    let dyn_entries: [(u64, u64); 6] = [
+    let dyn_entries: [(u64, u64); 10] = [
         (4, HASH_OFF as u64),   // DT_HASH
         (5, STRTAB_OFF as u64), // DT_STRTAB
         (6, SYMTAB_OFF as u64), // DT_SYMTAB
         (10, strtab_len as u64), // DT_STRSZ
         (11, 24),               // DT_SYMENT
-        (0, 0),                 // DT_NULL
+        // Version tags (Go vdso crash fix): Go's runtime.vdsoFindVersion
+        // dereferences DT_VERDEF unconditionally — a missing section is a
+        // nil pointer and every Go binary dies at its first clock read
+        // (snapd: SEGV at vdsoFindVersion+0x33, cr2=0x2). glibc is
+        // indifferent (unversioned symbols are accepted when DT_VERSYM
+        // is absent; with it present the LINUX_2.6 match is exact).
+        // Tag values (elf.h): VERDEF 0x6ffffffc, VERDEFNUM 0x6ffffffd,
+        // VERSYM 0x6ffffff0. Boot H caught the first cut using 0x6ffffffe
+        // (DT_VERNEED!) for VERSYM: ld.so parses the vDSO's dynamic table
+        // during startup dependency processing, read the versym array as
+        // a Verneed with vn_version garbage and refused to load init
+        // ("unsupported version 0 of Verneed record" -> poweroff).
+        (0x6ffffffc, VERDEF_OFF as u64),   // DT_VERDEF
+        (0x6ffffffd, 2),                   // DT_VERDEFNUM
+        (0x6ffffff0, VERSYM_OFF as u64),   // DT_VERSYM
+        (0, 0),                            // DT_NULL
+        (0, 0),                            // DT_NULL (padding keeps 160B)
     ];
     for (i, (tag, val)) in dyn_entries.iter().enumerate() {
         let p = DYN_OFF + i * 16;
@@ -858,8 +955,8 @@ fn build_code_page() -> [u8; 4096] {
         4,
         DYN_OFF as u64,
         DYN_OFF as u64,
-        96,
-        96,
+        160,
+        160,
         8,
     );
 
