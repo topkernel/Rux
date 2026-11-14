@@ -825,8 +825,19 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             }
         }
 
-        // Copy brk value
-        let parent_brk = (*current_ptr).get_brk();
+        // Copy brk value — from the SHARED address space, not the
+        // parent's per-task copy (GNOME trim face, 2026-11-07/c127e4bc1:
+        // the break is per-mm; a thread's task-side copy can be stale,
+        // and seeding the child from it made the child shrink "the
+        // heap" below the real break, releasing live pages). CLONE_VM
+        // children share the mm and its authoritative value anyway;
+        // fork children get the same value through their copied mm.
+        let parent_brk = if let Some(parent_as) = (*current_ptr).address_space() {
+            let v = parent_as.brk().as_usize() as u64;
+            if v != 0 { v } else { (*current_ptr).get_brk() }
+        } else {
+            (*current_ptr).get_brk()
+        };
         (*task_ptr).set_brk(parent_brk);
 
         // === CLONE_FS: Share filesystem info ===
