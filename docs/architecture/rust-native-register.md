@@ -428,3 +428,96 @@ numbers this register cites).
   the campaign's hotspot tables (80,961 → 244,516 samples, kernel
   1-5 / user 2-16+ frame chains). Instruments that ARE the workload
   beat instruments that approximate it.
+
+## I. Merge-day additions (2026-11-14, evidence-backed)
+
+- **Per-hop input verdict tables (INEV/INOP/INRD)** (wake-drop merge
+  f4c57e7c6 carrying the oh-input-chain tracepoints
+  f23d4266a/bb798852c; events input:input_event/evdev_read/
+  evdev_open, ids 53-55): the question "where does pointer input die
+  between kernel evdev and the OH UI?" was answered hop-by-hop with
+  a PASS/PARTIAL/FAIL verdict per hop, each backed by counted
+  tracepoint output on the serial console (the OH rig cannot mount
+  tracefs in-guest): (i) injection fidelity PASS — 149/112/106 INEV
+  records per boot with every tap coordinate landing exactly
+  (tap x=360 → `code=0 value=16406` on the 720-wide panel, 32
+  BTN_LEFT press+release pairs, 46 SYN, KEY_UP/KEY_ESC on the
+  keyboard node); (ii-a) open PARTIAL — only audio_server ever opens
+  input nodes (event1+event2, never event0), multimodalinput ZERO
+  INOP on every boot; (ii-b) read FAIL — exactly 2 reads per boot,
+  both the first payload event of the first gesture, then zero reads
+  across ~100 queued events; (iii) dispatch ZERO (moot); UI reaction
+  NONE with the same injection on the reference kernel reacting
+  (control proves the method). Result: the kernel evdev path
+  exonerated hop-by-hop; the break mapped to mmi's device-manager
+  init never completing (image-side service chain; its launcher
+  transactions run 5.0-8.6 s) plus the WAKE-RUN-LEAK scheduler
+  family downstream of the one stranded reader. The methodology —
+  per-hop identity (pid/tgid/node) at one load+test+branch per site
+  when disarmed, budgeted serial echo when armed — is the reusable
+  artifact; a synthetic probe cannot deliver a per-hop verdict
+  because the verdict IS the counted absence on the real image, and
+  the reference kernel has no built-in per-hop input identity to
+  count against. Source: oh-input-chain lane
+  run/INPUT-CHAIN-FINDINGS.md +
+  run/serial-boot1/5/6.log, run/inj*/.
+- **Frozen-user-word forensics: the kernel adjudicates USERSPACE lock
+  state** (rwlock-livelock merge 95b5e61fb, commits ac33690d2/
+  1d0ed59ab; census + op-watch instruments, all default-off): when
+  Ubuntu 24.04 froze mid-boot, the suspect was our futex/scheduler
+  machinery. The instrument family read the frozen word from inside
+  the kernel and decoded it against libc semantics: RWFRZ-MEM dumps
+  the lock-struct neighborhood (word=2, +0x8 __owner=0, +0x10
+  __kind=0 — a glibc NORMAL mutex, not the suspected rwlock; the
+  old census's "readers=2" decode was a musl-shape heuristic misread,
+  now corrected), APPPARK-RETS captures the waiter's USER return
+  chain call-site-validated and symbolized against the image's own
+  libs (futex syscall ← g_cond_wait+0x4d ← g_async_queue_pop/
+  push_sorted ← udisksd frames — naming GLib's gthreadpool spawn
+  queue as the subject), and the op-watch twin records every futex
+  op on the word from t=0. Measured verdict across 6 boots
+  (F/G/J/K/L/M): the complete word lifecycle is a 5-op sequence
+  (boot L #0-#8; the terminal shape is word=2 — glibc's waiters bit,
+  where every future unlock MUST futex_wake), after which the word
+  is silent FOREVER (zero ops in every boot, watch pre-armed), and
+  the one pre-freeze WAKE(val=1, ret=1) was DELIVERED (the woken
+  waiter's WAIT returned ret=0 immediately). Kernel exculpated at
+  word level: no lost wake (none was issued), no kernel write to
+  user futex words on WAIT/WAKE paths, no runnable task stranded
+  (tgid dumps show all parked). This is the allocwatch/lospark
+  "built to exonerate" tradition (F) extended across the user/kernel
+  boundary — an in-kernel decoder for libc lock objects that the
+  reference kernel has no equivalent of at this granularity.
+  Source: rwlock-livelock lane run/LIVELOCK-FINDINGS.md +
+  run/serial-F..M.log, run/imgx2/ (symbolization inputs).
+- **Line-atomic dump staging under the printk emit lock**
+  (obs-hygiene merge 8f4a4a259, commits 3f87a9ee6/a77685745): hunt
+  dumps (taskdump, WQLEAK, census, trap printers) were per-byte raw
+  UART writes — on SMP8 OH boots the concurrent /dev/kmsg flood
+  (printk records holding the console-emit lock 0.4-17 ms per line)
+  spliced dump bytes into flood records and vice versa, destroying
+  115/6783 task lines (1.7%) including every line the hunt depended
+  on. The landed design stages each line in a PER-CPU buffer and
+  emits it as one batched TX pass under printk's console-emit lock,
+  with a BOUNDED acquire (Full 50 ms, irqs-on, for dumps; Brief
+  100 µs for GRQ-held and IRQ-context hunt prints) and a lockless
+  fallback that keeps the readable-at-any-cost contract. Measured:
+  mangled task lines 1.7% → 0 (1506/1506 well-formed, r2), ENQ hunt
+  lines 240/240 whole (previously char-mangled); the two design
+  defects the first cuts had were caught by the smoke boots
+  themselves and fixed in-round (shared stage byte-mixed → per-CPU
+  stages; IRQs-off emit wait tripped the RCU frozen-CPU detector →
+  stack-copy + flush with caller's interrupt state). Honest
+  residuals recorded: same-CPU nested dumps can still mix (a
+  whole-dump mutex is not survivable from trap/NMI), and brief-budget
+  fallbacks can append line-granular onto a long kmsg record tail
+  (14/238 in r2 — whole line visible, no char mixing); the
+  deferred-ring follow-up that kills that class is specified in the
+  lane record. Crash-context writers (trap printers, oops, spinlock
+  watchdog) deliberately stay raw. Not a port: the design couples
+  the dump emitter to the printk console-emit lock with a bounded
+  acquire and graded budgets — the reference kernel serializes
+  printk records against each other but has no equivalent contract
+  for out-of-printk diagnostic dumps, which is exactly the class of
+  writer a hunt kernel needs atomic. Source: obs-hygiene lane
+  run/OBS-HYGIENE.md + oh-before/r1/r2/r3-serial.log.

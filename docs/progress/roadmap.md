@@ -1,6 +1,92 @@
 # Rux Development Roadmap
 
-## Current Phase (2026-10-30): AArch64 landed — stages 0-3 complete, merged to main
+## Current Phase (2026-11-14): merge day — OH lock screen reached, Ubuntu 24.04 at graphical.target
+
+**Twelve merges in one day, every fix evidence-banked
+(docs/architecture/safety-and-performance.md merge-day round,
+rust-native-register.md §I).**
+
+### Boot-state changes
+
+- **OpenHarmony**: a post-flood-fix boot (b11) sets
+  `ohos.boot.time.lockscreen.ready` — the lock screen is reached.
+  The hilog flood that kept every service loop spinning (writev
+  fabric 63-102k/s → 1.7-3.7k/s after the epoll poll-semantics fix)
+  is gone; appspawn forks 130-272 ms → 85-90 ms; guest CPU was 579%
+  of 800% at baseline vs the reference's 17.5% on the same image
+  (post-fix the fabric syscall burn is gone; residual CPU is
+  boot-dependent). The input
+  chain is mapped end to end with per-hop verdict tables (INEV/
+  INOP/INRD): the kernel evdev path is exonerated hop-by-hop; the
+  break is multimodalinput's device-manager init never completing
+  (image-side service chain) plus the one stranded reader
+  (WAKE-RUN-LEAK family, wake lane's territory). The reaper/wait
+  machinery is exonerated (788/788 leader exits reaped, zero
+  zombies, waitid never used); the systemui incarnation cycle is a
+  userspace exit_group(-2) race.
+- **Ubuntu 24.04 (noble, systemd 255)**: systemd reaches
+  multi-user.target AND graphical.target (~1 min 40 s userspace)
+  with journald, logind, dbus, udisks2 and network-online live —
+  unlocked by the unix setsockopt errno family, tmpfs fallocate and
+  the securityfs/mqueue/debugfs/tracefs mount arms. Remaining wall:
+  the mid-graphical-chain freeze, decoded to a GLib gthreadpool
+  mutex left locked with no owner (kernel exculpated at the
+  futex-word level; userspace hunt continues).
+- **riscv64 TCG matrix**: smp×mem ls/proc gate 13/16 clean after R87
+  (secondary-bringup interrupt window) and the config-derived
+  trap.S clamps; previously-failing 5/1G, 7/1G, 8/1G, 8/2G cells
+  clean; residual ~1/3 ownership race on smp8-class cells handed to
+  the sched lane with named entry points. The "ksp smear" family is
+  retired as a print-format ghost (two decimals, no separator).
+
+### The fixes (merge order)
+
+1. **arena-mmap (94e1338b7)**: SIGSEGV/SIGBUS siginfo fault addresses
+   + class on 3 arches (killed the FFRT fault-loop family and the
+   mmi 148.9 s death); vDSO DT_STRTAB/DT_SYMTAB swap (musl
+   clock_gettime resolution); unaligned MAP_FIXED EINVAL — arena
+   probe 19/19
+2. **uboot-campaign (28b880495)**: program break per-mm on x86_64 —
+   24-boot A/B, shell SIGSEGV 3/12 → 0/12, success 11/12 → 12/12
+3. **hilog-flood (7415622ea)**: epoll fds implement ep_poll
+   semantics — the nested-epoll spin flood, 25-50x fabric reduction
+4. **ub2404 (6770963ea)**: setsockopt errno family, tmpfs fallocate,
+   mount arms — carries Ubuntu 24.04 systemd to graphical.target
+5. **wake-drop (f4c57e7c6)**: R127 wait-queue hardening (task-keyed
+   entries, stale-evict, WQLEAK) + input:* tracepoints; wake→run
+   edge exonerated (4 DELIVERED / 4 REFUSED-benign / ~880 EMPTY)
+6. **reaper-waitid (537f9e6ed)**: reaper probe arms — waitid never
+   used, wait4-WNOHANG is the channel, no zombies
+7. **riscv-smp8-panic (f5416e8a4)**: R87 secondary-bringup window,
+   trap.S clamps, ksp print separator (the 'corruption' was a
+   print-format ghost)
+8. **rwlock-livelock (95b5e61fb)**: vDSO DT_VERDEF chain (Go/snapd);
+   Ubuntu freeze = GLib gthreadpool mutex, kernel exculpated at word
+   level
+9. **huks-wedge (5fb35cba7)**: fault-path default deaths are group
+   deaths (Linux parity, 15 sites × 3 arches) — the orphaned-mutex
+   wedge chain eliminated live on hw7; exit-cause print + SEGV
+   history ring; fuxwatch page-retire fix
+10. **gate-infra (d8476534e)**: Tier-1 volume re-bank 15.36M
+    (tok-r4fix vehicle)
+11. **obs-hygiene (8f4a4a259)**: taskdump line-atomic staging
+    (mangled lines 1.7% → 0) + hilogcensus/spinwatch tracepoint
+    migration (events 57-60)
+12. **Rig/gate**: run-oh.sh/run-x86-ub.sh unified at KVM SMP8 8G
+    (8b21a8440, 2f2c236ee); pbench.c path fix (1342fb78f);
+    pa-boot.sh census token fix (untracked run/ script, note only)
+
+### Next milestones
+
+1. OH: interactive launcher from the lock screen (needs the
+   spawn-stall userspace races and the stranded-reader wake family)
+2. Ubuntu 24.04: past the glib freeze to serial login and gdm's bus
+   name (post-login diagnosis queue is written down in the lane
+   status)
+3. riscv64: the residual sched ownership race (fair.rs orphan-sweep
+   entry points named in PANIC-FINDINGS.md)
+
+## Previous Phase (2026-10-30): AArch64 landed — stages 0-3 complete, merged to main
 
 **The third architecture is up end to end on QEMU virt (cortex-a72).**
 
@@ -607,5 +693,5 @@ parity (24/24 matrix vs Linux).
 
 ---
 
-**Document Version**: v31.0
-**Last Updated**: 2026-10-04
+**Document Version**: v32.0
+**Last Updated**: 2026-11-14
