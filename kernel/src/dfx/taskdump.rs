@@ -15,16 +15,70 @@
 
 use core::sync::atomic::Ordering;
 
+// ============================================================================
+// Line-atomic staging (obs-hygiene round)
+// ============================================================================
+//
+// Every dump byte used to go out through uart_putc_raw with no lock (the
+// crash-context discipline), so on SMP8 the OH kmsg flood — printk
+// records holding CONSOLE_EMIT_LOCK ~0.4-17 ms per line — spliced dump
+// bytes into flood records and vice versa: dump lines arrived mangled or
+// "missing" (the dhardware lane's detour; two lanes lost time to it).
+// The wake-drop lane fixed its own serial echoes the same way (b80f76a55,
+// HuntLine: stage the full line, one write).
+//
+// Discipline now: every byte STAGES into a dedicated buffer under an
+// irqsave stage lock; a '\n' (or a full buffer — long lines continue as
+// whole chunks) flushes the staged bytes in ONE batched TX pass under
+// the printk console-emit lock, so a dump line and a printk record can
+// never splice mid-line and two CPUs' dump lines can never splice with
+// each other. On emit-lock timeout (wedged holder) the line still goes
+// out locklessly — readable at any cost beats atomic in a wedge.
+//
+// All taskdump-family writers funnel here (putc/puts/put_hex/put_dec,
+// taskdump_raw_line, taskdump_dec): hung-task FTX stacks, WQLEAK,
+// memwatch census, small_alloc census lines, schb, the trap printers —
+// no call site changes, only the write discipline changed.
+
+struct DumpStage {
+    buf: [u8; 512],
+    n: usize,
+}
+
+static DUMP_STAGE: crate::sync::spinlock::Spinlock<DumpStage> =
+    crate::sync::spinlock::Spinlock::new(DumpStage { buf: [0; 512], n: 0 });
+
+/// ONE atomic console burst for pre-staged bytes: bounded acquire of
+/// printk's console-emit lock (50 ms — larger than one OH-flood record,
+/// see `try_console_emit_lock_ms`), one `puts_batch` pass, release. On
+/// timeout the same bytes go out locklessly (the wedge fallback).
+///
+/// pstore visibility is unchanged: `puts_batch` sinks every byte to the
+/// persistent record exactly like the per-byte `uart_putc_raw` did.
+pub fn line_atomic_write(bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    let uart = crate::console::Uart::new();
+    if crate::printk::try_console_emit_lock_ms(50) {
+        uart.puts_batch(bytes);
+        crate::printk::console_emit_unlock();
+    } else {
+        // Wedged emit-lock holder: still write — a torn line beats a
+        // missing one in exactly the contexts this dump exists for.
+        uart.puts_batch(bytes);
+    }
+}
+
 fn putc(c: u8) {
-    // SAFETY: SBI legacy console_putchar is safe to call from any context.
-    //
-    // Release visibility (119th loglevel hunt): the console.rs wrapper is
-    // compiled to a no-op in release builds, which blinded every taskdump
-    // on production-config boots — exactly the legs we need stacks from.
-    // Write the UART directly here instead; the taskdump path is already
-    // dfx-gated and budgeted, so this only re-enables an explicitly
-    // requested diagnostic, not general console noise.
-    unsafe { crate::console::uart_putc_raw(c); }
+    let mut st = DUMP_STAGE.lock_irqsave();
+    let at = st.n;
+    st.buf[at] = c;
+    st.n = at + 1;
+    if c == b'\n' || st.n == st.buf.len() {
+        line_atomic_write(&st.buf[..st.n]);
+        st.n = 0;
+    }
 }
 
 fn puts(s: &str) {
@@ -60,8 +114,8 @@ fn put_dec(mut v: u64) {
     }
 }
 
-/// DFX raw diagnostic line (SBI console, no locks) for other subsystems'
-/// one-shot probes — same discipline as the dump itself.
+/// DFX raw diagnostic line for other subsystems' one-shot probes — same
+/// discipline as the dump itself (line-atomic staging, see `putc`).
 pub fn taskdump_raw_line(s: &[u8]) {
     for &b in s {
         putc(b);

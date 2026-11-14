@@ -3727,18 +3727,24 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
     ret
 }
 
-/// spinwatch (cmdline spinwatch=1): dump this epoll's interest set with
-/// each fd's CURRENT poll verdict — the stuck-ready fd inside a spinner's
-/// wait set shows itself. Rate-limited by dfx::spinwatch::record().
+/// spinwatch: dump this epoll's interest set with each fd's CURRENT
+/// poll verdict — the stuck-ready fd inside a spinner's wait set shows
+/// itself. Rate-limited by dfx::spinwatch::record() (armed by the
+/// unified-framework event rux:spinwatch; the per-fd rows record into
+/// rux:spinwatch_fd when that event is armed too). The old
+/// `spinwatch=1` cmdline token survives as a boot alias for both.
 fn spinwatch_dump_interest(epoll: &EpollFile, epfd: i32) {
     use alloc::format;
     let pid = crate::process::current_pid();
-    let comm = match crate::sched::current() {
+    let (comm, comm16) = match crate::sched::current() {
         // SAFETY: read-only comm access on the current task.
         Some(t) => {
             let c = unsafe { (*t).comm() };
             let end = c.iter().position(|&b| b == 0).unwrap_or(16);
-            alloc::string::String::from_utf8_lossy(&c[..end]).into_owned()
+            (
+                alloc::string::String::from_utf8_lossy(&c[..end]).into_owned(),
+                *c,
+            )
         }
         None => return,
     };
@@ -3751,6 +3757,16 @@ fn spinwatch_dump_interest(epoll: &EpollFile, epfd: i32) {
         pid,
         comm,
         epfd
+    );
+    // obs-hygiene migration: the report marker rides the unified
+    // framework (rux:spinwatch — the event IS the arm switch, so a
+    // report by construction means it is on; n is the window count
+    // captured by record() right before it returned true).
+    crate::trace::trace_spinwatch(
+        pid as i32,
+        &comm16,
+        epfd,
+        crate::dfx::spinwatch::last_report_n(),
     );
     let mut entries = epoll.entries.lock();
     let head = entries.init_once();
@@ -3794,6 +3810,10 @@ fn spinwatch_dump_interest(epoll: &EpollFile, epfd: i32) {
             mask,
             ops
         );
+        // obs-hygiene migration: one rux:spinwatch_fd record per fd row
+        // (armed() check inside — rows vanish, not cost, when only
+        // rux:spinwatch is armed).
+        crate::trace::trace_spinwatch_fd(epfd, entry.fd, want, mask as u32, ops as u64);
         shown += 1;
         if shown >= 64 {
             crate::pr_warn!("SPINWATCH   (interest set truncated at 64)");

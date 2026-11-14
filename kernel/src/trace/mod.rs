@@ -202,6 +202,32 @@ impl PackArg for &[u8; COMM_LEN] {
     }
 }
 
+/// A 32-byte short byte sample (a census line head, a tag content
+/// sample) occupies four slots as little-endian words — the same
+/// word-packing discipline the 16-byte comms take (obs-hygiene: the
+/// hilogcensus/spinwatch tracepoint migration needed a fixed sample
+/// size between a comm and a dynamic blob; a blob cannot share a
+/// record with scalars because its SLOTS reservation is the whole
+/// argument array).
+impl PackArg for &[u8; 32] {
+    const SLOTS: usize = 4;
+    #[inline]
+    fn pack(&self, slots: &mut [u64; TRACE_ARGS], at: &mut usize) {
+        let mut w = [0u64; 4];
+        for (i, word) in w.iter_mut().enumerate() {
+            let mut chunk = [0u8; 8];
+            chunk.copy_from_slice(&self[i * 8..(i + 1) * 8]);
+            *word = u64::from_le_bytes(chunk);
+        }
+        for word in w {
+            if *at < TRACE_ARGS {
+                slots[*at] = word;
+                *at += 1;
+            }
+        }
+    }
+}
+
 /// A short ASCII tag (the rwbs column: "R", "W", ...) packs into one
 /// slot as up to 8 little-endian bytes.
 impl PackArg for &str {
@@ -1541,6 +1567,125 @@ tracepoints! {
             args[3] as u32,
             args[4] as i32,
             args[5] as u32,
+        )
+    };
+
+    /// rux:hilog_census — the hilog-flood census's ARM SWITCH and its
+    /// per-sender aggregate row in one event (obs-hygiene migration of
+    /// the bespoke `hilogcensus=1` cmdline token into the unified
+    /// framework; aggregate-as-event: the fabric runs up to 10^6 msg/s,
+    /// so the event carries the 30-60 s dump row, never a message).
+    /// Arming `rux:hilog_census` (trace_event= or set_event) runs the
+    /// counting hooks; each dumped top-sender row then records here.
+    /// The old `hilogcensus=1` token remains as a compatibility alias
+    /// that arms this event at boot.
+    EVENT_HILOG_CENSUS / hilog_census_fmt / trace_hilog_census :
+        "rux", "hilog_census", 57,
+    print: "\"pid=%d comm=%s delivered=%llu eagain=%llu err=%llu bytes=%llu relay=%llu miss=%llu\", REC->pid, REC->comm, REC->delivered, REC->eagain, REC->err, REC->bytes, REC->relay, REC->miss",
+    fields: "\tfield:int pid;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:char comm[16];\toffset:16;\tsize:16;\tsigned:0;\n\
+             \tfield:unsigned long long delivered;\toffset:32;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long long eagain;\toffset:40;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long long err;\toffset:48;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long long bytes;\toffset:56;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long long relay;\toffset:64;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long long miss;\toffset:72;\tsize:8;\tsigned:0;\n",
+    call (pid: i32, comm: &[u8; COMM_LEN], delivered: u64, eagain: u64, err: u64,
+          bytes: u64, relay: u64, miss: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let comm = comm_from_words(args[1], args[2]);
+        let end = comm.iter().position(|&b| b == 0).unwrap_or(COMM_LEN);
+        format!(
+            "pid={} comm={} delivered={} eagain={} err={} bytes={} relay={} miss={}",
+            args[0] as i32,
+            String::from_utf8_lossy(&comm[..end]),
+            args[3],
+            args[4],
+            args[5],
+            args[6],
+            args[7],
+            args[8],
+        )
+    };
+
+    /// rux:hilog_kmsg — one /dev/kmsg writer's census row: pid, comm,
+    /// cumulative write count and the LAST line-head sample (32 bytes —
+    /// the repeating-pattern evidence the serial HILOGTAP kmsg lines
+    /// carry; longer heads truncate at the fixed record capacity).
+    /// Same migration round as rux:hilog_census.
+    EVENT_HILOG_KMSG / hilog_kmsg_fmt / trace_hilog_kmsg :
+        "rux", "hilog_kmsg", 58,
+    print: "\"pid=%d comm=%s n=%llu head=%s\", REC->pid, REC->comm, REC->n, REC->head",
+    fields: "\tfield:int pid;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:char comm[16];\toffset:16;\tsize:16;\tsigned:0;\n\
+             \tfield:unsigned long long n;\toffset:32;\tsize:8;\tsigned:0;\n\
+             \tfield:char head[32];\toffset:40;\tsize:32;\tsigned:0;\n",
+    call (pid: i32, comm: &[u8; COMM_LEN], n: u64, head: &[u8; 32]),
+    render |args: &[u64; TRACE_ARGS]| {
+        let comm = comm_from_words(args[1], args[2]);
+        let cend = comm.iter().position(|&b| b == 0).unwrap_or(COMM_LEN);
+        let mut head = [0u8; 32];
+        for (i, word) in args[4..8].iter().enumerate() {
+            head[i * 8..(i + 1) * 8].copy_from_slice(&word.to_le_bytes());
+        }
+        let hend = head.iter().position(|&b| b == 0).unwrap_or(32);
+        format!(
+            "pid={} comm={} n={} head={}",
+            args[0] as i32,
+            String::from_utf8_lossy(&comm[..cend]),
+            args[3],
+            String::from_utf8_lossy(&head[..hend]),
+        )
+    };
+
+    /// rux:spinwatch — the stuck-epoll spin detector's ARM SWITCH and
+    /// report marker in one event (obs-hygiene migration of the bespoke
+    /// `spinwatch=1` cmdline token). Records when a task crosses the
+    /// zero-event epoll_wait threshold (>80 per 200 ms): pid, comm,
+    /// epfd and the window count at the report. The per-fd interest
+    /// rows ride rux:spinwatch_fd on the same report.
+    EVENT_SPINWATCH / spinwatch_fmt / trace_spinwatch :
+        "rux", "spinwatch", 59,
+    print: "\"pid=%d comm=%s epfd=%d n=%u\", REC->pid, REC->comm, REC->epfd, REC->n",
+    fields: "\tfield:int pid;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:char comm[16];\toffset:16;\tsize:16;\tsigned:0;\n\
+             \tfield:int epfd;\toffset:32;\tsize:4;\tsigned:1;\n\
+             \tfield:__u32 n;\toffset:36;\tsize:4;\tsigned:0;\n",
+    call (pid: i32, comm: &[u8; COMM_LEN], epfd: i32, n: u32),
+    render |args: &[u64; TRACE_ARGS]| {
+        let comm = comm_from_words(args[1], args[2]);
+        let end = comm.iter().position(|&b| b == 0).unwrap_or(COMM_LEN);
+        format!(
+            "pid={} comm={} epfd={} n={}",
+            args[0] as i32,
+            String::from_utf8_lossy(&comm[..end]),
+            args[3] as i32,
+            args[4] as u32,
+        )
+    };
+
+    /// rux:spinwatch_fd — one fd row of a spinwatch interest-set dump:
+    /// the fd, the wanted event mask, the CURRENT poll verdict and the
+    /// file-ops table pointer (%pS — names the file class without a
+    /// print budget). The stuck-ready fd inside a spinner's wait set
+    /// shows itself in the ring, no serial parse needed.
+    EVENT_SPINWATCH_FD / spinwatch_fd_fmt / trace_spinwatch_fd :
+        "rux", "spinwatch_fd", 60,
+    print: "\"epfd=%d fd=%d want=%#x ready=%#x ops=%pS\", REC->epfd, REC->fd, REC->want, REC->ready, (void *)REC->ops",
+    fields: "\tfield:int epfd;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:int fd;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:__u32 want;\toffset:16;\tsize:4;\tsigned:0;\n\
+             \tfield:__u32 ready;\toffset:20;\tsize:4;\tsigned:0;\n\
+             \tfield:void *ops;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (epfd: i32, fd: i32, want: u32, ready: u32, ops: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "epfd={} fd={} want={:#x} ready={:#x} ops={}",
+            args[0] as i32,
+            args[1] as i32,
+            args[2] as u32,
+            args[3] as u32,
+            ps_render(args[4])
         )
     };
 }

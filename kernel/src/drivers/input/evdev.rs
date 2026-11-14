@@ -275,7 +275,9 @@ pub fn push_event(&self, event: InputEvent) {
         {
             // dfx=inputtrace: the input arrival trace (release-visible via
             // the raw UART path — this is the datum that says whether the
-            // guest's event source reaches the device at all).
+            // guest's event source reaches the device at all). Line
+            // rides the taskdump funnel (obs-hygiene): one atomic write,
+            // not per-byte uart_putc_raw the kmsg flood could splice.
             if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
                 let n = self.events_pushed.fetch_add(1, Ordering::Relaxed);
                 if n < 24 {
@@ -293,9 +295,7 @@ pub fn push_event(&self, event: InputEvent) {
                         event.code,
                         event.value
                     );
-                    for b in line.as_bytes() {
-                        crate::console::uart_putc_raw(*b);
-                    }
+                    crate::dfx::taskdump::taskdump_raw_line(line.as_bytes());
                 }
             }
         }
@@ -826,10 +826,9 @@ pub fn trace_open(dev: &EvdevDevice, file: &File, node: u32) {
         .take_while(|&&c| c != 0)
         .copied()
         .collect();
-    let mut s = alloc::format!("IN-OPEN pid={} name={} file_id={}\n", crate::process::current_pid(), String::from_utf8_lossy(&nm), file.file_id);
-    for b in s.as_bytes() {
-        crate::console::uart_putc_raw(*b);
-    }
+    let s = alloc::format!("IN-OPEN pid={} name={} file_id={}\n", crate::process::current_pid(), String::from_utf8_lossy(&nm), file.file_id);
+    // obs-hygiene: line-atomic funnel instead of per-byte raw writes.
+    crate::dfx::taskdump::taskdump_raw_line(s.as_bytes());
 }
 
 /// evdev close function
@@ -1770,17 +1769,37 @@ impl HuntLine {
             return;
         }
         let _g = HUNT_ECHO_LOCK.lock_irqsave();
-        for i in 0..self.n {
-            // SAFETY: raw console byte write under the echo lock.
-            crate::console::uart_putc_raw(self.buf[i]);
-        }
+        // obs-hygiene: the burst rides the taskdump funnel's emit-lock
+        // coordination (one atomic write vs printk records too — the
+        // kmsg-flood splice class), not the bare per-byte raw writes.
+        crate::dfx::taskdump::line_atomic_write(&self.buf[..self.n]);
         self.n = 0;
     }
 }
 
+// obs-hygiene: the INRD/INOP echo lines were the remaining per-byte
+// writers of the input hunt family — stage them under the hunt echo
+// lock and flush whole lines through the same emit-lock-coordinated
+// write the HuntLine bursts take, so a kmsg-flood record can no longer
+// splice an INRD line mid-flight (the dhardware "missing lines" class).
+struct IttStage {
+    buf: [u8; 128],
+    n: usize,
+}
+
+static ITT_STAGE: crate::sync::spinlock::Spinlock<IttStage> =
+    crate::sync::spinlock::Spinlock::new(IttStage { buf: [0; 128], n: 0 });
+
 fn itt_msg(msg: &[u8]) {
     for &b in msg {
-        crate::console::uart_putc_raw(b);
+        let mut st = ITT_STAGE.lock_irqsave();
+        let at = st.n;
+        st.buf[at] = b;
+        st.n = at + 1;
+        if b == b'\n' || st.n == st.buf.len() {
+            crate::dfx::taskdump::line_atomic_write(&st.buf[..st.n]);
+            st.n = 0;
+        }
     }
 }
 
@@ -1798,7 +1817,7 @@ fn itt_u64(mut v: u64) {
         }
     }
     for i in (0..n).rev() {
-        crate::console::uart_putc_raw(buf[i]);
+        itt_msg(&[buf[i]]);
     }
 }
 

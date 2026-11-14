@@ -454,6 +454,36 @@ pub fn console_emit_unlock() {
     CONSOLE_EMIT_LOCK.store(false, Ordering::Release);
 }
 
+/// Bounded acquire of the console emit lock with a caller-chosen budget
+/// in milliseconds (obs-hygiene line-atomicity round).
+///
+/// `try_console_emit_lock`'s 100µs interrupt-context budget is tuned for
+/// crash contexts where the holder may be wedged. The diagnostic
+/// line-atomic writers (the taskdump family) run on hunt boots where the
+/// console is FLOODED — the OH kmsg flood holds this lock 0.4-17ms per
+/// record — so a 100µs acquire fails on nearly every line and the dump
+/// bytes splice into flood records again. This variant spends an
+/// explicit caller budget (the dump already costs far more than that in
+/// UART time per line) so a staged line and a printk record can never
+/// interleave. Same fallback contract: false on timeout, the caller
+/// writes locklessly.
+pub fn try_console_emit_lock_ms(budget_ms: u64) -> bool {
+    let budget = crate::config::TIMER_CLOCK_FREQ_HZ.saturating_mul(budget_ms) / 1000;
+    let start = crate::arch::cpu::read_time();
+    loop {
+        if CONSOLE_EMIT_LOCK
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            return true;
+        }
+        if crate::arch::cpu::read_time().saturating_sub(start) >= budget {
+            return false;
+        }
+        core::hint::spin_loop();
+    }
+}
+
 /// Write a formatted message with trailing newline to the kernel log.
 /// Used by the `println!` macro.
 pub fn printk_ln(level: u8, args: fmt::Arguments) {

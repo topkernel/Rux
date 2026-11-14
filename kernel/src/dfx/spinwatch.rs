@@ -16,35 +16,51 @@
 //! private to that module); this file owns arming, per-task counting
 //! and the report rate limit.
 //!
-//! Arming: cmdline `spinwatch=1` (own key, unixrd pattern; the bespoke
-//! dfx= switch table stays frozen). Zero cost when off (one relaxed
-//! load per zero-event return).
+//! Arming (obs-hygiene migration): the unified-framework tracepoint
+//! `rux:spinwatch` IS the switch — arm it via `trace_event=` on the
+//! cmdline or `set_event` at runtime; one relaxed load per zero-event
+//! return when armed, zero when off. Each report also records into the
+//! framework (`rux:spinwatch` names the spinner; the per-fd interest
+//! rows ride `rux:spinwatch_fd`). The bespoke cmdline token `spinwatch=1`
+//! survives as a compatibility ALIAS that arms the same events at boot
+//! (existing hunt rigs keep working; the frozen dfx= switch table is
+//! untouched — this module was never in it).
 
 use core::sync::atomic::Ordering::Relaxed;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 
-static ARMED8: AtomicU8 = AtomicU8::new(0);
-
+/// The watch gate: the unified-framework event switch (live — runtime
+/// `set_event` arming takes effect immediately, which the old cached
+/// tri-state could not do).
 #[inline]
 pub fn on() -> bool {
-    match ARMED8.load(Relaxed) {
-        2 => true,
-        1 => false,
-        _ => {
-            let v = match crate::cmdline::get_cmdline() {
-                None => return false,
-                Some(_) => crate::cmdline::get_param("spinwatch").as_deref() == Some("1"),
-            };
-            ARMED8.store(if v { 2 } else { 1 }, Relaxed);
-            crate::pr_warn!(
-                "spinwatch: {} (cmdline spinwatch param = {:?})",
-                if v { "armed" } else { "off" },
-                crate::cmdline::get_param("spinwatch")
-            );
-            v
-        }
+    crate::trace::EVENT_SPINWATCH.armed()
+}
+
+/// Compatibility arm (boot, before trace_event= is applied): the old
+/// bespoke cmdline token `spinwatch=1` now just flips the unified
+/// events' enable switches — same running state as
+/// `trace_event=rux:spinwatch,rux:spinwatch_fd`.
+pub fn compat_arm() {
+    if crate::cmdline::get_cmdline().is_none() {
+        return;
+    }
+    if crate::cmdline::get_param("spinwatch").as_deref() == Some("1") {
+        crate::trace::EVENT_SPINWATCH.enabled.store(true, Relaxed);
+        crate::trace::EVENT_SPINWATCH_FD.enabled.store(true, Relaxed);
+        crate::pr_warn!(
+            "spinwatch: compat token spinwatch=1 armed (rux:spinwatch + rux:spinwatch_fd)"
+        );
     }
 }
+
+/// The window count of the LAST report (set by `record` right before it
+/// returns true; read by the report emitter for the trace record).
+pub fn last_report_n() -> u32 {
+    LAST_REPORT_N.load(Relaxed)
+}
+
+static LAST_REPORT_N: AtomicU32 = AtomicU32::new(0);
 
 /// Per-task watch state, direct-mapped by pid (512 slots — attribution
 /// fidelity at census granularity, the hilogcensus trade-off).
@@ -112,6 +128,7 @@ pub fn record() -> bool {
             // next report (steady spinners re-report every 5 s).
             w.n.store(0, Relaxed);
             w.win.store(now, Relaxed);
+            LAST_REPORT_N.store(n, Relaxed);
             if !ANY_REPORTED.swap(true, Relaxed) {
                 crate::pr_warn!(
                     "SPINWATCH first report (threshold {} per {}ms)",
