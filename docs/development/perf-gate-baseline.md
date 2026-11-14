@@ -50,7 +50,7 @@ main lands, do not cherry-pick rows.
 | WAKE-STRANDED | 23–31 organic, 1–2 s family (pa109dbg/pa112tok/pa113tok), max 32–107 s; seed-vehicle reads 0–65 organic, max 297 s (pa-116 series, 2026-11-04) with the same no-grid verdict | no 1001ms-grid class |
 | tick rate per CPU | 99.74–99.98 /s (pre-2026-11-01 semantics); 104–124+/s class on the current arc (hooks fire beyond jiffies — pa116 series reads 104–107/s) | ≥99.5 sustained (quiet window; one-CPU marginal misses under heavy foreign-QEMU load are the documented flake class) |
 | kernel panics / new OOM classes | 0 | 0 |
-| total syscall volume (780s boot) | 15.36M (girebank1, 2026-11-14, main@f5416e8a4 release, tok-r4fix lineage) | ±10% IN A COMPARABLE HOST-LOAD WINDOW AND THE SAME LINEAGE CLASS — re-banked 2026-11-14 on the tok-r4fix vehicle (tok109 lineage + the Nov 9 r4fix gate boot): the 126.0M pa115debt1 bank was tok109-lineage depth; tok-r4fix is one boot deeper and the volume plateaus at ~15.3M regardless of build profile (release f5416e8a4 15,359,337 @t=120s; debug 95b5e61fb sysrep1 15,253,824 @t=720s — 0.7% apart). Vehicle-bound: a fresh tok lineage or seed cook needs its own bank. The superseded 126M/107.5M/85–107M families and their history live in the refresh sections below; 2026-11-04 seed-vehicle instability note (1.5M parked ↔ 173.9M deep) still applies to any non-tok vehicle |
+| total syscall volume (780s boot) — **profile-classed** (2026-11-15, gate-bank lane; supersedes the invalid 15.36M single bank) | debug class: 15.5M family base (family 7.2–25.2M, 4 boots: relw6dbg/relw4dbg/sysrep1/gbank2dbg); release class: 50M family base (family 30.8–73.5M, 5 boots: relw7mrel/relw5mrel/relw2/relw1/gbank1rel) | debug ±80% of 15.5M (3.1–27.9M); release ±60% of 50M (20–80M). Both are wide FAMILY bands: the image-side hilog recvmsg storm's amplitude is boot luck (2.4x within release, 3.5x within debug), so a tight band fails healthy boots by construction; the rows' job is class separation + gross-depth catching (parked 1.5M, runaway amplification), not ±10% depth accounting. Observed classes are disjoint (debug max 25.2M < release min 30.8M) but the bands overlap in 20–27.9M — profile identity comes from --profile/kernel-path/banner detection, never from volume. The 2026-11-14 single 15,359,337 bank is INVALID: it is girebank1's counter frozen at its t=120 summary (all print paths died t=217; dumps stop at t=180), and its debug "corroboration" compared release@t=120-wedged vs debug@t=720 across different kernels — wrong on both ends (relwedge adjudication, run/RELWEDGE-FINDINGS.md; gate-bank re-adjudication, run/GATE-BANK.md). Vehicle-bound: a fresh tok lineage or seed cook needs its own banks. Two new guard rows back this up in run/perf-gate.sh: "dump cadence reaches window end" (girebank1's face: 3 dumps then silence) and "volume counter not frozen" (last summary must be the last dump's) |
 | clock_gettime avg | 3–4 µs | ±20% or better |
 | nanosleep avg | 203 ms (pa50main, n=26,945); family 158–222 ms through 2026-11-01 (pa115debt1 read 158.4 ms, n=29.5k) | ≤244 ms (one-sided; 203 ms +20% top). 2026-11-04: SEED-vehicle populations (n=3.0–5.2k, long-sleep dominated) read 529–927 ms — population artifact, not sleep cost: the p7_sleep1ms overshoot probe reads 15.8 µs on the same kernel (TCG family 54.4 µs); enforce the avg row only on tok-class populations |
 
@@ -405,6 +405,12 @@ Board log: run/116pb1-boot.log, serial work/pbench-116pb1-serial.log.
 
 ## Tier-1 volume re-bank on the tok-r4fix vehicle + vehicle protection (2026-11-14, gate-infra lane, main@f5416e8a4)
 
+> **RETRACTED (2026-11-15, gate-bank lane)**: the volume re-bank below
+> is banked from a wedged boot and is superseded by the profile-classed
+> banks in the next section ("Tier-1 volume row re-banked per profile
+> class + wedge guards, 2026-11-15"). The vehicle-protection work in
+> this section (store master, loud fallback, oversize guard) stands.
+
 The syscost-repair lane (2026-11-14) established that the Nov 14
 "instrument silent" scare was vehicle loss, not an arming break: the
 tok109 master vanished (second loss), pa-boot.sh's silent fallback
@@ -464,6 +470,98 @@ Evidence: run/pa-girebank1-serial.log (raw), run/pa-girebank1-driver.log,
 run/perf-gate-girebank1-parse.txt, run/GATE-INFRA.md (this lane's
 deliverable, incl. the pa-boot before/after fallback behavior);
 syscost-repair lane: run/SYSCOST-REPAIR-FINDINGS.md, run/pa-sysrep1-serial.log.
+
+## Tier-1 volume row re-banked per profile class + wedge guards (2026-11-15, gate-bank lane, main@2649af4e3)
+
+The 2026-11-14 single volume bank (15,359,337, from girebank1) is
+retracted as **banked from a wedged boot**. The relwedge lane's
+adjudication (run/RELWEDGE-FINDINGS.md in their worktree) showed:
+(1) girebank1's release console went dead at t=217 — kernel tick
+prints, timer probes and userspace kmsg writes all stopped within
+~0.5 s of each other while QEMU ran to the 780 s horizon — so its
+"plateau at ~15.3M" is the counter frozen at the t=120 summary, not a
+workload plateau; (2) the "0.7% apart, profile-insensitive"
+justification compared release@t=120 (already wedged) against
+debug@t=720 (its plateau) on different kernels — invalid on both
+ends. Healthy boots since: release 30.8–73.5M (relw7mrel/relw5mrel/
+relw2/relw1/gbank1rel), debug 7.2–25.2M (relw6dbg/relw4dbg/sysrep1/
+gbank2dbg). The class MEDIANS sit ~3.5x apart and the observed
+families are disjoint, so one bank cannot judge both profiles — but
+per-boot volume inside a class is hilog-storm boot luck (2.4x release,
+3.5x debug spread), so the class banks are wide family bands.
+
+**Re-banked rows (run/perf-gate.sh)**:
+
+- `VOLUME_BASE_DEBUG=15500000` ±80% (3.1–27.9M) — family: 7.24M
+  (relw6dbg @main), 8.10M (relw4dbg @1e4a9df0a), 15.25M (sysrep1
+  @95b5e61fb), 25.20M (gbank2dbg @main, this lane's confirm boot).
+  The parked class (1.5M) sits outside the floor; the girebank1
+  frozen 15.36M sits mid-band here — the cadence/frozen guard rows
+  are what catch that face.
+- `VOLUME_BASE_RELEASE=50000000` ±60% (20–80M) — family: 30.81M
+  (relw7mrel), 39.00M (relw5mrel), 44.64M (relw2), 54.46M (relw1),
+  73.45M (gbank1rel, this lane's confirm boot). The release volume is
+  dominated by the image-side hilog recvmsg storm (nr=47: 6.9M–13.8M
+  calls across healthy boots). The wedge-frozen 15.36M and the parked
+  class sit outside the floor.
+- The row is selected by profile: `--profile release|debug`, else
+  detected from the kernel path (`target/.../{release,debug}/bzImage`),
+  else the serial's image-span banner (debug-class images end at
+  0x...82000000; release ends lower). Default debug (the Tier-1
+  default stays debug per the relwedge recommendation — all existing
+  comparative anchors are debug-class).
+- Two new verdict rows guard the girebank1 face directly:
+  "dump cadence reaches window end" (last dump must be within 180 s of
+  the window horizon; girebank1 fails it at t=180) and "volume counter
+  not frozen" (the last syscall summary must be the last dump's).
+  Validated on ten reference logs: girebank1 FAILs the cadence row and
+  the volume row; every healthy boot (relw1/2/4dbg/5mrel/6mdbg/7mrel,
+  sysrep1, gbank1rel, gbank2dbg) passes cadence+frozen+volume in its
+  detected class.
+
+**Confirming boots (this lane, gate-bank worktree @2649af4e3, fresh
+builds, tok-r4fix store master, KVM q35 smp2 4G, 780 s)**:
+
+| boot | profile | dumps | TERM/REFUSED | vol@720 | panic/ALLOC/TXN-HANG | notes |
+|---|---|---|---|---|---|---|
+| gbank1rel | release | 11 unique t, cadence to 720 | 8 / 31 | **73,453,087** | 0 / 0 / 0 | recvmsg storm 13.82M (relw1 class); serial alive to t=779.4; nanosleep 157.5ms in band; clock_gettime truncates to 0us on release |
+| gbank2dbg | debug | 12/12, cadence to 720 | 8 / 31 | **25,196,490** | 0 / 0 / 0 | serial alive to t=779.8; clock_gettime 3us in band; nanosleep 78.1ms in band; GRQ 5068ns in band |
+
+Build note: the gate-bank worktree builds are fresh-clone products —
+the release image carries the ksyms stub (371-byte
+ksyms_generated.rs; relwedge's carried a locally-generated 3.1MB
+table, hence their 16.0MB vs our 12.2MB release bzImage). Symbol
+table size only affects runtime symbolication, not perf paths; the
+debug bzImages are byte-size-identical (20,443,136).
+
+**New opt-in gate leg `--profile-companion`** (relwedge
+recommendation): when the merge under gate touches
+printk/console/sched/timer/irq paths, the caller adds
+`--profile-companion` and the gate ALSO boots one release-profile
+780s kernel (the `/release/` sibling of `--kernel`, or
+`--companion-kernel PATH`) and checks the same Tier-1 rows on it.
+Rationale: release soaks 3–7x the syscall volume per window and is
+the profile that once showed the console-death (print-emit) wedge
+class the debug default cannot see. On the companion leg the per-op
+rows (clock_gettime/nanosleep averages) print as INFO — they are
+debug-class banks (release cg truncates to 0us; write avg sits ~13%
+below debug) — while panics/cadence/census/tick/volume rows stay
+verdict-bearing.
+
+**Related bookkeeping in the same change**: relw-parse.sh (the
+cadence/silence-onset summarizer) copied into the lane with its sort
+fix (this host's `sort` rejects `-t=`; strip the prefix and sort
+`-un` numerically instead). Observed-but-not-rebanked: relw6mdbg read
+clock_gettime at a steady 8–9us across its whole window (every dump
+t=240–720), outside the 3–4.8us band, while this lane's fresh debug
+confirm boot (gbank2dbg, same commit) reads 3us in band — the 8–9us
+class is a host-load/mix outlier, not a stale band; no re-bank made,
+noted for the rerun-once rule.
+
+Evidence: run/pa-gbank1rel-serial.log, run/pa-gbank2dbg-serial.log
+(this lane's confirming boots; relwedge's serials run/pa-relw*-*.log;
+adjudication RELWEDGE-FINDINGS.md in the relwedge worktree run/;
+deliverable GATE-BANK.md in the gate-bank worktree run/).
 
 ## Guarded hot-path domains (user mandate: allocation/reclaim, scheduling, filesystem)
 
