@@ -4013,11 +4013,32 @@ pub fn unix_setsockopt(
     // socket". Rux has no LSM: accept and drop the label.
     const SO_SECURITYCONTEXT: i32 = 33;
     const SO_PASSCRED: i32 = 16;
+    // Timestamp/aux-data receive options: Linux accepts them on every
+    // socket family. Rux does not timestamp unix datagrams -- accept and
+    // ignore. journald's socket setup treats setsockopt(SO_TIMESTAMP)
+    // failure as FATAL (server_open_native_socket -> "SO_TIMESTAMP
+    // failed" -> exit 1), so every option systemd/journald sets at boot
+    // must return 0:
+    //   29 SO_TIMESTAMP   (journald native + PID1 socket units)
+    //   34 SO_PASSSEC     (PID1 journald*.socket "ignoring" path)
+    //   35 SO_TIMESTAMPNS (glibc socket_enable_timestamp)
+    //   37 SO_TIMESTAMPING
+    //   63/64/65 SO_{TIMESTAMP,TIMESTAMPNS,TIMESTAMPING}_NEW
+    //      (y2038-safe spellings from 64-bit time_t builds)
+    const SO_TIMESTAMP: i32 = 29;
+    const SO_PASSSEC: i32 = 34;
+    const SO_TIMESTAMPNS: i32 = 35;
+    const SO_TIMESTAMPING: i32 = 37;
+    const SO_TIMESTAMP_NEW: i32 = 63;
+    const SO_TIMESTAMPNS_NEW: i32 = 64;
+    const SO_TIMESTAMPING_NEW: i32 = 65;
     if level != SOL_SOCKET {
-        return -97; // ENOPROTOOPT for unknown levels
+        return -92; // ENOPROTOOPT for unknown levels (97 is EAFNOSUPPORT)
     }
     match optname {
         SO_SECURITYCONTEXT => 0,
+        SO_TIMESTAMP | SO_PASSSEC | SO_TIMESTAMPNS | SO_TIMESTAMPING
+        | SO_TIMESTAMP_NEW | SO_TIMESTAMPNS_NEW | SO_TIMESTAMPING_NEW => 0,
         // SO_PASSCRED (init's second mandatory service-socket option,
         // init_service_socket.c:81): store the flag — the recvmsg side
         // attaches creds cmsgs when it is set (shared SocketOptions
@@ -4077,7 +4098,7 @@ pub fn unix_setsockopt(
             }
             0
         }
-        _ => -97, // ENOPROTOOPT (SO_TYPE/SO_ERROR are read-only)
+        _ => -92, // ENOPROTOOPT (SO_TYPE/SO_ERROR are read-only)
     }
 }
 

@@ -397,6 +397,56 @@ pub fn do_mount(
             crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
             register_mount("tmpfs", target, "tmpfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
         }
+        // ramfs/rootfs: tmpfs-instance alias. systemd mounts ramfs on
+        // /run/credentials/<unit> (target given as /proc/self/fd/N) at
+        // every unit start; refusing it made every service log
+        // "Failed to set up mount namespacing" and dropped credentials
+        // dirs (gdm's first failure family).
+        "ramfs" | "rootfs" => {
+            crate::fs::tmpfs::ensure_registered();
+            let root_inode = crate::fs::tmpfs::create_mount_instance(data);
+            crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
+            register_mount(fs_type, target, fs_type, if mnt_flags.is_readonly() { "ro" } else { "rw" });
+        }
+        // POSIX mqueue: no queue semantics in Rux yet (mq_* syscalls
+        // answer ENOSYS on their own); an empty tmpfs instance satisfies
+        // dev-mqueue.mount so sysinit does not fail. mqueue(7) users that
+        // actually open a queue surface the syscall gap unchanged.
+        "mqueue" => {
+            crate::fs::tmpfs::ensure_registered();
+            let root_inode = crate::fs::tmpfs::create_mount_instance(data);
+            crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
+            register_mount("mqueue", target, "mqueue", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+        }
+        // debugfs/tracefs from userspace (sys-kernel-debug.mount /
+        // sys-kernel-tracing.mount in the sysinit chain). The boot path
+        // mounts the canonical instances; a userspace mount request
+        // either mounts the boot instance at the requested point or, if
+        // boot did not create it (feature-gated), creates it now.
+        "debugfs" => {
+            if crate::fs::debugfs::debugfs_root().is_none() {
+                crate::fs::debugfs::init_debugfs()?;
+            }
+            let _ = crate::fs::vfs::path_lookup(target, 0);
+            crate::fs::vfs::vfs_mount(
+                target,
+                crate::fs::debugfs::create_root_inode(),
+                mnt_flags,
+            );
+            register_mount("debugfs", target, "debugfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+        }
+        "tracefs" => {
+            if crate::fs::tracefs::tracefs_root().is_none() {
+                crate::fs::tracefs::init_tracefs()?;
+            }
+            let _ = crate::fs::vfs::path_lookup(target, 0);
+            crate::fs::vfs::vfs_mount(
+                target,
+                crate::fs::tracefs::create_root_inode(),
+                mnt_flags,
+            );
+            register_mount("tracefs", target, "tracefs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+        }
         _ => return Err(errno::Errno::InvalidArgument.as_neg_i32()),
     }
 
