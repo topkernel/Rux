@@ -328,6 +328,21 @@ unsafe fn free_dead_member(member: *mut Task) {
     // before for the legitimate window.
     const FDM_STALE_RELEASE_JIFFIES: u64 = 300;
     {
+        // LTP-open lane (cve-2017-17052 wedge, 2026-11-14): the wait used
+        // to be a pure spin_loop. on_cpu clears on the MEMBER's OWN CPU
+        // when its exit tail reaches the final context switch — nothing
+        // this CPU does advances that — and under a fork/exit storm the
+        // exit tails queue behind allocator and lock contention for
+        // SECONDS. Every sweeper then burned a whole CPU spinning
+        // (wakewatch: the runner's wake→pick strands 1-3s behind these
+        // monopolist windows; FDM-WAIT churn with climbing member pids is
+        // the wedge face). Bounded spin batches keep the µs-latency fast
+        // path (a legitimate final switch-out clears in micro-to-ms); a
+        // schedule() between batches returns the CPU to the runqueue so
+        // the very exit tails we are waiting ON can make progress.
+        // Same discipline as wait_for_thread_group_death (a schedule()
+        // loop in the same exit context); IRQs are already enabled here.
+        const FDM_SPIN_BATCH: u32 = 100_000;
         let mut spins: u32 = 0;
         let mut armed_at = crate::drivers::timer::get_jiffies();
         while (*member).on_cpu() {
@@ -358,7 +373,11 @@ unsafe fn free_dead_member(member: *mut Task) {
                 armed_at = crate::drivers::timer::get_jiffies();
             }
             spins = spins.wrapping_add(1);
-            core::hint::spin_loop();
+            if spins % FDM_SPIN_BATCH == 0 {
+                crate::sched::schedule();
+            } else {
+                core::hint::spin_loop();
+            }
         }
     }
     // BOUNDED (lb125 decode): monopolist windows stalled this wait for
