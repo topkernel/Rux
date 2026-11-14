@@ -148,6 +148,11 @@ pub(crate) fn do_execve_elf(
         name[..len].copy_from_slice(&base.as_bytes()[..len]);
         // SAFETY: task_ptr is the current task, valid throughout execve.
         unsafe { (*task_ptr).set_comm(&name); }
+        // 125th waitid leg: SPAWN clock for com.*-named executables (the
+        // OH bundle-name convention); dfx=schedtrace-gated (dfx/reaper.rs).
+        if crate::dfx::reaper::on() {
+            crate::dfx::reaper::note_nameset(unsafe { (*task_ptr).pid() }, &name);
+        }
         // perf COMM sideband (hiperf process tracking; no-op when no
         // perf event asks for comm records).
         unsafe {

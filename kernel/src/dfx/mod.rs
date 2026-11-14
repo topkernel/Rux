@@ -142,6 +142,11 @@ pub mod lostpark;
 /// lane): NS-sum brackets for the __schedule, context_switch, wake and
 /// semop/pipe/unix bodies, dumped at shutdown; see dfx/cctx.rs.
 pub mod cctx;
+/// Reaper forensics (dfx=schedtrace, reaper-waitid lane): SPAWN/ZEXIT/
+/// REAP4/REAP4N/REAPW/ZLINGER — who reaps the OH launcher/systemui
+/// app-cycle children, and whether they linger un-reaped; see
+/// dfx/reaper.rs.
+pub mod reaper;
 
 /// Initialize the DFX subsystem.
 ///
