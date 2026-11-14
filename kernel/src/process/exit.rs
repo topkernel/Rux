@@ -872,6 +872,75 @@ pub fn do_exit(exit_code: i32) -> ! {
                 exit_code
             );
         }
+        // rwlock-livelock: thread-exit forensics — the ub2404 wedge's
+        // frozen word is GLib's GAsyncQueue mutex (pool-spawner parked
+        // in g_cond_wait's relock at word=2) and the mutex holder
+        // matches NO live task. If a thread EXITS while holding the
+        // queue mutex (glibc normal mutexes are not robust; GLib's
+        // spawn protocol has no ownership recovery), the wedge is a
+        // userspace death-while-holding. Gate on the tgid of the FIRST
+        // process that parks a waiter on a word the census later flags
+        // (learned dynamically — comm-gating missed GLib's
+        // "pool-udisksd" worker comms in boot J). NON-LEADER exits only
+        // (thread exits; whole-process death is not this shape).
+        {
+            use core::sync::atomic::Ordering::Relaxed;
+            static UDEXIT_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let watch_tgid = crate::sync::futex::rwfz_exit_watch_tgid();
+            let is_leader = dying_pid == tgid;
+            if !is_leader
+                && watch_tgid != 0
+                && tgid == watch_tgid
+                && UDEXIT_N.fetch_add(1, Relaxed) < 128
+            {
+                let comm_b = unsafe { (*current).comm() };
+                let comm = core::str::from_utf8(comm_b.as_slice())
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                let lastsys = unsafe { (*current).last_syscall_nr.load(Relaxed) };
+                let urip = {
+                    let pr = unsafe { (*current).pt_regs() };
+                    if pr.is_null() {
+                        0u64
+                    } else {
+                        #[cfg(feature = "x86_64")]
+                        {
+                            unsafe { (*pr).rip }
+                        }
+                        #[cfg(feature = "riscv64")]
+                        {
+                            unsafe { (*pr).epc }
+                        }
+                        #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
+                        {
+                            0u64
+                        }
+                    }
+                };
+                // HOTPATH-PRINT: thread exits of the watched tgid.
+                crate::pr_warn!(
+                    "RWFRZ-THREADEXIT tid={} comm='{}' code={} lastsys={} unrip={:#x}",
+                    dying_pid,
+                    comm,
+                    exit_code,
+                    lastsys as i64,
+                    urip
+                );
+                // rwlock-livelock: the dying thread's USER return chain —
+                // the exit rip is always libc's exit syscall site and
+                // cannot say WHERE the thread came from; the live frames
+                // below it name the GLib path (worker-proxy retirement vs
+                // a requester dying between g_async_queue_lock and
+                // g_cond_wait — the death-while-holding window).
+                if UDEXIT_N.load(Relaxed) <= 8 {
+                    // SAFETY: current is the calling task; read-only walk
+                    // of its own user stack (the frames are intact at
+                    // do_exit time).
+                    unsafe { crate::sync::futex::apppark_rets_public(current) };
+                }
+            }
+        }
     }
     // 50th (crash-storm hunt): failed-spawn forensics — a process LEADER
     // that exits without ever having execve'd forked and died pre-exec
