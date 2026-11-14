@@ -280,7 +280,18 @@ pub mod user_addr {
 
     pub const TASK_UNMAPPED_BASE: usize = TASK_SIZE / 3;
     pub const MMAP_LEGACY_BASE: usize = TASK_SIZE / 3;
-    pub const MMAP_START: usize = TASK_SIZE - (64 * 1024 * 1024 * 1024); // 64GB below top
+    // mmap search-window floor (LTP-open lane, 2026-11-14): the old
+    // TASK_SIZE-64GB cap made one process run out of untouched-mmap VA
+    // after exactly 64GB of anonymous mappings — a Linux-ABI divergence
+    // (Linux's top-down search exhausts ~TASK_SIZE minus the stack gap,
+    // ~128TB here) that cve-2017-17052's mmap_thread hits inside a single
+    // 10ms-lived process when the box is fast enough (mmap+TBROK instead
+    // of the intended storm). The floor now matches the legacy base
+    // (TASK_SIZE/3, the same bound Linux uses for bottom-up placement);
+    // find_free_area is a first-fit GAP scan, so occupied regions inside
+    // the window (PIE at TASK_SIZE*2/3, the ELF interpreter, the stack)
+    // are skipped, and the window is ~85TB.
+    pub const MMAP_START: usize = TASK_SIZE / 3;
     pub const MMAP_END: usize = TASK_SIZE;
 
     pub const BRK_DEFAULT: usize = 0x2000_0000;  // 512MB
