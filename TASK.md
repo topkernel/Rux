@@ -13201,3 +13201,55 @@ Edge-B instruments landed this round (from the 114th, now committed):
 txnhunt lock-free OWING snapshot (binder.rs) + exit-print owing arm
 (exit.rs), SEGV high-fault budget split + adjvma/altstack forensics
 (trap.rs).
+
+### 2026-11-15, round 116 (mmi-silent-exit) — the "~180s mmi silent exit" DECODED: it is init's own critical-service REBOOT cascade after samgr SIGABRTs at 95s (3/3 pre-merge boots, 0/3 post-merge); x86_64 reboot now actually resets; UIEXIT exit-print arm + live WW symbolization landed; healthy boots show the real finish-line blocker: the UI phase never completes (bootanimation FFRT pool futex-parked), and the image's samgr idle-unload kills the one input reader (dhardware) 6-9s after it opens /dev/input/event*
+
+Branch mmi-silent-exit (f0f0ea8e1 + commit a075b656b), kernel
+run/bzImage-mmi1, boots mmi1w1-w3 (KVM q35 SMP8 8G 540s,
+dfx=txnhunt,fuxstuck,periodic,parkdump,schedtrace trace_event=input).
+Full evidence: run/MMI-EXIT-FINDINGS.md.
+
+1. THE DECODE: hw10's mass death (26+ parked processes killed in two
+   waves, 136-189s, mmi/bootanimation in wave 2, hilogd last) is
+   init's shutdown: samgr pid 336 (the foundation host — the same
+   tgid bootanimation's BWR parks pointed at) SIGABRTs at 95.07s
+   ("Child process samgr(pid 336) exit with signal : 6" +
+   "ServiceReap error critical service crashed samgr"), init's
+   critical-service policy runs its reboot plugin (95.2s
+   WritePowerOffReason rows), stops everything, syncs (init's last
+   syscall 162=sync at 158.5s), collects /log/startup (184.9s —
+   shutdown-only: 0 rows in healthy boots), kills hilogd last
+   (189.3). THEN init wedges in a write(2) spin (rip 0xffffffff
+   802eda95, 0.6-9.9s IF=0 bursts, 190-521s, on_cpu whole time)
+   BEFORE reaching reboot(2) — under the old x86_64 reboot arm it
+   would have parked forever anyway.
+2. THE CRASH IS GONE POST-MERGE: samgr-abort 3/3 on hw10 (fd3ddbeaf,
+   pre sched-orphan-race) and 0/3 on mmi1 (f0f0ea8e1 includes merge
+   2649af4e3 claimer-liveness/TORN guards) — all three mmi1 boots
+   healthy to 540s (0 panics, ZEXIT≈REAP4, 0 ZLINGER, launcher
+   spawned, screen shows boot animation's static first frame).
+   Control: inputmethod_ser is samgr-idle-unload-killed in mmi1w2
+   (38.6s) with NO cascade — inputmethod was never the trigger.
+3. KERNEL FIXES: x86_64 reboot(2) now drives a real reset (8042
+   pulse 0xFE->0x64, then 0xcf9=0x0E) — a completed shutdown
+   restarts the machine instead of freezing it in the zombie state
+   (the image's crash-recovery loop restored). WW IRQ-OFF-WINDOW now
+   symbolizes the rip live via the built-in ksyms table (the hw10
+   write-spin was undecodable — that build's .config is gone; next
+   repro self-decodes). UIEXIT arm (FuxStuck-gated, own budget,
+   churn-filtered) prints exit code/cause/signal-sender/caller-RIP/
+   last-syscall/parent/owing for the UI-family processes.
+4. THE FINISH LINE NOW SITS AT: the UI phase never completing — all
+   UI processes alive but parked (bootanimation leader nanosleep,
+   its 17-thread FFRT pool FUTEX_WAIT_PRIVATE, render_service idle
+   epoll, no page flips after frame 1, no boot.completed). Input:
+   hop1 100% (INEV 107-111); hop2 — dhardware/input_user_host opens
+   event0/1/2 at 45s and is samgr-ordered SIGKILLed at 51-54s
+   ("SAMGR: Scheduler proc:dhardware kill pid:..."), mmi never opens
+   the nodes (EventHub needs a subscriber), INRD stays 2 (audio);
+   hop3 static (pixel diffs 0 on 10 taps+swipe+keys). This is the
+   111st's FFRT never-sent family — now the ONLY blocker left.
+5. Gates: x86_64/riscv64/aarch64 builds rc=0; riscv64 make test ALL
+   TESTS PASSED (run/mmi-maketest.log). Open: the write-spin site
+   (next repro self-symbolizes), the FFRT never-sent wedge upstream
+   of the UI phase.
