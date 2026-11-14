@@ -1253,6 +1253,15 @@ use core::sync::atomic::Ordering as Relaxed2;
 // the latched tgid's mms; foreign same-VA words never fault at all.
 pub static FUXWATCH1_TGID: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
+// huks-wedge lane (hw1): slot 2 gets its own tgid restriction. The
+// 81st restricted only slot 1 (FUXWATCH1_TGID) but arm_round applied
+// that restriction to the WHOLE round — with slot 1 tgid-latched, the
+// round never visited any other tgid's mms, so a slot-2 word armed by
+// the latch (huks on hw1w1) could never actually arm. Slot 2 is now
+// tgid-restricted the same way and arm_round visits a task when EITHER
+// slot's tgid matches.
+pub static FUXWATCH2_TGID: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
 
 // 81st (ohw126 frontier): the sync-holder futex park latch. The 80th's
 // immediate per-word wake verdict (fuxw_push) only fires when a fuxwatch
@@ -1282,6 +1291,17 @@ pub static FUXPARK_J: core::sync::atomic::AtomicU32 =
 /// slot 1 takes slot 2 (the PTE watch is per page — a same-page shift is
 /// already covered by slot 1's page plus the FW-PG page-mate log).
 /// dfx=fuxstuck-gated by the caller.
+///
+/// huks-wedge lane (hw1): STICKY watch slots. The 81st re-targeted slot
+/// 1 on every latch, so with several stalled tgids the write watch kept
+/// re-arming the winner of the moment (hw1w1: huks 0x..64224 -> huks
+/// 0x..19224 -> foundation 0x..4e24 within 70 ms; huks's word lost its
+/// slot before any write could be logged). The verdict fields
+/// (FUXPARK_WORD/TID/TGID) still follow the newest row exactly as the
+/// 81st had them; only the SLOTS are now assigned to the first two
+/// DISTINCT stalled tgids and re-targeted only on a same-tgid page move
+/// (with the done-set re-opened so the moved page actually arms — the
+/// old code never reset it on the slot-1 move path).
 pub fn fuxpark_latch(word: u64, tid: u32, tgid: u32) {
     use core::sync::atomic::Ordering::Relaxed;
     if word == 0 || word < 0x1000 {
@@ -1293,62 +1313,69 @@ pub fn fuxpark_latch(word: u64, tid: u32, tgid: u32) {
     if prev == 0 {
         FUXPARK_J.store(crate::drivers::timer::get_jiffies() as u32, Relaxed);
     }
-    // Arm the write watch on first sight and on a page move only — the
-    // shift-within-page case keeps slot 1's page RO (write side covered).
-    let page_move = prev != 0 && (prev & !0xfff) != (word & !0xfff);
-    if prev == 0 || page_move {
-        let s1 = FUXWATCH_ADDR.load(Relaxed);
-        if s1 == 0 || ((s1 & !0xfff) != (word & !0xfff) && page_move) {
-            if FUXWATCH_ADDR
-                .compare_exchange(s1, word, Relaxed, Relaxed)
-                .is_ok()
-            {
-                FUXWATCH1_TGID.store(tgid, Relaxed);
-                // ConsoleWriter, not pr_warn — the censusd audit context
-                // drops printk (ohw128-134: this print never appeared
-                // while the arm provably happened).
-                {
-                    let mut cw = crate::dfx::backtrace::ConsoleWriter::new();
-                    use core::fmt::Write as _;
-                    let _ = writeln!(
-                        cw,
-                        "FUXPARK-ARM s1 word={:#x} tid={} tgid={} (sync-holder park)",
-                        word,
-                        tid,
-                        tgid
-                    );
-                }
-                crate::dfx::taskdump::ensure_defer_thread();
-                return;
-            }
+    // ---- watch-slot assignment (sticky, per tgid) ----
+    let arm_print = |slot: u8, w: u64| {
+        let mut cw = crate::dfx::backtrace::ConsoleWriter::new();
+        use core::fmt::Write as _;
+        let _ = writeln!(
+            cw,
+            "FUXPARK-ARM s{} word={:#x} tid={} tgid={} (sync-holder park{})",
+            slot,
+            w,
+            tid,
+            tgid,
+            if slot == 1 { "" } else { ", sticky" }
+        );
+        crate::dfx::taskdump::ensure_defer_thread();
+    };
+    let reopen_done_set = || {
+        for d in FUXWATCH_MM_DONE.iter() {
+            d.store(0, Relaxed);
         }
-        // Slot 1 busy with a foreign page: slot 2, and re-open the mm
-        // done-set so the arm round arms the new page in every mm
-        // (FUXWATCH_MM_DONE entries are per root and would skip mms
-        // already armed for slot 1's page).
-        let s2 = FUXWATCH2_ADDR.load(Relaxed);
-        if s2 == 0
-            && (s1 == 0 || (s1 & !0xfff) != (word & !0xfff))
-            && FUXWATCH2_ADDR
-                .compare_exchange(0, word, Relaxed, Relaxed)
-                .is_ok()
+    };
+    let s1 = FUXWATCH_ADDR.load(Relaxed);
+    let s1_t = FUXWATCH1_TGID.load(Relaxed);
+    if s1 == 0 {
+        if FUXWATCH_ADDR
+            .compare_exchange(0, word, Relaxed, Relaxed)
+            .is_ok()
         {
-            for d in FUXWATCH_MM_DONE.iter() {
-                d.store(0, Relaxed);
-            }
-            {
-                let mut cw = crate::dfx::backtrace::ConsoleWriter::new();
-                use core::fmt::Write as _;
-                let _ = writeln!(
-                    cw,
-                    "FUXPARK-ARM s2 word={:#x} tid={} tgid={} (sync-holder park)",
-                    word,
-                    tid,
-                    tgid
-                );
-            }
-            crate::dfx::taskdump::ensure_defer_thread();
+            FUXWATCH1_TGID.store(tgid, Relaxed);
+            // ConsoleWriter, not pr_warn — the censusd audit context
+            // drops printk (ohw128-134: this print never appeared
+            // while the arm provably happened).
+            arm_print(1, word);
         }
+        return;
+    }
+    if s1_t == tgid {
+        // Same-tgid word (mid-park shift or a sibling word): follow only
+        // a PAGE move (a same-page shift is already covered by the RO
+        // page plus the FW-PG page-mate log).
+        if (s1 & !0xfff) != (word & !0xfff) {
+            FUXWATCH_ADDR.store(word, Relaxed);
+            reopen_done_set();
+            arm_print(1, word);
+        }
+        return;
+    }
+    // Foreign tgid relative to slot 1: slot 2 is dedicated to the SECOND
+    // distinct stalled tgid and stays sticky afterwards.
+    let s2 = FUXWATCH2_ADDR.load(Relaxed);
+    let s2_t = FUXWATCH2_TGID.load(Relaxed);
+    if s2 == 0 {
+        if FUXWATCH2_ADDR
+            .compare_exchange(0, word, Relaxed, Relaxed)
+            .is_ok()
+        {
+            FUXWATCH2_TGID.store(tgid, Relaxed);
+            reopen_done_set();
+            arm_print(2, word);
+        }
+    } else if s2_t == tgid && (s2 & !0xfff) != (word & !0xfff) {
+        FUXWATCH2_ADDR.store(word, Relaxed);
+        reopen_done_set();
+        arm_print(2, word);
     }
 }
 
@@ -1456,9 +1483,17 @@ pub fn fuxwatch_arm_round() {
         let tk = unsafe { &*task };
         // 81st: a park-latched slot-1 word is watched in its OWN tgid
         // only (see FUXWATCH1_TGID) — the same VA in every other mm is
-        // a different object.
-        let park_tgid = FUXWATCH1_TGID.load(Relaxed);
-        if park_tgid != 0 && tk.tgid() as u32 != park_tgid {
+        // a different object. hw1 (huks-wedge): the restriction is now
+        // PER SLOT — slot 2 carries its own tgid (FUXWATCH2_TGID) and
+        // the round visits a task when EITHER slot's tgid matches; the
+        // 81st applied slot 1's restriction to the whole round, so a
+        // slot-2 word latched by the census could never arm.
+        let park_tgid1 = FUXWATCH1_TGID.load(Relaxed);
+        let park_tgid2 = FUXWATCH2_TGID.load(Relaxed);
+        let this_tgid = tk.tgid() as u32;
+        let ok1 = park_tgid1 == 0 || this_tgid == park_tgid1;
+        let ok2 = park_tgid2 == 0 || this_tgid == park_tgid2;
+        if !ok1 && !ok2 {
             return;
         }
         let Some(aspace) = tk.address_space() else {
@@ -1479,8 +1514,15 @@ pub fn fuxwatch_arm_round() {
         // SAFETY: read-only walk of the task's page tables.
         let mut to_arm: [u64; 2] = [0; 2];
         let mut narm = 0usize;
-        for &wa in [&addr, &addr2] {
+        for (si, wa) in [&addr, &addr2].iter().enumerate() {
+            let wa: u64 = **wa;
             if wa == 0 || to_arm.contains(&wa) {
+                continue;
+            }
+            if si == 0 && !ok1 {
+                continue;
+            }
+            if si == 1 && !ok2 {
                 continue;
             }
             let ok = unsafe {
@@ -3403,8 +3445,21 @@ pub fn sqwalk_step_deep(tgid: u32, word: u64, deep: bool) {
         let drained = match rd_word(old_root, old_w & !7) {
             Some(x) => {
                 let v = ((x >> ((old_w & 4) * 8)) & 0xffff_ffff) as u32;
-                SQW_DEEP.load(Relaxed) != 0
-                    || !(v & 0x8000_0000 != 0 && (v & 0x7fff_ffff) >= 8)
+                if SQW_DEEP.load(Relaxed) != 0 {
+                    true
+                } else {
+                    // hw1 (huks-wedge): the rwlock-shape test (bit31 set,
+                    // 8+ "readers") called live musl-MUTEX freezes
+                    // "drained": the frozen pthread-mutex words sit at
+                    // 0x2 / 0x10 with no bit31 (hw1w1 FW decode: acquire
+                    // CAS musl+0x11b8d7 0->0x10, release musl+0x11bd83;
+                    // huks's -224 family parks at val 0x2), and the
+                    // bit31 marker flickers with waiter churn on the
+                    // 0x80000010 face. A lock of either family is FREE
+                    // only when the whole word reads 0 — a cycling word
+                    // drains at its next unlock, a frozen one never.
+                    v == 0
+                }
             }
             None => true, // mm gone: nothing to scan anyway
         };
