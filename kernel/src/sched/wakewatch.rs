@@ -442,7 +442,7 @@ fn probe_prints_on() -> bool {
 
 fn ww_msg(msg: &[u8]) {
     for &b in msg {
-        unsafe { crate::console::putchar_no_lock(b) };
+        crate::dfx::taskdump::putc_brief(b);
     }
 }
 
@@ -460,7 +460,7 @@ fn ww_u64(mut v: u64) {
         }
     }
     for i in (0..n).rev() {
-        unsafe { crate::console::putchar_no_lock(buf[i]) };
+        crate::dfx::taskdump::putc_brief(buf[i]);
     }
 }
 
@@ -483,7 +483,7 @@ fn ww_hex(v: u64) {
         }
     }
     for i in (0..n).rev() {
-        unsafe { crate::console::putchar_no_lock(buf[i]) };
+        crate::dfx::taskdump::putc_brief(buf[i]);
     }
 }
 

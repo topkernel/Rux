@@ -854,12 +854,14 @@ pub fn do_exit(exit_code: i32) -> ! {
             let n = WQL_N.fetch_add(1, Rel::Relaxed);
             if n < 64 {
                 let comm = unsafe { (*current).comm_str() };
-                let mut line: alloc::string::String =
+                let line: alloc::string::String =
                     alloc::format!("WQLEAK[{}] pid={} regs={} comm='{}'\n", n, dying_pid, regs, comm);
                 // Raw UART, one write per line: readable at any loglevel.
-                for b in line.as_bytes() {
-                    crate::console::uart_putc_raw(*b);
-                }
+                // Routed through the taskdump funnel (obs-hygiene): the
+                // line stages and flushes atomically instead of per-byte
+                // uart_putc_raw, which the OH kmsg flood spliced mid-line
+                // on SMP8.
+                crate::dfx::taskdump::taskdump_raw_line(line.as_bytes());
             }
         }
     }
