@@ -150,19 +150,31 @@ impl ListHead {
     where
         F: FnMut(*mut ListHead),
     {
+        // LTP-open lane (post-msgstress01 wedge, 2026-11-14): this walk
+        // used to break at 1000 iterations "to prevent infinite loops".
+        // The bound is a Linux-ABI divergence, not a safety net: the only
+        // users are the task-tree children walks (for_each_child /
+        // for_each_group_child / find_child_by_pid / count_children /
+        // collect_children_pinned, all under PROCESS_TREE_LOCK), and a
+        // parent can legitimately hold FAR more than 1000 children —
+        // LTP msgstress01's timeout kill reparents ~1400 orphans to init
+        // in one boot (TREE-RELEASE-HEAL 433 + the one-by-one reparents
+        // ahead of it). New children are add_tail'd, so after the storm
+        // every fresh child of pid 1 sat past position 1000; the cap then
+        // truncated every do_wait walk, pid 1 never reaped or even FOUND
+        // its later children, and all 32 subsequent tests in that scan
+        // chunk returned the runner's exec-failed rc=254/127 (census
+        // chunk 0600: "Too many iterations" before each RES row; the
+        // storm1500 probe reproduces it exactly — /bin/echo exec rc=127
+        // with 4 cap prints on the capped kernel, rc=0 x3 with zero
+        // prints on this walk). Reference list_for_each_entry has NO
+        // iteration cap; list integrity is a list-mutation invariant
+        // (all mutations hold the owning lock), and a corrupted cycle
+        // would be caught by the spinlock/deadlock watchdog — silently
+        // truncating correct walks is the worse failure mode. Termination
+        // is `pos != head`, exactly the reference discipline.
         let mut pos = (*head).next;
-        let mut iterations = 0usize;
         while pos != head {
-            if iterations > 1000 {
-                // Prevent infinite loop
-                use crate::console::putchar;
-                const MSG: &[u8] = b"ListHead::for_each: Too many iterations, breaking\n";
-                for &b in MSG {
-                    putchar(b);
-                }
-                break;
-            }
-            iterations += 1;
             let next = (*pos).next;
             f(pos);
             pos = next;
