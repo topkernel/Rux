@@ -309,6 +309,20 @@ static RWFRZ_WATCH_CNT: core::sync::atomic::AtomicUsize =
 // the same worst-case UART bound as one parkdump stack dump.
 const RWFRZ_WATCH_BUDGET: usize = 192;
 
+/// rwlock-livelock: tgid whose THREAD EXITS are traced (the exit-path
+/// forensics in do_exit read this). Latched at the FIRST plain-mutex
+/// contention WAIT (expected val 1/2) from a process whose TGID LEADER
+/// comm starts with "udisksd" — early enough to cover exits that happen
+/// BEFORE the freeze census adopts the frozen word (the wedge's holder
+/// must have died or stalled before the waiter parked).
+static RWFRZ_EXIT_WATCH_TGID: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// The exit-path forensics tgid (0 = off).
+pub fn rwfz_exit_watch_tgid() -> u32 {
+    RWFRZ_EXIT_WATCH_TGID.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 // FXDV2: param-arena futex tracer budget (see the FXDV2 block in
 // do_futex — traces every futex op on the fixed-address /dev/__parameters__
 // window from any process).
@@ -1358,6 +1372,22 @@ pub static FUXWATCH_OWNER_J: core::sync::atomic::AtomicU32 =
 /// off. fuxwatch2 pre-arms the second slot (the census/chain-walk
 /// auto-arm only fills it when free).
 pub fn fuxwatch_parse() {
+    // rwlock-livelock: rwfrzwatch=0xADDR pre-arms the RWFRZ-WATCH futex
+    // op tracer at boot (the census latches only minutes after a freeze
+    // forms — the holder's final unlock lands before that and was
+    // invisible). For a deterministic image (the ub2404 spawn-queue
+    // mutex address is stable across boots) this records the word's
+    // COMPLETE WAIT/WAKE lifecycle from t=0.
+    if let Some(v) = crate::cmdline::get_param("rwfrzwatch") {
+        if let Some(a) = v.trim_start_matches("0x").split(',').next() {
+            if let Ok(addr) = u64::from_str_radix(a, 16) {
+                if addr > 0x1000 {
+                    RWFRZ_WATCH[0].store(addr as usize, core::sync::atomic::Ordering::Relaxed);
+                    crate::pr_warn!("rwfrzwatch armed {:#x}", addr);
+                }
+            }
+        }
+    }
     let Some(v) = crate::cmdline::get_param("fuxwatch") else {
         // fuxwatch2 is independent of slot 1
         fuxwatch2_parse();
@@ -7737,35 +7767,67 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
     // nonzero — reader side stuck). Budgeted at 64 lines total.
     {
         use core::sync::atomic::Ordering::Relaxed;
-        if RWFRZ_WATCH[0].load(Relaxed) != 0 || RWFRZ_WATCH[1].load(Relaxed) != 0 {
-            for w in RWFRZ_WATCH.iter() {
-                let wa = w.load(Relaxed);
-                if wa != 0 && wa == uaddr {
-                    let c = RWFRZ_WATCH_CNT.fetch_add(1, Relaxed);
-                    if c < RWFRZ_WATCH_BUDGET {
-                        let (tid, tgid) = match crate::sched::current() {
-                            Some(t) => unsafe { ((*t).pid(), (*t).tgid()) },
-                            None => (0, 0),
-                        };
-                        crate::pr_warn!(
-                            "RWFRZ-WATCH #{} tid={} tgid={} op={} uaddr={:#x} val={:#x} jif={}",
-                            c,
-                            tid,
-                            tgid,
-                            match cmd {
-                                FUTEX_WAIT => "WAIT",
-                                FUTEX_WAIT_BITSET => "WAITB",
-                                FUTEX_WAKE => "WAKE",
-                                FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => "REQUEUE",
-                                _ => "other",
-                            },
-                            uaddr,
-                            val,
-                            crate::drivers::timer::get_jiffies(),
-                        );
-                    }
-                    break;
+        // rwlock-livelock: latch the exit-watch tgid at the FIRST
+        // plain-mutex contention WAIT (expected val 1/2 — glibc
+        // pthread_mutex slow path) from a process whose tgid LEADER is
+        // udisksd. The wedge's mutex holder matches no live task, so
+        // the discriminating datum is whether a thread of this process
+        // EXITS in the window before the waiter parks; the census adopts
+        // the frozen word only minutes later, so the latch must ride
+        // the very first contention.
+        if matches!(cmd, FUTEX_WAIT | FUTEX_WAIT_BITSET)
+            && (val == 1 || val == 2)
+            && RWFRZ_EXIT_WATCH_TGID.load(Relaxed) == 0
+        {
+            if let Some(t) = crate::sched::current() {
+                // SAFETY: read-only tgid of the current task.
+                let tgid = unsafe { (*t).tgid() as u32 };
+                // SAFETY: pid-hash lookup of the tgid leader; read-only
+                // comm read.
+                let lead = unsafe { crate::sched::find_task_by_pid(tgid) };
+                if !lead.is_null()
+                    && unsafe { (*lead).comm() }.starts_with(b"udisksd")
+                {
+                    let _ = RWFRZ_EXIT_WATCH_TGID.compare_exchange(
+                        0,
+                        tgid,
+                        Relaxed,
+                        Relaxed,
+                    );
                 }
+            }
+        }
+        // rwlock-livelock: the guard read only slots 0/1 — a word latched
+        // into a later slot (glibc-shape latch after musl parks took the
+        // front slots) never printed. Scan all 8; the all-zero fast exit
+        // is the same cost as the old two loads.
+        for w in RWFRZ_WATCH.iter() {
+            let wa = w.load(Relaxed);
+            if wa != 0 && wa == uaddr {
+                let c = RWFRZ_WATCH_CNT.fetch_add(1, Relaxed);
+                if c < RWFRZ_WATCH_BUDGET {
+                    let (tid, tgid) = match crate::sched::current() {
+                        Some(t) => unsafe { ((*t).pid(), (*t).tgid()) },
+                        None => (0, 0),
+                    };
+                    crate::pr_warn!(
+                        "RWFRZ-WATCH #{} tid={} tgid={} op={} uaddr={:#x} val={:#x} jif={}",
+                        c,
+                        tid,
+                        tgid,
+                        match cmd {
+                            FUTEX_WAIT => "WAIT",
+                            FUTEX_WAIT_BITSET => "WAITB",
+                            FUTEX_WAKE => "WAKE",
+                            FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => "REQUEUE",
+                            _ => "other",
+                        },
+                        uaddr,
+                        val,
+                        crate::drivers::timer::get_jiffies(),
+                    );
+                }
+                break;
             }
         }
     }
@@ -8069,6 +8131,51 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
             -ENOSYS as i64
         }
     };
+    // rwlock-livelock: post-dispatch twin of the RWFRZ-WATCH entry print.
+    // The verdict ladder needs op OUTCOMES on the frozen word, not just
+    // arrivals: a WAKE that returned 0 while a waiter stays parked is the
+    // (b) wake-miss shape; a WAKE that returned >=1 with the waiter still
+    // parked is (c) re-park; a WAIT returning -EAGAIN in a loop is the
+    // userspace spin itself; total silence after the latch is (a)
+    // never-sent. glibc's rwlock retry ladder keys off futex_wake's
+    // return count, so ret is printed for every op class. Shares the
+    // 192-line budget with the entry print (a spinner eats it in ms, but
+    // the first 192 lines ARE the loop's shape).
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        for w in RWFRZ_WATCH.iter() {
+            let wa = w.load(Relaxed);
+            if wa != 0 && wa == uaddr {
+                let c = RWFRZ_WATCH_CNT.fetch_add(1, Relaxed);
+                if c < RWFRZ_WATCH_BUDGET {
+                    let (tid, tgid) = match crate::sched::current() {
+                        Some(t) => unsafe { ((*t).pid(), (*t).tgid()) },
+                        None => (0, 0),
+                    };
+                    crate::pr_warn!(
+                        "RWFRZ-WATCH-RET #{} tid={} tgid={} op={} uaddr={:#x} val={:#x} ret={} jif={}",
+                        c,
+                        tid,
+                        tgid,
+                        match cmd {
+                            FUTEX_WAIT => "WAIT",
+                            FUTEX_WAIT_BITSET => "WAITB",
+                            FUTEX_WAKE => "WAKE",
+                            FUTEX_WAKE_BITSET => "WAKEB",
+                            FUTEX_WAKE_OP => "WAKEOP",
+                            FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => "REQUEUE",
+                            _ => "other",
+                        },
+                        uaddr,
+                        val,
+                        ret,
+                        crate::drivers::timer::get_jiffies(),
+                    );
+                }
+                break;
+            }
+        }
+    }
     // sc58: record completed WAKE-class ops in the verdict ring (the
     // census dumps the window around stuck parks' births). Includes the
     // error returns — a rejected op is also a "fired but delivered
@@ -9734,6 +9841,13 @@ fn probe_file_path(f: &crate::fs::file::File) -> alloc::string::String {
 /// (slot[1] resolved into libc++ string::assign — data, not code flow;
 /// slot[12] points into a zero page), so the cond's true caller chain
 /// is still unnamed. This pass keeps a stack qword only when the bytes
+/// Public shim for the exit-path forensics (process/exit.rs): walk the
+/// DYING thread's user stack — its frames are intact at do_exit time.
+/// SAFETY: caller guarantees `task` is the current, still-live task.
+pub unsafe fn apppark_rets_public(task: *const Task) {
+    unsafe { apppark_rets(task) }
+}
+
 /// IMMEDIATELY BEFORE it decode as a call instruction — `E8 rel32`
 /// (v-5) or `FF D0-D7` call-reg (v-2) — the cheap x86-64 signature of
 /// a real return address. Slots surviving that check are the real
@@ -10203,18 +10317,216 @@ pub fn freeze_scan(now: u64, hz: u64) {
                     if now.saturating_sub(htab[i].at) >= 60 * hz {
                         let prev_r = htab[i].lastv & 0x7fffffff;
                         let cur_r = v & 0x7fffffff;
+                        let unchanged = cur_r == prev_r;
                         htab[i].lastv = v;
                         htab[i].at = now;
+                        // rwlock-livelock lane: name the sample waiter (the
+                        // parked task the cluster was keyed on) so the dump
+                        // answers "who waits" without a second probe.
+                        let (sample_tid, sample_state) = if c.sample.is_null() {
+                            (0u32, 0u32)
+                        } else {
+                            // SAFETY: read-only pid/state of a task still
+                            // linked in a futex bucket (waiter_clusters ran
+                            // under the bucket lock when it sampled).
+                            unsafe { ((*c.sample).pid(), (*c.sample).state().bits()) }
+                        };
                         crate::pr_warn!(
-                            "RWFRZ-HIGH uaddr={:#x} tgid {} waiters={} word={:#x} readers={} (was {}, d{:+})",
+                            "RWFRZ-HIGH uaddr={:#x} tgid {} waiters={} word={:#x} readers={} (was {}, d{:+}) wtid={} wstate={:#x}",
                             c.uaddr,
                             c.tgid,
                             c.n,
                             v,
                             cur_r,
                             prev_r,
-                            cur_r as i64 - prev_r as i64
+                            cur_r as i64 - prev_r as i64,
+                            sample_tid,
+                            sample_state
                         );
+                        // rwlock-livelock: the parked sample waiter's user
+                        // frame — comm + the SYSCALL-ENTRY registers still
+                        // live in pt_regs while the task sleeps in
+                        // futex_wait. On x86_64: rip = return address
+                        // after the syscall instruction (names the libc
+                        // wait site), rsi = op, rdx = val (the EXPECTED
+                        // word value the waiter parked on — decides which
+                        // glibc rwlock wait site this is: __readers vs
+                        // __wrphase_futex vs __writers_futex), r8 = uaddr2.
+                        // This mirrors HUNG-CTX's frame read; printed as a
+                        // separate line so the RWFRZ-HIGH shape stays
+                        // diffable against older serials.
+                        if !c.sample.is_null() {
+                            // SAFETY: read-only diagnostics of a task still
+                            // linked in a futex bucket (sampled under the
+                            // bucket lock by waiter_clusters).
+                            let tk = unsafe { &*c.sample };
+                            let cb = tk.comm();
+                            let cl = cb.iter().position(|&b| b == 0).unwrap_or(16);
+                            let comm = core::str::from_utf8(&cb[..cl]).unwrap_or("?");
+                            // The process name: the tgid leader's comm
+                            // (thread comms like 'pool-spawner' name the
+                            // GLib role, the leader names the daemon).
+                            let lead = unsafe { crate::sched::find_task_by_pid(c.tgid) };
+                            let leader_comm = if lead.is_null() {
+                                "?"
+                            } else {
+                                // SAFETY: read-only comm of the tgid leader
+                                // found by pid-hash lookup.
+                                let lb = unsafe { (*lead).comm() };
+                                let ll = lb.iter().position(|&b| b == 0).unwrap_or(16);
+                                core::str::from_utf8(&lb[..ll]).unwrap_or("?")
+                            };
+                            let pr = tk.pt_regs();
+                            if !pr.is_null() {
+                                #[cfg(feature = "x86_64")]
+                                let (urip, uop, uval) = unsafe {
+                                    ((*pr).rip, (*pr).rsi as i64, (*pr).rdx)
+                                };
+                                #[cfg(feature = "riscv64")]
+                                let (urip, uop, uval) = unsafe {
+                                    ((*pr).epc, (*pr).a1 as i64, (*pr).a2)
+                                };
+                                #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
+                                let (urip, uop, uval) = (0u64, 0i64, 0u32);
+                                crate::pr_warn!(
+                                    "RWFRZ-WAITER tid={} comm='{}' tgid={} leader='{}' unrip={:#x} unrop={} unval={:#x}",
+                                    sample_tid,
+                                    comm,
+                                    c.tgid,
+                                    leader_comm,
+                                    urip,
+                                    uop,
+                                    uval
+                                );
+                            }
+                        }
+                        // rwlock-livelock: dump the LOCK STRUCT once per
+                        // stable window — 33 u32 words from uaddr-64 to
+                        // uaddr+64 through the sample task's page table.
+                        // The word pattern identifies the primitive where
+                        // guesswork cannot: pthread_mutex (__lock 0/1/2 at
+                        // +0, owner tid at +8), pthread_rwlock (__readers
+                        // flags 1/2/4 at +0 with count<<3, __wrphase_futex
+                        // at +8, __writers_futex at +12), pthread_cond
+                        // (__wseq u64 at +0, __g1_orig_size at +8, __wrefs
+                        // at +12, __g_signals[2] at +16/+20). The observed
+                        // park vals 2->3 fit glibc rwlock __wrphase_futex
+                        // but the observed WAKE nr=1 fits cond/mutex —
+                        // only the raw bytes settle it.
+                        if unchanged && !c.sample.is_null() {
+                            let base = c.uaddr.saturating_sub(64) & !3;
+                            // One pr_warn PER ROW: a single multi-line
+                            // string loses its tail to console interleaving
+                            // (observed in boot F: the dump died after 7 of
+                            // 33 words every window).
+                            for row in 0..5usize {
+                                let mut words = alloc::string::String::new();
+                                use core::fmt::Write as _;
+                                for k in 0..8usize {
+                                    let idx = row * 8 + k;
+                                    if idx >= 33 {
+                                        break;
+                                    }
+                                    let va = base + idx * 4;
+                                    match unsafe { read_u32_via_task(c.sample, va) } {
+                                        Some(wv) => {
+                                            let _ = write!(
+                                                words,
+                                                " {:+#x}={:#x}",
+                                                va as i64 - c.uaddr as i64,
+                                                wv
+                                            );
+                                        }
+                                        None => {
+                                            let _ = write!(
+                                                words,
+                                                " {:+#x}=X",
+                                                va as i64 - c.uaddr as i64
+                                            );
+                                        }
+                                    }
+                                }
+                                if !words.is_empty() {
+                                    crate::pr_warn!(
+                                        "RWFRZ-MEM{} uaddr={:#x} tgid={}:{}",
+                                        row,
+                                        c.uaddr,
+                                        c.tgid,
+                                        words
+                                    );
+                                }
+                            }
+                        }
+                        // rwlock-livelock lane (glibc shape): the ub2404
+                        // freeze is word=0x2 — NO waiters bit, so the musl
+                        // RWFRZ-PARK hook (which requires val&0x80000000)
+                        // never latches it and the sc185 oplog stays dark.
+                        // A cluster word that kept >=2 readers for a full
+                        // 60 s census window with a live waiter is frozen
+                        // by any protocol's lights: latch it into the
+                        // existing RWFRZ-WATCH table so every subsequent
+                        // futex op on the word prints (WAIT vs WAKE vs
+                        // silence — the (a)/(b)/(c) verdict data). Same
+                        // first-free-slot pattern as the RWFRZ-PARK latch.
+                        if unchanged {
+                            let watched = RWFRZ_WATCH.iter().any(|w| {
+                                w.load(core::sync::atomic::Ordering::Relaxed)
+                                    == c.uaddr
+                            });
+                            if !watched {
+                                for w in RWFRZ_WATCH.iter() {
+                                    if w.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+                                        w.store(c.uaddr, core::sync::atomic::Ordering::Relaxed);
+                                        crate::pr_warn!(
+                                            "RWFRZ-WATCH-LATCH uaddr={:#x} tgid {} (stable 60s, readers={})",
+                                            c.uaddr,
+                                            c.tgid,
+                                            cur_r
+                                        );
+                                        break;
+                                    }
+                                }
+                                // rwlock-livelock: one-shot full-tgid task
+                                // dump AT THE LATCH (the musl-shape FROZEN
+                                // dump never fires for the glibc word=0x2
+                                // shape — no waiters bit). Every task's
+                                // last syscall + rip + arg0 + kernel frames:
+                                // the frozen word's HOLDER (or the thread
+                                // blocked mid-critical-section in the
+                                // kernel) shows up as sys=clone/exec/read
+                                // with frames naming the stuck path.
+                                static TGID_DUMPED: core::sync::atomic::AtomicU32 =
+                                    core::sync::atomic::AtomicU32::new(0);
+                                if TGID_DUMPED
+                                    .compare_exchange(
+                                        0,
+                                        c.tgid,
+                                        core::sync::atomic::Ordering::Relaxed,
+                                        core::sync::atomic::Ordering::Relaxed,
+                                    )
+                                    .is_ok()
+                                {
+                                    exit_ring_dump_tgid(c.tgid);
+                                    let n = rwfz_dump_tgid(c.tgid, 32, true);
+                                    crate::pr_warn!(
+                                        "RWFRZ: GBC-FROZEN tgid {} uaddr={:#x} word={:#x} — dumped {} tasks",
+                                        c.tgid,
+                                        c.uaddr,
+                                        v,
+                                        n
+                                    );
+                                    // rwlock-livelock: the sample waiter's
+                                    // USER return-address chain (call-site-
+                                    // validated, vma+file-offset annotated)
+                                    // — names the exact libc/GLib wait site
+                                    // (mutex vs cond vs rwlock path) when
+                                    // symbolized against the image's libs.
+                                    if !c.sample.is_null() {
+                                        unsafe { apppark_rets(c.sample) };
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 None => {
@@ -10253,6 +10565,58 @@ pub fn freeze_scan(now: u64, hz: u64) {
                             v,
                             readers
                         );
+                        // rwlock-livelock: latch the futex-op watch AT
+                        // FIRST SIGHT, not after a stable 60s window —
+                        // the holder's final unlock (the (a)-verdict
+                        // datum) can land inside that first minute and
+                        // was invisible in boots E/F/G.
+                        {
+                            let watched = RWFRZ_WATCH.iter().any(|w| {
+                                w.load(core::sync::atomic::Ordering::Relaxed) == c.uaddr
+                            });
+                            if !watched {
+                                for w in RWFRZ_WATCH.iter() {
+                                    if w.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+                                        w.store(c.uaddr, core::sync::atomic::Ordering::Relaxed);
+                                        crate::pr_warn!(
+                                            "RWFRZ-WATCH-EARLY uaddr={:#x} tgid {} word={:#x}",
+                                            c.uaddr,
+                                            c.tgid,
+                                            v
+                                        );
+                                        break;
+                                    }
+                                }
+                                // ...and run the one-shot full-tgid task
+                                // dump HERE too (boot J: the early latch
+                                // made the 60s-stable LATCH's !watched
+                                // guard false and the dump never fired).
+                                static TGID_DUMPED_E: core::sync::atomic::AtomicU32 =
+                                    core::sync::atomic::AtomicU32::new(0);
+                                if TGID_DUMPED_E
+                                    .compare_exchange(
+                                        0,
+                                        c.tgid,
+                                        core::sync::atomic::Ordering::Relaxed,
+                                        core::sync::atomic::Ordering::Relaxed,
+                                    )
+                                    .is_ok()
+                                {
+                                    exit_ring_dump_tgid(c.tgid);
+                                    let n = rwfz_dump_tgid(c.tgid, 32, true);
+                                    crate::pr_warn!(
+                                        "RWFRZ: GBC-EARLY tgid {} uaddr={:#x} word={:#x} — dumped {} tasks",
+                                        c.tgid,
+                                        c.uaddr,
+                                        v,
+                                        n
+                                    );
+                                    if !c.sample.is_null() {
+                                        unsafe { apppark_rets(c.sample) };
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
