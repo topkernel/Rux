@@ -754,14 +754,22 @@ impl<T: ?Sized> DerefMut for SpinlockIrqGuard<'_, T> {
 impl<T: ?Sized> Drop for SpinlockIrqGuard<'_, T> {
     #[inline]
     fn drop(&mut self) {
-        self.lock.raw.unlock();
+        // ORDER FIX (glib-mutex lane, 2026-11-14): preempt sub BEFORE the
+        // raw unlock. The old order exposed a [unlock..sub] window in
+        // which the lock was free while the dropping task still carried
+        // its +1 — any observer adjudicating "parked task with a live
+        // count" (the WAKE-HEAL class) could zero an in-flight guard.
+        // preempt_enable is a bare sub (no resched) and IF stays 0 until
+        // irq_restore below, so the reorder cannot enable preemption
+        // under the lock.
         preempt_enable();
+        self.lock.raw.unlock();
         irq_restore(self.flags);
     }
 }
 
 impl<T: ?Sized> SpinlockIrqGuard<'_, T> {
-    /// Release only the spinlock (unlock + preempt_enable), returning
+    /// Release only the spinlock (preempt_enable + unlock), returning
     /// the saved IRQ flags. The caller must later call `irq_restore(flags)`
     /// to restore interrupt state.
     ///
@@ -769,11 +777,15 @@ impl<T: ?Sized> SpinlockIrqGuard<'_, T> {
     /// context_switch but keep interrupts disabled until after
     /// context_switch returns (following Linux's pattern where
     /// finish_task_switch releases the lock).
+    ///
+    /// ORDER FIX (glib-mutex lane): preempt sub before unlock — see the
+    /// Drop impl above; the GRQ twin's capture (garepro26 WAKE-HEAL /
+    /// PREEMPT-UNDERFLOW pair) convicted this window.
     #[inline]
     pub fn unlock_irqretain(self) -> bool {
         let flags = self.flags;
-        self.lock.raw.unlock();
         preempt_enable();
+        self.lock.raw.unlock();
         core::mem::forget(self); // prevent Drop from running
         flags
     }
