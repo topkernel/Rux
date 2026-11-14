@@ -620,23 +620,26 @@ fn sigill_has_handler() -> bool {
 }
 
 /// Pend SIGSEGV for delivery by a handler, or kill — the riscv64
-/// Segfault/PermissionDenied twin's exact routing.
-fn fault_sigsegv_route() {
+/// Segfault/PermissionDenied twin's exact routing. si_code/si_addr
+/// parity (arena-mmap lane 2026-11-14): the siginfo must carry the
+/// faulting address (Linux force_sig_fault) or any handler that
+/// demand-maps the faulting page installs the WRONG page and
+/// re-faults forever.
+fn fault_sigsegv_route(code: i32, addr: u64) {
     let pid = crate::process::current_pid();
+    let info = crate::signal::SigInfo::fault(
+        crate::signal::Signal::SIGSEGV as i32,
+        code,
+        addr,
+    );
     if sigsegv_has_handler() && !sigsegv_blocked_current() {
-        let _ = crate::signal::send_signal_directed(
-            pid,
-            crate::signal::Signal::SIGSEGV as i32,
-        );
+        let _ = crate::signal::send_signal_with_info_directed(pid, info);
         // Synchronous fault: deliver despite a blocked mask (Linux
         // force_sig parity).
         crate::signal::force_unblock_current(crate::signal::Signal::SIGSEGV as i32);
         return;
     }
-    let _ = crate::signal::send_signal_directed(
-        pid,
-        crate::signal::Signal::SIGSEGV as i32,
-    );
+    let _ = crate::signal::send_signal_with_info_directed(pid, info);
     crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
 }
 
@@ -729,7 +732,14 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
                 // deliver it on the way back to userspace; without one
                 // (or faulting inside the handler itself) the default
                 // action kills here, avoiding a fault-retry loop.
-                fault_sigsegv_route();
+                fault_sigsegv_route(
+                    if matches!(result, MmFaultResult::PermissionDenied) {
+                        crate::signal::si_code::SEGV_ACCERR
+                    } else {
+                        crate::signal::si_code::SEGV_MAPERR
+                    },
+                    fault_addr as u64,
+                );
             } else {
                 crate::dfx::oops::oops(
                     crate::dfx::oops::Kind::PageFault { addr: fault_addr },
@@ -747,9 +757,15 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
             );
             if regs.user_mode() {
                 let pid = crate::process::current_pid();
-                let _ = crate::signal::send_signal_directed(
+                // si_code/si_addr parity (arena-mmap lane): BUS_ADRERR +
+                // fault_addr, Linux force_sig_bus shape.
+                let _ = crate::signal::send_signal_with_info_directed(
                     pid,
-                    crate::signal::Signal::SIGBUS as i32,
+                    crate::signal::SigInfo::fault(
+                        crate::signal::Signal::SIGBUS as i32,
+                        crate::signal::si_code::BUS_ADRERR,
+                        fault_addr as u64,
+                    ),
                 );
                 if !sigbus_has_handler() {
                     crate::process::exit::do_exit(-(crate::signal::Signal::SIGBUS as i32));

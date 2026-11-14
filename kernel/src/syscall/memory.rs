@@ -536,6 +536,19 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
         return mmap_error::EINVAL;
     }
 
+    // MAP_FIXED (and MAP_FIXED_NOREPLACE) placement requires a page-
+    // aligned address: the reference's do_mmap rejects it with EINVAL
+    // before any VMA work. The old shape silently TRUNCATED the address
+    // here (mm::page::VirtAddr::new masks the low bits on the way into
+    // the mm layer, whose own alignment check is therefore dead code),
+    // so an unaligned fixed mmap mapped the WRONG page and returned
+    // success (arena-mmap lane probe T16, 2026-11-14).
+    if map_flags & (map::MAP_FIXED | map::MAP_FIXED_NOREPLACE) != 0
+        && addr % crate::mm::page::PAGE_SIZE != 0
+    {
+        return mmap_error::EINVAL;
+    }
+
     // MAP_FIXED_NOREPLACE: exact placement like MAP_FIXED, but any overlap
     // with an EXISTING mapping fails EEXIST instead of replacing it
     // (Linux do_mmap — LTP mmap17 maps the same address twice).
