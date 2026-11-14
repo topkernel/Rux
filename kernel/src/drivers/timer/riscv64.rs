@@ -51,6 +51,17 @@ pub fn get_jiffies() -> u64 {
     JIFFIES.load(Ordering::Acquire)
 }
 
+/// Test-only deterministic jiffy advance (unit-test harness): the tests
+/// run with the timer interrupt disabled and — since R87 keeps secondary
+/// harts interrupt-less until boot_complete — nothing increments JIFFIES
+/// during the suite. Tests that need "time has passed" semantics (e.g.
+/// the tcp-karn RTT-sampling control) bump the counter explicitly
+/// instead of relying on incidental ticks.
+#[cfg(feature = "unit-test")]
+pub fn test_advance_jiffies(n: u64) {
+    JIFFIES.fetch_add(n, core::sync::atomic::Ordering::Release);
+}
+
 /// Floor-map an absolute timebase value onto the jiffy grid — the
 /// read side of increment_jiffies' `floor((time - base) / period)`
 /// derivation (0 before the grid origin is established). The timer
