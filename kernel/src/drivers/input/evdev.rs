@@ -1778,21 +1778,27 @@ impl HuntLine {
 }
 
 // obs-hygiene: the INRD/INOP echo lines were the remaining per-byte
-// writers of the input hunt family — stage them under the hunt echo
-// lock and flush whole lines through the same emit-lock-coordinated
-// write the HuntLine bursts take, so a kmsg-flood record can no longer
-// splice an INRD line mid-flight (the dhardware "missing lines" class).
+// writers of the input hunt family — stage them per CPU and flush whole
+// lines through the same emit-lock-coordinated write the HuntLine
+// bursts take, so a kmsg-flood record can no longer splice an INRD line
+// mid-flight (the dhardware "missing lines" class), and two CPUs'
+// echo lines cannot byte-mix (per-CPU stage — the taskdump DUMP_STAGES
+// lesson: a shared stage locked per byte still mixes concurrent
+// writers inside one flushed line).
 struct IttStage {
     buf: [u8; 128],
     n: usize,
 }
 
-static ITT_STAGE: crate::sync::spinlock::Spinlock<IttStage> =
-    crate::sync::spinlock::Spinlock::new(IttStage { buf: [0; 128], n: 0 });
+static ITT_STAGES: [crate::sync::spinlock::Spinlock<IttStage>; crate::config::MAX_CPUS] =
+    [const {
+        crate::sync::spinlock::Spinlock::new(IttStage { buf: [0; 128], n: 0 })
+    }; crate::config::MAX_CPUS];
 
 fn itt_msg(msg: &[u8]) {
+    let cpu = (crate::arch::cpu_id() as usize) % crate::config::MAX_CPUS;
     for &b in msg {
-        let mut st = ITT_STAGE.lock_irqsave();
+        let mut st = ITT_STAGES[cpu].lock_irqsave();
         let at = st.n;
         st.buf[at] = b;
         st.n = at + 1;

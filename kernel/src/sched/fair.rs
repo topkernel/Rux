@@ -148,7 +148,7 @@ pub fn note_pick_skip(task: *mut Task, reason: u8) {
 /// Print (direct console, GRQ-held discipline) and clear the recorded
 /// skip history of `task`. Called from wakewatch's strand report.
 pub fn print_skip_history(task: *mut Task) {
-    use crate::console::putchar_no_lock as putchar;
+    use crate::dfx::taskdump::putc_brief as putchar;
     let s = skip_hist_of(task);
     if s.task.load(Ordering::Acquire) != task as usize as u64 {
         // s16: the 256-slot table is keyed by Task address and msgstress
@@ -176,7 +176,7 @@ pub fn print_skip_history(task: *mut Task) {
     }
     s.task.store(0, Ordering::Release);
     fn pu(mut v: u64) {
-        use crate::console::putchar_no_lock as putchar;
+        use crate::dfx::taskdump::putc_brief as putchar;
         let mut buf = [0u8; 20];
         let mut k = 0;
         if v == 0 {
@@ -929,7 +929,7 @@ impl CfsRunQueue {
             {
                 let loc = core::panic::Location::caller();
                 let pid = crate::sched::get_current_pid();
-                use crate::console::putchar_no_lock as putchar;
+                use crate::dfx::taskdump::putc_brief as putchar;
                 for &b in b"\nNRUN-DOUBLE-DEC pid=0x" { putchar(b); }
                 let mut v = pid as u64;
                 for _ in 0..8 {
@@ -965,7 +965,7 @@ impl CfsRunQueue {
     /// 0xfd79-class values, init unpicked from t=53s — with no instrument
     /// to localize the write). Armed on dfx=fuxstuck|schedtrace (same gate
     /// as the pick/wake history); zero cost otherwise (one switch load).
-    /// GRQ-held callers only; prints via putchar_no_lock (R34 discipline).
+    /// GRQ-held callers only; prints via the taskdump brief-budget funnel (R34 discipline, obs-hygiene: staged line-atomic writes).
     pub fn vr_canary(&self, task: *mut crate::process::Task, site: &[u8; 3], vr: u64) {
         if !crate::sched::sched::sched_hist_armed() {
             return;
@@ -991,9 +991,9 @@ impl CfsRunQueue {
             return;
         }
         VR_TRIP_LAST_JIF.store(now, Ordering::Release);
-        use crate::console::putchar_no_lock as putchar;
+        use crate::dfx::taskdump::putc_brief as putchar;
         fn ph(mut v: u64) {
-            use crate::console::putchar_no_lock as putchar;
+            use crate::dfx::taskdump::putc_brief as putchar;
             putchar(b'0');
             putchar(b'x');
             let mut buf = [0u8; 16];
@@ -1009,7 +1009,7 @@ impl CfsRunQueue {
             }
         }
         fn pd(mut v: u64) {
-            use crate::console::putchar_no_lock as putchar;
+            use crate::dfx::taskdump::putc_brief as putchar;
             let mut buf = [0u8; 20];
             let mut n = 0;
             if v == 0 {
@@ -1028,7 +1028,7 @@ impl CfsRunQueue {
         }
         fn ps(s: &[u8]) {
             for &b in s {
-                crate::console::putchar_no_lock(b);
+                crate::dfx::taskdump::putc_brief(b);
             }
         }
         ps(b"\nVRTRIP site=");
@@ -1117,7 +1117,7 @@ impl CfsRunQueue {
                 && LASTW.compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire).is_ok()
             {
                 let loc = core::panic::Location::caller();
-                use crate::console::putchar_no_lock as putchar;
+                use crate::dfx::taskdump::putc_brief as putchar;
                 for &b in b"\nLWEIGHT-UNDERFLOW at " { putchar(b); }
                 let f = loc.file();
                 let base = f.rfind('/').map(|i| i + 1).unwrap_or(0);
@@ -1598,7 +1598,7 @@ impl CfsRunQueue {
     /// One heal line prefix: TAG by_cpu=N pid=P from_claim=C[ pk=K] (no
     /// trailing newline — callers append their context tail first).
     fn stale_heal_line(tag: &[u8], cpu_id: usize, pid: u32, was: i32, pk: u32) {
-        use crate::console::putchar_no_lock as putchar;
+        use crate::dfx::taskdump::putc_brief as putchar;
         for &b in tag {
             putchar(b);
         }
@@ -1651,9 +1651,9 @@ impl CfsRunQueue {
         // never scheduled: recycle-residue class) and the jiffy stamp —
         // pairs with ENQ-CLAIMED-SLOTBK jif= lines (same pid+claim).
         if !task.is_null() {
-            use crate::console::putchar_no_lock as putchar;
+            use crate::dfx::taskdump::putc_brief as putchar;
             fn pdec5(mut v: u64) {
-                use crate::console::putchar_no_lock as p;
+                use crate::dfx::taskdump::putc_brief as p;
                 let mut buf = [0u8; 20];
                 let mut n = 0;
                 if v == 0 {
@@ -1706,7 +1706,7 @@ impl CfsRunQueue {
                 pdec5(crate::drivers::timer::get_jiffies().wrapping_sub(pjif));
             }
         }
-        crate::console::putchar_no_lock(b'\n');
+        crate::dfx::taskdump::putc_brief(b'\n');
     }
 
     /// R85 (tail-phase PICK-SKIP wedge): always-on, rate-limited report
@@ -1747,7 +1747,7 @@ impl CfsRunQueue {
             // owner masks at heal time (both must be 0 — that is the
             // adjudication's precondition; a nonzero mask here names a
             // racing owner).
-            use crate::console::putchar_no_lock as putchar;
+            use crate::dfx::taskdump::putc_brief as putchar;
             const M: &[u8] = b" st=0x";
             for &b in M {
                 putchar(b);
@@ -1781,7 +1781,7 @@ impl CfsRunQueue {
 
     /// Decimal printer for the heal reports (R34: direct console writes).
     fn put_dec(v: u64) {
-        use crate::console::putchar_no_lock as putchar;
+        use crate::dfx::taskdump::putc_brief as putchar;
         if v == 0 {
             putchar(b'0');
             return;
@@ -1973,7 +1973,7 @@ impl CfsRunQueue {
                 WW_CLAIM_HEALS.fetch_add(1, Ordering::Relaxed);
                 if Self::heal_report_budget_ok() {
                     Self::stale_heal_line(b"SWEEP-CLAIM-RESET", cpu_id, (*task).pid(), claim, u32::MAX);
-                    crate::console::putchar_no_lock(b'\n');
+                    crate::dfx::taskdump::putc_brief(b'\n');
                 }
             }
         }
@@ -2259,9 +2259,9 @@ impl CfsRunQueue {
                                 static TORN_N: core::sync::atomic::AtomicU32 =
                                     core::sync::atomic::AtomicU32::new(0);
                                 if TORN_N.fetch_add(1, Ordering::Relaxed) < 40 {
-                                    use crate::console::putchar_no_lock as putchar;
+                                    use crate::dfx::taskdump::putc_brief as putchar;
                                     fn ph6(mut v: u64) {
-                                        use crate::console::putchar_no_lock as p;
+                                        use crate::dfx::taskdump::putc_brief as p;
                                         for sh in (0..16).rev() {
                                             let n = ((v >> (sh * 4)) & 0xF) as u8;
                                             p(if n < 10 { b'0' + n } else { b'a' + n - 10 });
@@ -2428,9 +2428,9 @@ impl CfsRunQueue {
         // write discipline (R34): we hold the GRQ lock here.
         if result.is_none() && skip_count > 0 {
             PICK_SKIP_ALL.fetch_add(1, Ordering::Relaxed);
-            use crate::console::putchar_no_lock as putchar;
+            use crate::dfx::taskdump::putc_brief as putchar;
             fn pd(mut v: u64) {
-                use crate::console::putchar_no_lock as putchar;
+                use crate::dfx::taskdump::putc_brief as putchar;
                 let mut buf = [0u8; 20];
                 let mut n = 0;
                 if v == 0 {
@@ -2449,7 +2449,7 @@ impl CfsRunQueue {
             }
             fn ps(s: &[u8]) {
                 for &b in s {
-                    crate::console::putchar_no_lock(b);
+                    crate::dfx::taskdump::putc_brief(b);
                 }
             }
             static LAST_REPORT: core::sync::atomic::AtomicU64 =
