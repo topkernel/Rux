@@ -670,6 +670,26 @@ impl SigInfo {
         self._rest[..8].copy_from_slice(bytes);
     }
 
+    /// Synchronous fault siginfo (Linux force_sig_fault semantics):
+    /// si_code is a fault class (SEGV_*/BUS_*/ILL_*/FPE_* or SI_KERNEL)
+    /// and si_addr carries the faulting address. The kernel siginfo
+    /// _sigfault layout puts the 8-byte _addr at offset 16 — the same
+    /// words si_pid/si_uid occupy in the kill layout, so the address is
+    /// stored through those fields.
+    ///
+    /// This is LOAD-BEARING for any SEGV handler that maps memory at the
+    /// faulting address (userfaultfd-style demand paging — OpenHarmony
+    /// FFRT arenas, Boehm/JSC GC guard pages, LTP mmap05): without
+    /// si_addr the handler cannot know which page to install and the
+    /// faulting instruction retries into the same fault forever (the OH
+    /// 0x7ff1 arena fault-loop family, arena-mmap lane 2026-11-14).
+    pub fn fault(signo: i32, code: i32, addr: u64) -> Self {
+        let mut info = Self::new(signo, code, 0, 0);
+        info.si_pid = (addr & 0xFFFF_FFFF) as i32;
+        info.si_uid = (addr >> 32) as u32;
+        info
+    }
+
     /// Create child process exit signal info
     pub fn child(pid: u32, uid: u32, status: i32) -> Self {
         let mut info = Self::new(Signal::SIGCHLD as i32, 1, pid, uid);
@@ -738,6 +758,9 @@ pub mod si_code {
     pub const SEGV_MAPERR: i32 = 1;
     /// SEGV: invalid permissions (SEGV_ACCERR)
     pub const SEGV_ACCERR: i32 = 2;
+    /// BUS: nonexistent address (SIGBUS on a truncated file mapping —
+    /// the reference's filemap_fault past-EOF force_sig_bus code)
+    pub const BUS_ADRERR: i32 = 2;
 }
 
 // ============================================================================

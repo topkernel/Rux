@@ -1417,8 +1417,18 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                 // inside the handler itself — the default action kills
                 // here (and avoids a fault-retry loop).
                 let pid = crate::process::current_pid();
+                // si_code/si_addr parity (arena-mmap lane 2026-11-14):
+                // force_sig_fault(SEGV, SEGV_MAPERR, fault_addr) — the
+                // siginfo must carry the faulting address, or any handler
+                // that demand-maps the faulting page (FFRT arenas, GC
+                // guards) installs the WRONG page and re-faults forever.
+                let segv_info = crate::signal::SigInfo::fault(
+                    crate::signal::Signal::SIGSEGV as i32,
+                    crate::signal::si_code::SEGV_MAPERR,
+                    fault_addr as u64,
+                );
                 if sigsegv_has_handler() && !sigsegv_blocked_current() {
-                    let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
+                    let _ = crate::signal::send_signal_with_info_directed(pid, segv_info);
                     // Synchronous fault: deliver despite a blocked mask
                     // (Linux force_sig parity — see force_unblock_current).
                     crate::signal::force_unblock_current(crate::signal::Signal::SIGSEGV as i32);
@@ -1509,7 +1519,7 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                         }
                     }
                 }
-                let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
+                let _ = crate::signal::send_signal_with_info_directed(pid, segv_info);
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
             } else {
                 crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, ra={:#x}, sp={:#x}, t6={:#x}, pid={}, mode={}",
@@ -1528,15 +1538,22 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                 // Serial-cleanliness (print-audit lane, 2026-11): the
                 // line prints only on the FATAL branch — handler-routed
                 // PROT_NONE probes are survivable guard-page events.
+                // si_code = SEGV_ACCERR with si_addr = the fault address
+                // (arena-mmap lane parity with the x86_64 twin).
                 let pid = crate::process::current_pid();
+                let acc_info = crate::signal::SigInfo::fault(
+                    crate::signal::Signal::SIGSEGV as i32,
+                    crate::signal::si_code::SEGV_ACCERR,
+                    fault_addr as u64,
+                );
                 if sigsegv_has_handler() && !sigsegv_blocked_current() {
-                    let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
+                    let _ = crate::signal::send_signal_with_info_directed(pid, acc_info);
                     // Synchronous fault: deliver despite a blocked mask.
                     crate::signal::force_unblock_current(crate::signal::Signal::SIGSEGV as i32);
                     return;
                 }
                 crate::pr_err!("pagefault: Permission denied at {:#x}", fault_addr);
-                let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
+                let _ = crate::signal::send_signal_with_info_directed(pid, acc_info);
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
             } else {
                 crate::pr_err!("pagefault: Permission denied at {:#x}", fault_addr);
@@ -1548,9 +1565,17 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                 // a SIGBUS handler and must catch it; the default action
                 // kills with SIGBUS. Serial-cleanliness (print-audit
                 // lane, 2026-11): the line prints only on the FATAL
-                // branch.
+                // branch. si_code/si_addr parity (arena-mmap lane):
+                // BUS_ADRERR + fault_addr, Linux force_sig_bus shape.
                 let pid = crate::process::current_pid();
-                let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGBUS as i32);
+                let _ = crate::signal::send_signal_with_info_directed(
+                    pid,
+                    crate::signal::SigInfo::fault(
+                        crate::signal::Signal::SIGBUS as i32,
+                        crate::signal::si_code::BUS_ADRERR,
+                        fault_addr as u64,
+                    ),
+                );
                 if !sigbus_has_handler() {
                     crate::pr_err!("pagefault: Bus error (past EOF) at {:#x}", fault_addr);
                     crate::process::exit::do_exit(-(crate::signal::Signal::SIGBUS as i32));

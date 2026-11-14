@@ -1979,15 +1979,22 @@ fn handle_general_protection(regs: &mut PtRegs) {
         // disposition kills here. A fault inside the (blocked) SIGSEGV
         // handler itself is forced to the default action — unblocking
         // alone would re-enter the handler and loop forever.
+        // si_code/si_addr parity (arena-mmap lane): #GP from user mode is
+        // force_sig(SIGSEGV) — SI_KERNEL with si_addr 0 on the reference.
         let pid = crate::process::current_pid();
+        let gp_info = crate::signal::SigInfo::fault(
+            crate::signal::Signal::SIGSEGV as i32,
+            crate::signal::si_code::SI_KERNEL,
+            0,
+        );
         if sigsegv_has_handler() && !sigsegv_blocked_current() {
-            let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
+            let _ = crate::signal::send_signal_with_info_directed(pid, gp_info);
             // Synchronous fault: deliver despite a blocked mask
             // (Linux force_sig parity — see force_unblock_current).
             crate::signal::force_unblock_current(crate::signal::Signal::SIGSEGV as i32);
             return;
         }
-        let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
+        let _ = crate::signal::send_signal_with_info_directed(pid, gp_info);
         crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
     } else {
         #[cfg(feature = "x86_64")]
@@ -3071,13 +3078,24 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 // A blocked SIGSEGV (fault inside its own handler) is
                 // forced to the default action instead of pended — see
                 // sigsegv_blocked_current.
+                // si_code/si_addr parity (arena-mmap lane 2026-11-14):
+                // force_sig_fault(SEGV, SEGV_MAPERR, addr) — the siginfo
+                // must carry the faulting address, or any handler that
+                // demand-maps the faulting page (FFRT arenas, GC guards)
+                // installs the WRONG page and the instruction re-faults
+                // forever (the 0x7ff1 OH fault-loop family).
                 user_segv_forensics(regs, fault_addr);
                 let pid = crate::process::current_pid();
+                let info = crate::signal::SigInfo::fault(
+                    crate::signal::Signal::SIGSEGV as i32,
+                    crate::signal::si_code::SEGV_MAPERR,
+                    fault_addr as u64,
+                );
                 if sigsegv_has_handler() && !sigsegv_blocked_current() {
-                    let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
+                    let _ = crate::signal::send_signal_with_info_directed(pid, info);
                     return;
                 }
-                let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
+                let _ = crate::signal::send_signal_with_info_directed(pid, info);
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
             } else {
                 #[cfg(feature = "x86_64")]
@@ -3101,14 +3119,22 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 fault_addr, regs.rip, crate::sched::get_current_pid());
             if regs.user_mode() {
                 // Handler-first routing like Segfault (PROT_NONE access);
-                // likewise force-default a blocked SIGSEGV.
+                // likewise force-default a blocked SIGSEGV. si_code is
+                // SEGV_ACCERR (permission denied, the PROT_NONE class)
+                // with si_addr = cr2 — FFRT's arena handler maps exactly
+                // this page (arena-mmap lane 2026-11-14).
                 user_segv_forensics(regs, fault_addr);
                 let pid = crate::process::current_pid();
+                let info = crate::signal::SigInfo::fault(
+                    crate::signal::Signal::SIGSEGV as i32,
+                    crate::signal::si_code::SEGV_ACCERR,
+                    fault_addr as u64,
+                );
                 if sigsegv_has_handler() && !sigsegv_blocked_current() {
-                    let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
+                    let _ = crate::signal::send_signal_with_info_directed(pid, info);
                     return;
                 }
-                let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
+                let _ = crate::signal::send_signal_with_info_directed(pid, info);
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
             } else {
                 #[cfg(feature = "x86_64")]
@@ -3132,8 +3158,17 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 // a blocked SIGBUS would otherwise stay pended while the
                 // task returns to the faulting rip and refaults forever —
                 // the same livelock the SIGSEGV arm guards against.
+                // si_code/si_addr parity (arena-mmap lane): BUS_ADRERR +
+                // fault_addr, Linux force_sig_bus shape.
                 let pid = crate::process::current_pid();
-                let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGBUS as i32);
+                let _ = crate::signal::send_signal_with_info_directed(
+                    pid,
+                    crate::signal::SigInfo::fault(
+                        crate::signal::Signal::SIGBUS as i32,
+                        crate::signal::si_code::BUS_ADRERR,
+                        fault_addr as u64,
+                    ),
+                );
                 if !sigbus_has_handler() {
                     crate::process::exit::do_exit(-(crate::signal::Signal::SIGBUS as i32));
                 } else {
