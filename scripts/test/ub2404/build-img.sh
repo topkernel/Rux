@@ -87,6 +87,11 @@ sudo mkdir -p "$STAGE/etc/systemd/system/serial-getty@ttyS0.service.d"
 sudo tee "$STAGE/etc/systemd/system/serial-getty@ttyS0.service.d/override.conf" >/dev/null <<'EOS'
 [Unit]
 Requires=
+BindsTo=
+After=systemd-user-sessions.service getty-pre.target
+
+[Service]
+Type=simple
 EOS
 # agetty needs the tty to exist; also mask the "container" heuristic that
 # would skip auto-console gettys
@@ -100,6 +105,15 @@ sudo sed -i "s|^root:[^:]*:|root:${HASH//:/:}:|" "$STAGE/etc/shadow" ||
 # cloud-init off (first-boot datasource hunt = minutes of noise)
 sudo mkdir -p "$STAGE/etc/cloud"
 sudo touch "$STAGE/etc/cloud/cloud-init.disabled"
+
+# Mask units that hang the 24.04 transaction on Rux today (each verified
+# on bring-up boots: update-notifier's python3 wedges 90s until the job
+# timeout kill; gnome-remote-desktop aborts on a grd-settings assertion;
+# gpu-manager spins in stop-sigterm until killed). Empty files are valid
+# no-op oneshot units — enough to take them out of the critical path.
+for u in update-notifier-download gnome-remote-desktop gpu-manager; do
+    : > "$STAGE/etc/systemd/system/$u.service"
+done
 
 # machine-id: keep the extracted one; mirror it for dbus
 MID="$(sudo cat "$STAGE/etc/machine-id")"
