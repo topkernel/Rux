@@ -517,6 +517,35 @@ pub fn file_id_is_input(fid: u64) -> bool {
     }
 }
 
+/// Pids that opened an evdev node this boot (wake-drop hunt, max 8):
+/// the PPARK/PRET echoes filter on this set so the input openers' poll
+/// rounds are all visible without flooding the console with every
+/// GLib main-loop park on the machine.
+static EVDEV_OPENER_PIDS: [core::sync::atomic::AtomicU32; 8] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; 8];
+
+fn latch_opener_pid(pid: u32) {
+    for slot in EVDEV_OPENER_PIDS.iter() {
+        match slot.compare_exchange(
+            0,
+            pid,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return,
+            Err(v) if v == pid => return,
+            Err(_) => continue,
+        }
+    }
+}
+
+/// True when `pid` opened an evdev node this boot (hunt filter).
+pub fn evdev_opener_pid(pid: u32) -> bool {
+    EVDEV_OPENER_PIDS
+        .iter()
+        .any(|s| s.load(Ordering::Acquire) == pid)
+}
+
 /// Resolve an EvdevDevice by its devfs device number (the devfs open
 /// path uses this to stamp the device with the new file description).
 pub fn device_of_devno(devno: DevNo) -> Option<&'static EvdevDevice> {
@@ -761,7 +790,12 @@ const EVDEV_READ_POLL_MS: u64 = 10;
 /// node; pid/comm name the opener in the trace record header and the
 /// serial echo). `node` is the devfs minor (64/65/66).
 pub fn trace_open(dev: &EvdevDevice, file: &File, node: u32) {
-    // The tracepoint path first (it is the policy instrument; the dfx
+    // The wake-drop hunt's opener latch (PPARK/PRET filter) — armed
+    // with the same gate as the rest of the hunt echoes.
+    if crate::trace::EVENT_EVDEV_OPEN.armed() {
+        latch_opener_pid(crate::process::current_pid() as u32);
+    }
+    // The tracepoint path first (it's the policy instrument; the dfx
     // prints below are the frozen legacy view of the same event).
     if crate::trace::EVENT_EVDEV_OPEN.armed() {
         crate::trace::trace_evdev_open(node);
