@@ -815,6 +815,32 @@ fn build_code_page() -> [u8; 4096] {
 
     // ---- dynstr @ 0x240 ----
     const STRTAB_OFF: usize = 0x240;
+    // x86_64: the two TIME functions are exported under inert names.
+    // The fast path itself is probe-verified (cgt_probe: syscall-vs-vdso
+    // within [74 ns, 1.2 ms] after the mult-corruption fix), but LTP
+    // clock_gettime04 demands STRICT non-negative deltas between
+    // ADJACENT vDSO and syscall reads, and the syscall track applies
+    // per-CPU corrections + a monotonic ratchet (TSC_CPU_OFF / TSC_LAST
+    // — µs-class steps when the publication tick switches CPU or the
+    // 1 Hz resync fires) that a user-side raw-TSC interpolation cannot
+    // reproduce: the residual µs-scale bidirectional skew makes one of
+    // the two adjacent-pair directions read negative (observed −4582 ns
+    // with the fast path live). Unexporting (not stubbing: a vDSO
+    // function cannot set errno, and LTP's raw-call variants need
+    // errno==ENOSYS) makes glibc and LTP's parser both take the plain
+    // syscall — the pre-live-vDSO behavior that passed. The timer lane
+    // re-arms by restoring the canonical names AND unifying the tracks
+    // (or proving the corrections are identically zero on every CPU).
+    // COST, deliberately traded for correctness: the live fast path
+    // moved 21.3M clock_gettime syscalls per OH boot to userspace
+    // (~6.6% of the box).
+    #[cfg(feature = "x86_64")]
+    const NAMES: [&str; 3] = [
+        "__vdso_clock_gettime_x86_disabled",
+        "__vdso_gettimeofday_x86_disabled",
+        "__vdso_clock_getres",
+    ];
+    #[cfg(not(feature = "x86_64"))]
     const NAMES: [&str; 3] = [
         "__vdso_clock_gettime",
         "__vdso_gettimeofday",
