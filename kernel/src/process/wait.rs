@@ -11,7 +11,7 @@
 //! - When the condition is met, wake_up() wakes waiting processes
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use crate::sync::spinlock::Spinlock;
 
 use super::Task;
@@ -39,6 +39,14 @@ pub struct WaitQueueEntry {
     exclusive: bool,
     /// Whether woken
     woken: AtomicBool,
+    /// The task's pid at registration time (wake-drop fix, R127):
+    /// entries are matched by (task pointer, pid) so a Task page that
+    /// was freed and RECYCLED by a new task cannot be mistaken for the
+    /// old owner. Pids are unique per boot (monotonic until wraparound
+    /// far beyond any session's spawn volume), so the pair is a sound
+    /// incarnation discriminator; free_task_slot's TASK_POISON write
+    /// also fails the compare, catching dead-but-not-reused pages.
+    pid: u32,
 }
 
 impl WaitQueueEntry {
@@ -48,11 +56,26 @@ impl WaitQueueEntry {
     /// * `task` - Associated task
     /// * `exclusive` - Whether exclusive mode (mutual exclusion)
     pub fn new(task: *mut Task, exclusive: bool) -> Self {
+        // SAFETY: every constructor passes the parking (current) task,
+        // which is alive by construction; the pid read cannot fault
+        // (kernel linear map) and cannot race the task's own free (a
+        // task cannot free itself while executing its own park path).
+        let pid = if task.is_null() {
+            0
+        } else {
+            unsafe { (*task).pid() as u32 }
+        };
         Self {
             task,
             exclusive,
             woken: AtomicBool::new(false),
+            pid,
         }
+    }
+
+    /// The registration-time pid (wake-drop fix R127 — see the field).
+    pub fn registered_pid(&self) -> u32 {
+        self.pid
     }
 
     /// Check if woken
@@ -128,6 +151,37 @@ pub struct WaitQueueHead {
 unsafe impl Send for WaitQueueHead {}
 unsafe impl Sync for WaitQueueHead {}
 
+/// Total stale wait-queue entries evicted by the R127 wake-time screen
+/// (wake-drop hunt diagnostic: a non-zero value on a boot means tasks
+/// died with entries still parked — the exit-without-unwind leak class).
+pub static WQ_STALE_EVICTED: AtomicU64 = AtomicU64::new(0);
+
+/// Clamped decrement of a task's live-registration count (R127 helper).
+/// The eviction path can name a Task page that was freed and RECYCLED —
+/// its new incarnation owns the word now, and its count must never
+/// underflow on the predecessor's behalf (a wrapped u32::MAX would pin
+/// the exit-leak detector on that task forever). Clamps at zero.
+///
+/// # Safety
+/// `t` points into the kernel linear map (same read-contract as the
+/// wake-time staleness screen).
+unsafe fn wq_regs_dec(t: *mut Task, n: u32) {
+    use core::sync::atomic::Ordering as AO;
+    let mut cur = (*t).wq_regs.load(AO::Relaxed);
+    loop {
+        let next = cur.saturating_sub(n);
+        match (*t).wq_regs.compare_exchange_weak(
+            cur,
+            next,
+            AO::Relaxed,
+            AO::Relaxed,
+        ) {
+            Ok(_) => return,
+            Err(v) => cur = v,
+        }
+    }
+}
+
 impl WaitQueueHead {
     /// Create new wait queue head
     pub const fn new() -> Self {
@@ -149,6 +203,14 @@ impl WaitQueueHead {
     pub fn add(&self, entry: WaitQueueEntry) {
         // Use lock_irqsave: wake_up is called from IRQ handlers
         let mut list = self.list.lock_irqsave();
+        // R127 wake-drop hunt: per-task live-registration count (see
+        // Task::wq_regs) — the exit-leak detector's datum.
+        let t = entry.task();
+        if !t.is_null() {
+            // SAFETY: the entry's task is parking on this queue; the
+            // count is a diagnostic mirror of the list we hold.
+            unsafe { (*t).wq_regs.fetch_add(1, Ordering::Relaxed) };
+        }
         // Non-exclusive entries added to head, exclusive entries added to tail
         if entry.is_exclusive() {
             list.push(entry);
@@ -163,14 +225,53 @@ impl WaitQueueHead {
     ///
     /// # Arguments
     /// * `task` - Task to remove
-    pub fn remove(&self, task: *mut Task) {
+    ///
+    /// Returns how many entries were dropped (wake-drop hunt: a remove
+    /// that drops MORE entries than the caller registered — or drops
+    /// entries on a queue the caller never parked on — is the
+    /// pointer-recycling theft signature; Task pages are recycled after
+    /// free, so a stale entry keyed by the old pointer matches the new
+    /// incarnation's remove).
+    ///
+    /// R127: entries are matched by (task pointer, registration pid) —
+    /// a recycled Task page (same address, new pid) no longer matches,
+    /// so a live task's unwait cannot strip a dead predecessor's stale
+    /// entries. Those are evicted lazily by [`Self::wake_up`]'s
+    /// staleness screen instead.
+    pub fn remove_count(&self, task: *mut Task) -> usize {
+        // SAFETY: every caller passes its own (live, running) task;
+        // reading its pid is a const offset read in the linear map.
+        let pid = if task.is_null() {
+            0
+        } else {
+            unsafe { (*task).pid() as u32 }
+        };
         let mut list = self.list.lock_irqsave();
         let before = list.len();
-        list.retain(|entry| entry.task() != task);
+        // R127 wake-drop hunt: mirror the per-task count for every entry
+        // this remove actually drops (same (ptr, pid) match as the retain).
+        let mut regs_dropped: u32 = 0;
+        list.retain(|entry| {
+            let hit = entry.task() == task && entry.registered_pid() == pid;
+            if hit && !entry.task().is_null() {
+                regs_dropped = regs_dropped.saturating_add(1);
+            }
+            !hit
+        });
         let dropped = before - list.len();
+        if regs_dropped > 0 {
+            // SAFETY: task is the caller's own live task (see above).
+            unsafe { wq_regs_dec(task, regs_dropped) };
+        }
         if dropped > 0 {
             self.waiters.fetch_sub(dropped, Ordering::Release);
         }
+        dropped
+    }
+
+    /// Remove from wait queue (drop count not needed).
+    pub fn remove(&self, task: *mut Task) {
+        let _ = self.remove_count(task);
     }
 
     /// Wake up processes in wait queue
@@ -202,7 +303,7 @@ impl WaitQueueHead {
             return 0;
         }
         // Use lock_irqsave: this is called from interrupt handlers.
-        let list = self.list.lock_irqsave();
+        let mut list = self.list.lock_irqsave();
         let mut awakened = 0;
         // Reference __wake_up_common budget discipline: ONLY exclusive
         // entries consume the nr_exclusive budget ("wake one" = wake ONE
@@ -229,15 +330,60 @@ impl WaitQueueHead {
         // acquiring the GRQ). The earlier PID-revalidation and reverted
         // RCU-wrap were interim measures.
         //
+        // R127 AMENDMENT: the proof above covers tasks that unwind their
+        // park through finish_wait/remove — but the OH wake-drop hunt
+        // captured a poller thread that exited with its poll entries
+        // still queued (no unwait ran; the entries then vanished only
+        // via a recycled-page remove). Stale entries therefore EXIST;
+        // the R127 screen below evicts them at wake time and the
+        // (pointer, pid) key makes them unstealable meanwhile.
+        //
         // R34: wake directly inside the iteration — the earlier
         // collect-into-a-Vec (heap allocation under this irqsave lock)
         // was pure overhead: waking here is equivalent (a woken task's
         // finish_wait on another CPU simply blocks on this lock, it
         // cannot mutate the list mid-iteration) and removes an in-lock
         // heap allocation from every event source's hot path.
+        // Stale-entry eviction set (wake-drop fix R127): entries whose
+        // task died without unwinding its park (observed on the OH input
+        // hunt: a poller thread exited with its evdev poll entries still
+        // queued — no finish_wait/remove ran, R12-1's liveness proof has
+        // exactly this hole) keep naming a freed Task page. Once that
+        // page is recycled the entry either strips ANOTHER task's
+        // registrations (remove-by-pointer theft) or wakes the WRONG
+        // (new) task. The registration-time pid (see WaitQueueEntry)
+        // discriminates incarnations; mismatched entries are evicted
+        // here, under the same lock, self-healing the queue at the next
+        // wake. Fixed array, no heap: queues hold single-digit entries.
+        let mut stale: [*mut Task; 16] = [core::ptr::null_mut(); 16];
+        let mut stale_n: usize = 0;
+
         for entry in list.iter() {
             if budget == 0 {
                 break;
+            }
+
+            // R127 staleness screen: one volatile pid read per entry
+            // (the same offset wake_up_process reads anyway). A freed
+            // Task carries TASK_POISON in pid; a recycled one carries
+            // the NEW task's pid; both fail the compare.
+            let entry_task = entry.task();
+            let entry_stale = entry_task.is_null() || {
+                // SAFETY: read at a compile-time Task offset inside the
+                // kernel linear map (same contract as the poison probe
+                // in Task::is_plausible_task_ptr — cannot fault).
+                let cur_pid = unsafe { core::ptr::read_volatile(
+                    (entry_task as *const u8).add(crate::process::task::task_offsets::TASK_PID)
+                        as *const u32,
+                ) };
+                cur_pid != entry.registered_pid()
+            };
+            if entry_stale {
+                if stale_n < stale.len() && !stale[..stale_n].contains(&entry_task) {
+                    stale[stale_n] = entry_task;
+                    stale_n += 1;
+                }
+                continue;
             }
 
             if !entry.is_woken() {
@@ -315,6 +461,51 @@ impl WaitQueueHead {
                 }
             }
         }
+
+        // R127 eviction pass: drop the stale entries collected above
+        // (still under the lock — no interleaving remove/add can race
+        // it) and keep the `waiters` counter exact so the leg-36
+        // fast path re-engages once the queue drains.
+        if stale_n > 0 {
+            let before = list.len();
+            // Per-task count mirror: group the evicted entries' tasks so
+            // each freed page's wq_regs decrements exactly once per
+            // evicted entry naming it (the page may be recycled already —
+            // the count then lands on the new incarnation, which the
+            // reset-at-reuse list re-zeroes anyway; a DEAD-but-unfreed
+            // page keeps an accurate count).
+            let mut per_task: [(*mut Task, u32); 16] = [(core::ptr::null_mut(), 0); 16];
+            let mut per_task_n = 0usize;
+            list.retain(|e| {
+                if stale[..stale_n].contains(&e.task()) {
+                    let t = e.task();
+                    if !t.is_null() {
+                        if let Some(slot) =
+                            per_task[..per_task_n].iter_mut().find(|(x, _)| *x == t)
+                        {
+                            slot.1 += 1;
+                        } else if per_task_n < per_task.len() {
+                            per_task[per_task_n] = (t, 1);
+                            per_task_n += 1;
+                        }
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
+            let evicted = before - list.len();
+            for (t, n) in per_task[..per_task_n].iter() {
+                // SAFETY: diagnostic count bookkeeping on a page that was
+                // on this queue an instant ago (kernel linear map; the
+                // same read-contract as the staleness screen above).
+                unsafe { wq_regs_dec(*t, *n) };
+            }
+            if evicted > 0 {
+                self.waiters.fetch_sub(evicted, Ordering::Release);
+                WQ_STALE_EVICTED.fetch_add(evicted as u64, Ordering::Relaxed);
+            }
+        }
         drop(list);
 
         awakened
@@ -348,6 +539,27 @@ impl WaitQueueHead {
     /// Wake one process (exclusive)
     pub fn wake_up_one(&self) -> usize {
         self.wake_up(WakeUpHint::Normal, 1)
+    }
+
+    /// Wake-drop probe snapshot (input:evdev_wake hunt): entries as
+    /// (pid, state bits, woken flag, task ptr) so the push_event probe
+    /// can key pre/post wake verdicts per entry AND read scheduler
+    /// linkage for the exact task. Diagnostic only; irqsave list lock.
+    pub fn debug_entries_ptr(&self) -> (usize, Vec<(u32, u32, bool, *mut Task)>) {
+        let list = self.list.lock_irqsave();
+        let mut out = Vec::new();
+        for e in list.iter() {
+            let t = e.task();
+            if t.is_null() {
+                out.push((0, 0xFFFF_FFFF, e.is_woken(), t));
+                continue;
+            }
+            // SAFETY: read-only diagnostic snapshot; the entry keeps the
+            // task alive on this queue while the lock is held.
+            let (pid, st) = unsafe { ((*t).pid(), (*t).state().bits()) };
+            out.push((pid as u32, st, e.is_woken(), t));
+        }
+        (self.waiters.load(Ordering::Acquire), out)
     }
 
     /// Lock-free proof of waiters (the `waiters` fast-path counter):
