@@ -329,15 +329,47 @@ impl IoCompletion {
                     continue;
                 }
             } else {
+                // Sleep-path recover wake + waiter-side rescue (the
+                // VW-EXT4LOCK wedge lesson; mirrors the sync path's
+                // SLEEP_RECOVER_MS discipline in virtio/queue.rs): with
+                // ONLY the wait queue as a wake source, a lost interrupt
+                // engine meant schedule() never returned until the 10 s
+                // deadline — every async batch then cost 10 s while its
+                // completions sat harvested-by-nobody in the used ring.
+                // Arm a short one-shot wakeup so the rescue drain below
+                // runs every 250 ms even with no interrupt at all; the
+                // timer is deleted on wake (a healthy completion in
+                // µs/ms never observes it). Timer-table exhaustion
+                // degrades to the old wake-dependent behavior.
+                const ASYNC_RECOVER_MS: u64 = 250;
+                let rid = {
+                    let pid = crate::sched::get_current_pid();
+                    let at = crate::drivers::timer::get_jiffies()
+                        .saturating_add(msecs_to_jiffies(ASYNC_RECOVER_MS));
+                    crate::timer::add_timer_wakeup(at, pid)
+                };
                 // R54: schedule() now restores the caller's SIE state;
                 // wait-path callers re-arm explicitly (semaphore.rs
-                // discipline) so ticks/IPIs reach this CPU across the
-                // wait loop.
+                // discipline) so ticks/IPIs reach this CPU across the wait
+                // loop.
                 crate::arch::cpu::restore_irq(true);
                 crate::sched::schedule();
+                if rid != 0 {
+                    crate::timer::del_timer(rid);
+                }
             }
 
             self.wait_queue.finish_wait(current);
+
+            // Waiter-side rescue (VW-EXT4LOCK wedge lesson, the sync
+            // path's ftest01 fix applied to async): a wake whose data is
+            // still pending can mean the used ring is ahead of the
+            // completion walker AND no interrupt is coming (device idle,
+            // softirq bits clear). Drain the lag ourselves before
+            // re-sleeping — cheap when caught up, and it converts any
+            // lost-IRQ engine into at most one extra 250 ms poll round
+            // instead of a 10 s deadline batch stall.
+            crate::drivers::virtio::pci_rescue_all_lagged();
         }
         if deadline_armed && deadline_timer != 0 {
             crate::timer::del_timer(deadline_timer);

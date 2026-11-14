@@ -196,7 +196,22 @@ __switch_to:
 
     # Now restore callee-saved registers (s0 last)
     ld    ra,  {thread_ra}(a4)
+    # R74-ra gate: a garbage saved ra survives every ownership check and
+    # kills the box on the first ret — the orphan-race resumer deaths
+    # executed IDLE_TASK_STORAGES (.bss) and task-stack pages as code
+    # (epc inside .bss/stack, ra unchanged). Every legitimately saved ra
+    # points into kernel text (switch-out only happens from kernel
+    # mode), so ra outside [_stext, _etext) is scribble. Repair: divert
+    # into rux_switchin_bad_ra with a0 = bad ra, a1 = task — the task
+    # dies with the CORRECT identity on its own validated stack instead
+    # of jumping to a data address. Cold path: two la + two compares on
+    # a switch that already runs 20+ loads and a CAS.
+    la    t2, _stext
+    bltu  ra, t2, .Lswitch_ra_bad
+    la    t2, _etext
+    bgeu  ra, t2, .Lswitch_ra_bad
     mv    sp,  t6              # validated thread.sp (R74)
+.Lswitch_after_ra:
     ld    s11, {thread_s0} + 11*8(a4)
     ld    s10, {thread_s0} + 10*8(a4)
     ld    s9,  {thread_s0} + 9*8(a4)
@@ -274,6 +289,46 @@ __switch_to:
     mv    a1, t1              # restore next
     j     .Lswitch_go_after_sp
 
+.Lswitch_ra_bad:
+    # R74-ra: report (SBI putchar, same discipline as the sp gate), then
+    # divert the ret into the Rust repair trampoline. t6 (validated or
+    # R74-repaired sp) must survive; a0/a1 are rebuilt for the handler.
+    mv    t0, a0              # prev (kept for symmetry; dead after ret)
+    mv    t1, a1              # next (task base)
+    li    a7, 1               # SBI putchar
+    la    t4, .Lswitch_ra_msg
+2:  lbu  a0, 0(t4)
+    beqz a0, 3f
+    ecall
+    addi t4, t4, 1
+    j 2b
+3:  mv   t2, t1               # next task pointer (diagnostic id)
+    li   t5, 10
+4:  srli a0, t2, 60
+    bltu a0, t5, 5f
+    addi a0, a0, 39
+5:  addi a0, a0, 48
+    ecall
+    slli t2, t2, 4
+    bnez t2, 4b
+    li   a0, ' '
+    ecall
+    mv   t2, ra               # the bad ra
+6:  srli a0, t2, 60
+    bltu a0, t5, 7f
+    addi a0, a0, 39
+7:  addi a0, a0, 48
+    ecall
+    slli t2, t2, 4
+    bnez t2, 6b
+    li   a0, '\n'
+    ecall
+    mv    a0, ra              # handler arg 1: the bad ra
+    mv    a1, t1              # handler arg 2: the task base
+    la    ra, rux_switchin_bad_ra
+    mv    sp,  t6             # validated / R74-repaired sp
+    j     .Lswitch_after_ra
+
 .Lswitch_abort:
     # R56-heal: the pick was revoked between mark_picked_on_cpu and this
     # resume (or the state was already LIVE: breach — same repair).
@@ -298,6 +353,8 @@ __switch_to:
 .section .rodata
 .Lswitch_sp_msg:
     .asciz "\nSWITCH-BADSP task=0x"
+.Lswitch_ra_msg:
+    .asciz "\nSWITCH-BADRA task=0x"
 .section .text.__switch_to
 "#,
     task_thread = const core::mem::offset_of!(Task, thread),
@@ -326,6 +383,31 @@ const _: () = {
             == core::mem::offset_of!(Task, ti_on_cpu) + 4
     );
 };
+
+/// R74-ra gate repair target (see `__switch_to`): a resumed task whose
+/// saved ra was outside kernel text lands here with `bad_ra` = the value
+/// and `task` = its Task pointer, on its own validated stack, with tp
+/// already switched (the s-register restore ran before the ret). The
+/// alternative was executing a data address as code — the orphan-race
+/// resumer deaths (epc inside IDLE_TASK_STORAGES / task-stack pages).
+/// Report with the correct identity and force-exit; never returns.
+#[no_mangle]
+pub extern "C" fn rux_switchin_bad_ra(bad_ra: usize, task: *mut Task) -> ! {
+    // SAFETY: the switch-in protocol guarantees `task` is a live Task
+    // (it was just picked and affirmed) and we now run as it.
+    let (pid, comm) = unsafe { ((*task).pid(), (*task).comm()) };
+    let comm_str = core::str::from_utf8(
+        comm.split(|c| *c == 0).next().unwrap_or(&[]),
+    )
+    .unwrap_or("?");
+    crate::pr_err!(
+        "SWITCH-BADRA-GATE pid={} comm={} ra={:#x} — garbage saved ra, forcing exit",
+        pid,
+        comm_str,
+        bad_ra
+    );
+    crate::process::exit::do_exit(9)
+}
 
 // ============================================================================
 // Per-CPU variable for prev task

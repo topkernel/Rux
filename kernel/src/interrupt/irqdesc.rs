@@ -169,6 +169,33 @@ pub fn irq_get_name(irq: u32) -> Option<&'static str> {
     action_guard.as_ref().map(|a| a.name)
 }
 
+/// Re-apply the chip's unmask for every IRQ with a registered action and
+/// depth == 0 (enabled). Post-SMP-bringup companion to the riscv64 PLIC
+/// restore (see drivers/intc/plic.rs `after_smp_online_restore`):
+/// firmware warm-init clears per-CPU enable state as secondaries wake,
+/// so the kernel re-arms everything it had registered before bringup.
+/// Two passes with NO lock nesting: snapshot the registered+enabled IRQ
+/// numbers first, then unmask each under its irq_data lock. Returns the
+/// number of IRQs re-armed.
+pub fn remask_registered_irqs() -> usize {
+    let mut armed = 0usize;
+    for i in 0..NR_IRQS {
+        let desc = &IRQ_DESC_ARRAY[i];
+        let registered = desc.action.lock().is_some();
+        if !registered || desc.depth.load(Ordering::Relaxed) != 0 {
+            continue;
+        }
+        let irq_data = desc.irq_data.lock_irqsave();
+        if let Some(ref chip) = irq_data.chip {
+            if let Some(unmask) = chip.irq_unmask {
+                unmask(&irq_data);
+                armed += 1;
+            }
+        }
+    }
+    armed
+}
+
 // ==================== Registration ====================
 
 /// Register an interrupt handler.

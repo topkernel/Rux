@@ -207,6 +207,13 @@ pub fn start_secondaries() {
     }
 
     let cpu_count = num_started_cpus();
+    // Post-bring-up PLIC restore: OpenSBI's per-secondary warm init
+    // clears each secondary's S-mode PLIC context (threshold=max,
+    // enables zero) as it wakes — clobbering the kernel's early-init
+    // delivery state. Re-establish thresholds and re-arm every
+    // registered IRQ now that the bringup window is closed (reference
+    // parity: Linux's sifive-plic cpu-online notifier).
+    crate::drivers::intc::plic::after_smp_online_restore();
     // Post-bring-up affinity refresh: every task created before this point
     // (boot init + early kthreads) gets its default mask widened to the
     // online set (see Task::refresh_default_affinity_to_online).

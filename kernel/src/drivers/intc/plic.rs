@@ -220,7 +220,7 @@ impl Plic {
 static ENABLE_RMW_LOCK: crate::sync::spinlock::Spinlock<()> =
     crate::sync::spinlock::Spinlock::new(());
 
-static PLIC: Plic = Plic::new(PLIC_BASE, 4);
+static PLIC: Plic = Plic::new(PLIC_BASE, crate::config::MAX_CPUS);
 
 // ==================== IrqChip implementation ====================
 
@@ -248,6 +248,42 @@ fn plic_unmask(data: &IrqData) {
 fn plic_eoi(data: &IrqData) {
     let hart = crate::arch::smp::cpu_id() as usize;
     PLIC.complete(hart, data.hwirq as usize);
+}
+
+/// Post-SMP-bringup delivery restore (the VW-EXT4LOCK wedge root cause).
+///
+/// OpenSBI's per-hart warm init reprograms every secondary's S-mode PLIC
+/// context as that hart wakes (threshold raised to max, enable bits
+/// cleared), clobbering the kernel's early-init state on every context
+/// except the boot hart's — the boot hart never passes through warm init,
+/// so its context alone keeps the enables the kernel's request_irq
+/// unmask had set on ALL contexts. Whether external IRQs deliver at all
+/// after SMP online then depends on the boot hart's own context: with
+/// num_harts hardcoded to 4, a boot hart of 4..7 kept its firmware
+/// residue threshold=7 — ZERO external interrupts delivered anywhere
+/// (virtio-blk completions AND UART RX). Every async block I/O then
+/// waited to its 10 s deadline (the only async harvest fallback), the
+/// shell held EXT4_BIG_LOCK across those waits, fdreapd D-parked behind
+/// it, and the fed boot script never reached the shell (UART RX IRQ
+/// dead): the VW-EXT4LOCK fdreapd-stall hang face, ~4/8 of boots on
+/// -smp 8 cells (never on -smp 2: harts 0/1 are always init-covered).
+///
+/// Reference parity: Linux's sifive-plic driver re-establishes per-CPU
+/// enable state through its cpu-online notifier
+/// (irq_sifive_plic_cpu_starting). We do the same in one shot: when the
+/// bringup window closes, zero every S-mode context's threshold and
+/// re-apply the unmask of every registered, enabled IRQ. Idempotent;
+/// runs once on the boot hart before userspace starts.
+pub fn after_smp_online_restore() {
+    for hart in 0..crate::config::MAX_CPUS {
+        PLIC.set_threshold(hart, 0);
+    }
+    let rearmed = crate::interrupt::irqdesc::remask_registered_irqs();
+    crate::pr_info!(
+        "intc: post-SMP PLIC restore: thresholds=0 on {} S-mode contexts, {} IRQs re-enabled",
+        crate::config::MAX_CPUS,
+        rearmed
+    );
 }
 
 /// PLIC irq_chip (function-pointer-table pattern)
@@ -298,7 +334,7 @@ pub fn init() {
     }
 
     // 4. Enable IPI interrupts for all harts (S-mode contexts)
-    for hart in 0..4 {
+    for hart in 0..crate::config::MAX_CPUS {
         for ipi_irq in 11..14 {
             PLIC.enable_interrupt(hart, ipi_irq);
         }
@@ -323,4 +359,70 @@ pub fn read_pending() -> u32 {
 
 pub fn trigger_ipi(irq: usize) {
     PLIC.trigger_ipi(irq)
+}
+
+/// VW forensic snapshot: print the PLIC delivery state (VW-PLIC) — the
+/// pending array, each S-mode context's enable words, and its threshold.
+/// Read-only MMIO, safe to call from watchdog/deadline contexts. Answers
+/// the "delivery vs assertion" question for a dead device IRQ: a pending
+/// bit that stays set with zero handler entries names a delivery break
+/// (enable/threshold); a clear pending bit means the device never
+/// asserted (driver/device side).
+pub fn vw_plic_dump() {
+    let words = (MAX_INTERRUPTS + 31) / 32;
+    // Pending array
+    let mut pend = [0u32; 16];
+    let n = words.min(pend.len());
+    for w in 0..n {
+        pend[w] = PLIC.read_pending_word(w);
+    }
+    crate::pr_err!(
+        "VW-PLIC pending={:08x}{:08x} harts(maxcpus)={}",
+        (pend[1] & 0xfffffffe) | ((pend[0] >> 31) & 1), // IRQs 32..62 (33=blk,32..47=gpex) compacted
+        pend[0] & 0x7fffffff,
+        crate::config::MAX_CPUS
+    );
+    // Enable words + threshold per S-mode context
+    for hart in 0..crate::config::MAX_CPUS {
+        let ctx = s_mode_ctx(hart);
+        let addr = self_addr_enable(ctx, 0);
+        let addr1 = self_addr_enable(ctx, 1);
+        // SAFETY: PLIC enable register reads (diagnostic context).
+        let en0 = unsafe {
+            let v: u32;
+            asm!("lw {}, 0({})", out(reg) v, in(reg) addr, options(nostack));
+            v
+        };
+        let en1 = unsafe {
+            let v: u32;
+            asm!("lw {}, 0({})", out(reg) v, in(reg) addr1, options(nostack));
+            v
+        };
+        let th = read_threshold(ctx);
+        crate::pr_err!(
+            "VW-PLIC ctx={} (hart {}) enable[0]={:08x} enable[1]={:08x} threshold={}",
+            ctx,
+            hart,
+            en0,
+            en1,
+            th
+        );
+    }
+}
+
+fn self_addr_enable(ctx: usize, word: usize) -> usize {
+    PLIC_BASE + offset::ENABLE_BASE + ctx * offset::ENABLE_SIZE + word * 4
+}
+
+fn read_threshold(ctx: usize) -> u32 {
+    let addr = PLIC_BASE
+        + offset::CONTEXT_BASE
+        + ctx * offset::CONTEXT_SIZE
+        + offset::CONTEXT_THRESHOLD;
+    // SAFETY: PLIC threshold register read (diagnostic context).
+    unsafe {
+        let v: u32;
+        asm!("lw {}, 0({})", out(reg) v, in(reg) addr, options(nostack));
+        v
+    }
 }

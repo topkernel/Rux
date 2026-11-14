@@ -2317,6 +2317,11 @@ pub fn vw_report(tag: &str) {
             woken
         );
     }
+    // PLIC delivery state (the riscv-hang wedge hunt): distinguish
+    // "device asserted but nobody claims" (delivery break) from "device
+    // never asserted" (driver side).
+    #[cfg(feature = "riscv64")]
+    crate::drivers::intc::plic::vw_plic_dump();
     for disk in 0..MAX_PCI_BLK_DISKS {
         if !PCI_BLK_READY[disk].load(core::sync::atomic::Ordering::Acquire) {
             continue;
@@ -2907,6 +2912,17 @@ pub fn pci_rescue_lagged_completions(slot: usize) {
     let last = PCI_BLK_PENDING_LAST[slot].load(core::sync::atomic::Ordering::Acquire);
     if used_idx != last {
         pci_process_async_completions_slot(slot);
+    }
+}
+
+/// All-disks variant of the waiter-side rescue for the async
+/// IoCompletion::wait path (which has no slot identity): drain every
+/// ready PCI disk whose used ring is ahead of the completion walker.
+/// Cheap when caught up (two loads per disk); converts a lost interrupt
+/// engine into bounded poll latency instead of a 10 s deadline stall.
+pub fn pci_rescue_all_lagged() {
+    for slot in 0..MAX_PCI_BLK_DISKS {
+        pci_rescue_lagged_completions(slot);
     }
 }
 
