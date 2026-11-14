@@ -13,12 +13,12 @@
 #
 # Environment overrides:
 #   ROOTFS=path/to/img   image to boot (default work/ubuntu-x86.img)
-#   SMP=1                CPUs (x86 SMP bring-up is not landed: keep 1)
-#   MEM=2G               guest RAM — 2G max for now: with RAM >= 3G the
-#                       q35 PCI hole starts at 0xc0000000, the first BAR
-#                       lands exactly there, and the device-mapping
-#                       install leaves it unmapped (write #PF in
-#                       VirtIOPCI::reset_device; x86-mm territory)
+#   SMP=8                CPUs (unified rig 2026-11-14: KVM SMP8 8G)
+#   MEM=8G               guest RAM (unified rig). The old 2G cap and the
+#                       ">=3G PCI-hole BAR" warning are STALE: the hole
+#                       0xc0000000..4GB is megapage-mapped (mmu_init.rs
+#                       setup_device_mappings); verified booting 8G SMP8
+#                       KVM to the GNOME stage with zero virtio faults.
 #   QEMU=qemu-system-x86_64
 #   NOBUILD=1            skip the kernel build step
 set -euo pipefail
@@ -32,8 +32,8 @@ cd "$WT"
 
 MODE="${1:-console}"
 ROOTFS="${ROOTFS:-work/ubuntu-x86.img}"
-SMP="${SMP:-1}"
-MEM="${MEM:-2G}"
+SMP="${SMP:-8}"
+MEM="${MEM:-8G}"
 QEMU="${QEMU:-qemu-system-x86_64}"
 KERNEL_ELF="target/x86_64-unknown-none/debug/rux"
 BZIMAGE="target/x86_64-unknown-none/debug/bzImage"
