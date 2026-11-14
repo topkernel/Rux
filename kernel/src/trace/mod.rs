@@ -1508,6 +1508,41 @@ tracepoints! {
     render |args: &[u64; TRACE_ARGS]| {
         format!("node=event{}", args[0].saturating_sub(64))
     };
+
+    /// input:evdev_wake — the per-entry verdict of one poll-wait-queue
+    /// wake issued by evdev push_event (the wake-drop hunt's per-wake
+    /// answer for "wake fires, does the target run"). `verdict`:
+    ///   0 EMPTY     — no entry on the queue (nobody parks here)
+    ///   1 DELIVERED — wake linked the task (post-state RUNNING or the
+    ///                 target left for a pick)
+    ///   2 REFUSED   — wake_up_process refused (entry token returned)
+    ///   3 STICKY    — entry carried a spent token; re-issue woke a
+    ///                 sleeping target (sc100 path)
+    ///   4 GONE      — entry vanished inside the wake window (the
+    ///                 sleeper's unwait raced the push)
+    /// pre/post are the task's state bits either side of the wake;
+    /// linked is the GRQ CFS-linkage snapshot after it.
+    EVENT_EVDEV_WAKE / evdev_wake_fmt / trace_evdev_wake :
+        "input", "evdev_wake", 56,
+    print: "\"pid=%d verdict=%u pre=%#x post=%#x linked=%d waiters=%d\", REC->pid, REC->verdict, REC->pre_state, REC->post_state, REC->linked, REC->waiters",
+    fields: "\tfield:int pid;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:__u32 verdict;\toffset:12;\tsize:4;\tsigned:0;\n\
+             \tfield:__u32 pre_state;\toffset:16;\tsize:4;\tsigned:0;\n\
+             \tfield:__u32 post_state;\toffset:20;\tsize:4;\tsigned:0;\n\
+             \tfield:int linked;\toffset:24;\tsize:4;\tsigned:1;\n\
+             \tfield:__u32 waiters;\toffset:28;\tsize:4;\tsigned:0;\n",
+    call (pid: u32, verdict: u32, pre_state: u32, post_state: u32, linked: i32, waiters: u32),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "pid={} verdict={} pre={:#x} post={:#x} linked={} waiters={}",
+            args[0] as u32,
+            args[1] as u32,
+            args[2] as u32,
+            args[3] as u32,
+            args[4] as i32,
+            args[5] as u32,
+        )
+    };
 }
 
 /// The trace_marker pseudo-event. NOT in EVENTS on purpose: a marker
