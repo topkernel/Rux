@@ -10541,6 +10541,51 @@ pub fn freeze_scan(now: u64, hz: u64) {
                                         break;
                                     }
                                 }
+                                // hw1 (huks-wedge): run the reader-identity
+                                // scan for EVERY standing word whose live
+                                // waiter never owes a binder txn — the TXN
+                                // census park-row path never fires for those
+                                // (hw2w1: zero FUTEX park rows, yet 12+
+                                // standing 0x2/0x80000010 words). The scan
+                                // names the tgid's threads that carry the
+                                // word (or its owner object) on their stacks
+                                // — the holder candidates. Once per word
+                                // (16-slot table), ConsoleWriter inside.
+                                {
+                                    const HW_SCAN_SZ: usize = 16;
+                                    static HW_SCANNED: [core::sync::atomic::AtomicU64;
+                                        HW_SCAN_SZ] =
+                                        [const {
+                                            core::sync::atomic::AtomicU64::new(0)
+                                        }; HW_SCAN_SZ];
+                                    let key = ((c.tgid as u64) << 48)
+                                        | ((c.uaddr as u64) & 0xffff_ffff_ffff);
+                                    let mut hit = false;
+                                    for s in HW_SCANNED.iter() {
+                                        if s.load(core::sync::atomic::Ordering::Relaxed)
+                                            == key
+                                        {
+                                            hit = true;
+                                            break;
+                                        }
+                                    }
+                                    if !hit {
+                                        for s in HW_SCANNED.iter() {
+                                            if s
+                                                .compare_exchange(
+                                                    0,
+                                                    key,
+                                                    core::sync::atomic::Ordering::Relaxed,
+                                                    core::sync::atomic::Ordering::Relaxed,
+                                                )
+                                                .is_ok()
+                                            {
+                                                rwfrz_reader_scan(c.tgid, c.uaddr as u64);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
                                 // rwlock-livelock: one-shot full-tgid task
                                 // dump AT THE LATCH (the musl-shape FROZEN
                                 // dump never fires for the glibc word=0x2
