@@ -270,8 +270,8 @@ impl EvdevDevice {
         self.open_file_count.store(n as u32, Ordering::Release);
     }
 
-    /// Push event (called from softirq context)
-    pub fn push_event(&self, event: InputEvent) {
+/// Push event (called from softirq context)
+pub fn push_event(&self, event: InputEvent) {
         {
             // dfx=inputtrace: the input arrival trace (release-visible via
             // the raw UART path — this is the datum that says whether the
@@ -476,6 +476,26 @@ fn sleep_ms_interruptible(ms: u64) -> bool {
     }
 }
 
+/// Resolve the EvdevDevice AND its devfs minor a file was opened
+/// against (the minor is the input:evdev_read/evdev_open `node` field).
+// SAFETY: same contract as device_of_file.
+unsafe fn node_of_file(file: &File) -> Option<(&'static EvdevDevice, u32)> {
+    let ptr = match *(file.private_data.get()) {
+        Some(p) => p,
+        None => return None,
+    };
+    let devno = *(ptr as *const DevNo);
+    if devno == DEV_EVDEV_KEYBOARD {
+        unsafe { EVDEV_KEYBOARD.as_ref() }.map(|d| (d, devno.minor))
+    } else if devno == DEV_EVDEV_POINTER {
+        unsafe { EVDEV_POINTER.as_ref() }.map(|d| (d, devno.minor))
+    } else if devno == crate::fs::dev_t::DEV_EVDEV_TOUCHSCREEN {
+        unsafe { EVDEV_TOUCHSCREEN.as_ref() }.map(|d| (d, devno.minor))
+    } else {
+        None
+    }
+}
+
 /// evdev read function
 ///
 /// Linux semantics: a blocking fd sleeps until at least one event is
@@ -487,7 +507,7 @@ fn evdev_file_read(file: &File, buf: &mut [u8]) -> isize {
     // SAFETY: private_data contains a valid DevNo pointer set during device
     // open; the EVDEV_* statics are initialized by init_evdev() before any
     // file operations can occur.
-    let device = match unsafe { device_of_file(file) } {
+    let (device, node) = match unsafe { node_of_file(file) } {
         Some(d) => d,
         None => return -9, // EBADF
     };
@@ -505,6 +525,32 @@ fn evdev_file_read(file: &File, buf: &mut [u8]) -> isize {
 
         match device.pop_event() {
             Some(event) => {
+                // input:evdev_read — hop 2 of the input chain: a
+                // userspace reader took this event off the node. The
+                // reader's pid/comm ride the trace record's TASK-PID
+                // column; the serial echo spells the pid out (the OH
+                // rig reads its verdict off serial).
+                if crate::trace::EVENT_EVDEV_READ.armed() {
+                    crate::trace::trace_evdev_read(node, event.type_, event.code, event.value);
+                    use core::sync::atomic::{AtomicU64, Ordering};
+                    static RD_ECHO_N: AtomicU64 = AtomicU64::new(0);
+                    let n = RD_ECHO_N.fetch_add(1, Ordering::Relaxed);
+                    if input_echo_budget(n) {
+                        itt_msg(b"INRD[");
+                        itt_u64(n);
+                        itt_msg(b"] pid=");
+                        itt_u64(crate::process::current_pid() as u64);
+                        itt_msg(b" node=event");
+                        itt_u64(node.saturating_sub(64) as u64);
+                        itt_msg(b" type=");
+                        itt_u64(event.type_ as u64);
+                        itt_msg(b" code=");
+                        itt_u64(event.code as u64);
+                        itt_msg(b" value=");
+                        itt_i64(event.value as i64);
+                        itt_msg(b"\n");
+                    }
+                }
                 // dfx=inputtrace: the userspace READ hop — pid, which node,
                 // how many events remained after this one. If this prints
                 // during a gesture the delivery chain is complete and any
@@ -560,8 +606,30 @@ fn evdev_file_read(file: &File, buf: &mut [u8]) -> isize {
 /// Backstop poll interval for the blocking read sleep.
 const EVDEV_READ_POLL_MS: u64 = 10;
 
-/// dfx=inputtrace: announce which node the guest opened.
-pub fn trace_open(dev: &EvdevDevice, file: &File) {
+/// dfx=inputtrace: announce which node the guest opened. Also records
+/// input:evdev_open (hop 2a of the input chain — a consumer opened the
+/// node; pid/comm name the opener in the trace record header and the
+/// serial echo). `node` is the devfs minor (64/65/66).
+pub fn trace_open(dev: &EvdevDevice, file: &File, node: u32) {
+    // The tracepoint path first (it is the policy instrument; the dfx
+    // prints below are the frozen legacy view of the same event).
+    if crate::trace::EVENT_EVDEV_OPEN.armed() {
+        crate::trace::trace_evdev_open(node);
+        use core::sync::atomic::{AtomicU64, Ordering};
+        static OP_ECHO_N: AtomicU64 = AtomicU64::new(0);
+        let n = OP_ECHO_N.fetch_add(1, Ordering::Relaxed);
+        if n < 64 {
+            itt_msg(b"INOP[");
+            itt_u64(n);
+            itt_msg(b"] pid=");
+            itt_u64(crate::process::current_pid() as u64);
+            itt_msg(b" node=event");
+            itt_u64(node.saturating_sub(64) as u64);
+            itt_msg(b" file_id=");
+            itt_u64(file.file_id);
+            itt_msg(b"\n");
+        }
+    }
     if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
         return;
     }
@@ -1248,6 +1316,35 @@ fn fill_capabilities(
 
 /// Push event to evdev device
 pub fn push_input_event(is_pointer: bool, event: InputEvent) {
+    // input:input_event — hop 1 of the input chain: the event crossed
+    // from the virtio virtqueue into the kernel input core. The armed()
+    // check inside the generated call is the one relaxed load this adds
+    // when the event is off; the serial echo re-checks armed() so it
+    // rides the same enable path (trace_event=).
+    if crate::trace::EVENT_INPUT_EVENT.armed() {
+        crate::trace::trace_input_event(
+            if is_pointer { "ptr" } else { "kbd" },
+            event.type_,
+            event.code,
+            event.value,
+        );
+        use core::sync::atomic::{AtomicU64, Ordering};
+        static ECHO_N: AtomicU64 = AtomicU64::new(0);
+        let n = ECHO_N.fetch_add(1, Ordering::Relaxed);
+        if input_echo_budget(n) {
+            itt_msg(b"INEV[");
+            itt_u64(n);
+            itt_msg(b"] dev=");
+            itt_msg(if is_pointer { b"ptr" } else { b"kbd" });
+            itt_msg(b" type=");
+            itt_u64(event.type_ as u64);
+            itt_msg(b" code=");
+            itt_u64(event.code as u64);
+            itt_msg(b" value=");
+            itt_i64(event.value as i64);
+            itt_msg(b"\n");
+        }
+    }
 
     if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
         static PN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -1348,6 +1445,61 @@ pub fn push_input_event(is_pointer: bool, event: InputEvent) {
                 dev.push_event(event);
             }
         }
+    }
+}
+
+// ============================================================================
+// input:* tracepoint serial echo (OH input-chain hunts)
+// ============================================================================
+//
+// The OH image gives the hunts no in-guest way to read tracefs (no
+// shell on the serial console, debugfs not mounted), so the per-hop
+// verdict is read off the serial log. When the input tracepoints are
+// armed — through the reference's `trace_event=` boot parameter, the
+// unified-framework enable path (NOT a dfx= switch) — each traced hop
+// ALSO echoes one budgeted line through uart_putc_raw (the raw UART
+// path that is deliberately not compiled out of release builds; safe
+// from the softirq tasklet context push_input_event runs in). Off by
+// default exactly like the tracepoints themselves. Hand-rolled number
+// formatting, no allocation: these fire from the input tasklet BH.
+
+/// Serial-echo budget per class: first 300 lines in full, then every
+/// 25th (a phantom event flood must not wedge the console; a quiet
+/// injection window prints every line).
+fn input_echo_budget(n: u64) -> bool {
+    n < 300 || n % 25 == 0
+}
+
+fn itt_msg(msg: &[u8]) {
+    for &b in msg {
+        crate::console::uart_putc_raw(b);
+    }
+}
+
+fn itt_u64(mut v: u64) {
+    let mut buf = [0u8; 20];
+    let mut n = 0;
+    if v == 0 {
+        buf[0] = b'0';
+        n = 1;
+    } else {
+        while v > 0 && n < buf.len() {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+    }
+    for i in (0..n).rev() {
+        crate::console::uart_putc_raw(buf[i]);
+    }
+}
+
+fn itt_i64(v: i64) {
+    if v < 0 {
+        itt_msg(b"-");
+        itt_u64(v.unsigned_abs());
+    } else {
+        itt_u64(v as u64);
     }
 }
 

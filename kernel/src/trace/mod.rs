@@ -1444,6 +1444,70 @@ tracepoints! {
             args[4]
         )
     };
+
+    /// input:input_event — one input event crossed from a virtio input
+    /// device (virtio-keyboard / virtio-tablet) into the kernel input
+    /// core, i.e. it was drained off the virtqueue and is about to enter
+    /// the evdev client queues. The input-chain hunts' hop-1 event: it
+    /// answers "did the injected gesture reach the kernel at all".
+    /// `dev` is the device-class tag ("kbd" or "ptr"). Rux-native event
+    /// (the reference has no input tracepoints — its evbug is a printk
+    /// driver), so the field set is ours in the reference's format-file
+    /// shape.
+    EVENT_INPUT_EVENT / input_event_fmt / trace_input_event :
+        "input", "input_event", 53,
+    print: "\"dev=%s type=%u code=%u value=%d\", REC->dev, REC->type, REC->code, REC->value",
+    fields: "\tfield:char dev[8];\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:__u16 type;\toffset:16;\tsize:2;\tsigned:0;\n\
+             \tfield:__u16 code;\toffset:18;\tsize:2;\tsigned:0;\n\
+             \tfield:int value;\toffset:20;\tsize:4;\tsigned:1;\n",
+    call (dev: &str, type_: u16, code: u16, value: i32),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "dev={} type={} code={} value={}",
+            ascii_from_word(args[0]),
+            args[1] as u16,
+            args[2] as u16,
+            args[3] as i32,
+        )
+    };
+
+    /// input:evdev_read — one input_event was handed to userspace by a
+    /// read() on an /dev/input/eventX node. The reader's pid/comm ride
+    /// the record header (the TASK-PID column), so this single event
+    /// answers hop 2 — "did any process read the evdev node during the
+    /// injection window" — AND names who. `node` is the evdev minor
+    /// (64/65/66 = event0/1/2, the reference's minors).
+    EVENT_EVDEV_READ / evdev_read_fmt / trace_evdev_read :
+        "input", "evdev_read", 54,
+    print: "\"node=event%d type=%u code=%u value=%d\", REC->node - 64, REC->type, REC->code, REC->value",
+    fields: "\tfield:unsigned int node;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:__u16 type;\toffset:16;\tsize:2;\tsigned:0;\n\
+             \tfield:__u16 code;\toffset:18;\tsize:2;\tsigned:0;\n\
+             \tfield:int value;\toffset:20;\tsize:4;\tsigned:1;\n",
+    call (node: u32, type_: u16, code: u16, value: i32),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "node=event{} type={} code={} value={}",
+            args[0].saturating_sub(64),
+            args[1] as u16,
+            args[2] as u16,
+            args[3] as i32,
+        )
+    };
+
+    /// input:evdev_open — an /dev/input/eventX node was opened. Same
+    /// header discipline (pid/comm name the opener): a boot where
+    /// evdev_read never fires but evdev_open does names a consumer that
+    /// opened the device and never read (or read and got nothing).
+    EVENT_EVDEV_OPEN / evdev_open_fmt / trace_evdev_open :
+        "input", "evdev_open", 55,
+    print: "\"node=event%d\", REC->node - 64",
+    fields: "\tfield:unsigned int node;\toffset:8;\tsize:4;\tsigned:0;\n",
+    call (node: u32),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!("node=event{}", args[0].saturating_sub(64))
+    };
 }
 
 /// The trace_marker pseudo-event. NOT in EVENTS on purpose: a marker

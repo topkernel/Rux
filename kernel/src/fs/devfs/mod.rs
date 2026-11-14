@@ -1426,7 +1426,7 @@ unsafe fn devfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
         // in the queue: the UI renders but no gesture ever arrives.
         if let Some(dev) = crate::drivers::input::evdev::device_of_devno(entry.devno) {
             dev.register_open_file(file.file_id);
-            crate::drivers::input::evdev::trace_open(dev, file);
+            crate::drivers::input::evdev::trace_open(dev, file, entry.devno.minor);
         }
     }
     // VT nodes (4, 0..=NR_VT): stash the DevNo (the ioctl layer reads
