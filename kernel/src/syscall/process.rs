@@ -6125,6 +6125,7 @@ fn shutdown_cascade(cmd: u32) {
     crate::dfx::fsw::dump();
     crate::dfx::cctx::dump();
     crate::dfx::unixrd::dump();
+    crate::dfx::hilogcensus::dump();
 
     // --- 1. Tell init (PID 1) to shut down (SIGTERM, systemd sequence) ---
     let my_pid = crate::sched::get_current_pid();

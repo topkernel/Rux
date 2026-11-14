@@ -1569,6 +1569,9 @@ pub fn dump() {
     // 39th: AF_UNIX hot-path phase anatomy rides the same dump cadence
     // (no-op unless the unixrd=1 cmdline param is armed).
     crate::dfx::unixrd::dump();
+    // hilog-flood lane: OH log-fabric per-caller census (no-op unless
+    // the hilogcensus=1 cmdline param is armed).
+    crate::dfx::hilogcensus::dump();
 
     // Tick modes: one line per dump.
     let mut line = alloc::string::String::from("SYSCOST t=");

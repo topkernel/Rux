@@ -968,7 +968,11 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
             // perf-ipc: hand the gathered buffer to the unix engine OWNED
             // (write_slice would re-copy it into the segment).
             let ur_t_send = crate::dfx::unixrd::now();
+            // hilogcensus (cmdline hilogcensus=1): parse/claim before the
+            // owned send consumes the buffer, record the outcome after.
+            crate::dfx::hilogcensus::unix_send_pre(&gathered);
             let sent = crate::net::unix::unix_write_slice_owned(&file, gathered) as i64;
+            crate::dfx::hilogcensus::unix_send_post(sent as isize);
             crate::dfx::unixrd::add(&crate::dfx::unixrd::WV_SEND_NS, ur_t_send);
             if sent < 0 {
                 if sent == -11 {
