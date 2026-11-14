@@ -1000,6 +1000,190 @@ pub fn do_exit(exit_code: i32) -> ! {
         }
     }
 
+    // mmi-endgame (116th): the UIEXIT comm arm — clean-death decode for
+    // the UI-phase process family. The 115th's boots ended with a
+    // system-wide death event at ~136-190 s (hw10w1: ueventd,
+    // watchdog_servic, storage_daemon, hdf_devmgr, every *_host,
+    // ui_service, render_service, allocator/composer_host,
+    // uinput_inject, multimodalinput, bootanimation, then a second wave
+    // ending with hilogd) with NO fault rows, NO SIGCHLD kmsg and no
+    // reaping — every victim was PARKED (futex/BWR/poll/epoll), so they
+    // were killed, not voluntarily exited — and the holder print's
+    // owing/frozen/segv arms matched none of them (and its 96-row
+    // window is consumed by ALL exits, so it goes blind mid-boot).
+    // This arm fires for ANY thread exit whose comm — or whose tgid
+    // LEADER's comm — names the UI-phase family, with its OWN budget,
+    // and decodes the death: exit code + cause (signal: si_pid names
+    // the SENDER; exit_group; thread-exit), the exit CALLER's user
+    // return address (pt_regs at do_exit: the instruction after the
+    // exit/exit_group syscall site in libc, or the interruption point
+    // of a killed thread), the last-syscall latch with args, the parent
+    // (pid+comm) that will or will not reap, and the txnhunt owing
+    // snapshot. FuxStuck-gated like the holder block above.
+    {
+        use core::sync::atomic::Ordering::Relaxed as Rel;
+        static UIEXIT_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        const UIEXIT_COMMS: [&str; 18] = [
+            "multimodalinput",
+            "uinput_inject",
+            "mmi_service",
+            "mmi",
+            "bootanimation",
+            "render_service",
+            "composer_host",
+            "allocator_host",
+            "ui_service",
+            "foundation",
+            "input_user_host",
+            "inputmethod_ser",
+            "hdf_devmgr",
+            "storage_daemon",
+            "ueventd",
+            "watchdog_servic",
+            "hilogd",
+            "sensors",
+        ];
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck)
+            && UIEXIT_N.load(Rel) < 96
+        {
+            let comm_matches = |raw: &[u8; 16]| -> bool {
+                let name = core::str::from_utf8(raw).unwrap_or("").trim_end_matches('\0');
+                UIEXIT_COMMS.iter().any(|&w| name == w)
+            };
+            // SAFETY: current is the running (exiting) task; the leader
+            // pointer is fixed up by group_leader_ptr() and stays valid
+            // until the group is reaped — later than this point.
+            let my_comm = unsafe { (*current).comm() };
+            let leader = unsafe { (*current).group_leader_ptr() };
+            let leader_comm: &[u8; 16] = if leader.is_null() {
+                my_comm
+            } else {
+                unsafe { (*leader).comm() }
+            };
+            let my_named = comm_matches(my_comm);
+            if my_named || comm_matches(leader_comm) {
+                // Churn filter (first matrix's lesson): the UI processes
+                // shed dozens of FFRT worker threads during startup —
+                // clean single-thread exit_group(0)-free exits that
+                // burned the whole budget in the first 10 s. A thread
+                // whose OWN comm is on the list (mmi_service-style
+                // named threads) always prints; a match via the LEADER
+                // comm alone prints only for non-benign deaths (signal,
+                // group exit, leader death, nonzero code).
+                let my_tgid_early = unsafe { (*current).tgid() } as u32;
+                let is_leader_early = dying_pid == my_tgid_early;
+                let grp_early = unsafe { (*current).signal_arc() }
+                    .map(|ss| ss.group_exiting.load(Rel))
+                    .unwrap_or(false);
+                let benign_churn =
+                    !my_named && exit_code == 0 && !grp_early && !is_leader_early;
+                if !benign_churn {
+                let n = UIEXIT_N.fetch_add(1, Rel);
+                if n < 96 {
+                    let comm = core::str::from_utf8(my_comm)
+                        .unwrap_or("")
+                        .trim_end_matches('\0');
+                    let leader_name = core::str::from_utf8(leader_comm)
+                        .unwrap_or("")
+                        .trim_end_matches('\0');
+                    let my_tgid = unsafe { (*current).tgid() } as u32;
+                    let is_leader = dying_pid == my_tgid;
+                    // Parent at death time (pid + comm for the reaping
+                    // question). None/implausible = racing reaper or an
+                    // already-freed parent pointer.
+                    let (ppid, pcomm) = match unsafe { (*current).parent_ptr() } {
+                        Some(pp) if Task::is_plausible_task_ptr(pp) => unsafe {
+                            (
+                                (*pp).pid(),
+                                alloc::string::String::from(
+                                    core::str::from_utf8((*pp).comm())
+                                        .unwrap_or("")
+                                        .trim_end_matches('\0'),
+                                ),
+                            )
+                        },
+                        _ => (0, alloc::string::String::from("?")),
+                    };
+                    let lastsys = unsafe { (*current).last_syscall_nr.load(Rel) } as i64;
+                    let la0 = unsafe { (*current).last_syscall_a0.load(Rel) };
+                    let la1 = unsafe { (*current).last_syscall_a1.load(Rel) };
+                    let (group_exiting, _group_code) = unsafe { (*current).signal_arc() }
+                        .map(|ss| {
+                            (ss.group_exiting.load(Rel), ss.group_exit_code.load(Rel))
+                        })
+                        .unwrap_or((false, 0));
+                    let cause = if exit_code < 0 {
+                        "signal"
+                    } else if group_exiting {
+                        "exit_group"
+                    } else if !is_leader {
+                        "thread-exit"
+                    } else {
+                        "exit"
+                    };
+                    // Sender forensics for signal deaths (kill/tgkill
+                    // carry si_pid; kernel-forced kills print si_code).
+                    let (sender, sicode) = if exit_code < 0 {
+                        unsafe { (*current).pending.peek_info(-exit_code) }
+                            .map(|si| (si.si_pid, si.si_code))
+                            .unwrap_or((0, 0))
+                    } else {
+                        (0, 0)
+                    };
+                    // The exit caller's user return address (see the
+                    // RWFRZ-THREADEXIT precedent above for the cfg split).
+                    let exrip = {
+                        let pr = unsafe { (*current).pt_regs() };
+                        if pr.is_null() {
+                            0u64
+                        } else {
+                            #[cfg(feature = "x86_64")]
+                            {
+                                unsafe { (*pr).rip }
+                            }
+                            #[cfg(feature = "riscv64")]
+                            {
+                                unsafe { (*pr).epc }
+                            }
+                            #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
+                            {
+                                0u64
+                            }
+                        }
+                    };
+                    let (owing_n, owing_txn, _owing_stid) =
+                        crate::ipc::binder::txn_owing_of(my_tgid, dying_pid);
+                    // HOTPATH-PRINT: dfx=fuxstuck-gated UI-family exits.
+                    crate::pr_warn!(
+                        "UIEXIT[{}] tid={} comm='{}' tgid={} leader='{}' ppid={}('{}') code={:#x} cause={} sig={} sender={} sicode={:#x} grpexit={} leader={} lastsys={}({:#x},{:#x}) exrip={:#x} owing_n={} owing_txn={}",
+                        n,
+                        dying_pid,
+                        comm,
+                        my_tgid,
+                        leader_name,
+                        ppid,
+                        pcomm,
+                        exit_code,
+                        cause,
+                        if exit_code < 0 { -exit_code } else { 0 },
+                        sender,
+                        sicode,
+                        group_exiting,
+                        is_leader,
+                        lastsys,
+                        la0,
+                        la1,
+                        exrip,
+                        owing_n,
+                        owing_txn
+                    );
+                }
+                }
+            }
+        }
+    }
+
     // sc57 (57th session): thread-exit forensics for the OH wedge —
     // an FFRT/binder worker that exits while holding a userspace
     // ffrt::mutex leaves every later locker parked forever with no

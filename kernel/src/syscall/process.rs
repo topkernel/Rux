@@ -6248,7 +6248,24 @@ fn shutdown_cascade(cmd: u32) {
             }
             #[cfg(feature = "x86_64")]
             {
-                // No 8259/ACPI reset yet — park with interrupts waiting.
+                // mmi-endgame (116th): a REAL reset on q35. The old
+                // stand-in parked forever — a guest whose init decides
+                // to reboot (OH's critical-service policy) froze in a
+                // half-dead zombie state instead of restarting, so the
+                // image never got its crash-recovery loop. Linux's PC
+                // reboot ladder, ACPI RESET_REG unparsed: the 8042
+                // keyboard-controller pulse (outb 0xFE -> port 0x64,
+                // honored directly by QEMU), then the PCI/ATX reset
+                // port 0xcf9 (bit 2 = RSTDRV; QEMU resets on it).
+                // machine_park only runs on hardware that ignored both.
+                crate::println!("reboot: resetting (8042 pulse / 0xcf9)");
+                unsafe {
+                    crate::arch::x86_64::cpu::outb(0x64, 0xFE);
+                    for _ in 0..100_000 {
+                        core::hint::spin_loop();
+                    }
+                    crate::arch::x86_64::cpu::outb(0xcf9, 0x0E);
+                }
                 machine_park();
             }
         }

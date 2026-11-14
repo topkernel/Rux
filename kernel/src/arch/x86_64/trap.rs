@@ -1567,6 +1567,28 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
                 putchar(b);
             }
             ph(regs.rip);
+            // mmi-endgame (116th): symbolize the rip LIVE with the
+            // kernel's own ksyms table — the 115th's hw10 boots left
+            // init spinning at one rip for 300+s (recurring 0.6-9.9 s
+            // IF=0 windows) and the address could only be decoded
+            // offline against that build's exact ELF, which no longer
+            // existed (build/.config drift). Read-only static-table
+            // binary search — IRQ-safe. Name capped to keep the
+            // direct-console line bounded.
+            if let Some((name, base, _sz)) = crate::dfx::ksyms::lookup(regs.rip) {
+                let msg: &[u8] = b" sym=";
+                for &b in msg {
+                    putchar(b);
+                }
+                for &b in name.as_bytes().iter().take(96) {
+                    putchar(b);
+                }
+                let msg: &[u8] = b"+0x";
+                for &b in msg {
+                    putchar(b);
+                }
+                ph(regs.rip - base);
+            }
             let msg: &[u8] = b" rsp=";
             for &b in msg {
                 putchar(b);
