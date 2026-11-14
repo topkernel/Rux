@@ -113,6 +113,18 @@ pub fn generate_hostname() -> Vec<u8> {
     out
 }
 
+pub fn generate_domainname() -> Vec<u8> {
+    // Same discipline as hostname: per-UTS-namespace storage behind the
+    // global sysctl file. Default "(none)" mirrors init_uts_ns.
+    let mut out = crate::process::ns::current_uts_ns().get_domainname();
+    out.push(b'\n');
+    out
+}
+
+pub fn generate_osrelease() -> Vec<u8> {
+    Vec::from(&b"6.8.0-rux\n"[..])
+}
+
 pub fn generate_pid_max() -> Vec<u8> {
     alloc::format!("{}\n", read_pid_max()).into_bytes()
 }
@@ -287,6 +299,24 @@ pub fn write_hostname(input: &[u8]) -> i32 {
         return -(crate::errno::constants::EINVAL as i32);
     }
     if !crate::process::ns::current_uts_ns().set_hostname(s) {
+        return -(crate::errno::constants::EINVAL as i32);
+    }
+    0
+}
+
+pub fn write_domainname(input: &[u8]) -> i32 {
+    // Linux setdomainname(2) semantics mirrored from write_hostname:
+    // ≤ __NEW_UTS_LEN (64) bytes, trailing newline accepted, empty
+    // allowed, affects the caller's UTS namespace only.
+    let s: &[u8] = if input.last() == Some(&b'\n') {
+        &input[..input.len() - 1]
+    } else {
+        input
+    };
+    if s.len() > 64 {
+        return -(crate::errno::constants::EINVAL as i32);
+    }
+    if !crate::process::ns::current_uts_ns().set_domainname(s) {
         return -(crate::errno::constants::EINVAL as i32);
     }
     0

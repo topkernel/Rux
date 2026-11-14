@@ -563,15 +563,15 @@ impl ProcFSSuperBlock {
         // /proc/cgroups — cgroup v2 controller list. systemd reads this
         // at boot to discover available controllers ("Cannot determine
         // cgroup" freeze without it, noble-desktop 2026-11-13).
-        self.create_dynamic_file("sys/kernel/domainname", || b"(none)\n".to_vec());
-        self.create_dynamic_file("sys/kernel/hostname", || {
-            let hn = crate::process::ns::current_uts_ns().get_hostname();
-            let mut v = hn.to_vec();
-            v.push(b'\n');
-            v
-        });
-        self.create_dynamic_file("sys/kernel/osrelease", || b"6.8.0-rux\n".to_vec());
-        self.create_dynamic_file("sys/kernel/ostype", || b"Linux\n".to_vec());
+        // NOTE: create_dynamic_file adds a node with the LITERAL name under
+        // the procfs root — a slashed name like "sys/kernel/domainname" is
+        // unreachable (no nested walk). The real /proc/sys/kernel files
+        // live in init_sys_tree(); the slashed registrations that used to
+        // sit here (domainname/hostname/osrelease/ostype) were phantom
+        // root-level nodes, and /proc/sys/kernel/domainname resolved
+        // ENOENT — which is what broke systemd's ProtectHostname= mount
+        // namespacing ("Failed to set up mount namespacing:
+        // /proc/sys/kernel/domainname", ub2404 polkit/ppsd/localed).
 self.create_dynamic_file("cgroups", || {
             b"#subsys_name\thierarchy\tnum_cgroups\tenabled\n              cpu\t0\t1\t1\n              memory\t0\t1\t1\n              io\t0\t1\t1\n\n"
                 .to_vec()
@@ -708,6 +708,21 @@ self.create_dynamic_file("cgroups", || {
             b"hostname".to_vec(),
             sysctl::generate_hostname,
             sysctl::write_hostname,
+            self.alloc_ino(),
+        )));
+        // domainname — the OTHER ProtectHostname= file (systemd binds
+        // /proc/sys/kernel/{hostname,domainname} read-only into service
+        // mount namespaces; missing here it failed the whole namespace
+        // setup for polkit/power-profiles-daemon/localed on noble).
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"domainname".to_vec(),
+            sysctl::generate_domainname,
+            sysctl::write_domainname,
+            self.alloc_ino(),
+        )));
+        kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"osrelease".to_vec(),
+            sysctl::generate_osrelease,
             self.alloc_ino(),
         )));
         kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
