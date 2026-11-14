@@ -308,7 +308,17 @@ pub fn push_event(&self, event: InputEvent) {
         }
         // Wake poll/select waiters OUTSIDE the event_queue lock (INV-LOCK-6
         // discipline: never nest a wait-queue wake inside a held spinlock).
-        self.poll_waitq.wake_up_all();
+        // input:evdev_wake (wake-drop hunt): when armed, wrap the wake with
+        // a per-entry verdict — pre/post entry snapshots around
+        // wake_up_all() split EMPTY / DELIVERED / REFUSED / STICKY / GONE
+        // for every parked poller, with the GRQ linkage snapshot after.
+        // Off by default like every tracepoint; the serial echo rides the
+        // same armed() gate with the INEV budget discipline.
+        if crate::trace::EVENT_EVDEV_WAKE.armed() {
+            self.wake_pollq_probed();
+        } else {
+            self.poll_waitq.wake_up_all();
+        }
         // …and wake the EPOLL waiters: an epoll-based reader (OH's
         // multimodalinput reads /dev/input/eventN through epoll) that is
         // blocked in epoll_wait() is parked on the EPOLL wait queue, not
@@ -330,9 +340,146 @@ pub fn push_event(&self, event: InputEvent) {
         }
     }
 
+    /// input:evdev_wake probe: wake the poll wait queue with a per-entry
+    /// verdict (the wake-drop hunt's per-wake answer). Runs only when the
+    /// tracepoint is armed; the serial echo carries the same verdicts so
+    /// the OH rig (no in-guest tracefs) reads them off serial.
+    ///
+    /// Verdicts per pre-wake entry:
+    ///   0 EMPTY     — queue had no entries at push time
+    ///   1 DELIVERED — wake consumed the token AND the target left the
+    ///                 sleeping state (linked for a pick, or already
+    ///                 running through its poll re-scan)
+    ///   2 REFUSED   — token returned (wake_up_process refused: the W1
+    ///                 path — the entry stays eligible for the next push)
+    ///   3 STICKY    — pre-woken token on a still-sleeping target at post
+    ///                 time (the sc100 re-issue attempted this push)
+    ///   4 GONE      — entry vanished inside the window (the sleeper's
+    ///                 unwait raced the push — its own re-check owns the
+    ///                 event)
+    ///   5 RERAN     — token consumed and the target is parked AGAIN at
+    ///                 post time: the wake ran it through the poll loop
+    ///                 within the window (fast SMP round trip)
+    fn wake_pollq_probed(&self) {
+        use core::sync::atomic::{AtomicU64, Ordering};
+        let (pre_waiters, pre) = self.poll_waitq.debug_entries_ptr();
+        if pre.is_empty() {
+            crate::trace::trace_evdev_wake(0, 0, 0, 0, 2, pre_waiters as u32);
+            static EMPTY_N: AtomicU64 = AtomicU64::new(0);
+            let n = EMPTY_N.fetch_add(1, Ordering::Relaxed);
+            if input_echo_budget(n) {
+                let q = self.event_queue.lock_irqsave().len();
+                let mut l = HuntLine::new();
+                l.push(b"INWK[");
+                l.u64(n);
+                l.push(b"]E ");
+                for &c in self.name.iter().take_while(|&&c| c != 0).take(10) {
+                    l.push(&[c]);
+                }
+                l.push(b" q=");
+                l.u64(q as u64);
+                // w= names the waiters COUNTER (not just list emptiness):
+                // w>0 with an empty list is the counter/list divergence
+                // signature; w=0 confirms nobody is registered at all.
+                l.push(b" w=");
+                l.u64(pre_waiters as u64);
+                // stE= the R127 wake-time stale-eviction total: stE>0 on
+                // this boot means the screen has already self-healed
+                // leaked entries from dead parkers upstream of this push.
+                l.push(b" stE=");
+                l.u64(crate::process::wait::WQ_STALE_EVICTED.load(Ordering::Relaxed));
+                l.push(b"\n");
+                l.flush();
+            }
+            return;
+        }
+        self.poll_waitq.wake_up_all();
+        let (post_waiters, post) = self.poll_waitq.debug_entries_ptr();
+        static WK_ECHO_N: AtomicU64 = AtomicU64::new(0);
+        for (pid, pre_state, pre_woken, task) in pre.iter() {
+            if *pid == 0 {
+                continue;
+            }
+            let post_e = post.iter().find(|(p, _, _, _)| p == pid);
+            let (verdict, post_state) = match post_e {
+                None => (4u32, 0u32),
+                Some((_, st, woken, _)) => {
+                    let st = *st;
+                    let sleeping = st & 0x3 != 0; // INTERRUPTIBLE|UNINTERRUPTIBLE bits
+                    if !*pre_woken {
+                        if !*woken {
+                            (2, st) // token returned — refused
+                        } else if sleeping {
+                            (5, st) // delivered, ran, re-parked inside window
+                        } else {
+                            (1, st) // delivered
+                        }
+                    } else if sleeping {
+                        (3, st) // sticky token on sleeping target
+                    } else {
+                        (1, st) // re-issue delivered
+                    }
+                }
+            };
+            let linked = match crate::sched::sched::grq_diag_cfs_linked(*task) {
+                Some(true) => 1,
+                Some(false) => 0,
+                None => 2,
+            };
+            crate::trace::trace_evdev_wake(
+                *pid, verdict, *pre_state, post_state, linked, post_waiters as u32,
+            );
+            let n = WK_ECHO_N.fetch_add(1, Ordering::Relaxed);
+            if input_echo_budget(n) {
+                let mut l = HuntLine::new();
+                l.push(b"INWK[");
+                l.u64(n);
+                l.push(b"] pid=");
+                l.u64(*pid as u64);
+                l.push(b" v=");
+                l.u64(verdict as u64);
+                l.push(b" pre=");
+                l.u64(*pre_state as u64);
+                l.push(b" post=");
+                l.u64(post_state as u64);
+                l.push(b" lnk=");
+                l.u64(linked as u64);
+                l.push(b" w=");
+                l.u64(post_waiters as u64);
+                l.push(b"\n");
+                l.flush();
+            }
+        }
+    }
+
     /// Read event
     pub fn pop_event(&self) -> Option<InputEvent> {
-        self.event_queue.lock_irqsave().pop_front()
+        let ev = self.event_queue.lock_irqsave().pop_front();
+        // input:evdev_wake hunt: name the consumer even when the INRD
+        // echo tears on the raw UART — one short line per pop (budgeted),
+        // first-8-chars device name + remaining depth.
+        if ev.is_some() && crate::trace::EVENT_EVDEV_WAKE.armed() {
+            use core::sync::atomic::{AtomicU64, Ordering};
+            static POP_N: AtomicU64 = AtomicU64::new(0);
+            let n = POP_N.fetch_add(1, Ordering::Relaxed);
+            if input_echo_budget(n) {
+                let remain = self.event_queue.lock_irqsave().len();
+                let mut l = HuntLine::new();
+                l.push(b"INPOP[");
+                l.u64(n);
+                l.push(b"] ");
+                l.u64(crate::process::current_pid() as u64);
+                l.push(b" ");
+                for &c in self.name.iter().take_while(|&&c| c != 0).take(10) {
+                    l.push(&[c]);
+                }
+                l.push(b" r=");
+                l.u64(remain as u64);
+                l.push(b"\n");
+                l.flush();
+            }
+        }
+        ev
     }
 
     /// Check if there are events
@@ -749,6 +896,33 @@ pub fn evdev_poll_wait(file: &File, task: *mut crate::process::task::Task) -> bo
             device
                 .poll_waitq
                 .add(crate::process::wait::WaitQueueEntry::new(task, false));
+            // input:evdev_wake hunt: echo the park registration (names
+            // WHO parks on the input nodes — the OH rig reads it off
+            // serial). Same armed() gate as the verdict echo.
+            if crate::trace::EVENT_EVDEV_WAKE.armed() {
+                use core::sync::atomic::{AtomicU64, Ordering};
+                static REG_N: AtomicU64 = AtomicU64::new(0);
+                let n = REG_N.fetch_add(1, Ordering::Relaxed);
+                if input_echo_budget(n) {
+                    // SAFETY: task is the current task parking here.
+                    let pid = unsafe { (*task).pid() };
+                    let mut l = HuntLine::new();
+                    l.push(b"INPW[");
+                    l.u64(n);
+                    l.push(b"] reg pid=");
+                    l.u64(pid as u64);
+                    l.push(b" dev=");
+                    for &c in device.name.iter().take_while(|&&c| c != 0).take(10) {
+                        l.push(&[c]);
+                    }
+                    // f= correlates the registration with the INOP open
+                    // line (which node this file really is).
+                    l.push(b" f=");
+                    l.u64(file.file_id);
+                    l.push(b"\n");
+                    l.flush();
+                }
+            }
             true
         }
         None => false,
@@ -759,7 +933,44 @@ pub fn evdev_poll_wait(file: &File, task: *mut crate::process::task::Task) -> bo
 pub fn evdev_poll_unwait(file: &File, task: *mut crate::process::task::Task) {
     // SAFETY: same contract as evdev_poll_wait.
     if let Some(device) = unsafe { device_of_file(file) } {
-        device.poll_waitq.remove(task);
+        let dropped = device.poll_waitq.remove_count(task);
+        if crate::trace::EVENT_EVDEV_WAKE.armed() {
+            use core::sync::atomic::{AtomicU64, Ordering};
+            static UNREG_N: AtomicU64 = AtomicU64::new(0);
+            let n = UNREG_N.fetch_add(1, Ordering::Relaxed);
+            // d>1 is the pointer-recycling theft signature: this task
+            // registered at most ONE entry on this queue per poll round,
+            // so a remove dropping more says a stale entry from a DEAD
+            // previous owner of the same Task address was stripped too
+            // (exit leak + page recycle). With the R127 (ptr, pid) key a
+            // live task's remove can no longer strip a predecessor's
+            // entries, so d>1 now names either a dup-fd double
+            // registration (legitimate) or a keying bug — print those
+            // unconditionally (not just inside the budget).
+            let steal = dropped > 1;
+            if steal || input_echo_budget(n) {
+                // SAFETY: task is the current task leaving the wait.
+                let pid = unsafe { (*task).pid() };
+                let mut l = HuntLine::new();
+                l.push(b"INPW[");
+                l.u64(n);
+                l.push(b"] unreg pid=");
+                l.u64(pid as u64);
+                l.push(b" dev=");
+                for &c in device.name.iter().take_while(|&&c| c != 0).take(10) {
+                    l.push(&[c]);
+                }
+                l.push(b" d=");
+                l.u64(dropped as u64);
+                l.push(b" f=");
+                l.u64(file.file_id);
+                if steal {
+                    l.push(b" MULTI");
+                }
+                l.push(b"\n");
+                l.flush();
+            }
+        }
     }
 }
 
@@ -1474,6 +1685,63 @@ pub fn push_input_event(is_pointer: bool, event: InputEvent) {
 /// injection window prints every line).
 fn input_echo_budget(n: u64) -> bool {
     n < 300 || n % 25 == 0
+}
+
+/// Line-staging buffer for the hunt echoes (R127 wake-drop round): the
+/// per-byte uart_putc_raw writes interleaved CHAR-BY-CHAR when two CPUs
+/// echoed concurrently (r3's "IINPWCK_[11_7665]" mangling — two whole
+/// lines lost), so the verdict lines are now staged into a stack buffer
+/// and flushed as ONE critical section under a dedicated echo lock.
+/// irqsave: the wake-side echoes fire from the input tasklet (BH).
+static HUNT_ECHO_LOCK: crate::sync::spinlock::Spinlock<()> =
+    crate::sync::spinlock::Spinlock::new(());
+
+pub(crate) struct HuntLine {
+    buf: [u8; 192],
+    n: usize,
+}
+
+impl HuntLine {
+    pub(crate) const fn new() -> Self {
+        Self { buf: [0; 192], n: 0 }
+    }
+    pub(crate) fn push(&mut self, s: &[u8]) {
+        for &b in s {
+            if self.n < self.buf.len() {
+                self.buf[self.n] = b;
+                self.n += 1;
+            }
+        }
+    }
+    pub(crate) fn u64(&mut self, v: u64) {
+        let mut tmp = [0u8; 20];
+        let mut k = 0usize;
+        let mut x = v;
+        if x == 0 {
+            tmp[k] = b'0';
+            k = 1;
+        } else {
+            while x > 0 && k < tmp.len() {
+                tmp[k] = b'0' + (x % 10) as u8;
+                x /= 10;
+                k += 1;
+            }
+        }
+        for i in (0..k).rev() {
+            self.push(&[tmp[i]]);
+        }
+    }
+    pub(crate) fn flush(&mut self) {
+        if self.n == 0 {
+            return;
+        }
+        let _g = HUNT_ECHO_LOCK.lock_irqsave();
+        for i in 0..self.n {
+            // SAFETY: raw console byte write under the echo lock.
+            crate::console::uart_putc_raw(self.buf[i]);
+        }
+        self.n = 0;
+    }
 }
 
 fn itt_msg(msg: &[u8]) {

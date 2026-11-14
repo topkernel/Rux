@@ -1299,6 +1299,37 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
         }
 
         if ready_count > 0 {
+            // input:evdev_wake hunt: the round's result — which fds
+            // reported what. With the r9 face (reader read one event per
+            // node then never returned to them), this names the LAST
+            // ready set the OH input host actually saw.
+            if crate::trace::EVENT_EVDEV_WAKE.armed() {
+                use core::sync::atomic::{AtomicU64, Ordering};
+                static PR_N: AtomicU64 = AtomicU64::new(0);
+                let n = PR_N.fetch_add(1, Ordering::Relaxed);
+                if n < 24 || n % 50 == 0 {
+                    let mut l = crate::drivers::input::evdev::HuntLine::new();
+                    l.push(b"PRET[");
+                    l.u64(n);
+                    l.push(b"] pid=");
+                    l.u64(crate::process::current_pid() as u64);
+                    l.push(b" rc=");
+                    l.u64(ready_count as u64);
+                    l.push(b" rdy=");
+                    for i in 0..nfds {
+                        let pfd = &pollfds[i];
+                        if pfd.revents == 0 || pfd.fd < 0 {
+                            continue;
+                        }
+                        l.u64(pfd.fd as u64);
+                        l.push(b":");
+                        l.u64(pfd.revents as u64);
+                        l.push(b",");
+                    }
+                    l.push(b"\n");
+                    l.flush();
+                }
+            }
             return ready_count as i64;
         }
 
@@ -1353,6 +1384,96 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
                     Some(t) => t,
                     None => return -(errno::EINTR as i64),
                 };
+                // input:evdev_wake hunt (wake-drop lane): echo the park
+                // decision — WHICH fds this poll round sleeps on and
+                // their wait-path kinds. The r9 face had the OH input
+                // reader re-enter poll(2) after its first read batch
+                // with a REBUILT fd set (no evdev registration echo, task
+                // parked, taskdump lastsys=7): this line names the fds so
+                // "userspace dropped the input fds" separates from "the
+                // park round failed to register/wake". Kinds: e=evdev,
+                // u=unix, p=pipe/fifo, s=socket, i=inotify, b=binder,
+                // t=timerfd, v=eventfd, d=pidfd, g=signalfd, f=perf,
+                // -=unwired. Gated by the hunt tracepoint + budgeted.
+                if crate::trace::EVENT_EVDEV_WAKE.armed() {
+                    use core::sync::atomic::{AtomicU64, Ordering};
+                    static PP_N: AtomicU64 = AtomicU64::new(0);
+                    let n = PP_N.fetch_add(1, Ordering::Relaxed);
+                    if n < 24 || n % 50 == 0 {
+                        let mut l =
+                            crate::drivers::input::evdev::HuntLine::new();
+                        l.push(b"PPARK[");
+                        l.u64(n);
+                        l.push(b"] pid=");
+                        l.u64(crate::process::current_pid() as u64);
+                        l.push(b" nfds=");
+                        l.u64(nfds as u64);
+                        l.push(b" to=");
+                        l.u64(timeout_ms as u64);
+                        l.push(b" fds=");
+                        for i in 0..nfds {
+                            let pfd = &pollfds[i];
+                            if pfd.fd < 0 {
+                                continue;
+                            }
+                            if i > 0 {
+                                l.push(b",");
+                            }
+                            l.u64(pfd.fd as u64);
+                            l.push(b":");
+                            let kind = match fdtable
+                                .get_file(pfd.fd as usize)
+                            {
+                                Some(f) => {
+                                    let ops = match f.get_ops() {
+                                        Some(o) => {
+                                            o as *const crate::fs::FileOps as *const ()
+                                        }
+                                        None => core::ptr::null(),
+                                    };
+                                    let is = |p: &crate::fs::FileOps| {
+                                        ops == (p as *const _ as *const ())
+                                    };
+                                    if is(&crate::net::unix::UNIX_SOCKET_OPS) {
+                                        b"u"
+                                    } else if is(&crate::fs::pipe::PIPE_OPS)
+                                        || is(&crate::fs::fifo::FIFO_OPS)
+                                    {
+                                        b"p"
+                                    } else if is(&crate::net::socket::SOCKET_OPS) {
+                                        b"s"
+                                    } else if is(&crate::fs::inotify::INOTIFY_OPS) {
+                                        b"i"
+                                    } else if is(&crate::ipc::binder::BINDER_OPS) {
+                                        b"b"
+                                    } else if is(
+                                        &crate::drivers::input::evdev::EVDEV_OPS,
+                                    ) {
+                                        b"e"
+                                    } else if is(&TIMERFD_OPS) {
+                                        b"t"
+                                    } else if is(&EVENTFD_OPS) {
+                                        b"v"
+                                    } else if is(&crate::fs::pidfd::PIDFD_OPS)
+                                        || is(&crate::fs::procfs::PROC_PIDDIR_OPS)
+                                    {
+                                        b"d"
+                                    } else if is(&SIGNALFD_OPS) {
+                                        b"g"
+                                    } else if is(&crate::perf::PERF_OPS) {
+                                        b"f"
+                                    } else {
+                                        b"-"
+                                    }
+                                }
+                                None => b"x",
+                            };
+                            l.push(kind);
+                        }
+                        l.push(b" path=wired\n");
+                        l.flush();
+                    }
+                }
                 // Quick readiness re-check used inside the wait round: any
                 // polled fd reporting nonzero revents ends the sleep.
                 let pollfds_ref = &pollfds;
