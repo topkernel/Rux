@@ -387,29 +387,91 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
                 core::sync::atomic::AtomicUsize::new(0);
             let n = SGP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if n < 200 {
-                // Explicit integers, not {:?} arrays — array Debug
-                // formatting pulls enough core::fmt code to push the
-                // debug image over the boot.S 20MB window (the window
-                // margin is single-digit KB).
-                let (q0, q1, q2, q3) = (
-                    RCU_QS_GEN[0].load(Ordering::Acquire),
-                    RCU_QS_GEN[1].load(Ordering::Acquire),
-                    RCU_QS_GEN[2].load(Ordering::Acquire),
-                    RCU_QS_GEN[3].load(Ordering::Acquire),
-                );
+                // rwlock-livelock: the old print showed only qs[0..4] —
+                // on the SMP8 ub2404 rig the non-quiescent CPU was
+                // invisible (qs0-3 all == gen while the round failed),
+                // so the monopolist was unnameable. Show all MAX_CPUS
+                // (gen|on|idle triplets) and the first stuck CPU's
+                // slot-current task inline (same fields the
+                // frozen-CPU truth dump reads; no IPI here).
+                let mut qs_desc = alloc::string::String::new();
+                let mut stuck = usize::MAX;
+                for i in 0..MAX_CPUS {
+                    let on = crate::sched::sched::cpu_online(i);
+                    let idle = crate::sched::sched::cpu_running_idle(i);
+                    let q = RCU_QS_GEN[i].load(Ordering::Acquire);
+                    use core::fmt::Write as _;
+                    let _ = write!(
+                        qs_desc,
+                        "{}:{:x}/{}/{},",
+                        i, q, on as u8, idle as u8
+                    );
+                    if on && stuck == usize::MAX && !cpu_quiescent(i, gen) {
+                        stuck = i;
+                    }
+                }
+                let mut victim = alloc::string::String::new();
+                if stuck != usize::MAX {
+                    let cur = crate::sched::sched::grq_diag_cpu_currents();
+                    let t = cur[stuck].2 as *mut crate::process::task::Task;
+                    if !t.is_null() {
+                        // SAFETY: diagnostic read of stable fields on the
+                        // per-CPU current Task (idle/static or heap; both
+                        // stay valid while current on that CPU).
+                        let tk = unsafe { &*t };
+                        use core::fmt::Write as _;
+                        let cb = tk.comm();
+                        let cl = cb.iter().position(|&b| b == 0).unwrap_or(16);
+                        let name = core::str::from_utf8(&cb[..cl]).unwrap_or("?");
+                        let _ = write!(
+                            victim,
+                            " stuck-cpu{}-cur pid={} tgid={} {} preempt={:#x}",
+                            stuck,
+                            tk.pid(),
+                            tk.tgid(),
+                            name,
+                            tk.preempt_count()
+                        );
+                        // rwlock-livelock: the victim's live kernel frames
+                        // sit BELOW the sp saved at its last switch-in
+                        // (same technique as the FROZEN-CPU IF=0 fallback,
+                        // but at STALL TIME — mid-episode; the one-shot
+                        // IPI dump kept arriving after rolling monopolies
+                        // had already drained). Names the leaking loop.
+                        let sp = tk.thread().sp;
+                        if (sp >> 48) == 0xffff && (sp & 7) == 0 && sp > 0x1000 {
+                            let base = sp as *const u64;
+                            let mut shown = 0usize;
+                            // SAFETY: diagnostic read within the current
+                            // task's own kernel stack pages (mapped while
+                            // the Task exists); races cost at worst a
+                            // torn-but-bounded word.
+                            for k in 0..96 {
+                                let v = unsafe {
+                                    core::ptr::read_volatile(base.wrapping_sub(k))
+                                };
+                                #[cfg(feature = "x86_64")]
+                                let (lo, hi) = (0xffff_ffff_8020_0000u64, 0xffff_ffff_8200_0000u64);
+                                #[cfg(not(feature = "x86_64"))]
+                                let (lo, hi) = (0xffff_ffff_8000_0000u64, 0xffff_ffff_8020_0000u64);
+                                if v >= lo && v < hi && (v & 1) == 0 {
+                                    let _ = write!(victim, " {v:#x}");
+                                    shown += 1;
+                                    if shown >= 10 {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 crate::pr_warn!(
-                    "RCU-GP-BOUND site={} waited>{}ms (sleepy): no full quiescent round gen={} qs={},{},{},{} on={},{},{},{}",
+                    "RCU-GP-BOUND site={} waited>{}ms (sleepy): no full quiescent round gen={} per-cpu(cpu:gen/on/idle,...)={}:{}",
                     site,
                     max_ms,
                     gen,
-                    q0,
-                    q1,
-                    q2,
-                    q3,
-                    crate::sched::sched::cpu_online(0),
-                    crate::sched::sched::cpu_online(1),
-                    crate::sched::sched::cpu_online(2),
-                    crate::sched::sched::cpu_online(3)
+                    qs_desc,
+                    victim,
                 );
             }
             // Comprehensive-fix residual hunt (2026-11-04, cgf1): a CPU
@@ -433,7 +495,10 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
             // round. One-shot per boot (GP_DUMPED), same latch as the
             // full dump below.
             let consec = GP_CONSEC_FAIL.fetch_add(1, Ordering::Relaxed) + 1;
-            if (consec == 4 || consec == 32)
+            // rwlock-livelock: consec==2 added — the ub2404 boot showed
+            // rolling monopolies where successes reset the counter
+            // before 4 accumulated, leaving the monopolist unnameable.
+            if (consec == 2 || consec == 4 || consec == 32)
                 && !GP_DUMPED.swap(true, Ordering::AcqRel)
             {
                 // FIRST name the stuck CPU's live producer — per-CPU

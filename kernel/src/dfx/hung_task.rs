@@ -194,11 +194,17 @@ fn report_hung_task(task: *mut crate::process::task::Task, elapsed_secs: u64) {
     let mut w = ConsoleWriter::new();
     let task_ref = unsafe { &*task };
 
+    // rwlock-livelock: comm was a pid placeholder — the ub2404 wedge left
+    // an anonymous D-state task (312) whose identity decided the whole
+    // anatomy. comm() exists (the W2 refusal print uses it).
+    let comm_b = task_ref.comm();
+    let comm_end = comm_b.iter().position(|&b| b == 0).unwrap_or(16);
+    let comm = core::str::from_utf8(&comm_b[..comm_end]).unwrap_or("?");
     let _ = write!(
         w,
         "INFO: task {}:{} blocked for more than {} seconds\n",
         task_ref.pid(),
-        task_ref.pid(), // No comm name yet; use PID as placeholder
+        comm,
         elapsed_secs
     );
 
@@ -215,7 +221,7 @@ fn report_hung_task(task: *mut crate::process::task::Task, elapsed_secs: u64) {
         let vfork_ppid = t.vfork_parent_ptr().map(|p| unsafe { (*p).pid() }).unwrap_or(0);
         let _ = write!(
             w,
-            "      HUNG-CTX pid={} state={:#x} oncpu={} claim={} pk={} ti_cpu={} onrq={} vfork_ppid={} lastsys={} a0={:#x}\n",
+            "      HUNG-CTX pid={} state={:#x} oncpu={} claim={} pk={} ti_cpu={} onrq={} vfork_ppid={} lastsys={} a0={:#x}",
             t.pid(),
             t.state().bits(),
             t.on_cpu() as u8,
@@ -227,6 +233,25 @@ fn report_hung_task(task: *mut crate::process::task::Task, elapsed_secs: u64) {
             t.last_syscall_nr.load(Ordering::Relaxed),
             t.last_syscall_a0.load(Ordering::Relaxed),
         );
+        // rwlock-livelock: the parked task's user entry frame — syscall
+        // nr + user rip decide "kernel thread" (no user frame) vs
+        // "userspace task blocked in syscall X at library Y". The old
+        // print left task 312 anonymous; lastsys/a0 stayed 0.
+        {
+            let pr = t.pt_regs();
+            if !pr.is_null() {
+                #[cfg(feature = "x86_64")]
+                let (urip, _usp, unr, _ua0, _ua1, _ua2) =
+                    unsafe { ((*pr).rip, (*pr).rsp, (*pr).orig_rax, (*pr).rdi, (*pr).rsi, (*pr).rdx) };
+                #[cfg(feature = "riscv64")]
+                let (urip, _usp, unr, _ua0, _ua1, _ua2) =
+                    unsafe { ((*pr).epc, (*pr).sp, (*pr).a7, (*pr).orig_a0, (*pr).a1, (*pr).a2) };
+                #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
+                let (urip, unr) = (0u64, 0u64);
+                let _ = write!(w, " unrip={:#x} unrsys={}", urip, unr as i64);
+            }
+        }
+        let _ = writeln!(w);
         let thsp = t.thread().sp;
         if (thsp >> 48) == 0xffff && (thsp & 7) == 0 && thsp > 0x1000 {
             let _ = write!(w, "      HUNG-STK sp={:#x}", thsp);
@@ -260,7 +285,7 @@ fn report_hung_task(task: *mut crate::process::task::Task, elapsed_secs: u64) {
             let lo = core::ptr::addr_of!(_stext) as u64;
             #[cfg(not(feature = "x86_64"))]
             let hi = core::ptr::addr_of!(_etext) as u64;
-            for k in 0..80 {
+            for k in 0..200 {
                 // SAFETY: diagnostic read within the task's own kernel
                 // stack pages (the Task exists and pins them).
                 let v = unsafe { core::ptr::read_volatile(base.add(k)) };
