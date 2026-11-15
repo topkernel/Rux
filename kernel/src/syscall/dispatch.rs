@@ -422,7 +422,11 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         }
     }
 
-    // Dispatch based on system call number (sorted by number)
+    // Dispatch based on system call number (sorted by number).
+    // unknown_nr: set by the unmapped-number arm below so the
+    // dispatch-tail ENOSYS-TRACE can exclude numbers that already
+    // carry their own attribution (the keyctl budget lesson).
+    let mut unknown_nr = false;
     let result: i64 = match syscall_no as u32 {
         // ==================== Linux AIO (NR 0-4) ====================
         0 => memory::sys_io_setup(args),       // io_setup
@@ -819,8 +823,57 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
 
         // ==================== Unimplemented System Calls ====================
         _ => {
-            crate::println!("syscall: unknown syscall {} (args: {:#x}, {:#x}, {:#x})",
-                syscall_no, args[0], args[1], args[2]);
+            unknown_nr = true;
+            // Budgeted PER-NR (8 lines each, 16 distinct numbers, 400
+            // lines total), WITH the caller's pid+comm. The keyctl
+            // lesson (ub2404-gaps): native 250 landed here 57x/boot
+            // from systemd's per-service KeyringMode=private session
+            // join — unbudgeted it flooded the console, and its volume
+            // ate the dispatch-tail ENOSYS-TRACE budget before
+            // journald's write-path ENOSYS ever printed; without the
+            // comm the line could not be attributed to any caller.
+            use core::sync::atomic::Ordering::Relaxed;
+            static UNK_NR: [core::sync::atomic::AtomicU32; 16] =
+                [const { core::sync::atomic::AtomicU32::new(0) }; 16];
+            static UNK_N: [core::sync::atomic::AtomicUsize; 16] =
+                [const { core::sync::atomic::AtomicUsize::new(0) }; 16];
+            static UNK_TOTAL: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let mut slot = 16;
+            for i in 0..16 {
+                let s = UNK_NR[i].load(Relaxed);
+                if s == syscall_no as u32 {
+                    slot = i;
+                    break;
+                }
+                if s == 0
+                    && UNK_NR[i]
+                        .compare_exchange(0, syscall_no as u32, Relaxed, Relaxed)
+                        .is_ok()
+                {
+                    slot = i;
+                    break;
+                }
+            }
+            let budget_ok = slot < 16
+                && UNK_N[slot].fetch_add(1, Relaxed) < 8
+                && UNK_TOTAL.fetch_add(1, Relaxed) < 400;
+            if budget_ok {
+                let comm = match crate::sched::current() {
+                    Some(t) => {
+                        // SAFETY: sched::current() returns the running task;
+                        // comm_str is the lossy NUL-aware decoder.
+                        unsafe { (*t).comm_str() }
+                    }
+                    None => alloc::borrow::Cow::Borrowed("?"),
+                };
+                crate::println!(
+                    "syscall: unknown syscall {} (args: {:#x}, {:#x}, {:#x}) pid={} comm={}",
+                    syscall_no, args[0], args[1], args[2],
+                    crate::process::current_pid(),
+                    comm
+                );
+            }
             -(errno::ENOSYS as i64)
         }
     };
@@ -845,7 +898,11 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // journald's "Failed to map main seqnum file: Function not
     // implemented" needs exactly this attribution; the generic nr maps
     // through syscall/x86_compat.rs comments.
-    if result == -(38i64) {
+    // ub2404-gaps blind-spot fix: numbers that hit the unknown-syscall
+    // arm are EXCLUDED (they carry their own per-nr budgeted
+    // attribution above) — keyctl's 57 joins/boot used to eat this
+    // whole budget before the implemented-but-ENOSYS families printed.
+    if result == -(38i64) && !unknown_nr {
         static ENOSYS_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if ENOSYS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
