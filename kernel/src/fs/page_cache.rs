@@ -1251,7 +1251,25 @@ impl PageCache {
         data: &[u8],
         skip_pfn: u64,
     ) {
-        self.writeback_update_range_impl(fs_id, ino, file_off, data, skip_pfn, false);
+        self.writeback_update_range_impl(fs_id, ino, file_off, data, &[skip_pfn], false);
+    }
+
+    /// Multi-source twin of `writeback_update_range` (the run-batched
+    /// flush): EVERY pfn of the run's flush-source frames is skipped —
+    /// the staged bytes came FROM those frames, so copying any of them
+    /// back would revert a mapper store that raced the staging copy
+    /// (POSIX leaves unsynchronized stores vs writeback unordered; the
+    /// kernel must not actively undo them). Runs are chunk-bounded
+    /// (<= 16 pages), so the membership scan is trivially cheap.
+    pub fn writeback_update_range_multi(
+        &self,
+        fs_id: u64,
+        ino: u64,
+        file_off: u64,
+        data: &[u8],
+        skip_pfns: &[u64],
+    ) {
+        self.writeback_update_range_impl(fs_id, ino, file_off, data, skip_pfns, false);
     }
 
     /// Authoritative-repopulation twin of `writeback_update_range` (tmpfs
@@ -1270,7 +1288,7 @@ impl PageCache {
         file_off: u64,
         data: &[u8],
     ) {
-        self.writeback_update_range_impl(fs_id, ino, file_off, data, 0, true);
+        self.writeback_update_range_impl(fs_id, ino, file_off, data, &[], true);
     }
 
     fn writeback_update_range_impl(
@@ -1279,7 +1297,7 @@ impl PageCache {
         ino: u64,
         file_off: u64,
         data: &[u8],
-        skip_pfn: u64,
+        skip_pfns: &[u64],
         force_stale: bool,
     ) {
         if data.is_empty() {
@@ -1304,8 +1322,8 @@ impl PageCache {
                     // writeback_update_range_stale.)
                     continue;
                 }
-                if skip_pfn != 0 && page.pfn as u64 == skip_pfn {
-                    // The flush source frame itself (see the doc comment) —
+                if page.pfn as u64 != 0 && skip_pfns.contains(&(page.pfn as u64)) {
+                    // A flush source frame itself (see the doc comment) —
                     // copying a frame onto itself is a self-overlap.
                     continue;
                 }
@@ -1362,13 +1380,26 @@ impl PageCache {
         data: &[u8],
         skip_pfn: u64,
     ) {
+        self.writeback_populate_range_multi(fs_id, ino, file_off, data, &[skip_pfn]);
+    }
+
+    /// Multi-source twin (the run-batched flush passes every source
+    /// frame's PFN — see writeback_update_range_multi).
+    pub fn writeback_populate_range_multi(
+        &self,
+        fs_id: u64,
+        ino: u64,
+        file_off: u64,
+        data: &[u8],
+        skip_pfns: &[u64],
+    ) {
         if data.is_empty() {
             return;
         }
         // Existing entries first — same-body update (an inserted page
         // below carries exactly its slice of `data`, so there is no
         // second copy for fresh frames).
-        self.writeback_update_range(fs_id, ino, file_off, data, skip_pfn);
+        self.writeback_update_range_multi(fs_id, ino, file_off, data, skip_pfns);
 
         let len = data.len() as u64;
         let first_index = file_off / PAGE_SIZE as u64;
