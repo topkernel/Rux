@@ -1024,7 +1024,12 @@ pub fn do_exit(exit_code: i32) -> ! {
         use core::sync::atomic::Ordering::Relaxed as Rel;
         static UIEXIT_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
-        const UIEXIT_COMMS: [&str; 18] = [
+        // early30 lane (120th): + samgr, huks_service — the early-30s
+        // intermittent death window's two observed faces (hw10w3 huks
+        // SIGABRT 32-34 s; mew3 samgr SIGSEGV 35.26 s) had NO comm arm,
+        // so the SIGABRT leader death printed nothing kernel-side (no
+        // SEGV history, no owing latch). Same budget, same gating.
+        const UIEXIT_COMMS: [&str; 20] = [
             "multimodalinput",
             "uinput_inject",
             "mmi_service",
@@ -1043,6 +1048,8 @@ pub fn do_exit(exit_code: i32) -> ! {
             "watchdog_servic",
             "hilogd",
             "sensors",
+            "samgr",
+            "huks_service",
         ];
         if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck)
             && UIEXIT_N.load(Rel) < 96
