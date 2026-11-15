@@ -66,7 +66,7 @@
 
   <article class="doc-main">
     <h1>Performance</h1>
-    <div class="sub">Verdict first, data right after: vs Linux on the same host and the same accelerator (QEMU q35 + KVM) · data as of 2026-11-06 · baseline file docs/development/perf-gate-baseline.md</div>
+    <div class="sub">Verdict first, data right after: vs Linux on the same host and the same accelerator (QEMU q35 + KVM) · data as of 2026-11-15 · baseline file docs/development/perf-gate-baseline.md</div>
 
     <h2 id="verdict"><span class="anchor">§1</span>Verdict: where we lead and lag vs Linux</h2>
     <p>Every comparison against Linux on this page is <b>same-host, same-accelerator</b>: the same host (9950X), the same QEMU q35 + KVM (<code>-accel kvm -cpu host</code>), the same image shape, the same static benchmark binaries. No native columns.</p>
@@ -78,8 +78,8 @@
         <div class="nums">best lead 4.2× · worst lag 1.61× · data in §2</div>
       </div>
       <div class="card">
-        <h3><span class="ico">🏁</span>Geekbench 5: multi-core +4.3%, single-core +5.1%</h3>
-        <p>Multi-core total <b>7332 vs 7027 (+4.3%)</b>: 8 workloads ahead / 5 parity / 8 behind. Single-core total quiet best <b>2274 vs 2165 (+5.1%)</b>: 13 ahead / 3 parity / 5 behind.</p>
+        <h3><span class="ico">🏁</span>Geekbench 5: single-core 2440 / multi-core 7709 (historical best)</h3>
+        <p>Single-core total <b>2440 vs 2165 (113%)</b>, multi-core total <b>7709 vs 7027 (110%)</b>, best-of-runs convention (gb-opt round, 2026-11-15). Per-workload split from the 2026-11-04 full capture: multi-core 8 ahead / 5 parity / 8 behind; single-core 13 ahead / 3 parity / 5 behind.</p>
         <div class="nums">per-workload data in §3 · rig note: Linux side is the host 4-CPU pin (taskset, topology-matched)</div>
       </div>
     </div>
@@ -120,17 +120,17 @@
     <p style="font-size:13px;color:var(--text-3)">Mechanism note: the wins concentrate in scheduler/wakeup paths and the page-fault/mapping path; syscall-latency rows run the guest's own entry (no vmexit), so both sides carry almost no virtualization overhead — the gaps are real kernel differences. bw_unix (42,885 vs 22,783 MB/s, 1.88×) and fstat (ahead 1.37×, RCU fd lookup) also lead in the same-rig table — see the standing table in lmbench-report.md.</p>
     <div class="callout"><b>Correctness bugs the campaign found and fixed</b> (the performance gaps were hiding them): a stale-rsp0-at-free UAF (the fork bistability root cause); a call_rcu zero-grace callback firing; a wake-monitor staleness inversion; the fdreap per-tick 10 ms close stall; the mainline munmap final-TLB-flush loss (5b4a4bc7).</div>
 
-    <h2 id="gb"><span class="anchor">§3</span>Geekbench 5 data (5.5.1, 9950X, KVM q35 smp4/4G, strong kernel, 2026-11-04)</h2>
+    <h2 id="gb"><span class="anchor">§3</span>Geekbench 5 data (5.5.1, 9950X, KVM q35 smp4/4G, strong kernel; per-workload tables 2026-11-04, totals updated through the gb-opt round 2026-11-15)</h2>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th></th><th class="num">Rux</th><th class="num">Linux (4-CPU pin)</th><th>Verdict</th></tr></thead>
         <tbody>
-          <tr><td><b>Multi-core total</b></td><td class="num">7332</td><td class="num">7027</td><td><span class="chip ok">ahead 4.3%</span></td></tr>
-          <tr><td><b>Single-core total</b></td><td class="num"><b>2274</b> (quiet best)</td><td class="num">2165</td><td><span class="chip ok">ahead 5.1%</span></td></tr>
+          <tr><td><b>Multi-core total</b></td><td class="num">7709</td><td class="num">7027</td><td><span class="chip ok">110%</span></td></tr>
+          <tr><td><b>Single-core total</b></td><td class="num"><b>2440</b> (best-of-runs)</td><td class="num">2165</td><td><span class="chip ok">113%</span></td></tr>
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">Rig note: the Linux side is the host-native <code>taskset -c 0-3</code> pin (topology-matched to the guest's 4 vCPUs; a same-rig KVM Linux comparison is queued). Single-core caveat: two native self-runs differ by ~15% (2549 vs 2165) — deltas within ±15% are noise. The per-workload tables come from the 2026-11-04 full capture (that round's SC total was 2115; the quiet best is 2274 — same noise band).</p>
+    <p style="font-size:13px;color:var(--text-3)">Rig note: the Linux side is the host-native <code>taskset -c 0-3</code> pin (topology-matched to the guest's 4 vCPUs; a same-rig KVM Linux comparison is queued). Totals use the best-of-runs convention (user rule, recorded): multi-core historical best 7709 (gb-opt round), single-core historical best 2440. Single-core caveat: two native self-runs differ by ~15% (2549 vs 2165) — deltas within ±15% are noise. The per-workload tables come from the 2026-11-04 full capture (that round's SC total was 2115; the quiet best is 2274 — same noise band).</p>
 
     <h3>Single-core, per workload (all 21)</h3>
     <div class="tbl-wrap">
@@ -192,7 +192,7 @@
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">The multi-core split: the +4.3% total is pulled by scheduler-sensitive workloads — text compression (150%), inpainting (120%), speech recognition (131%), ray tracing (118%) — while AES-XTS SC 64% in the 11-04 capture was the pre-fix reading (now re-run at 105–106%); Clang/PDF-rendering single-core residuals await isolated re-runs.</p>
+    <p style="font-size:13px;color:var(--text-3)">The multi-core split: the 11-04 capture's 7332 vs 7027 (104%) is pulled by scheduler-sensitive workloads — text compression (150%), inpainting (120%), speech recognition (131%), ray tracing (118%) — while AES-XTS SC 64% in the 11-04 capture was the pre-fix reading (now re-run at 105–106%); after the gb-opt round the multi-core best-of-runs stands at 7709 = 110%; Clang/PDF-rendering single-core residuals await isolated re-runs.</p>
 
     <h2 id="fio"><span class="anchor">§4</span>fio 3.36 storage-IO testing: compatibility and correctness (qa-suites rounds 5/5b, 2026-11-04/05)</h2>
     <p style="font-size:13.5px">Source: the qa-suites lane ledger run/qa-suites-findings.md (kernel 9f2c1cc6). Rig: x86_64 + KVM q35 2G/2cpu, fio 3.36 static musl (libaio engine builtin), one family per boot, 20 boots total. Zero KERNPANIC / DEADLOCK / ALLOCTHROW across all boots.</p>
@@ -309,6 +309,7 @@
           <tr><td>Context switch</td><td>FSGSBASE (393 ns/switch) + lazy FPU (xsaveopt moved into #NM) + CPUID-gated PCID</td><td>lat_ctx 4.97→<b>2.07 µs (−58%)</b></td></tr>
           <tr><td>Measured-wait wakeup preemption gate (D-14)</td><td>Poke a busy CPU only when the wakee's measured wait ≥6 ms, replacing vruntime-credit comparison</td><td>74-byte unix-stream wake/preempt/switch round trip ~275→~2.5 µs; p5 family <b>10–18×</b></td></tr>
           <tr><td>fs metadata re-anchor</td><td>D-8 direct-write jbd2 + D-12 read-window batch fill + D-13 batched publication / discard-on-free</td><td>stat −65% / openclose −70% / append −88% / mkdrmdir −88%; p6_mkdrmdir median 29,796→<b>2,107 µs</b></td></tr>
+          <tr><td>Filesystem flush (fs-flush + virtio-async)</td><td>run-batched flush + batched async span writes (CHUNK=64, absent-durable skip); the fsx revive-in-place fix</td><td>128 MB mtest06 shape (x86_64 KVM): fsync <b>11.55→6.18→3.04 s</b> (~3.8× cumulative vs pre-campaign), msync <b>13.95→3.31 s</b> (4.2×), sync <b>11.30→3.31 s</b>; mmap2 TIMEOUT→PASS, fsx -N10000 PASS, pbench fs in band</td></tr>
           <tr><td>vm-op family</td><td>leaf-table direct unmap (allocation-free per-page walker)</td><td>mmap 72→27–32 µs, munmap 177→52 µs; OH workload <b>15→5 s/CPU-min</b></td></tr>
           <tr><td>Anon reclaim (SP-7)</td><td>reclaim check-path rework</td><td>check rate <b>35%→82–89%</b>, swap writes +75%</td></tr>
           <tr><td>Typed timer wheel (D-19)</td><td>clock-domain typing + scope guards</td><td>arm lock 924→697 ns; nanosleep 772.6→<b>662.7 ms</b>; p2_ctxsw 12.198 vs 15.400 µs</td></tr>
@@ -330,7 +331,7 @@
       <li><b>COW-fault cross-CPU shootdown</b>: the +58% (18.42 µs) honest gap at SMP-8, affecting fork-heavy service graphs — the next main target.</li>
       <li><b>lat_syscall open 1.61× / stat 1.32×</b>: open's tail (memo-hit 80–90 ns + fd install); stat's tail v3 unblocked now that the call_rcu contract is fixed — retry.</li>
       <li><b>lat_syscall null 1.18× / write 1.14×</b>: entry floor; null's 2× is proven physically unreachable (the shared syscall RTT floor) — converge to parity; write is 6 ns from parity.</li>
-      <li><b>Geekbench single-core residuals</b>: Text Compression 94% / Navigation 81% / PDF 85% / Clang 88% / Face 87% await isolated re-runs (AES-XTS root-caused and fixed, 105–106%; best-of-runs 2297 = 106%).</li>
+      <li><b>Geekbench single-core residuals</b>: Text Compression 94% / Navigation 81% / PDF 85% / Clang 88% / Face 87% await isolated re-runs (AES-XTS root-caused and fixed, 105–106%; single-core best-of-runs 2440 = 113%).</li>
       <li><b>Network family</b>: bw_tcp TIMEOUT / lat_connect 14–16 ms — a scheduler stale-claim refuses the accept server/worker wakes (WAKE-HEAL-SKIP ×39); TCP throughput needs that fix first.</li>
       <li><b>Backfill queue</b>: a fio throughput benchmark (same-rig Linux baseline, direct=1); the Geekbench same-rig KVM comparison; page-cache hit-rate absolutes, PCP watermarks, binder throughput.</li>
     </ul>

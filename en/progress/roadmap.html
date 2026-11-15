@@ -72,7 +72,7 @@
     <ul>
       <li><b>A complete GNOME desktop loop</b> (x86_64 + KVM primary): GDM login achieved; the gnome-session component chain (gsd → gnome-shell) closing out.</li>
       <li><b>OpenHarmony launcher → desktop</b>: /data mounting and the SystemUI lock screen achieved; advancing toward the full launcher home screen.</li>
-      <li><b>Maximizing the LTP pass rate</b>: r27 = 1084/1869, attacking the FAIL/CRASH/TIMEOUT surface.</li>
+      <li><b>Maximizing the LTP pass rate</b>: r27 audited official 1093/1869 (raw 1084), attacking the FAIL/CRASH/TIMEOUT surface.</li>
       <li><b>Aligning debugging with the reference kernel</b>: the tracepoint framework expanding (lock/tcp/input families + PSI + log control); deep water: lockdep/RCU-stall/blktrace/perf-probes/kdump.</li>
     </ul>
 
@@ -125,7 +125,7 @@
       </div>
       <div class="tl-item">
         <div class="when">2026-11-05/06</div>
-        <h4>LTP r27 = 1084/1869; the munmap churn-race family closed</h4>
+        <h4>LTP r27 = 1084/1869 (audited official 1093); the munmap churn-race family closed</h4>
         <p>PI futexes land fully in main; the munmap chunked TLB-flush race family (taxonomy row 34) closes and ports back to all three architectures.</p>
       </div>
     </div>

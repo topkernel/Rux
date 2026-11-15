@@ -66,27 +66,28 @@
 
   <article class="doc-main">
     <h1>Code layout</h1>
-    <div class="sub">Repository layout and the kernel source map — kernel/src: 436 files, ~343,933 lines (recounted 2026-11-06)</div>
+    <div class="sub">Repository layout and the kernel source map — convention (main 98702db0, recounted 2026-11-15, git ls-files + wc -l): kernel/ 623 files · 384,307 lines (377,650 Rust); kernel/src 453 files · 354,945 lines</div>
 
     <h2 id="kernel"><span class="anchor">§1</span>The kernel source map (kernel/src/)</h2>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>Directory</th><th class="num">Lines</th><th class="num">Share</th><th>Contents</th></tr></thead>
         <tbody>
-          <tr><td class="mono">fs/</td><td class="num">61,091</td><td class="num">19.1%</td><td>ext4 (12 files), jbd2, VFS, dcache, page_cache, bio/buffer, procfs/sysfs/debugfs/tracefs/tmpfs, pipe, xattr, inotify, locks, io_uring, elf</td></tr>
-          <tr><td class="mono">arch/</td><td class="num">43,440</td><td class="num">13.6%</td><td>riscv64 / x86_64 / aarch64: boot, trap, mm (page_fault), cpu, uaccess, intc, SBI/MSR/registers</td></tr>
-          <tr><td class="mono">debug/</td><td class="num">37,946</td><td class="num">11.9%</td><td>syscost, kallsyms, debugfs, taskdump, watchdog, memwatch, ledger (the diagnostics layer, unsafe tracked separately)</td></tr>
-          <tr><td class="mono">syscall/</td><td class="num">33,840</td><td class="num">10.6%</td><td>the dispatch tables and implementations (the capsule boundary: user-pointer validation/translation, uaccess_safe typed copy_in/out)</td></tr>
-          <tr><td class="mono">drivers/</td><td class="num">23,247</td><td class="num">7.3%</td><td>virtio (blk/net/gpu/input; queue + PCI transport), blkdev, intc, pci, gpu/drm, input, timer</td></tr>
-          <tr><td class="mono">net/</td><td class="num">18,649</td><td class="num">5.8%</td><td>SkBuff, eth, arp, ipv4/ipv6, icmp, udp, tcp (4,841 lines), unix (3,707 lines), netlink, raw</td></tr>
-          <tr><td class="mono">process/</td><td class="num">14,824</td><td class="num">4.7%</td><td>task structures, fork/exit, signals, wait, pid, cgroup</td></tr>
-          <tr><td class="mono">mm/</td><td class="num">16,712</td><td class="num">5.2%</td><td>memblock, buddy, slab, small_alloc, page fault, VMA, page-cache cooperation, kswapd, rmap</td></tr>
-          <tr><td class="mono">ipc/</td><td class="num">14,559</td><td class="num">4.6%</td><td>binder (10,425 lines, the largest single file), access_token, SysV sem/msg/shm, POSIX MQ</td></tr>
-          <tr><td class="mono">sched/</td><td class="num">12,532</td><td class="num">3.9%</td><td>the GRQ, fair/rt/deadline classes, wakewatch, census/heal</td></tr>
-          <tr><td class="mono">sync/</td><td class="num">7,281</td><td class="num">2.3%</td><td>spinlocks/sleep-locks/futex (incl. PI), CpuLocal (D-7), typed lock keys (D-11)</td></tr>
-          <tr><td class="mono">trace/</td><td class="num">—</td><td>—</td><td>the unified trace-event framework: mod.rs event side (2,538 lines) + files.rs tracefs side</td></tr>
-          <tr><td class="mono">tests/</td><td class="num">—</td><td>—</td><td>73 in-guest test files (the make test host)</td></tr>
-          <tr><td class="mono">verify/</td><td class="num">—</td><td>—</td><td>the formal-verification crate: 157 Kani harnesses, 1104 proptests, 4 SPIN models, Miri/loom mirrors</td></tr>
+          <tr><td class="mono">fs/</td><td class="num">67,491</td><td class="num">19.0%</td><td>ext4 (12 files), jbd2, VFS, dcache, page_cache, bio/buffer, procfs/sysfs/debugfs/tracefs/tmpfs, pipe, xattr, inotify, locks, io_uring, elf</td></tr>
+          <tr><td class="mono">arch/</td><td class="num">48,089</td><td class="num">13.5%</td><td>riscv64 / x86_64 / aarch64: boot, trap, mm (page_fault), cpu, uaccess, intc, SBI/MSR/registers</td></tr>
+          <tr><td class="mono">syscall/</td><td class="num">39,442</td><td class="num">11.1%</td><td>the dispatch tables and implementations (the capsule boundary: user-pointer validation/translation, uaccess_safe typed copy_in/out)</td></tr>
+          <tr><td class="mono">drivers/</td><td class="num">25,413</td><td class="num">7.2%</td><td>virtio (blk/net/gpu/input; queue + PCI transport), blkdev, intc, pci, gpu/drm, input, timer</td></tr>
+          <tr><td class="mono">ipc/</td><td class="num">21,409</td><td class="num">6.0%</td><td>binder (14,077 lines, the largest single file), access_token, SysV sem/msg/shm, POSIX MQ</td></tr>
+          <tr><td class="mono">net/</td><td class="num">20,669</td><td class="num">5.8%</td><td>SkBuff, eth, arp, ipv4/ipv6, icmp, udp, tcp (5,250 lines), unix (4,349 lines), netlink, raw</td></tr>
+          <tr><td class="mono">dfx/</td><td class="num">18,887</td><td class="num">5.3%</td><td>syscost, kallsyms, debugfs, taskdump, watchdog, memwatch, ledger (the diagnostics layer, unsafe tracked separately)</td></tr>
+          <tr><td class="mono">mm/</td><td class="num">18,895</td><td class="num">5.3%</td><td>memblock, buddy, slab, small_alloc, page fault, VMA, page-cache cooperation, kswapd, rmap</td></tr>
+          <tr><td class="mono">sync/</td><td class="num">18,788</td><td class="num">5.3%</td><td>spinlocks/sleep-locks/futex (incl. PI), CpuLocal (D-7), typed lock keys (D-11)</td></tr>
+          <tr><td class="mono">process/</td><td class="num">17,552</td><td class="num">4.9%</td><td>task structures, fork/exit, signals, wait, pid, cgroup</td></tr>
+          <tr><td class="mono">sched/</td><td class="num">16,885</td><td class="num">4.8%</td><td>the GRQ, fair/rt/deadline classes, wakewatch, census/heal</td></tr>
+          <tr><td class="mono">tests/</td><td class="num">15,236</td><td class="num">4.3%</td><td>76 in-guest test files (the make test host)</td></tr>
+          <tr><td class="mono">other (interrupt/timer/io_uring/perf/security/module + top-level .rs)</td><td class="num">22,714</td><td class="num">6.4%</td><td>interrupt subsystem, timer wheel, the io_uring stub, perf counters, LSM/capabilities, module stub, and 13 top-level files (init/panic/console etc.)</td></tr>
+          <tr><td class="mono">trace/</td><td class="num">3,475</td><td class="num">1.0%</td><td>the unified trace-event framework: the event side + the tracefs file side (61 events / 20 groups)</td></tr>
+          <tr><td class="mono">verify/ (kernel/verify, outside the kernel/src total)</td><td class="num">28,216</td><td class="num">—</td><td>the formal-verification crate: 157 Kani harnesses, 1104 proptests, 4 SPIN models, Miri/loom mirrors</td></tr>
         </tbody>
       </table>
     </div>

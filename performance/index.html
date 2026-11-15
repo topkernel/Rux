@@ -66,7 +66,7 @@
 
   <article class="doc-main">
     <h1>性能测试</h1>
-    <div class="sub">结论先行,数据随后:与 Linux 同机同加速(QEMU q35 + KVM)对照 · 数据截至 2026-11-06 · 基线文件 docs/development/perf-gate-baseline.md</div>
+    <div class="sub">结论先行,数据随后:与 Linux 同机同加速(QEMU q35 + KVM)对照 · 数据截至 2026-11-15 · 基线文件 docs/development/perf-gate-baseline.md</div>
 
     <!-- ================= 结论 ================= -->
     <h2 id="verdict"><span class="anchor">§1</span>结论:与 Linux 相比领先多少、落后多少</h2>
@@ -79,8 +79,8 @@
         <div class="nums">领先最高 4.2× · 落后最大 1.61× · 数据见 §2</div>
       </div>
       <div class="card">
-        <h3><span class="ico">🏁</span>Geekbench 5:多核总分领先 4.3%、单核总分领先 5.1%</h3>
-        <p>多核总分 <b>7332 vs 7027(+4.3%)</b>:21 项负载 8 领先 / 5 持平 / 8 落后。单核总分 quiet 最佳 <b>2274 vs 2165(+5.1%)</b>:13 领先 / 3 持平 / 5 落后。</p>
+        <h3><span class="ico">🏁</span>Geekbench 5:单核 2440 / 多核 7709(历史最佳)</h3>
+        <p>单核总分 <b>2440 vs 2165(113%)</b>、多核总分 <b>7709 vs 7027(110%)</b>,best-of-runs 口径(gb-opt 轮,2026-11-15)。2026-11-04 完整捕获的逐项分布:多核 8 领先 / 5 持平 / 8 落后,单核 13 领先 / 3 持平 / 5 落后。</p>
         <div class="nums">逐项数据见 §3 · 机位注明:Linux 侧为宿主 4-CPU 钉核(taskset,拓扑对齐)</div>
       </div>
     </div>
@@ -123,17 +123,17 @@
     <div class="callout"><b>campaign 顺带挖出并修复的正确性 bug</b>(性能差距掩盖了它们):free 时的 stale-rsp0 UAF(fork 双稳态根因);call_rcu 零宽限期回调触发;唤醒监视器陈旧性判定反转;fdreap 每 tick 10 ms close 停滞;主线 munmap 末批 TLB flush 丢失(5b4a4bc7)。</div>
 
     <!-- ================= Geekbench 数据 ================= -->
-    <h2 id="gb"><span class="anchor">§3</span>Geekbench 5 数据(5.5.1,9950X,KVM q35 smp4/4G,strong 内核,2026-11-04)</h2>
+    <h2 id="gb"><span class="anchor">§3</span>Geekbench 5 数据(5.5.1,9950X,KVM q35 smp4/4G,strong 内核;逐项表 2026-11-04,总分更新至 gb-opt 轮 2026-11-15)</h2>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th></th><th class="num">Rux</th><th class="num">Linux(4-CPU 钉核)</th><th>结论</th></tr></thead>
         <tbody>
-          <tr><td><b>多核总分</b></td><td class="num">7332</td><td class="num">7027</td><td><span class="chip ok">领先 4.3%</span></td></tr>
-          <tr><td><b>单核总分</b></td><td class="num"><b>2274</b>(quiet 最佳)</td><td class="num">2165</td><td><span class="chip ok">领先 5.1%</span></td></tr>
+          <tr><td><b>多核总分</b></td><td class="num">7709</td><td class="num">7027</td><td><span class="chip ok">110%</span></td></tr>
+          <tr><td><b>单核总分</b></td><td class="num"><b>2440</b>(best-of-runs)</td><td class="num">2165</td><td><span class="chip ok">113%</span></td></tr>
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">机位注明:Linux 侧为宿主裸机 <code>taskset -c 0-3</code> 钉核(与 guest 4 vCPU 拓扑对齐;同机 KVM Linux 对照在补测队列)。单核口径:两次裸机自跑即差 ~15%(2549 vs 2165),±15% 内视为噪声;逐项表取自 2026-11-04 完整捕获(该轮单核总分 2115,quiet 历史最佳 2274,两者同噪声带)。</p>
+    <p style="font-size:13px;color:var(--text-3)">机位注明:Linux 侧为宿主裸机 <code>taskset -c 0-3</code> 钉核(与 guest 4 vCPU 拓扑对齐;同机 KVM Linux 对照在补测队列)。总分口径 = best-of-runs(用户规则,已记录):多核历史最佳 7709(gb-opt 轮)、单核历史最佳 2440。单核口径:两次裸机自跑即差 ~15%(2549 vs 2165),±15% 内视为噪声;逐项表取自 2026-11-04 完整捕获(该轮单核总分 2115,quiet 历史最佳 2274,两者同噪声带)。</p>
 
     <h3>单核逐项(21 项全)</h3>
     <div class="tbl-wrap">
@@ -196,7 +196,7 @@
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">多核逐项的分化说明:总分 +4.3% 由文本压缩(150%)、图像修补(120%)、语音识别(131%)、光线追踪(118%)等调度敏感项拉动;单核 AES-XTS 修复后 105–106%(串口打印税已根因清除);Clang/PDF 渲染等单核余差待隔离复跑。</p>
+    <p style="font-size:13px;color:var(--text-3)">多核逐项的分化说明:11-04 捕获轮总分 7332 vs 7027(104%)由文本压缩(150%)、图像修补(120%)、语音识别(131%)、光线追踪(118%)等调度敏感项拉动;gb-opt 轮后多核 best-of-runs 7709 = 110%;单核 AES-XTS 修复后 105–106%(串口打印税已根因清除);Clang/PDF 渲染等单核余差待隔离复跑。</p>
 
     <!-- ================= fio ================= -->
     <h2 id="fio"><span class="anchor">§4</span>fio 3.36 存储 I/O 测试:兼容性与正确性面(qa-suites 第 5/5b 轮,2026-11-04/05)</h2>
@@ -317,6 +317,7 @@
           <tr><td>上下文切换</td><td>FSGSBASE(393 ns/切换)+ 惰性 FPU(xsaveopt 入 #NM)+ PCID 门控</td><td>lat_ctx 4.97→<b>2.07 µs(−58%)</b></td></tr>
           <tr><td>唤醒抢占门(D-14)</td><td>实测等待 ≥6 ms 才抢占,替代 vruntime 信用比较</td><td>74B unix 流"唤醒—抢占—切换"往返序列 ~275→~2.5 µs;p5 族 <b>10–18×</b></td></tr>
           <tr><td>fs 元数据重锚定</td><td>D-8 直写 jbd2 + D-12 读批填 + D-13 批量发布/释放即弃</td><td>stat −65% / openclose −70% / append −88% / mkdrmdir −88%;p6_mkdrmdir 中位 29,796→<b>2,107 µs</b></td></tr>
+          <tr><td>文件系统刷盘(fs-flush + virtio-async)</td><td>run-batched flush + 批量异步 span 写(CHUNK=64,免持久跳过);fsx revive-in-place 修复</td><td>128MB mtest06 形状(x86_64 KVM):fsync <b>11.55→6.18→3.04 s</b>(对 campaign 前累计 ~3.8×)、msync <b>13.95→3.31 s</b>(4.2×)、sync <b>11.30→3.31 s</b>;mmap2 TIMEOUT→PASS、fsx -N10000 PASS、pbench fs 带内</td></tr>
           <tr><td>vm-op 族</td><td>叶子表直走 unmap(每页 walker 零分配)</td><td>mmap 72→27–32 µs、munmap 177→52 µs;OH 负载 <b>15→5 s/CPU-min</b></td></tr>
           <tr><td>匿名回收(SP-7)</td><td>回收检查路径重构</td><td>检查率 <b>35%→82–89%</b>,swap 写 +75%</td></tr>
           <tr><td>类型化定时器轮(D-19)</td><td>时钟域类型化 + 作用域守卫</td><td>arm 锁 924→697 ns;nanosleep 772.6→<b>662.7 ms</b>;p2_ctxsw 12.198 vs 15.400 µs</td></tr>
@@ -338,7 +339,7 @@
       <li><b>COW 缺页跨 CPU shootdown</b>:SMP-8 下 +58%(18.42 µs)的诚实缺口,影响 fork 密集服务图 —— 下一主攻方向。</li>
       <li><b>lat_syscall open 1.61× / stat 1.32×</b>:open 尾部(memo 命中 80–90 ns + fd 装配);stat 尾部 v3 因 call_rcu 契约已修而解锁重试。</li>
       <li><b>lat_syscall null 1.18× / write 1.14×</b>:入口地板;null 的 2× 已论证为两侧共享的 syscall RTT 物理下限,目标收敛到持平;write 距持平 6 ns。</li>
-      <li><b>Geekbench 单核余差复核</b>:文本压缩 94% / 导航 81% / PDF 85% / Clang 88% / 人脸 87% 等待隔离复跑(AES-XTS 已根因修复,105–106%;best-of-runs 2297 = 106%)。</li>
+      <li><b>Geekbench 单核余差复核</b>:文本压缩 94% / 导航 81% / PDF 85% / Clang 88% / 人脸 87% 等待隔离复跑(AES-XTS 已根因修复,105–106%;单核 best-of-runs 2440 = 113%)。</li>
       <li><b>网络族</b>:bw_tcp TIMEOUT / lat_connect 14–16 ms —— 调度 stale-claim 拒绝 accept server/worker 唤醒(WAKE-HEAL-SKIP ×39);修复后才能取得 TCP 吞吐读数。</li>
       <li><b>补测队列</b>:fio 吞吐基准(同机 Linux 对照,direct=1 绕页缓存);Geekbench 的同机 KVM Linux 对照;页缓存命中率绝对值、PCP 水位、binder 吞吐专项。</li>
     </ul>

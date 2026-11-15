@@ -72,7 +72,7 @@
     <ul>
       <li><b>完整 GNOME 桌面闭环</b>(x86_64 + KVM 主平台):GDM 登录已达成, gnome-session 组件链(gsd → gnome-shell)收尾中。</li>
       <li><b>OpenHarmony launcher → 桌面</b>:/data 挂载与 SystemUI 锁屏已达成,继续向完整 launcher 主屏推进。</li>
-      <li><b>LTP 通过率最大化</b>:r27 = 1084/1869,持续清 FAIL/CRASH/TIMEOUT 面。</li>
+      <li><b>LTP 通过率最大化</b>:r27 审计官方 1093/1869(原始 1084),持续清 FAIL/CRASH/TIMEOUT 面。</li>
       <li><b>调试手段对齐Linux 内核</b>:tracepoint 框架扩张中(lock/tcp/input 族 + PSI + 日志控制);深水区 lockdep/RCU-stall/blktrace/perf-probes/kdump。</li>
     </ul>
 
@@ -125,7 +125,7 @@
       </div>
       <div class="tl-item">
         <div class="when">2026-11-05/06</div>
-        <h4>LTP r27 = 1084/1869;mm-unmap churn-race 家族关闭</h4>
+        <h4>LTP r27 = 1084/1869(审计官方 1093);mm-unmap churn-race 家族关闭</h4>
         <p>PI futex 全量入 main;munmap 分批 TLB flush 竞态家族(bug 分类学第 34 行)关闭并回移植三架构。</p>
       </div>
     </div>

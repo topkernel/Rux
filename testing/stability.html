@@ -93,6 +93,7 @@
       <li>桌面会话保持 <b>45 分钟零 panic</b>(GDM 端到端链路,2026-11-01);boot-to-login ~4.5 s(4 vCPU MTTCG)。</li>
       <li>GUI 验证器(<code>test/ubuntu-gui/verify.py</code>):每次启动 <b>23 项像素/串口检查</b>;键入式终端对话两次独立启动逐像素一致(convcheck)。</li>
       <li>OH 侧:bootanimation → SystemUI 锁屏 → 135+ 服务集,集群随机化测试持续走查(见压力子页)。</li>
+      <li><b>riscv64 启动参数矩阵 16/16</b>:smp{2,4,6,8} × mem{1,2,4,8}G 十六个格子全部干净启动到 shell、零 panic 零挂起(矩阵铺开前存在多个 panic/挂起格)。</li>
     </ul>
 
     <h2 id="heal"><span class="anchor">§3</span>自愈观测(census + heal)</h2>

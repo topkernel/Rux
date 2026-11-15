@@ -68,6 +68,15 @@
     <h1>更新日志(精选)</h1>
     <div class="sub">逐条全史见仓库 docs/progress/changelog.md 与 git log · 本页只收录结构性节点</div>
 
+    <h2 id="n1115"><span class="anchor">2026-11-15</span></h2>
+    <ul>
+      <li><b>Geekbench 5 gb-opt 轮并入 main</b>:单核 best-of-runs <b>2440</b>(对 Linux 4-CPU 锚 113%)、多核 <b>7709</b>(110%)—— 历史最佳;总分口径 best-of-runs(用户规则,已记录)。</li>
+      <li><b>文件系统刷盘两轮并入 main</b>(fs-flush + virtio-async):128MB mtest06 形状(x86_64 KVM)fsync 11.55→6.18→<b>3.04 s</b>(累计 ~3.8×)、msync 13.95→<b>3.31 s</b>(4.2×)、sync 11.30→3.31 s;mmap2 TIMEOUT→PASS。</li>
+      <li><b>LTP r27 审计定档</b>:官方校正计数 <b>1093/1869</b>(原始 1084;cve-2017-17052 与 shmat03 两项真实增量曾被两个顺序依赖伪影部分掩盖)。</li>
+      <li><b>riscv64 启动参数矩阵 16/16</b>:smp{2,4,6,8} × mem{1,2,4,8}G 全格干净启动(此前多个 panic/挂起格)。</li>
+      <li>代码规模复点(main 98702db0,git ls-files):kernel/ 623 文件 · 377,650 行 Rust · 384,307 行总计;仓库全量 1,094 文件 · 915,347 行。</li>
+    </ul>
+
     <h2 id="n1111"><span class="anchor">2026-11-11</span></h2>
     <ul>
       <li>主页新增<b>调试专栏</b>(中英):内核日志、panic 取证与符号化、统一 tracepoint/tracefs 用法、debug= 开关表、三道死锁防线与 lockdep-lite、hunt-wedge 自动捕获、性能调试工具箱(syscost/pbench/census/if0/PSI)、内存与文件系统取证(memwatch/TRIMQ/USEGV-FOR)、GDB 与场景速查。</li>

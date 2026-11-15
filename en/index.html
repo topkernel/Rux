@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Rux — A Linux ABI-compatible OS kernel written from scratch in Rust</title>
-<meta name="description" content="Rux is a Linux ABI-compatible operating system kernel written entirely in Rust: unmodified Ubuntu 22.04 boots to a GNOME Shell desktop and unmodified OpenHarmony boots all 135+ services. ~344k lines of Rust, 345+ syscalls, three architectures.">
+<meta name="description" content="Rux is a Linux ABI-compatible operating system kernel written entirely in Rust: unmodified Ubuntu 22.04 boots to a GNOME Shell desktop and unmodified OpenHarmony boots all 135+ services. ~378k lines of Rust, 345+ syscalls, three architectures.">
 <link rel="stylesheet" href="../css/style.css?v=16">
 </head>
 <body>
@@ -77,11 +77,11 @@
 <section class="section-tight">
   <div class="container">
     <div class="stats">
-      <div class="stat"><div class="v">344<em>k+</em></div><div class="l">lines of Rust</div></div>
+      <div class="stat"><div class="v">378<em>k+</em></div><div class="l">lines of Rust</div></div>
       <div class="stat"><div class="v">345<em>+</em></div><div class="l">syscalls</div></div>
       <div class="stat"><div class="v">4200<em>+</em></div><div class="l">test cases</div></div>
       <div class="stat"><div class="v">3</div><div class="l">architectures</div></div>
-      <div class="stat"><div class="v">1084<em>/1869</em></div><div class="l">LTP passing</div></div>
+      <div class="stat"><div class="v">1093<em>/1869</em></div><div class="l">LTP passing</div></div>
       <div class="stat"><div class="v">19</div><div class="l">design divergences (registered)</div></div>
     </div>
   </div>
@@ -146,7 +146,7 @@
       <div class="card">
         <h3><span class="ico">📜</span>Compatibility as the constitution</h3>
         <p>POSIX and the Linux kernel ABI are the supreme constraints: LTP families pass family by family; distribution userspace runs unmodified.</p>
-        <div class="nums">345+ syscalls · LTP <b>1084/1869</b></div>
+        <div class="nums">345+ syscalls · LTP <b>1093/1869</b></div>
         <a class="more" href="architecture/design.html#divergences">Divergence register →</a>
       </div>
       <div class="card">
@@ -240,19 +240,19 @@
     <div class="card-grid grid-4">
       <div class="card">
         <h3><span class="ico">🧪</span>LTP compliance</h3>
-        <p>The full 1,869-case scan grew from 35 early passes to 1,084; every round is archived and new failures are isolated-rerun twice before being called regressions; the TIMEOUT class is adjudicated row by row under the P0 rule (1 kernel defect / 11 test defects / 1 lost-wake / 1 slow-progress).</p>
-        <div class="nums">current <b>1084 / 1869</b> (r27)</div>
+        <p>The full 1,869-case scan grew from 35 early passes to 1,093; every round is archived and new failures are isolated-rerun twice before being called regressions; the TIMEOUT class is adjudicated row by row under the P0 rule (1 kernel defect / 11 test defects / 1 lost-wake / 1 slow-progress). The r27 raw count was 1084; the audited official correction is 1093 (two real gains, cve-2017-17052 and shmat03, were partly masked by two order-dependent artifacts).</p>
+        <div class="nums">current <b>1093 / 1869</b> (r27 audited official)</div>
         <a class="more" href="testing/ltp.html">LTP scan →</a>
       </div>
       <div class="card">
         <h3><span class="ico">🛡️</span>Stability &amp; stress</h3>
-        <p>Kernel suite green on three architectures, 2,100 s desktop gates ×3, census/heal self-correction MISS=0; a standing 11-QEMU concurrent stress cluster (randomized/fuzz/memstorm).</p>
-        <div class="nums">make test <b>1267/1267</b> · 2100s zero panic</div>
+        <p>Kernel suite green on three architectures, 2,100 s desktop gates ×3, census/heal self-correction MISS=0; a standing 11-QEMU concurrent stress cluster (randomized/fuzz/memstorm); the riscv64 boot-parameter matrix smp{2,4,6,8} × mem{1,2,4,8}G is clean in all sixteen cells (previously several panic/hang cells).</p>
+        <div class="nums">make test <b>1267/1267</b> · boot matrix <b>16/16</b></div>
         <a class="more" href="testing/stability.html">Stability →</a>
       </div>
       <div class="card">
         <h3><span class="ico">📊</span>Performance</h3>
-        <p>Three gate tiers + six guarded domains. Same-rig KVM-vs-KVM vs Linux: 14 paired cases, 10 ahead or at parity (page fault 2.26–2.45×, mmap 4.2×, pipe 3.56×, exec/fork at parity), 4 behind (worst 1.61×); Geekbench MC +4.3%, SC +5.1%.</p>
+        <p>Three gate tiers + six guarded domains. Same-rig KVM-vs-KVM vs Linux: 14 paired cases, 10 ahead or at parity (page fault 2.26–2.45×, mmap 4.2×, pipe 3.56×, exec/fork at parity), 4 behind (worst 1.61×); Geekbench 5 SC 2440 / MC 7709 (best-of-runs historical best, vs the Linux 4-CPU anchor 113% / 110%); filesystem flush 128 MB (x86_64 KVM): fsync 11.55→3.04 s, msync 13.95→3.31 s, sync 11.30→3.31 s.</p>
         <div class="nums">14 paired cases · full ledger</div>
         <a class="more" href="performance/index.html">Performance →</a>
       </div>
@@ -345,7 +345,7 @@ make ubuntu-run <span class="c"># Ubuntu 22.04 → GNOME desktop</span></code></
   <div class="container">
     <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
       <span>Rux Kernel · MIT License · <a href="https://github.com/topkernel/Rux">github.com/topkernel/Rux</a></span>
-      <span>~344,000 lines of Rust · built by AI agents under human direction · 2026</span>
+      <span>~378,000 lines of Rust · built by AI agents under human direction · 2026</span>
     
       <span class="foot-stats">Site traffic: <span id="busuanzi_value_site_pv"></span> views · <span id="busuanzi_value_site_uv"></span> visitors</span></div>
   </div>
