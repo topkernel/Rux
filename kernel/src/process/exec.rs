@@ -668,16 +668,22 @@ pub(crate) fn do_execve_elf(
         let (data_paddr, code_paddr) = crate::mm::vdso::vdso_pages_phys();
         // SAFETY: user_ppn is the freshly created page-table root; the
         // physical frames are the aligned 4 KiB vDSO statics; flags are
-        // valid user PTE bits (data RW, code RX — executable by NOT
+        // valid user PTE bits (data RO, code RX — executable by NOT
         // setting NX).
+        //
+        // The data page is USER-READ-ONLY since the unified-track re-arm:
+        // the kernel's own clock (read_time) reads its timekeeping
+        // anchor from this page, so a user-writable alias would let any
+        // process corrupt the syscall-side clock (the reference maps
+        // vvar RO for the same reason). The kernel writes through its
+        // own image mapping.
         unsafe {
             crate::arch::mm::mm_ops::map_user_region(
                 user_ppn,
                 crate::mm::vdso::VDSO_BASE,
                 data_paddr,
                 4096,
-                PageTableEntry::P | PageTableEntry::RW | PageTableEntry::US
-                    | PageTableEntry::A | PageTableEntry::D,
+                PageTableEntry::P | PageTableEntry::US | PageTableEntry::A,
             );
             crate::arch::mm::mm_ops::map_user_region(
                 user_ppn,

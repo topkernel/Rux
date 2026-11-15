@@ -13253,3 +13253,67 @@ Full evidence: run/MMI-EXIT-FINDINGS.md.
    TESTS PASSED (run/mmi-maketest.log). Open: the write-spin site
    (next repro self-symbolizes), the FFRT never-sent wedge upstream
    of the UI phase.
+
+### 2026-11-15, round 117 (vdso-rearm, resume after quota wall) — THE vDSO IS RE-ARMED ON A UNIFIED TIMEKEEPING TRACK: one anchor serves read_time() and the vDSO bit-identically, LTP clock_gettime04 6/6 (the test that forced the 106th's disarm), and the OH A/B shows clock_gettime syscalls 8,259,773 → 0 per boot (−2.0% of box, −26% syscall volume)
+
+Branch vdso-rearm: 6643148ee + 4c0cabe85 (re-arm) + 1385dafd5 (build
+fix). Full record: run/VDSO-REARM.md. Register/ledger entries added
+in the same change (rust-native-register.md §E,
+safety-and-performance.md §3).
+
+1. THE DESIGN (4c0cabe85): the anchor {cycle_last, base_mono_nom,
+   mult} lives in the vDSO data page (user-RO since exec.rs — the
+   kernel clock reads its own anchor there). read_time() and the
+   emitted vDSO code run the same seq protocol (seq1 → fields →
+   lfence;rdtsc → seq2) and the same arithmetic (nom = base +
+   ((tsc-cl)*mult)>>32, ns = nom*100) over the same words — the
+   syscall track and the vDSO track are ONE track, so the strict
+   adjacent-pair LTP requirement holds structurally. Seq word doubles
+   as writer lock (cmpxchg even→odd — closes the old fetch_or
+   multi-writer tear). Per-CPU TSC_CPU_OFF corrections GONE (APs
+   measure+report divergence >1ms instead of correcting); 1 Hz HPET
+   resync = one forward-only anchor step; TSC_LAST ratchet kept as
+   anomaly insurance (never engages healthy). vDSO dispatch: COARSE/
+   CPUTIME/garbage ids fall back INSIDE the vDSO to the real syscall
+   (reference shape) — the ECHILD face decoded: LTP's vdso variants
+   read the caller's stale errno (ECHILD from LTP's own wait()),
+   so the −ENOSYS return form TFAIL'd every COARSE clock. Canonical
+   dynstr names restored (the "inert-name export" a6ee2acd5 is
+   reverted by the same commit).
+2. FUNCTIONAL: probe cgt5 (30k pairs × 4 clocks × both directions,
+   libc/vdso/sys) neg=0 on all 12 families; LTP acceptance set green
+   on the final build (run/iso-logs/chunk0000-a1.log): clock_gettime04
+   6/6 (was 4/6 — both COARSE fixed), clock_gettime02 10/10,
+   gettimeofday01, time01, nanosleep01 — 5/5 rc=0.
+3. THE OH A/B (name-only pair, same tree/rig/vehicle: tok-r4fix,
+   KVM q35 SMP2 4G, syscost=1 dfx=wwcensus, 780s, sequential;
+   run/pa-vdsorearm-{a,b}-serial.log): re-arm vs names-inert control
+   (md5 15be7881 vs 86b57066, differ ONLY in the two dynstr names).
+   clock_gettime @720: 0 (flood: appspawn=1) vs 8,259,773
+   (avg 3µs, tot 29,408ms = 2.0% of SMP2 box); total volume 16.42M vs
+   22.27M (−26%; both in the debug family band 7.2–25.2M;
+   cross-check: gate-bank's gbank2dbg same day/vehicle read 8.9M/
+   25.2M — the control replicates it, so the collapse is the re-arm).
+   The control's burners: OS_FFRT_2_0 1.10M, init 9.8k,
+   hilogd.rd_kmsg 13.8k — ALL move to userspace with names live:
+   the 108th's "dynamic-musl fails or burners bypass libc" question
+   is answered — neither. Census 8/27/2 vs 8/32/3 (REFUSED 1 below
+   the 28–36 band on the A boot — noted for the gate run); nanosleep
+   155.1 vs 149.7ms; GRQ rest-site 4.97 vs 5.44µs; 12/12 dumps and
+   zero panics both arms. The "~6.6% of box" class was the 105th-era
+   stack (21.3M × 3µs); on today's stack the honest number is
+   −2.0% of box + 8.26M fewer traps.
+4. GATES: triple-arch builds rc=0 (x86_64 run/build-x86-rearm3.log,
+   riscv64 run/gate-riscv-build.log, aarch64
+   run/gate-aarch64-build.log); riscv64 make test ALL PASSED
+   (1328 PASS lines, run/gate-riscv-maketest2.log). BUILD FIX
+   (1385dafd5, coordinator-relevant): 5449b2a2c's malloc_holder_scan
+   read crate::arch::x86_64::pt_regs ungated — every riscv64/aarch64
+   build of the 6643148ee lineage is broken until this lands.
+5. FOR THE COORDINATOR: perf-gate expectations — Tier-1
+   clock_gettime row reads ~0 (improved), volume drops by the
+   clock_gettime share (family band holds), nanosleep/census/ticks
+   clean (watch WAKE-REFUSED 27-vs-28 note); Tier-2 P1_clock should
+   IMPROVE (libc clock_gettime now vDSO-served, 66–74ns class vs
+   the 0.371µs anchor); Tier-3 not owed (no allocator/IRQ-path
+   change). riscv64 untouched (rv vDSO unchanged; make test green).
