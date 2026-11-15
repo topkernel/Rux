@@ -942,6 +942,13 @@ pub fn rust_main_tail() -> ! {
             trace::files::init_from_cmdline();
         }
 
+        // __setup("nohz_full=") — the full-dynticks CPU list
+        // (kernel/time/tick-sched.c tick_nohz_full_setup); parsed from
+        // the arch-neutral cmdline store (multiboot/DTB /chosen).
+        if let Some(arg) = crate::cmdline::get_param("nohz_full") {
+            timer::nohz::nohz_full_setup(&arg);
+        }
+
         // Persistent kernel log — /var/log/kmsg, the console tail on
         // disk (klogd kernel thread, 30 s flush period, 256 KiB cap;
         // zero cost on the printk hot path — the flusher walks the
