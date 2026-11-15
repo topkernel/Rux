@@ -3950,8 +3950,18 @@ pub fn sys_execveat(args: SyscallArgs) -> i64 {
         let file = crate::sched::get_current_fdtable()
             .and_then(|ft| ft.get_file(dirfd as usize));
         match file {
-            Some(f) => f.path(),
-            None => return -(errno::EBADF as i64),
+            Some(f) => {
+                let p = f.path();
+                p
+            }
+            None => {
+                crate::pr_warn!(
+                    "EXECTRAP execveat-empty pid={} fd={} -> EBADF",
+                    crate::process::current_pid(),
+                    dirfd
+                );
+                return -(errno::EBADF as i64);
+            }
         }
     } else {
         match crate::syscall::file::resolve_user_path(dirfd, pathname_ptr) {

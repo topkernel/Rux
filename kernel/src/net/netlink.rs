@@ -501,6 +501,10 @@ pub struct NetlinkSocket {
     recv_queue: Spinlock<VecDeque<Vec<u8>>>,
     /// Closed flag (EOF for blocked receivers).
     closed: Spinlock<bool>,
+    /// Per-socket coldboot-replay marker: the first bind that subscribes
+    /// to the kernel-event group gets the synthesized device tree's
+    /// "add" uevents pushed once (sysfs::coldboot_uevent_replay_into).
+    coldboot_served: core::sync::atomic::AtomicBool,
     /// Wait queue for blocking recv.
     pub wait_queue: WaitQueueHead,
     /// Stored socket options (SOL_SOCKET subset).
@@ -520,6 +524,7 @@ impl NetlinkSocket {
             groups: core::sync::atomic::AtomicU32::new(0),
             recv_queue: Spinlock::new(VecDeque::new()),
             closed: Spinlock::new(false),
+            coldboot_served: core::sync::atomic::AtomicBool::new(false),
             wait_queue: WaitQueueHead::new(),
             options: Spinlock::new(SocketOptions::new()),
         }
@@ -972,6 +977,16 @@ pub fn netlink_bind(
     groups: u32,
 ) -> Result<(), i32> {
     sock.bind_groups(groups);
+    // A KOBJECT_UEVENT listener subscribing to the kernel-event group:
+    // push the synthesized device tree's "add" uevents into THIS socket
+    // once (per-monitor coldboot — see sysfs::coldboot_uevent_replay_into
+    // for the ordering hole this closes and why it is per-socket).
+    if sock.protocol == NETLINK_KOBJECT_UEVENT
+        && groups & 1 != 0
+        && !sock.coldboot_served.swap(true, core::sync::atomic::Ordering::AcqRel)
+    {
+        crate::fs::sysfs::coldboot_uevent_replay_into(sock);
+    }
     if nl_pid != 0 {
         let old = sock.portid.load(core::sync::atomic::Ordering::Relaxed);
         if nl_pid != old {
@@ -1086,6 +1101,14 @@ pub fn uevent_broadcast(payload: &[u8]) {
         }
         None => false, // socket closed — drop the listener
     });
+}
+
+/// Push a kernel-originated uevent payload into ONE monitor socket (the
+/// coldboot replay's delivery side — same queue semantics as
+/// uevent_broadcast, single destination).
+pub fn uevent_push_direct(sock: &Arc<NetlinkSocket>, payload: &[u8]) {
+    sock.recv_queue.lock().push_back(payload.to_vec());
+    sock.wait_queue.wake_up_all();
 }
 
 /// Userspace MULTICAST send — the monitor protocol's transmit half.

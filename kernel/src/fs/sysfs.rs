@@ -324,6 +324,75 @@ pub fn sysfs_root() -> Option<Arc<KObject>> {
     SYSFS_ROOT.lock().clone()
 }
 
+/// Per-listener COLDBOOT REPLAY: push "add" uevents for every
+/// registered device kobject into a monitor socket that has JUST bound
+/// its kernel-event group — each such listener gets the coldboot set
+/// exactly once (per-socket one-shot).
+///
+/// Rux synthesizes the entire device tree at kernel-boot (there is no
+/// later hotplug arrival), so the registration-time kobject_uevent()
+/// calls all land before any listener exists. Userspace's coldplug —
+/// systemd-udev-trigger writing "add" into every
+/// /sys/class/<bus>/<dev>/uevent — is only ordered After= the udev
+/// SOCKETS (Ubuntu 24.04's unit), not After=systemd-udevd.service, so
+/// the trigger can finish while the daemon is still starting: on the
+/// ub2404 boot the trigger finished ~2k console lines before "Started
+/// systemd-udevd.service", every synthesized "add" was broadcast into
+/// the void, and dev-ttyS0.device waited out its 90 s timeout with the
+/// getty dead ("Timed out waiting for device" → "Dependency failed for
+/// serial-getty@ttyS0.service", 2026-11-15). The contract restored here
+/// — a monitor that binds sees the devices that exist — must hold for
+/// EVERY monitor (pid1 binds its own before udevd's; a global one-shot
+/// replay fed only the first binder and udevd still starved), so the
+/// replay is per-socket: duplicate adds re-run idempotent rules, fresh
+/// SEQNUMs, same DEVPATHs the trigger would have produced.
+pub fn coldboot_uevent_replay_into(sock: &alloc::sync::Arc<crate::net::netlink::NetlinkSocket>) {
+    let Some(root) = sysfs_root() else { return };
+    // Iterative DFS over the kobject tree; build "add" payloads for
+    // every node carrying a device number (ttyS0, block devices, drm
+    // cards, input nodes, fb — exactly the set the boot-time
+    // registration uevents covered; parents without devnos contribute
+    // only DEVPATH prefixes, which need no uevent of their own).
+    let mut stack: alloc::vec::Vec<alloc::sync::Arc<KObject>> =
+        alloc::vec![root];
+    let mut fired = 0u32;
+    while let Some(node) = stack.pop() {
+        if node.devno.lock().is_some() {
+            let (payload, _) = device_add_payload(&node);
+            crate::net::netlink::uevent_push_direct(sock, &payload);
+            fired += 1;
+        }
+        for child in node.children.lock().values() {
+            stack.push(child.clone());
+        }
+    }
+    crate::pr_info!(
+        "uevent: coldboot replay pushed {} device adds to new listener",
+        fired
+    );
+}
+
+/// Build one device's "add" payload (kobject_uevent's message shape).
+fn device_add_payload(kobj: &KObject) -> (Vec<u8>, u64) {
+    let devpath = kobj.path();
+    let subsystem = kobj.ktype.subsystem().unwrap_or("kernel");
+    if let Some((major, minor)) = *kobj.devno.lock() {
+        let maj = format!("{}", major);
+        let min = format!("{}", minor);
+        let dn = kobj.devname.lock().clone();
+        let mut extra: Vec<(&str, &str)> = vec![("MAJOR", maj.as_str()), ("MINOR", min.as_str())];
+        if let Some(name) = dn.as_deref() {
+            extra.push(("DEVNAME", name));
+        }
+        if kobj.ktype == KType::Block {
+            extra.push(("DEVTYPE", "disk"));
+        }
+        uevent_payload_for(&devpath, "add", subsystem, &extra)
+    } else {
+        uevent_payload_for(&devpath, "add", subsystem, &[])
+    }
+}
+
 /// Look up a path like "class/net/lo" from the root (for internal use).
 pub fn lookup_path(path: &str) -> Option<Arc<KObject>> {
     let mut cur = sysfs_root()?;
@@ -1517,6 +1586,93 @@ fn build_tree() -> Arc<KObject> {
     let _drm_bus_devices = mk_dir(&drm_bus, "devices", KType::Generic);
     let input_bus = mk_dir(&bus, "input", KType::Input);
     let _input_bus_devices = mk_dir(&input_bus, "devices", KType::Generic);
+    // /sys/bus/tty — the tty bus hub. Linux registers the "tty" bus_type
+    // at init (bus_register creates bus/tty/{devices,drivers}); every tty
+    // device's `subsystem` readlink resolves here, and udev's sd-device
+    // takes the subsystem from exactly that readlink.
+    let tty_bus = mk_dir(&bus, "tty", KType::Tty);
+    let tty_bus_devices = mk_dir(&tty_bus, "devices", KType::Generic);
+    let tty_bus_drivers = mk_dir(&tty_bus, "drivers", KType::Generic);
+
+    // ---------------- serial console device: ttyS0 ----------------
+    // The 8250/ns16550 serial console as a real device-model object —
+    // the dev-ttyS0.device activation chain:
+    //
+    //   serial-getty@ttyS0.service binds to dev-ttyS0.device BOTH
+    //   explicitly (template BindsTo=dev-%i.device) and implicitly
+    //   (TTYPath=/dev/%I makes systemd add automatic Requires=/After=
+    //   dependencies on the device unit — a drop-in that clears BindsTo
+    //   cannot escape it). The unit only activates when udevd processes
+    //   an "add" uevent for a /sys device whose devnode is ttyS0
+    //   (99-systemd.rules: SUBSYSTEM=="tty" KERNEL=="tty[a-z0-9]*" →
+    //   TAG+="systemd"; PID1 then creates dev-<escaped-syspath>.device
+    //   with the dev-ttyS0.device alias from DEVNAME). udevd's coldboot
+    //   (systemd-udev-trigger) walks /sys/class/tty/* writing "add" into
+    //   each uevent attr — the uevent attr's store side below IS that
+    //   delivery path (a kernel-time broadcast lands before any netlink
+    //   listener exists).
+    //
+    // Linux device-model shape (x86 serial8250 driver):
+    //   /sys/devices/platform/serial8250            platform device (uevent)
+    //   /sys/devices/platform/serial8250/tty/ttyS0  dev/uevent/subsystem
+    //   /sys/class/tty/ttyS0 -> ../../devices/platform/serial8250/tty/ttyS0
+    //   /sys/dev/char/4:64    -> ../../devices/platform/serial8250/tty/ttyS0
+    //   /sys/bus/tty/devices/ttyS0 -> ../../../devices/platform/serial8250/tty/ttyS0
+    //   /sys/bus/tty/drivers/serial8250/ttyS0 -> ../../../../../devices/...
+    //
+    // 4:64 mirrors the static devtmpfs node /dev/ttyS0 devfs creates on
+    // every arch (CONDEV_OPS UART console); the parent name "serial8250"
+    // is the generic 8250 driver device (riscv64's ns16550 MMIO node has
+    // a different address name on Linux, but nothing in the activation
+    // chain keys on the parent). Without this entry the device unit waits
+    // out its 90 s job timeout and the getty dies: "Timed out waiting
+    // for device dev-ttyS0.device" → "Dependency failed for
+    // serial-getty@ttyS0.service" (ub2404 baseline, 2026-11-15).
+    {
+        let serial8250 = mk_dir(&platform, "serial8250", KType::Generic);
+        mk_link(&serial8250, "subsystem", "../../../bus/platform");
+        // platform uevent (input_dev pattern: SUBSYSTEM=platform,
+        // MODALIAS=platform:serial8250).
+        add_env_uevent_attr(
+            &serial8250,
+            "/devices/platform/serial8250",
+            "platform",
+            vec![(
+                String::from("MODALIAS"),
+                String::from("platform:serial8250"),
+            )],
+        );
+
+        let tty_dir = mk_dir(&serial8250, "tty", KType::Generic);
+        let ttys0 = mk_dir(&tty_dir, "ttyS0", KType::Tty);
+        *ttys0.devno.lock() = Some((crate::fs::dev_t::TTY_MAJOR, 64));
+        *ttys0.devname.lock() = Some(String::from("ttyS0"));
+        // 4:64 == (TTY_MAJOR, 64)
+        attr_ro(&ttys0, "dev", || b"4:64\n".to_vec());
+        add_uevent_attr(&ttys0);
+        // 5 components below /sys (devices/platform/serial8250/tty/ttyS0)
+        mk_link(&ttys0, "subsystem", "../../../../../bus/tty");
+
+        mk_link(&tty, "ttyS0", "../../devices/platform/serial8250/tty/ttyS0");
+        mk_link(&dev_char, "4:64", "../../devices/platform/serial8250/tty/ttyS0");
+        mk_link(
+            &tty_bus_devices,
+            "ttyS0",
+            "../../../devices/platform/serial8250/tty/ttyS0",
+        );
+        let serial_drv = mk_dir(&tty_bus_drivers, "serial8250", KType::Generic);
+        mk_link(
+            &serial_drv,
+            "ttyS0",
+            "../../../../devices/platform/serial8250/tty/ttyS0",
+        );
+
+        // Boot-time "add" (Linux parity: serial8250 registers its ports
+        // at init). In practice udevd only sees the coldboot trigger's
+        // uevent-attr write; this fires for parity with the
+        // input/drm/block registration paths.
+        kobject_uevent(&ttys0, "add");
+    }
     // /sys/bus/pci/devices — the per-function symlinks libdrm's
     // drmGetDevice falls back to when /sys/dev/char is not usable
     // ("/sys/bus/pci/devices/%04x:%02x:%02x.%d" is in the image's
@@ -1590,6 +1746,21 @@ pub fn uevent_send_full(
     subsystem: &str,
     extra_env: &[(&str, &str)],
 ) -> u64 {
+    let (msg, seq) = uevent_payload_for(devpath, action, subsystem, extra_env);
+    crate::net::netlink::uevent_broadcast(&msg);
+    seq
+}
+
+/// Build one kernel uevent payload (and allocate its SEQNUM) without
+/// delivering it — the coldboot replay pushes the same bytes into the
+/// just-bound monitor socket directly (per-listener replay; see
+/// coldboot_uevent_replay).
+fn uevent_payload_for(
+    devpath: &str,
+    action: &str,
+    subsystem: &str,
+    extra_env: &[(&str, &str)],
+) -> (Vec<u8>, u64) {
     let seq = UEVENT_SEQNUM.fetch_add(1, Ordering::Relaxed);
 
     let mut msg: Vec<u8> = Vec::new();
@@ -1604,9 +1775,7 @@ pub fn uevent_send_full(
         push_env(&mut msg, k, v);
     }
     push_env(&mut msg, "SEQNUM", &format!("{}", seq));
-
-    crate::net::netlink::uevent_broadcast(&msg);
-    seq
+    (msg, seq)
 }
 
 /// Infer SUBSYSTEM from a DEVPATH ("/class/net/lo" → "net").

@@ -173,6 +173,14 @@ pub enum PidFileKind {
     /// (cgroup_core01..03, clone303, madvise06, memcg_*) opens
     /// /proc/self/mounts to find the cgroup2 mount point.
     Mounts,
+    /// /proc/[pid]/mountinfo — the detailed per-process mount table
+    /// (proc-mounts(5) format). Linux exposes it under EVERY pid dir,
+    /// not just /proc/self: systemd's namespace child probes
+    /// /proc/<own-pid>/mountinfo (the "self" spelling resolves to the
+    /// number form first), and util-linux mount(1) readlinks
+    /// /proc/<pid>/mountinfo before every mountinfo consult — ENOENT
+    /// here fed the udevd NAMESPACE setup failures (ub2404, 2026-11-15).
+    Mountinfo,
     /// /proc/[pid]/attr/exec — SELinux exec label (writable; OH init
     /// writes the service context here via setexeccon() before exec —
     /// ENOENT made init abort every display service child).
@@ -409,6 +417,7 @@ impl ProcFSNode {
                 PidFileKind::Comm => pid::generate_comm(pid),
                 PidFileKind::Cgroup => pid::generate_cgroup(pid),
                 PidFileKind::Mounts => mounts::generate(),
+                PidFileKind::Mountinfo => mounts::generate_mountinfo(),
                 PidFileKind::AttrExec => pid::attr_label_get(pid, true),
                 PidFileKind::AttrCurrent => pid::attr_label_get(pid, false),
                 PidFileKind::AttrFscreate => pid::attr_get(pid, pid::ATTR_FSCREATE),
@@ -1138,6 +1147,36 @@ pub fn get_procfs_sb() -> Option<&'static ProcFSSuperBlock> {
     }
 }
 
+/// Rewind-regeneration hook for the procfs MOUNT TABLES served through
+/// the openat read-only shortcut: /proc/{self,<pid>}/mounts and
+/// /proc/{self,<pid>}/mountinfo must re-run their generator on
+/// lseek(0) (Linux seq_file semantics) — systemd's namespace setup
+/// keeps one fd open, mounts, rewinds, re-parses, and must observe the
+/// mounts it just made. Returns the generator fn for a mount-table
+/// path, None for every other /proc path (those keep snapshot files).
+pub fn mount_table_regen(path: &str) -> Option<fn() -> Vec<u8>> {
+    let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if components.len() != 3 || components[0] != "proc" {
+        return None;
+    }
+    // /proc/self/... and /proc/<pid>/... both address the READER's own
+    // view once resolved by the generator (get_mounts reads the current
+    // task's namespace at call time).
+    let middle = if components[1] == "self" {
+        None
+    } else {
+        pid::parse_pid(components[1].as_bytes())
+    };
+    if components[1] != "self" && middle.is_none() {
+        return None;
+    }
+    match components[2] {
+        "mounts" => Some(mounts::generate),
+        "mountinfo" => Some(mounts::generate_mountinfo),
+        _ => None,
+    }
+}
+
 /// Read file from /proc
 pub fn read_file(path: &str) -> Option<Vec<u8>> {
     use crate::process::current_pid;
@@ -1368,6 +1407,7 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
             b"comm" => PidFileKind::Comm,
             b"cgroup" => PidFileKind::Cgroup,
             b"mounts" => PidFileKind::Mounts,
+            b"mountinfo" => PidFileKind::Mountinfo,
             _ => {
                 // /proc/[pid]/fd — the fd subdirectory (review 5.7: used to
                 // exist only behind a syscall-layer string special case, so
@@ -2132,7 +2172,7 @@ fn procfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isiz
     unsafe {
         let data_opt = &*file.private_data.get();
         if let Some(content_ptr) = *data_opt {
-            let content = &*(content_ptr as *const ProcfsFileContent);
+            let content = &mut *(content_ptr as *mut ProcfsFileContent);
             let file_size = content.data.len() as isize;
             let new_offset = match whence {
                 0 => offset,
@@ -2142,6 +2182,36 @@ fn procfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isiz
             };
             if new_offset < 0 || new_offset > file_size {
                 return -22;
+            }
+            // Linux seq_file semantics for the mount tables: a rewind
+            // (lseek to 0) restarts the iterator, so a reader that
+            // keeps the file open sees CURRENT table state, not the
+            // open-time snapshot. systemd v255's sandbox setup
+            // (bind_remount_recursive_with_mountinfo, mount-util.c)
+            // opens /proc/self/mountinfo ONCE, mounts, rewinds,
+            // re-parses — with a snapshot that rescan never observed
+            // the mounts it just made, the loop re-bound 32x and gave
+            // up -EBUSY: every ProtectHostname/ProtectSystem service
+            // died 226/NAMESPACE ("Failed to set up mount namespacing:
+            // /proc/sys/kernel/domainname: Device or resource busy",
+            // ub2404, 2026-11-15). Regenerate the mount tables on
+            // rewind; all other procfs files keep the snapshot (their
+            // readers do not rewind-and-expect-change).
+            if new_offset == 0 {
+                let mut kind = None;
+                if let Some(inode) = (*file.inode.get()).as_ref() {
+                    if let Some(node_ptr) = inode.private_data {
+                        let node = &*(node_ptr as *const ProcFSNode);
+                        kind = node.pid_file_kind;
+                    }
+                }
+                match kind {
+                    Some(PidFileKind::Mounts) => content.data = mounts::generate(),
+                    Some(PidFileKind::Mountinfo) => {
+                        content.data = mounts::generate_mountinfo()
+                    }
+                    _ => {}
+                }
             }
             file.set_pos(new_offset as u64);
             new_offset

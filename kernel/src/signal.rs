@@ -511,6 +511,20 @@ impl SignalStruct {
         Ok(())
     }
 
+    /// CLONE_CLEAR_SIGHAND (kernel flush_signal_handlers): reset EVERY
+    /// signal disposition to SIG_DFL. Used by glibc's posix_spawn (via
+    /// clone3) to give the spawn helper a clean signal state without a
+    /// helper syscall — the flag rides along CLONE_VM where the child
+    /// cannot run sigaction code before exec. Unlike SignalStruct::new,
+    /// even SIGCHLD lands on SIG_DFL here (Linux resets all 64 actions
+    /// unconditionally).
+    pub fn reset_all_handlers_default(&self) {
+        let mut actions = self.action.write();
+        for a in actions.iter_mut() {
+            *a = SigAction::new();
+        }
+    }
+
     /// Get signal handling action
     pub fn get_action(&self, sig: i32) -> Option<SigAction> {
         if sig < 1 || sig > 64 {

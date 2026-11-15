@@ -468,7 +468,11 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
             }
         }
         if let Some(content) = crate::fs::procfs::read_file(&full_path) {
-            return match crate::fs::vfs::open_mem_file(content, flags) {
+            // Mount tables regenerate on rewind (seq_file semantics) —
+            // see mount_table_regen's doc for the systemd reader this
+            // serves.
+            let regen = crate::fs::procfs::mount_table_regen(&full_path);
+            return match crate::fs::vfs::open_mem_file_regen(content, flags, regen) {
                 Ok(fd) => {
                     if (flags & O_CLOEXEC) != 0 { crate::fs::set_cloexec_fd(fd, true); }
                     fd as i64
@@ -2443,24 +2447,64 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
     // The mount target must exist (Linux path_mount resolves it before the
     // filesystem-specific helper runs — the old code fabricated success for
     // any path string).
-    if let Err(e) = ph.t(5, || crate::fs::vfs::path_lookup(target, 0)) {
-        // lb-lane hunt (switch_root): OH's switch_root MS_MOVE loop got
-        // err=2 here with NO kernel mount-tap line (this early return
-        // sits before the tap), hiding which move failed and why. Ring
-        // every ENOENT-before-mount so the switch_root move map is
-        // complete on serial.
-        if args[3] & 8192 != 0 {
-            crate::pr_warn!(
-                "mnt-precheck-fail MS_MOVE '{}' -> '{}': {} (pid {})",
-                source,
-                target,
-                e,
-                crate::process::current_pid()
-            );
+    //
+    // Mount THROUGH symlinks (Linux path_mount walks the mountpoint with
+    // LOOKUP_FOLLOW). systemd's mount_fd()/mount_nofollow() (v255) mount
+    // by the /proc/self/fd/<n> MAGIC LINK — every namespace-using
+    // service's root preparation ("recursive bind / onto
+    // /run/systemd/mount-rootfs") arrives with that as the TARGET, and
+    // mount units mount onto /proc/self/fd/<n> the same way. vfs_mount()
+    // walks the RAW dentry tree, so the mount used to attach at the
+    // magic-link node inside procfs while the fd's referent stayed
+    // unmounted: systemd-udevd's namespace setup then found
+    // /run/systemd/mount-rootfs empty and every sandboxed service died
+    // with "Failed to set up mount namespacing: /proc/sys/kernel/domainname:
+    // No such file or directory" (ub2404), while mount units logged
+    // "Mount process finished, but there is no mount". Rewrite the target
+    // to the resolved dentry's real path so the attach lands where Linux
+    // puts it. Non-symlink targets resolve to themselves (no change).
+    let orig_target: &str = target;
+    let resolved_target: alloc::string::String;
+    // Set when the target STRING was rewritten (magic-link/symlink
+    // target that resolved elsewhere): the REMOUNT branch then re-flags
+    // the mount at the RESOLVED dentry directly (Linux do_remount on a
+    // /proc/self/fd/N target) instead of re-walking the global mount
+    // table by the canonical alias string — the string walk could flag
+    // an unrelated topmost mount in the MAIN namespace (ub2404 journald
+    // 209/STDOUT regression: /dev+/run went EROFS, 2026-11-15).
+    let mut rewritten_dentry: Option<alloc::sync::Arc<crate::fs::dentry::Dentry>> = None;
+    let target = match ph.t(5, || crate::fs::vfs::path_lookup(target, 0)) {
+        Ok(vp) => {
+            let rewritten = match vp.dentry.as_ref() {
+                Some(d) => crate::fs::vfs::dentry_user_path(d),
+                None => alloc::string::String::new(),
+            };
+            if !rewritten.is_empty() && rewritten != target {
+                rewritten_dentry = vp.dentry.clone();
+                resolved_target = rewritten;
+                resolved_target.as_str()
+            } else {
+                target
+            }
         }
-        return e as i64;
-    }
-
+        Err(e) => {
+            // lb-lane hunt (switch_root): OH's switch_root MS_MOVE loop got
+            // err=2 here with NO kernel mount-tap line (this early return
+            // sits before the tap), hiding which move failed and why. Ring
+            // every ENOENT-before-mount so the switch_root move map is
+            // complete on serial.
+            if args[3] & 8192 != 0 {
+                crate::pr_warn!(
+                    "mnt-precheck-fail MS_MOVE '{}' -> '{}': {} (pid {})",
+                    source,
+                    target,
+                    e,
+                    crate::process::current_pid()
+                );
+            }
+            return e as i64;
+        }
+    };
     // MS_REMOUNT: update the flags of the mount already attached at `target`
     // instead of mounting a fresh instance. LTP's needs_rofs setup does
     // mount(NULL, mntpoint, "tmpfs", 0), creates files, then
@@ -2553,7 +2597,18 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
     if args[3] & MS_REMOUNT != 0 {
         let new_flags =
             crate::fs::mount::translate_mnt_flags_public(args[3] & !MS_REMOUNT);
-        match ph.t(6, || crate::fs::vfs::vfs_remount(target, new_flags)) {
+        // REMOUNT THROUGH A MAGIC-LINK TARGET (rewritten_dentry set):
+        // re-flag the mount at the RESOLVED dentry, not the mount a
+        // global string walk finds under the canonical alias — see
+        // vfs_remount_dentry. This is the shape of every systemd v255
+        // sandbox re-flag (ProtectHostname/ProtectSystem/ReadOnlyPaths:
+        // mount(NULL, "/proc/self/fd/N", MS_BIND|MS_REMOUNT|MS_RDONLY)).
+        let remount_result = if let Some(d) = rewritten_dentry.as_ref() {
+            ph.t(6, || crate::fs::vfs::vfs_remount_dentry(d, new_flags))
+        } else {
+            ph.t(6, || crate::fs::vfs::vfs_remount(target, new_flags))
+        };
+        match remount_result {
             Ok(()) => {
                 // Keep the /proc/mounts row in sync (ro/rw string).
                 let existing = ph
@@ -4210,7 +4265,11 @@ pub fn sys_openat2(args: SyscallArgs) -> i64 {
             crate::pr_warn!("NOBLEDBG openat2 shortcut path={}", cleaned);
         }
         if let Some(content) = crate::fs::procfs::read_file(&cleaned) {
-            return match crate::fs::vfs::open_mem_file(content, how.flags as u32) {
+            // Mount tables regenerate on rewind (seq_file semantics) —
+            // see mount_table_regen's doc for the systemd reader this
+            // serves.
+            let regen = crate::fs::procfs::mount_table_regen(&cleaned);
+            return match crate::fs::vfs::open_mem_file_regen(content, how.flags as u32, regen) {
                 Ok(fd) => {
                     if (how.flags as u32 & 0o2000000) != 0 {
                         crate::fs::set_cloexec_fd(fd, true);
@@ -4232,7 +4291,11 @@ pub fn sys_openat2(args: SyscallArgs) -> i64 {
         && cleaned.starts_with("/proc/")
     {
         if let Some(content) = crate::fs::procfs::read_file(&cleaned) {
-            return match crate::fs::vfs::open_mem_file(content, how.flags as u32) {
+            // Mount tables regenerate on rewind (seq_file semantics) —
+            // see mount_table_regen's doc for the systemd reader this
+            // serves.
+            let regen = crate::fs::procfs::mount_table_regen(&cleaned);
+            return match crate::fs::vfs::open_mem_file_regen(content, how.flags as u32, regen) {
                 Ok(fd) => {
                     if (how.flags as u32 & 0o2000000) != 0 {
                         crate::fs::set_cloexec_fd(fd, true);

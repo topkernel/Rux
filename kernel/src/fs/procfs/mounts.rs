@@ -191,9 +191,22 @@ pub fn generate_mountinfo() -> Vec<u8> {
         // nested mounts (e.g. /sys/fs/cgroup under /sys) keep their
         // textual path — systemd only needs a consistent DAG.
         let parent_id = 1u32;
+        // The per-mount VFS options column carries the mount's ACTUAL
+        // ro/rw state, like Linux's mountinfo (a ro bind remount shows
+        // "ro,relatime" here; the superblock options stay in the last
+        // field). systemd's sandbox remount loop reads THIS column to
+        // verify a MS_RDONLY re-flag took effect (bind_remount_recursive
+        // → mnt_optstr_get_flags); a hardcoded "rw" made every ro
+        // remount look like it never applied (ub2404 226/NAMESPACE
+        // hunt, 2026-11-15).
+        let vfs_opts = if options.contains("ro") {
+            "ro,relatime"
+        } else {
+            "rw,relatime"
+        };
         content.push_str(&format!(
-            "{} {} 0:23 / {} rw,relatime - {} {} {}\n",
-            mount_id, parent_id, mount_point, fs_type, device, options
+            "{} {} 0:23 / {} {} - {} {} {}\n",
+            mount_id, parent_id, mount_point, vfs_opts, fs_type, device, options
         ));
     }
 
