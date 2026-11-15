@@ -3832,6 +3832,60 @@ fn fill_statfs_for_inode(inode: &crate::fs::inode::Inode, buf: &mut Statfs) {
         buf.f_fsid = [crate::fs::inode::stat_dev_user(inode.fs_id) as u32, 0];
         return;
     }
+    // debugfs/tracefs (own inode ops; sys-kernel-debug.mount /
+    // sys-kernel-tracing.mount verify the magic by statfs — tracing
+    // FAILED as a unit while answering the rootfs fallback magic).
+    if inode
+        .ops
+        .is_some_and(|o| core::ptr::eq(o as *const _, &crate::fs::debugfs::DEBUGFS_INODE_OPS as *const _))
+    {
+        const DEBUGFS_MAGIC: u64 = 0x6462_6720;
+        fill_rootfs_statfs(buf);
+        buf.f_type = DEBUGFS_MAGIC;
+        buf.f_fsid = [crate::fs::inode::stat_dev_user(inode.fs_id) as u32, 0];
+        return;
+    }
+    if inode
+        .ops
+        .is_some_and(|o| core::ptr::eq(o as *const _, &crate::fs::tracefs::TRACEFS_INODE_OPS as *const _))
+    {
+        const TRACEFS_MAGIC: u64 = 0x7472_6163;
+        fill_rootfs_statfs(buf);
+        buf.f_type = TRACEFS_MAGIC;
+        buf.f_fsid = [crate::fs::inode::stat_dev_user(inode.fs_id) as u32, 0];
+        return;
+    }
+    // tmpfs-instance mounts that are their own filesystem type (ops
+    // twins — see tmpfs::MQUEUE_INODE_OPS): statfs reports the type's
+    // magic, NOT tmpfs's. systemd verifies mount units by statfs
+    // f_type after mount(2) (dev-mqueue.mount failed as a unit with
+    // mount(2) == 0 while the instance answered TMPFS_MAGIC).
+    {
+        const MQUEUE_MAGIC: u64 = 0x1980_0202;
+        const SECURITYFS_MAGIC: u64 = 0x7363_6673;
+        const DEVPTS_MAGIC: u64 = 0x1cd1;
+        let magic = if inode.ops.is_some_and(|o| {
+            core::ptr::eq(o as *const _, &crate::fs::tmpfs::MQUEUE_INODE_OPS as *const _)
+        }) {
+            Some(MQUEUE_MAGIC)
+        } else if inode.ops.is_some_and(|o| {
+            core::ptr::eq(o as *const _, &crate::fs::tmpfs::SECURITYFS_INODE_OPS as *const _)
+        }) {
+            Some(SECURITYFS_MAGIC)
+        } else if inode.ops.is_some_and(|o| {
+            core::ptr::eq(o as *const _, &crate::fs::tmpfs::DEVPTS_INODE_OPS as *const _)
+        }) {
+            Some(DEVPTS_MAGIC)
+        } else {
+            None
+        };
+        if let Some(m) = magic {
+            fill_rootfs_statfs(buf);
+            buf.f_type = m;
+            buf.f_fsid = [crate::fs::inode::stat_dev_user(inode.fs_id) as u32, 0];
+            return;
+        }
+    }
     if inode
         .ops
         .is_some_and(|o| core::ptr::eq(o as *const _, &crate::fs::cgroup::CGROUP_INODE_OPS as *const _))
