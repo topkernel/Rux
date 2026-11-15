@@ -173,6 +173,13 @@ pub enum PidFileKind {
     /// (cgroup_core01..03, clone303, madvise06, memcg_*) opens
     /// /proc/self/mounts to find the cgroup2 mount point.
     Mounts,
+    /// /proc/[pid]/mountinfo — the detailed per-process mount list
+    /// (proc-mounts(5) format). systemd 255's namespace setup fopen()s
+    /// /proc/self/mountinfo as its FIRST act (apply_mounts) and fails the
+    /// whole namespace — service exit 226/NAMESPACE — when the file is
+    /// missing; the file is a REGULAR file in the reference (readlink
+    /// answers EINVAL, not ENOENT).
+    Mountinfo,
     /// /proc/[pid]/attr/exec — SELinux exec label (writable; OH init
     /// writes the service context here via setexeccon() before exec —
     /// ENOENT made init abort every display service child).
@@ -409,6 +416,7 @@ impl ProcFSNode {
                 PidFileKind::Comm => pid::generate_comm(pid),
                 PidFileKind::Cgroup => pid::generate_cgroup(pid),
                 PidFileKind::Mounts => mounts::generate(),
+                PidFileKind::Mountinfo => mounts::generate_mountinfo(),
                 PidFileKind::AttrExec => pid::attr_label_get(pid, true),
                 PidFileKind::AttrCurrent => pid::attr_label_get(pid, false),
                 PidFileKind::AttrFscreate => pid::attr_get(pid, pid::ATTR_FSCREATE),
@@ -1421,6 +1429,7 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
             b"comm" => PidFileKind::Comm,
             b"cgroup" => PidFileKind::Cgroup,
             b"mounts" => PidFileKind::Mounts,
+            b"mountinfo" => PidFileKind::Mountinfo,
             _ => {
                 // /proc/[pid]/fd — the fd subdirectory (review 5.7: used to
                 // exist only behind a syscall-layer string special case, so
@@ -1800,6 +1809,7 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
             b"oom_score_adj" => PidFileKind::OomScoreAdj,
             b"comm" => PidFileKind::Comm,
             b"cgroup" => PidFileKind::Cgroup,
+            b"mountinfo" => PidFileKind::Mountinfo,
             _ => {
                 // /proc/[pid]/fd directory (review 5.7): a synthetic
                 // directory whose readdir lists the target's open fds —
@@ -2375,6 +2385,7 @@ unsafe fn generate_pid_dir_entries(pid: u64) -> alloc::vec::Vec<crate::fs::inode
         (b"status", file_type::DT_REG),
         (b"cmdline", file_type::DT_REG),
     (b"mounts", file_type::DT_REG),
+    (b"mountinfo", file_type::DT_REG),
         (b"stat", file_type::DT_REG),
         (b"schedstat", file_type::DT_REG),
         (b"maps", file_type::DT_REG),

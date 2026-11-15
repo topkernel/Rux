@@ -812,7 +812,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         426 => process::sys_io_uring_enter(args),   // io_uring_enter
         427 => process::sys_io_uring_register(args), // io_uring_register
         428 => file::sys_open_tree(args),       // open_tree
-        429 => file::sys_move_mount(args),      // move_mount
+        429 => file::sys_move_mount_tap(args),  // move_mount (ub2404 ns bring-up: failures on serial)
         430 => file::sys_fsopen(args),         // fsopen
         431 => file::sys_fsconfig(args),       // fsconfig
         432 => file::sys_fsmount(args),        // fsmount
@@ -824,7 +824,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         439 => process::sys_faccessat2(args),  // faccessat2
         440 => process::sys_process_madvise(args), // process_madvise
         441 => file::sys_epoll_pwait2(args),   // epoll_pwait2
-        442 => file::sys_mount_setattr(args),  // mount_setattr
+        442 => file::sys_mount_setattr_tap(args), // mount_setattr (ub2404 ns bring-up: failures on serial)
         443 => file::sys_quotactl_fd(args),   // quotactl_fd
         444 => file::sys_landlock_create_ruleset(args), // landlock_create_ruleset
         445 => file::sys_landlock_add_rule(args), // landlock_add_rule
