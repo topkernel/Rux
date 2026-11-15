@@ -574,6 +574,25 @@ impl Zone {
                     crate::pr_err!("  RAW-FREE frame {:#x}", f);
                 }
             }
+            // mmforensics (pcachewedge §6 residual): deep capture — full
+            // tracking state, the frame's incarnation history, and the
+            // bounded reverse scan of every live tree for links naming
+            // this pfn (the stale-pointer origin). Runs BEFORE the zone
+            // lock is taken; internally gated + rate-limited.
+            crate::dfx::mmforensics::capture_frame(pfn, "raw-free-live-table");
+            // mmforensics fix (2026-11-15): REFUSE the free and QUARANTINE
+            // the frame. The capture evidence (pfn 0x6bd1 boot) showed the
+            // old print-then-free behavior is the double-availability
+            // engine itself: the frame re-enters the buddy while its
+            // previous owners (live table stamp, cache entry, stale PTEs)
+            // all still reference it, and every re-allocation re-collides
+            // (observed: one frame re-stamped by five trees in one boot,
+            // ending in a SIGSEGV cascade). A live-stamped frame has NO
+            // legitimate raw free (legit table frees clear the stamp via
+            // PtLedger::take() first) — leak it and mark it poisoned so
+            // no other free path ever picks it up either.
+            crate::arch::mm::mmu_init::PtLedger::poison_table(pfn as u64);
+            return;
         }
 
         let _guard = self.lock.lock();
@@ -626,6 +645,16 @@ impl Zone {
                     }
                 }
             }
+        }
+        // QUARANTINE refusal (mmforensics lane): a poisoned frame (ever
+        // double-tracked — see PtLedger::poison_table) must never re-enter
+        // the allocator; its stale references make every future owner a
+        // collision. Silent + taint + counter (zone lock held — same
+        // discipline as R15-3 above).
+        if crate::arch::mm::mmu_init::PtLedger::is_poisoned(pfn as u64) {
+            crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
+            crate::dfx::driftwatch::MM_POISON_FREES.fetch_add(1, Ordering::Relaxed);
+            return;
         }
         // Member-state invariant for high-order frees (review 4.4):
         // the block's members are reset by add_to_free_list() when the

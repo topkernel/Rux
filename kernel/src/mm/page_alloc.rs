@@ -1088,6 +1088,12 @@ pub fn pcache_leaf_phantom_zero_put(phys: usize, site: &str) {
         );
     }
     // Intentionally NO free: the page cache owns the frame.
+    // QUARANTINE (mmforensics lane): the mapping's reference was consumed
+    // early — the frame is (or is about to be) double-tracked. Mark it so
+    // no free path can ever hand it to a new owner while the surviving
+    // references (cache entry, stale PTEs) still name it.
+    crate::arch::mm::mmu_init::PtLedger::poison_table((phys >> 12) as u64);
+    crate::dfx::driftwatch::MM_POISONED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Free contiguous physical pages

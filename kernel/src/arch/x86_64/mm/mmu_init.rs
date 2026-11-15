@@ -437,6 +437,19 @@ pub struct PtLedger {
     // refuses legitimate frees — every refusal permanently leaks one
     // table frame; see the riscv64 fake-OOM investigation.)
     live: [AtomicU64; MAX_PAGES / 64],
+    // QUARANTINE bitset (mmforensics lane, 2026-11-15): set once, never
+    // cleared, on any double-tracking guard firing for the frame (raw
+    // free of a live-stamped frame, cache-side live-PT release refusal,
+    // phantom zero-put leak, ledger double-free/double-alloc). A frame
+    // that was ever tracked by two owners may keep unreclaimable stale
+    // references (an immortal page-cache entry, surviving PCACHE PTEs,
+    // foreign tree links); letting it re-enter the allocator re-wires
+    // those references into every new owner — the circulation engine
+    // behind the RAW-FREE echo family (capture evidence: pfn 0x6bd1
+    // re-stamped by five different trees while the cache kept releasing
+    // it). Every free path refuses poisoned frames: the poisoned frame
+    // becomes an inert, bounded (<= a few/boot) orphan instead.
+    poisoned: [AtomicU64; MAX_PAGES / 64],
     // Boot-permanent tables (kernel root tree + Early static + Fixmap):
     // referenced by every early mm — freeing them per-mm tears down shared
     // state and feeds the frames back for reuse as live page tables (the
@@ -451,6 +464,7 @@ impl PtLedger {
     const fn new() -> Self {
         Self {
             live: [const { AtomicU64::new(0) }; MAX_PAGES / 64],
+            poisoned: [const { AtomicU64::new(0) }; MAX_PAGES / 64],
             boot: [const { AtomicU64::new(0) }; 512],
             reported: AtomicUsize::new(0),
         }
@@ -528,14 +542,34 @@ impl PtLedger {
                 "PTLEDGER: DOUBLE-ALLOC ppn={:#x} by pid={} (still live)",
                 ppn, pid
             );
+            // Double-tracked frame: quarantine so no free path can ever
+            // re-expose it to the allocator.
+            Self::poison_table(ppn);
         }
         // FORENSIC (fake-OOM family): alloc-side ring — pairs with
         // PT_FREE_RING to replay a frame's full table-incarnation history.
+        // mmforensics (2026-11-15, pcachewedge §6 residual): the stamp
+        // side now also records WHICH tree stamped the frame (the
+        // stamping context's root) — at a RAW-FREE echo this names the
+        // frame's live owner, the half of the double-track the free-side
+        // rings cannot see. Root fetch only when the switch is armed:
+        // stamp() runs on every table alloc, the fetch stays off the
+        // default hot path.
         {
             let idx = PT_STAMP_CURSOR.fetch_add(1, Relaxed) % PT_STAMP_RING.len();
             PT_STAMP_RING[idx].ppn.store(ppn, Relaxed);
             PT_STAMP_RING[idx].pid.store(pid, Relaxed);
             PT_STAMP_RING[idx].site.store(b'S' as u64, Relaxed);
+            let root = if crate::dfx::switches::enabled(
+                crate::dfx::switches::DfxSwitch::MmForensics,
+            ) {
+                crate::sched::current()
+                    .and_then(|t| t.address_space().map(|mm| mm.root_ppn()))
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            PT_STAMP_RING[idx].root.store(root, Relaxed);
         }
     }
     /// Returns true if the frame had a live stamp (a legitimate first
@@ -625,6 +659,12 @@ impl PtLedger {
                 }
             }
         }
+        // mmforensics: deep capture at the double/foreign free refusal
+        // (own report cap + switch gate; no locks needed here — the
+        // refusal path runs before any frame-state transition).
+        crate::dfx::mmforensics::capture_frame(ppn as usize, "ptledger-double-free");
+        // Double-tracked frame: quarantine.
+        Self::poison_table(ppn);
         false
     }
 }
@@ -738,6 +778,27 @@ impl PtLedger {
     /// live page-table tree stale.
     pub fn is_live_table(ppn: u64) -> bool {
         PT_LEDGER.live_bit(ppn)
+    }
+
+    /// Quarantine a frame (see the `poisoned` field doc). One-way.
+    pub fn poison_table(ppn: u64) {
+        match Self::bit_index(ppn) {
+            Some(i) => {
+                PT_LEDGER.poisoned[i / 64].fetch_or(1u64 << (i % 64), Ordering::Relaxed);
+            }
+            None => {}
+        }
+    }
+
+    /// Is this frame quarantined (ever double-tracked)? Every free path
+    /// refuses such frames; cache pins refuse to serve them.
+    pub fn is_poisoned(ppn: u64) -> bool {
+        match Self::bit_index(ppn) {
+            Some(i) => {
+                PT_LEDGER.poisoned[i / 64].load(Ordering::Relaxed) & (1u64 << (i % 64)) != 0
+            }
+            None => false,
+        }
     }
 
     /// Accounting ledger: number of frames currently carrying a live
@@ -1298,6 +1359,13 @@ pub unsafe fn free_user_page_tables(
                 }
             }
         }
+    }
+
+    // mmforensics: deep capture naming the first stale table frame (the
+    // stale-tree census witness — bounded reverse scan answers who else
+    // still references it).
+    if stale_count > 0 {
+        crate::dfx::mmforensics::capture_frame(stale_tables[0].3 as usize, "fut-stale-table");
     }
 
     // Free root table (PML4)
@@ -2342,4 +2410,186 @@ pub fn map_identity(virt: VirtAddr, phys: PhysAddr, flags: u64) {
 /// Get kernel page table PPN (physical)
 pub fn get_kernel_page_table_ppn() -> u64 {
     root_static_ppn()
+}
+
+// ==================== mmforensics: live-tree reverse scan ====================
+
+/// Bounded reverse scan: which LIVE page-table trees still reference
+/// `target_ppn` (as root, as an upper-table link, or as a leaf/data
+/// mapping)? This is the reverse map the kernel otherwise lacks — the
+/// decisive capture at a RAW-FREE-OF-LIVE-TABLE echo (pcachewedge §6
+/// residual): the frame is double-tracked, and the referencing tree that
+/// is NOT the stamping root holds the stale pointer.
+///
+/// Safety shape (forensic, gated by dfx=mmforensics, <= a few/boot):
+/// - task set snapshotted with `for_each_task_try` (non-blocking; held
+///   pid-hash buckets are skipped and reported);
+/// - each task's root is read with a single-field unsafe peek
+///   (`mm_ptr_peek` + `(*mm).pgd`) — no Arc is cloned inside the
+///   bucket-locked callback (its drop could run a teardown under the
+///   spinlock). A stale read at worst yields a garbage root, which the
+///   ledger-live/boot validation below rejects;
+/// - every walk link is bounds-checked (`phys_valid`, above the kernel
+///   image reserve, below the discovered RAM top) before descent, and
+///   the walk carries a hard entry budget;
+/// - shared boot subtrees (MMIO/ECAM tables cloned into every mm) are
+///   link-checked but not descended into — they are boot-permanent and
+///   never the freed frame.
+///
+/// Returns (hits, tasks_scanned, skipped_buckets, entries_read).
+pub fn forensics_scan_trees(
+    target_ppn: u64,
+    out: &mut [crate::dfx::mmforensics::TreeHit],
+) -> (usize, usize, usize, usize) {
+    const MAX_TASKS: usize = 128;
+    let mut roots = [(0u32, 0u64); MAX_TASKS];
+    let mut tasks = 0usize;
+    let skipped = crate::sched::for_each_task_try(|t| {
+        if tasks >= MAX_TASKS {
+            return;
+        }
+        // SAFETY: task is pinned by the pid-hash bucket lock; the mm
+        // pointer peek takes mm_slot_lock (never held in reverse around
+        // pid-hash writers); the single-field read cannot fault (kernel
+        // heap is linearly mapped) and a stale value is filtered by the
+        // ledger validation below.
+        // SAFETY: see the comment above the closure.
+        let (pid, root) = unsafe {
+            let root = (*t)
+                .mm_ptr_peek()
+                .map(|mm| (*mm).pgd)
+                .unwrap_or(0);
+            ((*t).pid() as u32, root)
+        };
+        roots[tasks] = (pid, root);
+        tasks += 1;
+    });
+
+    let ram_top = (crate::mm::page_desc::max_pfn() as u64) << 12;
+    let mut reads = 0usize;
+    const BUDGET: usize = 400_000;
+    let mut nh = 0usize;
+
+    let mut push = |pid: u32, root: u64, level: u8, i0: u32, i1: u32| {
+        if nh < out.len() {
+            out[nh] = crate::dfx::mmforensics::TreeHit {
+                pid,
+                root_ppn: root,
+                level,
+                idx0: i0,
+                idx1: i1,
+            };
+        }
+        nh += 1;
+    };
+
+    let link_ok = |ppn: u64| -> bool {
+        let phys = ppn << 12;
+        ppn != 0 && phys >= 0x1E0_0000 && phys < ram_top && crate::mm::phys_valid(phys as usize)
+    };
+
+    for &(pid, root) in roots.iter().take(tasks) {
+        if root == 0 || reads >= BUDGET {
+            continue;
+        }
+        // Root validation: a live mm's root carries a ledger stamp (or is
+        // boot-shared); a garbage peek fails here and the task is skipped.
+        if root != target_ppn
+            && !PtLedger::is_live_table(root)
+            && !PT_LEDGER.is_boot(root)
+        {
+            continue;
+        }
+        if root == target_ppn {
+            push(pid, root, 0, 0xFFFF, 0xFFFF);
+        }
+        // SAFETY: link_ok-validated frames are inside managed RAM and
+        // linearly mapped; reads are volatile-free plain loads through
+        // the established table accessors (read-only walk).
+        let root_table = unsafe { get_page_table_virt(root << 12) };
+        for vpn4 in 0..USER_PTRS_PER_PGD {
+            if reads >= BUDGET {
+                break;
+            }
+            reads += 1;
+            // SAFETY: see above.
+            let pte4 = unsafe { (*root_table).get(vpn4) };
+            if !pte4.is_valid() || pte4.is_leaf() {
+                continue;
+            }
+            let ppn3 = pte4.ppn();
+            if ppn3 == target_ppn {
+                push(pid, root, 1, vpn4 as u32, 0xFFFF);
+            }
+            if !link_ok(ppn3) || PT_LEDGER.is_boot(ppn3) {
+                continue;
+            }
+            // SAFETY: link_ok validated.
+            let table3 = unsafe { get_page_table_virt(ppn3 << 12) };
+            for vpn3 in 0..512 {
+                if reads >= BUDGET {
+                    break;
+                }
+                reads += 1;
+                // SAFETY: see above.
+                let pte3 = unsafe { (*table3).get(vpn3) };
+                if !pte3.is_valid() {
+                    continue;
+                }
+                if pte3.is_leaf() {
+                    if pte3.ppn() == target_ppn {
+                        push(pid, root, 4, vpn4 as u32, vpn3 as u32);
+                    }
+                    continue;
+                }
+                let ppn2 = pte3.ppn();
+                if ppn2 == target_ppn {
+                    push(pid, root, 2, vpn4 as u32, vpn3 as u32);
+                }
+                if !link_ok(ppn2) || PT_LEDGER.is_boot(ppn2) {
+                    continue;
+                }
+                // SAFETY: link_ok validated.
+                let table2 = unsafe { get_page_table_virt(ppn2 << 12) };
+                for vpn2 in 0..512 {
+                    if reads >= BUDGET {
+                        break;
+                    }
+                    reads += 1;
+                    // SAFETY: see above.
+                    let pte2 = unsafe { (*table2).get(vpn2) };
+                    if !pte2.is_valid() {
+                        continue;
+                    }
+                    if pte2.is_leaf() {
+                        if pte2.ppn() == target_ppn {
+                            push(pid, root, 4, vpn3 as u32, vpn2 as u32);
+                        }
+                        continue;
+                    }
+                    let ppn1 = pte2.ppn();
+                    if ppn1 == target_ppn {
+                        push(pid, root, 3, vpn3 as u32, vpn2 as u32);
+                    }
+                    if !link_ok(ppn1) || PT_LEDGER.is_boot(ppn1) {
+                        continue;
+                    }
+                    // SAFETY: link_ok validated.
+                    let table1 = unsafe { get_page_table_virt(ppn1 << 12) };
+                    for vpn1 in 0..512 {
+                        if reads >= BUDGET {
+                            break;
+                        }
+                        reads += 1;
+                        // SAFETY: see above.
+                        let pte1 = unsafe { (*table1).get(vpn1) };
+                        if pte1.is_valid() && pte1.is_leaf() && pte1.ppn() == target_ppn {
+                            push(pid, root, 4, vpn2 as u32, vpn1 as u32);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (nh.min(out.len()), tasks, skipped, reads)
 }
