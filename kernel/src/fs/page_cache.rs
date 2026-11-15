@@ -2880,6 +2880,11 @@ fn release_page_frame(pfn: usize) {
             );
             crate::dfx::backtrace::dump_stack();
         }
+        // mmforensics: deep capture at the producer-side refusal (the
+        // capture takes no page-cache locks — it only reads descriptors,
+        // rings and foreign trees — so running it from this lock-held
+        // context is safe).
+        crate::dfx::mmforensics::capture_frame(pfn, "pcache-live-pt-refused");
         // The caller has already removed the map entry and unlinked the
         // LRU member; the leaked frame is an untracked orphan. Its
         // stale PageCache descriptor is unreachable from the LRU walk,

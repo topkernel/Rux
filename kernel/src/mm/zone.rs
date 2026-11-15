@@ -574,6 +574,12 @@ impl Zone {
                     crate::pr_err!("  RAW-FREE frame {:#x}", f);
                 }
             }
+            // mmforensics (pcachewedge §6 residual): deep capture — full
+            // tracking state, the frame's incarnation history, and the
+            // bounded reverse scan of every live tree for links naming
+            // this pfn (the stale-pointer origin). Runs BEFORE the zone
+            // lock is taken; internally gated + rate-limited.
+            crate::dfx::mmforensics::capture_frame(pfn, "raw-free-live-table");
         }
 
         let _guard = self.lock.lock();

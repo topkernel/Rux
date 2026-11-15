@@ -528,6 +528,18 @@ impl PtLedger {
             PT_STAMP_RING[idx].ppn.store(ppn, Relaxed);
             PT_STAMP_RING[idx].pid.store(pid, Relaxed);
             PT_STAMP_RING[idx].site.store(b'S' as u64, Relaxed);
+            // mmforensics (x86_64 parity): record the stamping tree's
+            // root; fetch gated off the default hot path.
+            let root = if crate::dfx::switches::enabled(
+                crate::dfx::switches::DfxSwitch::MmForensics,
+            ) {
+                crate::sched::current()
+                    .and_then(|t| t.address_space().map(|mm| mm.root_ppn()))
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            PT_STAMP_RING[idx].root.store(root, Relaxed);
         }
     }
     /// Returns true if the frame had a live stamp (a legitimate first
@@ -546,6 +558,16 @@ impl PtLedger {
                 PT_FREE_RING[idx].ppn.store(ppn, Relaxed);
                 PT_FREE_RING[idx].pid.store(pid, Relaxed);
                 PT_FREE_RING[idx].site.store(site.as_bytes()[0] as u64, Relaxed);
+                let root = if crate::dfx::switches::enabled(
+                    crate::dfx::switches::DfxSwitch::MmForensics,
+                ) {
+                    crate::sched::current()
+                        .and_then(|t| t.address_space().map(|mm| mm.root_ppn()))
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                PT_FREE_RING[idx].root.store(root, Relaxed);
             }
             // EARLY-TEARDOWN WITNESS: a registered fork-mm root is being
             // freed. If the freeing context is NOT the registered owner and
@@ -616,6 +638,9 @@ impl PtLedger {
                 }
             }
         }
+        // mmforensics: deep capture at the double/foreign free refusal
+        // (x86_64 parity; own cap + switch gate).
+        crate::dfx::mmforensics::capture_frame(ppn as usize, "ptledger-double-free");
         false
     }
 }
@@ -627,6 +652,10 @@ pub struct PtFreeEntry {
     pub ppn: core::sync::atomic::AtomicU64,
     pub pid: core::sync::atomic::AtomicU32,
     pub site: core::sync::atomic::AtomicU64,
+    /// Root of the tree that stamped/freed the frame (mmforensics
+    /// parity with x86_64: at a RAW-FREE echo this names the frame's
+    /// other owner).
+    pub root: core::sync::atomic::AtomicU64,
 }
 impl PtFreeEntry {
     const fn new() -> Self {
@@ -634,6 +663,7 @@ impl PtFreeEntry {
             ppn: core::sync::atomic::AtomicU64::new(0),
             pid: core::sync::atomic::AtomicU32::new(0),
             site: core::sync::atomic::AtomicU64::new(0),
+            root: core::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -1392,6 +1422,12 @@ pub unsafe fn free_user_page_tables(
                 }
             }
         }
+    }
+
+    // mmforensics: deep capture naming the first stale table frame (the
+    // stale-tree census witness — x86_64 parity).
+    if stale_count > 0 {
+        crate::dfx::mmforensics::capture_frame(stale_tables[0].3 as usize, "fut-stale-table");
     }
 
     // Free root table (L2)
@@ -2170,4 +2206,148 @@ pub fn map_identity(virt: VirtAddr, phys: PhysAddr, flags: u64) {
 /// Get kernel page table PPN (physical)
 pub fn get_kernel_page_table_ppn() -> u64 {
     unsafe { root_page_table_ppn() }
+}
+
+// ==================== mmforensics: live-tree reverse scan ====================
+
+/// Bounded reverse scan: which LIVE Sv39 trees still reference
+/// `target_ppn` (as root, as an L1/L0 link, or as a leaf/data mapping)?
+/// riscv64 mirror of the x86_64 capture support (pcachewedge §6
+/// residual); same safety shape — non-blocking task snapshot, single-
+/// field mm peek validated against the ledger, bounds-checked links,
+/// hard entry budget, boot subtrees link-checked but not descended.
+///
+/// Returns (hits, tasks_scanned, skipped_buckets, entries_read).
+pub fn forensics_scan_trees(
+    target_ppn: u64,
+    out: &mut [crate::dfx::mmforensics::TreeHit],
+) -> (usize, usize, usize, usize) {
+    const MAX_TASKS: usize = 128;
+    let mut roots = [(0u32, 0u64); MAX_TASKS];
+    let mut tasks = 0usize;
+    let skipped = crate::sched::for_each_task_try(|t| {
+        if tasks >= MAX_TASKS {
+            return;
+        }
+        // SAFETY: task pinned by the pid-hash bucket lock; the mm
+        // pointer peek takes mm_slot_lock; the single-field read cannot
+        // fault (kernel heap is linearly mapped) and garbage values are
+        // filtered by the ledger validation below.
+        // SAFETY: see the comment above the closure.
+        let (pid, root) = unsafe {
+            let root = (*t)
+                .mm_ptr_peek()
+                .map(|mm| (*mm).pgd)
+                .unwrap_or(0);
+            ((*t).pid() as u32, root)
+        };
+        roots[tasks] = (pid, root);
+        tasks += 1;
+    });
+
+    let ram_top = (crate::mm::page_desc::max_pfn() as u64) << 12;
+    let mut reads = 0usize;
+    const BUDGET: usize = 400_000;
+    let mut nh = 0usize;
+
+    let mut push = |pid: u32, root: u64, level: u8, i0: u32, i1: u32| {
+        if nh < out.len() {
+            out[nh] = crate::dfx::mmforensics::TreeHit {
+                pid,
+                root_ppn: root,
+                level,
+                idx0: i0,
+                idx1: i1,
+            };
+        }
+        nh += 1;
+    };
+
+    let link_ok = |ppn: u64| -> bool {
+        let phys = ppn << 12;
+        ppn != 0 && phys >= 0x8000_0000 && phys < ram_top && crate::mm::phys_valid(phys as usize)
+    };
+
+    for &(pid, root) in roots.iter().take(tasks) {
+        if root == 0 || reads >= BUDGET {
+            continue;
+        }
+        if root != target_ppn
+            && !PtLedger::is_live_table(root)
+            && !PT_LEDGER.is_boot(root)
+        {
+            continue;
+        }
+        if root == target_ppn {
+            push(pid, root, 0, 0xFFFF, 0xFFFF);
+        }
+        // SAFETY: link_ok-validated frames are inside managed RAM and
+        // linearly mapped; the walk is read-only through the
+        // established table accessors.
+        let root_table = unsafe { get_page_table_virt(root << 12) };
+        for vpn2 in 0..256 {
+            if reads >= BUDGET {
+                break;
+            }
+            reads += 1;
+            // SAFETY: see above.
+            let pte2 = unsafe { (*root_table).get(vpn2) };
+            if !pte2.is_valid() {
+                continue;
+            }
+            if pte2.is_leaf() {
+                if pte2.ppn() == target_ppn {
+                    push(pid, root, 4, vpn2 as u32, 0xFFFF);
+                }
+                continue;
+            }
+            let ppn1 = pte2.ppn();
+            if ppn1 == target_ppn {
+                push(pid, root, 1, vpn2 as u32, 0xFFFF);
+            }
+            if !link_ok(ppn1) || PT_LEDGER.is_boot(ppn1) {
+                continue;
+            }
+            // SAFETY: link_ok validated.
+            let table1 = unsafe { get_page_table_virt(ppn1 << 12) };
+            for vpn1 in 0..512 {
+                if reads >= BUDGET {
+                    break;
+                }
+                reads += 1;
+                // SAFETY: see above.
+                let pte1 = unsafe { (*table1).get(vpn1) };
+                if !pte1.is_valid() {
+                    continue;
+                }
+                if pte1.is_leaf() {
+                    if pte1.ppn() == target_ppn {
+                        push(pid, root, 4, vpn2 as u32, vpn1 as u32);
+                    }
+                    continue;
+                }
+                let ppn0 = pte1.ppn();
+                if ppn0 == target_ppn {
+                    push(pid, root, 2, vpn2 as u32, vpn1 as u32);
+                }
+                if !link_ok(ppn0) || PT_LEDGER.is_boot(ppn0) {
+                    continue;
+                }
+                // SAFETY: link_ok validated.
+                let table0 = unsafe { get_page_table_virt(ppn0 << 12) };
+                for vpn0 in 0..512 {
+                    if reads >= BUDGET {
+                        break;
+                    }
+                    reads += 1;
+                    // SAFETY: see above.
+                    let pte0 = unsafe { (*table0).get(vpn0) };
+                    if pte0.is_valid() && pte0.is_leaf() && pte0.ppn() == target_ppn {
+                        push(pid, root, 4, vpn1 as u32, vpn0 as u32);
+                    }
+                }
+            }
+        }
+    }
+    (nh.min(out.len()), tasks, skipped, reads)
 }

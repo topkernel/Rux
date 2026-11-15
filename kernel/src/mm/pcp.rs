@@ -369,3 +369,35 @@ pub fn cached_pages_per_cpu() -> [usize; MAX_CPUS] {
     }
     out
 }
+
+/// mmforensics capture support: which CPU rows currently hold `pfn`.
+///
+/// Racy by design (diagnostic only): rows are read through raw pointers
+/// without the owning CPU's irq-off window, mirroring the
+/// `cached_pages_total` peeks. Writes the cpu ids of hits into `out`
+/// (capped) and returns the total number of rows holding the frame.
+pub fn forensics_scan_rows(pfn: usize, out: &mut [usize]) -> usize {
+    let mut total = 0usize;
+    for c in 0..MAX_CPUS {
+        // SAFETY: read-only peek of the row's list/count through the raw
+        // pointer — no reference escapes; moment-stale values are fine
+        // for a forensic snapshot.
+        let row = unsafe { &*core::ptr::addr_of!(PCP_ROWS[c]) }.0.get();
+        let r = unsafe { &*row };
+        let count = r.count.min(PCP_HIGH);
+        let mut hit = false;
+        for i in 0..count {
+            if r.list[i] == pfn {
+                hit = true;
+                break;
+            }
+        }
+        if hit {
+            if total < out.len() {
+                out[total] = c;
+            }
+            total += 1;
+        }
+    }
+    total
+}
