@@ -2361,21 +2361,20 @@ pub(crate) fn free_inode(fs: &Ext4FileSystem, ino: u32) -> Result<(), i32> {
     // Drop every cache keyed by this inode BEFORE the number can be
     // reallocated (review EXT4-H8 + icache variant):
     // - page cache: a reader that cached pages of the dying file would
-    //   serve them to whatever file reuses this inode number. FORCE
-    //   detach (not plain invalidate): a plain invalidate leaves
-    //   pinned/mapped entries in the map as invalidated shadows, and
-    //   since the number is reused immediately, those shadows poison the
-    //   successor file (get_phys refuses / insert leaves-alone /
-    //   collect_dirty skips — the msync01-after-mincore04 order-dependent
-    //   corruption). Force removes them all; mapped frames are orphaned
-    //   and die at their last unmap.
+    //   serve them to whatever file reuses this inode number. Plain
+    //   invalidate releases every unpinned/unmapped entry here; the
+    //   pinned/mapped stragglers stay as retired-but-live entries which
+    //   insert's REVIVE-IN-PLACE (3c464b9ec) makes coherent again for
+    //   the successor — with the pin leaks fixed (resident() probes),
+    //   stragglers only remain while a mapping genuinely outlives the
+    //   unlink, and the successor then shares the still-live frame
+    //   instead of a dead one. (The forced-detach variant of this call
+    //   was tried and withdrawn: see ORDERDEP.md — it correlated with a
+    //   PT-frame double-hand storm on inode-churn-heavy boots.)
     // - VFS icache: path_lookup resurrects cached VFS Inodes, and the
     //   stale sb block map made the new file read/write through the OLD
     //   file's blocks (reproduced via `ln -s x; rm x` + file readback).
-    crate::fs::page_cache::get_page_cache().invalidate_inode_force(
-        fs as *const Ext4FileSystem as u64,
-        ino as u64,
-    );
+    crate::fs::page_cache::get_page_cache().invalidate_inode(fs as *const Ext4FileSystem as u64, ino as u64);
     crate::fs::inode::icache_remove(ino as u64, fs as *const Ext4FileSystem as u64);
     // Dir-blocks memo (23rd): same reuse class — a reallocated dir ino
     // must never be served the old directory's block list.
