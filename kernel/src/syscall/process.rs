@@ -5144,24 +5144,40 @@ pub fn sys_capget(args: SyscallArgs) -> i64 {
     let version = hdr[0];
     let pid = hdr[1] as i32;
 
-    // Version probe (Linux capget semantics): version == 0 asks the
-    // kernel to report the highest supported capability ABI version —
-    // written back into the header, returning EINVAL. This runs BEFORE
-    // the data-pointer check: libcap-ng's init() calls capget(&hdr, NULL)
-    // and classifies by the version written back (an EFAULT there broke
-    // capng_change_id and killed dbus-daemon startup).
-    if version == 0 {
-        let supported = _LINUX_CAPABILITY_VERSION_3;
-        // SAFETY: hdr_ptr validated with access_ok; copy_to_user handles user writes.
-        unsafe {
-            copy_to_user(hdr_ptr as *mut u8, &supported as *const u32 as *const u8, 4);
+    // Version handling (Linux cap_validate_magic + the NULL-dataptr
+    // rule, v6.8 kernel/capability.c):
+    //   ret = cap_validate_magic(header, &tocopy);
+    //   if ((dataptr == NULL) || (ret != 0))
+    //       return ((dataptr == NULL) && (ret == -EINVAL)) ? 0 : ret;
+    // version 0 or an unknown magic asks the kernel to write the
+    // preferred ABI version back into the header; with a non-NULL
+    // data array that answers EINVAL (LTP capget02 "bad version"),
+    // with a NULL one it answers 0. A NULL dataptr with a VALID
+    // version is likewise a legal probe answered 0 — our old EFAULT
+    // surfaced as `EFAULTTRAC: pid=1 nr=90 a1=0x0` on every ub2404
+    // boot (systemd/libcap probing the capability layout at startup),
+    // and LTP documents the NULL-data exception explicitly ("data may
+    // be NULL only when the user is trying to determine the preferred
+    // capability version format"). EFAULT stays reserved for bad
+    // addresses (access_ok / copy failures below).
+    let data_count: usize = match version {
+        _LINUX_CAPABILITY_VERSION_1 => 1, // 1 x 3 u32s = 12 bytes
+        _LINUX_CAPABILITY_VERSION_2 | _LINUX_CAPABILITY_VERSION_3 => 2, // 2 x 3 u32s = 24 bytes
+        _ => {
+            // version 0 or unknown magic: report the preferred version
+            let supported = _LINUX_CAPABILITY_VERSION_3;
+            // SAFETY: hdr_ptr validated with access_ok; copy_to_user handles user writes.
+            unsafe {
+                copy_to_user(hdr_ptr as *mut u8, &supported as *const u32 as *const u8, 4);
+            }
+            if data_ptr == 0 {
+                return 0;
+            }
+            return -(errno::EINVAL as i64);
         }
-        return -(errno::EINVAL as i64);
-    }
-
-    // A real query needs the data array
+    };
     if data_ptr == 0 {
-        return -(errno::EFAULT as i64);
+        return 0; // valid-version probe — no data requested, nothing to do
     }
 
     // Determine the target task
@@ -5186,23 +5202,6 @@ pub fn sys_capget(args: SyscallArgs) -> i64 {
     };
 
     let cred = target.cred();
-
-    // Validate version and determine data size
-    let data_count: usize;
-    match version {
-        _LINUX_CAPABILITY_VERSION_1 => data_count = 1,  // 1 x 3 u32s = 12 bytes
-        _LINUX_CAPABILITY_VERSION_2 => data_count = 2,  // 2 x 3 u32s = 24 bytes
-        _LINUX_CAPABILITY_VERSION_3 => data_count = 2,  // 2 x 3 u32s = 24 bytes
-        _ => {
-            // Unknown version: write back the highest supported version and return -EINVAL
-            let supported = _LINUX_CAPABILITY_VERSION_3;
-            // SAFETY: hdr_ptr validated with access_ok; copy_to_user handles user writes.
-            unsafe {
-                copy_to_user(hdr_ptr as *mut u8, &supported as *const u32 as *const u8, 4);
-            }
-            return -(errno::EINVAL as i64);
-        }
-    }
 
     let data_size = data_count * 3 * 4; // each entry is 3 u32s
     if !crate::arch::uaccess::access_ok(data_ptr, data_size) {

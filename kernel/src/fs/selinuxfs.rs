@@ -112,6 +112,7 @@ fn build_child_inode(idx: usize) -> Arc<Inode> {
         Node::Sink => InodeMode::S_IFREG | 0o644,
     };
     let mut inode = Inode::new(child_ino(idx), InodeMode::new(mode_bits));
+    inode.fs_id = crate::fs::inode::FS_ID_SELINUXFS;
     inode.ops = Some(&SELINUXFS_INODE_OPS);
     // Report the true byte size: file-backed mmap() faults SIGBUS at or
     // past inode size, so `status` must claim 20 bytes for libselinux's
@@ -318,6 +319,7 @@ pub mod caps_shape {
 /// Build the root inode for a selinuxfs mount.
 pub fn create_root_inode() -> Arc<Inode> {
     let mut inode = Inode::new(ROOT_INO, InodeMode::new(InodeMode::S_IFDIR | 0o555));
+    inode.fs_id = crate::fs::inode::FS_ID_SELINUXFS;
     inode.ops = Some(&SELINUXFS_INODE_OPS);
     Arc::new(inode)
 }

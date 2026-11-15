@@ -337,10 +337,10 @@ pub fn vfs_remount(mountpoint: &str, new_flags: crate::fs::mount::MntFlags) -> R
     let vfs_root = VFS_STATE.lock().root_dentry.clone()
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
     let mut current = vfs_root;
-    let mut found: Option<alloc::sync::Arc<VfsMountInternal>> = None;
+    let mut crossed: Option<alloc::sync::Arc<VfsMountInternal>> = None;
     for component in mountpoint.split('/').filter(|s| !s.is_empty()) {
         if let Some(mnt) = current.get_mount() {
-            found = Some(mnt.clone());
+            crossed = Some(mnt.clone());
             current = mnt.root.clone();
         }
         current = match current.lookup_child(component) {
@@ -348,11 +348,16 @@ pub fn vfs_remount(mountpoint: &str, new_flags: crate::fs::mount::MntFlags) -> R
             None => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
         };
     }
-    if found.is_none() {
-        if let Some(mnt) = current.get_mount() {
-            found = Some(mnt);
-        }
-    }
+    // The TOPMOST mount covering the path wins: a mount attached AT the
+    // terminal dentry (a bind of a FILE, e.g. systemd's ProtectHostname
+    // step mount(NULL, /proc/sys/kernel/domainname, MS_BIND|MS_REMOUNT|
+    // MS_RDONLY)) shadows whatever mount was crossed on the way down.
+    // The old walk only consulted the terminal dentry when NO mount had
+    // been crossed, so the remount flags landed on the ENCLOSING mount
+    // (the whole procfs) instead of the bind. Linux __do_loopback/
+    // do_remount semantics: flags apply to the last-mounted covering
+    // mount of the path.
+    let found = current.get_mount().or(crossed);
     match found {
         Some(mnt) => {
             *mnt.flags.lock() = new_flags;
@@ -588,6 +593,23 @@ pub fn vfs_umount(mountpoint: &str) -> Result<(), i32> {
     // take_mount also clears the lock-free presence mirror (perf-path).
     mnt.root.clear_mountpoint_back();
     child.take_mount();
+    // A mount whose mountpoint DENTRY it created itself (vfs_mount's
+    // bare-dentry arm — boot-time /proc, /sys, ... never went through a
+    // path_lookup first) leaves an INODE-LESS dentry behind after the
+    // unmount: the walk's dcache hit then reads it as a NEGATIVE entry
+    // and every lookup of the mountpoint fails ENOENT. systemd's
+    // mount_private_apivfs (ProtectProc=/PrivateMounts services,
+    // systemd-udevd on noble) umounts /proc and MS_MOVEs a fresh
+    // instance onto it — the failed target lookup aborted the whole
+    // namespace setup (status 226/NAMESPACE, udevd restart loop).
+    // Drop such dentries from the parent: the next walk re-resolves the
+    // name against the underlying filesystem and the covered directory
+    // "re-appears" like Linux's umount. Dentries that DO carry an inode
+    // are kept as-is — removing those broke LTP chdir01's
+    // remount-at-same-target.
+    if child.get_inode().is_none() {
+        parent_dentry.remove_child(&name);
+    }
     Ok(())
 }
 
@@ -4261,6 +4283,10 @@ pub fn vfs_stat(pathname: &str, stat: &mut Stat) -> Result<(), i32> {
             if let Some(getattr_fn) = ops.getattr {
                 let result = getattr_fn(inode.as_ref(), stat);
                 if result == 0 {
+                    // st_dev: the filesystem instance's anonymous device
+                    // (Linux s_dev), stamped centrally over whatever the
+                    // per-fs getattr wrote — see inode::stat_dev_user.
+                    stat.st_dev = crate::fs::inode::stat_dev_user(inode.fs_id);
                     return Ok(());
                 } else {
                     return Err(result);
@@ -4270,6 +4296,7 @@ pub fn vfs_stat(pathname: &str, stat: &mut Stat) -> Result<(), i32> {
     }
 
     // Fallback: fill in basic info from inode
+    stat.st_dev = crate::fs::inode::stat_dev_user(inode.fs_id);
     stat.st_ino = inode.ino;
     stat.st_mode = inode.mode.bits();
     stat.st_size = 0;
@@ -5010,6 +5037,10 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
         };
         let result = inode.op_getattr(stat);
         if result == 0 {
+            // st_dev: the instance's anonymous device (Linux s_dev) —
+            // same stamp as vfs_stat (fstat must agree with stat for
+            // libmount's is-mounted probes on open fds).
+            stat.st_dev = crate::fs::inode::stat_dev_user(inode.fs_id);
             Ok(())
         } else {
             Err(result)
@@ -5033,6 +5064,9 @@ pub fn stat_file_by_path_with_flags(path: &str, stat: &mut Stat, flags: u32) -> 
             if let Some(getattr_fn) = ops.getattr {
                 let result = getattr_fn(inode.as_ref(), stat);
                 if result == 0 {
+                    // st_dev: the instance's anonymous device (Linux
+                    // s_dev) — same stamp as vfs_stat.
+                    stat.st_dev = crate::fs::inode::stat_dev_user(inode.fs_id);
                     return Ok(());
                 } else {
                     return Err(result);
@@ -6154,7 +6188,9 @@ pub fn mem_file_stat(file: &File, stat: &mut crate::fs::Stat) -> Option<i32> {
     let ptr = unsafe { *file.private_data.get() }?;
     // SAFETY: read-only access to the content length for st_size.
     let size = unsafe { (*(ptr as *const MemFileContent)).data.len() };
-    stat.st_dev = 0;
+    // Generated procfs content files belong to the procfs instance's
+    // device (Linux stats them on proc's s_dev — never 0).
+    stat.st_dev = crate::fs::inode::stat_dev_user(crate::fs::inode::FS_ID_PROCFS);
     // Distinct identity per content instance (the raw pointer is unique).
     stat.st_ino = ptr as usize as u64;
     stat.st_nlink = 1;

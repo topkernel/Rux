@@ -700,6 +700,17 @@ pub fn create_mount_instance(data: Option<&str>) -> Arc<Inode> {
     tmpfs_make_inode(&root_node)
 }
 
+/// Retag a FRESH tmpfs mount root with a filesystem-type ops twin
+/// (identity tag for statfs magic dispatch — see MQUEUE_INODE_OPS).
+/// Valid only immediately after create_mount_instance, while the Arc
+/// is still uniquely owned.
+pub fn tag_mount_instance_type(root: &mut Arc<Inode>, ops: &'static INodeOps) {
+    match Arc::get_mut(root) {
+        Some(inode) => inode.ops = Some(ops),
+        None => crate::println!("tmpfs: instance root already shared; type tag skipped"),
+    }
+}
+
 /// Build the VFS inode view of a tmpfs node (shared by mount + iget).
 fn tmpfs_make_inode(node: &Arc<TmpfsNode>) -> Arc<Inode> {
     let mut inode = Inode::new(node.ino, InodeMode::new(*node.mode.lock()));
@@ -1467,6 +1478,84 @@ pub static TMPFS_INODE_OPS: INodeOps = INodeOps {
     readdir_cacheable: true,
     open: None,
     permission: None, // default: allow all (DAC via generic path)
+    getattr: Some(tmpfs_getattr),
+    setattr: Some(tmpfs_setattr),
+    iget: Some(tmpfs_iget),
+    destroy_inode: Some(tmpfs_destroy_inode),
+};
+
+// Ops-table twins of TMPFS_INODE_OPS: IDENTICAL callbacks, distinct
+// table identity. tmpfs-family mounts that are their own filesystem
+// type (POSIX mqueue, securityfs, devpts) carry a magic in statfs that
+// systemd verifies by statfs f_type after mount(2) — dev-mqueue.mount
+// failed as a unit even with mount(2) == 0 because the instance
+// reported TMPFS_MAGIC. Only the ROOT inode of such a mount needs the
+// tag: statfs dispatches on the ops identity of the statfs target.
+pub static MQUEUE_INODE_OPS: INodeOps = INodeOps {
+    lookup: Some(tmpfs_lookup),
+    create: Some(tmpfs_create),
+    link: Some(tmpfs_link),
+    unlink: Some(tmpfs_unlink),
+    symlink: Some(tmpfs_symlink),
+    mkdir: Some(tmpfs_mkdir),
+    rmdir: Some(tmpfs_rmdir),
+    mknod: Some(tmpfs_mknod),
+    rename: Some(tmpfs_rename),
+    readlink: Some(tmpfs_readlink),
+    get_file_ops: Some(tmpfs_get_file_ops),
+    readdir: Some(tmpfs_readdir),
+    readdir_cacheable: true,
+    open: None,
+    permission: None,
+    getattr: Some(tmpfs_getattr),
+    setattr: Some(tmpfs_setattr),
+    iget: Some(tmpfs_iget),
+    destroy_inode: Some(tmpfs_destroy_inode),
+};
+
+/// Securityfs twin (SECURITYFS_MAGIC 0x73636673 — systemd's
+/// sys-kernel-security.mount / mount_setup verification).
+pub static SECURITYFS_INODE_OPS: INodeOps = INodeOps {
+    lookup: Some(tmpfs_lookup),
+    create: Some(tmpfs_create),
+    link: Some(tmpfs_link),
+    unlink: Some(tmpfs_unlink),
+    symlink: Some(tmpfs_symlink),
+    mkdir: Some(tmpfs_mkdir),
+    rmdir: Some(tmpfs_rmdir),
+    mknod: Some(tmpfs_mknod),
+    rename: Some(tmpfs_rename),
+    readlink: Some(tmpfs_readlink),
+    get_file_ops: Some(tmpfs_get_file_ops),
+    readdir: Some(tmpfs_readdir),
+    readdir_cacheable: true,
+    open: None,
+    permission: None,
+    getattr: Some(tmpfs_getattr),
+    setattr: Some(tmpfs_setattr),
+    iget: Some(tmpfs_iget),
+    destroy_inode: Some(tmpfs_destroy_inode),
+};
+
+/// devpts twin (DEVPTS_MAGIC 0x1cd1 — devpts mounts are tmpfs-style
+/// instances; glibc's getpt()/posix_openpt probes /dev/pts with
+/// statfs).
+pub static DEVPTS_INODE_OPS: INodeOps = INodeOps {
+    lookup: Some(tmpfs_lookup),
+    create: Some(tmpfs_create),
+    link: Some(tmpfs_link),
+    unlink: Some(tmpfs_unlink),
+    symlink: Some(tmpfs_symlink),
+    mkdir: Some(tmpfs_mkdir),
+    rmdir: Some(tmpfs_rmdir),
+    mknod: Some(tmpfs_mknod),
+    rename: Some(tmpfs_rename),
+    readlink: Some(tmpfs_readlink),
+    get_file_ops: Some(tmpfs_get_file_ops),
+    readdir: Some(tmpfs_readdir),
+    readdir_cacheable: true,
+    open: None,
+    permission: None,
     getattr: Some(tmpfs_getattr),
     setattr: Some(tmpfs_setattr),
     iget: Some(tmpfs_iget),

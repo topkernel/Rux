@@ -679,6 +679,14 @@ pub struct Cred {
     /// bootanimation) before exec — EINVAL there aborted the service
     /// with INIT_EKEEPCAP before it ever ran.
     pub securebits: u32,
+    // Key-retention-service slots (ipc/keys.rs). Stored on the cred so
+    // fork inheritance is the cred clone (reference process_keys.c);
+    // exec clears the thread keyring (exec_keys()). Serial 0 is never
+    // a valid key, but Option keeps "never set" explicit for the
+    // session-lookup auto-install logic.
+    pub thread_keyring: Option<u32>,
+    pub process_keyring: Option<u32>,
+    pub session_keyring: Option<u32>,
 }
 
 /// SECBIT_KEEP_CAPS (bit 4) in the prctl securebits encoding.
@@ -707,6 +715,9 @@ impl Cred {
             cap_ambient:     crate::security::capability::Cap::EMPTY,
             keepcaps: false,
             securebits: 0,
+            thread_keyring: None,
+            process_keyring: None,
+            session_keyring: None,
         }
     }
 
@@ -746,6 +757,9 @@ impl Cred {
             cap_ambient:     crate::security::capability::Cap::EMPTY,
             keepcaps: false,
             securebits: 0,
+            thread_keyring: None,
+            process_keyring: None,
+            session_keyring: None,
         }
     }
 

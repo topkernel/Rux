@@ -267,7 +267,16 @@ extern "C" fn fdreapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         if crate::process::kthread::kthread_should_stop() {
             break;
         }
-        TICKET.down();
+        // INTERRUPTIBLE park (reference discipline for a perpetually-idle
+        // daemon: Linux kthreads sleep on down_interruptible()/wait_event_
+        // interruptible, so the hung-task detector never flags their idle
+        // wait). The plain down() parked UNINTERRUPTIBLE, and khungtaskd
+        // printed a full "INFO: task fdreapd blocked for more than 120
+        // seconds" + stack dump EVERY cycle, forever — ~1.3 KB of serial
+        // spam per 120 s that also raced the tty echo and corrupted long
+        // serial input lines (ub2404 shell work). A spurious wake is
+        // already handled below (empty batch → continue).
+        let _ = TICKET.down_interruptible();
         let batch = {
             let mut q = RETIRED.lock_irqsave();
             core::mem::take(&mut *q)

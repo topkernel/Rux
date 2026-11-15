@@ -563,15 +563,15 @@ impl ProcFSSuperBlock {
         // /proc/cgroups — cgroup v2 controller list. systemd reads this
         // at boot to discover available controllers ("Cannot determine
         // cgroup" freeze without it, noble-desktop 2026-11-13).
-        self.create_dynamic_file("sys/kernel/domainname", || b"(none)\n".to_vec());
-        self.create_dynamic_file("sys/kernel/hostname", || {
-            let hn = crate::process::ns::current_uts_ns().get_hostname();
-            let mut v = hn.to_vec();
-            v.push(b'\n');
-            v
-        });
-        self.create_dynamic_file("sys/kernel/osrelease", || b"6.8.0-rux\n".to_vec());
-        self.create_dynamic_file("sys/kernel/ostype", || b"Linux\n".to_vec());
+        // NOTE: create_dynamic_file adds a node with the LITERAL name under
+        // the procfs root — a slashed name like "sys/kernel/domainname" is
+        // unreachable (no nested walk). The real /proc/sys/kernel files
+        // live in init_sys_tree(); the slashed registrations that used to
+        // sit here (domainname/hostname/osrelease/ostype) were phantom
+        // root-level nodes, and /proc/sys/kernel/domainname resolved
+        // ENOENT — which is what broke systemd's ProtectHostname= mount
+        // namespacing ("Failed to set up mount namespacing:
+        // /proc/sys/kernel/domainname", ub2404 polkit/ppsd/localed).
 self.create_dynamic_file("cgroups", || {
             b"#subsys_name\thierarchy\tnum_cgroups\tenabled\n              cpu\t0\t1\t1\n              memory\t0\t1\t1\n              io\t0\t1\t1\n\n"
                 .to_vec()
@@ -708,6 +708,67 @@ self.create_dynamic_file("cgroups", || {
             b"hostname".to_vec(),
             sysctl::generate_hostname,
             sysctl::write_hostname,
+            self.alloc_ino(),
+        )));
+        // domainname — the OTHER ProtectHostname= file (systemd binds
+        // /proc/sys/kernel/{hostname,domainname} read-only into service
+        // mount namespaces; missing here it failed the whole namespace
+        // setup for polkit/power-profiles-daemon/localed on noble).
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"domainname".to_vec(),
+            sysctl::generate_domainname,
+            sysctl::write_domainname,
+            self.alloc_ino(),
+        )));
+        kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"osrelease".to_vec(),
+            sysctl::generate_osrelease,
+            self.alloc_ino(),
+        )));
+        // /proc/sys/kernel/keys/* — key-retention quota knobs (LTP
+        // keyctl02 raises root_maxkeys before its add_key/revoke
+        // loop). Readable + writable; enforcement is a documented
+        // divergence (see ipc/keys.rs).
+        let keys = Arc::new(ProcFSNode::new_dir(b"keys".to_vec(), self.alloc_ino()));
+        kernel.add_child(keys.clone());
+        keys.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"root_maxkeys".to_vec(),
+            sysctl::generate_root_maxkeys,
+            sysctl::write_root_maxkeys,
+            self.alloc_ino(),
+        )));
+        keys.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"root_maxbytes".to_vec(),
+            sysctl::generate_root_maxbytes,
+            sysctl::write_root_maxbytes,
+            self.alloc_ino(),
+        )));
+        keys.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"maxkeys".to_vec(),
+            sysctl::generate_maxkeys,
+            sysctl::write_maxkeys,
+            self.alloc_ino(),
+        )));
+        keys.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"maxbytes".to_vec(),
+            sysctl::generate_maxbytes,
+            sysctl::write_maxbytes,
+            self.alloc_ino(),
+        )));
+        // /proc/sys/kernel/random/* — boot_id is what sd_id128_get_boot
+        // reads (missing here + wrong statfs magic on /proc made every
+        // journald journal-file append fail with a synthesized ENOSYS);
+        // uuid is the fresh-per-read variant.
+        let random = Arc::new(ProcFSNode::new_dir(b"random".to_vec(), self.alloc_ino()));
+        kernel.add_child(random.clone());
+        random.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"boot_id".to_vec(),
+            sysctl::generate_boot_id,
+            self.alloc_ino(),
+        )));
+        random.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"uuid".to_vec(),
+            sysctl::generate_uuid,
             self.alloc_ino(),
         )));
         kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
@@ -1244,12 +1305,19 @@ pub fn create_root_inode() -> alloc::sync::Arc<Inode> {
         None => {
             // Fallback: create a minimal root node
             let mut inode = Inode::new(1, InodeMode::new(InodeMode::S_IFDIR | 0o555));
+            inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
             inode.ops = Some(&PROCFS_INODE_OPS);
             return alloc::sync::Arc::new(inode);
         }
     };
     let root_node = sb.root_node.clone();
     let mut inode = Inode::new(root_node.ino, InodeMode::new(InodeMode::S_IFDIR | 0o555));
+    // fs_id MUST be the procfs instance tag: the root inode decides
+    // st_dev for the /proc MOUNTPOINT itself — stat("/proc") used to
+    // report the fs_id-0 fallback device while every /proc/<pid> inode
+    // reported procfs's, so /proc looked like a device boundary in the
+    // middle of procfs (find -xdev, du -x mis-walk).
+    inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
     inode.ops = Some(&PROCFS_INODE_OPS);
     inode.private_data = Some(alloc::sync::Arc::as_ptr(&root_node) as *mut u8);
     alloc::sync::Arc::new(inode)
@@ -1467,13 +1535,13 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
 /// ProcFS getattr operation
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
-    // Distinct st_dev for procfs (Linux s_dev of procfs instances): the
-    // root ext4 reports its own fs_id and procfs used to leave st_dev at
-    // 0 — with both filesystems effectively sharing a device id,
-    // RESOLVE_NO_XDEV (openat2 st_dev comparison) and any statfs/dev
-    // based cross-mount logic could never distinguish them (LTP
+    // Distinct st_dev for procfs: fallback only — the central stat exits
+    // overwrite this with the instance's anonymous device
+    // (inode::stat_dev_user, Linux get_anon_bdev semantics), so procfs
+    // vs the root ext4 (and any other mount) always report different
+    // devices (RESOLVE_NO_XDEV / openat2 st_dev comparison, LTP
     // openat202's resolve-no-xdev case).
-    stat.st_dev = 0x9e90; // "proc" instance id, chosen non-zero and stable
+    stat.st_dev = 0x9e90; // legacy placeholder, normalized centrally
     // PID directory: private_data is None, inode.ino stores the PID
     if inode.private_data.is_none() && pid::is_valid_pid(inode.ino) {
         let pid = inode.ino;

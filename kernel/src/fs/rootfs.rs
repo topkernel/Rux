@@ -1287,6 +1287,7 @@ pub fn create_root_inode() -> alloc::sync::Arc<Inode> {
         alloc::sync::Arc::new(RootFSNode::new_dir(b"/".to_vec(), 1))
     };
     let mut inode = Inode::new(root_node.ino, InodeMode::new(InodeMode::S_IFDIR | 0o755));
+    inode.fs_id = crate::fs::inode::FS_ID_ROOTFS;
     inode.ops = Some(&ROOTFS_INODE_OPS);
     inode.private_data = Some(alloc::sync::Arc::into_raw(alloc::sync::Arc::clone(&root_node)) as *mut u8);
     alloc::sync::Arc::new(inode)
@@ -1349,6 +1350,7 @@ unsafe fn rootfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<allo
     // Create inode using the node's stored mode (mkdir honors umask-ed mode
     // via the node default; chmod through rootfs_setattr is now real).
     let mut inode = Inode::new(ino, InodeMode::new(*new_dir.mode.lock()));
+    inode.fs_id = crate::fs::inode::FS_ID_ROOTFS;
     inode.private_data = Some(alloc::sync::Arc::into_raw(alloc::sync::Arc::clone(&new_dir)) as *mut u8);
     inode.ops = Some(&ROOTFS_INODE_OPS);
 
@@ -1457,6 +1459,7 @@ unsafe fn rootfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<all
 
     // Create inode
     let mut inode = Inode::new(ino, InodeMode::new(*new_file.mode.lock()));
+    inode.fs_id = crate::fs::inode::FS_ID_ROOTFS;
     inode.private_data = Some(alloc::sync::Arc::into_raw(alloc::sync::Arc::clone(&new_file)) as *mut u8);
     inode.ops = Some(&ROOTFS_INODE_OPS);
 
@@ -1493,6 +1496,7 @@ unsafe fn rootfs_symlink(dir: &Inode, name: &[u8], target: &[u8]) -> Result<allo
 
     // Create inode
     let mut inode = Inode::new(ino, InodeMode::new(*new_link.mode.lock()));
+    inode.fs_id = crate::fs::inode::FS_ID_ROOTFS;
     inode.private_data = Some(alloc::sync::Arc::into_raw(alloc::sync::Arc::clone(&new_link)) as *mut u8);
     inode.ops = Some(&ROOTFS_INODE_OPS);
 
