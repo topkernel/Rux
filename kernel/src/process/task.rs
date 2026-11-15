@@ -2708,6 +2708,33 @@ impl Task {
                 as *mut core::sync::atomic::AtomicBool,
             core::sync::atomic::AtomicBool::new(false),
         );
+        // freed-task lane (2026-11-15, fork audit): three more Task::new-
+        // literal fields were missing from this clone-path list, so a
+        // fork-allocated Task read the recycled page's previous life:
+        //   - execed: has_execed() gates setpgid's post-exec EACCES
+        //     (syscall/process.rs) — residue `true` made a fresh child
+        //     that never exec'd already unmovable between groups
+        //     (LTP setpgid03 shape).
+        //   - last_syscall_nr/a0/a1: the hung-task / forensic latches
+        //     printed the previous tenant's syscall (the sc130 garbage-nr
+        //     family, third recurrence).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, execed))
+                as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, last_syscall_nr)) as *mut AtomicU32,
+            AtomicU32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, last_syscall_a0)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, last_syscall_a1)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
 
         // Initialize thread_info style fields (must be at beginning)
         ptr::write(
