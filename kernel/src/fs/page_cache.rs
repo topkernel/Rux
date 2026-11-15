@@ -694,6 +694,29 @@ impl PageCache {
         out
     }
 
+    /// Non-pinning residency probe: is ((fs_id, ino), page_index) cached
+    /// and NOT invalidated? Takes no pin and touches no LRU state — for
+    /// callers that only need the ANSWER (mincore(2)'s page-cache
+    /// fallback, the read path's post-fill verification). `get()`/`get_phys()`
+    /// each transfer a pin the caller must return via put(); a caller that
+    /// drops the returned handle leaks the pin, and a leaked pin is how an
+    /// invalidated-but-never-freed entry survives inode free to shadow the
+    /// next file that reuses the inode number (the msync01-after-mincore04
+    /// order-dependent corruption).
+    pub fn resident(&self, fs_id: u64, ino: u64, page_index: u64) -> bool {
+        let key = cache_key(fs_id, ino);
+        let Some(entry) = self.lookup_claimed(key) else {
+            return false;
+        };
+        let out = {
+            let g = entry.lock.lock();
+            g.get(&page_index)
+                .is_some_and(|page| !page.invalidated)
+        };
+        drop(entry);
+        out
+    }
+
     /// Same as `get` but returns the PHYSICAL address — for mapping the
     /// cached frame directly into a user page table (MAP_SHARED faults).
     /// The returned pin is owned by that PTE mapping for its lifetime.
