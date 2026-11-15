@@ -1251,6 +1251,9 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                     crate::arch::ipi::handle_ipi_vector(v, regs_ref);
                     crate::interrupt::preempt::irq_exit();
                     irq_exit_maybe_preempt_kernel(regs_ref);
+                    // tick_nohz_irq_exit: the kick (a dep 0->1 transition)
+                    // re-evaluates the tick stop decision here.
+                    crate::timer::nohz::tick_nohz_irq_exit();
                 }
 
                 vec::IRQ0 => {
@@ -1709,13 +1712,9 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
     crate::drivers::timer::timer_interrupt_handler();
 
     // 1.1 Re-arm the LAPIC timer BEFORE anything below can switch tasks
-    // or block: once x86_64 arms one-shot mode (set_next_trigger via
-    // apic::timer_arm_oneshot, perf lane pd), a tick that fails to
-    // re-arm leaves this CPU tick-less forever. Grid-glued to the next
-    // nominal tick, pulled earlier by any due hres deadline. No-op
-    // while the timebase is not precise (periodic tick still running)
-    // and on the PIT fallback path.
-    crate::drivers::timer::set_next_trigger();
+    // (Tick re-arm moved to the END of this handler as
+    // tick_nohz_irq_exit() — the reference's tick_nohz machinery
+    // re-evaluates the stop decision AFTER the tick work, at irq_exit.)
 
     // 1.2 sc109: 1 Hz drift discipline for the HPET-calibrated TSC
     // timekeeper (offset-only forward steps, clamped; see
@@ -1750,6 +1749,12 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
     if crate::sched::need_resched() && crate::interrupt::preempt::preemptible() {
         crate::sched::schedule();
     }
+
+    // 5. tick_nohz_irq_exit (tick-sched.c): after the tick work, decide
+    //    whether this CPU's periodic tick can stop (can_stop_full_tick)
+    //    or must resume (a dependency appeared) — the re-arm that the
+    //    pre-nohz set_next_trigger call above used to do.
+    crate::timer::nohz::tick_nohz_irq_exit();
 }
 
 /// Handle timer interrupt on the legacy PIC IRQ0 vector (virtual-wire

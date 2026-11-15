@@ -34,6 +34,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::spinlock::Spinlock;
 use crate::drivers::timer;
 
+pub mod nohz;
 pub mod oneshot;
 pub mod wheel;
 

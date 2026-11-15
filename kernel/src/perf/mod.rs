@@ -249,6 +249,18 @@ static STASH: [TickStash; crate::config::MAX_CPUS] = [const { new_stash() }; cra
 /// softirq-raise gate (`timer_softirq_work_pending`) read this; open,
 /// close and the ENABLE/DISABLE ioctls maintain it. When 0 the
 /// subsystem costs one relaxed load per tick.
+
+/// TICK_DEP_BIT_PERF_EVENTS sync: while any sampling event is armed the
+/// tick must keep running (Rux's software samples are tick-produced —
+/// see timer/nohz.rs for the reference divergence note).
+fn perf_tick_dep_sync() {
+    if ARMED.load(Ordering::Acquire) > 0 {
+        crate::timer::nohz::tick_nohz_dep_set(crate::timer::nohz::tick_dep::PERF_EVENTS);
+    } else {
+        crate::timer::nohz::tick_nohz_dep_clear(crate::timer::nohz::tick_dep::PERF_EVENTS);
+    }
+}
+
 static ARMED: AtomicUsize = AtomicUsize::new(0);
 
 /// Bitmap of "any armed event wants this sideband/event class" so the
@@ -476,6 +488,7 @@ fn register(ev: *mut PerfEvent, starts_armed: bool) -> u64 {
         ARMED.fetch_add(1, Ordering::Release);
     }
     refresh_wanted_bits();
+    perf_tick_dep_sync();
     id
 }
 
@@ -1737,6 +1750,7 @@ fn perf_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
                 }
                 ev.enabled.store(enable, Ordering::Release);
                 refresh_wanted_bits();
+                perf_tick_dep_sync();
             }
             0
         }
@@ -1748,6 +1762,7 @@ fn perf_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
                 ARMED.fetch_add(1, Ordering::Acquire);
                 ev.enabled.store(true, Ordering::Release);
                 refresh_wanted_bits();
+                perf_tick_dep_sync();
             }
             0
         }
@@ -2064,6 +2079,7 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
             let was_armed = unregister(unsafe { (*ev_ptr).id });
             if was_armed {
                 ARMED.fetch_sub(1, Ordering::Release);
+                perf_tick_dep_sync();
             }
             // SAFETY: reclaim the box.
             unsafe { let _ = Box::from_raw(ev_ptr); }

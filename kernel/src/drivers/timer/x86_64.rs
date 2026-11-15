@@ -25,7 +25,7 @@
 //! handler derives jiffies from the timebase (`floor(elapsed/period)`),
 //! which is idempotent under concurrent tick handlers on any CPU.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 use crate::arch::cpu::{inb, io_wait, outb};
 
@@ -405,6 +405,14 @@ pub fn set_timer(deadline: u64) {
 /// from the coarse clock would mistime; the periodic LAPIC/PIT tick
 /// keeps the grid in that window (grid-only hres granularity, the
 /// pre-fix behavior, only on calibration-failed boots).
+///
+/// NOTE (NOHZ): the adaptive-tick machinery lives in
+/// crate::timer::nohz (a function-for-function mirror of the
+/// reference's kernel/time/tick-sched.c) and re-arms through
+/// tick_nohz_irq_exit at the IRQ exits. This function keeps ONLY the
+/// pre-nohz grid-glue discipline for the callers outside the tick
+/// re-evaluation path (the PIT-fallback tail and the early
+/// hres-sleep re-arm; the latter now routes through tick_nohz as well).
 pub fn set_next_trigger() {
     if !timebase_precise() {
         return;
@@ -428,8 +436,20 @@ pub fn set_next_trigger() {
 /// sleep so the already-armed (later) deadline does not delay its
 /// precise wake (perf lane pd: this used to be a no-op on x86_64 —
 /// every hres sleep waited for the next 10 ms grid tick).
+///
+/// NOHZ: the sleeper's CPU re-evaluates through the tick_nohz
+/// machinery — tick_nohz_next_event arms at the new wheel deadline
+/// (the reference's timer-enqueue path re-programs the local
+/// clockevent the same way); the retain case keeps the grid glue.
 pub fn rearm_for_hres() {
-    set_next_trigger();
+    // Non-full-dynticks CPUs keep the plain grid-glue arm (the
+    // reference's timer-enqueue re-program applies to nohz cpus only).
+    let cpu = crate::arch::cpu_id() as usize;
+    if !crate::timer::nohz::tick_nohz_full_cpu(cpu) {
+        set_next_trigger();
+        return;
+    }
+    crate::timer::nohz::tick_nohz_rearm_local();
 }
 
 /// True when a precise (non-jiffies) timebase is active — the tick

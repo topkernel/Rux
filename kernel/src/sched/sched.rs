@@ -1397,6 +1397,56 @@ pub extern "C" fn asm_need_resched() -> i64 {
     if need_resched() { 1 } else { 0 }
 }
 
+/// bool sched_can_stop_tick(struct rq *rq) — reference kernel/sched/
+/// core.c, decision tree preserved in order (DL → RR → FIFO → CFS):
+/// Deadline tasks need the tick even when single; more than one RR
+/// task needs the tick for RR behaviour; FIFO-only needs no tick (no
+/// forced preemption between FIFO tasks); otherwise more than one CFS
+/// task needs the tick for involuntary preemption. The HZ_BW cfs-
+/// bandwidth check is statically false here (no CFS bandwidth). The rq
+/// is the global run queue (D-1) — the counters are global; the early-
+/// boot guard keeps pre-grq_init ticks periodic (grq() panics before
+/// grq_init).
+pub fn sched_can_stop_tick() -> bool {
+    if !GRQ_READY.load(core::sync::atomic::Ordering::Acquire) {
+        return false;
+    }
+    let g = grq();
+    // Deadline tasks, even if single, need the tick.
+    if g.dl_rq.dl_nr_running.load(core::sync::atomic::Ordering::Relaxed) != 0 {
+        return false;
+    }
+    // If there are more than one RR tasks, we need the tick to affect
+    // the actual RR behaviour.
+    let rr = g.rt_rq.rr_nr_running.load(core::sync::atomic::Ordering::Relaxed);
+    if rr != 0 {
+        return rr == 1;
+    }
+    // If there's no RR tasks, but FIFO tasks, we can skip the tick —
+    // no forced preemption between FIFO tasks.
+    let rt = g.rt_rq.rt_nr_running.load(core::sync::atomic::Ordering::Relaxed);
+    if rt.saturating_sub(rr) != 0 {
+        return true;
+    }
+    // More than one CFS task: the tick drives involuntary preemption.
+    // STRUCTURAL MAPPING: the reference's rq->nr_running INCLUDES the
+    // currently-running task (a task stays on_rq while it runs; the
+    // dequeue happens at sleep/exit). Rux's GRQ counter drops the
+    // current at pick, so the running non-idle currents are added back
+    // here to reproduce the reference's count.
+    let mut load = g.nr_running.load(core::sync::atomic::Ordering::Relaxed);
+    for c in 0..MAX_CPUS {
+        let cur = cpu_state(c).current;
+        if !cur.is_null() && cur != cpu_state(c).idle {
+            load += 1;
+        }
+    }
+    if load > 1 {
+        return false;
+    }
+    true
+}
+
 #[inline]
 pub fn set_need_resched() {
     // SAFETY: cpu_id is bounds-checked against MAX_CPUS; only the current CPU
@@ -4227,6 +4277,11 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
         // the queue membership (R39 ordering, see above).
         (*task).set_state(TaskState::new(TaskState::RUNNING));
         grq.nr_running.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        // sched_update_tick_dependency (add_nr_running tail, sched.h):
+        // every load increase re-evaluates the tick dependency — the
+        // 0->1 transition kicks the stopped CPUs so they restart their
+        // tick at their next exit.
+        crate::timer::nohz::sched_update_tick_dependency_on_load_change();
         // ORPHAN-MARK creation tripwire (wake-fastrepro final-boss): the
         // task is being LINKED right now — under the GRQ, no pick or
         // switch can be in flight on it. If its ownership qword shows a
@@ -4253,67 +4308,14 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
             let slot_backed = claim >= 0
                 && (claim as usize) < MAX_CPUS
                 && cpu_state(claim as usize).current == task;
-            if slot_backed && !mid_swout {
-                // The pick-in-flight relink: the task is linked while its
-                // claim's slot still names it (the picker has not reached
-                // its context switch). Tagged separately, small budget —
-                // a later STALE-CLAIM-RESET with the SAME pid+claim
-                // convicts this window as the orphan producer.
-                static ENQSB_N: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(0);
-                if (*task).pid() > 1
-                    && ENQSB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200
-                {
-                    use crate::dfx::taskdump::putc_brief as putchar;
-                    fn pdec4(mut v: u64) {
-                        use crate::dfx::taskdump::putc_brief as p;
-                        let mut buf = [0u8; 20];
-                        let mut n = 0;
-                        if v == 0 {
-                            p(b'0');
-                            return;
-                        }
-                        while v > 0 && n < buf.len() {
-                            buf[n] = b'0' + (v % 10) as u8;
-                            v /= 10;
-                            n += 1;
-                        }
-                        for i in (0..n).rev() {
-                            p(buf[i]);
-                        }
-                    }
-                    const M: &[u8] = b"\nENQ-CLAIMED-SLOTBK pid=";
-                    for &b in M {
-                        putchar(b);
-                    }
-                    pdec4((*task).pid() as u64);
-                    const M2: &[u8] = b" claim=";
-                    for &b in M2 {
-                        putchar(b);
-                    }
-                    pdec4(claim.unsigned_abs() as u64);
-                    const M3: &[u8] = b" pk=";
-                    for &b in M3 {
-                        putchar(b);
-                    }
-                    pdec4((*task).pick_state() as u64);
-                    const M4: &[u8] = b" jif=";
-                    for &b in M4 {
-                        putchar(b);
-                    }
-                    pdec4(crate::drivers::timer::get_jiffies());
-                    const M5: &[u8] = b" from=";
-                    for &b in M5 {
-                        putchar(b);
-                    }
-                    for &b in ENQ_CALLER.file().as_bytes() {
-                        putchar(b);
-                    }
-                    putchar(b':');
-                    pdec4(ENQ_CALLER.line() as u64);
-                    putchar(b'\n');
-                }
-            }
+            // (ENQ-CLAIMED-SLOTBK print DELETED: it fired on EVERY
+            // tick-preempt requeue of a CPU-bound task — the perf-sample
+            // capture of the lmbench strand (2026-11-15) shows it is the
+            // normal preempt-requeue window, present in completed boots
+            // too, carrying no signal; ~1 ms of polled UART per tick on
+            // the measured CPU was pure disturbance. The nohz round's
+            // `rq_load() <= 1` slice guard already keeps the solo case
+            // out of this path entirely.)
             if (oncpu || claim != -1) && !mid_swout && !slot_backed && (*task).pid() != 0 {
                 static ENQC_N: core::sync::atomic::AtomicU32 =
                     core::sync::atomic::AtomicU32::new(0);
@@ -8243,11 +8245,35 @@ pub fn scheduler_tick() {
                     // weights: a heavy task's slice is proportionally
                     // longer than the time its vruntime needs to overtake
                     // the leftmost (and vice versa for light tasks).
-                    let se = (*current).sched_entity();
-                    let slice_ns = grq_guard.cfs_rq.sched_slice(se);
-                    let sum = se.sum_exec_runtime.load(core::sync::atomic::Ordering::Acquire);
-                    let prev_sum = se.prev_sum_exec_runtime.load(core::sync::atomic::Ordering::Acquire);
-                    sum.saturating_sub(prev_sum) > slice_ns
+                    //
+                    // NOHZ round: the reference guards check_preempt_tick
+                    // with `if (cfs_rq->nr_running > 1)` (entity_tick) — a
+                    // SOLO runnable task is never tick-preempted. The GRQ
+                    // slice check ran unconditionally, so a solo CPU-bound
+                    // task (the lmbench calibration chase) was dequeued,
+                    // requeued and re-picked on EVERY tick: pure churn
+                    // (pick-state writes + sub_preempt_count + the ENQSB
+                    // print storm in the requeue path) that lands inside
+                    // every measured interval.
+                    //
+                    // STRUCTURAL MAPPING: the reference's cfs_rq->
+                    // nr_running INCLUDES the running current (on_rq);
+                    // Rux's timeline count drops it at pick, so
+                    // `reference_count > 1` maps to
+                    // `timeline_count + 1 > 1` = `timeline_count > 0`
+                    // here — at least one OTHER queued CFS task.
+                    if grq_guard.cfs_rq.nr_running() > 0 {
+                        let se = (*current).sched_entity();
+                        let slice_ns = grq_guard.cfs_rq.sched_slice(se);
+                        let sum =
+                            se.sum_exec_runtime.load(core::sync::atomic::Ordering::Acquire);
+                        let prev_sum = se
+                            .prev_sum_exec_runtime
+                            .load(core::sync::atomic::Ordering::Acquire);
+                        sum.saturating_sub(prev_sum) > slice_ns
+                    } else {
+                        false
+                    }
                 }; // grq_guard dropped here
 
                 if should_resched {
@@ -10248,6 +10274,11 @@ pub fn cpu_idle_loop() -> ! {
         // WW_IDLE_PHASE 1: about to enter schedule() (may switch away and
         // back; the stamp survives until the next phase write).
         WW_IDLE_PHASE[cpu_id].store(1, core::sync::atomic::Ordering::Release);
+        // tick_nohz_idle_exit: leaving the idle section — the picked task
+        // (if any) runs with inidle clear, so its irq exits take the
+        // full_update_tick path (the reference's idle loop brackets its
+        // idle section with the same enter/exit pair).
+        crate::timer::nohz::tick_nohz_idle_exit();
         unsafe {
             schedule();
         }
@@ -10258,6 +10289,13 @@ pub fn cpu_idle_loop() -> ! {
             let curr = pcpu.current;
             !curr.is_null() && unsafe { (*curr).pid() == 0 }
         };
+
+        // tick_nohz_idle_enter: back in the idle section (schedule
+        // returned to the idle task) — the IRQ exits from here on take
+        // the start-idle stop path.
+        if is_idle {
+            crate::timer::nohz::tick_nohz_idle_enter();
+        }
 
         // Lost-park lie detector (fix-lostpark lane, dfx=lostpark): this
         // CPU just ran schedule() and is about to idle-mark/halt, but its
