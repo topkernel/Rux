@@ -755,6 +755,22 @@ self.create_dynamic_file("cgroups", || {
             sysctl::write_maxbytes,
             self.alloc_ino(),
         )));
+        // /proc/sys/kernel/random/* — boot_id is what sd_id128_get_boot
+        // reads (missing here + wrong statfs magic on /proc made every
+        // journald journal-file append fail with a synthesized ENOSYS);
+        // uuid is the fresh-per-read variant.
+        let random = Arc::new(ProcFSNode::new_dir(b"random".to_vec(), self.alloc_ino()));
+        kernel.add_child(random.clone());
+        random.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"boot_id".to_vec(),
+            sysctl::generate_boot_id,
+            self.alloc_ino(),
+        )));
+        random.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"uuid".to_vec(),
+            sysctl::generate_uuid,
+            self.alloc_ino(),
+        )));
         kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
             b"threads-max".to_vec(),
             sysctl::generate_threads_max,

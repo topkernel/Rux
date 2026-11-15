@@ -6153,6 +6153,22 @@ pub fn sys_getrandom(args: SyscallArgs) -> i64 {
     buflen as i64
 }
 
+/// Kernel-internal random bytes (procfs /proc/sys/kernel/random/*) —
+/// the same CRNG sys_getrandom serves, behind a small helper so procfs
+/// does not reach into the syscall's private statics.
+pub fn kernel_random_bytes(out: &mut [u8]) {
+    let mut guard = GETRANDOM_CRNG.lock();
+    let rng = guard.get_or_insert_with(ChaCha20Crng::new);
+    let mut filled = 0usize;
+    while filled < out.len() {
+        let (block, used) = rng.next_bytes();
+        let chunk = (out.len() - filled).min(64 - used);
+        out[filled..filled + chunk].copy_from_slice(&block[used..used + chunk]);
+        rng.consume(chunk);
+        filled += chunk;
+    }
+}
+
 /// ChaCha20 keystream generator backing sys_getrandom.
 ///
 /// Construction: a 256-bit key is drawn once per boot from CLINT timebase,
