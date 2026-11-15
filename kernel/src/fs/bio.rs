@@ -1838,6 +1838,213 @@ pub unsafe fn bfree_multi(bh: *mut BufferHead) {
     unsafe { drop(Box::from_raw(bh)) };
 }
 
+// ============================================================================
+// Plugged writes (batch submit + single drain)
+// ============================================================================
+//
+// The WRITE counterpart of the batch-async-read machinery above, in the
+// shape Linux's blk-mq plugging gives ext4 writeback: submit N requests
+// without waiting, then wait once for the whole batch. The synchronous
+// alternative — one blkdev_write per span, each blocking for its own
+// completion — serialized every 64 KiB span write behind a full device
+// round trip (measured: the fsync flush wall, ~2048 serialized spans at
+// 128 MB ≈ 6.2 s under KVM).
+//
+// DMA-source stability is the one discipline reads do not have: a write's
+// data buffer is READ BY THE DEVICE, so it must stay valid AND UNMODIFIED
+// until completion. The batch therefore copies every span into its own
+// heap block at submit time (the same copy the synchronous Request path
+// makes in blkdev_write), and nothing else references that copy — buffer
+// heads can be re-dirtied, re-read, or evicted the moment their bytes are
+// staged, and the pins/dirty-clear happen at drain, driven by per-span
+// status. Callers that already own a stable, single-owner buffer may skip
+// the copy by submitting that buffer's slice — the contract is on the
+// BYTES, not on who allocated them.
+//
+// Ordering: nothing here reorders writes relative to any OTHER submission
+// — every chain takes a submission ordinal under the device BLK lock and
+// the device executes chains in submission order, so span i+1 leaves the
+// device no earlier than span i. Relative to the caller's other I/O, the
+// guarantees are exactly the synchronous path's: a write submitted before
+// drain() returns is complete (device-acked) when drain() returns, and a
+// failed/timed-out span reports its own status — the caller keeps that
+// span's buffers dirty for the standing durability points.
+
+/// In-flight cap of one WriteBatch window. Bounds the batch's private
+/// memory (32 x 64 KiB spans = 2 MiB) and the device's pending-table
+/// pressure (MAX_PENDING_IO_PCI = 64); the 32-submission safety-kick bound
+/// of the PCI submit path matches it.
+pub const MAX_WRITE_BATCH: usize = 32;
+
+struct WriteEntry {
+    /// Private stable copy of the span's bytes (the DMA source).
+    data: Box<[u8]>,
+    /// Completion signaled by the device's completion walker.
+    completion: Box<crate::fs::io_completion::IoCompletion>,
+}
+
+/// A batch of asynchronously-submitted device writes (plugged writes).
+///
+/// Typical use (the run-batched flush's span path):
+/// ```ignore
+/// let mut batch = WriteBatch::new();
+/// // ... per contiguous span:
+/// if !batch.submit(dev, sector, span_bytes) {
+///     // device without async write / window lag: drain + retry once,
+///     // then fall back to blkdev_write for THIS span.
+/// }
+/// // ... after the last span:
+/// batch.flush();
+/// for i in 0..flushed { if batch.status(i) == 0 { /* clear BH_Dirty */ } }
+/// ```
+pub struct WriteBatch {
+    entries: alloc::vec::Vec<WriteEntry>,
+    /// Per-entry outcome of the LAST flush(), indexed by submission order.
+    /// Only meaningful after flush() returned; reset by the next submit.
+    results: alloc::vec::Vec<i32>,
+}
+
+impl WriteBatch {
+    pub fn new() -> Self {
+        Self {
+            entries: alloc::vec::Vec::new(),
+            results: alloc::vec::Vec::new(),
+        }
+    }
+
+    /// Number of spans currently in flight (not yet drained).
+    pub fn in_flight(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Outcome of entry `i` of the most recent flush (submission order).
+    /// 0 = device-acked; negative errno otherwise (a timed-out span's
+    /// bytes may not have reached the device — treat like EIO and keep
+    /// the span's buffers dirty).
+    pub fn status(&self, i: usize) -> i32 {
+        self.results.get(i).copied().unwrap_or(-5)
+    }
+
+    /// Submit one span without waiting. Returns false when the batch
+    /// window is full (flush, then retry) or the device rejected the
+    /// submission (no async write / retry-exhausted window lag: fall back
+    /// to a synchronous write for this span — correctness is unchanged,
+    /// only the batching is lost).
+    pub fn submit(
+        &mut self,
+        device: *const blkdev::GenDisk,
+        sector: u64,
+        data: &[u8],
+    ) -> bool {
+        if data.is_empty() || self.entries.len() >= MAX_WRITE_BATCH {
+            return false;
+        }
+        // The private stable copy: the device DMAs FROM this block, so it
+        // must not alias anything the kernel mutates before the drain.
+        let owned: Box<[u8]> = alloc::vec::Vec::from(data).into_boxed_slice();
+        let completion = Box::new(crate::fs::io_completion::IoCompletion::new());
+        // SAFETY: device is a registered GenDisk; `owned` and `completion`
+        // are owned by this batch and stay valid (and unmodified) until
+        // the completion fires — the write-batch contract.
+        let rc = blkdev::blkdev_write_async(device, sector, &owned, &completion);
+        match rc {
+            Ok(()) => {
+                self.entries.push(WriteEntry { data: owned, completion });
+                true
+            }
+            Err(_) => {
+                // Submission failed before any chain was built (the PCI
+                // path deallocs its own io_buf on failure); both boxes
+                // drop here — nothing references them.
+                false
+            }
+        }
+    }
+
+    /// Kick the device once and wait for every in-flight span. Fills
+    /// `status(i)` for i in 0..in_flight(), frees the completed entries,
+    /// and leaves the batch empty. Returns the first nonzero status (0
+    /// when every span device-acked).
+    pub fn flush(&mut self) -> i32 {
+        if self.entries.is_empty() {
+            return 0;
+        }
+        // One device kick for the whole quietly-submitted batch (the PCI
+        // submit path publishes chains quietly; every notify is an MMIO
+        // trap). The MMIO device notifies inline per chain — a no-op kick.
+        crate::drivers::virtio::pci_blk_kick_all();
+
+        self.results.clear();
+        self.results.resize(self.entries.len(), 0);
+        let mut first_error = 0i32;
+        // Move the whole window out first: each box's death below is then
+        // plain scope-end, and `results` keeps SUBMISSION order (entries
+        // waited in order; the device completes them in submission order,
+        // so the first waiter sleeps while the batch drains behind it).
+        let entries = core::mem::take(&mut self.entries);
+        for (i, entry) in entries.into_iter().enumerate() {
+            let status = entry.completion.wait();
+            let status = if status == 0 {
+                // Attribution guard (the read path's zero-serve analog):
+                // the walker stamps the completion with the DMA data
+                // pointer of the chain whose completion it delivered. A
+                // token mismatch means some OTHER chain's completion fired
+                // here — this span's write may not have landed, so its
+                // buffers must stay dirty (report EIO, loudly).
+                let token = entry.completion.delivered_token();
+                if token != 0 && token != entry.data.as_ptr() as usize {
+                    crate::pr_err!(
+                        "bio: misattributed write completion (token {:x} != buffer {:x}) — refusing to ack",
+                        token,
+                        entry.data.as_ptr() as usize
+                    );
+                    -5
+                } else {
+                    0
+                }
+            } else if status == crate::fs::io_completion::WAIT_TIMED_OUT {
+                // The chain may STILL be in flight: wait() already
+                // tombstoned the device-side pending (abandon) and drained
+                // deliveries, so the walker will never fire this
+                // completion again — the completion box may die. The DATA
+                // block is still the device's DMA source and must be
+                // LEAKED, never freed (the freed-kernel-DMA family).
+                core::mem::forget(entry.data);
+                status
+            } else {
+                status
+            };
+            self.results[i] = status;
+            if status != 0 && first_error == 0 {
+                first_error = status;
+            }
+            // entry.data and entry.completion drop here — safe on every
+            // completed path: the walker fired the completion (delivery
+            // handshake drained inside wait()) and the chain's DMA is
+            // done, so the data block is once again ordinary heap.
+        }
+        first_error
+    }
+}
+
+impl Default for WriteBatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for WriteBatch {
+    /// Safety net: an abandoned batch never leaves device-side pendings
+    /// pointing at freed memory — drain it. Normally unreachable (the
+    /// flush owner drains explicitly); a panic-unwind or an early return
+    /// still lands here in task context, where sleeping is legal.
+    fn drop(&mut self) {
+        if !self.entries.is_empty() {
+            let _ = self.flush();
+        }
+    }
+}
+
 /// Sync a dirty buffer to disk
 ///
 /// Lazy write-back: while the current task holds an active ext4 journal
