@@ -139,6 +139,7 @@ pub fn init_loops() {
                         private_data: None,
                         request_fn: Some(loop_request_fn),
                         async_read_fn: None,
+                        async_write_fn: None,
                     }),
                 );
             }

@@ -1486,6 +1486,19 @@ fn ext4_sync_file_inner(
         if block == 0 {
             continue; // sparse hole
         }
+        // DURABILITY-BY-ABSENCE: a block whose buffer left the cache was
+        // synchronously written at its eviction (bio evict_one Phase 4) —
+        // its latest content is already on disk, so fsync owes it nothing.
+        // Re-reading it (the old shape) paid one synchronous 4 KiB read
+        // per absent block: a file larger than the 8192-entry buffer cache
+        // turns the cache over and the loop re-reads ~every block the
+        // preceding flush just persisted (measured: ~3 s of the 6.4 s
+        // 128 MB fsync wall). Mid-eviction keys take the slow path —
+        // their sync write may still be in flight.
+        // SAFETY: fs.device is the fs's registered GenDisk.
+        if unsafe { bio::block_absent_durable(fs.device, block) } {
+            continue;
+        }
         // SAFETY: bio::bread returns a valid BufferHead on success.
         unsafe {
             let bh = bio::bread(fs.device, block)
@@ -2581,7 +2594,14 @@ pub fn ext4_flush_dirty_inode(
     let ino = inode.ino as u64;
     let cache = page_cache::get_page_cache();
 
-    const CHUNK: usize = 16;
+    // Run width (pages per collected chunk / maximal run). 16 matched the
+    // run-batched flush's first cut (64 KiB spans); 64 quadruples the run
+    // (256 KiB spans, Linux writeback-chunk class) so the per-RUN fixed
+    // costs of the write core (journal bracket, read_inode/write_inode,
+    // big-lock pair) amortize over 4x more bytes — diskstats attribution
+    // on the plugged-span kernel showed the 128 MB fsync wall is the
+    // per-run core (2048 runs x ~3 ms), not span submission.
+    const CHUNK: usize = 64;
     let mut chunk: [(u64, u64); CHUNK] = [(0, 0); CHUNK];
     // Per-entry write outcomes for flush_done: an entry may only go clean
     // when its bytes verifiably reached the file (full write or a
@@ -2599,6 +2619,12 @@ pub fn ext4_flush_dirty_inode(
     // use; a no-dirty call never grows it (collect returns 0 first).
     let mut stage: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     let mut total = 0usize;
+    // Plugged span pipeline for the whole pass (see SpanFlusher): spans of
+    // consecutive runs share one submission window; the final drain below
+    // device-acks everything before the caller proceeds to its journal
+    // commit (ext4_sync_file) — the ordered-mode data-before-metadata
+    // direction the synchronous span writes had.
+    let mut flusher = SpanFlusher::new();
     // Resume cursor — the PROGRESS RULE (collect_dirty_range doc): pages
     // of live writable mappings STAY dirty after their flush (flush_done
     // clears the bit only at pin count 0), so re-collecting from
@@ -2625,7 +2651,16 @@ pub fn ext4_flush_dirty_inode(
             }
             // SAFETY: fs_ptr is the inode's private_data fs pointer,
             // installed at mount/open and valid for the inode's life.
-            unsafe { flush_run(&*fs_ptr, inode, &chunk[i..j], &mut stage, &mut done[i..j]) };
+            unsafe {
+                flush_run(
+                    &*fs_ptr,
+                    inode,
+                    &chunk[i..j],
+                    &mut stage,
+                    &mut done[i..j],
+                    &mut flusher,
+                )
+            };
             i = j;
         }
         cache.flush_done(fs_id, ino, &done[..n]);
@@ -2636,6 +2671,9 @@ pub fn ext4_flush_dirty_inode(
         }
         cursor = last_idx + 1;
     }
+    // Final window drain: every submitted span is device-acked (or left
+    // dirty by its error status) before the flush returns.
+    flusher.drain();
     total
 }
 
@@ -2654,6 +2692,7 @@ fn flush_run(
     run: &[(u64, u64)],
     stage: &mut alloc::vec::Vec<u8>,
     done_out: &mut [(u64, u64, bool)],
+    flusher: &mut SpanFlusher,
 ) {
     let ps = crate::mm::PAGE_SIZE as u64;
     let psu = crate::mm::PAGE_SIZE;
@@ -2728,7 +2767,7 @@ fn flush_run(
         // requests (best-effort: a block left dirty by a fallback inside
         // is owned by the standing durability points — eviction, the
         // fsync data loop, sync(2)).
-        run_sync_spans(fs, inode, off0, run_bytes, stage);
+        run_sync_spans(fs, inode, off0, run_bytes, stage, flusher);
         for k in 0..run_pages {
             done_out[k] = (run[k].0, run[k].1, true);
         }
@@ -2790,16 +2829,142 @@ fn flush_run(
 /// pending publication constraint falls back to sync_dirty_buffer (which
 /// satisfies the constraint first — the guard contract).
 ///
+/// Span-write pipeline for the run-batched flush: submits consecutive
+/// data-block spans to the device ASYNCHRONOUSLY (bio's WriteBatch — one
+/// completion wait per window) and settles them (BH_Dirty clear + pin
+/// release) at the drain, per-span by device-acked status.
+///
+/// Lives ACROSS runs of one ext4_flush_dirty_inode pass: a 128 MB flush is
+/// ~2048 consecutive 64 KiB spans over ~2048 runs, and the batching win
+/// comes from keeping the device busy across run boundaries (run N+1's
+/// staging/journal work overlaps run N's writes). The final drain happens
+/// at ext4_flush_dirty_inode's exit, so every span write is device-acked
+/// before the caller proceeds to its journal commit — the ordered-mode
+/// data-before-metadata direction is preserved exactly as with the
+/// synchronous span writes.
+///
+/// Locking: the EXT4_BIG_LOCK discipline of run_sync_spans extends to the
+/// drain — BH_Dirty clears and pin releases happen under the big lock
+/// (task-recursive per INV-LOCK-8, so re-taking it inside a run_sync_spans
+/// hold is legal), fencing the same racing write cores the synchronous
+/// path was fenced against. A failed/timed-out span keeps its BH_Dirty
+/// bits (the standing durability points retry), mirroring the sync path's
+/// error contract.
+struct SpanFlusher {
+    batch: crate::fs::bio::WriteBatch,
+    /// Per in-flight span (submission order): its pinned buffer heads.
+    pending_bhs: alloc::vec::Vec<alloc::vec::Vec<*mut crate::fs::bio::BufferHead>>,
+    /// Device of the in-flight spans (one fs per flush pass).
+    dev: *const crate::drivers::blkdev::GenDisk,
+}
+
+impl SpanFlusher {
+    fn new() -> Self {
+        Self {
+            batch: crate::fs::bio::WriteBatch::new(),
+            pending_bhs: alloc::vec::Vec::new(),
+            dev: core::ptr::null(),
+        }
+    }
+
+    /// Submit one assembled span (bytes + its pinned buffer heads). Takes
+    /// the bh Vec by value (capacity stays with the caller via swap-in of
+    /// the taken Vec's remains); on a full window drains first, and on a
+    /// device that cannot take the async write falls back to the
+    /// synchronous single blkdev_write — the pre-plugging behavior.
+    fn submit_span(
+        &mut self,
+        dev: *const crate::drivers::blkdev::GenDisk,
+        sector: u64,
+        bytes: &[u8],
+        bhs: &mut alloc::vec::Vec<*mut crate::fs::bio::BufferHead>,
+    ) {
+        self.dev = dev;
+        if !self.batch.submit(dev, sector, bytes) {
+            // Window full or soft submission failure: drain the window
+            // (frees device pending-table pressure), then try once more.
+            self.drain();
+            if !self.batch.submit(dev, sector, bytes) {
+                // Synchronous fallback (device without async write, e.g.
+                // a loop device, or persistent window lag): exactly the
+                // pre-plugging span write. A write error leaves every
+                // BH_Dirty bit set (the standing durability points retry).
+                // SAFETY: dev is the fs's registered GenDisk; bytes covers
+                // exactly the span's consecutive blocks.
+                let rc = unsafe { crate::drivers::blkdev::blkdev_write(dev, sector, bytes) };
+                if rc.is_ok() {
+                    for &bh in bhs.iter() {
+                        // SAFETY: bh is a pinned cached BufferHead whose
+                        // content just persisted.
+                        unsafe {
+                            (*bh).clear_state_bit(crate::fs::bio::BufferState::BH_Dirty)
+                        };
+                    }
+                }
+                for &bh in bhs.iter() {
+                    // SAFETY: pinned by peek_buffer; balanced put.
+                    unsafe { crate::fs::bio::get_block_cache().put(bh) };
+                }
+                bhs.clear();
+                return;
+            }
+        }
+        // Async path: the span's heads stay pinned and dirty until the
+        // drain acks them.
+        let mut owned = alloc::vec::Vec::new();
+        core::mem::swap(&mut owned, bhs);
+        self.pending_bhs.push(owned);
+    }
+
+    /// Drain the window: one completion wait for every in-flight span,
+    /// then settle — BH_Dirty cleared only for device-acked spans, pins
+    /// released for all. No-op when idle.
+    fn drain(&mut self) {
+        if self.batch.in_flight() == 0 {
+            self.pending_bhs.clear();
+            return;
+        }
+        // The settle runs under the big lock: same serialization vs
+        // racing write cores as the span assembly itself (task-recursive
+        // SleepMutex — re-entry under run_sync_spans' hold is legal).
+        let _ext4_guard = crate::fs::ext4::EXT4_BIG_LOCK.lock();
+        self.batch.flush();
+        let cache = crate::fs::bio::get_block_cache();
+        for (i, bhs) in self.pending_bhs.drain(..).enumerate() {
+            if self.batch.status(i) == 0 {
+                for &bh in bhs.iter() {
+                    // SAFETY: bh is a pinned cached BufferHead; the span's
+                    // device write was acked, so its bytes are persisted.
+                    unsafe { (*bh).clear_state_bit(crate::fs::bio::BufferState::BH_Dirty) };
+                }
+            }
+            for &bh in bhs.iter() {
+                // SAFETY: pinned by peek_buffer; balanced put.
+                unsafe { cache.put(bh) };
+            }
+        }
+    }
+}
+
 /// Best-effort by design: a block whose buffer is missing (evicted after
 /// the write core dirtied it — the eviction write carried the same
 /// bytes), clean (already persisted), or hole-mapped is skipped; the
 /// standing durability points own whatever stays dirty.
+///
+/// PLUGGED SPANS (2026-11): spans are submitted ASYNCHRONOUSLY through
+/// `SpanFlusher` (bio's WriteBatch) — N consecutive spans go to the device
+/// with one completion wait at the end of the window (the blk-mq-plugging
+/// shape), replacing the one-blkdev_write-one-round-trip serialization
+/// that made the 128 MB fsync flush cost ~2048 serialized 64 KiB writes.
+/// A span's BH_Dirty bits are cleared and its pins dropped only at the
+/// window drain, and only for spans the device acked.
 fn run_sync_spans(
     fs: &crate::fs::ext4::Ext4FileSystem,
     inode: &crate::fs::inode::Inode,
     off0: u64,
     run_bytes: usize,
     stage: &mut alloc::vec::Vec<u8>,
+    flusher: &mut SpanFlusher,
 ) {
     // The buffer cache's block size is fixed at 4096 (bio::get_block_cache);
     // a different fs block size has no 1:1 page/block mapping — leave the
@@ -2842,7 +3007,9 @@ fn run_sync_spans(
                 // Assemble the span's bytes from the buffer heads (the
                 // authoritative buffer-committed truth — if a racing
                 // write core ran between the run write and this sync,
-                // ITS newer bytes are what must persist).
+                // ITS newer bytes are what must persist). The big lock
+                // held here makes the assembled copy stable until the
+                // batch's private copy is taken at submit.
                 let mut dst_off = 0usize;
                 for &bh in span_bhs.iter() {
                     // SAFETY: bh is pinned (peek_buffer) and holds a
@@ -2851,28 +3018,17 @@ fn run_sync_spans(
                     stage[dst_off..dst_off + src.len()].copy_from_slice(src);
                     dst_off += src.len();
                 }
-                // SAFETY: dev is valid; the sector range covers exactly
-                // span_len consecutive blocks and the assembled slice is
-                // span_len * 4096 bytes. A write error leaves every
-                // BH_Dirty bit set (the standing durability points retry).
-                let rc = unsafe {
-                    crate::drivers::blkdev::blkdev_write(
-                        dev,
-                        span_first_phys * sectors_per_block,
-                        &stage[..dst_off],
-                    )
-                };
-                if rc.is_ok() {
-                    for &bh in span_bhs.iter() {
-                        // SAFETY: bh is a pinned cached BufferHead; the
-                        // bytes just persisted are exactly its content.
-                        unsafe { (*bh).clear_state_bit(crate::fs::bio::BufferState::BH_Dirty) };
-                    }
-                }
-                for &bh in span_bhs.iter() {
-                    // SAFETY: pinned by peek_buffer; balanced put.
-                    unsafe { cache.put(bh) };
-                }
+                // PLUGGED SUBMIT: the span goes to the device without
+                // waiting; settle (dirty-clear + unpin) happens at the
+                // window drain for device-acked spans. Submission
+                // failures drain-then-retry, then fall back to the
+                // synchronous single write inside submit_span.
+                flusher.submit_span(
+                    dev,
+                    span_first_phys * sectors_per_block,
+                    &stage[..dst_off],
+                    &mut span_bhs,
+                );
                 span_bhs.clear();
                 span_len = 0;
             }
