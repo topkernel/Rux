@@ -413,7 +413,12 @@ fn ext4_file_read_cached_dst(
         // early (I/O or metadata error, OOM). Verify against the block map:
         // an ALLOCATED-but-uncached page gets a synchronous single-block
         // read here; only true holes (block 0) zero-fill.
-        if cache.get(fs_id, ino, page_index).is_none() {
+        // `resident`, not `get`: this is a pure membership check — a `get()`
+        // handle dropped on the hit side leaks one pin per filled page, and
+        // leaked pins keep entries alive past inode free as invalidated
+        // shadows that poison the inode-number successor (the
+        // msync01-after-mincore04 order-dependent corruption).
+        if !cache.resident(fs_id, ino, page_index) {
             // Distinguish a HOLE (Ok(0) — zero-fill, the sparse contract)
             // from a metadata ERROR (Err — the extent/bitmap read failed):
             // the old unwrap_or(0) folded both into the hole arm and served
