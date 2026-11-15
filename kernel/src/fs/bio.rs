@@ -1774,6 +1774,42 @@ pub fn block_cached(device: *const blkdev::GenDisk, blocknr: u64) -> bool {
     }
 }
 
+/// Durability-by-absence probe: TRUE only when the block's buffer is
+/// GONE from the cache AND no same-key eviction is still in flight.
+///
+/// Contract (evict_one Phase 4): a dirty victim is synchronously
+/// written before its entry is freed, so a settled-absent block's
+/// latest content is on disk. A mid-eviction entry does NOT count —
+/// its sync write may not have landed yet — the caller must take the
+/// slow path for it. This is what lets fsync's data loop skip the
+/// synchronous re-read of every evicted block (the post-flush wall:
+/// a 128 MB file turns over the 8192-entry cache ~4x, and the loop's
+/// bread() of each absent block paid one 4 KiB device read apiece).
+pub fn block_absent_durable(device: *const blkdev::GenDisk, blocknr: u64) -> bool {
+    // SAFETY: device is a valid GenDisk pointer; bucket traversal
+    // mirrors block_cached under the same bucket lock.
+    unsafe {
+        let (device_major, device_minor) = ((*device).major, (*device).first_minor);
+        let cache = get_block_cache();
+        let index = cache.hash_index(device_major, device_minor, blocknr);
+        let bucket = cache.buckets[index].lock_irqsave();
+        let mut current = bucket.head;
+        while let Some(entry_ptr) = current {
+            let entry = &*entry_ptr;
+            if entry.key == (device_major, device_minor, blocknr)
+                && (entry.evicting || (!entry.bh.is_null()
+                    && (*entry.bh).b_data.len() == cache.block_size as usize))
+            {
+                // Present (or its eviction still in flight): not
+                // provably durable by absence.
+                return false;
+            }
+            current = entry.hash_next;
+        }
+        true
+    }
+}
+
 /// Submit ONE async read covering `nblocks` consecutive disk blocks into a
 /// single buffer — the coalesced-readahead fast path.
 ///

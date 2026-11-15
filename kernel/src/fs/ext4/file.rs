@@ -1486,6 +1486,19 @@ fn ext4_sync_file_inner(
         if block == 0 {
             continue; // sparse hole
         }
+        // DURABILITY-BY-ABSENCE: a block whose buffer left the cache was
+        // synchronously written at its eviction (bio evict_one Phase 4) —
+        // its latest content is already on disk, so fsync owes it nothing.
+        // Re-reading it (the old shape) paid one synchronous 4 KiB read
+        // per absent block: a file larger than the 8192-entry buffer cache
+        // turns the cache over and the loop re-reads ~every block the
+        // preceding flush just persisted (measured: ~3 s of the 6.4 s
+        // 128 MB fsync wall). Mid-eviction keys take the slow path —
+        // their sync write may still be in flight.
+        // SAFETY: fs.device is the fs's registered GenDisk.
+        if unsafe { bio::block_absent_durable(fs.device, block) } {
+            continue;
+        }
         // SAFETY: bio::bread returns a valid BufferHead on success.
         unsafe {
             let bh = bio::bread(fs.device, block)
@@ -2581,7 +2594,14 @@ pub fn ext4_flush_dirty_inode(
     let ino = inode.ino as u64;
     let cache = page_cache::get_page_cache();
 
-    const CHUNK: usize = 16;
+    // Run width (pages per collected chunk / maximal run). 16 matched the
+    // run-batched flush's first cut (64 KiB spans); 64 quadruples the run
+    // (256 KiB spans, Linux writeback-chunk class) so the per-RUN fixed
+    // costs of the write core (journal bracket, read_inode/write_inode,
+    // big-lock pair) amortize over 4x more bytes — diskstats attribution
+    // on the plugged-span kernel showed the 128 MB fsync wall is the
+    // per-run core (2048 runs x ~3 ms), not span submission.
+    const CHUNK: usize = 64;
     let mut chunk: [(u64, u64); CHUNK] = [(0, 0); CHUNK];
     // Per-entry write outcomes for flush_done: an entry may only go clean
     // when its bytes verifiably reached the file (full write or a

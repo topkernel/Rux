@@ -1413,6 +1413,15 @@ pub fn sync_flushed_data(targets: &[(u64, u64)]) -> usize {
             if block == 0 {
                 continue; // hole
             }
+            // DURABILITY-BY-ABSENCE (same rationale as ext4_sync_file's
+            // data loop): a block whose buffer left the cache was synced
+            // at its eviction, so the ordered-data obligation for it is
+            // already met — re-reading it paid one synchronous 4 KiB read
+            // per absent block (the sync(2) wall after a large flush).
+            // SAFETY: fs.device is a valid GenDisk of a live instance.
+            if unsafe { crate::fs::bio::block_absent_durable(fs.device, block) } {
+                continue;
+            }
             // SAFETY: fs.device is a valid GenDisk of a live instance;
             // bread returns a valid BufferHead on success.
             unsafe {
