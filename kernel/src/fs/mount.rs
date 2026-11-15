@@ -75,6 +75,14 @@ pub fn get_mounts() -> Vec<(String, String, String, String)> {
         .collect()
 }
 
+/// Same view as get_mounts(), keeping the rows' PERMANENT mount ids —
+/// /proc/self/mountinfo numbers rows by struct mount.mnt_id, never by
+/// output position (registry churn re-pairing positional ids with
+/// different mounts made systemd's monitor see phantom changes).
+pub fn get_mount_entries() -> Vec<crate::process::ns::MountEntry> {
+    crate::process::ns::ns_get_mounts()
+}
+
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct MntFlags(u64);

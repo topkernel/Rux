@@ -270,6 +270,13 @@ pub struct MountFd {
     /// move_mount-attach time (the MS_REC bind clone discipline: the
     /// deferred roots share the source mounts' inodes, same superblock).
     pub submounts: Vec<(Vec<String>, Arc<Dentry>, MntFlags)>,
+    /// The ORIGINAL subtree root the submount rel-paths are relative to
+    /// (open_tree's resolved source `anc`). The materialization walk's
+    /// source-side cursor starts here — kernel-created mountpoints
+    /// (/proc, /dev, /sys: dcache-only, no on-disk entries) resolve
+    /// through it when the fresh root's disk tree has no placeholders
+    /// (same fallback as the MS_REC bind clone, flip6).
+    pub submount_src_base: Option<Arc<Dentry>>,
 }
 
 /// Build the root instance for a created fs_context (the per-type
@@ -483,6 +490,7 @@ pub fn make_detached_mount(
     fs_type: &str,
     source: &str,
     submounts: Vec<(Vec<String>, Arc<Dentry>, MntFlags)>,
+    submount_src_base: Option<Arc<Dentry>>,
 ) -> Arc<crate::fs::File> {
     let mounted_root = Arc::new(Dentry::new(String::from("/")));
     mounted_root.set_inode(root_inode);
@@ -499,6 +507,7 @@ pub fn make_detached_mount(
         fs_type: String::from(fs_type),
         source: String::from(source),
         submounts,
+        submount_src_base,
     });
     // SAFETY: single-owner handoff into the fd's private_data slot.
     unsafe {

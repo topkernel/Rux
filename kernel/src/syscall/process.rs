@@ -5570,6 +5570,7 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
             .find(|e| e.mount_point == "/")
             .cloned()
             .unwrap_or(MountEntry {
+                mount_id: crate::process::ns::alloc_mount_id(),
                 device: alloc::string::String::from("rootfs"),
                 mount_point: alloc::string::String::from("/"),
                 fs_type: alloc::string::String::from("rootfs"),
@@ -5598,6 +5599,9 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
         }
         // The old root at put_old (relative to the NEW root).
         table.push(MountEntry {
+            // The old root is a MOVE of the "/" row to put_old — same
+            // mount, same mnt_id (reference pivot_root keeps the mount).
+            mount_id: old_root_entry.mount_id,
             device: old_root_entry.device,
             mount_point: if rel_put_old.is_empty() {
                 alloc::string::String::from("/oldroot")

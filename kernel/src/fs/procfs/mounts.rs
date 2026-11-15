@@ -173,7 +173,6 @@ pub fn generate_mountinfo() -> Vec<u8> {
 
     let boot = boot_mounts();
     let seen: Vec<&str> = boot.iter().map(|m| m.mount_point).collect();
-    let mut next_id: u32 = 16;
     for m in boot.iter() {
         content.push_str(&format!(
             "{} {} {} / {} rw,relatime - {} {} rw\n",
@@ -181,12 +180,19 @@ pub fn generate_mountinfo() -> Vec<u8> {
         ));
     }
 
-    for (device, mount_point, fs_type, options) in crate::fs::mount::get_mounts() {
+    for entry in crate::fs::mount::get_mount_entries() {
+        let (device, mount_point, fs_type, options) =
+            (&entry.device, &entry.mount_point, &entry.fs_type, &entry.flags);
         if mount_point == "/" || seen.iter().any(|s| *s == mount_point) {
             continue;
         }
-        let mount_id = next_id;
-        next_id += 1;
+        // Linux mountinfo: the row's FIRST field is the mount's own
+        // PERMANENT mnt_id (struct mount.mnt_id), not a position in the
+        // output. Numbering positionally over the namespace Vec made any
+        // registry churn re-pair ids with different mounts between reads
+        // — systemd's monitor diffed phantom changes and failed healthy
+        // mount units (sys-kernel-tracing "no mount" class).
+        let mount_id = entry.mount_id;
         // Parent of anything not under /dev/pts is the root mount (1);
         // nested mounts (e.g. /sys/fs/cgroup under /sys) keep their
         // textual path — systemd only needs a consistent DAG.

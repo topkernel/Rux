@@ -6851,8 +6851,19 @@ pub fn sys_open_tree(args: SyscallArgs) -> i64 {
     } else {
         alloc::vec::Vec::new()
     };
+    // The submount rel-paths are relative to `anc` — the materialization
+    // walk's source-side cursor base (kernel-created mountpoints resolve
+    // through it; flip6).
+    let submount_src_base = if submounts.is_empty() { None } else { Some(anc.clone()) };
 
-    let file = fapi::make_detached_mount(root_inode, mnt_flags, &fs_type, &source, submounts);
+    let file = fapi::make_detached_mount(
+        root_inode,
+        mnt_flags,
+        &fs_type,
+        &source,
+        submounts,
+        submount_src_base,
+    );
     match fapi::install_fd_with(file, flags & fapi::OPEN_TREE_CLOEXEC != 0) {
         Ok(fd) => fd as i64,
         Err(e) => e as i64,
@@ -7083,13 +7094,18 @@ pub fn sys_move_mount(args: SyscallArgs) -> i64 {
             }
             // open_tree(AT_RECURSIVE) clones: materialize inside the
             // now-attached root.
-            let submounts = from_mfd
+            let (submounts, submount_src_base) = from_mfd
                 .as_ref()
                 .and_then(|f| fapi::mountfd_of(f))
-                .map(|mfd| core::mem::take(&mut mfd.submounts))
+                .map(|mfd| {
+                    (
+                        core::mem::take(&mut mfd.submounts),
+                        mfd.submount_src_base.clone(),
+                    )
+                })
                 .unwrap_or_default();
             if !submounts.is_empty() {
-                crate::fs::vfs::vfs_clone_submounts(&mnt.root, &submounts);
+                crate::fs::vfs::vfs_clone_submounts(&mnt.root, &submounts, submount_src_base.as_ref());
             }
             0
         }
@@ -7373,6 +7389,7 @@ pub fn sys_fsmount(args: SyscallArgs) -> i64 {
         &fc.fs_type,
         &source,
         alloc::vec::Vec::new(),
+        None,
     );
     match fapi::install_fd_with(mfile, args[1] & fapi::FSMOUNT_CLOEXEC != 0) {
         Ok(fd) => fd as i64,

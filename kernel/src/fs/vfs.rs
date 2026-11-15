@@ -1903,13 +1903,20 @@ pub fn vfs_governing_mount_of(d: &Arc<Dentry>) -> Option<Arc<VfsMountInternal>> 
 /// fsctx (open_tree AT_RECURSIVE): materialize recorded submount clones
 /// at their relative paths INSIDE a freshly attached mount root — the
 /// same never-fabricate walk the MS_REC bind clone uses
-/// (bind_clone_attach; see the sc31 lesson there).
+/// (bind_clone_attach; see the sc31 lesson there). `src_base` is the
+/// ORIGINAL subtree root the rel-paths are relative to (open_tree's
+/// `anc`): the source-side cursor base for kernel-created mountpoints.
+/// Without it the clones are dropped — the walk cannot resolve their
+/// mountpoint components (None only occurs for mount fds that carry no
+/// submounts anyway).
 pub fn vfs_clone_submounts(
     root: &Arc<Dentry>,
     clones: &[(Vec<String>, Arc<Dentry>, MntFlags)],
+    src_base: Option<&Arc<Dentry>>,
 ) {
+    let Some(src_base) = src_base else { return };
     for (rel, src_root, flags) in clones {
-        bind_clone_attach(root, rel, src_root, *flags);
+        bind_clone_attach(root, src_base, rel, src_root, *flags);
     }
 }
 
