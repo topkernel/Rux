@@ -10169,6 +10169,12 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
     // waiter with >=2 WRAP frames = recursive holder (named); thread
     // parked OFF the word with WRAP/NG frames = stuck holder (named);
     // neither = thread-side holders acquitted (holder exited).
+    // x86_64-only (pcachewedge build fix, 2026-11-15): the scan reads
+    // x86 pt_regs field names (orig_rax/rdi/rsp) and the OH x86_64
+    // image's fixed musl load base — it cannot compile or mean anything
+    // on the other arches; this block had escaped its cfg and broke
+    // every non-x86_64 build of main f5ed08765.
+    #[cfg(feature = "x86_64")]
     if word & 0xffff_f000 == 0x3fbf_13e000 {
         let mut w2 = crate::dfx::backtrace::ConsoleWriter::new();
         let _ = writeln!(w2, "MHUNT-CANARY2 word={:#x}", word);

@@ -2768,8 +2768,23 @@ impl PageCache {
             STAT_DEMOTIONS.fetch_add(demoted as u64, Ordering::Relaxed);
         }
 
-        // LRU walk exhausted — fall back to slot-table scan (safety net)
-        for si in 0..PC_TABLE_CAP {
+        // LRU walk exhausted — fall back to slot-table scan (safety net).
+        // WINDOWED (pcachewedge lane, 2026-11-15): the whole-table scan
+        // (32768 slots, each a per-inode lock + map iteration) ran inside
+        // ONE wlock section with preemption disabled — under the fammm
+        // churn (everything pinned/mapped, nothing evictable) that was a
+        // MULTI-SECOND preempt-off monopolist window: RCU quiescent
+        // rounds stalled, fdreapd (waiting on the grace period to close
+        // dead tasks' fds) starved for 179 s+, and every task piling
+        // behind the pcache locks spun. The net is a safety valve, not a
+        // correctness requirement — a rotating window of slots per call
+        // keeps the coverage (successive calls continue where the last
+        // stopped) while bounding any single wlock hold.
+        const FALLBACK_WINDOW: usize = 512;
+        static FALLBACK_CURSOR: AtomicUsize = AtomicUsize::new(0);
+        let start = FALLBACK_CURSOR.fetch_add(FALLBACK_WINDOW, Ordering::Relaxed) % PC_TABLE_CAP;
+        for k in 0..FALLBACK_WINDOW {
+            let si = (start + k) % PC_TABLE_CAP;
             let ptr = self.slots[si].0.load(Ordering::Acquire);
             if ptr.is_null() || ptr as usize == PC_TOMBSTONE_BITS {
                 continue;

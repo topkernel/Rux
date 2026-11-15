@@ -13,7 +13,7 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use crate::drivers::blkdev::{GenDisk, ReqCmd, Request};
 use crate::fs::dev_t::{DevNo, LOOP_MAJOR, MISC_MAJOR};
@@ -65,6 +65,19 @@ struct LoopDev {
     name: Spinlock<[u8; 64]>,
     /// Serializes the set_pos/read/write dance on the backing file.
     io_lock: Spinlock<()>,
+    /// Re-entrancy guard (pcachewedge lane, 2026-11-15): the pid whose
+    /// request currently owns `io_lock` (0 = none). The backing-file
+    /// write below runs SYNCHRONOUSLY under the lock; under memory
+    /// pressure its allocations enter direct reclaim, whose writeback
+    /// flushes dirty pages of filesystems ON THIS SAME LOOP — the bio
+    /// re-enters loop_request_fn and re-acquires io_lock it already
+    /// holds: a non-recursive spinlock self-deadlock that spun cpu1
+    /// forever with every other task asleep (the fammm a1 wedge face;
+    /// GATE-CENSUS selffight counts the same pid's nested reclaims).
+    /// The guard makes the recursive request FAIL instead of spin: the
+    /// failed write keeps its pages dirty (flush_done's write_ok=false
+    /// discipline) for a later, non-recursive flush.
+    io_owner_pid: AtomicU32,
     /// The GenDisk handed out to the block layer (stable address: boxed).
     disk: Option<&'static GenDisk>,
 }
@@ -78,6 +91,7 @@ impl LoopDev {
             flags: AtomicU64::new(0),
             name: Spinlock::new([0; 64]),
             io_lock: Spinlock::new(()),
+            io_owner_pid: AtomicU32::new(0),
             disk: None,
         }
     }
@@ -298,6 +312,55 @@ unsafe extern "C" fn loop_request_fn(req: &mut Request) {
     }
     // SAFETY: static array access bounded by N_LOOPS.
     let dev = unsafe { &LOOPS[idx] };
+    // Re-entrancy guard (see io_owner_pid): claim the device for this
+    // pid BEFORE waiting on io_lock; a recursive request (this pid
+    // already inside) fails with EDEADLK instead of self-spinning.
+    // Error 35 (-EDEADLK): the caller's write is failed, its pages stay
+    // dirty, and the flush retries outside the loop-write context.
+    {
+        let me = crate::process::current_pid() as u32;
+        match dev.io_owner_pid.compare_exchange(
+            0,
+            me,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => {}
+            Err(owner) if owner == me => {
+                static RECUR_REPORTS: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if RECUR_REPORTS
+                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                    < 8
+                {
+                    crate::pr_err!(
+                        "loop{}: recursive request while pid {} owns io_lock — failing request (reclaim writeback re-entry)",
+                        idx,
+                        me
+                    );
+                }
+                req.error.store(-35, Ordering::Release); // -EDEADLK
+                return;
+            }
+            Err(_) => {}
+        }
+    }
+    // Claimed — every exit path below must release the guard. The
+    // release is a CAS(owner==me → 0): a task that arrived while another
+    // owned the claim (its CAS above failed, it only WAITED on io_lock)
+    // must not clear a claim it never took.
+    loop_request_fn_claimed(req, dev, idx);
+    let _ = dev.io_owner_pid.compare_exchange(
+        crate::process::current_pid() as u32,
+        0,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    );
+}
+
+/// Body of [`loop_request_fn`] with the io_owner_pid re-entrancy claim
+/// held; the wrapper releases it on return.
+unsafe fn loop_request_fn_claimed(req: &mut Request, dev: &'static LoopDev, idx: usize) {
     let _io = dev.io_lock.lock();
     let guard = dev.file.lock();
     let Some(file) = guard.as_ref() else {
