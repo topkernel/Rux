@@ -312,6 +312,34 @@ numbers this register cites).
   dispatch layer and owned by the perf queue). The whole table, both
   directions, is the artifact — this register records the standing,
   not a selection.
+- **The unified-track vDSO: one timekeeping anchor serves kernel and
+  userspace bit-identically** (vdso-rearm lane, commit 4c0cabe85,
+  2026-11-15): the x86_64 timekeeping anchor {cycle_last,
+  base_mono_nom, mult} lives in the vDSO data page itself; the
+  kernel's `read_time()` and the hand-emitted AMD64 vDSO functions
+  run the SAME seq protocol (seq1 → fields → lfence;rdtsc → seq2) and
+  the SAME integer arithmetic over the SAME words, so a syscall clock
+  read and a vDSO read at the same instant agree bit for bit. That
+  structural identity is what LTP clock_gettime04 demands (strict
+  non-negative deltas between ADJACENT vdso and syscall reads —
+  10,000 interleaved pairs per clock) and it is achieved by
+  construction, not by tolerance tuning: the reference kernel keeps
+  separate kernel/vvar clockstate and accepts cross-track skew that
+  its own LTP test tolerates through coarser pair spacing; here the
+  two tracks CANNOT diverge because they are one track. The seq word
+  doubles as the writer lock (cmpxchg even→odd), closing a multi-
+  writer tear class (two tick CPUs racing a fetch_or publication).
+  Measured, name-only same-rig A/B (OH boot, tok-r4fix vehicle, KVM
+  q35 SMP2 4G, syscost, 780 s, kernels differ only in the two dynstr
+  symbol names): clock_gettime syscalls 8,259,773 → 0 per boot
+  (−29.4 CPU-s = −2.0% of the box, −26% total syscall volume; the
+  biggest burner OS_FFRT_2_0's 1.1 M calls all move to userspace),
+  with nanosleep avg (155.1 vs 149.7 ms) and the GRQ lock-site avg
+  (4.97 vs 5.44 µs) flat, zero panics both arms. Functional:
+  clock_gettime04 6/6 incl. both COARSE clocks and the vdso variants
+  (the exact test that forced the 106th's disarm), 480k probe
+  adjacent-pair checks zero negatives. Source: vdso-rearm lane
+  run/VDSO-REARM.md + run/pa-vdsorearm-{a,b}-serial.log.
 
 ## F. Observability as a first-class subsystem
 

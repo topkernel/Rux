@@ -273,6 +273,22 @@ dead-proc `expect()` replaced by a bounded warning (619bf4b6); the
   renderer asserts, not a global counter's arrival order. Artifacts:
   oh-tracepc TASK.md §5-7, run/ab-analyze.sh outputs
   (run/oh-abp1[ab]-*, run/oh-abe1[ab]-*, work/pbench-pb[oa]-[ab]-*).
+- Unified-track vDSO (vdso-rearm lane, commit 4c0cabe85, 2026-11-15):
+  clock_gettime syscalls per OH boot 8,259,773 → 0 (name-only
+  same-rig A/B, tok-r4fix vehicle, KVM q35 SMP2 4G, 780 s;
+  −29.4 CPU-s = −2.0% of the box, −26% total syscall volume),
+  nanosleep avg and the GRQ lock-site avg flat, zero panics both arms
+  — AND the speed came from a correctness construction: the kernel
+  clock and the userspace vDSO now read ONE anchor under one seq
+  protocol with identical arithmetic (bit-identical tracks — the
+  property LTP clock_gettime04's strict adjacent-pair test enforces),
+  where the previous fast attempt needed per-CPU correction spread
+  and had to be disarmed. The seq word doubles as the writer lock
+  (cmpxchg even→odd), eliminating the multi-writer publication tear
+  as a class rather than narrowing it; the page is user-RO precisely
+  because the kernel trusts its words. LTP clock_gettime04 6/6 incl.
+  the vdso variants and both COARSE clocks. Artifacts: vdso-rearm lane
+  run/VDSO-REARM.md, run/pa-vdsorearm-{a,b}-serial.log.
 
 ## 4. Nothing traded away
 The compatibility checklist stands while both ledgers hold: 345+
