@@ -408,6 +408,22 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             syscall_set_return_value(regs, misc::sys_epoll_wait(args));
             return;
         }
+        172 => {
+            // iopl(2) — x86_64 native, no asm-generic number. Contract
+            // surface (CAP_SYS_RAWIO + level 0..=3): user mode has no
+            // IOPL to switch. Unhandled, 172 hit generic getpid and LTP
+            // iopl01 read the pid as the return value — first a fake
+            // PASS, then ENOSYS after the native-table sweep (a1dce23b7).
+            syscall_set_return_value(regs, crate::arch::process::sys_iopl(args));
+            return;
+        }
+        173 => {
+            // ioperm(2) — x86_64 native, same story (generic 173 is
+            // getppid). Contract surface: CAP_SYS_RAWIO gate + the
+            // 0..0x10000 port-space range check.
+            syscall_set_return_value(regs, crate::arch::process::sys_ioperm(args));
+            return;
+        }
         _ => {}
     }
 
