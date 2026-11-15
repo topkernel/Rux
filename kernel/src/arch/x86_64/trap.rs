@@ -2590,8 +2590,19 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
         // high-userspace faults get their own 8-decode budget.
         static SEGVD_HI_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
+        // early30 (120th): control-flow faults (instruction fetch at a
+        // non-exec target — cr2 == rip, the foundation exec-at-heap and
+        // the IMS call-to-0 faces) are the rare corruption-shaped ones,
+        // but they are also low-address faults and the NULL-deref storm
+        // (bluetooth/usb_host, cr2=0, rip!=cr2) burns the 6-decode low
+        // budget long before they land (e30b6: foundation's one fault
+        // got a one-liner). Own 8-decode bucket for rip==cr2.
+        static SEGVD_XN_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
         let hi_fault = fault_addr >= 0x7f00_0000_0000;
-        let over = if hi_fault {
+        let over = if fault_addr == regs.rip {
+            SEGVD_XN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 8
+        } else if hi_fault {
             SEGVD_HI_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 8
         } else {
             SEGVD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 6
