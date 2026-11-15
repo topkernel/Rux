@@ -754,3 +754,34 @@ deterministic. Evidence: run/pa115debt3-wedge-excerpt.txt (full
 serial kept lane-local). Filed for the owning lane: the round-3
 per-field absence-stamp heal (8387c00b) did not clear a
 wfi-resident softirq-field phantom under vCPU starvation.
+
+## NOHZ round (2026-11-16, the 9f01767df merge) — debug-class gate board + anchor staleness notes
+
+Debug-class Tier-1+2 on the nohz kernel (q35 KVM smp2, default boot —
+no nohz_full parameter, the anchor-banking condition), foreign-QEMU
+background 4-6 (heavier than the anchor's quiet<=2):
+
+- Tier-1 all rows PASS: TERM-DESCHED 8, WAKE-REFUSED 31, volume 16.9M
+  (debug band 15.5M±80%), **GRQ avg hold 5153 ns — inside the
+  1200-7320 band** (the 699 ns reading in the release-class leg is a
+  CROSS-CLASS artifact: the hold band was banked on debug; release
+  reads faster by construction), nanosleep 149 ms, dumps 12 to t=720.
+- Tier-2: p1_null 0.341 (+13.7%), p1_clock 0.411 (+10.8%) — both in
+  band. p2_ctxsw 2.149/2.294 vs the 1.242 anchor (+73-85%).
+- **p2 anchor staleness (rerun-once applied, then a pre-merge
+  control)**: the anchor was banked on the round-7 kernel (main
+  91de1d04, 2026-11-01). A pre-nohz control board on the merged
+  tree's parent (a436fab85, same debug class, same rig) reads
+  **p2_ctxsw 1.994** — the current tree is already +60% over the
+  anchor before the nohz changes; the nohz delta (2.149/2.294 vs
+  1.994) sits within the board-to-board spread (p2's p99 spread on
+  these boards is 10-27 us). The 1.242 anchor no longer describes the
+  tree; REBANK p2 (3-rep median per the provenance discipline) on the
+  current kernel before the next merge that touches sched hot paths.
+- clock_gettime avg row: reads 0 us since vdso-rearm (the call is
+  served by the vDSO — the syscost row counts syscall-path cost that
+  no longer carries the workload); the row needs a vDSO-aware
+  reinterpretation before it can band again.
+- The nohz_full=1 numbers (release class, same-kernel A/B) live in
+  rust-native-register.md §J: p1_null 0.050 vs 0.060 (-17%), strand
+  pass-rate 11/12 vs 5/12 vs main-tip 0/10.
