@@ -13317,3 +13317,38 @@ safety-and-performance.md §3).
    IMPROVE (libc clock_gettime now vDSO-served, 66–74ns class vs
    the 0.371µs anchor); Tier-3 not owed (no allocator/IRQ-path
    change). riscv64 untouched (rv vDSO unchanged; make test green).
+
+## EARLY-PUT SESSION — the phantom-put producer named and closed: insert_batch discarded pre-marked frames through the raw free path (2026-11-15/16, branch early-put @ fe6b13c91)
+
+Resumed after the quota wall with the ref-ring WIP built. Completed the
+instrument (GET decode, 8192-entry ring), added a free-of-live-cache-entry
+tripwire to the free funnel (every legit cache free clears type+keys in
+release_page_frame first; a dirty arrival is a foreign free), and ran the
+fammm rig.
+
+- Boot 1 (ring only): capture #1 live-pt-refused, pfn 0x7fc16 — ring shows
+  teardown PUT old=1->0 with NO GET since the frame's cache insert; the
+  frame was already double-tracked before the window (late echo).
+- Boot 2 (tripwire armed): 4 consecutive frames refused, stacks all naming
+  PageCache::insert_batch <- ext4 fill_page_cache_batch <- loader faults.
+  Producer NAMED: insert_batch pre-marks frames (PageCache type + UpToDate
+  + mapping key + index) in its unlocked fill stage; the table-full /
+  duplicate / revive discard arms freed them via raw free_page WITHOUT
+  clearing the identity. The zone's alloc path clears flags+refcount but
+  NOT type/mapping/index — the discarded frame keeps claiming to be a live
+  cache entry (carrying the duplicate winner's keys: two frames, one cache
+  identity) through every recycling life. 29 such frees in one boot.
+- Fix: discard_prepared_frame() strips the identity at all three arms
+  (same stores as release_page_frame). Commit fe6b13c91; instrument commit
+  d2a23260c.
+
+Verification: loader-phase A/B unfixed 29 events vs fixed 0; fammm(-mkfs)
+4 boots and mmap-family storm 3 boots (111 runs) at ZERO events of every
+family (CACHE-OWNED / phantom-put / live-pt-refused / DOUBLE-*) and zero
+quarantine events — the ≤2/boot residual leak face did not reproduce
+under the armed detector. Gates: triple builds rc=0; riscv64 make test
+1328/0. Full report: run/EARLY-PUT.md.
+
+Not this family (needs its own lane): fallocate05/06 mkfs phase wedges the
+runner via reclaim io_lock re-entry + fdreap RCU stall under the 243k-page
+cache balloon — present pre-fix, not caused by the fix.
