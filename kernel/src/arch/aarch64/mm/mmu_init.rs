@@ -556,6 +556,13 @@ impl PtLedger {
         POISON_BITMAP[w].fetch_or(1 << b, Ordering::AcqRel);
     }
 
+    /// Boot-set probe (mmforensics capture parity): the aarch64 ledger
+    /// keeps no boot-ppn registry yet — report "not boot-shared" so the
+    /// generic capture line compiles and stays truthful about coverage.
+    pub fn is_boot(&self, _ppn: u64) -> bool {
+        false
+    }
+
     /// Is this frame quarantined (ever double-tracked)?
     pub fn is_poisoned(ppn: u64) -> bool {
         let Some(i) = Self::index(ppn) else { return false };
