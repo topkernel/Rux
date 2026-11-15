@@ -250,6 +250,10 @@ fn main() {
     // Generate configuration code
     generate_config_code(&config);
 
+    // Apply the arch linker script(s) exactly once (see the comment on
+    // emit_linker_scripts for why this must not live in .cargo/config.toml)
+    emit_linker_scripts();
+
     // Compile boot.S separately (Linux-style: first object = entry point)
     compile_boot_asm();
 
@@ -813,6 +817,99 @@ pub const TARGET: &str = "none";
 /// (name offset into NAMES, address, size, ELF type) per symbol.
 pub static INDEX: &[(u32, u64, u64, u8)] = &[];
 "#;
+
+/// Apply the arch linker script(s) to this bin's link, exactly once.
+///
+/// The -T link-args used to live in .cargo/config.toml. That is not
+/// idempotent under cargo's config discovery: cargo CONCATENATES
+/// [target.<triple>] rustflags arrays across every ancestor
+/// .cargo/config.toml, and every Rux worktree carries that tracked file —
+/// so a build run from a checkout nested inside another worktree (the lane
+/// `run/<base>/` pattern) applied each script TWICE. A twice-applied
+/// x86_64 linker.ld resets `. = BOOT_BASE` (0x100000) and merges a second
+/// .boot_stack allocation over the first pass's real .boot contents:
+/// rust-lld: "section .boot virtual address range overlaps with .boot_stack"
+/// (reproduced deterministically at 912995089 and at main 0c343b043; the
+/// old scripts only *happened* to tolerate it on riscv64/aarch64).
+///
+/// Emitting from here is single-sourced: a build script runs once per
+/// build no matter how many ancestor configs cargo merged. For the
+/// mixed-version nesting case (a fixed checkout inside an OLDER worktree
+/// whose config still carries -T), the effective rustflags are inspected
+/// via CARGO_ENCODED_RUSTFLAGS (cargo passes build scripts the merged
+/// flag list) and this script defers to the already-applied -T.
+fn emit_linker_scripts() {
+    let target = env::var("TARGET").unwrap_or_default();
+
+    // (repo-relative script path) per kernel target triple, in -T order.
+    let scripts: &[&str] = if target.contains("x86_64-unknown-none") {
+        &[
+            "kernel/src/arch/x86_64/linker.ld",
+            "kernel/src/arch/x86_64/linker-extra.ld",
+        ]
+    } else if target.contains("riscv64gc-unknown-none-elf") {
+        &["kernel/src/arch/riscv64/linker.ld"]
+    } else if target.contains("aarch64-unknown-none") {
+        &["kernel/src/arch/aarch64/linker.ld"]
+    } else {
+        return; // host/verify targets: no kernel link
+    };
+
+    // Repo root (workspace root) is the parent of kernel/ (CARGO_MANIFEST_DIR).
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let root = manifest_dir
+        .parent()
+        .expect("kernel/ manifest dir has no parent")
+        .to_path_buf();
+
+    for script in scripts {
+        let abs = root.join(script);
+        assert!(
+            abs.is_file(),
+            "linker script missing: {} (target {})",
+            abs.display(),
+            target
+        );
+        match rustflags_script_count(script) {
+            0 => println!("cargo:rustc-link-arg=-T{}", abs.display()),
+            // An ancestor config (older worktree) already applies this
+            // exact script; a second application re-breaks the layout.
+            1 => {}
+            // Two pre-fix configs merged (e.g. a shared ancestor plus an
+            // older wrapping worktree): the doubled -T is already on the
+            // rustc command line and cannot be removed from here. Say so
+            // instead of failing with a bare rust-lld overlap error.
+            n => println!(
+                "cargo:warning=-T {} applied {}x by merged .cargo configs \
+                 (x86_64 will fail to link: .boot/.boot_stack overlap). \
+                 Build from a checkout whose .cargo/config.toml carries no \
+                 link-arg=-T (post link-fix), or unset the extra config.",
+                script, n
+            ),
+        }
+    }
+}
+
+/// How many times the effective rustflags apply a `link-arg=-T` for
+/// `script` (repo-relative, forward slashes). Understands both token
+/// shapes cargo produces: "-C" + "link-arg=-T<path>" (config arrays,
+/// \x1f-separated in CARGO_ENCODED_RUSTFLAGS) and the joined
+/// "-Clink-arg=-T<path>" form of a hand-set RUSTFLAGS variable.
+fn rustflags_script_count(script: &str) -> usize {
+    let flags = env::var("CARGO_ENCODED_RUSTFLAGS")
+        .or_else(|_| env::var("RUSTFLAGS"))
+        .unwrap_or_default();
+    let sep = if flags.contains('\u{1f}') { '\u{1f}' } else { ' ' };
+    flags.split(sep)
+        .filter(|tok| {
+            let tok = tok.trim().trim_start_matches("-C");
+            match tok.strip_prefix("link-arg=-T") {
+                Some(path) => path.replace('\\', "/").ends_with(script),
+                None => false,
+            }
+        })
+        .count()
+}
 
 /// Compile boot.S assembly file separately and link it as the first object.
 /// This ensures _start is at the kernel's load address (physical address).
