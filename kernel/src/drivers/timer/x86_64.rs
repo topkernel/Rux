@@ -25,7 +25,7 @@
 //! handler derives jiffies from the timebase (`floor(elapsed/period)`),
 //! which is idempotent under concurrent tick handlers on any CPU.
 
-use core::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::arch::cpu::{inb, io_wait, outb};
 
@@ -70,72 +70,16 @@ const PIT_CH0_MODE3_BIN: u8 = 0x36;
 /// the 1 Hz bounded resync absorbs what is left.
 pub const TSC_MULSHIFT: u32 = 32;
 
-/// Map a raw TSC delta into the nominal 10 MHz domain at full precision:
-/// MULTIPLY FIRST, SHIFT SECOND.
+/// TSC timekeeping state lives in the vDSO DATA PAGE (mm/vdso.rs
+/// x86_track) since the unified-track re-arm: ONE anchor
+/// {cycle_last, base_mono_nom, mult} serves both the kernel's
+/// read_time() and the user-side vDSO interpolation, bit-identically.
+/// The only timer-local state left:
 ///
-/// sc204 TICKPROBE (2026-10-24, launcher leg 12): the shift-first form
-/// `(delta >> 32) * mult` introduced by 9e5f0147 (shift 12 -> 32) left
-/// the kernel clock with a granularity of `mult` nominal ticks — at
-/// 4.29 GHz that is ONE STEP EVERY 2^32 TSC ticks = 1.0008 SECONDS. Both
-/// of the probe's nominal-2 ms sample windows measured dt = 10,008,094
-/// ticks (one full step, identical twice); every sc200-sc203
-/// WW IRQ-OFF-WINDOW read an age of exactly 1000 ms and every
-/// WAKE-STRANDED strand quantized to the same grid, because read_time
-/// itself only moved once per second. Every timed wait in the kernel
-/// (nanosleep/expiry checks, scheduler deltas, binder slices, the OH
-/// boot chain) coarsened to 1 s steps — the quiet-quiet soft-wedge /
-/// crawl shape. At shift 12 the granularity was 2^12 TSC ticks (~1 us)
-/// and nobody noticed the form; raising the shift made it 1 s.
-/// Multiply-then-shift keeps the ~3 ppm rate accuracy of 9e5f0147 AND
-/// restores ~0.23 ns granularity. The u128 product of delta (< uptime x
-/// 4.3 GHz, far under 2^64) and mult (~10M) cannot overflow u128.
-#[inline]
-fn tsc_delta_nominal(delta: u64, mult: u64) -> u64 {
-    (((delta as u128) * (mult as u128)) >> TSC_MULSHIFT) as u64
-}
-
-/// TSC timekeeping state (written once by `lapic_time_calibrated`):
-/// nominal = ((tsc - base_tsc) >> SHIFT) * MULT, where
-/// MULT = round(CLOCK_FREQ << SHIFT / tsc_freq).
-static TSC_MULT: AtomicU64 = AtomicU64::new(0);
-static TSC_BASE: AtomicU64 = AtomicU64::new(0);
-/// Offset added to the TSC-derived value so the switch from the
-/// jiffies-derived clock cannot run time backward.
-static TSC_CONTINUITY_OFFSET: AtomicU64 = AtomicU64::new(0);
-
-/// Per-CPU additive correction to the TSC-derived nominal clock.
-///
-/// KVM can give every vCPU its own TSC offset (rates identical, offsets
-/// not). Each AP measures its own (HPET - TSC-derived) delta once, right
-/// before its first tick, and `read_time()` applies the current CPU's
-/// correction — the same shape as Linux's per-CPU cyc2ns offsets.
-/// 0 = not yet calibrated (index 0 stays 0: the BSP's correction is
-/// folded into TSC_CONTINUITY_OFFSET at promote time).
-///
-/// HISTORY NOTE: sc110-114's "one-time ~25 s TSC-vs-HPET step" was NOT
-/// vCPU skew — it was the shift-12 ceil rounding running the mapping
-/// 4.796% fast (see the TSC_MULSHIFT note; the sc114 AP "skew" of
-/// -21.9 ms was 4.796% x the 0.456 s AP-bringup instant). The per-CPU
-/// discipline stays: it is correct in principle and costs one acquire
-/// load on the read path.
-///
-/// Residual calibration noise between CPUs still makes tiny BACKWARD
-/// steps possible on thread migration; sc113 measured one such step
-/// under the OLD 4.8% mapping error (samgr printed `cost:4294946ms` —
-/// a 21 ms backward step wrapping a u32 microsecond diff, which aborted
-/// SA loads and killed the OsAccount host's clients). Two guards: the
-/// calibration takes the MIN of three bracketed samples (noise floor),
-/// and read_time ratchets through TSC_LAST (published time never goes
-/// backward).
-static TSC_CPU_OFF: [AtomicI64; crate::config::MAX_CPUS] =
-    [const { AtomicI64::new(0) }; crate::config::MAX_CPUS];
-
-/// Monotonic ratchet: the largest value ever returned by read_time().
-/// Plain unsynchronized max-store — a lost race only leaves the ratchet
-/// one store behind, never lets it decrease.
-static TSC_LAST: AtomicU64 = AtomicU64::new(0);
-
-/// True once the TSC became the timekeeper.
+/// - TSC_ACTIVE: the page anchor is published (promote ran);
+/// - TSC_FROM_HPET: the anchor was HPET-calibrated (gates the 1 Hz
+///   resync);
+/// - TSC_LAST: the kernel-side monotonic ratchet (see read_time).
 static TSC_ACTIVE: AtomicU64 = AtomicU64::new(0);
 
 /// True when the active TSC timekeeper was calibrated against the HPET
@@ -145,6 +89,19 @@ static TSC_ACTIVE: AtomicU64 = AtomicU64::new(0);
 /// and vCPU-synchronized, so after calibration RDTSC serves the nominal
 /// clock with no exits; a 1 Hz resync against the HPET bounds drift).
 static TSC_FROM_HPET: AtomicU64 = AtomicU64::new(0);
+
+/// Monotonic ratchet: the largest value ever returned by read_time().
+/// Plain unsynchronized max-store — a lost race only leaves the ratchet
+/// one store behind, never lets it decrease.
+///
+/// On the unified track this NEVER engages on a healthy boot (the page
+/// base only moves forward; the vCPU TSC never goes backward): it is
+/// anomaly insurance for the >25 s rebase pull-back and any future
+/// writer bug — the syscall clock freezes briefly instead of stepping
+/// back. NOTE the vDSO track has no ratchet (userspace cannot see
+/// TSC_LAST); that is exactly what makes the two tracks bit-identical,
+/// and why the base must never move backward outside the rebase path.
+static TSC_LAST: AtomicU64 = AtomicU64::new(0);
 
 /// jiffies — global tick counter (advanced from the timer IRQ)
 static JIFFIES: AtomicU64 = AtomicU64::new(0);
@@ -208,100 +165,87 @@ pub fn monotonic_ns_since_boot() -> u64 {
     ((read_time() as u128) * 1_000_000_000u128 / (CLOCK_FREQ as u128)) as u64
 }
 
-/// The TSC→ns slope the kernel mapping actually uses (×100: the mapping
-/// yields 100 ns nominal ticks, the vDSO wants ns directly). Publishing
-/// THIS as the vDSO mult — instead of one re-derived from the APIC's
-/// TSC_FREQ — makes the user-side interpolation slope identical to the
-/// kernel's, so extrapolation error cannot grow between publications
-/// even if the two calibrations disagree slightly.
-#[inline]
-pub fn tsc_mult_ns_for_vdso() -> u64 {
-    TSC_MULT.load(Ordering::Acquire).wrapping_mul(100)
-}
-
 /// Read current time in the nominal CLOCK_FREQ clock domain.
 ///
-/// TSC-derived first (fast: RDTSC, no VM exit) once calibrated — against
-/// the LAPIC tick when there is no HPET, against the HPET itself when
-/// there is (hpet::calibrate_tsc); HPET-derived (one MMIO read per call)
-/// only in the pre-calibration window; jiffies-derived before either.
+/// TSC-derived first (fast: RDTSC, no VM exit) once the page anchor is
+/// published — the UNIFIED TRACK (mm/vdso.rs x86_track): the same page
+/// words, the same seq protocol, the same integer arithmetic the vDSO
+/// functions run in userspace, so a syscall read and a vDSO read at the
+/// same instant are bit-identical (LTP clock_gettime04's strict
+/// adjacent-pair requirement). HPET-derived (one MMIO read per call)
+/// only in the pre-promotion window; jiffies-derived before either.
 #[inline]
 pub fn read_time() -> u64 {
     if TSC_ACTIVE.load(Ordering::Acquire) != 0 {
-        let mult = TSC_MULT.load(Ordering::Acquire);
-        let now = crate::arch::cpu::read_counter();
-        let base = TSC_BASE.load(Ordering::Acquire);
-        let delta = now.wrapping_sub(base);
-        let mut v = tsc_delta_nominal(delta, mult)
-            + TSC_CONTINUITY_OFFSET.load(Ordering::Acquire);
-        // Per-CPU vCPU TSC-offset correction (TSC_CPU_OFF doc). Signed
-        // add keeps cross-CPU monotonicity inside the i64 nominal range;
-        // an uncalibrated CPU (0) reads the uncorrected value.
-        let cpu = crate::arch::cpu_id() as usize;
-        if cpu < crate::config::MAX_CPUS {
-            v = v.wrapping_add(TSC_CPU_OFF[cpu].load(Ordering::Acquire) as u64);
+        if let Some(mut v) =
+            crate::mm::vdso::x86_track::tsc_track_now_nominal()
+        {
+            // Monotonic ratchet (TSC_LAST doc): never engages on a
+            // healthy unified track; freezes the clock through the
+            // rebase pull-back instead of stepping back.
+            let last = TSC_LAST.load(Ordering::Relaxed);
+            if v > last {
+                TSC_LAST.store(v, Ordering::Relaxed);
+            } else if v < last {
+                v = last;
+            }
+            return v;
         }
-        // Monotonic ratchet (sc113: per-CPU calibration noise stepped
-        // the clock ~21 ms backward once, samgr's u32-us duration math
-        // wrapped to 4294967ms and aborted SA loads). A value behind the
-        // last published time is clamped up to it — time briefly freezes
-        // (never more than the residual noise) instead of stepping back.
-        let last = TSC_LAST.load(Ordering::Relaxed);
-        if v > last {
-            TSC_LAST.store(v, Ordering::Relaxed);
-        } else if v < last {
-            v = last;
-        }
-        v
-    } else if crate::drivers::timer::hpet::ready() {
+        // Page unreadable (writer wedged — should be impossible: the
+        // writer runs IRQ-off for a handful of stores): fall through to
+        // the HPET/jiffies branches; the ratchet keeps the visible
+        // clock monotonic across the excursion.
+    }
+    if crate::drivers::timer::hpet::ready() {
         crate::drivers::timer::hpet::read_time_nominal()
     } else {
         get_jiffies() * TIME_SLICE_TICKS
     }
 }
 
-/// Promote the calibrated TSC to timekeeper (hpet::calibrate_tsc).
+/// Promote the calibrated TSC to timekeeper (hpet::calibrate_tsc /
+/// lapic_time_calibrated).
 ///
-/// `mult` maps (tsc >> TSC_MULSHIFT) deltas to the nominal domain,
+/// `mult` maps TSC deltas to the nominal domain (mult-then-shift),
 /// `base_tsc` is the TSC stamp captured with `nominal_at_base`, and the
-/// continuity offset makes tsc_nominal(base) == nominal_at_base so the
-/// switch from the HPET clock cannot run time backward.
+/// continuity base makes track(base_tsc) == nominal_at_base so the
+/// switch from the previous clock cannot run time backward. The anchor
+/// is published to the vDSO data page (the single timekeeping state);
+/// from this instant read_time() and the vDSO fast path compute the
+/// same value from the same words.
 pub fn promote_tsc_timekeeper(mult: u64, base_tsc: u64, nominal_at_base: u64) {
-    TSC_MULT.store(mult, Ordering::Release);
-    TSC_BASE.store(base_tsc, Ordering::Release);
-    TSC_CONTINUITY_OFFSET.store(nominal_at_base, Ordering::Release);
+    crate::mm::vdso::x86_track::publish_tsc_anchor(mult, base_tsc, nominal_at_base);
     TSC_ACTIVE.store(1, Ordering::Release);
     TSC_FROM_HPET.store(1, Ordering::Release);
 }
 
-/// 1 Hz drift discipline for the HPET-calibrated TSC (timer tick calls
-/// this; see TSC_FROM_HPET). Corrections are PER-CPU (TSC_CPU_OFF):
-/// vCPU TSC offsets differ, so a single global step would yo-yo the
-/// clock as the tick migrates CPUs. A TSC that fell behind (or a KVM
-/// TSC resync) is stepped forward, clamped to 10 ms per resync so a
-/// poisoned HPET read cannot jump the clock; a TSC ahead by >250 ms is
-/// REPORTED (post shift-32 this should be silent forever — the marker
-/// proves the mapping error stays under a quarter second), and a lead
-/// >25 s is pulled back as a last resort (with the shift-12 rounding
-/// error fixed that means a real vCPU TSC smash, not calibration).
+/// 1 Hz drift discipline for the HPET-calibrated unified track (timer
+/// tick calls this; see TSC_FROM_HPET). The correction is a SINGLE
+/// FORWARD STEP of the page anchor's base (tsc_anchor_step_forward):
+/// forward moves are safe for the strict adjacent-pair tests (every
+/// reader — kernel or vDSO — jumps forward together, since both read
+/// the same word), while any per-CPU correction would re-introduce the
+/// cross-CPU spread the unified track exists to eliminate. A track that
+/// fell behind (mapping drift, KVM TSC resync) is stepped forward,
+/// clamped to 10 ms per resync so a poisoned HPET read cannot jump the
+/// clock; a lead >250 ms is REPORTED (post shift-32 this should be
+/// silent for ~a day — any print is a new divergence worth reading),
+/// and a lead >25 s is pulled back as a last resort (a real vCPU TSC
+/// smash; the one backward base move — see tsc_anchor_step_back).
 pub fn resync_tsc_against_hpet() {
     if TSC_FROM_HPET.load(Ordering::Acquire) == 0 {
         return;
     }
-    let cpu = crate::arch::cpu_id() as usize;
-    if cpu >= crate::config::MAX_CPUS {
+    let Some((cl, base, mult)) = crate::mm::vdso::x86_track::tsc_anchor_peek() else {
         return;
-    }
-    let mult = TSC_MULT.load(Ordering::Acquire);
-    let base = TSC_BASE.load(Ordering::Acquire);
-    let off = TSC_CONTINUITY_OFFSET.load(Ordering::Acquire);
-    if mult == 0 {
-        return;
-    }
-    let raw = crate::arch::cpu::read_counter();
-    let tsc_nom_uncorr = tsc_delta_nominal(raw.wrapping_sub(base), mult).wrapping_add(off);
+    };
+    let raw = crate::mm::vdso::x86_track::read_tsc_ordered();
+    let tsc_nom = base
+        .wrapping_add(crate::mm::vdso::x86_track::tsc_delta_nominal(
+            raw.wrapping_sub(cl),
+            mult,
+        ));
     let hpet_nom = crate::drivers::timer::hpet::read_time_nominal();
-    let tsc_nom = tsc_nom_uncorr.wrapping_add(TSC_CPU_OFF[cpu].load(Ordering::Acquire) as u64);
     if hpet_nom > tsc_nom {
         let behind = hpet_nom - tsc_nom;
         // 10 ms nominal-domain clamp (CLOCK_FREQ=10 MHz → 100_000 ticks).
@@ -309,7 +253,7 @@ pub fn resync_tsc_against_hpet() {
         if behind > 100_000 {
             resync_report(b"tsc-clock: fell behind ", behind);
         }
-        TSC_CPU_OFF[cpu].fetch_add(step as i64, Ordering::AcqRel);
+        crate::mm::vdso::x86_track::tsc_anchor_step_forward(step);
     } else if tsc_nom > hpet_nom && tsc_nom - hpet_nom > 2_500_000 {
         // 250 ms..25 s lead: REPORT ONLY. Proof-of-fix marker for the
         // shift-32 correction — at ~3 ppm residual mapping error this
@@ -317,86 +261,74 @@ pub fn resync_tsc_against_hpet() {
         // divergence (or an HPET read stall), worth reading.
         resync_report(b"tsc-clock: lead ", tsc_nom - hpet_nom);
     } else if tsc_nom - hpet_nom > 250_000_000 {
-        // >25 s lead on THIS cpu: either a vCPU TSC-offset jump (skew)
-        // or a smashed mapping. Pull this CPU's offset back into sync
-        // and print the raw pair for offline skew-vs-smash triage.
+        // >25 s lead: either a vCPU TSC-offset jump (skew) or a smashed
+        // mapping. Pull the anchor base back into sync and print the
+        // raw pair for offline skew-vs-smash triage. The TSC_LAST
+        // ratchet freezes the syscall track through the pull; the vDSO
+        // track steps back (a broken-by-definition state — but better
+        // than a clock 25 s off, and loud in the log).
         let lead = tsc_nom - hpet_nom;
         resync_report(b"tsc-clock: rebase, lead ", lead);
         crate::pr_warn!(
-            "tsc-clock: rebase cpu={} raw_tsc={:#x} tsc_nom={:#x} hpet_nom={:#x} base={:#x} mult={:#x} cpu_off={:#x}",
-            cpu,
+            "tsc-clock: rebase raw_tsc={:#x} tsc_nom={:#x} hpet_nom={:#x} cl={:#x} base={:#x} mult={:#x}",
             raw,
             tsc_nom,
             hpet_nom,
+            cl,
             base,
-            mult,
-            TSC_CPU_OFF[cpu].load(Ordering::Acquire)
+            mult
         );
-        TSC_CPU_OFF[cpu].fetch_sub(lead as i64, Ordering::AcqRel);
+        crate::mm::vdso::x86_track::tsc_anchor_step_back(lead);
     }
 }
 
-/// One-shot per-CPU calibration of TSC_CPU_OFF (TSC_CPU_OFF doc): each
-/// AP measures its own (HPET - TSC-derived) delta right after its LAPIC
-/// timer is programmed and before its first tick, closing the vCPU
-/// TSC-offset skew window (sc110's one-time ~25 s step). Runs on the AP
-/// itself with IRQs off; safe to call multiple times.
+/// One-shot per-CPU divergence CHECK (AP bringup, IRQs off, before the
+/// AP's first tick). With the unified track there is no per-CPU state
+/// to calibrate — the page anchor serves every CPU identically, which
+/// is only correct when the vCPU TSC offsets are synchronized (KVM
+/// invariant TSC; the sc110-114 "skews" were the shift-12 mult bug).
+/// Each AP therefore MEASURES its own (HPET − track) divergence and
+/// reports anything beyond 1 ms: the tripwire for a host that really
+/// arms per-vCPU TSC offsets (hotplug, post-migration), where the
+/// global 1 Hz resync would oscillate by the skew. The residual µs
+/// noise (HPET MMIO exit latency) is absorbed by the resync clamp.
 pub fn calibrate_cpu_tsc_offset(cpu: usize) {
     if TSC_FROM_HPET.load(Ordering::Acquire) == 0 {
-        return; // TSC not the HPET-calibrated timekeeper
+        return; // track not HPET-calibrated — nothing to check against
     }
-    if cpu >= crate::config::MAX_CPUS || cpu == 0 {
-        return; // index 0 is folded into TSC_CONTINUITY_OFFSET at promote
-    }
-    let mult = TSC_MULT.load(Ordering::Acquire);
-    let base = TSC_BASE.load(Ordering::Acquire);
-    let off = TSC_CONTINUITY_OFFSET.load(Ordering::Acquire);
-    if mult == 0 {
+    if cpu == 0 || cpu >= crate::config::MAX_CPUS {
         return;
     }
-    let raw = crate::arch::cpu::read_counter();
-    let mut delta = i64::MAX;
-    // Three bracketed samples, take the MINIMUM (hpet - tsc_nom): the
-    // HPET MMIO read can stall (sc113 measured ~21 ms of read skew right
-    // after AP startup), and a too-LARGE correction is what steps the
-    // clock backward on migration; a slightly-small one is absorbed by
-    // the 1 Hz forward-only resync and the read_time ratchet.
+    let Some((cl, base, mult)) = crate::mm::vdso::x86_track::tsc_anchor_peek() else {
+        return;
+    };
+    // Three bracketed samples, take the extreme |hpet - track|: the
+    // HPET MMIO read can stall (sc113 measured ~21 ms of read skew
+    // right after AP startup), and a stall INFLATES the apparent
+    // divergence — report the minimum-magnitude sample to keep the
+    // tripwire honest.
+    let mut best = i64::MAX;
     for _ in 0..3 {
         let hpet_nom = crate::drivers::timer::hpet::read_time_nominal();
-        let t_after = crate::arch::cpu::read_counter();
-        // Same base/mult math for each bracket's TSC stamps.
-        let nom = |raw_t: u64| -> i64 {
-            tsc_delta_nominal(raw_t.wrapping_sub(base), mult)
-                .wrapping_add(off) as i64
-        };
-        // Lower bound of the true offset: the HPET read happened at or
-        // before the t_after stamp, so hpet_nom - nom(t_after) can only
-        // underestimate the correction.
-        let d = hpet_nom as i64 - nom(t_after);
-        if d < delta {
-            delta = d;
+        let t_after = crate::mm::vdso::x86_track::read_tsc_ordered();
+        let track_after = base.wrapping_add(
+            crate::mm::vdso::x86_track::tsc_delta_nominal(
+                t_after.wrapping_sub(cl),
+                mult,
+            ),
+        );
+        let d = hpet_nom as i64 - track_after as i64;
+        if d.abs() < best.abs() {
+            best = d;
         }
     }
-    let tsc_nom_now = tsc_delta_nominal(raw.wrapping_sub(base), mult)
-        .wrapping_add(off) as i64;
-    // Negative-sum guard: a vCPU that reads BEHIND by more than the
-    // current uptime would wrap the u64 clock forward by ~2^64. Clamp
-    // the correction so corrected >= 0 (the CPU then reads a hair fast
-    // until uptime outgrows the skew — never wraps).
-    if tsc_nom_now + delta < 0 {
-        delta = -tsc_nom_now;
-    }
-    // Residual is the vCPU TSC-offset skew — apply it whatever the size
-    // (25 s is the observed magnitude), but say so beyond 1 ms so the
-    // boot log documents each vCPU's skew once.
-    if delta.abs() > 10_000 {
+    if best != i64::MAX && best.abs() > 10_000 {
         crate::pr_info!(
-            "tsc-clock: cpu {} vCPU TSC offset skew {:+} us vs HPET (corrected)",
+            "tsc-clock: cpu {} diverges {:+} us from the HPET track (no per-CPU correction; invariant-TSC assumption check)",
             cpu,
-            delta / 10
+            best / 10
         );
     }
-    TSC_CPU_OFF[cpu].store(delta, Ordering::Release);
 }
 
 /// Rate-limited one-line report for resync events (max 8 per boot).
@@ -420,7 +352,9 @@ pub fn tsc_active() -> bool {
 /// Called by the intc/APIC driver after calibration: promote the TSC to
 /// timekeeper.  `tsc_freq == 0` (failed calibration) keeps the PIT phase.
 /// No-op when the HPET clocksource is active — the TSC then stays a
-/// delay-only counter (see `hpet.rs`).
+/// delay-only counter (see `hpet.rs`). Publishes the page anchor (the
+/// unified track) but does NOT arm the 1 Hz HPET resync (no HPET to
+/// check against — TSC_FROM_HPET stays 0).
 pub fn lapic_time_calibrated(_lapic_freq: u64, tsc_freq: u64) {
     if tsc_freq == 0 {
         return;
@@ -435,9 +369,7 @@ pub fn lapic_time_calibrated(_lapic_freq: u64, tsc_freq: u64) {
     let mult = ((CLOCK_FREQ << TSC_MULSHIFT) + tsc_freq / 2) / tsc_freq;
     let now = crate::arch::cpu::read_counter();
     let continuity = get_jiffies() * TIME_SLICE_TICKS;
-    TSC_MULT.store(mult, Ordering::Release);
-    TSC_BASE.store(now, Ordering::Release);
-    TSC_CONTINUITY_OFFSET.store(continuity, Ordering::Release);
+    crate::mm::vdso::x86_track::publish_tsc_anchor(mult, now, continuity);
     TSC_ACTIVE.store(1, Ordering::Release);
 }
 

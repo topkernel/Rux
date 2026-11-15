@@ -29,14 +29,19 @@
 //!   32  u32  tz_minuteswest (always 0: no timezone model)
 //!   36  u32  tz_dsttime
 //!
+//! (x86_64 differs: the page is the UNIFIED timekeeping anchor —
+//! see the `x86_track` module for the layout and the kernel/user
+//! bit-identity contract.)
+//!
 //! Functions (RV64 code, built below by a mini assembler):
 //!   __vdso_clock_gettime(clk, struct timespec*)       0 / -ENOSYS
 //!   __vdso_gettimeofday(struct timeval*, struct tz*)  0
 //!   __vdso_clock_getres(clk, struct timespec*)        0 / -ENOSYS
 //!
 //! Supported clocks: REALTIME(0), MONOTONIC(1), MONOTONIC_RAW(4),
-//! BOOTTIME(7), TAI(11 = REALTIME + 37). Everything else returns
-//! -ENOSYS so libc falls back to the real syscall.
+//! BOOTTIME(7), TAI(11 = REALTIME + 37). x86_64: every other clockid
+//! (the COARSE clocks, CPUTIME ids, garbage) falls back INSIDE the vDSO
+//! to the real syscall — the reference's shape (see mod x86 dispatch).
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -101,77 +106,312 @@ pub fn vdso_data_tick() {
     }
 }
 
-/// x86_64 twin (106th: the vDSO lever — 21.3M clock_gettime syscalls
-/// per OH boot at ~3 µs each ≈ 6.6% of the whole box).
+/// x86_64 unified-track timekeeping (vDSO re-arm, 2026-11-15).
 ///
-/// The user side reads the RAW TSC (`rdtsc`), so the published pair is
-/// (raw base_tsc, kernel mono ns at that instant) plus a TSC→ns
-/// mult/shift for the interpolation `ns = base + ((tsc - base) *
-/// mult) >> 32`. Data page x86 extensions: mult u64 @40 (@44 reserved —
-/// see the write-site note), shift always 32 (an emitter immediate)
-/// (always 32, matching the kernel's TSC_MULSHIFT), res_ns u32 @48.
+/// THE ANCHOR LIVES IN THIS PAGE — it is the single timekeeping state
+/// for BOTH consumers. `read_time()`'s TSC branch (the clock behind
+/// every syscall) and the vDSO functions compute the SAME value from
+/// the SAME words with the SAME integer ops:
 ///
-/// Known, accepted skews (same class as the reference's vDSO):
-/// - `read_time()` applies per-CPU vCPU TSC-offset corrections and a
-///   monotonic ratchet; a user `rdtsc` on another CPU than the tick's
-///   carries the inter-CPU TSC offset delta (µs-class under KVM's
-///   invariant TSC; the historical ms-class offsets were the shift-12
-///   mult bug, fixed).
-/// - base_tsc and base_mono_ns are two reads, not one atomic snapshot;
-///   the error is a per-tick constant offset well under a jiffy.
+///   nom(t) = base_mono_nom + ((tsc(t) - cycle_last) * mult) >> 32
+///
+/// read under the seq protocol [seq1 → fields → lfence;rdtsc → seq2,
+/// retry on odd/changed], then ×100 to ns. Integer-associative, so the
+/// two tracks are BIT-IDENTICAL — this is what LTP clock_gettime04
+/// demands: it interleaves libc/vDSO reads with raw-syscall reads
+/// 10000x per clock and requires STRICT non-negative adjacent-pair
+/// deltas in both directions; adjacent reads can sit <1 µs apart, so
+/// any per-track bias (even 100 ns of rounding) eventually pairs
+/// negative. The pre-re-arm publication (base sampled from the
+/// per-CPU-corrected, ratcheted `read_time()`, read back by a raw-TSC
+/// interpolation) carried the TSC_CPU_OFF spread between the publisher
+/// and the reader — µs-class steady state, ms-class while APs
+/// calibrated (tsleep2: -356 ms at t<1 s; cgt_probe5: syscall-vs-vdso
+/// spread to +1.2 ms; clock_gettime04 iso4: -4582 ns residual) — and no
+/// user-side fix could remove it: replicating per-CPU offsets via
+/// rdtscp+TSC_AUX reproduces the spread, it does not erase it.
+///
+/// Design consequences:
+/// - base_mono_nom is NOMINAL-domain (10 MHz ticks) and carries ALL
+///   corrections folded in (boot continuity offset, 1 Hz resync
+///   steps). It only ever moves FORWARD: refreshes add the measured
+///   TSC delta, the resync adds its clamped step, so the track cannot
+///   step back by construction (the kernel's TSC_LAST ratchet stays as
+///   anomaly insurance and then never engages on a healthy track).
+/// - Per-CPU TSC_CPU_OFF corrections are GONE. They existed for KVM
+///   per-vCPU TSC offsets, which under this rig's invariant TSC are
+///   synchronized (the sc110-114 "skews" were the shift-12 mult bug);
+///   residual per-CPU divergence is measured at AP bringup and
+///   reported (>1 ms trips a boot-log line) instead of corrected —
+///   a correction spread across CPUs is exactly what the strict
+///   adjacent-pair tests cannot tolerate.
+/// - The seq word doubles as the WRITER lock: cmpxchg even→odd, a
+///   losing writer skips this refresh (next tick catches up), so the
+///   fetch_or(1) multi-writer tear of the old publication (two tick
+///   CPUs racing both-begin → both-write → seq lands odd) is closed.
+///
+/// Data page x86 layout (offsets; mult is nominal-domain here, NOT
+/// the old ×100 ns-domain value — the emitter multiplies by 100 after
+/// the nominal sum, matching `monotonic_time()`'s split exactly):
+///   8   u64 cycle_last      raw TSC at the last refresh
+///   16  u64 base_mono_nom   nominal-domain mono at cycle_last
+///   24  u64 wall_epoch_ns   REALTIME = mono + this (ns)
+///   40  u64 mult            TSC→nominal mult (== TSC_MULSHIFT 32;
+///                           write-once at promote; 44 stays RESERVED
+///                           — the old overlap published mult|(32<<32))
+///   48  u32 res_ns          clock_getres answer (1)
+///   52  u64 max_interp_tsc  interpolation bound; beyond it the emitter
+///                           falls back to the real syscall
+#[cfg(feature = "x86_64")]
+pub mod x86_track {
+    use core::sync::atomic::Ordering;
+
+    use super::vdso_seq;
+
+    // ------------------------------------------------------------------
+    // field accessors (the page static — plain volatile loads/stores;
+    // coherence is the seq word's job)
+    // ------------------------------------------------------------------
+
+    #[inline]
+    pub(super) unsafe fn rd(off: usize) -> u64 {
+        unsafe {
+            core::ptr::read_volatile(
+                super::VDSO_DATA_PAGE.0.as_ptr().add(off) as *const u64,
+            )
+        }
+    }
+    #[inline]
+    pub(super) unsafe fn wr(off: usize, v: u64) {
+        unsafe {
+            core::ptr::write_volatile(
+                super::VDSO_DATA_PAGE.0.as_mut_ptr().add(off) as *mut u64,
+                v,
+            )
+        }
+    }
+
+    /// lfence;rdtsc — the ORDERED counter read. A bare rdtsc can be
+    /// hoisted across the field loads by the CPU; the seq protocol
+    /// requires the TSC stamp to sit inside the seq1..seq2 window (the
+    /// emitted vDSO code uses the identical pair).
+    #[inline]
+    pub fn read_tsc_ordered() -> u64 {
+        let lo: u32;
+        let hi: u32;
+        // SAFETY: pure counter read; lfence orders it against the
+        // surrounding seq-word loads.
+        unsafe {
+            core::arch::asm!(
+                "lfence",
+                "rdtsc",
+                out("eax") lo,
+                out("edx") hi,
+                options(nomem, nostack)
+            );
+        }
+        (lo as u64) | ((hi as u64) << 32)
+    }
+
+    /// (delta_tsc * mult) >> 32 — full-precision nominal mapping,
+    /// MULTIPLY FIRST, SHIFT SECOND.
+    ///
+    /// sc204 history (the shift-first bug): `(delta >> 32) * mult` left
+    /// the kernel clock with a granularity of `mult` nominal ticks — at
+    /// 4.29 GHz that is ONE STEP EVERY 2^32 TSC ticks = 1.0008 SECONDS;
+    /// every timed wait in the kernel (nanosleep expiry checks,
+    /// scheduler deltas, binder slices, the OH boot chain) coarsened to
+    /// 1 s steps. Multiply-then-shift keeps the ~3 ppm rate accuracy
+    /// AND ~0.23 ns granularity; the u128 product of delta (< uptime ×
+    /// 4.3 GHz) and mult (~10M) cannot overflow. Same expression the
+    /// emitter's mul+shrd computes.
+    #[inline]
+    pub fn tsc_delta_nominal(delta: u64, mult: u64) -> u64 {
+        (((delta as u128) * (mult as u128)) >> 32) as u64
+    }
+
+    // ------------------------------------------------------------------
+    // writer side (all under cmpxchg even→odd; losers skip)
+    // ------------------------------------------------------------------
+
+    /// Take the page for writing. Returns false when another writer
+    /// holds it (seq odd) — the caller skips this round.
+    #[inline]
+    pub(super) unsafe fn seq_try_begin() -> bool {
+        unsafe {
+            let seq = vdso_seq();
+            let cur = seq.load(Ordering::Relaxed);
+            if cur & 1 != 0 {
+                return false;
+            }
+            seq.compare_exchange(cur, cur | 1, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+        }
+    }
+    #[inline]
+    pub(super) unsafe fn seq_end() {
+        unsafe { vdso_seq().fetch_add(1, Ordering::Release); }
+    }
+
+    /// Publish the initial anchor (promote_tsc_timekeeper; boot-time
+    /// single-threaded, but the seq protocol runs anyway for uniformity).
+    /// `base_mono_nom` must make the track continuous with the previous
+    /// clock (the caller computes the continuity value).
+    pub fn publish_tsc_anchor(mult: u64, cycle_last: u64, base_mono_nom: u64) {
+        unsafe {
+            if !seq_try_begin() {
+                // Cannot happen today (promote runs pre-SMP with IRQs
+                // off); if it ever races, the next tick refresh
+                // publishes — mult stays 0 and userspace falls back to
+                // the syscall until then.
+                return;
+            }
+            wr(40, mult);
+            wr(8, cycle_last);
+            wr(16, base_mono_nom);
+            wr(48, 1); // res_ns
+            seq_end();
+        }
+    }
+
+    /// Forward-only base step (1 Hz HPET resync). Returns false when
+    /// another writer held the page (retry next second).
+    pub fn tsc_anchor_step_forward(step_nominal: u64) -> bool {
+        if step_nominal == 0 {
+            return true;
+        }
+        unsafe {
+            if !seq_try_begin() {
+                return false;
+            }
+            let base = rd(16);
+            wr(16, base.wrapping_add(step_nominal));
+            seq_end();
+            true
+        }
+    }
+
+    /// The >25 s rebase pull-back (vCPU TSC-offset smash class). This
+    /// is the ONE base movement that can go backward; it prints loudly
+    /// at the caller and the TSC_LAST ratchet freezes the syscall track
+    /// through the pull (the vDSO track steps back — a broken-by-
+    /// definition state, documented, better than a 25 s-off clock).
+    pub fn tsc_anchor_step_back(lead_nominal: u64) -> bool {
+        unsafe {
+            if !seq_try_begin() {
+                return false;
+            }
+            let base = rd(16);
+            wr(16, base.wrapping_sub(lead_nominal));
+            seq_end();
+            true
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // reader side
+    // ------------------------------------------------------------------
+
+    /// Seq-validated anchor triple (no TSC read). None when not
+    /// promoted (mult == 0) or the writer wedged odd.
+    pub fn tsc_anchor_peek() -> Option<(u64, u64, u64)> {
+        unsafe {
+            for _ in 0..128 {
+                let s1 = vdso_seq().load(Ordering::Acquire);
+                if s1 & 1 != 0 {
+                    continue;
+                }
+                let cl = rd(8);
+                let base = rd(16);
+                let mult = rd(40);
+                let s2 = vdso_seq().load(Ordering::Acquire);
+                if s1 != s2 {
+                    continue;
+                }
+                if mult == 0 {
+                    return None; // not promoted
+                }
+                return Some((cl, base, mult));
+            }
+            None
+        }
+    }
+
+    /// The unified-track clock read (kernel side of the vDSO contract):
+    /// seq1 → fields → lfence;rdtsc → seq2, then the nominal sum.
+    /// IDENTICAL arithmetic to the emitted vDSO interpolation, so a
+    /// syscall read and a vDSO read at the same instant agree bit for
+    /// bit. None when not promoted / writer wedged (caller falls back;
+    /// the TSC_LAST ratchet keeps that fallback monotonic).
+    pub fn tsc_track_now_nominal() -> Option<u64> {
+        unsafe {
+            for _ in 0..128 {
+                let s1 = vdso_seq().load(Ordering::Acquire);
+                if s1 & 1 != 0 {
+                    continue;
+                }
+                let cl = rd(8);
+                let base = rd(16);
+                let mult = rd(40);
+                if mult == 0 {
+                    return None; // not promoted
+                }
+                // The TSC stamp sits INSIDE the window: a refresh that
+                // lands between the field loads and this read bumps the
+                // seq word and the whole read retries — cycle_last can
+                // never be ahead of the stamped TSC (no wrapped delta).
+                let raw = read_tsc_ordered();
+                let s2 = vdso_seq().load(Ordering::Acquire);
+                if s1 != s2 {
+                    continue;
+                }
+                let delta = raw.wrapping_sub(cl);
+                return Some(base.wrapping_add(tsc_delta_nominal(delta, mult)));
+            }
+            None
+        }
+    }
+}
+
+/// x86_64 per-tick refresh: advance the anchor to NOW under the seq
+/// word, and republish the epoch and interpolation bound. Forward-only
+/// by construction (the measured TSC delta is non-negative); skipped
+/// entirely while the TSC timekeeper is not promoted (mult == 0 keeps
+/// userspace on the syscall fallback — the HPET/jiffies clock then
+/// serves every read).
 #[cfg(feature = "x86_64")]
 pub fn vdso_data_tick() {
-    let hz = crate::drivers::intc::apic::TSC_FREQ.load(Ordering::Acquire);
-    if hz < 1_000_000 {
-        return; // TSC not calibrated yet — keep the primed snapshot
-    }
-    // Publish the SYSCALL-track monotonic (read_time: per-CPU corrected,
-    // ratcheted — the clock every syscall caller sees), paired with the
-    // raw TSC read immediately before it in the same IRQ-off tick
-    // context. Both reads happen back to back with interrupts off, so
-    // the pairing gap is µs-class. Readers whose own raw TSC disagrees
-    // with the publisher's beyond max_interp_tsc fall back to the
-    // syscall (see below) — the fast path and the syscall path can no
-    // longer disagree by more than the corrections' magnitude.
-    let tsc = crate::arch::cpu::read_counter();
-    let mono_ns = crate::drivers::timer::monotonic_ns_since_boot();
-    let mult = crate::drivers::timer::x86_64::tsc_mult_ns_for_vdso();
-    if mult == 0 {
-        return; // TSC mapping not promoted yet — keep the primed snapshot
-    }
-    let epoch_ns = crate::syscall::time::wall_epoch_offset_ns();
-    // Interpolation bound: 50 ms of raw TSC. Publications happen every
-    // tick (~10 ms), so a healthy reader interpolates at most a few tens
-    // of ms past base_tsc. A larger (or wrapped-negative) delta means the
-    // reader's CPU raw-TSC disagrees with the publisher's — KVM per-vCPU
-    // TSC offsets drift after bringup, and userspace cannot apply the
-    // kernel's TSC_CPU_OFF corrections — and the vDSO stubs fall back to
-    // the real syscall (observed skews: -0.45 s .. -1.37 s; LTP
-    // clock_gettime04).
-    let max_interp_tsc = hz / 20;
-    // SAFETY: the page is only written here under the seqlock; user
-    // readers validate via the seq word before trusting the fields.
     unsafe {
-        let seq = vdso_seq();
-        seq.fetch_or(1, Ordering::Release);
-        let base = VDSO_DATA_PAGE.0.as_mut_ptr();
-        core::ptr::write_volatile(base.add(8) as *mut u64, tsc);
-        core::ptr::write_volatile(base.add(16) as *mut u64, mono_ns);
-        core::ptr::write_volatile(base.add(24) as *mut u64, epoch_ns);
-        // mult is a u64 at 40. Offset 44 is RESERVED (historically a
-        // "shift" u32 that nobody reads — the emitter hardcodes 32 as
-        // the SHRD immediate): writing it OVERLAPPED mult's high half,
-        // publishing mult | (32<<32) ≈ 32x the true slope. Every
-        // user-side interpolation then advanced ~32x too fast between
-        // tick publications — the vDSO clock raced ahead by up to
-        // hundreds of ms per 10 ms interval (LTP clock_gettime04
-        // "time travelled backwards" at -454/-557/-1051 ms; probe
-        // cgt_probe4 read mult=138439650872 where 1000706700 was
-        // written). Do not write offset 44.
-        core::ptr::write_volatile(base.add(40) as *mut u64, mult);
-        core::ptr::write_volatile(base.add(48) as *mut u32, 1u32);
-        core::ptr::write_volatile(base.add(52) as *mut u64, max_interp_tsc);
-        seq.fetch_add(1, Ordering::Release);
+        if x86_track::tsc_anchor_peek().is_none() {
+            return; // TSC timekeeper not promoted — keep the page as-is
+        }
+        if !x86_track::seq_try_begin() {
+            return; // another CPU is mid-refresh; next tick catches up
+        }
+        let cl = x86_track::rd(8);
+        let base = x86_track::rd(16);
+        let mult = x86_track::rd(40);
+        let raw = crate::arch::cpu::read_counter();
+        // TSC must never read backward; if it ever does (vCPU TSC
+        // smash), keep the old anchor — the emitted bound check sends
+        // readers to the syscall and the resync report paths fire.
+        if raw >= cl {
+            let d = x86_track::tsc_delta_nominal(raw - cl, mult);
+            x86_track::wr(16, base.wrapping_add(d));
+            x86_track::wr(8, raw);
+        }
+        let epoch_ns = crate::syscall::time::wall_epoch_offset_ns();
+        x86_track::wr(24, epoch_ns);
+        let hz = crate::drivers::intc::apic::TSC_FREQ.load(Ordering::Acquire);
+        if hz >= 1_000_000 {
+            // Interpolation bound: 50 ms of raw TSC. Refreshes happen
+            // every tick (~10 ms); a healthy reader interpolates at most
+            // a few tens of ms past cycle_last. A larger (or wrapped)
+            // delta means the anchor is stale or the TSC jumped — the
+            // emitter then takes the syscall fallback.
+            x86_track::wr(52, hz / 20);
+        }
+        x86_track::seq_end();
     }
 }
 
@@ -503,35 +743,48 @@ mod rv {
 }
 
 // ============================================================================
-// x86_64 code page emitters (106th vDSO lever)
+// x86_64 code page emitters (106th vDSO lever, re-armed 2026-11-15)
 // ============================================================================
 //
 // Three position-dependent functions, hand-encoded System V AMD64:
-//   __vdso_clock_gettime(rdi=clk, rsi=tp)   -> 0 / -ENOSYS
+//   __vdso_clock_gettime(rdi=clk, rsi=tp)   -> 0 / raw -errno (fallback)
 //   __vdso_gettimeofday (rdi=tv,  rsi=tz)   -> 0
 //   __vdso_clock_getres (rdi=clk, rsi=res)  -> 0 / -ENOSYS
 //
 // Register contract per function: r11 = data page base (RIP-relative
 // LEA, so the code page works at whatever VDSO_BASE it is mapped at),
 // r10 = TAI extra seconds, rax/rcx/rdx/r8/r9 scratch. Only
-// caller-saved registers are touched — no stack frame at all.
+// caller-saved registers are touched — no stack frame; the sole stack
+// access is seqlock_read's balanced push/pop rdx (seq1 across RDTSC;
+// see there).
 //
-// Time math mirrors the kernel's TSC path (drivers/timer/x86_64.rs):
-// LFENCE;RDTSC for an ordered counter read, then
-//   ns = base_mono_ns + ((tsc - base_tsc) * mult) >> 32
-// with mult/shift published per tick in the data page (offsets 40/44;
-// shift is always 32, emitted as an immediate in SHRD).
+// Time math IS the kernel's TSC path (drivers/timer/x86_64.rs
+// read_time → x86_track::tsc_track_now_nominal): the seq protocol
+// [seq1 → cycle_last/base/mult → LFENCE;RDTSC → seq2, retry] then
+//   nom = base_mono_nom + ((tsc - cycle_last) * mult) >> 32
+//   ns  = nom * 100
+// The kernel syscall path computes the identical expression from the
+// identical page words (and splits ns with the same floor arithmetic
+// as monotonic_time()), so a vDSO read and a syscall read at the same
+// instant are bit-identical — the strict adjacent-pair requirement of
+// LTP clock_gettime04 (see the x86_track doc above). mult is the
+// nominal-domain TSC multiplier; shift is always 32, an immediate in
+// MUL+SHRD. A delta beyond the published bound (offset 52) — anchor
+// stale or TSC smashed — falls back to the real syscall.
 #[cfg(feature = "x86_64")]
 mod x86 {
     use alloc::vec::Vec;
 
     /// Byte assembler with rel8 label fixups (every branch in the three
-    /// functions is short — the bodies are < 200 bytes).
+    /// functions is short — the bodies are < 200 bytes) plus rel32 jumps
+    /// for the few long hops (dispatch → syscall fallback).
     struct Asm {
         bytes: Vec<u8>,
         labels: [Option<usize>; 8],
         /// (insn index, label, byte position of the rel8 slot)
         fixups: Vec<(usize, usize, usize)>,
+        /// (label, byte position of the rel32 slot)
+        fixups32: Vec<(usize, usize)>,
     }
 
     impl Asm {
@@ -540,6 +793,7 @@ mod x86 {
                 bytes: Vec::new(),
                 labels: [None; 8],
                 fixups: Vec::new(),
+                fixups32: Vec::new(),
             }
         }
         fn b(&mut self, bytes: &[u8]) {
@@ -552,6 +806,16 @@ mod x86 {
             self.fixups.push((usize::MAX, l, self.bytes.len() + 1));
             self.b(&[op, 0]);
         }
+        /// Near jmp (E9 rel32).
+        fn jmp32(&mut self, l: usize) {
+            self.fixups32.push((l, self.bytes.len() + 1));
+            self.b(&[0xE9, 0, 0, 0, 0]);
+        }
+        /// Near jcc (0F 8x rel32).
+        fn jcc32(&mut self, op: u8, l: usize) {
+            self.fixups32.push((l, self.bytes.len() + 2));
+            self.b(&[0x0F, op, 0, 0, 0, 0]);
+        }
         fn finish(mut self) -> Vec<u8> {
             for (_, l, at) in self.fixups.drain(..) {
                 let target = self.labels[l].expect("vdso x86: undefined label") as i64;
@@ -561,6 +825,15 @@ mod x86 {
                     "vdso x86: rel8 out of range ({rel})"
                 );
                 self.bytes[at] = rel as u8;
+            }
+            for (l, at) in self.fixups32.drain(..) {
+                let target = self.labels[l].expect("vdso x86: undefined label") as i64;
+                let rel = target - (at as i64 + 4);
+                assert!(
+                    rel >= i32::MIN as i64 && rel <= i32::MAX as i64,
+                    "vdso x86: rel32 out of range ({rel})"
+                );
+                self.bytes[at..at + 4].copy_from_slice(&(rel as i32).to_le_bytes());
             }
             self.bytes
         }
@@ -575,42 +848,62 @@ mod x86 {
     }
 
     // ---- shared instruction fragments (see the table above) ----
+    //
+    // Seqlock read WITH the TSC stamp inside the window — the protocol
+    // the kernel's tsc_track_now_nominal() uses. The in-window rdtsc
+    // guarantees cycle_last <= stamped TSC at seq2-check time (a
+    // refresh landing between the field loads and the rdtsc bumps the
+    // seq word and the whole read retries), so the delta never wraps.
+    //   edx = seq1; r8 = cycle_last(+8); r9 = base_mono_nom(+16);
+    //   rcx = mult(+40); lfence; rdtsc -> rax; seq2 recheck.
+    //
+    // seq1 must survive RDTSC, which clobbers rax/rdx — and every other
+    // register is live (rdi/rsi are the caller's args, also the syscall
+    // fallback ABI; rcx mult; r8/r9 fields; r10 TAI secs; r11 page). A
+    // balanced PUSH/POP RDX around the pair is the only stack touch in
+    // the three functions (8 bytes, transient, leaf-safe: any async
+    // event sees a consistent rsp and the slot sits inside the red
+    // zone). Without it the rebase `cmp [r11],edx` would compare the
+    // seq word against rdx's POST-shl low half — always 0 — and the
+    // retry loop would never exit once the first publication bumps the
+    // seq word off 0 (every fast-path read would spin).
     fn seqlock_read(a: &mut Asm, retry: usize) {
         a.label(retry);
-        a.b(&[0x41, 0x8B, 0x13]); // mov edx,[r11]      seq
+        a.b(&[0x41, 0x8B, 0x13]); // mov edx,[r11]      seq1
         a.b(&[0xF6, 0xC2, 0x01]); // test dl,1
         a.jcc(0x75, retry); //     jne retry
-        a.b(&[0x4D, 0x8B, 0x43, 0x08]); // mov r8,[r11+8]   base_tsc
-        a.b(&[0x4D, 0x8B, 0x4B, 0x10]); // mov r9,[r11+16]  base_mono_ns
-        a.b(&[0x49, 0x8B, 0x4B, 0x28]); // mov rcx,[r11+40] mult (inside the
-        //                              seq window: mult can change when the
-        //                              TSC is re-calibrated; a stale-mult
-        //                              pairing is a torn read)
-        a.b(&[0x41, 0x39, 0x13]); //     cmp [r11],edx    seq recheck
-        a.jcc(0x75, retry); //     jne retry
-    }
-    /// rax = interpolated ns from (r8 base_tsc, r9 base_mono_ns, rcx mult).
-    ///
-    /// `fb` is the fallback label: when the user-side raw-TSC delta since
-    /// base_tsc exceeds the published bound (data page +52), the
-    /// interpolation is untrustworthy — either the reading CPU's raw TSC
-    /// sits ~seconds away from the publisher's (KVM per-vCPU TSC offsets
-    /// drift after bringup; userspace cannot apply TSC_CPU_OFF), or the
-    /// publication tick stalled. Both mean: issue the REAL syscall (rdi
-    /// and rsi still carry the caller's arguments). A wrapped (negative)
-    /// delta also compares unsigned-above and takes the fallback.
-    fn interpolate(a: &mut Asm, fb: usize) {
+        a.b(&[0x4D, 0x8B, 0x43, 0x08]); // mov r8,[r11+8]   cycle_last
+        a.b(&[0x4D, 0x8B, 0x4B, 0x10]); // mov r9,[r11+16]  base_mono_nom
+        a.b(&[0x49, 0x8B, 0x4B, 0x28]); // mov rcx,[r11+40] mult
+        a.b(&[0x52]); // push rdx — seq1 survives the rdtsc
         a.b(&[0x0F, 0xAE, 0xE8]); // lfence (ordered rdtsc)
         a.b(&[0x0F, 0x31]); //     rdtsc
         a.b(&[0x48, 0xC1, 0xE2, 0x20]); // shl rdx,32
-        a.b(&[0x48, 0x09, 0xD0]); //     or rax,rdx
+        a.b(&[0x48, 0x09, 0xD0]); //     or rax,rdx        rax = raw tsc
+        a.b(&[0x5A]); // pop rdx — seq1 back (rdx dead after the or)
+        a.b(&[0x41, 0x39, 0x13]); //     cmp [r11],edx     seq2 recheck
+        a.jcc(0x75, retry); //     jne retry
+    }
+    /// rax = interpolated ns from (rax raw tsc, r8 cycle_last,
+    /// r9 base_mono_nom, rcx mult) — the unified-track arithmetic:
+    /// nom = base + ((tsc - cycle_last) * mult) >> 32; ns = nom * 100.
+    ///
+    /// `fb` is the fallback label: when the raw-TSC delta since
+    /// cycle_last exceeds the published bound (data page +52), the
+    /// interpolation is untrustworthy — the anchor is stale (ticks
+    /// stopped) or the TSC jumped — so issue the REAL syscall (rdi and
+    /// rsi still carry the caller's arguments, which is the syscall ABI
+    /// too). A wrapped (negative) delta also compares unsigned-above
+    /// and takes the fallback.
+    fn interpolate(a: &mut Asm, fb: usize) {
         a.b(&[0x4C, 0x29, 0xC0]); //     sub rax,r8       delta tsc
         a.b(&[0x49, 0x8B, 0x53, 0x34]); // mov rdx,[r11+52] max_interp_tsc
         a.b(&[0x48, 0x39, 0xD0]); //     cmp rax,rdx
         a.jcc(0x77, fb); //     ja  fallback (also catches wrapped delta)
         a.b(&[0x48, 0xF7, 0xE1]); //     mul rcx          rdx:rax
-        a.b(&[0x48, 0x0F, 0xAC, 0xD0, 0x20]); // shrd rax,rdx,32
-        a.b(&[0x4C, 0x01, 0xC8]); //     add rax,r9       + base_mono_ns
+        a.b(&[0x48, 0x0F, 0xAC, 0xD0, 0x20]); // shrd rax,rdx,32   nom_delta
+        a.b(&[0x4C, 0x01, 0xC8]); //     add rax,r9       + base_mono_nom
+        a.b(&[0x48, 0x6B, 0xC0, 0x64]); // imul rax,rax,100  nominal -> ns
     }
     /// ns in rax -> timespec {rax+r10 sec, rdx nsec} stored at rsi.
     fn split_store(a: &mut Asm) {
@@ -623,7 +916,20 @@ mod x86 {
         a.b(&[0x31, 0xC0]); //     xor eax,eax
         a.b(&[0xC3]); //     ret
     }
-    fn dispatch(a: &mut Asm, wall: usize, mono: usize, tai: usize) {
+    /// Clock dispatch. REALTIME(0)/MONOTONIC(1)/RAW(4)/BOOTTIME(7)/TAI(11)
+    /// take the fast path; EVERYTHING ELSE — the COARSE clocks (5/6, which
+    /// the syscall serves grid-snapped from the same track), CPUTIME ids,
+    /// and garbage — goes to the SYSCALL FALLBACK, the reference's shape:
+    /// Linux's __vdso_clock_gettime never returns -ENOSYS itself, it
+    /// internally falls back to the real syscall for every clock the
+    /// fast path doesn't carry (coarse included). Returning the raw
+    /// syscall's result (0, or -errno raw) instead of -ENOSYS also keeps
+    /// RAW vDSO callers correct: LTP's vdso variants check `ret != 0`
+    /// with errno==ENOSYS to skip, but a vDSO function cannot set errno,
+    /// and the caller's errno is stale harness state (clock_gettime04's
+    /// j=2 read ECHILD left by LTP's own wait() reaping — TFAIL on every
+    /// COARSE clock with the -ENOSYS form).
+    fn dispatch(a: &mut Asm, wall: usize, mono: usize, tai: usize, fb: usize) {
         a.b(&[0x48, 0x85, 0xFF]); // test rdi,rdi     REALTIME(0)
         a.jcc(0x74, wall);
         a.b(&[0x48, 0x83, 0xFF, 0x01]); // cmp rdi,1  MONOTONIC
@@ -634,8 +940,7 @@ mod x86 {
         a.jcc(0x74, mono);
         a.b(&[0x48, 0x83, 0xFF, 0x0B]); // cmp rdi,11 TAI
         a.jcc(0x74, tai);
-        a.b(&[0xB8, 0xDA, 0xFF, 0xFF, 0xFF]); // mov eax,-38
-        a.b(&[0xC3]); //     ret
+        a.jmp32(fb); // everything else: real syscall
     }
 
     const L_WALL: usize = 0;
@@ -660,7 +965,7 @@ mod x86 {
         let mut a = Asm::new();
         lea_data_base(&mut a, off);
         a.b(&[0x45, 0x31, 0xD2]); // xor r10d,r10d   extra secs = 0
-        dispatch(&mut a, L_WALL, L_MONO, L_TAI);
+        dispatch(&mut a, L_WALL, L_MONO, L_TAI, L_FB_CGI);
         a.label(L_TAI);
         a.b(&[0x41, 0xBA, 0x25, 0x00, 0x00, 0x00]); // mov r10d,37
         a.label(L_WALL);
@@ -815,29 +1120,24 @@ fn build_code_page() -> [u8; 4096] {
 
     // ---- dynstr @ 0x240 ----
     const STRTAB_OFF: usize = 0x240;
-    // x86_64: the two TIME functions are exported under inert names.
-    // The fast path itself is probe-verified (cgt_probe: syscall-vs-vdso
-    // within [74 ns, 1.2 ms] after the mult-corruption fix), but LTP
-    // clock_gettime04 demands STRICT non-negative deltas between
-    // ADJACENT vDSO and syscall reads, and the syscall track applies
-    // per-CPU corrections + a monotonic ratchet (TSC_CPU_OFF / TSC_LAST
-    // — µs-class steps when the publication tick switches CPU or the
-    // 1 Hz resync fires) that a user-side raw-TSC interpolation cannot
-    // reproduce: the residual µs-scale bidirectional skew makes one of
+    // x86_64: canonical names RESTORED (vDSO re-arm, 2026-11-15). The
+    // inert-name export (a6ee2acd5) was the deliberate correctness
+    // trade of the live fast path for LTP clock_gettime04: the old
+    // publication carried the TSC_CPU_OFF spread between publisher and
+    // reader, and the residual µs-scale bidirectional skew made one of
     // the two adjacent-pair directions read negative (observed −4582 ns
-    // with the fast path live). Unexporting (not stubbing: a vDSO
-    // function cannot set errno, and LTP's raw-call variants need
-    // errno==ENOSYS) makes glibc and LTP's parser both take the plain
-    // syscall — the pre-live-vDSO behavior that passed. The timer lane
-    // re-arms by restoring the canonical names AND unifying the tracks
-    // (or proving the corrections are identically zero on every CPU).
-    // COST, deliberately traded for correctness: the live fast path
-    // moved 21.3M clock_gettime syscalls per OH boot to userspace
-    // (~6.6% of the box).
+    // with the fast path live; the syscall track's per-CPU corrections
+    // + ratchet are not reproducible by a raw-TSC interpolation). With
+    // the unified track (x86_track above) the vDSO and the syscall
+    // compute bit-identical values from the same page words, so the
+    // strict adjacent-pair requirement holds structurally and the
+    // names come back — glibc and LTP's parser take the fast path
+    // again (the 21.3M clock_gettime syscalls per OH boot, ~6.6% of
+    // the box, move back to userspace).
     #[cfg(feature = "x86_64")]
     const NAMES: [&str; 3] = [
-        "__vdso_clock_gettime_x86_disabled",
-        "__vdso_gettimeofday_x86_disabled",
+        "__vdso_clock_gettime",
+        "__vdso_gettimeofday",
         "__vdso_clock_getres",
     ];
     #[cfg(not(feature = "x86_64"))]
