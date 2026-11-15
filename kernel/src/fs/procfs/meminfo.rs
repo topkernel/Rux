@@ -34,15 +34,30 @@ fn mem_used_kb() -> u64 {
 
 /// Page-cache pages in kB (4 KiB pages).
 fn cached_kb() -> u64 {
-    crate::fs::page_cache::page_cache_total_pages() as u64 * 4
+    (crate::fs::page_cache::page_cache_total_pages() as u64).saturating_mul(4)
 }
 
 /// LRU class sizes in kB: (active_file, inactive_file, active_anon,
 /// inactive_anon).
+///
+/// Saturating math (pcachewedge lane, 2026-11-15): an LRU class counter
+/// can underflow-wrap (a double `unlink_locked` on a corrupted
+/// descriptor makes `fetch_sub` wrap to ~usize::MAX) and the plain
+/// `* 4` then panicked the whole kernel in debug builds
+/// ("attempt to multiply with overflow", fs/procfs/meminfo.rs:45 — the
+/// old-base fammm a1 boot). /proc/meminfo is an observability file:
+/// saturate, never panic — the reference reports these fields on every
+/// host size.
 fn lru_kb() -> (u64, u64, u64, u64) {
+    // Physical bound for any page-count counter: a class size above the
+    // machine's page total is wrapped garbage, clamp it before the math.
+    let total_pages = (crate::mm::meminfo::get_basic_memory_info().mem_total
+        / crate::mm::PAGE_SIZE) as u64;
     crate::mm::pglist::first_online_node().map_or((0, 0, 0, 0), |node| {
         let sz = |which: usize| {
-            node.lru_sizes[which].load(core::sync::atomic::Ordering::Relaxed) as u64 * 4
+            (node.lru_sizes[which].load(core::sync::atomic::Ordering::Relaxed) as u64)
+                .min(total_pages)
+                .saturating_mul(4)
         };
         (
             sz(crate::mm::pglist::LRU_ACTIVE_FILE),
@@ -56,7 +71,10 @@ fn lru_kb() -> (u64, u64, u64, u64) {
 /// Swap totals in kB: (total, free).
 fn swap_kb() -> (u64, u64) {
     let s = crate::mm::swap::swap_stats();
-    (s.swap_total as u64 * 4, s.swap_free as u64 * 4)
+    (
+        (s.swap_total as u64).saturating_mul(4),
+        (s.swap_free as u64).saturating_mul(4),
+    )
 }
 
 /// Kernel buddy-heap stats in kB: (total, used, free).

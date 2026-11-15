@@ -985,8 +985,17 @@ pub unsafe fn free_user_page_tables(
                         }
                         let new_ref = (*page).put_page_site(crate::dfx::driftwatch::S_TEARDOWN_X86_L3);
                         if new_ref == 0 {
-                            crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                            free_pages(phys_addr as usize, 0);
+                            // Cache-backed leaf: leak, never hand the live
+                            // cache frame to the zone (pcachewedge lane).
+                            if pte3.bits() & super::mm_ops::cow_flags::PCACHE != 0 {
+                                crate::mm::page_alloc::pcache_leaf_phantom_zero_put(
+                                    phys_addr as usize,
+                                    "teardown-l3",
+                                );
+                            } else {
+                                crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                                free_pages(phys_addr as usize, 0);
+                            }
                         }
                     }
                 }
@@ -1041,8 +1050,17 @@ pub unsafe fn free_user_page_tables(
                         }
                         let new_ref = (*page).put_page_site(crate::dfx::driftwatch::S_TEARDOWN_X86_L2);
                         if new_ref == 0 {
-                            crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                            free_pages(phys_addr as usize, 0);
+                            // Cache-backed leaf: leak, never hand the live
+                            // cache frame to the zone (pcachewedge lane).
+                            if pte2.bits() & super::mm_ops::cow_flags::PCACHE != 0 {
+                                crate::mm::page_alloc::pcache_leaf_phantom_zero_put(
+                                    phys_addr as usize,
+                                    "teardown-l2",
+                                );
+                            } else {
+                                crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                                free_pages(phys_addr as usize, 0);
+                            }
                         }
                     }
                     continue;
@@ -1106,8 +1124,17 @@ pub unsafe fn free_user_page_tables(
                     if pte1.bits() & super::mm_ops::cow_flags::PCACHE_RO == 0 {
                         let new_ref = (*page).put_page_site(crate::dfx::driftwatch::S_TEARDOWN_X86_L1);
                         if new_ref == 0 {
-                            crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                            free_pages(phys_addr as usize, 0);
+                            // Cache-backed leaf: leak, never hand the live
+                            // cache frame to the zone (pcachewedge lane).
+                            if pte1.bits() & super::mm_ops::cow_flags::PCACHE != 0 {
+                                crate::mm::page_alloc::pcache_leaf_phantom_zero_put(
+                                    phys_addr as usize,
+                                    "teardown-l1",
+                                );
+                            } else {
+                                crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                                free_pages(phys_addr as usize, 0);
+                            }
                         }
                         // PCACHE leaf (filemap_fault private mapping): drop the
                         // mapping's page-cache pin after the descriptor put

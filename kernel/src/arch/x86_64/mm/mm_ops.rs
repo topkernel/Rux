@@ -1396,9 +1396,21 @@ impl MmStruct {
                         let new_ref =
                             unsafe { (*page).put_page_site(crate::dfx::driftwatch::S_UNMAP_X86) };
                         if new_ref == 0 {
-                            crate::mm::page_alloc::free_pages(
-                                (ppn_val as usize) << PAGE_SHIFT, 0,
-                            );
+                            // Cache-backed leaf: the frame still belongs to
+                            // the page cache — a zero put here is a phantom
+                            // put; leaking beats wiring the live cache frame
+                            // into the zone (pcachewedge lane; see
+                            // pcache_leaf_phantom_zero_put).
+                            if leaf_is_pcache {
+                                crate::mm::page_alloc::pcache_leaf_phantom_zero_put(
+                                    (ppn_val as usize) << PAGE_SHIFT,
+                                    "unmap-fast",
+                                );
+                            } else {
+                                crate::mm::page_alloc::free_pages(
+                                    (ppn_val as usize) << PAGE_SHIFT, 0,
+                                );
+                            }
                         }
                         // PCACHE mapping (filemap_fault): drop this mapping's
                         // page-cache pin AFTER the descriptor put (see
@@ -1547,9 +1559,18 @@ impl MmStruct {
                         let new_ref =
                             unsafe { (*page).put_page_site(crate::dfx::driftwatch::S_UNMAP_X86) };
                         if new_ref == 0 {
-                            crate::mm::page_alloc::free_pages(
-                                (ppn_val as usize) << PAGE_SHIFT, 0,
-                            );
+                            // Cache-backed leaf: leak, never hand the live
+                            // cache frame to the zone (pcachewedge lane).
+                            if pte_bits & cow_flags::PCACHE != 0 {
+                                crate::mm::page_alloc::pcache_leaf_phantom_zero_put(
+                                    (ppn_val as usize) << PAGE_SHIFT,
+                                    "unmap-slow",
+                                );
+                            } else {
+                                crate::mm::page_alloc::free_pages(
+                                    (ppn_val as usize) << PAGE_SHIFT, 0,
+                                );
+                            }
                         }
                         if pte_bits & cow_flags::PCACHE != 0 {
                             release_cache_mapping_pin(ppn_val as usize);
@@ -1624,7 +1645,18 @@ impl MmStruct {
                 let new_ref =
                     unsafe { (*page).put_page_site(crate::dfx::driftwatch::S_UNMAP_X86) };
                 if new_ref == 0 {
-                    crate::mm::page_alloc::free_pages((ppn_val as usize) << PAGE_SHIFT, 0);
+                    // Cache-backed leaf: leak, never hand the live cache
+                    // frame to the zone (pcachewedge lane).
+                    if pte_bits & cow_flags::PCACHE != 0 {
+                        crate::mm::page_alloc::pcache_leaf_phantom_zero_put(
+                            (ppn_val as usize) << PAGE_SHIFT,
+                            "mremap-dst",
+                        );
+                    } else {
+                        crate::mm::page_alloc::free_pages(
+                            (ppn_val as usize) << PAGE_SHIFT, 0,
+                        );
+                    }
                 }
                 // PCACHE mapping: drop the pin after the descriptor put (same
                 // ordering as unmap_pages).
@@ -3161,7 +3193,14 @@ pub unsafe fn handle_cow_fault(
     };
 
     // If refcount <= 1, we're the only owner - just enable write.
-    if refcount <= 1 {
+    // EXCEPT a cache-backed leaf: the page cache holds the frame's base
+    // reference for as long as the entry lives, so refcount 1 on a
+    // PCACHE leaf means the MAPPING's reference is missing (a phantom
+    // put consumed it) — enabling W in place would (a) let MAP_PRIVATE
+    // stores land in the shared cache frame and (b) arm the unmap path
+    // to zero-put the frame the cache still owns. Force the copy path;
+    // the copy's put then just exposes the drift (pcachewedge lane).
+    if refcount <= 1 && old_bits & cow_flags::PCACHE == 0 {
         let new_pte = PageTableEntry::from_bits(
             (old_bits & !cow_flags::COW) | PageTableEntry::W | PageTableEntry::P
         );

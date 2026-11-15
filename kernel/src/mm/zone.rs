@@ -599,11 +599,23 @@ impl Zone {
         // double free. Proceeding would relink an already-linked block
         // (two lists share its next_free) and corrupt both — leak it
         // instead, like Linux's bad_page() path.
+        //
+        // pcachewedge (2026-11-15): OnPcp is the SAME class of linked
+        // state — the frame sits on a per-CPU pageset row. A raw zone
+        // free of a pcp-cached frame (the teardown echo of a stale tree
+        // reference: the frame was freed once before, cached, and the
+        // stale walk frees it again) links it into the buddy WHILE the
+        // row still hands it out — one frame, two future owners, and
+        // the re-alloc stamps it as a live page table in between (the
+        // observed RAW-FREE-OF-LIVE-TABLE mid-flight re-stamp). Refuse
+        // identically: leak + taint, never double-link.
         {
             let page = pfn_to_page_mut(pfn);
             if !page.is_null() {
                 unsafe {
-                    if (*page).test_flag(PageFlag::OnFreelist) {
+                    if (*page).test_flag(PageFlag::OnFreelist)
+                        || (*page).test_flag(PageFlag::OnPcp)
+                    {
                         // Taint-only reporting: this runs under the zone
                         // lock; raw putchar / printk here can wedge the
                         // console path (same discipline as the heap

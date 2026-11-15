@@ -1077,6 +1077,17 @@ pub(crate) unsafe fn release_user_leaf(
             crate::mm::page_desc::text_stamp_remove(pfn);
         }
     }
+    // Cache-backed leaf (pcachewedge lane, 2026-11-15): the page cache
+    // owns the frame while the entry lives (map + LRU); its release path
+    // is release_page_frame, never a descriptor zero-put. A zero put on
+    // a PageCache-typed descriptor here is a PHANTOM put — freeing would
+    // wire a live cache frame back into the zone (the RAW-FREE double
+    // hand). Leak + name it instead (x86_64 twin: the per-site
+    // pcache_leaf_phantom_zero_put guards).
+    if (*page).page_type() == crate::mm::page_desc::PageType::PageCache {
+        crate::mm::page_alloc::pcache_leaf_phantom_zero_put(pfn << 12, "rv-release-user-leaf");
+        return false;
+    }
     crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     free_pages(pfn << 12, 0);
     true

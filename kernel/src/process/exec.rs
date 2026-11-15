@@ -1220,6 +1220,21 @@ pub(crate) fn do_execve_elf(
     if ec2_on { ec2_fill = crate::arch::cpu::read_time(); }
     let new_addr_space = unsafe { crate::mm::MmStruct::new_user(user_ppn) };
 
+    // OWNERSHIP TRANSFER (pcachewedge lane, 2026-11-15): from here the
+    // MmStruct owns user_ppn — its Drop tears the tree down exactly once.
+    // The RAII guard MUST be defused NOW: every later `return Err` (the
+    // interpreter-VMA re-validation at 1428's checked_add, etc.) unwinds
+    // BOTH new_addr_space (its Drop frees the tree) and _guard (declared
+    // earlier, so it drops LAST) — the guard's second
+    // free_user_page_tables walk of the same root re-freed every frame
+    // the first teardown had just returned to the zone: the exec-side
+    // double-hand behind the RAW-FREE-OF-LIVE-TABLE / PTLEDGER
+    // DOUBLE-ALLOC family (resA r2's flagged exec-teardown free). With
+    // the guard defused, error paths after this point free the tree
+    // exactly once (via the MmStruct) and the success paths need no
+    // forget of their own.
+    core::mem::forget(_guard);
+
     // Reset the heap to the NEW image: exec used to leave the task's brk
     // (and the mm default) inherited from the PARENT image, so the first
     // malloc in the exec'd program extended a heap at the old image's
@@ -1603,12 +1618,10 @@ pub(crate) fn do_execve_elf(
             // No trap frame, this is the init process case
             // Need to return via ret_from_fork
             // Success path: the new address space is now owned by the init
-            // task — the RAII guard MUST be defused here too. Its drop was
-            // freeing PID 1's freshly built page tables straight back to
-            // the zone; the frames then got reused by the first kernel/user
-            // allocations while init kept executing on them (stale TLB),
-            // seeding the whole recycled-frame corruption family.
-            core::mem::forget(_guard);
+            // task. The RAII guard was already defused at the MmStruct
+            // ownership transfer above (double-teardown fix), so its drop
+            // can no longer free PID 1's freshly built page tables straight
+            // back to the zone (the recycled-frame corruption family).
             return Ok(());
         }
 
@@ -1711,7 +1724,8 @@ pub(crate) fn do_execve_elf(
         crate::process::task::vfork_wake_parent(task_ptr);
     }
 
-    // Success — prevent RAII guard from freeing page tables
+    // Success — the RAII guard was defused at the MmStruct ownership
+    // transfer (see there); the installed mm owns the tree.
     if ec2_on {
         let t = crate::arch::cpu::read_time();
         crate::pr_info!(
@@ -1730,6 +1744,5 @@ pub(crate) fn do_execve_elf(
             t - ec2_t0
         );
     }
-    core::mem::forget(_guard);
     Ok(())
 }

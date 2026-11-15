@@ -85,6 +85,17 @@ pub static FREE_NULL: AtomicUsize = AtomicUsize::new(0);
 /// put_page() underflow refusals (rc already 0) — the inverse drift
 /// signal (a page freed twice through the refcount side).
 pub static PUT_UNDERFLOW: AtomicUsize = AtomicUsize::new(0);
+/// mm-side descriptor puts that reached 0 on a PCACHE (cache-backed)
+/// mapping leaf — the phantom-put signal (pcachewedge lane, 2026-11-15).
+/// Each one leaked a frame instead of freeing it (see
+/// page_alloc::pcache_leaf_phantom_zero_put); nonzero here names the
+/// raw-free double-hand family's producer.
+pub static PCACHE_LEAF_PHANTOM_PUT: AtomicUsize = AtomicUsize::new(0);
+/// Cache-side releases REFUSED because the frame still carries a live
+/// PT-ledger stamp (double-owned cache entry; see
+/// page_cache::release_page_frame). Each refusal leaked one frame and
+/// prevented a RAW-FREE of a live page table.
+pub static PCACHE_LIVE_PT_REFUSED: AtomicUsize = AtomicUsize::new(0);
 
 #[inline]
 pub fn note_zero_put(site: usize) {
@@ -130,5 +141,13 @@ pub fn report() {
     let v = PUT_UNDERFLOW.load(Ordering::Relaxed);
     if v != 0 {
         crate::println!("DRIFTWATCH put_underflow={}", v);
+    }
+    let v = PCACHE_LEAF_PHANTOM_PUT.load(Ordering::Relaxed);
+    if v != 0 {
+        crate::println!("DRIFTWATCH pcache_leaf_phantom_put={}", v);
+    }
+    let v = PCACHE_LIVE_PT_REFUSED.load(Ordering::Relaxed);
+    if v != 0 {
+        crate::println!("DRIFTWATCH pcache_live_pt_refused={}", v);
     }
 }
