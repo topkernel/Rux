@@ -1087,6 +1087,11 @@ pub fn pcache_leaf_phantom_zero_put(phys: usize, site: &str) {
             n + 1
         );
     }
+    // mmforensics (early-put hunt): the PRODUCER-side capture — this is
+    // the moment the mapping's descriptor reference is proven missing.
+    // The ref-transition ring replay in the capture names the path that
+    // consumed it early. Takes no locks (PTE-lock context is fine).
+    crate::dfx::mmforensics::capture_frame(phys >> 12, "pcache-phantom-put");
     // Intentionally NO free: the page cache owns the frame.
     // QUARANTINE (mmforensics lane): the mapping's reference was consumed
     // early — the frame is (or is about to be) double-tracked. Mark it so
@@ -1141,7 +1146,55 @@ pub fn free_pages(addr: usize, order: usize) {
                 );
                 crate::dfx::backtrace::dump_stack();
             }
+            // mmforensics (early-put hunt): a free of a still-mapped
+            // frame is the premature-free face of the same producer
+            // family — capture names the frame and its referees.
+            crate::dfx::mmforensics::capture_frame(phys_to_pfn(addr), "free-while-mapped");
             return;
+        }
+    }
+
+    // mmforensics (early-put hunt, 2026-11-15): an mm-side free of a
+    // frame the page cache still owns. Every legitimate cache-side free
+    // funnels through page_cache::release_page_frame, which clears the
+    // PageCache type and the eviction keys (mapping/index) BEFORE the
+    // free_page call — a frame arriving HERE still PageCache-typed with
+    // its mapping key live is being freed by a foreign path (observed:
+    // a teardown/unmap leaf put reaching 0 on a cache-owned frame — the
+    // phantom-put's free face; first boot's capture #1 ring: PUT
+    // old=1->0 with NO matching get since the frame's cache insert).
+    // Under dfx=mmforensics: capture AT this moment (the rings still
+    // hold the fresh evidence — the install sites, the transition
+    // sequence) and REFUSE the free (quarantine-leak), so the frame
+    // never re-enters circulation and scrambles the trail.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::MmForensics) {
+        let pd = crate::mm::page_desc::pfn_to_page(phys_to_pfn(addr));
+        if !pd.is_null() {
+            // SAFETY: read-only descriptor access on the diagnostic path.
+            let p = unsafe { &*pd };
+            if p.page_type() == crate::mm::page_desc::PageType::PageCache
+                && !p.mapping().is_null()
+            {
+                static CACHE_FREES: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                let n = CACHE_FREES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 8 {
+                    crate::pr_err!(
+                        "free_pages: REFUSED frame {:#x} still CACHE-OWNED (type PageCache, mapping key live, refcount {}) pid {} — phantom-put free face",
+                        addr,
+                        p.refcount(),
+                        crate::process::current_pid()
+                    );
+                    crate::dfx::backtrace::dump_stack();
+                }
+                crate::dfx::mmforensics::capture_frame(
+                    phys_to_pfn(addr),
+                    "free-of-live-cache-entry",
+                );
+                crate::dfx::driftwatch::MM_POISON_FREES
+                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                return;
+            }
         }
     }
 

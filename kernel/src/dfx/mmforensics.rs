@@ -37,11 +37,78 @@
 //! bounds-checked (`phys_valid` + RAM top) before descent and every
 //! walk carries a hard entry budget.
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 /// Per-boot cap on captures: the events occur <=2/boot; four captures
 /// carry the evidence, more would only flood the serial console.
 static CAPTURES: AtomicUsize = AtomicUsize::new(0);
+
+// ==================== ref-transition ring (early-put hunt, 2026-11-15) ====================
+//
+// The mmforensics capture answers "what does the frame look like NOW";
+// the ORIGINAL-producer hunt (why a PCACHE mapping's descriptor
+// reference is consumed before unmap) additionally needs WHO performed
+// every refcount transition on the frame in the past. Every mm-side
+// put on a mapped leaf runs through `Page::put_page_site` (driftwatch
+// attribution); installs and fork copies run through `Page::get_page`.
+// This ring records BOTH for page-cache-typed frames only (the other
+// get/put users — shm/ashmem/binder/io_uring/perf — hold their own
+// frames), gated by the mmforensics switch so standard boots pay one
+// relaxed load per transition. The capture's ring replay then prints
+// the get/put sequence with sites: a put whose `old` shows the mapping
+// reference already missing names the early consumer directly.
+
+/// One recorded descriptor refcount transition on a PageCache frame.
+pub struct RefRingEntry {
+    pub ppn: AtomicU64,
+    /// kind (0 = get, 1 = put) in the high byte, driftwatch site below.
+    pub kind_site: AtomicU64,
+    /// Refcount BEFORE the transition (the value the actor observed).
+    pub old: AtomicI32,
+    /// Descriptor mapcount at the transition.
+    pub mc: AtomicI32,
+    pub pid: AtomicU32,
+}
+
+// 8192 entries (256 KiB of statics): a fammm boot's PageCache mapping
+// transitions can push far past 1024 entries between the early put and
+// the capture that replays them — the deeper ring keeps the window.
+const REF_RING_LEN: usize = 8192;
+pub static REF_RING: [RefRingEntry; REF_RING_LEN] =
+    [const {
+        RefRingEntry {
+            ppn: AtomicU64::new(0),
+            kind_site: AtomicU64::new(0),
+            old: AtomicI32::new(0),
+            mc: AtomicI32::new(0),
+            pid: AtomicU32::new(0),
+        }
+    }; REF_RING_LEN];
+pub static REF_CUR: AtomicUsize = AtomicUsize::new(0);
+
+/// Record a get/put transition on a page-cache-typed descriptor.
+/// `kind`: 0 = get_page, 1 = put (site-attributed). No-op unless
+/// `dfx=mmforensics` is armed; takes no locks (safe under PTE locks).
+#[inline]
+pub fn note_ref(page: *const crate::mm::page_desc::Page, kind: u8, site: u8, old: i32) {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::MmForensics) {
+        return;
+    }
+    // SAFETY: the caller passes a valid page descriptor it is operating on.
+    let p = unsafe { &*page };
+    use crate::mm::page_desc::PageType;
+    if p.page_type() != PageType::PageCache {
+        return;
+    }
+    let ppn = crate::mm::page_desc::page_to_pfn(page) as u64;
+    let idx = REF_CUR.fetch_add(1, Ordering::Relaxed) % REF_RING_LEN;
+    let e = &REF_RING[idx];
+    e.ppn.store(ppn, Ordering::Relaxed);
+    e.kind_site.store(((kind as u64) << 8) | site as u64, Ordering::Relaxed);
+    e.old.store(old, Ordering::Relaxed);
+    e.mc.store(p.mapcount(), Ordering::Relaxed);
+    e.pid.store(crate::process::current_pid(), Ordering::Relaxed);
+}
 
 /// One live-tree reference to the target frame, found by the bounded
 /// reverse scan. `level` semantics (x86_64 naming; riscv64 Sv39 maps
@@ -179,6 +246,58 @@ fn ring_history(ppn: u64) {
                 break;
             }
         }
+    }
+
+    // Refcount transitions (early-put hunt): the get/put sequence with
+    // driftwatch sites. Newest first; the full relevant window matters,
+    // so this replay prints more matches than the others.
+    let site_name = |s: u64| -> &'static str {
+        match s {
+            0 => "TEARDOWN_RV",
+            1 => "TEARDOWN_X86_L1",
+            2 => "TEARDOWN_X86_L2",
+            3 => "TEARDOWN_X86_L3",
+            4 => "COW_RV",
+            5 => "COW_X86",
+            6 => "UNMAP_X86",
+            7 => "UNMAP_RV",
+            8 => "VMSCAN_SWAP",
+            9 => "SHM_DROP",
+            10 => "ASHMEM_DROP",
+            11 => "BINDER_DROP",
+            12 => "BINDER_ZAP",
+            13 => "IOURING_DROP",
+            14 => "PAGECACHE",
+            _ => "OTHER",
+        }
+    };
+    let cur = REF_CUR.load(Relaxed);
+    let mut n = 0;
+    for k in 0..REF_RING_LEN {
+        let idx = (cur + REF_RING_LEN - 1 - k) % REF_RING_LEN;
+        if REF_RING[idx].ppn.load(Relaxed) == ppn {
+            let ks = REF_RING[idx].kind_site.load(Relaxed);
+            let (kind, site) = ((ks >> 8) as u8, (ks & 0xFF) as u64);
+            crate::pr_err!(
+                "  hist ref[age {}]: ppn={:#x} {} site={} old={} mc={} pid={}",
+                k,
+                ppn,
+                if kind == 0 { "GET" } else { "PUT" },
+                // GETs carry no driftwatch site (they are installs/fork
+                // copies); only PUTs are site-attributed.
+                if kind == 0 { "install" } else { site_name(site) },
+                REF_RING[idx].old.load(Relaxed),
+                REF_RING[idx].mc.load(Relaxed),
+                REF_RING[idx].pid.load(Relaxed)
+            );
+            n += 1;
+            if n >= 16 {
+                break;
+            }
+        }
+    }
+    if n == 0 {
+        crate::pr_err!("  hist ref: no recorded transition names this ppn");
     }
 }
 
