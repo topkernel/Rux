@@ -2600,10 +2600,24 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
         static SEGVD_XN_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         let hi_fault = fault_addr >= 0x7f00_0000_0000;
+        // early30 follow-up: split the NULL class out of the low bucket
+        // too — the bluetooth/usb_host storm faults at cr2=0 (rip!=cr2)
+        // and its 8+ faults/boot starve every OTHER low fault (e30f5's
+        // IMS heap-exec variant faulted at cr2=0x2ba96d50 with rip in
+        // the heap — not the XN bucket, and the low budget was already
+        // burned). e30g3 refined the split: the storm's cr2 is ALWAYS
+        // exactly 0x0, while the heap-exec face dereferences a NEAR-NULL
+        // address (cr2=0x38, a NULL->field access at offset 0x38) — so
+        // the NULL bucket must match cr2 == 0 exactly, and every other
+        // low fault (near-NULL included) keeps the 6-decode budget.
+        static SEGVD_NULL_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
         let over = if fault_addr == regs.rip {
             SEGVD_XN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 8
         } else if hi_fault {
             SEGVD_HI_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 8
+        } else if fault_addr == 0 {
+            SEGVD_NULL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 2
         } else {
             SEGVD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 6
         };
