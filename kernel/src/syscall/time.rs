@@ -975,6 +975,50 @@ fn set_itimer_real(interval_sec: i64, interval_usec: i64, value_sec: i64, value_
     );
 }
 
+/// sys_alarm — legacy alarm(2), x86_64 native NR 37 (no asm-generic
+/// number; dispatched from the x86_64 legacy arm). alarm(seconds) is a
+/// one-shot ITIMER_REAL; the return value is the PREVIOUS timer's
+/// remaining seconds rounded UP (Linux sys_alarm:
+/// `old.it_value.tv_sec + (old.it_value.tv_usec ? 1 : 0)`).
+/// Untranslated, 37 fell through to the generic table where 37 is
+/// linkat — glibc's alarm() on x86_64 issues the native number, so
+/// every alarm() caller parsed a linkat errno as the previous
+/// remaining time (LTP alarm02/03/05/06/07 are this family).
+pub fn sys_alarm(args: SyscallArgs) -> i64 {
+    let seconds = args[0] as i64;
+
+    // Previous remaining, same accounting as the setitimer old-value
+    // path above (deadline mirror minus monotonic now).
+    let prev_remaining_ns: u64 = match crate::process::current_task() {
+        Some(t) => {
+            let deadline_ns = t.itimer_real[0].load(core::sync::atomic::Ordering::Acquire);
+            if deadline_ns == 0 {
+                0
+            } else {
+                let (mono_sec, mono_nsec) = monotonic_time();
+                let now_ns = mono_sec
+                    .saturating_mul(1_000_000_000)
+                    .saturating_add(mono_nsec as u64);
+                deadline_ns.saturating_sub(now_ns)
+            }
+        }
+        None => 0,
+    };
+
+    // alarm(N): one-shot ITIMER_REAL, zero interval; alarm(0) disarms.
+    // alarm() takes unsigned seconds — a value with the top bit set
+    // reads as a negative i64 but is a HUGE interval, not zero; clamp
+    // to i64 seconds (still centuries on the jiffies wheel).
+    if seconds != 0 {
+        let clamped = if seconds < 0 { i64::MAX } else { seconds };
+        set_itimer_real(0, 0, clamped, 0);
+    } else {
+        disarm_itimer_real();
+    }
+
+    ((prev_remaining_ns + 999_999_999) / 1_000_000_000) as i64
+}
+
 /// sys_clock_nanosleep - High-resolution sleep (with specified clock)
 ///
 /// # Arguments

@@ -419,3 +419,144 @@ captures.log (entries 2026-11-02T07:23:15 scored and 07:47:04 confirm),
 scores-11-02.txt (both uploads' per-workload scores + per-iteration
 runtimes, committed), build-gb2.log. Worktree: work/bzImage (the
 measured kernel), work/geekbench-x86.img, work/probe-x86.img.
+
+---
+
+# 2026-11-15 standing — main@2649af4e3 (lane gb-opt)
+
+Quiet-window runs (9950X, load 3–6, same rig/protocol; four boots total,
+one of them strand-killed — see the sched note below). Kernel:
+strong-profile `build-release-opt`.
+
+## Headline
+
+| | main run 1 (01:01) | main run 2 (02:05) | opt: munmap fast path | opt final: + fault-walk consolidation | Reference, 4-CPU pinned |
+|---|---|---|---|---|---|
+| **Single-Core Score** | 2365 | 2390 | 2423 | **2440** | 2165 |
+| **Multi-Core Score** | 7420 | 7716 | 7644 | 7709 | 7027 |
+| **vs 4-CPU reference** | 109% / 106% | 110% / 110% | 112% / 109% | **113% / 110%** | 100% |
+
+Best-ever totals on both sections; the four-run SC sequence is
+monotonically up (2365→2390→2423→2440) while MC stays flat — the SC
+uplift rides the mm work below plus run-to-run noise (per the standing
+~15% single-core noise band, individual deltas are indicative; the
+consistent direction across four boots is the signal).
+
+## The mm-probe attribution (new rig piece: run/mmprobe/)
+
+A guest probe (`mm_probe.c`, PID-1, six sections) boots on BOTH kernels
+— Rux and the host's 7.0.0-43-generic via the reference-kernel boot path
+— and times the allocation-shape costs Geekbench's workloads pay.
+Same-rig, same-boot A/B (load-window readings, best-of-N per pattern):
+
+| pattern | Rux main | reference | ratio |
+|---|---|---|---|
+| A anon sequential alloc+touch+free (ns/fault) | 503.6 | 513.9 | 0.98x |
+| B anon random-order write fault (ns/fault) | 613.9 | 323.2 | **1.90x** |
+| C file-backed random touch, amortized (ns/fault) | 34.6 | 70.2 | 0.49x |
+| D mmap 64 MB, no touch | 300 ns | 401 ns | 0.75x |
+| D munmap 64 MB, no touch | **23.2 µs** | **0.38 µs** | **61x** |
+| D2 munmap 2 MB | 1.0 µs | 0.33 µs | 3.0x |
+| D3 mprotect 4 MB (arena growth) | 2.36 µs | 0.23 µs | **10x** |
+| E brk growth + touch | 836 ns | 716 ns | 1.17x |
+| F fork+exit | 606 µs | 1207 µs | 0.50x (load-window artifact both sides) |
+| H pthread create+join | 134–171 µs | 23.6 µs | ~6x (load-polluted ratio, needs a quiet rerun) |
+
+Two fixes landed against this table (both in the x86_64 mm guarded
+domain), one was tried and reverted:
+
+1. **Whole-VMA munmap fast path** (`mm_ops.rs::munmap`): the chunked
+   loop paid its fixed per-chunk cost (vma_write cycle + VMA
+   remove/re-add + pin re-key + cond_resched) once per 1 MB chunk —
+   64 lock/tree/pin cycles for a 64 MB arena teardown. When the range
+   carries NO page-table state (the glibc mmap/munmap churn case), the
+   whole munmap now runs as ONE guard cycle: an authoritative emptiness
+   scan under the PTE section (a same-mm fault cannot install while
+   pte_lock is held), whole-VMA removal, zap skipped. Post-fix:
+   munmap 64 MB 23.2→4.3 µs, 16 MB 6.2→1.4 µs, 2 MB 1.0→0.6 µs.
+   Face-B invariant preserved: the zap still runs inside the surgery
+   guard whenever state exists; a fault installing after the guard drop
+   is the same post-drop shape the chunked path tolerates.
+2. **Fault-entry walk consolidation** (`page_fault.rs::handle_mm_fault`):
+   the entry ran PageTableWalker::walk (mapped check) plus a separate
+   read_pte_raw (swap/migration) plus another read_pte_raw (PROT_NONE
+   marker) — three full leaf walks per fault where one suffices.
+   One read_pte_raw now serves all three decisions. Post-fix:
+   B row 613.9→558–565 ns. Two of five per-fault walks gone.
+3. **REVERTED: mprotect block-hoisted walker.** Resolving the upper
+   chain once per 2 MB block (instead of per page) measured 2.36 µs →
+   ~0.4 µs on D3 — and wedged the machine 4/4 boots exactly at that
+   section (soft lockup inside handle_timer_tick, "not servicing IPIs",
+   garbage pc; symbolized trace: handle_timer_tick ← trap_handler),
+   while the pre-hoist kernel passed it 10/10 boots. Reverted with a
+   full comment at the site; the per-page walk apparently tolerates a
+   concurrent upper-level mutation the hoist does not — the mutator
+   must be named before re-landing.
+
+GB totals moved within noise (SC +3.2% across four boots, MC flat):
+glibc's arena reuse means Geekbench's per-iteration munmap/mprotect
+rates are far below the probe's churn shape. The wins are real at the
+allocation-syscall level and compound for mmap/munmap-heavy
+applications (thread-stack teardown: an 8 MB stack detach is 8 chunks
+→ 1 guard cycle).
+
+## The -smp2 lmbench strand: NOT a sched bug (corrected 2026-11-15, gb-opt)
+
+The earlier section claimed a sched claim-strand (ENQ-CLAIMED-SLOTBK
+loops, lying slot). **That attribution is RETRACTED**: the ENQSB prints
+are the NORMAL preempted-prev requeue (they fire in completed boots too
+— 200-print budget cap on every boot, clean or wedged), and the
+instrumented boots prove the child RUNS (exec clock advances 1.0 → 6.3 s
+across samples). The verified facts:
+
+- Reference control: the SAME lmbench image on the same -smp 2 rig with
+  the reference kernel passes 6/6 (the reference boots finish in ~10 s).
+  Rux passes 1-2/6. **A real kernel-side gap, location NOT yet pinned.**
+- The wedge point: the benchmp master (the runner's fork) sits in
+  `get_enough`'s calibration machinery BEFORE its slave fork (FORKLOG:
+  completed boots show `parent=306 child=307/308`; stranded boots show
+  no second fork), calling clock_gettime (syscall 113 — musl's
+  gettimeofday is implemented as clock_gettime) once per ~200 ms round
+  (cgt counter A/B: 221→247 over 0.3 s), with rip in `usecs_spent`
+  (gettime) and the start_tv/stop_tv globals healthy (4.8 s, ~1 µs
+  deltas).
+- The calibration's ~200 ms rounds (vs ms-class on the reference) do not
+  converge within the 35 s budget — the compute_enough machinery grinds
+  and the 35 s kill fires first. Exercised-and-dead-end kernel fixes in
+  this session (all reverted): per-CPU monotonic ratchet, global
+  HPET-anchored anchor + interpolation, universalized-TSC reads, TSC
+  cross-vCPU sync via IA32_TSC write (the first cut also had a broken
+  EDX:EAX asm), NTP-style slew. The strand survived every one — the
+  rounds are NOT clock-delta driven. A dedicated lane with per-round
+  strace-class instrumentation (the probes are archived in run/strand-hunt/)
+  should instrument the chase loop (`enough_duration`, lib_timing.c) and
+  the put_user path directly.
+
+The rig's own `budget=<secs>` knob does NOT rescue it (150 s tested,
+still stranded). LMBENCH_SCHED=SINGLE pinning (lmbench's own scheduler
+control) does not reach the wedge (get_enough runs before
+handle_scheduler).
+
+## Remaining queue (ranked)
+
+1. **sched claim-strand (P0)** — every fork/thread-heavy workload
+   pays it; also poisons every benchmark battery.
+2. **pthread create+join ~6x** (H row) — quiet-window attribution:
+   clone path vs futex join vs wake→pick latency. The thread-heavy MC
+   rows (Camera/Face Detection/N-Body) sit 86–100% today.
+3. **mprotect 10x** — re-land the hoist after naming the tick-side
+   mutator (see the revert note).
+4. **SC Navigation 81–84%** — flat per-iteration shift; the 11-02
+   capture shows ~55 ms/iteration over reference with zero variance.
+   Candidate: wake placement of the harness→worker handoff on 4 idle
+   vCPUs.
+5. **B row residual 1.7x** (random-anon fault) — alloc+zero+bookkeeping
+   below the walk layer.
+
+## Artifacts (gb-opt worktree run/)
+
+`geekbench/{scores-base,scores-main,scores-opt,scores-final}.txt`,
+`captures-{base,main,opt,allfixes,final}.log`, serial logs;
+`mmprobe/{mm_probe.c, probe-x86.img, rux*.log, ref*.log, ab-*.log,
+verify-*.log}`; `lmbench-rux-{main,opt}.txt`, `lmbench-linux.txt`,
+`lmbench-table-{main,opt}.md`; `pipeline.log` (every stage logged).

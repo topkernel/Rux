@@ -1039,6 +1039,63 @@ fn report_free_refusal(detail_msg: &core::fmt::Arguments) {
     }
 }
 
+/// mm-side release of a PCACHE (page-cache-backed) mapping leaf whose
+/// descriptor put just returned 0 (pcachewedge lane, 2026-11-15).
+///
+/// A non-RO PCACHE leaf's frame ALWAYS belongs to the page cache while
+/// the cache entry lives: the cache holds the frame's base descriptor
+/// reference (the allocator's grant at insert, never dropped by the
+/// cache — its release path frees through `release_page_frame` without
+/// consulting the descriptor refcount), and every mapping adds its own
+/// `get_page` at install (filemap_bookkeep / fork's copy walk). A
+/// descriptor put reaching 0 here therefore means the mapping's own
+/// reference was already consumed somewhere else — a PHANTOM put.
+///
+/// Freeing would hand a frame the page cache still owns (map entry +
+/// LRU link) to the zone allocator; the frame is then re-allocated
+/// (observed: as a page table, PT_LEDGER-stamped) while the cache still
+/// lists it, and the cache's own later release (eviction, invalidate,
+/// final put) frees the LIVE new owner: the RAW-FREE-OF-LIVE-TABLE
+/// double-hand behind the fammm-window corruption cascade (PTE values
+/// scribbled into recycled task memory, oops-killed lock holders, the
+/// fdreapd starvation wedge). Reproduced and stack-attributed in the
+/// pcachewedge fammm boot: evict_one_locked → release_page_frame freeing
+/// pfn 0x7e41d while the ledger still stamped it live.
+///
+/// Discipline (same shape as the REUSE-WHILE-MAPPED tripwire in
+/// free_pages): LEAK the frame — bounded, one frame per phantom put —
+/// and name it. There is no legitimate mm-side zero-put free of a
+/// cache-backed leaf: the cache's release paths never run through
+/// put_page.
+pub fn pcache_leaf_phantom_zero_put(phys: usize, site: &str) {
+    use crate::dfx::driftwatch;
+    use core::sync::atomic::Ordering::Relaxed;
+    driftwatch::PCACHE_LEAF_PHANTOM_PUT.fetch_add(1, Relaxed);
+    static REPORTS: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
+    let n = REPORTS.fetch_add(1, Relaxed);
+    if n < 8 {
+        crate::pr_err!(
+            "pcache-leaf phantom zero-put: frame {:#x} still cache-owned (site {}) — leaking instead of freeing",
+            phys,
+            site
+        );
+        crate::dfx::backtrace::dump_stack();
+    } else if (n + 1) % 4096 == 0 {
+        crate::pr_err!(
+            "pcache-leaf phantom zero-put: {} frames leaked so far (prints suppressed)",
+            n + 1
+        );
+    }
+    // Intentionally NO free: the page cache owns the frame.
+    // QUARANTINE (mmforensics lane): the mapping's reference was consumed
+    // early — the frame is (or is about to be) double-tracked. Mark it so
+    // no free path can ever hand it to a new owner while the surviving
+    // references (cache entry, stale PTEs) still name it.
+    crate::arch::mm::mmu_init::PtLedger::poison_table((phys >> 12) as u64);
+    crate::dfx::driftwatch::MM_POISONED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
+
 /// Free contiguous physical pages
 ///
 /// # Arguments

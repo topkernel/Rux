@@ -307,7 +307,11 @@ static RWFRZ_WATCH_CNT: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 // sc186: 64 lines died on arena churn before the wedge window; 192 keeps
 // the same worst-case UART bound as one parkdump stack dump.
-const RWFRZ_WATCH_BUDGET: usize = 192;
+// glib-mutex: rwfrzbudget=N raises the cap (the garepro repro drives
+// thousands of ops/min through the watched word; the default cap goes
+// dark long before a freeze could form). Default unchanged.
+static RWFRZ_WATCH_BUDGET: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(192);
 
 /// rwlock-livelock: tgid whose THREAD EXITS are traced (the exit-path
 /// forensics in do_exit read this). Latched at the FIRST plain-mutex
@@ -1496,6 +1500,14 @@ pub fn fuxwatch_parse() {
                     RWFRZ_WATCH[0].store(addr as usize, core::sync::atomic::Ordering::Relaxed);
                     crate::pr_warn!("rwfrzwatch armed {:#x}", addr);
                 }
+            }
+        }
+    }
+    if let Some(v) = crate::cmdline::get_param("rwfrzbudget") {
+        if let Ok(b) = v.parse::<usize>() {
+            if b > 0 && b <= 200000 {
+                RWFRZ_WATCH_BUDGET.store(b, core::sync::atomic::Ordering::Relaxed);
+                crate::pr_warn!("rwfrzbudget {}", b);
             }
         }
     }
@@ -4857,7 +4869,15 @@ pub fn futex_stuck_census() {
                 // TXN-HANG rows named 8 futex-parked samgr handlers the
                 // census never reached). Prints stay bounded (8 + graph);
                 // this only widens the walk's collection window.
-                if stuck.len() < 96 {
+                // 118th: 96 -> 192 (early-break 192 -> 384) — the wedge
+                // population on the oh image is 124+ waiters, and the
+                // first-96 bucket-order sample missed exactly the two
+                // words the hunt needed (foundation tid 1398's
+                // 0x2aab58a77a74 park — only visible via TXN-HANG — and
+                // input_user_host's leader word). Same collection-window
+                // argument as the 48th; phase-B cost is the O(tasks x
+                // stuck) pointer-compare loop.
+                if stuck.len() < 192 {
                     stuck.push(Stuck {
                         task,
                         uaddr,
@@ -4910,7 +4930,7 @@ pub fn futex_stuck_census() {
                         chn_head: 0,
                         chn_head_win: [0; 8],
                     });
-                } else if total > 192 {
+                } else if total > 384 {
                     // Sample cap reached with clear headroom — stop the
                     // walk (the SUM line carries the truncation).
                     drop(h);
@@ -5866,6 +5886,76 @@ pub fn futex_stuck_census() {
             h.map(|h| h.int_other).unwrap_or(0),
             h.map(|h| h.unint).unwrap_or(0),
         );
+        // 118th (mouse-endgame): standing-word holder scan. A group whose
+        // park has stood >= 60 s names a lock that will never turn again;
+        // the TXN-HANG parkv arm only latches rwfrz_reader_scan for looper
+        // threads owing a txn, so the empty-stack parks (foundation tid
+        // 1332 on the 0x80000010 mutex; the HDI host leader parks at
+        // fval 0x80000000) never got a holder verdict. Run the existing
+        // reader scan for THIS word in THIS tgid — every same-tgid thread
+        // whose stack window references the word prints as an RDR row
+        // with its own park word (the holder's terminal park; a zero-hit
+        // pass acquits thread-side holders and points at a suspended
+        // coroutine). Once per (tgid, word) per 60 s, budget 2 per burst
+        // — the same for_each_task_try + page-walk cost class the parkv
+        // arm already runs in this heartbeat slot.
+        if g.max_age >= 60 && g.uaddr > 0x1000 {
+            use core::sync::atomic::Ordering::Relaxed;
+            static SCAN_TGID: [core::sync::atomic::AtomicU32; 8] =
+                [const { core::sync::atomic::AtomicU32::new(0) }; 8];
+            static SCAN_WORD: [core::sync::atomic::AtomicU64; 8] =
+                [const { core::sync::atomic::AtomicU64::new(0) }; 8];
+            static SCAN_J: [core::sync::atomic::AtomicU32; 8] =
+                [const { core::sync::atomic::AtomicU32::new(0) }; 8];
+            static SCAN_BURST: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            static SCAN_USED: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            let burst = (now / 500) as u32;
+            let cur_burst = SCAN_BURST.load(Relaxed);
+            if cur_burst != burst
+                && SCAN_BURST
+                    .compare_exchange(cur_burst, burst, Relaxed, Relaxed)
+                    .is_ok()
+            {
+                SCAN_USED.store(0, Relaxed);
+            }
+            let used = SCAN_USED.load(Relaxed);
+            let mut slot_due = false;
+            let mut slot_ix = usize::MAX;
+            for i in 0..8 {
+                let t = SCAN_TGID[i].load(Relaxed);
+                let w = SCAN_WORD[i].load(Relaxed);
+                if t == g.tgid && w == g.uaddr as u64 {
+                    slot_ix = i;
+                    let j = SCAN_J[i].load(Relaxed);
+                    slot_due = now.wrapping_sub(j as u64) >= 600;
+                    break;
+                }
+                if t == 0 && slot_ix == usize::MAX {
+                    slot_ix = i;
+                    slot_due = true;
+                }
+            }
+            if slot_due
+                && used < 2
+                && slot_ix != usize::MAX
+                && SCAN_USED
+                    .compare_exchange(used, used + 1, Relaxed, Relaxed)
+                    .is_ok()
+            {
+                SCAN_TGID[slot_ix].store(g.tgid, Relaxed);
+                SCAN_WORD[slot_ix].store(g.uaddr as u64, Relaxed);
+                SCAN_J[slot_ix].store(now as u32, Relaxed);
+                rwfrz_reader_scan(g.tgid, g.uaddr as u64);
+                // 118th: the standing word is ld-musl's __malloc_lock
+                // (fixed loader base) — run the allocator-frame holder
+                // hunt for this tgid alongside the reader scan.
+                if (g.uaddr as u64) & 0xffff_f000 == 0x3fbf_13e000 {
+                    malloc_holder_scan(g.tgid, g.uaddr as u64);
+                }
+            }
+        }
         // 51st session: follow this word's futex lifecycle from here on
         // (FXRS word watch — the WAIT/WAKE trace decides holder-never-
         // releases from kernel-lost-wake).
@@ -8002,7 +8092,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
             let wa = w.load(Relaxed);
             if wa != 0 && wa == uaddr {
                 let c = RWFRZ_WATCH_CNT.fetch_add(1, Relaxed);
-                if c < RWFRZ_WATCH_BUDGET {
+                if c < RWFRZ_WATCH_BUDGET.load(core::sync::atomic::Ordering::Relaxed) {
                     let (tid, tgid) = match crate::sched::current() {
                         Some(t) => unsafe { ((*t).pid(), (*t).tgid()) },
                         None => (0, 0),
@@ -8344,7 +8434,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
             let wa = w.load(Relaxed);
             if wa != 0 && wa == uaddr {
                 let c = RWFRZ_WATCH_CNT.fetch_add(1, Relaxed);
-                if c < RWFRZ_WATCH_BUDGET {
+                if c < RWFRZ_WATCH_BUDGET.load(core::sync::atomic::Ordering::Relaxed) {
                     let (tid, tgid) = match crate::sched::current() {
                         Some(t) => unsafe { ((*t).pid(), (*t).tgid()) },
                         None => (0, 0),
@@ -8456,17 +8546,58 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
     // catches the very first park, in the parking thread's own syscall
     // context, where the user stack still carries the full write-lock
     // caller chain. Capped at 16 dumps per boot.
+    // 118th (mouse-endgame): the cap is now PER-TGID 3 within a global
+    // 32 — the 16 global dumps all landed in the 2.6-3.4 s startup
+    // contention burst (hilogd, samgr FFRT workers, init children —
+    // every one transient), so the wedge-window park of foundation tid
+    // 1332 on the 0x80000010 mutex at ~13.6 s (the exact caller-chain
+    // this arm exists for) never dumped. Per-tgid budgeting keeps the
+    // early spam bounded while leaving room for late parks.
     if matches!(op & FUTEX_CMD_MASK, FUTEX_WAIT | FUTEX_WAIT_BITSET) {
         let readers = val & 0x7fffffff;
         if val & 0x80000000 != 0 && readers >= 4 && readers < 0x40000000 {
             static PARKED_DUMPS: core::sync::atomic::AtomicU32 =
                 core::sync::atomic::AtomicU32::new(0);
+            static PARK_TGID: [core::sync::atomic::AtomicU32; 8] =
+                [const { core::sync::atomic::AtomicU32::new(0) }; 8];
+            static PARK_TGID_N: [core::sync::atomic::AtomicU32; 8] =
+                [const { core::sync::atomic::AtomicU32::new(0) }; 8];
             let n = PARKED_DUMPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            // Per-tgid accounting: find this tgid's slot (or the first
+            // free one) and take one unit of its 3-dump budget.
+            use core::sync::atomic::Ordering::Relaxed;
+            let cur_tgid = crate::sched::current()
+                .map(|t| unsafe { (*t).tgid() as u32 })
+                .unwrap_or(0);
+            let mut tslot = usize::MAX;
+            for i in 0..8 {
+                let t = PARK_TGID[i].load(Relaxed);
+                if cur_tgid != 0 && t == cur_tgid {
+                    tslot = i;
+                    break;
+                }
+                if t == 0 && tslot == usize::MAX {
+                    tslot = i;
+                }
+            }
+            let tgid_ok = tslot != usize::MAX && {
+                // Claim a free slot for this tgid (racy claim is fine —
+                // a lost claimant simply skips its dump this once).
+                if PARK_TGID[tslot].load(Relaxed) == 0 {
+                    let _ = PARK_TGID[tslot]
+                        .compare_exchange(0, cur_tgid, Relaxed, Relaxed);
+                }
+                PARK_TGID[tslot].load(Relaxed) == cur_tgid
+                    && PARK_TGID_N[tslot].fetch_add(1, Relaxed) < 3
+            };
             // dfx=parkdump: each park dump costs hundreds of UART+kmsg
             // lines (hilogd.rd_kmsg eats a vCPU copying them out of
             // /dev/kmsg — the b128/b129 lesson), so the park-dump family
             // is OFF in launcher-milestone boots.
-            if n < 16 && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ParkDump) {
+            if n < 32
+                && tgid_ok
+                && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ParkDump)
+            {
                 if let Some(t) = crate::sched::current() {
                     let tk = unsafe { &*t };
                     let comm = tk.comm();
@@ -10021,7 +10152,306 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
             let _ = writeln!(w, "    parkword={:#x} val={:#x}", a0 as u64, w0);
         }
     });
-    let _ = writeln!(w, "RWFRZ-READERS end hits={}", hits);
+    let _ = writeln!(w, "RWFRZ-READERS end hits={} [118m]", hits);
+    // 118th (mouse-endgame): malloc-lock holder hunt, INLINED here
+    // (a standalone fn with the same body failed to reach the binary
+    // while edits inside this fn land reliably). The standing word on
+    // the ld-musl data page 0x3fbf13e000 is __malloc_lock[0] (bss
+    // static at vaddr 0x13e6a8 of the oh image's ld-musl, LOCK() from
+    // mallocng per musl glue.h; bit31 = held, low = 1+waiters). ls1:
+    // foundation's copy held-forever from <=12.43 s with 28 waiters,
+    // no thread parked inside malloc on any syscall, none running —
+    // holder exited holding or recursive-malloc self-deadlock. Walk
+    // every same-tgid thread's stack and count allocator frames:
+    //   WRAP [base+0x12adb0, base+0x12b4b8) malloc/calloc/free/...
+    //   NG   [base+0xba000, base+0xbd000) mallocng internals
+    //   HOOK [base+0x12bb00, base+0x12c500) OH malloc-hook cluster
+    // waiter with >=2 WRAP frames = recursive holder (named); thread
+    // parked OFF the word with WRAP/NG frames = stuck holder (named);
+    // neither = thread-side holders acquitted (holder exited).
+    // x86_64-only (pcachewedge build fix, 2026-11-15): the scan reads
+    // x86 pt_regs field names (orig_rax/rdi/rsp) and the OH x86_64
+    // image's fixed musl load base — it cannot compile or mean anything
+    // on the other arches; this block had escaped its cfg and broke
+    // every non-x86_64 build of main f5ed08765.
+    #[cfg(target_arch = "x86_64")]
+    if word & 0xffff_f000 == 0x3fbf_13e000 {
+        let mut w2 = crate::dfx::backtrace::ConsoleWriter::new();
+        let _ = writeln!(w2, "MHUNT-CANARY2 word={:#x}", word);
+        let _ = writeln!(w2, "MHUNT tgid={} word={:#x}:", tgid, word);
+        let mut rows = 0u32;
+        let mut waiters = 0u32;
+        let mut v_rec: Option<u64> = None;
+        let mut v_stuck: Option<(u64, u64, u64)> = None;
+        const MUSL_BASE: u64 = 0x3fbf_0000_0000;
+        const WRAP_LO: u64 = MUSL_BASE + 0x12adb0;
+        const WRAP_HI: u64 = MUSL_BASE + 0x12b4b8;
+        const NG_LO: u64 = MUSL_BASE + 0xba000;
+        const NG_HI: u64 = MUSL_BASE + 0xbd000;
+        const HOOK_LO: u64 = MUSL_BASE + 0x12bb00;
+        const HOOK_HI: u64 = MUSL_BASE + 0x12c500;
+        crate::sched::for_each_task_try(|t| {
+            if rows >= 24 {
+                return;
+            }
+            // SAFETY: pid-hash walk contract; reads confined to pt-regs
+            // and the task's own user pages.
+            let tk = unsafe { &*t };
+            if tk.tgid() as u32 != tgid {
+                return;
+            }
+            let Some(top) = tk.kernel_stack_top_checked() else {
+                return;
+            };
+            // Arch gate (same twin as rwfrz_reader_scan above): the
+            // pt_regs layout probe is x86_64-only — the 118th inline
+            // copy landed without it and broke riscv64/aarch64 builds.
+            #[cfg(feature = "x86_64")]
+            let (sys, a0, rsp) = {
+                let regs = (top.wrapping_sub(
+                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+                unsafe { ((*regs).orig_rax, (*regs).rdi, (*regs).rsp) }
+            };
+            #[cfg(not(feature = "x86_64"))]
+            let (sys, a0, rsp) = (0u64, 0u64, 0u64);
+            if rsp == 0 || rsp > 0x7fff_ffff_ffff {
+                return;
+            }
+            let on_word = sys == FUTEX_SYSNO && a0 == word;
+            if on_word {
+                waiters += 1;
+            }
+            let mut wrap_hits: [u64; 3] = [0; 3];
+            let mut ng_hits: [u64; 2] = [0; 2];
+            let mut hook_hits: [u64; 2] = [0; 2];
+            let mut nw = 0usize;
+            let mut nn = 0usize;
+            let mut nh = 0usize;
+            for i in 0..4096u64 {
+                let va = rsp + 8 * i;
+                if va & 0xfff > 0xff8 {
+                    continue; // page-cross split — skip
+                }
+                let lo = unsafe { read_u32_via_task(t, va as usize) }.unwrap_or(0) as u64
+                    | ((unsafe { read_u32_via_task(t, va as usize + 4) }.unwrap_or(0) as u64) << 32);
+                if lo >= WRAP_LO && lo < WRAP_HI {
+                    if nw < 3 {
+                        wrap_hits[nw] = lo - MUSL_BASE;
+                    }
+                    nw += 1;
+                } else if lo >= NG_LO && lo < NG_HI {
+                    if nn < 2 {
+                        ng_hits[nn] = lo - MUSL_BASE;
+                    }
+                    nn += 1;
+                } else if lo >= HOOK_LO && lo < HOOK_HI {
+                    if nh < 2 {
+                        hook_hits[nh] = lo - MUSL_BASE;
+                    }
+                    nh += 1;
+                }
+            }
+            if nw == 0 && nn == 0 {
+                return;
+            }
+            rows += 1;
+            let comm = tk.comm();
+            let name = core::str::from_utf8(&comm[..])
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            let _ = writeln!(
+                w2,
+                "  MHUNT-ROW tid={} comm='{}' sys={} a0={:#x} on_word={} wrap={} [+{:#x},{:#x},{:#x}] ng={} [+{:#x},{:#x}] hook={} [+{:#x},{:#x}]",
+                tk.pid(),
+                name,
+                sys,
+                a0,
+                on_word,
+                nw,
+                wrap_hits[0],
+                wrap_hits[1],
+                wrap_hits[2],
+                nn,
+                ng_hits[0],
+                ng_hits[1],
+                nh,
+                hook_hits[0],
+                hook_hits[1],
+            );
+            if on_word && nw >= 2 && v_rec.is_none() {
+                v_rec = Some(tk.pid() as u64);
+            }
+            if !on_word && v_stuck.is_none() {
+                v_stuck = Some((tk.pid() as u64, sys, a0));
+            }
+        });
+        match (v_rec, v_stuck) {
+            (Some(tid), _) => {
+                let _ = writeln!(w2, "MHUNT-VERDICT recursive-holder tid={} (>=2 WRAP frames while parked on __malloc_lock)", tid);
+            }
+            (None, Some((tid, sys, a0))) => {
+                let _ = writeln!(w2, "MHUNT-VERDICT stuck-holder tid={} sys={} a0={:#x} (allocator frames while parked OFF the lock)", tid, sys, a0);
+            }
+            (None, None) => {
+                let _ = writeln!(w2, "MHUNT-VERDICT none: thread-side holders acquitted (holder exited holding)");
+            }
+        }
+        let _ = writeln!(w2, "MHUNT end rows={} waiters_on_word={}", rows, waiters);
+    }
+}
+
+/// 118th (mouse-endgame): malloc-lock holder hunt. The standing word
+/// 0x3fbf13e6a8 is ld-musl's `__malloc_lock[0]` (bss static at vaddr
+/// 0x13e6a8 of the oh image's ld-musl-x86_64.so.1 — verified by
+/// disassembly: mallocng's LOCK(__malloc_lock) per musl glue.h, where
+/// rdlock==wrlock==exclusive; bit31 = held, low count = 1+waiters).
+/// ls1 froze foundation's copy at <=12.43 s (val=0x8000001d = held +
+/// 28 waiters, low count tracking arrivals 1:1) with NO thread parked
+/// inside malloc on any syscall and NO running thread — so the holder
+/// either exited while holding, or is a recursive-malloc self-deadlock
+/// (the holder parks on its own lock as the first waiter). This scan
+/// walks every same-tgid thread's user stack and counts frames inside
+/// the allocator code ranges of that image (base 0x3fbf000000, fixed
+/// by the loader):
+///   WRAP [0x3fbf12adb0, 0x3fbf12b4b8) — malloc/calloc/free/realloc/
+///        aligned_alloc/malloc_usable_size wrappers
+///   NG   [0x3fbf0ba000, 0x3fbf0bd000) — mallocng internals (incl.
+///        the unlock helper with the cmpxchg ladder)
+///   HOOK [0x3fbf12bb00, 0x3fbf12c500) — OH malloc-hook cluster
+/// Verdict rules:
+///   - a WAITER on this word with >= 2 WRAP frames = recursive
+///     self-deadlock holder (named);
+///   - a thread parked OFF the word (any other syscall/futex) with a
+///     WRAP or NG frame = holder stuck inside malloc (named);
+///   - all waiters carry <= 1 WRAP frame and no off-word thread hits
+///     = thread-side holders acquitted (holder exited holding).
+/// Same for_each_task_try + page-walk cost class as the reader scan.
+pub fn malloc_holder_scan(tgid: u32, word: u64) {
+    use core::fmt::Write as _;
+    #[cfg(feature = "x86_64")]
+    const FUTEX_SYSNO: u64 = 202;
+    #[cfg(not(feature = "x86_64"))]
+    const FUTEX_SYSNO: u64 = 0;
+    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+    let _ = writeln!(w, "MHUNT tgid={} word={:#x}:", tgid, word);
+    let mut rows = 0u32;
+    let mut waiters = 0u32;
+    let mut verdict_recursive: Option<u64> = None;
+    let mut verdict_stuck: Option<(u64, u64, u64)> = None;
+    const MUSL_BASE: u64 = 0x3fbf_0000_0000;
+    const WRAP_LO: u64 = MUSL_BASE + 0x12adb0;
+    const WRAP_HI: u64 = MUSL_BASE + 0x12b4b8;
+    const NG_LO: u64 = MUSL_BASE + 0xba000;
+    const NG_HI: u64 = MUSL_BASE + 0xbd000;
+    const HOOK_LO: u64 = MUSL_BASE + 0x12bb00;
+    const HOOK_HI: u64 = MUSL_BASE + 0x12c500;
+    crate::sched::for_each_task_try(|t| {
+        if rows >= 24 {
+            return;
+        }
+        // SAFETY: pid-hash walk contract; reads confined to pt-regs and
+        // the task's own user pages.
+        let tk = unsafe { &*t };
+        if tk.tgid() as u32 != tgid {
+            return;
+        }
+        let Some(top) = tk.kernel_stack_top_checked() else {
+            return;
+        };
+        #[cfg(feature = "x86_64")]
+        let (sys, a0, rsp) = {
+            let regs = (top.wrapping_sub(
+                crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+            )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+            unsafe { ((*regs).orig_rax, (*regs).rdi, (*regs).rsp) }
+        };
+        #[cfg(not(feature = "x86_64"))]
+        let (sys, a0, rsp) = (0u64, 0u64, 0u64);
+        if rsp == 0 || rsp > 0x7fff_ffff_ffff {
+            return;
+        }
+        let on_word = sys == FUTEX_SYSNO && a0 == word;
+        if on_word {
+            waiters += 1;
+        }
+        let mut wrap_hits: [u64; 3] = [0; 3];
+        let mut ng_hits: [u64; 2] = [0; 2];
+        let mut hook_hits: [u64; 2] = [0; 2];
+        let mut nw = 0usize;
+        let mut nn = 0usize;
+        let mut nh = 0usize;
+        // 4096 words (32 KB) — the proven reader-scan window depth.
+        for i in 0..4096u64 {
+            let va = rsp + 8 * i;
+            if va & 0xfff > 0xff8 {
+                continue; // page-cross split — skip
+            }
+            let lo = unsafe { read_u32_via_task(t, va as usize) }.unwrap_or(0) as u64
+                | ((unsafe { read_u32_via_task(t, va as usize + 4) }.unwrap_or(0) as u64) << 32);
+            if lo >= WRAP_LO && lo < WRAP_HI {
+                if nw < 3 {
+                    wrap_hits[nw] = lo - MUSL_BASE;
+                }
+                nw += 1;
+            } else if lo >= NG_LO && lo < NG_HI {
+                if nn < 2 {
+                    ng_hits[nn] = lo - MUSL_BASE;
+                }
+                nn += 1;
+            } else if lo >= HOOK_LO && lo < HOOK_HI {
+                if nh < 2 {
+                    hook_hits[nh] = lo - MUSL_BASE;
+                }
+                nh += 1;
+            }
+        }
+        if nw == 0 && nn == 0 {
+            return;
+        }
+        rows += 1;
+        let comm = tk.comm();
+        let name = core::str::from_utf8(&comm[..])
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        let _ = writeln!(
+            w,
+            "  MHUNT-ROW tid={} comm='{}' sys={} a0={:#x} on_word={} wrap={} [+{:#x},{:#x},{:#x}] ng={} [+{:#x},{:#x}] hook={} [+{:#x},{:#x}]",
+            tk.pid(),
+            name,
+            sys,
+            a0,
+            on_word,
+            nw,
+            wrap_hits[0],
+            wrap_hits[1],
+            wrap_hits[2],
+            nn,
+            ng_hits[0],
+            ng_hits[1],
+            nh,
+            hook_hits[0],
+            hook_hits[1],
+        );
+        if on_word && nw >= 2 && verdict_recursive.is_none() {
+            verdict_recursive = Some(tk.pid() as u64);
+        }
+        if !on_word && verdict_stuck.is_none() {
+            verdict_stuck = Some((tk.pid() as u64, sys, a0));
+        }
+    });
+    match (verdict_recursive, verdict_stuck) {
+        (Some(tid), _) => {
+            let _ = writeln!(w, "MHUNT-VERDICT recursive-holder tid={} (>=2 WRAP frames while parked on __malloc_lock)", tid);
+        }
+        (None, Some((tid, sys, a0))) => {
+            let _ = writeln!(w, "MHUNT-VERDICT stuck-holder tid={} sys={} a0={:#x} (allocator frames while parked OFF the lock)", tid, sys, a0);
+        }
+        (None, None) => {
+            let _ = writeln!(w, "MHUNT-VERDICT none: all allocator-frame threads are single-frame waiters; thread-side holders acquitted (holder exited holding)");
+        }
+    }
+    let _ = writeln!(w, "MHUNT end rows={} waiters_on_word={}", rows, waiters);
 }
 
 /// sc138 (Session Q): display path for a File that may be a memfd —

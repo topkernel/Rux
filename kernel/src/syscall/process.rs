@@ -5154,24 +5154,40 @@ pub fn sys_capget(args: SyscallArgs) -> i64 {
     let version = hdr[0];
     let pid = hdr[1] as i32;
 
-    // Version probe (Linux capget semantics): version == 0 asks the
-    // kernel to report the highest supported capability ABI version —
-    // written back into the header, returning EINVAL. This runs BEFORE
-    // the data-pointer check: libcap-ng's init() calls capget(&hdr, NULL)
-    // and classifies by the version written back (an EFAULT there broke
-    // capng_change_id and killed dbus-daemon startup).
-    if version == 0 {
-        let supported = _LINUX_CAPABILITY_VERSION_3;
-        // SAFETY: hdr_ptr validated with access_ok; copy_to_user handles user writes.
-        unsafe {
-            copy_to_user(hdr_ptr as *mut u8, &supported as *const u32 as *const u8, 4);
+    // Version handling (Linux cap_validate_magic + the NULL-dataptr
+    // rule, v6.8 kernel/capability.c):
+    //   ret = cap_validate_magic(header, &tocopy);
+    //   if ((dataptr == NULL) || (ret != 0))
+    //       return ((dataptr == NULL) && (ret == -EINVAL)) ? 0 : ret;
+    // version 0 or an unknown magic asks the kernel to write the
+    // preferred ABI version back into the header; with a non-NULL
+    // data array that answers EINVAL (LTP capget02 "bad version"),
+    // with a NULL one it answers 0. A NULL dataptr with a VALID
+    // version is likewise a legal probe answered 0 — our old EFAULT
+    // surfaced as `EFAULTTRAC: pid=1 nr=90 a1=0x0` on every ub2404
+    // boot (systemd/libcap probing the capability layout at startup),
+    // and LTP documents the NULL-data exception explicitly ("data may
+    // be NULL only when the user is trying to determine the preferred
+    // capability version format"). EFAULT stays reserved for bad
+    // addresses (access_ok / copy failures below).
+    let data_count: usize = match version {
+        _LINUX_CAPABILITY_VERSION_1 => 1, // 1 x 3 u32s = 12 bytes
+        _LINUX_CAPABILITY_VERSION_2 | _LINUX_CAPABILITY_VERSION_3 => 2, // 2 x 3 u32s = 24 bytes
+        _ => {
+            // version 0 or unknown magic: report the preferred version
+            let supported = _LINUX_CAPABILITY_VERSION_3;
+            // SAFETY: hdr_ptr validated with access_ok; copy_to_user handles user writes.
+            unsafe {
+                copy_to_user(hdr_ptr as *mut u8, &supported as *const u32 as *const u8, 4);
+            }
+            if data_ptr == 0 {
+                return 0;
+            }
+            return -(errno::EINVAL as i64);
         }
-        return -(errno::EINVAL as i64);
-    }
-
-    // A real query needs the data array
+    };
     if data_ptr == 0 {
-        return -(errno::EFAULT as i64);
+        return 0; // valid-version probe — no data requested, nothing to do
     }
 
     // Determine the target task
@@ -5196,23 +5212,6 @@ pub fn sys_capget(args: SyscallArgs) -> i64 {
     };
 
     let cred = target.cred();
-
-    // Validate version and determine data size
-    let data_count: usize;
-    match version {
-        _LINUX_CAPABILITY_VERSION_1 => data_count = 1,  // 1 x 3 u32s = 12 bytes
-        _LINUX_CAPABILITY_VERSION_2 => data_count = 2,  // 2 x 3 u32s = 24 bytes
-        _LINUX_CAPABILITY_VERSION_3 => data_count = 2,  // 2 x 3 u32s = 24 bytes
-        _ => {
-            // Unknown version: write back the highest supported version and return -EINVAL
-            let supported = _LINUX_CAPABILITY_VERSION_3;
-            // SAFETY: hdr_ptr validated with access_ok; copy_to_user handles user writes.
-            unsafe {
-                copy_to_user(hdr_ptr as *mut u8, &supported as *const u32 as *const u8, 4);
-            }
-            return -(errno::EINVAL as i64);
-        }
-    }
 
     let data_size = data_count * 3 * 4; // each entry is 3 u32s
     if !crate::arch::uaccess::access_ok(data_ptr, data_size) {
@@ -5433,8 +5432,30 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
         Err(_) => return -(errno::EFAULT as i64),
     };
 
-    let new_root = crate::fs::path::path_normalize(new_root);
-    let put_old = crate::fs::path::path_normalize(put_old);
+    // Relative arguments resolve against the CALLER'S CWD (Linux
+    // user_path_at). systemd 255's mount_switch_root_pivot() runs the
+    // documented idiom pivot_root(".", ".") after fchdir() into the new
+    // root — the raw "." used to fail the is-absolute check below and
+    // every namespaced service fell back to (and died in) the MS_MOVE
+    // switch_root path (226/NAMESPACE on ub2404).
+    let join_cwd = |p: &str| -> alloc::string::String {
+        if p.starts_with('/') {
+            return alloc::string::String::from(p);
+        }
+        let cwd = match crate::sched::current() {
+            Some(t) => t.get_cwd(),
+            None => alloc::boxed::Box::from(&b"/"[..]),
+        };
+        let cwd_str = core::str::from_utf8(&cwd).unwrap_or("/");
+        let mut abs = alloc::string::String::from(cwd_str);
+        if !abs.ends_with('/') {
+            abs.push('/');
+        }
+        abs.push_str(p);
+        abs
+    };
+    let new_root = crate::fs::path::path_normalize(&join_cwd(new_root));
+    let put_old = crate::fs::path::path_normalize(&join_cwd(put_old));
     if !new_root.starts_with('/') || !put_old.starts_with('/') {
         return -(errno::EINVAL as i64);
     }
@@ -6258,7 +6279,24 @@ fn shutdown_cascade(cmd: u32) {
             }
             #[cfg(feature = "x86_64")]
             {
-                // No 8259/ACPI reset yet — park with interrupts waiting.
+                // mmi-endgame (116th): a REAL reset on q35. The old
+                // stand-in parked forever — a guest whose init decides
+                // to reboot (OH's critical-service policy) froze in a
+                // half-dead zombie state instead of restarting, so the
+                // image never got its crash-recovery loop. Linux's PC
+                // reboot ladder, ACPI RESET_REG unparsed: the 8042
+                // keyboard-controller pulse (outb 0xFE -> port 0x64,
+                // honored directly by QEMU), then the PCI/ATX reset
+                // port 0xcf9 (bit 2 = RSTDRV; QEMU resets on it).
+                // machine_park only runs on hardware that ignored both.
+                crate::println!("reboot: resetting (8042 pulse / 0xcf9)");
+                unsafe {
+                    crate::arch::x86_64::cpu::outb(0x64, 0xFE);
+                    for _ in 0..100_000 {
+                        core::hint::spin_loop();
+                    }
+                    crate::arch::x86_64::cpu::outb(0xcf9, 0x0E);
+                }
                 machine_park();
             }
         }

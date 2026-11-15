@@ -333,7 +333,11 @@ pub fn do_mount(
             // devpts mount data (gid=/mode=/ptmxmode=/newinstance) carries
             // no page budget; pass it through so a hypothetical future
             // size= is honored too, same as tmpfs.
-            let root_inode = crate::fs::tmpfs::create_mount_instance(data);
+            let mut root_inode = crate::fs::tmpfs::create_mount_instance(data);
+            crate::fs::tmpfs::tag_mount_instance_type(
+                &mut root_inode,
+                &crate::fs::tmpfs::DEVPTS_INODE_OPS,
+            );
             crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
             register_mount(fs_type, target, "devpts", if mnt_flags.is_readonly() { "ro" } else { "rw" });
         }
@@ -416,13 +420,25 @@ pub fn do_mount(
         // sys-kernel-security.mount must not fail local-fs.
         "securityfs" => {
             crate::fs::tmpfs::ensure_registered();
-            let root_inode = crate::fs::tmpfs::create_mount_instance(data);
+            let mut root_inode = crate::fs::tmpfs::create_mount_instance(data);
+            crate::fs::tmpfs::tag_mount_instance_type(
+                &mut root_inode,
+                &crate::fs::tmpfs::SECURITYFS_INODE_OPS,
+            );
             crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
             register_mount("securityfs", target, "securityfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
         }
         "mqueue" => {
             crate::fs::tmpfs::ensure_registered();
-            let root_inode = crate::fs::tmpfs::create_mount_instance(data);
+            let mut root_inode = crate::fs::tmpfs::create_mount_instance(data);
+            // Type tag: statfs on the mount must report MQUEUE_MAGIC —
+            // systemd verifies dev-mqueue.mount by statfs f_type AFTER
+            // mount(2) and failed the unit even with mount(2) == 0
+            // (ub2404 sysinit, the st_dev follow-on).
+            crate::fs::tmpfs::tag_mount_instance_type(
+                &mut root_inode,
+                &crate::fs::tmpfs::MQUEUE_INODE_OPS,
+            );
             crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
             register_mount("mqueue", target, "mqueue", if mnt_flags.is_readonly() { "ro" } else { "rw" });
         }

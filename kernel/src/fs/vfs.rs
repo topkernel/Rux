@@ -453,6 +453,25 @@ pub fn vfs_remount_dentry(
 /// MS_REMOUNT). Returns Ok(()) when a mount was found and updated,
 /// Err(EINVAL) when the path is not a mount point.
 pub fn vfs_remount(mountpoint: &str, new_flags: crate::fs::mount::MntFlags) -> Result<(), i32> {
+    // Caller-relative discipline (same as vfs_attach_mount_at / vfs_mount):
+    // a task virtually switch-rooted into its namespace's crafted root
+    // (vfs_virtual_switch_root) or chrooted remounts paths AS IT SEES
+    // THEM — "/dev" is the crafted clone's /dev, not the global mount.
+    // Without this, a namespace child's ProtectSystem/ProtectKernel*
+    // read-only flips landed on the GLOBAL mounts (serial-155614:
+    // generators' namespace left the global /dev read-only and every
+    // later mknod/mkdir under it EROFS'd).
+    let owned_mp;
+    let mountpoint = {
+        let root = get_process_root();
+        if root != "/" && mountpoint.starts_with('/') {
+            let joined = format!("{}{}", root.trim_end_matches('/'), mountpoint);
+            owned_mp = path_normalize(&joined);
+            owned_mp.as_str()
+        } else {
+            mountpoint
+        }
+    };
     let vfs_root = VFS_STATE.lock().root_dentry.clone()
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
     let mut current = vfs_root;
@@ -687,6 +706,23 @@ pub fn vfs_umount(mountpoint: &str) -> Result<(), i32> {
     // take_mount also clears the lock-free presence mirror (perf-path).
     mnt.root.clear_mountpoint_back();
     child.take_mount();
+    // A mount whose mountpoint DENTRY it created itself (vfs_mount's
+    // bare-dentry arm — boot-time /proc, /sys, ... never went through a
+    // path_lookup first) leaves an INODE-LESS dentry behind after the
+    // unmount: the walk's dcache hit then reads it as a NEGATIVE entry
+    // and every lookup of the mountpoint fails ENOENT. systemd's
+    // mount_private_apivfs (ProtectProc=/PrivateMounts services,
+    // systemd-udevd on noble) umounts /proc and MS_MOVEs a fresh
+    // instance onto it — the failed target lookup aborted the whole
+    // namespace setup (status 226/NAMESPACE, udevd restart loop).
+    // Drop such dentries from the parent: the next walk re-resolves the
+    // name against the underlying filesystem and the covered directory
+    // "re-appears" like Linux's umount. Dentries that DO carry an inode
+    // are kept as-is — removing those broke LTP chdir01's
+    // remount-at-same-target.
+    if child.get_inode().is_none() {
+        parent_dentry.remove_child(&name);
+    }
     Ok(())
 }
 
@@ -1394,6 +1430,125 @@ fn bind_clone_attach(
 /// does (root inode replacement), and additionally drops the old
 /// root's cached children so ramdisk names cannot shadow the moved-in
 /// filesystem's root (lookups resolve through the new root inode).
+/// Virtual switch_root for a PRIVATE mount namespace — the shadowing-
+/// correct answer for `MS_MOVE <crafted-root> /` from a namespace child.
+///
+/// systemd 255's mount_namespace() builds a recursive clone of / under
+/// /run/systemd/mount-rootfs, applies the service's mount entries onto
+/// the CLONE, then does `mount(root, "/", MS_MOVE)` + chroot inside the
+/// service's own CLONE_NEWNS (namespace.c: root = "/run/systemd/
+/// mount-rootfs"; the temporary dir "prevents any mounts from being
+/// potentially obscured by other mounts we already applied"). In the
+/// reference the MS_MOVE re-roots ONLY that namespace.
+///
+/// Rux has one dentry tree: the old code swapped the GLOBAL root (root
+/// inode swap + child rehome) and every OTHER task — PID 1 included —
+/// inherited the service's crafted root; when the namespace then died,
+/// its Drop unmounted the tracked mounts, tearing pieces off the LIVE
+/// root (serial-155614: journald's teardown left /dev/shm ENOENT,
+/// /proc/<pid>/mountinfo ENOENT, udevd 226/NAMESPACE, random-seed and
+/// sysusers failing downstream). The reference behavior — caller gets
+/// the new root, everyone else keeps theirs — is produced WITHOUT a
+/// namespace-private mount tree by re-rooting only the CALLER:
+///
+///  - the crafted tree stays attached at its global path (its mounts
+///    keep their registry rows and the namespace keeps its teardown
+///    list — Drop still detaches exactly what this ns attached);
+///  - the task's fs root becomes (root-path = the crafted mountpoint's
+///    global path, root-dentry = the crafted mount's root), so every
+///    absolute lookup starts INSIDE the crafted tree (path_lookup's
+///    fast-base) and every mount/remount from this task resolves
+///    through the root-path prefix INTO the crafted tree (the same
+///    discipline vfs_attach_mount_at / vfs_mount already apply for
+///    chrooted tasks — flag flips stay private to the clone);
+///  - getcwd answers root-relative paths (build_path_rooted), so the
+///    service sees "/" like after a real pivot.
+///
+/// Consumed by sys_mount's MS_MOVE and sys_move_mount when the target is
+/// "/" and the caller's mount namespace is not the init namespace.
+pub fn vfs_virtual_switch_root(from: &str) -> Result<(), i32> {
+    if from == "/" {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+    // Source: the MOUNTPOINT dentry (final component not followed) —
+    // the same walk discipline as vfs_move_mount's from-side.
+    let src_child = {
+        let vfs_root = VFS_STATE.lock().root_dentry.clone()
+            .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+        let comps: Vec<&str> = from.split('/').filter(|s| !s.is_empty()).collect();
+        let mut current = vfs_root;
+        for (i, component) in comps.iter().enumerate() {
+            let child = match current.lookup_child(component) {
+                Some(c) => c,
+                None => {
+                    crate::pr_warn!(
+                        "vswitch-root: walk miss at '{}' of '{}' (pid {})",
+                        component,
+                        from,
+                        crate::process::current_pid()
+                    );
+                    return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+                }
+            };
+            current = if i + 1 == comps.len() {
+                child
+            } else {
+                follow_mount(child)
+            };
+        }
+        current
+    };
+    let mnt = match src_child.get_mount() {
+        Some(m) => m.clone(),
+        None => {
+            crate::pr_warn!(
+                "vswitch-root: no mount object at '{}' (pid {})",
+                from,
+                crate::process::current_pid()
+            );
+            return Err(errno::Errno::InvalidArgument.as_neg_i32());
+        }
+    };
+    // The crafted root must be ATTACHED (a mountpoint back-ref exists);
+    // a detached mount fd or a plain directory is EINVAL, like Linux
+    // refusing to MS_MOVE a non-mount.
+    if mnt.root.get_mountpoint_back().is_none() {
+        crate::pr_warn!(
+            "vswitch-root: no attached mount at '{}' (pid {})",
+            from,
+            crate::process::current_pid()
+        );
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    // Re-root the CALLER (path + dentry, chroot discipline).
+    if let Some(task) = crate::sched::current() {
+        if let Some(fs) = task.fs_arc() {
+            fs.set_root_with_dentry(from.as_bytes(), Some(mnt.root.clone()));
+        }
+    }
+
+    // Namespace anchor: setns(CLONE_NEWNS) re-anchoring and Drop
+    // bookkeeping read ns.root; record the crafted root like a pivot.
+    let ns = crate::process::ns::current_mnt_ns();
+    *ns.root.lock() = Some(mnt.root.clone());
+    // Teardown tracking (mntput-on-nsput): the attach path usually
+    // tracked this mount already — dedupe by identity so Drop unmounts
+    // it exactly once.
+    {
+        let mut list = ns.vfs_mounts.lock();
+        if !list.iter().any(|m| alloc::sync::Arc::ptr_eq(m, &mnt)) {
+            list.push(mnt.clone());
+        }
+    }
+    crate::pr_info!(
+        "vswitch-root: task re-rooted at '{}' (pid {})",
+        from,
+        crate::process::current_pid()
+    );
+    Ok(())
+}
+
 pub fn vfs_move_mount(from: &str, to: &str) -> Result<(), i32> {
     if from == "/" {
         return Err(errno::Errno::DeviceOrResourceBusy.as_neg_i32());
@@ -1529,7 +1684,7 @@ pub fn vfs_move_mount(from: &str, to: &str) -> Result<(), i32> {
     let mut current = vfs_root;
     current = follow_mount(current);
     for (i, component) in comps.iter().enumerate() {
-        let is_last = i == comps.len() - 1;
+        let is_last = i + 1 == comps.len();
         let name = String::from(*component);
         let child = match current.lookup_child(&name) {
             Some(existing) => existing,
@@ -1554,6 +1709,229 @@ pub fn vfs_move_mount(from: &str, to: &str) -> Result<(), i32> {
         }
     }
     Ok(())
+}
+
+/// Attach a DETACHED mount object (fsmount/open_tree-CLONE product, or a
+/// mount just detached by move_mount) at `target` — the move_mount(2)
+/// attach step. Shares the mountpoint-walk discipline of vfs_mount:
+/// intermediate components cross their mounts, the final dentry is
+/// found-or-created and receives the mount.
+///
+/// Returns the mountpoint dentry the mount landed on (for registry
+/// bookkeeping by the caller).
+pub fn vfs_attach_mount_at(
+    mnt: &Arc<VfsMountInternal>,
+    target: &str,
+) -> Result<Arc<Dentry>, i32> {
+    // Namespace discipline (same as vfs_mount): attach at the mountpoint
+    // AS THE CALLER SEES IT.
+    let owned_target;
+    let target = {
+        let root = get_process_root();
+        if root != "/" && target.starts_with('/') {
+            owned_target = format!("{}{}", root.trim_end_matches('/'), target);
+            owned_target.as_str()
+        } else {
+            target
+        }
+    };
+
+    let mut state = VFS_STATE.lock();
+    let vfs_root = state
+        .root_dentry
+        .clone()
+        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+
+    if target == "/" {
+        // Root attach: overlay the VFS root's inode with the mount's root
+        // inode and carry the mount's cached children over (same policy
+        // as vfs_move_mount's to == "/" arm).
+        state.mounts.retain(|m| !Arc::ptr_eq(m, mnt));
+        if let Some(inode) = mnt.root.get_inode() {
+            vfs_root.set_inode(inode);
+        }
+        vfs_root.clear_children();
+        mnt.root.rehome_children_into(&vfs_root);
+        mount_index_rebuild(&mut state);
+        return Ok(vfs_root);
+    }
+
+    let comps: Vec<&str> = target.split('/').filter(|s| !s.is_empty()).collect();
+    let mut current = vfs_root;
+    current = follow_mount(current);
+    let mut mountpoint: Option<Arc<Dentry>> = None;
+    for (i, component) in comps.iter().enumerate() {
+        let is_last = i + 1 == comps.len();
+        let name = String::from(*component);
+        let child = match current.lookup_child(&name) {
+            Some(existing) => existing,
+            None => {
+                let d = Arc::new(Dentry::new(name.clone()));
+                d.set_parent(current.clone());
+                current.add_child(name.clone(), d.clone());
+                d
+            }
+        };
+        if is_last {
+            child.set_mount(mnt.clone());
+            mnt.root.set_mountpoint_back(child.clone());
+            state.mounts.push(mnt.clone());
+            mount_index_insert(&mut state, mnt, &child);
+            mountpoint = Some(child);
+        } else {
+            current = follow_mount(child);
+        }
+    }
+    let mountpoint = mountpoint
+        .ok_or(errno::Errno::InvalidArgument.as_neg_i32())?;
+    // ns_track_vfsmount must run AFTER dropping VFS_STATE (lazy
+    // ns init reaches get_vfs_root() — see the sc98 note in vfs_mount).
+    drop(state);
+    crate::process::ns::ns_track_vfsmount(mnt.clone());
+    Ok(mountpoint)
+}
+
+/// The TOPMOST mount covering `path` — the mount whose flags
+/// mount_setattr/reconfigure apply (Linux path mounting semantics: the
+/// last-mounted mount at the terminal dentry, or the mount crossed on
+/// the way down when none sits on the terminal dentry).
+pub fn vfs_covering_mount(path: &str) -> Option<Arc<VfsMountInternal>> {
+    let owned;
+    let path = {
+        let root = get_process_root();
+        if root != "/" && path.starts_with('/') {
+            owned = format!("{}{}", root.trim_end_matches('/'), path);
+            owned.as_str()
+        } else {
+            path
+        }
+    };
+    let vfs_root = VFS_STATE.lock().root_dentry.clone()?;
+    // vfs_remount's walk discipline: check for a mount on the current
+    // dentry BEFORE each component (the topmost mount covering the path
+    // wins; a mount stacked AT the terminal dentry shadows everything
+    // crossed on the way down).
+    let mut current = vfs_root;
+    let mut crossed: Option<Arc<VfsMountInternal>> = None;
+    for component in path.split('/').filter(|s| !s.is_empty()) {
+        if let Some(mnt) = current.get_mount() {
+            crossed = Some(mnt.clone());
+            current = mnt.root.clone();
+        }
+        current = current.lookup_child(component)?;
+    }
+    current.get_mount().or(crossed)
+}
+
+/// Detach a mount from its current mountpoint (move_mount's from-side
+/// for an attached mount): drops the registry row and index entry and
+/// clears the dentry/back-reference links. The mount object itself
+/// (Arc) stays alive for re-attachment.
+pub fn vfs_detach_mount(mnt: &Arc<VfsMountInternal>) -> Result<(), i32> {
+    let mp = mnt
+        .root
+        .get_mountpoint_back()
+        .ok_or(errno::Errno::InvalidArgument.as_neg_i32())?;
+    {
+        let mut state = VFS_STATE.lock();
+        // sc181: drop the chain-index entry BEFORE the back-ref clear
+        // (the chain is recomputed from the still-live mountpoint).
+        mount_index_remove(&mut state, mnt, &mp);
+        state.mounts.retain(|m| !Arc::ptr_eq(m, mnt));
+    }
+    // Only clear the slot when this mount is still the live one there (a
+    // newer stacked mount owns the slot — same guard as vfs_umount_object).
+    {
+        let mut cur = mp.vfsmount.lock();
+        if let Some(top) = cur.as_ref() {
+            if Arc::ptr_eq(top, mnt) {
+                *cur = None;
+            }
+        }
+        mp.set_mount_flag(cur.is_some());
+    }
+    mnt.root.clear_mountpoint_back();
+    Ok(())
+}
+
+/// The mount GOVERNING `d`: the topmost mount stacked ON the dentry, or
+/// — when none sits on it — the mount whose filesystem tree contains it
+/// (the climb walks parent links up to a mounted root, then outward
+/// through its mountpoint). None means the dentry lives in the root
+/// filesystem proper (no VfsMountInternal covers it — the global root
+/// overlay). open_tree(CLONE) clones this object; "/" answers None and
+/// callers fall back to cloning the root inode.
+pub fn vfs_governing_mount_of(d: &Arc<Dentry>) -> Option<Arc<VfsMountInternal>> {
+    if let Some(m) = d.get_mount() {
+        return Some(m);
+    }
+    let mut cur = d.clone();
+    loop {
+        // SAFETY: plain parent-pointer read under its spinlock.
+        let parent = cur.parent.lock().clone();
+        match parent {
+            Some(p) => cur = p,
+            None => {
+                // A filesystem root. Mounted? (mountpoint back-ref set.)
+                if let Some(_mp) = cur.mountpoint_dentry() {
+                    // Find the registry mount whose root IS this dentry —
+                    // a newer stack on the same mountpoint may own the
+                    // dentry's vfsmount slot, so the registry is the
+                    // authority (rare path; a short scan).
+                    let state = VFS_STATE.lock();
+                    let found = state
+                        .mounts
+                        .iter()
+                        .rev()
+                        .find(|m| Arc::ptr_eq(&m.root, &cur))
+                        .cloned();
+                    if let Some(m) = found {
+                        return Some(m);
+                    }
+                    // Mountpoint back-ref without a registry row (torn
+                    // detach): treat as unmounted, climb outward.
+                    cur = _mp;
+                } else {
+                    // The global root — the root filesystem, no mount.
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+/// fsctx (open_tree AT_RECURSIVE): materialize recorded submount clones
+/// at their relative paths INSIDE a freshly attached mount root — the
+/// same never-fabricate walk the MS_REC bind clone uses
+/// (bind_clone_attach; see the sc31 lesson there).
+pub fn vfs_clone_submounts(
+    root: &Arc<Dentry>,
+    clones: &[(Vec<String>, Arc<Dentry>, MntFlags)],
+) {
+    for (rel, src_root, flags) in clones {
+        bind_clone_attach(root, rel, src_root, *flags);
+    }
+}
+
+/// fsctx (open_tree CLONE|AT_RECURSIVE): the mounts nested under `anc`,
+/// as relative-path clone descriptors (see collect_subtree_mounts).
+/// `fresh_root` is the clone's own root — used to skip self-cloning.
+pub fn vfs_collect_submounts(
+    anc: &Arc<Dentry>,
+    fresh_root: &Arc<Dentry>,
+) -> Vec<(Vec<String>, Arc<Dentry>, MntFlags)> {
+    collect_subtree_mounts(anc, fresh_root)
+}
+
+/// The registry's (/proc/mounts) row for the mountpoint path `mp`, if
+/// one exists — move_mount's row relocation needs the old device/type.
+pub fn vfs_mount_registry_row(
+    mp: &str,
+) -> Option<(String, String)> {
+    crate::fs::mount::get_mounts()
+        .into_iter()
+        .find(|(_, m, _, _)| m == mp)
+        .map(|(dev, _, ty, _)| (dev, ty))
 }
 
 /// Filesystem type identifier
@@ -4459,6 +4837,10 @@ pub fn vfs_stat(pathname: &str, stat: &mut Stat) -> Result<(), i32> {
             if let Some(getattr_fn) = ops.getattr {
                 let result = getattr_fn(inode.as_ref(), stat);
                 if result == 0 {
+                    // st_dev: the filesystem instance's anonymous device
+                    // (Linux s_dev), stamped centrally over whatever the
+                    // per-fs getattr wrote — see inode::stat_dev_user.
+                    stat.st_dev = crate::fs::inode::stat_dev_user(inode.fs_id);
                     return Ok(());
                 } else {
                     return Err(result);
@@ -4468,6 +4850,7 @@ pub fn vfs_stat(pathname: &str, stat: &mut Stat) -> Result<(), i32> {
     }
 
     // Fallback: fill in basic info from inode
+    stat.st_dev = crate::fs::inode::stat_dev_user(inode.fs_id);
     stat.st_ino = inode.ino;
     stat.st_mode = inode.mode.bits();
     stat.st_size = 0;
@@ -4662,10 +5045,24 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
         // (O_WRONLY / O_RDWR / O_TRUNC) on a MS_RDONLY mount fails, as does
         // O_CREAT on one (Linux may_open + mnt_want_write; LTP creat06 and
         // the needs_rofs family).
+        //
+        // NON-REGULAR inodes are exempt from the mount-ro open gate
+        // (deferred to below, post-lookup): opening a character device
+        // (/dev/null!) O_WRONLY on a read-only MOUNT is legal in the
+        // reference — MS_RDONLY on a bind does not make device nodes
+        // unwritable at open time. systemd 255's namespace apivfs table
+        // binds /dev READ-ONLY into every namespaced service, and the
+        // executor's setup_output opens /dev/null O_WRONLY for
+        // StandardOutput=null — the open-time EROFS here killed every
+        // namespaced service with 209/STDOUT (ub2404 serial evidence).
         let write_intent =
             flags & (FileFlags::O_WRONLY | FileFlags::O_RDWR | FileFlags::O_TRUNC) != 0;
-        if (write_intent || o_creat) && path_on_readonly_mount(filename) {
+        if o_creat && path_on_readonly_mount(filename) {
             return Err(errno::Errno::ReadOnlyFileSystem.as_neg_i32());
+        }
+        let mut deferred_rofs_check = false;
+        if write_intent && !o_creat && path_on_readonly_mount(filename) {
+            deferred_rofs_check = true;
         }
 
         // O_CREAT atomicity (review 5.1 high): the existence check and the
@@ -4710,6 +5107,14 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                     return Err(errno::Errno::FileExists.as_neg_i32());
                 }
                 let inode = vpath.inode.ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+                // Deferred mount-ro gate (see the header comment): a
+                // write-intent open of an EXISTING file fails EROFS on a
+                // read-only mount ONLY for regular files (the LTP
+                // needs_rofs contract); character/block/fifo/socket nodes
+                // open fine — the device layer is not the mount's data.
+                if deferred_rofs_check && inode.mode.is_regular_file() {
+                    return Err(errno::Errno::ReadOnlyFileSystem.as_neg_i32());
+                }
                 if flags & (FileFlags::O_NOFOLLOW | FileFlags::O_PATH) != 0
                     && inode.mode.is_symlink()
                     && flags & FileFlags::O_PATH == 0
@@ -5216,6 +5621,10 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
         };
         let result = inode.op_getattr(stat);
         if result == 0 {
+            // st_dev: the instance's anonymous device (Linux s_dev) —
+            // same stamp as vfs_stat (fstat must agree with stat for
+            // libmount's is-mounted probes on open fds).
+            stat.st_dev = crate::fs::inode::stat_dev_user(inode.fs_id);
             Ok(())
         } else {
             Err(result)
@@ -5239,6 +5648,9 @@ pub fn stat_file_by_path_with_flags(path: &str, stat: &mut Stat, flags: u32) -> 
             if let Some(getattr_fn) = ops.getattr {
                 let result = getattr_fn(inode.as_ref(), stat);
                 if result == 0 {
+                    // st_dev: the instance's anonymous device (Linux
+                    // s_dev) — same stamp as vfs_stat.
+                    stat.st_dev = crate::fs::inode::stat_dev_user(inode.fs_id);
                     return Ok(());
                 } else {
                     return Err(result);
@@ -6367,7 +6779,9 @@ pub fn mem_file_stat(file: &File, stat: &mut crate::fs::Stat) -> Option<i32> {
     let ptr = unsafe { *file.private_data.get() }?;
     // SAFETY: read-only access to the content length for st_size.
     let size = unsafe { (*(ptr as *const MemFileContent)).data.len() };
-    stat.st_dev = 0;
+    // Generated procfs content files belong to the procfs instance's
+    // device (Linux stats them on proc's s_dev — never 0).
+    stat.st_dev = crate::fs::inode::stat_dev_user(crate::fs::inode::FS_ID_PROCFS);
     // Distinct identity per content instance (the raw pointer is unique).
     stat.st_ino = ptr as usize as u64;
     stat.st_nlink = 1;

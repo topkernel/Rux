@@ -175,11 +175,16 @@ pub enum PidFileKind {
     Mounts,
     /// /proc/[pid]/mountinfo — the detailed per-process mount table
     /// (proc-mounts(5) format). Linux exposes it under EVERY pid dir,
-    /// not just /proc/self: systemd's namespace child probes
+    /// not just /proc/self: systemd 255's namespace setup fopen()s
+    /// /proc/self/mountinfo as its FIRST act (apply_mounts) and fails
+    /// the whole namespace — service exit 226/NAMESPACE — when the file
+    /// is missing (the file is a REGULAR file in the reference; readlink
+    /// answers EINVAL, not ENOENT); its namespace children probe
     /// /proc/<own-pid>/mountinfo (the "self" spelling resolves to the
     /// number form first), and util-linux mount(1) readlinks
     /// /proc/<pid>/mountinfo before every mountinfo consult — ENOENT
     /// here fed the udevd NAMESPACE setup failures (ub2404, 2026-11-15).
+
     Mountinfo,
     /// /proc/[pid]/attr/exec — SELinux exec label (writable; OH init
     /// writes the service context here via setexeccon() before exec —
@@ -732,6 +737,52 @@ self.create_dynamic_file("cgroups", || {
         kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
             b"osrelease".to_vec(),
             sysctl::generate_osrelease,
+            self.alloc_ino(),
+        )));
+        // /proc/sys/kernel/keys/* — key-retention quota knobs (LTP
+        // keyctl02 raises root_maxkeys before its add_key/revoke
+        // loop). Readable + writable; enforcement is a documented
+        // divergence (see ipc/keys.rs).
+        let keys = Arc::new(ProcFSNode::new_dir(b"keys".to_vec(), self.alloc_ino()));
+        kernel.add_child(keys.clone());
+        keys.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"root_maxkeys".to_vec(),
+            sysctl::generate_root_maxkeys,
+            sysctl::write_root_maxkeys,
+            self.alloc_ino(),
+        )));
+        keys.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"root_maxbytes".to_vec(),
+            sysctl::generate_root_maxbytes,
+            sysctl::write_root_maxbytes,
+            self.alloc_ino(),
+        )));
+        keys.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"maxkeys".to_vec(),
+            sysctl::generate_maxkeys,
+            sysctl::write_maxkeys,
+            self.alloc_ino(),
+        )));
+        keys.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"maxbytes".to_vec(),
+            sysctl::generate_maxbytes,
+            sysctl::write_maxbytes,
+            self.alloc_ino(),
+        )));
+        // /proc/sys/kernel/random/* — boot_id is what sd_id128_get_boot
+        // reads (missing here + wrong statfs magic on /proc made every
+        // journald journal-file append fail with a synthesized ENOSYS);
+        // uuid is the fresh-per-read variant.
+        let random = Arc::new(ProcFSNode::new_dir(b"random".to_vec(), self.alloc_ino()));
+        kernel.add_child(random.clone());
+        random.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"boot_id".to_vec(),
+            sysctl::generate_boot_id,
+            self.alloc_ino(),
+        )));
+        random.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"uuid".to_vec(),
+            sysctl::generate_uuid,
             self.alloc_ino(),
         )));
         kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
@@ -1298,12 +1349,19 @@ pub fn create_root_inode() -> alloc::sync::Arc<Inode> {
         None => {
             // Fallback: create a minimal root node
             let mut inode = Inode::new(1, InodeMode::new(InodeMode::S_IFDIR | 0o555));
+            inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
             inode.ops = Some(&PROCFS_INODE_OPS);
             return alloc::sync::Arc::new(inode);
         }
     };
     let root_node = sb.root_node.clone();
     let mut inode = Inode::new(root_node.ino, InodeMode::new(InodeMode::S_IFDIR | 0o555));
+    // fs_id MUST be the procfs instance tag: the root inode decides
+    // st_dev for the /proc MOUNTPOINT itself — stat("/proc") used to
+    // report the fs_id-0 fallback device while every /proc/<pid> inode
+    // reported procfs's, so /proc looked like a device boundary in the
+    // middle of procfs (find -xdev, du -x mis-walk).
+    inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
     inode.ops = Some(&PROCFS_INODE_OPS);
     inode.private_data = Some(alloc::sync::Arc::as_ptr(&root_node) as *mut u8);
     alloc::sync::Arc::new(inode)
@@ -1522,13 +1580,13 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
 /// ProcFS getattr operation
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
-    // Distinct st_dev for procfs (Linux s_dev of procfs instances): the
-    // root ext4 reports its own fs_id and procfs used to leave st_dev at
-    // 0 — with both filesystems effectively sharing a device id,
-    // RESOLVE_NO_XDEV (openat2 st_dev comparison) and any statfs/dev
-    // based cross-mount logic could never distinguish them (LTP
+    // Distinct st_dev for procfs: fallback only — the central stat exits
+    // overwrite this with the instance's anonymous device
+    // (inode::stat_dev_user, Linux get_anon_bdev semantics), so procfs
+    // vs the root ext4 (and any other mount) always report different
+    // devices (RESOLVE_NO_XDEV / openat2 st_dev comparison, LTP
     // openat202's resolve-no-xdev case).
-    stat.st_dev = 0x9e90; // "proc" instance id, chosen non-zero and stable
+    stat.st_dev = 0x9e90; // legacy placeholder, normalized centrally
     // PID directory: private_data is None, inode.ino stores the PID
     if inode.private_data.is_none() && pid::is_valid_pid(inode.ino) {
         let pid = inode.ino;
@@ -1787,6 +1845,7 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
             b"oom_score_adj" => PidFileKind::OomScoreAdj,
             b"comm" => PidFileKind::Comm,
             b"cgroup" => PidFileKind::Cgroup,
+            b"mountinfo" => PidFileKind::Mountinfo,
             _ => {
                 // /proc/[pid]/fd directory (review 5.7): a synthetic
                 // directory whose readdir lists the target's open fds —
@@ -2392,6 +2451,7 @@ unsafe fn generate_pid_dir_entries(pid: u64) -> alloc::vec::Vec<crate::fs::inode
         (b"status", file_type::DT_REG),
         (b"cmdline", file_type::DT_REG),
     (b"mounts", file_type::DT_REG),
+    (b"mountinfo", file_type::DT_REG),
         (b"stat", file_type::DT_REG),
         (b"schedstat", file_type::DT_REG),
         (b"maps", file_type::DT_REG),

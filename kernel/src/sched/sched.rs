@@ -391,13 +391,31 @@ pub struct GrqGuard<'a> {
 impl<'a> GrqGuard<'a> {
     /// Release the spinlock but keep interrupts disabled.
     /// Returns the saved IRQ flags. Caller must call restore_irq() later.
+    ///
+    /// ORDER FIX (glib-mutex lane, 2026-11-14): the preempt_count sub runs
+    /// BEFORE the raw unlock. The old order (unlock, then sub) left a
+    /// two-instruction window in which the GRQ was observable-free while
+    /// the switching task still carried its +1 — and in __schedule that
+    /// window sits AFTER the sched-slot flip to `next` (sched.rs:3113), so
+    /// a concurrent waker's WAKE-HEAL adjudication saw the task as
+    /// "count=1, owned by no slot" and zeroed the LIVE guard count. Under
+    /// KVM with a loaded host the vCPU can be descheduled anywhere,
+    /// stretching the window to milliseconds — captured live (garepro26,
+    /// +252.1 s): WAKE-HEAL-ORIGIN pid=328 osite=sched.rs:2994 ocpu=5
+    /// oage_jif=0 (the heal zeroing the in-flight guard), then 5 ms later
+    /// PREEMPT-UNDERFLOW "count_was=0 sub=1" at sched.rs:397 (this
+    /// function's own sub arriving late) with UNDERFLOW-ORIGIN naming the
+    /// same acquire. With the sub first, a waker entering after the raw
+    /// unlock always observes count==0 and the heal predicate never fires
+    /// on a live guard. Safe: preempt_enable here is a bare sub (no
+    /// resched), IF stays 0 across the whole bracket.
     pub fn unlock_irqretain(self) -> bool {
         let flags = self.flags;
-        // SAFETY: we hold the GRQ lock via this guard, so the unlock is valid.
-        unsafe { (*self.grq).lock.unlock() };
         crate::interrupt::preempt::preempt_count_sub(
             crate::interrupt::preempt::PREEMPT_OFFSET,
         );
+        // SAFETY: we hold the GRQ lock via this guard, so the unlock is valid.
+        unsafe { (*self.grq).lock.unlock() };
         core::mem::forget(self);
         flags
     }
@@ -420,10 +438,14 @@ impl core::ops::DerefMut for GrqGuard<'_> {
 
 impl Drop for GrqGuard<'_> {
     fn drop(&mut self) {
-        unsafe { (*self.grq).lock.unlock() };
+        // ORDER FIX (glib-mutex lane): sub before unlock — see
+        // GrqGuard::unlock_irqretain; same rationale for the plain drop
+        // path (the [unlock..sub] gap must never be observable with the
+        // count still elevated).
         crate::interrupt::preempt::preempt_count_sub(
             crate::interrupt::preempt::PREEMPT_OFFSET,
         );
+        unsafe { (*self.grq).lock.unlock() };
         crate::arch::cpu::restore_irq(self.flags);
     }
 }
@@ -749,6 +771,27 @@ static RQ_INITIALIZED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [const { cor
 // coroutine switch), so the waker's under-lock read is race-free.
 static SWITCHING_OUT: [core::sync::atomic::AtomicU64; MAX_CPUS] =
     [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+
+/// glib-mutex lane (2026-11-14): jiffies at the moment SWITCHING_OUT[c]
+/// was LAST SET (stored together with the marker, under the GRQ). The
+/// WAKE-HEAL's stale-marker adjudication uses MARKER AGE from this
+/// stamp — the previous sighting-to-sighting test could not tell a
+/// wedged leftover (marker set long ago, its switch never completing)
+/// from a FRESH marker on a fast-cycling task whose previous mid-switch
+/// sighting was naturally >50 jiffies earlier, and so ignored fresh
+/// markers exactly for the futex/yield worker class — the garepro26
+/// capture (WAKE-HEAL zeroing pid=328's in-flight GRQ guard count, then
+/// the PREEMPT-UNDERFLOW of the same guard 5 ms later). A marker whose
+/// age exceeds the threshold is a wedged leftover and may be ignored;
+/// a fresh one is honored unconditionally.
+static SWITCHING_OUT_JIF: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+
+/// Age (jiffies) beyond which a SWITCHING_OUT marker is adjudicated a
+/// wedged leftover of an aborted/lost switch (the original WM constant;
+/// a legitimate switch completes in microseconds, so 50 jiffies is
+/// generous by three orders of magnitude).
+const SWITCHING_OUT_STALE_JIF: u64 = 50;
 
 /// R63: whether `task` is the prev of a context switch in flight on any
 /// CPU. Called with the GRQ lock held (same discipline as the R49
@@ -1987,6 +2030,136 @@ pub fn free_task_slot(task_ptr: *mut Task) {
     if task_ptr.is_null() {
         return;
     }
+    // freed-task lane (2026-11-15, live capture in the dio_read storm):
+    // a CPU whose PER_CPU current slot still names this task keeps
+    // dereferencing — and MUTATING — the page after the free. Captured
+    // face: scheduler_tick resolved current from the stale slot, ran
+    // Task::rlimit() (a Spinlock INSIDE the Task page), whose bracket
+    // fetched +1/-1 on the painted ti_preempt_count
+    // (PREEMPT-UNDERFLOW count_was=0xc3c3c3c4 at spinlock.rs:758,
+    // FREED-TOUCH cpu-cur!0, chain scheduler_tick->Task::rlimit), and
+    // once the page is recycled the same stale slot books phantom
+    // counts onto the new tenant (the WAKE-HEAL was=1 class) and walks
+    // VMAs through freed address spaces (the do_page_fault NULL+8
+    // face). The reference's task_free rule: a task struct outlives
+    // every CPU that still names it (finish_task_switch drops the last
+    // ref; the free never races a stale current). on_cpu (cleared by
+    // __switch_to) is NOT sufficient — the R9 gate upstream proves the
+    // mark and the slot can diverge (lying slot). Gate the free on the
+    // scheduler's own truth: no PER_CPU current slot and no in-flight
+    // SWITCHING_OUT marker may name the task. Bounded, yielding (same
+    // discipline as free_dead_member's bounded spin batches — the exit
+    // tails this waits on make progress only if this CPU can schedule);
+    // past the deadline the page LEAKS loudly instead of dangling —
+    // one page per wedged CPU, never a use-after-free.
+    {
+        const FTS_SLOT_WAIT_JIFFIES: u64 = 300; // 3 s, R86/FDM budget
+        const FTS_SPIN_BATCH: u32 = 100_000;
+        let mut spins: u32 = 0;
+        let armed_at = crate::drivers::timer::get_jiffies();
+        let mut printed = false;
+        crate::arch::cpu::restore_irq(true);
+        loop {
+            let mut owner: usize = usize::MAX;
+            for c in 0..crate::config::MAX_CPUS {
+                if cpu_state(c).current == task_ptr {
+                    owner = c;
+                    break;
+                }
+            }
+            if owner == usize::MAX
+                && (0..crate::config::MAX_CPUS).all(|c| {
+                    SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire)
+                        != task_ptr as u64
+                })
+            {
+                break;
+            }
+            if !printed {
+                printed = true;
+                use crate::dfx::taskdump::putc_brief as putchar;
+                fn pdec_fts(mut v: u64) {
+                    use crate::dfx::taskdump::putc_brief as p;
+                    let mut buf = [0u8; 20];
+                    let mut n = 0;
+                    if v == 0 {
+                        p(b'0');
+                        return;
+                    }
+                    while v > 0 && n < buf.len() {
+                        buf[n] = b'0' + (v % 10) as u8;
+                        v /= 10;
+                        n += 1;
+                    }
+                    while n > 0 {
+                        n -= 1;
+                        p(buf[n]);
+                    }
+                }
+                const M: &[u8] = b"\nFTS-SLOT-WAIT pid=";
+                for &b in M {
+                    putchar(b);
+                }
+                pdec_fts(unsafe { (*task_ptr).pid() } as u64);
+                const M2: &[u8] = b" cpu=";
+                for &b in M2 {
+                    putchar(b);
+                }
+                if owner != usize::MAX {
+                    pdec_fts(owner as u64);
+                } else {
+                    const SW: &[u8] = b"switching-out";
+                    for &b in SW {
+                        putchar(b);
+                    }
+                }
+                putchar(b'\n');
+            }
+            if crate::drivers::timer::get_jiffies().wrapping_sub(armed_at)
+                >= FTS_SLOT_WAIT_JIFFIES
+            {
+                // Leak, don't dangle: the owning CPU is wedged with a
+                // stale slot. One page per such CPU; the alternative is
+                // every later dereference of the recycled page
+                // (phantom counts, wrong-task wakes, freed-mm walks).
+                use crate::dfx::taskdump::putc_brief as putchar;
+                const M: &[u8] = b"\nFTS-SLOT-LEAK (page withheld) pid=";
+                for &b in M {
+                    putchar(b);
+                }
+                let mut v = unsafe { (*task_ptr).pid() } as u64;
+                {
+                    let mut buf = [0u8; 10];
+                    let mut n = 0;
+                    if v == 0 {
+                        n = 1;
+                        buf[0] = b'0';
+                    }
+                    while v > 0 && n < buf.len() {
+                        buf[n] = b'0' + (v % 10) as u8;
+                        v /= 10;
+                        n += 1;
+                    }
+                    let mut i = n;
+                    while i > 0 {
+                        i -= 1;
+                        putchar(buf[i]);
+                    }
+                }
+                putchar(b'\n');
+                // Keep the pid-hash state consistent: the caller-side
+                // bookkeeping already ran; nothing else to do — the
+                // page simply never returns to the allocator.
+                return;
+            }
+            spins = spins.wrapping_add(1);
+            if spins % FTS_SPIN_BATCH == 0 {
+                crate::sched::schedule();
+            } else {
+                core::hint::spin_loop();
+            }
+        }
+    }
     // ORPHAN-MARK residue check (wake-fastrepro final-boss): a Task page
     // entering the free pool with a dirty ownership qword hands its
     // residue to whatever recycles the page (the constructors reset the
@@ -3115,6 +3288,13 @@ unsafe fn __schedule() {
     let switching = next != prev && !next.is_null();
     if switching {
         SWITCHING_OUT[cpu_id].store(prev as u64, core::sync::atomic::Ordering::Release);
+        // glib-mutex lane: stamp the marker's birth (under the same GRQ
+        // hold) so the WAKE-HEAL adjudicates staleness by MARKER AGE,
+        // not by the sighting history of the target task.
+        SWITCHING_OUT_JIF[cpu_id].store(
+            crate::drivers::timer::get_jiffies(),
+            core::sync::atomic::Ordering::Release,
+        );
     }
 
     // Update per-CPU current under lock
@@ -5430,47 +5610,41 @@ pub fn wake_up_enqueue_opt(
                         .bits()
                     != 0;
                 let mut mid_switch = task_is_mid_switch_out(task);
-                // Stale-marker confirmation: a real context switch-out is
-                // microseconds and the marker is cleared on the same CPU
-                // right after the coroutine switch. A marker that names
-                // this task across wake attempts 50+ jiffies apart (same
-                // discipline as orphan_watch_confirm) is a wedged leftover
-                // of an aborted switch — no CPU is saving this context,
-                // the task is parked, and treating the marker as live
-                // would poison every future wake-heal of this task (the
-                // same per-task forever-skip the parkwalk's mid-switch
-                // skip produces). Time-confirm, then ignore.
+                // Stale-marker confirmation (glib-mutex rewrite,
+                // 2026-11-14): a real context switch-out is microseconds
+                // and the marker is cleared on the same CPU right after
+                // the coroutine switch. A marker whose AGE (from
+                // SWITCHING_OUT_JIF, stamped at marker-set time under the
+                // GRQ) exceeds SWITCHING_OUT_STALE_JIF is a wedged
+                // leftover of an aborted/lost switch — no CPU is saving
+                // this context, the task is parked, and treating the
+                // marker as live would poison every future wake-heal of
+                // this task. Time-confirm by AGE, then ignore.
+                //
+                // The ORIGINAL form compared SIGHTING-to-SIGHTING
+                // distance per task (the WM table): a wake only sees the
+                // marker when it lands inside the microseconds-wide
+                // switch window, so for fast-cycling tasks (futex/yield
+                // workers — the garepro class) sightings are naturally
+                // hundreds of jiffies apart and every FRESH marker was
+                // declared stale. That disabled the mid-switch guard
+                // exactly for the tasks that park/wake hardest, letting
+                // the heal zero a task's LIVE in-flight guard count
+                // (captured: garepro26 +252.1 s, pid=328, WAKE-HEAL
+                // zeroing the GRQ guard booked at sched.rs:2994 on cpu5,
+                // then the guard's own release underflowing 5 ms later).
                 if mid_switch {
-                    const WMS: usize = 8;
-                    static WM_TASK: [core::sync::atomic::AtomicUsize; WMS] =
-                        [const { core::sync::atomic::AtomicUsize::new(0) }; WMS];
-                    static WM_JIF: [core::sync::atomic::AtomicU64; WMS] =
-                        [const { core::sync::atomic::AtomicU64::new(0) }; WMS];
-                    let key = task as usize;
                     let jif = crate::drivers::timer::get_jiffies();
                     let mut stale = false;
-                    for s in 0..WMS {
-                        let prev = WM_TASK[s].load(core::sync::atomic::Ordering::Relaxed);
-                        if prev == key {
-                            let prev_jif =
-                                WM_JIF[s].load(core::sync::atomic::Ordering::Relaxed);
-                            if jif.wrapping_sub(prev_jif) >= 50 {
+                    for c in 0..MAX_CPUS {
+                        if SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire)
+                            == task as u64
+                        {
+                            let set_jif =
+                                SWITCHING_OUT_JIF[c].load(core::sync::atomic::Ordering::Acquire);
+                            if jif.wrapping_sub(set_jif) >= SWITCHING_OUT_STALE_JIF {
                                 stale = true;
                             }
-                            WM_JIF[s].store(jif, core::sync::atomic::Ordering::Relaxed);
-                            break;
-                        }
-                        if prev == 0
-                            && WM_TASK[s]
-                                .compare_exchange(
-                                    0,
-                                    key,
-                                    core::sync::atomic::Ordering::Relaxed,
-                                    core::sync::atomic::Ordering::Relaxed,
-                                )
-                                .is_ok()
-                        {
-                            WM_JIF[s].store(jif, core::sync::atomic::Ordering::Relaxed);
                             break;
                         }
                     }
@@ -6845,6 +7019,20 @@ pub fn scheduler_tick() {
             core::sync::atomic::AtomicU64::new(0);
         if cpu_id < crate::config::MAX_CPUS {
             let cur = crate::sched::sched::cpu_state(cpu_id).current;
+            // freed-task lane: skip a lying slot — a freed/painted task
+            // must not feed the leak window (see the TICK-GHOST gate at
+            // this tick's tail for the capture story). One volatile pid
+            // read; poison fails the compare.
+            let cur = if !cur.is_null() && unsafe {
+                core::ptr::read_volatile(
+                    (cur as *const u8)
+                        .add(crate::process::task::task_offsets::TASK_PID) as *const u32,
+                ) == TASK_POISON
+            } {
+                core::ptr::null_mut()
+            } else {
+                cur
+            };
             if !cur.is_null() {
                 let pc =
                     unsafe { (*cur).preempt_count() };
@@ -7839,7 +8027,80 @@ pub fn scheduler_tick() {
         }
     }
 
-    let current = this_cpu().current;
+    // freed-task lane (2026-11-15, live capture): this slot-resolved
+    // `current` is the dereferencer that MUTATED a freed Task page in
+    // the dio_read storm — a lying slot (task freed after its on_cpu
+    // cleared, slot never re-published) fed Task::rlimit() a painted
+    // page; the lock bracket inside rlimit() fetched +1/-1 on the
+    // 0xc3c3c3c3 paint (PREEMPT-UNDERFLOW count_was=0xc3c3c3c4,
+    // FREED-TOUCH cpu-cur, chain scheduler_tick->Task::rlimit). Gate
+    // every use below on the poison: a DEADBEEF/painted pid or a
+    // dead state means the slot is stale — fall back to the hardware
+    // truth (tp) and skip the tick work for the ghost. One budgeted
+    // report per boot class; the free-side slot-quiescence gate in
+    // free_task_slot keeps this from ever firing on a healthy boot.
+    let mut current = this_cpu().current;
+    if !current.is_null() {
+        // SAFETY: read at compile-time Task offsets in the kernel
+        // linear map (same contract as the R127 screen / poison probe
+        // — cannot fault).
+        let ghost = unsafe {
+            let pid = core::ptr::read_volatile(
+                (current as *const u8)
+                    .add(crate::process::task::task_offsets::TASK_PID) as *const u32,
+            );
+            let state = core::ptr::read_volatile(
+                (current as *const u8)
+                    .add(crate::process::task::task_offsets::TASK_STATE) as *const u32,
+            );
+            pid == TASK_POISON || state == TASK_POISON
+        };
+        if ghost {
+            static GHOST_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            if GHOST_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+                use crate::dfx::taskdump::putc_brief as putchar;
+                const M: &[u8] = b"\nTICK-GHOST-CURRENT cpu=";
+                for &b in M {
+                    putchar(b);
+                }
+                let mut v = cpu_id as u64;
+                {
+                    let mut buf = [0u8; 10];
+                    let mut n = 0;
+                    if v == 0 {
+                        n = 1;
+                        buf[0] = b'0';
+                    }
+                    while v > 0 && n < buf.len() {
+                        buf[n] = b'0' + (v % 10) as u8;
+                        v /= 10;
+                        n += 1;
+                    }
+                    let mut i = n;
+                    while i > 0 {
+                        i -= 1;
+                        putchar(buf[i]);
+                    }
+                }
+                const M2: &[u8] = b" slot=0x";
+                for &b in M2 {
+                    putchar(b);
+                }
+                let mut a = current as usize as u64;
+                for sh in (0..16).rev() {
+                    putchar(match ((a >> (sh * 4)) & 0xF) as u8 {
+                        n if n < 10 => b'0' + n,
+                        n => b'a' + n - 10,
+                    });
+                }
+                putchar(b'\n');
+            }
+            // The hardware truth: tp still names the task this CPU
+            // actually executes; the tick's per-task work runs on that.
+            current = crate::arch::cpu::get_thread_id() as *mut Task;
+        }
+    }
     if current.is_null() {
         return;
     }

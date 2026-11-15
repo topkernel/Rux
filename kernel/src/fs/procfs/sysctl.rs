@@ -731,3 +731,92 @@ pub fn write_perf_event_mlock_kb(input: &[u8]) -> i32 {
         _ => -(crate::errno::constants::EINVAL as i32),
     }
 }
+
+// ============================================================================
+// Key-retention quota knobs (/proc/sys/kernel/keys/*)
+//
+// LTP keyctl02 raises root_maxkeys before its add_key/revoke loop
+// (SAFE_FILE_SCANF + SAFE_FILE_PRINTF on the node). The quota is not
+// enforced (documented divergence in ipc/keys.rs), but the nodes exist,
+// read back their stored value and accept writes like the reference.
+// ============================================================================
+
+fn generate_key_quota(v: &core::sync::atomic::AtomicI32) -> Vec<u8> {
+    alloc::format!("{}\n", v.load(core::sync::atomic::Ordering::Relaxed)).into_bytes()
+}
+
+fn write_key_quota(v: &core::sync::atomic::AtomicI32, input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(n) if n <= i32::MAX as u64 => {
+            v.store(n as i32, core::sync::atomic::Ordering::Relaxed);
+            0
+        }
+        _ => -(crate::errno::constants::EINVAL as i32),
+    }
+}
+
+pub fn generate_root_maxkeys() -> Vec<u8> {
+    generate_key_quota(&crate::ipc::keys::ROOT_MAXKEYS)
+}
+pub fn write_root_maxkeys(input: &[u8]) -> i32 {
+    write_key_quota(&crate::ipc::keys::ROOT_MAXKEYS, input)
+}
+pub fn generate_root_maxbytes() -> Vec<u8> {
+    generate_key_quota(&crate::ipc::keys::ROOT_MAXBYTES)
+}
+pub fn write_root_maxbytes(input: &[u8]) -> i32 {
+    write_key_quota(&crate::ipc::keys::ROOT_MAXBYTES, input)
+}
+pub fn generate_maxkeys() -> Vec<u8> {
+    generate_key_quota(&crate::ipc::keys::MAXKEYS)
+}
+pub fn write_maxkeys(input: &[u8]) -> i32 {
+    write_key_quota(&crate::ipc::keys::MAXKEYS, input)
+}
+pub fn generate_maxbytes() -> Vec<u8> {
+    generate_key_quota(&crate::ipc::keys::MAXBYTES)
+}
+pub fn write_maxbytes(input: &[u8]) -> i32 {
+    write_key_quota(&crate::ipc::keys::MAXBYTES, input)
+}
+
+// ============================================================================
+// /proc/sys/kernel/random/{boot_id,uuid}
+//
+// sd_id128_get_boot() (libsystemd) reads boot_id here; on ENOENT with
+// proc_mounted() == 0 it answers -ENOSYS, and journal_file_append_entry
+// propagates that into EVERY journal write ("Unexpected error while
+// writing to journal file: Function not implemented", 4300+ drops per
+// ub2404 boot). boot_id is stable per boot (UUID v4 shape); uuid is a
+// fresh v4 per read, like the reference.
+// ============================================================================
+
+fn format_uuid_v4(b: &mut [u8; 16]) -> alloc::string::String {
+    // Set RFC 4122 version 4 + variant bits (same discipline as
+    // id128_make_v4_uuid / kernel generate_random_uuid).
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    alloc::format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}\n",
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]
+    )
+}
+
+pub fn generate_boot_id() -> Vec<u8> {
+    static BOOT_ID: crate::sync::spinlock::Spinlock<Option<alloc::vec::Vec<u8>>> =
+        crate::sync::spinlock::Spinlock::new(None);
+    let mut guard = BOOT_ID.lock();
+    if guard.is_none() {
+        let mut b = [0u8; 16];
+        crate::syscall::misc::kernel_random_bytes(&mut b);
+        *guard = Some(format_uuid_v4(&mut b).into_bytes());
+    }
+    guard.as_ref().map(|v| v.clone()).unwrap_or_default()
+}
+
+pub fn generate_uuid() -> Vec<u8> {
+    let mut b = [0u8; 16];
+    crate::syscall::misc::kernel_random_bytes(&mut b);
+    format_uuid_v4(&mut b).into_bytes()
+}

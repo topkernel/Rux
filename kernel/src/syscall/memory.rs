@@ -3586,9 +3586,20 @@ pub fn sys_mincore(args: [u64; 6]) -> i64 {
                                     let voff = vma.offset() as u64
                                         + (page_addr - vma.start().as_usize()) as u64;
                                     let idx = voff / crate::mm::page::PAGE_SIZE as u64;
-                                    page_in_memory = crate::fs::page_cache::get_page_cache()
-                                        .get(inode.fs_id, inode.ino, idx)
-                                        .is_some();
+                                    // Non-pinning probe: `get()` transfers a
+                                    // pin the caller must put back; dropping
+                                    // its handle leaked one pin per consulted
+                                    // page, and those pins kept the file's
+                                    // entries alive past inode free as
+                                    // invalidated shadows that poisoned the
+                                    // next file reusing the inode number
+                                    // (msync01 after mincore04, 4/4).
+                                    page_in_memory =
+                                        crate::fs::page_cache::get_page_cache().resident(
+                                            inode.fs_id,
+                                            inode.ino,
+                                            idx,
+                                        );
                                 }
                             }
                         }

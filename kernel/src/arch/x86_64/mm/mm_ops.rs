@@ -785,6 +785,93 @@ impl MmStruct {
         // follows the VMA, not the address).
         const MUNMAP_CHUNK_BYTES: usize = 256 * PAGE_SIZE_USIZE;
 
+        // Whole-range fast path — see the block after the mp declarations
+        // (mp/mp_t0 must exist before the fast path can record timings).
+
+        let mp = crate::dfx::mmprof::on();
+        let mp_t0 = if mp { crate::dfx::mmprof::now() } else { 0 };
+
+        // Whole-range fast path (gb-opt lane, 2026-11-15): glibc allocator
+        // churn (large malloc/free pairs, thread-stack teardown, arena
+        // trim) munmaps ranges whose leaf PTEs are ALL zero — the mapping
+        // was never faulted or was already zapped. The chunked loop below
+        // pays its fixed per-chunk cost (vma_write cycle + VMA
+        // remove/re-add + pin re-key + cond_resched) once per 1 MB chunk:
+        // 64 lock/tree/pin cycles for a 64 MB arena teardown measured
+        // 23.2 µs vs the reference kernel's 0.38 µs (mm-probe D, same-rig
+        // A/B). When the range carries NO page-table state, run the whole
+        // munmap as ONE guard cycle.
+        //
+        // Correctness: the scan is a COST DECISION, not a correctness gate.
+        // The zap (unmap_pages) still runs inside the same vma_write guard
+        // as the surgery, so the Face-B invariant (VMA gone ⇒ PTEs gone at
+        // every guard drop) holds exactly as in the chunked path: a
+        // CLONE_VM fault that sneaks in between the lock-free scan and the
+        // zap is cleared by the zap like any other page; the scan cannot
+        // miss it in a way the chunked path would have caught — the
+        // chunked path zaps the same range with the same primitive. A
+        // racing fork's COW downgrade only clears W on existing P=1
+        // leaves; it cannot turn an empty range non-empty.
+        {
+            let mut vma_mgr = self.vma_write();
+            // Authoritative emptiness scan under the PTE section: with
+            // pte_lock held, a same-mm fault cannot install (the install
+            // maps under the pte lock), so an empty scan here means the
+            // range stays empty through the surgery — the per-range zap
+            // (unmap_pages) is skipped entirely. A fault that ALREADY
+            // installed shows up in this scan (the chunked path below
+            // then frees it page by page). A fault whose install is still
+            // queued behind this pte section installs after the drop — a
+            // PTE in a VMA-gone hole, the same post-drop shape the
+            // chunked path's zap cannot prevent either (its install
+            // re-check is mapped-ness, not VMA coverage); exit teardown
+            // reaps it. Lock order vma → pte, INV-LOCK-7.
+            let _pte_guard = crate::arch::mm::mm_ops::pte_lock_for(self).lock();
+            if self.range_is_pte_empty(addr_us, aligned_size) {
+                let mut cur = addr_us;
+                while cur < end_addr {
+                    let hit = vma_mgr
+                        .last_at_or_before(PageVirtAddr::new(cur))
+                        .filter(|v| v.end().as_usize() > cur)
+                        .or_else(|| {
+                            vma_mgr.find_vma_after(PageVirtAddr::new(cur))
+                        })
+                        .filter(|v| v.start().as_usize() < end_addr);
+                    let vma = match hit {
+                        Some(v) => v,
+                        None => break,
+                    };
+                    let vs = vma.start().as_usize();
+                    let ve = vma.end().as_usize();
+                    let seg_start = vs.max(cur);
+                    let seg_end = ve.min(end_addr);
+                    // Clone the snapshot: remove_vma_piece mutates the tree.
+                    let v = *vma;
+                    self.remove_vma_piece(&mut *vma_mgr, &v, seg_start, seg_end);
+                    // Advance past the WHOLE VMA: the tree search skips holes.
+                    cur = ve;
+                }
+                drop(_pte_guard);
+                drop(vma_mgr);
+                crate::sched::cond_resched();
+
+                crate::arch::ipi::flush_tlb_others_mm(
+                    self.tlb_cpu_mask(),
+                    addr_us as u64,
+                    end_addr as u64,
+                );
+                crate::arch::mm::asid::flush_tlb_all();
+                if mp {
+                    crate::dfx::mmprof::add(crate::dfx::mmprof::MU_BODY, mp_t0);
+                }
+                return Ok(());
+            }
+            drop(_pte_guard);
+            drop(vma_mgr);
+            // Range carries page-table state: fall through to the chunked
+            // path, which frees the pages piece by piece.
+        }
+
         let mp = crate::dfx::mmprof::on();
         let mp_t0 = if mp { crate::dfx::mmprof::now() } else { 0 };
 
@@ -808,15 +895,8 @@ impl MmStruct {
                 None => break,
             };
 
-            let vkey = vma.start();
             let vs = vma.start().as_usize();
             let ve = vma.end().as_usize();
-            let vflags = vma.flags();
-            let vtype = vma.vma_type();
-            let vorigin = vma.origin();
-            let vfd = vma.file_fd();
-            let vfsz = vma.file_size();
-            let voff = vma.offset();
 
             let seg_start = vs.max(cur);
             let seg_end = ve.min(end_addr);
@@ -829,45 +909,11 @@ impl MmStruct {
                 );
             }
 
-            // Pages of this piece leave the mapping: release their
-            // virtual-size charge (head/tail survivors stay charged).
-            self.release_unmapped_pages(vs, ve, seg_start, chunk_end);
-
-            let pinned = self.get_vma_file(vs);
-            let _ = vma_mgr.remove(vkey);
-            self.unpin_vma_file(vs);
-            if vs < seg_start {
-                let mut head = Vma::new(
-                    crate::mm::page::VirtAddr::new(vs),
-                    crate::mm::page::VirtAddr::new(seg_start),
-                    vflags,
-                );
-                head.set_type(vtype);
-                head.set_origin(vorigin);
-                head.set_file_fd(vfd);
-                head.set_file_size(vfsz);
-                head.set_offset(voff);
-                let _ = vma_mgr.add(head);
-                if let Some(f) = pinned.clone() {
-                    self.pin_vma_file(vs, f);
-                }
-            }
-            if chunk_end < ve {
-                let mut tail = Vma::new(
-                    crate::mm::page::VirtAddr::new(chunk_end),
-                    crate::mm::page::VirtAddr::new(ve),
-                    vflags,
-                );
-                tail.set_type(vtype);
-                tail.set_origin(vorigin);
-                tail.set_file_fd(vfd);
-                tail.set_file_size(vfsz);
-                tail.set_offset(voff + (chunk_end - vs));
-                let _ = vma_mgr.add(tail);
-                if let Some(f) = pinned.clone() {
-                    self.pin_vma_file(chunk_end, f);
-                }
-            }
+            // Pages of this piece leave the mapping: charge release, pin
+            // re-key, removal, survivor re-add — the shared piece surgery
+            // (remove_vma_piece) does all of it.
+            let v_snapshot = *vma;
+            self.remove_vma_piece(&mut *vma_mgr, &v_snapshot, seg_start, chunk_end);
 
             // Face-B closure: this piece's PTE zap runs INSIDE the same
             // guard as its surgery (unmap_pages nests vma → pte one-way),
@@ -920,6 +966,192 @@ impl MmStruct {
             return Err(MapError::Invalid);
         }
         self.unmap_pages(start, aligned_size, false)
+    }
+
+    /// Remove one VMA — or one [seg_start, piece_end) piece of it — from
+    /// the tree: virtual-size charge release, pin un-key, removal, and
+    /// survivor re-add (head before seg_start, tail after piece_end, each
+    /// re-keyed in the pin table). Shared by the chunked munmap loop and
+    /// the whole-range fast path. Caller holds vma_write.
+    fn remove_vma_piece(
+        &self,
+        vma_mgr: &mut crate::mm::vma::VmaManager,
+        v: &Vma,
+        seg_start: usize,
+        piece_end: usize,
+    ) {
+        let vs = v.start().as_usize();
+        let ve = v.end().as_usize();
+        let vkey = v.start();
+
+        self.release_unmapped_pages(vs, ve, seg_start, piece_end);
+        let pinned = self.get_vma_file(vs);
+        let _ = vma_mgr.remove(vkey);
+        self.unpin_vma_file(vs);
+        if vs < seg_start {
+            let mut head = Vma::new(
+                v.start(),
+                crate::mm::page::VirtAddr::new(seg_start),
+                v.flags(),
+            );
+            head.set_type(v.vma_type());
+            head.set_origin(v.origin());
+            head.set_file_fd(v.file_fd());
+            head.set_file_size(v.file_size());
+            head.set_offset(v.offset());
+            let _ = vma_mgr.add(head);
+            if let Some(f) = pinned.clone() {
+                self.pin_vma_file(vs, f);
+            }
+        }
+        if piece_end < ve {
+            let mut tail = Vma::new(
+                crate::mm::page::VirtAddr::new(piece_end),
+                v.end(),
+                v.flags(),
+            );
+            tail.set_type(v.vma_type());
+            tail.set_origin(v.origin());
+            tail.set_file_fd(v.file_fd());
+            tail.set_file_size(v.file_size());
+            tail.set_offset(v.offset() + (piece_end - vs));
+            let _ = vma_mgr.add(tail);
+            if let Some(f) = pinned.clone() {
+                self.pin_vma_file(piece_end, f);
+            }
+        }
+    }
+
+    /// True when every leaf PTE in [start, start+size) is raw-zero AND no
+    /// upper-level leaf covers any block — i.e. the range carries no
+    /// page-table state at all (never faulted, or already zapped).
+    ///
+    /// Read-only, lock-free (the caller's munmap fast path re-zaps under
+    /// the surgery guard, so a racing CLONE_VM fault that installs a PTE
+    /// after this scan is cleared by the zap — see the fast-path comment
+    /// in munmap). Same stale-intermediate guards as unmap_pages, minus
+    /// the mutation. The upper chain (PML4 entry, PUD entry) is resolved
+    /// once per 1 GB PUD region — sequential ranges pay ~1 leaf read per
+    /// 2 MB instead of three upper reads per block (gb-opt lane: the
+    /// per-block walk made the scan ~5 µs of a 10.8 µs 64 MB munmap).
+    fn range_is_pte_empty(&self, start: usize, size: usize) -> bool {
+        let mut addr = start;
+        let end = addr.saturating_add(size);
+
+        // Root guard (same shape as unmap_pages / PageTableWalker::walk).
+        {
+            let root_pa = self.pgd << PAGE_SHIFT;
+            if crate::mm::page_desc::descs_published()
+                && root_pa != 0
+                && !crate::mm::phys_valid(root_pa as usize)
+            {
+                // Garbage root: treat as empty (unmap_pages bails Ok too).
+                return true;
+            }
+        }
+        // SAFETY: self.pgd passed the root guard above.
+        let root_table = unsafe { get_page_table_virt(self.pgd << PAGE_SHIFT) };
+
+        // Upper-chain state, re-resolved on 1 GB crossings.
+        let mut table2: *mut super::pagetable::PageTable = core::ptr::null_mut();
+        let mut pud_end: usize = 0;
+        let mut pud_empty: bool = true; // current PUD region has no PMD table
+
+        while addr < end {
+            if addr >= pud_end {
+                // (Re)resolve PML4 → PUD for this 1 GB region.
+                let pud_base = addr & !(PUD_SIZE as usize - 1);
+                pud_end = pud_base + PUD_SIZE as usize;
+                let a = VirtAddr::new(addr as u64);
+                let pte4 = unsafe { (*root_table).get(a.pgd_index() as usize) };
+                if !pte4.is_valid() {
+                    pud_empty = true;
+                    addr = pud_end.min(end);
+                    continue;
+                }
+                if pte4.is_leaf() {
+                    return false; // 1GB leaf covers the region
+                }
+                {
+                    let pa = pte4.phys_addr();
+                    if crate::mm::page_desc::descs_published()
+                        && pa != 0
+                        && !crate::mm::phys_valid(pa as usize)
+                    {
+                        pud_empty = true;
+                        addr = pud_end.min(end);
+                        continue;
+                    }
+                }
+                // SAFETY: pa re-validated immediately above.
+                let table3 = unsafe { get_page_table_virt(pte4.phys_addr()) };
+                let pte3 = unsafe { (*table3).get(a.pud_index() as usize) };
+                if !pte3.is_valid() {
+                    pud_empty = true;
+                    addr = pud_end.min(end);
+                    continue;
+                }
+                if pte3.is_leaf() {
+                    return false; // 2MB-or-1GB leaf covers the region
+                }
+                {
+                    let pa = pte3.phys_addr();
+                    if crate::mm::page_desc::descs_published()
+                        && pa != 0
+                        && !crate::mm::phys_valid(pa as usize)
+                    {
+                        pud_empty = true;
+                        addr = pud_end.min(end);
+                        continue;
+                    }
+                }
+                // SAFETY: pa re-validated immediately above.
+                table2 = unsafe { get_page_table_virt(pte3.phys_addr()) };
+                pud_empty = false;
+            }
+
+            let pmd_end = (addr & !(PMD_SIZE as usize - 1)) + PMD_SIZE as usize;
+            let block_end = end.min(pmd_end);
+            if pud_empty {
+                addr = block_end;
+                continue;
+            }
+            let a = VirtAddr::new(addr as u64);
+            let pte2 = unsafe { (*table2).get(a.pmd_index() as usize) };
+            if !pte2.is_valid() {
+                addr = block_end;
+                continue;
+            }
+            if pte2.is_leaf() {
+                return false; // 2MB leaf covers the block
+            }
+            {
+                let pa = pte2.phys_addr();
+                if crate::mm::page_desc::descs_published()
+                    && pa != 0
+                    && !crate::mm::phys_valid(pa as usize)
+                {
+                    addr = block_end;
+                    continue;
+                }
+            }
+            // SAFETY: pa re-validated immediately above.
+            let table1 = unsafe { get_page_table_virt(pte2.phys_addr()) };
+            // Leaf-table scan: ANY non-zero raw means state (resident
+            // frame, swap entry, PROT_NONE marker, kernel window leaf) —
+            // the conservative answer sends the munmap to the chunked
+            // path, which frees/zaps each of those by its own discipline.
+            let mut va = addr;
+            while va < block_end {
+                let idx = (((va as u64) >> PAGE_SHIFT) & 0x1ff) as usize;
+                if unsafe { (*table1).get(idx).bits() } != 0 {
+                    return false;
+                }
+                va += PAGE_SIZE_USIZE;
+            }
+            addr = block_end;
+        }
+        true
     }
 
     /// Unmap physical pages in specified range
@@ -1164,9 +1396,21 @@ impl MmStruct {
                         let new_ref =
                             unsafe { (*page).put_page_site(crate::dfx::driftwatch::S_UNMAP_X86) };
                         if new_ref == 0 {
-                            crate::mm::page_alloc::free_pages(
-                                (ppn_val as usize) << PAGE_SHIFT, 0,
-                            );
+                            // Cache-backed leaf: the frame still belongs to
+                            // the page cache — a zero put here is a phantom
+                            // put; leaking beats wiring the live cache frame
+                            // into the zone (pcachewedge lane; see
+                            // pcache_leaf_phantom_zero_put).
+                            if leaf_is_pcache {
+                                crate::mm::page_alloc::pcache_leaf_phantom_zero_put(
+                                    (ppn_val as usize) << PAGE_SHIFT,
+                                    "unmap-fast",
+                                );
+                            } else {
+                                crate::mm::page_alloc::free_pages(
+                                    (ppn_val as usize) << PAGE_SHIFT, 0,
+                                );
+                            }
                         }
                         // PCACHE mapping (filemap_fault): drop this mapping's
                         // page-cache pin AFTER the descriptor put (see
@@ -1315,9 +1559,18 @@ impl MmStruct {
                         let new_ref =
                             unsafe { (*page).put_page_site(crate::dfx::driftwatch::S_UNMAP_X86) };
                         if new_ref == 0 {
-                            crate::mm::page_alloc::free_pages(
-                                (ppn_val as usize) << PAGE_SHIFT, 0,
-                            );
+                            // Cache-backed leaf: leak, never hand the live
+                            // cache frame to the zone (pcachewedge lane).
+                            if pte_bits & cow_flags::PCACHE != 0 {
+                                crate::mm::page_alloc::pcache_leaf_phantom_zero_put(
+                                    (ppn_val as usize) << PAGE_SHIFT,
+                                    "unmap-slow",
+                                );
+                            } else {
+                                crate::mm::page_alloc::free_pages(
+                                    (ppn_val as usize) << PAGE_SHIFT, 0,
+                                );
+                            }
                         }
                         if pte_bits & cow_flags::PCACHE != 0 {
                             release_cache_mapping_pin(ppn_val as usize);
@@ -1392,7 +1645,18 @@ impl MmStruct {
                 let new_ref =
                     unsafe { (*page).put_page_site(crate::dfx::driftwatch::S_UNMAP_X86) };
                 if new_ref == 0 {
-                    crate::mm::page_alloc::free_pages((ppn_val as usize) << PAGE_SHIFT, 0);
+                    // Cache-backed leaf: leak, never hand the live cache
+                    // frame to the zone (pcachewedge lane).
+                    if pte_bits & cow_flags::PCACHE != 0 {
+                        crate::mm::page_alloc::pcache_leaf_phantom_zero_put(
+                            (ppn_val as usize) << PAGE_SHIFT,
+                            "mremap-dst",
+                        );
+                    } else {
+                        crate::mm::page_alloc::free_pages(
+                            (ppn_val as usize) << PAGE_SHIFT, 0,
+                        );
+                    }
                 }
                 // PCACHE mapping: drop the pin after the descriptor put (same
                 // ordering as unmap_pages).
@@ -2929,7 +3193,14 @@ pub unsafe fn handle_cow_fault(
     };
 
     // If refcount <= 1, we're the only owner - just enable write.
-    if refcount <= 1 {
+    // EXCEPT a cache-backed leaf: the page cache holds the frame's base
+    // reference for as long as the entry lives, so refcount 1 on a
+    // PCACHE leaf means the MAPPING's reference is missing (a phantom
+    // put consumed it) — enabling W in place would (a) let MAP_PRIVATE
+    // stores land in the shared cache frame and (b) arm the unmap path
+    // to zero-put the frame the cache still owns. Force the copy path;
+    // the copy's put then just exposes the drift (pcachewedge lane).
+    if refcount <= 1 && old_bits & cow_flags::PCACHE == 0 {
         let new_pte = PageTableEntry::from_bits(
             (old_bits & !cow_flags::COW) | PageTableEntry::W | PageTableEntry::P
         );
@@ -3198,6 +3469,16 @@ pub unsafe fn mprotect_pte_range(root_ppn: u64, start_virt: u64, num_pages: u64,
         base &= !PageTableEntry::P;
     }
 
+    // REVERTED hoisted-walk attempt (gb-opt lane, 2026-11-15): resolving
+    // the upper chain once per 2 MB block measured 2.36 µs → ~0.4 µs on
+    // the mm-probe D3 shape, but wedged the machine 4/4 boots (soft
+    // lockup inside handle_timer_tick, "not servicing IPIs", garbage pc)
+    // exactly at this section, while the pre-hoist kernel passed it —
+    // the per-page walk apparently tolerates a concurrent upper-level
+    // mutation the hoist does not (candidate mutators: tick-context
+    // mm walkers). The per-page body below is the original; re-land the
+    // hoist only after the mutator is named and the walk made safe
+    // against it.
     for i in 0..num_pages {
         let va = start_virt.wrapping_add(i * PAGE_SIZE as u64);
         let a = VirtAddr::new(va);

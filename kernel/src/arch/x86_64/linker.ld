@@ -37,12 +37,22 @@ SECTIONS
         __boot_page_tables_end = .;
     }
 
-    .boot_stack (NOLOAD) : ALIGN(16)
-    {
-        __boot_stack_bottom = .;
-        . += 16K;
-        __boot_stack_top = .;
-    }
+    /* Boot stack: pure symbol assignments (NO output section), fixed
+     * low identity address. The link applies this script twice on the
+     * current cargo nightly (target rustflags/link args are duplicated
+     * into the link command); the second pass resets `.` to BOOT_BASE
+     * and a location-relative .boot_stack section re-lands at 0x100000,
+     * overlapping the first pass's .boot (24K early page tables since
+     * SMP8) — every clean x86_64 link failed on it (masked before by
+     * stale boot_x86_64.o artifacts). Symbols re-assigned to the same
+     * value are a no-op in the second pass.
+     *
+     * 0x80000 (in the e820-low usable segment, below the kernel image)
+     * is used only between multiboot entry and the 64-bit entry — by
+     * the time the page allocator runs, the stack is abandoned, so the
+     * buddy may freely hand the region out later. */
+    __boot_stack_bottom = 0x80000;
+    __boot_stack_top = 0x84000;
 
     . = ALIGN(4096);
     __boot_end = .;

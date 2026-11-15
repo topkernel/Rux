@@ -314,6 +314,7 @@ impl VirtIOBlkDevice {
             self.disk.set_capacity(self.capacity as u64);
             self.disk.set_request_fn(Self::handle_request);
             self.disk.set_async_read_fn(Self::async_read_fn);
+            self.disk.set_async_write_fn(Self::async_write_fn);
             *self.virtqueue.lock() = Some(virtqueue);
 
             // 17. State machine: DRIVER_OK (0x04)
@@ -995,6 +996,180 @@ impl VirtIOBlkDevice {
             // Zero-serve guard: the walker stamps this into the delivered
             // completion; bread_wait verifies it against its own buffer.
             data_ptr: buf.as_ptr() as usize,
+            is_write: false,
+            // block:block_rq_complete geometry for the walker below.
+            trace_dev: ((self.disk.major << 20) | self.disk.first_minor) as u32,
+            trace_sector: sector,
+            trace_nr_sector: (buf.len() / 512) as u32,
+        };
+        VIRTIO_MMIO_PENDING.lock_irqsave()[slot] = Some(pending);
+
+        Ok(())
+    }
+
+    /// Submit an async WRITE request. Does NOT wait for completion — the
+    /// mirror of [`Self::submit_read_async`] for the OUT direction (the
+    /// plugged-write primitive). Two direction-specific differences, both
+    /// load-bearing:
+    ///
+    /// 1. The data descriptor carries NO VIRTQ_DESC_F_WRITE: the device
+    ///    READS the buffer. `buf` is therefore the DMA SOURCE and must stay
+    ///    valid AND UNMODIFIED until the completion fires (the write-batch
+    ///    contract; freeing or mutating it mid-flight corrupts the disk).
+    /// 2. The pending's is_write bit makes the walker's trace record
+    ///    report "W" (block:block_rq_complete truth).
+    ///
+    /// Everything else — pending-table slot discipline, head_desc
+    /// device-truth matching, the zero-serve data_ptr token — is the read
+    /// path's, unchanged.
+    fn submit_write_async(
+        &self,
+        sector: u64,
+        buf: &[u8],
+        completion: &crate::fs::io_completion::IoCompletion,
+    ) -> Result<(), i32> {
+        if !*self.initialized.lock_irqsave() {
+            return Err(-5);  // EIO
+        }
+
+        use queue::{VirtIOBlkReqHeader, VirtIOBlkResp};
+
+        let mut queue_guard = self.virtqueue.lock_irqsave();
+        let _nest = VirtioLockNest::new();
+        let queue = match queue_guard.as_mut() {
+            Some(q) => q,
+            None => return Err(-5),
+        };
+
+        // Allocate header and response buffers
+        let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
+        let header_ptr: *mut u8;
+        // SAFETY: Layout is non-zero-sized; null check follows immediately.
+        unsafe {
+            header_ptr = alloc::alloc::alloc(header_layout);
+        }
+        if header_ptr.is_null() {
+            return Err(-12);
+        }
+        // SAFETY: header_ptr is non-null and properly aligned for VirtIOBlkReqHeader.
+        unsafe {
+            let header = header_ptr as *mut VirtIOBlkReqHeader;
+            (*header) = VirtIOBlkReqHeader {
+                type_: queue::req_type::VIRTIO_BLK_T_OUT,
+                reserved: 0,
+                sector,
+            };
+        }
+
+        let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
+        let resp_ptr: *mut u8;
+        // SAFETY: Layout is non-zero-sized; null check follows immediately.
+        unsafe {
+            resp_ptr = alloc::alloc::alloc(resp_layout);
+        }
+        if resp_ptr.is_null() {
+            // SAFETY: header_ptr was allocated with header_layout and is still valid.
+            unsafe { alloc::alloc::dealloc(header_ptr, header_layout); }
+            return Err(-12);
+        }
+        // SAFETY: resp_ptr is non-null and properly aligned for VirtIOBlkResp.
+        unsafe {
+            *(resp_ptr as *mut VirtIOBlkResp) = VirtIOBlkResp { status: 0xFF };
+        }
+
+        const VIRTQ_DESC_F_NEXT: u16 = 1;
+        const VIRTQ_DESC_F_WRITE: u16 = 2;
+
+        let header_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(header_ptr as u64),
+        ).0;
+        let data_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(buf.as_ptr() as u64),
+        ).0;
+        let resp_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(resp_ptr as u64),
+        ).0;
+
+        let header_desc_idx = match queue.alloc_desc() {
+            Some(idx) => idx,
+            None => {
+                // SAFETY: Both pointers were allocated above and are still valid.
+                unsafe {
+                    alloc::alloc::dealloc(header_ptr, header_layout);
+                    alloc::alloc::dealloc(resp_ptr, resp_layout);
+                }
+                return Err(-5);
+            }
+        };
+        let data_desc_idx = match queue.alloc_desc() {
+            Some(idx) => idx,
+            None => {
+                // SAFETY: Both pointers were allocated above and are still valid.
+                unsafe {
+                    alloc::alloc::dealloc(header_ptr, header_layout);
+                    alloc::alloc::dealloc(resp_ptr, resp_layout);
+                }
+                return Err(-5);
+            }
+        };
+        let resp_desc_idx = match queue.alloc_desc() {
+            Some(idx) => idx,
+            None => {
+                // SAFETY: Both pointers were allocated above and are still valid.
+                unsafe {
+                    alloc::alloc::dealloc(header_ptr, header_layout);
+                    alloc::alloc::dealloc(resp_ptr, resp_layout);
+                }
+                return Err(-5);
+            }
+        };
+
+        queue.set_desc(header_desc_idx, header_phys,
+            core::mem::size_of::<VirtIOBlkReqHeader>() as u32,
+            VIRTQ_DESC_F_NEXT, data_desc_idx);
+        // WRITE direction: the device READS the data — no F_WRITE here.
+        queue.set_desc(data_desc_idx, data_phys, buf.len() as u32,
+            VIRTQ_DESC_F_NEXT, resp_desc_idx);
+        queue.set_desc(resp_desc_idx, resp_phys,
+            core::mem::size_of::<VirtIOBlkResp>() as u32,
+            VIRTQ_DESC_F_WRITE, 0); // Device writes the status byte (DRIV-H4)
+
+        let prev = get_mmio_expected_used_idx();
+        let slot = prev as usize % MAX_PENDING_IO;
+        // Occupancy check BEFORE submit (the tombstone-reservation rule of
+        // submit_read_async — overwriting a live slot would let the walker
+        // fire this pending with the OLD chain's used-ring entry).
+        {
+            let table = VIRTIO_MMIO_PENDING.lock_irqsave();
+            if table[slot].is_some() {
+                // SAFETY: both buffers were allocated above and are still
+                // owned by this frame; no chain was submitted for them.
+                unsafe {
+                    alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+                    alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
+                }
+                return Err(-5);
+            }
+        }
+        queue.submit(header_desc_idx);
+        queue.notify();
+        increment_mmio_expected_used_idx();
+
+        // Store in pending table
+        let pending = PendingIo {
+            completion: completion as *const _ as *mut _,
+            resp_ptr,
+            resp_layout,
+            header_ptr,
+            header_layout,
+            // Device-truth key for the walker (same discipline as the read
+            // path): match the used-ring entry by the chain's head id.
+            head_desc: header_desc_idx as u32,
+            ordinal: prev,
+            timed_out: false,
+            // Zero-serve guard token (attribution proof for the waiter).
+            data_ptr: buf.as_ptr() as usize,
+            is_write: true,
             // block:block_rq_complete geometry for the walker below.
             trace_dev: ((self.disk.major << 20) | self.disk.first_minor) as u32,
             trace_sector: sector,
@@ -1007,20 +1182,44 @@ impl VirtIOBlkDevice {
 
     /// Static wrapper for async read — matches `async_read_fn` signature on GenDisk.
     ///
-    /// Casts `*const GenDisk` back to `&VirtIOBlkDevice` and calls the
-    /// instance method `submit_read_async`.
-    /// SAFETY: `disk` must be a raw pointer to a VirtIOBlkDevice (cast from `self`),
-    /// and `completion` must be a valid pointer to an IoCompletion. Called only
-    /// via GenDisk's async_read_fn callback after device initialization.
+    /// Resolves the owning device through GenDisk.private_data (set to the
+    /// VirtIOBlkDevice address in `init()`). The previous body cast the
+    /// GEN disk pointer itself (`disk as *const VirtIOBlkDevice`) — a
+    /// field pointer miscast into its container; every standard boot uses
+    /// virtio-blk-pci so the path was dead, but any MMIO-disk boot that
+    /// reached it would have read device fields out of bounds.
+    /// SAFETY: `disk` must be the MMIO GenDisk whose private_data names
+    /// this device; `completion` must be a valid pointer to an IoCompletion.
     unsafe fn async_read_fn(
         disk: *const crate::drivers::blkdev::GenDisk,
         sector: u64,
         buf: &mut [u8],
         completion: *mut core::ffi::c_void,
     ) -> i32 {
-        let device = &*(disk as *const VirtIOBlkDevice);
+        let device = &*((*disk).private_data.unwrap() as *const VirtIOBlkDevice);
         let comp = &*(completion as *const crate::fs::io_completion::IoCompletion);
         match device.submit_read_async(sector, buf, comp) {
+            Ok(()) => 0,
+            Err(e) => e,
+        }
+    }
+
+    /// Static wrapper for async write — matches `async_write_fn` signature
+    /// on GenDisk. `buf` is the DMA source and must stay stable until the
+    /// completion fires (see `submit_write_async`).
+    ///
+    /// SAFETY: `disk` must be the MMIO GenDisk whose private_data names
+    /// this device; `buf` a stable DMA source; `completion` a valid
+    /// IoCompletion pointer that outlives the I/O.
+    unsafe fn async_write_fn(
+        disk: *const crate::drivers::blkdev::GenDisk,
+        sector: u64,
+        buf: &[u8],
+        completion: *mut core::ffi::c_void,
+    ) -> i32 {
+        let device = &*((*disk).private_data.unwrap() as *const VirtIOBlkDevice);
+        let comp = &*(completion as *const crate::fs::io_completion::IoCompletion);
+        match device.submit_write_async(sector, buf, comp) {
             Ok(()) => 0,
             Err(e) => e,
         }
@@ -1068,7 +1267,7 @@ pub(crate) static PCI_BLK_LOCKS: [Spinlock<()>; MAX_PCI_BLK_DISKS] =
 // QEMU under KVM, where six virtio-blk disks make the exit path subject
 // to BQL/iothread convoys. Both are now moved OUTSIDE the lock (see
 // read_block_once / write_block_once / flush_block_once /
-// pci_submit_read_async), Linux-parity style.
+// pci_submit_data_async), Linux-parity style.
 //
 // To make any recurrence self-describing, every acquire goes through
 // `pci_blk_lock()` below, which records holder cpu/pid/acquire-site/
@@ -1469,6 +1668,10 @@ struct PendingIo {
     /// landed (the zero-serve guard; the no-journal ext4 root-lookup
     /// family). 0 on tombstones (nothing fires through them).
     data_ptr: usize,
+    /// Direction of the chain (async submits only; false on every
+    /// tombstone — trace_dev is 0 there so nothing reports): selects the
+    /// rwbs column of the walker's block:block_rq_complete record.
+    is_write: bool,
     /// block:block_rq_complete geometry (dev as major<<20|minor, first
     /// sector, sector count), stored at async submit so the completion
     /// walker can record the event without any lookup. Zero on
@@ -1539,6 +1742,7 @@ fn mmio_publish_sync_tombstone(ordinal: u16, head_desc: u16) {
         ordinal,
         timed_out: false,
         data_ptr: 0,
+        is_write: false,
         trace_dev: 0,
         trace_sector: 0,
         trace_nr_sector: 0,
@@ -1713,7 +1917,7 @@ const MAX_PENDING_IO_PCI: usize = 64;
 /// completion can never touch memory its owner has stopped owning.
 ///
 /// LIVENESS: a still-occupied slot or overlapping window is walker lag,
-/// never fatal — submitters drain + retry (see pci_submit_read_async), and
+/// never fatal — submitters drain + retry (see pci_submit_data_async), and
 /// because ordinal N+64 cannot publish until entry N was walked, the
 /// walker can never trail far enough for the used ring (queue_size deep)
 /// to overwrite an unconsumed entry.
@@ -1726,7 +1930,7 @@ static PCI_BLK_PENDING_LAST: [core::sync::atomic::AtomicU16; MAX_PCI_BLK_DISKS] 
 
 /// Chains published to a slot's avail ring since the last device kick.
 /// Batch submitters publish quietly and the waiter kicks once — see
-/// pci_submit_read_async.
+/// pci_submit_data_async.
 static PCI_BLK_UNKICKED: [core::sync::atomic::AtomicUsize; MAX_PCI_BLK_DISKS] =
     [const { core::sync::atomic::AtomicUsize::new(0) }; MAX_PCI_BLK_DISKS];
 
@@ -1852,6 +2056,7 @@ pub fn pci_publish_sync_chain(disk: usize, queue_size: u32, ordinal: u16, head_d
         ordinal,
         timed_out: false,
         data_ptr: 0,
+        is_write: false,
         trace_dev: 0,
         trace_sector: 0,
         trace_nr_sector: 0,
@@ -1942,6 +2147,7 @@ pub fn abandon_pending_completion(
                         ordinal: p.ordinal,
                         timed_out: true,
                         data_ptr: 0,
+                        is_write: false,
                         trace_dev: 0,
                         trace_sector: 0,
                         trace_nr_sector: 0,
@@ -1992,6 +2198,7 @@ pub fn abandon_pending_completion(
                         ordinal: p.ordinal,
                         timed_out: false,
                         data_ptr: 0,
+                        is_write: false,
                         trace_dev: 0,
                         trace_sector: 0,
                         trace_nr_sector: 0,
@@ -2023,15 +2230,22 @@ pub fn abandon_pending_completion(
     abandoned
 }
 
-/// Submit an async read on the PCI VirtIO block device (no waiting).
+/// Submit an async data chain (read or write per `is_write`) on the PCI
+/// VirtIO block device (no waiting). The direction parameterizes exactly
+/// three things: the request type (T_IN/T_OUT), the data descriptor's
+/// F_WRITE bit (set for reads — the device writes the buffer; clear for
+/// writes — the device READS the buffer), and the pending's is_write trace
+/// bit. Everything else is direction-neutral.
 ///
-/// SAFETY: `disk` must be the PCI virtio-blk GenDisk (major 8); `buf` must
-/// remain valid and unmodified until the completion fires; `completion` must
-/// outlive the I/O. Mirrors `VirtIOBlkDevice::submit_read_async`.
-unsafe fn pci_submit_read_async(
+/// SAFETY: `disk` must be the PCI virtio-blk GenDisk (major 8); `data_ptr`
+/// must remain valid and, for writes, UNMODIFIED until the completion
+/// fires; `completion` must outlive the I/O.
+unsafe fn pci_submit_data_async(
     disk: *const crate::drivers::blkdev::GenDisk,
     sector: u64,
-    buf: &mut [u8],
+    data_ptr: *mut u8,
+    data_len: usize,
+    is_write: bool,
     completion: &crate::fs::io_completion::IoCompletion,
 ) -> Result<(), i32> {
     use queue::{VirtIOBlkReqHeader, VirtIOBlkResp};
@@ -2059,7 +2273,11 @@ unsafe fn pci_submit_read_async(
     // SAFETY: pointers derived above are valid and aligned.
     unsafe {
         *header_ptr = VirtIOBlkReqHeader {
-            type_: queue::req_type::VIRTIO_BLK_T_IN,
+            type_: if is_write {
+                queue::req_type::VIRTIO_BLK_T_OUT
+            } else {
+                queue::req_type::VIRTIO_BLK_T_IN
+            },
             reserved: 0,
             sector,
         };
@@ -2073,7 +2291,7 @@ unsafe fn pci_submit_read_async(
         crate::arch::mm::VirtAddr::new(header_ptr as u64),
     ).0;
     let data_phys = crate::arch::mm::virt_to_phys(
-        crate::arch::mm::VirtAddr::new(buf.as_ptr() as u64),
+        crate::arch::mm::VirtAddr::new(data_ptr as u64),
     ).0;
     let resp_phys = crate::arch::mm::virt_to_phys(
         crate::arch::mm::VirtAddr::new(resp_ptr as u64),
@@ -2142,8 +2360,13 @@ unsafe fn pci_submit_read_async(
                     virt_queue.set_desc(header_desc_idx, header_phys,
                         core::mem::size_of::<VirtIOBlkReqHeader>() as u32,
                         VIRTQ_DESC_F_NEXT, data_desc_idx);
-                    virt_queue.set_desc(data_desc_idx, data_phys, buf.len() as u32,
-                        VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT, resp_desc_idx);
+                    // Direction: a WRITE's data descriptor has NO
+                    // VIRTQ_DESC_F_WRITE — the device READS the buffer
+                    // (it is the DMA source; the write-batch contract
+                    // keeps it stable until completion).
+                    virt_queue.set_desc(data_desc_idx, data_phys, data_len as u32,
+                        if is_write { VIRTQ_DESC_F_NEXT } else { VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT },
+                        resp_desc_idx);
                     virt_queue.set_desc(resp_desc_idx, resp_phys,
                         core::mem::size_of::<VirtIOBlkResp>() as u32,
                         VIRTQ_DESC_F_WRITE, 0);
@@ -2187,11 +2410,12 @@ unsafe fn pci_submit_read_async(
                         timed_out: false,
                         // Zero-serve guard: the walker stamps this into the
                         // delivered completion; bread_wait verifies it.
-                        data_ptr: buf.as_ptr() as usize,
+                        data_ptr: data_ptr as usize,
+                        is_write,
                         // block:block_rq_complete geometry for the walker.
                         trace_dev: (((*disk).major << 20) | (*disk).first_minor) as u32,
                         trace_sector: sector,
-                        trace_nr_sector: (buf.len() / 512) as u32,
+                        trace_nr_sector: (data_len / 512) as u32,
                     });
 
                     submitted = true;
@@ -2236,7 +2460,49 @@ unsafe fn pci_async_read_fn(
     completion: *mut core::ffi::c_void,
 ) -> i32 {
     let comp = &*(completion as *const crate::fs::io_completion::IoCompletion);
-    match pci_submit_read_async(disk, sector, buf, comp) {
+    // SAFETY: buf stays valid until the completion fires (read contract).
+    match pci_submit_data_async(disk, sector, buf.as_mut_ptr(), buf.len(), false, comp) {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
+}
+
+/// Submit an async write on the PCI VirtIO block device (no waiting) — the
+/// plugged-write primitive's device side. Mirrors the async read end to end
+/// (quiet submit, ordinal slot + descriptor-window reservation, pending
+/// publish under the BLK lock); the only direction-specific deltas are in
+/// `pci_submit_data_async` (T_OUT header, no F_WRITE on the data descriptor).
+///
+/// `buf` is the DMA SOURCE: it must remain valid and unmodified until the
+/// completion fires. Callers that cannot promise that submit from a private
+/// copy (bio's WriteBatch does).
+///
+/// SAFETY: `disk` must be the PCI virtio-blk GenDisk (major 8); `buf` must
+/// remain stable until the completion fires; `completion` must outlive the
+/// I/O.
+unsafe fn pci_submit_write_async(
+    disk: *const crate::drivers::blkdev::GenDisk,
+    sector: u64,
+    buf: &[u8],
+    completion: &crate::fs::io_completion::IoCompletion,
+) -> Result<(), i32> {
+    pci_submit_data_async(disk, sector, buf.as_ptr() as *mut u8, buf.len(), true, completion)
+}
+
+/// Static wrapper matching GenDisk's `async_write_fn` signature for the PCI
+/// disk.
+///
+/// SAFETY: `disk` is the registered PCI virtio-blk GenDisk; `buf` is a
+/// stable DMA source; `completion` is a valid IoCompletion pointer that
+/// outlives the I/O.
+unsafe fn pci_async_write_fn(
+    disk: *const crate::drivers::blkdev::GenDisk,
+    sector: u64,
+    buf: &[u8],
+    completion: *mut core::ffi::c_void,
+) -> i32 {
+    let comp = &*(completion as *const crate::fs::io_completion::IoCompletion);
+    match pci_submit_write_async(disk, sector, buf, comp) {
         Ok(()) => 0,
         Err(e) => e,
     }
@@ -2817,7 +3083,7 @@ pub fn pci_process_async_completions_slot(slot: usize) -> usize {
             unsafe {
                 alloc::alloc::dealloc(pending.header_ptr, pending.header_layout);
             }
-            // block:block_rq_complete — the async read's IRQ-side
+            // block:block_rq_complete — the async chain's IRQ-side
             // completion, with the geometry stored at submit time
             // (tombstones and sync chains carry zeros and skip).
             if pending.trace_dev != 0 {
@@ -2827,7 +3093,7 @@ pub fn pci_process_async_completions_slot(slot: usize) -> usize {
                     pending.trace_nr_sector as u32,
                     io_status,
                     0,
-                    "R",
+                    if pending.is_write { "W" } else { "R" },
                 );
             }
             // SAFETY: the delivering-protocol count taken under the table
@@ -3173,6 +3439,10 @@ pub fn register_pci_gen_disk(slot: usize) {
     // on the root disk and ext4 read-ahead was silently disabled there
     // (every page miss = one synchronous virtio round trip).
     disk.set_async_read_fn(pci_async_read_fn);
+    // Async write path (the plugged-write primitive): without it,
+    // bio's WriteBatch falls back to serialized synchronous writes —
+    // correct, but the fsync flush wall stays.
+    disk.set_async_write_fn(pci_async_write_fn);
 
     // Register to block device manager
     let _ = crate::drivers::blkdev::register_disk(disk);
@@ -3583,7 +3853,7 @@ pub fn block_bh_handler(_vec: usize) {
                         pending.resp_ptr, pending.resp_layout,
                     );
 
-                    // block:block_rq_complete — the async read's
+                    // block:block_rq_complete — the async chain's
                     // softirq-side completion, geometry from submit.
                     if pending.trace_dev != 0 {
                         crate::trace::trace_block_rq_complete(
@@ -3592,7 +3862,7 @@ pub fn block_bh_handler(_vec: usize) {
                             pending.trace_nr_sector,
                             io_status,
                             0,
-                            "R",
+                            if pending.is_write { "W" } else { "R" },
                         );
                     }
 

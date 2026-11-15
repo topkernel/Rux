@@ -9,6 +9,7 @@
 //! - `sysv_msg` — System V message queues (msgget, msgctl, msgsnd, msgrcv)
 //! - `sysv_shm` — System V shared memory (shmget, shmctl, shmat, shmdt)
 //! - `posix_mq` — POSIX message queues (mq_open, mq_unlink, mq_timedsend, mq_timedreceive, mq_notify, mq_getsetattr)
+//! - `keys` — Kernel key retention service (add_key, request_key, keyctl)
 
 pub mod util;
 pub mod sysv_sem;
@@ -17,6 +18,7 @@ pub mod sysv_shm;
 pub mod posix_mq;
 pub mod binder;
 pub mod access_token;
+pub mod keys;
 
 // Re-export IPC constants for use by dispatch and other modules
 pub use util::*;

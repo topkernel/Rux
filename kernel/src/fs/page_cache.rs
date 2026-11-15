@@ -694,6 +694,29 @@ impl PageCache {
         out
     }
 
+    /// Non-pinning residency probe: is ((fs_id, ino), page_index) cached
+    /// and NOT invalidated? Takes no pin and touches no LRU state — for
+    /// callers that only need the ANSWER (mincore(2)'s page-cache
+    /// fallback, the read path's post-fill verification). `get()`/`get_phys()`
+    /// each transfer a pin the caller must return via put(); a caller that
+    /// drops the returned handle leaks the pin, and a leaked pin is how an
+    /// invalidated-but-never-freed entry survives inode free to shadow the
+    /// next file that reuses the inode number (the msync01-after-mincore04
+    /// order-dependent corruption).
+    pub fn resident(&self, fs_id: u64, ino: u64, page_index: u64) -> bool {
+        let key = cache_key(fs_id, ino);
+        let Some(entry) = self.lookup_claimed(key) else {
+            return false;
+        };
+        let out = {
+            let g = entry.lock.lock();
+            g.get(&page_index)
+                .is_some_and(|page| !page.invalidated)
+        };
+        drop(entry);
+        out
+    }
+
     /// Same as `get` but returns the PHYSICAL address — for mapping the
     /// cached frame directly into a user page table (MAP_SHARED faults).
     /// The returned pin is owned by that PTE mapping for its lifetime.
@@ -1144,14 +1167,26 @@ impl PageCache {
         let out = {
             let mut g = entry.lock.lock();
             if let Some(page) = g.get_mut(&page_index) {
-                page.pin_locked();
-                let page_desc = pfn_to_page_mut(page.pfn);
-                if !page_desc.is_null() {
-                    unsafe {
-                        (*page_desc).set_flag(PageFlag::Referenced);
+                // QUARANTINE guard (mmforensics lane): a poisoned frame
+                // (ever double-tracked) must not be mapped as file data —
+                // its other owners' contents would alias the mapping.
+                // Serve a miss instead: callers read from disk into a
+                // fresh frame; the stale entry dies at its next eviction
+                // (release refused, entry removed — self-healing).
+                if crate::arch::mm::mmu_init::alloc_stage_is_late()
+                    && crate::arch::mm::mmu_init::PtLedger::is_poisoned(page.pfn as u64)
+                {
+                    false
+                } else {
+                    page.pin_locked();
+                    let page_desc = pfn_to_page_mut(page.pfn);
+                    if !page_desc.is_null() {
+                        unsafe {
+                            (*page_desc).set_flag(PageFlag::Referenced);
+                        }
                     }
+                    true
                 }
-                true
             } else {
                 false
             }
@@ -1251,7 +1286,25 @@ impl PageCache {
         data: &[u8],
         skip_pfn: u64,
     ) {
-        self.writeback_update_range_impl(fs_id, ino, file_off, data, skip_pfn, false);
+        self.writeback_update_range_impl(fs_id, ino, file_off, data, &[skip_pfn], false);
+    }
+
+    /// Multi-source twin of `writeback_update_range` (the run-batched
+    /// flush): EVERY pfn of the run's flush-source frames is skipped —
+    /// the staged bytes came FROM those frames, so copying any of them
+    /// back would revert a mapper store that raced the staging copy
+    /// (POSIX leaves unsynchronized stores vs writeback unordered; the
+    /// kernel must not actively undo them). Runs are chunk-bounded
+    /// (<= 16 pages), so the membership scan is trivially cheap.
+    pub fn writeback_update_range_multi(
+        &self,
+        fs_id: u64,
+        ino: u64,
+        file_off: u64,
+        data: &[u8],
+        skip_pfns: &[u64],
+    ) {
+        self.writeback_update_range_impl(fs_id, ino, file_off, data, skip_pfns, false);
     }
 
     /// Authoritative-repopulation twin of `writeback_update_range` (tmpfs
@@ -1270,7 +1323,7 @@ impl PageCache {
         file_off: u64,
         data: &[u8],
     ) {
-        self.writeback_update_range_impl(fs_id, ino, file_off, data, 0, true);
+        self.writeback_update_range_impl(fs_id, ino, file_off, data, &[], true);
     }
 
     fn writeback_update_range_impl(
@@ -1279,7 +1332,7 @@ impl PageCache {
         ino: u64,
         file_off: u64,
         data: &[u8],
-        skip_pfn: u64,
+        skip_pfns: &[u64],
         force_stale: bool,
     ) {
         if data.is_empty() {
@@ -1304,8 +1357,8 @@ impl PageCache {
                     // writeback_update_range_stale.)
                     continue;
                 }
-                if skip_pfn != 0 && page.pfn as u64 == skip_pfn {
-                    // The flush source frame itself (see the doc comment) —
+                if page.pfn as u64 != 0 && skip_pfns.contains(&(page.pfn as u64)) {
+                    // A flush source frame itself (see the doc comment) —
                     // copying a frame onto itself is a self-overlap.
                     continue;
                 }
@@ -1362,13 +1415,26 @@ impl PageCache {
         data: &[u8],
         skip_pfn: u64,
     ) {
+        self.writeback_populate_range_multi(fs_id, ino, file_off, data, &[skip_pfn]);
+    }
+
+    /// Multi-source twin (the run-batched flush passes every source
+    /// frame's PFN — see writeback_update_range_multi).
+    pub fn writeback_populate_range_multi(
+        &self,
+        fs_id: u64,
+        ino: u64,
+        file_off: u64,
+        data: &[u8],
+        skip_pfns: &[u64],
+    ) {
         if data.is_empty() {
             return;
         }
         // Existing entries first — same-body update (an inserted page
         // below carries exactly its slice of `data`, so there is no
         // second copy for fresh frames).
-        self.writeback_update_range(fs_id, ino, file_off, data, skip_pfn);
+        self.writeback_update_range_multi(fs_id, ino, file_off, data, skip_pfns);
 
         let len = data.len() as u64;
         let first_index = file_off / PAGE_SIZE as u64;
@@ -1925,6 +1991,11 @@ impl PageCache {
             // never returns from inside the guards — the frame return is
             // scheduled here and executed after all locks drop.
             let mut duplicate = false;
+            // Revive-in-place of a retired-but-live squatter (see the
+            // REVIVE-IN-PLACE block below): the caller's data landed in
+            // the existing frame, so the call reports success while the
+            // pre-allocated frame is still freed like a duplicate's.
+            let mut revived = false;
             {
                 let mut g = entry.lock.lock();
 
@@ -1938,7 +2009,7 @@ impl PageCache {
                 // page (exactly what invalidate_inode promises not to
                 // do). Skip caching this read; the old entry dies via
                 // its refcount. The pre-allocated frame is unused on
-                // both paths — returned below.
+                // all paths — returned below.
                 //
                 // LAZY REAP (FXW-SQUAT, fsx-linux ext4 face): an entry
                 // retired by an earlier invalidate whose frame was
@@ -1951,11 +2022,15 @@ impl PageCache {
                 // bounce, zero fill) dedups against it and frees its own
                 // fresh frame — the page can NEVER be cached again, and
                 // the fault path falls to the private-copy arm (mapper
-                // data invisible to every other face of the file). A
-                // fresh insert is the natural reaper: a retired entry
-                // with NO pin and NO live mapping is removed here (frame
-                // freed exactly like invalidate's doomed path) so this
-                // insert installs the new frame.
+                // data invisible to every other face of the file). Two
+                // resolutions live here: a retired entry with NO pin and
+                // NO live mapping is REAPED (frame freed exactly like
+                // invalidate's doomed path) so this insert installs the
+                // new frame; a retired-but-LIVE one (pin or mapcount
+                // held — the d37643abb KNOWN LIMIT) is REVIVED IN PLACE
+                // with this insert's data (see the REVIVE-IN-PLACE arm
+                // below) so the index resolves to current data and the
+                // frame's every alias stays coherent.
                 if g.contains_key(&page_index) {
                     let reap = {
                         let stale = g.get(&page_index).expect("contains_key");
@@ -1980,6 +2055,56 @@ impl PageCache {
                         release_page_frame(stale.pfn);
                         self.total_pages.fetch_sub(1, Ordering::Relaxed);
                         // fall through: the fresh frame installs below
+                    } else if g.get(&page_index).expect("contains_key").invalidated {
+                        // REVIVE-IN-PLACE (fsx-linux ext4 face, the
+                        // d37643abb KNOWN LIMIT): the squatter is
+                        // retired-but-LIVE (pinned or still mapped — Rux
+                        // never zaps PTEs), so it cannot be reaped, and
+                        // failing this insert (the old `duplicate` arm)
+                        // left the page PERMANENTLY uncachable: every
+                        // populate deduped against the squatter and
+                        // filemap faults bounced to the private-copy
+                        // arm — mapper stores invisible to every other
+                        // face of the file. Instead the entry is revived
+                        // WITH THIS INSERT'S DATA: the frame is
+                        // overwritten with exactly what a fresh install
+                        // would carry (disk content on the read path,
+                        // the written span for insert_dirty) and
+                        // un-retired, so the index resolves to the
+                        // current entry again and every alias — the old
+                        // mapper's PTE included — is coherent through
+                        // the ONE frame (the reference kernel's
+                        // single-page-per-index shape; stores racing the
+                        // revive are last-writer-wins, POSIX latitude).
+                        // Pins, mapcount and LRU membership are
+                        // untouched: their owners put exactly as before,
+                        // into an entry that is a full citizen again.
+                        // The pre-allocated frame is unused — freed
+                        // below like a duplicate's.
+                        let stale = g.get_mut(&page_index).expect("contains_key");
+                        stale.invalidated = false;
+                        let pfn = stale.pfn;
+                        // SAFETY: pfn is this entry's zone-allocated
+                        // frame; the linear map covers PAGE_SIZE bytes.
+                        unsafe {
+                            let dst = phys_to_virt_ptr(pfn_to_phys(pfn));
+                            let copy_len = core::cmp::min(data.len(), PAGE_SIZE);
+                            core::ptr::copy_nonoverlapping(data.as_ptr(), dst, copy_len);
+                            if copy_len < PAGE_SIZE {
+                                core::ptr::write_bytes(
+                                    dst.add(copy_len),
+                                    0,
+                                    PAGE_SIZE - copy_len,
+                                );
+                            }
+                        }
+                        // `dirty` is always touched through atomic ops
+                        // (leg-54 note): the revived frame carries
+                        // exactly this insert's content — clean for a
+                        // read install (frame == disk), dirty for
+                        // insert_dirty (bytes not yet persisted).
+                        stale.dirty.store(dirty, Ordering::Release);
+                        revived = true;
                     } else {
                         duplicate = true;
                     }
@@ -2032,7 +2157,7 @@ impl PageCache {
             drop(w);
             self.flush_parked(&mut parked);
             drop(entry);
-            if duplicate {
+            if duplicate || revived {
                 free_page(phys_addr);
             }
             !duplicate
@@ -2228,6 +2353,46 @@ impl PageCache {
                                 release_page_frame(stale.pfn);
                                 self.total_pages.fetch_sub(1, Ordering::Relaxed);
                                 // fall through: install the batch frame below
+                            } else if g.get(&page_index).expect("contains_key").invalidated {
+                                // REVIVE-IN-PLACE (see insert_ext's twin):
+                                // a retired-but-live squatter (pinned or
+                                // still mapped) is revived WITH THIS
+                                // BATCH PAGE'S DATA instead of blocking
+                                // the install — the index resolves to
+                                // current data and every alias of the
+                                // frame stays coherent. The batch frame
+                                // is released exactly like a duplicate's.
+                                let src_off = (done + k) * block_size;
+                                let copy_len =
+                                    core::cmp::min(PAGE_SIZE, buf.len().saturating_sub(src_off));
+                                let stale = g.get_mut(&page_index).expect("contains_key");
+                                stale.invalidated = false;
+                                let pfn = stale.pfn;
+                                // SAFETY: pfn is this entry's zone frame;
+                                // the linear map covers PAGE_SIZE bytes and
+                                // copy_len <= PAGE_SIZE.
+                                unsafe {
+                                    let dst = phys_to_virt_ptr(pfn_to_phys(pfn));
+                                    if copy_len > 0 {
+                                        core::ptr::copy_nonoverlapping(
+                                            buf.as_ptr().add(src_off),
+                                            dst,
+                                            copy_len,
+                                        );
+                                    }
+                                    if copy_len < PAGE_SIZE {
+                                        core::ptr::write_bytes(
+                                            dst.add(copy_len),
+                                            0,
+                                            PAGE_SIZE - copy_len,
+                                        );
+                                    }
+                                }
+                                // Read-path batch: the revived frame now
+                                // matches disk — clean (atomic-op rule).
+                                stale.dirty.store(false, Ordering::Release);
+                                free_page(phys);
+                                continue;
                             } else {
                                 // Duplicate index: the frame was already filled
                                 // and described in the unlocked stage above —
@@ -2615,8 +2780,23 @@ impl PageCache {
             STAT_DEMOTIONS.fetch_add(demoted as u64, Ordering::Relaxed);
         }
 
-        // LRU walk exhausted — fall back to slot-table scan (safety net)
-        for si in 0..PC_TABLE_CAP {
+        // LRU walk exhausted — fall back to slot-table scan (safety net).
+        // WINDOWED (pcachewedge lane, 2026-11-15): the whole-table scan
+        // (32768 slots, each a per-inode lock + map iteration) ran inside
+        // ONE wlock section with preemption disabled — under the fammm
+        // churn (everything pinned/mapped, nothing evictable) that was a
+        // MULTI-SECOND preempt-off monopolist window: RCU quiescent
+        // rounds stalled, fdreapd (waiting on the grace period to close
+        // dead tasks' fds) starved for 179 s+, and every task piling
+        // behind the pcache locks spun. The net is a safety valve, not a
+        // correctness requirement — a rotating window of slots per call
+        // keeps the coverage (successive calls continue where the last
+        // stopped) while bounding any single wlock hold.
+        const FALLBACK_WINDOW: usize = 512;
+        static FALLBACK_CURSOR: AtomicUsize = AtomicUsize::new(0);
+        let start = FALLBACK_CURSOR.fetch_add(FALLBACK_WINDOW, Ordering::Relaxed) % PC_TABLE_CAP;
+        for k in 0..FALLBACK_WINDOW {
+            let si = (start + k) % PC_TABLE_CAP;
             let ptr = self.slots[si].0.load(Ordering::Acquire);
             if ptr.is_null() || ptr as usize == PC_TOMBSTONE_BITS {
                 continue;
@@ -2680,8 +2860,66 @@ impl PageCache {
 }
 
 /// Release a physical page frame back to the zone allocator.
+///
+/// PT-ledger refusal (pcachewedge lane, 2026-11-15): the single funnel
+/// for every cache-side frame free (eviction, invalidate, final put,
+/// lazy reap). A frame the page-table ledger still stamps LIVE must
+/// never re-enter the zone from here: it is simultaneously a live page
+/// table (its PT allocation grabbed it after a premature free left the
+/// frame on the cache LRU with a stale PageCache-typed descriptor) and
+/// a cache entry — freeing it RAW-FREEs the live table (the corruption
+/// cascade: PTLEDGER DOUBLE-ALLOC, PTE values in recycled task memory,
+/// oops-killed lock holders). REFUSE the free — the frame is leaked
+/// (bounded, one per corrupted entry) and the evidence names it. Same
+/// tripwire shape as zone.rs's RAW-FREE-OF-LIVE-TABLE watchpoint, but
+/// as a refusal at the producer.
 fn release_page_frame(pfn: usize) {
     let phys_addr = pfn_to_phys(pfn);
+
+    // QUARANTINED frames (ever double-tracked) are never released: their
+    // stale references make every re-allocation a collision. Leak.
+    if crate::arch::mm::mmu_init::alloc_stage_is_late()
+        && crate::arch::mm::mmu_init::PtLedger::is_poisoned(pfn as u64)
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        crate::dfx::driftwatch::MM_POISON_FREES.fetch_add(1, Relaxed);
+        return;
+    }
+
+    if crate::arch::mm::mmu_init::alloc_stage_is_late()
+        && crate::arch::mm::mmu_init::PtLedger::is_live_table(pfn as u64)
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        crate::dfx::driftwatch::PCACHE_LIVE_PT_REFUSED
+            .fetch_add(1, Relaxed);
+        static REPORTS: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let n = REPORTS.fetch_add(1, Relaxed);
+        if n < 8 {
+            crate::pr_err!(
+                "page-cache release of LIVE PT frame pfn={:#x} REFUSED — leaking (double-owned cache entry; RAW-FREE cascade guard)",
+                pfn
+            );
+            crate::dfx::backtrace::dump_stack();
+        }
+        // mmforensics: deep capture at the producer-side refusal (the
+        // capture takes no page-cache locks — it only reads descriptors,
+        // rings and foreign trees — so running it from this lock-held
+        // context is safe).
+        crate::dfx::mmforensics::capture_frame(pfn, "pcache-live-pt-refused");
+        // QUARANTINE the frame (mmforensics lane): the capture evidence
+        // showed such frames keep colliding with re-allocation for the
+        // rest of the boot (one frame re-stamped by five trees); the
+        // poison bit makes every later free of it impossible, so the
+        // surviving references dangle inertly.
+        crate::arch::mm::mmu_init::PtLedger::poison_table(pfn as u64);
+        crate::dfx::driftwatch::MM_POISONED.fetch_add(1, Relaxed);
+        // The caller has already removed the map entry and unlinked the
+        // LRU member; the leaked frame is an untracked orphan. Its
+        // stale PageCache descriptor is unreachable from the LRU walk,
+        // so it cannot be re-picked here.
+        return;
+    }
 
     // Clear page cache metadata
     let page_desc = pfn_to_page_mut(pfn);

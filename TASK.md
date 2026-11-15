@@ -13201,3 +13201,119 @@ Edge-B instruments landed this round (from the 114th, now committed):
 txnhunt lock-free OWING snapshot (binder.rs) + exit-print owing arm
 (exit.rs), SEGV high-fault budget split + adjvma/altstack forensics
 (trap.rs).
+
+### 2026-11-15, round 116 (mmi-silent-exit) — the "~180s mmi silent exit" DECODED: it is init's own critical-service REBOOT cascade after samgr SIGABRTs at 95s (3/3 pre-merge boots, 0/3 post-merge); x86_64 reboot now actually resets; UIEXIT exit-print arm + live WW symbolization landed; healthy boots show the real finish-line blocker: the UI phase never completes (bootanimation FFRT pool futex-parked), and the image's samgr idle-unload kills the one input reader (dhardware) 6-9s after it opens /dev/input/event*
+
+Branch mmi-silent-exit (f0f0ea8e1 + commit a075b656b), kernel
+run/bzImage-mmi1, boots mmi1w1-w3 (KVM q35 SMP8 8G 540s,
+dfx=txnhunt,fuxstuck,periodic,parkdump,schedtrace trace_event=input).
+Full evidence: run/MMI-EXIT-FINDINGS.md.
+
+1. THE DECODE: hw10's mass death (26+ parked processes killed in two
+   waves, 136-189s, mmi/bootanimation in wave 2, hilogd last) is
+   init's shutdown: samgr pid 336 (the foundation host — the same
+   tgid bootanimation's BWR parks pointed at) SIGABRTs at 95.07s
+   ("Child process samgr(pid 336) exit with signal : 6" +
+   "ServiceReap error critical service crashed samgr"), init's
+   critical-service policy runs its reboot plugin (95.2s
+   WritePowerOffReason rows), stops everything, syncs (init's last
+   syscall 162=sync at 158.5s), collects /log/startup (184.9s —
+   shutdown-only: 0 rows in healthy boots), kills hilogd last
+   (189.3). THEN init wedges in a write(2) spin (rip 0xffffffff
+   802eda95, 0.6-9.9s IF=0 bursts, 190-521s, on_cpu whole time)
+   BEFORE reaching reboot(2) — under the old x86_64 reboot arm it
+   would have parked forever anyway.
+2. THE CRASH IS GONE POST-MERGE: samgr-abort 3/3 on hw10 (fd3ddbeaf,
+   pre sched-orphan-race) and 0/3 on mmi1 (f0f0ea8e1 includes merge
+   2649af4e3 claimer-liveness/TORN guards) — all three mmi1 boots
+   healthy to 540s (0 panics, ZEXIT≈REAP4, 0 ZLINGER, launcher
+   spawned, screen shows boot animation's static first frame).
+   Control: inputmethod_ser is samgr-idle-unload-killed in mmi1w2
+   (38.6s) with NO cascade — inputmethod was never the trigger.
+3. KERNEL FIXES: x86_64 reboot(2) now drives a real reset (8042
+   pulse 0xFE->0x64, then 0xcf9=0x0E) — a completed shutdown
+   restarts the machine instead of freezing it in the zombie state
+   (the image's crash-recovery loop restored). WW IRQ-OFF-WINDOW now
+   symbolizes the rip live via the built-in ksyms table (the hw10
+   write-spin was undecodable — that build's .config is gone; next
+   repro self-decodes). UIEXIT arm (FuxStuck-gated, own budget,
+   churn-filtered) prints exit code/cause/signal-sender/caller-RIP/
+   last-syscall/parent/owing for the UI-family processes.
+4. THE FINISH LINE NOW SITS AT: the UI phase never completing — all
+   UI processes alive but parked (bootanimation leader nanosleep,
+   its 17-thread FFRT pool FUTEX_WAIT_PRIVATE, render_service idle
+   epoll, no page flips after frame 1, no boot.completed). Input:
+   hop1 100% (INEV 107-111); hop2 — dhardware/input_user_host opens
+   event0/1/2 at 45s and is samgr-ordered SIGKILLed at 51-54s
+   ("SAMGR: Scheduler proc:dhardware kill pid:..."), mmi never opens
+   the nodes (EventHub needs a subscriber), INRD stays 2 (audio);
+   hop3 static (pixel diffs 0 on 10 taps+swipe+keys). This is the
+   111st's FFRT never-sent family — now the ONLY blocker left.
+5. Gates: x86_64/riscv64/aarch64 builds rc=0; riscv64 make test ALL
+   TESTS PASSED (run/mmi-maketest.log). Open: the write-spin site
+   (next repro self-symbolizes), the FFRT never-sent wedge upstream
+   of the UI phase.
+
+### 2026-11-15, round 117 (vdso-rearm, resume after quota wall) — THE vDSO IS RE-ARMED ON A UNIFIED TIMEKEEPING TRACK: one anchor serves read_time() and the vDSO bit-identically, LTP clock_gettime04 6/6 (the test that forced the 106th's disarm), and the OH A/B shows clock_gettime syscalls 8,259,773 → 0 per boot (−2.0% of box, −26% syscall volume)
+
+Branch vdso-rearm: 6643148ee + 4c0cabe85 (re-arm) + 1385dafd5 (build
+fix). Full record: run/VDSO-REARM.md. Register/ledger entries added
+in the same change (rust-native-register.md §E,
+safety-and-performance.md §3).
+
+1. THE DESIGN (4c0cabe85): the anchor {cycle_last, base_mono_nom,
+   mult} lives in the vDSO data page (user-RO since exec.rs — the
+   kernel clock reads its own anchor there). read_time() and the
+   emitted vDSO code run the same seq protocol (seq1 → fields →
+   lfence;rdtsc → seq2) and the same arithmetic (nom = base +
+   ((tsc-cl)*mult)>>32, ns = nom*100) over the same words — the
+   syscall track and the vDSO track are ONE track, so the strict
+   adjacent-pair LTP requirement holds structurally. Seq word doubles
+   as writer lock (cmpxchg even→odd — closes the old fetch_or
+   multi-writer tear). Per-CPU TSC_CPU_OFF corrections GONE (APs
+   measure+report divergence >1ms instead of correcting); 1 Hz HPET
+   resync = one forward-only anchor step; TSC_LAST ratchet kept as
+   anomaly insurance (never engages healthy). vDSO dispatch: COARSE/
+   CPUTIME/garbage ids fall back INSIDE the vDSO to the real syscall
+   (reference shape) — the ECHILD face decoded: LTP's vdso variants
+   read the caller's stale errno (ECHILD from LTP's own wait()),
+   so the −ENOSYS return form TFAIL'd every COARSE clock. Canonical
+   dynstr names restored (the "inert-name export" a6ee2acd5 is
+   reverted by the same commit).
+2. FUNCTIONAL: probe cgt5 (30k pairs × 4 clocks × both directions,
+   libc/vdso/sys) neg=0 on all 12 families; LTP acceptance set green
+   on the final build (run/iso-logs/chunk0000-a1.log): clock_gettime04
+   6/6 (was 4/6 — both COARSE fixed), clock_gettime02 10/10,
+   gettimeofday01, time01, nanosleep01 — 5/5 rc=0.
+3. THE OH A/B (name-only pair, same tree/rig/vehicle: tok-r4fix,
+   KVM q35 SMP2 4G, syscost=1 dfx=wwcensus, 780s, sequential;
+   run/pa-vdsorearm-{a,b}-serial.log): re-arm vs names-inert control
+   (md5 15be7881 vs 86b57066, differ ONLY in the two dynstr names).
+   clock_gettime @720: 0 (flood: appspawn=1) vs 8,259,773
+   (avg 3µs, tot 29,408ms = 2.0% of SMP2 box); total volume 16.42M vs
+   22.27M (−26%; both in the debug family band 7.2–25.2M;
+   cross-check: gate-bank's gbank2dbg same day/vehicle read 8.9M/
+   25.2M — the control replicates it, so the collapse is the re-arm).
+   The control's burners: OS_FFRT_2_0 1.10M, init 9.8k,
+   hilogd.rd_kmsg 13.8k — ALL move to userspace with names live:
+   the 108th's "dynamic-musl fails or burners bypass libc" question
+   is answered — neither. Census 8/27/2 vs 8/32/3 (REFUSED 1 below
+   the 28–36 band on the A boot — noted for the gate run); nanosleep
+   155.1 vs 149.7ms; GRQ rest-site 4.97 vs 5.44µs; 12/12 dumps and
+   zero panics both arms. The "~6.6% of box" class was the 105th-era
+   stack (21.3M × 3µs); on today's stack the honest number is
+   −2.0% of box + 8.26M fewer traps.
+4. GATES: triple-arch builds rc=0 (x86_64 run/build-x86-rearm3.log,
+   riscv64 run/gate-riscv-build.log, aarch64
+   run/gate-aarch64-build.log); riscv64 make test ALL PASSED
+   (1328 PASS lines, run/gate-riscv-maketest2.log). BUILD FIX
+   (1385dafd5, coordinator-relevant): 5449b2a2c's malloc_holder_scan
+   read crate::arch::x86_64::pt_regs ungated — every riscv64/aarch64
+   build of the 6643148ee lineage is broken until this lands.
+5. FOR THE COORDINATOR: perf-gate expectations — Tier-1
+   clock_gettime row reads ~0 (improved), volume drops by the
+   clock_gettime share (family band holds), nanosleep/census/ticks
+   clean (watch WAKE-REFUSED 27-vs-28 note); Tier-2 P1_clock should
+   IMPROVE (libc clock_gettime now vDSO-served, 66–74ns class vs
+   the 0.371µs anchor); Tier-3 not owed (no allocator/IRQ-path
+   change). riscv64 untouched (rv vDSO unchanged; make test green).

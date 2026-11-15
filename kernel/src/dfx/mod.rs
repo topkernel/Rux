@@ -26,6 +26,7 @@
 //! bug!()                    // Unconditional fatal BUG
 //! ```
 
+pub mod mmforensics;
 pub mod taint;
 /// Allocator class-lock holder watch (cmdline `dfx=allocwatch`): cross-CPU
 /// naming of a small_alloc/slab/buddy class-lock holder frozen mid-section

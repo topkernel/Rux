@@ -60,6 +60,10 @@ pub struct GenDisk {
     pub request_fn: Option<unsafe extern "C" fn(&mut Request)>,
     /// Async read function (device-specific async submit without blocking)
     pub async_read_fn: Option<unsafe fn(*const GenDisk, u64, &mut [u8], *mut core::ffi::c_void) -> i32>,
+    /// Async write function (device-specific async submit without blocking).
+    /// The DATA buffer is the DMA SOURCE: the caller must keep it valid and
+    /// unmodified until the completion fires (the write-batch contract).
+    pub async_write_fn: Option<unsafe fn(*const GenDisk, u64, &[u8], *mut core::ffi::c_void) -> i32>,
 }
 
 unsafe impl Send for GenDisk {}
@@ -85,6 +89,7 @@ impl GenDisk {
             private_data: None,
             request_fn: None,
             async_read_fn: None,
+            async_write_fn: None,
         }
     }
 
@@ -111,6 +116,11 @@ impl GenDisk {
     /// Set async read function (for async I/O submission without blocking)
     pub fn set_async_read_fn(&mut self, f: unsafe fn(*const GenDisk, u64, &mut [u8], *mut core::ffi::c_void) -> i32) {
         self.async_read_fn = Some(f);
+    }
+
+    /// Set async write function (for async I/O submission without blocking)
+    pub fn set_async_write_fn(&mut self, f: unsafe fn(*const GenDisk, u64, &[u8], *mut core::ffi::c_void) -> i32) {
+        self.async_write_fn = Some(f);
     }
 }
 
@@ -274,6 +284,75 @@ pub fn blkdev_read_async(
 }
 
 static BLOCK_MANAGER: BlockDeviceManager = BlockDeviceManager::new();
+
+/// Submit an async block write. Returns immediately; completion is signaled
+/// later via interrupt.
+///
+/// The WRITE counterpart of [`blkdev_read_async`] (the plugged-write
+/// primitive's device entry): `buf` is the DMA SOURCE, so it must remain
+/// valid AND UNMODIFIED until `completion` fires — unlike a read, where only
+/// freeing the DMA target was forbidden. Callers that cannot promise buffer
+/// stability across the submission window must submit from a private copy
+/// (bio's WriteBatch does exactly that).
+///
+/// # Arguments
+/// * `disk` - Block device
+/// * `sector` - Starting sector (512-byte units)
+/// * `buf` - Data buffer (stable until completion)
+/// * `completion` - IoCompletion to signal on completion
+///
+/// # Returns
+/// Ok(()) if submitted successfully, Err on failure (the caller falls back
+/// to a synchronous write — correctness is never lost, only the batching).
+// SAFETY: disk is a valid GenDisk pointer from register_disk; completion and
+// buf outlive the async operation.
+pub fn blkdev_write_async(
+    disk: *const GenDisk,
+    sector: u64,
+    buf: &[u8],
+    completion: &crate::fs::io_completion::IoCompletion,
+) -> Result<(), i32> {
+    unsafe {
+        let gd = &*disk;
+        if let Some(async_fn) = gd.async_write_fn {
+            // /proc/diskstats: the async path does not go through
+            // submit_request, so it is counted here (is_write = true).
+            let major = gd.major;
+            let minor = gd.first_minor;
+            let sectors = (buf.len() / 512) as u64;
+            let t0 = crate::drivers::timer::read_time();
+            // block:block_rq_issue (async write): completion lands in the
+            // device's IRQ walker, which carries the geometry this submit
+            // stores in the pending entry.
+            if crate::trace::EVENT_BLOCK_RQ_ISSUE.armed() {
+                // SAFETY: current task's comm is read for the record only.
+                let comm = crate::sched::current().map(|cur| (*cur).comm());
+                if let Some(comm) = comm {
+                    crate::trace::trace_block_rq_issue(
+                        (major << 20) | minor,
+                        sector,
+                        sectors as u32,
+                        buf.len() as u32,
+                        0,
+                        "W",
+                        comm,
+                    );
+                }
+            }
+            let ret = async_fn(disk, sector, buf, completion as *const _ as *mut _);
+            let elapsed_ns = crate::drivers::timer::read_time().saturating_sub(t0) * 100
+                / crate::config::TIMER_CLOCK_FREQ_HZ;
+            iostat::note_io(major, minor, true, sectors, elapsed_ns);
+            if ret < 0 {
+                Err(ret)
+            } else {
+                Ok(())
+            }
+        } else {
+            Err(-6)  // ENXIO — device doesn't support async writes
+        }
+    }
+}
 
 pub fn register_disk(disk: Box<GenDisk>) -> Result<(), &'static str> {
     // /proc/diskstats lists every registered device.

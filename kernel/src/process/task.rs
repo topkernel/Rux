@@ -679,6 +679,14 @@ pub struct Cred {
     /// bootanimation) before exec — EINVAL there aborted the service
     /// with INIT_EKEEPCAP before it ever ran.
     pub securebits: u32,
+    // Key-retention-service slots (ipc/keys.rs). Stored on the cred so
+    // fork inheritance is the cred clone (reference process_keys.c);
+    // exec clears the thread keyring (exec_keys()). Serial 0 is never
+    // a valid key, but Option keeps "never set" explicit for the
+    // session-lookup auto-install logic.
+    pub thread_keyring: Option<u32>,
+    pub process_keyring: Option<u32>,
+    pub session_keyring: Option<u32>,
 }
 
 /// SECBIT_KEEP_CAPS (bit 4) in the prctl securebits encoding.
@@ -707,6 +715,9 @@ impl Cred {
             cap_ambient:     crate::security::capability::Cap::EMPTY,
             keepcaps: false,
             securebits: 0,
+            thread_keyring: None,
+            process_keyring: None,
+            session_keyring: None,
         }
     }
 
@@ -746,6 +757,9 @@ impl Cred {
             cap_ambient:     crate::security::capability::Cap::EMPTY,
             keepcaps: false,
             securebits: 0,
+            thread_keyring: None,
+            process_keyring: None,
+            session_keyring: None,
         }
     }
 
@@ -2707,6 +2721,33 @@ impl Task {
             (ptr as usize + offset_of!(Task, did_exec))
                 as *mut core::sync::atomic::AtomicBool,
             core::sync::atomic::AtomicBool::new(false),
+        );
+        // freed-task lane (2026-11-15, fork audit): three more Task::new-
+        // literal fields were missing from this clone-path list, so a
+        // fork-allocated Task read the recycled page's previous life:
+        //   - execed: has_execed() gates setpgid's post-exec EACCES
+        //     (syscall/process.rs) — residue `true` made a fresh child
+        //     that never exec'd already unmovable between groups
+        //     (LTP setpgid03 shape).
+        //   - last_syscall_nr/a0/a1: the hung-task / forensic latches
+        //     printed the previous tenant's syscall (the sc130 garbage-nr
+        //     family, third recurrence).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, execed))
+                as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, last_syscall_nr)) as *mut AtomicU32,
+            AtomicU32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, last_syscall_a0)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, last_syscall_a1)) as *mut AtomicU64,
+            AtomicU64::new(0),
         );
 
         // Initialize thread_info style fields (must be at beginning)

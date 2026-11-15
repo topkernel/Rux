@@ -329,6 +329,23 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             syscall_set_return_value(regs, result);
             return;
         }
+        37 => {
+            // alarm(seconds) — one-shot ITIMER_REAL, returns the previous
+            // remaining seconds (rounded up). No asm-generic number;
+            // untranslated, 37 fell through to generic 37 = linkat and
+            // every glibc alarm() caller parsed a linkat errno as the
+            // return value (LTP alarm02/03/05/06/07 family).
+            syscall_set_return_value(regs, time::sys_alarm(args));
+            return;
+        }
+        78 => {
+            // getdents(fd, buf, count) — legacy record layout (name at
+            // 18, d_type at 18+nlen+1). No asm-generic number (generic
+            // libcs use getdents64); untranslated, 78 fell through to
+            // generic 78 = readlinkat.
+            syscall_set_return_value(regs, file::sys_getdents(args));
+            return;
+        }
         34 => {
             // pause(): sleep until a signal; always -EINTR.
             syscall_set_return_value(regs, signal::sys_pause(args));
@@ -367,6 +384,22 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
                 misc::sys_epoll_create(args)
             };
             syscall_set_return_value(regs, result);
+            return;
+        }
+        235 => {
+            // utimes(path, timeval[2]) — microsecond utime(2), no
+            // asm-generic number. Untranslated, 235 fell through to
+            // generic 235 = mbind; glibc's utimes() on x86_64 issues
+            // the native number (LTP utimes01 on x86).
+            syscall_set_return_value(regs, file::sys_utimes(args));
+            return;
+        }
+        261 => {
+            // futimesat(dirfd, path, timeval[2]) — no asm-generic
+            // number. Untranslated, 261 fell through to generic 261 =
+            // prlimit64, whose EINVAL was read as the test outcome by
+            // LTP futimesat01 on every x86 run.
+            syscall_set_return_value(regs, file::sys_futimesat_native(args));
             return;
         }
         232 => {
@@ -422,7 +455,11 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         }
     }
 
-    // Dispatch based on system call number (sorted by number)
+    // Dispatch based on system call number (sorted by number).
+    // unknown_nr: set by the unmapped-number arm below so the
+    // dispatch-tail ENOSYS-TRACE can exclude numbers that already
+    // carry their own attribution (the keyctl budget lesson).
+    let mut unknown_nr = false;
     let result: i64 = match syscall_no as u32 {
         // ==================== Linux AIO (NR 0-4) ====================
         0 => memory::sys_io_setup(args),       // io_setup
@@ -667,6 +704,11 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         214 => memory::sys_brk(args),          // brk
         215 => memory::sys_munmap(args),       // munmap
         216 => memory::sys_mremap(args),       // mremap
+        // ==================== Key retention (asm-generic 217-219) ====================
+        // x86_64 natives 248/249/250 arrive translated in x86_compat.
+        217 => crate::ipc::keys::sys_add_key(args),     // add_key
+        218 => crate::ipc::keys::sys_request_key(args), // request_key
+        219 => crate::ipc::keys::sys_keyctl(args),      // keyctl
         222 => memory::sys_mmap(args),         // mmap
         223 => memory::sys_fadvise64(args),    // fadvise64
         224 => file::sys_swapon(args),         // swapon
@@ -770,7 +812,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         426 => process::sys_io_uring_enter(args),   // io_uring_enter
         427 => process::sys_io_uring_register(args), // io_uring_register
         428 => file::sys_open_tree(args),       // open_tree
-        429 => file::sys_move_mount(args),      // move_mount
+        429 => file::sys_move_mount_tap(args),  // move_mount (ub2404 ns bring-up: failures on serial)
         430 => file::sys_fsopen(args),         // fsopen
         431 => file::sys_fsconfig(args),       // fsconfig
         432 => file::sys_fsmount(args),        // fsmount
@@ -782,7 +824,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         439 => process::sys_faccessat2(args),  // faccessat2
         440 => process::sys_process_madvise(args), // process_madvise
         441 => file::sys_epoll_pwait2(args),   // epoll_pwait2
-        442 => file::sys_mount_setattr(args),  // mount_setattr
+        442 => file::sys_mount_setattr_tap(args), // mount_setattr (ub2404 ns bring-up: failures on serial)
         443 => file::sys_quotactl_fd(args),   // quotactl_fd
         444 => file::sys_landlock_create_ruleset(args), // landlock_create_ruleset
         445 => file::sys_landlock_add_rule(args), // landlock_add_rule
@@ -814,8 +856,57 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
 
         // ==================== Unimplemented System Calls ====================
         _ => {
-            crate::println!("syscall: unknown syscall {} (args: {:#x}, {:#x}, {:#x})",
-                syscall_no, args[0], args[1], args[2]);
+            unknown_nr = true;
+            // Budgeted PER-NR (8 lines each, 16 distinct numbers, 400
+            // lines total), WITH the caller's pid+comm. The keyctl
+            // lesson (ub2404-gaps): native 250 landed here 57x/boot
+            // from systemd's per-service KeyringMode=private session
+            // join — unbudgeted it flooded the console, and its volume
+            // ate the dispatch-tail ENOSYS-TRACE budget before
+            // journald's write-path ENOSYS ever printed; without the
+            // comm the line could not be attributed to any caller.
+            use core::sync::atomic::Ordering::Relaxed;
+            static UNK_NR: [core::sync::atomic::AtomicU32; 16] =
+                [const { core::sync::atomic::AtomicU32::new(0) }; 16];
+            static UNK_N: [core::sync::atomic::AtomicUsize; 16] =
+                [const { core::sync::atomic::AtomicUsize::new(0) }; 16];
+            static UNK_TOTAL: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let mut slot = 16;
+            for i in 0..16 {
+                let s = UNK_NR[i].load(Relaxed);
+                if s == syscall_no as u32 {
+                    slot = i;
+                    break;
+                }
+                if s == 0
+                    && UNK_NR[i]
+                        .compare_exchange(0, syscall_no as u32, Relaxed, Relaxed)
+                        .is_ok()
+                {
+                    slot = i;
+                    break;
+                }
+            }
+            let budget_ok = slot < 16
+                && UNK_N[slot].fetch_add(1, Relaxed) < 8
+                && UNK_TOTAL.fetch_add(1, Relaxed) < 400;
+            if budget_ok {
+                let comm = match crate::sched::current() {
+                    Some(t) => {
+                        // SAFETY: sched::current() returns the running task;
+                        // comm_str is the lossy NUL-aware decoder.
+                        unsafe { (*t).comm_str() }
+                    }
+                    None => alloc::borrow::Cow::Borrowed("?"),
+                };
+                crate::println!(
+                    "syscall: unknown syscall {} (args: {:#x}, {:#x}, {:#x}) pid={} comm={}",
+                    syscall_no, args[0], args[1], args[2],
+                    crate::process::current_pid(),
+                    comm
+                );
+            }
             -(errno::ENOSYS as i64)
         }
     };
@@ -833,6 +924,40 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
                 crate::process::current_pid(), syscall_no, args[0], args[1]
             );
         }
+    }
+
+    // ub2404 bring-up: budgeted ENOSYS tracer -- every syscall that
+    // answers ENOSYS gets one line (pid, generic nr, first two args).
+    // journald's "Failed to map main seqnum file: Function not
+    // implemented" needs exactly this attribution; the generic nr maps
+    // through syscall/x86_compat.rs comments.
+    // ub2404-gaps blind-spot fix: numbers that hit the unknown-syscall
+    // arm are EXCLUDED (they carry their own per-nr budgeted
+    // attribution above) — keyctl's 57 joins/boot used to eat this
+    // whole budget before the implemented-but-ENOSYS families printed.
+    if result == -(38i64) && !unknown_nr {
+        static ENOSYS_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if ENOSYS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
+            crate::pr_info!(
+                "ENOSYS-TRACE: pid={} nr={} a0={:#x} a1={:#x}",
+                crate::process::current_pid(),
+                syscall_no,
+                args[0],
+                args[1]
+            );
+        }
+    }
+
+    // STRACE1 (loader hunts, dfx=strace1): one line per file/memory
+    // syscall of PID 1, with the pathname decoded for path-taking calls.
+    // musl ld.so's "Error loading shared library" carries no errno — this
+    // turns that into "which step failed" (search-open, fstat, mmap,
+    // header read).
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Strace1)
+        && crate::process::current_pid() == 1
+    {
+        strace1_line(syscall_no as u32, &args, result);
     }
 
     syscall_set_return_value(regs, result);

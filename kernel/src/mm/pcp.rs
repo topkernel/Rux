@@ -215,6 +215,33 @@ pub fn free_order0(pfn: usize, zone: &Zone) -> bool {
         {
             return false;
         }
+        // LIVE-STAMP REFUSAL (mmforensics lane, 2026-11-15): the pcp fast
+        // path used to be the INVISIBLE first free — a frame still
+        // carrying a LIVE page-table ledger stamp entered the row with no
+        // zone-level check, and only its much-later drain printed the
+        // RAW-FREE-OF-LIVE-TABLE echo (by then the frame had already been
+        // re-handed to a second owner; capture evidence: pfn 0x6bd1,
+        // fallocate06 SIGSEGV). A live-stamped frame has NO legitimate
+        // raw free (legit table frees clear the stamp via
+        // PtLedger::take() before reaching here), so refuse, quarantine,
+        // and leak. Silent + taint + counter (free contexts hold locks;
+        // printk here can wedge the console — INV-PCP-3's irq-off window
+        // is near). The mmforensics capture (switch-gated) still names
+        // the frame on forensic boots.
+        if crate::arch::mm::mmu_init::alloc_stage_is_late() {
+            let ppn = pfn as u64;
+            if crate::arch::mm::mmu_init::PtLedger::is_live_table(ppn) {
+                crate::arch::mm::mmu_init::PtLedger::poison_table(ppn);
+                crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
+                crate::dfx::driftwatch::MM_POISONED.fetch_add(1, Ordering::Relaxed);
+                crate::dfx::mmforensics::capture_frame(pfn, "pcp-raw-free-live-table");
+                return true; // handled: leaked, never cached
+            }
+            if crate::arch::mm::mmu_init::PtLedger::is_poisoned(ppn) {
+                crate::dfx::driftwatch::MM_POISON_FREES.fetch_add(1, Ordering::Relaxed);
+                return true; // handled: quarantined frames never re-enter
+            }
+        }
         if (*page).test_flag(PageFlag::OnPcp) {
             // Double free of a pcp-cached frame. Leak it (stay cached,
             // never hand out twice) and name it, mirroring the buddy's
@@ -368,4 +395,36 @@ pub fn cached_pages_per_cpu() -> [usize; MAX_CPUS] {
         out[c] = unsafe { (*row).count };
     }
     out
+}
+
+/// mmforensics capture support: which CPU rows currently hold `pfn`.
+///
+/// Racy by design (diagnostic only): rows are read through raw pointers
+/// without the owning CPU's irq-off window, mirroring the
+/// `cached_pages_total` peeks. Writes the cpu ids of hits into `out`
+/// (capped) and returns the total number of rows holding the frame.
+pub fn forensics_scan_rows(pfn: usize, out: &mut [usize]) -> usize {
+    let mut total = 0usize;
+    for c in 0..MAX_CPUS {
+        // SAFETY: read-only peek of the row's list/count through the raw
+        // pointer — no reference escapes; moment-stale values are fine
+        // for a forensic snapshot.
+        let row = unsafe { &*core::ptr::addr_of!(PCP_ROWS[c]) }.0.get();
+        let r = unsafe { &*row };
+        let count = r.count.min(PCP_HIGH);
+        let mut hit = false;
+        for i in 0..count {
+            if r.list[i] == pfn {
+                hit = true;
+                break;
+            }
+        }
+        if hit {
+            if total < out.len() {
+                out[total] = c;
+            }
+            total += 1;
+        }
+    }
+    total
 }

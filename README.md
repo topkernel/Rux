@@ -2,13 +2,13 @@
 
 <div align="center">
 
-**A Linux-compatible kernel, ~391,000 lines of Rust — written entirely by AI.**
+**A Linux-compatible kernel, ~378,000 lines of Rust — written entirely by AI.**
 
 [![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-riscv64%20%7C%20x86__64%20%7C%20aarch64-informational.svg)](#platforms)
 [![Tests](https://img.shields.io/badge/tests-4%2C200%2B%20cases-brightgreen.svg)](#numbers)
-[![Code](https://img.shields.io/badge/code-~391%2C000%20lines-blue.svg)](docs/architecture/structure.md)
+[![Code](https://img.shields.io/badge/code-~378%2C000%20lines-blue.svg)](docs/architecture/structure.md)
 
 Unmodified Ubuntu 22.04 boots to a GNOME Shell desktop.
 Unmodified OpenHarmony boots 135+ services to an interactive launcher.
@@ -98,9 +98,10 @@ make ci                    # full unattended pass: build → boot regressions �
 | Surface | Standing |
 |---|---|
 | In-kernel suite (`make test`) | 1,267 riscv64 · 1,263 x86_64 · 1,119 aarch64, all green |
-| Linux Test Project | **1,084 / 1,869** |
+| Linux Test Project | **1,093 / 1,869** (r27 audited official; raw 1,084) |
 | Formal verification | 157 Kani harnesses · 1,104 proptests · 4 SPIN models · Miri |
-| Performance (same-rig KVM A/B vs Linux) | lmbench: 10 of 14 paired rows at parity or ahead (best 4.2×, worst deficit 1.61×) · Geekbench 5: multi-core 7332 vs 7027 |
+| Performance (same-rig KVM A/B vs Linux) | lmbench: 10 of 14 paired rows at parity or ahead (best 4.2×, worst deficit 1.61×) · Geekbench 5: SC 2440 / MC 7709 (best-of-runs; 113% / 110% vs the 4-CPU anchor) · fs flush 128 MB (x86_64 KVM): fsync 11.55→3.04 s, msync 13.95→3.31 s, sync 11.30→3.31 s |
+| Boot-parameter matrix (riscv64) | smp{2,4,6,8} × mem{1,2,4,8}G — 16/16 cells clean (previously several panic/hang cells) |
 | fio 3.36 storage battery | 9 load classes PASS, 256 MiB full-matrix crc32 verify at zero errors |
 | Stress fleet | standing 11-QEMU loop (LTP, randomized, memstorm, fsfuzz) |
 | One-key CI (`make ci`) | build → suites → image → Ubuntu/OH boot regressions → full LTP → 32-class stress; a KERNPANIC anywhere halts with an alert |
@@ -150,7 +151,7 @@ ladder, coding contracts, debugging toolkit — is in
 
 | | |
 |---|---|
-| Kernel source | ~391,000 lines, 438 files |
+| Kernel source | 623 files, 384,307 lines (377,650 Rust) — kernel/, counted via git ls-files + wc -l |
 | Syscalls dispatched | 345+ |
 | Design divergences registered | 19, each with compatibility evidence |
 | `unsafe` tokens | 3,158 service + 1,340 framework, each under a written contract |

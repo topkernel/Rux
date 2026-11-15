@@ -1567,6 +1567,28 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
                 putchar(b);
             }
             ph(regs.rip);
+            // mmi-endgame (116th): symbolize the rip LIVE with the
+            // kernel's own ksyms table — the 115th's hw10 boots left
+            // init spinning at one rip for 300+s (recurring 0.6-9.9 s
+            // IF=0 windows) and the address could only be decoded
+            // offline against that build's exact ELF, which no longer
+            // existed (build/.config drift). Read-only static-table
+            // binary search — IRQ-safe. Name capped to keep the
+            // direct-console line bounded.
+            if let Some((name, base, _sz)) = crate::dfx::ksyms::lookup(regs.rip) {
+                let msg: &[u8] = b" sym=";
+                for &b in msg {
+                    putchar(b);
+                }
+                for &b in name.as_bytes().iter().take(96) {
+                    putchar(b);
+                }
+                let msg: &[u8] = b"+0x";
+                for &b in msg {
+                    putchar(b);
+                }
+                ph(regs.rip - base);
+            }
             let msg: &[u8] = b" rsp=";
             for &b in msg {
                 putchar(b);
@@ -2568,9 +2590,34 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
         // high-userspace faults get their own 8-decode budget.
         static SEGVD_HI_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
+        // early30 (120th): control-flow faults (instruction fetch at a
+        // non-exec target — cr2 == rip, the foundation exec-at-heap and
+        // the IMS call-to-0 faces) are the rare corruption-shaped ones,
+        // but they are also low-address faults and the NULL-deref storm
+        // (bluetooth/usb_host, cr2=0, rip!=cr2) burns the 6-decode low
+        // budget long before they land (e30b6: foundation's one fault
+        // got a one-liner). Own 8-decode bucket for rip==cr2.
+        static SEGVD_XN_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
         let hi_fault = fault_addr >= 0x7f00_0000_0000;
-        let over = if hi_fault {
+        // early30 follow-up: split the NULL class out of the low bucket
+        // too — the bluetooth/usb_host storm faults at cr2=0 (rip!=cr2)
+        // and its 8+ faults/boot starve every OTHER low fault (e30f5's
+        // IMS heap-exec variant faulted at cr2=0x2ba96d50 with rip in
+        // the heap — not the XN bucket, and the low budget was already
+        // burned). e30g3 refined the split: the storm's cr2 is ALWAYS
+        // exactly 0x0, while the heap-exec face dereferences a NEAR-NULL
+        // address (cr2=0x38, a NULL->field access at offset 0x38) — so
+        // the NULL bucket must match cr2 == 0 exactly, and every other
+        // low fault (near-NULL included) keeps the 6-decode budget.
+        static SEGVD_NULL_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let over = if fault_addr == regs.rip {
+            SEGVD_XN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 8
+        } else if hi_fault {
             SEGVD_HI_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 8
+        } else if fault_addr == 0 {
+            SEGVD_NULL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 2
         } else {
             SEGVD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 6
         };

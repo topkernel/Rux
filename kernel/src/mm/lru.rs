@@ -65,7 +65,29 @@ unsafe fn unlink_locked(
 
     page.set_lru_next(LRU_NONE);
     page.set_lru_prev(LRU_NONE);
-    node.lru_sizes[lru].fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+    // FLOOR AT ZERO (pcachewedge lane, 2026-11-15): a plain fetch_sub
+    // wraps on underflow (a double unlink of a corrupted descriptor),
+    // and the wrapped ~usize::MAX class size later panicked
+    // /proc/meminfo's debug-build multiply (meminfo.rs:45). A size
+    // counter never legitimately goes below zero — clamp it.
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        let mut cur = node.lru_sizes[lru].load(Relaxed);
+        loop {
+            if cur == 0 {
+                break;
+            }
+            match node.lru_sizes[lru].compare_exchange_weak(
+                cur,
+                cur - 1,
+                core::sync::atomic::Ordering::AcqRel,
+                Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(now) => cur = now,
+            }
+        }
+    }
 }
 
 /// O(1) link of `page` at the TAIL of LRU list `lru` — caller holds

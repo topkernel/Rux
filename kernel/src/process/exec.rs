@@ -148,6 +148,11 @@ pub(crate) fn do_execve_elf(
         name[..len].copy_from_slice(&base.as_bytes()[..len]);
         // SAFETY: task_ptr is the current task, valid throughout execve.
         unsafe { (*task_ptr).set_comm(&name); }
+        // Reference exec_keys(): the thread keyring is cleared on exec
+        // (process and session keyrings persist). Nothing on the boot
+        // images sets a thread keyring yet, but keyctl(THREAD_KEYRING)
+        // create/inherit discipline lives here.
+        crate::ipc::keys::exec_clear_thread_keyring();
         // 125th waitid leg: SPAWN clock for com.*-named executables (the
         // OH bundle-name convention); dfx=schedtrace-gated (dfx/reaper.rs).
         if crate::dfx::reaper::on() {
@@ -663,16 +668,22 @@ pub(crate) fn do_execve_elf(
         let (data_paddr, code_paddr) = crate::mm::vdso::vdso_pages_phys();
         // SAFETY: user_ppn is the freshly created page-table root; the
         // physical frames are the aligned 4 KiB vDSO statics; flags are
-        // valid user PTE bits (data RW, code RX — executable by NOT
+        // valid user PTE bits (data RO, code RX — executable by NOT
         // setting NX).
+        //
+        // The data page is USER-READ-ONLY since the unified-track re-arm:
+        // the kernel's own clock (read_time) reads its timekeeping
+        // anchor from this page, so a user-writable alias would let any
+        // process corrupt the syscall-side clock (the reference maps
+        // vvar RO for the same reason). The kernel writes through its
+        // own image mapping.
         unsafe {
             crate::arch::mm::mm_ops::map_user_region(
                 user_ppn,
                 crate::mm::vdso::VDSO_BASE,
                 data_paddr,
                 4096,
-                PageTableEntry::P | PageTableEntry::RW | PageTableEntry::US
-                    | PageTableEntry::A | PageTableEntry::D,
+                PageTableEntry::P | PageTableEntry::US | PageTableEntry::A,
             );
             crate::arch::mm::mm_ops::map_user_region(
                 user_ppn,
@@ -1215,6 +1226,21 @@ pub(crate) fn do_execve_elf(
     if ec2_on { ec2_fill = crate::arch::cpu::read_time(); }
     let new_addr_space = unsafe { crate::mm::MmStruct::new_user(user_ppn) };
 
+    // OWNERSHIP TRANSFER (pcachewedge lane, 2026-11-15): from here the
+    // MmStruct owns user_ppn — its Drop tears the tree down exactly once.
+    // The RAII guard MUST be defused NOW: every later `return Err` (the
+    // interpreter-VMA re-validation at 1428's checked_add, etc.) unwinds
+    // BOTH new_addr_space (its Drop frees the tree) and _guard (declared
+    // earlier, so it drops LAST) — the guard's second
+    // free_user_page_tables walk of the same root re-freed every frame
+    // the first teardown had just returned to the zone: the exec-side
+    // double-hand behind the RAW-FREE-OF-LIVE-TABLE / PTLEDGER
+    // DOUBLE-ALLOC family (resA r2's flagged exec-teardown free). With
+    // the guard defused, error paths after this point free the tree
+    // exactly once (via the MmStruct) and the success paths need no
+    // forget of their own.
+    core::mem::forget(_guard);
+
     // Reset the heap to the NEW image: exec used to leave the task's brk
     // (and the mm default) inherited from the PARENT image, so the first
     // malloc in the exec'd program extended a heap at the old image's
@@ -1598,12 +1624,10 @@ pub(crate) fn do_execve_elf(
             // No trap frame, this is the init process case
             // Need to return via ret_from_fork
             // Success path: the new address space is now owned by the init
-            // task — the RAII guard MUST be defused here too. Its drop was
-            // freeing PID 1's freshly built page tables straight back to
-            // the zone; the frames then got reused by the first kernel/user
-            // allocations while init kept executing on them (stale TLB),
-            // seeding the whole recycled-frame corruption family.
-            core::mem::forget(_guard);
+            // task. The RAII guard was already defused at the MmStruct
+            // ownership transfer above (double-teardown fix), so its drop
+            // can no longer free PID 1's freshly built page tables straight
+            // back to the zone (the recycled-frame corruption family).
             return Ok(());
         }
 
@@ -1706,7 +1730,8 @@ pub(crate) fn do_execve_elf(
         crate::process::task::vfork_wake_parent(task_ptr);
     }
 
-    // Success — prevent RAII guard from freeing page tables
+    // Success — the RAII guard was defused at the MmStruct ownership
+    // transfer (see there); the installed mm owns the tree.
     if ec2_on {
         let t = crate::arch::cpu::read_time();
         crate::pr_info!(
@@ -1725,6 +1750,5 @@ pub(crate) fn do_execve_elf(
             t - ec2_t0
         );
     }
-    core::mem::forget(_guard);
     Ok(())
 }

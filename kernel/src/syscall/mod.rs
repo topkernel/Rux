@@ -60,8 +60,9 @@ pub enum SyscallNo {
     EpollCtl = 21,
     EpollPwait = 22,
     Dup = 23,
+    // asm-generic 24 is dup3 (the dispatch arm); dup2 has NO generic
+    // number — x86_64 native 33 is handled in dispatch's legacy block.
     Dup2 = 24,
-    Dup3 = 249,
     Fcntl = 25,
     InotifyInit1 = 26,
     InotifyAddWatch = 27,
@@ -201,6 +202,12 @@ pub enum SyscallNo {
     Munmap = 215,
     Mremap = 216,
     Mprotect = 226,
+
+    // Key retention (asm-generic; x86_64 natives are 248/249/250,
+    // translated in syscall/x86_compat.rs)
+    AddKey = 217,
+    RequestKey = 218,
+    Keyctl = 219,
     Msync = 227,
     Mlock = 228,
     Munlock = 229,
