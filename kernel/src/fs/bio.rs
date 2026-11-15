@@ -313,7 +313,7 @@ struct LruState {
 ///
 /// No global mutex is held during I/O. Eviction syncs dirty buffers
 /// *after* releasing the bucket lock.
-struct BlockCache {
+pub struct BlockCache {
     /// Per-bucket hash chains, each with its own lock
     buckets: Vec<Spinlock<HashBucket>>,
     /// Global LRU list (manipulated only while holding a bucket lock)
@@ -1050,7 +1050,7 @@ impl BlockCache {
     }
 
     /// Release buffer (decrement refcount)
-    fn put(&self, bh: *const BufferHead) {
+    pub fn put(&self, bh: *const BufferHead) {
         // SAFETY: bh is a raw pointer returned by get()/bread(); it points to a
         // valid BufferHead owned by a CacheEntry in the cache.
         unsafe {
@@ -1280,7 +1280,7 @@ static CACHE_INIT: AtomicBool = AtomicBool::new(false);
 static mut BLOCK_CACHE: Option<BlockCache> = None;
 static CACHE_INIT_LOCK: Spinlock<()> = Spinlock::new(());
 
-fn get_block_cache() -> &'static BlockCache {
+pub fn get_block_cache() -> &'static BlockCache {
     // Double-checked locking: fast path checks without lock,
     // slow path acquires lock then re-checks before initializing.
     if !CACHE_INIT.load(Ordering::Acquire) {
@@ -2289,7 +2289,7 @@ fn publication_capture_note_dirty(
 
 /// Is this block a pending `entry` or `post` block (order-constrained,
 /// must not be persisted out of band)?
-fn publication_constrained(mj: u32, mi: u32, blocknr: u64) -> bool {
+pub fn publication_constrained(mj: u32, mi: u32, blocknr: u64) -> bool {
     PENDING_PUBLICATIONS.lock().constrained(mj, mi, blocknr)
 }
 
@@ -2762,7 +2762,7 @@ impl BlockCache {
     /// Lookup a cached buffer WITHOUT any disk read (bread reads on a
     /// miss). Bumps the refcount on hit; caller must put(). Used by the
     /// publication flush.
-    fn peek_buffer(&self, dev: (u32, u32), blocknr: u64) -> Option<*mut BufferHead> {
+    pub fn peek_buffer(&self, dev: (u32, u32), blocknr: u64) -> Option<*mut BufferHead> {
         let index = self.hash_index(dev.0, dev.1, blocknr);
         let bucket = self.buckets[index].lock();
         let mut current = bucket.head;

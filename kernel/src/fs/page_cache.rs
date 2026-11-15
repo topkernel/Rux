@@ -1251,7 +1251,25 @@ impl PageCache {
         data: &[u8],
         skip_pfn: u64,
     ) {
-        self.writeback_update_range_impl(fs_id, ino, file_off, data, skip_pfn, false);
+        self.writeback_update_range_impl(fs_id, ino, file_off, data, &[skip_pfn], false);
+    }
+
+    /// Multi-source twin of `writeback_update_range` (the run-batched
+    /// flush): EVERY pfn of the run's flush-source frames is skipped —
+    /// the staged bytes came FROM those frames, so copying any of them
+    /// back would revert a mapper store that raced the staging copy
+    /// (POSIX leaves unsynchronized stores vs writeback unordered; the
+    /// kernel must not actively undo them). Runs are chunk-bounded
+    /// (<= 16 pages), so the membership scan is trivially cheap.
+    pub fn writeback_update_range_multi(
+        &self,
+        fs_id: u64,
+        ino: u64,
+        file_off: u64,
+        data: &[u8],
+        skip_pfns: &[u64],
+    ) {
+        self.writeback_update_range_impl(fs_id, ino, file_off, data, skip_pfns, false);
     }
 
     /// Authoritative-repopulation twin of `writeback_update_range` (tmpfs
@@ -1270,7 +1288,7 @@ impl PageCache {
         file_off: u64,
         data: &[u8],
     ) {
-        self.writeback_update_range_impl(fs_id, ino, file_off, data, 0, true);
+        self.writeback_update_range_impl(fs_id, ino, file_off, data, &[], true);
     }
 
     fn writeback_update_range_impl(
@@ -1279,7 +1297,7 @@ impl PageCache {
         ino: u64,
         file_off: u64,
         data: &[u8],
-        skip_pfn: u64,
+        skip_pfns: &[u64],
         force_stale: bool,
     ) {
         if data.is_empty() {
@@ -1304,8 +1322,8 @@ impl PageCache {
                     // writeback_update_range_stale.)
                     continue;
                 }
-                if skip_pfn != 0 && page.pfn as u64 == skip_pfn {
-                    // The flush source frame itself (see the doc comment) —
+                if page.pfn as u64 != 0 && skip_pfns.contains(&(page.pfn as u64)) {
+                    // A flush source frame itself (see the doc comment) —
                     // copying a frame onto itself is a self-overlap.
                     continue;
                 }
@@ -1362,13 +1380,26 @@ impl PageCache {
         data: &[u8],
         skip_pfn: u64,
     ) {
+        self.writeback_populate_range_multi(fs_id, ino, file_off, data, &[skip_pfn]);
+    }
+
+    /// Multi-source twin (the run-batched flush passes every source
+    /// frame's PFN — see writeback_update_range_multi).
+    pub fn writeback_populate_range_multi(
+        &self,
+        fs_id: u64,
+        ino: u64,
+        file_off: u64,
+        data: &[u8],
+        skip_pfns: &[u64],
+    ) {
         if data.is_empty() {
             return;
         }
         // Existing entries first — same-body update (an inserted page
         // below carries exactly its slice of `data`, so there is no
         // second copy for fresh frames).
-        self.writeback_update_range(fs_id, ino, file_off, data, skip_pfn);
+        self.writeback_update_range_multi(fs_id, ino, file_off, data, skip_pfns);
 
         let len = data.len() as u64;
         let first_index = file_off / PAGE_SIZE as u64;
@@ -1925,6 +1956,11 @@ impl PageCache {
             // never returns from inside the guards — the frame return is
             // scheduled here and executed after all locks drop.
             let mut duplicate = false;
+            // Revive-in-place of a retired-but-live squatter (see the
+            // REVIVE-IN-PLACE block below): the caller's data landed in
+            // the existing frame, so the call reports success while the
+            // pre-allocated frame is still freed like a duplicate's.
+            let mut revived = false;
             {
                 let mut g = entry.lock.lock();
 
@@ -1938,7 +1974,7 @@ impl PageCache {
                 // page (exactly what invalidate_inode promises not to
                 // do). Skip caching this read; the old entry dies via
                 // its refcount. The pre-allocated frame is unused on
-                // both paths — returned below.
+                // all paths — returned below.
                 //
                 // LAZY REAP (FXW-SQUAT, fsx-linux ext4 face): an entry
                 // retired by an earlier invalidate whose frame was
@@ -1951,11 +1987,15 @@ impl PageCache {
                 // bounce, zero fill) dedups against it and frees its own
                 // fresh frame — the page can NEVER be cached again, and
                 // the fault path falls to the private-copy arm (mapper
-                // data invisible to every other face of the file). A
-                // fresh insert is the natural reaper: a retired entry
-                // with NO pin and NO live mapping is removed here (frame
-                // freed exactly like invalidate's doomed path) so this
-                // insert installs the new frame.
+                // data invisible to every other face of the file). Two
+                // resolutions live here: a retired entry with NO pin and
+                // NO live mapping is REAPED (frame freed exactly like
+                // invalidate's doomed path) so this insert installs the
+                // new frame; a retired-but-LIVE one (pin or mapcount
+                // held — the d37643abb KNOWN LIMIT) is REVIVED IN PLACE
+                // with this insert's data (see the REVIVE-IN-PLACE arm
+                // below) so the index resolves to current data and the
+                // frame's every alias stays coherent.
                 if g.contains_key(&page_index) {
                     let reap = {
                         let stale = g.get(&page_index).expect("contains_key");
@@ -1980,6 +2020,56 @@ impl PageCache {
                         release_page_frame(stale.pfn);
                         self.total_pages.fetch_sub(1, Ordering::Relaxed);
                         // fall through: the fresh frame installs below
+                    } else if g.get(&page_index).expect("contains_key").invalidated {
+                        // REVIVE-IN-PLACE (fsx-linux ext4 face, the
+                        // d37643abb KNOWN LIMIT): the squatter is
+                        // retired-but-LIVE (pinned or still mapped — Rux
+                        // never zaps PTEs), so it cannot be reaped, and
+                        // failing this insert (the old `duplicate` arm)
+                        // left the page PERMANENTLY uncachable: every
+                        // populate deduped against the squatter and
+                        // filemap faults bounced to the private-copy
+                        // arm — mapper stores invisible to every other
+                        // face of the file. Instead the entry is revived
+                        // WITH THIS INSERT'S DATA: the frame is
+                        // overwritten with exactly what a fresh install
+                        // would carry (disk content on the read path,
+                        // the written span for insert_dirty) and
+                        // un-retired, so the index resolves to the
+                        // current entry again and every alias — the old
+                        // mapper's PTE included — is coherent through
+                        // the ONE frame (the reference kernel's
+                        // single-page-per-index shape; stores racing the
+                        // revive are last-writer-wins, POSIX latitude).
+                        // Pins, mapcount and LRU membership are
+                        // untouched: their owners put exactly as before,
+                        // into an entry that is a full citizen again.
+                        // The pre-allocated frame is unused — freed
+                        // below like a duplicate's.
+                        let stale = g.get_mut(&page_index).expect("contains_key");
+                        stale.invalidated = false;
+                        let pfn = stale.pfn;
+                        // SAFETY: pfn is this entry's zone-allocated
+                        // frame; the linear map covers PAGE_SIZE bytes.
+                        unsafe {
+                            let dst = phys_to_virt_ptr(pfn_to_phys(pfn));
+                            let copy_len = core::cmp::min(data.len(), PAGE_SIZE);
+                            core::ptr::copy_nonoverlapping(data.as_ptr(), dst, copy_len);
+                            if copy_len < PAGE_SIZE {
+                                core::ptr::write_bytes(
+                                    dst.add(copy_len),
+                                    0,
+                                    PAGE_SIZE - copy_len,
+                                );
+                            }
+                        }
+                        // `dirty` is always touched through atomic ops
+                        // (leg-54 note): the revived frame carries
+                        // exactly this insert's content — clean for a
+                        // read install (frame == disk), dirty for
+                        // insert_dirty (bytes not yet persisted).
+                        stale.dirty.store(dirty, Ordering::Release);
+                        revived = true;
                     } else {
                         duplicate = true;
                     }
@@ -2032,7 +2122,7 @@ impl PageCache {
             drop(w);
             self.flush_parked(&mut parked);
             drop(entry);
-            if duplicate {
+            if duplicate || revived {
                 free_page(phys_addr);
             }
             !duplicate
@@ -2228,6 +2318,46 @@ impl PageCache {
                                 release_page_frame(stale.pfn);
                                 self.total_pages.fetch_sub(1, Ordering::Relaxed);
                                 // fall through: install the batch frame below
+                            } else if g.get(&page_index).expect("contains_key").invalidated {
+                                // REVIVE-IN-PLACE (see insert_ext's twin):
+                                // a retired-but-live squatter (pinned or
+                                // still mapped) is revived WITH THIS
+                                // BATCH PAGE'S DATA instead of blocking
+                                // the install — the index resolves to
+                                // current data and every alias of the
+                                // frame stays coherent. The batch frame
+                                // is released exactly like a duplicate's.
+                                let src_off = (done + k) * block_size;
+                                let copy_len =
+                                    core::cmp::min(PAGE_SIZE, buf.len().saturating_sub(src_off));
+                                let stale = g.get_mut(&page_index).expect("contains_key");
+                                stale.invalidated = false;
+                                let pfn = stale.pfn;
+                                // SAFETY: pfn is this entry's zone frame;
+                                // the linear map covers PAGE_SIZE bytes and
+                                // copy_len <= PAGE_SIZE.
+                                unsafe {
+                                    let dst = phys_to_virt_ptr(pfn_to_phys(pfn));
+                                    if copy_len > 0 {
+                                        core::ptr::copy_nonoverlapping(
+                                            buf.as_ptr().add(src_off),
+                                            dst,
+                                            copy_len,
+                                        );
+                                    }
+                                    if copy_len < PAGE_SIZE {
+                                        core::ptr::write_bytes(
+                                            dst.add(copy_len),
+                                            0,
+                                            PAGE_SIZE - copy_len,
+                                        );
+                                    }
+                                }
+                                // Read-path batch: the revived frame now
+                                // matches disk — clean (atomic-op rule).
+                                stale.dirty.store(false, Ordering::Release);
+                                free_page(phys);
+                                continue;
                             } else {
                                 // Duplicate index: the frame was already filled
                                 // and described in the unlocked stage above —

@@ -987,7 +987,34 @@ pub fn ext4_file_write(
         // SAFETY: bio::bread returns a valid BufferHead; b_data is a writable
         // block-sized buffer. The slice ranges are bounded by block_size.
         unsafe {
-            let bh = match bio::bread(fs.device, block_num) {
+            // FULL-BLOCK OVERWRITE (flush-wall fix, 2026-11): when this
+            // loop step covers the whole buffer-cache block (4096 — the
+            // cache's fixed granularity), fetch it with getblk_overwrite
+            // instead of bread: no disk READ on a miss (the buffer is
+            // fabricated zeroed+dirty and every byte is overwritten
+            // before the buffer becomes observable — the same contract
+            // namei's dir-block writer already relies on). This is the
+            // writeback shape: a flush of an N-page file re-writes N
+            // allocated blocks in full; with bread each buffer the
+            // cache evicted since the last pass cost one synchronous
+            // 4 KiB read (measured: the msync pass of the mtest06
+            // shape, 8192 blocks vs an 8192-entry cache — the read
+            // wall). Partial blocks still take the read path: they
+            // splice into existing content.
+            let bh = match {
+                if block_offset == 0 {
+                    let remaining = to_write as usize - total_written;
+                    let write_in_block =
+                        core::cmp::min(remaining, block_size as usize);
+                    if write_in_block >= 4096 {
+                        bio::getblk_overwrite(fs.device, block_num)
+                    } else {
+                        bio::bread(fs.device, block_num)
+                    }
+                } else {
+                    bio::bread(fs.device, block_num)
+                }
+            } {
                 Some(b) => b,
                 None => partial_or_err!('block_loop, errno::Errno::IOError.as_neg_i32()),
             };
@@ -1939,7 +1966,7 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
                 durability & (crate::fs::file::FileFlags::O_SYNC
                     | crate::fs::file::FileFlags::O_DSYNC) == 0,
                 buf,
-                0,
+                &[0],
             )
         };
         if written > 0 {
@@ -1996,7 +2023,7 @@ pub unsafe fn ext4_file_write_at_vfs(file: &File, offset: u64, buf: *const u8, c
                 durability & (crate::fs::file::FileFlags::O_SYNC
                     | crate::fs::file::FileFlags::O_DSYNC) == 0,
                 data,
-                0,
+                &[0],
             )
         }
     }
@@ -2014,7 +2041,7 @@ pub fn ext4_kernel_write_at(
 ) -> isize {
     // SAFETY: fs is a valid Ext4FileSystem reference; the core owns all
     // locking and operates on (fs, ino) exactly like the fd paths.
-    unsafe { ext4_write_at_core(fs, ext4_ino, None, offset, true, buf, 0) }
+    unsafe { ext4_write_at_core(fs, ext4_ino, None, offset, true, buf, &[0]) }
 }
 
 /// Buffered (delayed-allocation) write for regular files — the reference
@@ -2246,7 +2273,7 @@ unsafe fn ext4_buffered_write(
             // place, writeback_populate_range).
             // SAFETY: same (fs, ino, inode) discipline as write_vfs.
             let r = unsafe {
-                ext4_write_at_core(fs, inode.ino as u32, Some(inode), file_off, true, src, 0)
+                ext4_write_at_core(fs, inode.ino as u32, Some(inode), file_off, true, src, &[0])
             };
             if r < 0 {
                 if copied > 0 && crate::trace::EVENT_EXT4_DA_WRITE_END.armed() {
@@ -2381,7 +2408,10 @@ unsafe fn ext4_write_at_core(
     // flush already defers under its handle today).
     defer_unjournaled: bool,
     buf: &[u8],
-    skip_update_pfn: u64,
+    // Flush-source frames exempt from the write-through populate (a
+    // frame copied onto itself is a self-overlap; the run-batched flush
+    // passes EVERY source frame of its staged run). `&[0]` = no skip.
+    skip_pfns: &[u64],
 ) -> isize {
     // SMP serialization for the write path (review 5.5 high: 写路径/位图
     // RMW 无锁——SMP 位图丢更新双分配): allocation, bitmap RMW, group
@@ -2482,9 +2512,9 @@ unsafe fn ext4_write_at_core(
                     // stale — a MAP_PRIVATE read-only mapper then served
                     // PRE-WRITE bytes from its still-pinned stale frame,
                     // and a MAP_SHARED re-fault forked a divergent frame.)
-                    // skip_update_pfn: the msync/fsync flush path writes a
-                    // cache frame's own bytes back to the file — updating
-                    // THAT entry would copy the frame onto itself.
+                    // skip_pfns: the msync/fsync flush path writes cache
+                    // frames' own bytes back to the file — updating THOSE
+                    // entries would copy each frame onto itself.
                     //
                     // writeback_populate_range (perf-mm 2026-10-31): the
                     // update arm is unchanged, PLUS the fully-written
@@ -2494,12 +2524,12 @@ unsafe fn ext4_write_at_core(
                     // cache (p3c cold 14.1 us/page vs warm 0.94) instead
                     // of repopulating through the read machinery.
                     if written_bytes > 0 {
-                        page_cache::get_page_cache().writeback_populate_range(
+                        page_cache::get_page_cache().writeback_populate_range_multi(
                             fs as *const crate::fs::ext4::Ext4FileSystem as u64,
                             ext4_ino as u64,
                             offset,
                             &buf[..written_bytes],
-                            skip_update_pfn,
+                            skip_pfns,
                         );
                     }
                     written_bytes as isize
@@ -2560,6 +2590,14 @@ pub fn ext4_flush_dirty_inode(
     // left) clearing the bit would make the sole surviving frame
     // evictable and its data silently losable.
     let mut done: [(u64, u64, bool); CHUNK] = [(0, 0, false); CHUNK];
+    // RUN-BATCHED FLUSH (flush-wall, 2026-11): contiguous dirty pages are
+    // staged into this buffer and written through ONE ext4_write_at_core
+    // per RUN (16x fewer journal brackets / read_inode / write_inode /
+    // big-lock pairs per page), then the run's data blocks are pushed to
+    // disk in coalesced multi-block requests (run_sync_spans) instead of
+    // trickling through per-4 KiB dirty-buffer evictions. Grown on first
+    // use; a no-dirty call never grows it (collect returns 0 first).
+    let mut stage: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     let mut total = 0usize;
     // Resume cursor — the PROGRESS RULE (collect_dirty_range doc): pages
     // of live writable mappings STAY dirty after their flush (flush_done
@@ -2575,75 +2613,20 @@ pub fn ext4_flush_dirty_inode(
         if n == 0 {
             break;
         }
-        for i in 0..n {
-            let (idx, pfn) = chunk[i];
-            // i_size clamp (see the doc comment). Read per page: a truncate
-            // or write racing the flush moves the boundary. Past-EOF is a
-            // legitimate DISCARD (truncate won): counts as done.
-            let size = inode.get_size();
-            let off = idx * crate::mm::PAGE_SIZE as u64;
-            if off >= size {
-                done[i] = (idx, pfn, true);
-                continue;
+        // Partition the collected chunk into maximal runs of CONTIGUOUS
+        // page indices (collect walks the BTreeMap in key order, so each
+        // run is a slice of the chunk). Isolated pages degenerate to
+        // runs of one — exactly the old per-page shape.
+        let mut i = 0;
+        while i < n {
+            let mut j = i + 1;
+            while j < n && chunk[j].0 == chunk[j - 1].0 + 1 {
+                j += 1;
             }
-            let n_bytes =
-                core::cmp::min(crate::mm::PAGE_SIZE as u64, size - off) as usize;
-            let kva = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(
-                (pfn as u64) * crate::mm::PAGE_SIZE as u64,
-            )).0 as *const u8;
-            // SAFETY: pfn belongs to a page-cache entry pinned by
-            // collect_dirty_range; the linear map covers the whole frame and
-            // n_bytes <= PAGE_SIZE. ext4_write_at_core validates the file
-            // references itself. The pfn is ALSO passed as the update-skip:
-            // the write core's cache write-through must not copy this frame
-            // onto itself (self-overlap UB, and the frame is already the
-            // source of truth being persisted).
-            let src = unsafe { core::slice::from_raw_parts(kva, n_bytes) };
-            // SAFETY: same inode/fs resolution discipline as write_vfs.
-            let mut written = unsafe {
-                ext4_write_at_core(
-                    &*fs_ptr,
-                    inode.ino as u32,
-                    Some(inode),
-                    off,
-                    true,
-                    src,
-                    pfn,
-                )
-            };
-            // TRANSIENT-FAILURE RETRY (fi-fix-verify razor-6, P0 lane):
-            // write_at_core reports EIO when bread's device read fails
-            // under I/O pressure (blkdev submit/device error — measured
-            // razor6: ONE such failure in 2048 pages left the pattern
-            // file exactly one block short of byte-exact after the
-            // crash; the failed page stayed dirty and nothing ever
-            // retried it before the power cut). A flush is a WRITE-BACK
-            // context with plenty of time budget — retry a failed page
-            // a bounded number of times; only persistent failure keeps
-            // the page dirty (the standing contract).
-            if written != n_bytes as isize {
-                let mut tries = 0u32;
-                while tries < 3 {
-                    tries += 1;
-                    // SAFETY: same discipline as the first attempt; src
-                    // still borrows the pinned frame.
-                    written = unsafe {
-                        ext4_write_at_core(
-                            &*fs_ptr,
-                            inode.ino as u32,
-                            Some(inode),
-                            off,
-                            true,
-                            src,
-                            pfn,
-                        )
-                    };
-                    if written == n_bytes as isize {
-                        break;
-                    }
-                }
-            }
-            done[i] = (idx, pfn, written == n_bytes as isize);
+            // SAFETY: fs_ptr is the inode's private_data fs pointer,
+            // installed at mount/open and valid for the inode's life.
+            unsafe { flush_run(&*fs_ptr, inode, &chunk[i..j], &mut stage, &mut done[i..j]) };
+            i = j;
         }
         cache.flush_done(fs_id, ino, &done[..n]);
         total += n;
@@ -2656,6 +2639,297 @@ pub fn ext4_flush_dirty_inode(
     total
 }
 
+/// Flush one contiguous run of pinned dirty pages (the run-batched flush
+/// unit). Stages every in-file page's bytes into `stage`, writes the
+/// whole run through a single ext4_write_at_core, then (on success)
+/// persists the run's data blocks in coalesced multi-block requests.
+/// Pages fully past the CURRENT VFS size are legitimate discards
+/// (truncate won) and count as done without writing. On any short or
+/// failed run write the run falls back to the per-page write core with
+/// the bounded transient-failure retry (fi-fix-verify razor-6: only
+/// persistent failure keeps a page dirty — the standing contract).
+fn flush_run(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    inode: &crate::fs::inode::Inode,
+    run: &[(u64, u64)],
+    stage: &mut alloc::vec::Vec<u8>,
+    done_out: &mut [(u64, u64, bool)],
+) {
+    let ps = crate::mm::PAGE_SIZE as u64;
+    let psu = crate::mm::PAGE_SIZE;
+    let size = inode.get_size();
+    let off0 = run[0].0 * ps;
+
+    // i_size clamp (see ext4_flush_dirty_inode's doc comment): pages past
+    // the CURRENT size are discards; the run's writable prefix is the
+    // leading pages with off < size, its tail clamped mid-page.
+    let mut run_pages = 0usize;
+    while run_pages < run.len() && run[run_pages].0 * ps < size {
+        run_pages += 1;
+    }
+    for k in run_pages..run.len() {
+        done_out[k] = (run[k].0, run[k].1, true); // past-EOF discard
+    }
+    if run_pages == 0 {
+        return;
+    }
+    let run_bytes = core::cmp::min(run_pages as u64 * ps, size - off0) as usize;
+
+    // Stage the run's bytes from the pinned frames. run_bytes <= len*ps;
+    // the (only) partial tail's uncovered bytes stay zero — they are
+    // never written (the write clamps at run_bytes).
+    if stage.len() < run_pages * psu {
+        stage.resize(run_pages * psu, 0);
+    }
+    for k in 0..run_pages {
+        let (idx, pfn) = run[k];
+        let off = idx * ps;
+        let n_bytes = core::cmp::min(psu as u64, size - off) as usize;
+        let kva = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(
+            pfn * ps,
+        ))
+        .0 as *const u8;
+        // SAFETY: pfn belongs to a page-cache entry pinned by
+        // collect_dirty_range; the linear map covers the whole frame and
+        // n_bytes <= PAGE_SIZE.
+        unsafe {
+            core::ptr::copy_nonoverlapping(kva, stage.as_mut_ptr().add(k * psu), n_bytes);
+            if n_bytes < psu {
+                core::ptr::write_bytes(
+                    stage.as_mut_ptr().add(k * psu + n_bytes),
+                    0,
+                    psu - n_bytes,
+                );
+            }
+        }
+    }
+
+    // The skip set: every SOURCE frame of the run (the write core's
+    // populate must not copy a frame onto itself, and must not revert a
+    // mapper store that raced the staging copy — POSIX leaves
+    // unsynchronized stores vs writeback unordered).
+    let skip_pfns: alloc::vec::Vec<u64> = run[..run_pages].iter().map(|&(_, p)| p).collect();
+
+    // SAFETY: same (fs, ino, inode) discipline as the fd write paths;
+    // stage[..run_bytes] carries the pinned frames' bytes.
+    let written = unsafe {
+        ext4_write_at_core(
+            fs,
+            inode.ino as u32,
+            Some(inode),
+            off0,
+            true,
+            &stage[..run_bytes],
+            &skip_pfns,
+        )
+    };
+    if written == run_bytes as isize {
+        // Persist the run's data blocks now, in coalesced multi-block
+        // requests (best-effort: a block left dirty by a fallback inside
+        // is owned by the standing durability points — eviction, the
+        // fsync data loop, sync(2)).
+        run_sync_spans(fs, inode, off0, run_bytes, stage);
+        for k in 0..run_pages {
+            done_out[k] = (run[k].0, run[k].1, true);
+        }
+        return;
+    }
+
+    // Short/failed run write: per-page fallback with the bounded retry
+    // (razor-6). Each page is judged on its own clamped length (a mid-run
+    // ENOSPC may legitimately cover fewer bytes than the run did).
+    for k in 0..run_pages {
+        let (idx, pfn) = run[k];
+        let off = idx * ps;
+        let n_bytes = core::cmp::min(psu as u64, size - off) as usize;
+        let src = &stage[k * psu..k * psu + n_bytes];
+        // SAFETY: same discipline as the run write; src borrows the
+        // staged bytes (the pinned frames' copy).
+        let mut written =
+            unsafe { ext4_write_at_core(fs, inode.ino as u32, Some(inode), off, true, src, &[pfn]) };
+        if written != n_bytes as isize {
+            let mut tries = 0u32;
+            while tries < 3 {
+                tries += 1;
+                // SAFETY: same discipline as the first attempt.
+                written = unsafe {
+                    ext4_write_at_core(
+                        fs,
+                        inode.ino as u32,
+                        Some(inode),
+                        off,
+                        true,
+                        src,
+                        &[pfn],
+                    )
+                };
+                if written == n_bytes as isize {
+                    break;
+                }
+            }
+        }
+        done_out[k] = (idx, pfn, written == n_bytes as isize);
+    }
+}
+
+/// Persist a just-written run's data blocks in coalesced multi-block
+/// requests (the run-batched flush's disk side). The write core left
+/// every data block BH_Dirty in the 4 KiB buffer cache; with a cache
+/// capacity of 8192 entries, a large file's flush used to turn over the
+/// whole cache and pay one SERIALIZED synchronous 4 KiB write per dirty
+/// victim at eviction time (measured: the mtest06-shape fsync/msync
+/// walls, ~8192 dirty evictions per pass). Here the run's blocks are
+/// resolved to physical, runs of PHYSICALLY CONSECUTIVE blocks are
+/// assembled from their (pinned) buffer heads and pushed with ONE
+/// blkdev_write per span — 16x fewer device round trips for contiguous
+/// layouts — and their BH_Dirty bits cleared so eviction and the fsync
+/// data loop skip them.
+///
+/// Ordering: data-before-metadata is the ordered-mode direction, so an
+/// early data write is legal at any point of the flush; a block under a
+/// pending publication constraint falls back to sync_dirty_buffer (which
+/// satisfies the constraint first — the guard contract).
+///
+/// Best-effort by design: a block whose buffer is missing (evicted after
+/// the write core dirtied it — the eviction write carried the same
+/// bytes), clean (already persisted), or hole-mapped is skipped; the
+/// standing durability points own whatever stays dirty.
+fn run_sync_spans(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    inode: &crate::fs::inode::Inode,
+    off0: u64,
+    run_bytes: usize,
+    stage: &mut alloc::vec::Vec<u8>,
+) {
+    // The buffer cache's block size is fixed at 4096 (bio::get_block_cache);
+    // a different fs block size has no 1:1 page/block mapping — leave the
+    // dirty buffers to the standing durability points.
+    if fs.block_size != 4096 {
+        return;
+    }
+    let bs: u64 = 4096;
+    let sectors_per_block = bs / 512;
+    let n_blocks = (run_bytes as u64 + bs - 1) / bs;
+    let first_block = off0 / bs;
+    // Serialized against racing write cores: the span assembly reads the
+    // buffers' CURRENT bytes and the dirty-clear must not revert a
+    // concurrent writer's newer buffer content (the same serialization
+    // the write cores apply to each other; held across the span I/O like
+    // the write core holds it across its breads).
+    let _ext4_guard = crate::fs::ext4::EXT4_BIG_LOCK.lock();
+    // Fresh extent view: write core's refresh_cached_vfs_inode published
+    // the just-written mapping into the cached sb copy under the big lock.
+    let sbi = match inode.sb {
+        Some(p) => unsafe { &*(p as *const super::inode::Ext4Inode) },
+        None => return,
+    };
+    let dev = fs.device;
+    // SAFETY: dev is the fs's registered GenDisk; only identity fields
+    // are read here.
+    let (mj, mi) = unsafe { ((*dev).major, (*dev).first_minor) };
+    let cache = crate::fs::bio::get_block_cache();
+
+    // Span assembly state: pinned dirty buffer heads whose block numbers
+    // are physically consecutive.
+    let mut span_bhs: alloc::vec::Vec<*mut crate::fs::bio::BufferHead> =
+        alloc::vec::Vec::with_capacity(16);
+    let mut span_first_phys: u64 = 0;
+    let mut span_len: u64 = 0;
+
+    macro_rules! close_span {
+        () => {
+            if !span_bhs.is_empty() {
+                // Assemble the span's bytes from the buffer heads (the
+                // authoritative buffer-committed truth — if a racing
+                // write core ran between the run write and this sync,
+                // ITS newer bytes are what must persist).
+                let mut dst_off = 0usize;
+                for &bh in span_bhs.iter() {
+                    // SAFETY: bh is pinned (peek_buffer) and holds a
+                    // 4096-byte b_data Vec.
+                    let src = unsafe { &(*bh).b_data };
+                    stage[dst_off..dst_off + src.len()].copy_from_slice(src);
+                    dst_off += src.len();
+                }
+                // SAFETY: dev is valid; the sector range covers exactly
+                // span_len consecutive blocks and the assembled slice is
+                // span_len * 4096 bytes. A write error leaves every
+                // BH_Dirty bit set (the standing durability points retry).
+                let rc = unsafe {
+                    crate::drivers::blkdev::blkdev_write(
+                        dev,
+                        span_first_phys * sectors_per_block,
+                        &stage[..dst_off],
+                    )
+                };
+                if rc.is_ok() {
+                    for &bh in span_bhs.iter() {
+                        // SAFETY: bh is a pinned cached BufferHead; the
+                        // bytes just persisted are exactly its content.
+                        unsafe { (*bh).clear_state_bit(crate::fs::bio::BufferState::BH_Dirty) };
+                    }
+                }
+                for &bh in span_bhs.iter() {
+                    // SAFETY: pinned by peek_buffer; balanced put.
+                    unsafe { cache.put(bh) };
+                }
+                span_bhs.clear();
+                span_len = 0;
+            }
+        };
+    }
+
+    for bi in 0..n_blocks {
+        let lblock = first_block + bi;
+        // Extent/indirect walk over cached tree blocks (the run write
+        // just touched them).
+        let phys = match sbi.get_data_block(fs, lblock) {
+            Ok(p) if p != 0 => p,
+            _ => {
+                close_span!();
+                continue;
+            }
+        };
+        // SAFETY: peek_buffer pins the returned head; every pin is
+        // balanced by a put below or inside close_span!.
+        let bh = match unsafe { cache.peek_buffer((mj, mi), phys) } {
+            Some(b) => b,
+            None => {
+                // Evicted after the write core dirtied it: the eviction's
+                // sync write carried these bytes — nothing to do.
+                close_span!();
+                continue;
+            }
+        };
+        let dirty = unsafe { (*bh).is_dirty() };
+        if !dirty {
+            // SAFETY: pinned above; not part of any span.
+            unsafe { cache.put(bh) };
+            close_span!();
+            continue;
+        }
+        // Publication-constrained block: the guarded drain owns its
+        // ordering — sync_dirty_buffer satisfies the constraint first.
+        if unsafe { crate::fs::bio::publication_constrained(mj, mi, phys) } {
+            // SAFETY: bh is a pinned dirty BufferHead.
+            let _ = unsafe { crate::fs::bio::sync_dirty_buffer(bh) };
+            // SAFETY: pinned above.
+            unsafe { cache.put(bh) };
+            close_span!();
+            continue;
+        }
+        if span_len != 0 && phys == span_first_phys + span_len {
+            span_bhs.push(bh);
+            span_len += 1;
+        } else {
+            close_span!();
+            span_bhs.push(bh);
+            span_first_phys = phys;
+            span_len = 1;
+        }
+    }
+    close_span!();
+}
 /// Get or create ReadAheadState stored in file.private_data.
 unsafe fn get_or_create_ra_state<'a>(file: &File, block_size: u64) -> &'a mut ReadAheadState {
     let ptr = file.private_data.get();
