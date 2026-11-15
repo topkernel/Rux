@@ -5957,6 +5957,22 @@ pub fn futex_stuck_census() {
                 if gu & 0xffff_ffff_f000 == 0x3fbf_13e000 {
                     malloc_holder_scan(g.tgid, gu);
                 }
+                // 120th GENERALIZED TRIGGER: a word that stood parked
+                // >= 60 s with zero wakes gets the CoTask decoder with
+                // THIS word as the key. The holder datum (a suspended
+                // coroutine whose saved stack references the word) and
+                // the resumer chains (owning serial queue active flag +
+                // qname; WE ring; WUE deadline) are word-generic — only
+                // the ALLOC-RIP/aframes arms are malloc-word-specific
+                // and they add signal, never gate. The historical
+                // foundation freeze keyed the malloc word; the
+                // deterministic pre-foundation wedge (ctf15+ faces)
+                // keys FFRT mutex/rwlock words in samgr/storage/param
+                // instead — same release-side-never-runs family, and
+                // now decodable. Cost bound: the per-tgid DONE latch
+                // inside ctd_decode (16 slots) allows one decode per
+                // tgid per boot.
+                ctd_decode(g.tgid, gu, "W");
             }
         }
         // 51st session: follow this word's futex lifecycle from here on
