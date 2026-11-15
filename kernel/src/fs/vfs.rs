@@ -593,6 +593,23 @@ pub fn vfs_umount(mountpoint: &str) -> Result<(), i32> {
     // take_mount also clears the lock-free presence mirror (perf-path).
     mnt.root.clear_mountpoint_back();
     child.take_mount();
+    // A mount whose mountpoint DENTRY it created itself (vfs_mount's
+    // bare-dentry arm — boot-time /proc, /sys, ... never went through a
+    // path_lookup first) leaves an INODE-LESS dentry behind after the
+    // unmount: the walk's dcache hit then reads it as a NEGATIVE entry
+    // and every lookup of the mountpoint fails ENOENT. systemd's
+    // mount_private_apivfs (ProtectProc=/PrivateMounts services,
+    // systemd-udevd on noble) umounts /proc and MS_MOVEs a fresh
+    // instance onto it — the failed target lookup aborted the whole
+    // namespace setup (status 226/NAMESPACE, udevd restart loop).
+    // Drop such dentries from the parent: the next walk re-resolves the
+    // name against the underlying filesystem and the covered directory
+    // "re-appears" like Linux's umount. Dentries that DO carry an inode
+    // are kept as-is — removing those broke LTP chdir01's
+    // remount-at-same-target.
+    if child.get_inode().is_none() {
+        parent_dentry.remove_child(&name);
+    }
     Ok(())
 }
 
@@ -6171,7 +6188,9 @@ pub fn mem_file_stat(file: &File, stat: &mut crate::fs::Stat) -> Option<i32> {
     let ptr = unsafe { *file.private_data.get() }?;
     // SAFETY: read-only access to the content length for st_size.
     let size = unsafe { (*(ptr as *const MemFileContent)).data.len() };
-    stat.st_dev = 0;
+    // Generated procfs content files belong to the procfs instance's
+    // device (Linux stats them on proc's s_dev — never 0).
+    stat.st_dev = crate::fs::inode::stat_dev_user(crate::fs::inode::FS_ID_PROCFS);
     // Distinct identity per content instance (the raw pointer is unique).
     stat.st_ino = ptr as usize as u64;
     stat.st_nlink = 1;
