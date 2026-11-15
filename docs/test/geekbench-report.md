@@ -500,24 +500,42 @@ allocation-syscall level and compound for mmap/munmap-heavy
 applications (thread-stack teardown: an 8 MB stack detach is 8 chunks
 → 1 guard cycle).
 
-## sched claim-strand bug found by this lane (P0, hand-off)
+## The -smp2 lmbench strand: NOT a sched bug (corrected 2026-11-15, gb-opt)
 
-`-smp 2` fork-heavy boots (the lmbench rig) strand the forked child
-~60% of the time on main@2649af4e3: the child is claimed
-(ENQ-CLAIMED-SLOTBK pid=N claim=1 pk=1 repeating every jiffy from
-sched.rs:4105) but the pick never completes — cpu1's slot names the
-task (slot_backed), the task reads state=RUNNING, and it never
-executes until the runner's kill. The mm-probe boots (no fork) and
-`-smp 4` Geekbench boots mostly dodge it; one Geekbench run today
-stranded the same way (WAIT4-PARK on the runner, children never ran).
-The soft-lockup face of the same family wedged two probe boots inside
-handle_timer_tick (cpu stuck, IPIs unserviced). Evidence: gb-opt
-`run/` serial logs (lm-lat_syscall-*.log, rux-final*.log,
-ab-opt-*.log), repro = any lmbench `-smp 2` boot. This is the
-lying-slot family left unhealed after the black-screen revert — it
-cost this lane ~2/3 of the lmbench battery rows (TIMEOUT rows below
-are strand casualties, not load) and it should be the sched lane's
-next target.
+The earlier section claimed a sched claim-strand (ENQ-CLAIMED-SLOTBK
+loops, lying slot). **That attribution is RETRACTED**: the ENQSB prints
+are the NORMAL preempted-prev requeue (they fire in completed boots too
+— 200-print budget cap on every boot, clean or wedged), and the
+instrumented boots prove the child RUNS (exec clock advances 1.0 → 6.3 s
+across samples). The verified facts:
+
+- Reference control: the SAME lmbench image on the same -smp 2 rig with
+  the reference kernel passes 6/6 (the reference boots finish in ~10 s).
+  Rux passes 1-2/6. **A real kernel-side gap, location NOT yet pinned.**
+- The wedge point: the benchmp master (the runner's fork) sits in
+  `get_enough`'s calibration machinery BEFORE its slave fork (FORKLOG:
+  completed boots show `parent=306 child=307/308`; stranded boots show
+  no second fork), calling clock_gettime (syscall 113 — musl's
+  gettimeofday is implemented as clock_gettime) once per ~200 ms round
+  (cgt counter A/B: 221→247 over 0.3 s), with rip in `usecs_spent`
+  (gettime) and the start_tv/stop_tv globals healthy (4.8 s, ~1 µs
+  deltas).
+- The calibration's ~200 ms rounds (vs ms-class on the reference) do not
+  converge within the 35 s budget — the compute_enough machinery grinds
+  and the 35 s kill fires first. Exercised-and-dead-end kernel fixes in
+  this session (all reverted): per-CPU monotonic ratchet, global
+  HPET-anchored anchor + interpolation, universalized-TSC reads, TSC
+  cross-vCPU sync via IA32_TSC write (the first cut also had a broken
+  EDX:EAX asm), NTP-style slew. The strand survived every one — the
+  rounds are NOT clock-delta driven. A dedicated lane with per-round
+  strace-class instrumentation (the probes are archived in run/strand-hunt/)
+  should instrument the chase loop (`enough_duration`, lib_timing.c) and
+  the put_user path directly.
+
+The rig's own `budget=<secs>` knob does NOT rescue it (150 s tested,
+still stranded). LMBENCH_SCHED=SINGLE pinning (lmbench's own scheduler
+control) does not reach the wedge (get_enough runs before
+handle_scheduler).
 
 ## Remaining queue (ranked)
 
