@@ -57,25 +57,34 @@ pub fn ext4_file_read(
     let available = file_size - offset;
     let to_read = core::cmp::min(buf.len() as u64, available) as usize;
 
-    let blocks = inode.get_data_blocks(fs)?;
     let block_size = fs.block_size as usize;
 
     let mut total_read = 0;
     let mut current_offset = offset as usize;
     let mut buf_offset = 0;
 
+    // Per-block lazy resolution (dio-data, 2026-11-15): the old body
+    // materialized the WHOLE file mapping via get_data_blocks per call —
+    // O(file blocks) extent lookups PLUS a file-sized Vec allocation PER
+    // read. The dio_read O_DIRECT shape (64 KiB pread chunks of a 128 MiB
+    // file) paid 32768 lookups + a 256 KiB alloc per chunk: ~16.7M lookups
+    // per 32 MiB pread, which alone blew the test's 30s wall (the
+    // dominant dio_read timeout face). Resolve only the blocks this read
+    // touches — exactly the buffered sibling's shape (read_data).
     while total_read < to_read {
         let block_index = current_offset / block_size;
         let block_offset = current_offset % block_size;
 
-        if block_index >= blocks.len() {
+        if block_index * block_size >= file_size as usize {
             break;
         }
 
+        let this_block = inode.get_data_block(fs, block_index as u64)?;
+
         // Sparse hole (block 0 = unallocated): serve ZEROES, never physical
-        // block 0 (superblock-backup garbage) — review 5.5 (稀疏洞读盘块 0,
+        // block 0 (superblock-backup garbage) — review 5.5 (稀疏洞读盘 0,
         // 非缓存路径).
-        if blocks[block_index] == 0 {
+        if this_block == 0 {
             // dfx=exthunt: O_DIRECT hole verdict — see exthunt_read_hole.
             crate::fs::ext4::extent::exthunt_read_hole(
                 inode.ino,
@@ -97,7 +106,7 @@ pub fn ext4_file_read(
         // SAFETY: bio::bread returns a valid pinned BufferHead on success;
         // b_data points to a block-sized buffer aligned to block_size.
         unsafe {
-            let bh = bio::bread(fs.device, blocks[block_index])
+            let bh = bio::bread(fs.device, this_block)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
             let data = &(*bh).b_data;
@@ -105,7 +114,7 @@ pub fn ext4_file_read(
             crate::fs::ext4::extent::exthunt_rd_od(
                 inode.ino as u64,
                 block_index as u64,
-                blocks[block_index],
+                this_block,
                 data[0],
                 data[1],
                 data.as_ptr(),

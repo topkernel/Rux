@@ -1305,7 +1305,15 @@ const KERNEL_RESERVE_SIZE: usize = 0x1E0_0000; // 30MB
 // and the buddy handed it out (kernel statics corrupted at boot). The
 // memblock reserve now tracks the REAL image end — this const is the
 // documented minimum and the linker.ld ASSERT bound; grow them together.
-const KERNEL_RESERVE_SIZE: usize = 0x2800_0000; // 40MB
+// dio-data (2026-11-15): the value below was 0x2800_0000 (640 MB) — a
+// one-digit typo for 0x280_0000 (40 MB) that survived since 2df7b6123.
+// The x86_64 boot reserved [0, 640 MB) around a ~32 MB image, so a 2G
+// machine seeded only 351 MB into the buddy (memblock dump: reserved
+// [0, 0x2c021000) + [0x40000000, 0x7e000000), available 351 MB) — every
+// memory-heavy guest (dio_read's 300 MB, the OH images) OOM'd against
+// phantom scarcity. This is the x86_64 engine of the "fake OOM at
+// ~342 MB/2G" family.
+const KERNEL_RESERVE_SIZE: usize = 0x280_0000; // 40MB
 #[cfg(feature = "aarch64")]
 const KERNEL_RESERVE_SIZE: usize = 0x1C0_0000; // 28MB static window (RUX-RISCV-LAYOUT-7; the aarch64 reserve arm below uses its own top)
 /// Effective (RAM-clamped) static-region sizes computed by the early
