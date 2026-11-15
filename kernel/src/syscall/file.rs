@@ -2625,14 +2625,38 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
             static MSMV_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if MSMV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
-                crate::pr_debug!(
-                    "MSMOVE[{}] '{}' -> '{}' (pid {})",
+                crate::pr_info!(
+                    "MSMOVE[{}] '{}' -> '{}' initns={} (pid {})",
                     MSMV_N.load(core::sync::atomic::Ordering::Relaxed),
                     source_abs,
                     target,
+                    crate::process::ns::in_init_mnt_ns(),
                     crate::process::current_pid()
                 );
             }
+        }
+        // Virtual switch_root: a namespace child MS_MOVEs its crafted
+        // rootfs clone onto "/" (systemd 255's mount_switch_root after
+        // building the clone under /run/systemd/mount-rootfs). Inside a
+        // PRIVATE mount namespace this re-roots the CALLER only — the
+        // global tree must not swap (see vfs_virtual_switch_root for the
+        // failure chain this used to cause).
+        if target == "/" && !crate::process::ns::in_init_mnt_ns() {
+            return match ph.t(6, || {
+                crate::fs::vfs::vfs_virtual_switch_root(&source_abs)
+            }) {
+                Ok(()) => 0,
+                Err(e) => {
+                    crate::pr_warn!(
+                        "vswitch-root syscall fail '{}' -> {}: {} (pid {})",
+                        source_abs,
+                        target,
+                        e,
+                        crate::process::current_pid()
+                    );
+                    e as i64
+                }
+            };
         }
         return match ph.t(6, || crate::fs::vfs::vfs_move_mount(&source_abs, target)) {
             Ok(()) => {
@@ -2662,6 +2686,22 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
     if args[3] & MS_REMOUNT != 0 {
         let new_flags =
             crate::fs::mount::translate_mnt_flags_public(args[3] & !MS_REMOUNT);
+        // Bring-up instrumentation (rate-limited, the mount-tap family):
+        // remounts flip live mounts — the generator-protection RO walk
+        // rides this path and aborts midway on any EINVAL row.
+        {
+            static RMNT_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if RMNT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
+                crate::pr_info!(
+                    "remount[{}] '{}' flags {:#x} (pid {})",
+                    RMNT_N.load(core::sync::atomic::Ordering::Relaxed),
+                    target,
+                    args[3],
+                    crate::process::current_pid()
+                );
+            }
+        }
         match ph.t(6, || crate::fs::vfs::vfs_remount(target, new_flags)) {
             Ok(()) => {
                 // Keep the /proc/mounts row in sync (ro/rw string).
@@ -2684,7 +2724,17 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
                 }
                 return 0;
             }
-            Err(e) => return e as i64,
+            Err(e) => {
+                // Bring-up tap: a failed namespace remount is the current
+                // ub2404 blocker family — every Err must be visible.
+                crate::pr_warn!(
+                    "remount fail '{}' -> {} (pid {})",
+                    target,
+                    e,
+                    crate::process::current_pid()
+                );
+                return e as i64;
+            }
         }
     }
 
@@ -6840,12 +6890,6 @@ pub fn sys_move_mount(args: SyscallArgs) -> i64 {
     } else {
         None
     };
-    if was_attached {
-        match crate::fs::vfs::vfs_detach_mount(&mnt) {
-            Ok(()) => {}
-            Err(e) => return e as i64,
-        }
-    }
 
     // ---- TO side ----
     let mut tbuf = [0u8; PATH_MAX];
@@ -6890,6 +6934,45 @@ pub fn sys_move_mount(args: SyscallArgs) -> i64 {
     };
 
     // ---- attach ----
+    // Virtual switch_root for namespace children (see
+    // vfs_virtual_switch_root): move_mount(<crafted root>, "/") from a
+    // private mount namespace re-roots the CALLER; the mount stays
+    // attached at its crafted path and the global tree is untouched —
+    // so the detach below must not run either.
+    if target == "/" && was_attached && !crate::process::ns::in_init_mnt_ns() {
+        if let Some(p) = old_mp.as_ref() {
+            return match crate::fs::vfs::vfs_virtual_switch_root(p) {
+                Ok(()) => 0,
+                Err(e) => e as i64,
+            };
+        }
+    }
+    if was_attached {
+        match crate::fs::vfs::vfs_detach_mount(&mnt) {
+            Ok(()) => {}
+            Err(e) => return e as i64,
+        }
+    }
+    // The target mountpoint must EXIST (Linux user_path_at on the to-path
+    // — ENOENT for a missing directory). Attaching at a fabricated dentry
+    // left phantom rows in /proc/mounts; systemd's recursive read-only
+    // bind remount then walked one, aborted EINVAL midway and left real
+    // mounts (dev) read-only (boot2: '/dev/mqueue' mkdir EROFS cascade).
+    if target != "/" {
+        if let Err(e) = crate::fs::vfs::path_lookup(&target, 0) {
+            static MOVE_NT_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if MOVE_NT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+                crate::pr_info!(
+                    "movemount-enoent target '{}' -> {} (pid {})",
+                    target,
+                    e,
+                    crate::process::current_pid()
+                );
+            }
+            return e as i64;
+        }
+    }
     match crate::fs::vfs::vfs_attach_mount_at(&mnt, &target) {
         Ok(_mountpoint) => {
             // Mark the mount fd attached (its close must not own the
@@ -6924,6 +7007,23 @@ pub fn sys_move_mount(args: SyscallArgs) -> i64 {
                 &fs_type,
                 if readonly { "ro" } else { "rw" },
             );
+            {
+                // Bring-up instrumentation (the mount-tap family): the
+                // new-API attaches are otherwise invisible on serial —
+                // systemd 255's namespace prep uses them exclusively.
+                static MOVE_OK_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if MOVE_OK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
+                    crate::pr_info!(
+                        "movemount[{}] '{}' -> '{}' flags {:#x} (pid {})",
+                        MOVE_OK_N.load(core::sync::atomic::Ordering::Relaxed),
+                        device,
+                        target,
+                        mnt.flags.lock().bits(),
+                        crate::process::current_pid()
+                    );
+                }
+            }
             // open_tree(AT_RECURSIVE) clones: materialize inside the
             // now-attached root.
             let submounts = from_mfd
@@ -7421,6 +7521,60 @@ pub fn sys_epoll_pwait2(args: SyscallArgs) -> i64 {
     ret
 }
 
+/// Dispatch wrappers (ub2404 namespace bring-up): the new-mount-API
+/// failure surfaces must be visible on serial — the systemd executor
+/// dies 226/NAMESPACE without logging which syscall rejected it (its
+/// stderr rides the dead journal socket).
+pub fn sys_move_mount_tap(args: SyscallArgs) -> i64 {
+    let r = sys_move_mount(args);
+    if r != 0 {
+        static MM_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if MM_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 160 {
+            crate::pr_info!(
+                "movemount-fail[{}] from_fd={} to_fd={} -> {} (pid {})",
+                MM_N.load(core::sync::atomic::Ordering::Relaxed),
+                args[0] as i32,
+                args[2] as i32,
+                r,
+                crate::process::current_pid()
+            );
+        }
+    }
+    r
+}
+
+pub fn sys_mount_setattr_tap(args: SyscallArgs) -> i64 {
+    let r = sys_mount_setattr(args);
+    if r != 0 {
+        static MS_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if MS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 160 {
+            let mut pbuf = [0u8; PATH_MAX];
+            let path = if args[1] != 0 {
+                read_user_path(args[1] as *const u8, &mut pbuf)
+                    .map(|s| {
+                        // Truncate for the log line.
+                        let end = s.len().min(64);
+                        alloc::string::String::from(&s[..end])
+                    })
+                    .unwrap_or_else(|_| alloc::string::String::from("<bad-ptr>"))
+            } else {
+                alloc::string::String::from("<null>")
+            };
+            crate::pr_info!(
+                "mount_setattr-fail[{}] dfd={} path='{}' -> {} (pid {})",
+                MS_N.load(core::sync::atomic::Ordering::Relaxed),
+                args[0] as i32,
+                path,
+                r,
+                crate::process::current_pid()
+            );
+        }
+    }
+    r
+}
+
 /// sys_mount_setattr - Change mount attributes (NR 442). Applies
 /// MOUNT_ATTR_* set/clear bitmaps to the covering mount of a path, or
 /// to a mount/tree fd with AT_EMPTY_PATH. size must equal sizeof(struct
@@ -7522,7 +7676,25 @@ pub fn sys_mount_setattr(args: SyscallArgs) -> i64 {
                 let abs = canonical_mount_path(&abs, path);
                 match crate::fs::vfs::vfs_covering_mount(&abs) {
                     Some(m) => m,
-                    None => return -(errno::EINVAL as i64),
+                    None => {
+                        // "/" itself has no mount object (the root
+                        // overlay) — EINVAL there is the reference's
+                        // answer for unmountable roots; name it.
+                        if abs != "/" {
+                            static MSA_MISS_N: core::sync::atomic::AtomicUsize =
+                                core::sync::atomic::AtomicUsize::new(0);
+                            if MSA_MISS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                                < 40
+                            {
+                                crate::pr_info!(
+                                    "mount_setattr no-cover '{}' (pid {})",
+                                    abs,
+                                    crate::process::current_pid()
+                                );
+                            }
+                        }
+                        return -(errno::EINVAL as i64);
+                    }
                 }
             }
             Err(e) => return e as i64,
@@ -7534,7 +7706,25 @@ pub fn sys_mount_setattr(args: SyscallArgs) -> i64 {
     // (systemd namespace flag resets) operate on single mounts —
     // accepted and applied to the one mount.
     let cur = *mnt.flags.lock();
-    *mnt.flags.lock() = fapi::mount_attr_apply(cur, attr_set, attr_clr);
+    let new_flags = fapi::mount_attr_apply(cur, attr_set, attr_clr);
+    *mnt.flags.lock() = new_flags;
+    {
+        // Bring-up instrumentation (rate-limited): flag flips on mounts
+        // are the Protect*/namespace knob — needed them visible.
+        static MSA_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if MSA_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
+            crate::pr_info!(
+                "mount_setattr[{}] set={:#x} clr={:#x}: flags {:#x} -> {:#x} (pid {})",
+                MSA_N.load(core::sync::atomic::Ordering::Relaxed),
+                attr_set,
+                attr_clr,
+                cur.bits(),
+                new_flags.bits(),
+                crate::process::current_pid()
+            );
+        }
+    }
     0
 }
 

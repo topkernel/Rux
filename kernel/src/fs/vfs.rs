@@ -334,6 +334,25 @@ fn check_not_readonly(pathname: &str) -> Result<(), i32> {
 /// MS_REMOUNT). Returns Ok(()) when a mount was found and updated,
 /// Err(EINVAL) when the path is not a mount point.
 pub fn vfs_remount(mountpoint: &str, new_flags: crate::fs::mount::MntFlags) -> Result<(), i32> {
+    // Caller-relative discipline (same as vfs_attach_mount_at / vfs_mount):
+    // a task virtually switch-rooted into its namespace's crafted root
+    // (vfs_virtual_switch_root) or chrooted remounts paths AS IT SEES
+    // THEM — "/dev" is the crafted clone's /dev, not the global mount.
+    // Without this, a namespace child's ProtectSystem/ProtectKernel*
+    // read-only flips landed on the GLOBAL mounts (serial-155614:
+    // generators' namespace left the global /dev read-only and every
+    // later mknod/mkdir under it EROFS'd).
+    let owned_mp;
+    let mountpoint = {
+        let root = get_process_root();
+        if root != "/" && mountpoint.starts_with('/') {
+            let joined = format!("{}{}", root.trim_end_matches('/'), mountpoint);
+            owned_mp = path_normalize(&joined);
+            owned_mp.as_str()
+        } else {
+            mountpoint
+        }
+    };
     let vfs_root = VFS_STATE.lock().root_dentry.clone()
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
     let mut current = vfs_root;
@@ -1245,6 +1264,125 @@ fn bind_clone_attach(
 /// does (root inode replacement), and additionally drops the old
 /// root's cached children so ramdisk names cannot shadow the moved-in
 /// filesystem's root (lookups resolve through the new root inode).
+/// Virtual switch_root for a PRIVATE mount namespace — the shadowing-
+/// correct answer for `MS_MOVE <crafted-root> /` from a namespace child.
+///
+/// systemd 255's mount_namespace() builds a recursive clone of / under
+/// /run/systemd/mount-rootfs, applies the service's mount entries onto
+/// the CLONE, then does `mount(root, "/", MS_MOVE)` + chroot inside the
+/// service's own CLONE_NEWNS (namespace.c: root = "/run/systemd/
+/// mount-rootfs"; the temporary dir "prevents any mounts from being
+/// potentially obscured by other mounts we already applied"). In the
+/// reference the MS_MOVE re-roots ONLY that namespace.
+///
+/// Rux has one dentry tree: the old code swapped the GLOBAL root (root
+/// inode swap + child rehome) and every OTHER task — PID 1 included —
+/// inherited the service's crafted root; when the namespace then died,
+/// its Drop unmounted the tracked mounts, tearing pieces off the LIVE
+/// root (serial-155614: journald's teardown left /dev/shm ENOENT,
+/// /proc/<pid>/mountinfo ENOENT, udevd 226/NAMESPACE, random-seed and
+/// sysusers failing downstream). The reference behavior — caller gets
+/// the new root, everyone else keeps theirs — is produced WITHOUT a
+/// namespace-private mount tree by re-rooting only the CALLER:
+///
+///  - the crafted tree stays attached at its global path (its mounts
+///    keep their registry rows and the namespace keeps its teardown
+///    list — Drop still detaches exactly what this ns attached);
+///  - the task's fs root becomes (root-path = the crafted mountpoint's
+///    global path, root-dentry = the crafted mount's root), so every
+///    absolute lookup starts INSIDE the crafted tree (path_lookup's
+///    fast-base) and every mount/remount from this task resolves
+///    through the root-path prefix INTO the crafted tree (the same
+///    discipline vfs_attach_mount_at / vfs_mount already apply for
+///    chrooted tasks — flag flips stay private to the clone);
+///  - getcwd answers root-relative paths (build_path_rooted), so the
+///    service sees "/" like after a real pivot.
+///
+/// Consumed by sys_mount's MS_MOVE and sys_move_mount when the target is
+/// "/" and the caller's mount namespace is not the init namespace.
+pub fn vfs_virtual_switch_root(from: &str) -> Result<(), i32> {
+    if from == "/" {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+    // Source: the MOUNTPOINT dentry (final component not followed) —
+    // the same walk discipline as vfs_move_mount's from-side.
+    let src_child = {
+        let vfs_root = VFS_STATE.lock().root_dentry.clone()
+            .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+        let comps: Vec<&str> = from.split('/').filter(|s| !s.is_empty()).collect();
+        let mut current = vfs_root;
+        for (i, component) in comps.iter().enumerate() {
+            let child = match current.lookup_child(component) {
+                Some(c) => c,
+                None => {
+                    crate::pr_warn!(
+                        "vswitch-root: walk miss at '{}' of '{}' (pid {})",
+                        component,
+                        from,
+                        crate::process::current_pid()
+                    );
+                    return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+                }
+            };
+            current = if i + 1 == comps.len() {
+                child
+            } else {
+                follow_mount(child)
+            };
+        }
+        current
+    };
+    let mnt = match src_child.get_mount() {
+        Some(m) => m.clone(),
+        None => {
+            crate::pr_warn!(
+                "vswitch-root: no mount object at '{}' (pid {})",
+                from,
+                crate::process::current_pid()
+            );
+            return Err(errno::Errno::InvalidArgument.as_neg_i32());
+        }
+    };
+    // The crafted root must be ATTACHED (a mountpoint back-ref exists);
+    // a detached mount fd or a plain directory is EINVAL, like Linux
+    // refusing to MS_MOVE a non-mount.
+    if mnt.root.get_mountpoint_back().is_none() {
+        crate::pr_warn!(
+            "vswitch-root: no attached mount at '{}' (pid {})",
+            from,
+            crate::process::current_pid()
+        );
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    // Re-root the CALLER (path + dentry, chroot discipline).
+    if let Some(task) = crate::sched::current() {
+        if let Some(fs) = task.fs_arc() {
+            fs.set_root_with_dentry(from.as_bytes(), Some(mnt.root.clone()));
+        }
+    }
+
+    // Namespace anchor: setns(CLONE_NEWNS) re-anchoring and Drop
+    // bookkeeping read ns.root; record the crafted root like a pivot.
+    let ns = crate::process::ns::current_mnt_ns();
+    *ns.root.lock() = Some(mnt.root.clone());
+    // Teardown tracking (mntput-on-nsput): the attach path usually
+    // tracked this mount already — dedupe by identity so Drop unmounts
+    // it exactly once.
+    {
+        let mut list = ns.vfs_mounts.lock();
+        if !list.iter().any(|m| alloc::sync::Arc::ptr_eq(m, &mnt)) {
+            list.push(mnt.clone());
+        }
+    }
+    crate::pr_info!(
+        "vswitch-root: task re-rooted at '{}' (pid {})",
+        from,
+        crate::process::current_pid()
+    );
+    Ok(())
+}
+
 pub fn vfs_move_mount(from: &str, to: &str) -> Result<(), i32> {
     if from == "/" {
         return Err(errno::Errno::DeviceOrResourceBusy.as_neg_i32());
@@ -4714,10 +4852,24 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
         // (O_WRONLY / O_RDWR / O_TRUNC) on a MS_RDONLY mount fails, as does
         // O_CREAT on one (Linux may_open + mnt_want_write; LTP creat06 and
         // the needs_rofs family).
+        //
+        // NON-REGULAR inodes are exempt from the mount-ro open gate
+        // (deferred to below, post-lookup): opening a character device
+        // (/dev/null!) O_WRONLY on a read-only MOUNT is legal in the
+        // reference — MS_RDONLY on a bind does not make device nodes
+        // unwritable at open time. systemd 255's namespace apivfs table
+        // binds /dev READ-ONLY into every namespaced service, and the
+        // executor's setup_output opens /dev/null O_WRONLY for
+        // StandardOutput=null — the open-time EROFS here killed every
+        // namespaced service with 209/STDOUT (ub2404 serial evidence).
         let write_intent =
             flags & (FileFlags::O_WRONLY | FileFlags::O_RDWR | FileFlags::O_TRUNC) != 0;
-        if (write_intent || o_creat) && path_on_readonly_mount(filename) {
+        if o_creat && path_on_readonly_mount(filename) {
             return Err(errno::Errno::ReadOnlyFileSystem.as_neg_i32());
+        }
+        let mut deferred_rofs_check = false;
+        if write_intent && !o_creat && path_on_readonly_mount(filename) {
+            deferred_rofs_check = true;
         }
 
         // O_CREAT atomicity (review 5.1 high): the existence check and the
@@ -4754,6 +4906,14 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                     return Err(errno::Errno::FileExists.as_neg_i32());
                 }
                 let inode = vpath.inode.ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+                // Deferred mount-ro gate (see the header comment): a
+                // write-intent open of an EXISTING file fails EROFS on a
+                // read-only mount ONLY for regular files (the LTP
+                // needs_rofs contract); character/block/fifo/socket nodes
+                // open fine — the device layer is not the mount's data.
+                if deferred_rofs_check && inode.mode.is_regular_file() {
+                    return Err(errno::Errno::ReadOnlyFileSystem.as_neg_i32());
+                }
                 if flags & (FileFlags::O_NOFOLLOW | FileFlags::O_PATH) != 0
                     && inode.mode.is_symlink()
                     && flags & FileFlags::O_PATH == 0

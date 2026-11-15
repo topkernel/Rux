@@ -5422,8 +5422,30 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
         Err(_) => return -(errno::EFAULT as i64),
     };
 
-    let new_root = crate::fs::path::path_normalize(new_root);
-    let put_old = crate::fs::path::path_normalize(put_old);
+    // Relative arguments resolve against the CALLER'S CWD (Linux
+    // user_path_at). systemd 255's mount_switch_root_pivot() runs the
+    // documented idiom pivot_root(".", ".") after fchdir() into the new
+    // root — the raw "." used to fail the is-absolute check below and
+    // every namespaced service fell back to (and died in) the MS_MOVE
+    // switch_root path (226/NAMESPACE on ub2404).
+    let join_cwd = |p: &str| -> alloc::string::String {
+        if p.starts_with('/') {
+            return alloc::string::String::from(p);
+        }
+        let cwd = match crate::sched::current() {
+            Some(t) => t.get_cwd(),
+            None => alloc::boxed::Box::from(&b"/"[..]),
+        };
+        let cwd_str = core::str::from_utf8(&cwd).unwrap_or("/");
+        let mut abs = alloc::string::String::from(cwd_str);
+        if !abs.ends_with('/') {
+            abs.push('/');
+        }
+        abs.push_str(p);
+        abs
+    };
+    let new_root = crate::fs::path::path_normalize(&join_cwd(new_root));
+    let put_old = crate::fs::path::path_normalize(&join_cwd(put_old));
     if !new_root.starts_with('/') || !put_old.starts_with('/') {
         return -(errno::EINVAL as i64);
     }
