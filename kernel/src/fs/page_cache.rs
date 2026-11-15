@@ -2848,8 +2848,44 @@ impl PageCache {
 }
 
 /// Release a physical page frame back to the zone allocator.
+///
+/// PT-ledger refusal (pcachewedge lane, 2026-11-15): the single funnel
+/// for every cache-side frame free (eviction, invalidate, final put,
+/// lazy reap). A frame the page-table ledger still stamps LIVE must
+/// never re-enter the zone from here: it is simultaneously a live page
+/// table (its PT allocation grabbed it after a premature free left the
+/// frame on the cache LRU with a stale PageCache-typed descriptor) and
+/// a cache entry — freeing it RAW-FREEs the live table (the corruption
+/// cascade: PTLEDGER DOUBLE-ALLOC, PTE values in recycled task memory,
+/// oops-killed lock holders). REFUSE the free — the frame is leaked
+/// (bounded, one per corrupted entry) and the evidence names it. Same
+/// tripwire shape as zone.rs's RAW-FREE-OF-LIVE-TABLE watchpoint, but
+/// as a refusal at the producer.
 fn release_page_frame(pfn: usize) {
     let phys_addr = pfn_to_phys(pfn);
+
+    if crate::arch::mm::mmu_init::alloc_stage_is_late()
+        && crate::arch::mm::mmu_init::PtLedger::is_live_table(pfn as u64)
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        crate::dfx::driftwatch::PCACHE_LIVE_PT_REFUSED
+            .fetch_add(1, Relaxed);
+        static REPORTS: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let n = REPORTS.fetch_add(1, Relaxed);
+        if n < 8 {
+            crate::pr_err!(
+                "page-cache release of LIVE PT frame pfn={:#x} REFUSED — leaking (double-owned cache entry; RAW-FREE cascade guard)",
+                pfn
+            );
+            crate::dfx::backtrace::dump_stack();
+        }
+        // The caller has already removed the map entry and unlinked the
+        // LRU member; the leaked frame is an untracked orphan. Its
+        // stale PageCache descriptor is unreachable from the LRU walk,
+        // so it cannot be re-picked here.
+        return;
+    }
 
     // Clear page cache metadata
     let page_desc = pfn_to_page_mut(pfn);
