@@ -1305,12 +1305,19 @@ pub fn create_root_inode() -> alloc::sync::Arc<Inode> {
         None => {
             // Fallback: create a minimal root node
             let mut inode = Inode::new(1, InodeMode::new(InodeMode::S_IFDIR | 0o555));
+            inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
             inode.ops = Some(&PROCFS_INODE_OPS);
             return alloc::sync::Arc::new(inode);
         }
     };
     let root_node = sb.root_node.clone();
     let mut inode = Inode::new(root_node.ino, InodeMode::new(InodeMode::S_IFDIR | 0o555));
+    // fs_id MUST be the procfs instance tag: the root inode decides
+    // st_dev for the /proc MOUNTPOINT itself — stat("/proc") used to
+    // report the fs_id-0 fallback device while every /proc/<pid> inode
+    // reported procfs's, so /proc looked like a device boundary in the
+    // middle of procfs (find -xdev, du -x mis-walk).
+    inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
     inode.ops = Some(&PROCFS_INODE_OPS);
     inode.private_data = Some(alloc::sync::Arc::as_ptr(&root_node) as *mut u8);
     alloc::sync::Arc::new(inode)

@@ -294,6 +294,8 @@ pub const FS_ID_PROCFS: u64 = 0x5052_4F43_0002;
 pub const FS_ID_DEVFS: u64 = 0x4445_5646_0003;
 /// cgroup2 (unified cgroup hierarchy) — "CGRP"
 pub const FS_ID_CGROUPFS: u64 = 0x4347_5250_0004;
+/// selinuxfs — "SLNX"
+pub const FS_ID_SELINUXFS: u64 = 0x534C_4E58_0005;
 
 // ============================================================================
 // Anonymous device numbers (stat st_dev / statfs f_fsid source)
