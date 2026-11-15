@@ -71,6 +71,7 @@ fn current_root_ppn() -> u64 {
 /// `arch::mm::mmu_init`, ZTRACE_ALLOC / ZTRACE_FREE under `mm::zone`),
 /// so this compiles once for both. Each replay is capped (the first
 /// matches carry the history; more would flood the console).
+#[cfg(any(feature = "x86_64", feature = "riscv64"))]
 fn ring_history(ppn: u64) {
     use core::sync::atomic::Ordering::Relaxed;
     const MAX_PER_RING: usize = 6;
@@ -246,7 +247,10 @@ pub fn capture_frame(pfn: usize, why: &'static str) {
     );
 
     // ---- 3. incarnation history (forensic rings, newest first) ----
+    #[cfg(any(feature = "x86_64", feature = "riscv64"))]
     ring_history(ppn);
+    #[cfg(feature = "aarch64")]
+    crate::pr_err!("  hist: (no forensic rings on aarch64)");
 
     // ---- 4. per-CPU pageset rows ----
     let mut rows = [0usize; 8];
@@ -261,32 +265,37 @@ pub fn capture_frame(pfn: usize, why: &'static str) {
     }
 
     // ---- 5. bounded reverse scan of every live tree ----
-    let mut hits = [
-        TreeHit {
-            pid: 0,
-            root_ppn: 0,
-            level: 0,
-            idx0: 0,
-            idx1: 0,
-        };
-        16
-    ];
-    let (nh, tasks, skipped, budget) =
-        crate::arch::mm::mmu_init::forensics_scan_trees(ppn, &mut hits);
-    for h in hits.iter().take(nh) {
-        let kind = match h.level {
-            0 => "ROOT frame",
-            1..=3 => "upper-table LINK",
-            _ => "LEAF (data mapping)",
-        };
+    #[cfg(any(feature = "x86_64", feature = "riscv64"))]
+    {
+        let mut hits = [
+            TreeHit {
+                pid: 0,
+                root_ppn: 0,
+                level: 0,
+                idx0: 0,
+                idx1: 0,
+            };
+            16
+        ];
+        let (nh, tasks, skipped, budget) =
+            crate::arch::mm::mmu_init::forensics_scan_trees(ppn, &mut hits);
+        for h in hits.iter().take(nh) {
+            let kind = match h.level {
+                0 => "ROOT frame",
+                1..=3 => "upper-table LINK",
+                _ => "LEAF (data mapping)",
+            };
+            crate::pr_err!(
+                "  tree-ref: pid={} root={:#x} level={} idx0={} idx1={} ({})",
+                h.pid, h.root_ppn, h.level, h.idx0, h.idx1, kind
+            );
+        }
         crate::pr_err!(
-            "  tree-ref: pid={} root={:#x} level={} idx0={} idx1={} ({})",
-            h.pid, h.root_ppn, h.level, h.idx0, h.idx1, kind
+            "  tree-scan: {} reference(s) over {} tasks ({} buckets skipped, {} entries read)",
+            nh, tasks, skipped, budget
         );
     }
-    crate::pr_err!(
-        "  tree-scan: {} reference(s) over {} tasks ({} buckets skipped, {} entries read)",
-        nh, tasks, skipped, budget
-    );
+    #[cfg(feature = "aarch64")]
+    crate::pr_err!("  tree-scan: (not implemented on aarch64)");
     crate::pr_err!("=== MMFORENSICS capture end ===");
 }

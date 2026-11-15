@@ -1167,14 +1167,26 @@ impl PageCache {
         let out = {
             let mut g = entry.lock.lock();
             if let Some(page) = g.get_mut(&page_index) {
-                page.pin_locked();
-                let page_desc = pfn_to_page_mut(page.pfn);
-                if !page_desc.is_null() {
-                    unsafe {
-                        (*page_desc).set_flag(PageFlag::Referenced);
+                // QUARANTINE guard (mmforensics lane): a poisoned frame
+                // (ever double-tracked) must not be mapped as file data —
+                // its other owners' contents would alias the mapping.
+                // Serve a miss instead: callers read from disk into a
+                // fresh frame; the stale entry dies at its next eviction
+                // (release refused, entry removed — self-healing).
+                if crate::arch::mm::mmu_init::alloc_stage_is_late()
+                    && crate::arch::mm::mmu_init::PtLedger::is_poisoned(page.pfn as u64)
+                {
+                    false
+                } else {
+                    page.pin_locked();
+                    let page_desc = pfn_to_page_mut(page.pfn);
+                    if !page_desc.is_null() {
+                        unsafe {
+                            (*page_desc).set_flag(PageFlag::Referenced);
+                        }
                     }
+                    true
                 }
-                true
             } else {
                 false
             }
@@ -2864,6 +2876,16 @@ impl PageCache {
 fn release_page_frame(pfn: usize) {
     let phys_addr = pfn_to_phys(pfn);
 
+    // QUARANTINED frames (ever double-tracked) are never released: their
+    // stale references make every re-allocation a collision. Leak.
+    if crate::arch::mm::mmu_init::alloc_stage_is_late()
+        && crate::arch::mm::mmu_init::PtLedger::is_poisoned(pfn as u64)
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        crate::dfx::driftwatch::MM_POISON_FREES.fetch_add(1, Relaxed);
+        return;
+    }
+
     if crate::arch::mm::mmu_init::alloc_stage_is_late()
         && crate::arch::mm::mmu_init::PtLedger::is_live_table(pfn as u64)
     {
@@ -2885,6 +2907,13 @@ fn release_page_frame(pfn: usize) {
         // rings and foreign trees — so running it from this lock-held
         // context is safe).
         crate::dfx::mmforensics::capture_frame(pfn, "pcache-live-pt-refused");
+        // QUARANTINE the frame (mmforensics lane): the capture evidence
+        // showed such frames keep colliding with re-allocation for the
+        // rest of the boot (one frame re-stamped by five trees); the
+        // poison bit makes every later free of it impossible, so the
+        // surviving references dangle inertly.
+        crate::arch::mm::mmu_init::PtLedger::poison_table(pfn as u64);
+        crate::dfx::driftwatch::MM_POISONED.fetch_add(1, Relaxed);
         // The caller has already removed the map entry and unlinked the
         // LRU member; the leaked frame is an untracked orphan. Its
         // stale PageCache descriptor is unreachable from the LRU walk,

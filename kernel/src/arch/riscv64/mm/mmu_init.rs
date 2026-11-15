@@ -425,6 +425,13 @@ pub struct PtLedger {
     // "PTLEDGER: DOUBLE-FREE REFUSED" / "FUT-STALE-TREE" reports (the
     // fake-OOM investigation's first dead end). A bitmap cannot collide.
     live: [core::sync::atomic::AtomicU64; MAX_PAGES / 64],
+    // QUARANTINE bitset (mmforensics lane, 2026-11-15): set once, never
+    // cleared, on any double-tracking guard firing for the frame. See
+    // the x86_64 twin for the full rationale — a frame that was ever
+    // tracked by two owners keeps unreclaimable stale references, and
+    // every free path refuses poisoned frames so the circulation engine
+    // (RAW-FREE echo family) dies at the first guard.
+    poisoned: [core::sync::atomic::AtomicU64; MAX_PAGES / 64],
     // Boot-permanent tables (kernel root tree + Early static + Fixmap):
     // referenced by every early mm — freeing them per-mm tears down shared
     // state and feeds the frames back for reuse as live page tables (the
@@ -443,6 +450,7 @@ impl PtLedger {
     const fn new() -> Self {
         Self {
             live: [const { core::sync::atomic::AtomicU64::new(0) }; MAX_PAGES / 64],
+            poisoned: [const { core::sync::atomic::AtomicU64::new(0) }; MAX_PAGES / 64],
             boot: [const { core::sync::atomic::AtomicU64::new(0) }; 512],
             reported: core::sync::atomic::AtomicUsize::new(0),
         }
@@ -520,6 +528,8 @@ impl PtLedger {
                 "PTLEDGER: DOUBLE-ALLOC ppn={:#x} by pid={} (still live)",
                 ppn, pid
             );
+            // Double-tracked frame: quarantine.
+            Self::poison_table(ppn);
         }
         // FORENSIC (fake-OOM family): alloc-side ring — pairs with
         // PT_FREE_RING to replay a frame's full table-incarnation history.
@@ -641,6 +651,8 @@ impl PtLedger {
         // mmforensics: deep capture at the double/foreign free refusal
         // (x86_64 parity; own cap + switch gate).
         crate::dfx::mmforensics::capture_frame(ppn as usize, "ptledger-double-free");
+        // Double-tracked frame: quarantine.
+        Self::poison_table(ppn);
         false
     }
 }
@@ -757,6 +769,31 @@ impl PtLedger {
     /// Used by the raw-free watchpoint in Zone::free_pages — a raw
     /// (non-page-table-path) free of a live-stamped frame is the seed event
     /// that turns a live page-table tree stale.
+    /// Quarantine a frame (see the `poisoned` field doc). One-way.
+    pub fn poison_table(ppn: u64) {
+        match Self::bit_index(ppn) {
+            Some(i) => {
+                PT_LEDGER.poisoned[i / 64]
+                    .fetch_or(1u64 << (i % 64), core::sync::atomic::Ordering::Relaxed);
+            }
+            None => {}
+        }
+    }
+
+    /// Is this frame quarantined (ever double-tracked)? Every free path
+    /// refuses such frames; cache pins refuse to serve them.
+    pub fn is_poisoned(ppn: u64) -> bool {
+        match Self::bit_index(ppn) {
+            Some(i) => {
+                PT_LEDGER.poisoned[i / 64]
+                    .load(core::sync::atomic::Ordering::Relaxed)
+                    & (1u64 << (i % 64))
+                    != 0
+            }
+            None => false,
+        }
+    }
+
     pub fn is_live_table(ppn: u64) -> bool {
         PT_LEDGER.live_bit(ppn)
     }

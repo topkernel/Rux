@@ -544,11 +544,36 @@ impl PtLedger {
         let b = i % 64;
         LEDGER_BITMAP[w].load(Ordering::Acquire) & (1 << b) != 0
     }
+
+    /// Quarantine a frame (mmforensics lane, 2026-11-15 — see the x86_64
+    /// twin for the rationale): one-way mark; every free path refuses
+    /// poisoned frames so a double-tracked frame can never re-enter the
+    /// allocator.
+    pub fn poison_table(ppn: u64) {
+        let Some(i) = Self::index(ppn) else { return };
+        let w = i / 64;
+        let b = i % 64;
+        POISON_BITMAP[w].fetch_or(1 << b, Ordering::AcqRel);
+    }
+
+    /// Is this frame quarantined (ever double-tracked)?
+    pub fn is_poisoned(ppn: u64) -> bool {
+        let Some(i) = Self::index(ppn) else { return false };
+        let w = i / 64;
+        let b = i % 64;
+        POISON_BITMAP[w].load(Ordering::Acquire) & (1 << b) != 0
+    }
 }
 
 /// The ledger bitmap itself (64 KiB .bss)
 #[link_section = ".bss"]
 static LEDGER_BITMAP: [AtomicUsize; PT_LEDGER_WORDS] =
+    [const { AtomicUsize::new(0) }; PT_LEDGER_WORDS];
+
+/// Quarantine bitmap (mmforensics lane): one-way marks, same window as
+/// LEDGER_BITMAP.
+#[link_section = ".bss"]
+static POISON_BITMAP: [AtomicUsize; PT_LEDGER_WORDS] =
     [const { AtomicUsize::new(0) }; PT_LEDGER_WORDS];
 
 /// Global PT ledger
