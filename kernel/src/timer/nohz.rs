@@ -137,6 +137,14 @@ pub fn tick_nohz_dep_clear_cpu(cpu: usize, bit: u32) {
 /// kick the CPUs whose tick is currently stopped so they re-evaluate at
 /// their next exit.
 pub fn sched_update_tick_dependency_on_load_change() {
+    // The reference's sched_update_tick_dependency (sched.h) gates on
+    // tick_nohz_full_cpu FIRST — the dependency machinery never runs
+    // for CPUs outside the nohz_full mask. Without this gate the
+    // can-stop predicate's per-CPU current scan lands in every enqueue
+    // under the GRQ lock (measured: p2_ctxsw 1.242 -> 2.149 us, +73%).
+    if !NOHZ_FULL_RUNNING.load(Ordering::Acquire) {
+        return;
+    }
     if !crate::sched::sched::sched_can_stop_tick() {
         tick_nohz_full_kick_stopped();
     }
