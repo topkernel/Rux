@@ -4266,6 +4266,10 @@ pub fn vfs_stat(pathname: &str, stat: &mut Stat) -> Result<(), i32> {
             if let Some(getattr_fn) = ops.getattr {
                 let result = getattr_fn(inode.as_ref(), stat);
                 if result == 0 {
+                    // st_dev: the filesystem instance's anonymous device
+                    // (Linux s_dev), stamped centrally over whatever the
+                    // per-fs getattr wrote — see inode::stat_dev_user.
+                    stat.st_dev = crate::fs::inode::stat_dev_user(inode.fs_id);
                     return Ok(());
                 } else {
                     return Err(result);
@@ -4275,6 +4279,7 @@ pub fn vfs_stat(pathname: &str, stat: &mut Stat) -> Result<(), i32> {
     }
 
     // Fallback: fill in basic info from inode
+    stat.st_dev = crate::fs::inode::stat_dev_user(inode.fs_id);
     stat.st_ino = inode.ino;
     stat.st_mode = inode.mode.bits();
     stat.st_size = 0;
@@ -5015,6 +5020,10 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
         };
         let result = inode.op_getattr(stat);
         if result == 0 {
+            // st_dev: the instance's anonymous device (Linux s_dev) —
+            // same stamp as vfs_stat (fstat must agree with stat for
+            // libmount's is-mounted probes on open fds).
+            stat.st_dev = crate::fs::inode::stat_dev_user(inode.fs_id);
             Ok(())
         } else {
             Err(result)
@@ -5038,6 +5047,9 @@ pub fn stat_file_by_path_with_flags(path: &str, stat: &mut Stat, flags: u32) -> 
             if let Some(getattr_fn) = ops.getattr {
                 let result = getattr_fn(inode.as_ref(), stat);
                 if result == 0 {
+                    // st_dev: the instance's anonymous device (Linux
+                    // s_dev) — same stamp as vfs_stat.
+                    stat.st_dev = crate::fs::inode::stat_dev_user(inode.fs_id);
                     return Ok(());
                 } else {
                     return Err(result);

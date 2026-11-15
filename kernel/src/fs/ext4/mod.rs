@@ -2376,10 +2376,12 @@ unsafe fn ext4_getattr(inode: &Inode, stat: &mut Stat) -> i32 {
     };
     let ext4_inode = &*(ext4_inode_ptr as *const inode::Ext4Inode);
 
-    // st_dev = the filesystem instance's id (Linux s_dev): OH's
-    // switch_root stats "/" and "/usr" and SKIPS the root switch when
-    // they match — with st_dev 0 on both, the ramdisk root was never
-    // replaced and exec("/bin/init") failed ENOENT.
+    // st_dev = the filesystem instance's id. Fallback only: the central
+    // stat exits (vfs_stat / file_stat / stat_file_by_path*) overwrite
+    // this with the instance's anonymous device number
+    // (inode::stat_dev_user — Linux get_anon_bdev semantics); OH's
+    // switch_root "/" vs "/usr" comparison works either way — distinct
+    // instances report distinct devs.
     stat.st_dev = inode.fs_id;
     stat.st_ino = inode.ino;
     stat.st_mode = ext4_inode.mode as u32;  // u16 -> u32

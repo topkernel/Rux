@@ -295,6 +295,76 @@ pub const FS_ID_DEVFS: u64 = 0x4445_5646_0003;
 /// cgroup2 (unified cgroup hierarchy) — "CGRP"
 pub const FS_ID_CGROUPFS: u64 = 0x4347_5250_0004;
 
+// ============================================================================
+// Anonymous device numbers (stat st_dev / statfs f_fsid source)
+//
+// Linux semantics: every filesystem INSTANCE (superblock) carries an
+// s_dev, allocated from a global counter for anonymous filesystems
+// (get_anon_bdev: MKDEV(0, n)) — each tmpfs/proc/mqueue mount gets a
+// distinct number, bind/MS_MOVE mounts share the source's number, and
+// stat(2) reports it as st_dev for every inode under the mount.
+// Userspace depends on it: systemd/libmount's is-mounted check compares
+// st_dev against the parent directory (equal → not mounted); with st_dev
+// 0 everywhere every mountpoint looks unmounted (ub2404 dev-mqueue.mount
+// chase). Rux maps each icache fs_id (the per-instance identity —
+// tmpfs instances, ext4 instance pointers, the pseudo-fs constants) to
+// one anonymous 0:n device, first-come-first-served.
+//
+// Readers are lock-free (Acquire snapshot load); the writer (first stat
+// after a new fs_id appears) rebuilds + republishes under the write
+// lock. Retired snapshots leak: mounts per boot are tens, each map a
+// few hundred bytes — bounded, and freeing would race lock-free readers.
+// ============================================================================
+
+struct AnonDevMap(alloc::collections::BTreeMap<u64, crate::fs::dev_t::DevNo>);
+
+static ANON_DEV_NEXT: AtomicU32 = AtomicU32::new(1);
+static ANON_DEV_MAP: core::sync::atomic::AtomicPtr<AnonDevMap> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+static ANON_DEV_WRITE: Spinlock<()> = Spinlock::new(());
+
+/// The stat device (Linux s_dev) of a filesystem instance: kernel dev_t
+/// shape (DevNo, typically major 0 = UNNAMED_MAJOR, minor from the
+/// global counter). Deterministic per fs_id for the whole boot.
+pub fn stat_dev_for_fs(fs_id: u64) -> crate::fs::dev_t::DevNo {
+    // Fast path: immutable published snapshot.
+    let p = ANON_DEV_MAP.load(Ordering::Acquire);
+    if !p.is_null() {
+        // SAFETY: snapshots are immutable once published; the pointer is
+        // only ever replaced (never freed), so this reference stays valid.
+        if let Some(&d) = unsafe { (*p).0.get(&fs_id) } {
+            return d;
+        }
+    }
+    let _guard = ANON_DEV_WRITE.lock();
+    // Re-check under the write lock (another CPU may have just published).
+    let p = ANON_DEV_MAP.load(Ordering::Acquire);
+    if !p.is_null() {
+        // SAFETY: see above.
+        if let Some(&d) = unsafe { (*p).0.get(&fs_id) } {
+            return d;
+        }
+    }
+    let dev = crate::fs::dev_t::DevNo::new(0, ANON_DEV_NEXT.fetch_add(1, Ordering::Relaxed));
+    let mut next = alloc::collections::BTreeMap::new();
+    if !p.is_null() {
+        // SAFETY: see above; clone under the write lock.
+        next.clone_from(unsafe { &(*p).0 });
+    }
+    next.insert(fs_id, dev);
+    let fresh = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(AnonDevMap(next)));
+    ANON_DEV_MAP.store(fresh, Ordering::Release);
+    dev
+}
+
+/// stat(2) st_dev of a filesystem instance: the USERSPACE dev_t encoding
+/// (new_encode_dev layout — what struct stat carries and glibc
+/// major()/minor() decode). Non-zero, distinct per instance, identical
+/// for every inode of the instance (bind/move mounts included).
+pub fn stat_dev_user(fs_id: u64) -> u64 {
+    stat_dev_for_fs(fs_id).to_user_dev()
+}
+
 #[repr(C)]
 pub struct Inode {
     // ==================== Core Fields ====================

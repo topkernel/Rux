@@ -3613,6 +3613,10 @@ fn fill_statfs_for_inode(inode: &crate::fs::inode::Inode, buf: &mut Statfs) {
             // private_data (installed at iget; valid for the inode's life).
             let fs = unsafe { &*(p as *const crate::fs::ext4::Ext4FileSystem) };
             fill_ext4_statfs_live(fs, buf);
+            // f_fsid: the instance's device (Linux compute_fsid: fs without
+            // a uuid derive it from s_dev) — was the hardcoded EXT4 magic,
+            // so every ext4 instance answered the same fsid.
+            buf.f_fsid = [crate::fs::inode::stat_dev_user(inode.fs_id) as u32, 0];
             return;
         }
     }
@@ -3625,7 +3629,24 @@ fn fill_statfs_for_inode(inode: &crate::fs::inode::Inode, buf: &mut Statfs) {
         // come from meminfo, not statfs.
         fill_rootfs_statfs(buf);
         buf.f_type = crate::fs::tmpfs::TMPFS_MAGIC as u32 as u64;
-        buf.f_fsid = [crate::fs::tmpfs::TMPFS_MAGIC, 0];
+        buf.f_fsid = [crate::fs::inode::stat_dev_user(inode.fs_id) as u32, 0];
+        return;
+    }
+    if inode
+        .ops
+        .is_some_and(|o| core::ptr::eq(o as *const _, &crate::fs::procfs::PROCFS_INODE_OPS as *const _))
+    {
+        // procfs: f_type MUST be PROC_SUPER_MAGIC (0x9fa0) — systemd's
+        // proc_mounted() (statfs "/proc" + magic check) gates
+        // sd_id128_get_boot's graceful fallback: with the wrong magic
+        // and a missing /proc/sys/kernel/random/boot_id, id128 answers
+        // -ENOSYS and journald fails EVERY journal-file append with
+        // "Unexpected error while writing to journal file: Function not
+        // implemented" (ub2404, 4300+ drops/boot).
+        const PROC_SUPER_MAGIC: u64 = 0x9fa0;
+        fill_rootfs_statfs(buf);
+        buf.f_type = PROC_SUPER_MAGIC;
+        buf.f_fsid = [crate::fs::inode::stat_dev_user(inode.fs_id) as u32, 0];
         return;
     }
     if inode
@@ -3639,7 +3660,7 @@ fn fill_statfs_for_inode(inode: &crate::fs::inode::Inode, buf: &mut Statfs) {
         // 0x73636673 and logind degraded its cgroup accounting).
         fill_rootfs_statfs(buf);
         buf.f_type = 0x6367_7270; // CGROUP2_SUPER_MAGIC
-        buf.f_fsid = [0x6367_7270, 0];
+        buf.f_fsid = [crate::fs::inode::stat_dev_user(inode.fs_id) as u32, 0];
         return;
     }
     if inode
@@ -3654,11 +3675,12 @@ fn fill_statfs_for_inode(inode: &crate::fs::inode::Inode, buf: &mut Statfs) {
         const SELINUX_MAGIC: u64 = 0xf97c_ff8c;
         fill_rootfs_statfs(buf);
         buf.f_type = SELINUX_MAGIC;
-        buf.f_fsid = [SELINUX_MAGIC as u32, 0];
+        buf.f_fsid = [crate::fs::inode::stat_dev_user(inode.fs_id) as u32, 0];
         buf.f_flags = 0; // rw — verify_selinuxmnt rejects ST_RDONLY
         return;
     }
     fill_rootfs_statfs(buf);
+    buf.f_fsid = [crate::fs::inode::stat_dev_user(inode.fs_id) as u32, 0];
 }
 
 /// sys_statfs - Get filesystem statistics by path
@@ -3890,6 +3912,22 @@ pub fn sys_statx(args: SyscallArgs) -> i64 {
     // is set; 0 is always correct for "nothing special").
     stx.stx_attributes = 0;
     stx.stx_attributes_mask = 0;
+
+    // stx_dev / stx_rdev: Linux fills them unconditionally (part of
+    // STATX_BASIC_STATS; no mask bit — they are always present in the
+    // struct). Leaving them 0 made every statx consumer see st_dev 0:
+    // systemd/libmount's is-mounted check (st_dev vs the parent's) then
+    // reported every mountpoint as not-mounted (ub2404 dev-mqueue.mount
+    // chase). stat.st_dev carries the userspace dev_t encoding; statx
+    // wants the decoded major/minor (MAJOR/MINOR of s_dev).
+    {
+        let dev = crate::fs::dev_t::DevNo::from_user_dev(stat.st_dev);
+        stx.stx_dev_major = dev.major;
+        stx.stx_dev_minor = dev.minor;
+        let rdev = crate::fs::dev_t::DevNo::from_user_dev(stat.st_rdev);
+        stx.stx_rdev_major = rdev.major;
+        stx.stx_rdev_minor = rdev.minor;
+    }
 
     if requested & STATX_TYPE != 0 || requested & STATX_MODE != 0 {
         stx.stx_mode = stat.st_mode as u16;
