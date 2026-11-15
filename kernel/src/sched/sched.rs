@@ -1987,6 +1987,136 @@ pub fn free_task_slot(task_ptr: *mut Task) {
     if task_ptr.is_null() {
         return;
     }
+    // freed-task lane (2026-11-15, live capture in the dio_read storm):
+    // a CPU whose PER_CPU current slot still names this task keeps
+    // dereferencing — and MUTATING — the page after the free. Captured
+    // face: scheduler_tick resolved current from the stale slot, ran
+    // Task::rlimit() (a Spinlock INSIDE the Task page), whose bracket
+    // fetched +1/-1 on the painted ti_preempt_count
+    // (PREEMPT-UNDERFLOW count_was=0xc3c3c3c4 at spinlock.rs:758,
+    // FREED-TOUCH cpu-cur!0, chain scheduler_tick->Task::rlimit), and
+    // once the page is recycled the same stale slot books phantom
+    // counts onto the new tenant (the WAKE-HEAL was=1 class) and walks
+    // VMAs through freed address spaces (the do_page_fault NULL+8
+    // face). The reference's task_free rule: a task struct outlives
+    // every CPU that still names it (finish_task_switch drops the last
+    // ref; the free never races a stale current). on_cpu (cleared by
+    // __switch_to) is NOT sufficient — the R9 gate upstream proves the
+    // mark and the slot can diverge (lying slot). Gate the free on the
+    // scheduler's own truth: no PER_CPU current slot and no in-flight
+    // SWITCHING_OUT marker may name the task. Bounded, yielding (same
+    // discipline as free_dead_member's bounded spin batches — the exit
+    // tails this waits on make progress only if this CPU can schedule);
+    // past the deadline the page LEAKS loudly instead of dangling —
+    // one page per wedged CPU, never a use-after-free.
+    {
+        const FTS_SLOT_WAIT_JIFFIES: u64 = 300; // 3 s, R86/FDM budget
+        const FTS_SPIN_BATCH: u32 = 100_000;
+        let mut spins: u32 = 0;
+        let armed_at = crate::drivers::timer::get_jiffies();
+        let mut printed = false;
+        crate::arch::cpu::restore_irq(true);
+        loop {
+            let mut owner: usize = usize::MAX;
+            for c in 0..crate::config::MAX_CPUS {
+                if cpu_state(c).current == task_ptr {
+                    owner = c;
+                    break;
+                }
+            }
+            if owner == usize::MAX
+                && (0..crate::config::MAX_CPUS).all(|c| {
+                    SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire)
+                        != task_ptr as u64
+                })
+            {
+                break;
+            }
+            if !printed {
+                printed = true;
+                use crate::dfx::taskdump::putc_brief as putchar;
+                fn pdec_fts(mut v: u64) {
+                    use crate::dfx::taskdump::putc_brief as p;
+                    let mut buf = [0u8; 20];
+                    let mut n = 0;
+                    if v == 0 {
+                        p(b'0');
+                        return;
+                    }
+                    while v > 0 && n < buf.len() {
+                        buf[n] = b'0' + (v % 10) as u8;
+                        v /= 10;
+                        n += 1;
+                    }
+                    while n > 0 {
+                        n -= 1;
+                        p(buf[n]);
+                    }
+                }
+                const M: &[u8] = b"\nFTS-SLOT-WAIT pid=";
+                for &b in M {
+                    putchar(b);
+                }
+                pdec_fts(unsafe { (*task_ptr).pid() } as u64);
+                const M2: &[u8] = b" cpu=";
+                for &b in M2 {
+                    putchar(b);
+                }
+                if owner != usize::MAX {
+                    pdec_fts(owner as u64);
+                } else {
+                    const SW: &[u8] = b"switching-out";
+                    for &b in SW {
+                        putchar(b);
+                    }
+                }
+                putchar(b'\n');
+            }
+            if crate::drivers::timer::get_jiffies().wrapping_sub(armed_at)
+                >= FTS_SLOT_WAIT_JIFFIES
+            {
+                // Leak, don't dangle: the owning CPU is wedged with a
+                // stale slot. One page per such CPU; the alternative is
+                // every later dereference of the recycled page
+                // (phantom counts, wrong-task wakes, freed-mm walks).
+                use crate::dfx::taskdump::putc_brief as putchar;
+                const M: &[u8] = b"\nFTS-SLOT-LEAK (page withheld) pid=";
+                for &b in M {
+                    putchar(b);
+                }
+                let mut v = unsafe { (*task_ptr).pid() } as u64;
+                {
+                    let mut buf = [0u8; 10];
+                    let mut n = 0;
+                    if v == 0 {
+                        n = 1;
+                        buf[0] = b'0';
+                    }
+                    while v > 0 && n < buf.len() {
+                        buf[n] = b'0' + (v % 10) as u8;
+                        v /= 10;
+                        n += 1;
+                    }
+                    let mut i = n;
+                    while i > 0 {
+                        i -= 1;
+                        putchar(buf[i]);
+                    }
+                }
+                putchar(b'\n');
+                // Keep the pid-hash state consistent: the caller-side
+                // bookkeeping already ran; nothing else to do — the
+                // page simply never returns to the allocator.
+                return;
+            }
+            spins = spins.wrapping_add(1);
+            if spins % FTS_SPIN_BATCH == 0 {
+                crate::sched::schedule();
+            } else {
+                core::hint::spin_loop();
+            }
+        }
+    }
     // ORPHAN-MARK residue check (wake-fastrepro final-boss): a Task page
     // entering the free pool with a dirty ownership qword hands its
     // residue to whatever recycles the page (the constructors reset the
@@ -6845,6 +6975,20 @@ pub fn scheduler_tick() {
             core::sync::atomic::AtomicU64::new(0);
         if cpu_id < crate::config::MAX_CPUS {
             let cur = crate::sched::sched::cpu_state(cpu_id).current;
+            // freed-task lane: skip a lying slot — a freed/painted task
+            // must not feed the leak window (see the TICK-GHOST gate at
+            // this tick's tail for the capture story). One volatile pid
+            // read; poison fails the compare.
+            let cur = if !cur.is_null() && unsafe {
+                core::ptr::read_volatile(
+                    (cur as *const u8)
+                        .add(crate::process::task::task_offsets::TASK_PID) as *const u32,
+                ) == TASK_POISON
+            } {
+                core::ptr::null_mut()
+            } else {
+                cur
+            };
             if !cur.is_null() {
                 let pc =
                     unsafe { (*cur).preempt_count() };
@@ -7839,7 +7983,80 @@ pub fn scheduler_tick() {
         }
     }
 
-    let current = this_cpu().current;
+    // freed-task lane (2026-11-15, live capture): this slot-resolved
+    // `current` is the dereferencer that MUTATED a freed Task page in
+    // the dio_read storm — a lying slot (task freed after its on_cpu
+    // cleared, slot never re-published) fed Task::rlimit() a painted
+    // page; the lock bracket inside rlimit() fetched +1/-1 on the
+    // 0xc3c3c3c3 paint (PREEMPT-UNDERFLOW count_was=0xc3c3c3c4,
+    // FREED-TOUCH cpu-cur, chain scheduler_tick->Task::rlimit). Gate
+    // every use below on the poison: a DEADBEEF/painted pid or a
+    // dead state means the slot is stale — fall back to the hardware
+    // truth (tp) and skip the tick work for the ghost. One budgeted
+    // report per boot class; the free-side slot-quiescence gate in
+    // free_task_slot keeps this from ever firing on a healthy boot.
+    let mut current = this_cpu().current;
+    if !current.is_null() {
+        // SAFETY: read at compile-time Task offsets in the kernel
+        // linear map (same contract as the R127 screen / poison probe
+        // — cannot fault).
+        let ghost = unsafe {
+            let pid = core::ptr::read_volatile(
+                (current as *const u8)
+                    .add(crate::process::task::task_offsets::TASK_PID) as *const u32,
+            );
+            let state = core::ptr::read_volatile(
+                (current as *const u8)
+                    .add(crate::process::task::task_offsets::TASK_STATE) as *const u32,
+            );
+            pid == TASK_POISON || state == TASK_POISON
+        };
+        if ghost {
+            static GHOST_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            if GHOST_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+                use crate::dfx::taskdump::putc_brief as putchar;
+                const M: &[u8] = b"\nTICK-GHOST-CURRENT cpu=";
+                for &b in M {
+                    putchar(b);
+                }
+                let mut v = cpu_id as u64;
+                {
+                    let mut buf = [0u8; 10];
+                    let mut n = 0;
+                    if v == 0 {
+                        n = 1;
+                        buf[0] = b'0';
+                    }
+                    while v > 0 && n < buf.len() {
+                        buf[n] = b'0' + (v % 10) as u8;
+                        v /= 10;
+                        n += 1;
+                    }
+                    let mut i = n;
+                    while i > 0 {
+                        i -= 1;
+                        putchar(buf[i]);
+                    }
+                }
+                const M2: &[u8] = b" slot=0x";
+                for &b in M2 {
+                    putchar(b);
+                }
+                let mut a = current as usize as u64;
+                for sh in (0..16).rev() {
+                    putchar(match ((a >> (sh * 4)) & 0xF) as u8 {
+                        n if n < 10 => b'0' + n,
+                        n => b'a' + n - 10,
+                    });
+                }
+                putchar(b'\n');
+            }
+            // The hardware truth: tp still names the task this CPU
+            // actually executes; the tick's per-task work runs on that.
+            current = crate::arch::cpu::get_thread_id() as *mut Task;
+        }
+    }
     if current.is_null() {
         return;
     }
