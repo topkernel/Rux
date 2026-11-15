@@ -725,6 +725,36 @@ self.create_dynamic_file("cgroups", || {
             sysctl::generate_osrelease,
             self.alloc_ino(),
         )));
+        // /proc/sys/kernel/keys/* — key-retention quota knobs (LTP
+        // keyctl02 raises root_maxkeys before its add_key/revoke
+        // loop). Readable + writable; enforcement is a documented
+        // divergence (see ipc/keys.rs).
+        let keys = Arc::new(ProcFSNode::new_dir(b"keys".to_vec(), self.alloc_ino()));
+        kernel.add_child(keys.clone());
+        keys.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"root_maxkeys".to_vec(),
+            sysctl::generate_root_maxkeys,
+            sysctl::write_root_maxkeys,
+            self.alloc_ino(),
+        )));
+        keys.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"root_maxbytes".to_vec(),
+            sysctl::generate_root_maxbytes,
+            sysctl::write_root_maxbytes,
+            self.alloc_ino(),
+        )));
+        keys.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"maxkeys".to_vec(),
+            sysctl::generate_maxkeys,
+            sysctl::write_maxkeys,
+            self.alloc_ino(),
+        )));
+        keys.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"maxbytes".to_vec(),
+            sysctl::generate_maxbytes,
+            sysctl::write_maxbytes,
+            self.alloc_ino(),
+        )));
         kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
             b"threads-max".to_vec(),
             sysctl::generate_threads_max,

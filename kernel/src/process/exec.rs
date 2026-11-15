@@ -148,6 +148,11 @@ pub(crate) fn do_execve_elf(
         name[..len].copy_from_slice(&base.as_bytes()[..len]);
         // SAFETY: task_ptr is the current task, valid throughout execve.
         unsafe { (*task_ptr).set_comm(&name); }
+        // Reference exec_keys(): the thread keyring is cleared on exec
+        // (process and session keyrings persist). Nothing on the boot
+        // images sets a thread keyring yet, but keyctl(THREAD_KEYRING)
+        // create/inherit discipline lives here.
+        crate::ipc::keys::exec_clear_thread_keyring();
         // 125th waitid leg: SPAWN clock for com.*-named executables (the
         // OH bundle-name convention); dfx=schedtrace-gated (dfx/reaper.rs).
         if crate::dfx::reaper::on() {

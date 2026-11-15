@@ -731,3 +731,53 @@ pub fn write_perf_event_mlock_kb(input: &[u8]) -> i32 {
         _ => -(crate::errno::constants::EINVAL as i32),
     }
 }
+
+// ============================================================================
+// Key-retention quota knobs (/proc/sys/kernel/keys/*)
+//
+// LTP keyctl02 raises root_maxkeys before its add_key/revoke loop
+// (SAFE_FILE_SCANF + SAFE_FILE_PRINTF on the node). The quota is not
+// enforced (documented divergence in ipc/keys.rs), but the nodes exist,
+// read back their stored value and accept writes like the reference.
+// ============================================================================
+
+fn generate_key_quota(v: &core::sync::atomic::AtomicI32) -> Vec<u8> {
+    alloc::format!("{}\n", v.load(core::sync::atomic::Ordering::Relaxed)).into_bytes()
+}
+
+fn write_key_quota(v: &core::sync::atomic::AtomicI32, input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(n) if n <= i32::MAX as u64 => {
+            v.store(n as i32, core::sync::atomic::Ordering::Relaxed);
+            0
+        }
+        _ => -(crate::errno::constants::EINVAL as i32),
+    }
+}
+
+pub fn generate_root_maxkeys() -> Vec<u8> {
+    generate_key_quota(&crate::ipc::keys::ROOT_MAXKEYS)
+}
+pub fn write_root_maxkeys(input: &[u8]) -> i32 {
+    write_key_quota(&crate::ipc::keys::ROOT_MAXKEYS, input)
+}
+pub fn generate_root_maxbytes() -> Vec<u8> {
+    generate_key_quota(&crate::ipc::keys::ROOT_MAXBYTES)
+}
+pub fn write_root_maxbytes(input: &[u8]) -> i32 {
+    write_key_quota(&crate::ipc::keys::ROOT_MAXBYTES, input)
+}
+pub fn generate_maxkeys() -> Vec<u8> {
+    generate_key_quota(&crate::ipc::keys::MAXKEYS)
+}
+pub fn write_maxkeys(input: &[u8]) -> i32 {
+    write_key_quota(&crate::ipc::keys::MAXKEYS, input)
+}
+pub fn generate_maxbytes() -> Vec<u8> {
+    generate_key_quota(&crate::ipc::keys::MAXBYTES)
+}
+pub fn write_maxbytes(input: &[u8]) -> i32 {
+    write_key_quota(&crate::ipc::keys::MAXBYTES, input)
+}
+
+// ============================================================================

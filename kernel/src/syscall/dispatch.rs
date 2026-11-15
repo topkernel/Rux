@@ -667,6 +667,11 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         214 => memory::sys_brk(args),          // brk
         215 => memory::sys_munmap(args),       // munmap
         216 => memory::sys_mremap(args),       // mremap
+        // ==================== Key retention (asm-generic 217-219) ====================
+        // x86_64 natives 248/249/250 arrive translated in x86_compat.
+        217 => crate::ipc::keys::sys_add_key(args),     // add_key
+        218 => crate::ipc::keys::sys_request_key(args), // request_key
+        219 => crate::ipc::keys::sys_keyctl(args),      // keyctl
         222 => memory::sys_mmap(args),         // mmap
         223 => memory::sys_fadvise64(args),    // fadvise64
         224 => file::sys_swapon(args),         // swapon

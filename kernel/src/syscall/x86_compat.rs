@@ -285,6 +285,14 @@ pub fn translate(nr: u64, args: &SyscallArgs) -> Option<(u64, SyscallArgs)> {
         245 => Some((185, *args)), // mq_getsetattr
         246 => Some((104, *args)), // kexec_load
         247 => Some((95, *args)), // waitid
+        // Key-retention block: was missing → keyctl (250) surfaced as an
+        // unknown-syscall ENOSYS from every systemd-spawned service
+        // (KeyringMode=private joins a session keyring at spawn — 57
+        // lines/boot on ub2404), and add_key/request_key probes from
+        // libkeyutils/LTP TCONF'd on the ENOSYS.
+        248 => Some((217, *args)), // add_key
+        249 => Some((218, *args)), // request_key
+        250 => Some((219, *args)), // keyctl
         251 => Some((30, *args)), // ioprio_set
         252 => Some((31, *args)), // ioprio_get
         253 => Some((26, [0, 0, 0, 0, 0, 0])), // inotify_init = inotify_init1(0)
