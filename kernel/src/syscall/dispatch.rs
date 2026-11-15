@@ -329,6 +329,23 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             syscall_set_return_value(regs, result);
             return;
         }
+        37 => {
+            // alarm(seconds) — one-shot ITIMER_REAL, returns the previous
+            // remaining seconds (rounded up). No asm-generic number;
+            // untranslated, 37 fell through to generic 37 = linkat and
+            // every glibc alarm() caller parsed a linkat errno as the
+            // return value (LTP alarm02/03/05/06/07 family).
+            syscall_set_return_value(regs, time::sys_alarm(args));
+            return;
+        }
+        78 => {
+            // getdents(fd, buf, count) — legacy record layout (name at
+            // 18, d_type at 18+nlen+1). No asm-generic number (generic
+            // libcs use getdents64); untranslated, 78 fell through to
+            // generic 78 = readlinkat.
+            syscall_set_return_value(regs, file::sys_getdents(args));
+            return;
+        }
         34 => {
             // pause(): sleep until a signal; always -EINTR.
             syscall_set_return_value(regs, signal::sys_pause(args));
@@ -367,6 +384,22 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
                 misc::sys_epoll_create(args)
             };
             syscall_set_return_value(regs, result);
+            return;
+        }
+        235 => {
+            // utimes(path, timeval[2]) — microsecond utime(2), no
+            // asm-generic number. Untranslated, 235 fell through to
+            // generic 235 = mbind; glibc's utimes() on x86_64 issues
+            // the native number (LTP utimes01 on x86).
+            syscall_set_return_value(regs, file::sys_utimes(args));
+            return;
+        }
+        261 => {
+            // futimesat(dirfd, path, timeval[2]) — no asm-generic
+            // number. Untranslated, 261 fell through to generic 261 =
+            // prlimit64, whose EINVAL was read as the test outcome by
+            // LTP futimesat01 on every x86 run.
+            syscall_set_return_value(regs, file::sys_futimesat_native(args));
             return;
         }
         232 => {

@@ -1366,6 +1366,102 @@ pub fn sys_getdents64(args: SyscallArgs) -> i64 {
     }
 }
 
+/// sys_getdents — legacy getdents(2), x86_64 native NR 78 (no
+/// asm-generic number; dispatched from the x86_64 legacy arm).
+/// asm-generic libcs use getdents64 only, but glibc on x86_64 exposes
+/// the native number and pre-2.6-layout consumers still issue it.
+/// Untranslated, 78 fell through to the generic table where 78 is
+/// readlinkat. Entries come from the same readdir path as
+/// getdents64, repacked into struct linux_dirent:
+///   { d_ino u64; d_off s64; d_reclen u16; d_name[]; }
+/// with the name at offset 18, the NUL at 18+nlen and d_type at
+/// 18+nlen+1 (filldir's tail byte), reclen 8-aligned — the layout
+/// Linux emits for getdents since 2.6. The reclen is byte-identical
+/// to the dirent64 form (both ALIGN(name_payload+2, 8) after the
+/// fixed header), so a scratch buffer of `count` bytes cannot
+/// overflow the output. The file position advances inside
+/// file_getdents64, so pos/telldir semantics are shared with the
+/// getdents64 path.
+pub fn sys_getdents(args: SyscallArgs) -> i64 {
+    use crate::fs::vfs::file_getdents64;
+
+    let fd = args[0] as usize;
+    let dirp = args[1] as *mut u8;
+    let count = args[2] as usize;
+
+    if dirp.is_null() {
+        return -(errno::EFAULT as i64);
+    }
+    const MAX_GETDENTS_COUNT: usize = 4 * 1024 * 1024;
+    let count = if count > MAX_GETDENTS_COUNT { MAX_GETDENTS_COUNT } else { count };
+    if !crate::arch::uaccess::access_ok(dirp as usize, count) {
+        return -(errno::EFAULT as i64);
+    }
+    if count == 0 {
+        return -(errno::EINVAL as i64);
+    }
+
+    // Scratch read in dirent64 form; the legacy record for the same
+    // name is byte-identical in size (same ALIGN formula), so `count`
+    // bytes of scratch cannot overflow `count` bytes of output.
+    let mut scratch: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    if scratch.try_reserve_exact(count).is_err() {
+        return -(errno::ENOMEM as i64);
+    }
+    scratch.resize(count, 0);
+    let filled = match file_getdents64(fd, &mut scratch, count) {
+        Ok(n) => n,
+        // file_getdents64 returns ALREADY-NEGATIVE errnos.
+        Err(e) => return e as i64,
+    };
+
+    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    if out.try_reserve_exact(count).is_err() {
+        return -(errno::ENOMEM as i64);
+    }
+    out.resize(count, 0);
+
+    let mut src = 0usize;
+    let mut dst = 0usize;
+    while src + 19 <= filled {
+        let reclen64 = u16::from_le_bytes([scratch[src + 16], scratch[src + 17]]) as usize;
+        if reclen64 == 0 || src + reclen64 > filled {
+            break; // torn/corrupt tail record: serve what repacked cleanly
+        }
+        let name_region = &scratch[src + 19..src + reclen64];
+        let nlen = name_region
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(name_region.len());
+        let d_type = scratch[src + 18];
+        // Linux filldir(): reclen = ALIGN(offsetof(linux_dirent, d_name)
+        // + namlen + 2, sizeof(long)) — the +2 is the NUL and the
+        // d_type byte (filldir puts d_type at d_name+namlen+1).
+        let legacy_reclen = (18 + nlen + 2 + 7) & !7;
+        if dst + legacy_reclen > count {
+            break;
+        }
+        out[dst..dst + 8].copy_from_slice(&scratch[src..src + 8]); // d_ino
+        out[dst + 8..dst + 16].copy_from_slice(&scratch[src + 8..src + 16]); // d_off
+        out[dst + 16..dst + 18].copy_from_slice(&(legacy_reclen as u16).to_le_bytes());
+        out[dst + 18..dst + 18 + nlen].copy_from_slice(&name_region[..nlen]); // d_name
+        out[dst + 18 + nlen] = 0; // NUL terminator
+        out[dst + 18 + nlen + 1] = d_type; // d_type (filldir tail)
+        dst += legacy_reclen;
+        src += reclen64;
+    }
+
+    if dst == 0 {
+        return 0; // end of directory (or nothing repacked)
+    }
+    // SAFETY: dirp validated with access_ok(count) above; dst <= count.
+    let uncopied = unsafe { crate::arch::uaccess::copy_to_user(dirp, out.as_ptr(), dst) };
+    if uncopied != 0 {
+        return -(errno::EFAULT as i64);
+    }
+    dst as i64
+}
+
 /// datatap (el2/100 bundle-dir hunt, dt lane): one serial line per
 /// /data namespace mutation. The sc21 boot replaced or emptied the
 /// baked per-user-100 bundle dirs at runtime with no guest-side record
@@ -3197,6 +3293,93 @@ pub fn sys_utime(args: SyscallArgs) -> i64 {
 /// Current wall-clock time in whole seconds (for UTIME_NOW).
 fn current_time_secs() -> u64 {
     crate::drivers::rtc::wall_secs()
+}
+
+/// Parse a user timeval[2] — the utimes(2)/futimesat(2) ABI — into the
+/// (atime, mtime, explicit) triple consumed by vfs_utimensat_ex.
+/// Linux do_futimesat rules: NULL times = both stamps to now (with the
+/// "not explicit" owner-check semantics); tv_usec outside [0, 999999]
+/// is EINVAL; tv_sec passes through unvalidated (pre-epoch stamps are
+/// legal, same as utime(2)). The microsecond field is dropped — this
+/// kernel's setattr path is second-granular, the same granularity the
+/// utime/utimensat handlers already expose.
+fn parse_user_timeval(times_ptr: *const u8) -> Result<(Option<u64>, Option<u64>, bool), i64> {
+    if times_ptr.is_null() {
+        let now = current_time_secs();
+        return Ok((Some(now), Some(now), false));
+    }
+    if !crate::arch::uaccess::access_ok(times_ptr as usize, 32) {
+        return Err(-(errno::EFAULT as i64));
+    }
+    let mut b = [0u8; 32];
+    // SAFETY: times_ptr validated with access_ok(32); exception-table copy.
+    let uncopied = unsafe { crate::arch::uaccess::copy_from_user(b.as_mut_ptr(), times_ptr, 32) };
+    if uncopied > 0 {
+        return Err(-(errno::EFAULT as i64));
+    }
+    let rd = |i: usize| i64::from_le_bytes(b[i * 8..i * 8 + 8].try_into().unwrap());
+    let mut out = [None, None];
+    for i in 0..2 {
+        let (sec, usec) = (rd(i * 2), rd(i * 2 + 1));
+        if !(0..1_000_000).contains(&usec) {
+            return Err(-(errno::EINVAL as i64));
+        }
+        out[i] = Some(sec as u64);
+    }
+    Ok((out[0], out[1], true))
+}
+
+/// sys_utimes — legacy utimes(2), x86_64 native NR 235 (no asm-generic
+/// number; dispatched from the x86_64 legacy arm). Same shape as
+/// utime(2) but microsecond timevals. Untranslated, 235 fell through
+/// to the generic table where 235 is mbind — glibc's utimes() on
+/// x86_64 issues the native number, so every utimes() caller hit the
+/// mempolicy path (LTP utimes01 on x86 is this family).
+pub fn sys_utimes(args: SyscallArgs) -> i64 {
+    const AT_FDCWD: i32 = -100;
+    let pathname_ptr = args[0] as *const u8;
+    if pathname_ptr.is_null() {
+        return -(errno::EFAULT as i64);
+    }
+    let (atime, mtime, explicit) = match parse_user_timeval(args[1] as *const u8) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let full_path = match resolve_user_path(AT_FDCWD, pathname_ptr) {
+        Ok(p) => p,
+        Err(e) => return e as i64,
+    };
+    match crate::fs::vfs::vfs_utimensat_ex(&full_path, atime, mtime, explicit) {
+        Ok(()) => 0,
+        Err(e) => e as i64,
+    }
+}
+
+/// sys_futimesat — x86_64 native NR 261 (no asm-generic number;
+/// dispatched from the x86_64 legacy arm). timeval ABI like utimes(2),
+/// dirfd-relative path resolution like utimensat(2); a NULL pathname
+/// is EFAULT (futimesat has no fd-only form — that is futimens).
+/// Untranslated, 261 fell through to the generic table where 261 is
+/// prlimit64: LTP futimesat01 read prlimit64's EINVAL as the test
+/// outcome on every run.
+pub fn sys_futimesat_native(args: SyscallArgs) -> i64 {
+    let dirfd = args[0] as i32;
+    let pathname_ptr = args[1] as *const u8;
+    if pathname_ptr.is_null() {
+        return -(errno::EFAULT as i64);
+    }
+    let (atime, mtime, explicit) = match parse_user_timeval(args[2] as *const u8) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let full_path = match resolve_user_path(dirfd, pathname_ptr) {
+        Ok(p) => p,
+        Err(e) => return e as i64,
+    };
+    match crate::fs::vfs::vfs_utimensat_ex(&full_path, atime, mtime, explicit) {
+        Ok(()) => 0,
+        Err(e) => e as i64,
+    }
 }
 
 /// Read a null-terminated path string from user space into a kernel buffer.
