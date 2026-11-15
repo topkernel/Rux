@@ -2294,6 +2294,7 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
             if core::ptr::eq(ipipe.unwrap() as *const _, opipe.unwrap() as *const _) {
                 return -errno::EINVAL as i64; // splicing to self
             }
+            let in_pipe = ipipe.unwrap();
             let mut total = 0usize;
             while total < len {
                 let chunk = core::cmp::min(len - total, 4096);
@@ -2320,11 +2321,19 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
                     w += r as usize;
                 }
                 total += n as usize;
+                // Linux splice_pipe_to_pipe moves whatever the input pipe
+                // holds and RETURNS once it is momentarily empty — it never
+                // waits for the producer to refill toward the full len.
+                // Blocking here hangs a splice whose len exceeds the pipe
+                // content with the writer fd still open.
+                if in_pipe.fill_bytes() == 0 {
+                    break;
+                }
             }
             return writeback_and_return(off_in, in_off, off_out, out_off, total as i64);
         }
 
-        if let Some(_pipe) = ipipe {
+        if let Some(in_pipe) = ipipe {
             // pipe → file (Linux ipipe branch).
             if off_in != 0 {
                 return -errno::ESPIPE as i64;
@@ -2369,6 +2378,15 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
                     written += w as usize;
                 }
                 total += written;
+                // Linux __splice_from_pipe returns num_spliced as soon as
+                // the pipe is momentarily empty (empty + num_spliced>0 →
+                // return); it does NOT sleep to fill the caller's len.
+                // Without this check the next read_slice blocks on the
+                // open-but-empty pipe forever (splice06 case 2: 4 bytes
+                // in the pipe, len=100, writer still open).
+                if in_pipe.fill_bytes() == 0 {
+                    break;
+                }
             }
             return writeback_and_return(
                 off_in, in_off, off_out,
