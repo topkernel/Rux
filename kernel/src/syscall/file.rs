@@ -2557,6 +2557,16 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
         return e as i64;
     }
 
+    // fd-target canonicalization (see canonical_mount_path): mount at
+    // the RESOLVED mountpoint, never at the literal /proc/self/fd/N
+    // string. systemd's mount-namespace builder issues
+    // mount(..., "/proc/self/fd/N", ...) for every namespace mount —
+    // the tmpfs used to attach at a phantom dentry chain, the follow-up
+    // MS_MOVE EINVAL'd ("Moving mount ... Invalid argument") and every
+    // namespaced service died 226/NAMESPACE (serial-dbg).
+    let target_owned = canonical_mount_path(target, target);
+    let target = target_owned.as_str();
+
     // MS_REMOUNT: update the flags of the mount already attached at `target`
     // instead of mounting a fresh instance. LTP's needs_rofs setup does
     // mount(NULL, mntpoint, "tmpfs", 0), creates files, then
@@ -2604,6 +2614,9 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
             return -(errno::EINVAL as i64);
         }
         let source_abs = crate::fs::path::path_normalize(&source_owned);
+        // fd-target/symlink canonicalization on the SOURCE side too
+        // (same discipline as the target above).
+        let source_abs = canonical_mount_path(&source_abs, &source_abs);
         // lb-lane hunt (switch_root): every MS_MOVE and its result on
         // serial — the OH switch_root loop's successes are LOGV-silent
         // userspace-side, and this branch returns before the generic
@@ -2895,6 +2908,15 @@ pub fn sys_umount(args: SyscallArgs) -> i64 {
     // made vfs_umount's parent/name split fail EINVAL (sc23 umountfail
     // trace), leaving init wedged in a half-prepared sandbox.
     let target = crate::fs::path::path_normalize(&target_owned);
+    // fd-target canonicalization: umount("/proc/self/fd/N") and symlinked
+    // targets detach the RESOLVED mountpoint (user_path_at semantics —
+    // the mounts systemd attached through fd paths must come OFF the
+    // same way). UMOUNT_NOFOLLOW keeps the literal string, like Linux.
+    let target = if flags & UMOUNT_NOFOLLOW == 0 {
+        canonical_mount_path(&target, &target)
+    } else {
+        target
+    };
     let target = target.as_str();
 
     // U1c: drop the mount row from the CALLER's mount namespace (the
@@ -6577,37 +6599,746 @@ pub fn sys_pwritev2(args: SyscallArgs) -> i64 {
 }
 
 // ============================================================================
-// NR 428-433: Filesystem mounting/operations
+// NR 428-433: the new mount API (fs_context + detached mounts)
 // ============================================================================
+//
+// The keyctl model applied to mounting: reference-faithful where callers
+// look (systemd 255 + util-linux mount(8) new-API paths, LTP
+// fsopen/fsconfig/move_mount/mount_setattr suites), no stub errno lies.
+// The fs_context state machine and the detached-mount plumbing live in
+// fs/fsctx.rs; these are the syscall faces.
 
-/// sys_open_tree - Open a directory tree (NR 428)
-pub fn sys_open_tree(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
+use crate::fs::fsctx as fapi;
+
+/// sys_open_tree - Open a directory tree (NR 428). Without
+/// OPEN_TREE_CLONE the fd is an O_PATH-style tree descriptor; with CLONE
+/// it is a detached mount fd sharing the governing mount's superblock
+/// (clone_mnt), submount clones recorded when AT_RECURSIVE.
+pub fn sys_open_tree(args: SyscallArgs) -> i64 {
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    const AT_NO_AUTOMOUNT: u64 = 0x800;
+    const AT_EMPTY_PATH: u64 = 0x1000;
+    const AT_RECURSIVE: u64 = 0x8000;
+    let dfd = args[0] as i32;
+    let flags = args[2];
+
+    let known = fapi::OPEN_TREE_CLONE
+        | fapi::OPEN_TREE_CLOEXEC
+        | AT_SYMLINK_NOFOLLOW
+        | AT_NO_AUTOMOUNT
+        | AT_EMPTY_PATH
+        | AT_RECURSIVE;
+    if flags & !known != 0 {
+        return -(errno::EINVAL as i64);
+    }
+
+    let mut pbuf = [0u8; PATH_MAX];
+    let path: &str = match read_user_path(args[1] as *const u8, &mut pbuf) {
+        Ok(s) => s,
+        Err(e) => return e as i64,
+    };
+    // user_path_at_empty: "" is only legal with AT_EMPTY_PATH.
+    if path.is_empty() {
+        if flags & AT_EMPTY_PATH == 0 {
+            return -(errno::ENOENT as i64);
+        }
+    }
+
+    // Resolve the tree dentry.
+    let dentry = if path.is_empty() {
+        match unsafe { crate::fs::get_file_fd(dfd as usize) } {
+            Some(f) => {
+                if let Some(mfd) = fapi::mountfd_of(&f) {
+                    Some(mfd.mnt.root.clone())
+                } else {
+                    // SAFETY: dentry written once at open time; read-only.
+                    unsafe { (*f.dentry.get()).clone() }
+                }
+            }
+            None => return -(errno::EBADF as i64),
+        }
+    } else {
+        match resolve_user_path(dfd, args[1] as *const u8) {
+            Ok(abs) => {
+                let lkflags = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+                    crate::fs::vfs::LOOKUP_NOFOLLOW
+                } else {
+                    0
+                };
+                match crate::fs::vfs::path_lookup(&abs, lkflags) {
+                    Ok(vp) => vp.dentry,
+                    Err(e) => return e as i64,
+                }
+            }
+            Err(e) => return e as i64,
+        }
+    };
+    let Some(dentry) = dentry else {
+        return -(errno::ENOENT as i64);
+    };
+
+    if flags & fapi::OPEN_TREE_CLONE == 0 {
+        // O_PATH-style descriptor: names the tree, no I/O. move_mount
+        // and mount_setattr accept it through treepath_dentry().
+        let file = alloc::sync::Arc::new(crate::fs::File::new(
+            crate::fs::file::FileFlags::new(crate::fs::file::FileFlags::O_PATH),
+        ));
+        file.set_ops(&fapi::TREEPATH_OPS);
+        // SAFETY: fresh file, single-threaded setup before install.
+        unsafe {
+            *file.dentry.get() = Some(dentry.clone());
+            *file.inode.get() = dentry.get_inode();
+        }
+        return match fapi::install_fd_with(file, flags & fapi::OPEN_TREE_CLOEXEC != 0) {
+            Ok(fd) => fd as i64,
+            Err(e) => e as i64,
+        };
+    }
+
+    // OPEN_TREE_CLONE: a detached copy of the governing mount.
+    if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
+        return -(errno::EPERM as i64);
+    }
+    let (root_inode, mnt_flags, fs_type, source, anc) =
+        match crate::fs::vfs::vfs_governing_mount_of(&dentry) {
+            Some(m) => {
+                let anc = m
+                    .root
+                    .get_mountpoint_back()
+                    .unwrap_or_else(|| dentry.clone());
+                let inode = match m.root.get_inode() {
+                    Some(i) => i,
+                    None => return -(errno::EINVAL as i64),
+                };
+                // The /proc/mounts row (device/type) of the source mount.
+                let (dev, ty) = crate::fs::vfs::vfs_mount_registry_row(&anc.build_path())
+                    .unwrap_or_else(|| (alloc::string::String::from("none"), alloc::string::String::from("none")));
+                (inode, *m.flags.lock(), ty, dev, anc)
+            }
+            None => {
+                // The root filesystem (no VfsMountInternal covers it —
+                // "/" is the systemd mount-namespace case). Clone the
+                // dentry's own tree: the detached mount shares its inode
+                // (clone_mnt of the root mount).
+                let inode = match dentry.get_inode() {
+                    Some(i) => i,
+                    None => return -(errno::EINVAL as i64),
+                };
+                (
+                    inode,
+                    crate::fs::mount::MntFlags::new(0),
+                    alloc::string::String::from("rootfs"),
+                    alloc::string::String::from("rootfs"),
+                    dentry.clone(),
+                )
+            }
+        };
+
+    // AT_RECURSIVE: record the submount clones now, materialize them
+    // inside the root when move_mount attaches (MountFd::submounts).
+    let probe_root = alloc::sync::Arc::new(crate::fs::dentry::Dentry::new(
+        alloc::string::String::from("/"),
+    ));
+    let submounts = if flags & AT_RECURSIVE != 0 {
+        crate::fs::vfs::vfs_collect_submounts(&anc, &probe_root)
+    } else {
+        alloc::vec::Vec::new()
+    };
+
+    let file = fapi::make_detached_mount(root_inode, mnt_flags, &fs_type, &source, submounts);
+    match fapi::install_fd_with(file, flags & fapi::OPEN_TREE_CLOEXEC != 0) {
+        Ok(fd) => fd as i64,
+        Err(e) => e as i64,
+    }
 }
 
-/// sys_move_mount - Move a mount (NR 429)
-pub fn sys_move_mount(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
+/// sys_move_mount - Move/attach a mount (NR 429). From-side: a detached
+/// mount fd (fsmount/open_tree-CLONE product, ""+MOVE_MOUNT_F_EMPTY_PATH
+/// — the systemd/util-linux shape) or a path whose covering mount
+/// detaches first (MS_MOVE semantics). To-side: a path, or a dir fd
+/// with ""+MOVE_MOUNT_T_EMPTY_PATH.
+pub fn sys_move_mount(args: SyscallArgs) -> i64 {
+    let from_dfd = args[0] as i32;
+    let to_dfd = args[2] as i32;
+    let flags = args[4];
+
+    if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
+        return -(errno::EPERM as i64);
+    }
+    if flags & !fapi::MOVE_MOUNT_KNOWN != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    // MOVE_MOUNT_BENEATH (stack beneath the target) is not modelled.
+    if flags & fapi::MOVE_MOUNT_BENEATH != 0 {
+        return -(errno::EINVAL as i64);
+    }
+
+    // ---- FROM side ----
+    let mut fbuf = [0u8; PATH_MAX];
+    let from_path: Option<&str> = match read_user_path(args[1] as *const u8, &mut fbuf) {
+        Ok(s) => Some(s),
+        Err(e) => return e as i64,
+    };
+    let from_empty = from_path.map(|s| s.is_empty()).unwrap_or(false);
+
+    // (mnt, was_attached, registry source/type when known)
+    let mut from_mfd: Option<alloc::sync::Arc<crate::fs::File>> = None;
+    let (mnt, was_attached): (alloc::sync::Arc<crate::fs::dentry::VfsMountInternal>, bool) =
+        if from_empty {
+            // user_path_at_empty: "" consults the fd ONLY with
+            // MOVE_MOUNT_F_EMPTY_PATH; the flag is ignored for real
+            // paths (a non-empty path always wins).
+            if flags & fapi::MOVE_MOUNT_F_EMPTY_PATH == 0 {
+                return -(errno::ENOENT as i64);
+            }
+            match unsafe { crate::fs::get_file_fd(from_dfd as usize) } {
+                Some(f) => {
+                    if let Some(mfd) = fapi::mountfd_of(&f) {
+                        let was = mfd.attached;
+                        from_mfd = Some(f);
+                        (mfd.mnt.clone(), was)
+                    } else if let Some(d) = fapi::treepath_dentry(&f) {
+                        // O_PATH-style tree fd: move the covering mount
+                        // of that tree (attached).
+                        match crate::fs::vfs::vfs_governing_mount_of(&d) {
+                            Some(m) => (m, true),
+                            None => return -(errno::EINVAL as i64),
+                        }
+                    } else {
+                        return -(errno::EINVAL as i64);
+                    }
+                }
+                None => return -(errno::EBADF as i64),
+            }
+        } else {
+            let s = from_path.unwrap();
+            match resolve_user_path(from_dfd, args[1] as *const u8) {
+                Ok(abs) => {
+                    // The user string may itself be a magic link path
+                    // (/proc/self/fd/N): canonicalize to the resolved
+                    // dentry's path before looking the mount up.
+                    let abs = canonical_mount_path(&abs, s);
+                    match crate::fs::vfs::path_lookup(&abs, 0) {
+                        Ok(vp) => match vp.dentry {
+                            Some(d) => match crate::fs::vfs::vfs_governing_mount_of(&d) {
+                                Some(m) => (m, true),
+                                None => return -(errno::EINVAL as i64),
+                            },
+                            None => return -(errno::EINVAL as i64),
+                        },
+                        Err(e) => return e as i64,
+                    }
+                }
+                Err(e) => return e as i64,
+            }
+        };
+
+    // Registry key of the OLD mountpoint (row relocation), captured
+    // before the detach clears the back-reference.
+    let old_mp: Option<alloc::string::String> = if was_attached {
+        mnt.root.get_mountpoint_back().map(|mp| mp.build_path())
+    } else {
+        None
+    };
+    if was_attached {
+        match crate::fs::vfs::vfs_detach_mount(&mnt) {
+            Ok(()) => {}
+            Err(e) => return e as i64,
+        }
+    }
+
+    // ---- TO side ----
+    let mut tbuf = [0u8; PATH_MAX];
+    let to_path: Option<&str> = match read_user_path(args[3] as *const u8, &mut tbuf) {
+        Ok(s) => Some(s),
+        Err(e) => return e as i64,
+    };
+    let to_empty = to_path.map(|s| s.is_empty()).unwrap_or(false);
+    let target: alloc::string::String = if to_empty {
+        // Same user_path_at_empty discipline as the from-side: the fd
+        // answers only for the EMPTY string with T_EMPTY_PATH set.
+        if flags & fapi::MOVE_MOUNT_T_EMPTY_PATH == 0 {
+            return -(errno::ENOENT as i64);
+        }
+        match unsafe { crate::fs::get_file_fd(to_dfd as usize) } {
+            Some(f) => {
+                if let Some(mfd) = fapi::mountfd_of(&f) {
+                    // A mount fd as target: attach onto ITS mountpoint
+                    // (Linux takes the fd's path as the mountpoint).
+                    mfd.mnt
+                        .root
+                        .get_mountpoint_back()
+                        .map(|mp| mp.build_path())
+                        .unwrap_or_else(|| alloc::string::String::from("/"))
+                } else {
+                    // SAFETY: dentry written once at open time; read-only.
+                    let d = unsafe { (*f.dentry.get()).clone() };
+                    match d {
+                        Some(d) => d.build_path(),
+                        None => return -(errno::EBADF as i64),
+                    }
+                }
+            }
+            None => return -(errno::EBADF as i64),
+        }
+    } else {
+        let s = to_path.unwrap();
+        match resolve_user_path(to_dfd, args[3] as *const u8) {
+            Ok(abs) => canonical_mount_path(&abs, s),
+            Err(e) => return e as i64,
+        }
+    };
+
+    // ---- attach ----
+    match crate::fs::vfs::vfs_attach_mount_at(&mnt, &target) {
+        Ok(_mountpoint) => {
+            // Mark the mount fd attached (its close must not own the
+            // mount anymore).
+            if let Some(f) = from_mfd.as_ref() {
+                if let Some(mfd) = fapi::mountfd_of(f) {
+                    mfd.attached = true;
+                }
+            }
+            // /proc/mounts row: relocate the old row when there was one,
+            // else register from the MountFd's bookkeeping.
+            let readonly = mnt.flags.lock().is_readonly();
+            let (device, fs_type) = match old_mp
+                .as_ref()
+                .and_then(|p| crate::fs::vfs::vfs_mount_registry_row(p))
+            {
+                Some((dev, ty)) => (dev, ty),
+                None => match from_mfd.as_ref().and_then(|f| fapi::mountfd_of(f)) {
+                    Some(mfd) => (mfd.source.clone(), mfd.fs_type.clone()),
+                    None => (alloc::string::String::from("none"), alloc::string::String::from("none")),
+                },
+            };
+            // Drop a stale row at the OLD mountpoint (the mount moved).
+            if let Some(old) = old_mp.as_ref() {
+                if old != &target {
+                    crate::process::ns::ns_unregister_mount(old);
+                }
+            }
+            crate::fs::mount::register_mount(
+                &device,
+                &target,
+                &fs_type,
+                if readonly { "ro" } else { "rw" },
+            );
+            // open_tree(AT_RECURSIVE) clones: materialize inside the
+            // now-attached root.
+            let submounts = from_mfd
+                .as_ref()
+                .and_then(|f| fapi::mountfd_of(f))
+                .map(|mfd| core::mem::take(&mut mfd.submounts))
+                .unwrap_or_default();
+            if !submounts.is_empty() {
+                crate::fs::vfs::vfs_clone_submounts(&mnt.root, &submounts);
+            }
+            0
+        }
+        Err(e) => e as i64,
+    }
 }
 
-/// sys_fsopen - Open a filesystem (NR 430)
-pub fn sys_fsopen(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
+/// sys_fsopen - Open a filesystem (NR 430). Allocates an fs_context fd;
+/// unknown types are ENODEV (get_fs_type), flags beyond FSOPEN_CLOEXEC
+/// EINVAL. No capability check (the reference has none — unprivileged
+/// processes may configure contexts; fsmount/move_mount gate).
+pub fn sys_fsopen(args: SyscallArgs) -> i64 {
+    if args[1] & !fapi::FSOPEN_CLOEXEC != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    let mut buf = [0u8; 64];
+    let fs_type: &str = match read_user_str(args[0] as *const u8, &mut buf) {
+        Ok(s) => s,
+        Err(e) => return e as i64,
+    };
+    if !fapi::fs_type_known(fs_type) {
+        return -(errno::ENODEV as i64);
+    }
+    let fc = alloc::boxed::Box::new(fapi::FsContext::new(fs_type));
+    let file = alloc::sync::Arc::new(crate::fs::File::new(
+        crate::fs::file::FileFlags::new(crate::fs::file::FileFlags::O_PATH),
+    ));
+    file.set_ops(&fapi::FSCTX_OPS);
+    // SAFETY: single-owner handoff into the fd's private_data slot.
+    unsafe {
+        *file.private_data.get() = Some(alloc::boxed::Box::into_raw(fc) as *mut u8);
+    }
+    match fapi::install_fd_with(file, args[1] & fapi::FSOPEN_CLOEXEC != 0) {
+        Ok(fd) => fd as i64,
+        Err(e) => e as i64,
+    }
 }
 
-/// sys_fsconfig - Configure a filesystem context (NR 431)
-pub fn sys_fsconfig(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
+/// sys_fsconfig - Configure a filesystem context (NR 431). Parameter
+/// recording before FSCONFIG_CMD_CREATE; unknown keys on converted
+/// types are EINVAL (systemd's mount_option_supported probe); params
+/// after CREATE are EBUSY (vfs_parse_fs_param's phase check).
+pub fn sys_fsconfig(args: SyscallArgs) -> i64 {
+    let fd = args[0] as usize;
+    let cmd = args[1];
+
+    let file = match unsafe { crate::fs::get_file_fd(fd) } {
+        Some(f) => f,
+        None => return -(errno::EBADF as i64),
+    };
+    let fc = match fapi::fsctx_of_mut(&file) {
+        Some(fc) => fc,
+        None => return -(errno::EINVAL as i64),
+    };
+
+    let mut kbuf = [0u8; 256];
+    let mut read_key = |ptr: u64| -> Result<alloc::string::String, i64> {
+        if ptr == 0 {
+            return Err(-(errno::EFAULT as i64));
+        }
+        match read_user_str(ptr as *const u8, &mut kbuf) {
+            Ok(s) => Ok(alloc::string::String::from(s)),
+            Err(e) => Err(e as i64),
+        }
+    };
+
+    match cmd {
+        fapi::FSCONFIG_SET_FLAG | fapi::FSCONFIG_SET_STRING => {
+            let key = match read_key(args[2]) {
+                Ok(k) => k,
+                Err(e) => return e,
+            };
+            if key.is_empty() {
+                return -(errno::EINVAL as i64);
+            }
+            let value: Option<alloc::string::String> = if cmd == fapi::FSCONFIG_SET_STRING {
+                let mut vbuf = [0u8; 256];
+                match read_user_str(args[3] as *const u8, &mut vbuf) {
+                    Ok(v) => {
+                        // An empty value demotes to flag semantics
+                        // (sys_fsconfig's strndup + size==0 check).
+                        if v.is_empty() {
+                            None
+                        } else {
+                            Some(alloc::string::String::from(v))
+                        }
+                    }
+                    Err(e) => return e as i64,
+                }
+            } else {
+                None
+            };
+            if fc.root.is_some() && !fc.reconfigure {
+                return -(errno::EBUSY as i64);
+            }
+            if !fapi::param_key_known(&fc.fs_type, &key) {
+                return -(errno::EINVAL as i64);
+            }
+            match key.as_str() {
+                "source" => fc.source = value.clone(),
+                "ro" => {
+                    if value.is_none() {
+                        fc.sb_readonly = true;
+                    }
+                }
+                "rw" => {
+                    if value.is_none() {
+                        fc.sb_readonly = false;
+                    }
+                }
+                _ => {}
+            }
+            // Monolithic data accumulation (tmpfs size=/mode=, devpts
+            // gid=/mode= — create_mount_instance parses this string).
+            match key.as_str() {
+                "source" | "ro" | "rw" => {}
+                _ => {
+                    if !fc.legacy_data.is_empty() {
+                        fc.legacy_data.push(',');
+                    }
+                    fc.legacy_data.push_str(&key);
+                    if let Some(v) = value.as_ref() {
+                        fc.legacy_data.push('=');
+                        fc.legacy_data.push_str(v);
+                    }
+                }
+            }
+            fc.params.push((key, value));
+            0
+        }
+        fapi::FSCONFIG_SET_BINARY => {
+            let key = match read_key(args[2]) {
+                Ok(k) => k,
+                Err(e) => return e,
+            };
+            if args[3] == 0 {
+                return -(errno::EFAULT as i64);
+            }
+            if !crate::arch::uaccess::access_ok(args[3] as usize, 1) {
+                return -(errno::EFAULT as i64);
+            }
+            if args[4] > 4096 {
+                return -(errno::EINVAL as i64);
+            }
+            if fc.root.is_some() && !fc.reconfigure {
+                return -(errno::EBUSY as i64);
+            }
+            if !fapi::param_key_known(&fc.fs_type, &key) {
+                return -(errno::EINVAL as i64);
+            }
+            fc.params
+                .push((key, Some(alloc::format!("<binary:{}>", args[4]))));
+            0
+        }
+        fapi::FSCONFIG_SET_PATH | fapi::FSCONFIG_SET_PATH_EMPTY => {
+            let key = match read_key(args[2]) {
+                Ok(k) => k,
+                Err(e) => return e,
+            };
+            let mut vbuf = [0u8; PATH_MAX];
+            let value: alloc::string::String = match read_user_path(args[3] as *const u8, &mut vbuf) {
+                Ok(v) => alloc::string::String::from(v),
+                Err(e) => return e as i64,
+            };
+            if fc.root.is_some() && !fc.reconfigure {
+                return -(errno::EBUSY as i64);
+            }
+            if !fapi::param_key_known(&fc.fs_type, &key) {
+                return -(errno::EINVAL as i64);
+            }
+            if key == "source" {
+                fc.source = Some(value.clone());
+            }
+            fc.params.push((key, Some(value)));
+            0
+        }
+        fapi::FSCONFIG_SET_FD => {
+            let key = match read_key(args[2]) {
+                Ok(k) => k,
+                Err(e) => return e,
+            };
+            if fc.root.is_some() && !fc.reconfigure {
+                return -(errno::EBUSY as i64);
+            }
+            // Unknown option → EINVAL: systemd's
+            // mount_option_supported() decides per-option support here
+            // (fs_parse_param's fs_param_lookup miss).
+            if !fapi::param_key_known(&fc.fs_type, &key) {
+                return -(errno::EINVAL as i64);
+            }
+            // aux carries the descriptor: EBADF when it names none.
+            if unsafe { crate::fs::get_file_fd(args[4] as usize) }.is_none() {
+                return -(errno::EBADF as i64);
+            }
+            fc.params.push((key, None));
+            0
+        }
+        fapi::FSCONFIG_CMD_CREATE | fapi::FSCONFIG_CMD_CREATE_API => {
+            if fc.reconfigure {
+                return -(errno::EBUSY as i64);
+            }
+            if fc.root.is_some() {
+                return -(errno::EBUSY as i64);
+            }
+            let src = fc.source.clone();
+            let data = fc.data_string();
+            match fapi::create_fs_root(&fc.fs_type, src.as_deref(), data.as_deref(), fc.sb_readonly)
+            {
+                Ok((root, effective_ro)) => {
+                    fc.root = Some(root);
+                    fc.effective_ro = effective_ro;
+                    0
+                }
+                Err(e) => e as i64,
+            }
+        }
+        fapi::FSCONFIG_CMD_RECONFIGURE | fapi::FSCONFIG_CMD_RECONFIGURE_API => {
+            if fc.root.is_none() {
+                return -(errno::EINVAL as i64);
+            }
+            // Commit recorded sb_flags onto the live mount (ro/rw is the
+            // reconfigure callers' observable — util-linux mount -o
+            // remount via fspick). Parameters were accepted-and-ignored;
+            // the mount stays otherwise as-is.
+            if let Some(m) = fc.target_mount.as_ref() {
+                let cur = *m.flags.lock();
+                let bits = if fc.sb_readonly {
+                    cur.bits() | crate::fs::mount::MntFlags::MNT_READONLY
+                } else {
+                    cur.bits() & !crate::fs::mount::MntFlags::MNT_READONLY
+                };
+                *m.flags.lock() = crate::fs::mount::MntFlags::new(bits);
+            }
+            0
+        }
+        _ => -(errno::EOPNOTSUPP as i64),
+    }
 }
 
-/// sys_fsmount - Create a mount (NR 432)
-pub fn sys_fsmount(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
+/// sys_fsmount - Create a mount from a created fs_context (NR 432).
+/// The product is a DETACHED mount fd; move_mount attaches it.
+pub fn sys_fsmount(args: SyscallArgs) -> i64 {
+    if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
+        return -(errno::EPERM as i64);
+    }
+    if args[1] & !fapi::FSMOUNT_CLOEXEC != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    let file = match unsafe { crate::fs::get_file_fd(args[0] as usize) } {
+        Some(f) => f,
+        None => return -(errno::EBADF as i64),
+    };
+    let fc = match fapi::fsctx_of(&file) {
+        Some(fc) => fc,
+        None => return -(errno::EINVAL as i64),
+    };
+    if fc.reconfigure {
+        // A reconfigure-purpose context cannot produce a mount.
+        return -(errno::EINVAL as i64);
+    }
+    let Some(root) = fc.root.clone() else {
+        // FSCONFIG_CMD_CREATE never ran.
+        return -(errno::EINVAL as i64);
+    };
+    if let Err(e) = fapi::validate_mount_attr(args[2]) {
+        return e as i64;
+    }
+    let mut mnt_flags = fapi::attr_flags_to_mnt(args[2]);
+    if fc.effective_ro {
+        mnt_flags = crate::fs::mount::MntFlags::new(
+            mnt_flags.bits() | crate::fs::mount::MntFlags::MNT_READONLY,
+        );
+    }
+    let source = match fc.source.as_ref() {
+        Some(s) => s.clone(),
+        None => fc.fs_type.clone(),
+    };
+    let mfile = fapi::make_detached_mount(
+        root,
+        mnt_flags,
+        &fc.fs_type,
+        &source,
+        alloc::vec::Vec::new(),
+    );
+    match fapi::install_fd_with(mfile, args[1] & fapi::FSMOUNT_CLOEXEC != 0) {
+        Ok(fd) => fd as i64,
+        Err(e) => e as i64,
+    }
 }
 
-/// sys_fspick - Pick a filesystem (NR 433)
-pub fn sys_fspick(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
+/// sys_fspick - Pick an existing filesystem for reconfiguration (NR
+/// 433). The context's CMD_RECONFIGURE commits sb_flags onto the live
+/// mount; parameters are accepted-and-ignored (the mount is the state).
+pub fn sys_fspick(args: SyscallArgs) -> i64 {
+    const FSPICK_CLOEXEC: u64 = 0x1;
+    const FSPICK_SYMLINK_NOFOLLOW: u64 = 0x2;
+    const FSPICK_NO_AUTOMOUNT: u64 = 0x4;
+    const FSPICK_EMPTY_PATH: u64 = 0x8;
+    let dfd = args[0] as i32;
+    let flags = args[2];
+
+    if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
+        return -(errno::EPERM as i64);
+    }
+    if flags & !(FSPICK_CLOEXEC | FSPICK_SYMLINK_NOFOLLOW | FSPICK_NO_AUTOMOUNT | FSPICK_EMPTY_PATH)
+        != 0
+    {
+        return -(errno::EINVAL as i64);
+    }
+
+    let mut pbuf = [0u8; PATH_MAX];
+    let path: &str = match read_user_path(args[1] as *const u8, &mut pbuf) {
+        Ok(s) => s,
+        Err(e) => return e as i64,
+    };
+    let dentry = if path.is_empty() {
+        if flags & FSPICK_EMPTY_PATH == 0 {
+            return -(errno::ENOENT as i64);
+        }
+        match unsafe { crate::fs::get_file_fd(dfd as usize) } {
+            Some(f) => {
+                // SAFETY: dentry written once at open time; read-only.
+                match unsafe { (*f.dentry.get()).clone() } {
+                    Some(d) => d,
+                    None => return -(errno::EBADF as i64),
+                }
+            }
+            None => return -(errno::EBADF as i64),
+        }
+    } else {
+        match resolve_user_path(dfd, args[1] as *const u8) {
+            Ok(abs) => match crate::fs::vfs::path_lookup(&abs, 0) {
+                Ok(vp) => match vp.dentry {
+                    Some(d) => d,
+                    None => return -(errno::EINVAL as i64),
+                },
+                Err(e) => return e as i64,
+            },
+            Err(e) => return e as i64,
+        }
+    };
+
+    let Some(mnt) = crate::fs::vfs::vfs_governing_mount_of(&dentry) else {
+        return -(errno::EINVAL as i64);
+    };
+    let Some(root_inode) = mnt.root.get_inode() else {
+        return -(errno::EINVAL as i64);
+    };
+    let mp_path = mnt
+        .root
+        .get_mountpoint_back()
+        .map(|mp| mp.build_path())
+        .unwrap_or_else(|| alloc::string::String::from("/"));
+    let (device, fs_type) = crate::fs::vfs::vfs_mount_registry_row(&mp_path)
+        .unwrap_or_else(|| (alloc::string::String::from("none"), alloc::string::String::from("none")));
+
+    let mut fc = alloc::boxed::Box::new(fapi::FsContext::new_reconfigure(
+        &fs_type,
+        &device,
+        root_inode,
+    ));
+    fc.target_mount = Some(mnt);
+    let file = alloc::sync::Arc::new(crate::fs::File::new(
+        crate::fs::file::FileFlags::new(crate::fs::file::FileFlags::O_PATH),
+    ));
+    file.set_ops(&fapi::FSCTX_OPS);
+    // SAFETY: single-owner handoff into the fd's private_data slot.
+    unsafe {
+        *file.private_data.get() = Some(alloc::boxed::Box::into_raw(fc) as *mut u8);
+    }
+    match fapi::install_fd_with(file, flags & FSPICK_CLOEXEC != 0) {
+        Ok(fd) => fd as i64,
+        Err(e) => e as i64,
+    }
+}
+
+/// Canonicalize a mount-API path the way Linux user_path_at does:
+/// resolve the string (magic links /proc/[pid]/fd/N included) and take
+/// the RESOLVED dentry's walkable path. The dentry-tree mount machinery
+/// walks literal path strings from the root; a /proc/self/fd/N target
+/// used to attach at a phantom dentry chain instead of the fd's
+/// directory (systemd's namespace builder mounts with /proc/self/fd/N
+/// targets — the tmpfs landed nowhere, the follow-up MS_MOVE EINVAL'd
+/// and every namespaced service died 226/NAMESPACE). Falls back to the
+/// input string when resolution fails (the callers' own not-found errno
+/// paths then report).
+pub fn canonical_mount_path(resolved_abs: &str, raw: &str) -> alloc::string::String {
+    if !raw.contains("/fd/") && !raw.starts_with("/proc") {
+        // Fast path: plain paths never rewrite (perf — every mount
+        // crosses here; the proc walk is the only rewriting shape).
+        return alloc::string::String::from(resolved_abs);
+    }
+    match crate::fs::vfs::path_lookup(resolved_abs, 0) {
+        Ok(vp) => match vp.dentry {
+            Some(d) => {
+                let built = d.build_path();
+                if built.is_empty() {
+                    alloc::string::String::from(resolved_abs)
+                } else {
+                    built
+                }
+            }
+            None => alloc::string::String::from(resolved_abs),
+        },
+        Err(_) => alloc::string::String::from(resolved_abs),
+    }
 }
 
 // ============================================================================
@@ -6690,9 +7421,121 @@ pub fn sys_epoll_pwait2(args: SyscallArgs) -> i64 {
     ret
 }
 
-/// sys_mount_setattr - Change mount attributes (NR 442)
-pub fn sys_mount_setattr(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
+/// sys_mount_setattr - Change mount attributes (NR 442). Applies
+/// MOUNT_ATTR_* set/clear bitmaps to the covering mount of a path, or
+/// to a mount/tree fd with AT_EMPTY_PATH. size must equal sizeof(struct
+/// mount_attr) (32) — the size-0 probe shape answers EINVAL, never
+/// success or ENOSYS (systemd's mount_new_api_supported gate).
+pub fn sys_mount_setattr(args: SyscallArgs) -> i64 {
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    const AT_NO_AUTOMOUNT: u64 = 0x800;
+    const AT_EMPTY_PATH: u64 = 0x1000;
+    const AT_RECURSIVE: u64 = 0x8000;
+    const MOUNT_ATTR_SIZE: u64 = 32;
+
+    let dfd = args[0] as i32;
+    let flags = args[2];
+    let attr_ptr = args[3] as *const u8;
+    let size = args[4];
+
+    if size != MOUNT_ATTR_SIZE {
+        return -(errno::EINVAL as i64);
+    }
+    // NULL uattr is EINVAL regardless of the path (mount_setattr's
+    // explicit check — the supported() probe).
+    if attr_ptr.is_null() {
+        return -(errno::EINVAL as i64);
+    }
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH | AT_RECURSIVE) != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    if !crate::arch::uaccess::access_ok(attr_ptr as usize, MOUNT_ATTR_SIZE as usize) {
+        return -(errno::EFAULT as i64);
+    }
+    let mut buf = [0u8; 32];
+    // SAFETY: attr_ptr was access_ok-validated for 32 bytes above; buf
+    // is a 32-byte stack buffer (exception-table copy).
+    let uncopied =
+        unsafe { crate::arch::uaccess::copy_from_user(buf.as_mut_ptr(), attr_ptr, 32) };
+    if uncopied > 0 {
+        return -(errno::EFAULT as i64);
+    }
+    let attr_set = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+    let attr_clr = u64::from_le_bytes(buf[8..16].try_into().unwrap());
+    let propagation = u64::from_le_bytes(buf[16..24].try_into().unwrap());
+    let userns_fd = u64::from_le_bytes(buf[24..32].try_into().unwrap());
+    // Idmapped mounts need a real userns mapping model; reject rather
+    // than lie (EINVAL — the reference's pre-idmap answer).
+    if userns_fd != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    if let Err(e) = fapi::validate_mount_attr(attr_set) {
+        return e as i64;
+    }
+    if let Err(e) = fapi::validate_mount_attr(attr_clr) {
+        return e as i64;
+    }
+    // Propagation changes: accept any single bit (or none) as a no-op —
+    // Rux mounts never propagate, so the type change has no observable
+    // effect (multiple bits at once are EINVAL, like sys_mount).
+    if propagation != 0 && propagation & propagation.wrapping_sub(1) != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
+        return -(errno::EPERM as i64);
+    }
+
+    let mut pbuf = [0u8; PATH_MAX];
+    let path: &str = match read_user_path(args[1] as *const u8, &mut pbuf) {
+        Ok(s) => s,
+        Err(e) => return e as i64,
+    };
+
+    let mnt = if path.is_empty() {
+        // The fd answers only for the EMPTY string with AT_EMPTY_PATH;
+        // a real path always wins over the flag (user_path_at_empty).
+        if flags & AT_EMPTY_PATH == 0 {
+            return -(errno::ENOENT as i64);
+        }
+        match unsafe { crate::fs::get_file_fd(dfd as usize) } {
+            Some(f) => {
+                if let Some(mfd) = fapi::mountfd_of(&f) {
+                    mfd.mnt.clone()
+                } else {
+                    // Any path-carrying fd (O_PATH, open_tree no-clone):
+                    // the covering mount of the fd's tree.
+                    // SAFETY: dentry written once at open time; read-only.
+                    match unsafe { (*f.dentry.get()).clone() } {
+                        Some(d) => match crate::fs::vfs::vfs_governing_mount_of(&d) {
+                            Some(m) => m,
+                            None => return -(errno::EINVAL as i64),
+                        },
+                        None => return -(errno::EINVAL as i64),
+                    }
+                }
+            }
+            None => return -(errno::EBADF as i64),
+        }
+    } else {
+        match resolve_user_path(dfd, args[1] as *const u8) {
+            Ok(abs) => {
+                let abs = canonical_mount_path(&abs, path);
+                match crate::fs::vfs::vfs_covering_mount(&abs) {
+                    Some(m) => m,
+                    None => return -(errno::EINVAL as i64),
+                }
+            }
+            Err(e) => return e as i64,
+        }
+    };
+
+    // AT_RECURSIVE would apply to the whole subtree; the flag-bit
+    // changes here are mount-local and the boot's callers
+    // (systemd namespace flag resets) operate on single mounts —
+    // accepted and applied to the one mount.
+    let cur = *mnt.flags.lock();
+    *mnt.flags.lock() = fapi::mount_attr_apply(cur, attr_set, attr_clr);
+    0
 }
 
 /// sys_quotactl_fd - Disk quota operations via fd (NR 443)

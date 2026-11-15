@@ -1353,7 +1353,7 @@ pub fn vfs_move_mount(from: &str, to: &str) -> Result<(), i32> {
     let mut current = vfs_root;
     current = follow_mount(current);
     for (i, component) in comps.iter().enumerate() {
-        let is_last = i == comps.len() - 1;
+        let is_last = i + 1 == comps.len();
         let name = String::from(*component);
         let child = match current.lookup_child(&name) {
             Some(existing) => existing,
@@ -1378,6 +1378,229 @@ pub fn vfs_move_mount(from: &str, to: &str) -> Result<(), i32> {
         }
     }
     Ok(())
+}
+
+/// Attach a DETACHED mount object (fsmount/open_tree-CLONE product, or a
+/// mount just detached by move_mount) at `target` — the move_mount(2)
+/// attach step. Shares the mountpoint-walk discipline of vfs_mount:
+/// intermediate components cross their mounts, the final dentry is
+/// found-or-created and receives the mount.
+///
+/// Returns the mountpoint dentry the mount landed on (for registry
+/// bookkeeping by the caller).
+pub fn vfs_attach_mount_at(
+    mnt: &Arc<VfsMountInternal>,
+    target: &str,
+) -> Result<Arc<Dentry>, i32> {
+    // Namespace discipline (same as vfs_mount): attach at the mountpoint
+    // AS THE CALLER SEES IT.
+    let owned_target;
+    let target = {
+        let root = get_process_root();
+        if root != "/" && target.starts_with('/') {
+            owned_target = format!("{}{}", root.trim_end_matches('/'), target);
+            owned_target.as_str()
+        } else {
+            target
+        }
+    };
+
+    let mut state = VFS_STATE.lock();
+    let vfs_root = state
+        .root_dentry
+        .clone()
+        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+
+    if target == "/" {
+        // Root attach: overlay the VFS root's inode with the mount's root
+        // inode and carry the mount's cached children over (same policy
+        // as vfs_move_mount's to == "/" arm).
+        state.mounts.retain(|m| !Arc::ptr_eq(m, mnt));
+        if let Some(inode) = mnt.root.get_inode() {
+            vfs_root.set_inode(inode);
+        }
+        vfs_root.clear_children();
+        mnt.root.rehome_children_into(&vfs_root);
+        mount_index_rebuild(&mut state);
+        return Ok(vfs_root);
+    }
+
+    let comps: Vec<&str> = target.split('/').filter(|s| !s.is_empty()).collect();
+    let mut current = vfs_root;
+    current = follow_mount(current);
+    let mut mountpoint: Option<Arc<Dentry>> = None;
+    for (i, component) in comps.iter().enumerate() {
+        let is_last = i + 1 == comps.len();
+        let name = String::from(*component);
+        let child = match current.lookup_child(&name) {
+            Some(existing) => existing,
+            None => {
+                let d = Arc::new(Dentry::new(name.clone()));
+                d.set_parent(current.clone());
+                current.add_child(name.clone(), d.clone());
+                d
+            }
+        };
+        if is_last {
+            child.set_mount(mnt.clone());
+            mnt.root.set_mountpoint_back(child.clone());
+            state.mounts.push(mnt.clone());
+            mount_index_insert(&mut state, mnt, &child);
+            mountpoint = Some(child);
+        } else {
+            current = follow_mount(child);
+        }
+    }
+    let mountpoint = mountpoint
+        .ok_or(errno::Errno::InvalidArgument.as_neg_i32())?;
+    // ns_track_vfsmount must run AFTER dropping VFS_STATE (lazy
+    // ns init reaches get_vfs_root() — see the sc98 note in vfs_mount).
+    drop(state);
+    crate::process::ns::ns_track_vfsmount(mnt.clone());
+    Ok(mountpoint)
+}
+
+/// The TOPMOST mount covering `path` — the mount whose flags
+/// mount_setattr/reconfigure apply (Linux path mounting semantics: the
+/// last-mounted mount at the terminal dentry, or the mount crossed on
+/// the way down when none sits on the terminal dentry).
+pub fn vfs_covering_mount(path: &str) -> Option<Arc<VfsMountInternal>> {
+    let owned;
+    let path = {
+        let root = get_process_root();
+        if root != "/" && path.starts_with('/') {
+            owned = format!("{}{}", root.trim_end_matches('/'), path);
+            owned.as_str()
+        } else {
+            path
+        }
+    };
+    let vfs_root = VFS_STATE.lock().root_dentry.clone()?;
+    // vfs_remount's walk discipline: check for a mount on the current
+    // dentry BEFORE each component (the topmost mount covering the path
+    // wins; a mount stacked AT the terminal dentry shadows everything
+    // crossed on the way down).
+    let mut current = vfs_root;
+    let mut crossed: Option<Arc<VfsMountInternal>> = None;
+    for component in path.split('/').filter(|s| !s.is_empty()) {
+        if let Some(mnt) = current.get_mount() {
+            crossed = Some(mnt.clone());
+            current = mnt.root.clone();
+        }
+        current = current.lookup_child(component)?;
+    }
+    current.get_mount().or(crossed)
+}
+
+/// Detach a mount from its current mountpoint (move_mount's from-side
+/// for an attached mount): drops the registry row and index entry and
+/// clears the dentry/back-reference links. The mount object itself
+/// (Arc) stays alive for re-attachment.
+pub fn vfs_detach_mount(mnt: &Arc<VfsMountInternal>) -> Result<(), i32> {
+    let mp = mnt
+        .root
+        .get_mountpoint_back()
+        .ok_or(errno::Errno::InvalidArgument.as_neg_i32())?;
+    {
+        let mut state = VFS_STATE.lock();
+        // sc181: drop the chain-index entry BEFORE the back-ref clear
+        // (the chain is recomputed from the still-live mountpoint).
+        mount_index_remove(&mut state, mnt, &mp);
+        state.mounts.retain(|m| !Arc::ptr_eq(m, mnt));
+    }
+    // Only clear the slot when this mount is still the live one there (a
+    // newer stacked mount owns the slot — same guard as vfs_umount_object).
+    {
+        let mut cur = mp.vfsmount.lock();
+        if let Some(top) = cur.as_ref() {
+            if Arc::ptr_eq(top, mnt) {
+                *cur = None;
+            }
+        }
+        mp.set_mount_flag(cur.is_some());
+    }
+    mnt.root.clear_mountpoint_back();
+    Ok(())
+}
+
+/// The mount GOVERNING `d`: the topmost mount stacked ON the dentry, or
+/// — when none sits on it — the mount whose filesystem tree contains it
+/// (the climb walks parent links up to a mounted root, then outward
+/// through its mountpoint). None means the dentry lives in the root
+/// filesystem proper (no VfsMountInternal covers it — the global root
+/// overlay). open_tree(CLONE) clones this object; "/" answers None and
+/// callers fall back to cloning the root inode.
+pub fn vfs_governing_mount_of(d: &Arc<Dentry>) -> Option<Arc<VfsMountInternal>> {
+    if let Some(m) = d.get_mount() {
+        return Some(m);
+    }
+    let mut cur = d.clone();
+    loop {
+        // SAFETY: plain parent-pointer read under its spinlock.
+        let parent = cur.parent.lock().clone();
+        match parent {
+            Some(p) => cur = p,
+            None => {
+                // A filesystem root. Mounted? (mountpoint back-ref set.)
+                if let Some(_mp) = cur.mountpoint_dentry() {
+                    // Find the registry mount whose root IS this dentry —
+                    // a newer stack on the same mountpoint may own the
+                    // dentry's vfsmount slot, so the registry is the
+                    // authority (rare path; a short scan).
+                    let state = VFS_STATE.lock();
+                    let found = state
+                        .mounts
+                        .iter()
+                        .rev()
+                        .find(|m| Arc::ptr_eq(&m.root, &cur))
+                        .cloned();
+                    if let Some(m) = found {
+                        return Some(m);
+                    }
+                    // Mountpoint back-ref without a registry row (torn
+                    // detach): treat as unmounted, climb outward.
+                    cur = _mp;
+                } else {
+                    // The global root — the root filesystem, no mount.
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+/// fsctx (open_tree AT_RECURSIVE): materialize recorded submount clones
+/// at their relative paths INSIDE a freshly attached mount root — the
+/// same never-fabricate walk the MS_REC bind clone uses
+/// (bind_clone_attach; see the sc31 lesson there).
+pub fn vfs_clone_submounts(
+    root: &Arc<Dentry>,
+    clones: &[(Vec<String>, Arc<Dentry>, MntFlags)],
+) {
+    for (rel, src_root, flags) in clones {
+        bind_clone_attach(root, rel, src_root, *flags);
+    }
+}
+
+/// fsctx (open_tree CLONE|AT_RECURSIVE): the mounts nested under `anc`,
+/// as relative-path clone descriptors (see collect_subtree_mounts).
+/// `fresh_root` is the clone's own root — used to skip self-cloning.
+pub fn vfs_collect_submounts(
+    anc: &Arc<Dentry>,
+    fresh_root: &Arc<Dentry>,
+) -> Vec<(Vec<String>, Arc<Dentry>, MntFlags)> {
+    collect_subtree_mounts(anc, fresh_root)
+}
+
+/// The registry's (/proc/mounts) row for the mountpoint path `mp`, if
+/// one exists — move_mount's row relocation needs the old device/type.
+pub fn vfs_mount_registry_row(
+    mp: &str,
+) -> Option<(String, String)> {
+    crate::fs::mount::get_mounts()
+        .into_iter()
+        .find(|(_, m, _, _)| m == mp)
+        .map(|(dev, _, ty, _)| (dev, ty))
 }
 
 /// Filesystem type identifier

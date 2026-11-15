@@ -10197,12 +10197,18 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
             let Some(top) = tk.kernel_stack_top_checked() else {
                 return;
             };
+            // Arch gate (same twin as rwfrz_reader_scan above): the
+            // pt_regs layout probe is x86_64-only — the 118th inline
+            // copy landed without it and broke riscv64/aarch64 builds.
+            #[cfg(feature = "x86_64")]
             let (sys, a0, rsp) = {
                 let regs = (top.wrapping_sub(
                     crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
                 )) as *const crate::arch::x86_64::pt_regs::PtRegs;
                 unsafe { ((*regs).orig_rax, (*regs).rdi, (*regs).rsp) }
             };
+            #[cfg(not(feature = "x86_64"))]
+            let (sys, a0, rsp) = (0u64, 0u64, 0u64);
             if rsp == 0 || rsp > 0x7fff_ffff_ffff {
                 return;
             }

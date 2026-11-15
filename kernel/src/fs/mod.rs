@@ -45,6 +45,7 @@ pub mod pidfd;
 pub mod selinuxfs;
 pub mod fifo;
 pub mod cgroup;
+pub mod fsctx;
 
 pub use file::{File, FileFlags, FileOps, FdTable, get_file_fd, close_file_fd, set_cloexec_fd};
 pub use fs_struct::FsStruct;
