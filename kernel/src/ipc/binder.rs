@@ -1817,9 +1817,12 @@ struct BinderThread {
     /// runs every scan; only the ring entry is gated so the forensics
     /// history is not flooded by heal noise).
     rekicked: core::sync::atomic::AtomicBool,
-    /// Kicks issued in the current wait episode — >= 2 means a previous
-    /// kick failed to run the task (wake→run leak); the scheduler view is
-    /// dumped then (WAKE-RUN-LEAK line).
+    /// Kicks issued in the current wait episode — >= 2 means the thread is
+    /// still parked in the SAME read wait one scan after a kick. That is
+    /// usually the benign idle-reader re-park (the kick ran it; no work was
+    /// readable, so the wait_event loop slept again — see wrl_last_exec_ns
+    /// for the discriminator), NOT by itself a wake→run leak; the scheduler
+    /// view is dumped then (WAKE-RUN-LEAK line) with the exec-delta shape.
     rekick_count: core::sync::atomic::AtomicU32,
     /// sc252/sc253 attribution (leg 19): outcome counters for this
     /// thread's OWN wait-queue kicks, read by the WAKE-RUN-LEAK dump —
@@ -1828,6 +1831,16 @@ struct BinderThread {
     /// silently refused (the R82 DL-ENQ-DEFERRED / R80-phantom families).
     kick_wake_ok: core::sync::atomic::AtomicU32,
     kick_wake_refused: core::sync::atomic::AtomicU32,
+    /// wrl-class lane: exec_ns the WAKE-RUN-LEAK print last sampled for
+    /// this thread (per wait episode, reset with the kick counters). The
+    /// census row's exec delta between scans separates the dominant
+    /// benign shape — an idle reader whose kick RAN it (it re-checked
+    /// thread_has_work, found none, re-parked inside the same wait_event
+    /// epoch; exec advances a few µs per kick) — from the true leak
+    /// shape (kicks transition the queue entry, exec never advances: the
+    /// task never runs). On the lr-series boots ALL rows were re-parks;
+    /// without the delta each row reads as "kicked, never ran".
+    wrl_last_exec_ns: core::sync::atomic::AtomicU64,
 }
 
 impl BinderThread {
@@ -1843,6 +1856,7 @@ impl BinderThread {
             rekick_count: core::sync::atomic::AtomicU32::new(0),
             kick_wake_ok: core::sync::atomic::AtomicU32::new(0),
             kick_wake_refused: core::sync::atomic::AtomicU32::new(0),
+            wrl_last_exec_ns: core::sync::atomic::AtomicU64::new(0),
             st: core::cell::UnsafeCell::new(ThreadState {
                 looper: 0,
                 todo: VecDeque::new(),
@@ -7852,9 +7866,45 @@ pub fn stall_report() {
                                 let comm_bytes = tk.comm();
                                 let comm_len = comm_bytes.iter().position(|&b| b == 0).unwrap_or(16);
                                 let comm = core::str::from_utf8(&comm_bytes[..comm_len]).unwrap_or("?");
+                                // wrl-class: adjudicate the row against the
+                                // previous census sample of the SAME wait
+                                // episode. exec advanced => every kick ran
+                                // the task (benign re-park of an idle
+                                // reader); exec frozen with kicks >= 2 =>
+                                // the true wake->run leak this line was
+                                // built for. Caveats: (a) find_task_by_pid
+                                // may return a RECYCLED task after the
+                                // original exited mid-episode (exec jumps
+                                // wildly, dx saturates to 0) — treat wild
+                                // drops as re-park-class noise, follow-up
+                                // rows self-correct; (b) RT policies keep
+                                // no CFS exec accounting (SchedRtEntity has
+                                // no runtime field), so exec_ns reads 0
+                                // forever — no adjudication possible.
+                                let rt_policy = matches!(
+                                    tk.policy(),
+                                    crate::process::task::SchedPolicy::Fifo
+                                        | crate::process::task::SchedPolicy::Rr
+                                        | crate::process::task::SchedPolicy::Deadline
+                                );
+                                let exec_now = tk
+                                    .sched_entity()
+                                    .sum_exec_runtime
+                                    .load(core::sync::atomic::Ordering::Relaxed);
+                                let exec_prev = t
+                                    .wrl_last_exec_ns
+                                    .swap(exec_now, core::sync::atomic::Ordering::Relaxed);
+                                let exec_dx = exec_now.saturating_sub(exec_prev);
+                                let shape = if rt_policy {
+                                    "rt-n/a"
+                                } else if exec_prev != 0 && exec_dx == 0 {
+                                    "never-ran"
+                                } else {
+                                    "re-park"
+                                };
                                 let _ = writeln!(
                                     out,
-                                    "binder-stall: WAKE-RUN-LEAK tid {} ({}) kicked {}x age {}s state={:#x} cfs_linked={} on_cpu={} pick_state={} cpu={} pol={} on_rq={} dl_thr={} wok={} wno={} exec_ns={}",
+                                    "binder-stall: WAKE-RUN-LEAK tid {} ({}) kicked {}x age {}s state={:#x} cfs_linked={} on_cpu={} pick_state={} cpu={} pol={} on_rq={} dl_thr={} wok={} wno={} exec_ns={} exec_dx_ns={} shape={}",
                                     t.tid,
                                     comm,
                                     kicks + 1,
@@ -7869,9 +7919,9 @@ pub fn stall_report() {
                                     if dlthr { 1 } else { 0 },
                                     t.kick_wake_ok.load(core::sync::atomic::Ordering::Relaxed),
                                     t.kick_wake_refused.load(core::sync::atomic::Ordering::Relaxed),
-                                    tk.sched_entity()
-                                        .sum_exec_runtime
-                                        .load(core::sync::atomic::Ordering::Relaxed),
+                                    exec_now,
+                                    exec_dx,
+                                    shape,
                                 );
                                 let _ = writeln!(out, "binder-stall:{}", slots);
                                 // Watch this victim from now on — the ring
@@ -12989,6 +13039,7 @@ fn binder_thread_read(
             thread.rekick_count.store(0, core::sync::atomic::Ordering::Release);
             thread.kick_wake_ok.store(0, core::sync::atomic::Ordering::Release);
             thread.kick_wake_refused.store(0, core::sync::atomic::Ordering::Release);
+            thread.wrl_last_exec_ns.store(0, core::sync::atomic::Ordering::Release);
             let r = crate::wait_event_interruptible!(&thread.wait, {
                 let w = world_lock();
                 // SAFETY: under WORLD.

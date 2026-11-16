@@ -1159,11 +1159,20 @@ pub fn do_exit(exit_code: i32) -> ! {
                             }
                         }
                     };
-                    let (owing_n, owing_txn, _owing_stid) =
+                    let (owing_n, owing_txn, owing_stid) =
                         crate::ipc::binder::txn_owing_of(my_tgid, dying_pid);
+                    // wrl-class lane: owing_txn without owing_stid conflates
+                    // the thread's OWN debt with the tgid-wide fallback —
+                    // txn_owing_of returns the first txn owed by ANY thread
+                    // of the tgid when this tid has no exact match (f2's
+                    // tid-1523 exit printed owing txn4570, which its live
+                    // sibling 975 owed; the neverword lane read that as
+                    // "handler exits mid-transaction"). own=1 marks the
+                    // exact-tid match; own=0 means a sibling owes it.
+                    let owing_own = owing_stid != 0 && owing_stid == dying_pid;
                     // HOTPATH-PRINT: dfx=fuxstuck-gated UI-family exits.
                     crate::pr_warn!(
-                        "UIEXIT[{}] tid={} comm='{}' tgid={} leader='{}' ppid={}('{}') code={:#x} cause={} sig={} sender={} sicode={:#x} grpexit={} leader={} lastsys={}({:#x},{:#x}) exrip={:#x} owing_n={} owing_txn={}",
+                        "UIEXIT[{}] tid={} comm='{}' tgid={} leader='{}' ppid={}('{}') code={:#x} cause={} sig={} sender={} sicode={:#x} grpexit={} leader={} lastsys={}({:#x},{:#x}) exrip={:#x} owing_n={} owing_txn={} owing_stid={} own={}",
                         n,
                         dying_pid,
                         comm,
@@ -1183,7 +1192,9 @@ pub fn do_exit(exit_code: i32) -> ! {
                         la1,
                         exrip,
                         owing_n,
-                        owing_txn
+                        owing_txn,
+                        owing_stid,
+                        if owing_own { 1 } else { 0 }
                     );
                 }
                 }
