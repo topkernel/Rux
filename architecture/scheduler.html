@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>调度器 · Rux</title>
+<link rel="stylesheet" href="../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">首页</a>
+      <a href="design.html">架构设计</a>
+      <a href="../performance/index.html">性能</a>
+      <a href="../security/index.html">安全</a>
+      <a href="../testing/index.html">测试</a>
+      <a href="../debugging/index.html">调试</a>
+      <a href="../guides/getting-started.html">快速入门</a>
+      <a href="../progress/roadmap.html">项目进展</a>
+      <a href="../guestbook.html">留言</a>
+      <span class="lang-sw"><a class="on" href="scheduler.html">中文</a><a href="../en/architecture/scheduler.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">架构设计</div>
+    <a href="design.html">架构与模块设计</a>
+    <a class="on" href="scheduler.html">调度器</a>
+    <a href="memory.html">内存管理</a>
+    <a href="filesystem.html">文件系统</a>
+    <a href="ipc.html">进程间通信</a>
+    <a href="boot.html">启动流程</a>
+    <a href="interrupts.html">中断与时钟</a>
+    <a href="structure.html">代码结构</a>
+    <a href="riscv64.html">架构移植指南</a>
+    <a href="kernel-lock.html">锁序不变量</a>
+    <div class="grp">调试</div>
+    <a href="../debugging/index.html">调试指南</a>
+    <a href="../debugging/tracepoints.html">tracepoint 框架</a>
+    <a href="../debugging/perf.html">性能调试</a>
+    <a href="../debugging/locks.html">锁调试</a>
+    <a href="../debugging/memory.html">内存取证</a>
+    <a href="../debugging/panic.html">panic 与符号化</a>
+    <div class="grp">性能</div>
+    <a href="../performance/index.html">性能测试</a>
+    <div class="grp">安全</div>
+    <a href="../security/index.html">安全与形式验证</a>
+    <div class="grp">测试</div>
+    <a href="../testing/index.html">测试总览</a>
+    <a href="../testing/ci-pipeline.html">CI 流水线</a>
+    <a href="../testing/ltp.html">LTP 兼容扫描</a>
+    <a href="../testing/ltp-full.html">LTP 全量用例</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT 审计</a>
+    <a href="../testing/stability.html">稳定性</a>
+    <a href="../testing/stress.html">压力</a>
+    <a href="../testing/gnome-retrospective.html">回溯报告</a>
+    <div class="grp">开发指南</div>
+    <a href="../guides/getting-started.html">快速入门</a>
+    <a href="../guides/development.html">参与开发</a>
+    <a href="../guides/configuration.html">内核配置</a>
+    <div class="grp">项目进展</div>
+    <a href="../progress/roadmap.html">路线图</a>
+    <a href="../progress/changelog.html">更新日志</a>
+    <a href="../progress/quickref.html">命令速查</a>
+    <div class="grp">互动</div>
+    <a href="../guestbook.html">留言板</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>调度器</h1>
+    <div class="sub">kernel/src/sched/ · 全局运行队列、三调度类、唤醒抢占判定、tick 与上下文切换 —— 各项设计均给出机制、数据结构、实测数据与已知代价 · 依据:docs/architecture/design-divergences.md(D-1/D-11/D-14)、docs/development/perf-gate-baseline.md</div>
+
+    <h2 id="position"><span class="anchor">§1</span>设计定位:单一全局运行队列</h2>
+    <p>Rux 调度子系统的核心结构是<b>由全部 CPU 共享的单颗全局运行队列(Global Run Queue, GRQ)</b>(设计分歧 <a href="design.html#d1">D-1</a>):不存在 per-CPU 运行队列,不存在负载均衡器,不存在任务偷取。空闲 CPU 经 IPI 唤醒后<b>按需从全局队列取任务</b> —— 就绪集在结构上即均衡,负载不均衡及其引发的一整类公平性缺陷在该设计下不可表达。</p>
+    <p>该取舍面向<b>桌面、移动与嵌入式级核数</b>:当前平台以 MAX_CPUS=8 构建(<code>kernel/src/config.rs</code>),目标工作负载为数十至数百任务的图形会话与服务网格,而非数百核服务器。在此规模下,per-CPU 队列加负载均衡所引入的三类额外复杂度 —— 迁移决策、均衡器启发式、均衡不完备导致的公平性缺陷 —— 均为纯成本;GRQ 的两项已知代价(高核数下的争用上限、缓存局部性损失)已登记于分歧条目,并显式记录重审触发条件:当测量表明持锁进入争用受限形态时重新评估。</p>
+    <p>相对于 per-CPU 设计的关键差异是<b>可取证性</b>:调度序具有唯一事实源,唤醒/拣选/搁浅的全部观测仪器(§8)仅需推理单一结构。OpenHarmony 战役期间的调度缺陷族(丢失唤醒、幻影抢占计数、陈旧拣选声明)均在该单一结构上定位 —— 这属于设计目标而非偶然。</p>
+    <div class="callout"><b>该设计属于有意的历史重采纳,而非发明。</b>单一全局派发队列是前 SMP 经典 UNIX 的原生形态(Bach,《The Design of the UNIX Operating System》,1986)。Rux 在小核数场景重新采纳该形态,并以现代观测手段将其成本约束在实测带内:用户裁定(2026-10-28)在 4 核、持锁时间呈体积耦合而非争用受限的实测条件下,per-CPU 队列化属于过度工程;维持 GRQ,后续工作限于持锁段瘦身,不变更队列模型。</div>
+    <h3>成本约束的实测依据</h3>
+    <ul>
+      <li><b>持锁时长</b>:GRQ 平均持锁 <b>2786 ns</b>(n=6.3M,累计 17.6 s;KVM q35 smp2/4G,780 s 窗口,宿主负载 6.4–11.3),门禁带 <b>1200–7320 ns</b>。同一次启动内调度量增长约 2× 而平均持锁保持持平 → <b>该成本是执行体积的函数,而非锁缓存线争用的函数</b>。</li>
+      <li><b>churn 由配置常量界定</b>:<code>cfs_min_granularity_ns = 0.7 ms</code>(唤醒抢占粒度取同值)加 100 Hz tick —— 新入队任务在约 0.7 ms 的最小服务时间内不会被去调度,10 ms tick 界定重入队速率上限,唤醒风暴不具备扰动队列拓扑的通道。</li>
+      <li><b>持锁成本已分解至段级</b>:唤醒持锁 = 运行队列记账 / 摘除-插回 / pick / 统计四段,由 wakewatch 与 WW census 仪器逐段计量(§8)。</li>
+      <li>架构调研记录(<code>docs/architecture/os-kernel-survey.md</code>):Barrelfish 式复制态消息内核与 flat combining 两方案均以"携带实测数据否决"的形式登记 —— 其动机问题(高核数缓存一致性流量)在本场景不存在。</li>
+    </ul>
+
+    <h2 id="struct"><span class="anchor">§2</span>数据结构与锁协议</h2>
+    <pre><code>GlobalRunQueue {
+    lock:      RawSpinlock,
+    dl_rq:     DlRunQueue,      // BTreeMap&lt;(deadline, task_id)&gt;   EDF
+    rt_rq:     RtRunQueue,      // 位图 [AtomicU64;2] + 按优先级链表
+    cfs_rq:    CfsRunQueue,     // BTreeMap&lt;vruntime&gt; (tasks_timeline)
+    nr_running: AtomicUsize,
+    idle_cpus:  AtomicU32,      // 位图
+}</code></pre>
+    <p>per-CPU 状态仅保留 current / idle / stop 三个槽位指针。<code>pick_next_task</code> 的调度类顺序:stop(最高,per-CPU)→ DL → RT(本 CPU 处于 RT 带宽节流时跳过)→ CFS → idle;各调度类的 pick 均通过 PID-0 门与 DEAD-pick 门(中毒条目丢弃并计数)。</p>
+    <ul>
+      <li><b>idle_cpus 位图</b>:<code>mark_idle</code> 以 fetch_or 置位;<code>claim_idle_cpu</code> 在查找的同时原子清位 —— 并发唤醒不可能选中同一空闲 CPU;扫描起点绕 <code>LAST_IDLE_HINT</code> 轮转,使唤醒在空闲 CPU 集合上均匀分布。</li>
+      <li><b>锁协议</b>:<code>lock_irqsave</code> = 保存中断态 + 关中断 + 抢占计数 + 自旋等待;嵌套变体 <code>lock_irqsave_nested</code> 消费由类型化锁键(<a href="design.html#d11">D-11</a>)铸造的 NestProof —— 未登记的嵌套序不通过编译。GRQ 与 futex 桶锁的嵌套关系为编译期事实:在桶锁持锁下嵌套获取 GRQ 是 futex 唤醒的常规路径,反向嵌套等价于全机死锁。</li>
+      <li><b>计数纪律</b>:nr_running 的全部递减经由 checked-sub(fetch_update)—— 无符号回绕是历史上"未排除临界区"事故家族的特征签名,该路径已不可表达。</li>
+      <li>结构性限制如实登记:CFS tasks_timeline 的 <code>dequeue()</code> 仍为全树线性扫描(每次 O(n)),leftmost 缓存已登记未实现;pick 对被拒条目的抬出-插回每候选支付 2 次树遍历(有界 ≤32,位于正确性关键路径,不作投机优化)。</li>
+    </ul>
+
+    <h2 id="cfs"><span class="anchor">§3</span>CFS 调度类(fair.rs)</h2>
+    <ul>
+      <li><b>vruntime</b> = delta_exec × NICE_0_LOAD / weight,实现为移位乘法 <code>delta × NICE_0_LOAD × inv_weight &gt;&gt; 32</code>(inv_weight = 2³²/weight);NICE_0_LOAD = 1024;SCHED_IDLE 策略实现为 fair 类内权重 3(非独立调度类)。</li>
+      <li><b>粒度常量</b>:<code>SCHED_MIN_GRANULARITY_NS = 0.7 ms</code>(同时作为唤醒抢占粒度 —— 被唤醒者须领先在跑者 0.7 ms 以上方触发抢占);<code>SCHED_LATENCY_NS = 6 ms</code> 延迟窗;tick 100 Hz。调度时间片 = min(粒度×nr_running, 6 ms) × 本任务权重 / 总权重,下限为最小粒度。</li>
+      <li><b>放置与睡眠信用</b>:min_vruntime 为单调下界;唤醒/首次入队的放置基点取 avg_vruntime(与参考 6.6 fair.c 同构的映射);睡眠任务入队时获得 <code>min_vruntime − 6 ms</code> 的信用下界(睡眠时长在 vruntime 中获得等值补偿,不被清零);lag 钳制至 max(2×时间片, tick) 的 fair 域内。</li>
+      <li><b>pick 遍历与条目抬出</b>:leftmost 遍历拒绝本 CPU 当前不可运行的条目 —— 拒绝原因五类(所有权 / on_cpu / pick 声明被其他 CPU 持有 / 亲和性 / cgroup 节流 / healed 复位)—— 每个被拒条目临时移入 32 槽 stash,pick 完成后逆序插回。<b>min_vruntime 在全部插回之后、于完整 timeline 上更新</b>:条目抬出会使最左端点右移,先更新将永久抹除新任务与唤醒者的睡眠信用(该顺序经实测回归后修正)。</li>
+      <li><b>entity_tick 守卫</b>:单 CPU 密集任务不再于每个 tick 被摘除/重插/重新拣选(对齐参考 entity_tick 的 nr_running&gt;1 条件)。</li>
+    </ul>
+
+    <h2 id="rt-dl"><span class="anchor">§4</span>RT 与 DL 调度类</h2>
+    <ul>
+      <li><b>RT(rt.rs)</b>:SCHED_FIFO/RR;100 个用户优先级编码于 <code>[AtomicU64; 2]</code> 位图(bit 0 = 用户优先级 99,反转编码,最低置位即最高优先),每优先级一条 ListHead 队列;RR 时间片 10 tick = 100 ms;计数递减同走 checked-sub。</li>
+      <li><b>DL(deadline.rs)</b>:EDF + CBS;BTreeMap 以 (deadline, task_id) 为键;默认周期 1 s / 运行预算 100 ms,带宽单位 1&lt;&lt;20。CBS 曾被完全击穿(每次入队均触发预算补充)—— 修复为真节流语义:预算耗尽的任务离开运行队列(INTERRUPTIBLE),由内核定时器于下一 deadline 处重填预算,每周期恰好补充一次。安全性论证:锁序 GRQ→TIMERS 为单向,因定时器 softirq 的 wake_up_process 派发仅发生在 TIMERS 释放之后(R12-3)。</li>
+      <li><b>stop / idle</b>:stop 类占位(per-CPU 槽,用于热插拔与主动均衡,当前恒空);idle 任务永不入队 —— 任何唤醒立即抢占 idle 并触发重调度。</li>
+    </ul>
+
+    <h2 id="wakeup"><span class="anchor">§5</span>唤醒路径与抢占判定(D-14)</h2>
+    <p>唤醒派发为三级判定梯(<code>kernel/src/process/task.rs</code>):</p>
+    <ol>
+      <li><b>优先选取唤醒目标亲和范围内的空闲 CPU</b>(对齐参考 select_task_sibling + 远端入队形态):认领一颗空闲 CPU 并发送 resched IPI。</li>
+      <li><b>无空闲 CPU、非 sync 唤醒</b>:通过<b>实测等待抢占判定</b>(D-14)—— 仅当被唤醒者的实测等待时长(sched_clock − 最近拣选时间戳)≥ 延迟窗(6 ms)时,才对忙 CPU 置位 need_resched;窗内刚运行过的任务交由时间片届期/交接机制处理。</li>
+      <li><b>sync 唤醒且无空闲 CPU</b>:stacking —— 维持 wake_affine 的等价性质:持有全局队列时,同步唤醒绝不通知其他忙 CPU,唤醒者将接收者叠置于自身 CPU。</li>
+    </ol>
+    <p><b>不采用 vruntime 信用比较作为判定条件的原因</b>:参考实现以"被唤醒者 vruntime 是否领先在跑者"决定抢占。Rux 的睡眠信用下界与唤醒放置调整会使乒乓唤醒对端<b>持续</b>落后数毫秒 vruntime(实测:重排钳制引起 +~10 ms 的 vruntime 跳变)—— 参考实现的判定条件在本设计的放置策略下于每次唤醒均成立,退化为逐记录的抢占-切换往返。实测等待判定仅在等待者真实等待达阈值时才中断在跑任务。</p>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>D-14 效果(同 rig 对比)</th><th>前</th><th>后</th></tr></thead>
+      <tbody>
+        <tr><td>74 字节 unix 流单记录的唤醒—抢占—切换往返开销</td><td class="num">~275 µs</td><td class="num">~2.5 µs</td></tr>
+        <tr><td>p5b unix DGRAM send/recv</td><td class="num">318.6 / 318.3 µs</td><td class="num">23.1 / 40.9 µs(−93%/−87%)</td></tr>
+        <tr><td>p5c unix 流 write 系列</td><td class="num">276.5–277.6 µs</td><td class="num">24.9–26.8 µs(−90%)</td></tr>
+        <tr><td>p5 IPC 族整体</td><td colspan="2" class="num">10–18×</td></tr>
+        <tr><td>p5a 管道往返(交接路径不经唤醒判定,按设计不变)</td><td class="num">19.673 µs</td><td class="num">18.306 µs(−6.9%)</td></tr>
+      </tbody>
+    </table></div>
+    <p><b>已知代价(登记在案)</b>:亚 6 ms 乒乓接收者的唤醒延迟由时间片届期界定,而非即时抢占;exec_start 以最近拣选时间戳近似真实等待,存在轻微高估;落后于在跑任务的 futex 唤醒→运行延迟被 tick 量化至 ~10 ms(p2f 电池:hog 场景 9.99/10.0 ms,该行为已知量化类的哨兵行)。</p>
+    <h3>IPI 成本与轮询空闲</h3>
+    <ul>
+      <li>resched IPI 发送端单独 <b>935–1139 ns</b>(cctx 探针);IPI + halt 退出每次交接约 2–5 µs 的 KVM exit 开销。</li>
+      <li><b>轮询空闲窗 120 µs</b>:落入纯自旋空闲窗内的唤醒跳过 resched IPI(窗口由 30 µs 提升 —— battery2 实测 815/1915 次唤醒的 IPI 落于窗外,均值 995 ns;每次省略的 IPI 约节省 1 µs 交接开销)。与 <code>resched_cpu</code> 以 Dekker SeqCst 栅栏配对,丢失唤醒安全性具备形式化论证。</li>
+      <li>MARK_IDLE 与 WFI 之间重查 need_resched(R20-2):否则在 mark_idle 前一刻入队的任务将空转等待一个完整 tick 周期(10 ms)。</li>
+    </ul>
+
+    <h2 id="tick"><span class="anchor">§6</span>tick、内核抢占与 NOHZ</h2>
+    <ul>
+      <li><b>tick</b>:per-CPU 定时器 100 Hz。<code>scheduler_tick()</code> 执行:softlockup 触摸、schedstat 记账、幻影位孤儿扫描、allocwatch、1 Hz CLAIM-SWEEP(持 GRQ 对整条 CFS timeline 执行陈旧拣选声明治愈)、PREEMPT-LEAK 逐任务抢占计数泄漏窗探测。</li>
+      <li><b>内核抢占默认关闭</b>(经由显式 schedule() 调用点自愿让出);<code>kpreempt=1/0</code> 引导参数可武装 irq-exit 抢占钩子;A/B 对 hog 场景读数持平 —— 维持默认关闭。</li>
+      <li><b>can_stop_tick 决策树</b>(对齐参考 core.c 顺序):存在 DL 任务则需要 tick;RR 任务数 &gt;1 需要;纯 FIFO 不需要;CFS 任务数 &gt;1(GRQ 计数加回各 CPU 非空闲 current)需要。</li>
+      <li><b>NOHZ(自适应 tick)</b>:按参考 tick-sched.c 逐函数映射实现(check_tick_dependency / tick_nohz_stop·restart_sched_tick / tick_nohz_irq_exit / nohz_full= 参数);tick_dep 位集含 POSIX_TIMER/PERF/SCHED/RCU 等;per-rq→GRQ 的结构性映射已登记(0→1 kick 保留为入队边沿的 resched IPI)。x86_64 已接线(LAPIC one-shot),其余架构待跟进。<code>nohz_full=1</code> 实测(nozh 合并记录):对抗负载下 lmbench lat_syscall,null 通过 11/12(main tip 0/10),p1_null 中位 0.050 vs 0.060 µs(−17%),两条 census 带精确保持。</li>
+      <li><b>依赖门控</b>:负载变化时的 tick 依赖重算由 NOHZ_FULL_RUNNING 门控 —— 无门控时 can-stop 判定中对 per-CPU current 的扫描将落入每次 GRQ 持锁的入队路径(p2_ctxsw 1.242→2.149 µs,+73%,门控后消除)。</li>
+    </ul>
+
+    <h2 id="ctxsw"><span class="anchor">§7</span>上下文切换(x86_64 三项优化)</h2>
+    <p>切换路径经 cctx 分段计数器分解为 FPU 保存 / mm 切换 / FS·GS / 汇编体 / FPU 恢复五段:</p>
+    <ul>
+      <li><b>惰性 FPU</b>:仅当 prev 任务自切入后实际使用过浮点单元才执行保存(xsaveopt);恢复移入 #NM 缺陷处理器(CR0.TS 置位);内核二进制经反汇编验证不含编译器生成的浮点指令。fpusave 51 ns + fpurest 76 ns/切换。</li>
+      <li><b>FSGSBASE</b>:CPUID 门控;FS/GS 读写改用 wrfsbase/rdfsbase(该项占每切换 393 ns);无硬件支持时回退 wrmsr;每任务缓存镜像消除切换期 rdmsr。</li>
+      <li><b>PCID</b>:CPUID 双门控(PCID+INVPCID);每 mm 分配 12-bit PCID,CR3 写携带 tag+NOFLUSH —— 切回先前 mm 时保留 TLB 缓存,不再执行全冲刷(PCID 前 CR3 重载 543 ns,为切换最大单项);INVPCID type 0 单页精确失效 / type 3 全冲刷;ASID 回收前于全部 CPU 同步冲刷。</li>
+      <li><b>实测</b>(3 次交错 A/B 取中位):<code>lat_ctx -s64 2</code> 4.97→<b>2.07 µs</b>(−58%)、<code>-s64 8</code> 4.68→1.94 µs(−59%)。lmbench 同机权威行(smp2 KVM,同 guest 同二进制):<b>2.86–3.25 vs 12.84–12.97 µs(4.0–4.5×)</b>。</li>
+    </ul>
+
+    <h2 id="instruments"><span class="anchor">§8</span>观测仪器与门禁带</h2>
+    <p>调度域观测自成体系,各仪器的用法见<a href="../debugging/index.html">调试指南</a>:</p>
+    <ul>
+      <li><b>wakewatch</b>:唤醒→运行延迟取证。1024 槽旁表(以 Task 指针哈希,不触碰任务结构布局),将"应运行未运行"判别为四类:WAKE-STRANDED(唤醒及时但未获拣选,输出受害任务、延迟时长、拣选 CPU)/ TIMER-LATE-FIRE(定时器超期触发)/ WAKE-REFUSED / 进程内丢失;WW5 分档计数 N250/N500/N750;搁浅阈值 1000 ms(因打印位于 IF=0 语境消耗 LIFECYCLE_TIMEOUT 预算而调高)。</li>
+      <li><b>census</b>:TERM-DESCHED 8±2(DEAD 任务终末去调度循环,打印预算 n&lt;8)、WAKE-REFUSED 32±4(W3 唤醒拒绝普查,预算 32)。两条 census 在每次合格静默启动上<b>精确一致</b>(8/32),作为调度域的形状签名纳入性能门。</li>
+      <li><b>cctx 分段</b>:唤醒侧 WK_N/WK_SEL/WK_ENQ/WK_DISP/IPI_N/IPI_NS;切换侧 CW_FPUSAVE/CW_MM/CW_MSR/CW_ASM/CW_FPUREST;调度侧 SCH_PRE/LOCKWAIT/ACCT/DEQREQ/PICK/PUB —— 任何切换或唤醒回归均可定位至段。</li>
+      <li><b>门禁带</b>(调度域):GRQ 平均持锁 1200–7320 ns、census 8±2/32±4、p2_ctxsw ±20%、p5 行带;GRQ pick/放置的任何改动须通过 release-strong pbench 启动验证。</li>
+    </ul>
+
+    <h2 id="limits"><span class="anchor">§9</span>已知代价与未决项</h2>
+    <ul>
+      <li>GRQ 争用上限与局部性损失:登记于 D-1;重审触发条件 = IF=0/持锁测量进入争用受限形态(当前实测为体积耦合)。</li>
+      <li>CFS timeline 的 O(n) 线性 dequeue 与 leftmost 缓存缺失:持锁瘦身的下一个已知目标;pick 抬出-插回的 2× 树遍历有界但真实存在。</li>
+      <li>p4 fork 族当前为<b>未决回归</b>(fork_exit 13.2 ms,历史族 9.4–10.0 ms),在门禁表 watch 行如实挂账。</li>
+      <li>内核抢占默认关闭:吞吐型工作负载下与参考实现的可选内核抢占默认不同;落后唤醒的 ~10 ms tick 量化与该选择同源 —— 消除量化依赖 NOHZ 全架构接线与 kpreempt 调优。</li>
+    </ul>
+
+    <div class="callout">代码:<code>kernel/src/sched/</code>(sched.rs / fair.rs / rt.rs / deadline.rs / idle.rs / wakewatch.rs)。分歧登记:D-1/D-11/D-14。仪器:cctx(syscost 内)、wakewatch、census。门禁带:<code>docs/development/perf-gate-baseline.md</code> 调度域行。</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">返回首页</a></span>
+
+      <span class="foot-stats">本站访问 <span id="busuanzi_value_site_pv"></span> 次 · 访客 <span id="busuanzi_value_site_uv"></span> 人</span></div>
+  </div>
+</footer>
+
+<script src="../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>

@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Scheduler · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">Home</a>
+      <a href="design.html">Architecture</a>
+      <a href="../performance/index.html">Performance</a>
+      <a href="../security/index.html">Security</a>
+      <a href="../testing/index.html">Testing</a>
+      <a href="../debugging/index.html">Debugging</a>
+      <a href="../guides/getting-started.html">Getting started</a>
+      <a href="../progress/roadmap.html">Progress</a>
+      <a href="../guestbook.html">Feedback</a>
+      <span class="lang-sw"><a class="on" href="../../architecture/scheduler.html">中文</a><a href="scheduler.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="design.html">Design deep-dive</a>
+    <a class="on" href="scheduler.html">Scheduler</a>
+    <a href="memory.html">Memory management</a>
+    <a href="filesystem.html">Filesystem</a>
+    <a href="ipc.html">IPC</a>
+    <a href="boot.html">Boot flow</a>
+    <a href="interrupts.html">Interrupts &amp; timers</a>
+    <a href="structure.html">Code layout</a>
+    <a href="riscv64.html">Porting guide</a>
+    <a href="kernel-lock.html">Lock ordering</a>
+    <div class="grp">Debugging</div>
+    <a href="../debugging/index.html">Debugging guide</a>
+    <a href="../debugging/tracepoints.html">Tracepoints</a>
+    <a href="../debugging/perf.html">Performance debugging</a>
+    <a href="../debugging/locks.html">Lock debugging</a>
+    <a href="../debugging/memory.html">Memory forensics</a>
+    <a href="../debugging/panic.html">Panic &amp; symbols</a>
+    <div class="grp">Performance</div>
+    <a href="../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../security/index.html">Security &amp; verification</a>
+    <div class="grp">Testing</div>
+    <a href="../testing/index.html">Overview</a>
+    <a href="../testing/ci-pipeline.html">CI pipeline</a>
+    <a href="../testing/ltp.html">LTP scan</a>
+    <a href="../testing/ltp-full.html">LTP full cases</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT audit</a>
+    <a href="../testing/stability.html">Stability</a>
+    <a href="../testing/stress.html">Stress</a>
+    <a href="../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../guides/getting-started.html">Getting started</a>
+    <a href="../guides/development.html">Contributing</a>
+    <a href="../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../progress/roadmap.html">Roadmap</a>
+    <a href="../progress/changelog.html">Changelog</a>
+    <a href="../progress/quickref.html">Commands</a>
+    <div class="grp">Community</div>
+    <a href="../guestbook.html">Guestbook</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>Scheduler</h1>
+    <div class="sub">kernel/src/sched/ · The global run queue, three scheduling classes, the wakeup-preemption gate, tick and context switch — each design with mechanism, data structures, measured numbers and known costs · Sources: docs/architecture/design-divergences.md (D-1/D-11/D-14), docs/development/perf-gate-baseline.md</div>
+
+    <h2 id="position"><span class="anchor">§1</span>Design position: why a single global run queue</h2>
+    <p>Rux's scheduling core is <b>one global run queue serving all CPUs</b> (design divergence <a href="design.html#d1">D-1</a>): no per-CPU run queues, no load balancer, no stealing. An idle CPU is woken by IPI and <b>pulls tasks on demand</b> — the queue is inherently balanced, and the whole "imperfect balancing" bug class does not exist.</p>
+    <p>This is a deliberate trade for <b>desktop, mobile and embedded core counts</b>: the platform currently builds with MAX_CPUS=8 (<code>kernel/src/config.rs</code>), and the target workload is a graphics session plus a service mesh with tens-to-hundreds of tasks — not a multi-hundred-core server. At this scale, what per-CPU queues plus load balancing add — migration decisions, balancer heuristics, fairness bugs from imperfect balancing — is pure cost; the two known GRQ costs (contention ceiling at high core counts, cache-locality loss) are recorded in the divergence entry with an explicit revisit trigger: reopen when measurements show the hold entering a contention-bound regime.</p>
+    <p>The key difference from a per-CPU design is <b>forensicability</b>: scheduling order has a single source of truth, and every wake/pick/strand instrument (§8) reasons over exactly one structure. The scheduler bug families of the OpenHarmony campaign (lost wakes, phantom preempt bits, stale claims) were all located on this single structure — by design, not by luck.</p>
+    <div class="callout"><b>This is a deliberate re-adoption, not an invention.</b> A single global dispatch queue is the pre-SMP classic-UNIX native form (Bach, <i>The Design of the UNIX Operating System</i>, 1986). Rux re-adopts it at small core counts and pins its cost with modern instrumentation: the user ruling (2026-10-28) keeps the GRQ after per-CPU queueing was evaluated and rejected as over-engineering at 4 cores with volume-coupled, not contention-bound, holds. The follow-up is GRQ hold slimming, not a queue-model change.</div>
+    <h3>Evidence that the cost is pinned</h3>
+    <ul>
+      <li><b>Hold measurement</b>: GRQ average hold <b>2786 ns</b> (n=6.3M, 17.6 s total; KVM q35 smp2/4G, 780 s window, host load 6.4–11.3), gate band <b>1200–7320 ns</b>. Across the same boot, scheduling volume grew ~2× while average hold stayed flat → <b>the cost is a function of execution volume, not lock-line contention</b>.</li>
+      <li><b>Churn pinned by config</b>: <code>cfs_min_granularity_ns = 0.7 ms</code> (wakeup-preemption granularity takes the same value) plus a 100 Hz tick — a freshly queued task cannot lose its CPU before ~0.7 ms of service, the 10 ms tick bounds the re-queue rate, and wake storms cannot churn the queue structure.</li>
+      <li><b>Hold cost decomposed into segments</b>: wake hold = runqueue accounting / dequeue-enqueue / pick / stats, each segment measured by the wakewatch and WW census instruments (§8).</li>
+      <li>Survey record (<code>docs/architecture/os-kernel-survey.md</code>): Barrelfish-style replicated-state message kernels and flat combining are both REJECTED-with-data — the motivating problem (coherence traffic at high core counts) does not exist in this regime.</li>
+    </ul>
+
+    <h2 id="struct"><span class="anchor">§2</span>Data structures and lock protocol</h2>
+    <pre><code>GlobalRunQueue {
+    lock:      RawSpinlock,
+    dl_rq:     DlRunQueue,      // BTreeMap&lt;(deadline, task_id)&gt;   EDF
+    rt_rq:     RtRunQueue,      // bitmap [AtomicU64;2] + per-prio lists
+    cfs_rq:    CfsRunQueue,     // BTreeMap&lt;vruntime&gt; (tasks_timeline)
+    nr_running: AtomicUsize,
+    idle_cpus:  AtomicU32,      // bitmap
+}</code></pre>
+    <p>Per-CPU state keeps only current / idle / stop slot pointers. <code>pick_next_task</code> class order: stop (highest, per-CPU) → DL → RT (skipped while this CPU is RT-bandwidth throttled) → CFS → idle; every class pick passes a PID-0 gate and a DEAD-pick gate (poisoned entries are dropped and counted).</p>
+    <ul>
+      <li><b>idle_cpus bitmap</b>: <code>mark_idle</code> fetch_or sets a bit; <code>claim_idle_cpu</code> finds and atomically clears in one step — two racing wakes can never target the same idle CPU; the scan start rotates past <code>LAST_IDLE_HINT</code> so wakes spread across idle CPUs.</li>
+      <li><b>Lock protocol</b>: <code>lock_irqsave</code> = save IRQ state + disable + preempt count + spin; the nested variant <code>lock_irqsave_nested</code> consumes a NestProof minted by typed lock keys (<a href="design.html#d11">D-11</a>) — a reverse nesting does not compile. GRQ-vs-futex-bucket nesting is a compile-time fact: waking under the bucket lock with GRQ nested is the everyday path; the reverse is a machine-wide deadlock.</li>
+      <li><b>Counter discipline</b>: every nr_running decrement goes through checked-sub (fetch_update) — unsigned wraparound is the fingerprint of the historical "unexcluded section" incident family and is no longer representable.</li>
+      <li>Structural limits are on record: the CFS tasks_timeline <code>dequeue()</code> is still a linear scan (O(n) per call), the leftmost cache is logged but not landed; pick's lift-out/re-insert pays 2 tree walks per skipped candidate (bounded ≤32, on a correctness-critical path — no speculative optimization).</li>
+    </ul>
+
+    <h2 id="cfs"><span class="anchor">§3</span>CFS class (fair.rs)</h2>
+    <ul>
+      <li><b>vruntime</b> = delta_exec × NICE_0_LOAD / weight, implemented as the shift multiply <code>delta × NICE_0_LOAD × inv_weight &gt;&gt; 32</code> (inv_weight = 2³²/weight); NICE_0_LOAD = 1024; the SCHED_IDLE policy is fair-class weight 3 (not a separate class).</li>
+      <li><b>Granularity constants</b>: <code>SCHED_MIN_GRANULARITY_NS = 0.7 ms</code> (also the wakeup-preemption granularity — a waker preempts only if it beats the incumbent by &gt; 0.7 ms); <code>SCHED_LATENCY_NS = 6 ms</code> latency window; tick 100 Hz. sched_slice = min(granularity×nr_running, 6 ms) × weight / total weight, floored at the granularity.</li>
+      <li><b>Placement and credit</b>: min_vruntime is a monotone floor; the wake/first-link placement base uses avg_vruntime (the 6.6 fair.c mapping); a sleeper enqueues with a credit floor of <code>min_vruntime − 6 ms</code> (sleeping is never penalized to zero); lag is clamped to max(2×slice, tick) in the fair domain.</li>
+      <li><b>Pick walk and lift-out</b>: the leftmost walk refuses entries this CPU cannot run — five refusal reasons (ownership / on_cpu / pick claim held elsewhere / affinity / cgroup throttle / healed reset) — each refused entry is temporarily lifted into a 32-slot stash and re-inserted in reverse after the pick. <b>min_vruntime is updated after full re-insertion, over the complete timeline</b>: lifting entries makes the leftmost look further right, and updating first would permanently erase the sleep credit of new tasks and wakers (order fixed after a measured regression).</li>
+      <li><b>entity_tick guard</b>: a solo CPU-bound task is no longer dequeued/re-queued/re-picked on every tick (the reference entity_tick nr_running&gt;1 condition).</li>
+    </ul>
+
+    <h2 id="rt-dl"><span class="anchor">§4</span>RT and DL classes</h2>
+    <ul>
+      <li><b>RT (rt.rs)</b>: SCHED_FIFO/RR; 100 user priorities encoded in an <code>[AtomicU64; 2]</code> bitmap (bit 0 = user priority 99, inverted; lowest set bit = highest priority), one ListHead queue per priority; RR timeslice 10 ticks = 100 ms; counts checked-sub like everywhere.</li>
+      <li><b>DL (deadline.rs)</b>: EDF + CBS; BTreeMap keyed (deadline, task_id); default period 1 s / runtime 100 ms, bandwidth unit 1&lt;&lt;20. CBS was once completely defeated (every enqueue replenished) — fixed into real throttling: an exhausted task leaves the run queue (INTERRUPTIBLE) and a kernel timer re-fills it at the next deadline, replenishing exactly once per period. Safety argument: GRQ→TIMERS is one-way because the timer softirq delivers its wake_up_process calls only after releasing TIMERS (R12-3).</li>
+      <li><b>stop / idle</b>: stop-class slot (per-CPU, for hotplug/active balancing, currently always empty); idle tasks never enqueue — any wake preempts idle immediately and rescheds.</li>
+    </ul>
+
+    <h2 id="wakeup"><span class="anchor">§5</span>Wakeup path and the preemption gate (D-14)</h2>
+    <p>Wakeup dispatch is a three-rung ladder (<code>kernel/src/process/task.rs</code>):</p>
+    <ol>
+      <li><b>An idle CPU within the wakee's affinity first</b> (the reference's select_task_sibling + remote-enqueue shape): claim an idle CPU and send the resched IPI.</li>
+      <li><b>No idle CPU, non-sync wake</b>: pass the <b>measured-wait preemption gate</b> (D-14) — poke the busy CPU's need_resched only when the wakee's measured wait (sched_clock − last pick stamp) is ≥ one latency window (6 ms); a wakee that ran within the window is left to slice expiry / handoff machinery.</li>
+      <li><b>Sync wake, no idle</b>: stacking — preserve the wake_affine parity property: while holding the global queue, a sync wake never notifies another busy CPU; the waker stacks the receiver onto its own CPU.</li>
+    </ol>
+    <p><b>Why not a vruntime-credit comparison as the gate</b>: the reference preempts when the wakee's vruntime beats the incumbent's. Rux's sleeper-credit floor and place-on-wake adjustments keep a ping-pong peer <b>permanently</b> a few ms of vruntime behind (measured: re-queue clamps cause +~10 ms vruntime jumps) — the reference gate would pass on EVERY wake and degrade into a per-record preempt dance. The measured-wait gate pokes only when the wakee has genuinely waited.</p>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>D-14 effect (same rig)</th><th>Before</th><th>After</th></tr></thead>
+      <tbody>
+        <tr><td>74-byte unix-stream record's wake/preempt/switch dance</td><td class="num">~275 µs</td><td class="num">~2.5 µs</td></tr>
+        <tr><td>p5b unix DGRAM send/recv</td><td class="num">318.6 / 318.3 µs</td><td class="num">23.1 / 40.9 µs (−93%/−87%)</td></tr>
+        <tr><td>p5c unix stream write set</td><td class="num">276.5–277.6 µs</td><td class="num">24.9–26.8 µs (−90%)</td></tr>
+        <tr><td>p5 IPC family overall</td><td colspan="2" class="num">10–18×</td></tr>
+        <tr><td>p5a pipe roundtrip (handoffs bypass the wake gate, by design)</td><td class="num">19.673 µs</td><td class="num">18.306 µs (−6.9%)</td></tr>
+      </tbody>
+    </table></div>
+    <p><b>Known costs (on record)</b>: sub-6 ms ping-pong receivers wake at slice expiry rather than immediately; exec_start approximates true wait with the last pick stamp, slightly overestimating; a futex wake→run behind an incumbent is tick-quantized to ~10 ms (p2f battery: 9.99/10.0 ms in both hog regimes — the sentinel row of the known quantization class).</p>
+    <h3>IPI and polling idle</h3>
+    <ul>
+      <li>Resched IPI sender-side alone <b>935–1139 ns</b> (cctx probe); IPI + halt exit costs ~2–5 µs of KVM exit per handoff.</li>
+      <li><b>Polling idle window 120 µs</b>: wakes landing inside the pure-spin idle window skip the resched IPI (raised from 30 µs — battery2 measured 815/1915 wakes whose IPIs landed just past the window at a 995 ns mean; each elided IPI saves ~1 µs of handoff). Dekker SeqCst fence pairing with <code>resched_cpu</code> carries a documented lost-wake safety argument.</li>
+      <li>Re-check need_resched between MARK_IDLE and WFI (R20-2): otherwise a task enqueued the instant before mark_idle sleeps a full 10 ms tick for nothing.</li>
+    </ul>
+
+    <h2 id="tick"><span class="anchor">§6</span>Tick, kernel preemption and NOHZ</h2>
+    <ul>
+      <li><b>Tick</b>: per-CPU timer at 100 Hz. <code>scheduler_tick()</code> does: softlockup touch, schedstat, phantom-bit orphan scan, allocwatch, a 1 Hz CLAIM-SWEEP (stale-claim heal over the whole CFS timeline under the GRQ), and the per-task PREEMPT-LEAK tripwire.</li>
+      <li><b>Kernel preemption defaults off</b> (opt-in via explicit schedule() calls); the <code>kpreempt=1/0</code> boot param arms the irq-exit preemption hook; A/B reads flat for hog regimes — default stays off.</li>
+      <li><b>can_stop_tick decision tree</b> (reference core.c order): any DL task needs the tick; &gt;1 RR task needs it; FIFO-only does not; &gt;1 CFS task (GRQ counter plus running non-idle currents added back) needs it.</li>
+      <li><b>NOHZ (adaptive tick)</b>: a function-for-function mirror of the reference tick-sched.c (check_tick_dependency / tick_nohz_stop·restart_sched_tick / tick_nohz_irq_exit / the nohz_full= parameter); tick_dep bits POSIX_TIMER/PERF/SCHED/RCU etc.; the per-rq→GRQ structural mapping is on record (the 0→1 kick kept as a resched IPI from the enqueue edge). Wired on x86_64 (LAPIC one-shot); other twins pending. <code>nohz_full=1</code> measured (merge record): under a hostile-load battery lmbench lat_syscall,null passes 11/12 (main tip 0/10), p1_null median 0.050 vs 0.060 µs (−17%), both census bands hold exactly.</li>
+      <li><b>Dependency gate</b>: tick-dependency re-evaluation on load change is gated by NOHZ_FULL_RUNNING — ungated, the can-stop predicate's per-CPU current scan lands inside every GRQ-held enqueue (p2_ctxsw 1.242→2.149 µs, +73%, eliminated by the gate).</li>
+    </ul>
+
+    <h2 id="ctxsw"><span class="anchor">§7</span>Context switch (the three x86_64 levers)</h2>
+    <p>The switch path decomposes via cctx counters into FPU save / mm switch / FS·GS / asm body / FPU restore:</p>
+    <ul>
+      <li><b>Lazy FPU</b>: save (xsaveopt) only if prev actually used FP since switch-in; the restore moves into the #NM handler (CR0.TS); the kernel binary is disassembly-verified to contain no compiler-emitted FP. fpusave 51 ns + fpurest 76 ns per switch.</li>
+      <li><b>FSGSBASE</b>: CPUID-gated; FS/GS moves become wrfsbase/rdfsbase (393 ns of the per-switch cost); without hardware, wrmsr fallback; per-task cached mirrors avoid rdmsr on the switch path.</li>
+      <li><b>PCID</b>: dual-CPUID-gated (PCID+INVPCID); every mm owns a 12-bit PCID and the CR3 write carries tag+NOFLUSH — switching back to a previous mm keeps its cached translations instead of a full flush (pre-PCID CR3 reload was 543 ns, the largest single switch cost); INVPCID type 0 precise single-page / type 3 full; ASIDs are synchronously flushed on all CPUs before returning to the pool.</li>
+      <li><b>Measured</b> (median of 3 interleaved A/B): <code>lat_ctx -s64 2</code> 4.97→<b>2.07 µs</b> (−58%), <code>-s64 8</code> 4.68→1.94 µs (−59%). Same-rig lmbench authoritative row (smp2 KVM, same guest, same binary): <b>2.86–3.25 vs 12.84–12.97 µs (4.0–4.5×)</b>.</li>
+    </ul>
+
+    <h2 id="instruments"><span class="anchor">§8</span>Forensic instruments and gate bands</h2>
+    <p>The scheduling domain has its own instrument suite; usage lives in the <a href="../debugging/index.html">debugging guide</a>:</p>
+    <ul>
+      <li><b>wakewatch</b>: wake-to-run latency forensics. A 1024-slot side table (Task-pointer hashed; the task layout is untouched) classifies "should have run but didn't" into four verdicts: WAKE-STRANDED (woke on time, never picked — names the victim, the latency, the picking CPU) / TIMER-LATE-FIRE / WAKE-REFUSED / in-process loss; WW5 bucket counters N250/N500/N750; strand threshold 1000 ms (raised after prints inside IF=0 contexts ate the LIFECYCLE_TIMEOUT budget).</li>
+      <li><b>census</b>: TERM-DESCHED 8±2 (the terminal-deschedule loop for DEAD tasks, print budget n&lt;8) and WAKE-REFUSED 32±4 (the W3 wake-refusal census, budget 32). Both census counts are <b>exactly identical on every qualifying quiet boot</b> (8/32) and serve as the scheduling domain's shape signature in the perf gate.</li>
+      <li><b>cctx segments</b>: wake side WK_N/WK_SEL/WK_ENQ/WK_DISP/IPI_N/IPI_NS; switch side CW_FPUSAVE/CW_MM/CW_MSR/CW_ASM/CW_FPUREST; schedule side SCH_PRE/LOCKWAIT/ACCT/DEQREQ/PICK/PUB — any switch or wake regression lands in a segment.</li>
+      <li><b>Gate bands</b> (scheduling domain): GRQ average hold 1200–7320 ns, census 8±2 / 32±4, p2_ctxsw ±20%, p5 row bands; any pick/placement change must pass a release-strong pbench boot.</li>
+    </ul>
+
+    <h2 id="limits"><span class="anchor">§9</span>Known costs and open items</h2>
+    <ul>
+      <li>GRQ contention ceiling and locality loss: recorded in D-1; revisit trigger = IF=0/hold measurements entering a contention-bound regime (currently volume-coupled).</li>
+      <li>O(n) linear dequeue over the CFS timeline and the missing leftmost cache: the next known hold-slimming target; the pick lift-out's 2× walks are bounded but real.</li>
+      <li>The p4 fork family is currently an <b>open regression</b> (fork_exit 13.2 ms vs the 9.4–10.0 ms historical family), carried honestly on the gate's watch row.</li>
+      <li>Kernel preemption defaults off: differs from the reference's optional preemptible-kernel default for throughput workloads; the ~10 ms tick quantization of futex wakes behind incumbents is the other face of the same coin — removing it depends on NOHZ wiring on all arches and kpreempt tuning.</li>
+    </ul>
+
+    <div class="callout">Code: <code>kernel/src/sched/</code> (sched.rs / fair.rs / rt.rs / deadline.rs / idle.rs / wakewatch.rs). Divergences: D-1/D-11/D-14. Instruments: cctx (inside syscost), wakewatch, census. Gate bands: the scheduling-domain rows of <code>docs/development/perf-gate-baseline.md</code>.</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to home</a></span>
+
+      <span class="foot-stats">Site visits <span id="busuanzi_value_site_pv"></span> · Visitors <span id="busuanzi_value_site_uv"></span></span></div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>
