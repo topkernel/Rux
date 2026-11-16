@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Formal verification · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">Home</a>
+      <a href="../architecture/design.html">Architecture</a>
+      <a href="../performance/index.html">Performance</a>
+      <a href="index.html">Security</a>
+      <a href="../testing/index.html">Testing</a>
+      <a href="../debugging/index.html">Debugging</a>
+      <a href="../guides/getting-started.html">Getting started</a>
+      <a href="../progress/roadmap.html">Progress</a>
+      <a href="../guestbook.html">Feedback</a>
+      <span class="lang-sw"><a class="on" href="../../security/formal.html">中文</a><a href="formal.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">Security</div>
+    <a href="index.html">Security overview</a>
+    <a class="on" href="formal.html">Formal verification</a>
+    <a href="unsafe.html">Layered unsafe ledger</a>
+    <a href="taxonomy.html">Defect taxonomy</a>
+    <a href="hardening.html">Hardening &amp; gaps</a>
+    <div class="grp">Performance</div>
+    <a href="../performance/index.html">Performance overview</a>
+    <a href="../performance/lmbench.html">lmbench</a>
+    <a href="../performance/geekbench.html">Geekbench 5</a>
+    <a href="../performance/fio.html">fio</a>
+    <a href="../performance/rttests.html">rt-tests</a>
+    <a href="../performance/microbench.html">Internal microbenchmarks</a>
+    <div class="grp">Architecture</div>
+    <a href="../architecture/design.html">Design deep-dive</a>
+    <a href="../architecture/scheduler.html">Scheduler</a>
+    <a href="../architecture/memory.html">Memory management</a>
+    <a href="../architecture/filesystem.html">Filesystem</a>
+    <a href="../architecture/ipc.html">IPC</a>
+    <a href="../architecture/boot.html">Boot flow</a>
+    <a href="../architecture/interrupts.html">Interrupts &amp; timers</a>
+    <a href="../architecture/structure.html">Code layout</a>
+    <a href="../architecture/riscv64.html">Porting guide</a>
+    <a href="../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Testing</div>
+    <a href="../testing/index.html">Overview</a>
+    <a href="../testing/ci-pipeline.html">CI pipeline</a>
+    <a href="../testing/ltp.html">LTP scan</a>
+    <a href="../testing/ltp-full.html">LTP full cases</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT audit</a>
+    <a href="../testing/stability.html">Stability</a>
+    <a href="../testing/stress.html">Stress</a>
+    <a href="../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Debugging</div>
+    <a href="../debugging/index.html">Debugging guide</a>
+    <a href="../debugging/tracepoints.html">Tracepoints</a>
+    <a href="../debugging/perf.html">Performance debugging</a>
+    <a href="../debugging/locks.html">Lock debugging</a>
+    <a href="../debugging/memory.html">Memory forensics</a>
+    <a href="../debugging/panic.html">Panic &amp; symbols</a>
+    <div class="grp">Guides</div>
+    <a href="../guides/getting-started.html">Getting started</a>
+    <a href="../guides/development.html">Contributing</a>
+    <a href="../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../progress/roadmap.html">Roadmap</a>
+    <a href="../progress/changelog.html">Changelog</a>
+    <a href="../progress/quickref.html">Commands</a>
+    <div class="grp">Community</div>
+    <a href="../guestbook.html">Guestbook</a>
+  </aside>
+
+    <article class="doc-main">
+    <h1>Formal verification</h1>
+    <div class="sub">kernel/verify/ · Five verification instruments over the same mirrored kernel logic: symbolic execution (Kani), model checking (SPIN), concurrency-interleaving enumeration (loom), undefined-behavior detection (Miri), property testing (proptest) — each instrument's proof target, scale, cadence and captured defects · Canonical: kernel/verify/README.md, docs/architecture/security-design.md §3</div>
+
+    <h2 id="map"><span class="anchor">§1</span>The instrument map</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Instrument</th><th>Method</th><th>Proof target</th><th class="num">Scale (current tree)</th><th>Cadence</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">make verify</td><td>mirror-sync check + property tests + unit tests</td><td>kernel algorithms mirrored into the host crate</td><td class="num">1,164 #[test] fns (incl. 109 proptest! blocks) + 100 in-kernel unit tests</td><td><span class="chip ok">every push</span></td></tr>
+        <tr><td class="mono">make kani</td><td>symbolic execution — asserts and panic reachability for ALL inputs</td><td>core unsafe code and protocol invariants</td><td class="num">159 #[kani::proof] harnesses (34 files)</td><td><span class="chip cyan">nightly CI</span></td></tr>
+        <tr><td class="mono">make spin</td><td>Promela model checking (state enumeration + LTL)</td><td>lock ordering / futex wait-wake / interrupt-preempt / sched enqueue-dequeue</td><td class="num">4 models, all PASS</td><td><span class="chip cyan">nightly CI</span></td></tr>
+        <tr><td class="mono">loom</td><td>interleaving enumeration under a preemption bound</td><td>the SleepMutex handoff state machine</td><td class="num">8 scenarios (5 clean + 3 planted must-catch)</td><td><span class="chip cyan">nightly CI</span></td></tr>
+        <tr><td class="mono">make miri</td><td>interpreted execution + UB detection</td><td>the whole verify mirror crate</td><td class="num">with the 1,164 tests</td><td><span class="chip cyan">nightly CI</span></td></tr>
+      </tbody>
+    </table></div>
+    <p>All instruments run host-side with no kernel-image dependency: the proof targets are <b>pure types and state machines mirrored from kernel/src into the verify crate</b>. The instruments are complementary — proptest answers "correct on sampled inputs", Kani answers "correct on all inputs", SPIN/loom answer "no deadlock/lost wakeups under every interleaving", Miri answers "no undefined behavior".</p>
+
+    <h2 id="kani"><span class="anchor">§2</span>Kani symbolic execution (159 harnesses)</h2>
+    <ul>
+      <li><b>Coverage distribution</b>: fs 19, drivers 18, arch 17, process 16, signal 14, net 14, interrupt 11, sched 9, security 9, mm 18, ipc 5, errno 5, sync 4 (per file; 159 across 34 files).</li>
+      <li><b>Harness contract style</b>: each harness mirrors pure types from kernel/src into verify (the source file cited verbatim in a comment), takes symbolic inputs with <code>kani::any()</code>, narrows preconditions with <code>kani::assume</code>, and asserts named invariants <code>INV-&lt;domain&gt;-K&lt;n&gt;</code>. Examples: INV-CAP-K1 (capability mask valid at 41 bits), INV-RT-K1 (empty bitmap returns None), INV-INODE-K3 (file types mutually exclusive), INV-PCI-K4 (64-bit BAR detection bit shape), INV-ERRNO-K3 (EWOULDBLOCK == EAGAIN — POSIX).</li>
+      <li><b>The flagship proof</b> (sync/mutex_kani.rs, the S-1 pilot's data half): K1 proves that for <b>every disciplined operation sequence of length K</b> the invariant table INV-M1..M4 holds after every step, INV-M5 token conservation holds throughout, and INV-M6 no arithmetic panics occur (Kani checks panic reachability directly); K2 proves the designed do_exit orphaned-waiter leak is bounded and does not impair the gate/epoch/anti-starvation paths. Both proofs complete in ~2.2 s (Kani 0.68.0).</li>
+      <li><b>Invariant density</b>: 902 INV- references in the verify crate across ~150 invariant families; the kernel source carries another 158 runtime invariant references (INV-PCP, INV-LOCK, INV-FUTEX, INV-SCHED etc.).</li>
+      <li><b>Harness defects were caught too</b>: the first runs surfaced three harness call-discipline gaps, each fixed — the pid-0 free-state alias (two kernel entities share pid 0 and must not be modeled as one), a counted waiter also acquiring ungated (a call sequence no single lock() invocation can produce), and the designed do_exit leak correctly flagged as an INV-M5 violation (detection correct; the model gained a leaked field). One run also repaired a pre-existing vma_kani compile break that had left cargo kani unable to build the crate at all.</li>
+    </ul>
+
+    <h2 id="spin"><span class="anchor">§3</span>SPIN model checking (4 models, all PASS)</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Model</th><th>Properties checked</th><th class="num">States</th><th>Verdict</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">lock_ordering</td><td>no deadlock cycle in lock acquisition; the hierarchy L0 IRQ → L1 preempt → 2a GRQ → 2b futex bucket → 3 waiter slot; INV-LOCK-5 (bucket→GRQ allowed, GRQ→bucket forbidden)</td><td class="num">313</td><td class="chip ok">PASS (errors: 0)</td></tr>
+        <tr><td class="mono">futex_wait_wake</td><td>LTL NoLostWakeup + NoPermanentSleep; INV-FUTEX-1 (the waiter sets INTERRUPTIBLE under the bucket lock before dropping it)</td><td class="num">3,220,543</td><td class="chip ok">PASS (1.19 s)</td></tr>
+        <tr><td class="mono">interrupt_preempt</td><td>LTL HardirqBounded (0 ≤ depth ≤ 3) + PreemptNoUnderflow</td><td class="num">181</td><td class="chip ok">PASS</td></tr>
+        <tr><td class="mono">sched_enqueue_dequeue</td><td>LTL NrRunningValid (0 ≤ nr_running ≤ 4) + NoPermanentStarvation; INV-SCHED-1..3</td><td class="num">4,815</td><td class="chip ok">PASS</td></tr>
+      </tbody>
+    </table></div>
+    <ul>
+      <li>Run: <code>make spin</code> (spin -a → pan.c → pan -a); PASS requires errors: 0, the report is regenerated, and any FAIL/compile error exits 1; executed by nightly CI.</li>
+      <li>Liveness properties are scoped deliberately: interrupt_preempt intentionally omits starvation elimination ("SPIN explores starvation interleavings that do not exist on real hardware") — the criterion is model-reality correspondence, not state-count maximization.</li>
+    </ul>
+
+    <h2 id="loom"><span class="anchor">§4</span>loom interleaving enumeration: the SleepMutex extraction</h2>
+    <p>A <b>faithful extraction</b> of a kernel concurrency primitive: mutex_model.rs extracts the handoff state machine of kernel/src/sync/mutex.rs (R84/R85 fairness + orphaned-handoff recovery) with the environment hooks (get_jiffies/wake_up_one/anti-starvation threshold) injected as parameters; mutex_loom.rs is the driver and the 8 scenarios.</p>
+    <ul>
+      <li><b>The invariant table INV-M1..M6</b>: M1 locked ⇒ depth ≥ 1; M2 !locked ⇒ owner == 0 (the converse does NOT hold: a pid==0 early-boot/IRQ-context caller may hold the lock through the ungated spinner); M3 !locked ⇒ depth == 0; M4 owner ≠ 0 ⇒ locked; M5 token conservation; M6 waiters never underflows. Mutual exclusion is asserted via a shared counter equal to exactly 1 inside every state critical section; deadlock freedom is checked separately.</li>
+      <li><b>8 scenarios</b>: 5 clean (two-task / three-task / spinner+sleepers / recursion-and-exit-release / anti-starve override) + 3 <b>planted must-be-caught</b> scenarios (P1 no-epoch recovery = the pre-R85 strand; P2 token-skip decrement = an M5 break; P4 repark-recount) — the instrument's detection power against known defect classes is itself calibrated.</li>
+      <li><b>Run</b>: 8 scenarios in 59.5 s, preemption bound 3 (release); nightly CI builds with LOOM_MAX_PREEMPTIONS=3 and --cfg loom, failing on FAILED or deadlock.</li>
+      <li><b>First use caught a real kernel bug in 90 seconds</b> (011a71c5): the recursion arms tested only <code>owner == pid</code> — a FREE lock carries owner == 0 and a no-task context's get_current_pid() returns 0, so a no-task caller hitting a momentarily free lock behind a counted waiter (the handoff window) matched the recursion arm and "recursed into" the unlocked lock, setting depth=1; that bogus guard's release could free a lock another task genuinely holds (mutual exclusion broken). The fix adds <code>st.locked &amp;&amp;</code> to four recursion arms plus a deterministic regression test.</li>
+      <li><b>An exhaustive argument for a design feature</b>: two-task pure-fair contention is strand-free WITHOUT the R85 timer; with 3+ waiters, strand interleavings exist that only the timer bounds — the anti-starvation timer's existence is proven by model checking, not assumed as a heuristic.</li>
+      <li><b>An interpretation rule on record</b>: the timer is modeled partially (the park-time deadline check delivers the timer wake once other threads advance the model clock past the deadline) — a deadlock with the lock FREE and all waiters parked is the designed bounded-latency state, not a kernel bug.</li>
+    </ul>
+
+    <h2 id="proptest"><span class="anchor">§5</span>Property testing and Miri</h2>
+    <ul>
+      <li><b>Scale</b>: 1,164 #[test] functions in the verify crate (102 files), of which 109 are proptest! blocks (proptest 1.5, 256 cases per test by default, PROPTEST_CASES configurable); the kernel adds 100 #[test] fns (the unit-test feature, run in QEMU by make test).</li>
+      <li><b>Coverage</b>: buddy alignment/involution, refcount never-negative with underflow-free release, VMA non-overlap, Newton integer sqrt and watermark formulas, Sv39 PTE/Satp encoding, RFC 1071 checksum / RFC 6298 RTT / RFC 5681 congestion, longest-prefix match, ARP-cache LRU, path normalization with root-escape prevention, Unix DAC checks (incl. CAP_DAC_OVERRIDE), ext4 indirect/namei/superblock/allocator, OOM badness scoring (10 tests: OOM_SCORE_ADJ_MIN immunity, saturation avoidance, small totalpages unadjusted, symmetry), CFS weight-table monotonicity, deadline bandwidth clamp, futex key matching, capability algebra (De Morgan/subset/complement), cmdline parsing, JBD2 tag arithmetic.</li>
+      <li><b>The boundary is stated as such</b>: not covered are raw pointers/inline asm/GlobalAlloc impls, runtime concurrency and interrupts, and QEMU-required integration — "verify answers 'is the algorithm correct', unit tests answer 'is the implementation correct'"; the integration face is carried by LTP and the stress fleet.</li>
+      <li><b>Miri</b>: interprets the entire verify crate with <code>-Zmiri-disable-isolation</code>; any UB fails the run (nightly, 360-minute budget).</li>
+    </ul>
+
+    <h2 id="sync"><span class="anchor">§6</span>The mirror-sync discipline: proofs pinned to the proven code</h2>
+    <ul>
+      <li>The verify crate mirrors proven algorithms by hand; <b>drift between the mirror and the kernel source fails the build</b> (scripts/verify_sync_check.py, per-function equivalence normalization) — a proof cannot silently stop covering its code as the kernel evolves; make verify/make kani/make miri and CI all run the sync check first.</li>
+      <li>State-machine extractions (mutex_model.rs) additionally require the state-transition table to change in the <b>same commit</b> as the kernel implementation.</li>
+    </ul>
+
+    <h2 id="cadence"><span class="anchor">§7</span>Cadence</h2>
+    <ul>
+      <li><b>Every push</b>: the triple-arch build smoke + the mirror sync + the full verify suite (1,164 tests) — within a per-commit budget.</li>
+      <li><b>Nightly</b>: all 159 Kani harnesses, full Miri, the 4 SPIN models, the 8 loom scenarios — heavyweight jobs stay off the per-push path (so kernel commits are not painted red).</li>
+      <li><b>Before a proof-bearing change lands</b>: make verify &amp;&amp; make kani is run manually.</li>
+    </ul>
+
+    <h2 id="pilots"><span class="anchor">§8</span>Survey pilots → landed</h2>
+    <ul>
+      <li>S-1 (the concurrency-primitive model-checking pilot, seL4 lineage): the SleepMutex extraction + the loom/Kani pair are in main (11c73f42/011a71c5/1d697ec2d/3b7b6f68); further extraction targets queue by incident density (the D-7 magazine, the D-11 GRQ claim, futex bucket nesting).</li>
+      <li>S-5 (typed timer-wheel slot ranges): landed as D-19 — six misuse classes became compile errors (evidence: six rustc rejections on the real tree + a same-rig A/B).</li>
+      <li>S-2 (a typed binder transaction FSM) is a registered placeholder — the only exit from the placeholder zone is delivering measured evidence.</li>
+    </ul>
+
+    <div class="callout">Instrument selection vs the reference kernel: the reference has no Kani/loom/Miri counterpart, and SPIN corresponds to a compile-time subset of its lockdep — the difference here is that verification is moved to build/CI time rather than runtime sampling. Code: kernel/verify/ (34 harness files + spin/4 models + mutex_loom.rs); CI: .github/workflows/{kani,spin,loom,miri}.yml.</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to home</a></span>
+
+      <span class="foot-stats">Site visits <span id="busuanzi_value_site_pv"></span> · Visitors <span id="busuanzi_value_site_uv"></span></span></div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>

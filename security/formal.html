@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>形式验证 · Rux</title>
+<link rel="stylesheet" href="../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">首页</a>
+      <a href="../architecture/design.html">架构设计</a>
+      <a href="../performance/index.html">性能</a>
+      <a href="index.html">安全</a>
+      <a href="../testing/index.html">测试</a>
+      <a href="../debugging/index.html">调试</a>
+      <a href="../guides/getting-started.html">快速入门</a>
+      <a href="../progress/roadmap.html">项目进展</a>
+      <a href="../guestbook.html">留言</a>
+      <span class="lang-sw"><a class="on" href="formal.html">中文</a><a href="../en/security/formal.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">安全</div>
+    <a href="index.html">安全总览</a>
+    <a class="on" href="formal.html">形式验证</a>
+    <a href="unsafe.html">分层 unsafe 台账</a>
+    <a href="taxonomy.html">缺陷分类学</a>
+    <a href="hardening.html">运行时强化与缺口</a>
+    <div class="grp">性能</div>
+    <a href="../performance/index.html">性能总览</a>
+    <a href="../performance/lmbench.html">lmbench</a>
+    <a href="../performance/geekbench.html">Geekbench 5</a>
+    <a href="../performance/fio.html">fio</a>
+    <a href="../performance/rttests.html">rt-tests</a>
+    <a href="../performance/microbench.html">内部微基准</a>
+    <div class="grp">架构设计</div>
+    <a href="../architecture/design.html">架构与模块设计</a>
+    <a href="../architecture/scheduler.html">调度器</a>
+    <a href="../architecture/memory.html">内存管理</a>
+    <a href="../architecture/filesystem.html">文件系统</a>
+    <a href="../architecture/ipc.html">进程间通信</a>
+    <a href="../architecture/boot.html">启动流程</a>
+    <a href="../architecture/interrupts.html">中断与时钟</a>
+    <a href="../architecture/structure.html">代码结构</a>
+    <a href="../architecture/riscv64.html">架构移植指南</a>
+    <a href="../architecture/kernel-lock.html">锁序不变量</a>
+    <div class="grp">测试</div>
+    <a href="../testing/index.html">测试总览</a>
+    <a href="../testing/ci-pipeline.html">CI 流水线</a>
+    <a href="../testing/ltp.html">LTP 兼容扫描</a>
+    <a href="../testing/ltp-full.html">LTP 全量用例</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT 审计</a>
+    <a href="../testing/stability.html">稳定性</a>
+    <a href="../testing/stress.html">压力</a>
+    <a href="../testing/gnome-retrospective.html">回溯报告</a>
+    <div class="grp">调试</div>
+    <a href="../debugging/index.html">调试指南</a>
+    <a href="../debugging/tracepoints.html">tracepoint 框架</a>
+    <a href="../debugging/perf.html">性能调试</a>
+    <a href="../debugging/locks.html">锁调试</a>
+    <a href="../debugging/memory.html">内存取证</a>
+    <a href="../debugging/panic.html">panic 与符号化</a>
+    <div class="grp">开发指南</div>
+    <a href="../guides/getting-started.html">快速入门</a>
+    <a href="../guides/development.html">参与开发</a>
+    <a href="../guides/configuration.html">内核配置</a>
+    <div class="grp">项目进展</div>
+    <a href="../progress/roadmap.html">路线图</a>
+    <a href="../progress/changelog.html">更新日志</a>
+    <a href="../progress/quickref.html">命令速查</a>
+    <div class="grp">互动</div>
+    <a href="../guestbook.html">留言板</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>形式验证</h1>
+    <div class="sub">kernel/verify/ · 五种验证装置作用于同一份镜像的内核逻辑:符号执行(Kani)、模型检查(SPIN)、并发交错枚举(loom)、未定义行为检测(Miri)、属性测试(proptest) —— 各装置的证明对象、规模、运行节奏与已捕获缺陷 · 正本:kernel/verify/README.md、docs/architecture/security-design.md §3</div>
+
+    <h2 id="map"><span class="anchor">§1</span>装置全景</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>装置</th><th>方法</th><th>证明对象</th><th class="num">规模(当前树)</th><th>节奏</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">make verify</td><td>镜像同步检查 + 属性测试 + 单元测试</td><td>被镜像进宿主 crate 的内核算法</td><td class="num">1,164 个 #[test](含 109 个 proptest!) + 内核内 100 个单测</td><td><span class="chip ok">每次 push</span></td></tr>
+        <tr><td class="mono">make kani</td><td>符号执行,对全部输入证明断言与 panic 可达性</td><td>核心 unsafe 代码与协议不变量</td><td class="num">159 个 #[kani::proof](34 文件)</td><td><span class="chip cyan">nightly CI</span></td></tr>
+        <tr><td class="mono">make spin</td><td>Promela 模型检查(状态穷举 + LTL)</td><td>锁序 / futex 等待唤醒 / 中断-抢占 / 调度出入队</td><td class="num">4 个模型,全 PASS</td><td><span class="chip cyan">nightly CI</span></td></tr>
+        <tr><td class="mono">loom</td><td>并发交错枚举(受抢占界约束)</td><td>SleepMutex 交接状态机</td><td class="num">8 场景(5 清洁 + 3 预植必捕)</td><td><span class="chip cyan">nightly CI</span></td></tr>
+        <tr><td class="mono">make miri</td><td>解释执行 + UB 检测</td><td>verify 镜像 crate 全量</td><td class="num">随 1,164 测试</td><td><span class="chip cyan">nightly CI</span></td></tr>
+      </tbody>
+    </table></div>
+    <p>全部装置运行于宿主侧、不依赖内核镜像:验证对象是<b>从 kernel/src 镜像进 verify crate 的纯类型与状态机</b>。装置分工互补 —— proptest 答"算法对采样输入正确",Kani 答"对全部输入正确",SPIN/loom 答"所有交错下无死锁/无丢失唤醒",Miri 答"无未定义行为"。</p>
+
+    <h2 id="kani"><span class="anchor">§2</span>Kani 符号执行(159 harness)</h2>
+    <ul>
+      <li><b>覆盖分布</b>:fs 19、drivers 18、arch 17、process 16、signal 14、net 14、interrupt 11、sched 9、security 9、mm 18、ipc 5、errno 5、sync 4(每文件计数,合计 159/34 文件)。</li>
+      <li><b>harness 合同风格</b>:每个 harness 将 kernel/src 的纯类型镜像进 verify(注释逐字标注来源文件),以 <code>kani::any()</code> 取符号输入,<code>kani::assume</code> 收窄前条件,断言具名不变量 <code>INV-&lt;域&gt;-K&lt;n&gt;</code>。示例:INV-CAP-K1(能力掩码合法 41 位)、INV-RT-K1(空位图返回 None)、INV-INODE-K3(文件类型互斥)、INV-PCI-K4(64 位 BAR 判定位型)、INV-ERRNO-K3(EWOULDBLOCK == EAGAIN,POSIX 要求)。</li>
+      <li><b>旗舰证明</b>(sync/mutex_kani.rs,S-1 试点数据面):K1 对<b>任意长度 K 的规范操作序列</b>证明不变量表 INV-M1..M4 逐步保持、INV-M5 令牌守恒全程成立、INV-M6 无算术 panic(Kani 直接检查 panic 可达性);K2 证明设计内的 do_exit 孤儿等待者泄漏有界且不妨碍门控/纪元/防饿路径。两证明合计 ~2.2 s(Kani 0.68.0)。</li>
+      <li><b>不变量密度</b>:verify crate 内 902 处 INV- 引用、约 150 个不变量族;内核源码侧另有 158 处运行时不变量引用(INV-PCP、INV-LOCK、INV-FUTEX、INV-SCHED 等)。</li>
+      <li><b>harness 自身的缺陷也被捕获</b>:首批运行暴露三个 harness 调用纪律缺口并逐个修复 —— pid-0 空闲态别名(两个内核实体共享 pid 0,不得建模为同一者)、计数等待者同时无门获取(单一 lock() 调用不可产生的调用序)、设计内 do_exit 泄漏被正确判为 INV-M5 违例(检测正确,建模补 leaked 字段)。其中一次还修复了令 cargo kani 完全无法编译的 vma_kani 预存缺陷。</li>
+    </ul>
+
+    <h2 id="spin"><span class="anchor">§3</span>SPIN 模型检查(4 模型全 PASS)</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>模型</th><th>被检性质</th><th class="num">状态数</th><th>结论</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">lock_ordering</td><td>锁获取无死锁环;层级 L0 IRQ→L1 preempt→2a GRQ→2b futex 桶→3 waiter 槽;INV-LOCK-5(桶→GRQ 允许,GRQ→桶禁止)</td><td class="num">313</td><td class="chip ok">PASS(errors: 0)</td></tr>
+        <tr><td class="mono">futex_wait_wake</td><td>LTL NoLostWakeup + NoPermanentSleep;INV-FUTEX-1(等待者在桶锁内置 INTERRUPTIBLE 后才释放)</td><td class="num">3,220,543</td><td class="chip ok">PASS(1.19 s)</td></tr>
+        <tr><td class="mono">interrupt_preempt</td><td>LTL HardirqBounded(0≤深度≤3)+ PreemptNoUnderflow</td><td class="num">181</td><td class="chip ok">PASS</td></tr>
+        <tr><td class="mono">sched_enqueue_dequeue</td><td>LTL NrRunningValid(0≤nr_running≤4)+ NoPermanentStarvation;INV-SCHED-1..3</td><td class="num">4,815</td><td class="chip ok">PASS</td></tr>
+      </tbody>
+    </table></div>
+    <ul>
+      <li>运行:<code>make spin</code>(spin -a → pan.c → pan -a),仅 errors: 0 判 PASS,重生成 spin-report.txt,任何 FAIL/编译错误退出码 1;nightly CI 固定执行。</li>
+      <li>活性属性按建模注释有取舍:interrupt_preempt 有意不建模饥饿消除("SPIN 会穷举真实硬件上不存在的饥饿交错")—— 判据是建模范围与硬件现实的对应,而非状态数最大化。</li>
+    </ul>
+
+    <h2 id="loom"><span class="anchor">§4</span>loom 交错枚举:SleepMutex 提取</h2>
+    <p>内核并发原语的<b>忠实提取</b>:mutex_model.rs 提取 kernel/src/sync/mutex.rs 的交接状态机(R84/R85 公平性 + 孤儿交接恢复),环境钩子(get_jiffies/wake_up_one/防饿阈值)作参数注入;mutex_loom.rs 为驱动与 8 场景。</p>
+    <ul>
+      <li><b>不变量表 INV-M1..M6</b>:M1 locked ⇒ depth≥1;M2 !locked ⇒ owner==0(逆命题不成立:pid==0 的早期/中断上下文可经无门自旋路径持锁);M3 !locked ⇒ depth==0;M4 owner≠0 ⇒ locked;M5 令牌守恒;M6 waiters 无下溢。互斥以共享计数器在每个状态临界区内断言恰为 1;另检死锁自由。</li>
+      <li><b>8 场景</b>:5 个清洁场景(双任务/三任务/自旋者+睡眠者/递归与退出释放/防饿覆盖)+ 3 个<b>预植必捕</b>场景(P1 无纪元恢复 = R85 前搁浅形态;P2 令牌跳过递减 = M5 破坏;P4 重泊重计)—— 装置对已知缺陷类的检出能力本身经过校准。</li>
+      <li><b>运行</b>:8 场景 59.5 s,抢占界 3(release);CI nightly 以 LOOM_MAX_PREEMPTIONS=3、--cfg loom 构建执行,失败判据含 FAILED 与 deadlock。</li>
+      <li><b>首启用 90 秒捕获真实内核缺陷</b>(011a71c5):递归臂仅判 <code>owner == pid</code> —— 空闲锁 owner==0 而无任务上下文 get_current_pid()==0,无任务调用者在交接窗内命中"空闲锁"即误入递归臂,对未锁对象置 depth=1;该伪 guard 的 release 可释放他人真持有的锁(互斥破坏)。修复 = 四个递归臂加 <code>st.locked &amp;&amp;</code>,另加确定性回归测试。</li>
+      <li><b>设计特征的穷举论证</b>:两任务纯公平争用无 R85 定时器即无搁浅;3+ 等待者存在仅能由 R85 定时器界定的搁浅交错 —— 防饿定时器由模型检查给出存在性证明,非启发式。</li>
+      <li><b>解释规则在案</b>:定时器为部分建模(泊车时限检查在模型时钟推进过限期时投递)——"锁空闲且全部等待者已泊"的死锁判定为设计内有界等待状态,非内核缺陷。</li>
+    </ul>
+
+    <h2 id="proptest"><span class="anchor">§5</span>属性测试与 Miri</h2>
+    <ul>
+      <li><b>规模</b>:verify crate 1,164 个 #[test](102 文件),其中 109 个 proptest! 块(proptest 1.5,每测试默认 256 例,PROPTEST_CASES 可调);内核内另有 100 个 #[test](unit-test feature,QEMU 内 make test 执行)。</li>
+      <li><b>覆盖面</b>:buddy 对齐/对合性、引用计数非负且无下溢释放、VMA 不重叠、Newton 法整平方根与水位线公式、Sv39 PTE/Satp 编码、RFC 1071 校验和 / RFC 6298 RTT / RFC 5681 拥塞控制、最长前缀匹配、ARP 缓存 LRU、路径规范化与根逃逸防护、Unix DAC 判定(含 CAP_DAC_OVERRIDE)、ext4 间接块/namei/超级块/分配器、OOM badness 评分(10 项:OOM_SCORE_ADJ_MIN 免疫、饱和规避、小 totalpages 无调整、对称性)、CFS 权重表单调性、deadline 带宽钳制、futex 键匹配、能力代数(De Morgan/子集/补)、cmdline 解析、JBD2 标签算术。</li>
+      <li><b>边界如实声明</b>:不覆盖裸指针/内联汇编/GlobalAlloc 实现、运行期并发与中断行为、需 QEMU 的系统集成 —— "verify 回答'算法是否正确',单元测试回答'实现是否正确'",集成面由 LTP/压力舰队承担。</li>
+      <li><b>Miri</b>:对 verify crate 全量以 <code>-Zmiri-disable-isolation</code> 解释执行,检出任何 UB 即 fail(nightly,360 分钟预算)。</li>
+    </ul>
+
+    <h2 id="sync"><span class="anchor">§6</span>镜像同步纪律:证明钉在被证代码上</h2>
+    <ul>
+      <li>verify crate 手工镜像被证算法;镜像副本与内核原文的<b>漂移使构建失败</b>(scripts/verify_sync_check.py,逐函数等价归一化检查)—— 证明不可能在代码演化后静默失效;CI 与 make verify/make kani/make miri 全部先跑同步检查。</li>
+      <li>状态机类提取(mutex_model.rs)额外要求状态转换表与内核实现在<b>同一提交</b>内变更。</li>
+    </ul>
+
+    <h2 id="cadence"><span class="anchor">§7</span>运行节奏</h2>
+    <ul>
+      <li><b>每次 push</b>:三架构构建烟测 + 镜像同步 + verify 全量(1,164 测试)—— 单提交预算内。</li>
+      <li><b>nightly</b>:Kani 全 159 harness、Miri 全量、SPIN 4 模型、loom 8 场景 —— 重型作业不占 per-push 预算(避免每提交染红)。</li>
+      <li><b>证明性改动落地前</b>:make verify &amp;&amp; make kani 手动前置。</li>
+    </ul>
+
+    <h2 id="pilots"><span class="anchor">§8</span>调研试点 → 已落地</h2>
+    <ul>
+      <li>S-1(并发原语模型检查试点,seL4 谱系):SleepMutex 提取 + loom/Kani 双装置已落 main(11c73f42/011a71c5/1d697ec2d/3b7b6f68);后续提取目标按事故密集度排队(D-7 magazine、D-11 GRQ claim、futex 桶嵌套)。</li>
+      <li>S-5(类型化定时器轮槽域试点):落地为 D-19,六类误用成为编译错(证据:同树六处 rustc 拒绝 + 同 rig A/B)。</li>
+      <li>S-2(类型化 binder 事务 FSM)为登记的占位项 —— 进占位区的唯一出口是交付实测证据。</li>
+    </ul>
+
+    <div class="callout">装置选型原则(对照参考内核):参考内核无 Kani/loom/Miri 对应物,SPIN 对应其 lockdep 的编译期子集 —— Rux 的差异在验证前移到构建/CI 期而非运行期采样。代码:kernel/verify/(34 harness 文件 + spin/4 模型 + mutex_loom.rs);CI:.github/workflows/{kani,spin,loom,miri}.yml。</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">返回首页</a></span>
+
+      <span class="foot-stats">本站访问 <span id="busuanzi_value_site_pv"></span> 次 · 访客 <span id="busuanzi_value_site_uv"></span> 人</span></div>
+  </div>
+</footer>
+
+<script src="../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>
