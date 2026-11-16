@@ -120,7 +120,7 @@
     <h2 id="pistress"><span class="anchor">§3</span>pi_stress</h2>
     <ul>
       <li>r1-r4: FAIL — the FUTEX_LOCK_PI family was unimplemented then (ENOSYS).</li>
-      <li><b>The 2026-11-17 re-run</b> (current main, PI futexes merged in 0b4d1752b): <span id="pi-now">the glibc PI-mutex initialization path returns ENOTSUP ("initializing mutex: Operation not supported") — the kernel-side FUTEX_LOCK_PI exists, but glibc's PTHREAD_PRIO_INHERIT mutex dependency chain (robust registration + PI semantics) is not fully traversed yet; <span style="color:var(--text-3)">a registered UAPI compatibility gap, with pi_stress passing as the acceptance target.</span></span></li>
+      <li><b>The 2026-11-17 re-run</b> (current main, PI futexes merged in 0b4d1752b): <span id="pi-now">the glibc PI-mutex initialization path returns ENOTSUP ("initializing mutex: Operation not supported") — the kernel-side FUTEX_LOCK_PI exists, but glibc's PTHREAD_PRIO_INHERIT mutex dependency chain (robust registration + PI semantics) is not fully traversed yet; <span style="color:var(--text-3)">a registered UAPI compatibility gap, with pi_stress passing as the acceptance target.</span></span></span></li>
     </ul>
 
     <h2 id="infra"><span class="anchor">§4</span>Toolchain and injection</h2>
