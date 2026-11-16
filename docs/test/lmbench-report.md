@@ -88,6 +88,29 @@ Open remains 0.86-0.87 µs (in band; 2× target 0.197 µs needs the
 path-walk loop 598 ns + TAIL 950 ns reductions — deep water, queued
 behind the sampling-tool fix).
 
+## Patrol-4 med-of-3 (2026-11-17, kernel perf-2x head vs 11-16 standing)
+
+Paired med-of-3 boots (CCD0 + performance governor + warmer, nohz_full=1;
+r1 = the 11-16 standing kernel, r2 = perf-2x head with fdget/getppid/
+PT_REGS landed):
+
+| Case | r1 (standing) | r2 (perf-2x) | Δ | vs reference med (0.046/0.062/0.060) |
+|---|---|---|---|---|
+| lat_syscall null | 0.0498 µs | **0.0448 µs** | −10% | **0.97x — AHEAD of the reference median** |
+| lat_syscall write | 0.0878 µs | **0.0832 µs** | −5% | 1.39x |
+| lat_syscall read | 0.1062 µs | **0.0998 µs** | −6% | 1.61x |
+
+The null row has flipped to parity-better (the fdget borrow + getppid
+O(1) + PT_REGS gating stack removed ~5 ns of per-call overhead from
+the standing kernel). The 2× target (0.023 µs) sits BELOW the
+reference kernel's own full getppid syscall (0.046 µs) — reaching it
+requires the entry RTT alone to drop under 23 ns total; per the
+evidence requirement this is documented as requiring the entry-floor
+rework (frame build + exit checks) rather than incremental cuts.
+read/write 2× (0.031/0.030) similarly need the copy-tail and entry
+floor together; the fsw per-phase numbers carry observer tax (the
+counters read the timebase) and must not be used as absolute budgets.
+
 ## fork/exec phase anatomy (2026-11-17, forkprof=2, 61-69k samples, nohz_full=1)
 
 lat_proc fork 44.3 µs decomposed (per-fork kernel-side costs):
