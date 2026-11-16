@@ -230,6 +230,25 @@ struct FlockEntry {
 
 /// Global flock table (design note in module header).
 static FILE_LOCK_TABLE: Spinlock<Vec<FlockEntry>> = Spinlock::new(Vec::new());
+/// Live-entry mirror of FILE_LOCK_TABLE, stored inside every critical
+/// section that mutates it (the RECORD_LOCK_COUNT pattern; sysmm-2x
+/// lane, 2026-11-17). File::drop's release path reads this first and
+/// skips the table lock + retain scan when it is 0 — no process holds
+/// flocks on a default boot, so every close saves one irqsave lock
+/// pair + O(table) scan. Soundness of the 0-read against a racing
+/// FIRST-ever insert: an insert runs inside flock_lock(&File) which
+/// holds a File reference; File::drop (the gate reader) only runs
+/// after the LAST reference died, and the Arc refcount's
+/// Release/Acquire chain orders the dropping CPU's Acquire load of
+/// this counter after the inserter's Release store of the new length.
+static FLOCK_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+#[inline]
+fn note_flock_len(table: &Vec<FlockEntry>) {
+    FLOCK_COUNT.store(table.len(), core::sync::atomic::Ordering::Release);
+}
+
 /// All flock waiters (wake-all-and-recheck on every release/conversion).
 static FLOCK_WAIT_QUEUE: WaitQueueHead = WaitQueueHead::new();
 
@@ -261,6 +280,7 @@ pub fn flock_lock(file: &File, operation: i32) -> Result<(), crate::errno::Errno
             let mut table = FILE_LOCK_TABLE.lock();
             let before = table.len();
             table.retain(|e| !(e.key == key && e.file_id == file_id));
+            note_flock_len(&table);
             if table.len() != before {
                 drop(table);
                 FLOCK_WAIT_QUEUE.wake_up_all();
@@ -285,6 +305,7 @@ pub fn flock_lock(file: &File, operation: i32) -> Result<(), crate::errno::Errno
                             owner_pid,
                             exclusive,
                         });
+                        note_flock_len(&table);
                         true
                     }
                 };
@@ -330,9 +351,15 @@ fn flock_conflicts_locked(
 /// `File::drop` — the exact moment the last fd (possibly across fork
 /// copies and in-flight syscall clones) goes away.
 pub fn flock_release_file(file_id: u64) {
+    // closegap: empty-table fast path — see FLOCK_COUNT. One Acquire
+    // load replaces the lock pair + retain scan on every File::drop.
+    if FLOCK_COUNT.load(core::sync::atomic::Ordering::Acquire) == 0 {
+        return;
+    }
     let mut table = FILE_LOCK_TABLE.lock();
     let before = table.len();
     table.retain(|e| e.file_id != file_id);
+    note_flock_len(&table);
     if table.len() != before {
         drop(table);
         FLOCK_WAIT_QUEUE.wake_up_all();
@@ -837,6 +864,23 @@ struct LeaseEntry {
 }
 
 static LEASE_TABLE: Spinlock<Vec<LeaseEntry>> = Spinlock::new(Vec::new());
+/// Live-entry mirror of LEASE_TABLE (the RECORD_LOCK_COUNT/FLOCK_COUNT
+/// pattern; sysmm-2x lane, 2026-11-17). Every regular-file open runs
+/// break_lease -> lease_conflicts and every close runs the unregister
+/// lease leg; with no leases on the box (the default) both collapse to
+/// one Acquire load instead of a table lock + scan. Soundness against
+/// a racing FIRST-ever set_lease: the setter runs inside fcntl on a
+/// held File reference; File::drop only runs after the last reference
+/// died, and the Arc refcount Release/Acquire chain orders the
+/// dropping CPU's Acquire read after the setter's Release length
+/// store.
+static LEASE_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+#[inline]
+fn note_lease_len(table: &Vec<LeaseEntry>) {
+    LEASE_COUNT.store(table.len(), core::sync::atomic::Ordering::Release);
+}
 /// Openers blocked in a lease break.
 static LEASE_WAIT: WaitQueueHead = WaitQueueHead::new();
 
@@ -886,9 +930,14 @@ pub fn inode_open_unregister(file: &File) {
         }
     }
     // Release the dying description's lease and wake lease breakers.
+    // closegap: empty-table fast path — see LEASE_COUNT.
+    if LEASE_COUNT.load(core::sync::atomic::Ordering::Acquire) == 0 {
+        return;
+    }
     let mut table = LEASE_TABLE.lock();
     let before = table.len();
     table.retain(|e| e.file_id != file.file_id);
+    note_lease_len(&table);
     let released = table.len() != before;
     drop(table);
     if released {
@@ -965,8 +1014,13 @@ pub fn set_lease(file: &File, lease_type: i16) -> Result<(), crate::errno::Errno
     let file_id = file.file_id;
 
     if lease_type == flock_types_late::F_UNLCK {
+        // closegap: empty-table fast path — see LEASE_COUNT.
+        if LEASE_COUNT.load(core::sync::atomic::Ordering::Acquire) == 0 {
+            return Ok(());
+        }
         let mut table = LEASE_TABLE.lock();
         table.retain(|e| !(e.key == key && e.file_id == file_id));
+        note_lease_len(&table);
         drop(table);
         // Wake blocked breakers: the conflict just disappeared.
         LEASE_WAIT.wake_up_all();
@@ -1022,6 +1076,7 @@ pub fn set_lease(file: &File, lease_type: i16) -> Result<(), crate::errno::Errno
         owner_pid,
         exclusive,
     });
+    note_lease_len(&table);
     drop(table);
     // A downgrade or replacement changes the conflict set — wake blocked
     // breakers so they re-evaluate (LTP fcntl33 OP_OPEN_RDONLY: the
@@ -1040,6 +1095,10 @@ mod flock_types_late {
 /// F_GETLEASE: the lease type held by THIS description (F_RDLCK=0,
 /// F_WRLCK=1, F_UNLCK=2 when none).
 pub fn get_lease(file: &File) -> i16 {
+    // closegap: empty-table fast path — see LEASE_COUNT.
+    if LEASE_COUNT.load(core::sync::atomic::Ordering::Acquire) == 0 {
+        return flock_types_late::F_UNLCK;
+    }
     // SAFETY: inode written once at open; read-only access.
     let key = match unsafe { &*file.inode.get() }.as_ref() {
         Some(i) => inode_lock_key(i),
@@ -1064,6 +1123,12 @@ pub fn get_lease(file: &File) -> i16 {
 /// conflicts with ANY new open, a read lease only with writers
 /// (and with truncate).
 pub fn lease_conflicts(inode: &Inode, writer: bool) -> bool {
+    // closegap: empty-table fast path — see LEASE_COUNT. This runs on
+    // EVERY regular-file open (break_lease's conflict probe); with no
+    // leases on the box it collapses to one Acquire load.
+    if LEASE_COUNT.load(core::sync::atomic::Ordering::Acquire) == 0 {
+        return false;
+    }
     let key = inode_lock_key(inode);
     let table = LEASE_TABLE.lock();
     table
@@ -1124,6 +1189,7 @@ pub fn break_lease(inode: &Inode, writer: bool) -> Result<(), crate::errno::Errn
             // force (Linux break_lease → generic_break_lease).
             let mut table = LEASE_TABLE.lock();
             table.retain(|e| !(e.key == key && (e.exclusive || writer)));
+            note_lease_len(&table);
             drop(table);
             LEASE_WAIT.wake_up_all();
             break Ok(());
