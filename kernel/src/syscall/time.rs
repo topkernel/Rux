@@ -1698,14 +1698,41 @@ pub fn sys_time(args: SyscallArgs) -> i64 {
 /// sys_settimeofday - Set wall-clock time (NR 170)
 pub fn sys_settimeofday(args: SyscallArgs) -> i64 {
     let tv_ptr = args[0] as *const u8;
-    let _tz_ptr = args[1] as *const u8; // timezone is deprecated and ignored
+    let tz_ptr = args[1] as *const u8;
 
     // CAP_SYS_TIME required to set time
     if !crate::security::capable(crate::security::CAP_SYS_TIME) {
         return -(errno::EPERM as i64);
     }
+
+    // Linux (do_sys_settimeofday64) treats tv and tz INDEPENDENTLY: a
+    // NULL tv with a non-NULL tz is the historical "sysclktz" call and
+    // SUCCEEDS (sets only the kernel timezone); NULL tz skips the tz
+    // part; both NULL is a no-op returning 0. OH init's SystemInit calls
+    // settimeofday(NULL, &tz) ("sysclktz 0") on every boot — the old
+    // unconditional EFAULT on NULL tv made init log a time-set failure
+    // and skip the timezone store (why-slow lane: the boot error-stream
+    // diff vs the reference kernel showed this row only on Rux).
+    if !tz_ptr.is_null() {
+        // struct timezone: { i32 tz_minuteswest; i32 tz_dsttime; }
+        if !crate::arch::uaccess::access_ok(tz_ptr as usize, 8) {
+            return -(errno::EFAULT as i64);
+        }
+        let mut tz = [0u8; 8];
+        // SAFETY: tz_ptr validated with access_ok; copy_from_user is the
+        // exception-table copy path (SUM=0 safe) and zero-fills on fault.
+        if unsafe {
+            crate::arch::uaccess::copy_from_user(tz.as_mut_ptr(), tz_ptr, 8)
+        } != 0
+        {
+            return -(errno::EFAULT as i64);
+        }
+        let minuteswest = i32::from_le_bytes([tz[0], tz[1], tz[2], tz[3]]);
+        SYS_TZ_MINUTESWEST.store(minuteswest, core::sync::atomic::Ordering::Relaxed);
+    }
+
     if tv_ptr.is_null() {
-        return -(errno::EFAULT as i64);
+        return 0; // tz-only (or no-op) call: Linux returns 0 here
     }
     if !crate::arch::uaccess::access_ok(tv_ptr as usize, 16) {
         return -(errno::EFAULT as i64);
@@ -1733,6 +1760,11 @@ pub fn sys_settimeofday(args: SyscallArgs) -> i64 {
 
     set_realtime_from_secs_nanos(tv[0], tv[1].saturating_mul(1_000))
 }
+
+/// Kernel timezone (settimeofday's tz argument, "sysclktz"). Linux keeps
+/// this in struct timezone sys_tz; adjtimex's TIME_OFFSET report and old
+/// applications read it back through the tz argument of gettimeofday.
+static SYS_TZ_MINUTESWEST: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
 
 /// sys_adjtimex - Adjust system clock (NR 171)
 ///
