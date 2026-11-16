@@ -313,6 +313,20 @@ fn eagain() -> i32 { crate::errno::Errno::TryAgain.as_neg_i32() }
 fn enomem() -> i32 { crate::errno::Errno::OutOfMemory.as_neg_i32() }
 fn efault() -> i32 { crate::errno::Errno::BadAddress.as_neg_i32() }
 
+/// Clone-flag validation diagnostics: ONE budgeted line per family.
+///
+/// The clone(2) flag checks are genuine error paths (the caller gets
+/// EINVAL), but a guest that retries a rejected combination prints one
+/// line per attempt. The family keeps the first 8 lines and stays quiet
+/// afterwards (RETIRED by the probe-retire lane).
+fn clone_warn_budgeted(msg: &str) {
+    static CLONE_WARN_N: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
+    if CLONE_WARN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+        crate::pr_warn!("{}", msg);
+    }
+}
+
 /// Create child process/thread
 ///
 /// # Arguments
@@ -329,25 +343,31 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
     // Validate clone flag constraints (matches Linux kernel checks):
     // CLONE_THREAD requires CLONE_SIGHAND (kernel/fork.c clone3_args_check)
     // CLONE_SIGHAND requires CLONE_VM (kernel/fork.c copy_process)
+    //
+    // RETIRED (probe-retire): every arm of this validation printed
+    // unconditionally — a guest that retries a bad flag combination
+    // ("clone: unknown flags 0x100004100") could print one line per
+    // attempt. The family keeps ONE budgeted line (first 8) — the errno
+    // the caller gets is unchanged.
     if args.flags & CLONE_THREAD != 0 && args.flags & CLONE_SIGHAND == 0 {
-        crate::pr_warn!("clone: CLONE_THREAD requires CLONE_SIGHAND");
+        clone_warn_budgeted("clone: CLONE_THREAD requires CLONE_SIGHAND");
         return Err(einval());
     }
     if args.flags & CLONE_SIGHAND != 0 && args.flags & CLONE_VM == 0 {
-        crate::pr_warn!("clone: CLONE_SIGHAND requires CLONE_VM");
+        clone_warn_budgeted("clone: CLONE_SIGHAND requires CLONE_VM");
         return Err(einval());
     }
     // CLONE_FS|CLONE_NEWNS is mutually exclusive (kernel/fork.c copy_fs):
     // the child cannot both SHARE the parent's fs info and get a private
     // copy of its mount namespace (LTP clone302 "fs-newns").
     if args.flags & CLONE_NEWNS != 0 && args.flags & CLONE_FS != 0 {
-        crate::pr_warn!("clone: CLONE_NEWNS is incompatible with CLONE_FS");
+        clone_warn_budgeted("clone: CLONE_NEWNS is incompatible with CLONE_FS");
         return Err(einval());
     }
     // CLONE_CLEAR_SIGHAND|CLONE_SIGHAND is mutually exclusive (kernel
     // copy_process: one shares the handlers, the other wipes them).
     if args.flags & CLONE_CLEAR_SIGHAND != 0 && args.flags & CLONE_SIGHAND != 0 {
-        crate::pr_warn!("clone: CLONE_CLEAR_SIGHAND is incompatible with CLONE_SIGHAND");
+        clone_warn_budgeted("clone: CLONE_CLEAR_SIGHAND is incompatible with CLONE_SIGHAND");
         return Err(einval());
     }
     // Unknown flag bits (excluding the low CSIGNAL byte) → EINVAL.
@@ -355,7 +375,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
     // sys_clone's lower_32_bits mask — Linux parity — so this check only
     // ever sees real flag bits.)
     if args.flags & !CLONE_KNOWN_FLAGS & !0xff != 0 {
-        crate::pr_warn!("clone: unknown flags {:#x}", args.flags);
+        clone_warn_budgeted(&alloc::format!("clone: unknown flags {:#x}", args.flags));
         return Err(einval());
     }
 

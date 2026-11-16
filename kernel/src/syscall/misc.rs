@@ -2717,7 +2717,11 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
     // uevent hunt (serial-getty chain): every epoll registration of a
     // KOBJECT_UEVENT netlink socket — did udevd arm the socket-activation
     // monitor fd at all, and as which fd number? Budgeted.
-    {
+    //
+    // RETIRED (probe-retire): unconditional (3 lines per ub2404 boot);
+    // behind the existing OH hunt-print master gate (dfx=ohhunt) like the
+    // rest of the uevent-hunt family.
+    if crate::dfx::switches::oh_hunt_prints_on() {
         static UEC_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if UEC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
@@ -3952,11 +3956,20 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
         // 119th (epoll-pwait conviction): the per-round readiness probe
         // for init's main thread (pid 1). Stack buffers — no allocation
         // under the entries lock.
+        //
+        // RETIRED (probe-retire): the probe was armed for pid 1 on EVERY
+        // boot and printed a summary every 500 rounds — an unbounded
+        // flood (22 lines in the first 90 s of an ub2404 boot, growing
+        // forever). It now lives behind the existing epoll delivery
+        // trace switch (dfx=epolltrace), which is the switch whose doc
+        // names exactly this hunt ("permanently ready fds that spin
+        // epoll_pwait/ppoll callers").
         const PROBE_CAP: usize = 48;
         let mut probe_fds: [i32; PROBE_CAP] = [0; PROBE_CAP];
         let mut probe_rev: [u16; PROBE_CAP] = [0; PROBE_CAP];
         let probe_n = core::sync::atomic::AtomicUsize::new(0);
-        let probe_armed = crate::process::current_pid() == 1;
+        let probe_armed = crate::process::current_pid() == 1
+            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::EpollTrace);
         // P3 wiring set (see the event-driven wait block below): hoisted
         // so the per-round build never allocates under the entries lock.
         // EPOLL_WIRE_CAP bounds it — an interest set larger than the cap
@@ -4017,22 +4030,28 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                 // (Linux's ready-list delivery re-queues still-ready fds
                 // at the TAIL, so no fd starves). Name the truncation
                 // with the first skipped fd and its live verdict.
-                static USTRV_N: core::sync::atomic::AtomicUsize =
-                    core::sync::atomic::AtomicUsize::new(0);
-                if USTRV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
-                    let mut ids = alloc::string::String::new();
-                    for e in ready_events.iter().take(4) {
-                        let (ev, d) = (e.events, { let d = e.data; d });
-                        ids.push_str(&alloc::format!("{:#x}/{} ", ev, d));
+                //
+                // RETIRED (probe-retire): unconditional; behind the
+                // existing epoll delivery trace switch (dfx=epolltrace),
+                // the switch whose doc names this hunt.
+                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::EpollTrace) {
+                    static USTRV_N: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    if USTRV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
+                        let mut ids = alloc::string::String::new();
+                        for e in ready_events.iter().take(4) {
+                            let (ev, d) = (e.events, { let d = e.data; d });
+                            ids.push_str(&alloc::format!("{:#x}/{} ", ev, d));
+                        }
+                        crate::pr_warn!(
+                            "UESTARVE[{}] pid={} maxevents={} delivered=[{}] skipped_fd={}",
+                            USTRV_N.load(core::sync::atomic::Ordering::Relaxed),
+                            crate::process::current_pid(),
+                            maxevents,
+                            ids,
+                            entry.fd
+                        );
                     }
-                    crate::pr_warn!(
-                        "UESTARVE[{}] pid={} maxevents={} delivered=[{}] skipped_fd={}",
-                        USTRV_N.load(core::sync::atomic::Ordering::Relaxed),
-                        crate::process::current_pid(),
-                        maxevents,
-                        ids,
-                        entry.fd
-                    );
                 }
                 break;
             }
@@ -5319,7 +5338,16 @@ fn signalfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
             let sig = ready.trailing_zeros() as i32 + 1;
             // SFDDBG (launcher bring-up): a pid-1 signalfd consume — the
             // moment init learns a child died (HandleSigChild follows).
-            if (*current).pid() == 1 {
+            //
+            // RETIRED (probe-retire): this arm was the only SFDDBG print
+            // left ungated — it fired on every pid-1 signalfd consume
+            // (74 lines per ub2404 boot) while the other two SFDDBG
+            // arms in this file already honour the switch whose own doc
+            // says "ordinary boots must keep a clean serial". Now gated
+            // by dfx=sfddbg like its siblings.
+            if (*current).pid() == 1
+                && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SfdDbg)
+            {
                 static RD_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
                 if RD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 100 {

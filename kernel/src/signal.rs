@@ -3425,10 +3425,17 @@ unsafe fn send_signal_locked_info(
     // 1/2=SEGV_*(hardware fault), 0x80=SI_KERNEL; no tag = info-less
     // kernel-internal sender (timer/mq/pdeathsig paths). Rate-limited so a
     // runaway killer cannot flood the console.
-    if sig == Signal::SIGKILL as i32
-        || sig == Signal::SIGTERM as i32
-        || sig == Signal::SIGSEGV as i32
-        || sig == Signal::SIGHUP as i32
+    //
+    // RETIRED (probe-retire): the trace was unconditional (it fired on
+    // every systemd SIGTERM/SIGHUP of a service unit). It now lives
+    // behind the existing signal-family switch (dfx=sigtrace) — the same
+    // gate the other signal forensics in this file use — so an ordinary
+    // boot is silent and a signal hunt can still arm it.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SigTrace)
+        && (sig == Signal::SIGKILL as i32
+            || sig == Signal::SIGTERM as i32
+            || sig == Signal::SIGSEGV as i32
+            || sig == Signal::SIGHUP as i32)
     {
         static KILLTRACE_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);

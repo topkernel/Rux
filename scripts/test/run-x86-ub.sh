@@ -21,6 +21,12 @@
 #                       KVM to the GNOME stage with zero virtio faults.
 #   QEMU=qemu-system-x86_64
 #   NOBUILD=1            skip the kernel build step
+#   KERNEL_ELF=path      kernel ELF to boot (default: debug build)
+#   BZIMAGE=path         bzImage to boot (default: debug build)
+#                       Both default to the debug profile; point them at
+#                       target/x86_64-unknown-none/release/... to boot a
+#                       RELEASE kernel (the user-facing profile) without
+#                       touching this script.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -35,8 +41,8 @@ ROOTFS="${ROOTFS:-work/ubuntu-x86.img}"
 SMP="${SMP:-8}"
 MEM="${MEM:-8G}"
 QEMU="${QEMU:-qemu-system-x86_64}"
-KERNEL_ELF="target/x86_64-unknown-none/debug/rux"
-BZIMAGE="target/x86_64-unknown-none/debug/bzImage"
+KERNEL_ELF="${KERNEL_ELF:-target/x86_64-unknown-none/debug/rux}"
+BZIMAGE="${BZIMAGE:-target/x86_64-unknown-none/debug/bzImage}"
 
 if [ ! -f "$ROOTFS" ]; then
     echo "rootfs image missing: $ROOTFS" >&2
