@@ -225,7 +225,7 @@ pub fn retire_complete(file: Arc<File>) {
             static DEFER_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             let dn = DEFER_N.fetch_add(1, Ordering::Relaxed);
-            if dn == 0 || dn % 256 == 0 {
+            if dn == 0 || dn % 8192 == 0 {
                 crate::pr_warn!(
                     "fs: fdreap close deferred to reaper ({}x: stalled quiescent round — monopolist window)",
                     dn + 1
