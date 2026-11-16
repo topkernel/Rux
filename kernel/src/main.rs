@@ -759,7 +759,16 @@ pub fn rust_main_tail() -> ! {
             // superblock is also mounted at /sys/kernel/debug/tracing,
             // the way the reference automounts tracefs under debugfs —
             // consumers of either path see the same files.
+            // (launcher-errno lane) The alias mountpoint must exist IN
+            // THE DEBUGFS TREE first: vfs_mount can attach a mount to a
+            // bare dcache-only child, but path_lookup resolves through
+            // the debugfs INODE ops, which answered ENOENT for a
+            // "tracing" child that exists only in the dcache — every
+            // /sys/kernel/debug/tracing chmod then failed ENOENT (a
+            // 259-row ours-only error family vs the reference, whose
+            // kernel automounts tracefs under its debugfs).
             {
+                fs::debugfs::create_dir("tracing");
                 let ok = fs::tracefs::init_tracefs()
                     .and_then(|_| fs::tracefs::mount_at("/sys/kernel/tracing"))
                     .and_then(|_| fs::tracefs::mount_at("/sys/kernel/debug/tracing"))
