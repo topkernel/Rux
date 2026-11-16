@@ -74,7 +74,7 @@
       <div class="card">
         <h3><span class="ico">📏</span>lmbench same-rig: 14 of 21 cases ahead or at parity, 7 behind</h3>
         <p><b>Ahead</b>: lat_pipe <b>4.6×</b>, lat_ctx 2P <b>4.0–4.5×</b>, lat_ctx 8P <b>3.6×</b>, bw_pipe <b>3.7×</b>, lat_sem <b>2.9×</b>, bw_unix <b>2.1×</b>, lat_unix <b>1.4×</b>, fstat <b>1.3×</b>; bcopy/bzero/mem_rd/usleep at or above parity, bw_file_rd faster than the timer granularity.</p>
-        <p><b>Behind</b> (Rux/Linux): open <b>1.9–2.5×</b>, read <b>1.7–1.8×</b>, stat <b>1.4–1.9×</b>, write <b>1.4–1.5×</b>, null <b>1.2–1.5×</b>; fork/exec in the 1.08–1.19× band.</p>
+        <p><b>Behind</b> (Rux/Linux): open <b>1.9–2.5×</b>, read <b>1.7–1.8×</b>, stat <b>1.4–1.9×</b>, write <b>1.4×</b>, null <b>1.1–1.3×</b>; fork/exec in the 1.08–1.19× band (2× campaign round 1 landed: fdget borrow + getppid O(1), calibration pass rate 14/15 vs 0/15).</p>
         <div class="nums">best lead 4.6× · worst lag 2.5× · data in §2</div>
       </div>
       </div>
@@ -118,8 +118,8 @@
           <tr><td class="mono">lat_syscall open</td><td class="num">0.756–1.00 µs</td><td class="num">0.394–0.397 µs</td><td><span class="chip bad">behind 1.9–2.5×</span> (±30% boot variance)</td><td>path-resolution tail + fd install</td></tr>
           <tr><td class="mono">lat_syscall read</td><td class="num">0.103–0.108 µs</td><td class="num">0.060–0.062 µs</td><td><span class="chip bad">behind 1.7–1.8×</span></td><td>fill/copy tail (SMAP AC brackets)</td></tr>
           <tr><td class="mono">lat_syscall stat</td><td class="num">0.32–0.45 µs</td><td class="num">0.239 µs</td><td><span class="chip bad">behind 1.4–1.9×</span> (±30% boot variance)</td><td>path resolution</td></tr>
-          <tr><td class="mono">lat_syscall write</td><td class="num">0.086–0.089 µs</td><td class="num">0.0597–0.0600 µs</td><td><span class="chip bad">behind 1.4–1.5×</span></td><td>fill/copy tail</td></tr>
-          <tr><td class="mono">lat_syscall null</td><td class="num">0.051 µs</td><td class="num">0.0345–0.0430 µs</td><td><span class="chip bad">behind 1.2–1.5×</span></td><td>syscall entry floor</td></tr>
+          <tr><td class="mono">lat_syscall write</td><td class="num">0.082 µs</td><td class="num">0.0597–0.0600 µs</td><td><span class="chip bad">behind 1.4×</span> (−6% after the fdget borrow)</td><td>fill/copy tail</td></tr>
+          <tr><td class="mono">lat_syscall null</td><td class="num">0.045 µs</td><td class="num">0.0345–0.0430 µs</td><td><span class="chip bad">behind 1.1–1.3×</span> (−12% after getppid O(1))</td><td>syscall entry floor</td></tr>
           <tr><td class="mono">lat_proc fork</td><td class="num">37.8–40.3 µs</td><td class="num">33.9 µs</td><td><span class="chip bad">behind 1.11–1.19×</span></td><td>measurable again after NOHZ; keep converging</td></tr>
           <tr><td class="mono">lat_proc exec</td><td class="num">40.6 µs</td><td class="num">37.6 µs</td><td><span class="chip bad">behind 1.08×</span></td><td>near parity band</td></tr>
         </tbody>

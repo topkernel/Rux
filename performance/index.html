@@ -75,7 +75,7 @@
       <div class="card">
         <h3><span class="ico">📏</span>lmbench 同机对照:21 项中 14 项领先/持平、7 项落后</h3>
         <p><b>领先</b>:lat_pipe <b>4.6×</b>、lat_ctx 2P <b>4.0–4.5×</b>、lat_ctx 8P <b>3.6×</b>、bw_pipe <b>3.7×</b>、lat_sem <b>2.9×</b>、bw_unix <b>2.1×</b>、lat_unix <b>1.4×</b>、fstat <b>1.3×</b>;bcopy/bzero/mem_rd/usleep 持平偏领先,bw_file_rd 快于计时器粒度。</p>
-        <p><b>落后</b>(Rux/Linux):open <b>1.9–2.5×</b>、read <b>1.7–1.8×</b>、stat <b>1.4–1.9×</b>、write <b>1.4–1.5×</b>、null <b>1.2–1.5×</b>;fork/exec 回到 1.08–1.19× 带。</p>
+        <p><b>落后</b>(Rux/Linux):open <b>1.9–2.5×</b>、read <b>1.7–1.8×</b>、stat <b>1.4–1.9×</b>、write <b>1.4×</b>、null <b>1.1–1.3×</b>;fork/exec 回到 1.08–1.19× 带(2× 目标战役 round 1 已落:fdget 直借 + getppid O(1),校准通过率 14/15 vs 0/15)。</p>
         <div class="nums">领先最高 4.6× · 落后最大 2.5× · 数据见 §2</div>
       </div>
       <div class="card">
@@ -119,8 +119,8 @@
           <tr><td class="mono">lat_syscall open</td><td class="num">0.756–1.00 µs</td><td class="num">0.394–0.397 µs</td><td><span class="chip bad">落后 1.9–2.5×</span>(靴间方差 ±30%)</td><td>路径解析尾部 + fd 装配</td></tr>
           <tr><td class="mono">lat_syscall read</td><td class="num">0.103–0.108 µs</td><td class="num">0.060–0.062 µs</td><td><span class="chip bad">落后 1.7–1.8×</span></td><td>fill/copy 尾部(SMAP AC 括号)</td></tr>
           <tr><td class="mono">lat_syscall stat</td><td class="num">0.32–0.45 µs</td><td class="num">0.239 µs</td><td><span class="chip bad">落后 1.4–1.9×</span>(靴间方差 ±30%)</td><td>路径解析</td></tr>
-          <tr><td class="mono">lat_syscall write</td><td class="num">0.086–0.089 µs</td><td class="num">0.0597–0.0600 µs</td><td><span class="chip bad">落后 1.4–1.5×</span></td><td>fill/copy 尾部</td></tr>
-          <tr><td class="mono">lat_syscall null</td><td class="num">0.051 µs</td><td class="num">0.0345–0.0430 µs</td><td><span class="chip bad">落后 1.2–1.5×</span></td><td>系统调用入口地板</td></tr>
+          <tr><td class="mono">lat_syscall write</td><td class="num">0.082 µs</td><td class="num">0.0597–0.0600 µs</td><td><span class="chip bad">落后 1.4×</span>(fdget 直借后 −6%)</td><td>fill/copy 尾部</td></tr>
+          <tr><td class="mono">lat_syscall null</td><td class="num">0.045 µs</td><td class="num">0.0345–0.0430 µs</td><td><span class="chip bad">落后 1.1–1.3×</span>(getppid O(1) 后 −12%)</td><td>系统调用入口地板</td></tr>
           <tr><td class="mono">lat_proc fork</td><td class="num">37.8–40.3 µs</td><td class="num">33.9 µs</td><td><span class="chip bad">落后 1.11–1.19×</span></td><td>NOHZ 后已从超时族回归可测,继续收敛</td></tr>
           <tr><td class="mono">lat_proc exec</td><td class="num">40.6 µs</td><td class="num">37.6 µs</td><td><span class="chip bad">落后 1.08×</span></td><td>接近持平带</td></tr>
         </tbody>
