@@ -911,6 +911,18 @@ pub fn init() {
         .lock_irqsave()
         .insert(String::from("shm"), shm_dir);
 
+    // /dev/hugepages: kernel-created directory inside devtmpfs. On the
+    // reference, systemd's dev-hugepages.mount (hugetlbfs) owns this
+    // mountpoint and every namespace setup bind-mounts it into private
+    // mounts; without the node those bindmounts fail ENOENT
+    // ("bindmount '/dev/hugepages' -> ... -2", ub2404 namespace
+    // bring-up). A plain directory is the devtmpfs parity shape.
+    let hugepages_dir = Arc::new(DevfsEntry::new_dir("hugepages"));
+    root_entry
+        .children
+        .lock_irqsave()
+        .insert(String::from("hugepages"), hugepages_dir);
+
     // Create /dev/input directory
     let input_dir = Arc::new(DevfsEntry::new_dir("input"));
 
