@@ -1,0 +1,13 @@
+=== hg2w start 10:34:23 avail=43402M kernel=/home/william/rux-agents/heal-gate/run/../run/bzImage-healgate ===
+copying userdata base (16G, full copy on ext4)...
+=== hg2w rc=0 10:44:16 ===
+  KERNPANIC|kernel panic: 0
+  RUNQ-STRAND tid=:      0
+  MONOPOLIST nrrun:      0
+  PREEMPT-HEAL cpu=:     0
+  PREEMPT-HEAL-FIELD:    0
+  PREEMPT-HEAL-REFUSED:  0
+  PREEMPT-UNDERFLOW:     0
+  PREEMPT-LEAK cpu=:     542
+  WAKE-HEAL:             0
+=== FACE DONE (hg2w) 10:44:16 ===
