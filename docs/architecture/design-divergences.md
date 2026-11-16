@@ -840,3 +840,59 @@ STAC/CLAC on hardware; measured invisible under the benchmark rigs.
 
 **Guard.** SMAP-VIOL beacon on every boot; the uafault guest probe (11
 syscalls × bad pointer → EFAULT) in the packed probe set.
+
+---
+
+## D-20: Writer-side dirty writeback watermark on a free-fraction mark (no global dirty accounting)
+
+**Design.** Buffered-write throttling (kernel/src/fs/ext4/file.rs +
+kernel/src/mm/vmscan.rs, falloc-wedge lane 2026-11-16): once the
+Normal zone's free count falls below HALF its managed pages
+(`zone_below_dirty_writeback_mark`), the buffered writer itself flushes
+its own inode's dirty range and then runs a system-wide recovery pass
+(`PageCache::writeback_recover`: free already-clean pages first, then
+collect dirty inodes via a full-table rotating walk and flush each
+whole inode through the run-batched engine, evicting the flushed
+inode's pages directly up to mark + 1/16 managed). The reference kernel
+expresses the same discipline (writeback far below the memory wall,
+writers throttled in their own context) through
+dirty_background_threshold + balance_dirty_pages over a global dirty
+page count per backing device; Rux keeps no per-BDI dirty accounting,
+so the mark is a zone free-fraction instead. The discipline, not the
+constant, is the contract; the exact constant is recorded here as a
+divergence.
+
+**Advantage.** No new global lock or per-BDI state on the write path —
+the mark reads two zone counters (read-only atomics, any context), and
+the exact global DIRTY_PAGES counter that exists alongside is census
+only (adjusted under the per-inode entry lock that already serializes
+every transition — exactness by construction, zero added locking).
+The watermark eliminated the delayed-allocation dirty-balloon wedge
+class: a sustained buffered writer (mkfs/fill through a loop device)
+used to grow the dirty set to RAM scale (243k pages), dirty pages
+skipped eviction, the zone drained to zero, and reclaim's own
+nested, io-lock re-entering, allocation-starved flush was the last
+producer standing (the fallocate05/06 runner wedge: reclaim io_lock
+re-entry + fdreap RCU stall). With the watermark, the fallocate05
+ENOSPC fill completes and LTP fallocate05/06 pass (3/3 fresh boots
+each, RC=0, 16/24 TPASS, zero TFAIL — run/shell-f56-fin{1,2,3}.log).
+
+**Compatibility evidence.** LTP fallocate05/06 3/3 + 3/3 PASS on the
+landed tree; mm-family storm (111 runs, 37 tests x3) zero forensics
+events of every family (run/res-storm1.txt); triple-arch builds rc=0;
+riscv64 make test 1328/1328 (run/maketest-final.log). WB-WATERMARK
+tuning prints show the recovery un-tripping the mark (free 137k vs
+mark 121k after flush+shrink rounds, boot f56-fin1).
+
+**Known cost.** The free-fraction mark is coarser than the reference's
+dirty-fraction: it also trips when CLEAN page cache legitimately owns
+half the zone (the recovery's shrink stage handles exactly that — it
+un-trips the mark by evicting clean pages, measured shrunk=45k pages
+in one 498-jiffy round). First-40-per-boot WB-WATERMARK prints bound
+the log cost.
+
+**Guard.** WB-WATERMARK print rows (free must rise above mark, dirty
+must fall); PCACHE-RECLAIM census line (SR_*/EV_*/FL_* faces) on the
+OOM-FORENSIC block; pbench fs rows (stat/mkdir+rmdir/unlink/
+write+fsync medians) for the buffered-write path; the fallocate05/06
+pair as the standing regression probe.

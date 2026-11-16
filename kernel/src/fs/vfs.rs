@@ -7232,32 +7232,49 @@ pub fn vfs_fallocate(fd: usize, mode: i32, offset: u64, len: u64) -> Result<(), 
         return Err(errno::Errno::DeviceOrResourceBusy.as_neg_i32());
     }
 
-    // tmpfs: fallocate(2) grows the file (shmem semantics -- allocated
-    // ranges read as zeros; tmpfs pages materialize on write fault).
-    // journald v255 preallocates its seqnum sidecar file with
-    // fallocate(fd, 0, 0, len) before mmapping it MAP_SHARED; the file
-    // lives on /run (tmpfs), and the old ext4-only routing answered
-    // ENOSYS -- journald treats that as fatal ("Failed to map main
-    // seqnum file") and the whole journal stack died on every boot.
-    // PUNCH_HOLE stays EOPNOTSUPP (no partial-zero support yet).
+    // tmpfs: fallocate(2) with shmem semantics (falloc-wedge lane,
+    // 2026-11-16): mode=0 MATERIALIZES zero pages for the range under
+    // the mount's page budget (the reference allocates; Rux used to only
+    // grow the logical size, so a write into the "preallocated" range of
+    // a full tmpfs failed ENOSPC — LTP fallocate05/06's tmpfs
+    // iterations), PUNCH_HOLE|KEEP_SIZE discards the range's pages
+    // (byte-granular, budget returned — the dealloc step of the same
+    // tests). Other flag bits stay EOPNOTSUPP. journald v255's
+    // fallocate(fd, 0, 0, len) preallocation (the reason this arm
+    // exists) still succeeds — now with the pages actually reserved.
     if core::ptr::eq(
         inode.ops.unwrap_or(&crate::fs::ext4::EXT4_INODE_OPS) as *const _,
         &crate::fs::tmpfs::TMPFS_INODE_OPS as *const _,
     ) {
-        if mode & crate::fs::ext4::FALLOC_FL_PUNCH_HOLE != 0 {
+        const KEEP_SIZE: i32 = crate::fs::ext4::FALLOC_FL_KEEP_SIZE;
+        const PUNCH_HOLE: i32 = crate::fs::ext4::FALLOC_FL_PUNCH_HOLE;
+        if mode & !(KEEP_SIZE | PUNCH_HOLE) != 0 {
             return Err(errno::Errno::OperationNotSupported.as_neg_i32());
         }
-        if mode & crate::fs::ext4::FALLOC_FL_KEEP_SIZE == 0 {
-            let end = (offset as u64).saturating_add(len as u64);
+        // SAFETY: private_data holds an Arc<TmpfsNode> placed by
+        // tmpfs_make_inode; ManuallyDrop borrows the strong count
+        // without claiming it.
+        let node = core::mem::ManuallyDrop::new(unsafe {
+            alloc::sync::Arc::from_raw(
+                inode.private_data.unwrap() as *const crate::fs::tmpfs::TmpfsNode,
+            )
+        });
+        if mode & PUNCH_HOLE != 0 {
+            if mode & KEEP_SIZE == 0 {
+                // Linux: PUNCH_HOLE without KEEP_SIZE is EINVAL.
+                return Err(errno::Errno::InvalidArgument.as_neg_i32());
+            }
+            // Clamp to EOF (shmem_punch_range shape): bytes past the
+            // logical size are already holes.
+            let size = inode.size.load(core::sync::atomic::Ordering::Acquire);
+            let punched = core::cmp::min(len, size.saturating_sub(offset));
+            node.punch_hole(offset as usize, punched as usize);
+            return Ok(());
+        }
+        node.fallocate_alloc(offset as usize, len as usize)?;
+        if mode & KEEP_SIZE == 0 {
+            let end = offset.saturating_add(len);
             if end > inode.size.load(core::sync::atomic::Ordering::Acquire) {
-                // SAFETY: private_data holds an Arc<TmpfsNode> placed by
-                // tmpfs_make_inode; ManuallyDrop borrows the strong count
-                // without claiming it.
-                let node = core::mem::ManuallyDrop::new(unsafe {
-                    alloc::sync::Arc::from_raw(
-                        inode.private_data.unwrap() as *const crate::fs::tmpfs::TmpfsNode,
-                    )
-                });
                 node.truncate(end as usize);
                 inode.size.store(end, core::sync::atomic::Ordering::Release);
             }
@@ -7285,28 +7302,61 @@ pub fn vfs_fallocate(fd: usize, mode: i32, offset: u64, len: u64) -> Result<(), 
     // the VFS inode's size and the cached Ext4Inode box (inode.sb) still
     // hold the pre-allocation size, so a subsequent read(2) through ANY
     // open fd saw EOF at the old size (reads of a fallocated file
-    // returned 0 bytes). Refresh both caches and drop stale page-cache
-    // pages for the grown range (unwritten extents must read as zeros).
-    if mode & crate::fs::ext4::FALLOC_FL_KEEP_SIZE == 0 {
+    // returned 0 bytes). Refresh both caches. PUNCH included (falloc-wedge
+    // lane, 2026-11-16): the punch rebuilds the on-disk extent tree, but
+    // reads resolve through the cached Ext4Inode box — a stale cached
+    // tree kept serving the punched blocks' old bytes (LTP fallocate06's
+    // clear-check, run/shell-punch5: hole-nonzero=32 with the on-disk map
+    // already holed). Size refresh stays gated on !KEEP_SIZE (a KEEP_SIZE
+    // punch must not move the published size); the map/block-count
+    // refresh is unconditional.
+    //
+    // NO page-cache invalidation here (falloc-wedge root cause,
+    // 2026-11-16): this epilogue used to call invalidate_inode on the
+    // WHOLE inode after refreshing the map from disk. For a file with
+    // still-dirty DELAYED-ALLOCATION pages (written before the fallocate,
+    // not yet flushed) that dropped the only copy of already-acknowledged
+    // writes while the refreshed map reverted to the on-disk (blockless)
+    // state — reads returned zeros and the later fsync had nothing left
+    // to flush (punchprobe3: sample@0 goes 1 -> 0 across a plain mode-0
+    // fallocate with NO flush involved; identical on the root ext4 and on
+    // loop-stacked ext2; the LTP fallocate05/06 fail faces). The allocate
+    // path never changes the content of existing pages (Linux fallocate
+    // does not touch the page cache at all); the punch path owns its own
+    // RANGE-bounded cache discipline inside ext4_fallocate_on
+    // (invalidate_inode_span + writeback_update_range_stale — never the
+    // whole inode).
+    //
+    // Size refresh never SHRINKS the live size: buffered writes publish
+    // the VFS size immediately while the disk inode lags (delayed
+    // allocation), so the freshly-read disk size can be SMALLER than the
+    // live one — storing it would logically truncate the file and turn
+    // the dirty tail into past-EOF discards at the next flush (the same
+    // data-loss family, size-regression face).
+    {
+        let keep_size = mode & crate::fs::ext4::FALLOC_FL_KEEP_SIZE != 0;
         let fs_ptr2 = fs_ptr as *const crate::fs::ext4::Ext4FileSystem;
         // SAFETY: fs_ptr2 is the ext4 instance from inode.private_data.
         if let Ok(fresh) = unsafe { (*fs_ptr2).read_inode(inode.ino as u32) } {
-            inode.size.store(fresh.size, core::sync::atomic::Ordering::Relaxed);
+            if !keep_size {
+                let live = inode.size.load(core::sync::atomic::Ordering::Acquire);
+                if fresh.size > live {
+                    inode.size.store(fresh.size, core::sync::atomic::Ordering::Release);
+                }
+            }
             // SAFETY: inode.sb is the Box<Ext4Inode> cached at open.
             if let Some(ptr) = inode.sb {
                 unsafe {
                     let cached = &mut *(ptr as *mut crate::fs::ext4::inode::Ext4Inode);
                     cached.block = fresh.block;
-                    cached.size = fresh.size;
+                    if !keep_size && fresh.size > cached.size {
+                        cached.size = fresh.size;
+                    }
                     cached.blocks = fresh.blocks;
                     cached.mtime = fresh.mtime;
                     cached.ctime = fresh.ctime;
                 }
             }
-            crate::fs::page_cache::get_page_cache().invalidate_inode(
-                fs_ptr2 as u64,
-                inode.ino as u64,
-            );
         }
     }
     Ok(())

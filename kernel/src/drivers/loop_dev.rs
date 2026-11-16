@@ -64,19 +64,32 @@ struct LoopDev {
     /// Backing path for LOOP_GET_STATUS(64) lo_file_name/lo_name.
     name: Spinlock<[u8; 64]>,
     /// Serializes the set_pos/read/write dance on the backing file.
-    io_lock: Spinlock<()>,
+    /// SleepMutex (falloc-wedge lane, 2026-11-16; INV-LOCK-8 rule 3: a
+    /// lock whose holder can block must not be a spinlock): the holder
+    /// runs a whole backing-file read/write — journal commits, block
+    /// I/O waits, and under memory pressure even direct reclaim — which
+    /// sleeps for milliseconds at a time. As a Spinlock that was a
+    /// preempt-disabled section across all of it: every loop request was
+    /// an unpreemptible monopolist window (the falloc-wedge boots
+    /// measured pid 352 at preempt=2 across hundreds of ticks), RCU
+    /// quiescent rounds stalled on the CPU, and fdreap's grace waits
+    /// deferred (the fdreap RCU stall face). Waiters now park on the
+    /// mutex's queue; the section is preemptible.
+    io_lock: crate::sync::mutex::SleepMutex,
     /// Re-entrancy guard (pcachewedge lane, 2026-11-15): the pid whose
     /// request currently owns `io_lock` (0 = none). The backing-file
     /// write below runs SYNCHRONOUSLY under the lock; under memory
     /// pressure its allocations enter direct reclaim, whose writeback
     /// flushes dirty pages of filesystems ON THIS SAME LOOP — the bio
     /// re-enters loop_request_fn and re-acquires io_lock it already
-    /// holds: a non-recursive spinlock self-deadlock that spun cpu1
-    /// forever with every other task asleep (the fammm a1 wedge face;
-    /// GATE-CENSUS selffight counts the same pid's nested reclaims).
-    /// The guard makes the recursive request FAIL instead of spin: the
-    /// failed write keeps its pages dirty (flush_done's write_ok=false
-    /// discipline) for a later, non-recursive flush.
+    /// holds (the recursive request would park forever on the now-
+    /// sleeping mutex it already holds).
+    /// The guard makes the recursive request FAIL instead: the failed
+    /// write keeps its pages dirty (flush_done's write_ok=false
+    /// discipline) for a later, non-recursive flush — and reclaim-side
+    /// writeback now degrades to clean-only while ANY loop claim is held
+    /// by the current task (see shrink_reclaim), so the reference
+    /// discipline holds: no synchronous writeback under a held io lock.
     io_owner_pid: AtomicU32,
     /// The GenDisk handed out to the block layer (stable address: boxed).
     disk: Option<&'static GenDisk>,
@@ -90,7 +103,7 @@ impl LoopDev {
             sizelimit: AtomicU64::new(0),
             flags: AtomicU64::new(0),
             name: Spinlock::new([0; 64]),
-            io_lock: Spinlock::new(()),
+            io_lock: crate::sync::mutex::SleepMutex::new("loop-io", false),
             io_owner_pid: AtomicU32::new(0),
             disk: None,
         }
@@ -296,6 +309,31 @@ pub fn loop_is_bound(idx: usize) -> bool {
     unsafe { LOOPS[idx].file.lock().is_some() }
 }
 
+/// falloc-wedge (2026-11-16): does the CURRENT task hold the io claim of
+/// any loop device — i.e. is it inside `loop_request_fn`'s backing-file
+/// I/O right now? Reclaim's synchronous dirty writeback consults this
+/// before issuing block I/O: a writeback that targets a filesystem
+/// stacked on the SAME loop device would re-enter `loop_request_fn`
+/// with the claim already held (the EDEADLK arm) — the reference kernel
+/// never runs such writeback in the I/O submitter's context (loop I/O
+/// is dispatched from the loop's own worker). Callers degrade to
+/// clean-only reclaim instead, exactly like the WRITEBACK_GUARD nested
+/// reclaimer does. N_LOOPS is small and the check is only paid on the
+/// reclaim slow path.
+pub fn loop_io_claim_held_by_current() -> bool {
+    let me = crate::process::current_pid() as u32;
+    if me == 0 {
+        return false;
+    }
+    for i in 0..N_LOOPS {
+        // SAFETY: static array access bounded by N_LOOPS.
+        if unsafe { &LOOPS[i] }.io_owner_pid.load(Ordering::Acquire) == me {
+            return true;
+        }
+    }
+    false
+}
+
 /// File I/O size: stat through the inode size (regular files).
 fn file_size_bytes(file: &Arc<File>) -> Result<usize, i32> {
     // SAFETY: inode cell written at open time; read-only.
@@ -337,15 +375,19 @@ unsafe extern "C" fn loop_request_fn(req: &mut Request) {
             Err(owner) if owner == me => {
                 static RECUR_REPORTS: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
-                if RECUR_REPORTS
-                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
-                    < 8
-                {
+                let n = RECUR_REPORTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 8 {
                     crate::pr_err!(
                         "loop{}: recursive request while pid {} owns io_lock — failing request (reclaim writeback re-entry)",
                         idx,
                         me
                     );
+                    // falloc-wedge capture: symbolize the re-entry chain
+                    // (the first two occurrences carry the kernel backtrace
+                    // — error-path diagnostic, bounded like the print).
+                    if n < 2 {
+                        crate::dfx::backtrace::dump_stack();
+                    }
                 }
                 req.error.store(-35, Ordering::Release); // -EDEADLK
                 return;
@@ -369,7 +411,7 @@ unsafe extern "C" fn loop_request_fn(req: &mut Request) {
 /// Body of [`loop_request_fn`] with the io_owner_pid re-entrancy claim
 /// held; the wrapper releases it on return.
 unsafe fn loop_request_fn_claimed(req: &mut Request, dev: &'static LoopDev, idx: usize) {
-    let _io = dev.io_lock.lock();
+    let _io = dev.io_lock.guard();
     let guard = dev.file.lock();
     let Some(file) = guard.as_ref() else {
         req.error.store(-6, Ordering::Release); // ENXIO: unbound loop

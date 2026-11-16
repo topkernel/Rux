@@ -2154,6 +2154,32 @@ unsafe fn ext4_buffered_write(
     let ps = crate::mm::PAGE_SIZE as u64;
     let psu = crate::mm::PAGE_SIZE;
 
+    // EAGER-ENOSPC gate (falloc-wedge lane, 2026-11-16): an EXTENDING
+    // write on a zero-free fs fails BEFORE any size publication or page
+    // dirtying. Without it the delayed-allocation path kept accepting
+    // writes into a full fs (the pages' flushes then failed -ENOSPC
+    // forever — the unflushable dirty balloon), so an ENOSPC fill
+    // (LTP tst_fill_fs, fallocate05/06) never terminated: every write
+    // kept tripping the dirty watermark and paying a futile whole-inode
+    // flush (measured 39 j per 4 KiB write, run/f05h). The reference
+    // kernel's eager-allocation fses (ext2 among them) fail at write
+    // time; overwrites inside the allocated size pass — they may need
+    // no new blocks (a hole-overwrite that does surfaces its ENOSPC at
+    // writeback, the delayed-allocation latitude both kernels keep).
+    {
+        let would_extend = if offset == u64::MAX {
+            true // O_APPEND always extends
+        } else {
+            match offset.checked_add(buf.len() as u64) {
+                Some(end) => end > inode.size.load(Ordering::Acquire),
+                None => return errno::Errno::FileTooLarge.as_neg_i32() as isize,
+            }
+        };
+        if would_extend && fs.est_free_blocks() == 0 {
+            return errno::Errno::NoSpaceLeftOnDevice.as_neg_i32() as isize;
+        }
+    }
+
     // 1) Resolve + reserve the range.
     let mut offset = offset;
     let end = match offset.checked_add(buf.len() as u64) {
@@ -2377,8 +2403,106 @@ unsafe fn ext4_buffered_write(
             copied as u32,
         );
     }
+
+    // DIRTY-BALLOON WATERMARK (falloc-wedge lane, 2026-11-16): buffered
+    // writes are delayed-allocation — before this, the only writers of
+    // dirty frames back to disk were fsync/msync, the shutdown flush,
+    // and reclaim's starved shrink_reclaim flush. A sustained buffered
+    // writer (mkfs/fill through a loop device: every ext2 page write
+    // becomes a backing-file buffered write on the parent fs) grows the
+    // dirty set to RAM scale — dirty pages skip eviction, the zone
+    // drains to zero, and reclaim's own flush, nested inside the loop
+    // io claim and allocation-starved, wedges (the fallocate05/06
+    // reclaim io_lock re-entry + fdreap RCU stall; the wedge boot's
+    // census: 243k LRU pages, evict-skip dominated by the dirty bit).
+    // The reference kernel starts writeback far below the memory wall
+    // and throttles writers in their own context
+    // (dirty_background_threshold + balance_dirty_pages). Same
+    // discipline here: once the zone is half consumed, this writer
+    // flushes its OWN inode's dirty range before returning — the
+    // run-batched flush engine in this file, in writer context, no
+    // reclaim involvement. Stacked-device re-entry: the flush targets
+    // the inode being written, whose blocks live on THIS fs's device —
+    // a loop backing-file write flushes to the parent fs's device, never
+    // back through the loop it is inside (and shrink_reclaim separately
+    // degrades to clean-only under any loop io claim). One flusher at a
+    // time: a contending writer skips — the winner's flush already
+    // serves the watermark for both.
+    if copied > 0
+        && crate::mm::vmscan::zone_below_dirty_writeback_mark()
+        && WRITER_FLUSH_IN_FLIGHT
+            .compare_exchange(
+                false,
+                true,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    {
+        let t0 = crate::drivers::timer::get_jiffies();
+        // Flush THIS writer's inode first (the throttle proper — the
+        // writer waits for its own data), then the system-wide recovery
+        // pass: flush every dirty inode the windowed collect finds
+        // (WHOLE inodes, run-batched) and clean-evict up to the recover
+        // target (mark + 1/16 managed). The shrink stage is what raises
+        // nr_free, so the mark actually un-trips and the next
+        // ~1/16-managed dirty pages stay buffered — without it the mark
+        // trips permanently once the cache reaches its cap and every
+        // buffered write pays a synchronous flush of itself (measured on
+        // the fallocate05 fill: one 4 KiB page flushed per write
+        // syscall). Re-entrancy inside the recovery is loop-claim-aware
+        // (clean-only degrade) — see writeback_recover.
+        let flushed = ext4_flush_dirty_inode(inode, 0, u64::MAX);
+        let mut shrunk = 0usize;
+        if let Some((free, _mark, target)) = crate::mm::vmscan::zone_dirty_writeback_state() {
+            let shortfall = target.saturating_sub(free);
+            if shortfall > 0 {
+                shrunk = page_cache::get_page_cache().writeback_recover(shortfall);
+            }
+        }
+        let dt = crate::drivers::timer::get_jiffies().saturating_sub(t0);
+        WRITER_FLUSH_IN_FLIGHT.store(false, core::sync::atomic::Ordering::Release);
+        // Bounded tuning print (the first 40 watermark flushes per boot):
+        // names the flush cost class on the repro rigs; silent otherwise.
+        // free/dirty ride along (the recovery verdict: free must rise
+        // above mark, dirty must fall) plus the reclaim census line.
+        static WB_PRINTS: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if WB_PRINTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+            let (free_now, mark, _target) =
+                crate::mm::vmscan::zone_dirty_writeback_state().unwrap_or((0, 0, 0));
+            crate::pr_info!(
+                "WB-WATERMARK fs={:x} ino={} wrote={}B flushed_pages={} shrunk={} took={}j free={}/mark={} dirty={}",
+                fs_id,
+                ino,
+                copied,
+                flushed,
+                shrunk,
+                dt,
+                free_now,
+                mark,
+                page_cache::dirty_pages()
+            );
+            if shrunk == 0 {
+                crate::pr_info!(
+                    "WB-WATERMARK census: {}",
+                    page_cache::pcache_reclaim_census_line()
+                );
+                static HIST_PRINTS: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if HIST_PRINTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 6 {
+                    crate::pr_info!("{}", page_cache::pcache_dirty_histogram());
+                }
+            }
+        }
+    }
     copied as isize
 }
+
+/// One-writer-flush-at-a-time guard for the dirty-balloon watermark
+/// writeback in [`ext4_buffered_write`] (see there).
+static WRITER_FLUSH_IN_FLIGHT: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
 /// Explicit-offset ext4 write core shared by write(2) and pwrite/writeback
 /// (session 25). Owns the EXT4_BIG_LOCK + journal discipline and the
@@ -2841,6 +2965,24 @@ fn flush_run(
                 if written == n_bytes as isize {
                     break;
                 }
+            }
+        }
+        // falloc-wedge capture: the persistent-failure face — the fill's
+        // tail flushes failed wholesale while earlier inodes flushed
+        // clean; name the write core's verdict (negative errno or short
+        // count) for the first few failures per boot.
+        if written != n_bytes as isize {
+            static FAIL_PRINTS: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if FAIL_PRINTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+                crate::pr_err!(
+                    "FLUSH-FAIL ino={} idx={} wrote={}/{} fs={:x}",
+                    inode.ino,
+                    idx,
+                    written,
+                    n_bytes,
+                    fs as *const _ as u64
+                );
             }
         }
         done_out[k] = (idx, pfn, written == n_bytes as isize);

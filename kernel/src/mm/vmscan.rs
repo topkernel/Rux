@@ -221,6 +221,59 @@ pub fn vscan_heartbeat() {
 
 // ==================== Public API ====================
 
+/// falloc-wedge lane (2026-11-16): the buffered-write dirty-writeback
+/// watermark. True when the Normal zone's free count has fallen below
+/// half its managed pages — the point where a dirty page-cache balloon
+/// (delayed-allocation buffered writes) has consumed enough of the zone
+/// that writers must start flushing their own dirty pages EARLY, in the
+/// writer's context, instead of leaving the only writeback engine to
+/// reclaim at the memory wall (the fallocate05/06 wedge: 243k dirty
+/// pages skipped eviction, the zone drained to zero, and reclaim's own
+/// flush — nested, io-lock re-entering, allocation-starved — was the
+/// last producer standing). This is the reference kernel's
+/// dirty_background_threshold shape: writeback starts far below the
+/// memory wall, throttling writers in their own context
+/// (balance_dirty_pages); the exact constant differs (free-fraction
+/// instead of dirty-fraction — Rux keeps no global dirty count), the
+/// discipline is the same. Read-only atomics; callable from any context.
+pub fn zone_below_dirty_writeback_mark() -> bool {
+    let Some(node) = super::pglist::first_online_node() else {
+        return false;
+    };
+    let Some(zone) = node.zone(ZoneType::ZoneNormal) else {
+        return false;
+    };
+    if !zone.is_initialized() {
+        return false;
+    }
+    let managed = zone.managed_pages();
+    managed > 0 && zone.nr_free() * 2 < managed
+}
+
+/// Companion of [`zone_below_dirty_writeback_mark`]: the free-page count
+/// and the recover target (mark + 1/16 of managed). The writer-side
+/// watermark arm flushes its dirty pages (they become evictable) and
+/// then SHRINKS clean pages up to this target — the shrink is what
+/// raises nr_free, so the mark actually un-trips and subsequent writes
+/// stay buffered until the dirty set rebuilds (without it the mark
+/// trips permanently once the cache reaches its cap, and every buffered
+/// write pays a synchronous flush — the over-throttling measured on the
+/// fallocate05 fill: one 4 KiB page flushed per write syscall).
+pub fn zone_dirty_writeback_state() -> Option<(usize, usize, usize)> {
+    let node = super::pglist::first_online_node()?;
+    let zone = node.zone(ZoneType::ZoneNormal)?;
+    if !zone.is_initialized() {
+        return None;
+    }
+    let managed = zone.managed_pages();
+    if managed == 0 {
+        return None;
+    }
+    let mark = managed / 2;
+    let target = mark + managed / 16;
+    Some((zone.nr_free(), mark, target))
+}
+
 /// Reclaim batch size (Linux SWAP_CLUSTER_MAX).
 ///
 /// Reclaiming exactly the allocation size (`1 << order` = ONE page for the
@@ -249,6 +302,15 @@ pub fn balance_pgdat(order: i32) -> usize {
 
     let mut priority = DEF_PRIORITY;
     while priority >= 1 && sc.nr_reclaimed < sc.nr_to_reclaim {
+        // Reference fatal_signal_pending discipline (falloc-wedge): a
+        // killed direct reclaimer unwinds between priorities instead of
+        // walking all twelve with a pending SIGKILL (the wedge boots'
+        // holder completed rounds for minutes after the OOM kill).
+        // kswapd shares this entry point and is never "dying" short of
+        // kthread_stop.
+        if crate::sched::current_is_dying() {
+            break;
+        }
         sc.priority = priority;
         shrink_node(&mut sc);
         priority -= 1;
@@ -343,6 +405,14 @@ pub fn drain_file_cache_before_oom(nr_to_reclaim: usize) -> usize {
     let mut passes = 0usize;
 
     while freed_total < nr_to_reclaim && passes < MAX_PASSES {
+        // Reference fatal_signal_pending discipline (falloc-wedge): the
+        // drain's chunked flush loops are where a killed gate holder
+        // burned minutes on the wedge boots — unwind on a fatal signal
+        // (kthreads are never "dying" short of kthread_stop, so kswapd's
+        // shared entry here is unaffected).
+        if crate::sched::current_is_dying() {
+            break;
+        }
         passes += 1;
         super::page_alloc::gate_note_deep_pass(0);
         let want = core::cmp::min(CHUNK, nr_to_reclaim - freed_total);

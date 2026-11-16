@@ -13403,3 +13403,68 @@ compact incumbent rows, nrrun on strand rows), b0f6b1989 (the fix).
    fast-path change); follow-up lane candidate: gate PREEMPT-HEAL on
    acquire-observed evidence (TICK_ENTRY_RIP inside lock()'s range)
    so slow waiters stop being healed at all.
+
+## FALLOC-WEDGE SESSION — fallocate05/06 closed end-to-end: punch deallocates, the fallocate epilogue stops dropping dirty delayed-allocation pages, and the mkfs-phase dirty-balloon wedge is gone (2026-11-16, branch falloc-wedge @ e19b2f599 + 6 commits 5f58ca02f..3d9ac97c2)
+
+Resumed after the quota wall with the WIP dirty (8 files, +1221/-128)
+and the predecessor's verification bank: fallocate05 3/3 PASS on three
+fresh boots (run/shell-f05-iso{1,2,3}.log: RC=0, 16 TPASS each),
+fallocate06 3/3 PASS in one boot (run/shell-ver-f06.log), mm storm 111
+runs zero forensics events (run/res-storm1.txt; the 5 distinct FAILs —
+mmap08/12/16/18, msync04 — are the pre-existing pagemap/EBADF set, no
+wedge: the scan that used to hang the runner completed in 47 s). The
+same-boot 3x variant showed one RUN3 ENOSPC flake
+(run/shell-ver-f05.log) — not reproducible across 6 fresh boots; noted
+as a same-boot-repetition residue, follow-up if it recurs.
+
+This session: organized the WIP into SIX commits with hunk-level
+assignment (run/split-wip.py; union verified byte-identical to the
+predecessor's diff, run/committed.patch == run/wip-full.patch):
+
+1. 5f58ca02f dfx(mm,fs): falloc-wedge census — SR_*/EV_*/FL_* skip
+   faces, exact DIRTY_PAGES global (per-entry-lock accounting),
+   PCACHE-RECLAIM census line, PCACHE-DIRTY-TOP, GATE-CENSUS holder
+   RIP, OOM-FORENSIC pcache line.
+2. 657eeedd3 mm: direct reclaim unwinds on a dying task
+   (fatal_signal_pending shape) — balance_pgdat, drain-before-OOM,
+   shrink_reclaim.
+3. 32ae91f01 drivers/loop: io_lock Spinlock -> SleepMutex (INV-LOCK-8
+   rule 3 — the unpreemptible monopolist window behind the fdreap RCU
+   stall) + loop_io_claim_held_by_current() API.
+4. 6c6b25a63 fs,mm: writer-side dirty writeback watermark +
+   system-wide recovery (balance_dirty_pages shape; D-20) + eager
+   ENOSPC on extending writes at zero free blocks
+   (est_free_blocks) + collect_wb_work full-table walk + targeted
+   evict_clean_inode.
+5. b4902f613 fix(fs/ext4): PUNCH_HOLE deallocates — pre-sync dirty
+   data, aligned interior + zeroed edges, extent split frees the
+   covered middle, indirect interior freed, span-bounded cache
+   invalidation (invalidate_inode_span).
+6. 3d9ac97c2 fix(fs): fallocate epilogue keeps dirty
+   delayed-allocation pages (no whole-inode invalidation, size refresh
+   never shrinks); tmpfs fallocate allocates (shmem mode=0) and
+   punches byte-granularly; PUNCH without KEEP_SIZE = EINVAL.
+
+Reconciliation with main (fc79ac68c): our base e19b2f599 is an
+ancestor of main (merge-base = HEAD), so the mmforensics quarantine +
+early-put producer fix are already IN our base — nothing in the WIP
+superseded. main's vfs.rs gains since base (newmount2) do not touch
+the vfs_fallocate region; git merge-tree (HEAD, fc79ac68c) is CLEAN
+(3f08bc6ab) — re-test after cherry-pick.
+
+Gates (all on the committed tree): x86_64 build rc=0
+(run/build-final-x86.log), riscv64 fresh-config build rc=0 (rm
+build/.config; run/build-final-riscv.log), aarch64 build rc=0
+(run/build-final-aarch64.log), riscv64 make test 1328/1328 PASSED
+(ROOTFS_IMG=run/rootfs-maketest.img — a local copy of the shared
+rootfs, keeping the main-repo image unwritten;
+run/maketest-final.log).
+
+Final-tree verification: fallocate05+fallocate06 both RC=0 per fresh
+boot x3 (run/shell-f56-fin{1,2,3}.log, 16/24 TPASS, 0 TFAIL, 0
+panics); WB-WATERMARK rows show the mark un-tripping mid-fill (free
+137k vs mark 121k, flushed 15.8k + shrunk 29.6k pages per round).
+mm storm + LTP fs spot on the committed kernel: run/res-storm-fin.txt,
+run/res-fsspot-fin.txt. Docs: design-divergences D-20 (free-fraction
+watermark), safety ledger round entry. Full report: run/FALLOC-WEDGE.md.
+falloc-wedge

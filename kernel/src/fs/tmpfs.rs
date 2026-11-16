@@ -403,6 +403,90 @@ impl TmpfsNode {
         done
     }
 
+    /// fallocate(2) allocation semantics (falloc-wedge lane,
+    /// 2026-11-16): materialize ZERO pages for every missing page of
+    /// [offset, offset+len) under the mount's page budget — shmem's
+    /// mode=0 behavior (the reference allocates the range; Rux used to
+    /// only grow the logical size and leave the pages demand-allocated,
+    /// so a write into the "preallocated" range of a FULL tmpfs failed
+    /// ENOSPC — LTP fallocate05/06's tmpfs iterations, run/f05i). On a
+    /// budget shortfall returns ENOSPC with the pages allocated so far
+    /// kept (shmem keeps partial progress).
+    pub fn fallocate_alloc(&self, offset: usize, len: usize) -> Result<(), i32> {
+        if len == 0 {
+            return Ok(());
+        }
+        let end = offset
+            .checked_add(len)
+            .ok_or(errno::Errno::InvalidArgument.as_neg_i32())?;
+        let first = offset / PAGE_SIZE;
+        let last = (end - 1) / PAGE_SIZE;
+        {
+            let mut pages = self.pages.lock();
+            for idx in first..=last {
+                if pages.contains_key(&idx) {
+                    continue;
+                }
+                if !self.reserve_page() {
+                    return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+                }
+                pages.insert(idx, TmpfsPage::new(self.sb));
+            }
+        }
+        self.mtime.store(wall_secs(), Ordering::Release);
+        Ok(())
+    }
+
+    /// fallocate(2) PUNCH_HOLE|FALLOC_FL_KEEP_SIZE semantics (falloc-wedge
+    /// lane, 2026-11-16): the range reads as zeros afterward, the logical
+    /// size is unchanged. Whole pages inside the range are dropped (their
+    /// Drop returns the mount-budget slot — the freed space is
+    /// fallocate-able again, LTP fallocate05's dealloc step); partial
+    /// pages at the edges keep their frames with the punched slice zeroed.
+    /// Byte-granular (shmem semantics; no block alignment requirement).
+    pub fn punch_hole(&self, offset: usize, len: usize) {
+        if len == 0 {
+            return;
+        }
+        let end = offset.saturating_add(len);
+        {
+            let mut pages = self.pages.lock();
+            let first = offset / PAGE_SIZE;
+            let last = if end == 0 { 0 } else { (end - 1) / PAGE_SIZE };
+            for idx in first..=last {
+                let page_start = idx * PAGE_SIZE;
+                let page_end = page_start + PAGE_SIZE;
+                if page_start >= offset && page_end <= end {
+                    pages.remove(&idx); // Drop returns the budget slot
+                } else if let Some(page) = pages.get_mut(&idx) {
+                    let s = offset.saturating_sub(page_start);
+                    let e = core::cmp::min(end - page_start, PAGE_SIZE);
+                    if s < e {
+                        page.data[s..e].fill(0);
+                    }
+                }
+            }
+        }
+        // Cache side (the truncate family's discipline): zero every live
+        // frame's bytes in the range — read prefers the frames, and a
+        // stale-but-mapped alias must serve zeros too. Frames of fully
+        // dropped pages are NOT invalidated here (invalidate_inode_range
+        // is a tail-floor, not a mid-file range); they hold zeros, which
+        // is the required content, and die by eviction or final put.
+        {
+            const ZERO_PAGE: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
+            let cache = crate::fs::page_cache::get_page_cache();
+            let mut off = offset as u64;
+            let end64 = end as u64;
+            while off < end64 {
+                let n = (end64 - off).min(PAGE_SIZE as u64) as usize;
+                cache.writeback_update_range_stale(self.fs_id, self.ino, off, &ZERO_PAGE[..n]);
+                off += n as u64;
+            }
+        }
+        self.mtime.store(wall_secs(), Ordering::Release);
+    }
+
     /// Truncate to `new_size`: drop whole pages beyond the new size and
     /// zero the tail of the (kept) partial last page so a later re-extend
     /// exposes zeros, not stale data. Dropping a `TmpfsPage` returns it
