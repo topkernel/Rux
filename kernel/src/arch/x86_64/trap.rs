@@ -1025,11 +1025,24 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
     // SAFETY: regs points to a valid PtRegs built by a trap.S stub; the
     // pointer stays valid for the duration of this handler.
     unsafe {
-        // Save and swap PtRegs pointer (used for fork/exec).  Nesting
-        // save/restore mirrors the riscv64 twin: a timer IRQ landing
-        // inside a syscall must not clobber the outer syscall's pointer.
-        let prev_pt_regs = CURRENT_PT_REGS[cpu_id].load(core::sync::atomic::Ordering::Relaxed);
-        CURRENT_PT_REGS[cpu_id].store(regs as u64, core::sync::atomic::Ordering::Relaxed);
+        // Save and swap PtRegs pointer. Nesting save/restore mirrors
+        // the riscv64 twin: a timer IRQ landing inside a deeper trap
+        // must not clobber the outer pointer. SYSCALL entries SKIP the
+        // pair (three atomics on the hottest path in the kernel): fork
+        // and exec derive the frame from task.pt_regs() (the canonical
+        // outermost user frame at rsp0-168), so the slot has no
+        // production reader for syscall frames — only the diagnostic
+        // readers (taskdump, wakewatch cross-CPU rip), which are served
+        // by the IRQ/exception stores and already document their races.
+        let syscall_vec = vector == SYSCALL_VECTOR;
+        let prev_pt_regs = if syscall_vec {
+            0
+        } else {
+            CURRENT_PT_REGS[cpu_id].load(core::sync::atomic::Ordering::Relaxed)
+        };
+        if !syscall_vec {
+            CURRENT_PT_REGS[cpu_id].store(regs as u64, core::sync::atomic::Ordering::Relaxed);
+        }
 
         let regs_ref = &mut *regs;
 
@@ -1291,8 +1304,11 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
             }
         }
 
-        // Restore previous PtRegs pointer (handles nested interrupt case)
-        CURRENT_PT_REGS[cpu_id].store(prev_pt_regs, core::sync::atomic::Ordering::Relaxed);
+        // Restore previous PtRegs pointer (handles nested interrupt
+        // case; syscalls never stored, so they never restore)
+        if !syscall_vec {
+            CURRENT_PT_REGS[cpu_id].store(prev_pt_regs, core::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     // Leak-origin tripwire (dfx=leakhunt): this frame returns to
