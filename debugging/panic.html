@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>panic 与符号化 · Rux</title>
+<link rel="stylesheet" href="../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">首页</a>
+      <a href="../architecture/design.html">架构设计</a>
+      <a href="../performance/index.html">性能</a>
+      <a href="../security/index.html">安全</a>
+      <a href="../testing/index.html">测试</a>
+      <a href="index.html">调试</a>
+      <a href="../guides/getting-started.html">快速入门</a>
+      <a href="../progress/roadmap.html">项目进展</a>
+      <a href="../guestbook.html">留言</a>
+      <span class="lang-sw"><a class="on" href="panic.html">中文</a><a href="../en/debugging/panic.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">架构设计</div>
+    <a href="../architecture/design.html">架构与模块设计</a>
+    <a href="../architecture/scheduler.html">调度器</a>
+    <a href="../architecture/memory.html">内存管理</a>
+    <a href="../architecture/filesystem.html">文件系统</a>
+    <a href="../architecture/ipc.html">进程间通信</a>
+    <a href="../architecture/boot.html">启动流程</a>
+    <a href="../architecture/interrupts.html">中断与时钟</a>
+    <a href="../architecture/structure.html">代码结构</a>
+    <a href="../architecture/riscv64.html">架构移植指南</a>
+    <a href="../architecture/kernel-lock.html">锁序不变量</a>
+    <div class="grp">调试</div>
+    <a href="index.html">调试指南</a>
+    <a href="tracepoints.html">tracepoint 框架</a>
+    <a href="perf.html">性能调试</a>
+    <a href="locks.html">锁调试</a>
+    <a href="memory.html">内存取证</a>
+    <a class="on" href="panic.html">panic 与符号化</a>
+    <div class="grp">性能</div>
+    <a href="../performance/index.html">性能测试</a>
+    <div class="grp">安全</div>
+    <a href="../security/index.html">安全与形式验证</a>
+    <div class="grp">测试</div>
+    <a href="../testing/index.html">测试总览</a>
+    <a href="../testing/ci-pipeline.html">CI 流水线</a>
+    <a href="../testing/ltp.html">LTP 兼容扫描</a>
+    <a href="../testing/ltp-full.html">LTP 全量用例</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT 审计</a>
+    <a href="../testing/stability.html">稳定性</a>
+    <a href="../testing/stress.html">压力</a>
+    <a href="../testing/gnome-retrospective.html">回溯报告</a>
+    <div class="grp">开发指南</div>
+    <a href="../guides/getting-started.html">快速入门</a>
+    <a href="../guides/development.html">参与开发</a>
+    <a href="../guides/configuration.html">内核配置</a>
+    <div class="grp">项目进展</div>
+    <a href="../progress/roadmap.html">路线图</a>
+    <a href="../progress/changelog.html">更新日志</a>
+    <a href="../progress/quickref.html">命令速查</a>
+    <div class="grp">互动</div>
+    <a href="../guestbook.html">留言板</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>panic 与符号化</h1>
+    <div class="sub">内核 panic 报告结构、kallsyms 编译期符号表、oops 形态与行原子转储 —— 从一段串口输出到源码行号的完整流程 · 依据:kernel/src/dfx/(backtrace/oops/ksyms)、arch/*/trap.rs、design-divergences.md(D-3)</div>
+
+    <h2 id="report"><span class="anchor">§1</span>panic 报告结构</h2>
+    <p>panic 处理器绕过日志级别直写 UART,随后 <code>wfi</code> 停机。一份完整报告包含:</p>
+    <ol>
+      <li><b>PANIC 消息 + file:line</b>(panic! 的参数与源位置);</li>
+      <li><b>CSR 四件套</b>(riscv64):sstatus / scause / stval / sepc;x86_64 对应 cr2/rip/rsp/错误码;</li>
+      <li><b>全部 31 个通用寄存器</b>(riscv64)—— 在任意栈展开前由内联汇编保存;</li>
+      <li><b>调用栈回溯</b>:沿帧指针链(s0/fp;riscv64 / rbp;x86_64)最多 32 帧 <code>Call trace:</code>。</li>
+    </ol>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>字段</th><th>读法</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">scause</td><td>位 63 置位 = 中断;异常码:0 非对齐取指、2 非法指令、8 U 态 ecall、12 取指缺页、13 读缺页、15 写/AMO 缺页;中断码:5 时钟、9 外部</td></tr>
+        <tr><td class="mono">sepc</td><td>引发陷入的指令地址</td></tr>
+        <tr><td class="mono">stval</td><td>缺页时 = 出错虚拟地址;非法指令时 = 指令位</td></tr>
+        <tr><td class="mono">Call trace</td><td>首地址为 panic 函数的返回地址(ra),其后逐层为调用者返回地址</td></tr>
+      </tbody>
+    </table></div>
+
+    <h2 id="kallsyms"><span class="anchor">§2</span>编译期符号表(D-3)</h2>
+    <ul>
+      <li><b>构建</b>:构建期对链接 ELF 执行 nm + addr2line -C(demangle),压缩为 NUL 分隔名称 blob + (offset, address, size, type) 索引,入 .rodata;仅文本符号,两遍构建。</li>
+      <li><b>规模</b>:~22.6k 符号,2.4MB 名 + 0.7MB 索引;镜像 +3.1MB(riscv64 曾因此同步移动 boot 窗/堆基/RAM 预留 14→18MB;x86_64 映射自运行时 __kernel_end 派生,无需移动)。</li>
+      <li><b>启动开销</b>:零 —— 数据在镜像内,无运行期扫描。</li>
+      <li><b>消费方</b>:/proc/kallsyms(标准 <code>addr type name</code> 行,22,636 行,覆盖至 _etext)、Oops/回溯的原生符号化(%ps 形态 <code>name+0xoff/0xsize</code>,非文本符号以 ? 标注)、回溯器。</li>
+      <li><b>守卫</b>:scripts/test/kallsyms-smoke.sh 钉住符号覆盖;交叉构建按 target-triple 忽略陈旧表。</li>
+    </ul>
+
+    <h2 id="oops"><span class="anchor">§3</span>oops 形态</h2>
+    <ul>
+      <li>内核态缺页的处理序:例外表 → fixup(rip = fixup 地址)→ KernelPanic;oops 打印带重入闩(防野帧指针引发递归转储)。</li>
+      <li><b>USEGV 家族</b>(x86_64):用户态段错误结构化行 —— 详见<a href="memory.html#usegv">内存取证 §5</a>;PF-NOCTX 信标在 oops 机制污染上下文前点名裸用户指针解引用(SMAP 语境)。</li>
+      <li><b>%ps 符号化</b>:回溯行内直接给出 <code>symbol+0xoff/0xsize</code>,无需离线 addr2line 即可初判;精确行号仍走 addr2line。</li>
+    </ul>
+
+    <h2 id="atomic-dump"><span class="anchor">§4</span>行原子转储(printk 发送纪律)</h2>
+    <ul>
+      <li>逐 CPU 暂存批量 TX,持 printk 发送锁有界获取(Full 50 ms / Brief 100 µs)—— 实测:多任务并发转储下的破损任务行 1.7% → <b>0</b>(1506/1506 行完形)。</li>
+      <li>动机:并发转储交错曾使取证行彼此截断 —— 一段不可信的现场等于没有现场。</li>
+    </ul>
+
+    <h2 id="remote-bt"><span class="anchor">§5</span>REMOTE-BT:跨 CPU 栈捕获</h2>
+    <ul>
+      <li>dfx-lock-owner feature 下,看门狗/取证路径可经 IRQ_WORK IPI 请求<b>远端 CPU 的栈快照</b> —— 持锁者自身 IF=0 时其 tick 已死,只能由其他 CPU 观察。</li>
+      <li>配合 allocwatch 的跨 CPU 持锁者点名构成完整的"谁持有"取证对。</li>
+    </ul>
+
+    <h2 id="workflow"><span class="anchor">§6</span>符号化工作流</h2>
+    <pre><code><span class="c"># 1. 逐地址符号化(跨架构选对应工具链)</span>
+riscv64-linux-gnu-addr2line -e &lt;kernel.elf&gt; -f -C &lt;addr&gt; [addr2 addr3 ...]
+x86_64-linux-gnu-addr2line -e &lt;bzImage 对应 vmlinux&gt; -f -C &lt;addr&gt;
+<span class="c"># 2. 一次喂入整条 Call trace 的全部地址</span>
+<span class="c"># 3. 交叉核对:/proc/kallsyms 的符号边界(若 guest 仍活着)</span></code></pre>
+    <ul>
+      <li>bzImage 的符号化:构建时保留未剥离 ELF(kbuild 产物),addr2line -e 指向它;运行时 /proc/kallsyms 地址与 ELF 符号表一致(链接地址即运行地址)。</li>
+      <li>release 构建的符号表默认为 371 字节 stub(kallsyms_generated.rs)—— 需要符号化的诊断构建以 feature 重开;两条镜像尺寸口径(12.2MB vs 16.0MB)差异即此。</li>
+    </ul>
+
+    <h2 id="recipes"><span class="anchor">§7</span>从串口到根因的完整链路</h2>
+    <ol>
+      <li>捕获:串口落盘(-serial file:)或 hunt-wedge 自动抓取;</li>
+      <li>定类:scause/cr2 判异常类;panic 消息 + file:line 初判;</li>
+      <li>定位:Call trace 全地址一次性 addr2line → 定位函数与行;</li>
+      <li>取景:需要更多现场 → dfx=mmforensics / dfx=watchdog / REMOTE-BT 重跑;</li>
+      <li>定罪:确定性复现(THREAD=single)+ 多启动取交集。</li>
+    </ol>
+
+    <div class="callout">代码:<code>kernel/src/dfx/backtrace.rs</code>(帧指针行走,force-frame-pointers=yes)、<code>kernel/src/dfx/oops.rs</code>、<code>kernel/src/dfx/ksyms.rs</code> + build/gen-ksyms.py(生成器)。分歧:D-3。相关:<a href="memory.html">内存取证</a>(现场深化)、<a href="locks.html">锁调试</a>(看门狗联动)。</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">返回首页</a></span>
+
+      <span class="foot-stats">本站访问 <span id="busuanzi_value_site_pv"></span> 次 · 访客 <span id="busuanzi_value_site_uv"></span> 人</span></div>
+  </div>
+</footer>
+
+<script src="../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>

@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Panic &amp; symbols · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">Home</a>
+      <a href="../architecture/design.html">Architecture</a>
+      <a href="../performance/index.html">Performance</a>
+      <a href="../security/index.html">Security</a>
+      <a href="../testing/index.html">Testing</a>
+      <a href="index.html">Debugging</a>
+      <a href="../guides/getting-started.html">Getting started</a>
+      <a href="../progress/roadmap.html">Progress</a>
+      <a href="../guestbook.html">Feedback</a>
+      <span class="lang-sw"><a class="on" href="../../debugging/panic.html">中文</a><a href="panic.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="../architecture/design.html">Design deep-dive</a>
+    <a href="../architecture/scheduler.html">Scheduler</a>
+    <a href="../architecture/memory.html">Memory management</a>
+    <a href="../architecture/filesystem.html">Filesystem</a>
+    <a href="../architecture/ipc.html">IPC</a>
+    <a href="../architecture/boot.html">Boot flow</a>
+    <a href="../architecture/interrupts.html">Interrupts &amp; timers</a>
+    <a href="../architecture/structure.html">Code layout</a>
+    <a href="../architecture/riscv64.html">Porting guide</a>
+    <a href="../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Debugging</div>
+    <a href="index.html">Debugging guide</a>
+    <a href="tracepoints.html">Tracepoints</a>
+    <a href="perf.html">Performance debugging</a>
+    <a href="locks.html">Lock debugging</a>
+    <a href="memory.html">Memory forensics</a>
+    <a class="on" href="panic.html">Panic &amp; symbols</a>
+    <div class="grp">Performance</div>
+    <a href="../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../security/index.html">Security &amp; verification</a>
+    <div class="grp">Testing</div>
+    <a href="../testing/index.html">Overview</a>
+    <a href="../testing/ci-pipeline.html">CI pipeline</a>
+    <a href="../testing/ltp.html">LTP scan</a>
+    <a href="../testing/ltp-full.html">LTP full cases</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT audit</a>
+    <a href="../testing/stability.html">Stability</a>
+    <a href="../testing/stress.html">Stress</a>
+    <a href="../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../guides/getting-started.html">Getting started</a>
+    <a href="../guides/development.html">Contributing</a>
+    <a href="../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../progress/roadmap.html">Roadmap</a>
+    <a href="../progress/changelog.html">Changelog</a>
+    <a href="../progress/quickref.html">Commands</a>
+    <div class="grp">Community</div>
+    <a href="../guestbook.html">Guestbook</a>
+  </aside>
+
+    <article class="doc-main">
+    <h1>Panic &amp; symbolization</h1>
+    <div class="sub">The kernel panic report structure, the compile-time kallsyms symbol table, oops forms and line-atomic dumps — the complete path from a serial line to a source line · Sources: kernel/src/dfx/ (backtrace/oops/ksyms), arch/*/trap.rs, design-divergences.md (D-3)</div>
+
+    <h2 id="report"><span class="anchor">§1</span>Panic report structure</h2>
+    <p>The panic handler bypasses console log levels and writes the UART directly, then halts with <code>wfi</code>. A complete report contains:</p>
+    <ol>
+      <li><b>The PANIC message + file:line</b> (panic!'s arguments and source location);</li>
+      <li><b>The CSR quartet</b> (riscv64): sstatus / scause / stval / sepc; x86_64's counterparts are cr2/rip/rsp/error code;</li>
+      <li><b>All 31 general registers</b> (riscv64) — saved by inline asm before any stack unwinding;</li>
+      <li><b>The stack backtrace</b>: a frame-pointer chain walk (s0/fp on riscv64, rbp on x86_64), up to 32 frames under <code>Call trace:</code>.</li>
+    </ol>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Field</th><th>How to read it</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">scause</td><td>bit 63 set = interrupt; exception codes: 0 misaligned fetch, 2 illegal instruction, 8 U-mode ecall, 12 instruction page fault, 13 load fault, 15 store/AMO fault; interrupt codes: 5 timer, 9 external</td></tr>
+        <tr><td class="mono">sepc</td><td>the trapping instruction address</td></tr>
+        <tr><td class="mono">stval</td><td>on a page fault = the faulting virtual address; on an illegal instruction = the instruction bits</td></tr>
+        <tr><td class="mono">Call trace</td><td>the first address is the panic function's return address (ra); each following entry is the caller's return address</td></tr>
+      </tbody>
+    </table></div>
+
+    <h2 id="kallsyms"><span class="anchor">§2</span>The compile-time symbol table (D-3)</h2>
+    <ul>
+      <li><b>Build</b>: at build time, nm + addr2line -C (demangled) run over the linked ELF, compacted into a NUL-separated name blob plus an (offset, address, size, type) index placed in .rodata; text symbols only, a two-pass build.</li>
+      <li><b>Scale</b>: ~22.6k symbols, 2.4 MB of names + 0.7 MB of index; the image grows +3.1 MB (riscv64 once had to move its boot window/heap base/RAM reserve 14→18 MB together for it; x86_64 derives its mapping from the runtime __kernel_end and needed no move).</li>
+      <li><b>Boot cost</b>: zero — the data is in the image, no runtime scan.</li>
+      <li><b>Consumers</b>: /proc/kallsyms (standard <code>addr type name</code> lines, 22,636 lines, coverage through _etext), native symbolization for oopses/backtraces (the %ps form <code>name+0xoff/0xsize</code>, non-text symbols marked with ?), and the backtracer.</li>
+      <li><b>Guards</b>: scripts/test/kallsyms-smoke.sh pins the symbol coverage; cross builds ignore a stale table by target-triple.</li>
+    </ul>
+
+    <h2 id="oops"><span class="anchor">§3</span>Oops forms</h2>
+    <ul>
+      <li>The kernel-mode fault order: exception table → fixup (rip = the fixup address) → KernelPanic; oops printing carries a re-entrancy latch (against recursive dumps from wild frame pointers).</li>
+      <li><b>The USEGV family</b> (x86_64): structured lines for user-space segfaults — see <a href="memory.html#usegv">memory forensics §5</a>; the PF-NOCTX beacon names a raw user-pointer dereference before the oops machinery mangles context (in the SMAP context).</li>
+      <li><b>%ps symbolization</b>: backtrace lines carry <code>symbol+0xoff/0xsize</code> directly — a first judgment needs no offline addr2line; exact line numbers still go through addr2line.</li>
+    </ul>
+
+    <h2 id="atomic-dump"><span class="anchor">§4</span>Line-atomic dumps (the printk emit discipline)</h2>
+    <ul>
+      <li>Per-CPU staged batched TX with bounded printk-emit-lock acquisition (Full 50 ms / Brief 100 µs) — measured: mangled task lines under concurrent dumps went 1.7% → <b>0</b> (1506/1506 well-formed).</li>
+      <li>Motivation: interleaved concurrent dumps once truncated forensic lines against each other — an untrustworthy scene equals no scene.</li>
+    </ul>
+
+    <h2 id="remote-bt"><span class="anchor">§5</span>REMOTE-BT: cross-CPU stack capture</h2>
+    <ul>
+      <li>Under the dfx-lock-owner feature, the watchdog/forensic paths can request a <b>remote CPU's stack snapshot</b> via an IRQ_WORK IPI — a holder stuck at IF=0 has a dead tick of its own and can only be observed by another CPU.</li>
+      <li>Together with allocwatch's cross-CPU holder naming it forms the complete "who holds it" forensic pair.</li>
+    </ul>
+
+    <h2 id="workflow"><span class="anchor">§6</span>The symbolization workflow</h2>
+    <pre><code><span class="c"># 1. symbolize address by address (pick the toolchain per arch)</span>
+riscv64-linux-gnu-addr2line -e &lt;kernel.elf&gt; -f -C &lt;addr&gt; [addr2 addr3 ...]
+x86_64-linux-gnu-addr2line -e &lt;the unstripped ELF for the bzImage&gt; -f -C &lt;addr&gt;
+<span class="c"># 2. feed the whole Call trace's addresses in one command</span>
+<span class="c"># 3. cross-check against /proc/kallsyms symbol boundaries (if the guest is alive)</span></code></pre>
+    <ul>
+      <li>Symbolizing a bzImage: keep the unstripped ELF from the build and point addr2line -e at it; the runtime /proc/kallsyms addresses match the ELF symbol table (link address = run address).</li>
+      <li>Release builds default to a 371-byte ksyms stub (kallsyms_generated.rs) — diagnostic builds that need symbols re-enable it via the feature; the two image-size figures (12.2 MB vs 16.0 MB) differ exactly by this.</li>
+    </ul>
+
+    <h2 id="recipes"><span class="anchor">§7</span>The complete path from serial to root cause</h2>
+    <ol>
+      <li>Capture: serial to file (-serial file:) or hunt-wedge's automated capture;</li>
+      <li>Classify: scause/cr2 names the exception class; the panic message + file:line give the first read;</li>
+      <li>Locate: the whole Call trace's addresses through addr2line in one command → the function and line;</li>
+      <li>Zoom: more scene needed → re-run with dfx=mmforensics / dfx=watchdog / REMOTE-BT;</li>
+      <li>Convict: deterministic reproduction (THREAD=single) + intersecting across boots.</li>
+    </ol>
+
+    <div class="callout">Code: <code>kernel/src/dfx/backtrace.rs</code> (the frame-pointer walk, force-frame-pointers=yes), <code>kernel/src/dfx/oops.rs</code>, <code>kernel/src/dfx/ksyms.rs</code> + build/gen-ksyms.py (the generator). Divergence: D-3. Related: <a href="memory.html">memory forensics</a> (scene deepening), <a href="locks.html">lock debugging</a> (the watchdog linkage).</div>
+  
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to home</a></span>
+
+      <span class="foot-stats">Site visits <span id="busuanzi_value_site_pv"></span> · Visitors <span id="busuanzi_value_site_uv"></span></span></div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>
