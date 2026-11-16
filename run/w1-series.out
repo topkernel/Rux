@@ -1,0 +1,13 @@
+=== w1 start 20:45:21 avail=50363M kernel=/home/william/rux-agents/wrl-class/target/x86_64-unknown-none/release/bzImage secs=540 extra='dfx=pctlmon,fuxstuck,txnhunt,bindertrace,periodic trace_event=input' load='3.25 3.91 4.33 4/1551 89472' ===
+copying userdata base (16G full copy)...
+=== w1 rc=0 20:54:22 load='13.50 10.20 7.18 9/1558 90814' ===
+  panics:            0
+  ExecReboot:        0
+  WAKE-RUN-LEAK:     212
+  THREAD-DIED-SERV:  0
+  UIEXIT rows:       17
+  UIEXIT owing>0:    0
+  RERR-PUSH:         0
+  TXN-HANG-OWE:      4
+  AMS46-DRS:         0
+=== WRL BOOT DONE (w1) 20:54:22 ===
