@@ -85,7 +85,8 @@ fn check_name(name: &[u8]) -> Result<(), errno::Errno> {
 /// Namespace write gate (mirror of Linux xattr_permission, minimal):
 /// `user.*` needs write permission on the inode (checked by caller via the
 /// plain DAC path — we approximate with MAY_WRITE), `trusted.*` /
-/// `security.*` need CAP_SYS_ADMIN, `system.*` is read-only.
+/// `security.*` need CAP_SYS_ADMIN, `system.*` (POSIX ACLs) is
+/// owner-or-CAP_FOWNER.
 /// L3 wiring (sec-r1): `security.capability` specifically requires
 /// CAP_SETFCAP (reference cap_inode_setxattr / cap_inode_removexattr in
 /// commoncap), not CAP_SYS_ADMIN. Other `security.*` names keep the
@@ -125,7 +126,31 @@ fn may_set(name: &[u8]) -> Result<(), errno::Errno> {
                 Err(errno::Errno::OperationNotPermitted)
             }
         }
-        b"system" => Err(errno::Errno::OperationNotPermitted), // reserved / read-only
+        // system.* (POSIX ACLs). Linux: setxattr("system.posix_acl_access")
+        // is a REAL operation — the ACL is validated, stored, and the file
+        // mode derived from the base entries; permission is
+        // inode-owner-or-CAP_FOWNER (posix_acl_xattr_set on the handler,
+        // gated by inode_owner_or_capable). systemd's credentials helper
+        // (sd-mkdcreds) sets a base ACL on every credential file it
+        // prepares, and a blanket EPERM here killed each service start
+        // with 243/CREDENTIALS ("Failed to set up credentials: Protocol
+        // error" — safe_fork maps the helper's exit 1 to EPROTO), the
+        // ub2404 serial-getty restart loop. Accept for owner/CAP_FOWNER;
+        // the value is stored like any xattr (no ACL enforcement yet).
+        b"system" => {
+            let cred = if let Some(task) = crate::sched::current() {
+                task.cred().clone()
+            } else {
+                crate::process::task::Cred::new_init()
+            };
+            if cred.euid == 0
+                || crate::security::has_capability(&cred, crate::security::CAP_FOWNER)
+            {
+                Ok(())
+            } else {
+                Err(errno::Errno::OperationNotPermitted)
+            }
+        }
         _ => Err(errno::Errno::OperationNotSupported), // unknown namespace: no handler
     }
 }
