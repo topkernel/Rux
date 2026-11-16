@@ -247,6 +247,39 @@ dead-proc `expect()` replaced by a bounded warning (619bf4b6); the
   pairing: the same batching removed the sync-write cost class while
   keeping crash-consistency write-through (fsw counters show no new
   sync-write class outside provisioning).
+- open/close registry empty-gates + per-CPU file ids (sysmm-2x lane
+  2026-11-17, 9b7a9aef3): every regular-file open paid
+  LEASE_TABLE.lock+scan (break_lease's conflict probe) and every
+  File::drop paid FOUR more global lock pairs + scans (flock release,
+  inode-open unregister's lease leg, oasync unregister) with all
+  tables empty — the default boot state. Live-entry mirrors
+  (FLOCK_COUNT/LEASE_COUNT/OASYNC_COUNT, the RECORD_LOCK_COUNT
+  pattern) collapse each to one Acquire load. Safety pairing: the
+  0-read vs racing-first-insert soundness argument is documented at
+  each site — an insert runs inside flock/fcntl on a held File
+  reference, and File::drop runs only after the last reference died,
+  so the Arc refcount Release/Acquire chain orders the dropping CPU
+  after the inserter's length store; file_id moved to per-CPU counters
+  (cpu<<56|local) whose uniqueness argument (registries compare
+  equality, never order; a racing same-CPU fetch_add still yields a
+  distinct id) is at the field. Measured: lmbench open med 0.931→0.829
+  µs (−11%, interleaved 3+3, SMP-8 KVM).
+- VMA-range-bounded fork/teardown leaf scans (sysmm-2x lane
+  2026-11-17, 1aa932fd4): munmap leaves emptied leaf tables behind
+  (unmap_pages never frees them), so a fork-heavy parent carries 36
+  leaf tables for 61 present PTEs and both whole-tree walks (fork COW
+  copy, mm teardown) scanned all 512 PTEs per table — 18k streamed
+  loads per fork+exit, the 20 µs mm_cow + 18 µs drop_ptfree phases of
+  the SMP-8 fork decomposition. Both walks now scan only the PTE
+  windows the VMA snapshot covers (8-window stack array; no-coverage
+  tables and degenerate shapes keep the FULL scan so an orphan-PTE
+  invariant break still frees what it finds — the defense is the
+  fallback, not the assumption). Measured: forkprof-armed p4_fork_exit
+  med 107.4→56.6 µs; the wall-clock row stays dominated by a bimodal
+  51-69/90-107 µs child wake-to-run amplitude (sched/wakeup family,
+  handed off with the forkprof evidence in run/SYSMM-2X.md).
+  p3b_fault_cow unchanged (0.601-0.611 both arms) — the walk change
+  does not touch the fault path.
 - Geekbench multicore class: parity-to-ahead of the reference on the
   same host (7139 vs 7027, 4-CPU pinned class) — pairing: it runs on
   the D-1 global run queue, the single structure the wake/pick census
