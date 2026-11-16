@@ -742,3 +742,30 @@ absents stated plainly. Each absent names what closing looks like.
     token fix (untracked run/ script — note only; with the token
     fixed the census reads return to band, TERM 8 / REFUSED 31 on
     the merged 6770963ea kernel).
+- falloc-wedge (2026-11-16, branch falloc-wedge, six commits
+  5f58ca02f..3d9ac97c2): the fallocate05/06 family closed end-to-end.
+  Bug classes eliminated, all logic bugs in safe code (no unsafe
+  implicated): (1) acknowledged-data loss from the fallocate epilogue's
+  whole-inode page-cache invalidation dropping still-dirty
+  delayed-allocation pages (punchprobe3: sample@0 1 -> 0 across a
+  plain mode-0 fallocate, no flush involved, root ext4 AND loop-stacked
+  ext2) — replaced by never-invalidate-on-allocate + range-bounded
+  span invalidation owned by the punch itself; (2) PUNCH_HOLE that
+  deallocated nothing (zero-in-place arms) and clobbered misaligned
+  edge bytes — reference-shaped pre-sync + extent split + indirect
+  interior free + zeroed edges; (3) the delayed-allocation
+  dirty-balloon wedge (243k dirty pages skipping eviction, zone at
+  zero, reclaim re-entering the loop io lock, fdreap RCU stall) —
+  writer-side writeback watermark + system-wide recovery (D-20), eager
+  ENOSPC on extending writes at zero free blocks, dying-task reclaim
+  unwind (fatal_signal_pending shape); (4) the loop io_lock spinlock
+  monopolist window (holder sleeps through journal/I-O/reclaim with
+  preemption off — INV-LOCK-8 rule 3) — SleepMutex. Numbers:
+  fallocate05 3/3 + fallocate06 3/3 PASS fresh boots (RC=0, 16/24
+  TPASS, 0 TFAIL; run/shell-f56-fin{1,2,3}.log and predecessor
+  iso runs run/shell-f05-iso{1,2,3}.log / shell-ver-f06.log), mm
+  storm 111 runs zero forensics events (run/res-storm1.txt), triple
+  builds rc=0, riscv make test 1328/1328 (run/maketest-final.log).
+  WB-WATERMARK rows on the fill show the mark un-tripping (free
+  137k vs mark 121k, flushed 15.8k + shrunk 29.6k pages in one
+  215-jiffy round). Full record: run/FALLOC-WEDGE.md.
