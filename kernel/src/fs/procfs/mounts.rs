@@ -159,6 +159,47 @@ pub fn generate_filesystems() -> Vec<u8> {
     content.into_bytes()
 }
 
+/// Is `mp` a component-aligned path prefix of `path` ("/" always is;
+/// "/dev" matches "/dev/pts" but not "/devx")?
+fn mount_point_prefix(mp: &str, path: &str) -> bool {
+    if mp == "/" {
+        return true;
+    }
+    path == mp || (path.len() > mp.len() && path.starts_with(mp) && path.as_bytes()[mp.len()] == b'/')
+}
+
+/// The mount ID statx(STATX_MNT_ID) reports for a path: the row (boot
+/// layout or the live namespace table) whose mount_point is the LONGEST
+/// component-aligned prefix of the path — the same id
+/// generate_mountinfo() prints in the first column, so a caller that
+/// reads mountinfo and statx's the same path sees one id per mount.
+/// This is the shared helper both views answer through (systemd 255's
+/// mount detection: path_is_mount_point compares a path's stx_mnt_id
+/// with its parent's; sd-device matches device nodes against
+/// mountinfo rows by mnt_id). Anything unmatched sits on the root
+/// mount (id 1).
+pub fn mount_id_for(path: &str) -> u32 {
+    let mut best: u32 = 1;
+    let mut best_len: usize = 1; // "/" — matches every path
+    // Boot rows first, and strict > on prefix length: a registry row
+    // for the SAME mountpoint (re-registered /, /sys, /run ...) must
+    // NOT displace the boot row's id — generate_mountinfo() skips
+    // those rows in its `seen` pass, and the two views must agree.
+    let mut consider = |mp: &str, id: u32| {
+        if mount_point_prefix(mp, path) && mp.len() > best_len {
+            best_len = mp.len();
+            best = id;
+        }
+    };
+    for m in boot_mounts().iter() {
+        consider(m.mount_point, m.mount_id);
+    }
+    for e in crate::fs::mount::get_mount_entries() {
+        consider(&e.mount_point, e.mount_id);
+    }
+    best
+}
+
 /// Generate /proc/self/mountinfo content (detailed mount info)
 ///
 /// Format (systemd's parser, proc-mounts(5)):

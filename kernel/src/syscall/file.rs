@@ -4253,17 +4253,30 @@ pub fn sys_statx(args: SyscallArgs) -> i64 {
             && probe[0] == 0
     };
 
+    // The path whose GOVERNING mount statx(STATX_MNT_ID) reports — kept
+    // for the mnt_id fill below (both arms: resolved pathname, or the
+    // fd's dentry path for AT_EMPTY_PATH).
+    let mut mnt_id_path: Option<alloc::string::String> = None;
     if is_empty_path && (flags & AT_EMPTY_PATH) != 0 {
         // fstat(dirfd)
         match crate::fs::file_stat(dirfd as usize, &mut stat) {
             Ok(()) => {}
             Err(e) => return -(e as i64),
         }
+        // The fd's own path (the mount the open file sits on).
+        // SAFETY: fd validated by file_stat above; get_file_fd returns a
+        // live Arc<File> or None.
+        if let Some(f) = unsafe { crate::fs::get_file_fd(dirfd as usize) } {
+            if let Some(d) = unsafe { (*f.dentry.get()).clone() } {
+                mnt_id_path = Some(d.build_path());
+            }
+        }
     } else {
         let full_path = match resolve_user_path(dirfd, pathname_ptr) {
             Ok(p) => p,
             Err(e) => return e as i64,
         };
+        mnt_id_path = Some(full_path.clone());
         // AT_SYMLINK_NOFOLLOW: lstat-style lookup (do not follow the final
         // symlink component).
         let lookup_flags = if flags & AT_SYMLINK_NOFOLLOW != 0 {
@@ -4289,6 +4302,7 @@ pub fn sys_statx(args: SyscallArgs) -> i64 {
     const STATX_SIZE: u32 = 0x0200;
     const STATX_BLOCKS: u32 = 0x0400;
     const STATX_BTIME: u32 = 0x0800;
+    const STATX_MNT_ID: u32 = 0x1000;
 
     // Linux semantics: STATX_ALL-style requests are ANDed with what the fs
     // can provide; unknown request bits are not an error. We always answer
@@ -4296,7 +4310,7 @@ pub fn sys_statx(args: SyscallArgs) -> i64 {
     let requested = mask
         & (STATX_TYPE | STATX_MODE | STATX_NLINK | STATX_UID | STATX_GID
            | STATX_ATIME | STATX_MTIME | STATX_CTIME | STATX_INO | STATX_SIZE
-           | STATX_BLOCKS | STATX_BTIME);
+           | STATX_BLOCKS | STATX_BTIME | STATX_MNT_ID);
 
     let mut stx = Statx::new();
     stx.stx_mask = requested;
@@ -4345,6 +4359,16 @@ pub fn sys_statx(args: SyscallArgs) -> i64 {
     if requested & STATX_INO != 0 { stx.stx_ino = stat.st_ino; }
     if requested & STATX_SIZE != 0 { stx.stx_size = stat.st_size as u64; }
     if requested & STATX_BLOCKS != 0 { stx.stx_blocks = stat.st_blocks as u64; }
+    // STATX_MNT_ID: the mount the path is on, in the SAME id space
+    // mountinfo prints (shared helper in procfs::mounts — one model,
+    // two views). Anonymous fds (pipes/sockets: no dentry) carry no
+    // mount identity; callers only compare mnt_ids for path-backed
+    // files, so leaving 0 with the mask bit set is the honest answer.
+    if requested & STATX_MNT_ID != 0 {
+        if let Some(p) = mnt_id_path.as_ref() {
+            stx.stx_mnt_id = crate::fs::procfs::mounts::mount_id_for(p) as u64;
+        }
+    }
 
     // Copy to user space
     // SAFETY: statxbuf validated with access_ok(size_of::<Statx>); copies Statx to user.
