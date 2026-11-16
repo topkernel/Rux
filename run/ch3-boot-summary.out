@@ -1,0 +1,18 @@
+=== ch3 start 19:51:46 avail=52740M kernel=/home/william/rux-agents/carrier-heal/target/x86_64-unknown-none/release/bzImage ===
+copying userdata base (16G, full copy on ext4)...
+=== ch3 rc=0 20:00:48 ===
+  panics:            0
+  RUNQ-STRAND rows:  325
+  MONOPOLIST rows:   84
+  PREEMPT-HEAL rows: 40
+  PREEMPT-HEAL-FIELD:0
+  HEAL-REFUSED rows: 2070
+  REFUSED via=C:     0
+  REFUSED via=A:     2069
+  PREEMPT-UNDERFLOW: 0
+  FUX-STUCK lines:   822
+  WAKE-HEAL rows:    0
+  PARKED-HEAL rows:  0
+  TICK-GHOST rows:   0
+  DEADLOCK rows:     0
+=== FACE DONE (ch3) 20:00:48 ===

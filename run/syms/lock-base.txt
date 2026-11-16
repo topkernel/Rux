@@ -1,0 +1,87 @@
+
+ 文件格式 elf64-x86-64
+
+
+ of section .text:
+
+ <_RNvMNtNtCskM3lJAAH1t5_3rux4sync8spinlockNtB2_11RawSpinlock4lock>:
+ push %rbp
+ 89 e5 mov %rsp,%rbp
+ 57 push %r15
+ 56 push %r14
+ 55 push %r13
+ 54 push %r12
+ push %rbx
+ push %rax
+ 8b 45 08 mov 0x8(%rbp),%rax
+ 31 f6 xor %r14d,%r14d
+ 01 00 00 00 mov $0x1,%ecx
+ c0 xor %eax,%eax
+ 0f b1 0f lock cmpxchg %ecx,(%rdi)
+ 0f jne ffffffff8027fc61 <_RNvMNtNtCskM3lJAAH1t5_3rux4sync8spinlockNtB2_11RawSpinlock4lock+0x31>
+ 83 c4 08 add $0x8,%rsp
+ pop %rbx
+ 5c pop %r12
+ 5d pop %r13
+ 5e pop %r14
+ 5f pop %r15
+ pop %rbp
+ ret
+ 89 fb mov %rdi,%rbx
+ bf 00 00 00 80 mov $0x80000000,%r15d
+ 89 fc mov %rdi,%r12
+ 81 e4 00 f0 ff ff and $0xfffffffffffff000,%r12
+ 89 dd mov %ebx,%r13d
+ 81 e5 fc 0f 00 00 and $0xffc,%r13d
+ 02 jmp ffffffff8027fc82 <_RNvMNtNtCskM3lJAAH1t5_3rux4sync8spinlockNtB2_11RawSpinlock4lock+0x52>
+ 90 pause
+ 03 mov (%rbx),%eax
+ c0 test %eax,%eax
+ 84 7a 01 00 00 je ffffffff8027fe06 <_RNvMNtNtCskM3lJAAH1t5_3rux4sync8spinlockNtB2_11RawSpinlock4lock+0x1d6>
+ ff c6 inc %r14d
+ 45 85 f6 test %r14w,%r14w
+ 85 b7 00 00 00 jne ffffffff8027fd50 <_RNvMNtNtCskM3lJAAH1t5_3rux4sync8spinlockNtB2_11RawSpinlock4lock+0x120>
+ 8b 04 25 00 00 00 mov %gs:0x0,%eax
+
+ f8 07 cmp $0x7,%eax
+ 2c ja ffffffff8027fcd2 <_RNvMNtNtCskM3lJAAH1t5_3rux4sync8spinlockNtB2_11RawSpinlock4lock+0xa2>
+ c0 mov %eax,%eax
+ 8d 0c 40 lea (%rax,%rax,2),%rcx
+ 8b 0c cd 18 9d 4a mov -0x7eb562e8(,%rcx,8),%rcx
+
+ 85 c9 test %rcx,%rcx
+ 19 je ffffffff8027fcd2 <_RNvMNtNtCskM3lJAAH1t5_3rux4sync8spinlockNtB2_11RawSpinlock4lock+0xa2>
+ c1 e0 04 shl $0x4,%rax
+ 89 88 a0 da 46 81 mov %rcx,-0x7eb92560(%rax)
+ 8b 0d 0d 2b 26 01 mov 0x1262b0d(%rip),%rcx # ffffffff814e27d8 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_647JIFFIES>
+ 89 88 a8 da 46 81 mov %rcx,-0x7eb92558(%rax)
+ 8b 04 25 00 00 00 mov %gs:0x0,%eax
+
+ f8 07 cmp $0x7,%eax
+ 71 ja ffffffff8027fd50 <_RNvMNtNtCskM3lJAAH1t5_3rux4sync8spinlockNtB2_11RawSpinlock4lock+0x120>
+ c0 mov %eax,%eax
+ b6 80 b9 30 47 81 movzbl -0x7eb8cf47(%rax),%eax
+ c0 test %al,%al
+ 64 je ffffffff8027fd50 <_RNvMNtNtCskM3lJAAH1t5_3rux4sync8spinlockNtB2_11RawSpinlock4lock+0x120>
+ 8b 04 25 00 00 00 mov %gs:0x0,%eax
+
+ c7 mov %eax,%edi
+ f8 08 cmp $0x8,%eax
+ 83 32 01 00 00 jae ffffffff8027fe31 <_RNvMNtNtCskM3lJAAH1t5_3rux4sync8spinlockNtB2_11RawSpinlock4lock+0x201>
+ c1 e7 07 shl $0x7,%rdi
+ 8b 87 d8 6d bf 80 mov -0x7f409228(%rdi),%rax
+ 39 f8 cmp %r15,%rax
+ 07 jb ffffffff8027fd16 <_RNvMNtNtCskM3lJAAH1t5_3rux4sync8spinlockNtB2_11RawSpinlock4lock+0xe6>
+ 40 04 mov 0x4(%rax),%eax
+ c0 test %eax,%eax
+ 3a jne ffffffff8027fd50 <_RNvMNtNtCskM3lJAAH1t5_3rux4sync8spinlockNtB2_11RawSpinlock4lock+0x120>
+ pushf
+ pop %rax
+ 00 02 00 00 test $0x200,%eax
+ 31 je ffffffff8027fd50 <_RNvMNtNtCskM3lJAAH1t5_3rux4sync8spinlockNtB2_11RawSpinlock4lock+0x120>
+ 8b 04 25 00 00 00 mov %gs:0x0,%eax
+
+ c7 mov %eax,%edi
+ f8 08 cmp $0x8,%eax
+ .byte 0xf
+ ff 00 cmp $0x0,%edi
