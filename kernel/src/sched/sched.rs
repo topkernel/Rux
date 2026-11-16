@@ -2370,7 +2370,7 @@ pub fn free_task_slot(task_ptr: *mut Task) {
         // tree ops write node pointers into the recycled page (the
         // Task-pointer-fragment scribble family). Loud if it happens.
         #[cfg(feature = "x86_64")]
-        if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+        if crate::trace::EVENT_SCRIBBLE.armed() {
             if let Some(grq_guard) = try_grq_lock() {
                 use core::sync::atomic::Ordering as O;
                 let policy = unsafe { (*task_ptr).policy() };
@@ -2721,9 +2721,7 @@ pub fn schedule_dead_never_returns() {
                 // census boots only (dfx=wwcensus); ordinary boots fire
                 // this on every exiting child.
                 if rounds == 0
-                    && crate::dfx::switches::enabled(
-                        crate::dfx::switches::DfxSwitch::WwCensus,
-                    )
+                    && crate::trace::EVENT_WWCENSUS.armed()
                 {
                     let n = TERM_ENGAGE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     if n < 8 {
@@ -2899,7 +2897,7 @@ unsafe fn __schedule() {
     // before any dereference: fall back to the hardware truth (tp, the
     // arch per-CPU current_task) and resync the slot.
     #[cfg(feature = "x86_64")]
-    if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+    if crate::trace::EVENT_SCRIBBLE.armed()
         && !crate::dfx::scribble::task_plausible(prev)
     {
         let tp0: *mut Task = crate::arch::cpu::get_thread_id() as *mut Task;
@@ -2929,7 +2927,7 @@ unsafe fn __schedule() {
         // Scribble hunter tripwire: name the divergence the moment the
         // scheduler sees it (slot task vs the task the hardware runs).
         #[cfg(feature = "x86_64")]
-        if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+        if crate::trace::EVENT_SCRIBBLE.armed() {
             crate::dfx::scribble::slot_divergence(cpu_id, tp, prev);
         }
         // Locate the slot that still accounts tp (it was scheduled SOMEWHERE).
@@ -3187,9 +3185,7 @@ unsafe fn __schedule() {
             crate::arch::cpu::restore_irq(flags);
             static LPP_N: core::sync::atomic::AtomicU32 =
                 core::sync::atomic::AtomicU32::new(0);
-            if crate::dfx::switches::enabled(
-                crate::dfx::switches::DfxSwitch::LostParkTrace,
-            ) && LPP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120
+            if crate::trace::EVENT_LOSTPARK.armed() && LPP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120
             {
                 use crate::dfx::taskdump::putc_brief as putchar;
                 fn pdec3(mut v: u64) {
@@ -3739,7 +3735,7 @@ fn psl_slot(task: *mut Task) -> usize {
 /// Record a pick publication (GRQ held; single writer per task).
 /// dfx=leakhunt-gated: the unconditional cost is one relaxed load.
 pub fn psledger_note_publish(task: *mut Task, cpu: usize, pk: u32) {
-    if !crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+    if !crate::trace::EVENT_LEAKHUNT.armed() {
         return;
     }
     let s = psl_slot(task);
@@ -3753,7 +3749,7 @@ pub fn psledger_note_publish(task: *mut Task, cpu: usize, pk: u32) {
 /// Consume the ledger at a pick termination (affirm or abort). Returns
 /// the consumed entry for the caller's reporting.
 pub fn psledger_consume(task: *mut Task) -> bool {
-    if !crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+    if !crate::trace::EVENT_LEAKHUNT.armed() {
         return false;
     }
     let s = psl_slot(task);
@@ -3815,7 +3811,7 @@ unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
         // {false, -1}). Name the seed the moment the scheduler first
         // sees it, with the pre-mark state.
         #[cfg(feature = "x86_64")]
-        if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+        if crate::trace::EVENT_SCRIBBLE.armed() {
             let me = crate::arch::cpu_id() as usize;
             let mut owner_slot: i32 = -1;
             for c in 0..crate::config::MAX_CPUS {
@@ -5157,9 +5153,7 @@ pub fn wake_up_enqueue_opt(
                 // Serial-cleanliness: the W3 refusal census joins the
                 // wwcensus family — ordinary boots stay clean.
                 if !w3_benign_running
-                    && crate::dfx::switches::enabled(
-                        crate::dfx::switches::DfxSwitch::WwCensus,
-                    )
+                    && crate::trace::EVENT_WWCENSUS.armed()
                 {
                     w3_print_refused =
                         W3_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32;
@@ -5786,9 +5780,7 @@ pub fn wake_up_enqueue_opt(
                     static WHS_N: core::sync::atomic::AtomicU32 =
                         core::sync::atomic::AtomicU32::new(0);
                     if WHS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60
-                        && crate::dfx::switches::enabled(
-                            crate::dfx::switches::DfxSwitch::Schb,
-                        )
+                        && crate::trace::EVENT_SCHB.armed()
                     {
                         use crate::dfx::taskdump::putc_brief as putchar;
                         fn pdec(mut v: u64) {
@@ -5854,9 +5846,7 @@ pub fn wake_up_enqueue_opt(
                         // is refused forever, so the empty-queue-only form
                         // never fired on exactly the family it hunts.
                         if curr_on
-                            && crate::dfx::switches::enabled(
-                                crate::dfx::switches::DfxSwitch::LostParkTrace,
-                            )
+                            && crate::trace::EVENT_LOSTPARK.armed()
                         {
                             static LPW_N: core::sync::atomic::AtomicU32 =
                                 core::sync::atomic::AtomicU32::new(0);
@@ -7139,7 +7129,7 @@ pub fn scheduler_tick() {
             let (linked, stale_reset, owned_claim, oncpu_marked, oncpu_pids, owned_pids) =
                 g.cfs_rq.claim_sweep(cpu_id);
             drop(g);
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WwCensus)
+            if crate::trace::EVENT_WWCENSUS.armed()
                 && (stale_reset > 0 || owned_claim > 0 || oncpu_marked > 0)
             {
                 crate::pr_info!(
@@ -7358,8 +7348,7 @@ pub fn scheduler_tick() {
                             // reporter is a hunt instrument (dfx=wwcensus),
                             // not default output — idle-task word residue on
                             // quiet boots made the serial unusable.
-                            && crate::dfx::switches::enabled(
-                                crate::dfx::switches::DfxSwitch::WwCensus)
+                            && crate::trace::EVENT_WWCENSUS.armed()
                         {
                             let lp = LEAK_LAST_PRINT.load(
                                 core::sync::atomic::Ordering::Acquire);
@@ -7926,8 +7915,7 @@ pub fn scheduler_tick() {
                 core::sync::atomic::AtomicU64::new(0);
             let epoch = WALK_EPOCH.fetch_add(1, core::sync::atomic::Ordering::AcqRel) + 1;
             // stress-port r3 census: one count per completed walk entry.
-            if crate::dfx::leakorigin::ENABLED
-                .load(core::sync::atomic::Ordering::Relaxed)
+            if crate::trace::EVENT_LEAKHUNT.armed()
             {
                 PARKWALK_CENSUS[0].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             }
@@ -8020,8 +8008,7 @@ pub fn scheduler_tick() {
                     // "was the victim invisible to the walk, or clean?"
                     // (visibly clean supports the resume-time
                     // stale-bar false-fire, not a parked leak).
-                    if crate::dfx::leakorigin::ENABLED
-                        .load(core::sync::atomic::Ordering::Relaxed)
+                    if crate::trace::EVENT_LEAKHUNT.armed()
                     {
                         crate::sched::sched::PARKWALK_CENSUS[1]
                             .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -8251,8 +8238,7 @@ pub fn scheduler_tick() {
             }
             // stress-port r3 census print: every 1000 walks while
             // dfx=leakhunt is armed (direct console — IRQ context).
-            if crate::dfx::leakorigin::ENABLED
-                .load(core::sync::atomic::Ordering::Relaxed)
+            if crate::trace::EVENT_LEAKHUNT.armed()
                 && epoch % 1000 == 0
             {
                 use crate::dfx::taskdump::putc_brief as putchar;
@@ -8786,7 +8772,7 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     #[cfg(feature = "x86_64")]
     let next: &mut Task = {
         let np = next as *mut Task;
-        if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+        if crate::trace::EVENT_SCRIBBLE.armed()
             && !crate::dfx::scribble::task_plausible(np)
         {
             crate::dfx::scribble::bad_switch_arg(1, np as u64, prev as *mut Task as u64);
@@ -10675,9 +10661,7 @@ pub fn cpu_idle_loop() -> ! {
         // last writer of the lying slot: 1=pick 2=R56d 3=R56c 4=steal
         // 5=abort-republish) so the producer is named live.
         if !is_idle
-            && crate::dfx::switches::enabled(
-                crate::dfx::switches::DfxSwitch::LostParkTrace,
-            )
+            && crate::trace::EVENT_LOSTPARK.armed()
         {
             lp_idle_lie_report(cpu_id);
         }

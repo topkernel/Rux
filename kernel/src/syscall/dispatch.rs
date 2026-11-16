@@ -457,7 +457,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // pre-translate latch above stays always-on: it is what makes a
     // parked task's taskdump show the syscall it is parked IN, and it
     // costs 3 stores.
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SysForensic) {
+    if crate::trace::EVENT_SYSFORENSIC.armed() {
         SYSCALL_RING[SYSCALL_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % SYSCALL_RING.len()]
             .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], u64::MAX);
         if let Some(cur) = crate::sched::current() {
@@ -983,7 +983,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // musl ld.so's "Error loading shared library" carries no errno — this
     // turns that into "which step failed" (search-open, fstat, mmap,
     // header read).
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Strace1)
+    if crate::trace::EVENT_STRACE1.armed()
         && crate::process::current_pid() == 1
     {
         strace1_line(syscall_no as u32, &args, result);
@@ -995,7 +995,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // ungated this flooded the emulated UART (2.7GB per OH boot) and the
     // printing alone slowed services enough to lose races — see the
     // switch catalog note in dfx/switches.rs.
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Steptrace) {
+    if crate::trace::EVENT_STEPTRACE.armed() {
         crate::pr_debug!("syscall: pid={}, nr={}, ret={:#x} ({})",
             crate::process::current_pid(), syscall_no, result,
             if result < 0 { "error" } else { "ok" });
@@ -1069,7 +1069,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // missstat/openmiss) — is hunt instrumentation costing ~15 atomics
     // plus comm scans on EVERY syscall. Gated behind dfx=sysforensic;
     // quiet boots pay one atomic load.
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SysForensic) {
+    if !crate::trace::EVENT_SYSFORENSIC.armed() {
         return;
     }
 
@@ -1217,7 +1217,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         // milestone boots it only adds ~2.4k kernel lines for
         // hilogd.rd_kmsg to copy (the b128/b129 vCPU lesson).
         if family
-            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WriteTrace)
+            && crate::trace::EVENT_WRITETRACE.armed()
         {
             // sc157: comm-based gating. The sc155/156 pid latch (first
             // family task to write fd3 = "the daemon") was fragile — in

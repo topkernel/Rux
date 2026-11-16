@@ -327,7 +327,7 @@ pub static MMAP_CURSOR: core::sync::atomic::AtomicUsize = core::sync::atomic::At
 /// serial-bounded. The switch check lives here — call sites stay naked.
 fn vmap_budget_line(line: impl FnOnce()) {
     use core::sync::atomic::Ordering::Relaxed;
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::VmaProbe) {
+    if !crate::trace::EVENT_VMAP.armed() {
         return;
     }
     static VMAP_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
@@ -1431,9 +1431,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                     actual_length
                                 );
                             }
-                            if crate::dfx::switches::enabled(
-                                crate::dfx::switches::DfxSwitch::SyscallTrace,
-                            ) {
+                            if crate::trace::EVENT_SYSCALLTRACE.armed() {
                                 if prot_flags == 0
                                     && map_flags & map::MAP_ANONYMOUS != 0
                                     && actual_length >= 0x10_0000
@@ -1462,9 +1460,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                             // (mmap PROT_NONE then RW-upgrade) leaves the
                             // guard with THIS origin; budget-shared with
                             // the MPROTECT-DN trace in sys_mprotect.
-                            if crate::dfx::switches::enabled(
-                                crate::dfx::switches::DfxSwitch::VmaProbe,
-                            ) && prot_flags == 0
+                            if crate::trace::EVENT_VMAP.armed() && prot_flags == 0
                                 && map_flags & map::MAP_ANONYMOUS != 0
                                 && actual_length < 0x10_0000
                                 && !big_reserve
@@ -1641,7 +1637,7 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
         // wrong-flags, plus the neighboring VMAs (bounded, failure-only
         // so volume is negligible).
         mprotect_fail_forensics(args[0] as usize, args[1] as usize);
-    } else if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace)
+    } else if crate::trace::EVENT_SYSCALLTRACE.armed()
         && (args[2] as u32) & 0x6 == 0
     {
         crate::pr_info!(
@@ -2835,7 +2831,7 @@ pub fn sys_mremap(args: [u64; 6]) -> i64 {
             ret
         );
     }
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace) {
+    if crate::trace::EVENT_SYSCALLTRACE.armed() {
         let pid = crate::process::current_pid();
         let comm_bytes = crate::sched::current()
             .map(|t| unsafe { (*t).comm() }.to_vec())

@@ -445,7 +445,7 @@ pub fn sched_tick_audit() {
     // past the mapped window, one on a corrupted va_pa_offset read) —
     // diagnostics default OFF per the dfx convention.
     {
-        if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::R83HeapScan) {
+        if !crate::trace::EVENT_R83SCAN.armed() {
             return;
         }
         static LAST: AtomicU64 = AtomicU64::new(0);

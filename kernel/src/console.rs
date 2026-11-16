@@ -748,7 +748,7 @@ fn uart_rx_debug_magic(c: u8) {
 
         // Accounting-ledger magic trigger (dfx=ledger): latch only — the
         // census is printk-heavy and runs from the timer softirq.
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Ledger) {
+        if crate::trace::EVENT_LEDGER.armed() {
             const LMAGIC: &[u8; 7] = b"LEDGER!";
             LEDGER_MAGIC_POS = if LEDGER_MAGIC_POS < LMAGIC.len()
                 && c == LMAGIC[LEDGER_MAGIC_POS]

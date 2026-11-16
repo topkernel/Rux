@@ -398,7 +398,7 @@ impl VirtioInputDevice {
             let used_idx = core::ptr::read_volatile(&used.idx) as usize;
             let last_used = self.last_used as usize;
 
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
+            if crate::trace::EVENT_INPUTTRACE.armed() {
                 static DBG_N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
                 let n = DBG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 if n < 8 || used_idx != 0 {

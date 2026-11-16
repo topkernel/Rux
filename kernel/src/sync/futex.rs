@@ -8760,7 +8760,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
             // is OFF in launcher-milestone boots.
             if n < 32
                 && tgid_ok
-                && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ParkDump)
+                && crate::trace::EVENT_PARKDUMP.armed()
             {
                 if let Some(t) = crate::sched::current() {
                     let tk = unsafe { &*t };
@@ -8768,6 +8768,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                     let name = core::str::from_utf8(&comm[..])
                         .unwrap_or("")
                         .trim_end_matches('\0');
+                    crate::trace::trace_parkdump(0, tk.pid(), uaddr as u64, val as u64);
                     crate::pr_warn!(
                         "RWFRZ-PARK #{} tid {} comm='{}' uaddr={:#x} val={:#x} (writer parking on {} readers)",
                         n,
@@ -8834,10 +8835,9 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                     // chain forensics, OFF in milestone boots (b128/b129
                     // hilogd.rd_kmsg lesson).
                     if n < 6
-                        && crate::dfx::switches::enabled(
-                            crate::dfx::switches::DfxSwitch::ParkDump,
-                        )
+                        && crate::trace::EVENT_PARKDUMP.armed()
                     {
+                        crate::trace::trace_parkdump(1, tk.pid(), uaddr as u64, val as u64);
                         crate::pr_warn!(
                             "APP-PARK #{} tid {} comm='{}' uaddr={:#x} val={:#x} op={:#x}",
                             n,
@@ -11798,7 +11798,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
     // irq-off WORLD window); without this line that death is invisible.
     // Serial-cleanliness: the heartbeat joins the wwcensus family so
     // ordinary boots print nothing periodic.
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WwCensus) {
+    if crate::trace::EVENT_WWCENSUS.armed() {
         static BEAT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
         let last = BEAT.load(core::sync::atomic::Ordering::Relaxed);
         if now.saturating_sub(last) >= 60 * hz {

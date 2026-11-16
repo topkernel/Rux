@@ -10,7 +10,7 @@
 //! window the moment it detects the frozen state (wakes delta == 0,
 //! global queue empty).
 //!
-//! Everything is behind `dfx=lostpark` (DfxSwitch::LostParkTrace): the
+//! Everything is behind the `rux:lostpark` trace event (retired
 //! record fast path is one Relaxed load when off.
 
 // Kernel layer policy (docs/architecture/kernel-layers.md):
@@ -23,19 +23,13 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 pub const RING_LEN: usize = 64;
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
-static ARMED: AtomicBool = AtomicBool::new(false);
 static DUMPED: AtomicBool = AtomicBool::new(false);
 static RING: [AtomicU64; RING_LEN * 5] = [const { AtomicU64::new(0) }; RING_LEN * 5];
-
-/// Arm the ring (called when the dfx switch flips on at boot).
-pub fn arm() {
-    ARMED.store(true, Ordering::Release);
-}
 
 /// Whether the ring is armed (fast record gate).
 #[inline]
 pub fn armed() -> bool {
-    ARMED.load(Ordering::Relaxed)
+    crate::trace::EVENT_LOSTPARK.armed()
 }
 
 /// Record one event: (event, pid, a, b, jiffies). Lock-free; events may
@@ -60,6 +54,7 @@ pub fn dump_once(tag: &[u8]) {
     if !armed() || DUMPED.swap(true, Ordering::AcqRel) {
         return;
     }
+    crate::trace::trace_lostpark(0, 0, SEQ.load(Ordering::Relaxed).min(RING_LEN as u64), 0);
     let mut idx = [0usize; RING_LEN];
     for k in 0..RING_LEN {
         idx[k] = k;

@@ -131,6 +131,7 @@ fn report(kind: &str, last: u64, now: u64, jiffies: u64) {
         return;
     }
     let delta_ms = (now.saturating_sub(last)) / (crate::config::TIMER_CLOCK_FREQ_HZ / 1000);
+    crate::trace::trace_monowatch(0, (n + 1) as u32, last, now);
     crate::pr_err!(
         "MONOWATCH-JUMP: {} clocksource={} last={:#x} now={:#x} delta={}ms jiffies={} ({}/{})",
         kind,

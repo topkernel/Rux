@@ -79,7 +79,7 @@ static INPUT_ISR_BARS: [core::sync::atomic::AtomicU64; 2] =
 /// tasklet, the INTx wiring is the break; if the queues are empty, the
 /// device never wrote (QEMU-side drop).
 pub fn input_debug_tick() {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
+    if !crate::trace::EVENT_INPUTTRACE.armed() {
         return;
     }
     static TICKS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -139,7 +139,7 @@ fn input_bh_run(_t: *mut crate::interrupt::tasklet::TaskletStruct) {
             break; // both queues drained
         }
         if (n_kbd + n_ptr) > 0
-            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace)
+            && crate::trace::EVENT_INPUTTRACE.armed()
         {
             crate::pr_warn!("IN-BH kbd={} ptr={}", n_kbd, n_ptr);
         }

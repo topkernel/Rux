@@ -36,7 +36,6 @@ use core::panic::Location;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 /// Mirror of the dfx=leakhunt runtime switch (set from dfx/switches.rs).
-pub static ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Total print budget for the boot (reports + parked-site lines).
 static BUDGET: AtomicU32 = AtomicU32::new(400);
@@ -319,7 +318,6 @@ pub fn note_acquire(
 /// cause. Re-armed via the `dfx=acqdiv` runtime switch for the A/B: the
 /// print rides only on boots that ask for it, on a tree where kpreempt
 /// defaults OFF.
-pub static DIVERGENT_PRINT: AtomicBool = AtomicBool::new(false);
 
 #[allow(unsafe_code)]
 fn report_acquire_divergent(
@@ -328,7 +326,7 @@ fn report_acquire_divergent(
     cpu: u32,
     slot_task: usize,
 ) {
-    if !DIVERGENT_PRINT.load(Ordering::Relaxed) {
+    if !crate::trace::EVENT_ACQDIV.armed() {
         let _ = (task, loc, cpu, slot_task);
         return;
     }
@@ -450,7 +448,7 @@ fn report_acquire_divergent(
 /// cross-task booking split. Budgeted; the flag is evidence, not proof.
 #[inline]
 pub fn note_release(task: *mut crate::process::Task) {
-    if !ENABLED.load(Ordering::Relaxed) {
+    if !crate::trace::EVENT_LEAKHUNT.armed() {
         return;
     }
     let slot = slot_of(task);
@@ -685,7 +683,7 @@ pub fn note_softirq_release(task: *mut crate::process::Task) {
 /// task observed carrying a hardirq bit at tick ENTRY (stranded from an
 /// earlier bracket — the tick's own booking is not in that snapshot).
 pub fn report_hardirq_origin(tag: &[u8], task: *mut crate::process::Task) {
-    if !ENABLED.load(Ordering::Relaxed) {
+    if !crate::trace::EVENT_LEAKHUNT.armed() {
         return;
     }
     let slot = slot_of(task);
@@ -756,7 +754,7 @@ pub fn report_hardirq_origin(tag: &[u8], task: *mut crate::process::Task) {
 /// tick-side orphan scan (preempt.rs) and the heal reports. Budgeted
 /// separately so orphan lines cannot be starved.
 pub fn report_softirq_origin(tag: &[u8], task: *mut crate::process::Task) {
-    if !ENABLED.load(Ordering::Relaxed) {
+    if !crate::trace::EVENT_LEAKHUNT.armed() {
         return;
     }
     let slot = slot_of(task);
@@ -849,7 +847,7 @@ pub fn report_softirq_origin(tag: &[u8], task: *mut crate::process::Task) {
 /// carrier in the first 20s of ph1). Space reports 50 jiffies apart per
 /// task and give the face its own budget.
 pub fn check_user_return() {
-    if !ENABLED.load(Ordering::Relaxed) {
+    if !crate::trace::EVENT_LEAKHUNT.armed() {
         return;
     }
     let Some(task) = crate::sched::current() else {
@@ -887,7 +885,7 @@ pub fn check_user_return() {
 /// is actually running on N and the parkwalk's parked classification is
 /// the artifact; no tpcpu = genuinely parked, and the +1 is real.
 pub fn report_parked_site(task: *mut crate::process::Task) {
-    if !ENABLED.load(Ordering::Relaxed) {
+    if !crate::trace::EVENT_LEAKHUNT.armed() {
         return;
     }
     use crate::console::putchar_no_lock as putchar;
@@ -939,7 +937,7 @@ pub fn report_parked_site(task: *mut crate::process::Task) {
 /// Append the recorded site for the tick-side PREEMPT-LEAK incumbent
 /// (called from the scheduler_tick tripwire's print block).
 pub fn report_incumbent_site(task: *mut crate::process::Task) {
-    if !ENABLED.load(Ordering::Relaxed) {
+    if !crate::trace::EVENT_LEAKHUNT.armed() {
         return;
     }
     emit(b"\nLEAK-ORIGIN running", task, unsafe { (*task).preempt_count() });
@@ -953,7 +951,7 @@ pub fn report_incumbent_site(task: *mut crate::process::Task) {
 /// hunt's primary output; it must not be starved by parked-adjacent
 /// noise).
 pub fn report_outermost(tag: &[u8], task: *mut crate::process::Task) {
-    if !ENABLED.load(Ordering::Relaxed) {
+    if !crate::trace::EVENT_LEAKHUNT.armed() {
         return;
     }
     let slot = slot_of(task);

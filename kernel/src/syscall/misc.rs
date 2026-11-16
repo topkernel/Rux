@@ -346,7 +346,7 @@ pub fn epoll_notify_file(file_id: u64) {
         // 120th input hunt: an empty shard for this file means NO epoll
         // ever bound this file id — the exact datum for the opened-but-
         // never-read face.
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace)
+        if crate::trace::EVENT_INPUTTRACE.armed()
             && file_id != 0
         {
             static MISS_N: core::sync::atomic::AtomicU32 =
@@ -659,7 +659,7 @@ fn epoll_wake_unregister(file_id: u64, ep: *mut EpollFile) {
 /// never-reports signature. Lock order registry → entries (same as
 /// epoll_notify_file); collect under lock, print after release.
 pub fn epoll_dump_for_file(file_id: u64) {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SockSnap) {
+    if !crate::trace::EVENT_SOCKSNAP.armed() {
         return;
     }
     let mut out: alloc::vec::Vec<(usize, u32, u64, alloc::vec::Vec<(i32, u32, u64, u32, u64)>)> =
@@ -743,9 +743,10 @@ pub fn epoll_dump_for_file(file_id: u64) {
 /// Formatting happens AFTER both locks drop (collect under lock, print
 /// outside). Purely diagnostic; self-gated by dfx=socksnap.
 pub fn epoll_interest_snapshot() {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SockSnap) {
+    if !crate::trace::EVENT_SOCKSNAP.armed() {
         return;
     }
+    crate::trace::trace_socksnap(0, unsafe { crate::process::current_pid() }, 0, 0);
     // (epoll ptr, owner pid, wait count, [(fd, events, file_id, last_reported, reports); ..])
     // — collected under the registry + entries locks, printed after release.
     let mut out: alloc::vec::Vec<(
@@ -2772,7 +2773,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
     {
         static EC_N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
         let n = EC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if n < 400 && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
+        if n < 400 && crate::trace::EVENT_INPUTTRACE.armed() {
             let fd = args[1] as usize;
             let op = args[2] as i32;
             let fid = crate::sched::get_current_fdtable()
@@ -2987,9 +2988,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                         // if the old description is still open elsewhere
                         // this is bookkeeping drift the dark-child hunt
                         // needs named.
-                        if crate::dfx::switches::enabled(
-                            crate::dfx::switches::DfxSwitch::Pid1Spin,
-                        ) {
+                        if crate::trace::EVENT_PID1SPIN.armed() {
                             static REB_N: core::sync::atomic::AtomicUsize =
                                 core::sync::atomic::AtomicUsize::new(0);
                             let n = REB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -3076,9 +3075,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                 // a DEL of a still-live registered fd is the dark-child
                 // signature; a foreign-process DEL names the diverging
                 // caller directly). dfx=pid1spin-gated.
-                if crate::dfx::switches::enabled(
-                    crate::dfx::switches::DfxSwitch::Pid1Spin,
-                ) {
+                if crate::trace::EVENT_PID1SPIN.armed() {
                     static DEL_N: core::sync::atomic::AtomicUsize =
                         core::sync::atomic::AtomicUsize::new(0);
                     let n = DEL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -4082,9 +4079,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                     // 79th: the pid==1 restriction dropped — ohw124 lost
                     // fd 21's interest with NO purge print, so if this
                     // path fired at all it was from a non-pid-1 context.
-                    if crate::dfx::switches::enabled(
-                        crate::dfx::switches::DfxSwitch::Pid1Spin,
-                    )
+                    if crate::trace::EVENT_PID1SPIN.armed()
                     {
                         static PURGE_N: core::sync::atomic::AtomicUsize =
                             core::sync::atomic::AtomicUsize::new(0);
@@ -4262,7 +4257,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
         // every epoll_wait returned idle, so the missing datum is whether
         // the scan ran at all, how many interests it saw, and what it
         // collected. Rate-limited: first 400 then 1-in-100.
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::EpollScan) {
+        if crate::trace::EVENT_EPOLLSCAN.armed() {
             use core::sync::atomic::{AtomicU64, Ordering};
             static SC_N: AtomicU64 = AtomicU64::new(0);
             let n = SC_N.fetch_add(1, Ordering::Relaxed);
@@ -5264,7 +5259,7 @@ pub fn signalfd_notify_task(task: *mut crate::process::task::Task) {
     // Zero bindings means the fd was never registered (or was closed).
     // Serial-cleanliness: opt-in via dfx=sfddbg.
     if unsafe { (*task).pid() == 1 }
-        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SfdDbg)
+        && crate::trace::EVENT_SFDDBG.armed()
     {
         static NT_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
@@ -5342,7 +5337,7 @@ fn signalfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
             // says "ordinary boots must keep a clean serial". Now gated
             // by dfx=sfddbg like its siblings.
             if (*current).pid() == 1
-                && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SfdDbg)
+                && crate::trace::EVENT_SFDDBG.armed()
             {
                 static RD_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
@@ -5764,9 +5759,7 @@ pub fn sys_timerfd_create(args: SyscallArgs) -> i64 {
     // only ever names bluetooth/audio's one-shots. Behind the switch the
     // tap prints the first 16 calls of every 500-jiffy window, so the
     // phase that runs the storm names its caller.
-    let tfdc_log = if crate::dfx::switches::enabled(
-        crate::dfx::switches::DfxSwitch::TfdCensus,
-    ) {
+    let tfdc_log = if crate::trace::EVENT_TFDCENSUS.armed() {
         static WIN_JIF: core::sync::atomic::AtomicU64 =
             core::sync::atomic::AtomicU64::new(0);
         static WIN_N: core::sync::atomic::AtomicUsize =
@@ -6542,7 +6535,7 @@ pub fn epoll_purge_closed_fd(fd: usize, dying_file_id: u64) {
             // 79th (ohw124): attribute every purge removal — the
             // paramservice dark-child hunt needs the closer's pid/fd/
             // file_id triad.
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Pid1Spin) {
+            if crate::trace::EVENT_PID1SPIN.armed() {
                 static PURGE2_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
                 let n = PURGE2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -6573,7 +6566,7 @@ pub fn epoll_purge_closed_fd(fd: usize, dying_file_id: u64) {
 /// (tfd_addr, expires): each re-arm prints once; an unchanged overdue
 /// state prints once and stays named by its first line.
 pub fn timerfd_wheel_audit() {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SleepSnap) {
+    if !crate::trace::EVENT_SLEEPSNAP.armed() {
         return;
     }
     use core::fmt::Write as _;

@@ -559,7 +559,7 @@ impl BlockCache {
         // window; see the tracers in ext4/extent.rs).
         let vkey = unsafe { (*victim).key };
         let v_dirty = unsafe { (*(*victim).bh).is_dirty() };
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt)
+        if crate::trace::EVENT_EXTHUNT.armed()
             && crate::fs::ext4::extent::exthunt_phys_watched(vkey.2)
         {
             crate::fs::ext4::extent::exthunt_evict_unhash(vkey.2, v_dirty);
@@ -592,7 +592,7 @@ impl BlockCache {
                     Ok(()) => 0,
                     Err(e) => e,
                 };
-                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt)
+                if crate::trace::EVENT_EXTHUNT.armed()
                     && crate::fs::ext4::extent::exthunt_phys_watched(vkey.2)
                 {
                     crate::fs::ext4::extent::exthunt_evict_done(vkey.2, sync_rc);
@@ -728,9 +728,7 @@ impl BlockCache {
                         // same-key entries in the chain and report via
                         // the no-lock console (bucket spinlock held, same
                         // discipline as the dead-bh tripwire below).
-                        if crate::dfx::switches::enabled(
-                            crate::dfx::switches::DfxSwitch::ExtHunt,
-                        ) {
+                        if crate::trace::EVENT_EXTHUNT.armed() {
                             let mut dup = 0usize;
                             let mut c2 = bucket.head;
                             while let Some(cp2) = c2 {

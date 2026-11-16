@@ -726,7 +726,7 @@ pub fn handle_mm_fault(
         }
     }
 
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Steptrace) {
+    if crate::trace::EVENT_STEPTRACE.armed() {
         crate::pr_debug!(
             "pagefault: map new page at {:#x}, type={:?}",
             fault_addr.bits(),

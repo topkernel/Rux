@@ -103,7 +103,7 @@ fn enabled() -> bool {
     if ARMED.load(Ordering::Relaxed) {
         return true;
     }
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::AllocWatch) {
+    if crate::trace::EVENT_ALLOCWATCH.armed() {
         ARMED.store(true, Ordering::Relaxed);
         return true;
     }
@@ -204,6 +204,7 @@ fn stuck_report(
     if n > 200 {
         return;
     }
+    crate::trace::trace_allocwatch(0, (n + 1) as u32, class as u64, now.saturating_sub(first) * 10);
     crate::pr_warn!(
         "ALLOC-STUCK #{} site={} class={} stuck={}ms (lock word held with NO live holder stamp — corrupt/stuck word, wild-write producer face)",
         n,

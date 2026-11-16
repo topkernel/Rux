@@ -1042,8 +1042,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
         let routine_ipi = !regs_ref.user_mode()
             && (0xE0..=0xE5).contains(&vector);
         if !routine_ipi
-            && crate::dfx::switches::enabled(
-                crate::dfx::switches::DfxSwitch::Steptrace)
+            && crate::trace::EVENT_STEPTRACE.armed()
         {
             crate::pr_debug!(
                 "trap: vector={:#x}, rip={:#x}, rsp={:#x}, mode={}",
@@ -3161,7 +3160,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
         );
     }
 
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Steptrace) {
+    if crate::trace::EVENT_STEPTRACE.armed() {
         crate::pr_debug!(
             "trap: page fault addr={:#x}, rip={:#x}, ec={:#x}, mode={}",
             fault_addr,
@@ -3915,7 +3914,7 @@ fn utime_sample_rip(rip: u64, comm: &[u8; 16]) {
 /// to one print every 60 s.
 pub fn utime_ripsample_report() {
     use core::sync::atomic::Ordering::Relaxed;
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::RipSample) {
+    if !crate::trace::EVENT_RIPSAMPLE.armed() {
         return;
     }
     static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);

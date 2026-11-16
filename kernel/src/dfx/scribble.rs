@@ -92,7 +92,6 @@ static SLOTS: [Slot; SCRIBBLE_SLOTS] = [const {
     }
 }; SCRIBBLE_SLOTS];
 
-pub static ENABLED: AtomicBool = AtomicBool::new(false);
 pub static HITS: AtomicU32 = AtomicU32::new(0);
 /// Park for the gdb breakpoint after the first hit (dfx=scribblepark).
 pub static PARK: AtomicBool = AtomicBool::new(false);
@@ -138,7 +137,7 @@ static RING_CUR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsi
 
 /// Append a pick/publish event (lock-free, best-effort ordering).
 pub fn ring_log(cpu: usize, kind: u32, a: u64, b: u64) {
-    if !ENABLED.load(Ordering::Relaxed) {
+    if !crate::trace::EVENT_SCRIBBLE.armed() {
         return;
     }
     let i = RING_CUR.fetch_add(1, Ordering::Relaxed) % 128;
@@ -676,7 +675,7 @@ fn gen_of(idx: usize) -> u32 {
 
 /// Register a freshly built Task (called at the end of `new_task_at`).
 pub fn register(task: *mut Task) {
-    if !ENABLED.load(Ordering::Relaxed) || task.is_null() {
+    if !crate::trace::EVENT_SCRIBBLE.armed() || task.is_null() {
         return;
     }
     // R65 pin park (boot param `scribblepin=0x<hex>`): park exactly when
@@ -781,7 +780,7 @@ pub fn register(task: *mut Task) {
 
 /// Unregister a Task about to be freed (`free_task_slot`, before drop).
 pub fn unregister(task: *mut Task) {
-    if !ENABLED.load(Ordering::Relaxed) || task.is_null() {
+    if !crate::trace::EVENT_SCRIBBLE.armed() || task.is_null() {
         return;
     }
     if let Some(idx) = slot_of(task) {
@@ -793,7 +792,7 @@ pub fn unregister(task: *mut Task) {
 /// Absorb a legitimate in-run write to the thread fields (prctl
 /// ARCH_SET_GS/SET_FS, exec reset, fork child init) into the shadow.
 pub fn note_thread_write(task: *mut Task) {
-    if !ENABLED.load(Ordering::Relaxed) || task.is_null() {
+    if !crate::trace::EVENT_SCRIBBLE.armed() || task.is_null() {
         return;
     }
     if let Some(idx) = slot_of(task) {
@@ -811,7 +810,7 @@ pub fn note_thread_write(task: *mut Task) {
 /// tracked field that differs from its shadow changed outside the
 /// legitimate write points — scribbled while running.
 pub fn quiesce(task: *mut Task) {
-    if !ENABLED.load(Ordering::Relaxed) || task.is_null() {
+    if !crate::trace::EVENT_SCRIBBLE.armed() || task.is_null() {
         return;
     }
     let Some(idx) = slot_of(task) else { return };
@@ -859,7 +858,7 @@ pub fn quiesce(task: *mut Task) {
 /// the shadows using seqlock discipline (a read set is trusted only if
 /// the generation stayed even and unchanged across it).
 pub fn verify() {
-    if !ENABLED.load(Ordering::Relaxed) {
+    if !crate::trace::EVENT_SCRIBBLE.armed() {
         return;
     }
     let n = VERIFY_TICK.fetch_add(1, Ordering::Relaxed);
@@ -1112,7 +1111,7 @@ pub fn verify() {
 /// register-frame data, IVT patterns 0xf000ff53, user pointers landing
 /// in Task pages). Runs once per timer tick per CPU.
 pub fn verify_gs() {
-    if !ENABLED.load(Ordering::Relaxed) {
+    if !crate::trace::EVENT_SCRIBBLE.armed() {
         return;
     }
     // GS-pairing self-heal counter (trap.S guards): non-zero proves
@@ -1171,7 +1170,7 @@ pub fn verify_gs() {
 /// same kernel stack (register-frame scribbles, interleaved trap
 /// frames, sp/ret drift).
 pub fn verify_consistency() {
-    if !ENABLED.load(Ordering::Relaxed) {
+    if !crate::trace::EVENT_SCRIBBLE.armed() {
         return;
     }
     // Try the GRQ lock; skip this round if the scheduler holds it.
@@ -1463,7 +1462,7 @@ static REPORT_LOCK: AtomicBool = AtomicBool::new(false);
 /// a time via REPORT_LOCK, so at least one clean copy reaches the serial
 /// log even when several CPUs die together.
 pub fn crash_report(vector: &[u8], regs: &crate::arch::pt_regs::PtRegs) {
-    if !ENABLED.load(Ordering::Relaxed) {
+    if !crate::trace::EVENT_SCRIBBLE.armed() {
         return;
     }
     // Bounded spin (a concurrent panic path may hold the lock; never

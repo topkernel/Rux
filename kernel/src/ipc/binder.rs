@@ -1175,7 +1175,7 @@ static AMS46_TXNS: [core::sync::atomic::AtomicU64; 16] =
 static AMS46_ENQ_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 fn ams46_on() -> bool {
-    crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Ams46)
+    crate::trace::EVENT_AMS46.armed()
 }
 
 // ============================================================================
@@ -1450,7 +1450,7 @@ static POOL_SPAWN_EVENTS: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 
 fn pool_census_on() -> bool {
-    crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::PoolCensus)
+    crate::trace::EVENT_POOLCENSUS.armed()
 }
 
 fn ams46_txns_contains(id: u64) -> bool {
@@ -1523,7 +1523,7 @@ fn app_child_pids_contains(pid: u32) -> bool {
 fn app_txn_fail_print(proc: &BinderProc, why: &str, handle: u64, code: u64) {
     // 110th: rides dfx=bindertrace with the APPTXN tracer (skip the
     // comm scan entirely on standard boots).
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace) {
+    if !crate::trace::EVENT_BINDERTRACE.armed() {
         return;
     }
     let comm = crate::sched::current()
@@ -2087,7 +2087,7 @@ fn world_lock() -> crate::sync::spinlock::SpinlockIrqGuard<'static, Option<World
     // 105th WORLD-wait census (bindertrace): the acquire-wait time in
     // the nominal clock domain, bucketed like BRTT. Two relaxed loads
     // + one rdtsc per acquisition when armed; ~2 instructions when not.
-    let armed = crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace);
+    let armed = crate::trace::EVENT_BINDERTRACE.armed();
     let t0 = if armed { crate::arch::cpu::read_time() } else { 0 };
     let mut g = WORLD.lock_irqsave();
     if armed {
@@ -2584,7 +2584,7 @@ pub fn binder_open(file: &crate::fs::File, ctx: BinderCtx) -> i32 {
     // children EVER open /dev/binder themselves (own proc, own pid) or
     // reuse the daemon's inherited fd (shared proc — the sc156 APPTXN
     // "from pid=330 comm='m.ohos.systemui'" shape).
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace)
+    if crate::trace::EVENT_SYSCALLTRACE.armed()
     {
         static OPEN_PROBE_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
@@ -2666,7 +2666,7 @@ pub fn binder_close(file: &crate::fs::File) -> i32 {
             // limited budget so a chatty boot cannot flood the UART.
             // 110th: rides dfx=bindertrace (the whole-registry victim
             // scan + print ran on every fd close of every perf boot).
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace)
+            if crate::trace::EVENT_BINDERTRACE.armed()
             {
                 use core::sync::atomic::Ordering::Relaxed;
                 static CLOSE_PROBE_N: core::sync::atomic::AtomicU32 =
@@ -2733,9 +2733,7 @@ pub fn binder_close(file: &crate::fs::File) -> i32 {
                     static NOTICE_N: core::sync::atomic::AtomicUsize =
                         core::sync::atomic::AtomicUsize::new(0);
                     let mut printed = Vec::new();
-                    if crate::dfx::switches::enabled(
-                        crate::dfx::switches::DfxSwitch::BinderTrace,
-                    ) && NOTICE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200
+                    if crate::trace::EVENT_BINDERTRACE.armed() && NOTICE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200
                     {
                         printed = deaths.clone();
                     }
@@ -3235,7 +3233,7 @@ pub fn binder_task_died(dying_pid: u32, dying_tgid: u32, dying_tid: u32) {
             // This detector names every such victim at death time.
             // 110th: rides dfx=bindertrace (~17 lines on the crash-
             // restart loops of every perf boot).
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace)
+            if crate::trace::EVENT_BINDERTRACE.armed()
             {
                 if let Some(t) = proc.im().threads.iter().find(|t| t.tid == dying_tid) {
                     let th = t.st();
@@ -3541,7 +3539,7 @@ pub fn binder_mmap_handler(
     // the polled UART (the EXITGRP class, e2717687). The sc160 probe
     // joins the dfx=syscalltrace family (the hunt re-arms with the
     // flag); the info line is demoted to pr_debug.
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace)
+    if crate::trace::EVENT_SYSCALLTRACE.armed()
     {
         static MMAP_PROBE_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
@@ -3679,9 +3677,7 @@ pub fn binder_on_tgid_exit(tgid: u32) {
                                     // 110th: rides dfx=bindertrace.
                                     static CNOTICE_N: core::sync::atomic::AtomicUsize =
                                         core::sync::atomic::AtomicUsize::new(0);
-                                    if crate::dfx::switches::enabled(
-                                        crate::dfx::switches::DfxSwitch::BinderTrace,
-                                    ) && CNOTICE_N
+                                    if crate::trace::EVENT_BINDERTRACE.armed() && CNOTICE_N
                                         .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
                                         < 120
                                     {
@@ -4217,7 +4213,7 @@ static VMA_DUMPED_DONE: [core::sync::atomic::AtomicU32; 16] =
 /// brief bucket-lock visit); safe to call from any task context.
 pub fn dump_latched_maps_taskctx() {
     use core::fmt::Write as _;
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SleepSnap) {
+    if !crate::trace::EVENT_SLEEPSNAP.armed() {
         return;
     }
     // Collect candidates first (cheap atomic scans); the blocking vma
@@ -4399,9 +4395,10 @@ pub fn latch_park_walk_tgid(tgid: u32) {
 }
 
 pub fn sleep_snapshot() {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SleepSnap) {
+    if !crate::trace::EVENT_SLEEPSNAP.armed() {
         return;
     }
+    crate::trace::trace_sleepsnap(0, unsafe { crate::process::current_pid() }, 0, 0);
     // sc207 (launcher leg 13): NEVER print inside the for_each_task
     // callback - it runs under the pid-hash bucket lock, and one printk
     // per S-state task held each bucket across console port-IO for ~a
@@ -7251,6 +7248,7 @@ pub fn pool_census_audit() {
     }
     snaps.sort_by(|a, b| b.todo.cmp(&a.todo));
     for s in snaps.iter().take(6) {
+        crate::trace::trace_poolcensus(0, s.pid, s.todo as u64, s.max_t as u64);
         crate::pr_warn!(
             "POOL pid={} todo={} max={} req={} st={} thr={} w={} wwait={} wstk={} clients={}",
             s.pid,
@@ -8386,9 +8384,7 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
                 // Ungated it prints twice per call — samgr-side polls make
                 // this the highest-rate binder ioctl of an OH boot, and
                 // hilogd.rd_kmsg then eats a vCPU copying it to /data.
-                let trace = crate::dfx::switches::enabled(
-                    crate::dfx::switches::DfxSwitch::SyscallTrace,
-                );
+                let trace = crate::trace::EVENT_SYSCALLTRACE.armed();
                 if trace {
                     crate::pr_info!("btx: GET_SENDER_INFO caller tid {}", current_tid());
                 }
@@ -9133,9 +9129,7 @@ fn binder_thread_write(
                 // interface token ("ohos.system...." / hdf names) is ASCII
                 // at the head and names the target interface; replies carry
                 // the result int. Read BEFORE the world lock (uaccess).
-                if crate::dfx::switches::enabled(
-                    crate::dfx::switches::DfxSwitch::BinderTrace,
-                ) && binder_probe_on()
+                if crate::trace::EVENT_BINDERTRACE.armed() && binder_probe_on()
                     && tr.data_size > 0
                     && tr.data_size <= 160
                 {
@@ -10082,7 +10076,7 @@ fn binder_transaction(
                 // every completed sync txn (jiffies-free; the fast-path
                 // 4-5 ms class the 103rd measured is invisible to
                 // SLOW-TXN's 10 ms stamps).
-                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace) {
+                if crate::trace::EVENT_BINDERTRACE.armed() {
                     let pick = unsafe { *t.pick_ns.get() };
                     if pick != 0 {
                         let now = crate::arch::cpu::read_time();
@@ -10528,7 +10522,7 @@ fn binder_transaction(
             // conversation (who calls whom, which codes, oneway or not),
             // not just the failures. 105th: print family behind
             // binderprobe=1 (see binder_probe_on).
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace)
+            if crate::trace::EVENT_BINDERTRACE.armed()
                 && binder_probe_on()
             {
                 crate::pr_info!(
@@ -10994,7 +10988,7 @@ fn binder_transaction(
     // (SA 501 registration) is closed. Hunts needing SAREG/SLRD
     // pairing arm dfx=bindertrace binderprobe=1 (105th: the print
     // family left plain bindertrace to the passive census).
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace)
+    if crate::trace::EVENT_BINDERTRACE.armed()
         && binder_probe_on()
     {
         const SAMGR_ADD: u32 = 3;
@@ -11562,7 +11556,7 @@ fn binder_transaction(
         // the SAREG/SLRD family — the app-txn trace printed ~1.2k lines
         // per pristine boot through the console emit lock. 105th: print
         // family behind binderprobe=1.
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace)
+        if crate::trace::EVENT_BINDERTRACE.armed()
             && binder_probe_on()
             && (sender_is_app || target_child != 0)
             && SLTX_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 1500
@@ -11630,9 +11624,7 @@ fn binder_transaction(
             // hex format + ~112 print lines per perf boot) rides
             // dfx=bindertrace.
             if comm_now.starts_with("render_servi")
-                && crate::dfx::switches::enabled(
-                    crate::dfx::switches::DfxSwitch::BinderTrace,
-                )
+                && crate::trace::EVENT_BINDERTRACE.armed()
             {
                 let prev = SACMP_RS_PID
                     .swap(proc.pid, core::sync::atomic::Ordering::Relaxed);
@@ -11711,7 +11703,7 @@ fn binder_transaction(
         if !reply
             && tr.data_buffer != 0
             && data_size >= 4
-            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace)
+            && crate::trace::EVENT_BINDERTRACE.armed()
         {
             let mut buf = [0u8; 192];
             let n = core::cmp::min(buf.len(), data_size);
@@ -12154,7 +12146,7 @@ fn binder_transaction(
                     // whole block (comm scan + print, ~320 lines in the
                     // 9-12s spawn window of every perf boot) rides the
                     // dfx=bindertrace gate like the rest of the tracer.
-                    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace)
+                    if crate::trace::EVENT_BINDERTRACE.armed()
                     {
                         let comm = crate::sched::current()
                             .map(|t| unsafe { (*t).comm() })
@@ -12324,7 +12316,7 @@ fn binder_transaction(
                 // registered forked appspawn child: names the last hop
                 // that ever targeted a parked child. 110th: rides the
                 // dfx=bindertrace gate with the oneway half above.
-                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace)
+                if crate::trace::EVENT_BINDERTRACE.armed()
                 {
                     let comm = crate::sched::current()
                         .map(|t| unsafe { (*t).comm() })
@@ -13512,9 +13504,7 @@ fn binder_thread_read(
                                         // SAREG send side — see the sc155
                                         // block gate above. 105th: print
                                         // family behind binderprobe=1.
-                                        if crate::dfx::switches::enabled(
-                                            crate::dfx::switches::DfxSwitch::BinderTrace,
-                                        )
+                                        if crate::trace::EVENT_BINDERTRACE.armed()
                                             && binder_probe_on()
                                             && (lname.starts_with("m.ohos.")
                                                 || lname.starts_with("os.")
@@ -13633,9 +13623,7 @@ fn binder_thread_read(
                             // client's pickup — the kernel's reply-wake
                             // latency, the third leg of the round trip.
                             if is_reply
-                                && crate::dfx::switches::enabled(
-                                    crate::dfx::switches::DfxSwitch::BinderTrace,
-                                )
+                                && crate::trace::EVENT_BINDERTRACE.armed()
                             {
                                 rtt_census::W.add(
                                     crate::arch::cpu::read_time().saturating_sub(t.enq_ns)
@@ -13653,9 +13641,7 @@ fn binder_thread_read(
                                 // ms-scale pickup = kernel wake/sched latency;
                                 // elig=0 = every reader busy (pool capacity).
                                 // Budget 240 lines/boot.
-                                if crate::dfx::switches::enabled(
-                                    crate::dfx::switches::DfxSwitch::BinderTrace,
-                                ) {
+                                if crate::trace::EVENT_BINDERTRACE.armed() {
                                     let now_ns = crate::arch::cpu::read_time();
                                     let q_us =
                                         now_ns.saturating_sub(t.enq_ns) / RTT_TICKS_PER_US;
@@ -13913,6 +13899,7 @@ fn binder_thread_read(
             core::sync::atomic::AtomicU32::new(0);
         use core::sync::atomic::Ordering::Relaxed;
         if SPAWN_PRINTED.fetch_add(1, Relaxed) < 40 {
+            crate::trace::trace_poolcensus(1, proc.pid, thread.tid as u64, POOL_SPAWN_EVENTS.load(Relaxed));
             crate::pr_warn!(
                 "POOL-SPAWN pid {} tid {} carried BR_SPAWN_LOOPER (events {})",
                 proc.pid,

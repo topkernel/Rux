@@ -166,7 +166,7 @@ pub fn preemptible() -> bool {
 pub fn preempt_count_add(val: i32) {
     if let Some(task) = crate::sched::current() {
         if (val == PREEMPT_OFFSET || val == HARDIRQ_OFFSET || val == SOFTIRQ_OFFSET)
-            && crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+            && crate::trace::EVENT_LEAKHUNT.armed()
         {
             let c0 = task.preempt_count();
             if val == PREEMPT_OFFSET {
@@ -210,7 +210,7 @@ pub fn preempt_count_add_at(
 ) {
     if let Some(task) = crate::sched::current() {
         if (val == PREEMPT_OFFSET || val == HARDIRQ_OFFSET)
-            && crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+            && crate::trace::EVENT_LEAKHUNT.armed()
         {
             let c0 = task.preempt_count();
             if val == PREEMPT_OFFSET {
@@ -327,7 +327,7 @@ pub fn irq_enter() {
     // a split means tp changed between enter and exit: a switch ran
     // inside the hardirq bracket (the only shape that can strand a
     // 0x10000 bit on the enter task).
-    if crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+    if crate::trace::EVENT_LEAKHUNT.armed() {
         if let Some(task) = crate::sched::current() {
             let cpu = crate::arch::cpu_id() as usize;
             if cpu < crate::config::MAX_CPUS {
@@ -382,7 +382,7 @@ pub fn irq_exit() {
     // s14 IRQ-PAIR check BEFORE the sub: fire while both counts are
     // still observable. Direct console, budgeted (60 lines/boot): a
     // split is the stranded-0x10000 producer, not weather.
-    if crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+    if crate::trace::EVENT_LEAKHUNT.armed() {
         let cpu = crate::arch::cpu_id() as usize;
         if cpu < crate::config::MAX_CPUS {
             let booked = IRQ_PAIR_TASK[cpu].swap(0, core::sync::atomic::Ordering::AcqRel);
@@ -624,7 +624,7 @@ pub fn irqentry_nmi_exit() {
 /// pointer this CPU published moments before.
 #[allow(unsafe_code)]
 pub fn tick_orphan_scan(cpu_id: usize) {
-    if !crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+    if !crate::trace::EVENT_LEAKHUNT.armed() {
         return;
     }
     if cpu_id >= crate::config::MAX_CPUS {
