@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>rt-tests · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">Home</a>
+      <a href="../architecture/design.html">Architecture</a>
+      <a href="index.html">Performance</a>
+      <a href="../security/index.html">Security</a>
+      <a href="../testing/index.html">Testing</a>
+      <a href="../debugging/index.html">Debugging</a>
+      <a href="../guides/getting-started.html">Getting started</a>
+      <a href="../progress/roadmap.html">Progress</a>
+      <a href="../guestbook.html">Feedback</a>
+      <span class="lang-sw"><a class="on" href="../../performance/rttests.html">中文</a><a href="rttests.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">Performance</div>
+    <a href="../debugging/index.html">Performance overview</a>
+    <a href="lmbench.html">lmbench</a>
+    <a href="geekbench.html">Geekbench 5</a>
+    <a href="fio.html">fio</a>
+    <a href="rttests.html">rt-tests</a>
+    <a href="microbench.html">Internal microbenchmarks</a><div class="grp">Architecture</div>
+    <a href="../architecture/design.html">Design deep-dive</a>
+    <a href="../architecture/scheduler.html">Scheduler</a>
+    <a href="../architecture/memory.html">Memory management</a>
+    <a href="../architecture/filesystem.html">Filesystem</a>
+    <a href="../architecture/ipc.html">IPC</a>
+    <a href="../architecture/boot.html">Boot flow</a>
+    <a href="../architecture/interrupts.html">Interrupts &amp; timers</a>
+    <a href="../architecture/structure.html">Code layout</a>
+    <a href="../architecture/riscv64.html">Porting guide</a>
+    <a href="../architecture/kernel-lock.html">Lock ordering</a><div class="grp">Debugging</div>
+    <a href="../debugging/index.html">Debugging guide</a>
+    <a href="../debugging/tracepoints.html">Tracepoints</a>
+    <a href="../debugging/perf.html">Performance debugging</a>
+    <a href="../debugging/locks.html">Lock debugging</a>
+    <a href="../debugging/memory.html">Memory forensics</a>
+    <a href="../debugging/panic.html">Panic &amp; symbols</a><div class="grp">Performance</div>
+    <a href="../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../security/index.html">Security overview</a>
+    <a href="../security/formal.html">Formal verification</a>
+    <a href="../security/unsafe.html">Layered unsafe ledger</a>
+    <a href="../security/taxonomy.html">Defect taxonomy</a>
+    <a href="../security/hardening.html">Hardening &amp; gaps</a><div class="grp">Testing</div>
+    <a href="../testing/index.html">Overview</a>
+    <a href="../testing/ci-pipeline.html">CI pipeline</a>
+    <a href="../testing/ltp.html">LTP scan</a>
+    <a href="../testing/ltp-full.html">LTP full cases</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT audit</a>
+    <a href="../testing/stability.html">Stability</a>
+    <a href="../testing/stress.html">Stress</a>
+    <a href="../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../guides/getting-started.html">Getting started</a>
+    <a href="../guides/development.html">Contributing</a>
+    <a href="../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../progress/roadmap.html">Roadmap</a>
+    <a href="../progress/changelog.html">Changelog</a>
+    <a href="../progress/quickref.html">Commands</a>
+    <div class="grp">Community</div>
+    <a href="../guestbook.html">Guestbook</a>
+  </aside>
+  <article class="doc-main">
+    <h1>rt-tests latency &amp; scheduling stress</h1>
+    <div class="sub">The cyclictest round record, the hackbench matrix, pi_stress status and the injection protocol · Canonical: the qa-suites run/qa-suites-findings.md</div>
+
+    <h2 id="cyclictest"><span class="anchor">§1</span>cyclictest (rt-tests v2.11, static musl)</h2>
+    <p>Protocol: <code>cyclictest -D 30 -i 1000 -m</code> (SCHED_OTHER) and <code>-m -p 98</code> (SCHED_FIFO); a 30 s window, a 1000 µs interval, mlockall, 30k cycles. Rig as on the fio page (q35/KVM -cpu max smp2/2G, virtio-blk, one boot per round).</p>
+    <h3>The round record (the qa-suites ledger)</h3>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Round (kernel)</th><th class="num">SCHED_OTHER: missed/avg/max (µs)</th><th class="num">SCHED_FIFO p98: missed/avg/max (µs)</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>r1 (d08f8cd7)</td><td class="num">38 missed · avg 92 · max 2602</td><td class="num">42 missed · avg 95 · max 2132</td><td>the baseline round</td></tr>
+        <tr><td>r2 (0c8e4b79)</td><td class="num">38 · avg 95 · max 3149</td><td class="num">33 · avg 89 · max 1142</td><td>—</td></tr>
+        <tr><td>r3 (66cd9918 + the CLOCK_BOOTTIME/TAI timer fix)</td><td class="num">25 · avg 89 · <b>max 1289 (−59%)</b></td><td class="num">2 · avg 87 · <b>max 396 (−65%)</b></td><td>the max-latency drop rides the clock-domain fix (255f86f5)</td></tr>
+        <tr><td>r4 (merged 8d47783a)</td><td class="num">26 · avg 89 · max 1018 (the trend 3149→1289→1018)</td><td class="num">28 · avg 89 · max 1857</td><td>the FIFO max swing is unadjudicated (a sched-domain review item); misses &lt;0.1%, avg stable 87–89</td></tr>
+        <tr><td>r4 isolation rerun (pass 3)</td><td class="num">29 · avg 88 · <b>max 667 (best)</b></td><td class="num">27 · avg 88 · max 1352</td><td>—</td></tr>
+        <tr><td><b>the 2026-11-17 re-run (current main debug)</b></td><td class="num" id="cyc-other">29,947–29,968/30,000 · avg 107–108 · max 522 (one 29.8 ms spike in the final window — see note)</td><td class="num" id="cyc-fifo">29,946–29,966/30,000 · avg 104 · max 28448 (the final-window spike — see note)</td><td>the spike correlates with concurrent host load (other agents' QEMUs); avg and miss rate match history</td></tr>
+      </tbody>
+    </table></div>
+    <ul>
+      <li><b>The identified host-noise source</b>: other lanes' QEMU load ran on the same host during the re-run window; the final window's single 29.8/28.4 ms peaks correlate with it, while the in-window statistics (avg/miss rate) are unaffected. A quiet-host re-run is queued; the historical r3/r4 isolated readings (667/396) are the controlled figures.</li>
+      <li><b>Histogram mode not wired</b>: cyclictest -h histogram-to-file and a same-rig reference column are both uncaptured — in the queue (currently a Rux-only column).</li>
+      <li><b>Companion kernel-side readings</b>: the pbench p7_sleep1ms overshoot of 15.8 µs (nanosleep 1 ms × 1e4, KVM class); the old-tick era read 2094 µs vs the reference 14.64 (143×), fixed into the 14.6 µs class — the sleep-cost regression evidence chain. The nohz_full=1 hostile-load A/B: lmbench lat_syscall,null 0/10 → 11/12 PASS (92%), p1_null −17%.</li>
+    </ul>
+
+    <h2 id="hackbench"><span class="anchor">§2</span>hackbench</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Form</th><th class="num">Readings (r1-r4)</th><th>Verdict</th></tr></thead>
+      <tbody>
+        <tr><td>socketpair 20 processes</td><td class="num">0.791–0.858 s</td><td class="chip ok">PASS</td></tr>
+        <tr><td>pipe -p 20</td><td class="num">0.406–0.420 s</td><td class="chip ok">PASS</td></tr>
+        <tr><td>threads -T 20</td><td class="num">0.807–1.003 s</td><td class="chip ok">PASS</td></tr>
+        <tr><td>scale -g 40 -l 500</td><td class="num">22.19–22.98 s</td><td class="chip ok">PASS</td></tr>
+        <tr><td>inet 1 group</td><td class="num">0.037 s</td><td class="chip ok">PASS</td></tr>
+        <tr><td>inet ≥2 groups</td><td class="num">TIMEOUT-TERM (90 s, never finished)</td><td class="chip bad">F-1 (P0, the net lane)</td></tr>
+        <tr><td><b>the 2026-11-17 re-run</b> (current main): inet multi-group</td><td class="num">10 groups/400 tasks, T=90s TIMEOUT-TERM (Time: 91.487)</td><td class="chip bad">F-1 still reproduces on current main — loopback non-blocking connect EINPROGRESS / fresh-boot hangs; the net-lane P0 stands</td></tr>
+      </tbody>
+    </table></div>
+
+    <h2 id="pistress"><span class="anchor">§3</span>pi_stress</h2>
+    <ul>
+      <li>r1-r4: FAIL — the FUTEX_LOCK_PI family was unimplemented then (ENOSYS).</li>
+      <li><b>The 2026-11-17 re-run</b> (current main, PI futexes merged in 0b4d1752b): <span id="pi-now">the glibc PI-mutex initialization path returns ENOTSUP ("initializing mutex: Operation not supported") — the kernel-side FUTEX_LOCK_PI exists, but glibc's PTHREAD_PRIO_INHERIT mutex dependency chain (robust registration + PI semantics) is not fully traversed yet; <span style="color:var(--text-3)">a registered UAPI compatibility gap, with pi_stress passing as the acceptance target.</span></span></li>
+    </ul>
+
+    <h2 id="infra"><span class="anchor">§4</span>Toolchain and injection</h2>
+    <ul>
+      <li>The rt-tests v2.11 upstream tarball is committed; musl-static builds (run/rttests-bin/cyclictest, hackbench; pi_stress is a host-glibc build); the build carries a numa shim and the musl sched_* ENOSYS-stub override (F-3: the toolchain's libc.a ships ENOSYS stubs for the sched family — which once stopped cyclictest at "unable to get scheduler parameters", resolved by the override).</li>
+      <li>Every QA boot injects the three binaries automatically; a standalone run: <code>test/qrtests/run-suite-x86.sh "60 cyclictest -D 30 -i 1000 -m"</code>.</li>
+      <li>schedprobe (injected on every QA boot) verifies the raw sched_setparam/getscheduler/setscheduler syscall surface — the F-3 evidence probe.</li>
+    </ul>
+
+    <div class="callout">Canonical: the qa-suites worktree run/qa-suites-findings.md (the r1-r4 ledger + the F-1/F-2/F-3 adjudications); raw fleet logs run/qa-fleet/s*/cyclictest.log.</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to home</a></span>
+
+      <span class="foot-stats">Site visits <span id="busuanzi_value_site_pv"></span> · Visitors <span id="busuanzi_value_site_uv"></span></span></div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>

@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>fio · Rux</title>
+<link rel="stylesheet" href="../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">首页</a>
+      <a href="../architecture/design.html">架构设计</a>
+      <a href="index.html">性能</a>
+      <a href="../security/index.html">安全</a>
+      <a href="../testing/index.html">测试</a>
+      <a href="../debugging/index.html">调试</a>
+      <a href="../guides/getting-started.html">快速入门</a>
+      <a href="../progress/roadmap.html">项目进展</a>
+      <a href="../guestbook.html">留言</a>
+      <span class="lang-sw"><a class="on" href="fio.html">中文</a><a href="../en/performance/fio.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+<div class="grp">性能</div>
+    <a href="../debugging/index.html">性能总览</a>
+    <a href="lmbench.html">lmbench</a>
+    <a href="geekbench.html">Geekbench 5</a>
+    <a href="fio.html">fio</a>
+    <a href="rttests.html">rt-tests</a>
+    <a href="microbench.html">内部微基准</a><div class="grp">架构设计</div>
+    <a href="../architecture/design.html">架构与模块设计</a>
+    <a href="../architecture/scheduler.html">调度器</a>
+    <a href="../architecture/memory.html">内存管理</a>
+    <a href="../architecture/filesystem.html">文件系统</a>
+    <a href="../architecture/ipc.html">进程间通信</a>
+    <a href="../architecture/boot.html">启动流程</a>
+    <a href="../architecture/interrupts.html">中断与时钟</a>
+    <a href="../architecture/structure.html">代码结构</a>
+    <a href="../architecture/riscv64.html">架构移植指南</a>
+    <a href="../architecture/kernel-lock.html">锁序不变量</a>
+    <div class="grp">安全</div>
+    <a href="../security/index.html">安全总览</a>
+    <a href="../security/formal.html">形式验证</a>
+    <a href="../security/unsafe.html">分层 unsafe 台账</a>
+    <a href="../security/taxonomy.html">缺陷分类学</a>
+    <a href="../security/hardening.html">运行时强化与缺口</a><div class="grp">测试</div>
+    <a href="../testing/index.html">测试总览</a>
+    <a href="../testing/ci-pipeline.html">CI 流水线</a>
+    <a href="../testing/ltp.html">LTP 兼容扫描</a>
+    <a href="../testing/ltp-full.html">LTP 全量用例</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT 审计</a>
+    <a href="../testing/stability.html">稳定性</a>
+    <a href="../testing/stress.html">压力</a>
+    <a href="../testing/gnome-retrospective.html">回溯报告</a>
+    <div class="grp">调试</div>
+    <a href="../debugging/index.html">调试指南</a>
+    <a href="../debugging/tracepoints.html">tracepoint 框架</a>
+    <a href="../debugging/perf.html">性能调试</a>
+    <a href="../debugging/locks.html">锁调试</a>
+    <a href="../debugging/memory.html">内存取证</a>
+    <a href="../debugging/panic.html">panic 与符号化</a>
+    <div class="grp">开发指南</div>
+    <a href="../guides/getting-started.html">快速入门</a>
+    <a href="../guides/development.html">参与开发</a>
+    <a href="../guides/configuration.html">内核配置</a>
+    <div class="grp">项目进展</div>
+    <a href="../progress/roadmap.html">路线图</a>
+    <a href="../progress/changelog.html">更新日志</a>
+    <a href="../progress/quickref.html">命令速查</a>
+    <div class="grp">互动</div>
+    <a href="../guestbook.html">留言板</a>
+  </aside>
+  <article class="doc-main">
+    <h1>fio 3.36</h1>
+    <div class="sub">I/O 引擎枚举、负载类矩阵、数据完整性校验、吞吐读数与登记缺口 —— 兼容性与正确性面 · 正本:qa-suites run/qa-suites-findings.md</div>
+
+<h2 id="data"><span class="anchor">§4</span>fio 3.36 存储 I/O 测试:兼容性与正确性面(qa-suites 第 5/5b 轮,2026-11-04/05)</h2>
+    <p style="font-size:13.5px">来源:qa-suites 线台账 run/qa-suites-findings.md(内核 9f2c1cc6)。机位:x86_64 + KVM q35 2G/2cpu,fio 3.36 静态 musl 构建(libaio 引擎内建),每类负载一次独立启动,共 20 次启动。全部启动零 KERNPANIC / 零 DEADLOCK / 零 ALLOCTHROW。</p>
+    <h3>引擎枚举(单启动顺序小作业)</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>引擎</th><th>结论</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">sync / psync / vsync / pvsync2 / mmap / splice</td><td><span class="chip ok">PASS</span>(各 rc=0)</td></tr>
+          <tr><td class="mono">sync + direct=1</td><td><span class="chip ok">PASS</span> —— O_DIRECT 路径可用</td></tr>
+          <tr><td class="mono">posixaio</td><td><span class="chip warn">F-6</span>:1/6 概率启动挂起(fdreap RCU grace 停滞,竞态类;4 次复现尝试未捕获)</td></tr>
+          <tr><td class="mono">libaio</td><td><span class="chip bad">缺口</span>:io_setup/io_submit 返回 ENOSYS;fio 干净退出 err=38,errno 语义正确</td></tr>
+          <tr><td class="mono">io_uring</td><td><span class="chip bad">F-7</span>:环形语义不完整致 fio 用户态 SIGSEGV(setup 成功、mmap 成功,进入 enter 契约后崩溃;内核存活)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h3>负载类(每类独立启动,验证数据完整性)</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>类</th><th>负载</th><th>结论</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">seqrw</td><td>1M 顺序写 64M + 1M 顺序读 64M</td><td><span class="chip ok">PASS</span></td></tr>
+          <tr><td class="mono">randrw</td><td>4k 随机读 64M + 4k 随机写 64M</td><td><span class="chip ok">PASS</span></td></tr>
+          <tr><td class="mono">fsync</td><td>4k 随机写 8M + fsync=1(2048 个持久化点)</td><td><span class="chip ok">PASS</span></td></tr>
+          <tr><td class="mono">mmaprwn</td><td>mmap 引擎 4k 随机读写 64M</td><td><span class="chip ok">PASS</span>(8160 读 + 8224 写)</td></tr>
+          <tr><td class="mono">direct</td><td>4k 随机读/写 64M direct=1</td><td><span class="chip ok">PASS</span></td></tr>
+          <tr><td class="mono">verify</td><td>8k 随机写 32M + crc32 回读校验</td><td><span class="chip ok">PASS</span> —— 4096+4096 全矩阵<b>零校验错误</b></td></tr>
+          <tr><td class="mono">multi</td><td>同文件 4 作业竞争(2 随机读 + 随机写 + 顺序写)</td><td><span class="chip ok">PASS</span> —— 组级 <b>读 64MiB @711MiB/s / 写 64MiB @688MiB/s</b></td></tr>
+          <tr><td class="mono">bigfile</td><td>256M 写 + 256M 读 + crc32 全量校验</td><td><span class="chip ok">PASS</span> —— 256M 全量校验干净</td></tr>
+          <tr><td class="mono">churn / fsyncburn / deepdirect</td><td>创建/删除churn ×40 · 4k fsync=4 持续 240 s · direct=1 numjobs=4 随机读写 128M(16.3k 读 + 16.4k 写)</td><td><span class="chip ok">PASS</span>(各启动)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:13px;color:var(--text-3)">口径说明:fio 在此轮用于验证 I/O 引擎路径与数据完整性,非吞吐基准(无同机 Linux 对照;multi 组级 ~700 MiB/s 为页缓存吸收类的顺带读数)。I/O 吞吐性能由 §8 pbench P6(Rux 锚:write_fsync 8442.6 / mkdrmdir 216.7 / unlink 54.6 / append 5.19 µs)与 §2 lmbench 带宽行(bw_pipe 2.68×、bw_unix 1.88× 对 Linux)承担;fio 吞吐基准列入补测队列。附记:作业收尾后 numjobs 进程组回收阶段观测到 F-8(F-5 家族:停靠 forker + KOT-KILL 级联,调度交接问题,移交调度线);fio 自身结果不受影响(rc=0、数据正确)。netperf / iperf3 / sockperf 网络基准在 qa-suites 章程序列中,尚未开测。</p>
+
+    
+    <h2 id="r5b"><span class="anchor">§2</span>第 5b 轮扩展类与吞吐读数(qa-suites,2026-11-05)</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>类</th><th>负载</th><th>结论</th><th class="num">吞吐读数(组级)</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">churn</td><td>4k 随机写 4M × 40 轮 + unlink=1</td><td class="chip ok">PASS</td><td class="num">WRITE 546 MiB/s(io=160MiB,run=293 ms)</td></tr>
+        <tr><td class="mono">bigfile2</td><td>256M 写 + 256M 读 + crc32 全量校验(写入侧盖章)</td><td class="chip ok">PASS</td><td class="num">WRITE 361 MiB/s / READ 498–500 MiB/s(512 ms)</td></tr>
+        <tr><td class="mono">fsyncburn</td><td>4k 随机写 32M fsync=4,240 s</td><td class="chip ok">PASS</td><td class="num">WRITE 311 KiB/s(8192 写,2047 fsync)</td></tr>
+        <tr><td class="mono">deepdirect</td><td>direct=1 numjobs=4 随机读写 128M</td><td class="chip ok">PASS</td><td class="num">READ 8.6 MiB/s / WRITE 8.7 MiB/s(16,333 读 + 16,435 写)</td></tr>
+        <tr><td class="mono">hunt1-3</td><td>posixaio 定向复现阵(单/4 作业/8 作业)</td><td class="chip ok">PASS(0 次 fdreap 停滞)</td><td class="num">hunt2 WRITE 31.5 MiB/s;hunt3 READ 13.0 / WRITE 13.6 MiB/s</td></tr>
+        <tr><td class="mono">hunt4</td><td>7 引擎序列重放</td><td class="chip ok">PASS 7/7</td><td class="num">—</td></tr>
+      </tbody>
+    </table></div>
+    <p class="callout">口径注:组级 bw 读数为页缓存吸收类(KVM 宿主缓存);direct=1 类为真实设备路径但受镜像剩余空间约束(本轮 512M 作业 ENOSPC,48–64M 内作业正常)。逐作业 IOPS/延迟百分位未采集(RES 尾部截断伪影,已记录);延迟分级采集列入补测队列。</p>
+
+    <h2 id="gaps"><span class="anchor">§3</span>登记的缺口与定性</h2>
+    <ul>
+      <li><b>F-6(posixaio)</b>:1/6 概率启动挂起 —— fdreap retire_complete 的 RCU 宽限永不过(monopolist-window 族);4 次定向复现 + 2 次重放未再捕获(1/6 保持);fio 子进程不可回收 T=150s + hung-task pid >120s + fdreap close 完成停滞刷屏为特征签名。</li>
+      <li><b>libaio</b>:io_setup/io_submit 全 ENOSYS(UAPI 缺口,syscall/memory.rs);fio 干净退出 err=38 —— errno 纪律正确,属未实现而非错实现。</li>
+      <li><b>F-7(io_uring)</b>:setup 返回 fd、环形 mmap 由 io_uring_mmap_handler 供给,进入 enter 契约后用户态解引用 NULL+0x1e SIGSEGV(2× SIGDEATH + teardown #GP);内核存活 —— 环形语义不完整,登记为 io_uring 深化项。</li>
+      <li><b>F-8</b>:numjobs 启动的收尾阶段观测到停靠 forker + KOT-KILL 级联(qsrun forker pid 306,128 KSIG9)—— fio 自身结果不受影响(rc=0、数据正确),移交调度线。</li>
+    </ul>
+
+    <h2 id="method"><span class="anchor">§4</span>机位与扩展</h2>
+    <ul>
+      <li><b>机位</b>:x86_64 KVM q35 <code>-cpu max</code> smp2/2G,virtio-blk(run/rootfs-qa.img 私有 ext4 拷贝),<code>dfx=taskdump,watchdog</code>;每类负载一次独立启动,20 次启动;PID 1 = /test/qa/qsrun(cmds 协议:预算 + 程序行,QSRUN-BEGIN / RES|name|rc|tail / QS-ALL-DONE)。</li>
+      <li><b>fio 构建</b>:静态 musl 3.36(libaio 引擎内建),源码 tar 包入 git,构建脚本 userspace/fio/build-x86.sh。</li>
+      <li><b>扩展方式</b>:userspace/ci/classes/ 追加 .cmds(行格式 <code>&lt;预算秒&gt; fio --name=… --filename=/test/qa/&lt;file&gt;</code>);跑批 INJBINS=run/fio-bin test/qrtests/run-suite-x86.sh -f "run/&lt;class&gt;.cmds"。</li>
+    </ul>
+
+    <h2 id="fresh"><span class="anchor">§5</span>2026-11-17 复测(当前 main debug 内核)</h2>
+    <p id="fresh-placeholder">复测进行中:cyclictest 双模式、fio 直读延迟百分位(dump 工具采 JSON)、pi_stress(glibc PI mutex 路径)、hackbench inet 多组。数据落地后本节更新。</p>
+
+    <div class="callout">原始日志:qa-suites 工作树 run/qa-suites-findings.md(正本)+ run/qa-runs-r5b/*.log;作业定义:userspace/ci/classes/*.cmds(全部提交)。</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">返回首页</a></span>
+
+      <span class="foot-stats">本站访问 <span id="busuanzi_value_site_pv"></span> 次 · 访客 <span id="busuanzi_value_site_uv"></span> 人</span></div>
+  </div>
+</footer>
+
+<script src="../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>

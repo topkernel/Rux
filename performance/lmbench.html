@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>lmbench · Rux</title>
+<link rel="stylesheet" href="../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">首页</a>
+      <a href="../architecture/design.html">架构设计</a>
+      <a href="index.html">性能</a>
+      <a href="../security/index.html">安全</a>
+      <a href="../testing/index.html">测试</a>
+      <a href="../debugging/index.html">调试</a>
+      <a href="../guides/getting-started.html">快速入门</a>
+      <a href="../progress/roadmap.html">项目进展</a>
+      <a href="../guestbook.html">留言</a>
+      <span class="lang-sw"><a class="on" href="lmbench.html">中文</a><a href="../en/performance/lmbench.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">性能</div>
+    <a href="../debugging/index.html">性能总览</a>
+    <a href="lmbench.html">lmbench</a>
+    <a href="geekbench.html">Geekbench 5</a>
+    <a href="fio.html">fio</a>
+    <a href="rttests.html">rt-tests</a>
+    <a href="microbench.html">内部微基准</a><div class="grp">架构设计</div>
+    <a href="../architecture/design.html">架构与模块设计</a>
+    <a href="../architecture/scheduler.html">调度器</a>
+    <a href="../architecture/memory.html">内存管理</a>
+    <a href="../architecture/filesystem.html">文件系统</a>
+    <a href="../architecture/ipc.html">进程间通信</a>
+    <a href="../architecture/boot.html">启动流程</a>
+    <a href="../architecture/interrupts.html">中断与时钟</a>
+    <a href="../architecture/structure.html">代码结构</a>
+    <a href="../architecture/riscv64.html">架构移植指南</a>
+    <a href="../architecture/kernel-lock.html">锁序不变量</a>
+    <div class="grp">安全</div>
+    <a href="../security/index.html">安全总览</a>
+    <a href="../security/formal.html">形式验证</a>
+    <a href="../security/unsafe.html">分层 unsafe 台账</a>
+    <a href="../security/taxonomy.html">缺陷分类学</a>
+    <a href="../security/hardening.html">运行时强化与缺口</a><div class="grp">测试</div>
+    <a href="../testing/index.html">测试总览</a>
+    <a href="../testing/ci-pipeline.html">CI 流水线</a>
+    <a href="../testing/ltp.html">LTP 兼容扫描</a>
+    <a href="../testing/ltp-full.html">LTP 全量用例</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT 审计</a>
+    <a href="../testing/stability.html">稳定性</a>
+    <a href="../testing/stress.html">压力</a>
+    <a href="../testing/gnome-retrospective.html">回溯报告</a>
+    <div class="grp">调试</div>
+    <a href="../debugging/index.html">调试指南</a>
+    <a href="../debugging/tracepoints.html">tracepoint 框架</a>
+    <a href="../debugging/perf.html">性能调试</a>
+    <a href="../debugging/locks.html">锁调试</a>
+    <a href="../debugging/memory.html">内存取证</a>
+    <a href="../debugging/panic.html">panic 与符号化</a>
+    <div class="grp">开发指南</div>
+    <a href="../guides/getting-started.html">快速入门</a>
+    <a href="../guides/development.html">参与开发</a>
+    <a href="../guides/configuration.html">内核配置</a>
+    <div class="grp">项目进展</div>
+    <a href="../progress/roadmap.html">路线图</a>
+    <a href="../progress/changelog.html">更新日志</a>
+    <a href="../progress/quickref.html">命令速查</a>
+    <div class="grp">互动</div>
+    <a href="../guestbook.html">留言板</a>
+  </aside>
+  <article class="doc-main">
+    <h1>lmbench 3.0-a9</h1>
+    <div class="sub">同机 KVM 对照的权威表(12 延迟行 + 8 带宽行)、方法学、perf-2x 战役与口径沿革 · 正本:docs/test/lmbench-report.md</div>
+
+<h2 id="data"><span class="anchor">§2</span>lmbench 数据(同机 KVM 对照,21 项)</h2>
+    <p style="font-size:13.5px">数据来源:lmbench-report.md「Standing(2026-11-16,内核 main=017bf556b)」—— 唯一权威表,以下即该节数据。方法:两侧同 rig(q35/KVM/-cpu host/smp2/2G,宿主 CCD0 钉核 + performance 治理器 + 保温线程);Rux 启动带 nohz_full=1,每用例独立启动、失败行重试;Linux 列 = OHOS 6.6.101 内核在<b>同一 guest 机位</b>执行同一静态二进制,各 2 rep 取中位。切换/唤醒族对参考窗口敏感,比值只在同会话内有意义。</p>
+    <h3>领先/持平组(14 项)</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>用例</th><th class="num">Rux</th><th class="num">Linux(同 rig guest)</th><th>结论</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">lat_pipe</td><td class="num">5.54–5.64 µs</td><td class="num">25.06–26.27 µs</td><td><span class="chip ok">领先 4.6×</span></td></tr>
+          <tr><td class="mono">lat_ctx -s64 2</td><td class="num">2.86–3.25 µs</td><td class="num">12.84–12.97 µs</td><td><span class="chip ok">领先 4.0–4.5×</span></td></tr>
+          <tr><td class="mono">lat_ctx -s64 8</td><td class="num">3.33 µs</td><td class="num">12.06–12.08 µs</td><td><span class="chip ok">领先 3.6×</span></td></tr>
+          <tr><td class="mono">bw_pipe</td><td class="num">30,464 MB/s</td><td class="num">8,241 MB/s</td><td><span class="chip ok">领先 3.7×</span></td></tr>
+          <tr><td class="mono">lat_sem</td><td class="num">1.52–1.57 µs</td><td class="num">4.47–4.55 µs</td><td><span class="chip ok">领先 2.9×</span></td></tr>
+          <tr><td class="mono">bw_unix</td><td class="num">48,352 MB/s</td><td class="num">23,022 MB/s</td><td><span class="chip ok">领先 2.1×</span></td></tr>
+          <tr><td class="mono">lat_unix</td><td class="num">2.26 µs</td><td class="num">3.24 µs</td><td><span class="chip ok">领先 1.4×</span></td></tr>
+          <tr><td class="mono">lat_syscall fstat</td><td class="num">0.084–0.094 µs</td><td class="num">0.119–0.120 µs</td><td><span class="chip ok">领先 1.3×</span></td></tr>
+          <tr><td class="mono">bw_mem 4m bzero</td><td class="num">71,489 MB/s</td><td class="num">58,245 MB/s</td><td><span class="chip ok">领先 1.23×</span></td></tr>
+          <tr><td class="mono">bw_mem 1m bcopy</td><td class="num">84,520 MB/s</td><td class="num">74,252 MB/s</td><td><span class="chip ok">领先 1.14×</span></td></tr>
+          <tr><td class="mono">lat_mem_rd 1MB</td><td class="num">2.20–2.25 ns/load</td><td class="num">2.375 ns/load</td><td><span class="chip ok">领先 0.95×</span></td></tr>
+          <tr><td class="mono">lat_mem_rd 256MB</td><td class="num">6.49–6.65 ns/load</td><td class="num">6.691 ns/load</td><td><span class="chip ok">持平偏领先(0.97×)</span></td></tr>
+          <tr><td class="mono">lat_usleep 1000</td><td class="num">1030.8 µs</td><td class="num">1052.8 µs</td><td><span class="chip ok">持平(0.98×)</span></td></tr>
+          <tr><td class="mono">bw_file_rd 1m io_only</td><td class="num">&lt; 计时器粒度</td><td class="num">23,045 MB/s</td><td><span class="chip ok">领先(快于计时器可测范围)</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h3>落后组(7 项)</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>用例</th><th class="num">Rux</th><th class="num">Linux(同 rig guest)</th><th>结论</th><th>优化方向</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">lat_syscall open</td><td class="num">0.756–1.00 µs</td><td class="num">0.394–0.397 µs</td><td><span class="chip bad">落后 1.9–2.5×</span>(靴间方差 ±30%)</td><td>路径解析尾部 + fd 装配</td></tr>
+          <tr><td class="mono">lat_syscall read</td><td class="num">0.103–0.108 µs</td><td class="num">0.060–0.062 µs</td><td><span class="chip bad">落后 1.7–1.8×</span></td><td>fill/copy 尾部(SMAP AC 括号)</td></tr>
+          <tr><td class="mono">lat_syscall stat</td><td class="num">0.32–0.45 µs</td><td class="num">0.239 µs</td><td><span class="chip bad">落后 1.4–1.9×</span>(靴间方差 ±30%)</td><td>路径解析</td></tr>
+          <tr><td class="mono">lat_syscall write</td><td class="num">0.081 µs</td><td class="num">0.0597–0.0600 µs</td><td><span class="chip bad">落后 1.35×</span>(fdget 直借+PT_REGS 门控,累计 −7%)</td><td>fill/copy 尾部</td></tr>
+          <tr><td class="mono">lat_syscall null</td><td class="num">0.0435 µs</td><td class="num">0.0345–0.0430 µs</td><td><span class="chip bad">落后 1.0–1.25×</span>(getppid O(1) 后 −15%)</td><td>系统调用入口地板</td></tr>
+          <tr><td class="mono">lat_proc fork</td><td class="num">37.8–40.3 µs</td><td class="num">33.9 µs</td><td><span class="chip bad">落后 1.11–1.19×</span></td><td>NOHZ 后已从超时族回归可测,继续收敛</td></tr>
+          <tr><td class="mono">lat_proc exec</td><td class="num">40.6 µs</td><td class="num">37.6 µs</td><td><span class="chip bad">落后 1.08×</span></td><td>接近持平带</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:13px;color:var(--text-3)">机制注:领先面集中在调度/唤醒与 IPC(跨 vCPU 唤醒 IPI 在虚拟化下开销显著,Rux 单全局队列不产生跨核重调度风暴)与内存带宽;系统调用延迟行 guest 自带入口、不发生 vmexit,两侧几乎无虚拟化附加成本,差距为真实内核差距。未出数行:lat_mmap/lat_pagefault/bw_mmap_rd(本轮电池未打印)与 net-server 族(lat_tcp/udp/connect、bw_tcp、lat_fs)——无诚实数字,不列表。历史 r14 表(2026-11-08 窗口)见 lmbench-report.md 存档。</p>
+    <div class="callout"><b>campaign 顺带挖出并修复的正确性 bug</b>(性能差距掩盖了它们):free 时的 stale-rsp0 UAF(fork 双稳态根因);call_rcu 零宽限期回调触发;唤醒监视器陈旧性判定反转;fdreap 每 tick 10 ms close 停滞;主线 munmap 末批 TLB flush 丢失(5b4a4bc7)。</div>
+
+    
+    <h2 id="campaign"><span class="anchor">§3</span>perf-2x 战役(裸系统调用 + fork/exec 2× 目标)</h2>
+    <p>2026-11-16/17 三轮,主攻 lmbench 落后面(裸系统调用带与 fork/exec):</p>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>轮</th><th>内核</th><th>改动</th><th>实测</th></tr></thead>
+      <tbody>
+        <tr><td>round 2</td><td class="mono">34b339e01</td><td>fdget 无引用计数直借快路径 + getppid O(1) 任务指针</td><td>null <b>0.045 µs(−12%)</b>、write <b>0.082(−6%)</b>;校准稳定性:优化核 <b>14/15</b> 次启动收敛 vs 基线 <b>0/15</b>(getppid 哈希锁本身即抖动源);pbench p2_ctxsw <b>0.090–0.105 µs</b>(自 1.24–2.15 类,−90%+)</td></tr>
+        <tr><td>round 3</td><td class="mono">931623176</td><td>PT_REGS 门控(入口寄存器暂存精简)</td><td>write <b>0.0811 µs</b>(3 次取中位,历史最佳)、null <b>0.0435</b>、read <b>0.101</b></td></tr>
+      </tbody>
+    </table></div>
+    <p>对 2× 目标(Linux 列 ÷2)记分牌:null 0.0435(目标 0.0195)· read 0.101(0.030)· write 0.0811(0.030)· stat 0.34(0.120)· open 0.84(0.197)· fork 37.8(17)· exec 40.6(18.8)—— open 尾部解剖与后续杠杆在册(优化队列页)。</p>
+
+    <h2 id="history"><span class="anchor">§4</span>口径沿革与存档</h2>
+    <ul>
+      <li>上表为 2026-11-16 NOHZ 轮全量电池(12 延迟行 + 8 带宽行);perf-2x 三轮的最新裸系统调用值(null 0.0435/read 0.101/write 0.0811)为单行重测,尚未全量重跑 —— 两组数据分别标注,不混排。</li>
+      <li>历史口径:2026-11-15 gb-opt 29 行表、11-04 公平 KVM 表(含虚拟化税分析:pipe 4.85×/ctx 7.37×)与 r14 表均在 <code>docs/test/lmbench-report.md</code> 存档;失败行重试规则与 lat_fifo/bw_udp 上游缺陷弃用亦记录在案。</li>
+      <li>campaign 顺带修复的正确性缺陷(性能差距掩盖下):free 时 stale-rsp0 UAF(fork 双稳态根因)、call_rcu 零宽限期回调、唤醒监视器陈旧性判定反转、fdreap 每 tick 10 ms close 停滞、主线 munmap 末批 TLB flush 丢失(5b4a4bc7)。</li>
+    </ul>
+
+    <h2 id="rerun"><span class="anchor">§5</span>复现</h2>
+    <pre><code><span class="c"># 完整电池(每用例独立启动 + 重试规则)</span>
+cd userspace/lmbench && ./extract-lmbench.sh && ./build-lmbench.sh && ./build-rootfs.sh work/lmbench-x86.img && ./run-rux.sh
+<span class="c"># 快速通道(10 个头条用例,~3 分钟,标注 INDICATIVE)</span>
+./quick.sh [bzImage]</code></pre>
+    <div class="callout">镜像永久仓:/home/william/rux-images/testimages/lmbench-x86.img(reflink 拷贝后 snapshot=on 启动,永不改写原盘)。正本:docs/test/lmbench-report.md。</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">返回首页</a></span>
+
+      <span class="foot-stats">本站访问 <span id="busuanzi_value_site_pv"></span> 次 · 访客 <span id="busuanzi_value_site_uv"></span> 人</span></div>
+  </div>
+</footer>
+
+<script src="../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>

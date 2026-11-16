@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>内部微基准 · Rux</title>
+<link rel="stylesheet" href="../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">首页</a>
+      <a href="../architecture/design.html">架构设计</a>
+      <a href="index.html">性能</a>
+      <a href="../security/index.html">安全</a>
+      <a href="../testing/index.html">测试</a>
+      <a href="../debugging/index.html">调试</a>
+      <a href="../guides/getting-started.html">快速入门</a>
+      <a href="../progress/roadmap.html">项目进展</a>
+      <a href="../guestbook.html">留言</a>
+      <span class="lang-sw"><a class="on" href="microbench.html">中文</a><a href="../en/performance/microbench.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+<div class="grp">性能</div>
+    <a href="../debugging/index.html">性能总览</a>
+    <a href="lmbench.html">lmbench</a>
+    <a href="geekbench.html">Geekbench 5</a>
+    <a href="fio.html">fio</a>
+    <a href="rttests.html">rt-tests</a>
+    <a href="microbench.html">内部微基准</a><div class="grp">架构设计</div>
+    <a href="../architecture/design.html">架构与模块设计</a>
+    <a href="../architecture/scheduler.html">调度器</a>
+    <a href="../architecture/memory.html">内存管理</a>
+    <a href="../architecture/filesystem.html">文件系统</a>
+    <a href="../architecture/ipc.html">进程间通信</a>
+    <a href="../architecture/boot.html">启动流程</a>
+    <a href="../architecture/interrupts.html">中断与时钟</a>
+    <a href="../architecture/structure.html">代码结构</a>
+    <a href="../architecture/riscv64.html">架构移植指南</a>
+    <a href="../architecture/kernel-lock.html">锁序不变量</a>
+    <div class="grp">安全</div>
+    <a href="../security/index.html">安全总览</a>
+    <a href="../security/formal.html">形式验证</a>
+    <a href="../security/unsafe.html">分层 unsafe 台账</a>
+    <a href="../security/taxonomy.html">缺陷分类学</a>
+    <a href="../security/hardening.html">运行时强化与缺口</a><div class="grp">测试</div>
+    <a href="../testing/index.html">测试总览</a>
+    <a href="../testing/ci-pipeline.html">CI 流水线</a>
+    <a href="../testing/ltp.html">LTP 兼容扫描</a>
+    <a href="../testing/ltp-full.html">LTP 全量用例</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT 审计</a>
+    <a href="../testing/stability.html">稳定性</a>
+    <a href="../testing/stress.html">压力</a>
+    <a href="../testing/gnome-retrospective.html">回溯报告</a>
+    <div class="grp">调试</div>
+    <a href="../debugging/index.html">调试指南</a>
+    <a href="../debugging/tracepoints.html">tracepoint 框架</a>
+    <a href="../debugging/perf.html">性能调试</a>
+    <a href="../debugging/locks.html">锁调试</a>
+    <a href="../debugging/memory.html">内存取证</a>
+    <a href="../debugging/panic.html">panic 与符号化</a>
+    <div class="grp">开发指南</div>
+    <a href="../guides/getting-started.html">快速入门</a>
+    <a href="../guides/development.html">参与开发</a>
+    <a href="../guides/configuration.html">内核配置</a>
+    <div class="grp">项目进展</div>
+    <a href="../progress/roadmap.html">路线图</a>
+    <a href="../progress/changelog.html">更新日志</a>
+    <a href="../progress/quickref.html">命令速查</a>
+    <div class="grp">互动</div>
+    <a href="../guestbook.html">留言板</a>
+  </aside>
+  <article class="doc-main">
+    <h1>Tier 1/2 门禁带、pbench 锚、刷盘墙、NOHZ A/B 与切换解剖</h1>
+    <div class="sub">门禁采集器的基线带与内部基准的历史 A/B —— 与外部套件(lmbench/Geekbench/fio/rt-tests)互补</div>
+
+<h2 id="tier1"><span class="anchor">§7</span>Tier 1:静默 syscost 启动普查带(KVM q35 smp2/4G,780s 窗)</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>指标</th><th>基线 / 带</th></tr></thead>
+        <tbody>
+          <tr><td>TERM-DESCHED 普查</td><td class="num">8 ± 2(连续 4 次以上启动精确读 8/32)</td></tr>
+          <tr><td>WAKE-REFUSED 普查</td><td class="num">32 ± 4</td></tr>
+          <tr><td>WAKE-STRANDED</td><td class="num">5–31 有机类,无 1001ms 网格类</td></tr>
+          <tr><td>每 CPU tick 率</td><td class="num">≥99.5/s 持续到窗末(当前 arc 读 104–124/s)</td></tr>
+          <tr><td>panic / 新 OOM 类</td><td class="num">0</td></tr>
+          <tr><td>系统调用总量(780s)</td><td class="num">126.0M ± 10%(同谱系内执行)</td></tr>
+          <tr><td>clock_gettime 均值</td><td class="num">3–4 µs(±20% 或更优)</td></tr>
+          <tr><td>nanosleep 均值</td><td class="num">158–203 ms 族,≤244 ms 单边(p7_sleep1ms 探针同核 15.8 µs 证明睡眠成本未变)</td></tr>
+          <tr><td>IF=0 占机</td><td class="num">20.4% ± 3pp(EFLAGS 对探针 if0 v3 官方测量)</td></tr>
+          <tr><td>最长关中断段</td><td class="num">≤10 ms(现行 6–9 ms;594–599 ms 一次性类已消失)</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="pbench"><span class="anchor">§8</span>Tier 2:pbench P1–P7 全锚(SMP-8 标准,2026-11-08 重锚)</h2>
+    <div class="callout"><b>SMP-8 标准</b>(用户指令 2026-11-07):所有启动至少 8 CPU(Kernel.toml <code>smp.max_cpus = 8</code>;三架构驱动默认 <code>-smp 8</code>)。旧锚在 2–4 CPU 配置下测得,不能判定 8-CPU 跑分 —— 跨配置比较与 debug-vs-strong 同类无效。以下锚 = SMP-8 同 rig A/B 基线(base 166e4516 vs per-mm-break c127e4bc,KVM q35 4G)。</div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>组</th><th>内容(test/pbench.c)</th><th class="num">锚(SMP-8 KVM,µs)</th></tr></thead>
+        <tbody>
+          <tr><td>P1</td><td>p1_null 空系统调用(N=1e6)/ p1_clock_gettime(N=1e6)</td><td class="num">0.280 / —</td></tr>
+          <tr><td>P2</td><td>p2_ctxsw:1 字节管道乒乓上下文切换(绑核)</td><td class="num"><b>0.756</b>(per-mm-break 后;基线 1.222 → 8 CPU 切换快 38%)</td></tr>
+          <tr><td>P3</td><td>缺页族:p3a 首触匿名 / p3b COW / p3c 文件映射 / p3d 并发</td><td class="num">p3b_cow 18.424(SMP-8 代价 +58%,诚实缺口,见下)</td></tr>
+          <tr><td>P4</td><td>p4_fork_exit / p4_fork_exec(N=1e3)</td><td class="num">亚毫秒类(r11:fork 拷贝 910→574 ns、exit 释放 4491→825 ns;exit 体 17.9→7.3 µs)</td></tr>
+          <tr><td>P5</td><td>IPC 族:p5a 管道往返 / p5b unix dgram / p5c 流写 / p5e-p5f 流控判别</td><td class="num">p5 族沿用门禁带判定</td></tr>
+          <tr><td>P6</td><td>文件系统族:stat / openclose / getdents / read_cached / write_fsync / append / mkdir+rmdir / unlink</td><td class="num">write_fsync 8613.1 / mkdrmdir 269.8 / unlink 67.7 / append 6.402(stat ±25% 行噪声)</td></tr>
+          <tr><td>P7</td><td>p7_sleep1ms:nanosleep(1ms) 过冲(med/p99/max,N=1e4)</td><td class="num">15.8(探针口径)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:13px;color:var(--text-3)">开放代价(如实):COW 缺页在 SMP-8 下 +58%(12.07→18.42 µs)是 SMP-8 标准的价格,已记入安全-性能台账的诚实缺口;对 fork 密集的服务图(OH/GNOME)有影响,下一个优化目标是 COW 缺页路径的跨 CPU shootdown,而非 break 处理本身。四配置对照(8/4 CPU × 基线/修复)见基线文件「Re-bank: SMP-8 standard」节。</p>
+
+    
+    <h2 id="flush"><span class="anchor">§3</span>文件系统刷盘墙(fs-flush 线,mtest06 形状)</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>尺寸</th><th>探针</th><th class="num">修复前 → 后</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td>128 MB</td><td>mmap2time3</td><td class="num">fsync <b>11.546 → 6.181 s(−46%)</b>;msync(MS_SYNC) <b>13.950 → 3.307 s(4.2×)</b>;sync <b>11.300 → 3.308 s(−71%)</b></td><td>memset 段 0.853→0.136 s;I/O 相位合计 36.7→12.8 s</td></tr>
+        <tr><td>32 MB</td><td>mmap2time2</td><td class="num">fsync 2.851→1.758;msync 2.368→<b>0.274(8.6×)</b>;sync 2.982→0.890;<b>总墙钟 8.314 → 3.019 s(2.8×)</b></td><td>第二采样总墙钟 2.873 s</td></tr>
+      </tbody>
+    </table></div>
+    <ul>
+      <li>来源:run-batched flush + 聚合 span 写回(04e789690;A/B 基线 3c464b9ec);同 rig:x86_64 KVM q35 2G smp2,LTP 镜像 -snapshot;修复伴随 pbench fs 行门禁 A/B 全部带内(±20%)、mmap2 TIMEOUT→PASS、fsx -N10000 PASS。</li>
+      <li>homepage 历史口径曾写"fsync 11.55→3.04"—— 系 128MB fsync 行(→6.181)与 32MB 总墙钟行(→3.019)的并读混淆,本表为修正后的逐行口径。</li>
+    </ul>
+
+    <h2 id="nohz"><span class="anchor">§4</span>NOHZ A/B(对抗负载下的调度停摆)</h2>
+    <ul>
+      <li>4+4 交错 lmbench lat_syscall,null 启动(35 s 预算,6 个对抗性外部 QEMU):main tip <b>0/10</b> 通过;churn 修复仅 5/12(42%);<b>nohz_full=1:11/12(92%)</b>;p1_null 中位 0.050 vs 0.060 µs(−17%);两条 census 带精确保持(TERM 8/REFUSED 32)。</li>
+      <li>实现形态:照参考 tick-sched.c 逐函数映射(细节见<a href="../architecture/interrupts.html#nohz">中断与时钟 §6</a>)。</li>
+    </ul>
+
+    <h2 id="cctx"><span class="anchor">§5</span>上下文切换成本解剖(cctx 分段)</h2>
+    <ul>
+      <li>逐段:x86 切换机器 ~620 ns(schedule 125 + GRQ 锁 102 + pick 96 + mm 切换 202–295 + FPU 34 + FS/GS 54 + GPR ~22)—— 参考内核原生切换机器 ~910 ns。</li>
+      <li>fdget 直借 + getppid O(1) 后:pbench p2_ctxsw 管道乒乓 <b>0.090–0.105 µs</b>(自 1.24–2.15 类,−90%+)—— 在案的最锐利调度延迟读数。</li>
+      <li>唤醒侧分段(WK_SEL/WK_ENQ/WK_DISP/IPI_N/IPI_NS)与 GRQ 持锁分解(runqueue 记账/摘除-插回/pick/统计)见<a href="../architecture/scheduler.html#instruments">调度器 §8</a>。</li>
+    </ul>
+
+    <div class="callout">正本:docs/development/perf-gate-baseline.md(锚与带)、docs/development/perf-report.md(pbench 设计与历史)、fs-flush 工作树 run/FS-FLUSH-FINDINGS.md。</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">返回首页</a></span>
+
+      <span class="foot-stats">本站访问 <span id="busuanzi_value_site_pv"></span> 次 · 访客 <span id="busuanzi_value_site_uv"></span> 人</span></div>
+  </div>
+</footer>
+
+<script src="../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>

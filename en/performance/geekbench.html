@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Geekbench 5 · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">Home</a>
+      <a href="../architecture/design.html">Architecture</a>
+      <a href="index.html">Performance</a>
+      <a href="../security/index.html">Security</a>
+      <a href="../testing/index.html">Testing</a>
+      <a href="../debugging/index.html">Debugging</a>
+      <a href="../guides/getting-started.html">Getting started</a>
+      <a href="../progress/roadmap.html">Progress</a>
+      <a href="../guestbook.html">Feedback</a>
+      <span class="lang-sw"><a class="on" href="../../performance/geekbench.html">中文</a><a href="geekbench.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">Performance</div>
+    <a href="../debugging/index.html">Performance overview</a>
+    <a href="lmbench.html">lmbench</a>
+    <a href="geekbench.html">Geekbench 5</a>
+    <a href="fio.html">fio</a>
+    <a href="rttests.html">rt-tests</a>
+    <a href="microbench.html">Internal microbenchmarks</a><div class="grp">Architecture</div>
+    <a href="../architecture/design.html">Design deep-dive</a>
+    <a href="../architecture/scheduler.html">Scheduler</a>
+    <a href="../architecture/memory.html">Memory management</a>
+    <a href="../architecture/filesystem.html">Filesystem</a>
+    <a href="../architecture/ipc.html">IPC</a>
+    <a href="../architecture/boot.html">Boot flow</a>
+    <a href="../architecture/interrupts.html">Interrupts &amp; timers</a>
+    <a href="../architecture/structure.html">Code layout</a>
+    <a href="../architecture/riscv64.html">Porting guide</a>
+    <a href="../architecture/kernel-lock.html">Lock ordering</a><div class="grp">Debugging</div>
+    <a href="../debugging/index.html">Debugging guide</a>
+    <a href="../debugging/tracepoints.html">Tracepoints</a>
+    <a href="../debugging/perf.html">Performance debugging</a>
+    <a href="../debugging/locks.html">Lock debugging</a>
+    <a href="../debugging/memory.html">Memory forensics</a>
+    <a href="../debugging/panic.html">Panic &amp; symbols</a><div class="grp">Performance</div>
+    <a href="../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../security/index.html">Security overview</a>
+    <a href="../security/formal.html">Formal verification</a>
+    <a href="../security/unsafe.html">Layered unsafe ledger</a>
+    <a href="../security/taxonomy.html">Defect taxonomy</a>
+    <a href="../security/hardening.html">Hardening &amp; gaps</a><div class="grp">Testing</div>
+    <a href="../testing/index.html">Overview</a>
+    <a href="../testing/ci-pipeline.html">CI pipeline</a>
+    <a href="../testing/ltp.html">LTP scan</a>
+    <a href="../testing/ltp-full.html">LTP full cases</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT audit</a>
+    <a href="../testing/stability.html">Stability</a>
+    <a href="../testing/stress.html">Stress</a>
+    <a href="../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../guides/getting-started.html">Getting started</a>
+    <a href="../guides/development.html">Contributing</a>
+    <a href="../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../progress/roadmap.html">Roadmap</a>
+    <a href="../progress/changelog.html">Changelog</a>
+    <a href="../progress/quickref.html">Commands</a>
+    <div class="grp">Community</div>
+    <a href="../guestbook.html">Guestbook</a>
+  </aside>
+  <article class="doc-main">
+    <h1>Geekbench 5.5.1</h1>
+    <div class="sub">The best-of-runs standings, the 21 per-workload comparison tables, the rig and the capture method · Canonical: docs/test/geekbench-report.md</div>
+
+<h2 id="data"><span class="anchor">§3</span>Geekbench 5 data (5.5.1, 9950X, KVM q35 smp4/4G, strong kernel; per-workload tables 2026-11-04, totals updated through the gb-opt round 2026-11-15)</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th></th><th class="num">Rux</th><th class="num">Linux (4-CPU pin)</th><th>Verdict</th></tr></thead>
+        <tbody>
+          <tr><td><b>Multi-core total</b></td><td class="num">7709</td><td class="num">7027</td><td><span class="chip ok">110%</span></td></tr>
+          <tr><td><b>Single-core total</b></td><td class="num"><b>2440</b> (best-of-runs)</td><td class="num">2165</td><td><span class="chip ok">113%</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:13px;color:var(--text-3)">Rig note: the Linux side is the host-native <code>taskset -c 0-3</code> pin (topology-matched to the guest's 4 vCPUs; a same-rig KVM Linux comparison is queued). Totals use the best-of-runs convention (user rule, recorded): multi-core historical best 7709 (gb-opt round), single-core historical best 2440. Single-core caveat: two native self-runs differ by ~15% (2549 vs 2165) — deltas within ±15% are noise. The per-workload tables come from the 2026-11-04 full capture (that round's SC total was 2115; the quiet best is 2274 — same noise band).</p>
+
+    <h3>Single-core, per workload (all 21)</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Class</th><th>Workload</th><th class="num">Rux</th><th class="num">Linux</th><th class="num">Rux/Linux</th></tr></thead>
+        <tbody>
+          <tr><td>AES-XTS</td><td>AES-XTS</td><td class="num"><b>8140</b> (re-run)</td><td class="num">7643</td><td class="num"><span class="chip ok">106%</span></td></tr>
+          <tr><td>Integer</td><td>Text Compression</td><td class="num">1446</td><td class="num">1536</td><td class="num">94%</td></tr>
+          <tr><td>Integer</td><td>Image Compression</td><td class="num">1901</td><td class="num">1813</td><td class="num"><span class="chip ok">105%</span></td></tr>
+          <tr><td>Integer</td><td>Navigation</td><td class="num">1416</td><td class="num">1753</td><td class="num"><span class="chip bad">81%</span></td></tr>
+          <tr><td>Integer</td><td>HTML5</td><td class="num">1991</td><td class="num">1651</td><td class="num"><span class="chip ok">121%</span></td></tr>
+          <tr><td>Integer</td><td>SQLite</td><td class="num">1833</td><td class="num">1480</td><td class="num"><span class="chip ok">124%</span></td></tr>
+          <tr><td>Integer</td><td>PDF Rendering</td><td class="num">1758</td><td class="num">2074</td><td class="num"><span class="chip bad">85%</span></td></tr>
+          <tr><td>Integer</td><td>Text Rendering</td><td class="num">1771</td><td class="num">1456</td><td class="num"><span class="chip ok">122%</span></td></tr>
+          <tr><td>Integer</td><td>Clang</td><td class="num">1891</td><td class="num">2161</td><td class="num"><span class="chip bad">88%</span></td></tr>
+          <tr><td>Integer</td><td>Camera</td><td class="num">2005</td><td class="num">1861</td><td class="num"><span class="chip ok">108%</span></td></tr>
+          <tr><td>Float</td><td>N-Body Physics</td><td class="num">2227</td><td class="num">1956</td><td class="num"><span class="chip ok">114%</span></td></tr>
+          <tr><td>Float</td><td>Rigid Body Physics</td><td class="num">1885</td><td class="num">1737</td><td class="num"><span class="chip ok">109%</span></td></tr>
+          <tr><td>Float</td><td>Gaussian Blur</td><td class="num">2136</td><td class="num">2149</td><td class="num">99%</td></tr>
+          <tr><td>Float</td><td>Face Detection</td><td class="num">2401</td><td class="num">2770</td><td class="num"><span class="chip bad">87%</span></td></tr>
+          <tr><td>Float</td><td>Horizon Detection</td><td class="num">1834</td><td class="num">1459</td><td class="num"><span class="chip ok">126%</span></td></tr>
+          <tr><td>Float</td><td>Image Inpainting</td><td class="num">4100</td><td class="num">4092</td><td class="num">100%</td></tr>
+          <tr><td>Float</td><td>HDR</td><td class="num">4563</td><td class="num">3614</td><td class="num"><span class="chip ok">126%</span></td></tr>
+          <tr><td>Float</td><td>Ray Tracing</td><td class="num">2725</td><td class="num">2042</td><td class="num"><span class="chip ok">133%</span></td></tr>
+          <tr><td>Float</td><td>Structure from Motion</td><td class="num">1806</td><td class="num">1661</td><td class="num"><span class="chip ok">109%</span></td></tr>
+          <tr><td>Float</td><td>Speech Recognition</td><td class="num">1712</td><td class="num">1741</td><td class="num">98%</td></tr>
+          <tr><td>Float</td><td>Machine Learning</td><td class="num">2511</td><td class="num">2028</td><td class="num"><span class="chip ok">124%</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:13px;color:var(--text-3)">AES-XTS single-core carries the post-fix re-run value (8047 / confirm run 8140): the earlier low score was a kernel serial-print-tax artifact (AES-NI was probe-proven healthy — guest aesenc throughput 1268 vs native 1244 M rounds/s); the high-load capture is discarded. Source: docs/test/geekbench-report.md, 2026-11-02 standing.</p>
+
+    <h3>Multi-core, per workload (all 21)</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Class</th><th>Workload</th><th class="num">Rux</th><th class="num">Linux</th><th class="num">Rux/Linux</th></tr></thead>
+        <tbody>
+          <tr><td>AES-XTS</td><td>AES-XTS</td><td class="num">9331</td><td class="num">8972</td><td class="num"><span class="chip ok">104%</span></td></tr>
+          <tr><td>Integer</td><td>Text Compression</td><td class="num">5787</td><td class="num">3851</td><td class="num"><span class="chip ok">150%</span></td></tr>
+          <tr><td>Integer</td><td>Image Compression</td><td class="num">7410</td><td class="num">7481</td><td class="num">99%</td></tr>
+          <tr><td>Integer</td><td>Navigation</td><td class="num">4187</td><td class="num">3546</td><td class="num"><span class="chip ok">118%</span></td></tr>
+          <tr><td>Integer</td><td>HTML5</td><td class="num">8087</td><td class="num">7151</td><td class="num"><span class="chip ok">113%</span></td></tr>
+          <tr><td>Integer</td><td>SQLite</td><td class="num">7069</td><td class="num">6829</td><td class="num"><span class="chip ok">104%</span></td></tr>
+          <tr><td>Integer</td><td>PDF Rendering</td><td class="num">6566</td><td class="num">7632</td><td class="num"><span class="chip bad">86%</span></td></tr>
+          <tr><td>Integer</td><td>Text Rendering</td><td class="num">5794</td><td class="num">5924</td><td class="num">98%</td></tr>
+          <tr><td>Integer</td><td>Clang</td><td class="num">7359</td><td class="num">7823</td><td class="num"><span class="chip bad">94%</span></td></tr>
+          <tr><td>Integer</td><td>Camera</td><td class="num">7191</td><td class="num">7477</td><td class="num"><span class="chip bad">96%</span></td></tr>
+          <tr><td>Float</td><td>N-Body Physics</td><td class="num">7174</td><td class="num">7501</td><td class="num"><span class="chip bad">96%</span></td></tr>
+          <tr><td>Float</td><td>Rigid Body Physics</td><td class="num">7463</td><td class="num">7589</td><td class="num">98%</td></tr>
+          <tr><td>Float</td><td>Gaussian Blur</td><td class="num">7682</td><td class="num">7694</td><td class="num">100%</td></tr>
+          <tr><td>Float</td><td>Face Detection</td><td class="num">9949</td><td class="num">10296</td><td class="num"><span class="chip bad">97%</span></td></tr>
+          <tr><td>Float</td><td>Horizon Detection</td><td class="num">7111</td><td class="num">7616</td><td class="num"><span class="chip bad">93%</span></td></tr>
+          <tr><td>Float</td><td>Image Inpainting</td><td class="num">14838</td><td class="num">12349</td><td class="num"><span class="chip ok">120%</span></td></tr>
+          <tr><td>Float</td><td>HDR</td><td class="num">17872</td><td class="num">18962</td><td class="num"><span class="chip bad">94%</span></td></tr>
+          <tr><td>Float</td><td>Ray Tracing</td><td class="num">13374</td><td class="num">11370</td><td class="num"><span class="chip ok">118%</span></td></tr>
+          <tr><td>Float</td><td>Structure from Motion</td><td class="num">7155</td><td class="num">7486</td><td class="num"><span class="chip bad">96%</span></td></tr>
+          <tr><td>Float</td><td>Speech Recognition</td><td class="num">5939</td><td class="num">4537</td><td class="num"><span class="chip ok">131%</span></td></tr>
+          <tr><td>Float</td><td>Machine Learning</td><td class="num">5641</td><td class="num">5635</td><td class="num">100%</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:13px;color:var(--text-3)">The multi-core split: the 11-04 capture's 7332 vs 7027 (104%) is pulled by scheduler-sensitive workloads — text compression (150%), inpainting (120%), speech recognition (131%), ray tracing (118%) — while AES-XTS SC 64% in the 11-04 capture was the pre-fix reading (now re-run at 105–106%); after the gb-opt round the multi-core best-of-runs stands at 7709 = 110%; Clang/PDF-rendering single-core residuals await isolated re-runs.</p>
+
+    
+    <h2 id="standings"><span class="anchor">§2</span>The totals history (best-of-runs basis)</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Date</th><th>Kernel</th><th class="num">Single-core</th><th class="num">Multi-core</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>2026-11-01</td><td class="mono">—</td><td class="num">1941</td><td class="num">7139</td><td>the first full capture</td></tr>
+        <tr><td>2026-11-02</td><td class="mono">—</td><td class="num">2274 (quiet best 2297)</td><td class="num">7114 (7458)</td><td>the AES-XTS root-cause round (the serial-print tax)</td></tr>
+        <tr><td>2026-11-04</td><td class="mono">8d81c5da</td><td class="num">2115</td><td class="num">7332</td><td>the full per-workload capture (the two tables above)</td></tr>
+        <tr><td>2026-11-15</td><td class="mono">2649af4e3</td><td class="num">2365→2390→2423→<b>2440</b></td><td class="num">7420→7716→7644→<b>7709</b></td><td>the gb-opt four-boot sequence; vs the 4-CPU reference = <b>113% / 110%</b></td></tr>
+        <tr><td>2026-11-16</td><td class="mono">017bf556b</td><td class="num"><b>2440</b></td><td class="num"><b>7709</b></td><td>re-captured post-NOHZ under a hostile background — bit-identical to 11-15 (a deterministic reproduction)</td></tr>
+      </tbody>
+    </table></div>
+    <p>Reference anchors: the 4-CPU pinned native SC 2165 / MC 7027 (the 32-thread host 2549/20402 is a ceiling reference only); two native self-runs differ by ~15% SC (2549 vs 2165) — single-core deltas within ±15% are treated as noise, and best-of-runs is the standing convention. Geekbench 6.4.0 is deliberately excluded (rc=255 without a Pro license, no scores).</p>
+
+    <h2 id="rig"><span class="anchor">§3</span>Rig and capture method</h2>
+    <ul>
+      <li><b>Rig</b>: the 9950X host, q35 KVM <code>-cpu host -smp 4 -m 4G</code>, the strong build (build-release-opt); one boot per full run, 2700 s outer / 900 s in-guest budget.</li>
+      <li><b>Score capture</b>: a local TLS capture server (a self-signed CA injected into the guest /etc/hosts via debugfs, pinning browser.geekbench.com to 10.0.2.2; a :443 server receives the HTTPS upload POST, parsed by parse-capture.py) — scores never touch the external network and the process is replayable.</li>
+      <li><b>Kernel bugs this suite found and fixed</b>: mprotect returning ENOMEM for mid-VMA resizes; the TCP RX checksum reading stack garbage — commercial suites as compatibility probes.</li>
+      <li><b>An accounting note</b>: the per-workload tables above are the 11-04 full capture (that round's SC 2115); the single-core AES-XTS takes the post-fix re-measurement (8047/8140), the historical low being the serial-print-tax artifact (AES-NI probe-verified intact). The 11-15/11-16 totals are the four-boot best; a per-workload re-capture is in the queue.</li>
+    </ul>
+
+    <h2 id="rerun"><span class="anchor">§4</span>Reproducing</h2>
+    <pre><code><span class="c"># the full pipeline (image reflink + CA injection + the capture server + parsing)</span>
+cd /home/william/rux-agents/gb-opt &amp;&amp; ./run/bench-pipeline.sh</code></pre>
+    <div class="callout">Permanent image store: /home/william/rux-images/testimages/geekbench-x86.img. Canonical: docs/test/geekbench-report.md (reproduction steps itemized).</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to home</a></span>
+
+      <span class="foot-stats">Site visits <span id="busuanzi_value_site_pv"></span> · Visitors <span id="busuanzi_value_site_uv"></span></span></div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>

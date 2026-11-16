@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>fio · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">Home</a>
+      <a href="../architecture/design.html">Architecture</a>
+      <a href="index.html">Performance</a>
+      <a href="../security/index.html">Security</a>
+      <a href="../testing/index.html">Testing</a>
+      <a href="../debugging/index.html">Debugging</a>
+      <a href="../guides/getting-started.html">Getting started</a>
+      <a href="../progress/roadmap.html">Progress</a>
+      <a href="../guestbook.html">Feedback</a>
+      <span class="lang-sw"><a class="on" href="../../performance/fio.html">中文</a><a href="fio.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">Performance</div>
+    <a href="../debugging/index.html">Performance overview</a>
+    <a href="lmbench.html">lmbench</a>
+    <a href="geekbench.html">Geekbench 5</a>
+    <a href="fio.html">fio</a>
+    <a href="rttests.html">rt-tests</a>
+    <a href="microbench.html">Internal microbenchmarks</a><div class="grp">Architecture</div>
+    <a href="../architecture/design.html">Design deep-dive</a>
+    <a href="../architecture/scheduler.html">Scheduler</a>
+    <a href="../architecture/memory.html">Memory management</a>
+    <a href="../architecture/filesystem.html">Filesystem</a>
+    <a href="../architecture/ipc.html">IPC</a>
+    <a href="../architecture/boot.html">Boot flow</a>
+    <a href="../architecture/interrupts.html">Interrupts &amp; timers</a>
+    <a href="../architecture/structure.html">Code layout</a>
+    <a href="../architecture/riscv64.html">Porting guide</a>
+    <a href="../architecture/kernel-lock.html">Lock ordering</a><div class="grp">Debugging</div>
+    <a href="../debugging/index.html">Debugging guide</a>
+    <a href="../debugging/tracepoints.html">Tracepoints</a>
+    <a href="../debugging/perf.html">Performance debugging</a>
+    <a href="../debugging/locks.html">Lock debugging</a>
+    <a href="../debugging/memory.html">Memory forensics</a>
+    <a href="../debugging/panic.html">Panic &amp; symbols</a><div class="grp">Performance</div>
+    <a href="../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../security/index.html">Security overview</a>
+    <a href="../security/formal.html">Formal verification</a>
+    <a href="../security/unsafe.html">Layered unsafe ledger</a>
+    <a href="../security/taxonomy.html">Defect taxonomy</a>
+    <a href="../security/hardening.html">Hardening &amp; gaps</a><div class="grp">Testing</div>
+    <a href="../testing/index.html">Overview</a>
+    <a href="../testing/ci-pipeline.html">CI pipeline</a>
+    <a href="../testing/ltp.html">LTP scan</a>
+    <a href="../testing/ltp-full.html">LTP full cases</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT audit</a>
+    <a href="../testing/stability.html">Stability</a>
+    <a href="../testing/stress.html">Stress</a>
+    <a href="../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../guides/getting-started.html">Getting started</a>
+    <a href="../guides/development.html">Contributing</a>
+    <a href="../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../progress/roadmap.html">Roadmap</a>
+    <a href="../progress/changelog.html">Changelog</a>
+    <a href="../progress/quickref.html">Commands</a>
+    <div class="grp">Community</div>
+    <a href="../guestbook.html">Guestbook</a>
+  </aside>
+  <article class="doc-main">
+    <h1>fio 3.36</h1>
+    <div class="sub">The I/O-engine enumeration, the workload-class matrix, data-integrity verification, group-level throughput and the registered gaps — the compatibility and correctness face · Canonical: the qa-suites run/qa-suites-findings.md</div>
+
+<h2 id="data"><span class="anchor">§4</span>fio 3.36 storage-IO testing: compatibility and correctness (qa-suites rounds 5/5b, 2026-11-04/05)</h2>
+    <p style="font-size:13.5px">Source: the qa-suites lane ledger run/qa-suites-findings.md (kernel 9f2c1cc6). Rig: x86_64 + KVM q35 2G/2cpu, fio 3.36 static musl (libaio engine builtin), one family per boot, 20 boots total. Zero KERNPANIC / DEADLOCK / ALLOCTHROW across all boots.</p>
+    <h3>Engine survey (tiny sequential jobs, one boot)</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Engine</th><th>Verdict</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">sync / psync / vsync / pvsync2 / mmap / splice</td><td><span class="chip ok">PASS</span> (rc=0 each)</td></tr>
+          <tr><td class="mono">sync + direct=1</td><td><span class="chip ok">PASS</span> — the O_DIRECT path works</td></tr>
+          <tr><td class="mono">posixaio</td><td><span class="chip warn">F-6</span>: 1-in-6 boot wedge (fdreap RCU-grace stall, a race class; 4 reproduction attempts, no capture)</td></tr>
+          <tr><td class="mono">libaio</td><td><span class="chip bad">GAP</span>: io_setup/io_submit return ENOSYS; fio exits cleanly with err=38, correct errno discipline</td></tr>
+          <tr><td class="mono">io_uring</td><td><span class="chip bad">F-7</span>: incomplete ring semantics crash fio in userspace (setup ok, mmap ok, SIGSEGV entering the enter contract; the kernel stays alive)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h3>Load classes (one family per boot, verifying data integrity)</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Class</th><th>Load</th><th>Verdict</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">seqrw</td><td>1M sequential write 64M + 1M read 64M</td><td><span class="chip ok">PASS</span></td></tr>
+          <tr><td class="mono">randrw</td><td>4k randread 64M + randwrite 64M</td><td><span class="chip ok">PASS</span></td></tr>
+          <tr><td class="mono">fsync</td><td>4k randwrite 8M fsync=1 (2,048 durability points)</td><td><span class="chip ok">PASS</span></td></tr>
+          <tr><td class="mono">mmaprwn</td><td>mmap engine 4k randrw 64M</td><td><span class="chip ok">PASS</span> (8,160 reads + 8,224 writes)</td></tr>
+          <tr><td class="mono">direct</td><td>4k randread/randwrite 64M direct=1</td><td><span class="chip ok">PASS</span></td></tr>
+          <tr><td class="mono">verify</td><td>8k randwrite 32M + crc32 read-back</td><td><span class="chip ok">PASS</span> — 4096+4096 full matrix, <b>zero verify errors</b></td></tr>
+          <tr><td class="mono">multi</td><td>4-job same-file contention (2 randread + randwrite + seq write)</td><td><span class="chip ok">PASS</span> — group <b>read 64MiB @711MiB/s, write 64MiB @688MiB/s</b></td></tr>
+          <tr><td class="mono">bigfile</td><td>256M write + 256M read + full crc32 verify</td><td><span class="chip ok">PASS</span> — 256M full-matrix verify clean</td></tr>
+          <tr><td class="mono">churn / fsyncburn / deepdirect</td><td>create/unlink churn ×40 · 4k fsync=4 sustained 240 s · direct=1 numjobs=4 randrw 128M (16.3k reads + 16.4k writes)</td><td><span class="chip ok">PASS</span> (each boot)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:13px;color:var(--text-3)">Scope note: this round used fio to verify IO engine paths and data integrity, not throughput (no same-rig Linux baseline exists; the multi-group ~700 MiB/s reading is an incidental page-cache-absorbed number). IO throughput performance is carried by §8 pbench P6 (Rux anchors: write_fsync 8442.6 / mkdrmdir 216.7 / unlink 54.6 / append 5.19 µs) and §2 lmbench bandwidth rows (bw_pipe 2.68×, bw_unix 1.88× vs Linux); a fio throughput benchmark is on the backfill queue. Post-completion note: the numjobs process-group reaping phase showed F-8 (the F-5 family: parked forker + KOT-KILL cascade, a scheduler-handoff issue handed to the sched lane); fio's own results are unaffected (rc=0, data correct). netperf / iperf3 / sockperf network benchmarks are on the qa-suites charter but have not run yet.</p>
+
+        
+    <h2 id="r5b"><span class="anchor">§2</span>Round-5b extended classes and throughput readings (qa-suites, 2026-11-05)</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Class</th><th>Load</th><th>Verdict</th><th class="num">Throughput (group level)</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">churn</td><td>4k randwrite 4M × 40 loops + unlink=1</td><td class="chip ok">PASS</td><td class="num">WRITE 546 MiB/s (io=160MiB, run=293 ms)</td></tr>
+        <tr><td class="mono">bigfile2</td><td>256M write + 256M read + full crc32 verify (write-side stamping)</td><td class="chip ok">PASS</td><td class="num">WRITE 361 MiB/s / READ 498–500 MiB/s (512 ms)</td></tr>
+        <tr><td class="mono">fsyncburn</td><td>4k randwrite 32M fsync=4, 240 s</td><td class="chip ok">PASS</td><td class="num">WRITE 311 KiB/s (8192 writes, 2047 fsyncs)</td></tr>
+        <tr><td class="mono">deepdirect</td><td>direct=1 numjobs=4 randrw 128M</td><td class="chip ok">PASS</td><td class="num">READ 8.6 MiB/s / WRITE 8.7 MiB/s (16,333 reads + 16,435 writes)</td></tr>
+        <tr><td class="mono">hunt1-3</td><td>the posixaio directed hunt array (single / 4 jobs / 8 jobs)</td><td class="chip ok">PASS (0 fdreap stalls)</td><td class="num">hunt2 WRITE 31.5 MiB/s; hunt3 READ 13.0 / WRITE 13.6 MiB/s</td></tr>
+        <tr><td class="mono">hunt4</td><td>a 7-engine sequence replay</td><td class="chip ok">PASS 7/7</td><td class="num">—</td></tr>
+      </tbody>
+    </table></div>
+    <p class="callout">Accounting note: group-level bw readings are page-cache-absorbed (the KVM host cache); the direct=1 classes exercise the real device path but are constrained by the image's free space (a 512M job hit ENOSPC; 48–64M jobs run normally). Per-job IOPS/latency percentiles were not captured (the RES tail-truncation artifact, on record); latency-graded collection is in the queue.</p>
+
+    <h2 id="gaps"><span class="anchor">§3</span>Registered gaps and adjudications</h2>
+    <ul>
+      <li><b>F-6 (posixaio)</b>: a 1-in-6 chance of a boot wedge — fdreap retire_complete's RCU grace never passes (the monopolist-window family); 4 directed reproductions + 2 replays failed to capture it again (1/6 stands); the signature is the unreapable fio child at T=150s + a hung-task pid &gt;120 s + the fdreap close-completion stall flood.</li>
+      <li><b>libaio</b>: io_setup/io_submit all ENOSYS (a UAPI gap, syscall/memory.rs); fio exits cleanly with err=38 — correct errno discipline: unimplemented, not misimplemented.</li>
+      <li><b>F-7 (io_uring)</b>: setup returns an fd and the ring mmap is served by io_uring_mmap_handler, then the enter contract dereferences NULL+0x1e → user SIGSEGV (2× SIGDEATH + a teardown #GP); the kernel stays alive — incomplete ring semantics, registered as an io_uring deepening item.</li>
+      <li><b>F-8</b>: the numjobs boots observed a parked forker + KOT-KILL cascade at teardown (the qsrun forker pid 306, 128 KSIG9s) — fio's own results unaffected (rc=0, data correct); handed to the scheduling lane.</li>
+    </ul>
+
+    <h2 id="method"><span class="anchor">§4</span>Rig and extension</h2>
+    <ul>
+      <li><b>Rig</b>: x86_64 KVM q35 <code>-cpu max</code> smp2/2G, virtio-blk (a private ext4 copy at run/rootfs-qa.img), <code>dfx=taskdump,watchdog</code>; one boot per workload class, 20 boots; PID 1 = /test/qa/qsrun (the cmds protocol: budget + program lines, QSRUN-BEGIN / RES|name|rc|tail / QS-ALL-DONE).</li>
+      <li><b>The fio build</b>: static musl 3.36 (the libaio engine built in), the source tarball committed, built by userspace/fio/build-x86.sh.</li>
+      <li><b>Extension</b>: append .cmds files under userspace/ci/classes/ (the line format <code>&lt;budget-s&gt; fio --name=… --filename=/test/qa/&lt;file&gt;</code>); run with INJBINS=run/fio-bin test/qrtests/run-suite-x86.sh -f "run/&lt;class&gt;.cmds".</li>
+    </ul>
+
+    <h2 id="fresh"><span class="anchor">§5</span>The 2026-11-17 re-run (current main debug kernel)</h2>
+    <p id="fresh-placeholder">In progress: both cyclictest modes, fio direct-read latency percentiles (JSON via a dump tool), pi_stress (the glibc PI-mutex path), hackbench inet multi-group. This section updates when the data lands.</p>
+
+    <div class="callout">Raw logs: the qa-suites worktree run/qa-suites-findings.md (canonical) + run/qa-runs-r5b/*.log; job definitions: userspace/ci/classes/*.cmds (all committed).</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to home</a></span>
+
+      <span class="foot-stats">Site visits <span id="busuanzi_value_site_pv"></span> · Visitors <span id="busuanzi_value_site_uv"></span></span></div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>

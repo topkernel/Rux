@@ -41,10 +41,17 @@
     <a href="../architecture/structure.html">Code layout</a>
     <a href="../architecture/riscv64.html">Porting guide</a>
     <a href="../architecture/kernel-lock.html">Lock ordering</a><div class="grp">Performance</div>
-    <a class="on" href="index.html">Performance</a>
-    <div class="grp">Security</div>
-    <a href="../security/index.html">Security & verification</a>
-    <div class="grp">Testing</div>
+    <a href="../debugging/index.html">Performance overview</a>
+    <a href="lmbench.html">lmbench</a>
+    <a href="geekbench.html">Geekbench 5</a>
+    <a href="fio.html">fio</a>
+    <a href="rttests.html">rt-tests</a>
+    <a href="microbench.html">Internal microbenchmarks</a><div class="grp">Security</div>
+    <a href="../security/index.html">Security overview</a>
+    <a href="../security/formal.html">Formal verification</a>
+    <a href="../security/unsafe.html">Layered unsafe ledger</a>
+    <a href="../security/taxonomy.html">Defect taxonomy</a>
+    <a href="../security/hardening.html">Hardening &amp; gaps</a><div class="grp">Testing</div>
     <a href="../testing/index.html">Overview</a>
     <a href="../testing/ci-pipeline.html">CI pipeline</a>
     <a href="../testing/ltp.html">LTP scan</a>
@@ -82,174 +89,38 @@
         <h3><span class="ico">📏</span>lmbench same-rig: 14 of 21 cases ahead or at parity, 7 behind</h3>
         <p><b>Ahead</b>: lat_pipe <b>4.6×</b>, lat_ctx 2P <b>4.0–4.5×</b>, lat_ctx 8P <b>3.6×</b>, bw_pipe <b>3.7×</b>, lat_sem <b>2.9×</b>, bw_unix <b>2.1×</b>, lat_unix <b>1.4×</b>, fstat <b>1.3×</b>; bcopy/bzero/mem_rd/usleep at or above parity, bw_file_rd faster than the timer granularity.</p>
         <p><b>Behind</b> (Rux/Linux): open <b>1.9–2.5×</b>, read <b>1.7–1.8×</b>, stat <b>1.4–1.9×</b>, write <b>1.4×</b>, null <b>1.1–1.3×</b>; fork/exec in the 1.08–1.19× band (2× campaign round 1 landed: fdget borrow + getppid O(1), calibration pass rate 14/15 vs 0/15).</p>
-        <div class="nums">best lead 4.6× · worst lag 2.5× · data in §2</div>
+        <div class="nums">best lead 4.6× · worst lag 2.5× · data on the <a href="lmbench.html">lmbench page</a></div>
       </div>
       <div class="card">
         <h3><span class="ico">🏁</span>Geekbench 5: single-core 2440 / multi-core 7709 (historical best)</h3>
         <p>Single-core total <b>2440 vs 2165 (113%)</b>, multi-core total <b>7709 vs 7027 (110%)</b>, best-of-runs convention (gb-opt round, 2026-11-15). Per-workload split from the 2026-11-04 full capture: multi-core 8 ahead / 5 parity / 8 behind; single-core 13 ahead / 3 parity / 5 behind.</p>
-        <div class="nums">per-workload data in §3 · rig note: Linux side is the host 4-CPU pin (taskset, topology-matched)</div>
+        <div class="nums">per-workload on the <a href="geekbench.html">Geekbench page</a> · rig note: Linux side is the host 4-CPU pin (taskset, topology-matched)</div>
       </div>
     </div>
     <div class="callout"><b>Gap structure:</b> the leads cover scheduler/wakeup (context switch, pipe, semaphore), IPC bandwidth (unix, pipe) and memory bandwidth; the remaining gaps concentrate in syscall entry and path resolution (null/read/write/stat/open at 1.2–2.5×). Under the older reference window the historic campaign had scored fork/exec at parity; the 2026-11-16 same-rig re-measure puts them in the 1.08–1.19× band (the reference kernel's switch family is measurement-window-sensitive — ratios are only meaningful within one session). The 5 correctness bugs the campaign found and fixed are listed after the §2 tables.</div>
 
-    <h2 id="lmb"><span class="anchor">§2</span>lmbench data (same-rig KVM, 21 cases)</h2>
-    <p style="font-size:13.5px">Source: the "Standing (2026-11-16, kernel main=017bf556b)" section of lmbench-report.md — the single authoritative table; the data below is that section. Method: both sides in the same rig (q35/KVM/-cpu host/smp2/2G, host CCD0 pin + performance governor + warmer thread); Rux boots with nohz_full=1, one case per boot with the retry rule; the Linux column runs the OHOS 6.6.101 kernel in the <b>same guest rig</b> with the same static binaries, 2 reps, medians. The switch/wakeup family is reference-window-sensitive — ratios are only meaningful within one session.</p>
-    <h3>Ahead / parity (14 cases)</h3>
+        <h2 id="suites"><span class="anchor">§2</span>The suite map (one page per suite)</h2>
     <div class="tbl-wrap">
       <table>
-        <thead><tr><th>Case</th><th class="num">Rux</th><th class="num">Linux (same-rig guest)</th><th>Verdict</th></tr></thead>
+        <thead><tr><th>Suite</th><th>Type</th><th>Status</th><th>Page</th></tr></thead>
         <tbody>
-          <tr><td class="mono">lat_pipe</td><td class="num">5.54–5.64 µs</td><td class="num">25.06–26.27 µs</td><td><span class="chip ok">ahead 4.6×</span></td></tr>
-          <tr><td class="mono">lat_ctx -s64 2</td><td class="num">2.86–3.25 µs</td><td class="num">12.84–12.97 µs</td><td><span class="chip ok">ahead 4.0–4.5×</span></td></tr>
-          <tr><td class="mono">lat_ctx -s64 8</td><td class="num">3.33 µs</td><td class="num">12.06–12.08 µs</td><td><span class="chip ok">ahead 3.6×</span></td></tr>
-          <tr><td class="mono">bw_pipe</td><td class="num">30,464 MB/s</td><td class="num">8,241 MB/s</td><td><span class="chip ok">ahead 3.7×</span></td></tr>
-          <tr><td class="mono">lat_sem</td><td class="num">1.52–1.57 µs</td><td class="num">4.47–4.55 µs</td><td><span class="chip ok">ahead 2.9×</span></td></tr>
-          <tr><td class="mono">bw_unix</td><td class="num">48,352 MB/s</td><td class="num">23,022 MB/s</td><td><span class="chip ok">ahead 2.1×</span></td></tr>
-          <tr><td class="mono">lat_unix</td><td class="num">2.26 µs</td><td class="num">3.24 µs</td><td><span class="chip ok">ahead 1.4×</span></td></tr>
-          <tr><td class="mono">lat_syscall fstat</td><td class="num">0.084–0.094 µs</td><td class="num">0.119–0.120 µs</td><td><span class="chip ok">ahead 1.3×</span></td></tr>
-          <tr><td class="mono">bw_mem 4m bzero</td><td class="num">71,489 MB/s</td><td class="num">58,245 MB/s</td><td><span class="chip ok">ahead 1.23×</span></td></tr>
-          <tr><td class="mono">bw_mem 1m bcopy</td><td class="num">84,520 MB/s</td><td class="num">74,252 MB/s</td><td><span class="chip ok">ahead 1.14×</span></td></tr>
-          <tr><td class="mono">lat_mem_rd 1MB</td><td class="num">2.20–2.25 ns/load</td><td class="num">2.375 ns/load</td><td><span class="chip ok">ahead 0.95×</span></td></tr>
-          <tr><td class="mono">lat_mem_rd 256MB</td><td class="num">6.49–6.65 ns/load</td><td class="num">6.691 ns/load</td><td><span class="chip ok">parity-plus (0.97×)</span></td></tr>
-          <tr><td class="mono">lat_usleep 1000</td><td class="num">1030.8 µs</td><td class="num">1052.8 µs</td><td><span class="chip ok">parity (0.98×)</span></td></tr>
-          <tr><td class="mono">bw_file_rd 1m io_only</td><td class="num">&lt; timer granularity</td><td class="num">23,045 MB/s</td><td><span class="chip ok">ahead (faster than measurable)</span></td></tr>
+          <tr><td>lmbench 3.0-a9</td><td>microbenchmarks (latency + bandwidth vs same-rig Linux)</td><td><span class="chip ok">the 2026-11-16 full standing + three perf-2x rounds</span></td><td><a href="lmbench.html">lmbench</a></td></tr>
+          <tr><td>Geekbench 5.5.1</td><td>the composite suite (21 workloads vs the 4-CPU reference)</td><td><span class="chip ok">SC 2440 / MC 7709 best-of-runs, bit-identical reproduction confirmed</span></td><td><a href="geekbench.html">Geekbench 5</a></td></tr>
+          <tr><td>fio 3.36</td><td>storage I/O (engine enumeration + data integrity + group throughput)</td><td><span class="chip ok">a 20-boot matrix; the F-6/F-7/libaio gaps on the page</span></td><td><a href="fio.html">fio</a></td></tr>
+          <tr><td>rt-tests v2.11 (cyclictest/hackbench/pi_stress)</td><td>real-time latency + scheduling stress</td><td><span class="chip ok">cyclictest r1-r4 + the 11-17 re-run; F-1/F-2 gaps on the page</span></td><td><a href="rttests.html">rt-tests</a></td></tr>
+          <tr><td>internal microbenchmarks (pbench + the Tier bands + the flush wall + cctx)</td><td>gate collectors and historical A/Bs</td><td><span class="chip ok">the SMP-8 re-bank + SP-7 + the NOHZ A/B</span></td><td><a href="microbench.html">Internal microbenchmarks</a></td></tr>
+          <tr><td>planned (no data, nothing listed)</td><td>netperf/iperf3, bonnie++/postmark/dbench, UnixBench, a kselftest subset, Trinity/syzkaller corpora</td><td><span class="chip cyan">the qa-suites onboarding sequence</span></td><td>—</td></tr>
         </tbody>
       </table>
     </div>
-    <h3>Behind (7 cases)</h3>
-    <div class="tbl-wrap">
-      <table>
-        <thead><tr><th>Case</th><th class="num">Rux</th><th class="num">Linux (same-rig guest)</th><th>Verdict</th><th>Optimization direction</th></tr></thead>
-        <tbody>
-          <tr><td class="mono">lat_syscall open</td><td class="num">0.756–1.00 µs</td><td class="num">0.394–0.397 µs</td><td><span class="chip bad">behind 1.9–2.5×</span> (±30% boot variance)</td><td>path-resolution tail + fd install</td></tr>
-          <tr><td class="mono">lat_syscall read</td><td class="num">0.103–0.108 µs</td><td class="num">0.060–0.062 µs</td><td><span class="chip bad">behind 1.7–1.8×</span></td><td>fill/copy tail (SMAP AC brackets)</td></tr>
-          <tr><td class="mono">lat_syscall stat</td><td class="num">0.32–0.45 µs</td><td class="num">0.239 µs</td><td><span class="chip bad">behind 1.4–1.9×</span> (±30% boot variance)</td><td>path resolution</td></tr>
-          <tr><td class="mono">lat_syscall write</td><td class="num">0.081 µs</td><td class="num">0.0597–0.0600 µs</td><td><span class="chip bad">behind 1.35×</span> (fdget borrow + PT_REGS gating, −7% cumulative)</td><td>fill/copy tail</td></tr>
-          <tr><td class="mono">lat_syscall null</td><td class="num">0.0435 µs</td><td class="num">0.0345–0.0430 µs</td><td><span class="chip bad">behind 1.0–1.25×</span> (−15% after getppid O(1))</td><td>syscall entry floor</td></tr>
-          <tr><td class="mono">lat_proc fork</td><td class="num">37.8–40.3 µs</td><td class="num">33.9 µs</td><td><span class="chip bad">behind 1.11–1.19×</span></td><td>measurable again after NOHZ; keep converging</td></tr>
-          <tr><td class="mono">lat_proc exec</td><td class="num">40.6 µs</td><td class="num">37.6 µs</td><td><span class="chip bad">behind 1.08×</span></td><td>near parity band</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <p style="font-size:13px;color:var(--text-3)">Mechanism note: the wins concentrate in scheduler/wakeup and IPC (cross-vCPU wakeup IPIs are expensive under virtualization; the single global run queue produces no cross-core reschedule storm) and memory bandwidth; syscall-latency rows run the guest's own entry (no vmexit), so the gaps there are real kernel differences. Rows without honest numbers this round: lat_mmap/lat_pagefault/bw_mmap_rd (not printed by this battery) and the net-server family (lat_tcp/udp/connect, bw_tcp, lat_fs) — not listed. The historic r14 table (2026-11-08 window) is archived in lmbench-report.md.</p>
-    <div class="callout"><b>Correctness bugs the campaign found and fixed</b> (the performance gaps were hiding them): a stale-rsp0-at-free UAF (the fork bistability root cause); a call_rcu zero-grace callback firing; a wake-monitor staleness inversion; the fdreap per-tick 10 ms close stall; the mainline munmap final-TLB-flush loss (5b4a4bc7).</div>
-
-    <h2 id="gb"><span class="anchor">§3</span>Geekbench 5 data (5.5.1, 9950X, KVM q35 smp4/4G, strong kernel; per-workload tables 2026-11-04, totals updated through the gb-opt round 2026-11-15)</h2>
-    <div class="tbl-wrap">
-      <table>
-        <thead><tr><th></th><th class="num">Rux</th><th class="num">Linux (4-CPU pin)</th><th>Verdict</th></tr></thead>
-        <tbody>
-          <tr><td><b>Multi-core total</b></td><td class="num">7709</td><td class="num">7027</td><td><span class="chip ok">110%</span></td></tr>
-          <tr><td><b>Single-core total</b></td><td class="num"><b>2440</b> (best-of-runs)</td><td class="num">2165</td><td><span class="chip ok">113%</span></td></tr>
-        </tbody>
-      </table>
-    </div>
-    <p style="font-size:13px;color:var(--text-3)">Rig note: the Linux side is the host-native <code>taskset -c 0-3</code> pin (topology-matched to the guest's 4 vCPUs; a same-rig KVM Linux comparison is queued). Totals use the best-of-runs convention (user rule, recorded): multi-core historical best 7709 (gb-opt round), single-core historical best 2440. Single-core caveat: two native self-runs differ by ~15% (2549 vs 2165) — deltas within ±15% are noise. The per-workload tables come from the 2026-11-04 full capture (that round's SC total was 2115; the quiet best is 2274 — same noise band).</p>
-
-    <h3>Single-core, per workload (all 21)</h3>
-    <div class="tbl-wrap">
-      <table>
-        <thead><tr><th>Class</th><th>Workload</th><th class="num">Rux</th><th class="num">Linux</th><th class="num">Rux/Linux</th></tr></thead>
-        <tbody>
-          <tr><td>AES-XTS</td><td>AES-XTS</td><td class="num"><b>8140</b> (re-run)</td><td class="num">7643</td><td class="num"><span class="chip ok">106%</span></td></tr>
-          <tr><td>Integer</td><td>Text Compression</td><td class="num">1446</td><td class="num">1536</td><td class="num">94%</td></tr>
-          <tr><td>Integer</td><td>Image Compression</td><td class="num">1901</td><td class="num">1813</td><td class="num"><span class="chip ok">105%</span></td></tr>
-          <tr><td>Integer</td><td>Navigation</td><td class="num">1416</td><td class="num">1753</td><td class="num"><span class="chip bad">81%</span></td></tr>
-          <tr><td>Integer</td><td>HTML5</td><td class="num">1991</td><td class="num">1651</td><td class="num"><span class="chip ok">121%</span></td></tr>
-          <tr><td>Integer</td><td>SQLite</td><td class="num">1833</td><td class="num">1480</td><td class="num"><span class="chip ok">124%</span></td></tr>
-          <tr><td>Integer</td><td>PDF Rendering</td><td class="num">1758</td><td class="num">2074</td><td class="num"><span class="chip bad">85%</span></td></tr>
-          <tr><td>Integer</td><td>Text Rendering</td><td class="num">1771</td><td class="num">1456</td><td class="num"><span class="chip ok">122%</span></td></tr>
-          <tr><td>Integer</td><td>Clang</td><td class="num">1891</td><td class="num">2161</td><td class="num"><span class="chip bad">88%</span></td></tr>
-          <tr><td>Integer</td><td>Camera</td><td class="num">2005</td><td class="num">1861</td><td class="num"><span class="chip ok">108%</span></td></tr>
-          <tr><td>Float</td><td>N-Body Physics</td><td class="num">2227</td><td class="num">1956</td><td class="num"><span class="chip ok">114%</span></td></tr>
-          <tr><td>Float</td><td>Rigid Body Physics</td><td class="num">1885</td><td class="num">1737</td><td class="num"><span class="chip ok">109%</span></td></tr>
-          <tr><td>Float</td><td>Gaussian Blur</td><td class="num">2136</td><td class="num">2149</td><td class="num">99%</td></tr>
-          <tr><td>Float</td><td>Face Detection</td><td class="num">2401</td><td class="num">2770</td><td class="num"><span class="chip bad">87%</span></td></tr>
-          <tr><td>Float</td><td>Horizon Detection</td><td class="num">1834</td><td class="num">1459</td><td class="num"><span class="chip ok">126%</span></td></tr>
-          <tr><td>Float</td><td>Image Inpainting</td><td class="num">4100</td><td class="num">4092</td><td class="num">100%</td></tr>
-          <tr><td>Float</td><td>HDR</td><td class="num">4563</td><td class="num">3614</td><td class="num"><span class="chip ok">126%</span></td></tr>
-          <tr><td>Float</td><td>Ray Tracing</td><td class="num">2725</td><td class="num">2042</td><td class="num"><span class="chip ok">133%</span></td></tr>
-          <tr><td>Float</td><td>Structure from Motion</td><td class="num">1806</td><td class="num">1661</td><td class="num"><span class="chip ok">109%</span></td></tr>
-          <tr><td>Float</td><td>Speech Recognition</td><td class="num">1712</td><td class="num">1741</td><td class="num">98%</td></tr>
-          <tr><td>Float</td><td>Machine Learning</td><td class="num">2511</td><td class="num">2028</td><td class="num"><span class="chip ok">124%</span></td></tr>
-        </tbody>
-      </table>
-    </div>
-    <p style="font-size:13px;color:var(--text-3)">AES-XTS single-core carries the post-fix re-run value (8047 / confirm run 8140): the earlier low score was a kernel serial-print-tax artifact (AES-NI was probe-proven healthy — guest aesenc throughput 1268 vs native 1244 M rounds/s); the high-load capture is discarded. Source: docs/test/geekbench-report.md, 2026-11-02 standing.</p>
-
-    <h3>Multi-core, per workload (all 21)</h3>
-    <div class="tbl-wrap">
-      <table>
-        <thead><tr><th>Class</th><th>Workload</th><th class="num">Rux</th><th class="num">Linux</th><th class="num">Rux/Linux</th></tr></thead>
-        <tbody>
-          <tr><td>AES-XTS</td><td>AES-XTS</td><td class="num">9331</td><td class="num">8972</td><td class="num"><span class="chip ok">104%</span></td></tr>
-          <tr><td>Integer</td><td>Text Compression</td><td class="num">5787</td><td class="num">3851</td><td class="num"><span class="chip ok">150%</span></td></tr>
-          <tr><td>Integer</td><td>Image Compression</td><td class="num">7410</td><td class="num">7481</td><td class="num">99%</td></tr>
-          <tr><td>Integer</td><td>Navigation</td><td class="num">4187</td><td class="num">3546</td><td class="num"><span class="chip ok">118%</span></td></tr>
-          <tr><td>Integer</td><td>HTML5</td><td class="num">8087</td><td class="num">7151</td><td class="num"><span class="chip ok">113%</span></td></tr>
-          <tr><td>Integer</td><td>SQLite</td><td class="num">7069</td><td class="num">6829</td><td class="num"><span class="chip ok">104%</span></td></tr>
-          <tr><td>Integer</td><td>PDF Rendering</td><td class="num">6566</td><td class="num">7632</td><td class="num"><span class="chip bad">86%</span></td></tr>
-          <tr><td>Integer</td><td>Text Rendering</td><td class="num">5794</td><td class="num">5924</td><td class="num">98%</td></tr>
-          <tr><td>Integer</td><td>Clang</td><td class="num">7359</td><td class="num">7823</td><td class="num"><span class="chip bad">94%</span></td></tr>
-          <tr><td>Integer</td><td>Camera</td><td class="num">7191</td><td class="num">7477</td><td class="num"><span class="chip bad">96%</span></td></tr>
-          <tr><td>Float</td><td>N-Body Physics</td><td class="num">7174</td><td class="num">7501</td><td class="num"><span class="chip bad">96%</span></td></tr>
-          <tr><td>Float</td><td>Rigid Body Physics</td><td class="num">7463</td><td class="num">7589</td><td class="num">98%</td></tr>
-          <tr><td>Float</td><td>Gaussian Blur</td><td class="num">7682</td><td class="num">7694</td><td class="num">100%</td></tr>
-          <tr><td>Float</td><td>Face Detection</td><td class="num">9949</td><td class="num">10296</td><td class="num"><span class="chip bad">97%</span></td></tr>
-          <tr><td>Float</td><td>Horizon Detection</td><td class="num">7111</td><td class="num">7616</td><td class="num"><span class="chip bad">93%</span></td></tr>
-          <tr><td>Float</td><td>Image Inpainting</td><td class="num">14838</td><td class="num">12349</td><td class="num"><span class="chip ok">120%</span></td></tr>
-          <tr><td>Float</td><td>HDR</td><td class="num">17872</td><td class="num">18962</td><td class="num"><span class="chip bad">94%</span></td></tr>
-          <tr><td>Float</td><td>Ray Tracing</td><td class="num">13374</td><td class="num">11370</td><td class="num"><span class="chip ok">118%</span></td></tr>
-          <tr><td>Float</td><td>Structure from Motion</td><td class="num">7155</td><td class="num">7486</td><td class="num"><span class="chip bad">96%</span></td></tr>
-          <tr><td>Float</td><td>Speech Recognition</td><td class="num">5939</td><td class="num">4537</td><td class="num"><span class="chip ok">131%</span></td></tr>
-          <tr><td>Float</td><td>Machine Learning</td><td class="num">5641</td><td class="num">5635</td><td class="num">100%</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <p style="font-size:13px;color:var(--text-3)">The multi-core split: the 11-04 capture's 7332 vs 7027 (104%) is pulled by scheduler-sensitive workloads — text compression (150%), inpainting (120%), speech recognition (131%), ray tracing (118%) — while AES-XTS SC 64% in the 11-04 capture was the pre-fix reading (now re-run at 105–106%); after the gb-opt round the multi-core best-of-runs stands at 7709 = 110%; Clang/PDF-rendering single-core residuals await isolated re-runs.</p>
-
-    <h2 id="fio"><span class="anchor">§4</span>fio 3.36 storage-IO testing: compatibility and correctness (qa-suites rounds 5/5b, 2026-11-04/05)</h2>
-    <p style="font-size:13.5px">Source: the qa-suites lane ledger run/qa-suites-findings.md (kernel 9f2c1cc6). Rig: x86_64 + KVM q35 2G/2cpu, fio 3.36 static musl (libaio engine builtin), one family per boot, 20 boots total. Zero KERNPANIC / DEADLOCK / ALLOCTHROW across all boots.</p>
-    <h3>Engine survey (tiny sequential jobs, one boot)</h3>
-    <div class="tbl-wrap">
-      <table>
-        <thead><tr><th>Engine</th><th>Verdict</th></tr></thead>
-        <tbody>
-          <tr><td class="mono">sync / psync / vsync / pvsync2 / mmap / splice</td><td><span class="chip ok">PASS</span> (rc=0 each)</td></tr>
-          <tr><td class="mono">sync + direct=1</td><td><span class="chip ok">PASS</span> — the O_DIRECT path works</td></tr>
-          <tr><td class="mono">posixaio</td><td><span class="chip warn">F-6</span>: 1-in-6 boot wedge (fdreap RCU-grace stall, a race class; 4 reproduction attempts, no capture)</td></tr>
-          <tr><td class="mono">libaio</td><td><span class="chip bad">GAP</span>: io_setup/io_submit return ENOSYS; fio exits cleanly with err=38, correct errno discipline</td></tr>
-          <tr><td class="mono">io_uring</td><td><span class="chip bad">F-7</span>: incomplete ring semantics crash fio in userspace (setup ok, mmap ok, SIGSEGV entering the enter contract; the kernel stays alive)</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <h3>Load classes (one family per boot, verifying data integrity)</h3>
-    <div class="tbl-wrap">
-      <table>
-        <thead><tr><th>Class</th><th>Load</th><th>Verdict</th></tr></thead>
-        <tbody>
-          <tr><td class="mono">seqrw</td><td>1M sequential write 64M + 1M read 64M</td><td><span class="chip ok">PASS</span></td></tr>
-          <tr><td class="mono">randrw</td><td>4k randread 64M + randwrite 64M</td><td><span class="chip ok">PASS</span></td></tr>
-          <tr><td class="mono">fsync</td><td>4k randwrite 8M fsync=1 (2,048 durability points)</td><td><span class="chip ok">PASS</span></td></tr>
-          <tr><td class="mono">mmaprwn</td><td>mmap engine 4k randrw 64M</td><td><span class="chip ok">PASS</span> (8,160 reads + 8,224 writes)</td></tr>
-          <tr><td class="mono">direct</td><td>4k randread/randwrite 64M direct=1</td><td><span class="chip ok">PASS</span></td></tr>
-          <tr><td class="mono">verify</td><td>8k randwrite 32M + crc32 read-back</td><td><span class="chip ok">PASS</span> — 4096+4096 full matrix, <b>zero verify errors</b></td></tr>
-          <tr><td class="mono">multi</td><td>4-job same-file contention (2 randread + randwrite + seq write)</td><td><span class="chip ok">PASS</span> — group <b>read 64MiB @711MiB/s, write 64MiB @688MiB/s</b></td></tr>
-          <tr><td class="mono">bigfile</td><td>256M write + 256M read + full crc32 verify</td><td><span class="chip ok">PASS</span> — 256M full-matrix verify clean</td></tr>
-          <tr><td class="mono">churn / fsyncburn / deepdirect</td><td>create/unlink churn ×40 · 4k fsync=4 sustained 240 s · direct=1 numjobs=4 randrw 128M (16.3k reads + 16.4k writes)</td><td><span class="chip ok">PASS</span> (each boot)</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <p style="font-size:13px;color:var(--text-3)">Scope note: this round used fio to verify IO engine paths and data integrity, not throughput (no same-rig Linux baseline exists; the multi-group ~700 MiB/s reading is an incidental page-cache-absorbed number). IO throughput performance is carried by §8 pbench P6 (Rux anchors: write_fsync 8442.6 / mkdrmdir 216.7 / unlink 54.6 / append 5.19 µs) and §2 lmbench bandwidth rows (bw_pipe 2.68×, bw_unix 1.88× vs Linux); a fio throughput benchmark is on the backfill queue. Post-completion note: the numjobs process-group reaping phase showed F-8 (the F-5 family: parked forker + KOT-KILL cascade, a scheduler-handoff issue handed to the sched lane); fio's own results are unaffected (rc=0, data correct). netperf / iperf3 / sockperf network benchmarks are on the qa-suites charter but have not run yet.</p>
-
-        <h2 id="method"><span class="anchor">§5</span>Method and rig</h2>
+<h2 id="method"><span class="anchor">§3</span>Method and rig</h2>
     <ul>
       <li><b>Same host, same accelerator</b>: both sides on the same host, the same QEMU q35 + KVM (<code>-accel kvm -cpu host</code>), the same Ubuntu rootfs shape, the same static benchmark binaries; one case per boot (the serial console interleaves with long sweeps, so a single-case boot is the only clean collection), PID 1 runner, 35 s in-guest budget (exceptions noted per case).</li>
       <li><b>Comparable-class rule</b>: debug vs release-strong never cross-compared (strong reads 10–30× lower on the floor families); TCG vs KVM never cross-compared.</li>
       <li><b>Anchor provenance</b>: gate anchors read only Rux's own medians — the Linux column never enters a Rux gate anchor (leg 32 found four cells transcribed from the Linux column; corrected and filed).</li>
     </ul>
 
-    <h2 id="gate"><span class="anchor">§6</span>The merge-gate performance dimension (three tiers + six domains)</h2>
+    <h2 id="gate"><span class="anchor">§4</span>The merge-gate performance dimension (three tiers + six domains)</h2>
     <p>Every merge is reviewed for both function and performance; baselines move only through merges that passed their own tier; a regression blocks the merge until fixed or justified in writing. Workflow details: <a href="../guides/development.html#gate">Contributing §3</a>.</p>
     <div class="tbl-wrap">
       <table>
@@ -277,44 +148,7 @@
     </div>
     <div class="callout"><b>Principle:</b> every subsystem that can affect performance must be under gate measurement — if no existing tool measures it, add a debug observability tool (gated off by default). Measurement is part of the change, not an afterthought.</div>
 
-    <h2 id="t1"><span class="anchor">§7</span>Tier 1: quiet syscost boot census (KVM q35 smp2/4G, 780 s window)</h2>
-    <div class="tbl-wrap">
-      <table>
-        <thead><tr><th>Metric</th><th>Baseline / band</th></tr></thead>
-        <tbody>
-          <tr><td>TERM-DESCHED census</td><td class="num">8 ± 2 (4+ consecutive boots read exactly 8/32)</td></tr>
-          <tr><td>WAKE-REFUSED census</td><td class="num">32 ± 4</td></tr>
-          <tr><td>WAKE-STRANDED</td><td class="num">5–31 organic, no 1001 ms grid class</td></tr>
-          <tr><td>Per-CPU tick rate</td><td class="num">≥99.5/s sustained to window end (current arc reads 104–124/s)</td></tr>
-          <tr><td>panics / new OOM classes</td><td class="num">0</td></tr>
-          <tr><td>Syscall volume (780 s)</td><td class="num">126.0M ± 10% (same lineage class)</td></tr>
-          <tr><td>clock_gettime avg</td><td class="num">3–4 µs (±20% or better)</td></tr>
-          <tr><td>nanosleep avg</td><td class="num">158–203 ms family, ≤244 ms one-sided (p7_sleep1ms probe 15.8 µs on the same core)</td></tr>
-          <tr><td>IF=0 share</td><td class="num">20.4% ± 3pp (EFLAGS-pair probe if0 v3, official)</td></tr>
-          <tr><td>Longest closed cli segment</td><td class="num">≤10 ms (now 6–9 ms; the one-shot 594–599 ms class is gone)</td></tr>
-        </tbody>
-      </table>
-    </div>
-
-    <h2 id="t2"><span class="anchor">§8</span>Tier 2: pbench P1–P7 anchors (SMP-8 standard, re-banked 2026-11-08)</h2>
-    <div class="callout"><b>The SMP-8 standard</b> (user directive 2026-11-07): every launch boots with at least 8 CPUs (Kernel.toml <code>smp.max_cpus = 8</code>; the three-arch drivers default to <code>-smp 8</code>). The old anchors were measured at 2–4 real CPUs and cannot judge an 8-CPU run — cross-configuration comparison is as meaningless as debug-vs-strong. The anchors below = the SMP-8 same-rig A/B baseline (base 166e4516 vs per-mm-break c127e4bc, KVM q35 4G).</div>
-    <div class="tbl-wrap">
-      <table>
-        <thead><tr><th>Group</th><th>Content (test/pbench.c)</th><th class="num">Anchor (SMP-8 KVM, µs)</th></tr></thead>
-        <tbody>
-          <tr><td>P1</td><td>p1_null null syscall (N=1e6) / p1_clock_gettime (N=1e6)</td><td class="num">0.280 / —</td></tr>
-          <tr><td>P2</td><td>p2_ctxsw: 1-byte pipe ping-pong context switch (pinned)</td><td class="num"><b>0.756</b> (post per-mm-break; baseline 1.222 → 8 CPUs switch 38% faster)</td></tr>
-          <tr><td>P3</td><td>Page-fault family: p3a first-touch anon / p3b COW / p3c filemap / p3d concurrent</td><td class="num">p3b_cow 18.424 (+58% at SMP-8 — an honest gap, below)</td></tr>
-          <tr><td>P4</td><td>p4_fork_exit / p4_fork_exec (N=1e3)</td><td class="num">sub-ms class (r11: fork copy 910→574 ns, exit drop 4491→825 ns; exit body 17.9→7.3 µs)</td></tr>
-          <tr><td>P5</td><td>IPC family: p5a pipe round trip / p5b unix dgram / p5c stream write / p5e-p5f flow discriminators</td><td class="num">p5 family judged by gate bands</td></tr>
-          <tr><td>P6</td><td>Filesystem family: stat / openclose / getdents / read_cached / write_fsync / append / mkdir+rmdir / unlink</td><td class="num">write_fsync 8613.1 / mkdrmdir 269.8 / unlink 67.7 / append 6.402 (stat ±25% row noise)</td></tr>
-          <tr><td>P7</td><td>p7_sleep1ms: nanosleep(1ms) overshoot (med/p99/max, N=1e4)</td><td class="num">15.8 (probe basis)</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <p style="font-size:13px;color:var(--text-3)">Open cost (stated plainly): the COW fault's +58% at SMP-8 (12.07→18.42 µs) is the price of the SMP-8 standard, recorded as an honest gap in the safety-performance ledger; it matters for fork-heavy service graphs (OH/GNOME). The next optimization target is the COW fault path's cross-CPU shootdown, not the break handling itself. The four-configuration comparison (8/4 CPUs × base/fix) is in the baseline file's "Re-bank: SMP-8 standard" section.</p>
-
-    <h2 id="campaigns"><span class="anchor">§9</span>Landed performance work (same-rig A/B measured)</h2>
+    <h2 id="campaigns"><span class="anchor">§5</span>Landed performance work (same-rig A/B measured)</h2>
     <p>Each item below was attributed with a same-rig A/B; gains and costs are recorded in the same table (see docs/architecture/rust-native-register.md):</p>
     <div class="tbl-wrap">
       <table>
@@ -340,7 +174,7 @@
       </table>
     </div>
 
-    <h2 id="queue"><span class="anchor">§9</span>Optimization queue (open gaps, priority order)</h2>
+    <h2 id="queue"><span class="anchor">§6</span>Optimization queue (open gaps, priority order)</h2>
     <ul>
       <li><b>COW-fault cross-CPU shootdown</b>: the +58% (18.42 µs) honest gap at SMP-8, affecting fork-heavy service graphs — the next main target.</li>
       <li><b>lat_syscall open 1.61× / stat 1.32×</b>: open's tail (memo-hit 80–90 ns + fd install); stat's tail v3 unblocked now that the call_rcu contract is fixed — retry.</li>
@@ -350,7 +184,7 @@
       <li><b>Backfill queue</b>: a fio throughput benchmark (same-rig Linux baseline, direct=1); the Geekbench same-rig KVM comparison; page-cache hit-rate absolutes, PCP watermarks, binder throughput.</li>
     </ul>
 
-    <h2 id="tools"><span class="anchor">§11</span>debug measurement toolchain</h2>
+    <h2 id="tools"><span class="anchor">§7</span>debug measurement toolchain</h2>
     <ul>
       <li><b>syscost</b>: boot census (syscall volume, census counts, tick rate, per-op averages) — the Tier 1 collector.</li>
       <li><b>pbench</b> (test/pbench.c): the P1–P7 microbenchmark probes — the Tier 2 collector.</li>

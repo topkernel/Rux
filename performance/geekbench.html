@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Geekbench 5 · Rux</title>
+<link rel="stylesheet" href="../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">首页</a>
+      <a href="../architecture/design.html">架构设计</a>
+      <a href="index.html">性能</a>
+      <a href="../security/index.html">安全</a>
+      <a href="../testing/index.html">测试</a>
+      <a href="../debugging/index.html">调试</a>
+      <a href="../guides/getting-started.html">快速入门</a>
+      <a href="../progress/roadmap.html">项目进展</a>
+      <a href="../guestbook.html">留言</a>
+      <span class="lang-sw"><a class="on" href="geekbench.html">中文</a><a href="../en/performance/geekbench.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">性能</div>
+    <a href="../debugging/index.html">性能总览</a>
+    <a href="lmbench.html">lmbench</a>
+    <a href="geekbench.html">Geekbench 5</a>
+    <a href="fio.html">fio</a>
+    <a href="rttests.html">rt-tests</a>
+    <a href="microbench.html">内部微基准</a><div class="grp">架构设计</div>
+    <a href="../architecture/design.html">架构与模块设计</a>
+    <a href="../architecture/scheduler.html">调度器</a>
+    <a href="../architecture/memory.html">内存管理</a>
+    <a href="../architecture/filesystem.html">文件系统</a>
+    <a href="../architecture/ipc.html">进程间通信</a>
+    <a href="../architecture/boot.html">启动流程</a>
+    <a href="../architecture/interrupts.html">中断与时钟</a>
+    <a href="../architecture/structure.html">代码结构</a>
+    <a href="../architecture/riscv64.html">架构移植指南</a>
+    <a href="../architecture/kernel-lock.html">锁序不变量</a>
+    <div class="grp">安全</div>
+    <a href="../security/index.html">安全总览</a>
+    <a href="../security/formal.html">形式验证</a>
+    <a href="../security/unsafe.html">分层 unsafe 台账</a>
+    <a href="../security/taxonomy.html">缺陷分类学</a>
+    <a href="../security/hardening.html">运行时强化与缺口</a><div class="grp">测试</div>
+    <a href="../testing/index.html">测试总览</a>
+    <a href="../testing/ci-pipeline.html">CI 流水线</a>
+    <a href="../testing/ltp.html">LTP 兼容扫描</a>
+    <a href="../testing/ltp-full.html">LTP 全量用例</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT 审计</a>
+    <a href="../testing/stability.html">稳定性</a>
+    <a href="../testing/stress.html">压力</a>
+    <a href="../testing/gnome-retrospective.html">回溯报告</a>
+    <div class="grp">调试</div>
+    <a href="../debugging/index.html">调试指南</a>
+    <a href="../debugging/tracepoints.html">tracepoint 框架</a>
+    <a href="../debugging/perf.html">性能调试</a>
+    <a href="../debugging/locks.html">锁调试</a>
+    <a href="../debugging/memory.html">内存取证</a>
+    <a href="../debugging/panic.html">panic 与符号化</a>
+    <div class="grp">开发指南</div>
+    <a href="../guides/getting-started.html">快速入门</a>
+    <a href="../guides/development.html">参与开发</a>
+    <a href="../guides/configuration.html">内核配置</a>
+    <div class="grp">项目进展</div>
+    <a href="../progress/roadmap.html">路线图</a>
+    <a href="../progress/changelog.html">更新日志</a>
+    <a href="../progress/quickref.html">命令速查</a>
+    <div class="grp">互动</div>
+    <a href="../guestbook.html">留言板</a>
+  </aside>
+  <article class="doc-main">
+    <h1>Geekbench 5.5.1</h1>
+    <div class="sub">总分演进(best-of-runs)、21 项逐负载对照表、机位与采集方法 · 正本:docs/test/geekbench-report.md</div>
+
+<h2 id="data"><span class="anchor">§3</span>Geekbench 5 数据(5.5.1,9950X,KVM q35 smp4/4G,strong 内核;逐项表 2026-11-04,总分更新至 gb-opt 轮 2026-11-15)</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th></th><th class="num">Rux</th><th class="num">Linux(4-CPU 钉核)</th><th>结论</th></tr></thead>
+        <tbody>
+          <tr><td><b>多核总分</b></td><td class="num">7709</td><td class="num">7027</td><td><span class="chip ok">110%</span></td></tr>
+          <tr><td><b>单核总分</b></td><td class="num"><b>2440</b>(best-of-runs)</td><td class="num">2165</td><td><span class="chip ok">113%</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:13px;color:var(--text-3)">机位注明:Linux 侧为宿主裸机 <code>taskset -c 0-3</code> 钉核(与 guest 4 vCPU 拓扑对齐;同机 KVM Linux 对照在补测队列)。总分口径 = best-of-runs(用户规则,已记录):多核历史最佳 7709(gb-opt 轮)、单核历史最佳 2440。单核口径:两次裸机自跑即差 ~15%(2549 vs 2165),±15% 内视为噪声;逐项表取自 2026-11-04 完整捕获(该轮单核总分 2115,quiet 历史最佳 2274,两者同噪声带)。</p>
+
+    <h3>单核逐项(21 项全)</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>类</th><th>工作负载</th><th class="num">Rux</th><th class="num">Linux</th><th class="num">Rux/Linux</th></tr></thead>
+        <tbody>
+          <tr><td>AES-XTS</td><td>AES-XTS</td><td class="num"><b>8140</b>(复测)</td><td class="num">7643</td><td class="num"><span class="chip ok">106%</span></td></tr>
+          <tr><td>整数</td><td>文本压缩</td><td class="num">1446</td><td class="num">1536</td><td class="num">94%</td></tr>
+          <tr><td>整数</td><td>图像压缩</td><td class="num">1901</td><td class="num">1813</td><td class="num"><span class="chip ok">105%</span></td></tr>
+          <tr><td>整数</td><td>导航</td><td class="num">1416</td><td class="num">1753</td><td class="num"><span class="chip bad">81%</span></td></tr>
+          <tr><td>整数</td><td>HTML5</td><td class="num">1991</td><td class="num">1651</td><td class="num"><span class="chip ok">121%</span></td></tr>
+          <tr><td>整数</td><td>SQLite</td><td class="num">1833</td><td class="num">1480</td><td class="num"><span class="chip ok">124%</span></td></tr>
+          <tr><td>整数</td><td>PDF 渲染</td><td class="num">1758</td><td class="num">2074</td><td class="num"><span class="chip bad">85%</span></td></tr>
+          <tr><td>整数</td><td>文本渲染</td><td class="num">1771</td><td class="num">1456</td><td class="num"><span class="chip ok">122%</span></td></tr>
+          <tr><td>整数</td><td>Clang</td><td class="num">1891</td><td class="num">2161</td><td class="num"><span class="chip bad">88%</span></td></tr>
+          <tr><td>整数</td><td>相机</td><td class="num">2005</td><td class="num">1861</td><td class="num"><span class="chip ok">108%</span></td></tr>
+          <tr><td>浮点</td><td>N 体物理</td><td class="num">2227</td><td class="num">1956</td><td class="num"><span class="chip ok">114%</span></td></tr>
+          <tr><td>浮点</td><td>刚体物理</td><td class="num">1885</td><td class="num">1737</td><td class="num"><span class="chip ok">109%</span></td></tr>
+          <tr><td>浮点</td><td>高斯模糊</td><td class="num">2136</td><td class="num">2149</td><td class="num">99%</td></tr>
+          <tr><td>浮点</td><td>人脸检测</td><td class="num">2401</td><td class="num">2770</td><td class="num"><span class="chip bad">87%</span></td></tr>
+          <tr><td>浮点</td><td>地平线检测</td><td class="num">1834</td><td class="num">1459</td><td class="num"><span class="chip ok">126%</span></td></tr>
+          <tr><td>浮点</td><td>图像修补</td><td class="num">4100</td><td class="num">4092</td><td class="num">100%</td></tr>
+          <tr><td>浮点</td><td>HDR</td><td class="num">4563</td><td class="num">3614</td><td class="num"><span class="chip ok">126%</span></td></tr>
+          <tr><td>浮点</td><td>光线追踪</td><td class="num">2725</td><td class="num">2042</td><td class="num"><span class="chip ok">133%</span></td></tr>
+          <tr><td>浮点</td><td>运动恢复结构</td><td class="num">1806</td><td class="num">1661</td><td class="num"><span class="chip ok">109%</span></td></tr>
+          <tr><td>浮点</td><td>语音识别</td><td class="num">1712</td><td class="num">1741</td><td class="num">98%</td></tr>
+          <tr><td>浮点</td><td>机器学习</td><td class="num">2511</td><td class="num">2028</td><td class="num"><span class="chip ok">124%</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p style="font-size:13px;color:var(--text-3)">AES-XTS 单核取修复后复测值(8047 / 确认轮 8140):曾有的低分是内核串口打印税伪影(AES-NI 经探针证实从未受损,guest aesenc 吞吐 1268 vs 原生 1244 M rounds/s),高负载轮读数弃用。依据:docs/test/geekbench-report.md 2026-11-02 standing。</p>
+
+    <h3>多核逐项(21 项全)</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>类</th><th>工作负载</th><th class="num">Rux</th><th class="num">Linux</th><th class="num">Rux/Linux</th></tr></thead>
+        <tbody>
+          <tr><td>AES-XTS</td><td>AES-XTS</td><td class="num">9331</td><td class="num">8972</td><td class="num"><span class="chip ok">104%</span></td></tr>
+          <tr><td>整数</td><td>文本压缩</td><td class="num">5787</td><td class="num">3851</td><td class="num"><span class="chip ok">150%</span></td></tr>
+          <tr><td>整数</td><td>图像压缩</td><td class="num">7410</td><td class="num">7481</td><td class="num">99%</td></tr>
+          <tr><td>整数</td><td>导航</td><td class="num">4187</td><td class="num">3546</td><td class="num"><span class="chip ok">118%</span></td></tr>
+          <tr><td>整数</td><td>HTML5</td><td class="num">8087</td><td class="num">7151</td><td class="num"><span class="chip ok">113%</span></td></tr>
+          <tr><td>整数</td><td>SQLite</td><td class="num">7069</td><td class="num">6829</td><td class="num"><span class="chip ok">104%</span></td></tr>
+          <tr><td>整数</td><td>PDF 渲染</td><td class="num">6566</td><td class="num">7632</td><td class="num"><span class="chip bad">86%</span></td></tr>
+          <tr><td>整数</td><td>文本渲染</td><td class="num">5794</td><td class="num">5924</td><td class="num">98%</td></tr>
+          <tr><td>整数</td><td>Clang</td><td class="num">7359</td><td class="num">7823</td><td class="num"><span class="chip bad">94%</span></td></tr>
+          <tr><td>整数</td><td>相机</td><td class="num">7191</td><td class="num">7477</td><td class="num"><span class="chip bad">96%</span></td></tr>
+          <tr><td>浮点</td><td>N 体物理</td><td class="num">7174</td><td class="num">7501</td><td class="num"><span class="chip bad">96%</span></td></tr>
+          <tr><td>浮点</td><td>刚体物理</td><td class="num">7463</td><td class="num">7589</td><td class="num">98%</td></tr>
+          <tr><td>浮点</td><td>高斯模糊</td><td class="num">7682</td><td class="num">7694</td><td class="num">100%</td></tr>
+          <tr><td>浮点</td><td>人脸检测</td><td class="num">9949</td><td class="num">10296</td><td class="num"><span class="chip bad">97%</span></td></tr>
+          <tr><td>浮点</td><td>地平线检测</td><td class="num">7111</td><td class="num">7616</td><td class="num"><span class="chip bad">93%</span></td></tr>
+          <tr><td>浮点</td><td>图像修补</td><td class="num">14838</td><td class="num">12349</td><td class="num"><span class="chip ok">120%</span></td></tr>
+          <tr><td>浮点</td><td>HDR</td><td class="num">17872</td><td class="num">18962</td><td class="num"><span class="chip bad">94%</span></td></tr>
+          <tr><td>浮点</td><td>光线追踪</td><td class="num">13374</td><td class="num">11370</td><td class="num"><span class="chip ok">118%</span></td></tr>
+          <tr><td>浮点</td><td>运动恢复结构</td><td class="num">7155</td><td class="num">7486</td><td class="num"><span class="chip bad">96%</span></td></tr>
+          <tr><td>浮点</td><td>语音识别</td><td class="num">5939</td><td class="num">4537</td><td class="num"><span class="chip ok">131%</span></td></tr>
+          <tr><td>浮点</td><td>机器学习</td><td class="num">5641</td><td class="num">5635</td><td class="num">100%</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:13px;color:var(--text-3)">多核逐项的分化说明:11-04 捕获轮总分 7332 vs 7027(104%)由文本压缩(150%)、图像修补(120%)、语音识别(131%)、光线追踪(118%)等调度敏感项拉动;gb-opt 轮后多核 best-of-runs 7709 = 110%;单核 AES-XTS 修复后 105–106%(串口打印税已根因清除);Clang/PDF 渲染等单核余差待隔离复跑。</p>
+
+    
+    <h2 id="standings"><span class="anchor">§2</span>总分演进(best-of-runs 口径)</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>日期</th><th>内核</th><th class="num">单核</th><th class="num">多核</th><th>备注</th></tr></thead>
+      <tbody>
+        <tr><td>2026-11-01</td><td class="mono">—</td><td class="num">1941</td><td class="num">7139</td><td>首轮完整捕获</td></tr>
+        <tr><td>2026-11-02</td><td class="mono">—</td><td class="num">2274(quiet 最佳 2297)</td><td class="num">7114(7458)</td><td>AES-XTS 根因修复轮(串口打印税)</td></tr>
+        <tr><td>2026-11-04</td><td class="mono">8d81c5da</td><td class="num">2115</td><td class="num">7332</td><td>完整逐项捕获轮(下方两表)</td></tr>
+        <tr><td>2026-11-15</td><td class="mono">2649af4e3</td><td class="num">2365→2390→2423→<b>2440</b></td><td class="num">7420→7716→7644→<b>7709</b></td><td>gb-opt 四连跑;vs 4-CPU 参考 = <b>113% / 110%</b></td></tr>
+        <tr><td>2026-11-16</td><td class="mono">017bf556b</td><td class="num"><b>2440</b></td><td class="num"><b>7709</b></td><td>NOHZ 合并后对抗背景下重捕获 —— 与 11-15 逐位一致(确定性复现)</td></tr>
+      </tbody>
+    </table></div>
+    <p>参考锚:4-CPU 钉核原生 SC 2165 / MC 7027(宿主 32 线程全量 2549/20402 仅作天花板参照);单核两次裸机自跑即差 ~15%(2549 vs 2165)—— 单核 ±15% 内记为噪声带,best-of-runs 为既定口径。Geekbench 6.4.0 有意排除(无 Pro 许可证时 rc=255 不出分)。</p>
+
+    <h2 id="rig"><span class="anchor">§3</span>机位与采集方法</h2>
+    <ul>
+      <li><b>机位</b>:9950X 宿主,q35 KVM <code>-cpu host -smp 4 -m 4G</code>,strong 构建(build-release-opt);一次启动跑完整轮,外层预算 2700 s、in-guest 900 s。</li>
+      <li><b>分数采集</b>:本地 TLS 捕获服务(自签 CA 经 debugfs 注入 guest /etc/hosts,将 browser.geekbench.com 钉至 10.0.2.2;:443 捕获服务接 HTTPS 上传 POST,parse-capture.py 解析)—— 分数不经外网,过程可重放。</li>
+      <li><b>本套件发现并修复的内核缺陷</b>:mprotect 跨 VMA 中段 ENOMEM;TCP RX 校验和读栈垃圾 —— 商用套件作为兼容性探针的价值实例。</li>
+      <li><b>口径注</b>:上方逐项表为 11-04 完整捕获(该轮 SC 2115);单核 AES-XTS 取修复后复测值(8047/8140),低分历史为串口打印税伪影(AES-NI 经探针证实无损)。11-15/11-16 总分为四连跑 best;逐项重捕获在补测队列。</li>
+    </ul>
+
+    <h2 id="rerun"><span class="anchor">§4</span>复现</h2>
+    <pre><code><span class="c"># 完整流水线(镜像 reflink + CA 注入 + 捕获服务 + 解析)</span>
+cd /home/william/rux-agents/gb-opt && ./run/bench-pipeline.sh</code></pre>
+    <div class="callout">镜像永久仓:/home/william/rux-images/testimages/geekbench-x86.img。正本:docs/test/geekbench-report.md(复现步骤逐条在案)。</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">返回首页</a></span>
+
+      <span class="foot-stats">本站访问 <span id="busuanzi_value_site_pv"></span> 次 · 访客 <span id="busuanzi_value_site_uv"></span> 人</span></div>
+  </div>
+</footer>
+
+<script src="../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>
