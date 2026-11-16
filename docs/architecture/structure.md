@@ -6,11 +6,11 @@ This document describes the directory structure and file organization of the Rux
 
 ## Code Statistics
 
-**Last Updated**: 2026-11-15 (statistics; narrative from the 2026-09 sweep)
+**Last Updated**: 2026-11-16 (statistics; narrative from the 2026-09 sweep)
 
 ### Overall Statistics
 
-*Statistics recounted 2026-11-15 on main @ 98702db0. Counting method:
+*Statistics recounted 2026-11-16 on main @ fe5538c4e. Counting method:
 tracked files under `kernel/` via `git ls-files 'kernel/*'`, lines via
 `wc -l` — keep this convention so the next refresh stays comparable.
 The module narrative below the tables dates from the earlier sweep and
@@ -19,43 +19,43 @@ the tables win.*
 
 | Metric | Value |
 |--------|-------|
-| **Total Source Files** | 623 (kernel/: Rust + per-arch assembly + the verify crate) |
-| **Total Lines of Code** | **384,307 lines (377,650 Rust)** |
+| **Total Source Files** | 626 (kernel/: Rust + per-arch assembly + the verify crate) |
+| **Total Lines of Code** | **393,355 lines (386,698 Rust)** |
 | **Architectures** | riscv64 (primary) · x86_64 (q35) · aarch64 (virt) |
 
 ### Module Code Distribution
 
-*Scope: kernel/src (453 files, 354,945 lines; percentages against that
+*Scope: kernel/src (456 files, 363,936 lines; percentages against that
 total). kernel/verify (168 files, 28,216 lines) plus Cargo/build files
 make up the remainder of the kernel/ totals above.*
 
 | Module | Files | Lines of Code | Percentage | Description |
 |--------|-------|---------------|------------|-------------|
-| **fs/** | 84 | 67,491 | 19.0% | File system (ext4, procfs, jbd2, page cache, VFS) |
-| **arch/** | 77 | 48,089 | 13.5% | Three architectures (riscv64, x86_64, aarch64) |
-| **syscall/** | 12 | 39,442 | 11.1% | System call dispatch and implementations |
-| **drivers/** | 40 | 25,413 | 7.2% | virtio, DRM, serial, timer, input |
-| **ipc/** | 9 | 21,409 | 6.0% | IPC (System V, POSIX MQ, binder) |
-| **net/** | 18 | 20,669 | 5.8% | TCP/UDP/unix/netlink stack |
-| **dfx/** | 39 | 18,887 | 5.3% | Observability (syscost, kallsyms, debugfs, taskdump, watchdog, traces) |
-| **mm/** | 30 | 18,895 | 5.3% | Memory (zones, pcp pagesets, VMA, page cache glue, swap) |
-| **sync/** | 13 | 18,788 | 5.3% | Synchronization primitives |
-| **process/** | 12 | 17,552 | 4.9% | Process management (fork/exec/exit, signals) |
-| **sched/** | 11 | 16,885 | 4.8% | Global run queue scheduler |
-| **tests/** | 76 | 15,236 | 4.3% | In-kernel guest test suite |
-| **trace/** | 2 | 3,475 | 1.0% | Unified trace-event framework (tracefs file side) |
-| **other** | 30 | 22,714 | 6.4% | interrupt, timer, io_uring, perf, security, module + 13 top-level files |
+| **fs/** | 85 | 69,821 | 19.2% | File system (ext4, procfs, jbd2, page cache, VFS) |
+| **arch/** | 77 | 48,812 | 13.4% | Three architectures (riscv64, x86_64, aarch64) |
+| **syscall/** | 12 | 41,083 | 11.3% | System call dispatch and implementations |
+| **drivers/** | 40 | 25,436 | 7.0% | virtio, DRM, serial, timer, input |
+| **ipc/** | 9 | 21,758 | 6.0% | IPC (System V, POSIX MQ, binder; binder.rs 14,144) |
+| **net/** | 18 | 20,857 | 5.7% | TCP/UDP/unix/netlink stack (tcp 5,250, unix 4,372) |
+| **sync/** | 13 | 19,843 | 5.5% | Synchronization primitives |
+| **mm/** | 30 | 19,432 | 5.3% | Memory (zones, pcp pagesets, VMA, page cache glue, swap) |
+| **dfx/** | 40 | 19,395 | 5.3% | Observability (syscost, kallsyms, debugfs, taskdump, watchdog, traces) |
+| **process/** | 12 | 17,709 | 4.9% | Process management (fork/exec/exit, signals) |
+| **sched/** | 11 | 17,291 | 4.7% | Global run queue scheduler |
+| **tests/** | 76 | 15,241 | 4.2% | In-kernel guest test suite |
+| **trace/** | 2 | 3,795 | 1.0% | Unified trace-event framework (tracefs file side) |
+| **other** | 31 | 23,463 | 6.4% | interrupt, timer, io_uring, perf, security, module + 13 top-level files |
 
 ### Test Statistics
 
 | Test Type | Count | Description |
 |-----------|-------|-------------|
-| **Kernel Unit Tests** | 73 files; 1267 cases riscv64 / 1263 x86_64, all green | In-guest suite via `make test` |
+| **Kernel Unit Tests** | 76 files; 1328 cases riscv64 (2026-11-16) / 1263 x86_64 (2026-11-01), all green | In-guest suite via `make test` |
 | **Formal Verification** | 157 Kani harnesses; 1104 host proptests; 4 SPIN models; Miri nightly | Mirror-sync enforced; see docs/test/formal-verification-report.md |
-| **LTP** | 1133/1869 current expected (x86_64 KVM; 2026-11-15 audited scan 1122 + 11 tail fixes) · 1028/1869 (riscv64 TCG) | docs/test/ltp-report.md |
+| **LTP** | 1139/1869 current expected (x86_64 KVM; official scan3 corrected 1138 on 2026-11-16 + the tgkill03 fix) · 1028/1869 (riscv64 TCG) | docs/test/ltp-report.md |
 | **Benchmarks** | lmbench + Geekbench 5 dual-kernel baselines | docs/test/ |
 | **Linux LTP Tests** | 1,838 tests | Official LTP test suite (syscall, mem, fs, etc.) |
-| **Total** | **4,238 test cases (1,267 in-kernel riscv64 + 1,133 LTP passes + 1,838 LTP inventory) + 161 formal verification proofs** | Comprehensive kernel verification coverage |
+| **Total** | **4,305 test cases (1,328 in-kernel riscv64 + 1,139 LTP passes + 1,838 LTP inventory) + 161 formal verification proofs** | Comprehensive kernel verification coverage |
 
 ---
 
