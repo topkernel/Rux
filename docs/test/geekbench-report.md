@@ -553,6 +553,17 @@ handle_scheduler).
 5. **B row residual 1.7x** (random-anon fault) — alloc+zero+bookkeeping
    below the walk layer.
 
+# 2026-11-16 standing — main@017bf556b (NOHZ merged)
+
+One confirmation boot on the post-NOHZ main (nohz_full=1, host under
+4-6 foreign QEMUs — a hostile background, not a quiet window):
+**SC 2440 / MC 7709** — bit-identical to the 11-15 best-ever totals,
+from a FRESH capture (captures.log 2026-11-16 02:51, byte-different
+from the 11-15 capture). Deterministic reproduction under load: the
+NOHZ merge is GB-neutral and the score is robust to host background.
+Upload leg still exits 255 ("Unable to parse server response") — the
+score path is the capture POST (parse-capture.py), not the browser.
+
 ## Artifacts (gb-opt worktree run/)
 
 `geekbench/{scores-base,scores-main,scores-opt,scores-final}.txt`,

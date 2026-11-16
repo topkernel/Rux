@@ -54,6 +54,72 @@ python3 userspace/lmbench/make-report.py run/lmbench-rux.txt run/lmbench-linux.t
 
 <!--RESULTS-->
 
+## Standing (2026-11-16, kernel main=017bf556b — NOHZ merged; guest-vs-guest correction; rig discipline)
+
+Round facts, then the corrected column.
+
+**Rig discipline (applies to every future battery):**
+- Host CCD pinning: `taskset -c 0-7,16-23` (9950X CCD0). Cross-CCD
+  vCPU placement is the single biggest strand amplifier — unpinned
+  sequential boots strand calibration stochastically (~40%/boot),
+  CCD0-pinned concurrent boots pass 4/4.
+- `performance` cpufreq governor during measurement (powersave ramps
+  mid-calibration and breaks the 0.25% proportionality check).
+- A nice-19 warmer thread on one CCD0 logical CPU keeps the package out
+  of deep idle between sequential boots (battery TIMEOUT rows dropped
+  9 -> 3); remaining TIMEOUT rows get the retry rule.
+- The native reference column (run-linux.sh) is a HARDWARE CEILING,
+  never a ratio denominator for the wake/switch family. Ratios are
+  guest-vs-guest only. (A 2026-11-16 table briefly published
+  ctx/pipe/sem as 2-3.6x "slower" against the native column — wrong
+  denominator, retired the same day.)
+
+**Fresh same-session reference column:** the OHOS 6.6.101 bzImage
+booted in the SAME guest rig (q35/KVM/-cpu host/smp2/2G, CCD0-pinned,
+performance governor; wrapper init mounts /proc /sys /tmp — the Rux
+runner relies on Rux auto-mounting /proc). 2 reps, medians. Note the
+fresh column reads slower than the frozen 2026-11-04 reference window
+(ctx 6.71 -> 12.9): the reference kernel's switch family is highly
+condition-sensitive; ratios are only honest within one session.
+
+| Case | Rux (nohz_full=1) | Reference (same-rig guest) | Ratio |
+|---|---|---|---|
+| lat_ctx -s 64 2 | **2.86-3.25 µs** | 12.84-12.97 µs | **ahead 4.0-4.5x** |
+| lat_ctx -s 64 8 | **3.33 µs** | 12.06-12.08 µs | **ahead 3.6x** |
+| lat_pipe | **5.54-5.64 µs** | 25.06-26.27 µs | **ahead 4.6x** |
+| lat_sem | **1.52-1.57 µs** | 4.47-4.55 µs | **ahead 2.9x** |
+| lat_proc fork | **37.8-40.3 µs** | 33.9 µs | 1.11-1.19x |
+| lat_proc exec | 40.6 µs | 37.6 µs | 1.08x |
+| lat_syscall fstat | **0.084-0.094 µs** | 0.119-0.120 µs | **ahead 1.3x** |
+| lat_syscall null | 0.051 µs | 0.0345-0.0430 µs | 1.2-1.5x |
+| lat_syscall write | 0.086-0.089 µs | 0.0597-0.0600 µs | 1.4-1.5x |
+| lat_syscall read | 0.103-0.108 µs | 0.0601-0.0624 µs | 1.7-1.8x |
+| lat_syscall stat | 0.322-0.446 µs (±30% boot var) | 0.239 µs | 1.4-1.9x |
+| lat_syscall open | 0.756-1.00 µs (±30% boot var) | 0.394-0.397 µs | 1.9-2.5x |
+
+Memory/bandwidth rows (from the same Rux battery, native ceiling as
+context only): mem_rd 0.95-0.97x, bcopy 1.14x ahead, bzero 1.23x ahead,
+bw_pipe 3.70x ahead, bw_unix 2.10x ahead, bw_file_rd >timer (see
+correction below), unix latency 0.70x ahead, usleep 0.98x.
+
+**NOHZ round (main 9f01767df, details in
+docs/architecture/rust-native-register.md J):** interleaved strand A/B
+on a hostile background — main tip 0/10, churn fix (entity_tick guard +
+ENQ print removal) 5/12, nohz_full=1 11/12 PASS; p1_null 0.050 vs
+0.060 µs (-17%); Tier-1 census bands hold (TERM 8, REFUSED 31-32).
+
+**Parser corrections (make-report.py):** `bw_file_rd` "inf" throughput
+(faster than the timer granularity) was mis-read as the size column —
+the old table's "33662x slower" row was actually the fastest row;
+retired. Division-by-zero guard on 0-throughput rows. Net rows
+(lat_tcp 0.099 µs) fabricated from tcp-in debug noise — the net-server
+handshake family (lat_tcp/udp/connect, bw_tcp, lat_fs) remains open
+with no honest number on either column.
+
+**Open:** plain-syscall band null/read/write/stat/open 1.2-2.5x is the
+remaining true gap (SMAP AC brackets + entry floor, unchanged since
+11-04 audit); net-server family; lat_fs.
+
 ## Standing (2026-11-15, kernel main=2649af4e3, lane gb-opt)
 
 Fresh full battery on the current main (both kernels same-session
