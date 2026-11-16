@@ -54,6 +54,28 @@ python3 userspace/lmbench/make-report.py run/lmbench-rux.txt run/lmbench-linux.t
 
 <!--RESULTS-->
 
+## Standing round 3 (2026-11-17, kernel main=931623176 — PT_REGS gating)
+
+perf-2x round 2: SYSCALL-vector entries skip the CURRENT_PT_REGS
+load+store pair (fork/exec derive the frame from task.pt_regs(); the
+slot's remaining readers are diagnostics served by the IRQ stores).
+
+- write: **0.0811 µs** (med-of-3, reps 0.0800-0.0814) vs 0.082 round-1
+  / 0.086-0.089 standing = −4% vs round 1, −7% cumulative.
+- null 0.0435 / read 0.101 — both at their best-ever values, PT_REGS
+  gating within noise for them (relaxed stores to an uncontended
+  per-CPU line).
+- Campaign scoreboard vs the 2× targets (Linux/2): null 0.0435 (target
+  0.0195) · read 0.101 (0.030) · write 0.0811 (0.030) · stat 0.34
+  (0.120) · open 0.84 (0.197) · fork 37.8 (17) · exec 40.6 (18.8).
+- Open-tail anatomy (code-read, sampler starved by the fdreap serial
+  flood): per-open = probe copy (fast path exists) → path_lookup walk
+  → Arc::new(File) heap alloc → inode/dentry Arc bumps →
+  install_lowest_fd entry lock. Next levers: File allocation slab
+  cache (the reference's filp kmem_cache), getname-style name cache,
+  and the r14 path-memo audit (memo not visible in file_open's path).
+- Gates: triple-arch green, riscv suite green.
+
 ## Standing round 2 (2026-11-16 evening, kernel main=34b339e01 — fdget fast path + getppid O(1))
 
 perf-2x round 1 landed (merge 34b339e01): the fdget no-refcount fast
