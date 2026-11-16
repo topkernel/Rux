@@ -54,6 +54,31 @@ python3 userspace/lmbench/make-report.py run/lmbench-rux.txt run/lmbench-linux.t
 
 <!--RESULTS-->
 
+## Open-tail anatomy (2026-11-17, fsw pathcost, 20.7M opens, nohz_full=1)
+
+fsw=1 pathcost counters on the open/close storm (PC1 PRE bracket =
+probe copy + root fetch; PC1 TAIL = File::new + Arc + fd install +
+return; path_lookup decomposed separately):
+
+- per-open: PRE 239 ns + TAIL 950 ns; path_lookup walk pre 93 ns +
+  **loop 598 ns** + tail 22 ns + comp 4 ns — the per-component
+  dcache walk (lookup_child_walk: memo version check + seqlock pair +
+  name compare) is the largest single block (83% of the walk).
+- fdreap/RCU finding: under the open/close storm the RCU grace
+  cannot complete for 50+ ms (RCU-GP-BOUND, no quiescent reports from
+  user-busy CPUs — no context tracking), the deferred queue grows, and
+  the fdreap serial report needed its budget cut to 1/8192 (was
+  flooding the sampled boot to 0 samples). The reference reports RCU
+  QS from context tracking at user entry/exit — that mechanism is the
+  structural fix (also a NOHZ dependency already noted in nohz.rs).
+- File allocation already runs through the existing slab allocator
+  (ArcInner ≤ 4096 class) — no filp-cache win there; the File::new
+  field construction and the Arc drop's 5 registry lookups remain
+  candidates, gated on a working sampler.
+- Sampler tooling note: the perf-sample boot for open was starved by
+  the same fdreap serial flood (0 samples); scripts saved as
+  open_sample.sh/open_fsw.sh (absolute-path safe, warmer included).
+
 ## Standing round 3 (2026-11-17, kernel main=931623176 — PT_REGS gating)
 
 perf-2x round 2: SYSCALL-vector entries skip the CURRENT_PT_REGS
