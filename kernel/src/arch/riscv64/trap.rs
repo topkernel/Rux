@@ -300,6 +300,14 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                     crate::interrupt::preempt::TICK_ENTRY_RIP[cpu_id]
                         .store(epc_ctx,
                                core::sync::atomic::Ordering::Relaxed);
+                    // CARRIER-HEAL (123rd): CS twin (x86_64 has it since
+                    // the runq-strand lane) — ring 3 vs ring 0 of the
+                    // interrupted rip, so a heal row's rip= is
+                    // classifiable as user-returned residue vs kernel
+                    // carrier without symbolization.
+                    crate::interrupt::preempt::TICK_ENTRY_CS[cpu_id]
+                        .store(if regs_ref.user_mode() { 3 } else { 0 },
+                               core::sync::atomic::Ordering::Relaxed);
                 }
                 crate::interrupt::preempt::irq_enter();
                 handle_timer_interrupt(regs_ref, cpu_id);

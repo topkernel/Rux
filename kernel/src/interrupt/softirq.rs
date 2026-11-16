@@ -9,7 +9,7 @@
 //! handlers. Processing happens in `__do_softirq()` at `irq_exit()` time
 //! or in the ksoftirqd kernel thread on overflow.
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use crate::config::MAX_CPUS;
 
 // ============================================================================
@@ -142,6 +142,137 @@ fn win_note(cpu: usize, open: bool, bit: usize, restart: usize, pending: u32) {
     }
 }
 
+// ==================== Carrier evidence (CARRIER-HEAL, 123rd) ====================
+//
+// HEAL-GATE (122nd) refused PREEMPT-HEAL for holders observed inside
+// RawSpinlock::lock's CONTENDED loop (per-CPU {task, jiffies} stamps
+// refreshed every 64K spins — sync::spinlock::ACQUIRE_EVIDENCE). Its
+// residual class (HEAL-GATE.md §4.4): counts whose acquire evidence had
+// gone STALE at adjudication — the holder left the contended loop and
+// carries its levels through work somewhere else. One such family is
+// structurally identifiable WITHOUT touching any fast path: holders
+// inside an __do_softirq window. The window books SOFTIRQ_OFFSET on the
+// entry task around handler dispatch, and the make-test VW-WEDGE
+// conviction proved what a heal landing mid-window does: the executor
+// becomes preemptible, the handler never finishes, its completions are
+// lost and the machine wedges (29 completions, both CPUs idle forever).
+// These slots are the carrier-side half: __do_softirq's OWN boundaries
+// (window entry, every vector dispatch, window exit) publish the same
+// 16-byte {task, jiffies} evidence shape as heal-gate — one store pair
+// per boundary, nothing on any lock fast path.
+//
+// Concurrency argument (all Relaxed): the only writers are the CPU's
+// own __do_softirq boundaries; the only reader is the tick IRQ on that
+// SAME CPU. The tick interrupts the window, so writer and reader never
+// run concurrently and per-word coherence is enough (same shape as
+// ACQUIRE_EVIDENCE and TICK_ENTRY_PC). Task identity is read from the
+// scheduler's published cpu_state(cpu).current — the exact word the
+// tick-side heal adjudicates against, so writer and reader are
+// symmetric by construction.
+
+/// Per-CPU carrier-evidence slot for the softirq window (see the block
+/// comment above). `task` doubles as the open flag: nonzero while a
+/// window is open on this CPU (0 = closed).
+pub struct CarrierEvidence {
+    /// cpu_state(cpu).current when the window opened / last dispatched
+    /// (0 = no open window). Written at the window's own boundaries,
+    /// read by this CPU's tick.
+    pub task: AtomicUsize,
+    /// Jiffies at the last boundary stamp (entry, dispatch, or exit).
+    /// Age is only meaningful together with `task`.
+    pub jiffies: AtomicU64,
+}
+
+/// Freshness bound for carrier evidence, in jiffies. Vector dispatches
+/// refresh the stamp (bounded by the 2 ms budget check before each
+/// vector), so 10 jiffies (100 ms at 100Hz) keeps the heal-gate margin
+/// doctrine — 20x UNDER the heal's own 200-tick (2s) bar — while a
+/// leaked/stranded count is delayed by at most this window past the
+/// last genuine softirq boundary. Windows whose current handler runs
+/// longer than the bound go stale mid-handler; that residual gap is
+/// covered by the exact window-open flag (`in_progress_cpu`) consulted
+/// alongside this slot by the adjudication, and named in
+/// run/CARRIER-HEAL.md.
+pub const CARRIER_EVIDENCE_FRESH_JIF: u64 = 10;
+
+/// The per-CPU carrier-evidence slots (see [`CarrierEvidence`]).
+pub static CARRIER_EVIDENCE: [CarrierEvidence; MAX_CPUS] = {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const ZERO: CarrierEvidence = CarrierEvidence {
+        task: AtomicUsize::new(0),
+        jiffies: AtomicU64::new(0),
+    };
+    [ZERO; MAX_CPUS]
+};
+
+/// Publish carrier-side evidence from __do_softirq's boundaries (window
+/// entry and every vector dispatch). Costs one per-CPU slot read (the
+/// SAME cpu_state().current word the tick-side heal adjudicates against
+/// — writer and reader are symmetric by construction, no tp-vs-slot
+/// skew possible), one jiffies read and two relaxed local stores.
+#[inline]
+fn note_carrier_evidence() {
+    let cpu = crate::arch::smp::cpu_id() as usize;
+    if cpu >= CARRIER_EVIDENCE.len() {
+        return;
+    }
+    let t = crate::sched::sched::cpu_state(cpu).current as usize;
+    if t == 0 {
+        return;
+    }
+    let ev = &CARRIER_EVIDENCE[cpu];
+    ev.task.store(t, Ordering::Relaxed);
+    ev.jiffies
+        .store(crate::drivers::timer::get_jiffies(), Ordering::Relaxed);
+}
+
+/// Close the carrier-evidence window (called at __do_softirq exit,
+/// AFTER the SOFTIRQ_OFFSET sub so the slot never says closed while
+/// the count still carries the bit). The jiffies half records WHEN the
+/// window closed — a heal firing later can print its age.
+#[inline]
+fn clear_carrier_evidence() {
+    let cpu = crate::arch::smp::cpu_id() as usize;
+    if cpu >= CARRIER_EVIDENCE.len() {
+        return;
+    }
+    let ev = &CARRIER_EVIDENCE[cpu];
+    ev.task.store(0, Ordering::Relaxed);
+    ev.jiffies
+        .store(crate::drivers::timer::get_jiffies(), Ordering::Relaxed);
+}
+
+/// Does `task` (a Task pointer) have LIVE carrier-side evidence on
+/// `cpu` — i.e. was it observed inside an __do_softirq window on that
+/// CPU within [`CARRIER_EVIDENCE_FRESH_JIF`] jiffies of `now`? Called
+/// from the tick-side PREEMPT-HEAL adjudication: a `true` result means
+/// the incumbent is executing softirq work (or did so within the last
+/// 100 ms) and the heal must be refused. Callers should ALSO consult
+/// [`in_progress_cpu`] for the exact any-length window-open truth —
+/// this slot's freshness cannot vouch for the middle of a handler that
+/// runs longer than the bound.
+#[inline]
+pub fn carrier_evidence_fresh(cpu: usize, task: usize, now: u64) -> bool {
+    if cpu >= CARRIER_EVIDENCE.len() {
+        return false;
+    }
+    let ev = &CARRIER_EVIDENCE[cpu];
+    ev.task.load(Ordering::Relaxed) == task
+        && now.wrapping_sub(ev.jiffies.load(Ordering::Relaxed))
+            <= CARRIER_EVIDENCE_FRESH_JIF
+}
+
+/// Jiffies age of `cpu`'s last carrier-evidence boundary stamp (entry,
+/// dispatch or exit — whichever ran last). For the refusal row's
+/// audit trail only.
+#[inline]
+pub fn carrier_evidence_age(cpu: usize, now: u64) -> u64 {
+    if cpu >= CARRIER_EVIDENCE.len() {
+        return u64::MAX;
+    }
+    now.wrapping_sub(CARRIER_EVIDENCE[cpu].jiffies.load(Ordering::Relaxed))
+}
+
 // ============================================================================
 // Registration
 // ============================================================================
@@ -235,6 +366,11 @@ pub fn __do_softirq() -> bool {
     crate::interrupt::preempt_count_add(
         crate::interrupt::preempt::SOFTIRQ_OFFSET
     );
+    // CARRIER-HEAL (123rd): window-open stamp, AFTER the booking so the
+    // slot never vouches for a window whose count does not yet carry
+    // the bit (conservative direction: a tick in the entry sliver
+    // refuses a heal it could have taken one tick later).
+    note_carrier_evidence();
     // syscost probe: splits the open IF=0 segment only on the inline
     // irq-exit path (no-op when off).
     crate::dfx::syscost::zone_softirq_enter();
@@ -298,6 +434,12 @@ pub fn __do_softirq() -> bool {
                 // wake-strand census) name the vector a monopolized CPU
                 // is dispatching when the window wedges.
                 win_note(cpu, true, bit, restart_count, pending);
+                // CARRIER-HEAL (123rd): dispatch heartbeat — one store
+                // pair per vector dispatch keeps the window's evidence
+                // fresh while handlers keep running (a single handler
+                // longer than CARRIER_EVIDENCE_FRESH_JIF is covered by
+                // the in-progress flag the adjudication also consults).
+                note_carrier_evidence();
                 h(bit);
             }
         }
@@ -326,6 +468,13 @@ pub fn __do_softirq() -> bool {
     crate::interrupt::preempt_count_sub(
         crate::interrupt::preempt::SOFTIRQ_OFFSET
     );
+    // CARRIER-HEAL (123rd): window-closed stamp, AFTER the booking sub
+    // so the slot never says closed while the count still carries the
+    // bit. (Between this store pair and the flag clear below, the slot
+    // says closed a few instructions early — the epilogue there runs
+    // no handler code, and the conservative failure direction is a
+    // one-tick heal delay, not a mid-window heal.)
+    clear_carrier_evidence();
     // phantom-bits: window closed.
     win_note(cpu, false, 0, 0, 0);
     // SAFETY: per-CPU arrays accessed only by current CPU; cpu_id is correct

@@ -7486,8 +7486,44 @@ pub fn scheduler_tick() {
                             cur as usize,
                             now,
                         );
+                        // CARRIER-HEAL (123rd, heal-gate follow-up): the
+                        // softirq-window carrier leg. HEAL-GATE's acquire
+                        // stamp can only vouch for waiters INSIDE the
+                        // contended TTAS loop; its residual healable class
+                        // (HEAL-GATE.md §4.4) includes holders executing
+                        // an __do_softirq window — the make-test VW-WEDGE
+                        // conviction proved what a heal landing mid-window
+                        // does (executor preemptible, handler never
+                        // finishes, completions lost, machine wedged).
+                        // Two signals, both carrier-side (no fast path
+                        // touched): (1) the exact window-open flag —
+                        // SOFTIRQ_IN_PROGRESS is written only by this
+                        // CPU's own __do_softirq bracket, and this heal
+                        // runs in the tick IRQ on the SAME CPU, so the
+                        // pair can never run concurrently: a set flag
+                        // means the tick interrupted a live window whose
+                        // executor IS cur; (2) the {task, jiffies}
+                        // CARRIER_EVIDENCE slot stamped at window entry
+                        // and every vector dispatch — covers the
+                        // just-closed-window sliver with the same
+                        // freshness doctrine as the acquire stamp. A
+                        // count whose holder is inside (or within 10j of)
+                        // a softirq window is carrier-coupled and LIVE:
+                        // refuse the heal, both legs. No window or run
+                        // reset — once the window closes and the stamp
+                        // goes stale, the next tick heals a still-stuck
+                        // count normally (a parked-window victim is at
+                        // most 10j + one window late).
+                        let car_win =
+                            crate::interrupt::softirq::in_progress_cpu(cpu_id);
+                        let car_live = car_win
+                            || crate::interrupt::softirq::carrier_evidence_fresh(
+                                cpu_id,
+                                cur as usize,
+                                now,
+                            );
                         if (base != 0 && (p_stale || s_stale) || base == 0 && h_stale)
-                            && acq_live
+                            && (acq_live || car_live)
                         {
                             static REFUSE_LAST_PRINT: core::sync::atomic::AtomicU64 =
                                 core::sync::atomic::AtomicU64::new(0);
@@ -7540,13 +7576,34 @@ pub fn scheduler_tick() {
                                         .jiffies
                                         .load(core::sync::atomic::Ordering::Relaxed),
                                 ));
+                                // CARRIER-HEAL: carrier-evidence age +
+                                // which evidence refused the heal
+                                // (A = acquire stamp, C = softirq-window
+                                // carrier stamp/flag, AC = both).
+                                const M4B: &[u8] = b"j car_age=";
+                                for &b in M4B {
+                                    putchar(b);
+                                }
+                                ph(crate::interrupt::softirq::carrier_evidence_age(
+                                    cpu_id, now,
+                                ));
                                 const M5: &[u8] = b"j face=";
                                 for &b in M5 {
                                     putchar(b);
                                 }
                                 putchar(if base != 0 { b'B' } else { b'H' });
+                                const M5B: &[u8] = b" via=";
+                                for &b in M5B {
+                                    putchar(b);
+                                }
+                                if acq_live {
+                                    putchar(b'A');
+                                }
+                                if car_live {
+                                    putchar(b'C');
+                                }
                                 const M6: &[u8] =
-                                    b" (live acquire evidence; heal deferred)";
+                                    b" (live acquire/carrier evidence; heal deferred)";
                                 for &b in M6 {
                                     putchar(b);
                                 }
@@ -7651,6 +7708,38 @@ pub fn scheduler_tick() {
                                 putchar(b);
                             }
                             ph(unsafe { (*cur).ti_pc_hirq_present_run() });
+                            // CARRIER-HEAL (123rd): name the healed
+                            // carrier at fire time with the tick-entry
+                            // snapshots (already refreshed every tick on
+                            // both arches): pctick = the incumbent's OWN
+                            // count before this tick's HARDIRQ_OFFSET
+                            // (splits the printed was= into task-owned
+                            // bits vs observer offset), rip = the
+                            // interrupted instruction (symbolize with
+                            // addr2line; a userspace address means the
+                            // count returned to user mode with the
+                            // task — residue by definition), cs = the
+                            // interrupted code segment (ring 3 = user,
+                            // ring 0 = kernel carrier).
+                            const M4E: &[u8] = b" pctick=";
+                            for &b in M4E {
+                                putchar(b);
+                            }
+                            ph(crate::interrupt::preempt::TICK_ENTRY_PC[cpu_id]
+                                .load(core::sync::atomic::Ordering::Relaxed)
+                                as u64);
+                            const M4F: &[u8] = b" rip=";
+                            for &b in M4F {
+                                putchar(b);
+                            }
+                            ph(crate::interrupt::preempt::TICK_ENTRY_RIP[cpu_id]
+                                .load(core::sync::atomic::Ordering::Relaxed));
+                            const M4G: &[u8] = b" cs=";
+                            for &b in M4G {
+                                putchar(b);
+                            }
+                            ph(crate::interrupt::preempt::TICK_ENTRY_CS[cpu_id]
+                                .load(core::sync::atomic::Ordering::Relaxed));
                             putchar(b'\n');
                             // preempt-hunt (2026-11-01): the
                             // outermost-acquire record is guaranteed
