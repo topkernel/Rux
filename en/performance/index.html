@@ -117,6 +117,22 @@
         </tbody>
       </table>
     </div>
+    <h3>2026-11-16 standing (kernel main=017bf556b, NOHZ merged; same-rig reference re-measured)</h3>
+    <p style="font-size:13.5px">Method: both sides in the same rig (q35/KVM/-cpu host/smp2/2G, host CCD0 pin + performance governor + warmer thread; reference column = the OHOS 6.6.101 kernel inside the same guest, 2 reps, medians). The switch/wakeup family is condition-sensitive — the fresh reference window reads ~2x slower than the frozen 2026-11-04 column, so the larger leads combine a window effect with kernel progress; every ratio is within-window A/B.</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Case</th><th class="num">Rux</th><th class="num">Linux (same-rig guest)</th><th>Verdict</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">lat_ctx -s 64 2</td><td class="num">2.86–3.25 µs</td><td class="num">12.84–12.97 µs</td><td><span class="chip ok">ahead 4.0–4.5×</span></td></tr>
+          <tr><td class="mono">lat_ctx -s 64 8</td><td class="num">3.33 µs</td><td class="num">12.06–12.08 µs</td><td><span class="chip ok">ahead 3.6×</span></td></tr>
+          <tr><td class="mono">lat_pipe</td><td class="num">5.54–5.64 µs</td><td class="num">25.06–26.27 µs</td><td><span class="chip ok">ahead 4.6×</span></td></tr>
+          <tr><td class="mono">lat_sem</td><td class="num">1.52–1.57 µs</td><td class="num">4.47–4.55 µs</td><td><span class="chip ok">ahead 2.9×</span></td></tr>
+          <tr><td class="mono">lat_syscall null</td><td class="num">0.051 µs</td><td class="num">0.0345–0.0430 µs</td><td><span class="chip bad">behind 1.2–1.5×</span></td></tr>
+          <tr><td class="mono">lat_syscall read / write / stat / open</td><td class="num">0.103 / 0.087 / 0.32–0.45 / 0.76–1.00 µs</td><td class="num">0.061 / 0.060 / 0.239 / 0.395 µs</td><td><span class="chip bad">behind 1.4–2.5×</span> (file rows ±30% boot-to-boot variance)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:13px;color:var(--text-3)">Same round: the NOHZ adaptive tick merged (strand pass rate 0/10 → 11/12, pbench p1_null −17%); Geekbench SC 2440 / MC 7709 reproduced bit-identical under a hostile host background (capture freshness verified). Canonical record: the 2026-11-16 standing sections of docs/test/lmbench-report.md and geekbench-report.md.</p>
     <p style="font-size:13px;color:var(--text-3)">Mechanism note: the wins concentrate in scheduler/wakeup paths and the page-fault/mapping path; syscall-latency rows run the guest's own entry (no vmexit), so both sides carry almost no virtualization overhead — the gaps are real kernel differences. bw_unix (42,885 vs 22,783 MB/s, 1.88×) and fstat (ahead 1.37×, RCU fd lookup) also lead in the same-rig table — see the standing table in lmbench-report.md.</p>
     <div class="callout"><b>Correctness bugs the campaign found and fixed</b> (the performance gaps were hiding them): a stale-rsp0-at-free UAF (the fork bistability root cause); a call_rcu zero-grace callback firing; a wake-monitor staleness inversion; the fdreap per-tick 10 ms close stall; the mainline munmap final-TLB-flush loss (5b4a4bc7).</div>
 

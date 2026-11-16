@@ -119,6 +119,22 @@
         </tbody>
       </table>
     </div>
+    <h3>2026-11-16 standing(内核 main=017bf556b,NOHZ 已合;同 rig 参考列重测)</h3>
+    <p style="font-size:13.5px">方法:两侧同 rig(q35/KVM/-cpu host/smp2/2G,宿主 CCD0 钉核 + performance 治理器 + 保温线程;参考列 = OHOS 6.6.101 内核同一 guest 内执行,各 2 rep 取中位)。切换/唤醒家族对参考窗口敏感,比值只在同会话内有意义 —— 本节参考列读数比 2026-11-04 冻结列慢约 2×,故领先倍数变大是窗口效应+内核推进的合成,逐项以本节窗口内 A/B 为准。</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>用例</th><th class="num">Rux</th><th class="num">Linux(同 rig guest)</th><th>结论</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">lat_ctx -s 64 2</td><td class="num">2.86–3.25 µs</td><td class="num">12.84–12.97 µs</td><td><span class="chip ok">领先 4.0–4.5×</span></td></tr>
+          <tr><td class="mono">lat_ctx -s 64 8</td><td class="num">3.33 µs</td><td class="num">12.06–12.08 µs</td><td><span class="chip ok">领先 3.6×</span></td></tr>
+          <tr><td class="mono">lat_pipe</td><td class="num">5.54–5.64 µs</td><td class="num">25.06–26.27 µs</td><td><span class="chip ok">领先 4.6×</span></td></tr>
+          <tr><td class="mono">lat_sem</td><td class="num">1.52–1.57 µs</td><td class="num">4.47–4.55 µs</td><td><span class="chip ok">领先 2.9×</span></td></tr>
+          <tr><td class="mono">lat_syscall null</td><td class="num">0.051 µs</td><td class="num">0.0345–0.0430 µs</td><td><span class="chip bad">落后 1.2–1.5×</span></td></tr>
+          <tr><td class="mono">lat_syscall read / write / stat / open</td><td class="num">0.103 / 0.087 / 0.32–0.45 / 0.76–1.00 µs</td><td class="num">0.061 / 0.060 / 0.239 / 0.395 µs</td><td><span class="chip bad">落后 1.4–2.5×</span>(文件行靴间方差 ±30%)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:13px;color:var(--text-3)">同轮:NOHZ 自适应 tick 合入(strand 通过率 0/10 → 11/12,pbench p1_null −17%);Geekbench SC 2440 / MC 7709 在重载背景下逐位复现(捕获新鲜性已验)。正册:docs/test/lmbench-report.md 与 geekbench-report.md 的 2026-11-16 standing 节。</p>
     <p style="font-size:13px;color:var(--text-3)">机制注:领先面集中在调度/唤醒(跨 vCPU 唤醒 IPI 在虚拟化下开销显著,Rux 单全局队列不产生跨核重调度风暴)与缺页/映射路径;系统调用延迟行 guest 自带入口、不发生 vmexit,两侧几乎无虚拟化附加成本,差距为真实内核差距。bw_unix(42,885 vs 22,783 MB/s,1.88×)与 fstat(领先 1.37×,RCU fd 查找)在同机对照中亦领先,见 lmbench-report.md standing 表。</p>
     <div class="callout"><b>campaign 顺带挖出并修复的正确性 bug</b>(性能差距掩盖了它们):free 时的 stale-rsp0 UAF(fork 双稳态根因);call_rcu 零宽限期回调触发;唤醒监视器陈旧性判定反转;fdreap 每 tick 10 ms close 停滞;主线 munmap 末批 TLB flush 丢失(5b4a4bc7)。</div>
 
