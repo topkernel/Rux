@@ -7457,8 +7457,102 @@ pub fn scheduler_tick() {
                         // the safety net that lets IRQ-exit kernel
                         // preemption stay enabled while the leak's
                         // producer is still being hunted.
+                        //
+                        // HEAL-GATE (122nd, runq-strand follow-up): the
+                        // 200-observation bar proves the count was
+                        // PRESENT at every tick for 2 s — rs2 proved
+                        // that cannot distinguish a leaked count from a
+                        // LEGITIMATE waiter inside a slow acquire: those
+                        // waits were on the stalled binder OWNER-LATCH
+                        // chain (latch_age 2820ms) and the 20.5s heal
+                        // storm zeroed live waiters' counts mid-acquire
+                        // (was=0x10001/0x10003). The contended TTAS loop
+                        // now publishes acquire-side evidence (per-CPU
+                        // task+jiffies, refreshed every 64K spins —
+                        // sync::spinlock::ACQUIRE_EVIDENCE); a count
+                        // whose owner was observed in that loop within
+                        // ACQUIRE_EVIDENCE_FRESH_JIF jiffies is
+                        // acquire-coupled and LIVE: refuse the heal
+                        // (both legs — a slow waiter actively spinning
+                        // must never be healed). The refusal is
+                        // rate-gated (20j, PREEMPT-LEAK policy) and does
+                        // NOT reset the window or run counters — once
+                        // the evidence goes stale (the waiter acquired,
+                        // or was never spinning), the next tick heals a
+                        // still-stuck count normally.
                         let base = pc & !crate::interrupt::preempt::HARDIRQ_MASK;
-                        if base != 0 && (p_stale || s_stale) {
+                        let acq_live = crate::sync::spinlock::acquire_evidence_fresh(
+                            cpu_id,
+                            cur as usize,
+                            now,
+                        );
+                        if (base != 0 && (p_stale || s_stale) || base == 0 && h_stale)
+                            && acq_live
+                        {
+                            static REFUSE_LAST_PRINT: core::sync::atomic::AtomicU64 =
+                                core::sync::atomic::AtomicU64::new(0);
+                            let rp = REFUSE_LAST_PRINT.load(
+                                core::sync::atomic::Ordering::Acquire);
+                            if now.wrapping_sub(rp) >= 20
+                                && REFUSE_LAST_PRINT
+                                    .compare_exchange(
+                                        rp,
+                                        now,
+                                        core::sync::atomic::Ordering::AcqRel,
+                                        core::sync::atomic::Ordering::Acquire)
+                                    .is_ok()
+                            {
+                                use crate::dfx::taskdump::putc_brief as putchar;
+                                fn ph(v: u64) {
+                                    use crate::dfx::taskdump::putc_brief as putchar;
+                                    for sh in (0..16).rev() {
+                                        let n = ((v >> (sh * 4)) & 0xF) as u8;
+                                        putchar(if n < 10 {
+                                            b'0' + n
+                                        } else {
+                                            b'a' + n - 10
+                                        });
+                                    }
+                                }
+                                const M: &[u8] = b"\nPREEMPT-HEAL-REFUSED cpu=";
+                                for &b in M {
+                                    putchar(b);
+                                }
+                                ph(cpu_id as u64);
+                                const M2: &[u8] = b" pid=";
+                                for &b in M2 {
+                                    putchar(b);
+                                }
+                                ph(unsafe { (*cur).pid() } as u64);
+                                const M3: &[u8] = b" pc=";
+                                for &b in M3 {
+                                    putchar(b);
+                                }
+                                ph(pc as u32 as u64);
+                                const M4: &[u8] = b" ev_age=";
+                                for &b in M4 {
+                                    putchar(b);
+                                }
+                                // evidence age (jiffies since this CPU's
+                                // last contended-loop stamp by cur)
+                                ph(now.wrapping_sub(
+                                    crate::sync::spinlock::ACQUIRE_EVIDENCE[cpu_id]
+                                        .jiffies
+                                        .load(core::sync::atomic::Ordering::Relaxed),
+                                ));
+                                const M5: &[u8] = b"j face=";
+                                for &b in M5 {
+                                    putchar(b);
+                                }
+                                putchar(if base != 0 { b'B' } else { b'H' });
+                                const M6: &[u8] =
+                                    b" (live acquire evidence; heal deferred)";
+                                for &b in M6 {
+                                    putchar(b);
+                                }
+                                putchar(b'\n');
+                            }
+                        } else if base != 0 && (p_stale || s_stale) {
                             // Fleet session 3 (2026-10-25): clear base bits
                             // ONLY. This heal runs inside the timer IRQ
                             // bracket, so cur's count at this exact moment
@@ -7596,7 +7690,10 @@ pub fn scheduler_tick() {
                         // held across 200 consecutive ticks is phantom;
                         // the kept single level pairs the observer's own
                         // still-pending irq_exit sub.
-                        if base == 0 && h_stale {
+                        // (HEAL-GATE: else-chained behind the refusal so a
+                        // refused candidate cannot fall through to this
+                        // leg.)
+                        else if base == 0 && h_stale {
                             unsafe {
                                 (*cur).ti_preempt_count_keep_tick_nesting();
                             }
