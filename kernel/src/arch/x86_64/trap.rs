@@ -3227,6 +3227,50 @@ fn handle_page_fault(regs: &mut PtRegs) {
             let aspace = unsafe { (*tk).address_space() }?;
             let root = aspace.root_ppn();
             if !crate::sync::futex::fuxwatch_mm_armed(root) {
+                // neverword lane (nw1 conviction, safety net): an mm the
+                // arm round once covered but the ledger no longer lists
+                // (slot-latch reopen, fork-inherit of a W-cleared PTE)
+                // used to fall to do_page_fault -> present-RO PTE ->
+                // SEGV_ACCERR and group-kill its process (nw1 samgr,
+                // hg1 hilogd). A write fault on a WATCHED page with a
+                // present+user+W-clear PTE in a writable mapping is a
+                // leak of OUR watch, not a permission denial: restore W,
+                // retry unlogged, warn once.
+                let g = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock();
+                // SAFETY: read-only diagnostic walk of the faulting mm.
+                let leaked = unsafe {
+                    crate::arch::mm::mm_ops::PageTableWalker::walk(
+                        root,
+                        fault_addr & !0xfff,
+                    )
+                }
+                .map(|(_, bits)| bits & 0x1 != 0 && bits & 0x4 != 0 && bits & 0x2 == 0)
+                .unwrap_or(false);
+                if leaked {
+                    // SAFETY: current mm's live root; one page, RW.
+                    unsafe {
+                        crate::arch::mm::mm_ops::mprotect_pte_range(
+                            root,
+                            fault_addr & !0xfff,
+                            1,
+                            0x3,
+                        );
+                    }
+                    drop(g);
+                    super::mm::asid::flush_tlb_page(fault_addr);
+                    static LEAK_N: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    if LEAK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
+                        crate::pr_warn!(
+                            "FUXWATCH-LEAK-FIX tid={} rip={:#x} addr={:#x} W restored, unlogged",
+                            tid,
+                            rip,
+                            fault_addr
+                        );
+                    }
+                    return Some(());
+                }
+                drop(g);
                 return None;
             }
             let g = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock();
