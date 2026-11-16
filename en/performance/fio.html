@@ -148,7 +148,11 @@
     </ul>
 
     <h2 id="fresh"><span class="anchor">§5</span>The 2026-11-17 re-run (current main debug kernel)</h2>
-    <p id="fresh-placeholder">In progress: both cyclictest modes, fio direct-read latency percentiles (JSON via a dump tool), pi_stress (the glibc PI-mutex path), hackbench inet multi-group. This section updates when the data lands.</p>
+    <ul>
+      <li><b>Workload classes re-run</b>: 48M direct write / 48M direct read (20 s) / 48M direct randrw (15 s) / 64M buffered write — <b>4/4 rc=0</b>; the earlier 512M direct-write ENOSPC was the image's free-space constraint (~70M available), not a kernel defect; the job-size boundary is on record.</li>
+      <li><b>Latency-percentile capture did not land</b>: the JSON was written via the dump tool and captured by qsrun, but the RES tail truncation kept only the distribution tail — the percentile data is unreliable and not published; full-JSON retrieval (debugfs extraction outside the image or a larger tail budget) is in the queue.</li>
+      <li><b>Same-host noise declared</b>: other lanes' QEMUs ran on the same host during the re-run window; group-level throughput readings are influenced by it — this re-run records pass/fail and boundaries only, and the throughput conclusions remain with rounds 5/5b.</li>
+    </ul>
 
     <div class="callout">Raw logs: the qa-suites worktree run/qa-suites-findings.md (canonical) + run/qa-runs-r5b/*.log; job definitions: userspace/ci/classes/*.cmds (all committed).</div>
   </article>

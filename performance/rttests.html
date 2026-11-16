@@ -94,7 +94,7 @@
         <tr><td>r3(66cd9918 + CLOCK_BOOTTIME/TAI 定时器修复)</td><td class="num">25 · avg 89 · <b>max 1289(−59%)</b></td><td class="num">2 · avg 87 · <b>max 396(−65%)</b></td><td>最大延迟降幅来自时钟域修复(255f86f5)</td></tr>
         <tr><td>r4(合并 8d47783a)</td><td class="num">26 · avg 89 · max 1018(趋势 3149→1289→1018)</td><td class="num">28 · avg 89 · max 1857</td><td>FIFO max 波动未裁定(sched 域复核项);丢失率 &lt;0.1%、均值稳定 87–89</td></tr>
         <tr><td>r4 隔离复跑(第 3 遍)</td><td class="num">29 · avg 88 · <b>max 667(最佳)</b></td><td class="num">27 · avg 88 · max 1352</td><td>—</td></tr>
-        <tr><td><b>2026-11-17 复测(当前 main debug)</b></td><td class="num" id="cyc-other">29,947–29,968/30,000 · avg 107–108 · max 522(末窗单次 29.8ms 毛刺见注)</td><td class="num" id="cyc-fifo">29,946–29,966/30,000 · avg 104 · max 28448(末窗毛刺见注)</td><td>毛刺 = 快照窗内宿主并发负载(其他 agent QEMU);均值与丢失率与历史一致</td></tr>
+        <tr><td><b>2026-11-17 复测两轮(当前 main debug)</b></td><td class="num" id="cyc-other">r1:max 522 / r2:max 2922(快照前段);两轮末窗均出现单次 29.9/35.3 ms 峰值 —— 见注;avg 105–108 / min 54,丢失率 &lt;0.2%</td><td class="num" id="cyc-fifo">r1:max 28448 / r2:max 34566(均为末窗单次)· avg 103–104 · min 45–48</td><td>末窗峰值与宿主并发负载相关(其他 lane QEMU 同时运行);窗内 avg/丢失率与历史带一致;受控隔离值仍以 r3/r4 的 667/396 为准</td></tr>
       </tbody>
     </table></div>
     <ul>

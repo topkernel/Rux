@@ -148,7 +148,11 @@
     </ul>
 
     <h2 id="fresh"><span class="anchor">§5</span>2026-11-17 复测(当前 main debug 内核)</h2>
-    <p id="fresh-placeholder">复测进行中:cyclictest 双模式、fio 直读延迟百分位(dump 工具采 JSON)、pi_stress(glibc PI mutex 路径)、hackbench inet 多组。数据落地后本节更新。</p>
+    <ul>
+      <li><b>负载类复测</b>:48M 直写 / 48M 直读(20 s)/ 48M 直随机读写(15 s)/ 64M 缓冲写 —— <b>4/4 rc=0</b>;此前 512M 直写 ENOSPC 系镜像剩余空间约束(~70M 可用),非内核缺陷,作业尺寸边界入档。</li>
+      <li><b>延迟百分位采集未遂</b>:JSON 经 dump 工具落盘后由 qsrun 捕获,但 RES 尾部截断只保留分布尾部 —— 百分位数据不可靠,不入册;全量 JSON 回采(镜像外 debugfs 提取或加大 tail 预算)列入补测队列。</li>
+      <li><b>同宿主噪声声明</b>:复测窗内同宿主运行其他 lane 的 QEMU;组级吞吐读数受其影响,本复测仅记录通过性与边界,吞吐结论仍以第 5/5b 轮为准。</li>
+    </ul>
 
     <div class="callout">原始日志:qa-suites 工作树 run/qa-suites-findings.md(正本)+ run/qa-runs-r5b/*.log;作业定义:userspace/ci/classes/*.cmds(全部提交)。</div>
   </article>
