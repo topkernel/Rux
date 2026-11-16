@@ -115,6 +115,25 @@ pub unsafe fn data_of(file: &crate::fs::File) -> Option<&'static PidFdData> {
     Some(&*(p as *const PidFdData))
 }
 
+/// fdinfo helper (procfs): the pid a PIDFD_OPS file names, if `file`
+/// is a pidfd_open descriptor (pidfd_show_fdinfo parity — the
+/// "Pid:"/"NSpid:" lines). systemd's pidfd_get_pid() scans
+/// /proc/self/fdinfo/<fd> for "Pid:" to verify a pidfd still names the
+/// same process, and a missing line reads as ENOTTY ("fd valid, but
+/// not a pidfd") — which made PID 1 disown every freshly spawned
+/// service main process ("Can't determine if process N is our child,
+/// assuming it is not", the ub2404 serial-getty stop-sigterm/restart
+/// loop).
+pub fn fdinfo_pid_of(file: &crate::fs::File) -> Option<u32> {
+    let ops = file.get_ops()?;
+    if !core::ptr::eq(ops as *const _, &PIDFD_OPS as *const _) {
+        return None;
+    }
+    // SAFETY: PIDFD_OPS files carry a PidFdData from attach(); the ops
+    // check above proves the private_data slot is that box.
+    Some(unsafe { data_of(file)?.pid })
+}
+
 /// Resolve a pidfd's process with pid-reuse protection.
 ///
 /// Returns the pinned-at-open leader when it is STILL the task the pid

@@ -764,6 +764,41 @@ pub fn vfs_umount_object(mnt: &Arc<VfsMountInternal>) {
     // sc181: live unmount — drop the index entry before the back-ref
     // clear below (the chain is recomputed from `mp`).
     mount_index_remove(&mut state, mnt, &mp);
+    // Expose the mount this one was STACKED ON (Linux umount semantics):
+    // when a short-lived namespace mounted over an existing mountpoint
+    // (systemd 255's credentials child overmounts /dev/shm as its
+    // private workspace), the attach replaced the dentry slot; tearing
+    // the namespace down must restore the UNDERLYING mount, not strand
+    // the mountpoint slot empty — ub2404: every later credentials child
+    // found no mount, mounted its own tmpfs, and when IT died the
+    // slot stayed None with a bare mountpoint dentry left behind.
+    let restore = state.mounts.iter().rev().find(|m| {
+        m.root
+            .get_mountpoint_back()
+            .map(|under| Arc::ptr_eq(&under, &mp))
+            .unwrap_or(false)
+    });
+    if let Some(under) = restore {
+        let under = under.clone();
+        drop(state);
+        *mp.vfsmount.lock() = Some(under);
+        mp.set_mount_flag(true);
+    } else {
+        drop(state);
+        // No underlying mount. A mountpoint dentry the mount itself
+        // created (inode-less — the walk's bare-dentry arm) would read
+        // as a NEGATIVE dcache entry after this unmount and every
+        // lookup of the name would fail ENOENT (same discipline as
+        // vfs_umount's cleanup; drop it so the next walk re-resolves
+        // the name against the underlying filesystem).
+        if mp.get_inode().is_none() {
+            let name = mp.get_name();
+            let parent = mp.parent.lock().clone();
+            if let Some(p) = parent {
+                p.remove_child(&name);
+            }
+        }
+    }
     mnt.root.clear_mountpoint_back();
 }
 

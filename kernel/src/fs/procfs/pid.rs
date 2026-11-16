@@ -1457,6 +1457,15 @@ pub fn generate_fdinfo(pid: u64, fd: u32) -> Vec<u8> {
     out.push_str(&alloc::format!("flags:\t{:o}\n", file.flags_bits()));
     out.push_str("mnt_id:\t0\n");
 
+    // pidfd descriptors (fdinfo(5) + the reference's pidfd_show_fdinfo):
+    // the Pid:/NSpid: lines are how userspace verifies a pidfd —
+    // systemd's pidfd_get_pid() treats their absence as ENOTTY and
+    // disowns the process the fd names (serial-getty@ttyS0 restart
+    // loop, ub2404 2026-11-16).
+    if let Some(pid) = crate::fs::pidfd::fdinfo_pid_of(&file) {
+        out.push_str(&alloc::format!("Pid:\t{}\nNSpid:\t{}\n", pid, pid));
+    }
+
     if let Some(watches) = crate::fs::inotify::fdinfo_watches(&file) {
         for (wd, sdev, ino, mask) in watches {
             out.push_str(&alloc::format!(

@@ -869,6 +869,19 @@ pub fn init() {
     // Register the ptmx device ops (slave ops are registered per-pair).
     crate::fs::pty::devfs_register();
 
+    // /dev/shm: kernel-created directory inside devtmpfs — the
+    // reference's devtmpfs carries it, and the boot-time tmpfs mount
+    // (main.rs, P0-6) lands here. systemd 255's credentials child
+    // (sd-mkdcreds) also overmounts /dev/shm as its private workspace
+    // inside per-service mount namespaces: without the directory every
+    // credential-store mount fails ENOENT, services die
+    // 243/CREDENTIALS, and serial-getty loops (ub2404 login chain).
+    let shm_dir = Arc::new(DevfsEntry::new_dir("shm"));
+    root_entry
+        .children
+        .lock_irqsave()
+        .insert(String::from("shm"), shm_dir);
+
     // Create /dev/input directory
     let input_dir = Arc::new(DevfsEntry::new_dir("input"));
 
