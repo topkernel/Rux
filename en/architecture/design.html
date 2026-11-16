@@ -29,18 +29,22 @@
 
 <main>
 <div class="container doc">
-              <aside class="doc-side">
+                  <aside class="doc-side">
     <div class="grp">Architecture</div>
     <a class="on" href="design.html">Design deep-dive</a>
-    <a href="structure.html">Code layout</a>
-    <a href="boot.html">Boot flow</a>
+    <a href="scheduler.html">Scheduler</a>
     <a href="memory.html">Memory management</a>
+    <a href="filesystem.html">Filesystem</a>
+    <a href="ipc.html">IPC</a>
+    <a href="boot.html">Boot flow</a>
+    <a href="interrupts.html">Interrupts &amp; timers</a>
+    <a href="structure.html">Code layout</a>
     <a href="riscv64.html">Porting guide</a>
     <a href="kernel-lock.html">Lock ordering</a>
     <div class="grp">Performance</div>
     <a href="../performance/index.html">Performance</a>
     <div class="grp">Security</div>
-    <a href="../security/index.html">Security & verification</a>
+    <a href="../security/index.html">Security &amp; verification</a>
     <div class="grp">Testing</div>
     <a href="../testing/index.html">Overview</a>
     <a href="../testing/ci-pipeline.html">CI pipeline</a>
@@ -52,6 +56,11 @@
     <a href="../testing/gnome-retrospective.html">Retrospective</a>
     <div class="grp">Debugging</div>
     <a href="../debugging/index.html">Debugging guide</a>
+    <a href="../debugging/tracepoints.html">Tracepoints</a>
+    <a href="../debugging/perf.html">Performance debugging</a>
+    <a href="../debugging/locks.html">Lock debugging</a>
+    <a href="../debugging/memory.html">Memory forensics</a>
+    <a href="../debugging/panic.html">Panic &amp; symbols</a>
     <div class="grp">Guides</div>
     <a href="../guides/getting-started.html">Getting started</a>
     <a href="../guides/development.html">Contributing</a>
@@ -89,7 +98,7 @@
     <p>The layering model (<code>docs/architecture/kernel-layers.md</code>): the Framework layer (arch/mm primitives/interrupt/virtio core/trace) allows <code>unsafe</code> with per-block <code>// SAFETY:</code> comments; the service layer targets 100% <code>forbid(unsafe_code)</code> (47 files already forbid it at compile time, 56 more contain none); the syscall entry is the capsule boundary, validating and translating user pointers in one place.</p>
 
     <div class="mod-anchor" id="sched"></div>
-    <h2><span class="anchor">§1</span>Scheduler (kernel/src/sched/)</h2>
+    <h2><span class="anchor">§1</span>Scheduler (kernel/src/sched/) · <a href="scheduler.html">deep-dive →</a></h2>
     <p><b>A single global run queue — GRQ (divergence <a href="#d1">D-1</a>).</b> One <code>GlobalRunQueue</code> serves every CPU with three per-class subqueues: DL (BTreeMap, EDF), RT (bitmap + per-priority lists), CFS (BTreeMap by vruntime); atomic <code>nr_running</code>, an <code>idle_cpus</code> bitmap, and per-CPU current/idle/stop pointers only. <b>No per-CPU queues, no load balancer</b> — idle CPUs pull work on demand via IPI.</p>
     <ul>
       <li><b>CFS (fair.rs)</b>: vruntime = runtime ×(NICE_0_LOAD/weight); <code>cfs_min_granularity_ns = 0.7 ms</code> (also the wakeup granularity), a 6 ms latency window, 100 Hz ticks; pick lifts non-runnable entries out of the timeline and reinserts them; <code>min_vruntime</code> takes the whole tree's leftmost (never erasing a sleeper's credit).</li>
@@ -107,7 +116,7 @@
     <p><b>Compatibility:</b> pure internal policy, no ABI surface. Guarded by the performance gate's scheduler domain (hold band, census, P2 ±20%).</p>
 
     <div class="mod-anchor" id="mm"></div>
-    <h2><span class="anchor">§2</span>Memory management (kernel/src/mm/)</h2>
+    <h2><span class="anchor">§2</span>Memory management (kernel/src/mm/) · <a href="memory.html">deep-dive →</a></h2>
     <p>Deep dive in the <a href="memory.html">memory page</a>; summary:</p>
     <ul>
       <li><b>Three-stage boot</b>: memblock (dual-region table) → fixmap → zone/buddy; Sv39 layout constants match the reference (PAGE_OFFSET/VMALLOC/vmemmap/TASK_SIZE).</li>
@@ -128,11 +137,11 @@
     <p><b>Compatibility:</b> /proc/meminfo, pagemap, mmap/munmap/mprotect/mremap/mlock/brk semantics aligned item by item (msync wrap checks, mmap offset alignment EINVAL and the rest).</p>
 
     <div class="mod-anchor" id="fs"></div>
-    <h2><span class="anchor">§3</span>File systems (kernel/src/fs/)</h2>
+    <h2><span class="anchor">§3</span>File systems (kernel/src/fs/) · <a href="filesystem.html">deep-dive →</a></h2>
     <ul>
       <li><b>The capability-declarative FileOps builder (D-6)</b>: one method per slot, duplicate installs are compile errors; errno mapping collapses to a single point. Paid incident: read() on a valid epoll fd returned EBADF and the OH event loop spun 155,991 times.</li>
       <li><b>Lockless dcache reads (WalkClaim reader banks)</b>: removed two spinlock pairs per path component — stat <b>0.643→0.423 µs</b>, open <b>1.128→0.889 µs</b>; the negative memo invalidates by parent-directory generation.</li>
-      <li><b>ext4 (12 files, ~13k lines)</b>: mount feature gates (unknown incompat → refuse; ENCRYPT is a capability bit and accepted — refusing it once took down OH's stock userdata); read-side window batch fill (<a href="#d12">D-12</a>, ≤64 blocks/128KiB merged requests), write-side batched metadata publication + discard-on-free (<a href="#d13">D-13</a>).</li>
+      <li><b>ext4 (12 files, 17,486 lines, plus jbd2 3,899 lines; deep-dive on the <a href="filesystem.html">filesystem page</a>)</b>: mount feature gates (unknown incompat → refuse; ENCRYPT is a capability bit and accepted — refusing it once took down OH's stock userdata); read-side window batch fill (<a href="#d12">D-12</a>, ≤64 blocks/128KiB merged requests), write-side batched metadata publication + discard-on-free (<a href="#d13">D-13</a>).</li>
       <li><b>jbd2 direct-write commit (D-8)</b>: commit writes transaction buffers straight to their final locations and advances the log tail/head with the commit — a completed commit leaves nothing to replay, and the 8–12 synchronous round trips per unlink/rmdir disappear; on-disk format and recovery (e2fsck) unchanged.</li>
       <li><b>bio/buffer cache</b>: buffer_head five states + LRU; write planning once re-scanned all pending quadratically (fixed with a 3-round cap + conservative linear fallback; 252 samples of one fsync wedging 1,092 s pinned it).</li>
       <li><b>The procfile! macro (D-4)</b>: /proc formatters derived from one field-declaration table, killing the format-drift defect class (vmstat/meminfo/status byte-identical to a live host).</li>
@@ -147,9 +156,9 @@
     <p><b>Compatibility:</b> the jbd2 on-disk format is unchanged (image mounting/recovery identical); POSIX does not promise per-operation directory persistence (that is fsync(dirfd)); LTP change families green.</p>
 
     <div class="mod-anchor" id="ipc"></div>
-    <h2><span class="anchor">§4</span>IPC (kernel/src/ipc/)</h2>
+    <h2><span class="anchor">§4</span>IPC (kernel/src/ipc/) · <a href="ipc.html">deep-dive →</a></h2>
     <ul>
-      <li><b>binder (10,425 lines, the largest single file)</b>: the load-bearing implementation of the OpenHarmony service mesh. A misc device <code>/dev/binder</code>; mmap buffer silently truncated at 4 MiB (same as the reference); protocol version 8; the full BC_*/BR_* set, flat_binder_object cross-process translation, deferred TRANSACTION_COMPLETE for sync transactions. Lock model: one global spinlock, no user-memory copies and no sleeping under it.</li>
+      <li><b>binder (14,144 lines, the largest single file; deep-dive on the <a href="ipc.html">IPC page</a>)</b>: the load-bearing implementation of the OpenHarmony service mesh. A misc device <code>/dev/binder</code>; mmap buffer silently truncated at 4 MiB (same as the reference); protocol version 8; the full BC_*/BR_* set, flat_binder_object cross-process translation, deferred TRANSACTION_COMPLETE for sync transactions. Lock model: one global spinlock, no user-memory copies and no sleeping under it.</li>
       <li><b>The access_token registry</b>: <code>/dev/access_token_id</code> + BINDER_GET_SENDER_INFO — samgr's permission checks depend on it; its absence once caused the OH display blackout (the b98–b112 root cause).</li>
       <li><b>SysV trio + POSIX MQ</b>: structs compile-time asserted against the reference layouts (ShmidDsUapi 112B, MqAttr 64B); SysV objects scoped per ipc_namespace.</li>
       <li>The binder poll wake/availability fix converged four semantic divergences in one diff (the reference's three OR conditions in binder_has_work_ilocked).</li>
@@ -187,17 +196,17 @@
     </ul>
 
     <div class="mod-anchor" id="trace"></div>
-    <h2><span class="anchor">§7</span>Observability (kernel/src/trace/ + debug/)</h2>
+    <h2><span class="anchor">§7</span>Observability (kernel/src/trace/ + dfx/) · <a href="../debugging/tracepoints.html">tracepoint deep-dive →</a></h2>
     <ul>
-      <li><b>The unified trace-event framework (D-15)</b>: one declaration-table row = group/name/id/print-fmt/fields/typed record function; the tracefs (<code>/sys/kernel/tracing</code>) tree and byte formats align exactly (tracing_on/trace/trace_pipe/set_event/snapshot/events/*/enable…). Currently <b>61 events / 20 groups</b> (sched, kmem, raw_syscalls, block, binder, the ext4 family, jbd2, the lock/tcp/sock/net families, the rux family).</li>
+      <li><b>The unified trace-event framework (D-15)</b>: one declaration-table row = group/name/id/print-fmt/fields/typed record function; the tracefs (<code>/sys/kernel/tracing</code>) tree and byte formats align exactly (tracing_on/trace/trace_pipe/set_event/snapshot/events/*/enable…). Currently <b>69 events / 17 groups</b> (sched 9, rux 20, ext4 7, net and binder 5 each, input 4, kmem 4, raw_syscalls/irq/exceptions/block/jbd2 2 each, vmscan/timer/signal/printk/oom 1 each); the complete inventory and usage live on <a href="../debugging/tracepoints.html">Tracepoints</a>.</li>
       <li><b>Measured gate cost</b>: disabled sites compile to one load+test+branch (verified point by point in release disassembly); enabling costs <b>+13–19 ns/record</b>; image cost +0.18%.</li>
       <li><b>kallsyms (D-3)</b>: a compile-time symbol table in .rodata (2.4MB names + 0.7MB index @ ~22.6k symbols), zero boot cost, standard /proc/kallsyms lines.</li>
       <li><b>census + heal</b>: per-task per-field tick observation + phantom-preempt adjudication + a 20 ms starvation bound; IF=0 share <b>25.7%→20.4%</b>, longest cli segment 594–599 ms one-shot → <b>6–9 ms</b>, WAKE-STRANDED 233→31.</li>
-      <li><b>The debug= switch table is frozen at 59 entries</b> (legacy): new observability is tracepoint-only.</li>
+      <li><b>The dfx= switch table is frozen at 49 entries</b> (legacy, partly migrated into event-arming aliases): new observability is tracepoint-only.</li>
     </ul>
 
     <div class="mod-anchor" id="archs"></div>
-    <h2><span class="anchor">§8</span>The three port layers (kernel/src/arch/)</h2>
+    <h2><span class="anchor">§8</span>The three port layers (kernel/src/arch/) · <a href="boot.html">boot deep-dive →</a> / <a href="interrupts.html">interrupts &amp; timers →</a></h2>
     <p>Details in the <a href="riscv64.html">porting guide</a> and <a href="boot.html">boot flow</a>. Highlights:</p>
     <ul>
       <li><b>riscv64</b>: OpenSBI M→S mode, Sv39; a 288-byte PtRegs (orig_a0 rollback); SUM-bit uaccess + an exception table; Sstc direct stimecmp writes; a 9-bit ASID atomic bitmap allocator.</li>
@@ -230,7 +239,7 @@
           <tr><td><b>D-17</b></td><td><b>The kernel-side device alias arena</b>: no identity MMIO window at runtime, no uaccess identity hole (a bad user pointer faults instead of reading physical memory). Guards: PF-NOCTX/SMAP-VIOL beacons stay silent.</td></tr>
           <tr><td><b>D-18</b></td><td><b>SMAP via the pushfq EFLAGS.AC sequence</b>: STAC/CLAC unconditionally #UD under TCG (convicted by paired trials); ~55 ns per bracket, boots on hardware and TCG alike.</td></tr>
           <tr><td><b>D-19</b></td><td><b>The typed timer wheel</b>: clock domains cannot be mixed, periodic requires NonZeroU64, WakeArmed/WakeSpent scope guards. Six historical bug classes became compile errors; same-rig A/B: arm lock 924→697 ns, nanosleep 772.6→662.7 ms, p2_ctxsw 12.198 vs 15.400 µs.</td></tr>
-          <tr><td><b>D-20</b></td><td><b>PSI tick-sampled stall accounting</b>: /proc/pressure/{cpu,memory,io} matches the reference semantics (some/full percentages, avg10/60/300 decay, cumulative µs), but the mechanism differs — the reference charges elapsed time inside every psi_task_change (event-driven, per-CPU seqcount-protected), while Rux samples the global stall conditions from the scheduler tick: at most one CAS-gated sample per jiffy on any CPU, zero new work on the scheduling paths (cpu pressure reads the existing grq.nr_running and idle mask; memory/io pressure is marked by the stalling paths themselves with one relaxed atomic pair per stall section on a per-task bit). Advantage: always-on observability adds nothing to the scheduler hot paths; the cost is ~one atomic load + a ~100 ns fold per 10 ms per CPU.</td></tr>
+          <tr><td><b>D-20</b></td><td><b>The writer-side dirty-writeback watermark on a free-fraction mark (no global dirty accounting)</b>: once the Normal zone's free count falls below half its managed pages (zone_below_dirty_writeback_mark), the buffered writer flushes its own inode's dirty range and runs the system-wide recovery pass (writeback_recover: free already-clean pages first, collect dirty inodes via a full-table rotating walk and flush each, directly evict flushed pages). The difference from the reference: it throttles by per-BDI dirty thresholds / the balance_dirty_pages dirty fraction, while Rux keeps no per-BDI accounting and uses the zone free-fraction as the mark — <b>the discipline, not the constant, is the contract</b>. It eliminated the delayed-allocation dirty-balloon wedge (243k dirty pages growing to RAM scale, the zone draining to zero); LTP fallocate05/06 on three fresh boots RC=0; riscv64 make test 1328/1328. Cost: no per-BDI precision — with multi-device loads the watermark granularity is coarser than the reference. Note: PSI (/proc/pressure) is not in main; it is recorded on the debug-alignment resume queue.</td></tr>
         </tbody>
       </table>
     </div>
@@ -250,7 +259,7 @@
     <p>Thesis: <b>security checks happen at compile time and vanish from the fast paths — the fast design and the safe design are the same design.</b> Source: <code>docs/architecture/safety-and-performance.md</code>.</p>
     <ul>
       <li><b>Bug taxonomy v1</b> (3,358 deduplicated commits adjudicated one by one): of 34 memory-corruption defects, <b>23 live in explicit unsafe blocks/arch assembly</b> and <b>11 in safe code</b> — all ownership/refcount/lock-protocol classes safe Rust does not type-check today; <b>zero</b> pointer-expression defects (OOB/iterator invalidation/wild-pointer arithmetic/format strings) in safe code. 6 of 34 were caught by review before any boot.</li>
-      <li><b>The unsafe surface is enumerated and contracted</b>: 12.9% of lines; 47 service files compile-time forbid(unsafe_code), 56 more already unsafe-free; SAFETY comments cover 64%; 157 Kani harnesses prove the core unsafe code for all inputs.</li>
+      <li><b>The unsafe surface is enumerated and contracted</b>: 12.9% of lines; 47 service files compile-time forbid(unsafe_code), 56 more already unsafe-free; SAFETY comments cover 64%; 159 Kani harnesses prove the core unsafe code for all inputs.</li>
       <li><b>Every performance row is paired with its safety sentence</b>: e.g. the switch path carries typed per-CPU storage + keyed locks; lmbench/Geekbench numbers and the census-adjudicated structure share a table; the cost side (futex wake→run ~10 ms behind a running task, tick-quantized) is recorded as-is.</li>
       <li><b>The honest gap register v1</b>: KASLR (no boot entropy source), kernel text/rodata W^X tightening, compiler stack protectors, KASAN-style poisoning breadth, KCSAN watchpoints, kallsyms masking — each with what closing it looks like.</li>
     </ul>
