@@ -3460,7 +3460,18 @@ fn read_user_path<'a>(
     if pathname_ptr.is_null() {
         return Err(-errno::EFAULT as u64);
     }
-    if !crate::arch::uaccess::access_ok(pathname_ptr as usize, PATH_MAX) {
+    // Only the POINTER must be in user space here. strncpy_from_user
+    // clamps the readable span to the distance to USER_END and faults
+    // per page, so a path string that starts near the top of user
+    // memory — exactly where exec now places argv/env strings (the
+    // stack top ends at USER_END, reference parity) — reads fine. The
+    // old access_ok(ptr, PATH_MAX) precheck demanded the whole 4096
+    // probe span below USER_END and turned every syscall invoked with
+    // an argv-string argument near the stack top into EFAULT
+    // (coreutils mkdir/mount with "/xx": "Bad address"; systemd's
+    // early tmpfs mounts failed -> "Failed to mount API filesystems",
+    // ub-gfx 2026-11-17).
+    if !crate::arch::uaccess::access_ok(pathname_ptr as usize, 1) {
         return Err(-errno::EFAULT as u64);
     }
     let pathname = match strncpy_from_user(pathname_ptr, PATH_MAX, buf) {

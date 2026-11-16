@@ -297,7 +297,15 @@ pub mod user_addr {
     pub const BRK_DEFAULT: usize = 0x2000_0000;  // 512MB
     pub const BRK_MAX: usize = TASK_UNMAPPED_BASE;
 
-    pub const STACK_TOP: usize = TASK_SIZE - (super::PAGE_SIZE as usize);
+    /// STACK_TOP = TASK_SIZE (arch/x86 STACK_TOP = TASK_SIZE_LOW): the
+    /// initial stack VMA ends EXACTLY at the user-address-space top
+    /// 0x7ffffffff000, like the reference. The old `- PAGE_SIZE` put the
+    /// top page at 0x7fffffffe000 — one page low — and userspace that
+    /// touches the top page (glibc reading argv/auxv tails, avahi's
+    /// deep init frames) faulted at cr2 = 0x7fffffffe000, SIGSEGV
+    /// (avahi-daemon main-process crashes, ub2404 boot, ub-gfx
+    /// 2026-11-17; the same address word is mapped on the reference).
+    pub const STACK_TOP: usize = TASK_SIZE;
     pub const STACK_MAX_SIZE: usize = 8 * 1024 * 1024;  // 8MB
     pub const STACK_MIN_SIZE: usize = 1 * 1024 * 1024;  // 1MB
 

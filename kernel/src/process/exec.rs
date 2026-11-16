@@ -351,13 +351,20 @@ pub(crate) fn do_execve_elf(
     }.ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())?;
     if ec2_on { ec2_map = crate::arch::cpu::read_time(); }
 
-    // Initial stack at the top of user space (one guard page below
-    // USER_END). Mapped RW here; the VMA below marks it GROWSDOWN. The
+    // Initial stack at the top of user space. The reference places
+    // the initial stack top EXACTLY at STACK_TOP == TASK_SIZE (no
+    // guard subtraction; binfmt_elf's randomize_stack_top subtracts
+    // only randomization). The old `- PAGE_SIZE` sat the whole stack
+    // one page low, and userspace touching the reference's top page
+    // (glibc argv/auxv tail reads, avahi's deep init frames) faulted
+    // at cr2 = USER_END - PAGE_SIZE — SIGSEGV where the reference maps
+    // memory (avahi-daemon crashes, ub2404 graphical boot, ub-gfx
+    // 2026-11-17). Mapped RW here; the VMA below marks it GROWSDOWN. The
     // mapped range may span multiple floor-pow2 blocks — the args block
     // is installed through the page-table walk below, never through the
     // returned phys base.
     let user_end = crate::arch::mm::user_addr::USER_END as u64;
-    let stack_top = user_end - PAGE_SIZE as u64;
+    let stack_top = user_end;
     let stack_bottom = stack_top - initial_stack_size;
     let _stack_phys_base = unsafe {
         alloc_and_map_to_user_table(user_ppn, stack_bottom, initial_stack_size, stack_flags)
