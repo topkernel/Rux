@@ -658,6 +658,58 @@ fn mount_is_busy(mnt_root: &Arc<Dentry>) -> bool {
     busy.load(Ordering::Relaxed)
 }
 
+/// The durability sequence shared by sync(2) and umount(2) (data-integrity
+/// lane, 2026-11-11 for sync; umount hookup 2026-11-16): drain dirty
+/// page-cache frames into the ext4 write path, write the flushed files'
+/// DATA blocks first and their inode-table blocks last (ordered data —
+/// the metadata must never claim data the device has not received), then
+/// drain the buffer cache and persist the device's volatile cache.
+///
+/// umount(2) needs this for the same reason sync(2) does: the reference
+/// umount writes the filesystem out before dropping the mount, and a
+/// dirty page left behind at detach was only reachable through the DEAD
+/// mount's fs instance afterwards — LTP umount2_01's MNT_DETACH case
+/// wrote 26 bytes through an fd on the mounted fs, lazy-unmounted,
+/// remounted the same device, and read EOF: the bytes lived in the old
+/// instance's dirty page-cache frames and never reached the device.
+///
+/// Returns Err(EIO) only when the final device-cache persist fails (the
+/// sync(2) contract); umount callers treat that as best-effort.
+pub fn sync_dirty_filesystems() -> Result<(), i32> {
+    // Delayed allocation (2026-11): buffered write(2) leaves data ONLY in
+    // dirty page-cache frames — drain them into the ext4 write path (and
+    // thus the buffer cache) BEFORE syncing the buffer cache, or the sync
+    // would persist nothing of every un-fsynced write.
+    //
+    // The drain returns the (fs, inode) targets it flushed: their DATA
+    // blocks must reach the device BEFORE the inode-table blocks that
+    // describe them (ordered data), or a crash in between leaves a file
+    // that claims 8 MB of data the device never received.
+    let flushed_targets = crate::fs::page_cache::get_page_cache().flush_all_dirty();
+    // ORDERED DATA: the flushed files' DATA blocks first. The plain
+    // buffer-cache drain below writes every dirty buffer in HASH ORDER —
+    // the inode-table block (the file's new size) could reach the device
+    // BEFORE the data blocks it describes, and a crash in between leaves
+    // a file that claims 8 MB of data the device never received
+    // (measured: the fiE3 crash-window boot — full size, full extent
+    // map, ~35 % of the data). The data goes first; the metadata last.
+    let _ = crate::fs::ext4::sync_flushed_data(&flushed_targets);
+    // Flush all buffer cache
+    let _ = crate::fs::bio::sync_buffers();
+    // INODE-TABLE BLOCKS (data-integrity lane, 2026-11-11): the size the
+    // flushed files just learned lives in their inode-table blocks.
+    // fsync has always synced that block explicitly (ext4_sync_file_inner
+    // bakes the inode-table block + sync_dirty_buffer); sync(2) had NO
+    // equivalent, so the block stayed dirty in the buffer cache and a
+    // crash right after sync() returned left every synced file at its
+    // creation size (0 bytes, md5-of-empty) with its data blocks already
+    // on the device. Synced AFTER the buffer-cache drain above, so the
+    // metadata lands after the data it describes (ordered data).
+    let _ = crate::fs::ext4::sync_inode_tables(&flushed_targets);
+    // And persist the disk's volatile cache (see sys_fsync).
+    crate::drivers::virtio::flush_pci_blk().map(|_| ()).map_err(|_| -(errno::constants::EIO))
+}
+
 /// Unmount a filesystem from the dentry tree.
 ///
 /// Removes the mount point dentry (and its `VfsMountInternal`) from the parent.
@@ -665,7 +717,11 @@ fn mount_is_busy(mnt_root: &Arc<Dentry>) -> bool {
 ///
 /// `lazy` is MNT_DETACH: skip the busy check (the reference's do_umount
 /// detaches unconditionally under MNT_DETACH) and keep going.
-pub fn vfs_umount(mountpoint: &str, lazy: bool) -> Result<(), i32> {
+/// `nofollow` is UMOUNT_NOFOLLOW: resolve the target WITHOUT following a
+/// final symlink (Linux umount walks with LOOKUP_MOUNTPOINT — the
+/// umount2("symlink", UMOUNT_NOFOLLOW) of LTP umount2_02 must see the
+/// link itself and answer EINVAL, not unmount through it).
+pub fn vfs_umount(mountpoint: &str, lazy: bool, nofollow: bool) -> Result<(), i32> {
     if mountpoint == "/" || mountpoint.is_empty() {
         return Err(errno::Errno::DeviceOrResourceBusy.as_neg_i32());
     }
@@ -676,7 +732,8 @@ pub fn vfs_umount(mountpoint: &str, lazy: bool) -> Result<(), i32> {
     // path that RESOLVES but is not a mount root (LTP umount02 "Directory
     // not found" expects ENOENT; the old parent-split arm answered EINVAL
     // for the missing child).
-    let target_vpath = path_lookup(mountpoint, 0)?;
+    let lookup_flags = if nofollow { LOOKUP_NOFOLLOW } else { 0 };
+    let target_vpath = path_lookup(mountpoint, lookup_flags)?;
     let mnt_root = target_vpath.dentry
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
@@ -734,6 +791,14 @@ pub fn vfs_umount(mountpoint: &str, lazy: bool) -> Result<(), i32> {
     if child.get_inode().is_none() {
         parent_dentry.remove_child(&name);
     }
+    // Write the filesystem out before reporting success — the reference's
+    // umount syncs the superblock (see sync_dirty_filesystems for the
+    // data-loss case). MNT_DETACH included: the detached instance keeps
+    // serving its open fds, but nothing else will ever flush its dirty
+    // pages, and a remount of the same device reads the DEVICE, not the
+    // dead mount's page cache. Best-effort: an EIO from the final device
+    // cache persist does not fail an otherwise-complete unmount.
+    let _ = sync_dirty_filesystems();
     Ok(())
 }
 
@@ -3800,14 +3865,62 @@ pub fn vfs_symlink(pathname: &str, target: &str) -> Result<(), i32> {
 
 /// Remove directory - unified implementation using inode_operations
 pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
+    // Linux do_rmdir: "." (or "..") as the final component is EINVAL,
+    // not an attempt to remove the parent directory itself (LTP
+    // rmdir02's EINVAL case used to surface as ENOTEMPTY from the
+    // resolved cwd). The test runs on the RAW path — normalization
+    // strips "." components, so it is checked before normalizing. It
+    // also precedes every filesystem-touching check (do_rmdir rejects
+    // LAST_DOT before any lookup: rmdir(".") on a read-only filesystem
+    // is EINVAL, not EROFS).
+    {
+        let last = pathname.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+        if last == "." || last == ".." {
+            return Err(errno::Errno::InvalidArgument.as_neg_i32());
+        }
+    }
+
+    // Linux may_delete(): a dentry that is a mountpoint answers EBUSY —
+    // and this BEATS the read-only check of the mounted filesystem (the
+    // victim's mount is what is busy; the parent decides writability).
+    // LTP rmdir02's EBUSY case runs on the framework's READ-ONLY tmpfs
+    // mntpoint: the entry check_not_readonly below saw the RO mount
+    // first and answered EROFS. Gated on the target being on a
+    // read-only mount — the only case where the RO check would preempt
+    // EBUSY — so read-write workloads (pbench mkdir/rmdir churn) pay no
+    // extra parent walk. Probe-only-if-positive: every other resolution
+    // outcome (missing parent, non-directory mid-path, ...) falls
+    // through to the regular path below, whose error precedence (ENOENT
+    // / ENOTDIR / ELOOP) is unchanged.
+    if path_on_readonly_mount(pathname) {
+        if let Ok((parent_vpath, name)) = lookup_parent_dir(pathname) {
+            if let Some(ref parent_dentry) = parent_vpath.dentry {
+                if let Some(child) = parent_dentry.lookup_child(&name) {
+                    if child.get_mount().is_some() {
+                        return Err(errno::Errno::DeviceOrResourceBusy.as_neg_i32());
+                    }
+                }
+            }
+        }
+    }
+
     check_not_readonly(pathname)?;
 
     // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
     let _mutation_guard = VFS_MUTATION_LOCK.guard();
 
     // Look up the target inode to get its ino for cache invalidation
-    // (and its owner for the sticky-bit check).
-    let target_vpath = path_lookup(pathname, 0).ok();
+    // (and its owner for the sticky-bit check). Walk errors other than
+    // the final component's ENOENT propagate (Linux
+    // filename_parent_directory): ENOTDIR for a non-directory mid-path
+    // (rmdir "file/x") and ELOOP on symlink rings — the old `.ok()`
+    // swallow let both fall through to the parent resolution and
+    // resurface as ENOENT.
+    let target_vpath = match path_lookup(pathname, 0) {
+        Ok(vp) => Some(vp),
+        Err(e) if e == -(errno::constants::ENOENT) => None,
+        Err(e) => return Err(e),
+    };
     let target_ino_and_fs_id = target_vpath.as_ref().and_then(|vp| {
         vp.inode.as_ref().map(|i| (i.ino, i.fs_id))
     });
@@ -3842,6 +3955,17 @@ pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
         parent_inode,
         target_vpath.as_ref().and_then(|vp| vp.inode.as_ref().map(|a| a.as_ref())),
     )?;
+
+    // A mount point cannot be rmdir'd — EBUSY (Linux may_delete sees the
+    // dentry's live mount; LTP rmdir02's MNT_POINT case). Removing the
+    // covered dentry under a live mount would strand it.
+    if let Some(ref parent_dentry) = parent_vpath.dentry {
+        if let Some(child) = parent_dentry.lookup_child(&name) {
+            if child.get_mount().is_some() {
+                return Err(errno::Errno::DeviceOrResourceBusy.as_neg_i32());
+            }
+        }
+    }
 
     // Get inode operations
     let ops = parent_inode.ops.as_ref()
