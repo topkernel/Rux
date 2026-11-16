@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>进程间通信 · Rux</title>
+<link rel="stylesheet" href="../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">首页</a>
+      <a href="design.html">架构设计</a>
+      <a href="../performance/index.html">性能</a>
+      <a href="../security/index.html">安全</a>
+      <a href="../testing/index.html">测试</a>
+      <a href="../debugging/index.html">调试</a>
+      <a href="../guides/getting-started.html">快速入门</a>
+      <a href="../progress/roadmap.html">项目进展</a>
+      <a href="../guestbook.html">留言</a>
+      <span class="lang-sw"><a class="on" href="ipc.html">中文</a><a href="../en/architecture/ipc.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">架构设计</div>
+    <a href="design.html">架构与模块设计</a>
+    <a href="scheduler.html">调度器</a>
+    <a href="memory.html">内存管理</a>
+    <a href="filesystem.html">文件系统</a>
+    <a class="on" href="ipc.html">进程间通信</a>
+    <a href="boot.html">启动流程</a>
+    <a href="interrupts.html">中断与时钟</a>
+    <a href="structure.html">代码结构</a>
+    <a href="riscv64.html">架构移植指南</a>
+    <a href="kernel-lock.html">锁序不变量</a>
+    <div class="grp">调试</div>
+    <a href="../debugging/index.html">调试指南</a>
+    <a href="../debugging/tracepoints.html">tracepoint 框架</a>
+    <a href="../debugging/perf.html">性能调试</a>
+    <a href="../debugging/locks.html">锁调试</a>
+    <a href="../debugging/memory.html">内存取证</a>
+    <a href="../debugging/panic.html">panic 与符号化</a>
+    <div class="grp">性能</div>
+    <a href="../performance/index.html">性能测试</a>
+    <div class="grp">安全</div>
+    <a href="../security/index.html">安全与形式验证</a>
+    <div class="grp">测试</div>
+    <a href="../testing/index.html">测试总览</a>
+    <a href="../testing/ci-pipeline.html">CI 流水线</a>
+    <a href="../testing/ltp.html">LTP 兼容扫描</a>
+    <a href="../testing/ltp-full.html">LTP 全量用例</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT 审计</a>
+    <a href="../testing/stability.html">稳定性</a>
+    <a href="../testing/stress.html">压力</a>
+    <a href="../testing/gnome-retrospective.html">回溯报告</a>
+    <div class="grp">开发指南</div>
+    <a href="../guides/getting-started.html">快速入门</a>
+    <a href="../guides/development.html">参与开发</a>
+    <a href="../guides/configuration.html">内核配置</a>
+    <div class="grp">项目进展</div>
+    <a href="../progress/roadmap.html">路线图</a>
+    <a href="../progress/changelog.html">更新日志</a>
+    <a href="../progress/quickref.html">命令速查</a>
+    <div class="grp">互动</div>
+    <a href="../guestbook.html">留言板</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>进程间通信</h1>
+    <div class="sub">kernel/src/ipc/ + net/unix.rs · binder、PI futex、SysV/POSIX MQ、AF_UNIX —— 机制、锁模型与实测数据 · 语境:OpenHarmony 服务网格(~80 服务集合)在 /data 挂载后全量运行 · 依据:docs/architecture/binder-parity-audit.md、design-divergences.md(D-14)</div>
+
+    <h2 id="binder"><span class="anchor">§1</span>binder(kernel/src/ipc/binder.rs,14,144 行)</h2>
+    <p>binder 是 OpenHarmony 服务网格的核心传输:全部系统服务注册(samgr)、服务调用与 hilog 数据面均经此通道。实现按参考 6.6 binder.c 的语义逐函数对齐,并有专项对齐审计(binder-parity-audit.md)约束后续变更:<b>每处改动必须引用其镜像的参考函数与行号</b>。</p>
+    <ul>
+      <li><b>协议</b>:版本 8(BINDER_VERSION ioctl 返回);BC_* 全集(TRANSACTION/REPLY、FREE_BUFFER、INCREFS/ACQUIRE/RELEASE/DECREFS 及 DONE 对、REGISTER/ENTER/EXIT_LOOPER、DEAD_BINDER_DONE、TRANSACTION_SG/REPLY_SG);BR_* 全集(ERROR/TRANSACTION/REPLY/DEAD_REPLY/TRANSACTION_COMPLETE/NOOP/SPAWN_LOOPER/FAILED_REPLY 等)。</li>
+      <li><b>flat_binder_object 跨进程翻译</b>:BINDER_TYPE_{WEAK_}BINDER/_HANDLE 的节点/引用握手(BR_INCREFS → BC_INCREFS_DONE)工作;BINDER_TYPE_FD/FDA/PTR 部分落地 —— FDA fd 生存期为开放项(发送即安装会在未投递事务上遗留幽灵 fd,审计在案)。</li>
+      <li><b>同步事务延迟 TRANSACTION_COMPLETE</b>:发送者的读保持睡眠直至 reply 将其携带出 —— 一次唤醒完成整个往返;replier 侧取非延迟形态。</li>
+      <li><b>mmap 缓冲</b>:静默截断至 4 MiB(与参考 binder_mmap 同行为);重复 mmap EBUSY 先于分配判定;VM_DONTFORK 语义经 sc157→sc159/160 反转 —— OH appspawn 子进程继承守护进程映射,DONTCOPY 已移除。</li>
+      <li><b>锁模型</b>:单全局自旋锁守卫全部 binder 对象;<b>锁下不拷贝用户内存、不睡眠</b> —— BC 载荷在取锁前拷入,BR 载荷在锁内暂存内核 Vec、锁释放后拷出。</li>
+      <li><b>thread_has_work 对齐</b>:looper_need_return 作为函数的一项合成条件(进程 todo、节点 async_todo、spawned/pending 计数);poll 唤醒扇出与可用性语义一次 diff 收敛四处分歧。</li>
+      <li><b>失败回复路由</b>:BR_FAILED_REPLY/BR_DEAD_REPLY 语义 + 静默接收者清扫 sweep_silent_txns(进程 todo + 节点 async_todo,ONEWAY_SILENCE_J 窗)—— 对不履行 BC_FREE_BUFFER 义务的服务守住缓冲回收;TF_UPDATE_TXN(0x40)落地(对齐 binder.c:2734/2832-2845 的 supersede-on-park)。</li>
+      <li><b>access_token 注册表</b>:/dev/access_token_id + BINDER_GET_SENDER_INFO —— samgr 权限检查依赖;缺失时 AddSystemAbility 拒绝曾导致 OH 显示阻塞(b98–b112 黑屏根因链)。</li>
+    </ul>
+    <h3>运行数字与已知代价</h3>
+    <ul>
+      <li>/data 挂载服务网格 ~<b>89k txns/s</b> 时:binder REST 区段 n=64.4M、累计 592 s(整机 41%)、平均 <b>9.2 µs</b>。</li>
+      <li><b>监视行</b>:单事务最长持 IF=0 <b>73 ms</b> —— IPC 门禁的 SLOW-TXN 类(queue ≤ 10 ms 全域;FAIL 判据 queue ≥ 50 ms)盯住该形态。</li>
+    </ul>
+
+    <h2 id="pi-futex"><span class="anchor">§2</span>PI futex(sync/futex_pi.rs)</h2>
+    <ul>
+      <li>操作集:FUTEX_LOCK_PI / UNLOCK_PI / TRYLOCK_PI / LOCK_PI2 + WAIT_REQUEUE_PI / CMP_REQUEUE_PI;cmp-under-lock requeue 与 robust-exit 死亡标记齐全。</li>
+      <li><b>实现形态:nice 下界(nice-floor)</b>:PiState 存在等待者时,其属主以 nice −20 运行;等待链逐链接行死锁检测,每一链接传递式提升;exit 路径带 owner-died 交接释放 PI 锁。</li>
+      <li>与参考 rt_mutex 的语义差异(内核侧数值提升 vs nice 折算)登记于实现注释;LTP pi 族 + OH FFRT 负载为守卫。</li>
+    </ul>
+
+    <h2 id="sysv"><span class="anchor">§3</span>SysV 三件与 POSIX MQ</h2>
+    <ul>
+      <li><b>布局编译期断言</b>:ShmidDsUapi 112 字节(asm-generic/shmbuf.h RV64)、SemidDsUapi 104 字节(rv64)/88(32 位路径)、MqAttr 64 字节(glibc/Linux RV64);IpcPermUapi 字段偏移逐项断言 —— UAPI 结构漂移在编译期不可表达。</li>
+      <li><b>ipc_namespace 作用域</b>:SysV 对象按调用方命名空间过滤键可见性与 id 解析(1bde7490;LTP msg_comm "消息跨命名空间泄漏"为落地守卫)。</li>
+      <li>POSIX MQ 全功能实现;挂载面 mqueue 为空 tmpfs 别名并携带 MQUEUE_MAGIC 供 systemd 校验(statfs magic 家族修复)。</li>
+      <li>sem 的 MAX_SOPS 上限强制;SIGEV UAPI 值与 notify 校验顺序对齐(3ba353542)。</li>
+    </ul>
+
+    <h2 id="unix"><span class="anchor">§4</span>AF_UNIX(net/unix.rs,4,372 行)</h2>
+    <ul>
+      <li><b>类型</b>:SOCK_STREAM / SOCK_DGRAM / SOCK_SEQPACKET(连接态 + 记录边界,短读 MSG_TRUNC)。</li>
+      <li><b>抽象命名空间</b>:sun_path[0] == 0 即抽象名 —— 地址即名字,无文件系统节点,/proc/net/unix 以 @name 呈现;autobind "\0%05x" 对齐;UNIX_PATH_MAX=108。</li>
+      <li><b>SCM_RIGHTS fd 传递 + SCM_CREDENTIALS</b>:cmsg 载荷随 UnixSeg.files/cred 传输,由首个触及该段的 recv 消费。</li>
+      <li><b>Weak 对端模型</b>:对端链两侧均为 Weak —— fd 是唯一强属主,"对端关闭"即 Weak::upgrade 失败;引用环在该表示下不可构成,成对 socket 泄漏类问题不存在。</li>
+      <li><b>单锁发送路径</b>:每 socket 的 recv_queue/accept_queue/state/eof 为独立自旋锁;发送者仅取目标 recv_queue 一把锁 —— 两 socket 间无 AB-BA 可能。</li>
+      <li><b>等待纪律</b>:W3 等待队列形态(prepare_to_wait → 复查 → schedule → finish_wait);poll 语义:监听者仅报 POLLIN 不报 POLLHUP;对端关闭且有未读数据 = POLLHUP|POLLIN。</li>
+    </ul>
+
+    <h2 id="nums"><span class="anchor">§5</span>基准数字汇总</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>指标(pbench P5,debug 类,KVM)</th><th>D-14 前</th><th>后(门禁带)</th></tr></thead>
+      <tbody>
+        <tr><td>p5a 管道 1 字节往返</td><td class="num">19.673 µs</td><td class="num">18.306 µs</td></tr>
+        <tr><td>p5b unix DGRAM send/recv(74 B,hilogd 协议形态)</td><td class="num">318.6 / 318.3 µs</td><td class="num">23.1 / 40.9 µs(带 23–41)</td></tr>
+        <tr><td>p5c unix 流 write(74 B)</td><td class="num">276.5–277.6 µs</td><td class="num">24.9–26.8 µs(带 24–27)</td></tr>
+        <tr><td>p5c3 双向流</td><td class="num">32.7 µs</td><td class="num">25.0 µs</td></tr>
+        <tr><td>lmbench lat_pipe(同机)</td><td class="num">13.30 µs(参考)</td><td class="num">5.11 µs(2.6×)</td></tr>
+        <tr><td>appspawn fork(服务孵化关键路径)</td><td class="num">130–272 ms</td><td class="num">85–90 ms</td></tr>
+      </tbody>
+    </table></div>
+    <p class="callout">已知代价(如实):落后于在跑任务的唤醒→运行延迟被 tick 量化至 ~10 ms(p2f 电池双 hog 场景)—— 由 D-14 的亚 6 ms 窗口设计决定,消除路径见<a href="scheduler.html#tick">调度器 NOHZ</a>;binder 单事务最长 73 ms IF=0 为 watch 行。</p>
+
+    <div class="callout">代码:<code>kernel/src/ipc/</code>(binder / access_token / sysv_shm / sysv_sem / sysv_msg / posix_mq / util)、<code>kernel/src/sync/futex_pi.rs</code>、<code>kernel/src/net/unix.rs</code>。对齐审计:docs/architecture/binder-parity-audit.md(缺口表 + 自创风险表,逐条要求引用参考函数行号)。守卫:LTP sem/msg/shm/pi 族 + OH 全服务集;性能门 IPC 域 p5 行带与 binder SLOW-TXN 类。</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">返回首页</a></span>
+
+      <span class="foot-stats">本站访问 <span id="busuanzi_value_site_pv"></span> 次 · 访客 <span id="busuanzi_value_site_uv"></span> 人</span></div>
+  </div>
+</footer>
+
+<script src="../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>

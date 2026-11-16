@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IPC · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">Home</a>
+      <a href="design.html">Architecture</a>
+      <a href="../performance/index.html">Performance</a>
+      <a href="../security/index.html">Security</a>
+      <a href="../testing/index.html">Testing</a>
+      <a href="../debugging/index.html">Debugging</a>
+      <a href="../guides/getting-started.html">Getting started</a>
+      <a href="../progress/roadmap.html">Progress</a>
+      <a href="../guestbook.html">Feedback</a>
+      <span class="lang-sw"><a class="on" href="../../architecture/ipc.html">中文</a><a href="ipc.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="design.html">Design deep-dive</a>
+    <a href="scheduler.html">Scheduler</a>
+    <a href="memory.html">Memory management</a>
+    <a href="filesystem.html">Filesystem</a>
+    <a class="on" href="ipc.html">IPC</a>
+    <a href="boot.html">Boot flow</a>
+    <a href="interrupts.html">Interrupts &amp; timers</a>
+    <a href="structure.html">Code layout</a>
+    <a href="riscv64.html">Porting guide</a>
+    <a href="kernel-lock.html">Lock ordering</a>
+    <div class="grp">Debugging</div>
+    <a href="../debugging/index.html">Debugging guide</a>
+    <a href="../debugging/tracepoints.html">Tracepoints</a>
+    <a href="../debugging/perf.html">Performance debugging</a>
+    <a href="../debugging/locks.html">Lock debugging</a>
+    <a href="../debugging/memory.html">Memory forensics</a>
+    <a href="../debugging/panic.html">Panic &amp; symbols</a>
+    <div class="grp">Performance</div>
+    <a href="../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../security/index.html">Security &amp; verification</a>
+    <div class="grp">Testing</div>
+    <a href="../testing/index.html">Overview</a>
+    <a href="../testing/ci-pipeline.html">CI pipeline</a>
+    <a href="../testing/ltp.html">LTP scan</a>
+    <a href="../testing/ltp-full.html">LTP full cases</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT audit</a>
+    <a href="../testing/stability.html">Stability</a>
+    <a href="../testing/stress.html">Stress</a>
+    <a href="../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../guides/getting-started.html">Getting started</a>
+    <a href="../guides/development.html">Contributing</a>
+    <a href="../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../progress/roadmap.html">Roadmap</a>
+    <a href="../progress/changelog.html">Changelog</a>
+    <a href="../progress/quickref.html">Commands</a>
+    <div class="grp">Community</div>
+    <a href="../guestbook.html">Guestbook</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>Inter-process communication</h1>
+    <div class="sub">kernel/src/ipc/ + net/unix.rs · binder, PI futexes, SysV/POSIX MQ, AF_UNIX — mechanisms, lock models and measured numbers · Context: the OpenHarmony service mesh (~80 services) runs in full once /data is mounted · Sources: docs/architecture/binder-parity-audit.md, design-divergences.md (D-14)</div>
+
+    <h2 id="binder"><span class="anchor">§1</span>binder (kernel/src/ipc/binder.rs, 14,144 lines)</h2>
+    <p>binder is the core transport of the OpenHarmony service mesh: every system-service registration (samgr), service call, and the hilog data plane traverse it. The implementation is aligned function-by-function with the reference 6.6 binder.c semantics, with a dedicated parity audit (binder-parity-audit.md) constraining future changes: <b>every change must cite the reference function and line it mirrors</b>.</p>
+    <ul>
+      <li><b>Protocol</b>: version 8 (returned by the BINDER_VERSION ioctl); the full BC_* set (TRANSACTION/REPLY, FREE_BUFFER, INCREFS/ACQUIRE/RELEASE/DECREFS and their DONE pairs, REGISTER/ENTER/EXIT_LOOPER, DEAD_BINDER_DONE, TRANSACTION_SG/REPLY_SG); the full BR_* set (ERROR/TRANSACTION/REPLY/DEAD_REPLY/TRANSACTION_COMPLETE/NOOP/SPAWN_LOOPER/FAILED_REPLY etc.).</li>
+      <li><b>flat_binder_object cross-process translation</b>: the BINDER_TYPE_{WEAK_}BINDER/_HANDLE node/ref handshake (BR_INCREFS → BC_INCREFS_DONE) works; BINDER_TYPE_FD/FDA/PTR are partially landed — the FDA fd lifetime is an open item (install-at-send leaves ghost fds on undelivered transactions; audit on record).</li>
+      <li><b>Deferred TRANSACTION_COMPLETE for sync transactions</b>: the sender's read keeps sleeping until the reply carries the COMPLETE out — one wakeup completes the round trip; the replier side takes the non-deferred form.</li>
+      <li><b>mmap buffer</b>: silently truncated to 4 MiB (same as the reference binder_mmap); a double mmap is rejected EBUSY before allocation; the VM_DONTFORK semantics were reversed across sc157→sc159/160 — OH appspawn children inherit the daemon's mapping, so DONTCOPY was removed.</li>
+      <li><b>Lock model</b>: a single global spinlock guards every binder object; <b>no user-memory copies and no sleeping happen under the lock</b> — BC payloads are copied in before locking, BR payloads are staged into a kernel Vec under the lock and copied out after release.</li>
+      <li><b>thread_has_work parity</b>: looper_need_return is a composite term of the function (process todo, node async_todo, spawned/pending counts); the poll wake fan-out and availability semantics converged four divergences in one diff.</li>
+      <li><b>Failed-reply routing</b>: BR_FAILED_REPLY/BR_DEAD_REPLY semantics plus the silent-receiver sweep sweep_silent_txns (process todo + node async_todo, the ONEWAY_SILENCE_J window) — holding buffer reclamation against services that neglect their BC_FREE_BUFFER duty; TF_UPDATE_TXN (0x40) is landed (the binder.c:2734/2832-2845 supersede-on-park parity).</li>
+      <li><b>access_token registry</b>: /dev/access_token_id + BINDER_GET_SENDER_INFO — the samgr permission-check dependency; its absence once made AddSystemAbility refuse and blocked the OH display (the b98–b112 black-screen root chain).</li>
+    </ul>
+    <h3>Runtime numbers and known costs</h3>
+    <ul>
+      <li>At ~<b>89k txns/s</b> on the /data-mounted service mesh: binder REST sections n=64.4M, 592 s total (41% of the machine), average <b>9.2 µs</b>.</li>
+      <li><b>Watch row</b>: a single transaction holds IF=0 for up to <b>73 ms</b> — the IPC gate's SLOW-TXN class (queue ≤ 10 ms everywhere; FAIL at queue ≥ 50 ms) watches this shape.</li>
+    </ul>
+
+    <h2 id="pi-futex"><span class="anchor">§2</span>PI futexes (sync/futex_pi.rs)</h2>
+    <ul>
+      <li>Op set: FUTEX_LOCK_PI / UNLOCK_PI / TRYLOCK_PI / LOCK_PI2 + WAIT_REQUEUE_PI / CMP_REQUEUE_PI; the cmp-under-lock requeue and the robust-exit death mark are complete.</li>
+      <li><b>Implementation shape: a nice floor</b>: while a PiState has waiters, its owner runs at nice −20; wait chains are walked for deadlock detection with transitive boosting at every link; the exit path releases PI locks with the owner-died handoff.</li>
+      <li>The semantic difference from the reference rt_mutex (kernel-side priority elevation vs nice translation) is recorded in the implementation comments; the LTP pi family plus the OH FFRT load are the guards.</li>
+    </ul>
+
+    <h2 id="sysv"><span class="anchor">§3</span>SysV triple and POSIX MQ</h2>
+    <ul>
+      <li><b>Compile-time layout asserts</b>: ShmidDsUapi 112 bytes (asm-generic/shmbuf.h RV64), SemidDsUapi 104 bytes (rv64) / 88 (the 32-bit path), MqAttr 64 bytes (glibc/Linux RV64); IpcPermUapi field offsets asserted item by item — UAPI struct drift is unrepresentable at compile time.</li>
+      <li><b>ipc_namespace scoping</b>: SysV objects filter key visibility and id resolution by the caller's namespace (1bde7490; LTP msg_comm "messages leak between namespaces" is the landing guard).</li>
+      <li>POSIX MQ is fully implemented; the mqueue mount is an empty tmpfs alias carrying MQUEUE_MAGIC for systemd verification (the statfs-magic family fix).</li>
+      <li>MAX_SOPS is enforced on sem; the SIGEV UAPI values and the notify validation order are aligned (3ba353542).</li>
+    </ul>
+
+    <h2 id="unix"><span class="anchor">§4</span>AF_UNIX (net/unix.rs, 4,372 lines)</h2>
+    <ul>
+      <li><b>Types</b>: SOCK_STREAM / SOCK_DGRAM / SOCK_SEQPACKET (connection mode with record boundaries, MSG_TRUNC on short reads).</li>
+      <li><b>Abstract namespace</b>: sun_path[0] == 0 means an abstract name — the address IS the name, no filesystem node, presented as @name in /proc/net/unix; autobind "\0%05x" aligned; UNIX_PATH_MAX=108.</li>
+      <li><b>SCM_RIGHTS fd passing + SCM_CREDENTIALS</b>: the cmsg payload rides UnixSeg.files/cred and is consumed by the first recv touching the segment.</li>
+      <li><b>Weak peer model</b>: peer links are Weak on both sides — the fds are the only strong owners, and "peer closed" is simply Weak::upgrade failing; reference cycles are unrepresentable in this encoding, so the leaked-socket-pair class does not exist.</li>
+      <li><b>Single-lock send path</b>: each socket's recv_queue/accept_queue/state/eof are independent spinlocks; a sender takes only the target's recv_queue lock — no AB-BA between two sockets is reachable.</li>
+      <li><b>Wait discipline</b>: the W3 wait-queue form (prepare_to_wait → re-check → schedule → finish_wait); poll semantics: listeners report only POLLIN, never POLLHUP; a closed peer with unread data = POLLHUP|POLLIN.</li>
+    </ul>
+
+    <h2 id="nums"><span class="anchor">§5</span>Benchmark numbers</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Metric (pbench P5, debug class, KVM)</th><th>Before D-14</th><th>After (gate band)</th></tr></thead>
+      <tbody>
+        <tr><td>p5a pipe 1-byte roundtrip</td><td class="num">19.673 µs</td><td class="num">18.306 µs</td></tr>
+        <tr><td>p5b unix DGRAM send/recv (74 B, the hilogd protocol shape)</td><td class="num">318.6 / 318.3 µs</td><td class="num">23.1 / 40.9 µs (band 23–41)</td></tr>
+        <tr><td>p5c unix stream write (74 B)</td><td class="num">276.5–277.6 µs</td><td class="num">24.9–26.8 µs (band 24–27)</td></tr>
+        <tr><td>p5c3 bidirectional stream</td><td class="num">32.7 µs</td><td class="num">25.0 µs</td></tr>
+        <tr><td>lmbench lat_pipe (same rig)</td><td class="num">13.30 µs (reference)</td><td class="num">5.11 µs (2.6×)</td></tr>
+        <tr><td>appspawn fork (the service-spawn critical path)</td><td class="num">130–272 ms</td><td class="num">85–90 ms</td></tr>
+      </tbody>
+    </table></div>
+    <p class="callout">Known costs (as recorded): a wake→run behind an incumbent is tick-quantized to ~10 ms (the p2f battery, both hog regimes) — a consequence of D-14's sub-6 ms window design; the removal path is on the <a href="scheduler.html#tick">scheduler NOHZ</a> section. The binder 73 ms single-transaction IF=0 max is a watch row.</p>
+
+    <div class="callout">Code: <code>kernel/src/ipc/</code> (binder / access_token / sysv_shm / sysv_sem / sysv_msg / posix_mq / util), <code>kernel/src/sync/futex_pi.rs</code>, <code>kernel/src/net/unix.rs</code>. Parity audit: docs/architecture/binder-parity-audit.md (a gap table and an invention-risk table, each entry required to cite the reference function and line). Guards: the LTP sem/msg/shm/pi families + the full OH service set; the perf gate's IPC-domain p5 bands and the binder SLOW-TXN class.</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to home</a></span>
+
+      <span class="foot-stats">Site visits <span id="busuanzi_value_site_pv"></span> · Visitors <span id="busuanzi_value_site_uv"></span></span></div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>
