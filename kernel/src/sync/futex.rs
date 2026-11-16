@@ -4716,6 +4716,11 @@ pub fn futex_stuck_census() {
     // ohc74 close() strand class: linked, claim=-1, unexecuted 290 s).
     crate::sched::sched::runq_strand_census(now as u64);
 
+    // runq-strand lane (121st): the culprits' side — per-CPU incumbents
+    // holding their slot >= 2 s with the last tick's interrupted RIP and
+    // mode (kernel loop vs user spin vs halted CPU).
+    crate::sched::sched::monopolist_census(now as u64);
+
     // 63rd session (mission lever 2): the FFRT group's wake→pick
     // latency profile per burst — quiet-phase vs wedge-phase cost.
     crate::sched::sched::ffrt_wait_census();
@@ -5948,12 +5953,31 @@ pub fn futex_stuck_census() {
                 SCAN_WORD[slot_ix].store(g.uaddr as u64, Relaxed);
                 SCAN_J[slot_ix].store(now as u32, Relaxed);
                 rwfrz_reader_scan(g.tgid, g.uaddr as u64);
-                // 118th: the standing word is ld-musl's __malloc_lock
-                // (fixed loader base) — run the allocator-frame holder
-                // hunt for this tgid alongside the reader scan.
-                if (g.uaddr as u64) & 0xffff_f000 == 0x3fbf_13e000 {
-                    malloc_holder_scan(g.tgid, g.uaddr as u64);
+                // 120th ROOT-CAUSE CORRECTION: the 118th's gate
+                // `uaddr & 0xffff_f000 == 0x3fbf_13e000` used a 32-bit
+                // mask against a 42-bit constant — always false, so LLVM
+                // (correctly) DCE'd malloc_holder_scan out of every
+                // release binary since the 118th. 64-bit page mask.
+                let gu = g.uaddr as u64;
+                if gu & 0xffff_ffff_f000 == 0x3fbf_13e000 {
+                    malloc_holder_scan(g.tgid, gu);
                 }
+                // 120th GENERALIZED TRIGGER: a word that stood parked
+                // >= 60 s with zero wakes gets the CoTask decoder with
+                // THIS word as the key. The holder datum (a suspended
+                // coroutine whose saved stack references the word) and
+                // the resumer chains (owning serial queue active flag +
+                // qname; WE ring; WUE deadline) are word-generic — only
+                // the ALLOC-RIP/aframes arms are malloc-word-specific
+                // and they add signal, never gate. The historical
+                // foundation freeze keyed the malloc word; the
+                // deterministic pre-foundation wedge (ctf15+ faces)
+                // keys FFRT mutex/rwlock words in samgr/storage/param
+                // instead — same release-side-never-runs family, and
+                // now decodable. Cost bound: the per-tgid DONE latch
+                // inside ctd_decode (16 slots) allows one decode per
+                // tgid per boot.
+                ctd_decode(g.tgid, gu, "W");
             }
         }
         // 51st session: follow this word's futex lifecycle from here on
@@ -8084,6 +8108,93 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                 }
             }
         }
+        // 120th (cotask-decode): the malloc-lock wedge EARLY trigger.
+        // ld-musl's __malloc_lock sits at the fixed VA 0x3fbf13e6a8 in
+        // every OH process; the historical foundation freeze latches it
+        // held-forever with waiters arriving 1:1 onto the low count.
+        // Healthy malloc contention turns over in <100 ms (EAGAIN churn),
+        // so >=2 s of CONTINUOUS held-bit WAITs from one tgid is the
+        // wedge signature — and the waiters' own FUTEX_WAIT is the first
+        // kernel-visible event of it (the census adopts the word only
+        // ~60 s later; the OH68 acquire latch is process-blind). On the
+        // 2 s persistence edge: arm the write watch (a late unlock then
+        // logs an FW row with rip), run the thread-side holder hunt, and
+        // run the CoTask saved-stack decoder — while any live holder is
+        // still parked mid-critical-section and nameable. Once per tgid;
+        // dfx=fuxstuck-gated (the page compare below is the only cost
+        // on switch-off boots).
+        // 120th ROOT-CAUSE CORRECTION (presence hunt): the 118th's
+        // original gate compared `uaddr & 0xffff_f000 == 0x3fbf_13e000`
+        // — but 0xffff_f000 is a 32-bit mask, so the masked value can
+        // never carry the constant's bits 32..41: the compare was
+        // ALWAYS false and LLVM (correctly) DCE'd the whole subtree out
+        // of every release build, including the 120th atomic+black_box
+        // variant which kept the broken mask. The page mask must be
+        // 64-bit; the plain literal compare is runtime-variable and
+        // survives optimization (verified on a rustc -O repro).
+        const CTDE_PAGE: u64 = 0x3fbf_13e000;
+        const CTDE_WORD: u64 = 0x3fbf_13e6a8;
+        let ctde_uaddr = uaddr as u64;
+        if matches!(cmd, FUTEX_WAIT | FUTEX_WAIT_BITSET)
+            && ctde_uaddr & 0xffff_ffff_f000 == CTDE_PAGE
+            && val & 0x8000_0000 != 0
+            && val & 0x7fff_ffff >= 2
+            && crate::dfx::switches::enabled(
+                crate::dfx::switches::DfxSwitch::FuxStuck,
+            )
+        {
+            const CTDE_SLOTS: usize = 8;
+            static CTDE_TGID: [core::sync::atomic::AtomicU32; CTDE_SLOTS] =
+                [const { core::sync::atomic::AtomicU32::new(0) }; CTDE_SLOTS];
+            static CTDE_J: [core::sync::atomic::AtomicU32; CTDE_SLOTS] =
+                [const { core::sync::atomic::AtomicU32::new(0) }; CTDE_SLOTS];
+            static CTDE_FIRED: [core::sync::atomic::AtomicBool; CTDE_SLOTS] =
+                [const { core::sync::atomic::AtomicBool::new(false) }; CTDE_SLOTS];
+            if let Some(t) = crate::sched::current() {
+                // SAFETY: read-only pid/tgid of the current task.
+                let (tid, tgid) = unsafe { ((*t).pid() as u32, (*t).tgid() as u32) };
+                let now = crate::drivers::timer::get_jiffies() as u32;
+                let mut slot = usize::MAX;
+                let mut fire = false;
+                for i in 0..CTDE_SLOTS {
+                    let s = CTDE_TGID[i].load(Relaxed);
+                    if s == tgid {
+                        slot = i;
+                        if !CTDE_FIRED[i].load(Relaxed)
+                            && now.wrapping_sub(CTDE_J[i].load(Relaxed)) >= 200
+                        {
+                            fire = CTDE_FIRED[i]
+                                .compare_exchange(false, true, Relaxed, Relaxed)
+                                .is_ok();
+                        }
+                        break;
+                    }
+                    if s == 0 && slot == usize::MAX {
+                        slot = i;
+                        // claim the slot with its start jiffies; the
+                        // persistence check runs on later waits.
+                        if CTDE_TGID[i]
+                            .compare_exchange(0, tgid, Relaxed, Relaxed)
+                            .is_ok()
+                        {
+                            CTDE_J[i].store(now, Relaxed);
+                        }
+                    }
+                }
+                if fire {
+                    crate::pr_warn!(
+                        "CTD-EARLY tgid={} tid={} word=0x3fbf13e6a8 val={:#x} (held >=2s — full decode now)",
+                        tgid,
+                        tid,
+                        val
+                    );
+                    let ctw = CTDE_WORD;
+                    fuxpark_latch(ctw, tid, tgid);
+                    malloc_holder_scan(tgid, ctw);
+                    ctd_decode(tgid, ctw, "E");
+                }
+            }
+        }
         // rwlock-livelock: the guard read only slots 0/1 — a word latched
         // into a later slot (glibc-shape latch after musl parks took the
         // front slots) never printed. Scan all 8; the all-zero fast exit
@@ -10174,8 +10285,11 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
     // image's fixed musl load base — it cannot compile or mean anything
     // on the other arches; this block had escaped its cfg and broke
     // every non-x86_64 build of main f5ed08765.
+    // 120th ROOT-CAUSE CORRECTION (see the do_futex CTD-EARLY comment):
+    // the old 32-bit-mask page gate was always-false and DCE'd this
+    // entire hunt out of release builds. 64-bit page mask, plain literal.
     #[cfg(target_arch = "x86_64")]
-    if word & 0xffff_f000 == 0x3fbf_13e000 {
+    if word & 0xffff_ffff_f000 == 0x3fbf_13e000 {
         let mut w2 = crate::dfx::backtrace::ConsoleWriter::new();
         let _ = writeln!(w2, "MHUNT-CANARY2 word={:#x}", word);
         let _ = writeln!(w2, "MHUNT tgid={} word={:#x}:", tgid, word);
@@ -10183,13 +10297,7 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
         let mut waiters = 0u32;
         let mut v_rec: Option<u64> = None;
         let mut v_stuck: Option<(u64, u64, u64)> = None;
-        const MUSL_BASE: u64 = 0x3fbf_0000_0000;
-        const WRAP_LO: u64 = MUSL_BASE + 0x12adb0;
-        const WRAP_HI: u64 = MUSL_BASE + 0x12b4b8;
-        const NG_LO: u64 = MUSL_BASE + 0xba000;
-        const NG_HI: u64 = MUSL_BASE + 0xbd000;
-        const HOOK_LO: u64 = MUSL_BASE + 0x12bb00;
-        const HOOK_HI: u64 = MUSL_BASE + 0x12c500;
+        let musl = musl_anchor(tgid);
         crate::sched::for_each_task_try(|t| {
             if rows >= 24 {
                 return;
@@ -10203,9 +10311,10 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
             let Some(top) = tk.kernel_stack_top_checked() else {
                 return;
             };
-            // Arch gate (same twin as rwfrz_reader_scan above): the
-            // pt_regs layout probe is x86_64-only — the 118th inline
-            // copy landed without it and broke riscv64/aarch64 builds.
+            // 120th fix: the 118th's inlined copy of this hunt missed the
+            // cfg gate the standalone malloc_holder_scan carries — every
+            // non-x86_64 build of the tree (default `make build`) failed
+            // E0433 on `crate::arch::x86_64`. Same gating as the twin.
             #[cfg(feature = "x86_64")]
             let (sys, a0, rsp) = {
                 let regs = (top.wrapping_sub(
@@ -10235,19 +10344,20 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
                 }
                 let lo = unsafe { read_u32_via_task(t, va as usize) }.unwrap_or(0) as u64
                     | ((unsafe { read_u32_via_task(t, va as usize + 4) }.unwrap_or(0) as u64) << 32);
-                if lo >= WRAP_LO && lo < WRAP_HI {
+                let cls = musl.map(|a| musl_off_class(a, lo)).unwrap_or(0);
+                if cls == 1 {
                     if nw < 3 {
-                        wrap_hits[nw] = lo - MUSL_BASE;
+                        wrap_hits[nw] = lo;
                     }
                     nw += 1;
-                } else if lo >= NG_LO && lo < NG_HI {
+                } else if cls == 2 {
                     if nn < 2 {
-                        ng_hits[nn] = lo - MUSL_BASE;
+                        ng_hits[nn] = lo;
                     }
                     nn += 1;
-                } else if lo >= HOOK_LO && lo < HOOK_HI {
+                } else if cls == 3 {
                     if nh < 2 {
-                        hook_hits[nh] = lo - MUSL_BASE;
+                        hook_hits[nh] = lo;
                     }
                     nh += 1;
                 }
@@ -10327,6 +10437,85 @@ pub fn rwfrz_reader_scan(tgid: u32, word: u64) {
 ///   - all waiters carry <= 1 WRAP frame and no off-word thread hits
 ///     = thread-side holders acquitted (holder exited holding).
 /// Same for_each_task_try + page-walk cost class as the reader scan.
+///
+/// 120th ROOT-CAUSE CORRECTION #2 (cotask-decode): the classifier
+/// constants since the 118th compared runtime addresses against
+/// `MUSL_BASE = 0x3fbf_0000_0000` — 256x ABOVE the real mapping (the
+/// loader maps ld-musl at 0x3fbf000000-class; the extra two hex digits
+/// were a unit error, same family as the 32-bit page-mask bug). The
+/// WRAP/NG/HOOK/LCKHLP windows sat in an unmapped gap below every real
+/// code address and NEVER matched — the thread-side holder hunt has
+/// been inert since birth (its "acquitted" verdicts were vacuous).
+/// Robust replacement: classify by FILE OFFSET against the tgid's LIVE
+/// ld-musl exec VMA (file_off = addr - vma.start + vma.offset); the
+/// windows below are the BuildID 99627cfd ELF-vaddr windows shifted by
+/// the exec LOAD's vaddr-file delta (0x1000):
+///   WRAP_F  [0x129db0, 0x12a4b8) malloc/calloc/realloc/free wrappers
+///   NG_F    [0xb9000,  0xbc000)  mallocng internals (incl. unlock)
+///   HOOK_F  [0x12ab00, 0x12b500) OH malloc-hook cluster
+///   LCKHLP_F [0x115b40, 0x115e00) LOCK() futex helper (parked
+///                                  waiters' saved rip lands here)
+pub fn musl_anchor(tgid: u32) -> Option<(u64, u64)> {
+    let mut anchor: Option<(u64, u64)> = None;
+    crate::sched::for_each_task_try(|task| {
+        if anchor.is_some() {
+            return;
+        }
+        // SAFETY: diagnostic read under the for_each_task contract.
+        let tk = unsafe { &*task };
+        if tk.tgid() as u32 != tgid {
+            return;
+        }
+        if let Some(aspace) = tk.address_space() {
+            if let Some(mgr) = aspace.vma_try_read() {
+                for vma in mgr.iter() {
+                    if !vma.flags().is_executable() {
+                        continue;
+                    }
+                    let name = aspace
+                        .try_get_vma_file(vma.start().as_usize())
+                        .map(|f| f.path())
+                        .unwrap_or_default();
+                    let base: alloc::string::String = name
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or("-")
+                        .chars()
+                        .take(28)
+                        .collect();
+                    if base.starts_with("ld-musl") {
+                        anchor = Some((
+                            vma.start().as_usize() as u64,
+                            vma.offset() as u64,
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    anchor
+}
+
+/// File-offset classifier for the windows documented on musl_anchor.
+/// Returns (wrap, ng, hook, lckhlp) membership as a packed u8.
+#[inline]
+pub fn musl_off_class(anchor: (u64, u64), x: u64) -> u8 {
+    let Some(off) = x.checked_sub(anchor.0).map(|d| d + anchor.1) else {
+        return 0;
+    };
+    if (0x129db0..0x12a4b8).contains(&off) {
+        1
+    } else if (0xb9000..0xbc000).contains(&off) {
+        2
+    } else if (0x12ab00..0x12b500).contains(&off) {
+        3
+    } else if (0x115b40..0x115e00).contains(&off) {
+        4
+    } else {
+        0
+    }
+}
 pub fn malloc_holder_scan(tgid: u32, word: u64) {
     use core::fmt::Write as _;
     #[cfg(feature = "x86_64")]
@@ -10339,13 +10528,7 @@ pub fn malloc_holder_scan(tgid: u32, word: u64) {
     let mut waiters = 0u32;
     let mut verdict_recursive: Option<u64> = None;
     let mut verdict_stuck: Option<(u64, u64, u64)> = None;
-    const MUSL_BASE: u64 = 0x3fbf_0000_0000;
-    const WRAP_LO: u64 = MUSL_BASE + 0x12adb0;
-    const WRAP_HI: u64 = MUSL_BASE + 0x12b4b8;
-    const NG_LO: u64 = MUSL_BASE + 0xba000;
-    const NG_HI: u64 = MUSL_BASE + 0xbd000;
-    const HOOK_LO: u64 = MUSL_BASE + 0x12bb00;
-    const HOOK_HI: u64 = MUSL_BASE + 0x12c500;
+    let musl = musl_anchor(tgid);
     crate::sched::for_each_task_try(|t| {
         if rows >= 24 {
             return;
@@ -10389,19 +10572,20 @@ pub fn malloc_holder_scan(tgid: u32, word: u64) {
             }
             let lo = unsafe { read_u32_via_task(t, va as usize) }.unwrap_or(0) as u64
                 | ((unsafe { read_u32_via_task(t, va as usize + 4) }.unwrap_or(0) as u64) << 32);
-            if lo >= WRAP_LO && lo < WRAP_HI {
+            let cls = musl.map(|a| musl_off_class(a, lo)).unwrap_or(0);
+            if cls == 1 {
                 if nw < 3 {
-                    wrap_hits[nw] = lo - MUSL_BASE;
+                    wrap_hits[nw] = lo;
                 }
                 nw += 1;
-            } else if lo >= NG_LO && lo < NG_HI {
+            } else if cls == 2 {
                 if nn < 2 {
-                    ng_hits[nn] = lo - MUSL_BASE;
+                    ng_hits[nn] = lo;
                 }
                 nn += 1;
-            } else if lo >= HOOK_LO && lo < HOOK_HI {
+            } else if cls == 3 {
                 if nh < 2 {
-                    hook_hits[nh] = lo - MUSL_BASE;
+                    hook_hits[nh] = lo;
                 }
                 nh += 1;
             }
@@ -10452,6 +10636,633 @@ pub fn malloc_holder_scan(tgid: u32, word: u64) {
         }
     }
     let _ = writeln!(w, "MHUNT end rows={} waiters_on_word={}", rows, waiters);
+    // 120th (cotask-decode): the standing-word adoption is the LATE arm
+    // of the same hunt the early trigger (do_futex CTD-EARLY) starts at
+    // first-waiter +2 s; ctd_decode self-latches once per tgid so the
+    // late call is a no-op when the early one already ran, and the
+    // backstop when the early window missed (boot without fuxstuck, or
+    // a wedge whose waiters never cross the >=2-waiter early gate).
+    ctd_decode(tgid, word, "L");
+}
+
+/// 120th (cotask-decode): FFRT CoTask saved-stack decoder for the
+/// malloc-lock wedge. The 118th proved foundation's __malloc_lock
+/// (0x3fbf13e6a8, ld-musl fixed base) latches held-forever with the
+/// low count climbing 1:1 with parked waiters, no unlocking write, no
+/// wake attempt, and NO thread carrying allocator frames — the open
+/// hypotheses are (a) a suspended FFRT coroutine holding through a
+/// yield, (b) a holder that exited holding, (c) a holder descheduled
+/// mid-critical-section in a state no prior instrument names (page
+/// fault inside mallocng, signal-handler recursion). This decoder runs
+/// the full structural pass ONCE per tgid at the earliest wedge signal:
+///
+///  Phase T — every same-tgid thread: syscall, park uaddr, USER RIP
+///    (pt_regs) classified by module. A thread faulting INSIDE the
+///    allocator (RIP in mallocng/wrapper code, no syscall — the IO-stuck
+///    or demand-paging-stuck holder shape) is named here; prior taskdump
+///    rows only printed the syscall.
+///  Phase W — every worker's ExecuteCtx (musl TSD scan, the oh68
+///    contract): ctx, ctx->task, task label, ThreadWait word ctx+224.
+///    The ctx pointers are also the heap anchors for Phase C.
+///  Phase C — CoTask heap sweep over anchor-derived windows (each ctx
+///    +-1.5 MB merged; the 118th slab sweep anchored on the ld-musl
+///    mapping itself and never reached foundation's 0x2aab... arena).
+///    Structural shape (BuildID-verified layouts, libffrt bb6920ed):
+///      CoTask: type@0x18 in 0..=4 (ffrt task types), gid@0x20 small,
+///        preStatus@0x30/curStatus@0x34 (uint8 enums, cur<=11),
+///        createTime@0x60, executeTime@0x68, fromTid@0x70, label@0xd8
+///        (libc++ SSO or long), we@0x100 (WaitEntry: ring links +0x8,
+///        task@0x20), wue@0x128 (WaitUntilEntry*: status@+0x30,
+///        deadline@+0x38), coRoutine@0x130, runningTid@0x140,
+///        threadMode_@0x1a9; QueueTask adds handler_@0x1b8,
+///        nextTask_@0x1d8.
+///      CoRoutine: status@0 (0=uninit 1=not_finish 2=running), task@0x10
+///        backref, fiber RSP@+0x48 RIP@+0x50, stkMem.size@0x68,
+///        stkMem.magic@0x70 == 0x7bcdabcdabcdabcd (the shape test),
+///        stack [co+0x78, co+0x78+size).
+///    Every suspended CoTask (saved RIP not at libffrt's context_entry
+///    trampoline, file offset 0x86a24 = queued-fresh) prints label +
+///    saved RIP/RSP as module file offsets plus a walked stack; any
+///    stack word EQUAL to the malloc word (W!) or inside the ld-musl
+///    allocator/lock-helper VA ranges (A!) flags a holder candidate,
+///    which the verdict line names. TaskStatus strings from
+///    ffrt types.h: 0 PND 1 ENQ 2 DEQ 3 SUB 4 RDY 5 POP 6 EXE 7 THB
+///    (THREAD_BLOCK) 8 CRB (COROUTINE_BLOCK) 9 FIN 10 WRS 11 CAN.
+///
+/// All prints are SHORT self-contained rows (the 118th's single-line
+/// OH68 dump was garbled beyond recovery by concurrent census printers
+/// on the same wedge). Cost: ~30 tasks x (2 walks + 64-word TSD scan)
+/// + sweep budget 500k single-word reads — the proven reader-scan class
+/// (for_each_task_try, no pid-bucket locks held). x86_64-only content.
+pub fn ctd_decode(tgid: u32, word: u64, tag: &str) {
+    use core::fmt::Write as _;
+    use core::sync::atomic::Ordering::Relaxed;
+    if tgid == 0 {
+        return;
+    }
+    // once per tgid (the early arm carries the freshest holder state;
+    // re-runs would only re-print the same frozen graph). ctf1 live
+    // fire: the OLD single global slot was eaten by hilogd's benign
+    // 2 s boot-contention at 21.9 s, so foundation's trigger 0.3 s
+    // later decoded nothing — per-tgid slots now (16; overflow falls
+    // back to skip, the census late arm still prints for latecomers).
+    const DONE_SLOTS: usize = 16;
+    static DONE_TGIDS: [core::sync::atomic::AtomicU32; DONE_SLOTS] =
+        [const { core::sync::atomic::AtomicU32::new(0) }; DONE_SLOTS];
+    let mut claimed = false;
+    for i in 0..DONE_SLOTS {
+        let s = DONE_TGIDS[i].load(Relaxed);
+        if s == tgid {
+            return;
+        }
+        if s == 0 && !claimed {
+            claimed = DONE_TGIDS[i]
+                .compare_exchange(0, tgid, Relaxed, Relaxed)
+                .is_ok();
+            if !claimed {
+                // lost the race and it wasn't us — recheck this slot
+                if DONE_TGIDS[i].load(Relaxed) == tgid {
+                    return;
+                }
+            }
+        }
+    }
+    if !claimed {
+        return;
+    }
+    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+    let _ = writeln!(
+        w,
+        "CTD-HEAD {} tgid={} word={:#x} jif={}",
+        tag,
+        tgid,
+        word,
+        crate::drivers::timer::get_jiffies()
+    );
+    if cfg!(not(target_arch = "x86_64")) {
+        let _ = writeln!(w, "CTD-END (x86_64-only)");
+        return;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        // Phase 0: any same-tgid root (address spaces are shared).
+        let mut root: u64 = 0;
+        crate::sched::for_each_task_try(|task| {
+            if root != 0 {
+                return;
+            }
+            // SAFETY: diagnostic read under the for_each_task contract.
+            let tk = unsafe { &*task };
+            if tk.tgid() as u32 != tgid {
+                return;
+            }
+            if let Some(aspace) = tk.address_space() {
+                root = aspace.root_ppn();
+            }
+        });
+        if root == 0 {
+            let _ = writeln!(w, "CTD-END no-root");
+            return;
+        }
+        let rd = |va: u64| -> Option<u64> { rd_word(root, va) };
+        let rd32at = |va: u64| -> Option<u32> {
+            rd(va & !7).map(|w| (w >> ((va & 4) * 8)) as u32)
+        };
+        // Phase 1: exec-VMA table (module classifier). 96 entries (was
+        // 48 — ctf7: foundation maps more than 48 exec VMAs and the
+        // cap lost libffrt, so CoYield rips printed as `?`), one
+        // task's map (all threads share it).
+        let mut exec_vmas: alloc::vec::Vec<(u64, u64, u64, alloc::string::String)> =
+            alloc::vec::Vec::new();
+        crate::sched::for_each_task_try(|task| {
+            if !exec_vmas.is_empty() {
+                return;
+            }
+            // SAFETY: diagnostic read under the for_each_task contract.
+            let tk = unsafe { &*task };
+            if tk.tgid() as u32 != tgid {
+                return;
+            }
+            if let Some(aspace) = tk.address_space() {
+                if let Some(mgr) = aspace.vma_try_read() {
+                    for vma in mgr.iter() {
+                        if vma.flags().is_executable()
+                            && exec_vmas.len() < 96
+                        {
+                            let name = aspace
+                                .try_get_vma_file(vma.start().as_usize())
+                                .map(|f| f.path())
+                                .unwrap_or_default();
+                            let base: alloc::string::String = name
+                                .rsplit('/')
+                                .next()
+                                .unwrap_or("-")
+                                .chars()
+                                .take(28)
+                                .collect();
+                            exec_vmas.push((
+                                vma.start().as_usize() as u64,
+                                vma.end().as_usize() as u64,
+                                vma.offset() as u64,
+                                base,
+                            ));
+                        }
+                    }
+                }
+            }
+        });
+        let word_off = |x: u64| -> Option<(usize, u64)> {
+            for (i, &(s, e, f, _)) in exec_vmas.iter().enumerate() {
+                if x >= s && x < e {
+                    return Some((i, x - s + f));
+                }
+            }
+            None
+        };
+        // libffrt's vma index + the ld-musl vma index (name match; the
+        // OH image maps each exactly once per process).
+        let mut ffrt_ix = usize::MAX;
+        let mut musl_ix = usize::MAX;
+        for (i, &(_, _, _, ref n)) in exec_vmas.iter().enumerate() {
+            if n.starts_with("libffrt") && ffrt_ix == usize::MAX {
+                ffrt_ix = i;
+            }
+            if n.starts_with("ld-musl") && musl_ix == usize::MAX {
+                musl_ix = i;
+            }
+        }
+        for (i, &(s, e, f, ref n)) in exec_vmas.iter().enumerate() {
+            let _ = writeln!(w, "CTD-VMA v{}={:#x}-{:#x}/{:#x}/{}", i, s, e, f, n);
+        }
+        // ld-musl allocator frame classifier — 120th CORRECTION #2: the
+        // old MUSL_BASE(0x3fbf_0000_0000)+window form was 256x above
+        // the real mapping and never matched (see musl_anchor doc).
+        // Classify by FILE OFFSET through this decode's own VMA table
+        // (musl_ix); windows are BuildID-pinned ELF vaddrs - 0x1000.
+        let musl_off = |x: u64| -> Option<u64> {
+            match word_off(x) {
+                Some((m, o)) if m == musl_ix => Some(o),
+                _ => None,
+            }
+        };
+        let in_alloc = |x: u64| -> bool {
+            match musl_off(x) {
+                Some(o) => {
+                    (0x129db0..0x12a4b8).contains(&o)  // WRAP wrappers
+                        || (0xb9000..0xbc000).contains(&o)  // NG internals
+                        || (0x12ab00..0x12b500).contains(&o) // HOOK cluster
+                }
+                None => false,
+            }
+        };
+        let in_lckhlp = |x: u64| -> bool {
+            matches!(musl_off(x), Some(o) if (0x115b40..0x115e00).contains(&o))
+        };
+        // Phase T + W: thread table and worker ctx sweep in ONE pass
+        // (both walk the same task set; ctx discovery also collects the
+        // Phase C anchors). Thread rows print FIRST (holder-nameable
+        // even if the sweep later trips its budget).
+        let mut anchors: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+        let mut nthreads = 0u32;
+        let mut alloc_rip_tids: alloc::vec::Vec<(u32, u64)> = alloc::vec::Vec::new();
+        crate::sched::for_each_task_try(|task| {
+            if nthreads >= 40 {
+                return;
+            }
+            // SAFETY: diagnostic read under the for_each_task contract;
+            // reads confined to pt-regs, TLS and the task's own pages.
+            let tk = unsafe { &*task };
+            if tk.tgid() as u32 != tgid {
+                return;
+            }
+            nthreads += 1;
+            let tid = tk.pid() as u32;
+            let comm = tk.comm();
+            let name = core::str::from_utf8(&comm[..])
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            let Some(top) = tk.kernel_stack_top_checked() else {
+                return;
+            };
+            let regs = (top.wrapping_sub(
+                crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+            )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+            let (sys, a0, rip) =
+                unsafe { ((*regs).orig_rax, (*regs).rdi, (*regs).rip) };
+            let ripoff = match word_off(rip) {
+                Some((m, o)) => alloc::format!("v{}+{:#x}", m, o),
+                None => alloc::string::String::from("?"),
+            };
+            let mut flags = alloc::string::String::new();
+            if in_alloc(rip) || in_lckhlp(rip) {
+                let _ = write!(flags, " ALLOC-RIP");
+                alloc_rip_tids.push((tid, rip));
+            }
+            if sys == 202 && a0 != 0 && (a0 as u64 >> 47) == 0 && a0 as u64 > 0x1000 {
+                // heap-class park words anchor Phase C into the C++
+                // object arena (the ld-musl word itself is not heap).
+                if (a0 as u64) >= 0x1000_0000_0000 && (a0 as u64) < 0x7f00_0000_0000 {
+                    anchors.push(a0 as u64);
+                }
+            }
+            let _ = writeln!(
+                w,
+                "CTD-THR tid={} '{}' sys={} a0={:#x} rip={:#x}@{}{}",
+                tid,
+                name,
+                sys,
+                a0,
+                rip,
+                ripoff,
+                flags
+            );
+            // Phase W: this thread's ExecuteCtx (TSD scan, oh68 key
+            // cache). Thread-mode tasks (ctx->task set while parked
+            // inside Execute()) carry the task identity here.
+            let fs = tk.thread().fs_base;
+            let ctx = oh68_ctx_of(root, fs, tid);
+            if ctx != 0 {
+                let taskp = rd(ctx + 16).unwrap_or(0);
+                let (gid, ty, cur, lbl) = if taskp > 0x1000 && (taskp >> 47) == 0 {
+                    (
+                        rd(taskp + 0x20).unwrap_or(0),
+                        rd32at(taskp + 0x18).unwrap_or(0xffff),
+                        (rd(taskp + 0x30).unwrap_or(0) >> 32) & 0xff,
+                        ctd_label(&rd, taskp + 0xd8),
+                    )
+                } else {
+                    (0, 0xffff, 0xff, alloc::string::String::new())
+                };
+                let _ = writeln!(
+                    w,
+                    "CTD-WRK tid={} ctx={:#x} task={:#x} gid={:#x} ty={} cur={} lbl=\"{}\" parkw={:#x}",
+                    tid,
+                    ctx,
+                    taskp,
+                    gid,
+                    ty,
+                    cur,
+                    lbl,
+                    rd(ctx + 224).unwrap_or(0)
+                );
+                anchors.push(ctx);
+                if taskp > 0x1000 && (taskp >> 47) == 0 {
+                    anchors.push(taskp);
+                }
+            }
+        });
+        let _ = writeln!(w, "CTD-THREADS n={}", nthreads);
+        let otask = FUXWATCH_OWNER_TASK.load(Relaxed);
+        if otask > 0x1000 && (otask >> 47) == 0 {
+            // the acquire-time latch (process-blind — validate it belongs
+            // to THIS tgid by page-table reachability before anchoring)
+            if rd(otask + 0x20).is_some() {
+                let _ = writeln!(
+                    w,
+                    "CTD-OTASK latch={:#x} (cross-process latch, reachable)", otask
+                );
+                anchors.push(otask);
+            }
+        }
+        // Phase C: CoTask sweep over merged anchor windows.
+        anchors.sort_unstable();
+        anchors.dedup();
+        const WIN: u64 = 0x180000; // +-1.5 MB
+        let mut wins: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
+        for &a in anchors.iter() {
+            if a < 0x1000 || (a >> 47) != 0 {
+                continue;
+            }
+            // skip the fixed loader mapping (not a CoTask arena)
+            if a >= 0x3fbf_0000_0000 && a < 0x3fbf_4000_0000 {
+                continue;
+            }
+            let (lo, hi) = (a.saturating_sub(WIN), a + WIN);
+            match wins.last_mut() {
+                Some(last) if lo <= last.1 => {
+                    if hi > last.1 {
+                        last.1 = hi;
+                    }
+                }
+                _ => wins.push((lo, hi)),
+            }
+            if wins.len() >= 4 {
+                break;
+            }
+        }
+        // ctf1 live fire: 500k words exhausted inside the second 3 MB
+        // anchor window (cts=0, budget_left=0) — hilogd's arena walk
+        // never finished. 2M words covers all four merged windows.
+        let mut budget: u64 = 2_000_000;
+        let mut found = 0u32;
+        let mut suspended_n = 0u32;
+        let mut holder_n = 0u32;
+        for &(lo, hi) in wins.iter() {
+            if budget == 0 || found >= 40 {
+                break;
+            }
+            let _ = writeln!(w, "CTD-SWEEP win={:#x}-{:#x}", lo, hi);
+            let mut base = lo;
+            while base < hi && budget > 0 && found < 40 {
+                budget -= 1;
+                // type@gid window: one read at +0x18 covers type(4)+pad;
+                // most words fail here.
+                let Some(w18) = rd(base + 0x18) else {
+                    base += 8;
+                    continue;
+                };
+                let ty = w18 as u32;
+                if ty > 4 {
+                    base += 8;
+                    continue;
+                }
+                let gid = match rd(base + 0x20) {
+                    Some(g) if (1..=0x400000).contains(&g) => g,
+                    _ => {
+                        base += 8;
+                        continue;
+                    }
+                };
+                let co = match rd(base + 0x130) {
+                    Some(c) if c > 0x1000 && (c >> 47) == 0 => c,
+                    _ => {
+                        base += 8;
+                        continue;
+                    }
+                };
+                // CoRoutine stkMem magic — the strong shape test.
+                if rd(co + 0x70) != Some(0x7bcd_abcd_abcd_abcd) {
+                    base += 8;
+                    continue;
+                }
+                let w30 = rd(base + 0x30).unwrap_or(0);
+                let cur = (w30 >> 32) & 0xff;
+                let pre = w30 & 0xff;
+                if cur > 11 || pre > 11 {
+                    base += 8;
+                    continue;
+                }
+                found += 1;
+                let label = ctd_label(&rd, base + 0xd8);
+                let rsp = rd(co + 0x48).unwrap_or(0);
+                let rip = rd(co + 0x50).unwrap_or(0);
+                let stk_sz = rd(co + 0x68).unwrap_or(0).min(0x1800);
+                let ripoff = match word_off(rip) {
+                    Some((m, o)) => alloc::format!("v{}+{:#x}", m, o),
+                    None => alloc::string::String::from("?"),
+                };
+                // queued-fresh: saved RIP at libffrt context_entry.
+                let fresh = match word_off(rip) {
+                    Some((m, o)) if m == ffrt_ix && o == 0x86a24 => true,
+                    _ => false,
+                };
+                let wue = rd(base + 0x128).unwrap_or(0);
+                let rtid = rd(base + 0x140).unwrap_or(0);
+                let thr_m = rd(base + 0x1a9).map(|v| v & 0xff).unwrap_or(0xff);
+                let _ = writeln!(
+                    w,
+                    "CTD-CT tp={:#x} g{:#x} ty{} cur{}(pre{}) ct={} ex={} ft={} rtid={} thrM={} wue={:#x} rip={}{} lbl=\"{}\"",
+                    base,
+                    gid,
+                    ty,
+                    cur,
+                    pre,
+                    rd(base + 0x60).unwrap_or(0),
+                    rd(base + 0x68).unwrap_or(0),
+                    rd32at(base + 0x70).unwrap_or(0xffff),
+                    rtid,
+                    thr_m,
+                    wue,
+                    ripoff,
+                    if fresh { " FRESH" } else { "" },
+                    label
+                );
+                if fresh || rsp == 0 || (rsp >> 47) != 0 || rsp & 7 != 0 {
+                    base += 8;
+                    continue;
+                }
+                suspended_n += 1;
+                // saved-stack walk: every exec-VMA word is a candidate
+                // return address; W! = malloc-word data ref, A! =
+                // allocator code frame. Also flag the saved RIP itself.
+                let mut frames: alloc::vec::Vec<(usize, u64)> = alloc::vec::Vec::new();
+                let mut wrefs = 0u32;
+                let mut aframes: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+                let lo_stk = co + 0x78;
+                let hi_stk = co + 0x78 + stk_sz;
+                let top = (rsp + 0x1800).min(hi_stk);
+                if rsp >= lo_stk {
+                    let mut va = rsp;
+                    while va < top {
+                        if let Some(x) = rd(va) {
+                            if x == word {
+                                wrefs += 1;
+                            } else if in_alloc(x) || in_lckhlp(x) {
+                                if aframes.len() < 6 {
+                                    aframes.push(
+                                        musl_off(x).unwrap_or(0),
+                                    );
+                                }
+                            } else if let Some((m, o)) = word_off(x) {
+                                if frames.len() < 20 {
+                                    frames.push((m, o));
+                                }
+                            }
+                        }
+                        va += 8;
+                    }
+                }
+                let rip_alloc = in_alloc(rip) || in_lckhlp(rip);
+                let mut fs = alloc::string::String::new();
+                for (m, o) in frames.iter() {
+                    let _ = write!(fs, " v{}:{:#x}", m, o);
+                }
+                if !aframes.is_empty() || rip_alloc || wrefs > 0 {
+                    let _ = write!(fs, " W!={} A!=+{:x?}", wrefs, aframes);
+                    if rip_alloc {
+                        let _ = write!(fs, " RIPALLOC");
+                    }
+                }
+                let _ = writeln!(
+                    w,
+                    "CTD-ST tp={:#x} rsp={:#x} rip={:#x} st={}{}",
+                    base,
+                    rsp,
+                    rip,
+                    rd32at(co).unwrap_or(0xffff),
+                    fs
+                );
+                // resumer structures: the we ring (which sync object's
+                // waiter list this task is on) and the wue timeout state
+                // (status INIT + long-past deadline = the delayed-worker
+                // never fired; the offline pass compares against boot
+                // steady-clock ns).
+                let wen = rd(base + 0x108).unwrap_or(0);
+                if wen != 0 && (wen >> 47) == 0 && wen != base + 0x100 {
+                    let mut ring = alloc::string::String::new();
+                    let mut cur = wen;
+                    let mut hops = 0u32;
+                    while hops < 8 {
+                        let _ = write!(ring, " {:#x}", cur);
+                        match rd(cur + 0x8) {
+                            Some(nx) if nx != 0 && (nx >> 47) == 0 && nx != base + 0x100 => {
+                                cur = nx;
+                                hops += 1;
+                            }
+                            _ => break,
+                        }
+                    }
+                    let _ = writeln!(w, "CTD-WE tp={:#x} ring:{}", base, ring);
+                }
+                if wue > 0x1000 && (wue >> 47) == 0 {
+                    let _ = writeln!(
+                        w,
+                        "CTD-WUE tp={:#x} wue={:#x} status={} dl={:#x}",
+                        base,
+                        wue,
+                        rd32at(wue + 0x30).unwrap_or(0xffff),
+                        rd(wue + 0x38).unwrap_or(0)
+                    );
+                }
+                // QueueTask: the SQ that owns this task is its resumer.
+                if ty == 3 {
+                    let handler = rd(base + 0x1b8).unwrap_or(0);
+                    if handler > 0x1000 && (handler >> 47) == 0 {
+                        let queue = rd(handler + 8).unwrap_or(0);
+                        if queue > 0x1000 && (queue >> 47) == 0 {
+                            let _ = writeln!(
+                                w,
+                                "CTD-QT tp={:#x} h={:#x} q={:#x} active={} mapsz={} nxt={:#x} qname=\"{}\"",
+                                base,
+                                handler,
+                                queue,
+                                rd(queue + 78).unwrap_or(0) & 0xff,
+                                rd(queue + 96).unwrap_or(0),
+                                rd(base + 0x1d8).unwrap_or(0),
+                                ctd_label(&rd, queue + 0xc8)
+                            );
+                        }
+                    }
+                }
+                if rip_alloc || (!aframes.is_empty() && wrefs > 0) {
+                    holder_n += 1;
+                    let _ = writeln!(
+                        w,
+                        "CTD-HOLDER tp={:#x} gid={:#x} lbl=\"{}\" rip={} wrefs={} aframes={:?}",
+                        base,
+                        gid,
+                        label,
+                        ripoff,
+                        wrefs,
+                        aframes
+                    );
+                }
+                base += 8;
+            }
+        }
+        let _ = writeln!(
+            w,
+            "CTD-END {} tgid={} threads={} cts={} susp={} holders={} wins={} budget_left={}",
+            tag,
+            tgid,
+            nthreads,
+            found,
+            suspended_n,
+            holder_n,
+            wins.len(),
+            budget
+        );
+        for &(tid, rip) in alloc_rip_tids.iter() {
+            let _ = writeln!(
+                w,
+                "CTD-ALLOCRIP tid={} rip={:#x} (thread executing allocator code, no syscall)",
+                tid,
+                rip
+            );
+        }
+    }
+}
+
+/// 120th (cotask-decode): libc++ std::string decode at `va` — SSO
+/// (size in byte0>>1, chars at +1) or long form (size@+8, ptr@+16).
+/// Bounded 64 bytes; the label identifies the FFRT task (queue names,
+/// sq_collect lambdas, service entry labels).
+fn ctd_label(
+    rd: &dyn Fn(u64) -> Option<u64>,
+    va: u64,
+) -> alloc::string::String {
+    let w0 = match rd(va) {
+        Some(v) => v,
+        None => return alloc::string::String::new(),
+    };
+    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    if w0 & 1 == 0 {
+        let n = ((w0 & 0xff) >> 1) as usize;
+        if n > 0 && n <= 22 {
+            let w1 = rd(va + 8).unwrap_or(0);
+            let w2 = rd(va + 16).unwrap_or(0);
+            let buf = [w0, w1, w2];
+            for i in 1..=n {
+                let b = ((buf[i / 8] >> (8 * (i % 8))) & 0xff) as u8;
+                if !(0x20..0x7f).contains(&b) {
+                    return alloc::string::String::new();
+                }
+                out.push(b);
+            }
+        }
+    } else {
+        let size = rd(va + 8).unwrap_or(0);
+        let ptr = rd(va + 16).unwrap_or(0);
+        if size <= 64 && (ptr >> 47) == 0 && ptr > 0x1000 {
+            for i in 0..size as u64 {
+                match rd(ptr + i).map(|x| (x & 0xff) as u8) {
+                    Some(b) if (0x20..0x7f).contains(&b) => out.push(b),
+                    _ => break,
+                }
+            }
+        }
+    }
+    alloc::string::String::from(core::str::from_utf8(&out).unwrap_or(""))
 }
 
 /// sc138 (Session Q): display path for a File that may be a memfd —

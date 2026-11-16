@@ -549,3 +549,68 @@ numbers this register cites).
   for out-of-printk diagnostic dumps, which is exactly the class of
   writer a hunt kernel needs atomic. Source: obs-hygiene lane
   run/OBS-HYGIENE.md + oh-before/r1/r2/r3-serial.log.
+
+## J. NOHZ adaptive tick (2026-11-16, evidence-backed)
+
+`kernel/src/timer/nohz.rs` mirrors the reference's kernel/time/tick-sched.c
+function-for-function (`check_tick_dependency`, `tick_nohz_dep_*`,
+`sched_can_stop_tick`, `tick_nohz_next_event`, `tick_nohz_stop_tick`,
+`tick_nohz_stop_sched_tick`, `tick_nohz_restart_sched_tick`,
+`tick_nohz_full_update_tick`, `tick_nohz_irq_exit`, the `nohz_full=`
+cpulist parameter). Structural mappings, each a consequence of a known
+tree divergence — not new mechanisms:
+
+- per-rq -> the global run queue (D-1): the SCHED tick dependency is
+  evaluated on the fly by `can_stop_full_tick` (the reference caches it
+  in a per-cpu bit maintained by `sched_update_tick_dependency` from
+  add_nr_running/sub_nr_running; the 0->1 kick side is kept as a
+  resched-IPI to stopped CPUs from the enqueue edge).
+- `rq->nr_running` includes the running current (a task stays on_rq
+  while it runs); Rux's GRQ counter drops the current at pick, so both
+  consumers (`sched_can_stop_tick`, the `entity_tick` guard) add the
+  running non-idle currents back — `cfs_rq->nr_running > 1` maps to
+  `timeline_count > 0`.
+- clockevent KTIME_MAX arm -> `timer_arm_oneshot(u64::MAX)`, whose u32
+  count clamp parks the LAPIC at its maximum delta (the reference's
+  clockevent programming clamps the same way).
+- tick_do_timer_cpu -> the boot CPU with the sleep capped at
+  TIMEKEEPING_MAX_DEFERMENT (jiffies advance from the timebase inside
+  the tick handler, so some CPU must keep waking for
+  increment_jiffies_from_timebase).
+- perf: the reference sets TICK_DEP_BIT_PERF_EVENTS for freq-mode
+  events only; Rux's software sampling rides the tick (the reference's
+  rides per-event hrtimers), so the dep tracks any armed sampling
+  event. Documented divergence; the reference's per-event-hrtimer
+  swevent is the follow-up that removes it.
+- Rux's idle loop calls schedule() every pass, so the idle-section
+  bracketing of the reference's cpuidle loop collapses into the same
+  `can_stop_full_tick` machinery at every IRQ exit
+  (`tick_nohz_irq_exit`); non-nohz_full CPUs keep the plain grid-glue
+  arm (pre-nohz behavior, byte-for-byte).
+
+Companion scheduler change (same commit): the GRQ slice check now
+carries the reference's `entity_tick` guard (`cfs_rq->nr_running > 1`)
+— a solo CPU-bound task is no longer dequeued/requeued/re-picked on
+every tick — and the ENQ-CLAIMED-SLOTBK print (one ~1 ms polled-UART
+line per tick-preempt on a CPU-bound task) is deleted; the perf-sample
+capture of the strand hunt (2026-11-15) showed it carried no signal.
+
+Measured (same rig, same instant, 4+4 interleaved lmbench
+`lat_syscall,null` boots, runner budget 35 s, hostile background of 6
+foreign QEMUs):
+
+- main tip (pre-everything): 0/10 PASS under load (10/10 TIMEOUT).
+- churn fix only (nohz_full absent): 5/12 PASS (42%).
+- nohz_full=1: 11/12 PASS (92%).
+- pbench `p1_null` median: 0.050 us (nohz_full=1) vs 0.060 us (off),
+  -17%; the off config equals main tip's own number (0.051) — no
+  measurement-quality loss.
+- pbench boot completes with `nohz_full=1` (rc=0, DONE at t=54 s;
+  0 WAKE-STRANDED lines) and without (t=36 s, 0 lines) — the pre-nohz
+  kernel stranded pid1 for 27-30 s stretches (216M pick walks) in the
+  same phases.
+- Tier-1 census bands hold exactly under nohz_full=1: TERM-DESCHED 8
+  (band 8+-2), WAKE-REFUSED 32 (band 32+-4); GRQ avg hold 699 ns vs the
+  1200-7320 ns band (improvement, rebank); small_alloc REST 0.0%.
+- Gates: riscv64 `make test` green (unit suite verdict green); aarch64
+  builds clean; dual-arch x86_64 debug + release-opt build green.

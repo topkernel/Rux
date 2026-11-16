@@ -61,8 +61,107 @@
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU32, Ordering};
-#[cfg(feature = "dfx-lock-owner")]
 use core::sync::atomic::{AtomicU64, AtomicUsize};
+
+// ==================== Acquire evidence (HEAL-GATE, 122nd) ====================
+
+/// HEAL-GATE (122nd, runq-strand follow-up): per-CPU acquire-side
+/// evidence for the tick-side PREEMPT-HEAL family.
+///
+/// The runq-strand conviction (rs2): the heal's 200-consecutive-
+/// observation bar cannot distinguish a LEAKED count from a
+/// LEGITIMATE waiter inside a slow acquire — the rs2 waits were on
+/// the stalled binder OWNER-LATCH chain (latch_age 2820ms), and the
+/// 20.5s heal storm zeroed live waiters' counts mid-acquire
+/// (was=0x10001/0x10003), manufacturing phantom counts and (pre
+/// preemptible-TTAS) permanent CPU monopolists. This stamp is the
+/// acquire-side half of the fix: a waiter inside the CONTENDED TTAS
+/// loop publishes (its Task pointer, jiffies) on its own CPU's slot
+/// once per SPIN_PREEMPT_PERIOD (64K) iterations — the same 64K
+/// boundary the preempt-exit samples need_resched at, so the stamp
+/// rides the existing heartbeat (~0.07-2ms native/KVM, well inside
+/// one tick). The tick-side heal consults the slot via
+/// [`acquire_evidence_fresh`] before zeroing anything: a count with
+/// fresh acquire evidence is a LIVE waiter, not a leak, and must
+/// never be healed.
+///
+/// Concurrency argument (all Relaxed): the only writer is the CPU's
+/// current spinner inside lock()'s contended loop, and the only
+/// reader is the tick IRQ on that SAME CPU — the tick interrupts the
+/// loop, so the pair never runs concurrently and per-word coherence
+/// is enough (same shape as the TICK_ENTRY_PC stamps). A coupled
+/// spinner (preempt_count >= 1) cannot migrate or be preempted, so
+/// the stamp's task identity is stable for the whole contended wait.
+pub struct AcquireEvidence {
+    /// Task pointer of the spinner that last stamped this CPU's slot
+    /// (0 = never stamped). Written by the spinner, read by its own
+    /// CPU's tick.
+    pub task: AtomicUsize,
+    /// Jiffies at the last 64K-boundary stamp. Age is only meaningful
+    /// together with a matching `task`.
+    pub jiffies: AtomicU64,
+}
+
+/// Freshness bound for acquire evidence, in jiffies. A live spinner
+/// refreshes the stamp every ~0.07-2ms (KVM/native; TCG ~10x slower),
+/// so 10 jiffies (100ms at 100Hz) is a 50-1300x margin over the
+/// refresh period while staying 20x UNDER the heal's own 200-tick
+/// (2s) bar — a leaked count is delayed by at most this window past
+/// its last genuine contended spin.
+pub const ACQUIRE_EVIDENCE_FRESH_JIF: u64 = 10;
+
+/// The per-CPU acquire-evidence slots (see [`AcquireEvidence`]).
+pub static ACQUIRE_EVIDENCE: [AcquireEvidence; crate::config::MAX_CPUS] = {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const ZERO: AcquireEvidence = AcquireEvidence {
+        task: AtomicUsize::new(0),
+        jiffies: AtomicU64::new(0),
+    };
+    [ZERO; crate::config::MAX_CPUS]
+};
+
+/// Publish acquire-side evidence from lock()'s CONTENDED loop (called
+/// once per SPIN_PREEMPT_PERIOD iterations; the uncontended fast path
+/// never executes this). Costs one per-CPU slot read (the SAME
+/// cpu_state().current word the tick-side heal adjudicates against —
+/// writer and reader are symmetric by construction, no tp-vs-slot
+/// skew possible), one jiffies read and two relaxed local stores per
+/// 64K spins.
+#[inline]
+pub fn note_acquire_evidence() {
+    let cpu = crate::arch::smp::cpu_id() as usize;
+    if cpu >= ACQUIRE_EVIDENCE.len() {
+        return;
+    }
+    // Same-CPU plain read of the scheduler's published current pointer
+    // (the spinner cannot be migrated or preempted mid-loop, so this
+    // is stable for the whole contended wait).
+    let t = crate::sched::sched::cpu_state(cpu).current as usize;
+    if t == 0 {
+        return;
+    }
+    let ev = &ACQUIRE_EVIDENCE[cpu];
+    ev.task.store(t, Ordering::Relaxed);
+    ev.jiffies
+        .store(crate::drivers::timer::get_jiffies(), Ordering::Relaxed);
+}
+
+/// Does `task` (a Task pointer) have LIVE acquire-side evidence on
+/// `cpu` — i.e. was it observed inside lock()'s contended loop on
+/// that CPU within [`ACQUIRE_EVIDENCE_FRESH_JIF`] jiffies of `now`?
+/// Called from the tick-side PREEMPT-HEAL adjudication: a `true`
+/// result means the incumbent's base count is acquire-coupled and
+/// live (a slow legitimate waiter), and the heal must be refused.
+#[inline]
+pub fn acquire_evidence_fresh(cpu: usize, task: usize, now: u64) -> bool {
+    if cpu >= ACQUIRE_EVIDENCE.len() {
+        return false;
+    }
+    let ev = &ACQUIRE_EVIDENCE[cpu];
+    ev.task.load(Ordering::Relaxed) == task
+        && now.wrapping_sub(ev.jiffies.load(Ordering::Relaxed))
+            <= ACQUIRE_EVIDENCE_FRESH_JIF
+}
 
 // ==================== RawSpinlock (TTAS) ====================
 
@@ -160,6 +259,47 @@ impl RawSpinlock {
     /// 100M iterations ≈ 100-500ms depending on load/CAS latency.
     const DEADLOCK_WARN_ITERS: u32 = 100_000_000;
 
+    /// RUNQ-STRAND fix (121st): preempt-exit sampling period, in spin
+    /// iterations. Power of two so the check is a mask. At ~1-30ns per
+    /// TTAS iteration (native/KVM) this probes need_resched every
+    /// ~0.07-2ms — inside one tick period, so a preemptible spinner
+    /// yields within a single 10ms slice. The check itself is one
+    /// branch on a mask plus (rarely) a few loads; the uncontended
+    /// fast path never executes any of this.
+    const SPIN_PREEMPT_PERIOD: u32 = 65_536;
+
+    /// RUNQ-STRAND fix (121st): may this spinner call schedule()?
+    ///
+    /// Every in-kernel acquire of a raw spinlock is preempt-coupled
+    /// (Spinlock guards, GrqGuard, KeyedIrqGuard all add PREEMPT_OFFSET
+    /// around the raw claim), so `preempt_count() == 0` proves the
+    /// waiter holds NO spinlock at any nesting level and sits in no
+    /// interrupt/softirq nesting. The two producers of a count==0
+    /// spinner are (a) the tick-side PREEMPT-HEAL zeroing the count of
+    /// a task legitimately inside a slow acquire (a false heal — the
+    /// 121st census: accesstoken_ser/wallpaper_servi/netmanager spun
+    /// at RawSpinlock::lock+0x52 for 500+s with pc=0 and need_resched=1
+    /// after heals, each permanently monopolizing its CPU), and (b) a
+    /// future uncoupled raw caller. For both, rescheduling from the
+    /// WAIT loop is safe: nothing is acquired yet (the TTAS retry is
+    /// idempotent across a context switch), and the guards exclude the
+    /// deleted preemptible-wait's lost-park hazard (state must still be
+    /// RUNNING — a wait path that prepared INTERRUPTIBLE before a
+    /// guarded op must not sleep inside the acquire) and irq-off
+    /// contexts. This is the reference's preempt_schedule_irq contract
+    /// (a preemptible kernel loop must honor need_resched), placed at
+    /// the only point where the full guard set is checkable.
+    fn spin_may_preempt() -> bool {
+        crate::sched::need_resched()
+            && crate::interrupt::preempt::preempt_count() == 0
+            && crate::arch::cpu::get_interrupts_state()
+            && crate::sched::current()
+                .map(|t| {
+                    t.state().bits() == crate::process::task::TaskState::RUNNING
+                })
+                .unwrap_or(false)
+    }
+
     #[inline(never)]
     pub fn lock(&self) {
         // Capture caller's return address before spinning
@@ -179,6 +319,25 @@ impl RawSpinlock {
             }
             while self.locked.load(Ordering::Relaxed) != 0 {
                 spins = spins.wrapping_add(1);
+                // RUNQ-STRAND fix: a provably-preemptible waiter must not
+                // monopolize its CPU until the holder releases — yield
+                // once per period when the tick asked us to. schedule()
+                // clears need_resched at its entry, so the loop cannot
+                // re-fire recursively out of the scheduler's own locks.
+                if spins & (Self::SPIN_PREEMPT_PERIOD - 1) == 0 {
+                    // HEAL-GATE (122nd): publish acquire-side evidence at
+                    // the same 64K boundary — the tick-side PREEMPT-HEAL
+                    // refuses to zero any count whose owner is inside
+                    // this loop RIGHT NOW (a slow legitimate waiter on a
+                    // stalled holder chain is not a leak). Contended path
+                    // only; the fast path never reaches here.
+                    note_acquire_evidence();
+                    if Self::spin_may_preempt() {
+                        crate::sched::schedule();
+                        spins = 0;
+                        continue; // re-observe the lock word in the loop head
+                    }
+                }
                 if spins == Self::DEADLOCK_WARN_ITERS {
                     Self::deadlock_warn(self as *const Self, caller_ra);
                     spins = 0; // continue spinning (might resolve)
@@ -580,6 +739,15 @@ impl<T> Spinlock<T> {
     /// reference design and is deleted — the lost-park hazard class
     /// (a caller inside a wait path's prepared window parked inside a
     /// spinlock acquire) is structurally impossible now.
+    ///
+    /// RUNQ-STRAND fix (121st) precision on that discipline: the raw
+    /// TTAS loop below CAN call schedule(), but only through
+    /// `spin_may_preempt()` — which requires preempt_count()==0 and is
+    /// therefore unreachable for THIS acquire (our own preempt_disable
+    /// guarantees count >= 1 for every Spinlock-guarded caller). The
+    /// exit exists solely for a waiter whose count was zeroed under it
+    /// (tick-side PREEMPT-HEAL false positive) or a future uncoupled
+    /// raw caller; see `spin_may_preempt` for the full guard set.
     #[inline]
     #[track_caller]
     pub fn lock(&self) -> SpinlockGuard<'_, T> {

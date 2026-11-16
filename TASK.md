@@ -13317,3 +13317,89 @@ safety-and-performance.md §3).
    IMPROVE (libc clock_gettime now vDSO-served, 66–74ns class vs
    the 0.371µs anchor); Tier-3 not owed (no allocator/IRQ-path
    change). riscv64 untouched (rv vDSO unchanged; make test green).
+
+## EARLY-PUT SESSION — the phantom-put producer named and closed: insert_batch discarded pre-marked frames through the raw free path (2026-11-15/16, branch early-put @ fe6b13c91)
+
+Resumed after the quota wall with the ref-ring WIP built. Completed the
+instrument (GET decode, 8192-entry ring), added a free-of-live-cache-entry
+tripwire to the free funnel (every legit cache free clears type+keys in
+release_page_frame first; a dirty arrival is a foreign free), and ran the
+fammm rig.
+
+- Boot 1 (ring only): capture #1 live-pt-refused, pfn 0x7fc16 — ring shows
+  teardown PUT old=1->0 with NO GET since the frame's cache insert; the
+  frame was already double-tracked before the window (late echo).
+- Boot 2 (tripwire armed): 4 consecutive frames refused, stacks all naming
+  PageCache::insert_batch <- ext4 fill_page_cache_batch <- loader faults.
+  Producer NAMED: insert_batch pre-marks frames (PageCache type + UpToDate
+  + mapping key + index) in its unlocked fill stage; the table-full /
+  duplicate / revive discard arms freed them via raw free_page WITHOUT
+  clearing the identity. The zone's alloc path clears flags+refcount but
+  NOT type/mapping/index — the discarded frame keeps claiming to be a live
+  cache entry (carrying the duplicate winner's keys: two frames, one cache
+  identity) through every recycling life. 29 such frees in one boot.
+- Fix: discard_prepared_frame() strips the identity at all three arms
+  (same stores as release_page_frame). Commit fe6b13c91; instrument commit
+  d2a23260c.
+
+Verification: loader-phase A/B unfixed 29 events vs fixed 0; fammm(-mkfs)
+4 boots and mmap-family storm 3 boots (111 runs) at ZERO events of every
+family (CACHE-OWNED / phantom-put / live-pt-refused / DOUBLE-*) and zero
+quarantine events — the ≤2/boot residual leak face did not reproduce
+under the armed detector. Gates: triple builds rc=0; riscv64 make test
+1328/0. Full report: run/EARLY-PUT.md.
+
+Not this family (needs its own lane): fallocate05/06 mkfs phase wedges the
+runner via reclaim io_lock re-entry + fdreap RCU stall under the 243k-page
+cache balloon — present pre-fix, not caused by the fix.
+
+## RUNQ-STRAND SESSION (121st, branch runq-strand @ b0f6b1989) — the monopolist convicted: preemptible raw-spin waiters could never be preempted; fix = guarded preempt exit in RawSpinlock::lock
+
+Full record: run/RUNQ-STRAND.md. Commits: bc67ce28e (MONOPOLIST
+census instrument: per-CPU SCHED_CALLS + TICK_ENTRY_CS/PID/JIF stamps,
+compact incumbent rows, nrrun on strand rows), b0f6b1989 (the fix).
+
+1. THE CONVICTION (rs2 wedge boot, SMP8 NOSNAP face): the monopolist
+   set was stable for 510s — c0=accesstoken_ser, c1=wallpaper_servi,
+   c2=netmanager, each with sdx=0 (schedule() NEVER ran on that CPU),
+   act=+5000ms/burst, pc=0x0, nrs=1, ticks arriving (IF=1), and the
+   SAME tick-entry rip 0xffffffff80280f62 on all three:
+   RawSpinlock::lock+0x52, the TTAS contended-loop load. Their counts
+   had been zeroed by the tick-side PREEMPT-HEAL mid-acquire (heal
+   storm at 20.5s, incl. netmanager itself; the heal cannot tell a
+   leaked count from a slow legitimate waiter — waits on the stalled
+   binder OWNER-LATCH chain, latch_age 2820ms). A pc=0 kernel spinner
+   is unpreemptible everywhere today: the loop has no need_resched
+   check, trap-exit preempts only at USER return (sc267), and the
+   tick's in-IRQ schedule() needs preemptible() which is never true
+   inside irq_enter. With 3 CPUs gone and the rest halted idle with
+   all wakers frozen, WW_PICK_WALKS froze at 215 while nrrun grew
+   34→87: the RUNQ-STRAND class is the downstream symptom. Ladder:
+   (a) pick-scan miss REFUTED (victims in-map, pickable, visits=0 —
+   no walks ran); (b) wake-claim loss REFUTED (W2=0, linked fine);
+   (c) priority pathology REFUTED (all CFS Normal).
+2. THE FIX: in the contended TTAS loop, sample need_resched every 64K
+   spins; when preempt_count()==0 (holds no coupled guard at ANY
+   nesting — every in-kernel acquire adds PREEMPT_OFFSET around the
+   raw claim) AND IF=1 AND state==RUNNING (excludes the deleted
+   preemptible-wait's lost-park window), call schedule() and retry.
+   preempt_schedule_irq's contract at the only point it is checkable.
+   Fast path instruction-identical (disassembly-verified).
+3. VERIFICATION (SMP8 face, image-side stall PRESENT in both arms):
+   pre-fix rs2 401 strand rows/103 monopolist rows, init stranded
+   (linked, vr frozen 302M), 266 tasks stuck; pre-fix rs4 (control
+   rebuild) 112/30 same signature; FIXED rs5: 0/0 for the whole 540s,
+   init on_cpu executing (vr 6.2B), task graph drained to 60, 0
+   panics, censuses on cadence to 528s.
+4. GATES: x86_64 (dev, release, config-clear) + riscv64 + aarch64
+   builds rc=0; riscv64 make test ALL PASSED (1329 lines). Tier-1
+   syscost A/B on the tok-r4fix vehicle (SMP2 KVM 780s, fresh
+   userdata reflink per arm): volume 80.5M (fix) vs 79.9M (control)
+   +0.8% — the ~80M is this vehicle state's healthy bank (new bank;
+   the 16-22M historicals were wedged-era), NOT a fix effect; read
+   19.03/18.98ms, futex 133.1/134.1ms, nanosleep 159.0/154.4ms flat;
+   write 339µs vs 249µs traced to one 2033ms outlier (n=20k).
+   Coordinator merge-gate: sched domain Tier-2 expected in-band (no
+   fast-path change); follow-up lane candidate: gate PREEMPT-HEAL on
+   acquire-observed evidence (TICK_ENTRY_RIP inside lock()'s range)
+   so slow waiters stop being healed at all.

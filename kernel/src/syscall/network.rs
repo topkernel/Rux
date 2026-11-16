@@ -964,11 +964,17 @@ fn sys_accept_common(fd: usize, flags: i32, addr_ptr: *mut u8, addrlen_ptr: *mut
                     None => return -(errno::EBADF as i64),
                     // O_PATH descriptors reject every operation that
                     // actually uses the file (Linux f_op check) — accept
-                    // included — with EBADF (LTP accept03 case 2).
+                    // included — with EBADF (LTP accept03 case 2). The
+                    // new-mount-API fscontext fd (fsopen) is the one
+                    // O_PATH-MARKED file that is NOT a path fd on the
+                    // reference: it is an anon-inode file, so accept
+                    // answers ENOTSOCK there (LTP accept03 fsopen face).
+                    // open_tree(no-clone) fds ARE path fds and keep EBADF.
                     Some(f) => {
                         if f.flags().bits()
                             & crate::fs::file::FileFlags::O_PATH
                             != 0
+                            && crate::fs::fsctx::fsctx_of(&f).is_none()
                         {
                             return -(errno::EBADF as i64);
                         }

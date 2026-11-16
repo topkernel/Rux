@@ -68,7 +68,11 @@ pub const KEY_SPEC_USER_SESSION_KEYRING: i32 = -5;
 pub const KEY_SPEC_GROUP_KEYRING: i32 = -6;
 pub const KEY_SPEC_REQKEY_AUTH_KEY: i32 = -7;
 
-/// keyctl() commands.
+/// keyctl() commands — uapi/linux/keyctl.h numbering. The block from 12
+/// up must match the real ABI exactly: 14/15 are SET_REQKEY_KEYRING /
+/// SET_TIMEOUT (not REJECT/INSTANTIATE_IOV), which shift everything
+/// above NEGATE by the historical insertions (LTP keyctl04 /
+/// request_key02 both drive the real numbers).
 const KEYCTL_GET_KEYRING_ID: u64 = 0;
 const KEYCTL_JOIN_SESSION_KEYRING: u64 = 1;
 const KEYCTL_UPDATE: u64 = 2;
@@ -83,15 +87,22 @@ const KEYCTL_SEARCH: u64 = 10;
 const KEYCTL_READ: u64 = 11;
 const KEYCTL_INSTANTIATE: u64 = 12;
 const KEYCTL_NEGATE: u64 = 13;
-const KEYCTL_REJECT: u64 = 14;
-const KEYCTL_INSTANTIATE_IOV: u64 = 15;
-const KEYCTL_INVALIDATE: u64 = 16;
-const KEYCTL_GET_PERSISTENT: u64 = 17;
-const KEYCTL_DH_COMPUTE: u64 = 18;
-const KEYCTL_RESTRICT_KEYRING: u64 = 19;
-const KEYCTL_MOVE: u64 = 20;
-const KEYCTL_CAPABILITIES: u64 = 21;
-const KEYCTL_WATCH_KEY: u64 = 22;
+const KEYCTL_SET_REQKEY_KEYRING: u64 = 14;
+const KEYCTL_SET_TIMEOUT: u64 = 15;
+const KEYCTL_ASSUME_AUTHORITY: u64 = 16;
+const KEYCTL_GET_SECURITY: u64 = 17;
+const KEYCTL_SESSION_TO_PARENT: u64 = 18;
+const KEYCTL_REJECT: u64 = 19;
+const KEYCTL_INSTANTIATE_IOV: u64 = 20;
+const KEYCTL_INVALIDATE: u64 = 21;
+const KEYCTL_GET_PERSISTENT: u64 = 22;
+const KEYCTL_DH_COMPUTE: u64 = 23;
+// 24-28: KEYCTL_PKEY_{QUERY,ENCRYPT,DECRYPT,SIGN,VERIFY} — no public-key
+// machinery; the catch-all answers EOPNOTSUPP like an unconfigured host.
+const KEYCTL_RESTRICT_KEYRING: u64 = 29;
+const KEYCTL_MOVE: u64 = 30;
+const KEYCTL_CAPABILITIES: u64 = 31;
+const KEYCTL_WATCH_KEY: u64 = 32;
 
 const KEYCTL_MOVE_EXCL: u64 = 1;
 
@@ -112,6 +123,8 @@ const KEY_DEFAULT_PERM: u32 = (KEY_ALL << 24) | (KEY_ALL << 16);
 const KEY_MAX_DESC_SIZE: usize = 4096;
 /// user/logon payload cap (user_instantiate).
 const USER_PAYLOAD_MAX: usize = 32767;
+/// KEY_NEGATIVE_TIMEOUT: seconds a negatively-instantiated key survives.
+const KEY_NEGATIVE_TIMEOUT: u64 = 60;
 
 // ============================================================================
 // Registry
@@ -135,6 +148,8 @@ impl KeyType {
 }
 
 struct Key {
+    /// Own serial (possession check needs it without a KEYS lookup).
+    serial: u32,
     ktype: KeyType,
     desc: Vec<u8>,
     /// User/Logon payload bytes.
@@ -149,6 +164,10 @@ struct Key {
     revoked: bool,
     /// INVALIDATEd: unresolvable by serial, ignored by search.
     dead: bool,
+    /// Negatively instantiated (failed request_key upcall): unreadable
+    /// (KEYCTL_READ → ENOKEY, CVE-2017-12192), skipped by search, expires
+    /// after KEY_NEGATIVE_TIMEOUT seconds.
+    negative: bool,
 }
 
 static KEYS: Spinlock<BTreeMap<u32, Key>> = Spinlock::new(BTreeMap::new());
@@ -194,11 +213,16 @@ fn state_err(key: &Key) -> Option<i32> {
     }
 }
 
-fn class_perm(key: &Key, cred: &Cred, needed: u32) -> bool {
-    // Root override (CAP_SYS_ADMIN discipline in the reference paths).
-    if cred.euid == 0 {
+fn class_perm(key: &Key, cred: &Cred, needed: u32, possessed: bool) -> bool {
+    // Possessor class: the reference grants the possessor nibble to keys
+    // reachable from the caller's own keyrings (key_task_permission:
+    // is_key_possessed). `possessed` is computed by possessed_by() at
+    // the call sites (before the KEYS lock is taken).
+    if possessed && (key.perm >> 24) & needed == needed {
         return true;
     }
+    // No root override: the reference key permission bits apply to root
+    // as well (key_task_permission has no CAP_SYS_ADMIN bypass).
     let shift = if key.uid == cred.fsuid {
         16 // user class
     } else if key.gid == cred.egid || cred.in_group(key.gid) {
@@ -207,6 +231,31 @@ fn class_perm(key: &Key, cred: &Cred, needed: u32) -> bool {
         0 // other class
     };
     (key.perm >> shift) & needed == needed
+}
+
+/// Depth-1 possession: `serial` is one of the caller's cred-attached
+/// rings or is linked directly into one of them (reference possession is
+/// full reachability; depth-1 covers keys created into the caller's own
+/// thread/process/session rings). Locks KEYS briefly — callers must NOT
+/// hold the KEYS lock.
+fn possessed_by(serial: u32, cred: &Cred) -> bool {
+    let slots = [
+        cred.thread_keyring,
+        cred.process_keyring,
+        cred.session_keyring,
+    ];
+    let keys = KEYS.lock();
+    for s in slots.into_iter().flatten() {
+        if s == serial {
+            return true;
+        }
+        if let Some(r) = keys.get(&s) {
+            if r.ktype == KeyType::Keyring && r.links.contains(&serial) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 // ============================================================================
@@ -263,6 +312,7 @@ pub fn exec_clear_thread_keyring() {
 fn create_key(ktype: KeyType, desc: &[u8], payload: Vec<u8>, cred: &Cred) -> u32 {
     let serial = alloc_serial();
     let key = Key {
+        serial,
         ktype,
         desc: desc.to_vec(),
         payload,
@@ -273,6 +323,7 @@ fn create_key(ktype: KeyType, desc: &[u8], payload: Vec<u8>, cred: &Cred) -> u32
         expiry: 0,
         revoked: false,
         dead: false,
+        negative: false,
     };
     KEYS.lock().insert(serial, key);
     serial
@@ -375,6 +426,8 @@ fn resolve_ring(id: i32, create: bool, cred: &Cred) -> Result<u32, i32> {
                 // Unknown special ID: lookup_user_key default case.
                 return Err(errno::EINVAL);
             }
+            // Possession must be computed before the KEYS lock below.
+            let possessed = possessed_by(id as u32, cred);
             let keys = KEYS.lock();
             match keys.get(&(id as u32)) {
                 None => Err(errno::ENOKEY),
@@ -382,7 +435,7 @@ fn resolve_ring(id: i32, create: bool, cred: &Cred) -> Result<u32, i32> {
                     if let Some(e) = state_err(k) {
                         return Err(e);
                     }
-                    if !class_perm(k, cred, KEY_VIEW) {
+                    if !class_perm(k, cred, KEY_VIEW, possessed) {
                         // Permission denial is EACCES in key lookups.
                         return Err(errno::EACCES);
                     }
@@ -405,13 +458,24 @@ fn resolve_strict_ring(id: i32, create: bool, cred: &Cred) -> Result<u32, i32> {
     }
 }
 
+/// Search outcome: a live match, the errno of the FIRST unusable match
+/// (keyring_search returns -EKEYREVOKED/-EKEYEXPIRED/-ENOKEY when the
+/// only matching key is in a bad state — request_key(2) surfaces exactly
+/// these), or nothing.
+enum SearchOutcome {
+    Found(u32),
+    StateErr(i32),
+    NotFound,
+}
+
 /// Depth-first search of a keyring tree for a live key of the given
 /// type+description (search_keyring semantics: skips
 /// revoked/expired/dead/unviewable).
-fn search_tree(start: u32, ktype: KeyType, desc: &[u8], cred: &Cred) -> Option<u32> {
+fn search_tree(start: u32, ktype: KeyType, desc: &[u8], cred: &Cred) -> SearchOutcome {
     let keys = KEYS.lock();
     let mut stack = Vec::new();
     let mut visited = Vec::new();
+    let mut state_err: Option<i32> = None;
     stack.push(start);
     while let Some(cur) = stack.pop() {
         if visited.contains(&cur) {
@@ -427,12 +491,16 @@ fn search_tree(start: u32, ktype: KeyType, desc: &[u8], cred: &Cred) -> Option<u
                 continue;
             }
             if let Some(k) = keys.get(&child) {
-                if k.ktype == ktype
-                    && k.desc == desc
-                    && state_err(k).is_none()
-                    && class_perm(k, cred, KEY_SEARCH)
-                {
-                    return Some(child);
+                if k.ktype == ktype && k.desc == desc {
+                    if let Some(e) = state_err_of(k) {
+                        // Negative keys read as ENOKEY; revoked/expired
+                        // keep their errno for the caller to report.
+                        state_err = state_err.or(Some(e));
+                        continue;
+                    }
+                    if class_perm(k, cred, KEY_SEARCH, false) {
+                        return SearchOutcome::Found(child);
+                    }
                 }
                 if k.ktype == KeyType::Keyring {
                     stack.push(child);
@@ -440,7 +508,20 @@ fn search_tree(start: u32, ktype: KeyType, desc: &[u8], cred: &Cred) -> Option<u
             }
         }
     }
-    None
+    match state_err {
+        Some(e) => SearchOutcome::StateErr(e),
+        None => SearchOutcome::NotFound,
+    }
+}
+
+/// state_err extended with negative instantiation (search face of
+/// CVE-2017-12192: a negatively-instantiated match answers ENOKEY).
+fn state_err_of(key: &Key) -> Option<i32> {
+    if key.negative {
+        Some(errno::ENOKEY)
+    } else {
+        state_err(key)
+    }
 }
 
 // ============================================================================
@@ -543,13 +624,14 @@ pub fn sys_add_key(args: [u64; 6]) -> i64 {
         Ok(r) => r,
         Err(e) => return -(e as i64),
     };
+    let ring_possessed = possessed_by(ring, &cred);
     {
         let keys = KEYS.lock();
         if let Some(k) = keys.get(&ring) {
             if k.ktype != KeyType::Keyring {
                 return -(errno::ENOTDIR as i64);
             }
-            if !class_perm(k, &cred, KEY_WRITE) {
+            if !class_perm(k, &cred, KEY_WRITE, ring_possessed) {
                 return -(errno::EACCES as i64);
             }
         } else {
@@ -570,10 +652,14 @@ pub fn sys_add_key(args: [u64; 6]) -> i64 {
     };
 
     if let Some(old) = existing {
+        let old_possessed = possessed_by(old, &cred);
         let mut keys = KEYS.lock();
         if let Some(k) = keys.get_mut(&old) {
-            if state_err(k).is_none() {
-                if !class_perm(k, &cred, KEY_WRITE) {
+            // add_key must not update an uninstantiated/negative key
+            // (CVE-2017-15299): a negative match is unlinked and a fresh
+            // positive key takes its place.
+            if state_err(k).is_none() && !k.negative {
+                if !class_perm(k, &cred, KEY_WRITE, old_possessed) {
                     return -(errno::EACCES as i64);
                 }
                 // Keyring type has no update method: replace instead
@@ -645,37 +731,115 @@ pub fn sys_request_key(args: [u64; 6]) -> i64 {
     let cred = current_cred();
 
     // Search the caller's three keyrings, thread → process → session
-    // (request_key_and_link order).
-    let found = cred
-        .thread_keyring
-        .and_then(|s| search_tree(s, ktype, &desc, &cred))
-        .or_else(|| {
-            cred.process_keyring
-                .and_then(|s| search_tree(s, ktype, &desc, &cred))
-        })
-        .or_else(|| {
-            cred.session_keyring
-                .and_then(|s| search_tree(s, ktype, &desc, &cred))
-        });
+    // (request_key_and_link order). A match in a bad state propagates
+    // its errno (request_key02: EKEYREVOKED / EKEYEXPIRED).
+    let found = match cred.thread_keyring {
+        Some(s) => search_tree(s, ktype, &desc, &cred),
+        None => SearchOutcome::NotFound,
+    };
+    let found = match found {
+        SearchOutcome::NotFound => match cred.process_keyring {
+            Some(s) => search_tree(s, ktype, &desc, &cred),
+            None => SearchOutcome::NotFound,
+        },
+        other => other,
+    };
+    let found = match found {
+        SearchOutcome::NotFound => match cred.session_keyring {
+            Some(s) => search_tree(s, ktype, &desc, &cred),
+            None => SearchOutcome::NotFound,
+        },
+        other => other,
+    };
 
-    if let Some(serial) = found {
-        if dest != 0 {
-            match resolve_ring(dest, true, &cred) {
-                Ok(r) => link_into_ring(r, serial),
-                Err(e) => return -(e as i64),
+    match found {
+        SearchOutcome::Found(serial) => {
+            if dest != 0 {
+                match resolve_ring(dest, true, &cred) {
+                    Ok(r) => link_into_ring(r, serial),
+                    Err(e) => return -(e as i64),
+                }
             }
+            serial as i64
         }
-        return serial as i64;
-    }
-
-    // Miss: no callout → ENOKEY; with a callout the reference upcalls
-    // /sbin/request-key via the usermode helper, which this kernel
-    // lacks — ENOENT is the errno a reference caller sees when the
-    // helper cannot be executed.
-    if callout_ptr == 0 {
-        -(errno::ENOKEY as i64)
-    } else {
-        -(errno::ENOENT as i64)
+        SearchOutcome::StateErr(e) => -(e as i64),
+        SearchOutcome::NotFound if callout_ptr == 0 => -(errno::ENOKEY as i64),
+        SearchOutcome::NotFound => {
+            // Miss with callout: the reference constructs the key and
+            // upcalls /sbin/request-key via the usermode helper. This
+            // kernel has no usermode helper: the construction fails, the
+            // key is negatively instantiated (reject, 60 s) and stays
+            // linked in the destination keyring — exactly the
+            // post-failure state keyctl07 observes (CVE-2017-12192).
+            // The destination ring's Write permission is checked FIRST
+            // (request_key_and_link's KEY_NEED_WRITE lookup): a denied
+            // ring answers EACCES with the ring untouched
+            // (CVE-2017-17807 / request_key04).
+            let dest_serial = if dest != 0 {
+                match resolve_ring(dest, true, &cred) {
+                    Ok(r) => Some(r),
+                    Err(e) => return -(e as i64),
+                }
+            } else {
+                // dest=0: the caller's request-key default
+                // (cred->jit_keyring). DEFAULT/SESSION → session ring,
+                // THREAD/PROCESS → that ring, USER/USER_SESSION → the
+                // per-uid rings, REQUESTOR → session (no auth context
+                // exists without upcalls).
+                let defl = cred.reqkey_defl;
+                let id: i32 = match defl {
+                    1 => KEY_SPEC_THREAD_KEYRING,
+                    2 => KEY_SPEC_PROCESS_KEYRING,
+                    _ => KEY_SPEC_SESSION_KEYRING,
+                };
+                let serial = if defl == 5 || defl == 6 {
+                    let (usr, ses) = user_keyrings(cred.uid, &cred);
+                    if defl == 5 { usr } else { ses }
+                } else {
+                    match resolve_ring(id, true, &cred) {
+                        Ok(r) => r,
+                        Err(e) => return -(e as i64),
+                    }
+                };
+                Some(serial)
+            };
+            if let Some(r) = dest_serial {
+                let dest_possessed = possessed_by(r, &cred);
+                let keys = KEYS.lock();
+                if let Some(k) = keys.get(&r) {
+                    if !class_perm(k, &cred, KEY_WRITE, dest_possessed) {
+                        return -(errno::EACCES as i64);
+                    }
+                } else {
+                    return -(errno::ENOKEY as i64);
+                }
+            }
+            // Negatively instantiate into the destination ring.
+            let serial = alloc_serial();
+            KEYS.lock().insert(
+                serial,
+                Key {
+                    serial,
+                    ktype,
+                    desc,
+                    payload: Vec::new(),
+                    links: Vec::new(),
+                    uid: cred.fsuid,
+                    gid: cred.fsgid,
+                    perm: KEY_DEFAULT_PERM,
+                    expiry: now_realtime_secs() + KEY_NEGATIVE_TIMEOUT,
+                    revoked: false,
+                    dead: false,
+                    negative: true,
+                },
+            );
+            if let Some(r) = dest_serial {
+                link_into_ring(r, serial);
+            }
+            // No /sbin/request-key in this kernel: the errno the
+            // reference caller sees when the helper cannot be executed.
+            -(errno::ENOENT as i64)
+        }
     }
 }
 
@@ -734,7 +898,7 @@ pub fn sys_keyctl(args: [u64; 6]) -> i64 {
                             && !k.dead
                             && !k.revoked
                             && k.desc == name
-                            && class_perm(k, &cred, KEY_SEARCH)
+                            && class_perm(k, &cred, KEY_SEARCH, false)
                     })
                     .map(|(s, _)| *s)
             };
@@ -760,6 +924,7 @@ pub fn sys_keyctl(args: [u64; 6]) -> i64 {
                 Ok(s) => s,
                 Err(e) => return -(e as i64),
             };
+            let possessed = possessed_by(serial, &cred);
             let mut keys = KEYS.lock();
             match keys.get_mut(&serial) {
                 None => -(errno::ENOKEY as i64),
@@ -767,7 +932,7 @@ pub fn sys_keyctl(args: [u64; 6]) -> i64 {
                     if let Some(e) = state_err(k) {
                         return -(e as i64);
                     }
-                    if !class_perm(k, &cred, KEY_WRITE) {
+                    if !class_perm(k, &cred, KEY_WRITE, possessed) {
                         return -(errno::EACCES as i64);
                     }
                     match k.ktype {
@@ -789,11 +954,12 @@ pub fn sys_keyctl(args: [u64; 6]) -> i64 {
                 Ok(s) => s,
                 Err(e) => return -(e as i64),
             };
+            let possessed = possessed_by(serial, &cred);
             let mut keys = KEYS.lock();
             match keys.get_mut(&serial) {
                 None => -(errno::ENOKEY as i64),
                 Some(k) => {
-                    if !class_perm(k, &cred, KEY_SETATTR) {
+                    if !class_perm(k, &cred, KEY_SETATTR, possessed) {
                         return -(errno::EACCES as i64);
                     }
                     k.revoked = true;
@@ -829,7 +995,17 @@ pub fn sys_keyctl(args: [u64; 6]) -> i64 {
         }
 
         KEYCTL_SETPERM => {
-            let perm = a3 as u32;
+            // keyctl(KEYCTL_SETPERM, id, perm): perm is arg2 — reading it
+            // from arg3 left the perm to whatever garbage the variadic
+            // wrapper had there (LTP keyctl05's SETPERM/UPDATE race saw
+            // EINVAL from mask garbage). The reference validates the mask
+            // BEFORE the lookup (keyctl_setperm_key checks
+            // perm & ~(POS|USR|GRP|OTH ALL) first): a bad mask answers
+            // EINVAL even when the key is unviewable or gone.
+            let perm = a2 as u32;
+            if perm & !KEY_PERM_MASK != 0 {
+                return -(errno::EINVAL as i64);
+            }
             let serial = match resolve_ring(id, false, &cred) {
                 Ok(s) => s,
                 Err(e) => return -(e as i64),
@@ -840,9 +1016,6 @@ pub fn sys_keyctl(args: [u64; 6]) -> i64 {
                 Some(k) => {
                     if k.uid != cred.fsuid && cred.euid != 0 {
                         return -(errno::EPERM as i64);
-                    }
-                    if perm & !KEY_PERM_MASK != 0 {
-                        return -(errno::EINVAL as i64);
                     }
                     k.perm = perm;
                     0
@@ -857,12 +1030,13 @@ pub fn sys_keyctl(args: [u64; 6]) -> i64 {
                 Ok(s) => s,
                 Err(e) => return -(e as i64),
             };
+            let possessed = possessed_by(serial, &cred);
             let keys = KEYS.lock();
             let k = match keys.get(&serial) {
                 None => return -(errno::ENOKEY as i64),
                 Some(k) => k,
             };
-            if !class_perm(k, &cred, KEY_VIEW) {
+            if !class_perm(k, &cred, KEY_VIEW, possessed) {
                 return -(errno::EACCES as i64);
             }
             let desc = alloc::format!(
@@ -881,11 +1055,12 @@ pub fn sys_keyctl(args: [u64; 6]) -> i64 {
                 Ok(s) => s,
                 Err(e) => return -(e as i64),
             };
+            let possessed = possessed_by(serial, &cred);
             let mut keys = KEYS.lock();
             match keys.get_mut(&serial) {
                 None => -(errno::ENOKEY as i64),
                 Some(k) => {
-                    if !class_perm(k, &cred, KEY_WRITE) {
+                    if !class_perm(k, &cred, KEY_WRITE, possessed) {
                         return -(errno::EACCES as i64);
                     }
                     k.links.clear();
@@ -906,9 +1081,10 @@ pub fn sys_keyctl(args: [u64; 6]) -> i64 {
                 Err(e) => return -(e as i64),
             };
             {
+                let ring_possessed = possessed_by(ring, &cred);
                 let keys = KEYS.lock();
                 if let Some(k) = keys.get(&ring) {
-                    if !class_perm(k, &cred, KEY_WRITE) {
+                    if !class_perm(k, &cred, KEY_WRITE, ring_possessed) {
                         return -(errno::EACCES as i64);
                     }
                 }
@@ -932,9 +1108,10 @@ pub fn sys_keyctl(args: [u64; 6]) -> i64 {
                 Err(e) => return -(e as i64),
             };
             {
+                let ring_possessed = possessed_by(ring, &cred);
                 let keys = KEYS.lock();
                 if let Some(k) = keys.get(&ring) {
-                    if !class_perm(k, &cred, KEY_WRITE) {
+                    if !class_perm(k, &cred, KEY_WRITE, ring_possessed) {
                         return -(errno::EACCES as i64);
                     }
                 }
@@ -952,9 +1129,10 @@ pub fn sys_keyctl(args: [u64; 6]) -> i64 {
                 Err(e) => return -(e as i64),
             };
             {
+                let ring_possessed = possessed_by(ring, &cred);
                 let keys = KEYS.lock();
                 if let Some(k) = keys.get(&ring) {
-                    if !class_perm(k, &cred, KEY_SEARCH) {
+                    if !class_perm(k, &cred, KEY_SEARCH, ring_possessed) {
                         return -(errno::EACCES as i64);
                     }
                 }
@@ -974,8 +1152,9 @@ pub fn sys_keyctl(args: [u64; 6]) -> i64 {
                 Err(e) => return -(e as i64),
             };
             match search_tree(ring, ktype, &desc, &cred) {
-                None => -(errno::ENOKEY as i64),
-                Some(serial) => {
+                SearchOutcome::NotFound => -(errno::ENOKEY as i64),
+                SearchOutcome::StateErr(e) => -(e as i64),
+                SearchOutcome::Found(serial) => {
                     if dest != 0 {
                         match resolve_strict_ring(dest, true, &cred) {
                             Ok(r) => link_into_ring(r, serial),
@@ -994,13 +1173,19 @@ pub fn sys_keyctl(args: [u64; 6]) -> i64 {
                 Ok(s) => s,
                 Err(e) => return -(e as i64),
             };
+            let possessed = possessed_by(serial, &cred);
             let keys = KEYS.lock();
             let k = match keys.get(&serial) {
                 None => return -(errno::ENOKEY as i64),
                 Some(k) => k,
             };
-            if !class_perm(k, &cred, KEY_READ) {
+            if !class_perm(k, &cred, KEY_READ, possessed) {
                 return -(errno::EACCES as i64);
+            }
+            // Negative keys are unreadable: KEYCTL_READ answers ENOKEY
+            // (CVE-2017-12192, commit 37863c43b2c6).
+            if k.negative {
+                return -(errno::ENOKEY as i64);
             }
             match k.ktype {
                 // Logon payloads are never readable from user space.
@@ -1024,16 +1209,111 @@ pub fn sys_keyctl(args: [u64; 6]) -> i64 {
             -(errno::ENOKEY as i64)
         }
 
+        KEYCTL_SET_REQKEY_KEYRING => {
+            // keyctl_set_reqkey_keyring: record the default destination
+            // (cred->jit_keyring). THREAD/PROCESS create their ring on
+            // demand (keeping an existing one — CVE-2017-7472 / keyctl04:
+            // the thread keyring must NOT be replaced); NO_CHANGE returns
+            // the current setting; GROUP_KEYRING and any other value are
+            // EINVAL. Returns the previous setting.
+            let option = a1 as u32 as i32;
+            let old = cred.reqkey_defl;
+            if option == -1 {
+                // KEY_REQKEY_DEFL_NO_CHANGE
+                return old as i64;
+            }
+            let valid = matches!(option, 0..=6);
+            if !valid {
+                return -(errno::EINVAL as i64);
+            }
+            match option {
+                1 => {
+                    if cred.thread_keyring.is_none() {
+                        let s = create_key(
+                            KeyType::Keyring, b"_tid", Vec::new(), &cred,
+                        );
+                        set_thread_slot(s);
+                    }
+                }
+                2 => {
+                    if cred.process_keyring.is_none() {
+                        let s = create_key(
+                            KeyType::Keyring, b"_pid", Vec::new(), &cred,
+                        );
+                        set_process_slot(s);
+                    }
+                }
+                _ => {}
+            }
+            if let Some(t) = crate::sched::current() {
+                // SAFETY: sched::current() returns the running task.
+                unsafe { (*t).cred_mut().reqkey_defl = option }
+            }
+            old as i64
+        }
+
+        KEYCTL_SET_TIMEOUT => {
+            // keyctl_set_timeout(id, timeout): KEY_NEED_SETATTR on the
+            // key; timeout 0 clears, otherwise expiry = now + timeout
+            // (seconds, CLOCK_REALTIME). request_key02's expired-key case
+            // rides the expiry the next search observes.
+            let timeout = a2 as u64;
+            let serial = match resolve_ring(id, true, &cred) {
+                Ok(s) => s,
+                Err(e) => return -(e as i64),
+            };
+            let possessed = possessed_by(serial, &cred);
+            let mut keys = KEYS.lock();
+            match keys.get_mut(&serial) {
+                None => -(errno::ENOKEY as i64),
+                Some(k) => {
+                    if !class_perm(k, &cred, KEY_SETATTR, possessed) {
+                        return -(errno::EACCES as i64);
+                    }
+                    k.expiry = if timeout == 0 {
+                        0
+                    } else {
+                        now_realtime_secs() + timeout
+                    };
+                    0
+                }
+            }
+        }
+
+        KEYCTL_ASSUME_AUTHORITY => {
+            // keyctl_assume_authority: id 0 clears the (nonexistent)
+            // authorisation; any other id needs an auth key, and none can
+            // exist without request-key upcalls.
+            if a1 == 0 {
+                0
+            } else {
+                -(errno::ENOKEY as i64)
+            }
+        }
+
+        KEYCTL_GET_SECURITY => {
+            // No LSM key labels in this kernel: the reference's
+            // security_key_getsecurity fallback is -EOPNOTSUPP.
+            -(errno::EOPNOTSUPP as i64)
+        }
+
+        KEYCTL_SESSION_TO_PARENT => {
+            // Not modeled (would need cross-task cred writes into the
+            // parent); no LTP row on the list drives it.
+            -(errno::EOPNOTSUPP as i64)
+        }
+
         KEYCTL_INVALIDATE => {
             let serial = match resolve_ring(id, false, &cred) {
                 Ok(s) => s,
                 Err(e) => return -(e as i64),
             };
+            let possessed = possessed_by(serial, &cred);
             let mut keys = KEYS.lock();
             match keys.get(&serial) {
                 None => return -(errno::ENOKEY as i64),
                 Some(k) => {
-                    if !class_perm(k, &cred, KEY_SEARCH) {
+                    if !class_perm(k, &cred, KEY_SEARCH, possessed) {
                         return -(errno::EACCES as i64);
                     }
                 }
@@ -1105,10 +1385,12 @@ pub fn sys_keyctl(args: [u64; 6]) -> i64 {
                 Err(e) => return -(e as i64),
             };
             {
+                let from_possessed = possessed_by(from, &cred);
+                let to_possessed = possessed_by(to, &cred);
                 let keys = KEYS.lock();
-                for r in [from, to] {
+                for (r, possessed) in [(from, from_possessed), (to, to_possessed)] {
                     if let Some(k) = keys.get(&r) {
-                        if !class_perm(k, &cred, KEY_WRITE) {
+                        if !class_perm(k, &cred, KEY_WRITE, possessed) {
                             return -(errno::EACCES as i64);
                         }
                     }

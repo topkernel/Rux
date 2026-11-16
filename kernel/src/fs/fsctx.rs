@@ -64,8 +64,10 @@ pub const FSCONFIG_SET_PATH_EMPTY: u64 = 4;
 pub const FSCONFIG_SET_FD: u64 = 5;
 pub const FSCONFIG_CMD_CREATE: u64 = 6;
 pub const FSCONFIG_CMD_RECONFIGURE: u64 = 7;
-pub const FSCONFIG_CMD_CREATE_API: u64 = 8;
-pub const FSCONFIG_CMD_RECONFIGURE_API: u64 = 9;
+/// uapi/linux/mount.h numbering (verified against mainline): 6 CREATE,
+/// 7 RECONFIGURE, 8 CREATE_EXCL. There is no command 9 — unknown
+/// commands answer EOPNOTSUPP like the reference default case.
+pub const FSCONFIG_CMD_CREATE_EXCL: u64 = 8;
 
 pub const MOUNT_ATTR_RDONLY: u64 = 0x0000_0001;
 pub const MOUNT_ATTR_NOSUID: u64 = 0x0000_0002;
@@ -134,11 +136,12 @@ pub fn fs_type_known(fs_type: &str) -> bool {
 /// what systemd's mount_option_supported() probe expects. Legacy types
 /// accept everything (legacy_parse_param never rejects).
 pub fn param_key_known(fs_type: &str, key: &str) -> bool {
-    // Universal keys: "source" is vfs_parse_fs_param_source; "ro"/"rw"
-    // are the sb_flags legacy spellings util-libmount and older callers
-    // still send (accepted rather than lied about — a superset of the
-    // strict reference tables, chosen to never fail a real caller).
-    if key == "source" || key == "ro" || key == "rw" {
+    // Universal keys: "source" is vfs_parse_fs_param_source; the rest
+    // are the common sb-flag keys of vfs_parse_sb_flag (common_set/
+    // clear_sb_flag: sync/dirsync/lazytime/mand/ro/rw) — they apply to
+    // every filesystem type (LTP fsconfig01 SET_PATH "sync",
+    // fspick01 SET_STRING "sync").
+    if matches!(key, "source" | "ro" | "rw" | "sync" | "dirsync" | "lazytime" | "mand") {
         return true;
     }
     match fs_type {
@@ -561,6 +564,12 @@ pub fn mount_attr_apply(cur: MntFlags, attr_set: u64, attr_clr: u64) -> MntFlags
         MOUNT_ATTR_NODIRATIME,
         MOUNT_ATTR_NODIRATIME,
         MntFlags::MNT_NODIRATIME,
+    );
+    pair(
+        &mut bits,
+        MOUNT_ATTR_NOSYMFOLLOW,
+        MOUNT_ATTR_NOSYMFOLLOW,
+        MntFlags::MNT_NOSYMFOLLOW,
     );
     // The atime field: only a set-field value may RAISE noatime; both a
     // set-field relatime/strictatime value and any clear-field bits drop

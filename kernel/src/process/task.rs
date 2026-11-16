@@ -687,6 +687,10 @@ pub struct Cred {
     pub thread_keyring: Option<u32>,
     pub process_keyring: Option<u32>,
     pub session_keyring: Option<u32>,
+    /// KEYCTL_SET_REQKEY_KEYRING default (cred->jit_keyring in the
+    /// reference): which keyring a future request_key() links into when
+    /// the caller passes dest=0. KEY_REQKEY_DEFL_DEFAULT = 0.
+    pub reqkey_defl: i32,
 }
 
 /// SECBIT_KEEP_CAPS (bit 4) in the prctl securebits encoding.
@@ -718,6 +722,7 @@ impl Cred {
             thread_keyring: None,
             process_keyring: None,
             session_keyring: None,
+            reqkey_defl: 0,
         }
     }
 
@@ -760,6 +765,7 @@ impl Cred {
             thread_keyring: None,
             process_keyring: None,
             session_keyring: None,
+            reqkey_defl: 0,
         }
     }
 

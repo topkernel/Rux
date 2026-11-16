@@ -2189,6 +2189,33 @@ impl PageCache {
         block_size: usize,
         buf: &[u8],
     ) {
+        // Early-return arms below (table-full, duplicate, revive-in-place)
+        // free frames that the unlocked pre-stage ALREADY described as
+        // cache pages (type/UpToDate/mapping/index — the perf-review
+        // pre-marking). The zone's alloc path clears flags+refcount but
+        // NOT type/mapping/index, so a frame discarded with its pre-mark
+        // keeps claiming to be a LIVE cache entry for the rest of its
+        // recycling life: free-side guards misfire (mmforensics' 2026-11-15
+        // boot: 29 refused frees from insert_batch's own stack) and every
+        // identity-consulting path misjudges the frame. Strip the identity
+        // before every discard free — same stores release_page_frame does.
+        #[inline]
+        fn discard_prepared_frame(phys: usize) {
+            let page_desc = pfn_to_page_mut(phys / PAGE_SIZE);
+            if !page_desc.is_null() {
+                // SAFETY: frame was allocated by this batch's pre-stage
+                // (exclusive ownership) and is being discarded.
+                unsafe {
+                    let page = &*page_desc;
+                    page.set_page_type(PageType::Normal);
+                    page.clear_flag(PageFlag::UpToDate);
+                    page.set_mapping(core::ptr::null_mut());
+                    page.set_index(0);
+                }
+            }
+            free_page(phys);
+        }
+
         if block_size == 0 || buf.len() < block_size {
             return;
         }
@@ -2303,7 +2330,7 @@ impl PageCache {
                     // Table full: drop this chunk's frames, stop the batch.
                     drop(w);
                     for &phys in &phys_buf[..got] {
-                        free_page(phys);
+                        discard_prepared_frame(phys);
                     }
                     self.flush_parked(&mut parked);
                     break;
@@ -2391,14 +2418,16 @@ impl PageCache {
                                 // Read-path batch: the revived frame now
                                 // matches disk — clean (atomic-op rule).
                                 stale.dirty.store(false, Ordering::Release);
-                                free_page(phys);
+                                discard_prepared_frame(phys);
                                 continue;
                             } else {
                                 // Duplicate index: the frame was already filled
                                 // and described in the unlocked stage above —
                                 // release it exactly as the old in-lock order
-                                // did (no clobber, no leak).
-                                free_page(phys);
+                                // did (no clobber, no leak). The pre-marked
+                                // cache identity is stripped first (see
+                                // discard_prepared_frame above).
+                                discard_prepared_frame(phys);
                                 continue;
                             }
                         }

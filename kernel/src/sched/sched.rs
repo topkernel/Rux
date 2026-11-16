@@ -1397,6 +1397,56 @@ pub extern "C" fn asm_need_resched() -> i64 {
     if need_resched() { 1 } else { 0 }
 }
 
+/// bool sched_can_stop_tick(struct rq *rq) — reference kernel/sched/
+/// core.c, decision tree preserved in order (DL → RR → FIFO → CFS):
+/// Deadline tasks need the tick even when single; more than one RR
+/// task needs the tick for RR behaviour; FIFO-only needs no tick (no
+/// forced preemption between FIFO tasks); otherwise more than one CFS
+/// task needs the tick for involuntary preemption. The HZ_BW cfs-
+/// bandwidth check is statically false here (no CFS bandwidth). The rq
+/// is the global run queue (D-1) — the counters are global; the early-
+/// boot guard keeps pre-grq_init ticks periodic (grq() panics before
+/// grq_init).
+pub fn sched_can_stop_tick() -> bool {
+    if !GRQ_READY.load(core::sync::atomic::Ordering::Acquire) {
+        return false;
+    }
+    let g = grq();
+    // Deadline tasks, even if single, need the tick.
+    if g.dl_rq.dl_nr_running.load(core::sync::atomic::Ordering::Relaxed) != 0 {
+        return false;
+    }
+    // If there are more than one RR tasks, we need the tick to affect
+    // the actual RR behaviour.
+    let rr = g.rt_rq.rr_nr_running.load(core::sync::atomic::Ordering::Relaxed);
+    if rr != 0 {
+        return rr == 1;
+    }
+    // If there's no RR tasks, but FIFO tasks, we can skip the tick —
+    // no forced preemption between FIFO tasks.
+    let rt = g.rt_rq.rt_nr_running.load(core::sync::atomic::Ordering::Relaxed);
+    if rt.saturating_sub(rr) != 0 {
+        return true;
+    }
+    // More than one CFS task: the tick drives involuntary preemption.
+    // STRUCTURAL MAPPING: the reference's rq->nr_running INCLUDES the
+    // currently-running task (a task stays on_rq while it runs; the
+    // dequeue happens at sleep/exit). Rux's GRQ counter drops the
+    // current at pick, so the running non-idle currents are added back
+    // here to reproduce the reference's count.
+    let mut load = g.nr_running.load(core::sync::atomic::Ordering::Relaxed);
+    for c in 0..MAX_CPUS {
+        let cur = cpu_state(c).current;
+        if !cur.is_null() && cur != cpu_state(c).idle {
+            load += 1;
+        }
+    }
+    if load > 1 {
+        return false;
+    }
+    true
+}
+
 #[inline]
 pub fn set_need_resched() {
     // SAFETY: cpu_id is bounds-checked against MAX_CPUS; only the current CPU
@@ -2776,6 +2826,15 @@ unsafe fn __schedule() {
     // (now() short-circuits to 0, add() to a no-op).
     let cc_t0 = crate::dfx::cctx::now();
     crate::dfx::cctx::bump(&crate::dfx::cctx::SCH_N);
+    // runq-strand lane: per-CPU schedule-entry count — the monopolist
+    // census reads its per-burst delta (frozen = a CPU that stopped
+    // scheduling; the strand producer's signature).
+    {
+        let cpu_id = crate::arch::cpu_id() as u64 as usize;
+        if cpu_id < MAX_CPUS {
+            SCHED_CALLS[cpu_id].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
     clear_need_resched();
 
     // Context switch is an RCU quiescent state.
@@ -4227,6 +4286,11 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
         // the queue membership (R39 ordering, see above).
         (*task).set_state(TaskState::new(TaskState::RUNNING));
         grq.nr_running.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        // sched_update_tick_dependency (add_nr_running tail, sched.h):
+        // every load increase re-evaluates the tick dependency — the
+        // 0->1 transition kicks the stopped CPUs so they restart their
+        // tick at their next exit.
+        crate::timer::nohz::sched_update_tick_dependency_on_load_change();
         // ORPHAN-MARK creation tripwire (wake-fastrepro final-boss): the
         // task is being LINKED right now — under the GRQ, no pick or
         // switch can be in flight on it. If its ownership qword shows a
@@ -4253,67 +4317,14 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
             let slot_backed = claim >= 0
                 && (claim as usize) < MAX_CPUS
                 && cpu_state(claim as usize).current == task;
-            if slot_backed && !mid_swout {
-                // The pick-in-flight relink: the task is linked while its
-                // claim's slot still names it (the picker has not reached
-                // its context switch). Tagged separately, small budget —
-                // a later STALE-CLAIM-RESET with the SAME pid+claim
-                // convicts this window as the orphan producer.
-                static ENQSB_N: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(0);
-                if (*task).pid() > 1
-                    && ENQSB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200
-                {
-                    use crate::dfx::taskdump::putc_brief as putchar;
-                    fn pdec4(mut v: u64) {
-                        use crate::dfx::taskdump::putc_brief as p;
-                        let mut buf = [0u8; 20];
-                        let mut n = 0;
-                        if v == 0 {
-                            p(b'0');
-                            return;
-                        }
-                        while v > 0 && n < buf.len() {
-                            buf[n] = b'0' + (v % 10) as u8;
-                            v /= 10;
-                            n += 1;
-                        }
-                        for i in (0..n).rev() {
-                            p(buf[i]);
-                        }
-                    }
-                    const M: &[u8] = b"\nENQ-CLAIMED-SLOTBK pid=";
-                    for &b in M {
-                        putchar(b);
-                    }
-                    pdec4((*task).pid() as u64);
-                    const M2: &[u8] = b" claim=";
-                    for &b in M2 {
-                        putchar(b);
-                    }
-                    pdec4(claim.unsigned_abs() as u64);
-                    const M3: &[u8] = b" pk=";
-                    for &b in M3 {
-                        putchar(b);
-                    }
-                    pdec4((*task).pick_state() as u64);
-                    const M4: &[u8] = b" jif=";
-                    for &b in M4 {
-                        putchar(b);
-                    }
-                    pdec4(crate::drivers::timer::get_jiffies());
-                    const M5: &[u8] = b" from=";
-                    for &b in M5 {
-                        putchar(b);
-                    }
-                    for &b in ENQ_CALLER.file().as_bytes() {
-                        putchar(b);
-                    }
-                    putchar(b':');
-                    pdec4(ENQ_CALLER.line() as u64);
-                    putchar(b'\n');
-                }
-            }
+            // (ENQ-CLAIMED-SLOTBK print DELETED: it fired on EVERY
+            // tick-preempt requeue of a CPU-bound task — the perf-sample
+            // capture of the lmbench strand (2026-11-15) shows it is the
+            // normal preempt-requeue window, present in completed boots
+            // too, carrying no signal; ~1 ms of polled UART per tick on
+            // the measured CPU was pure disturbance. The nohz round's
+            // `rq_load() <= 1` slice guard already keeps the solo case
+            // out of this path entirely.)
             if (oncpu || claim != -1) && !mid_swout && !slot_backed && (*task).pid() != 0 {
                 static ENQC_N: core::sync::atomic::AtomicU32 =
                     core::sync::atomic::AtomicU32::new(0);
@@ -6061,6 +6072,165 @@ pub fn grq_diag_cfs_linked(task: *mut crate::process::task::Task) -> Option<bool
     Some(guard.cfs_rq.is_linked(task))
 }
 
+/// Per-CPU count of __schedule() entries (runq-strand lane): the
+/// monopolist detector's truth source. A CPU executing a preemptible
+/// workload calls schedule() hundreds of times per 5 s burst; a CPU
+/// held by an unpreemptible kernel loop (or a task whose preemption
+/// requests are all refused) stops calling it entirely. One relaxed
+/// fetch_add per schedule — same cost class as the cctx probe's
+/// existing per-schedule counters.
+pub static SCHED_CALLS: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+
+/// MONOPOLIST census (runq-strand lane, 121st): the RUNQ-STRAND census
+/// names the victims; this names their CULPRITS. The cotask-decode
+/// campaign's frozen-skipall evidence (walks stop completing while 50+
+/// entries stay linked and every CPU reads busy with FIXED pids for
+/// minutes) says the strand is produced by CPUs that never reach a
+/// schedule() again — incumbents monopolizing their harts. A CPU is a
+/// MONOPOLIST when the SAME real task holds its slot across a full
+/// 5 s burst while SCHED_CALLS for that CPU advances by < 20 (a
+/// preemptible holder re-picks itself through the walk hundreds of
+/// times per burst; a frozen counter means schedule() stopped running
+/// there). The row carries identity, preempt_count, need_resched, exec
+/// activation, and the last timer-tick stamp of WHERE the CPU was
+/// interrupted (TICK_ENTRY_RIP + CS ring bits: kernel vs user mode +
+/// stamp age). A kernel-mode RIP constant across bursts names the
+/// unpreemptible spin loop (symbolize offline); a user-mode RIP with a
+/// live need_resched names a broken user-return preempt gate; a stale
+/// stamp names a halted/tick-starved CPU. Runs under dfx=fuxstuck (the
+/// futex census burst calls it, right after runq_strand_census); the
+/// stamps themselves ride the tick (TICK_ENTRY_* are always on, same
+/// as leg-33B). Prints only when at least one monopolist exists —
+/// quiet boots pay nothing.
+pub fn monopolist_census(now_j: u64) {
+    use core::sync::atomic::Ordering::{Acquire, Relaxed};
+    use core::fmt::Write as _;
+
+    static LINES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    struct Prev {
+        pid: core::sync::atomic::AtomicU32,
+        sched: core::sync::atomic::AtomicU64,
+    }
+    static PREV: [Prev; MAX_CPUS] = {
+        #[allow(clippy::declare_interior_mutable_const)]
+        const ZERO: Prev = Prev {
+            pid: core::sync::atomic::AtomicU32::new(0),
+            sched: core::sync::atomic::AtomicU64::new(0),
+        };
+        [ZERO; MAX_CPUS]
+    };
+
+    let mut any = false;
+    let mut body = alloc::string::String::new();
+    for c in 0..MAX_CPUS {
+        let cur = cpu_state(c).current;
+        let pid = if cur.is_null() || cur == cpu_state(c).idle {
+            0
+        } else {
+            // SAFETY: per-CPU current is a valid task or idle (idle
+            // excluded above); diagnostic reads only.
+            let cur = unsafe { &*cur };
+            if cur.pid() == 0 {
+                0
+            } else {
+                cur.pid()
+            }
+        };
+        let sched_now = SCHED_CALLS[c].load(Relaxed);
+        let prev_pid = PREV[c].pid.swap(pid, Relaxed);
+        let prev_sched = PREV[c].sched.swap(sched_now, Relaxed);
+        // Skip the first burst for a holder (no delta yet).
+        let held_over_burst = pid != 0 && prev_pid == pid;
+        let sched_dx = sched_now.saturating_sub(prev_sched);
+        if !held_over_burst || sched_dx >= 20 {
+            continue;
+        }
+        // SAFETY: revalidated above (non-null, non-idle, pid != 0).
+        let cur = unsafe { &*cpu_state(c).current };
+        let se = cur.sched_entity();
+        let act_ms = se
+            .sum_exec_runtime
+            .load(Relaxed)
+            .saturating_sub(se.prev_sum_exec_runtime.load(Relaxed))
+            / 1_000_000;
+        any = true;
+        if LINES.load(Relaxed) > 400 {
+            continue;
+        }
+        let trip = crate::interrupt::preempt::TICK_ENTRY_RIP[c].load(Relaxed);
+        let tcs = crate::interrupt::preempt::TICK_ENTRY_CS[c].load(Relaxed);
+        let tpid = crate::interrupt::preempt::TICK_ENTRY_PID[c].load(Relaxed);
+        let tjif = crate::interrupt::preempt::TICK_ENTRY_JIF[c].load(Relaxed);
+        // SAFETY: NEED_RESCHED is an AtomicBool array sized MAX_CPUS;
+        // static mut access is single-word atomic reads here.
+        let nrs = unsafe { NEED_RESCHED[c].load(Acquire) } as u8;
+        let mode = if tcs & 3 == 3 { 'U' } else { 'K' };
+        let stamp_age = now_j.saturating_sub(tjif);
+        let _ = write!(
+            body,
+            " |c{}={}({}) sdx={} act={}ms pc={:#x} nrs={} rip={:#x}{}jif={} spid={}",
+            c,
+            cur.pid(),
+            core::str::from_utf8(cur.comm()).unwrap_or("").trim_end_matches('\0'),
+            sched_dx,
+            act_ms,
+            cur.preempt_count(),
+            nrs,
+            trip,
+            mode,
+            stamp_age,
+            tpid,
+        );
+        // Kernel-mode holder: capture the live call chain — scan down
+        // from below the entry frame, keeping kernel-text words (the
+        // same contract TXN-HANG-STK's top-dn walk uses; for an ON-CPU
+        // task the frames under the entry frame are the current
+        // syscall's chain, symbolized offline with addr2line).
+        #[cfg(feature = "x86_64")]
+        if mode == 'K' {
+            if let Some(top) = cur.kernel_stack_top_checked() {
+                let base = top.wrapping_sub(
+                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                );
+                let mut stk = alloc::string::String::new();
+                let mut kept = 0usize;
+                // SAFETY: entry-frame read of this task's pinned
+                // kernel-stack pages (kernel_stack_top_checked
+                // contract); diagnostic reads only.
+                unsafe {
+                    let mut p = (base as *const u64).wrapping_sub(1);
+                    for _ in 0..64 {
+                        if kept >= 14 {
+                            break;
+                        }
+                        let v = p.read_volatile();
+                        if (0xffffffff8000_0000..0xffffffff8200_0000).contains(&v) {
+                            let _ = write!(stk, " {v:#x}");
+                            kept += 1;
+                        }
+                        p = p.wrapping_sub(1);
+                    }
+                }
+                if kept > 0 {
+                    let _ = write!(body, "\nMONOPOLIST-STK c={} pid={}{}", c, cur.pid(), stk);
+                }
+            }
+        }
+    }
+    if !any || LINES.load(Relaxed) > 400 {
+        return;
+    }
+    LINES.fetch_add(1, Relaxed);
+    // HOTPATH-PRINT: fuxstuck graph-burst gate.
+    crate::pr_warn!(
+        "MONOPOLIST nrrun={} j={}{}",
+        GlobalRunQueue::grq_nr_running(),
+        now_j,
+        body
+    );
+}
+
 /// RUNQ-STRAND census (59th session, ohc74 close() strand): scan every
 /// burst for tasks in the PICKABLE-by-ownership shape — on_rq, state
 /// RUNNING, claim == -1, on_cpu == false, no CPU's current slot — whose
@@ -6293,7 +6463,7 @@ pub fn runq_strand_census(now_j: u64) {
                     );
                     // HOTPATH-PRINT: fuxstuck graph-burst gate.
                     crate::pr_warn!(
-                        "RUNQ-STRAND tid={} tgid={} ({}) age={}s exec_frozen={}ms linked={} aff={:#x} throttled={} pol={:?} claim={} pk={:#x} ts={}ms skips={} vr={:#x} min_vr=?{}{}",
+                        "RUNQ-STRAND tid={} tgid={} ({}) age={}s exec_frozen={}ms linked={} aff={:#x} throttled={} pol={:?} claim={} pk={:#x} ts={}ms skips={} vr={:#x} nrrun={} min_vr=?{}{}",
                         tk.pid(),
                         tk.tgid(),
                         core::str::from_utf8(tk.comm()).unwrap_or("").trim_end_matches('\0'),
@@ -6308,6 +6478,7 @@ pub fn runq_strand_census(now_j: u64) {
                         tk.get_time_slice() * 1000 / crate::config::KERNEL_HZ as u32,
                         skips,
                         vr,
+                        GlobalRunQueue::grq_nr_running(),
                         wall_s,
                         inc_s
                     );
@@ -6394,25 +6565,25 @@ pub fn runq_strand_census(now_j: u64) {
                     .load(core::sync::atomic::Ordering::Relaxed)
                     .saturating_sub(se.prev_sum_exec_runtime.load(core::sync::atomic::Ordering::Relaxed))
                     / 1_000_000;
-                // 60th: incumbent policy/prio — an RT-class incumbent
-                // (FIFO/RR) explains CFS strands without any pick bug.
+                // runq-strand lane: COMPACT form — the old long form
+                // (comm + act + pc + pol + prio) blew the printk record
+                // cap after c0, so 7 of 8 incumbents were NEVER visible
+                // on the strand rows. pid/pc/act identifies each CPU's
+                // holder; comm/policy ride the MONOPOLIST line.
                 let _ = write!(
                     inc_s,
-                    " c{}={}({}/act{}ms/pc{}/pol{}pr{})",
+                    " c{}={}/pc{:#x}/act{}s",
                     c,
                     cur.pid(),
-                    core::str::from_utf8(cur.comm()).unwrap_or("").trim_end_matches('\0'),
-                    act_ms,
                     cur.preempt_count(),
-                    cur.policy() as u8 as u64,
-                    cur.prio()
+                    act_ms / 1000
                 );
             }
             }
         }
         // HOTPATH-PRINT: fuxstuck graph-burst gate.
         crate::pr_warn!(
-            "RUNQ-STRAND tid={} tgid={} ({}) age={}s exec_frozen={}ms linked={} aff={:#x} throttled={} pol={:?} claim={} pk={:#x} ts={}ms skips={} vr={:#x} min_vr={:#x}{}{}",
+            "RUNQ-STRAND tid={} tgid={} ({}) age={}s exec_frozen={}ms linked={} aff={:#x} throttled={} pol={:?} claim={} pk={:#x} ts={}ms skips={} vr={:#x} nrrun={} min_vr={:#x}{}{}",
             tk.pid(),
             tk.tgid(),
             core::str::from_utf8(tk.comm()).unwrap_or("").trim_end_matches('\0'),
@@ -6427,6 +6598,7 @@ pub fn runq_strand_census(now_j: u64) {
             tk.get_time_slice() * 1000 / crate::config::KERNEL_HZ as u32,
             skips,
             vr,
+            GlobalRunQueue::grq_nr_running(),
             min_vr,
             wall_s,
             inc_s
@@ -7285,8 +7457,102 @@ pub fn scheduler_tick() {
                         // the safety net that lets IRQ-exit kernel
                         // preemption stay enabled while the leak's
                         // producer is still being hunted.
+                        //
+                        // HEAL-GATE (122nd, runq-strand follow-up): the
+                        // 200-observation bar proves the count was
+                        // PRESENT at every tick for 2 s — rs2 proved
+                        // that cannot distinguish a leaked count from a
+                        // LEGITIMATE waiter inside a slow acquire: those
+                        // waits were on the stalled binder OWNER-LATCH
+                        // chain (latch_age 2820ms) and the 20.5s heal
+                        // storm zeroed live waiters' counts mid-acquire
+                        // (was=0x10001/0x10003). The contended TTAS loop
+                        // now publishes acquire-side evidence (per-CPU
+                        // task+jiffies, refreshed every 64K spins —
+                        // sync::spinlock::ACQUIRE_EVIDENCE); a count
+                        // whose owner was observed in that loop within
+                        // ACQUIRE_EVIDENCE_FRESH_JIF jiffies is
+                        // acquire-coupled and LIVE: refuse the heal
+                        // (both legs — a slow waiter actively spinning
+                        // must never be healed). The refusal is
+                        // rate-gated (20j, PREEMPT-LEAK policy) and does
+                        // NOT reset the window or run counters — once
+                        // the evidence goes stale (the waiter acquired,
+                        // or was never spinning), the next tick heals a
+                        // still-stuck count normally.
                         let base = pc & !crate::interrupt::preempt::HARDIRQ_MASK;
-                        if base != 0 && (p_stale || s_stale) {
+                        let acq_live = crate::sync::spinlock::acquire_evidence_fresh(
+                            cpu_id,
+                            cur as usize,
+                            now,
+                        );
+                        if (base != 0 && (p_stale || s_stale) || base == 0 && h_stale)
+                            && acq_live
+                        {
+                            static REFUSE_LAST_PRINT: core::sync::atomic::AtomicU64 =
+                                core::sync::atomic::AtomicU64::new(0);
+                            let rp = REFUSE_LAST_PRINT.load(
+                                core::sync::atomic::Ordering::Acquire);
+                            if now.wrapping_sub(rp) >= 20
+                                && REFUSE_LAST_PRINT
+                                    .compare_exchange(
+                                        rp,
+                                        now,
+                                        core::sync::atomic::Ordering::AcqRel,
+                                        core::sync::atomic::Ordering::Acquire)
+                                    .is_ok()
+                            {
+                                use crate::dfx::taskdump::putc_brief as putchar;
+                                fn ph(v: u64) {
+                                    use crate::dfx::taskdump::putc_brief as putchar;
+                                    for sh in (0..16).rev() {
+                                        let n = ((v >> (sh * 4)) & 0xF) as u8;
+                                        putchar(if n < 10 {
+                                            b'0' + n
+                                        } else {
+                                            b'a' + n - 10
+                                        });
+                                    }
+                                }
+                                const M: &[u8] = b"\nPREEMPT-HEAL-REFUSED cpu=";
+                                for &b in M {
+                                    putchar(b);
+                                }
+                                ph(cpu_id as u64);
+                                const M2: &[u8] = b" pid=";
+                                for &b in M2 {
+                                    putchar(b);
+                                }
+                                ph(unsafe { (*cur).pid() } as u64);
+                                const M3: &[u8] = b" pc=";
+                                for &b in M3 {
+                                    putchar(b);
+                                }
+                                ph(pc as u32 as u64);
+                                const M4: &[u8] = b" ev_age=";
+                                for &b in M4 {
+                                    putchar(b);
+                                }
+                                // evidence age (jiffies since this CPU's
+                                // last contended-loop stamp by cur)
+                                ph(now.wrapping_sub(
+                                    crate::sync::spinlock::ACQUIRE_EVIDENCE[cpu_id]
+                                        .jiffies
+                                        .load(core::sync::atomic::Ordering::Relaxed),
+                                ));
+                                const M5: &[u8] = b"j face=";
+                                for &b in M5 {
+                                    putchar(b);
+                                }
+                                putchar(if base != 0 { b'B' } else { b'H' });
+                                const M6: &[u8] =
+                                    b" (live acquire evidence; heal deferred)";
+                                for &b in M6 {
+                                    putchar(b);
+                                }
+                                putchar(b'\n');
+                            }
+                        } else if base != 0 && (p_stale || s_stale) {
                             // Fleet session 3 (2026-10-25): clear base bits
                             // ONLY. This heal runs inside the timer IRQ
                             // bracket, so cur's count at this exact moment
@@ -7424,7 +7690,10 @@ pub fn scheduler_tick() {
                         // held across 200 consecutive ticks is phantom;
                         // the kept single level pairs the observer's own
                         // still-pending irq_exit sub.
-                        if base == 0 && h_stale {
+                        // (HEAL-GATE: else-chained behind the refusal so a
+                        // refused candidate cannot fall through to this
+                        // leg.)
+                        else if base == 0 && h_stale {
                             unsafe {
                                 (*cur).ti_preempt_count_keep_tick_nesting();
                             }
@@ -8243,11 +8512,35 @@ pub fn scheduler_tick() {
                     // weights: a heavy task's slice is proportionally
                     // longer than the time its vruntime needs to overtake
                     // the leftmost (and vice versa for light tasks).
-                    let se = (*current).sched_entity();
-                    let slice_ns = grq_guard.cfs_rq.sched_slice(se);
-                    let sum = se.sum_exec_runtime.load(core::sync::atomic::Ordering::Acquire);
-                    let prev_sum = se.prev_sum_exec_runtime.load(core::sync::atomic::Ordering::Acquire);
-                    sum.saturating_sub(prev_sum) > slice_ns
+                    //
+                    // NOHZ round: the reference guards check_preempt_tick
+                    // with `if (cfs_rq->nr_running > 1)` (entity_tick) — a
+                    // SOLO runnable task is never tick-preempted. The GRQ
+                    // slice check ran unconditionally, so a solo CPU-bound
+                    // task (the lmbench calibration chase) was dequeued,
+                    // requeued and re-picked on EVERY tick: pure churn
+                    // (pick-state writes + sub_preempt_count + the ENQSB
+                    // print storm in the requeue path) that lands inside
+                    // every measured interval.
+                    //
+                    // STRUCTURAL MAPPING: the reference's cfs_rq->
+                    // nr_running INCLUDES the running current (on_rq);
+                    // Rux's timeline count drops it at pick, so
+                    // `reference_count > 1` maps to
+                    // `timeline_count + 1 > 1` = `timeline_count > 0`
+                    // here — at least one OTHER queued CFS task.
+                    if grq_guard.cfs_rq.nr_running() > 0 {
+                        let se = (*current).sched_entity();
+                        let slice_ns = grq_guard.cfs_rq.sched_slice(se);
+                        let sum =
+                            se.sum_exec_runtime.load(core::sync::atomic::Ordering::Acquire);
+                        let prev_sum = se
+                            .prev_sum_exec_runtime
+                            .load(core::sync::atomic::Ordering::Acquire);
+                        sum.saturating_sub(prev_sum) > slice_ns
+                    } else {
+                        false
+                    }
                 }; // grq_guard dropped here
 
                 if should_resched {
@@ -10248,6 +10541,11 @@ pub fn cpu_idle_loop() -> ! {
         // WW_IDLE_PHASE 1: about to enter schedule() (may switch away and
         // back; the stamp survives until the next phase write).
         WW_IDLE_PHASE[cpu_id].store(1, core::sync::atomic::Ordering::Release);
+        // tick_nohz_idle_exit: leaving the idle section — the picked task
+        // (if any) runs with inidle clear, so its irq exits take the
+        // full_update_tick path (the reference's idle loop brackets its
+        // idle section with the same enter/exit pair).
+        crate::timer::nohz::tick_nohz_idle_exit();
         unsafe {
             schedule();
         }
@@ -10258,6 +10556,13 @@ pub fn cpu_idle_loop() -> ! {
             let curr = pcpu.current;
             !curr.is_null() && unsafe { (*curr).pid() == 0 }
         };
+
+        // tick_nohz_idle_enter: back in the idle section (schedule
+        // returned to the idle task) — the IRQ exits from here on take
+        // the start-idle stop path.
+        if is_idle {
+            crate::timer::nohz::tick_nohz_idle_enter();
+        }
 
         // Lost-park lie detector (fix-lostpark lane, dfx=lostpark): this
         // CPU just ran schedule() and is about to idle-mark/halt, but its

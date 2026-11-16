@@ -100,6 +100,8 @@ impl MntFlags {
     pub const MNT_SLAVE: u64 = 0x200;
     pub const MNT_UNBINDABLE: u64 = 0x400;
     pub const MNT_FORCE: u64 = 0x800;
+    /// SB_NOSYMFOLLOW (mount_setattr MOUNT_ATTR_NOSYMFOLLOW, 5.10+).
+    pub const MNT_NOSYMFOLLOW: u64 = 0x1000;
 
     pub fn new(flags: u64) -> Self {
         Self(flags)

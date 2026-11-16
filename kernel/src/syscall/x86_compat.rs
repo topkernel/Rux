@@ -56,17 +56,21 @@ pub fn native_enosys_hole(nr: u64) -> bool {
     }
     // Implemented on the reference x86_64 but not here. No 64-bit
     // Ubuntu caller issues these natives (glibc-2.39 uses arch_prctl
-    // for TLS; there is no port-I/O or LDT consumer), and the
-    // same-numbered generic rows are DIFFERENT calls — 154 modify_ldt
-    // → setpgid, 172 iopl → getpid, 173 ioperm → getppid, 205
-    // set_thread_area → getpeername, 211 get_thread_area → sendmsg —
-    // so ENOSYS (the honest "not implemented") is safer than the
-    // silent wrong-syscall fallthrough. Recorded as an honest gap:
-    // implement properly if an LTP/compat case ever needs them.
+    // for TLS; there is no LDT consumer), and the same-numbered
+    // generic rows are DIFFERENT calls — 154 modify_ldt → setpgid,
+    // 205 set_thread_area → getpeername, 211 get_thread_area →
+    // sendmsg — so ENOSYS (the honest "not implemented") is safer
+    // than the silent wrong-syscall fallthrough. Recorded as an
+    // honest gap: implement properly if an LTP/compat case ever
+    // needs them. 172 iopl / 173 ioperm lived here too until the
+    // LTP ioperm01/iopl01 rows demanded the real contract surface
+    // (arch/x86_64/process.rs + the dispatch pre-translate arms —
+    // the sweep note's "implement properly if an LTP case ever
+    // needs them" case arrived).
     // 136 ustat: the modern toolchain has no <sys/ustat.h>, so LTP
     // ustat01/02 TCONF on the reference too; generic 136 is
     // rt_sigpending.
-    matches!(nr, 136 | 154 | 172 | 173 | 205 | 211)
+    matches!(nr, 136 | 154 | 205 | 211)
 }
 
 /// Translate an x86_64 syscall number (and ABI-shaped arguments) to the

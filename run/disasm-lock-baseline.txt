@@ -1,0 +1,283 @@
+
+syms/rux-baseline.elf： 文件格式 elf64-x86-64
+
+
+Disassembly of section .text:
+
+LOCK:
+: 55 push rbp
+: 48 89 e5 mov rbp,rsp
+: 41 57 push r15
+: 41 56 push r14
+: 41 55 push r13
+: 41 54 push r12
+: 53 push rbx
+: 50 push rax
+: 48 8b 45 08 mov rax,QWORD PTR [rbp+0x8]
+: 45 31 f6 xor r14d,r14d
+: b9 01 00 00 00 mov ecx,0x1
+: 31 c0 xor eax,eax
+: f0 0f b1 0f lock cmpxchg DWORD PTR [rdi],ecx
+: 75 0f jne ffffffff802825b1 LOCK
+: 48 83 c4 08 add rsp,0x8
+: 5b pop rbx
+: 41 5c pop r12
+: 41 5d pop r13
+: 41 5e pop r14
+: 41 5f pop r15
+: 5d pop rbp
+: c3 ret
+: 48 89 fb mov rbx,rdi
+: 41 bf 00 00 00 80 mov r15d,0x80000000
+: 49 89 fc mov r12,rdi
+: 49 81 e4 00 f0 ff ff and r12,ADDR
+: 41 89 dd mov r13d,ebx
+: 41 81 e5 fc 0f 00 00 and r13d,0xffc
+: eb 02 jmp ffffffff802825d2 LOCK
+: f3 90 pause
+: 8b 03 mov eax,DWORD PTR [rbx]
+: 85 c0 test eax,eax
+: 0f 84 4a 01 00 00 je ffffffff80282726 LOCK
+: 41 ff c6 inc r14d
+: 66 45 85 f6 test r14w,r14w
+: 0f 85 87 00 00 00 jne ffffffff80282670 LOCK
+: 65 8b 04 25 00 00 00 mov eax,DWORD PTR gs:0x0
+: 00
+: 83 f8 07 cmp eax,0x7
+: 77 7a ja ffffffff80282670 LOCK
+: 89 c0 mov eax,eax
+: 0f b6 80 39 20 84 81 movzx eax,BYTE PTR [rax-0x7e7bdfc7]
+: 84 c0 test al,al
+: 74 6d je ffffffff80282670 LOCK
+: 65 8b 04 25 00 00 00 mov eax,DWORD PTR gs:0x0
+: 00
+: 89 c7 mov edi,eax
+: 83 f8 08 cmp eax,0x8
+: 0f 83 3b 01 00 00 jae ffffffff80282751 LOCK
+: 48 c1 e7 07 shl rdi,0x7
+: 48 8b 87 d8 5d fc 80 mov rax,QWORD PTR [rdi-0x7f03a228]
+: 4c 39 f8 cmp rax,r15
+: 72 07 jb ffffffff8028262d LOCK
+: 8b 40 04 mov eax,DWORD PTR [rax+0x4]
+: 85 c0 test eax,eax
+: 75 43 jne ffffffff80282670 LOCK
+: 9c pushf
+: 58 pop rax
+: a9 00 02 00 00 test eax,0x200
+: 74 3a je ffffffff80282670 LOCK
+: 65 8b 04 25 00 00 00 mov eax,DWORD PTR gs:0x0
+: 00
+: 89 c7 mov edi,eax
+: 83 f8 08 cmp eax,0x8
+: 0f 83 08 01 00 00 jae ffffffff80282751 LOCK
+: 48 c1 e7 07 shl rdi,0x7
+: 48 8b 87 d8 5d fc 80 mov rax,QWORD PTR [rdi-0x7f03a228]
+: 4c 39 f8 cmp rax,r15
+: 72 17 jb ffffffff80282670 LOCK
+: 8b 80 0c 1f 00 00 mov eax,DWORD PTR [rax+0x1f0c]
+: 85 c0 test eax,eax
+: 0f 84 dd 00 00 00 je ffffffff80282744 LOCK
+: 66 0f 1f 84 00 00 00 nop WORD PTR [rax+rax*1+0x0]
+: 00 00
+: 41 81 fe 00 e1 f5 05 cmp r14d,0x5f5e100
+: 0f 85 53 ff ff ff jne ffffffff802825d0 LOCK
+: 65 8b 04 25 00 00 00 mov eax,DWORD PTR gs:0x0
+: 00
+: 48 8b 0d 4c a5 b1 00 mov rcx,QWORD PTR [rip+0xb1a54c] # ffffffff80d9cbd8 LOCK
+: 48 8b 05 4d a5 b1 00 mov rax,QWORD PTR [rip+0xb1a54d] # ffffffff80d9cbe0 LOCK
+: 48 8d 41 ff lea rax,[rcx-0x1]
+: 48 39 d8 cmp rax,rbx
+: 73 54 jae ffffffff802826f0 LOCK
+: 48 89 d8 mov rax,rbx
+: 48 29 c8 sub rax,rcx
+: 48 3d ff ff ff 3f cmp rax,0x3fffffff
+: 77 46 ja ffffffff802826f0 LOCK
+: 89 c1 mov ecx,eax
+: c1 e9 0c shr ecx,0xc
+: 48 c1 e8 12 shr rax,0x12
+: 48 8b 04 c5 30 0d 39 mov rax,QWORD PTR [rax*8-0x7ec6f2d0]
+: 81
+: 48 0f a3 c8 bt rax,rcx
+: 73 2f jae ffffffff802826f0 LOCK
+: 66 41 81 3c 24 42 51 cmp WORD PTR [r12],0x5142
+: 75 26 jne ffffffff802826f0 LOCK
+: 41 0f b6 44 24 02 movzx eax,BYTE PTR [r12+0x2]
+: 84 c0 test al,al
+: 74 68 je ffffffff8028273c LOCK
+: 0f b6 c8 movzx ecx,al
+: 3c 07 cmp al,0x7
+: b8 07 00 00 00 mov eax,0x7
+: 0f 43 c8 cmovae ecx,eax
+: 0f b6 c1 movzx eax,cl
+: 4c 3b 2c c5 20 ae 64 cmp r13,QWORD PTR [rax*8-0x7f9b51e0]
+: 80
+: 73 10 jae ffffffff802826fe LOCK
+: 66 90 xchg ax,ax
+: 48 8b 05 e1 a4 b1 00 mov rax,QWORD PTR [rip+0xb1a4e1] # ffffffff80d9cbd8 LOCK
+: 48 8b 05 e2 a4 b1 00 mov rax,QWORD PTR [rip+0xb1a4e2] # ffffffff80d9cbe0 LOCK
+: 0f b6 05 a3 dd 3a 01 movzx eax,BYTE PTR [rip+0x13adda3] # ffffffff816304a8 LOCK
+: 45 31 f6 xor r14d,r14d
+: 84 c0 test al,al
+: 0f 84 c0 fe ff ff je ffffffff802825d0 LOCK
+: be 11 00 00 00 mov esi,0x11
+: 48 c7 c7 4e d6 64 80 mov rdi,ADDR
+: e8 bf b7 16 00 call ffffffff803edee0 LOCK
+: e9 aa fe ff ff jmp ffffffff802825d0 LOCK
+: 31 c0 xor eax,eax
+: b9 01 00 00 00 mov ecx,0x1
+: f0 0f b1 0b lock cmpxchg DWORD PTR [rbx],ecx
+: 0f 85 9b fe ff ff jne ffffffff802825d2 LOCK
+: e9 66 fe ff ff jmp ffffffff802825a2 LOCK
+: 41 83 fd 0f cmp r13d,0xf
+: 76 ae jbe ffffffff802826f0 LOCK
+: eb ba jmp ffffffff802826fe LOCK
+: e8 f7 04 24 00 call ffffffff804c2c40 LOCK
+: 45 31 f6 xor r14d,r14d
+: e9 81 fe ff ff jmp ffffffff802825d2 LOCK
+: be 08 00 00 00 mov esi,0x8
+: 48 c7 c2 40 97 a3 80 mov rdx,ADDR
+: e8 8f 93 3a 00 call ffffffff8062baf1 LOCK
+: cc int3
+: cc int3
+: cc int3
+: cc int3
+: cc int3
+: cc int3
+: cc int3
+: cc int3
+: cc int3
+: cc int3
+: cc int3
+: cc int3
+: cc int3
+: cc int3
+
+LOCK:
+: 55 push rbp
+: 48 89 e5 mov rbp,rsp
+: 41 57 push r15
+: 41 56 push r14
+: 41 55 push r13
+: 41 54 push r12
+: 53 push rbx
+: 48 83 ec 58 sub rsp,0x58
+: 48 85 ff test rdi,rdi
+: 0f 84 31 02 00 00 je ffffffff802829bb LOCK
+: 0f b6 87 d1 20 00 00 movzx eax,BYTE PTR [rdi+0x20d1]
+: 84 c0 test al,al
+: 0f 84 22 02 00 00 je ffffffff802829bb LOCK
+: 48 8b 1d 50 3e 5f 01 mov rbx,QWORD PTR [rip+0x15f3e50] # ffffffff818765f0 LOCK
+: 48 85 db test rbx,rbx
+: 41 0f 95 c2 setne r10b
+: 48 8b 05 52 3e 5f 01 mov rax,QWORD PTR [rip+0x15f3e52] # ffffffff81876600 LOCK
+: 48 89 45 c8 mov QWORD PTR [rbp-0x38],rax
+: 48 0f 44 c3 cmove rax,rbx
+: 4c 8b 35 3b 3e 5f 01 mov r14,QWORD PTR [rip+0x15f3e3b] # ffffffff818765f8 LOCK
+: 31 c9 xor ecx,ecx
+: 48 89 da mov rdx,rbx
+: 4d 89 f1 mov r9,r14
+: eb 26 jmp ffffffff802827ed LOCK
+: 66 0f 1f 84 00 00 00 nop WORD PTR [rax+rax*1+0x0]
+: 00 00
+: 4d 8d 48 01 lea r9,[r8+0x1]
+: 48 89 f1 mov rcx,rsi
+: 41 b2 01 mov r10b,0x1
+: ba 00 00 00 00 mov edx,0x0
+: 4a 39 bc c6 b8 00 00 cmp QWORD PTR [rsi+r8*8+0xb8],rdi
+: 00
+: 0f 84 df 01 00 00 je ffffffff802829cc LOCK
+: 48 83 e8 01 sub rax,0x1
+: 0f 82 c4 01 00 00 jb ffffffff802829bb LOCK
+: 41 f6 c2 01 test r10b,0x1
+: 0f 84 f6 05 00 00 je ffffffff80282df7 LOCK
+: 48 85 c9 test rcx,rcx
+: 74 2a je ffffffff80282830 LOCK
+: 0f b7 b1 12 01 00 00 movzx esi,WORD PTR [rcx+0x112]
+: 49 39 f1 cmp r9,rsi
+: 0f 83 ca 00 00 00 jae ffffffff802828e0 LOCK
+: 48 89 ce mov rsi,rcx
+: 4d 89 c8 mov r8,r9
+: e9 e7 00 00 00 jmp ffffffff80282908 LOCK
+: 66 66 66 66 66 66 2e data16 data16 data16 data16 data16 cs nop WORD PTR [rax+rax*1+0x0]
+: 0f 1f 84 00 00 00 00
+: 00
+: 4d 85 c9 test r9,r9
+: 74 38 je ffffffff8028286d LOCK
+: 4c 89 ce mov rsi,r9
+: 48 89 d1 mov rcx,rdx
+: 48 83 e6 07 and rsi,0x7
+: 74 31 je ffffffff80282872 LOCK
+: 45 31 c0 xor r8d,r8d
+: 66 66 66 2e 0f 1f 84 data16 data16 cs nop WORD PTR [rax+rax*1+0x0]
+: 00 00 00 00 00
+: 48 8b 89 18 01 00 00 mov rcx,QWORD PTR [rcx+0x118]
+: 49 ff c0 inc r8
+: 4c 39 c6 cmp rsi,r8
+: 75 f1 jne ffffffff80282850 LOCK
+: 4c 89 ca mov rdx,r9
+: 4c 29 c2 sub rdx,r8
+: 49 83 f9 08 cmp r9,0x8
+: 73 15 jae ffffffff80282880 LOCK
+: eb 51 jmp ffffffff802828be LOCK
+: 48 89 d1 mov rcx,rdx
+: eb 4c jmp ffffffff802828be LOCK
+: 4c 89 ca mov rdx,r9
+: 49 83 f9 08 cmp r9,0x8
+: 72 43 jb ffffffff802828be LOCK
+: 0f 1f 44 00 00 nop DWORD PTR [rax+rax*1+0x0]
+: 48 8b 89 18 01 00 00 mov rcx,QWORD PTR [rcx+0x118]
+: 48 8b 89 18 01 00 00 mov rcx,QWORD PTR [rcx+0x118]
+: 48 8b 89 18 01 00 00 mov rcx,QWORD PTR [rcx+0x118]
+: 48 8b 89 18 01 00 00 mov rcx,QWORD PTR [rcx+0x118]
+: 48 8b 89 18 01 00 00 mov rcx,QWORD PTR [rcx+0x118]
+: 48 8b 89 18 01 00 00 mov rcx,QWORD PTR [rcx+0x118]
+: 48 8b 89 18 01 00 00 mov rcx,QWORD PTR [rcx+0x118]
+: 48 8b 89 18 01 00 00 mov rcx,QWORD PTR [rcx+0x118]
+: 48 83 c2 f8 add rdx,ADDR
+: 75 c2 jne ffffffff80282880 LOCK
+: 31 d2 xor edx,edx
+: 45 31 c9 xor r9d,r9d
+: 0f b7 b1 12 01 00 00 movzx esi,WORD PTR [rcx+0x112]
+: 49 39 f1 cmp r9,rsi
+: 0f 82 43 ff ff ff jb ffffffff80282816 LOCK
+: 66 66 66 66 2e 0f 1f data16 data16 data16 cs nop WORD PTR [rax+rax*1+0x0]
+: 84 00 00 00 00 00
+: 48 8b b1 b0 00 00 00 mov rsi,QWORD PTR [rcx+0xb0]
+: 48 85 f6 test rsi,rsi
+: 0f 84 e3 04 00 00 je ffffffff80282dd3 LOCK
+: 48 ff c2 inc rdx
+: 44 0f b7 81 10 01 00 movzx r8d,WORD PTR [rcx+0x110]
+: 00
+: 48 89 f1 mov rcx,rsi
+: 66 44 3b 86 12 01 00 cmp r8w,WORD PTR [rsi+0x112]
+: 00
+: 73 d8 jae ffffffff802828e0 LOCK
+: 48 85 d2 test rdx,rdx
+: 0f 84 bf fe ff ff je ffffffff802827d0 LOCK
+: 4e 8d 0c c6 lea r9,[rsi+r8*8]
+: 49 81 c1 20 01 00 00 add r9,0x120
+: 49 89 d2 mov r10,rdx
+: 49 83 e2 07 and r10,0x7
+: 0f 84 87 00 00 00 je ffffffff802829b0 LOCK
+: 45 31 db xor r11d,r11d
+: 0f 1f 40 00 nop DWORD PTR [rax+0x0]
+: 49 8b 09 mov rcx,QWORD PTR [r9]
+: 4c 8d 89 18 01 00 00 lea r9,[rcx+0x118]
+: 49 ff c3 inc r11
+: 4d 39 da cmp r10,r11
+: 75 ee jne ffffffff80282930 LOCK
+: 49 89 d2 mov r10,rdx
+: 4d 29 da sub r10,r11
+: 48 83 fa 08 cmp rdx,0x8
+: 72 43 jb ffffffff80282991 LOCK
+: 66 90 xchg ax,ax
+: 49 8b 09 mov rcx,QWORD PTR [r9]
+: 48 8b 89 18 01 00 00 mov rcx,QWORD PTR [rcx+0x118]
+: 48 8b 89 18 01 00 00 mov rcx,QWORD PTR [rcx+0x118]
+: 48 8b 89 18 01 00 00 mov rcx,QWORD PTR [rcx+0x118]
+: 48 8b 89 18 01 00 00 mov rcx,QWORD PTR [rcx+0x118]
+: 48 8b 89 18 01 00 00 mov rcx,QWORD PTR [rcx+0x118]
+: 48 8b 89 18 01 00 00 mov rcx,QWORD PTR [rcx+0x118]
+: 48 rex.W
+: 8b .byte 0x8b
+: 89 .byte 0x89
