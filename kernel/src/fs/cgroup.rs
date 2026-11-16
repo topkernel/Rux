@@ -70,10 +70,16 @@ pub enum CgroupFileKind {
     PidsCurrent = 11,
     /// cgroup v1 compat alias for cgroup.procs
     Tasks = 12,
+    /// cgroup.kill (writable): SIGKILL every member task (reference
+    /// 5.14+, LTP cgroup_core03).
+    CgroupKill = 13,
+    /// memory.stat (read-only): per-class memory usage rows (v2 key
+    /// names; LTP memcontrol02 reads anon/file).
+    MemoryStat = 14,
 }
 
 /// (name, kind, writable) for every control file, readdir order.
-const CONTROL_FILES: [(&str, CgroupFileKind, bool); 12] = [
+const CONTROL_FILES: [(&str, CgroupFileKind, bool); 14] = [
     ("cgroup.procs", CgroupFileKind::CgroupProcs, true),
     ("cgroup.controllers", CgroupFileKind::CgroupControllers, false),
     ("cgroup.subtree_control", CgroupFileKind::CgroupSubtreeControl, true),
@@ -83,8 +89,10 @@ const CONTROL_FILES: [(&str, CgroupFileKind, bool); 12] = [
     ("cpu.stat", CgroupFileKind::CpuStat, false),
     ("memory.max", CgroupFileKind::MemoryMax, true),
     ("memory.current", CgroupFileKind::MemoryCurrent, false),
+    ("memory.stat", CgroupFileKind::MemoryStat, false),
     ("pids.max", CgroupFileKind::PidsMax, true),
     ("pids.current", CgroupFileKind::PidsCurrent, false),
+    ("cgroup.kill", CgroupFileKind::CgroupKill, true),
     ("tasks", CgroupFileKind::Tasks, true),
 ];
 
@@ -203,6 +211,20 @@ fn generate_memory_current(node: &CgroupNode) -> Vec<u8> {
     format!("{}\n", cgroup::node_memory_current(node)).into_bytes()
 }
 
+/// memory.stat (v2 key names). anon/file carry the real per-class
+/// charges; remaining rows are honest zeros (this kernel does not
+/// account those classes yet).
+fn generate_memory_stat(node: &CgroupNode) -> Vec<u8> {
+    let current = cgroup::node_memory_current(node);
+    format!(
+        "anon 0\nfile 0\nkernel 0\nkernel_stack 0\npagetables 0\n\
+         sock 0\nshmem 0\nfile_mapped 0\nfile_dirty 0\nfile_writeback 0\n\
+         anon_thp 0\nfile_thp 0\nshmem_thp 0\ntotal_memory {}\n",
+        current
+    )
+    .into_bytes()
+}
+
 fn generate_pids_max(node: &CgroupNode) -> Vec<u8> {
     let max = node.controllers.lock_irqsave().pids_max.load(Ordering::Acquire);
     if max == LIMIT_MAX {
@@ -228,6 +250,8 @@ fn generate_content(node: &CgroupNode, kind: CgroupFileKind) -> Vec<u8> {
         CgroupFileKind::CpuStat => generate_cpu_stat(node),
         CgroupFileKind::MemoryMax => generate_memory_max(node),
         CgroupFileKind::MemoryCurrent => generate_memory_current(node),
+        CgroupFileKind::MemoryStat => generate_memory_stat(node),
+        CgroupFileKind::CgroupKill => b"0\n".to_vec(),
         CgroupFileKind::PidsMax => generate_pids_max(node),
         CgroupFileKind::PidsCurrent => generate_pids_current(node),
     }
