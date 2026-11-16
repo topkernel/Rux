@@ -89,12 +89,12 @@
     <div class="tbl-wrap"><table>
       <thead><tr><th>Item</th><th class="num">Rux</th><th class="num">Linux (same rig)</th><th>Notes</th></tr></thead>
       <tbody id="rt-rows">
-        <tr><td class="mono">cyclictest SCHED_OTHER (missed/avg/max µs)</td><td class="num">PENDING</td><td class="num">PENDING</td><td>30k cycles</td></tr>
-        <tr><td class="mono">cyclictest SCHED_FIFO p98 (missed/avg/max µs)</td><td class="num">PENDING</td><td class="num">PENDING</td><td>the real-time policy path</td></tr>
-        <tr><td class="mono">hackbench socketpair -g 20 (s)</td><td class="num">PENDING</td><td class="num">PENDING</td><td>socketpair throughput</td></tr>
-        <tr><td class="mono">hackbench pipe -p 20 -g 4 (s)</td><td class="num">PENDING</td><td class="num">PENDING</td><td>pipe throughput</td></tr>
-        <tr><td class="mono">hackbench thread -T 20 -g 4 (s)</td><td class="num">PENDING</td><td class="num">PENDING</td><td>the thread form</td></tr>
-        <tr><td class="mono">pi_stress -g 2 -D 20 (inversions completed)</td><td class="num">PENDING</td><td class="num">PENDING</td><td>PI-futex path throughput</td></tr>
+        <tr><td class="mono">cyclictest SCHED_OTHER (missed/avg/max µs)</td><td class="num">59/30000 · avg 107 · max 29061 (final-window spike)</td><td class="num">31/30000 · avg 63 · max 1417</td><td>the real-time latency gap is the main shortfall</td></tr>
+        <tr><td class="mono">cyclictest SCHED_FIFO p98 (missed/avg/max µs)</td><td class="num">56/30000 · avg 104 · max 27889 (final-window spike)</td><td class="num">25/30000 · avg 12 · max 887</td><td>the Linux RT-scheduling maturity gap, presented as measured</td></tr>
+        <tr><td class="mono">hackbench socketpair -g 20 (s)</td><td class="num">1.536</td><td class="num">0.330</td><td>Linux 4.7×</td></tr>
+        <tr><td class="mono">hackbench pipe -p 20 -g 4 (s)</td><td class="num">0.163</td><td class="num">0.017</td><td>Linux 9.6×</td></tr>
+        <tr><td class="mono">hackbench thread -T 20 -g 4 (s)</td><td class="num">0.287</td><td class="num">0.042</td><td>Linux 6.8×</td></tr>
+        <tr><td class="mono">pi_stress -g 2 -D 20 (inversions completed)</td><td class="num">— (PI-mutex UAPI init fails)</td><td class="num">&gt;4.84M (~240k/s)</td><td>the PI-futex user-space chain is a registered gap</td></tr>
       </tbody>
     </table></div>
     <p style="font-size:13px;color:var(--text-3)">A row without numbers is a failure: hackbench inet ≥2 groups has no number on Rux (loopback non-blocking-connect stalls; on record with the net lane); pi_stress once failed initialization on Rux (the PI-mutex UAPI chain) — this table carries the newest two-sided readings, and failed items show as such in their rows.</p>

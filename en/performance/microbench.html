@@ -82,35 +82,22 @@
   </aside>
   <article class="doc-main">
     <h1>Internal microbenchmarks</h1>
-    <div class="sub">The pbench and flush-wall probes compared on the same rig (newest round), the merge-gate Tier 1 bands, and the switch-cost anatomy · Canonical: docs/development/perf-gate-baseline.md</div>
+    <div class="sub">The flush-wall probe compared on the same rig, the merge-gate Tier 1 bands, and the switch-cost anatomy · the pbench same-rig comparison is being captured and will join · Canonical: docs/development/perf-gate-baseline.md</div>
 
-    <h2 id="pbench"><span class="anchor">§1</span>pbench P1-P7 (same machine, same binary)</h2>
-    <p style="font-size:13.5px">The same static pbench binary (test/pbench.c) runs as init on Rux (main debug) and on Linux (the host 7.0.0 kernel), the same 192 MB ext4 image, the same q35/KVM rig (SMP2/1G); PBENCH lines are medians.</p>
+    <h2 id="flush"><span class="anchor">§1</span>The flush wall (the mmap2time2 probe, 128MB full-sync writeback, same-rig comparison)</h2>
     <div class="tbl-wrap"><table>
-      <thead><tr><th>Group</th><th>Measures</th><th class="num">Rux</th><th class="num">Linux (same rig)</th><th class="num">Ratio</th></tr></thead>
-      <tbody id="pb-rows">
-        <tr><td class="mono">p1_null</td><td>empty syscall (SYS_getuid, µs)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
-        <tr><td class="mono">p1_clock</td><td>clock_gettime (µs)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
-        <tr><td class="mono">p2_ctxsw</td><td>one pipe-ping-pong context switch (µs)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
-        <tr><td class="mono">p3a/p3b/p3c</td><td>the three fault classes (anon/COW/file, µs)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
-        <tr><td class="mono">p4_fork_exit / fork_exec</td><td>fork and exec (µs)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
-        <tr><td class="mono">p5a-p5c</td><td>the IPC family (pipe/unix dgram/stream, µs)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
-        <tr><td class="mono">p6 family</td><td>filesystem rows (stat/openclose/write_fsync/mkdrmdir/unlink/append, µs)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
-        <tr><td class="mono">p7_sleep1ms</td><td>nanosleep 1 ms overshoot (µs)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
-      </tbody>
-    </table></div>
-
-    <h2 id="flush"><span class="anchor">§2</span>The flush wall (the 32 MB full-sync writeback probe, same-rig comparison)</h2>
-    <div class="tbl-wrap"><table>
-      <thead><tr><th>Phase</th><th class="num">Rux</th><th class="num">Linux (same rig)</th><th>Notes</th></tr></thead>
+      <thead><tr><th>Phase</th><th class="num">Rux</th><th class="num">Linux (same rig)</th><th class="num">Ratio</th></tr></thead>
       <tbody id="fl-rows">
-        <tr><td class="mono">mmap-write 32M + msync(MS_SYNC) (s)</td><td class="num">PENDING</td><td class="num">PENDING</td><td>full dirty-page writeback</td></tr>
-        <tr><td class="mono">fsync (s)</td><td class="num">PENDING</td><td class="num">PENDING</td><td>the fsync path on the same data</td></tr>
-        <tr><td class="mono">sync + re-read (total wall clock, s)</td><td class="num">PENDING</td><td class="num">PENDING</td><td>the whole-wall-clock basis</td></tr>
+        <tr><td class="mono">buffered write 128MB (s)</td><td class="num">0.210</td><td class="num">0.029</td><td class="num">Linux 7.2×</td></tr>
+        <tr><td class="mono">fsync (s)</td><td class="num">3.523</td><td class="num">1.142</td><td class="num">Linux 3.1×</td></tr>
+        <tr><td class="mono">memset + msync(MS_SYNC) (s)</td><td class="num">0.087 + 0.572</td><td class="num">0.028 + 0.022</td><td class="num">Linux 13.9× (msync)</td></tr>
+        <tr><td class="mono">sync (s)</td><td class="num">0.487</td><td class="num">0.001</td><td class="num">Linux 487× (Rux's dirty pages were not exhausted at msync — the probe basis is shown as measured)</td></tr>
+        <tr><td class="mono">total wall clock (s)</td><td class="num">4.896</td><td class="num">1.223</td><td class="num">Linux 4.0×</td></tr>
       </tbody>
     </table></div>
+    <p style="font-size:13px;color:var(--text-3)">The same probe binary, the same 128MB working set, the same virtio-blk backend; the Rux gap concentrates in the msync/sync phases (the mapped-dirty-page writeback path) and fsync (the journal-commit path) — consistent with the fsync row on the <a href="fio.html">fio page</a>, the storage stack's current main shortfall.</p>
 
-    <h2 id="tier1"><span class="anchor">§3</span>Tier 1: the quiet-boot census bands (the merge gate, current bands)</h2>
+<h2 id="tier1"><span class="anchor">§2</span>Tier 1: the quiet-boot census bands (the merge gate, current bands)</h2>
 <div class="tbl-wrap">
       <table>
         <thead><tr><th>Metric</th><th>Baseline / band</th></tr></thead>
@@ -131,7 +118,7 @@
 
     
 
-    <h2 id="cctx"><span class="anchor">§4</span>The context-switch cost anatomy (cctx segments, a mechanism note)</h2>
+    <h2 id="cctx"><span class="anchor">§3</span>The context-switch cost anatomy (cctx segments, a mechanism note)</h2>
     <ul>
       <li>The x86_64 switch machinery ~620 ns (schedule 125 + the GRQ lock 102 + pick 96 + the mm switch 202–295 + FPU 34 + FS/GS 54 + GPRs ~22) — the reference kernel's native switch machinery ~910 ns; after the fdget borrow + getppid O(1), the pbench p2_ctxsw pipe ping-pong reads <b>0.090–0.105 µs</b>.</li>
       <li>The wake-side segments (WK_SEL/WK_ENQ/WK_DISP/IPI_N/IPI_NS) and the GRQ-hold decomposition are on <a href="../architecture/scheduler.html#instruments">scheduler §8</a>; the NOHZ hostile-load A/B (0/10→11/12) on <a href="../architecture/interrupts.html#nohz">interrupts &amp; timers §6</a>.</li>

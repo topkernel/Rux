@@ -88,13 +88,13 @@
     <div class="tbl-wrap"><table>
       <thead><tr><th>作业</th><th class="num">Rux</th><th class="num">Linux(同机)</th><th class="num">比值(Rux/Linux)</th></tr></thead>
       <tbody id="fio-rows">
-        <tr><td class="mono">1M 顺序写 48M(direct)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
-        <tr><td class="mono">1M 顺序读 48M(direct,读前写文件)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
-        <tr><td class="mono">4k 随机读 40M(direct,20 s)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
-        <tr><td class="mono">4k 随机读写 40M(direct,15 s)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
-        <tr><td class="mono">4k 随机写 8M + fsync=1(持久化路径)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
-        <tr><td class="mono">1M 缓冲写 48M(页缓存口径,两侧同)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
-        <tr><td class="mono">32 MB 刷盘墙探针(mmap 全同步回写,总墙钟)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
+        <tr><td class="mono">1M 顺序写 48M(direct)</td><td class="num">93.9 MiB/s · clat 10.6 ms</td><td class="num">5.2 GiB/s · clat 171 µs</td><td class="num">Linux 57×</td></tr>
+        <tr><td class="mono">1M 顺序读 48M(direct,读前写文件)</td><td class="num">40.8 MiB/s · clat 24.5 ms</td><td class="num">9.4 GiB/s · clat 90 µs</td><td class="num">Linux 226×</td></tr>
+        <tr><td class="mono">4k 随机读 40M(direct,20 s)</td><td class="num">69.7 MiB/s · 17.8k IOPS · clat 22.7 µs</td><td class="num">163.2 MiB/s · 41.8k IOPS · clat 22.7 µs</td><td class="num">Linux 2.34×(延迟持平)</td></tr>
+        <tr><td class="mono">4k 随机读写 40M(direct,15 s)</td><td class="num">30.9/30.9 MiB/s · clat 74.7/50.3 µs</td><td class="num">72.7/72.7 MiB/s · clat 23.9/25.3 µs</td><td class="num">Linux 2.35×</td></tr>
+        <tr><td class="mono">4k 随机写 8M + fsync=1(持久化路径)</td><td class="num">1.0 MiB/s · 260.6 IOPS · fsync 3.82 ms</td><td class="num">7.9 MiB/s · 2017.7 IOPS · fsync 489 µs</td><td class="num">Linux 7.7×(IOPS)</td></tr>
+        <tr><td class="mono">1M 缓冲写 48M(页缓存口径,两侧同)</td><td class="num">9.4 GiB/s · clat 79.9 µs</td><td class="num">9.4 GiB/s · clat 89.5 µs</td><td class="num">持平</td></tr>
+        <tr><td class="mono">128MB 刷盘墙探针(mmap 全同步回写,总墙钟)</td><td class="num">4.896 s(fsync 3.523 · msync 0.572)</td><td class="num">1.223 s(fsync 1.142 · msync 0.022)</td><td class="num">Linux 4.0×</td></tr>
         <tr><td class="mono">libaio(io_setup/io_submit)</td><td class="num">—</td><td class="num">有</td><td class="num">—</td></tr>
         <tr><td class="mono">io_uring(5.1 ABI enter 契约)</td><td class="num">—</td><td class="num">有</td><td class="num">—</td></tr>
       </tbody>

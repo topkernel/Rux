@@ -109,7 +109,7 @@
           <tr><td>Geekbench 5.5.1</td><td>综合套件(21 项逐负载,4-CPU 参考对照)</td><td><span class="chip ok">SC 2440 / MC 7709 best-of-runs,逐位复现确认</span></td><td><a href="geekbench.html">Geekbench 5</a></td></tr>
           <tr><td>fio 3.36</td><td>存储 I/O(引擎枚举 + 数据完整性 + 组级吞吐)</td><td><span class="chip ok">同机同镜像同二进制对照(吞吐/延迟/持久化路径)</span></td><td><a href="fio.html">fio</a></td></tr>
           <tr><td>rt-tests v2.11(cyclictest/hackbench/pi_stress)</td><td>实时延迟 + 调度压力</td><td><span class="chip ok">cyclictest/hackbench/pi_stress 同机对照(最新一轮)</span></td><td><a href="rttests.html">rt-tests</a></td></tr>
-          <tr><td>内部微基准(pbench + Tier 带 + 刷盘墙 + cctx)</td><td>门禁采集器与历史 A/B</td><td><span class="chip ok">SMP-8 重锚 + SP-7 + NOHZ A/B</span></td><td><a href="microbench.html">内部微基准</a></td></tr>
+          <tr><td>内部微基准(pbench + Tier 带 + 刷盘墙 + cctx)</td><td>门禁采集器与历史 A/B</td><td><span class="chip ok">Tier 1 带 + 刷盘墙同机对照 + 切换解剖</span></td><td><a href="microbench.html">内部微基准</a></td></tr>
           <tr><td>计划中(无数据,不列数)</td><td>netperf/iperf3、bonnie++/postmark/dbench、UnixBench、kselftest 子集、Trinity/syzkaller 语料</td><td><span class="chip cyan">qa-suites 章程序列</span></td><td>—</td></tr>
         </tbody>
       </table>

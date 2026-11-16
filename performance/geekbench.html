@@ -83,7 +83,7 @@
     <h1>Geekbench 5.5.1</h1>
     <div class="sub">最新状态:总分(同机对照)+ 21 项逐负载对照 · 正本:docs/test/geekbench-report.md</div>
 
-<h2 id="data"><span class="anchor">§1</span>数据(总分 + 21 项逐负载;逐项表 = 最近一次完整捕获,当前 main 重捕获进行中)</h2>
+<h2 id="data"><span class="anchor">§1</span>数据(总分 + 21 项逐负载;逐项表 = 最近一次完整逐项捕获)</h2>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th></th><th class="num">Rux</th><th class="num">Linux(4-CPU 钉核)</th><th>结论</th></tr></thead>
@@ -93,7 +93,7 @@
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">机位注明:Linux 侧为宿主裸机 <code>taskset -c 0-3</code> 钉核(与 guest 4 vCPU 拓扑对齐;同机 KVM Linux 对照在补测队列)。总分口径 = best-of-runs(用户规则,已记录):多核历史最佳 7709(gb-opt 轮)、单核历史最佳 2440。单核口径:两次裸机自跑即差 ~15%(2549 vs 2165),±15% 内视为噪声;逐项表为最近一次完整逐项捕获(当前 main 的逐项重捕获进行中,落地后替换)。</p>
+    <p style="font-size:13px;color:var(--text-3)">机位注明:Linux 侧为宿主裸机 <code>taskset -c 0-3</code> 钉核(与 guest 4 vCPU 拓扑对齐;同机 KVM Linux 对照在补测队列)。总分口径 = best-of-runs(用户规则,已记录):多核历史最佳 7709(gb-opt 轮)、单核历史最佳 2440。单核口径:两次裸机自跑即差 ~15%(2549 vs 2165),±15% 内视为噪声;逐项表为最近一次完整逐项捕获;总分列为最新四连跑 best-of-runs。</p>
 
     <h3>单核逐项(21 项全)</h3>
     <div class="tbl-wrap">

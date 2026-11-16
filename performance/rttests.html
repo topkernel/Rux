@@ -88,12 +88,12 @@
     <div class="tbl-wrap"><table>
       <thead><tr><th>项</th><th class="num">Rux</th><th class="num">Linux(同机)</th><th>说明</th></tr></thead>
       <tbody id="rt-rows">
-        <tr><td class="mono">cyclictest SCHED_OTHER(丢失/avg/max µs)</td><td class="num">PENDING</td><td class="num">PENDING</td><td>30k 周期</td></tr>
-        <tr><td class="mono">cyclictest SCHED_FIFO p98(丢失/avg/max µs)</td><td class="num">PENDING</td><td class="num">PENDING</td><td>实时策略路径</td></tr>
-        <tr><td class="mono">hackbench socketpair -g 20(秒)</td><td class="num">PENDING</td><td class="num">PENDING</td><td>进程间 socketpair 吞吐</td></tr>
-        <tr><td class="mono">hackbench pipe -p 20 -g 4(秒)</td><td class="num">PENDING</td><td class="num">PENDING</td><td>管道吞吐</td></tr>
-        <tr><td class="mono">hackbench thread -T 20 -g 4(秒)</td><td class="num">PENDING</td><td class="num">PENDING</td><td>线程形态</td></tr>
-        <tr><td class="mono">pi_stress -g 2 -D 20(完成反转数)</td><td class="num">PENDING</td><td class="num">PENDING</td><td>PI futex 路径吞吐</td></tr>
+        <tr><td class="mono">cyclictest SCHED_OTHER(丢失/avg/max µs)</td><td class="num">59/30000 · avg 107 · max 29061(末窗毛刺)</td><td class="num">31/30000 · avg 63 · max 1417</td><td>实时路径延迟差距为主要缺口</td></tr>
+        <tr><td class="mono">cyclictest SCHED_FIFO p98(丢失/avg/max µs)</td><td class="num">56/30000 · avg 104 · max 27889(末窗毛刺)</td><td class="num">25/30000 · avg 12 · max 887</td><td>Linux RT 调度成熟度差距如实呈现</td></tr>
+        <tr><td class="mono">hackbench socketpair -g 20(秒)</td><td class="num">1.536</td><td class="num">0.330</td><td>Linux 4.7×</td></tr>
+        <tr><td class="mono">hackbench pipe -p 20 -g 4(秒)</td><td class="num">0.163</td><td class="num">0.017</td><td>Linux 9.6×</td></tr>
+        <tr><td class="mono">hackbench thread -T 20 -g 4(秒)</td><td class="num">0.287</td><td class="num">0.042</td><td>Linux 6.8×</td></tr>
+        <tr><td class="mono">pi_stress -g 2 -D 20(完成反转数)</td><td class="num">—(PI mutex UAPI 初始化失败)</td><td class="num">>4.84M(~240k/s)</td><td>PI futex 用户态链为登记缺口</td></tr>
       </tbody>
     </table></div>
     <p style="font-size:13px;color:var(--text-3)">无数据项即失败:hackbench inet ≥2 组在 Rux 无数字(回环非阻塞 connect 停滞,net 线在案);pi_stress 在 Rux 曾初始化失败(PI mutex UAPI 链)—— 本表以最新一轮双侧读数为准,失败项在行内如实显示。</p>
