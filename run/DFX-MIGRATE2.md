@@ -102,7 +102,7 @@ in the one `tracepoints!` table in `kernel/src/trace/mod.rs`.
   rows; `events/rux/<name>/enable` replaces them.
 - `oh_hunt_prints_on()` unchanged (keys off `rux:ohhunt` + `sprobe=1`).
 - `#![recursion_limit = "4096"]` (the tracepoints! muncher recurses
-  once per event; 148 events now — 512 overflowed).
+  once per event; 109 events now — 512 overflowed at 149 declarations).
 
 ## The six permanent switches (with justification)
 
@@ -189,7 +189,8 @@ run-to-run; tag sets identical). Logs: `run/mig2-{a,b,c,d,e}-serial.log`.
 ## Scoreboard
 
 - switches.rs: **49 → 6 rows** (round 4: 62 → 49; rounds total: 62 → 6).
-- trace/mod.rs: +40 events (ids 71-110; table now 148 events).
+- trace/mod.rs: +40 events (ids 71-110; the table's 109 events now
+  span ids 1-110).
 - Tokens: 39 retired-alias + 1 retired-dead-with-timeline (thpark) +
   2 retired-dead (syncguard, syncwatch) + 6 permanent switches.
 - The injection class (claiminject/oncpuinject), the gdb-park actions
