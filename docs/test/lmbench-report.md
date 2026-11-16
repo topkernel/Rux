@@ -54,6 +54,36 @@ python3 userspace/lmbench/make-report.py run/lmbench-rux.txt run/lmbench-linux.t
 
 <!--RESULTS-->
 
+## Standing round 2 (2026-11-16 evening, kernel main=34b339e01 — fdget fast path + getppid O(1))
+
+perf-2x round 1 landed (merge 34b339e01): the fdget no-refcount fast
+path (unshared fdtable borrows the File from the lock-free slot — no
+irq bracket, no rcu section, no refcount RMW; CLONE_FILES tables fall
+back to fget) on read/write, and getppid follows the parent Task
+pointer (task_tgid_vnr shape) instead of a pid-hash lookup per call.
+
+- null: **0.045 µs** median (x5, 0.043-0.059) vs 0.051 standing = −12%.
+- write: **0.082 µs** (x3, dead-stable 0.0819-0.0821) vs 0.086-0.089 = −6%.
+- read: best 0.099 (band 0.099-0.132, n=3) vs 0.103-0.108 — in band.
+- stat ~0.34, open ~0.84 — in standing bands.
+- **Calibration stability: opt 14/15 boots converge vs base 0/15 in
+  the same window** — the getppid hash lookup's lock/cacheline variance
+  was itself a calibration-jitter source; the lmbench strand family
+  (35 s budget) disappears for these rows on the opt kernel.
+- pbench p2_ctxsw (1-byte pipe ping-pong, aff=1): **0.090-0.105 µs**
+  (two independent boots) from the 1.24-2.15 class — the borrow path
+  hits both sides of every roundtrip; −90%+. Pending: same-rig
+  reference p2 for an honest ratio.
+- Gates: Tier-1 census exact (8/32), GRQ hold 581 ns (release class,
+  improvement — band banked on debug), volume 81M (family band edge);
+  Tier-2 rows improvement-class vs the stale anchor; riscv suite green;
+  triple-arch builds green.
+
+2× campaign targets (Linux/2): null 0.0195 / read 0.030 / write 0.030 /
+stat 0.120 / open 0.197 / fork 17 / exec 18.8 µs. Next levers: entry
+floor (frame build + exit checks), open tail (memo hit + fd install),
+fork/exec (fdtable/mm copy).
+
 ## Standing (2026-11-16, kernel main=017bf556b — NOHZ merged; guest-vs-guest correction; rig discipline)
 
 Round facts, then the corrected column.
