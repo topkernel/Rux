@@ -501,6 +501,10 @@ pub struct NetlinkSocket {
     recv_queue: Spinlock<VecDeque<Vec<u8>>>,
     /// Closed flag (EOF for blocked receivers).
     closed: Spinlock<bool>,
+    /// Per-socket coldboot-replay marker: the first bind that subscribes
+    /// to the kernel-event group gets the synthesized device tree's
+    /// "add" uevents pushed once (sysfs::coldboot_uevent_replay_into).
+    coldboot_served: core::sync::atomic::AtomicBool,
     /// Wait queue for blocking recv.
     pub wait_queue: WaitQueueHead,
     /// Stored socket options (SOL_SOCKET subset).
@@ -520,6 +524,7 @@ impl NetlinkSocket {
             groups: core::sync::atomic::AtomicU32::new(0),
             recv_queue: Spinlock::new(VecDeque::new()),
             closed: Spinlock::new(false),
+            coldboot_served: core::sync::atomic::AtomicBool::new(false),
             wait_queue: WaitQueueHead::new(),
             options: Spinlock::new(SocketOptions::new()),
         }
@@ -543,6 +548,12 @@ impl NetlinkSocket {
 
     fn recv_ready(&self) -> bool {
         !self.recv_queue.lock().is_empty() || *self.closed.lock()
+    }
+
+    /// Receive-queue depth (uevent hunt probe: correlates the epoll
+    /// registration with the socket that holds the coldboot replay).
+    pub fn recv_queue_len(&self) -> usize {
+        self.recv_queue.lock().len()
     }
 
     fn push_response(&self, msg: Vec<u8>) {
@@ -972,6 +983,27 @@ pub fn netlink_bind(
     groups: u32,
 ) -> Result<(), i32> {
     sock.bind_groups(groups);
+    // uevent hunt: attribute every KOBJECT_UEVENT bind (pid + group
+    // mask) — the socket-activation shape has PID 1 binding on udevd's
+    // behalf, which is easy to misread as "udevd subscribed".
+    if sock.protocol == NETLINK_KOBJECT_UEVENT {
+        crate::pr_info!(
+            "UEBIND pid={} groups={:#x} sock={:#x}",
+            crate::process::current_pid(),
+            groups,
+            alloc::sync::Arc::as_ptr(sock) as usize
+        );
+    }
+    // A KOBJECT_UEVENT listener subscribing to the kernel-event group:
+    // push the synthesized device tree's "add" uevents into THIS socket
+    // once (per-monitor coldboot — see sysfs::coldboot_uevent_replay_into
+    // for the ordering hole this closes and why it is per-socket).
+    if sock.protocol == NETLINK_KOBJECT_UEVENT
+        && groups & 1 != 0
+        && !sock.coldboot_served.swap(true, core::sync::atomic::Ordering::AcqRel)
+    {
+        crate::fs::sysfs::coldboot_uevent_replay_into(sock);
+    }
     if nl_pid != 0 {
         let old = sock.portid.load(core::sync::atomic::Ordering::Relaxed);
         if nl_pid != old {
@@ -1014,16 +1046,80 @@ pub fn netlink_send_unicast(
 
 /// recvmsg/recvfrom/read: pop exactly one response message (blocking
 /// per `nonblock`/`deadline`).
+///
+/// `peek` (MSG_PEEK): look at the FRONT message WITHOUT consuming it.
+/// `report_full` (MSG_TRUNC): the RETURN value is the full datagram
+/// size even when `buf` was shorter — Linux datagram recvmsg returns
+/// skb->len under MSG_TRUNC (the "how big is the next datagram" probe:
+/// systemd's next_datagram_size_fd() peeks with a zero-length iov and
+/// sizes its buffer from the return; sd-device-monitor runs that probe
+/// before EVERY receive). Without peek the probe CONSUMED each uevent
+/// and reported 0 — "Invalid message length (0), ignoring message."
+/// on every coldboot-replay add, udev db empty, dev-ttyS0.device dead.
+/// The returned usize is the number of bytes actually written to
+/// `buf`; callers needing the reported length use `min(ret, buf.len())`
+/// scatter discipline or the tuple below.
 pub fn netlink_recv(
     sock: &Arc<NetlinkSocket>,
     buf: &mut [u8],
     nonblock: bool,
     deadline: Option<u64>,
 ) -> Result<usize, i32> {
+    netlink_recv_ext(sock, buf, nonblock, deadline, false, false).map(|(copied, _)| copied)
+}
+
+/// Extended receive with MSG_PEEK/MSG_TRUNC semantics; returns
+/// (bytes_copied_into_buf, reported_length).
+pub fn netlink_recv_ext(
+    sock: &Arc<NetlinkSocket>,
+    buf: &mut [u8],
+    nonblock: bool,
+    deadline: Option<u64>,
+    peek: bool,
+    report_full: bool,
+) -> Result<(usize, usize), i32> {
     loop {
-        if let Some(msg) = sock.recv_queue.lock().pop_front() {
-            let n = msg.len().min(buf.len());
-            buf[..n].copy_from_slice(&msg[..n]);
+        // MSG_PEEK: clone the front without popping; normal receive pops.
+        // The queue lock is dropped before the copy (guard scoped).
+        let front = {
+            let mut q = sock.recv_queue.lock();
+            if peek {
+                q.front().cloned()
+            } else {
+                q.pop_front()
+            }
+        };
+        if let Some(msg) = front {
+            let copied = msg.len().min(buf.len());
+            buf[..copied].copy_from_slice(&msg[..copied]);
+            let reported = if report_full { msg.len() } else { copied };
+            return Ok((copied, reported));
+        }
+        if *sock.closed.lock() {
+            return Ok((0, 0)); // EOF
+        }
+        if nonblock {
+            return Err(-11); // EAGAIN
+        }
+        netlink_wait_round(sock, deadline)?;
+    }
+}
+
+/// MSG_PEEK face of the receive queue: the front datagram's length
+/// WITHOUT dequeuing it — the reference's skb_recv_datagram(MSG_PEEK)
+/// (netlink_recvmsg). sd-netlink's datagram size probe
+/// `recv(fd, NULL, 0, MSG_PEEK|MSG_TRUNC)` lands here; the caller
+/// reports this length under MSG_TRUNC. Blocking/EAGAIN semantics
+/// match netlink_recv (waits for the first datagram per `nonblock`/
+/// `deadline`).
+pub fn netlink_peek_len(
+    sock: &Arc<NetlinkSocket>,
+    nonblock: bool,
+    deadline: Option<u64>,
+) -> Result<usize, i32> {
+    loop {
+        // Front-message length under the queue lock (peek, not pop).
+        if let Some(n) = sock.recv_queue.lock().front().map(|m| m.len()) {
             return Ok(n);
         }
         if *sock.closed.lock() {
@@ -1076,6 +1172,45 @@ pub fn uevent_broadcast(payload: &[u8]) {
     /// Kernel uevents are multicast to group 1 (MONITOR_GROUP_KERNEL).
     const UEVENT_GROUP_MASK: u32 = 1;
     let mut listeners = UEVENT_LISTENERS.lock();
+    // uevent hunt (serial-getty chain): fanout census per broadcast —
+    // listener count, member count (group-1 subscribed), and the event
+    // head. Budgeted.
+    {
+        static UEB_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if UEB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
+            let members = listeners
+                .iter()
+                .filter(|w| {
+                    w.upgrade()
+                        .map(|s| {
+                            s.groups.load(core::sync::atomic::Ordering::Acquire)
+                                & UEVENT_GROUP_MASK
+                                != 0
+                        })
+                        .unwrap_or(false)
+                })
+                .count();
+            let head: alloc::string::String = payload
+                .iter()
+                .take(40)
+                .map(|&b| {
+                    if b.is_ascii_graphic() || b == b' ' {
+                        b as char
+                    } else {
+                        '|'
+                    }
+                })
+                .collect();
+            crate::pr_info!(
+                "UEBCAST[{}] listeners={} members={} '{}'",
+                UEB_N.load(core::sync::atomic::Ordering::Relaxed),
+                listeners.len(),
+                members,
+                head
+            );
+        }
+    }
     listeners.retain(|weak| match weak.upgrade() {
         Some(sock) => {
             if sock.groups.load(core::sync::atomic::Ordering::Acquire) & UEVENT_GROUP_MASK != 0 {
@@ -1086,6 +1221,14 @@ pub fn uevent_broadcast(payload: &[u8]) {
         }
         None => false, // socket closed — drop the listener
     });
+}
+
+/// Push a kernel-originated uevent payload into ONE monitor socket (the
+/// coldboot replay's delivery side — same queue semantics as
+/// uevent_broadcast, single destination).
+pub fn uevent_push_direct(sock: &Arc<NetlinkSocket>, payload: &[u8]) {
+    sock.recv_queue.lock().push_back(payload.to_vec());
+    sock.wait_queue.wake_up_all();
 }
 
 /// Userspace MULTICAST send — the monitor protocol's transmit half.
@@ -1321,6 +1464,15 @@ pub fn netlink_file_of_file(file: &Arc<File>) -> Option<(Arc<NetlinkSocket>, boo
     // SAFETY: ops identity confirmed above.
     let socket = unsafe { netlink_of_file(file) }?;
     Some((socket, nonblock))
+}
+
+/// FIONREAD/SIOCINQ: the size of the FIRST queued datagram (Linux
+/// netlink SIOCINQ reports the front skb's length — datagram sockets
+/// answer per-message, not the summed byte count). sd-device-monitor's
+/// next_datagram_size_fd falls back to this when recv(NULL,0) probing
+/// is refused.
+pub fn netlink_fionread(sock: &Arc<NetlinkSocket>) -> usize {
+    sock.recv_queue.lock().front().map(|m| m.len()).unwrap_or(0)
 }
 
 /// Write a sockaddr_nl { AF_NETLINK, pid=0(kernel), groups } to user —

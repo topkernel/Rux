@@ -1343,6 +1343,37 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
     } else {
         0
     };
+    // uevent hunt (serial-getty chain): any exec carrying a
+    // KOBJECT_UEVENT netlink fd — the socket-activation shape (udevd
+    // inherits pid1's bound monitor). One line per such exec, with each
+    // fd's CLOEXEC state (LISTEN_FDS fds must pass with CLOEXEC CLEAR).
+    {
+        static UEEX_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if UEEX_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
+            if let Some(ft) = crate::sched::get_current_fdtable() {
+                let mut hits: alloc::vec::Vec<(usize, bool)> = alloc::vec::Vec::new();
+                for fd in 0..16usize {
+                    if let Some(f) = ft.get_file(fd) {
+                        if let Some((nl, _)) = crate::net::netlink::netlink_file_of_file(&f) {
+                            if nl.protocol == crate::net::netlink::NETLINK_KOBJECT_UEVENT {
+                                hits.push((fd, ft.get_fd_cloexec(fd)));
+                            }
+                        }
+                    }
+                }
+                if !hits.is_empty() {
+                    crate::pr_info!(
+                        "UEEXEC[{}] pid={} path='{}' uevent-fds={:?}",
+                        UEEX_N.load(core::sync::atomic::Ordering::Relaxed),
+                        crate::process::current_pid(),
+                        pathname_str,
+                        hits
+                    );
+                }
+            }
+        }
+    }
     let rc = do_execve(pathname_str, &argv, &envp, 0) as i64;
     if fp_t_exec != 0 {
         crate::dfx::forkprof::add(crate::dfx::forkprof::P_EXEC_TOTAL, fp_t_exec);
@@ -3950,8 +3981,18 @@ pub fn sys_execveat(args: SyscallArgs) -> i64 {
         let file = crate::sched::get_current_fdtable()
             .and_then(|ft| ft.get_file(dirfd as usize));
         match file {
-            Some(f) => f.path(),
-            None => return -(errno::EBADF as i64),
+            Some(f) => {
+                let p = f.path();
+                p
+            }
+            None => {
+                crate::pr_warn!(
+                    "EXECTRAP execveat-empty pid={} fd={} -> EBADF",
+                    crate::process::current_pid(),
+                    dirfd
+                );
+                return -(errno::EBADF as i64);
+            }
         }
     } else {
         match crate::syscall::file::resolve_user_path(dirfd, pathname_ptr) {
@@ -5560,6 +5601,7 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
             .find(|e| e.mount_point == "/")
             .cloned()
             .unwrap_or(MountEntry {
+                mount_id: crate::process::ns::alloc_mount_id(),
                 device: alloc::string::String::from("rootfs"),
                 mount_point: alloc::string::String::from("/"),
                 fs_type: alloc::string::String::from("rootfs"),
@@ -5588,6 +5630,9 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
         }
         // The old root at put_old (relative to the NEW root).
         table.push(MountEntry {
+            // The old root is a MOVE of the "/" row to put_old — same
+            // mount, same mnt_id (reference pivot_root keeps the mount).
+            mount_id: old_root_entry.mount_id,
             device: old_root_entry.device,
             mount_point: if rel_put_old.is_empty() {
                 alloc::string::String::from("/oldroot")

@@ -256,7 +256,12 @@ pub fn test_fileops_caps() {
     check(
         "procfs file caps",
         &crate::fs::procfs::PROCFS_FILE_OPS,
-        Expect { read: true, write: true, lseek: true, close: true, poll: false, read_at: false },
+        // poll: true since the ub2404 finish-line chase (2026-11-16) —
+        // reference seq_file answers the default poll mask (seq_poll);
+        // systemd's mount-table watch epoll-adds /proc/self/mountinfo
+        // (EPOLLIN|EPOLLET) and epoll_ctl EPERMs poll-less files, so
+        // the monitor's kernel source never armed.
+        Expect { read: true, write: true, lseek: true, close: true, poll: true, read_at: false },
     );
     check(
         "sysfs file caps",

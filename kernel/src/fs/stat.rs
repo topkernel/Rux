@@ -340,8 +340,14 @@ pub struct Statx {
     pub stx_dev_major: u32,
     /// Device minor of filesystem
     pub stx_dev_minor: u32,
+    /// Mount ID of the mount the file is on (STATX_MNT_ID, Linux
+    /// offset 0x90). Same id space as /proc/self/mountinfo's first
+    /// column — systemd 255's mount detection compares a path's
+    /// stx_mnt_id with its parent's (path_is_mount_point) and matches
+    /// device nodes against mountinfo rows by mnt_id.
+    pub stx_mnt_id: u64,
     /// Spare space to reach 256 bytes
-    __spare2: [u64; 14],
+    __spare2: [u64; 13],
 }
 
 /// Timestamp for statx
@@ -380,7 +386,8 @@ impl Statx {
             stx_rdev_minor: 0,
             stx_dev_major: 0,
             stx_dev_minor: 0,
-            __spare2: [0; 14],
+            stx_mnt_id: 0,
+            __spare2: [0; 13],
         }
     }
 }

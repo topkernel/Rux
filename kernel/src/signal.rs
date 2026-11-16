@@ -511,6 +511,23 @@ impl SignalStruct {
         Ok(())
     }
 
+    /// CLONE_CLEAR_SIGHAND (kernel flush_signal_handlers(t, 0), called
+    /// from copy_sighand): reset every signal disposition that is not
+    /// SIG_IGN to SIG_DFL, clearing flags and mask. Used by glibc's
+    /// posix_spawn (via clone3) to give the spawn helper a clean signal
+    /// state without a helper syscall — the flag rides along CLONE_VM
+    /// where the child cannot run sigaction code before exec. SIG_IGN
+    /// dispositions SURVIVE (reference passes force_default=0: "Reset
+    /// all signal handler not set to SIG_IGN to SIG_DFL"); SIGCHLD is
+    /// NOT special-cased.
+    pub fn reset_all_handlers_default(&self) {
+        let mut actions = self.action.write();
+        for a in actions.iter_mut() {
+            let keep_ign = a.action() == SigActionKind::Ignore;
+            *a = if keep_ign { SigAction::ignore() } else { SigAction::new() };
+        }
+    }
+
     /// Get signal handling action
     pub fn get_action(&self, sig: i32) -> Option<SigAction> {
         if sig < 1 || sig > 64 {

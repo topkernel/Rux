@@ -286,7 +286,14 @@ const CLONE_KNOWN_FLAGS: u64 = CLONE_VM
     | CLONE_NEWUSER     // 0x10000000
     | CLONE_NEWPID      // 0x20000000
     | CLONE_NEWNET      // 0x40000000
-    | CLONE_IO;         // 0x80000000
+    | CLONE_IO          // 0x80000000
+    | CLONE_CLEAR_SIGHAND; // 0x100000000 (clone3-only; glibc posix_spawn)
+/// CLONE_CLEAR_SIGHAND (uapi, 1<<32): reset every signal handler of the
+/// child to SIG_DFL (kernel flush_signal_handlers). glibc's posix_spawn
+/// requests it with CLONE_VM|CLONE_VFORK so the spawn helper starts with
+/// clean dispositions without running sigaction code in the shared
+/// address space (ub2404: every v255 executor spawn uses this shape).
+const CLONE_CLEAR_SIGHAND: u64 = 0x1_0000_0000;
 const CLONE_PIDFD: u64 = 0x00001000;
 const CLONE_PTRACE: u64 = 0x00002000;
 const CLONE_PARENT: u64 = 0x00008000;
@@ -335,6 +342,12 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
     // copy of its mount namespace (LTP clone302 "fs-newns").
     if args.flags & CLONE_NEWNS != 0 && args.flags & CLONE_FS != 0 {
         crate::pr_warn!("clone: CLONE_NEWNS is incompatible with CLONE_FS");
+        return Err(einval());
+    }
+    // CLONE_CLEAR_SIGHAND|CLONE_SIGHAND is mutually exclusive (kernel
+    // copy_process: one shares the handlers, the other wipes them).
+    if args.flags & CLONE_CLEAR_SIGHAND != 0 && args.flags & CLONE_SIGHAND != 0 {
+        crate::pr_warn!("clone: CLONE_CLEAR_SIGHAND is incompatible with CLONE_SIGHAND");
         return Err(einval());
     }
     // Unknown flag bits (excluding the low CSIGNAL byte) → EINVAL.
@@ -884,6 +897,14 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                 // Clone the inner SignalStruct and wrap in new Arc
                 let child_signal = alloc::sync::Arc::new((**parent_signal).clone());
                 (*task_ptr).signal = Some(child_signal);
+            }
+            // CLONE_CLEAR_SIGHAND: wipe the copied dispositions to SIG_DFL
+            // (kernel flush_signal_handlers) — glibc posix_spawn's clean
+            // signal state for the CLONE_VM spawn helper.
+            if args.flags & CLONE_CLEAR_SIGHAND != 0 {
+                if let Some(child_signal) = (*task_ptr).signal.as_ref() {
+                    child_signal.reset_all_handlers_default();
+                }
             }
         }
 

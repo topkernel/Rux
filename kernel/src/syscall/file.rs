@@ -468,7 +468,11 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
             }
         }
         if let Some(content) = crate::fs::procfs::read_file(&full_path) {
-            return match crate::fs::vfs::open_mem_file(content, flags) {
+            // Mount tables regenerate on rewind (seq_file semantics) —
+            // see mount_table_regen's doc for the systemd reader this
+            // serves.
+            let regen = crate::fs::procfs::mount_table_regen(&full_path);
+            return match crate::fs::vfs::open_mem_file_regen(content, flags, regen) {
                 Ok(fd) => {
                     if (flags & O_CLOEXEC) != 0 { crate::fs::set_cloexec_fd(fd, true); }
                     fd as i64
@@ -2539,34 +2543,68 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
     // The mount target must exist (Linux path_mount resolves it before the
     // filesystem-specific helper runs — the old code fabricated success for
     // any path string).
-    if let Err(e) = ph.t(5, || crate::fs::vfs::path_lookup(target, 0)) {
-        // lb-lane hunt (switch_root): OH's switch_root MS_MOVE loop got
-        // err=2 here with NO kernel mount-tap line (this early return
-        // sits before the tap), hiding which move failed and why. Ring
-        // every ENOENT-before-mount so the switch_root move map is
-        // complete on serial.
-        if args[3] & 8192 != 0 {
-            crate::pr_warn!(
-                "mnt-precheck-fail MS_MOVE '{}' -> '{}': {} (pid {})",
-                source,
-                target,
-                e,
-                crate::process::current_pid()
-            );
+    //
+    // Mount THROUGH symlinks (Linux path_mount walks the mountpoint with
+    // LOOKUP_FOLLOW). systemd's mount_fd()/mount_nofollow() (v255) mount
+    // by the /proc/self/fd/<n> MAGIC LINK — every namespace-using
+    // service's root preparation ("recursive bind / onto
+    // /run/systemd/mount-rootfs") arrives with that as the TARGET, and
+    // mount units mount onto /proc/self/fd/<n> the same way. vfs_mount()
+    // walks the RAW dentry tree, so the mount used to attach at the
+    // magic-link node inside procfs while the fd's referent stayed
+    // unmounted: systemd-udevd's namespace setup then found
+    // /run/systemd/mount-rootfs empty and every sandboxed service died
+    // with "Failed to set up mount namespacing: /proc/sys/kernel/domainname:
+    // No such file or directory" (ub2404), while mount units logged
+    // "Mount process finished, but there is no mount". Rewrite the target
+    // to the resolved dentry's real path so the attach lands where Linux
+    // puts it. Non-symlink targets resolve to themselves (no change).
+    let resolved_target: alloc::string::String;
+    // Set when the target STRING was rewritten (magic-link/symlink
+    // target that resolved elsewhere): the REMOUNT branch then re-flags
+    // the mount at the RESOLVED dentry directly (Linux do_remount on a
+    // /proc/self/fd/N target) instead of re-walking the global mount
+    // table by the canonical alias string — the string walk could flag
+    // an unrelated topmost mount in the MAIN namespace (ub2404 journald
+    // 209/STDOUT regression: /dev+/run went EROFS, 2026-11-15).
+    let mut rewritten_dentry: Option<alloc::sync::Arc<crate::fs::dentry::Dentry>> = None;
+    let target = match ph.t(5, || crate::fs::vfs::path_lookup(target, 0)) {
+        Ok(vp) => {
+            let rewritten = match vp.dentry.as_ref() {
+                Some(d) => crate::fs::vfs::dentry_user_path(d),
+                None => alloc::string::String::new(),
+            };
+            if !rewritten.is_empty() && rewritten != target {
+                rewritten_dentry = vp.dentry.clone();
+                resolved_target = rewritten;
+                resolved_target.as_str()
+            } else {
+                target
+            }
         }
-        return e as i64;
-    }
-
-    // fd-target canonicalization (see canonical_mount_path): mount at
-    // the RESOLVED mountpoint, never at the literal /proc/self/fd/N
-    // string. systemd's mount-namespace builder issues
-    // mount(..., "/proc/self/fd/N", ...) for every namespace mount —
-    // the tmpfs used to attach at a phantom dentry chain, the follow-up
-    // MS_MOVE EINVAL'd ("Moving mount ... Invalid argument") and every
-    // namespaced service died 226/NAMESPACE (serial-dbg).
-    let target_owned = canonical_mount_path(target, target);
-    let target = target_owned.as_str();
-
+        Err(e) => {
+            // lb-lane hunt (switch_root): OH's switch_root MS_MOVE loop got
+            // err=2 here with NO kernel mount-tap line (this early return
+            // sits before the tap), hiding which move failed and why. Ring
+            // every ENOENT-before-mount so the switch_root move map is
+            // complete on serial.
+            if args[3] & 8192 != 0 {
+                crate::pr_warn!(
+                    "mnt-precheck-fail MS_MOVE '{}' -> '{}': {} (pid {})",
+                    source,
+                    target,
+                    e,
+                    crate::process::current_pid()
+                );
+            }
+            return e as i64;
+        }
+    };
+    // NOTE (merge): main's post-lookup fd-target canonicalization
+    // (canonical_mount_path(target, target)) is subsumed by the Ok arm
+    // above — dentry_user_path() is the per-caller-root-aware superset
+    // of canonical_mount_path's build_path() walk, and the Err arm
+    // returns, so a second lookup here would only repeat the first.
     // MS_REMOUNT: update the flags of the mount already attached at `target`
     // instead of mounting a fresh instance. LTP's needs_rofs setup does
     // mount(NULL, mntpoint, "tmpfs", 0), creates files, then
@@ -2702,7 +2740,18 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
                 );
             }
         }
-        match ph.t(6, || crate::fs::vfs::vfs_remount(target, new_flags)) {
+        // REMOUNT THROUGH A MAGIC-LINK TARGET (rewritten_dentry set):
+        // re-flag the mount at the RESOLVED dentry, not the mount a
+        // global string walk finds under the canonical alias — see
+        // vfs_remount_dentry. This is the shape of every systemd v255
+        // sandbox re-flag (ProtectHostname/ProtectSystem/ReadOnlyPaths:
+        // mount(NULL, "/proc/self/fd/N", MS_BIND|MS_REMOUNT|MS_RDONLY)).
+        let remount_result = if let Some(d) = rewritten_dentry.as_ref() {
+            ph.t(6, || crate::fs::vfs::vfs_remount_dentry(d, new_flags))
+        } else {
+            ph.t(6, || crate::fs::vfs::vfs_remount(target, new_flags))
+        };
+        match remount_result {
             Ok(()) => {
                 // Keep the /proc/mounts row in sync (ro/rw string).
                 let existing = ph
@@ -3904,6 +3953,28 @@ fn fill_statfs_for_inode(inode: &crate::fs::inode::Inode, buf: &mut Statfs) {
         buf.f_fsid = [crate::fs::inode::stat_dev_user(inode.fs_id) as u32, 0];
         return;
     }
+    if inode
+        .ops
+        .is_some_and(|o| core::ptr::eq(o as *const _, &crate::fs::sysfs::SYSFS_INODE_OPS as *const _))
+    {
+        // sysfs: f_type MUST be SYSFS_MAGIC (0x62656572) — sd-device's
+        // device_set_syspath() runs fd_is_fs_type(fd, SYSFS_MAGIC) on
+        // every syspath it verifies (SYSTEMD_DEVICE_VERIFY_SYSFS
+        // default-on) and answers ENODEV "the syspath ... is outside of
+        // sysfs, refusing" for any other magic. With the rootfs-fallback
+        // magic leaking here, EVERY sd-device consumer failed: udevadm
+        // trigger/info "No such device", and udevd could not open ANY
+        // device from the coldboot-replay "add" uevents — no udev db
+        // entries, no processed-device "change" broadcast, dev-ttyS0.
+        // device never plugged, serial-getty@ttyS0 dead (ub2404,
+        // 2026-11-16 probe: "sd-device: the syspath ... is outside of
+        // sysfs, refusing").
+        const SYSFS_MAGIC_STATFS: u64 = 0x6265_6572;
+        fill_rootfs_statfs(buf);
+        buf.f_type = SYSFS_MAGIC_STATFS;
+        buf.f_fsid = [crate::fs::inode::stat_dev_user(inode.fs_id) as u32, 0];
+        return;
+    }
     // debugfs/tracefs (own inode ops; sys-kernel-debug.mount /
     // sys-kernel-tracing.mount verify the magic by statfs — tracing
     // FAILED as a unit while answering the rootfs fallback magic).
@@ -3986,6 +4057,43 @@ fn fill_statfs_for_inode(inode: &crate::fs::inode::Inode, buf: &mut Statfs) {
         buf.f_type = SELINUX_MAGIC;
         buf.f_fsid = [crate::fs::inode::stat_dev_user(inode.fs_id) as u32, 0];
         buf.f_flags = 0; // rw — verify_selinuxmnt rejects ST_RDONLY
+        return;
+    }
+    if inode
+        .ops
+        .is_some_and(|o| core::ptr::eq(o as *const _, &crate::fs::sysfs::SYSFS_INODE_OPS as *const _))
+    {
+        // sysfs: f_type MUST be SYSFS_MAGIC (0x62656572) — systemd's
+        // sd-device device_set_syspath() ends with fd_is_fs_type(fd,
+        // SYSFS_MAGIC) on the chased device directory and refuses
+        // EVERY device whose syspath is not sysfs-backed ("outside of
+        // sysfs, refusing", -ENODEV). With the rootfs fallback magic
+        // here, sd_device_new_from_syspath() rejected every /sys
+        // device: udevadm info answered "No such device",
+        // systemd-udev-trigger enumerated zero devices, udevd never
+        // saw a coldboot event, dev-*.device units timed out, and
+        // serial-getty@ttyS0 failed its dependency (ub2404, 2026-11-16).
+        fill_rootfs_statfs(buf);
+        buf.f_type = 0x6265_6572; // SYSFS_MAGIC
+        buf.f_fsid = [crate::fs::inode::stat_dev_user(inode.fs_id) as u32, 0];
+        return;
+    }
+    if inode
+        .ops
+        .is_some_and(|o| core::ptr::eq(o as *const _, &crate::fs::devfs::DEVFS_INODE_OPS as *const _))
+    {
+        // devfs (/dev): f_type MUST be DEVTMPFS_SUPER_MAGIC (0x958458f6)
+        // — systemd's dev_is_devtmpfs() gates sd-device-monitor's
+        // MONITOR_GROUP_UDEV subscription: with /run/udev/control not
+        // yet created (before udevd starts) AND /dev not reporting
+        // devtmpfs, device_monitor_new_full() downgrades PID 1's
+        // monitor to MONITOR_GROUP_NONE ("The udev service seems not
+        // to be active, disabling the monitor") — nl_groups=0, zero
+        // events received, and every dev-*.device unit times out
+        // (ub2404 serial-getty chain, 2026-11-16).
+        fill_rootfs_statfs(buf);
+        buf.f_type = 0x9584_58f6; // DEVTMPFS_SUPER_MAGIC
+        buf.f_fsid = [crate::fs::inode::stat_dev_user(inode.fs_id) as u32, 0];
         return;
     }
     fill_rootfs_statfs(buf);
@@ -4200,17 +4308,30 @@ pub fn sys_statx(args: SyscallArgs) -> i64 {
             && probe[0] == 0
     };
 
+    // The path whose GOVERNING mount statx(STATX_MNT_ID) reports — kept
+    // for the mnt_id fill below (both arms: resolved pathname, or the
+    // fd's dentry path for AT_EMPTY_PATH).
+    let mut mnt_id_path: Option<alloc::string::String> = None;
     if is_empty_path && (flags & AT_EMPTY_PATH) != 0 {
         // fstat(dirfd)
         match crate::fs::file_stat(dirfd as usize, &mut stat) {
             Ok(()) => {}
             Err(e) => return -(e as i64),
         }
+        // The fd's own path (the mount the open file sits on).
+        // SAFETY: fd validated by file_stat above; get_file_fd returns a
+        // live Arc<File> or None.
+        if let Some(f) = unsafe { crate::fs::get_file_fd(dirfd as usize) } {
+            if let Some(d) = unsafe { (*f.dentry.get()).clone() } {
+                mnt_id_path = Some(d.build_path());
+            }
+        }
     } else {
         let full_path = match resolve_user_path(dirfd, pathname_ptr) {
             Ok(p) => p,
             Err(e) => return e as i64,
         };
+        mnt_id_path = Some(full_path.clone());
         // AT_SYMLINK_NOFOLLOW: lstat-style lookup (do not follow the final
         // symlink component).
         let lookup_flags = if flags & AT_SYMLINK_NOFOLLOW != 0 {
@@ -4236,6 +4357,7 @@ pub fn sys_statx(args: SyscallArgs) -> i64 {
     const STATX_SIZE: u32 = 0x0200;
     const STATX_BLOCKS: u32 = 0x0400;
     const STATX_BTIME: u32 = 0x0800;
+    const STATX_MNT_ID: u32 = 0x1000;
 
     // Linux semantics: STATX_ALL-style requests are ANDed with what the fs
     // can provide; unknown request bits are not an error. We always answer
@@ -4243,7 +4365,7 @@ pub fn sys_statx(args: SyscallArgs) -> i64 {
     let requested = mask
         & (STATX_TYPE | STATX_MODE | STATX_NLINK | STATX_UID | STATX_GID
            | STATX_ATIME | STATX_MTIME | STATX_CTIME | STATX_INO | STATX_SIZE
-           | STATX_BLOCKS | STATX_BTIME);
+           | STATX_BLOCKS | STATX_BTIME | STATX_MNT_ID);
 
     let mut stx = Statx::new();
     stx.stx_mask = requested;
@@ -4292,6 +4414,16 @@ pub fn sys_statx(args: SyscallArgs) -> i64 {
     if requested & STATX_INO != 0 { stx.stx_ino = stat.st_ino; }
     if requested & STATX_SIZE != 0 { stx.stx_size = stat.st_size as u64; }
     if requested & STATX_BLOCKS != 0 { stx.stx_blocks = stat.st_blocks as u64; }
+    // STATX_MNT_ID: the mount the path is on, in the SAME id space
+    // mountinfo prints (shared helper in procfs::mounts — one model,
+    // two views). Anonymous fds (pipes/sockets: no dentry) carry no
+    // mount identity; callers only compare mnt_ids for path-backed
+    // files, so leaving 0 with the mask bit set is the honest answer.
+    if requested & STATX_MNT_ID != 0 {
+        if let Some(p) = mnt_id_path.as_ref() {
+            stx.stx_mnt_id = crate::fs::procfs::mounts::mount_id_for(p) as u64;
+        }
+    }
 
     // Copy to user space
     // SAFETY: statxbuf validated with access_ok(size_of::<Statx>); copies Statx to user.
@@ -4590,7 +4722,11 @@ pub fn sys_openat2(args: SyscallArgs) -> i64 {
             crate::pr_warn!("NOBLEDBG openat2 shortcut path={}", cleaned);
         }
         if let Some(content) = crate::fs::procfs::read_file(&cleaned) {
-            return match crate::fs::vfs::open_mem_file(content, how.flags as u32) {
+            // Mount tables regenerate on rewind (seq_file semantics) —
+            // see mount_table_regen's doc for the systemd reader this
+            // serves.
+            let regen = crate::fs::procfs::mount_table_regen(&cleaned);
+            return match crate::fs::vfs::open_mem_file_regen(content, how.flags as u32, regen) {
                 Ok(fd) => {
                     if (how.flags as u32 & 0o2000000) != 0 {
                         crate::fs::set_cloexec_fd(fd, true);
@@ -4612,7 +4748,11 @@ pub fn sys_openat2(args: SyscallArgs) -> i64 {
         && cleaned.starts_with("/proc/")
     {
         if let Some(content) = crate::fs::procfs::read_file(&cleaned) {
-            return match crate::fs::vfs::open_mem_file(content, how.flags as u32) {
+            // Mount tables regenerate on rewind (seq_file semantics) —
+            // see mount_table_regen's doc for the systemd reader this
+            // serves.
+            let regen = crate::fs::procfs::mount_table_regen(&cleaned);
+            return match crate::fs::vfs::open_mem_file_regen(content, how.flags as u32, regen) {
                 Ok(fd) => {
                     if (how.flags as u32 & 0o2000000) != 0 {
                         crate::fs::set_cloexec_fd(fd, true);
@@ -6822,13 +6962,23 @@ pub fn sys_open_tree(args: SyscallArgs) -> i64 {
     let probe_root = alloc::sync::Arc::new(crate::fs::dentry::Dentry::new(
         alloc::string::String::from("/"),
     ));
-    let submounts = if flags & AT_RECURSIVE != 0 {
-        crate::fs::vfs::vfs_collect_submounts(&anc, &probe_root)
+    let (submounts, submount_src_base) = if flags & AT_RECURSIVE != 0 {
+        (
+            crate::fs::vfs::vfs_collect_submounts(&anc, &probe_root),
+            Some(anc.clone()),
+        )
     } else {
-        alloc::vec::Vec::new()
+        (alloc::vec::Vec::new(), None)
     };
 
-    let file = fapi::make_detached_mount(root_inode, mnt_flags, &fs_type, &source, submounts);
+    let file = fapi::make_detached_mount(
+        root_inode,
+        mnt_flags,
+        &fs_type,
+        &source,
+        submounts,
+        submount_src_base,
+    );
     match fapi::install_fd_with(file, flags & fapi::OPEN_TREE_CLOEXEC != 0) {
         Ok(fd) => fd as i64,
         Err(e) => e as i64,
@@ -7088,14 +7238,18 @@ pub fn sys_move_mount(args: SyscallArgs) -> i64 {
                 }
             }
             // open_tree(AT_RECURSIVE) clones: materialize inside the
-            // now-attached root.
-            let submounts = from_mfd
-                .as_ref()
-                .and_then(|f| fapi::mountfd_of(f))
-                .map(|mfd| core::mem::take(&mut mfd.submounts))
-                .unwrap_or_default();
+            // now-attached root (with the recorded source subtree root
+            // as the source-side fallback cursor's base).
+            let mfd_ref = from_mfd.as_ref().and_then(|f| fapi::mountfd_of(f));
+            let (submounts, src_base) = match mfd_ref {
+                Some(mfd) => (
+                    core::mem::take(&mut mfd.submounts),
+                    mfd.submount_src_base.clone(),
+                ),
+                None => (alloc::vec::Vec::new(), None),
+            };
             if !submounts.is_empty() {
-                crate::fs::vfs::vfs_clone_submounts(&mnt.root, &submounts);
+                crate::fs::vfs::vfs_clone_submounts(&mnt.root, src_base.as_ref(), &submounts);
             }
             0
         }
@@ -7430,6 +7584,7 @@ pub fn sys_fsmount(args: SyscallArgs) -> i64 {
         &fc.fs_type,
         &source,
         alloc::vec::Vec::new(),
+        None,
     );
     match fapi::install_fd_with(mfile, args[1] & fapi::FSMOUNT_CLOEXEC != 0) {
         Ok(fd) => fd as i64,
@@ -7737,10 +7892,9 @@ pub fn sys_mount_setattr(args: SyscallArgs) -> i64 {
     if userns_fd != 0 {
         return -(errno::EINVAL as i64);
     }
-    if let Err(e) = fapi::validate_mount_attr(attr_set) {
-        return e as i64;
-    }
-    if let Err(e) = fapi::validate_mount_attr(attr_clr) {
+    // PAIR validation (the reference validates attr_set/attr_clr together:
+    // the atime enum transition idiom — see validate_mount_attr_pair).
+    if let Err(e) = fapi::validate_mount_attr_pair(attr_set, attr_clr) {
         return e as i64;
     }
     // Propagation changes: accept any single bit (or none) as a no-op —

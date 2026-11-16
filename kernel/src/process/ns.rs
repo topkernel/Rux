@@ -136,10 +136,32 @@ impl UtsNamespace {
 /// One row of the mount table (mirrors the legacy global registry tuple).
 #[derive(Clone)]
 pub struct MountEntry {
+    /// Permanent mount ID (Linux struct mount.mnt_id, allocated once per
+    /// mount from a global counter). /proc/self/mountinfo emits THIS id —
+    /// the old generator numbered rows POSITIONALLY over ns_get_mounts(),
+    /// and ns_register_mount's retain+push moved re-registered rows to
+    /// the Vec tail, so the same id re-paired with a different mount
+    /// between two reads. systemd's mount monitor diffed those phantom
+    /// changes against its table and failed freshly-mounted units
+    /// ("Mount process finished, but there is no mount" — the
+    /// sys-kernel-tracing class). Ids are stable for the row's life; a
+    /// re-registration of the SAME mountpoint (flags refresh, row
+    /// relocation) keeps the row's id, like remount keeps mnt_id.
+    pub mount_id: u32,
     pub device: String,
     pub mount_point: String,
     pub fs_type: String,
     pub flags: String,
+}
+
+/// Global mount-ID allocator (Linux mnt_id_start discipline: monotonic,
+/// never reused). Starts above the synthesized boot-layout ids (1-6 in
+/// procfs::mounts).
+static NEXT_MOUNT_ID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(16);
+
+/// Allocate the next mount ID.
+pub fn alloc_mount_id() -> u32 {
+    NEXT_MOUNT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
 }
 
 pub struct MountNamespace {
@@ -500,10 +522,12 @@ pub fn current_user_ns() -> Arc<UserNamespace> {
 /// Boot-time seed for the initial mount namespace (the hardcoded rootfs row
 /// plus anything registered before the first ns access).
 fn boot_mount_entries() -> Vec<MountEntry> {
-    // Read the legacy global registry (populated by do_mount at boot).
+    // Read the legacy global registry (populated by do_mount at boot) and
+    // stamp each row with a permanent id.
     crate::fs::mount::get_global_mounts()
         .into_iter()
         .map(|(d, m, f, fl)| MountEntry {
+            mount_id: alloc_mount_id(),
             device: d,
             mount_point: m,
             fs_type: f,
@@ -517,8 +541,16 @@ fn boot_mount_entries() -> Vec<MountEntry> {
 pub fn ns_register_mount(device: &str, mount_point: &str, fs_type: &str, flags: &str) {
     let ns = current_mnt_ns();
     let mut table = ns.mounts.lock();
+    // Same-mountpoint re-registration (remount flag refresh, row
+    // relocation) keeps the row's id — Linux remount keeps mnt_id.
+    let existing_id = table
+        .iter()
+        .find(|e| e.mount_point == mount_point)
+        .map(|e| e.mount_id);
     table.retain(|e| e.mount_point != mount_point);
+    let mount_id = existing_id.unwrap_or_else(alloc_mount_id);
     table.push(MountEntry {
+        mount_id,
         device: String::from(device),
         mount_point: String::from(mount_point),
         fs_type: String::from(fs_type),

@@ -330,6 +330,125 @@ fn check_not_readonly(pathname: &str) -> Result<(), i32> {
     Ok(())
 }
 
+/// May the CURRENT task re-flag this mount? Linux unshare(CLONE_NEWNS)
+/// clones the mount tree, so a namespace child's MS_REMOUNT re-flags ITS
+/// copy only; Rux attaches one shared VfsMountInternal per dentry, so
+/// without this gate the executor's ProtectSystem=strict pass
+/// (bind_remount_recursive over every mount under / — /, /dev, /dev/pts,
+/// ... — mount(NULL, "/proc/self/fd/N", MS_BIND|MS_REMOUNT|MS_RDONLY))
+/// read-only-flagged the MAIN namespace's mounts: /dev and /run went
+/// EROFS, journald died 209/STDOUT at open("/dev/null") (ub2404,
+/// 2026-11-15). Rule: the init namespace re-flags anything (remount-fs,
+/// LTP rofs); a private namespace only the mounts ATTACHED inside it
+/// (ns_track_vfsmount) — a re-flag of an inherited mount reports success
+/// without the global flag change (the sandbox is weaker, the system
+/// stays writable — the contained trade for the un-cloned ns model).
+fn ns_may_reflag(mnt: &Arc<VfsMountInternal>) -> bool {
+    if crate::process::ns::in_init_mnt_ns() {
+        return true;
+    }
+    let ns = crate::process::ns::current_mnt_ns();
+    let tracked = ns.vfs_mounts.lock();
+    tracked.iter().any(|m| Arc::ptr_eq(m, mnt))
+}
+
+/// Apply new mount flags to a VfsMountInternal, keeping the ext4 op-layer
+/// ro latch in sync (shared by the path-walk and dentry-direct remount
+/// entry points — see vfs_remount/vfs_remount_dentry for the callers).
+fn apply_mnt_flags(
+    mnt: &Arc<VfsMountInternal>,
+    new_flags: crate::fs::mount::MntFlags,
+) {
+    *mnt.flags.lock() = new_flags;
+    // Keep the underlying ext4's own ro latch in sync — its
+    // op-layer EROFS guard reads fs.read_only (sc21), so a
+    // remount,rw must reopen writes and remount,ro close them
+    // at the fs layer too. A metadata_csum image stays
+    // read-only regardless (mount-time downgrade policy: the
+    // write path does not maintain checksums).
+    if let Some(root_inode) = mnt.root.get_inode() {
+        if let Some(ops) = root_inode.ops {
+            if core::ptr::eq(
+                ops as *const _,
+                &crate::fs::ext4::EXT4_INODE_OPS as *const _,
+            ) {
+                if let Some(p) = root_inode.private_data {
+                    // SAFETY: the fs instance lives for the mount;
+                    // read_only is a plain bool whose only writers
+                    // are mount setup and this remount path.
+                    let forced_ro = unsafe {
+                        (*(p as *const crate::fs::ext4::Ext4FileSystem)).metadata_csum
+                    };
+                    unsafe {
+                        (*(p as *mut crate::fs::ext4::Ext4FileSystem)).read_only =
+                            new_flags.is_readonly() || forced_ro;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Remount by RESOLVED DENTRY — the mount(2) MS_REMOUNT|MS_BIND shape
+/// systemd v255 uses for every sandbox re-flag: the target arrives as a
+/// /proc/self/fd/N magic link, which the syscall layer already resolved
+/// to the referent dentry. Linux do_remount re-flags the mount that
+/// COVERS the looked-up path in the CALLER's namespace — not "whatever
+/// mount a global string walk happens to find under a dcache alias".
+/// The string walk (vfs_remount) is wrong for this shape in two ways:
+/// the fd's referent often lives under a bind mount whose canonical
+/// dcache path is a DIFFERENT alias (the global walk then flags an
+/// unrelated topmost mount — an ns child's RO re-flag could read-only a
+/// mount in the MAIN namespace: the ub2404 journald 209/STDOUT
+/// regression, /dev+/run EROFS, 2026-11-15), and the global root dentry
+/// carries no mount descriptor at all (remount of "/" returned EINVAL
+/// and killed every ProtectSystem=yes spawn).
+///
+/// Semantics here: re-flag the topmost mount AT the dentry; if the
+/// dentry is not a mountpoint, climb to the nearest ancestor mountpoint
+/// (the covering mount — same rule as vfs_remount's crossed-mount arm).
+/// Reaching the global root without a mount: Ok(()) — Linux would
+/// re-flag the root mount (which Rux models as root-inode replacement,
+/// with no flag object); the spawn must proceed, the weaker sandbox is
+/// the contained cost.
+pub fn vfs_remount_dentry(
+    dentry: &Arc<Dentry>,
+    new_flags: crate::fs::mount::MntFlags,
+) -> Result<(), i32> {
+    let mut cur = dentry.clone();
+    let root = VFS_STATE.lock().root_dentry.clone();
+    loop {
+        if let Some(mnt) = cur.get_mount() {
+            if ns_may_reflag(&mnt) {
+                apply_mnt_flags(&mnt, new_flags);
+            }
+            return Ok(());
+        }
+        if let Some(r) = root.as_ref() {
+            if Arc::ptr_eq(&cur, r) {
+                // The global root: no mount descriptor exists (root
+                // mounts are inode-replacement). Linux re-flags the
+                // root mount here; accept without a global flag change
+                // so namespace-using spawns do not die EINVAL.
+                return Ok(());
+            }
+        }
+        let parent = cur.parent.lock().clone();
+        match parent {
+            Some(p) => cur = p,
+            None => {
+                // A mounted filesystem's root without a mountpoint
+                // back-hop (unreachable via normal path walks — set at
+                // attach time); treat as the root case above.
+                match cur.mountpoint_dentry() {
+                    Some(p) => cur = p,
+                    None => return Ok(()),
+                }
+            }
+        }
+    }
+}
+
 /// Update the flags of the mount attached at `mountpoint` (mount(2) with
 /// MS_REMOUNT). Returns Ok(()) when a mount was found and updated,
 /// Err(EINVAL) when the path is not a mount point.
@@ -379,33 +498,8 @@ pub fn vfs_remount(mountpoint: &str, new_flags: crate::fs::mount::MntFlags) -> R
     let found = current.get_mount().or(crossed);
     match found {
         Some(mnt) => {
-            *mnt.flags.lock() = new_flags;
-            // Keep the underlying ext4's own ro latch in sync — its
-            // op-layer EROFS guard reads fs.read_only (sc21), so a
-            // remount,rw must reopen writes and remount,ro close them
-            // at the fs layer too. A metadata_csum image stays
-            // read-only regardless (mount-time downgrade policy: the
-            // write path does not maintain checksums).
-            if let Some(root_inode) = mnt.root.get_inode() {
-                if let Some(ops) = root_inode.ops {
-                    if core::ptr::eq(
-                        ops as *const _,
-                        &crate::fs::ext4::EXT4_INODE_OPS as *const _,
-                    ) {
-                        if let Some(p) = root_inode.private_data {
-                            // SAFETY: the fs instance lives for the mount;
-                            // read_only is a plain bool whose only writers
-                            // are mount setup and this remount path.
-                            let forced_ro = unsafe {
-                                (*(p as *const crate::fs::ext4::Ext4FileSystem)).metadata_csum
-                            };
-                            unsafe {
-                                (*(p as *mut crate::fs::ext4::Ext4FileSystem)).read_only =
-                                    new_flags.is_readonly() || forced_ro;
-                            }
-                        }
-                    }
-                }
+            if ns_may_reflag(&mnt) {
+                apply_mnt_flags(&mnt, new_flags);
             }
             Ok(())
         }
@@ -670,6 +764,41 @@ pub fn vfs_umount_object(mnt: &Arc<VfsMountInternal>) {
     // sc181: live unmount — drop the index entry before the back-ref
     // clear below (the chain is recomputed from `mp`).
     mount_index_remove(&mut state, mnt, &mp);
+    // Expose the mount this one was STACKED ON (Linux umount semantics):
+    // when a short-lived namespace mounted over an existing mountpoint
+    // (systemd 255's credentials child overmounts /dev/shm as its
+    // private workspace), the attach replaced the dentry slot; tearing
+    // the namespace down must restore the UNDERLYING mount, not strand
+    // the mountpoint slot empty — ub2404: every later credentials child
+    // found no mount, mounted its own tmpfs, and when IT died the
+    // slot stayed None with a bare mountpoint dentry left behind.
+    let restore = state.mounts.iter().rev().find(|m| {
+        m.root
+            .get_mountpoint_back()
+            .map(|under| Arc::ptr_eq(&under, &mp))
+            .unwrap_or(false)
+    });
+    if let Some(under) = restore {
+        let under = under.clone();
+        drop(state);
+        *mp.vfsmount.lock() = Some(under);
+        mp.set_mount_flag(true);
+    } else {
+        drop(state);
+        // No underlying mount. A mountpoint dentry the mount itself
+        // created (inode-less — the walk's bare-dentry arm) would read
+        // as a NEGATIVE dcache entry after this unmount and every
+        // lookup of the name would fail ENOENT (same discipline as
+        // vfs_umount's cleanup; drop it so the next walk re-resolves
+        // the name against the underlying filesystem).
+        if mp.get_inode().is_none() {
+            let name = mp.get_name();
+            let parent = mp.parent.lock().clone();
+            if let Some(p) = parent {
+                p.remove_child(&name);
+            }
+        }
+    }
     mnt.root.clear_mountpoint_back();
 }
 
@@ -1110,7 +1239,7 @@ pub fn vfs_bind_mount(
                     );
                 }
             }
-            bind_clone_attach(&fresh_root, &rel, &root, flags);
+            bind_clone_attach(&fresh_root, &anc, &rel, &root, flags);
         }
         #[cfg(feature = "x86_64")]
         {
@@ -1154,11 +1283,16 @@ pub fn vfs_bind_mount(
 /// answered real lookups with ENOENT forever).
 fn bind_clone_attach(
     fresh_root: &Arc<Dentry>,
+    src_base: &Arc<Dentry>,
     rel: &[String],
     src_root: &Arc<Dentry>,
     flags: MntFlags,
 ) {
     let mut cur = fresh_root.clone();
+    // Parallel SOURCE-side cursor (mount-crossing, like the target walk):
+    // the fallback inode source for kernel-created mountpoints — see the
+    // miss arm below (ub2404-login flip6).
+    let mut src_cur = src_base.clone();
     let Some(last) = rel.last() else { return };
     for comp in rel.iter() {
         // Cross an earlier clone attached at this level: later siblings
@@ -1177,21 +1311,61 @@ fn bind_clone_attach(
                         Some(o) => o,
                         None => return,
                     };
-                    let child_inode = unsafe {
+                    let child_inode = match unsafe {
                         let ino = match ops.lookup {
                             Some(f) => match f(&*dir_inode, comp.as_bytes()) {
-                                Ok(ino) => ino,
-                                Err(_) => return, // absent in the source tree
+                                Ok(ino) => Some(ino),
+                                // absent on disk — try source side
+                                Err(_) => None,
                             },
-                            None => return,
+                            None => None,
                         };
-                        match ops.iget {
-                            Some(f) => match f(&*dir_inode, comp.as_bytes(), ino) {
-                                Ok(i) => i,
-                                Err(_) => return,
+                        match ino {
+                            Some(ino) => match ops.iget {
+                                Some(f) => match f(&*dir_inode, comp.as_bytes(), ino) {
+                                    Ok(i) => Some(i),
+                                    Err(_) => None,
+                                },
+                                None => None,
                             },
-                            None => return,
+                            None => None,
                         }
+                    } {
+                        Some(i) => i,
+                        // SOURCE-SIDE FALLBACK (ub2404-login flip6, 2026-11-15):
+                        // the mountpoint has no on-disk entry — /proc, /dev,
+                        // /sys on a rootfs image without baked placeholder
+                        // dirs. The ORIGINAL tree still has the dentry (the
+                        // mount created it in the dcache), so the clone's
+                        // target child can carry THAT dentry's inode. This
+                        // is not fabrication: the source-side dentry exists
+                        // and is the very thing being bound. Without this,
+                        // the recursive bind of "/" dropped the /proc,
+                        // /dev, /sys clones — walks through the bind copy
+                        // (and, combined with the root flip, the whole
+                        // post-flip view) lost every kernel-created
+                        // mountpoint and namespace-sandboxed execs died
+                        // 203/EXEC (flip6 [thru]/[post] matrices).
+                        //
+                        // The mountpoint dentry itself carries NO inode
+                        // (vfs_mount's creation arm only attaches the mount
+                        // — the inode lives on the mount's root dentry), so
+                        // take the inode the WALK would reach: cross the
+                        // mount and read its root's inode (flip6 round 2:
+                        // every clone was dropped here because /proc, /sys,
+                        // /dev, /run mountpoints are all inode-less
+                        // kernel-created dentries — FLIP6-ATTACH kids 0->0
+                        // x9, [thru] matrix all ERR).
+                        None => match src_cur.lookup_child(comp) {
+                            Some(sd) => match sd
+                                .get_inode()
+                                .or_else(|| follow_mount(sd.clone()).get_inode())
+                            {
+                                Some(i) => i,
+                                None => return,
+                            },
+                            None => return, // genuinely absent — drop the clone
+                        },
                     };
                     let d = Arc::new(Dentry::new(comp.clone()));
                     d.set_inode(child_inode);
@@ -1217,7 +1391,9 @@ fn bind_clone_attach(
             crate::process::ns::ns_track_vfsmount(mnt_desc);
             return;
         }
-        // Intermediate component — dcache hit or fs lookup; never fabricate.
+        // Intermediate component — dcache hit or fs lookup; never fabricate
+        // (the source-side fallback below only carries inodes of dentries
+        // that exist in the ORIGINAL tree).
         cur = match cur.lookup_child(comp) {
             Some(c) => c,
             None => {
@@ -1229,21 +1405,39 @@ fn bind_clone_attach(
                     Some(o) => o,
                     None => return,
                 };
-                let child_inode = unsafe {
+                let child_inode = match unsafe {
                     let ino = match ops.lookup {
                         Some(f) => match f(&*dir_inode, comp.as_bytes()) {
-                            Ok(ino) => ino,
-                            Err(_) => return,
+                            Ok(ino) => Some(ino),
+                            // absent on disk — try source side
+                            Err(_) => None,
                         },
-                        None => return,
+                        None => None,
                     };
-                    match ops.iget {
-                        Some(f) => match f(&*dir_inode, comp.as_bytes(), ino) {
-                            Ok(i) => i,
-                            Err(_) => return,
+                    match ino {
+                        Some(ino) => match ops.iget {
+                            Some(f) => match f(&*dir_inode, comp.as_bytes(), ino) {
+                                Ok(i) => Some(i),
+                                Err(_) => None,
+                            },
+                            None => None,
+                        },
+                        None => None,
+                    }
+                } {
+                    Some(i) => i,
+                    // SOURCE-SIDE FALLBACK — see the final arm's comment
+                    // (including the inode-less mountpoint crossing).
+                    None => match src_cur.lookup_child(comp) {
+                        Some(sd) => match sd
+                            .get_inode()
+                            .or_else(|| follow_mount(sd.clone()).get_inode())
+                        {
+                            Some(i) => i,
+                            None => return,
                         },
                         None => return,
-                    }
+                    },
                 };
                 let d = Arc::new(Dentry::new(comp.clone()));
                 d.set_inode(child_inode);
@@ -1251,6 +1445,13 @@ fn bind_clone_attach(
                 cur.add_child(comp.clone(), d.clone());
                 d
             }
+        };
+        // Advance the parallel source cursor (mount-crossing, like the
+        // target walk): deeper kernel-created mountpoints (/proc/sys/...)
+        // resolve through it when the disk has no placeholder entries.
+        src_cur = match src_cur.lookup_child(comp) {
+            Some(c) => follow_mount(c),
+            None => src_cur,
         };
     }
 }
@@ -1440,6 +1641,33 @@ pub fn vfs_move_mount(from: &str, to: &str) -> Result<(), i32> {
         let mut state = VFS_STATE.lock();
         state.mounts.retain(|m| !Arc::ptr_eq(m, &mnt));
         if let Some(root) = state.root_dentry.clone() {
+            // SELF-BIND FLIP (ub2404-login, 2026-11-15): when the moved
+            // mount's root carries the SAME inode as the VFS root, the
+            // mount is a recursive bind OF "/" itself (systemd v255's
+            // executor idiom: mount("/", "/run/systemd/mount-rootfs",
+            // MS_BIND|MS_REC) ... mount(".", "/", MS_MOVE)). The
+            // wipe-and-rehome below annihilates in that shape —
+            // clear_children() empties the root's map and
+            // rehome_children_into moves the (same, now-empty) alias
+            // children — orphaning every top-level dentry INCLUDING the
+            // kernel-created mountpoints (/proc, /dev, /sys: dcache-only,
+            // no on-disk entry to re-resolve). Post-flip lookups then hit
+            // the bare ext4 placeholders and every namespace-sandboxed
+            // service died 203/EXEC on execve("/proc/self/fd/N") while
+            // open() still worked through the procfs string shortcut
+            // (flip6 probe, ser-154804). Linux's view after this move is
+            // IDENTICAL to before (the moved tree IS the root tree): drop
+            // the mount and keep the tree untouched.
+            let self_bind = match (mnt.root.get_inode(), root.get_inode()) {
+                (Some(a), Some(b)) => Arc::ptr_eq(&a, &b),
+                _ => false,
+            };
+            if self_bind {
+                crate::pr_info!(
+                    "move_mount: self-bind flip onto / — identity, tree kept"
+                );
+                return Ok(());
+            }
             if let Some(inode) = mnt.root.get_inode() {
                 root.set_inode(inode);
             }
@@ -1710,13 +1938,21 @@ pub fn vfs_governing_mount_of(d: &Arc<Dentry>) -> Option<Arc<VfsMountInternal>> 
 /// fsctx (open_tree AT_RECURSIVE): materialize recorded submount clones
 /// at their relative paths INSIDE a freshly attached mount root — the
 /// same never-fabricate walk the MS_REC bind clone uses
-/// (bind_clone_attach; see the sc31 lesson there).
+/// (bind_clone_attach; see the sc31 lesson there). `src_base` is the
+/// ORIGINAL subtree root the rel-paths are relative to (open_tree's
+/// resolved source `anc`): the source-side fallback cursor's start, so
+/// kernel-created mountpoints (/proc, /dev, /sys: dcache-only, no
+/// on-disk entries) resolve through it. None falls back to the clone
+/// root itself — only fsmount passes None, and it never carries
+/// submounts.
 pub fn vfs_clone_submounts(
     root: &Arc<Dentry>,
+    src_base: Option<&Arc<Dentry>>,
     clones: &[(Vec<String>, Arc<Dentry>, MntFlags)],
 ) {
+    let base = src_base.unwrap_or(root);
     for (rel, src_root, flags) in clones {
-        bind_clone_attach(root, rel, src_root, *flags);
+        bind_clone_attach(root, base, rel, src_root, *flags);
     }
 }
 
@@ -4888,10 +5124,18 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
         // privileged callers rely on this against symlink tricks, and the
         // flag was previously accepted and silently ignored (the link was
         // followed anyway).
-        // O_PATH (Linux): never follows the final component — the fd
-        // refers to the symlink itself when one is there (LTP readlinkat01
-        // opens its test link with O_PATH|O_NOFOLLOW).
-        let lookup_flags = if flags & (FileFlags::O_NOFOLLOW | FileFlags::O_PATH) != 0 {
+        // O_PATH does NOT change symlink traversal (Linux do_last: only
+        // O_NOFOLLOW|O_EXCL stop the follow) — an O_PATH open of a symlink
+        // path yields a descriptor for the FOLLOWED TARGET. The old
+        // O_PATH-implies-nofollow reading handed back the LINK inode, so
+        // systemd's find_executable_full (open(O_PATH) + fstat +
+        // S_ISREG on /usr/lib/systemd/systemd-udevd → ../../bin/udevadm)
+        // saw mode 0120777, failed fd_verify_regular, and every service
+        // whose ExecStart path is a symlink died 203/EXEC (ub2404
+        // udevd/journald-chain, flip7 [chain] fstat reg=0, 2026-11-15).
+        // readlinkat01's O_PATH|O_NOFOLLOW shape still lands on the link
+        // inode — O_NOFOLLOW keeps doing that job alone.
+        let lookup_flags = if flags & FileFlags::O_NOFOLLOW != 0 {
             LOOKUP_NOFOLLOW
         } else {
             0
@@ -6534,6 +6778,13 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
 struct MemFileContent {
     data: alloc::vec::Vec<u8>,
     offset: usize,
+    /// Dynamic-content hook (the procfs mount tables): regenerate
+    /// `data` when the file is rewound — Linux seq_file semantics, where
+    /// lseek(0) restarts the iterator and a re-read shows CURRENT state
+    /// instead of the open-time snapshot. A plain fn pointer (no
+    /// allocation): the generator reads the CURRENT task's mount
+    /// namespace at call time, so the rewind view is the reader's own.
+    regen: Option<fn() -> alloc::vec::Vec<u8>>,
 }
 
 /// Read operation for memory files
@@ -6595,7 +6846,7 @@ fn mem_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
     unsafe {
         let data_opt = &*file.private_data.get();
         if let Some(content_ptr) = *data_opt {
-            let content = &*(content_ptr as *const MemFileContent);
+            let content = &mut *(content_ptr as *mut MemFileContent);
             let file_size = content.data.len() as isize;
             let new_offset = match whence {
                 0 => offset,
@@ -6605,6 +6856,18 @@ fn mem_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
             };
             if new_offset < 0 || new_offset > file_size {
                 return -22;
+            }
+            // seq_file rewind semantics for dynamic content (the mount
+            // tables): a rewind re-runs the generator, so readers that
+            // keep the fd open and re-read (systemd v255's sandbox
+            // setup loop, bind_remount_recursive_with_mountinfo) see the
+            // mounts made since the last read instead of a stale
+            // snapshot (which made the loop re-bind 32x and fail every
+            // ProtectHostname spawn with EBUSY, ub2404 2026-11-15).
+            if new_offset == 0 {
+                if let Some(regen) = content.regen {
+                    content.data = regen();
+                }
             }
             file.set_pos(new_offset as u64);
             new_offset
@@ -6890,11 +7153,27 @@ pub fn open_procfs_dir(pid: u64, flags: u32) -> Result<usize, i32> {
 
 /// Open a memory-backed file with given content, return fd
 pub fn open_mem_file(data: alloc::vec::Vec<u8>, flags: u32) -> Result<usize, i32> {
+    open_mem_file_regen(data, flags, None)
+}
+
+/// open_mem_file with a rewind-regeneration hook (see MemFileContent::
+/// regen). Used for the procfs mount tables served through the openat
+/// read-only shortcut: their readers rewind and re-read expecting
+/// CURRENT table state (Linux seq_file iterator restart on lseek(0)).
+pub fn open_mem_file_regen(
+    data: alloc::vec::Vec<u8>,
+    flags: u32,
+    regen: Option<fn() -> alloc::vec::Vec<u8>>,
+) -> Result<usize, i32> {
     // SAFETY: MEM_FILE_OPS is a static FileOps; Box::into_raw ownership is transferred to File
     unsafe {
         let file = Arc::new(File::new(FileFlags::new(flags)));
         file.set_ops(&MEM_FILE_OPS);
-        let content = alloc::boxed::Box::new(MemFileContent { data, offset: 0 });
+        let content = alloc::boxed::Box::new(MemFileContent {
+            data,
+            offset: 0,
+            regen,
+        });
         file.set_private_data(alloc::boxed::Box::into_raw(content) as *mut u8);
         get_file_fd_install(file).ok_or(errno::Errno::TooManyOpenFiles.as_neg_i32())
     }
