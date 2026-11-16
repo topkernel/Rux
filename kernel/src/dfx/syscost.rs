@@ -1219,8 +1219,8 @@ pub fn note_errno(nr: usize, ret: i64, a0: u64, a1: u64) {
     // Which argument is the path (x86_64-generic table: open/stat family
     // paths in a0; *at family paths in a1). 0 = not a path syscall.
     let path_ptr = match nr {
-        2 | 4 | 6 | 21 | 83 | 87 | 90 => a0,   // open stat lstat access mkdir unlink chmod
-        257 | 332 => a1,                        // openat statx
+        2 | 4 | 6 | 21 | 83 | 87 | 88 | 89 | 90 => a0, // open stat lstat access mkdir unlink symlink readlink chmod
+        257 | 332 => a1,                                // openat statx
         _ => 0,
     };
     let mut path = [0u8; 64];
