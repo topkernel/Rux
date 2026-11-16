@@ -1167,6 +1167,24 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                         regs_ref.rip,
                         core::sync::atomic::Ordering::Relaxed,
                     );
+                    // runq-strand lane: mode + identity + freshness for
+                    // that RIP — the monopolist census needs to know
+                    // whether the spin is USER or KERNEL mode and which
+                    // incumbent the stamp belongs to.
+                    crate::interrupt::preempt::TICK_ENTRY_CS[cpu_id].store(
+                        regs_ref.cs as u64,
+                        core::sync::atomic::Ordering::Relaxed,
+                    );
+                    crate::interrupt::preempt::TICK_ENTRY_PID[cpu_id].store(
+                        crate::sched::current()
+                            .map(|t| t.pid())
+                            .unwrap_or(0),
+                        core::sync::atomic::Ordering::Relaxed,
+                    );
+                    crate::interrupt::preempt::TICK_ENTRY_JIF[cpu_id].store(
+                        crate::drivers::timer::get_jiffies(),
+                        core::sync::atomic::Ordering::Relaxed,
+                    );
                     // 118th param-stall conviction dump (one-shot once
                     // jiffies >= 30 000 = 300 s, dfx=schedtrace-gated): the
                     // OH ladder stall reduces to init handling zero

@@ -4716,6 +4716,11 @@ pub fn futex_stuck_census() {
     // ohc74 close() strand class: linked, claim=-1, unexecuted 290 s).
     crate::sched::sched::runq_strand_census(now as u64);
 
+    // runq-strand lane (121st): the culprits' side — per-CPU incumbents
+    // holding their slot >= 2 s with the last tick's interrupted RIP and
+    // mode (kernel loop vs user spin vs halted CPU).
+    crate::sched::sched::monopolist_census(now as u64);
+
     // 63rd session (mission lever 2): the FFRT group's wake→pick
     // latency profile per burst — quiet-phase vs wedge-phase cost.
     crate::sched::sched::ffrt_wait_census();

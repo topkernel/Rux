@@ -82,6 +82,32 @@ pub static TICK_ENTRY_RIP: [core::sync::atomic::AtomicU64;
     [const { core::sync::atomic::AtomicU64::new(0) };
         crate::config::MAX_CPUS];
 
+/// Per-CPU snapshot of the interrupted code segment (CS) at timer-trap
+/// entry, same sites as TICK_ENTRY_RIP (runq-strand lane). The ring
+/// bits name USER (cs & 3 == 3) vs KERNEL mode of the interrupted RIP
+/// — the discriminator between a userspace spinner (preemptable at
+/// user return) and a kernel-loop monopolist (no preempt points).
+pub static TICK_ENTRY_CS: [core::sync::atomic::AtomicU64;
+    crate::config::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) };
+        crate::config::MAX_CPUS];
+
+/// Per-CPU snapshot of the interrupted task's pid at timer-trap entry
+/// (same sites; lets the monopolist census attribute the stamp to the
+/// incumbent it sampled even across a CPU switch).
+pub static TICK_ENTRY_PID: [core::sync::atomic::AtomicU32;
+    crate::config::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU32::new(0) };
+        crate::config::MAX_CPUS];
+
+/// Jiffies at the last timer-trap stamp write (stamp freshness: a
+/// spinning monopolist refreshes it every tick; a halted or
+/// tick-starved CPU leaves it stale).
+pub static TICK_ENTRY_JIF: [core::sync::atomic::AtomicU64;
+    crate::config::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) };
+        crate::config::MAX_CPUS];
+
 /// Read current task's preempt_count
 #[inline]
 pub fn preempt_count() -> i32 {
