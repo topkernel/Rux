@@ -550,6 +550,12 @@ impl NetlinkSocket {
         !self.recv_queue.lock().is_empty() || *self.closed.lock()
     }
 
+    /// Receive-queue depth (uevent hunt probe: correlates the epoll
+    /// registration with the socket that holds the coldboot replay).
+    pub fn recv_queue_len(&self) -> usize {
+        self.recv_queue.lock().len()
+    }
+
     fn push_response(&self, msg: Vec<u8>) {
         self.recv_queue.lock().push_back(msg);
         self.wait_queue.wake_up_all();
@@ -977,6 +983,17 @@ pub fn netlink_bind(
     groups: u32,
 ) -> Result<(), i32> {
     sock.bind_groups(groups);
+    // uevent hunt: attribute every KOBJECT_UEVENT bind (pid + group
+    // mask) — the socket-activation shape has PID 1 binding on udevd's
+    // behalf, which is easy to misread as "udevd subscribed".
+    if sock.protocol == NETLINK_KOBJECT_UEVENT {
+        crate::pr_info!(
+            "UEBIND pid={} groups={:#x} sock={:#x}",
+            crate::process::current_pid(),
+            groups,
+            alloc::sync::Arc::as_ptr(sock) as usize
+        );
+    }
     // A KOBJECT_UEVENT listener subscribing to the kernel-event group:
     // push the synthesized device tree's "add" uevents into THIS socket
     // once (per-monitor coldboot — see sysfs::coldboot_uevent_replay_into
@@ -1088,6 +1105,33 @@ pub fn netlink_recv_ext(
     }
 }
 
+/// MSG_PEEK face of the receive queue: the front datagram's length
+/// WITHOUT dequeuing it — the reference's skb_recv_datagram(MSG_PEEK)
+/// (netlink_recvmsg). sd-netlink's datagram size probe
+/// `recv(fd, NULL, 0, MSG_PEEK|MSG_TRUNC)` lands here; the caller
+/// reports this length under MSG_TRUNC. Blocking/EAGAIN semantics
+/// match netlink_recv (waits for the first datagram per `nonblock`/
+/// `deadline`).
+pub fn netlink_peek_len(
+    sock: &Arc<NetlinkSocket>,
+    nonblock: bool,
+    deadline: Option<u64>,
+) -> Result<usize, i32> {
+    loop {
+        // Front-message length under the queue lock (peek, not pop).
+        if let Some(n) = sock.recv_queue.lock().front().map(|m| m.len()) {
+            return Ok(n);
+        }
+        if *sock.closed.lock() {
+            return Ok(0); // EOF
+        }
+        if nonblock {
+            return Err(-11); // EAGAIN
+        }
+        netlink_wait_round(sock, deadline)?;
+    }
+}
+
 /// close(): mark EOF and wake blocked receivers.
 pub fn netlink_close(sock: &Arc<NetlinkSocket>) {
     // review F11: drop the portid registration (the Weak would prune it
@@ -1128,6 +1172,45 @@ pub fn uevent_broadcast(payload: &[u8]) {
     /// Kernel uevents are multicast to group 1 (MONITOR_GROUP_KERNEL).
     const UEVENT_GROUP_MASK: u32 = 1;
     let mut listeners = UEVENT_LISTENERS.lock();
+    // uevent hunt (serial-getty chain): fanout census per broadcast —
+    // listener count, member count (group-1 subscribed), and the event
+    // head. Budgeted.
+    {
+        static UEB_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if UEB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
+            let members = listeners
+                .iter()
+                .filter(|w| {
+                    w.upgrade()
+                        .map(|s| {
+                            s.groups.load(core::sync::atomic::Ordering::Acquire)
+                                & UEVENT_GROUP_MASK
+                                != 0
+                        })
+                        .unwrap_or(false)
+                })
+                .count();
+            let head: alloc::string::String = payload
+                .iter()
+                .take(40)
+                .map(|&b| {
+                    if b.is_ascii_graphic() || b == b' ' {
+                        b as char
+                    } else {
+                        '|'
+                    }
+                })
+                .collect();
+            crate::pr_info!(
+                "UEBCAST[{}] listeners={} members={} '{}'",
+                UEB_N.load(core::sync::atomic::Ordering::Relaxed),
+                listeners.len(),
+                members,
+                head
+            );
+        }
+    }
     listeners.retain(|weak| match weak.upgrade() {
         Some(sock) => {
             if sock.groups.load(core::sync::atomic::Ordering::Acquire) & UEVENT_GROUP_MASK != 0 {
