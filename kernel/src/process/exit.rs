@@ -1023,6 +1023,39 @@ pub fn do_exit(exit_code: i32) -> ! {
     let dying_pid = unsafe { (*current).pid() };
     crate::mm::page_alloc::reclaim_gate_exit_release(dying_pid);
 
+    // ub-gfx (greeter-chain forensics): name the death of every gdm
+    // ladder / accounts-daemon / Xorg process with its exit code, so the
+    // serial alone answers "what killed the greeter". Budgeted 120.
+    {
+        static XIT_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let n = XIT_N.load(core::sync::atomic::Ordering::Relaxed);
+        if n < 120 {
+            // SAFETY: current is valid (we are it); comm() reads the
+            // task's own fixed comm buffer.
+            let comm = unsafe { (*current).comm() };
+            let name: &[u8] = &comm[..comm.iter().position(|&b| b == 0).unwrap_or(comm.len())];
+            let interesting = name.starts_with(b"gdm")
+                || name.starts_with(b"Xorg")
+                || name.starts_with(b"gnome")
+                || name.starts_with(b"accounts")
+                || name.starts_with(b"(s-")  // systemd's pre-exec helpers
+                || name.starts_with(b"avahi-d");
+            if interesting {
+                if XIT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
+                    crate::pr_info!(
+                        "GFXEXIT #{} pid={} comm={:?} code={} ({:#x})",
+                        XIT_N.load(core::sync::atomic::Ordering::Relaxed),
+                        dying_pid,
+                        core::str::from_utf8(name).unwrap_or("?"),
+                        exit_code,
+                        exit_code
+                    );
+                }
+            }
+        }
+    }
+
     // R127 wake-drop hunt: the exit-leak detector. A nonzero wq_regs at
     // exit means this task is going away with wait-queue entries still
     // naming it — the park was never unwound (no remove/finish_wait

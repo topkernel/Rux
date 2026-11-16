@@ -846,7 +846,12 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
         let path_interesting = pathname.contains("python3.10")
             || pathname.contains("dconf-service")
             || pathname.contains("launch-helper")
-            || pathname.contains("dbus-daemon");
+            || pathname.contains("dbus-daemon")
+            // ub-gfx (greeter-chain forensics): gdm's worker ladder.
+            || pathname.contains("gdm")
+            || pathname.contains("Xorg")
+            || pathname.contains("gnome-session")
+            || pathname.contains("accountsservice");
         (caller_is_dbus || path_interesting)
             && recursion_depth == 0
             && XT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400
