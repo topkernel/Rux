@@ -705,7 +705,6 @@ fn write_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: u
         if result <= 0 {
             return result as i32 as i64;
         }
-        charge_write_pagecache(file, result as usize);
         return result as i64;
     }
     // Chunked write (SYSA-C1): bounded staging buffer so a huge
@@ -759,26 +758,9 @@ fn write_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: u
         }
     }
     if total > 0 {
-        charge_write_pagecache(file, total);
         total as i64
     } else {
         first_err as i64
-    }
-}
-
-/// cgroup v2 memory.stat file-class charge for a successful write
-/// (memcontrol02's pagecache face): only regular-file writes charge,
-/// and the helper itself gates at the root chain (hot-path guardian —
-/// see cgroup_memory_charge_pagecache). Cost for the common case: one
-/// file-type test, zero atomics.
-fn charge_write_pagecache(file: &alloc::sync::Arc<crate::fs::file::File>, n: usize) {
-    // SAFETY: inode is stored once at open; read-only access here.
-    let is_reg = unsafe { (*file.inode.get()) }
-        .as_ref()
-        .map(|i| i.mode.is_regular_file())
-        .unwrap_or(false);
-    if is_reg {
-        crate::sched::cgroup::cgroup_memory_charge_pagecache(n);
     }
 }
 

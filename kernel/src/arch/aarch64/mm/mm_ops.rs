@@ -994,8 +994,6 @@ impl MmStruct {
                     vma_snapshot
                 {
                     let mut new_vma = Vma::new(start, end, flags);
-                    // Exact flags (VM_DUMPABLE note, x86 twin).
-                    new_vma.set_flags(flags);
                     new_vma.set_type(vma_type);
                     let mut o = origin;
                     o.mark_forked();

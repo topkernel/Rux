@@ -161,10 +161,6 @@ pub enum PidFileKind {
     Environ,
     OomScore,
     OomScoreAdj,
-    /// /proc/[pid]/coredump_filter — the mm's core-dump class filter
-    /// (rw hex byte; LTP madvise08 reads it in setup and TCONFs when
-    /// the file is absent).
-    CoreFilter,
     /// /proc/[pid]/comm — the task's comm (basename of exe, 15 chars
     /// like TASK_COMM_LEN). systemd compares /proc/1/comm against
     /// "systemd" to detect PID 1.
@@ -449,7 +445,6 @@ impl ProcFSNode {
                 PidFileKind::Environ => pid::generate_environ(pid),
                 PidFileKind::OomScore => pid::generate_oom_score(pid),
                 PidFileKind::OomScoreAdj => pid::generate_oom_score_adj(pid),
-                PidFileKind::CoreFilter => pid::generate_core_filter(pid),
                 PidFileKind::Comm => pid::generate_comm(pid),
                 PidFileKind::Cgroup => pid::generate_cgroup(pid),
                 PidFileKind::Mounts => mounts::generate(),
@@ -1316,7 +1311,6 @@ pub fn read_file(path: &str) -> Option<Vec<u8>> {
                 "environ" => Some(pid::generate_environ(pid)),
                 "oom_score" => Some(pid::generate_oom_score(pid)),
                 "oom_score_adj" => Some(pid::generate_oom_score_adj(pid)),
-                "coredump_filter" => Some(pid::generate_core_filter(pid)),
                 "comm" => Some(pid::generate_comm(pid)),
                 "cgroup" => Some(pid::generate_cgroup(pid)),
                 "mounts" => Some(mounts::generate()),
@@ -1373,7 +1367,6 @@ pub fn read_file(path: &str) -> Option<Vec<u8>> {
                 "environ" => Some(pid::generate_environ(pid)),
                 "oom_score" => Some(pid::generate_oom_score(pid)),
                 "oom_score_adj" => Some(pid::generate_oom_score_adj(pid)),
-                "coredump_filter" => Some(pid::generate_core_filter(pid)),
                 "comm" => Some(pid::generate_comm(pid)),
                 "cgroup" => Some(pid::generate_cgroup(pid)),
                 "mounts" => Some(mounts::generate()),
@@ -1513,7 +1506,6 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
             b"environ" => PidFileKind::Environ,
             b"oom_score" => PidFileKind::OomScore,
             b"oom_score_adj" => PidFileKind::OomScoreAdj,
-            b"coredump_filter" => PidFileKind::CoreFilter,
             b"comm" => PidFileKind::Comm,
             b"cgroup" => PidFileKind::Cgroup,
             b"mounts" => PidFileKind::Mounts,
@@ -1901,7 +1893,6 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
             b"environ" => PidFileKind::Environ,
             b"oom_score" => PidFileKind::OomScore,
             b"oom_score_adj" => PidFileKind::OomScoreAdj,
-            b"coredump_filter" => PidFileKind::CoreFilter,
             b"comm" => PidFileKind::Comm,
             b"cgroup" => PidFileKind::Cgroup,
             b"mountinfo" => PidFileKind::Mountinfo,
@@ -2254,42 +2245,6 @@ fn procfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
         };
     }
 
-    // /proc/[pid]/coredump_filter: store the mm's core-dump class
-    // filter byte (reference kstrtoux semantics: hex with optional
-    // 0x prefix and surrounding whitespace; undecodable is EINVAL).
-    // LTP madvise08 only READS the file, but the reference is rw and
-    // core-pattern tuning writes it.
-    if node.pid_file_kind == Some(PidFileKind::CoreFilter) {
-        let pid = match node.pid {
-            Some(p) => p,
-            None => return -22, // EINVAL
-        };
-        let trimmed = core::str::from_utf8(buf).unwrap_or("").trim();
-        if trimmed.is_empty() {
-            return buf.len() as isize;
-        }
-        let hex = trimmed
-            .strip_prefix("0x")
-            .or_else(|| trimmed.strip_prefix("0X"))
-            .unwrap_or(trimmed);
-        let filter = match u32::from_str_radix(hex, 16) {
-            Ok(v) => v,
-            Err(_) => return -22, // EINVAL (kstrtoux failure)
-        };
-        let task = if crate::process::current_pid() as u64 == pid {
-            crate::process::current_task()
-        } else {
-            crate::process::find_task_by_pid(pid as u32)
-        };
-        return match task.map(|t| unsafe { (*t).address_space_arc() }) {
-            Some(Some(mm)) => {
-                mm.set_core_filter(filter & 0xFF);
-                buf.len() as isize
-            }
-            _ => -3, // ESRCH: target task gone (or no mm)
-        };
-    }
-
     // /proc/[pid]/attr/{exec,current,fscreate}: store the SELinux label
     // (no enforcement — see pid::attr_label_set). libselinux writes the
     // context with a trailing NUL; accept the whole buffer.
@@ -2622,7 +2577,6 @@ unsafe fn generate_pid_dir_entries(pid: u64) -> alloc::vec::Vec<crate::fs::inode
         (b"attr", file_type::DT_DIR),
         (b"oom_score", file_type::DT_REG),
         (b"oom_score_adj", file_type::DT_REG),
-        (b"coredump_filter", file_type::DT_REG),
     ];
 
     for (name, ft) in files.iter() {

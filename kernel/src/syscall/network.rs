@@ -1955,8 +1955,6 @@ pub fn sys_setsockopt(args: SyscallArgs) -> i64 {
     const IP_MULTICAST_LOOP: i32 = 34;
     const IP_ADD_MEMBERSHIP: i32 = 35;
     const IP_DROP_MEMBERSHIP: i32 = 36;
-    const SO_SNDBUFFORCE: i32 = 32;
-    const SO_RCVBUFFORCE: i32 = 33;
 
     if !optval.is_null() && optlen > 0 {
         if !crate::arch::uaccess::access_ok(optval as usize, optlen as usize) {
@@ -2168,18 +2166,7 @@ pub fn sys_setsockopt(args: SyscallArgs) -> i64 {
 
     let socket = match crate::net::socket::get_socket_from_fd(fd) {
         Some(s) => s,
-        None => {
-            // Reference fd resolution order (net/socket.c sockfd_lookup
-            // via the syscall layer): a CLOSED fd answers EBADF before
-            // any socket-type check; an OPEN non-socket file is
-            // ENOTSOCK (LTP setsockopt01 arms 1-2 probe exactly this
-            // pair — arm 1 closes /dev/null first).
-            let opened = unsafe { crate::fs::get_file_fd(fd) }.is_some();
-            if opened {
-                return -(errno::ENOTSOCK as i64);
-            }
-            return -(errno::EBADF as i64);
-        }
+        None => return -(errno::ENOTSOCK as i64),
     };
 
     match level {
@@ -2248,60 +2235,13 @@ pub fn sys_setsockopt(args: SyscallArgs) -> i64 {
             }
             SO_SNDBUF | SO_RCVBUF => {
                 // W3: stored (doubled like Linux) and reported by getsockopt.
-                // Reference value-intake contract: optlen < 4 is EINVAL
-                // (sock_setsockopt prologue), null/unreadable is EFAULT.
-                // The stored size is clamped so getsockopt can never
-                // answer a NEGATIVE byte count (CVE-2016-9793's wrap face
-                // — LTP setsockopt04 asserts the getter); the upper cap
-                // stays the i32 ceiling rather than sysctl_wmem_max so
-                // existing large-buffer callers keep their throughput
-                // (recorded internal divergence).
-                if optlen < 4 {
-                    return -(errno::EINVAL as i64);
-                }
                 let v = match read_i32(4) {
                     Some(v) => v,
                     None => return -(errno::EFAULT as i64),
                 };
                 let mut opts = socket.options.lock();
-                let doubled =
-                    (v as i64).saturating_mul(2).clamp(2048, i32::MAX as i64) as u32;
+                let doubled = (v.saturating_mul(2).max(2048)) as u32;
                 if optname == SO_SNDBUF {
-                    opts.sndbuf = doubled;
-                } else {
-                    opts.rcvbuf = doubled;
-                }
-                0
-            }
-            // SO_SNDBUFFORCE / SO_RCVBUFFORCE (CVE-2016-9793's own face,
-            // LTP setsockopt04): root-privileged unclamped buffer sizing.
-            // The guest's test set runs as root (needs_root = 1), so the
-            // CAP_NET_ADMIN check passes; recorded divergence — no LSM
-            // capable() probe. Value treated as u32 like the reference,
-            // doubled with a positive-i32 ceiling: force must still never
-            // let the getter observe a negative size (setsockopt04 sets
-            // 0xffffff00 and requires the readback >= 0).
-            SO_SNDBUFFORCE | SO_RCVBUFFORCE => {
-                if optlen < 4 {
-                    return -(errno::EINVAL as i64);
-                }
-                if optval.is_null() {
-                    return -(errno::EFAULT as i64);
-                }
-                let mut b = [0u8; 4];
-                // SAFETY: access_ok covered optlen bytes at fn entry.
-                if unsafe {
-                    crate::arch::uaccess::copy_from_user(b.as_mut_ptr(), optval, 4)
-                } != 0
-                {
-                    return -(errno::EFAULT as i64);
-                }
-                let v = u32::from_ne_bytes(b);
-                let mut opts = socket.options.lock();
-                let doubled = ((v as u64)
-                    .saturating_mul(2)
-                    .min(i32::MAX as u64)) as u32;
-                if optname == SO_SNDBUFFORCE {
                     opts.sndbuf = doubled;
                 } else {
                     opts.rcvbuf = doubled;
@@ -2367,30 +2307,10 @@ pub fn sys_setsockopt(args: SyscallArgs) -> i64 {
                 opts.linger_secs = linger as u32;
                 0
             }
-            // Accepted-and-ignored (no operational effect in this stack),
-            // with the reference's value-intake contract (net/core/sock.c
-            // sock_setsockopt prologue): optlen < sizeof(int) is EINVAL
-            // first, then an unreadable/null option buffer is EFAULT
-            // (LTP setsockopt01 arms 3-4: optval NULL / optlen 0).
+            // Accepted-and-ignored (no operational effect in this stack):
             SO_DONTROUTE | SO_OOBINLINE
             | SO_NO_CHECK | SO_BSDCOMPAT | SO_PASSCRED | SO_RCVLOWAT
-            | SO_SNDLOWAT | SO_PRIORITY => {
-                if optlen < 4 {
-                    return -(errno::EINVAL as i64);
-                }
-                if optval.is_null() {
-                    return -(errno::EFAULT as i64);
-                }
-                let mut b = [0u8; 4];
-                // SAFETY: access_ok covered optlen bytes at fn entry.
-                if unsafe {
-                    crate::arch::uaccess::copy_from_user(b.as_mut_ptr(), optval, 4)
-                } != 0
-                {
-                    return -(errno::EFAULT as i64);
-                }
-                0
-            }
+            | SO_SNDLOWAT | SO_PRIORITY => 0,
             // P0-2: SO_BINDTODEVICE (25) takes an ifname string; with one
             // eth0 the bind is a no-op but must SUCCEED — udhcpc's
             // udhcp_listen_socket hard-fails (xfunc_die) when it errors.

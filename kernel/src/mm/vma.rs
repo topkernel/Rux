@@ -65,18 +65,6 @@ impl VmaFlags {
     /// VM_DONTCOPY unconditionally, which is what keeps forked OH
     /// appspawn children from sharing the daemon's binder_proc).
     pub const DONTFORK: u32 = 0x04000000;
-    /// Dumpable (Linux VM_DUMPABLE, 0x01000000): included in core
-    /// dumps, gated further by the mm's coredump_filter bits. Default
-    /// follows the process dumpable state (PR_SET_DUMPABLE); MADV_
-    /// DONTDUMP clears it on the advised range and MADV_DODUMP sets
-    /// it (madvise08 drives both).
-    pub const DUMPABLE: u32 = 0x01000000;
-
-    /// Check if included in core dumps
-    #[inline]
-    pub fn is_dumpable(&self) -> bool {
-        self.0 & Self::DUMPABLE != 0
-    }
 
     #[inline]
     pub const fn new() -> Self {
@@ -325,12 +313,6 @@ impl Vma {
         assert!(start.as_usize() < end.as_usize(), "Invalid VMA range");
         assert!(start.as_usize() % PAGE_SIZE == 0, "VMA start not page aligned");
         assert!(end.as_usize() % PAGE_SIZE == 0, "VMA end not page aligned");
-
-        // DUMPABLE is the reference default for a dumpable process's
-        // mappings (mm->def_flags VM_DUMPABLE when dumpable == SUID_
-        // DUMPABLE): coredump filters it further by class. Advice that
-        // turns dumping off for a range clears the bit explicitly.
-        let flags = VmaFlags::from_bits(flags.bits() | VmaFlags::DUMPABLE);
 
         Self {
             start,

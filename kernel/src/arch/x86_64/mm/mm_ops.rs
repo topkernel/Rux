@@ -1903,11 +1903,6 @@ impl MmStruct {
                 let mut new_vma_mgr = new_space.vma_write();
                 for (start, end, flags, vma_type, file_fd, file_size, offset, origin) in vma_snapshot {
                     let mut new_vma = Vma::new(start, end, flags);
-                    // Exact flags: Vma::new forces VM_DUMPABLE (fresh
-                    // mapping default) — the fork snapshot must carry the
-                    // parent's bits verbatim (a MADV_DONTDUMP'd range
-                    // stays non-dumpable in the child).
-                    new_vma.set_flags(flags);
                     new_vma.set_type(vma_type);
                     // Fork copy: inherit the parent's origin stamp and add
                     // the FORKED modifier (adjudication: "mprotect+FORK"
