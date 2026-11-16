@@ -576,30 +576,135 @@ pub fn vfs_mount(
 // Filesystem Type Enumeration
 // ============================================================================
 
+/// Is `d` inside the filesystem tree mounted at `mnt_root`? Identity climb
+/// through parent links; at a filesystem root the covered mountpoint
+/// dentry (mountpoint back-ref) is entered so files in SUBMOUNTS of the
+/// tested mount also report busy. The iteration cap bounds malformed
+/// back-ref cycles.
+fn dentry_in_mount_subtree(d: &Arc<Dentry>, mnt_root: &Arc<Dentry>) -> bool {
+    let mut cur = d.clone();
+    for _ in 0..128 {
+        if Arc::ptr_eq(&cur, mnt_root) {
+            return true;
+        }
+        // Bind the climb hop to a local so the parent-spinlock guard (a
+        // temporary borrowed from `cur`) is released before the
+        // reassignment.
+        let next = { cur.parent.lock().clone() };
+        match next {
+            Some(p) => cur = p,
+            None => {
+                let hop = cur.mountpoint_dentry();
+                match hop {
+                    Some(mp) if !Arc::ptr_eq(&mp, &cur) => cur = mp,
+                    _ => return false,
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Would detaching the mount at `mnt_root` strand live users? Linux's
+/// propagate_mount_busy() refuses a plain umount while references beyond
+/// the walk's own exist; the reference sources modeled here are the ones
+/// userspace actually trips over: open file descriptions on any task whose
+/// dentry lies inside the mount (umount02 holds an fd on `mntpoint/file`),
+/// and any task whose cwd or chroot lies inside it. MNT_DETACH skips this
+/// check entirely (lazy unmount — the references keep working until they
+/// close).
+fn mount_is_busy(mnt_root: &Arc<Dentry>) -> bool {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    let busy = AtomicBool::new(false);
+    // SAFETY: the pid-hash walk holds the bucket lock for each task (it
+    // cannot be freed mid-callback); we only take non-sleeping locks
+    // (fdtable entry lock, dentry parent spinlocks, FsStruct rwlocks).
+    crate::sched::for_each_task(|t| {
+        if busy.load(Ordering::Relaxed) {
+            return;
+        }
+        let task = unsafe { &*t };
+        // Open descriptors: any file whose dentry sits in the subtree.
+        if let Some(fdtable) = task.try_fdtable() {
+            fdtable.for_each_file(|_fd, file| {
+                // SAFETY: dentry is written once at open time before the
+                // File is published; read-only access here.
+                if let Some(d) = unsafe { &*file.dentry.get() } {
+                    if dentry_in_mount_subtree(d, mnt_root) {
+                        busy.store(true, Ordering::Relaxed);
+                    }
+                }
+            });
+        }
+        if busy.load(Ordering::Relaxed) {
+            return;
+        }
+        // cwd / chroot dentries pin the mount the same way.
+        if let Some(fs) = task.fs_arc() {
+            if let Some(pwd) = fs.cwd_dentry() {
+                if dentry_in_mount_subtree(&pwd, mnt_root) {
+                    busy.store(true, Ordering::Relaxed);
+                    return;
+                }
+            }
+            if let Some(root) = fs.root_dentry() {
+                if dentry_in_mount_subtree(&root, mnt_root) {
+                    busy.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+    });
+    busy.load(Ordering::Relaxed)
+}
+
 /// Unmount a filesystem from the dentry tree.
 ///
 /// Removes the mount point dentry (and its `VfsMountInternal`) from the parent.
 /// The root "/" cannot be unmounted.
-pub fn vfs_umount(mountpoint: &str) -> Result<(), i32> {
-    if mountpoint == "/" {
+///
+/// `lazy` is MNT_DETACH: skip the busy check (the reference's do_umount
+/// detaches unconditionally under MNT_DETACH) and keep going.
+pub fn vfs_umount(mountpoint: &str, lazy: bool) -> Result<(), i32> {
+    if mountpoint == "/" || mountpoint.is_empty() {
         return Err(errno::Errno::DeviceOrResourceBusy.as_neg_i32());
     }
 
-    let (parent_path, name) = path_parent_and_name(mountpoint)?;
-    let parent_vpath = path_lookup(&parent_path, 0)?;
-    let parent_dentry = parent_vpath.dentry
+    // Linux path_umount(): user_path_at resolves the target FIRST —
+    // resolution failures (ENOENT / ENOTDIR / ENAMETOOLONG / EACCES)
+    // propagate directly, and EINVAL ("not a mountpoint") is only for a
+    // path that RESOLVES but is not a mount root (LTP umount02 "Directory
+    // not found" expects ENOENT; the old parent-split arm answered EINVAL
+    // for the missing child).
+    let target_vpath = path_lookup(mountpoint, 0)?;
+    let mnt_root = target_vpath.dentry
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+
+    // path_lookup crossed INTO the mount: a mount root dentry carries the
+    // mountpoint back-reference to the covered dentry. A plain directory
+    // (or file) has none → EINVAL, exactly the reference's
+    // `path.dentry != path.mnt->mnt_root` arm.
+    let child = mnt_root
+        .mountpoint_dentry()
+        .ok_or(errno::Errno::InvalidArgument.as_neg_i32())?;
+    let mnt = child
+        .get_mount()
+        .ok_or(errno::Errno::InvalidArgument.as_neg_i32())?;
+
+    // EBUSY: without MNT_DETACH, live users pin the mount (see
+    // mount_is_busy). Linux checks this in do_umount AFTER the
+    // mountpoint checks — EINVAL still wins for a non-mountpoint.
+    if !lazy && mount_is_busy(&mnt_root) {
+        return Err(errno::Errno::DeviceOrResourceBusy.as_neg_i32());
+    }
 
     // Detach the mount but KEEP the mountpoint dentry: Linux umount leaves
     // the covered directory in place (the underlying dir "re-appears").
     // Removing the dentry made the mountpoint itself vanish — a later mount
     // at the same target failed ENOENT (LTP chdir01's per-filesystem
     // iteration 2: "Cannot resolve the absolute path of mntpoint").
-    let child = parent_dentry
-        .lookup_child(&name)
-        .ok_or(errno::Errno::InvalidArgument.as_neg_i32())?;
-    let mnt = child
-        .get_mount()
+    let name = child.get_name();
+    let parent_dentry = { child.parent.lock().clone() }
         .ok_or(errno::Errno::InvalidArgument.as_neg_i32())?;
     {
         let mut state = VFS_STATE.lock();

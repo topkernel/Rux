@@ -2969,13 +2969,6 @@ pub fn sys_umount(args: SyscallArgs) -> i64 {
     };
     let target = target.as_str();
 
-    // U1c: drop the mount row from the CALLER's mount namespace (the
-    // dentry-level unmount below is global — recorded divergence).
-    {
-        let norm = crate::fs::path::path_normalize(target);
-        crate::process::ns::ns_unregister_mount(&norm);
-    }
-
     // MNT_EXPIRE two-phase protocol (see the header comment): the first
     // attempt on a mount answers EAGAIN and arms the expire flag; a later
     // attempt unmounts only when nothing touched the mountpoint in
@@ -3027,10 +3020,19 @@ pub fn sys_umount(args: SyscallArgs) -> i64 {
         }
     }
 
-    let ret = match crate::fs::vfs::vfs_umount(target) {
+    let ret = match crate::fs::vfs::vfs_umount(target, flags & MNT_DETACH != 0) {
         Ok(()) => 0,
         Err(e) => e,
     };
+    // U1c: drop the mount row from the CALLER's mount namespace on SUCCESS
+    // only (the dentry-level unmount is global — recorded divergence). It
+    // used to run before vfs_umount, so a FAILED umount (EINVAL/EBUSY —
+    // umount02's busy case) already removed the namespace row: a busy
+    // mount vanished from /proc/mounts while staying mounted.
+    if ret == 0 {
+        let norm = crate::fs::path::path_normalize(target);
+        crate::process::ns::ns_unregister_mount(&norm);
+    }
     if ret != 0 {
         // b24: after the (now-working) sandbox pivot, OH init's cleanup
         // umount2(old_root, MNT_DETACH) fails EINVAL and wedges the boot
