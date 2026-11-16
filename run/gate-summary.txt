@@ -1,6 +1,0 @@
-riscv build rc=0
-aarch64 build rc=0
-x86 rebuild rc=0
-riscv make test rc=2
-rootfs rc=0
-riscv make test rc=0
