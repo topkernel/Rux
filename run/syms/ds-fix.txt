@@ -1,0 +1,834 @@
+
+rux-fix.elf：     文件格式 elf64-x86-64
+
+
+Disassembly of section .text:
+
+ffffffff80597d40 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq>:
+ffffffff80597d40:	55                   	push   %rbp
+ffffffff80597d41:	48 89 e5             	mov    %rsp,%rbp
+ffffffff80597d44:	41 57                	push   %r15
+ffffffff80597d46:	41 56                	push   %r14
+ffffffff80597d48:	41 55                	push   %r13
+ffffffff80597d4a:	41 54                	push   %r12
+ffffffff80597d4c:	53                   	push   %rbx
+ffffffff80597d4d:	48 81 ec 48 01 00 00 	sub    $0x148,%rsp
+ffffffff80597d54:	65 8b 04 25 00 00 00 	mov    %gs:0x0,%eax
+ffffffff80597d5b:	00 
+ffffffff80597d5c:	89 c7                	mov    %eax,%edi
+ffffffff80597d5e:	48 89 7d d0          	mov    %rdi,-0x30(%rbp)
+ffffffff80597d62:	83 f8 07             	cmp    $0x7,%eax
+ffffffff80597d65:	0f 87 64 0d 00 00    	ja     ffffffff80598acf <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xd8f>
+ffffffff80597d6b:	8b 04 bd 68 8b 4d 81 	mov    -0x7eb27498(,%rdi,4),%eax
+ffffffff80597d72:	85 c0                	test   %eax,%eax
+ffffffff80597d74:	74 07                	je     ffffffff80597d7d <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x3d>
+ffffffff80597d76:	31 c0                	xor    %eax,%eax
+ffffffff80597d78:	e9 ae 0c 00 00       	jmp    ffffffff80598a2b <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xceb>
+ffffffff80597d7d:	48 b8 00 00 00 00 00 	movabs $0x8000000000000000,%rax
+ffffffff80597d84:	00 00 80 
+ffffffff80597d87:	48 8b 5d d0          	mov    -0x30(%rbp),%rbx
+ffffffff80597d8b:	c7 04 9d 68 8b 4d 81 	movl   $0x1,-0x7eb27498(,%rbx,4)
+ffffffff80597d92:	01 00 00 00 
+ffffffff80597d96:	48 89 04 dd b8 87 4d 	mov    %rax,-0x7eb27848(,%rbx,8)
+ffffffff80597d9d:	81 
+ffffffff80597d9e:	48 8b 05 9b aa f4 00 	mov    0xf4aa9b(%rip),%rax        # ffffffff814e2840 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_6410TSC_ACTIVE.0>
+ffffffff80597da5:	48 85 c0             	test   %rax,%rax
+ffffffff80597da8:	0f 84 80 00 00 00    	je     ffffffff80597e2e <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xee>
+ffffffff80597dae:	be 80 00 00 00       	mov    $0x80,%esi
+ffffffff80597db3:	eb 0f                	jmp    ffffffff80597dc4 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x84>
+ffffffff80597db5:	66 66 2e 0f 1f 84 00 	data16 cs nopw 0x0(%rax,%rax,1)
+ffffffff80597dbc:	00 00 00 00 
+ffffffff80597dc0:	ff ce                	dec    %esi
+ffffffff80597dc2:	74 6a                	je     ffffffff80597e2e <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xee>
+ffffffff80597dc4:	44 8b 0d 35 f2 ab 00 	mov    0xabf235(%rip),%r9d        # ffffffff81057000 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE>
+ffffffff80597dcb:	41 f6 c1 01          	test   $0x1,%r9b
+ffffffff80597dcf:	75 ef                	jne    ffffffff80597dc0 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x80>
+ffffffff80597dd1:	4c 8b 05 30 f2 ab 00 	mov    0xabf230(%rip),%r8        # ffffffff81057008 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE+0x8>
+ffffffff80597dd8:	48 8b 0d 31 f2 ab 00 	mov    0xabf231(%rip),%rcx        # ffffffff81057010 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE+0x10>
+ffffffff80597ddf:	48 8b 3d 42 f2 ab 00 	mov    0xabf242(%rip),%rdi        # ffffffff81057028 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE+0x28>
+ffffffff80597de6:	48 85 ff             	test   %rdi,%rdi
+ffffffff80597de9:	74 43                	je     ffffffff80597e2e <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xee>
+ffffffff80597deb:	0f ae e8             	lfence
+ffffffff80597dee:	0f 31                	rdtsc
+ffffffff80597df0:	44 8b 15 09 f2 ab 00 	mov    0xabf209(%rip),%r10d        # ffffffff81057000 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE>
+ffffffff80597df7:	45 39 d1             	cmp    %r10d,%r9d
+ffffffff80597dfa:	75 c4                	jne    ffffffff80597dc0 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x80>
+ffffffff80597dfc:	89 c0                	mov    %eax,%eax
+ffffffff80597dfe:	4c 29 c0             	sub    %r8,%rax
+ffffffff80597e01:	48 c1 e2 20          	shl    $0x20,%rdx
+ffffffff80597e05:	48 01 c2             	add    %rax,%rdx
+ffffffff80597e08:	48 89 d0             	mov    %rdx,%rax
+ffffffff80597e0b:	48 f7 e7             	mul    %rdi
+ffffffff80597e0e:	48 0f a4 c2 20       	shld   $0x20,%rax,%rdx
+ffffffff80597e13:	48 01 d1             	add    %rdx,%rcx
+ffffffff80597e16:	48 8b 05 43 aa f4 00 	mov    0xf4aa43(%rip),%rax        # ffffffff814e2860 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_648TSC_LAST.0>
+ffffffff80597e1d:	48 39 c1             	cmp    %rax,%rcx
+ffffffff80597e20:	76 2d                	jbe    ffffffff80597e4f <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x10f>
+ffffffff80597e22:	48 89 0d 37 aa f4 00 	mov    %rcx,0xf4aa37(%rip)        # ffffffff814e2860 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_648TSC_LAST.0>
+ffffffff80597e29:	48 89 c8             	mov    %rcx,%rax
+ffffffff80597e2c:	eb 21                	jmp    ffffffff80597e4f <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x10f>
+ffffffff80597e2e:	48 8b 05 c3 a9 f4 00 	mov    0xf4a9c3(%rip),%rax        # ffffffff814e27f8 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer4hpet4BASE.0>
+ffffffff80597e35:	48 85 c0             	test   %rax,%rax
+ffffffff80597e38:	74 07                	je     ffffffff80597e41 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x101>
+ffffffff80597e3a:	e8 01 71 05 00       	call   ffffffff805eef40 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer4hpet17read_time_nominal>
+ffffffff80597e3f:	eb 0e                	jmp    ffffffff80597e4f <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x10f>
+ffffffff80597e41:	48 8b 05 10 aa f4 00 	mov    0xf4aa10(%rip),%rax        # ffffffff814e2858 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_647JIFFIES>
+ffffffff80597e48:	48 69 c0 a0 86 01 00 	imul   $0x186a0,%rax,%rax
+ffffffff80597e4f:	48 89 04 dd 78 8a 4d 	mov    %rax,-0x7eb27588(,%rbx,8)
+ffffffff80597e56:	81 
+ffffffff80597e57:	65 8b 04 25 00 00 00 	mov    %gs:0x0,%eax
+ffffffff80597e5e:	00 
+ffffffff80597e5f:	89 c7                	mov    %eax,%edi
+ffffffff80597e61:	83 f8 08             	cmp    $0x8,%eax
+ffffffff80597e64:	0f 83 54 0c 00 00    	jae    ffffffff80598abe <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xd7e>
+ffffffff80597e6a:	48 c1 e7 07          	shl    $0x7,%rdi
+ffffffff80597e6e:	48 8b 87 d8 6d bf 80 	mov    -0x7f409228(%rdi),%rax
+ffffffff80597e75:	48 89 45 b0          	mov    %rax,-0x50(%rbp)
+ffffffff80597e79:	65 8b 04 25 00 00 00 	mov    %gs:0x0,%eax
+ffffffff80597e80:	00 
+ffffffff80597e81:	89 c7                	mov    %eax,%edi
+ffffffff80597e83:	83 f8 08             	cmp    $0x8,%eax
+ffffffff80597e86:	0f 83 32 0c 00 00    	jae    ffffffff80598abe <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xd7e>
+ffffffff80597e8c:	48 c1 e7 07          	shl    $0x7,%rdi
+ffffffff80597e90:	48 8b 87 d8 6d bf 80 	mov    -0x7f409228(%rdi),%rax
+ffffffff80597e97:	48 a9 00 00 00 80    	test   $0xffffffff80000000,%rax
+ffffffff80597e9d:	0f 84 87 00 00 00    	je     ffffffff80597f2a <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x1ea>
+ffffffff80597ea3:	0f b6 0d 7e 11 c1 00 	movzbl 0xc1117e(%rip),%ecx        # ffffffff811a9028 <_RNvNtNtCskM3lJAAH1t5_3rux3dfx10leakorigin7ENABLED.0>
+ffffffff80597eaa:	84 c9                	test   %cl,%cl
+ffffffff80597eac:	74 74                	je     ffffffff80597f22 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x1e2>
+ffffffff80597eae:	8b 48 04             	mov    0x4(%rax),%ecx
+ffffffff80597eb1:	48 b9 15 7c 4a 7f b9 	movabs $0x9e3779b97f4a7c15,%rcx
+ffffffff80597eb8:	79 37 9e 
+ffffffff80597ebb:	48 0f af c8          	imul   %rax,%rcx
+ffffffff80597ebf:	48 c1 e9 35          	shr    $0x35,%rcx
+ffffffff80597ec3:	48 6b d1 78          	imul   $0x78,%rcx,%rdx
+ffffffff80597ec7:	48 8d 8a 28 d0 16 81 	lea    -0x7ee92fd8(%rdx),%rcx
+ffffffff80597ece:	48 89 82 28 d0 16 81 	mov    %rax,-0x7ee92fd8(%rdx)
+ffffffff80597ed5:	48 c7 c6 c0 66 66 80 	mov    $0xffffffff806666c0,%rsi
+ffffffff80597edc:	48 89 b2 50 d0 16 81 	mov    %rsi,-0x7ee92fb0(%rdx)
+ffffffff80597ee3:	48 8b 35 6e a9 f4 00 	mov    0xf4a96e(%rip),%rsi        # ffffffff814e2858 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_647JIFFIES>
+ffffffff80597eea:	48 89 b2 58 d0 16 81 	mov    %rsi,-0x7ee92fa8(%rdx)
+ffffffff80597ef1:	65 8b 34 25 00 00 00 	mov    %gs:0x0,%esi
+ffffffff80597ef8:	00 
+ffffffff80597ef9:	89 b2 8c d0 16 81    	mov    %esi,-0x7ee92f74(%rdx)
+ffffffff80597eff:	ba 02 00 00 00       	mov    $0x2,%edx
+ffffffff80597f04:	83 fe 07             	cmp    $0x7,%esi
+ffffffff80597f07:	77 16                	ja     ffffffff80597f1f <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x1df>
+ffffffff80597f09:	89 f2                	mov    %esi,%edx
+ffffffff80597f0b:	48 8d 14 52          	lea    (%rdx,%rdx,2),%rdx
+ffffffff80597f0f:	48 8b 34 d5 18 9d 4a 	mov    -0x7eb562e8(,%rdx,8),%rsi
+ffffffff80597f16:	81 
+ffffffff80597f17:	31 d2                	xor    %edx,%edx
+ffffffff80597f19:	48 39 c6             	cmp    %rax,%rsi
+ffffffff80597f1c:	0f 95 c2             	setne  %dl
+ffffffff80597f1f:	89 51 68             	mov    %edx,0x68(%rcx)
+ffffffff80597f22:	f0 81 40 04 00 01 00 	lock addl $0x100,0x4(%rax)
+ffffffff80597f29:	00 
+ffffffff80597f2a:	65 8b 04 25 00 00 00 	mov    %gs:0x0,%eax
+ffffffff80597f31:	00 
+ffffffff80597f32:	83 f8 07             	cmp    $0x7,%eax
+ffffffff80597f35:	77 2c                	ja     ffffffff80597f63 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x223>
+ffffffff80597f37:	89 c0                	mov    %eax,%eax
+ffffffff80597f39:	48 8d 0c 40          	lea    (%rax,%rax,2),%rcx
+ffffffff80597f3d:	48 8b 0c cd 18 9d 4a 	mov    -0x7eb562e8(,%rcx,8),%rcx
+ffffffff80597f44:	81 
+ffffffff80597f45:	48 85 c9             	test   %rcx,%rcx
+ffffffff80597f48:	74 19                	je     ffffffff80597f63 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x223>
+ffffffff80597f4a:	48 c1 e0 04          	shl    $0x4,%rax
+ffffffff80597f4e:	48 89 88 e0 8a 4d 81 	mov    %rcx,-0x7eb27520(%rax)
+ffffffff80597f55:	48 8b 0d fc a8 f4 00 	mov    0xf4a8fc(%rip),%rcx        # ffffffff814e2858 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_647JIFFIES>
+ffffffff80597f5c:	48 89 88 e8 8a 4d 81 	mov    %rcx,-0x7eb27518(%rax)
+ffffffff80597f63:	e8 18 ba e2 ff       	call   ffffffff803c3980 <_RNvNtNtCskM3lJAAH1t5_3rux3dfx7syscost2on>
+ffffffff80597f68:	84 c0                	test   %al,%al
+ffffffff80597f6a:	0f 84 07 01 00 00    	je     ffffffff80598077 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x337>
+ffffffff80597f70:	65 8b 04 25 00 00 00 	mov    %gs:0x0,%eax
+ffffffff80597f77:	00 
+ffffffff80597f78:	83 f8 07             	cmp    $0x7,%eax
+ffffffff80597f7b:	0f 87 f6 00 00 00    	ja     ffffffff80598077 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x337>
+ffffffff80597f81:	89 c1                	mov    %eax,%ecx
+ffffffff80597f83:	0f b6 81 68 49 a3 80 	movzbl -0x7f5cb698(%rcx),%eax
+ffffffff80597f8a:	84 c0                	test   %al,%al
+ffffffff80597f8c:	0f 84 e5 00 00 00    	je     ffffffff80598077 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x337>
+ffffffff80597f92:	0f 31                	rdtsc
+ffffffff80597f94:	89 c0                	mov    %eax,%eax
+ffffffff80597f96:	48 c1 e2 20          	shl    $0x20,%rdx
+ffffffff80597f9a:	48 09 c2             	or     %rax,%rdx
+ffffffff80597f9d:	0f b6 81 70 49 a3 80 	movzbl -0x7f5cb690(%rcx),%eax
+ffffffff80597fa4:	84 c0                	test   %al,%al
+ffffffff80597fa6:	74 43                	je     ffffffff80597feb <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x2ab>
+ffffffff80597fa8:	0f b6 f8             	movzbl %al,%edi
+ffffffff80597fab:	40 80 ff 05          	cmp    $0x5,%dil
+ffffffff80597faf:	0f 83 2b 0b 00 00    	jae    ffffffff80598ae0 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xda0>
+ffffffff80597fb5:	44 0f b6 8c 8f 47 49 	movzbl -0x7f5cb6b9(%rdi,%rcx,4),%r9d
+ffffffff80597fbc:	a3 80 
+ffffffff80597fbe:	48 8b 04 cd 48 48 a3 	mov    -0x7f5cb7b8(,%rcx,8),%rax
+ffffffff80597fc5:	80 
+ffffffff80597fc6:	45 31 c0             	xor    %r8d,%r8d
+ffffffff80597fc9:	48 89 d6             	mov    %rdx,%rsi
+ffffffff80597fcc:	48 29 c6             	sub    %rax,%rsi
+ffffffff80597fcf:	4c 0f 43 c6          	cmovae %rsi,%r8
+ffffffff80597fd3:	41 0f b6 f9          	movzbl %r9b,%edi
+ffffffff80597fd7:	40 80 ff 03          	cmp    $0x3,%dil
+ffffffff80597fdb:	0f 87 13 0b 00 00    	ja     ffffffff80598af4 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xdb4>
+ffffffff80597fe1:	48 8d 34 cd 48 48 a3 	lea    -0x7f5cb7b8(,%rcx,8),%rsi
+ffffffff80597fe8:	80 
+ffffffff80597fe9:	eb 1f                	jmp    ffffffff8059800a <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x2ca>
+ffffffff80597feb:	48 8d 34 cd 48 48 a3 	lea    -0x7f5cb7b8(,%rcx,8),%rsi
+ffffffff80597ff2:	80 
+ffffffff80597ff3:	48 8b 04 cd 48 48 a3 	mov    -0x7f5cb7b8(,%rcx,8),%rax
+ffffffff80597ffa:	80 
+ffffffff80597ffb:	31 ff                	xor    %edi,%edi
+ffffffff80597ffd:	49 89 d0             	mov    %rdx,%r8
+ffffffff80598000:	49 29 c0             	sub    %rax,%r8
+ffffffff80598003:	4c 0f 42 c7          	cmovb  %rdi,%r8
+ffffffff80598007:	45 31 c9             	xor    %r9d,%r9d
+ffffffff8059800a:	48 89 c8             	mov    %rcx,%rax
+ffffffff8059800d:	48 c1 e0 05          	shl    $0x5,%rax
+ffffffff80598011:	44 8d 1c fd 00 00 00 	lea    0x0(,%rdi,8),%r11d
+ffffffff80598018:	00 
+ffffffff80598019:	f0 4e 01 84 18 48 45 	lock add %r8,-0x7f5cbab8(%rax,%r11,1)
+ffffffff80598020:	a3 80 
+ffffffff80598022:	f0 4a ff 84 18 48 46 	lock incq -0x7f5cb9b8(%rax,%r11,1)
+ffffffff80598029:	a3 80 
+ffffffff8059802b:	4c 8d 90 48 47 a3 80 	lea    -0x7f5cb8b8(%rax),%r10
+ffffffff80598032:	4a 8b 84 18 48 47 a3 	mov    -0x7f5cb8b8(%rax,%r11,1),%rax
+ffffffff80598039:	80 
+ffffffff8059803a:	66 0f 1f 44 00 00    	nopw   0x0(%rax,%rax,1)
+ffffffff80598040:	49 39 c0             	cmp    %rax,%r8
+ffffffff80598043:	76 08                	jbe    ffffffff8059804d <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x30d>
+ffffffff80598045:	f0 4d 0f b1 04 fa    	lock cmpxchg %r8,(%r10,%rdi,8)
+ffffffff8059804b:	75 f3                	jne    ffffffff80598040 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x300>
+ffffffff8059804d:	45 84 c9             	test   %r9b,%r9b
+ffffffff80598050:	0f 84 e7 09 00 00    	je     ffffffff80598a3d <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xcfd>
+ffffffff80598056:	0f b6 81 70 49 a3 80 	movzbl -0x7f5cb690(%rcx),%eax
+ffffffff8059805d:	3c 03                	cmp    $0x3,%al
+ffffffff8059805f:	77 13                	ja     ffffffff80598074 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x334>
+ffffffff80598061:	0f b6 c0             	movzbl %al,%eax
+ffffffff80598064:	c6 84 88 48 49 a3 80 	movb   $0x2,-0x7f5cb6b8(%rax,%rcx,4)
+ffffffff8059806b:	02 
+ffffffff8059806c:	ff c0                	inc    %eax
+ffffffff8059806e:	88 81 70 49 a3 80    	mov    %al,-0x7f5cb690(%rcx)
+ffffffff80598074:	48 89 16             	mov    %rdx,(%rsi)
+ffffffff80598077:	48 8b 05 c2 a7 f4 00 	mov    0xf4a7c2(%rip),%rax        # ffffffff814e2840 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_6410TSC_ACTIVE.0>
+ffffffff8059807e:	48 85 c0             	test   %rax,%rax
+ffffffff80598081:	74 7b                	je     ffffffff805980fe <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x3be>
+ffffffff80598083:	be 80 00 00 00       	mov    $0x80,%esi
+ffffffff80598088:	eb 0a                	jmp    ffffffff80598094 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x354>
+ffffffff8059808a:	66 0f 1f 44 00 00    	nopw   0x0(%rax,%rax,1)
+ffffffff80598090:	ff ce                	dec    %esi
+ffffffff80598092:	74 6a                	je     ffffffff805980fe <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x3be>
+ffffffff80598094:	44 8b 0d 65 ef ab 00 	mov    0xabef65(%rip),%r9d        # ffffffff81057000 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE>
+ffffffff8059809b:	41 f6 c1 01          	test   $0x1,%r9b
+ffffffff8059809f:	75 ef                	jne    ffffffff80598090 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x350>
+ffffffff805980a1:	4c 8b 05 60 ef ab 00 	mov    0xabef60(%rip),%r8        # ffffffff81057008 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE+0x8>
+ffffffff805980a8:	48 8b 0d 61 ef ab 00 	mov    0xabef61(%rip),%rcx        # ffffffff81057010 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE+0x10>
+ffffffff805980af:	48 8b 3d 72 ef ab 00 	mov    0xabef72(%rip),%rdi        # ffffffff81057028 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE+0x28>
+ffffffff805980b6:	48 85 ff             	test   %rdi,%rdi
+ffffffff805980b9:	74 43                	je     ffffffff805980fe <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x3be>
+ffffffff805980bb:	0f ae e8             	lfence
+ffffffff805980be:	0f 31                	rdtsc
+ffffffff805980c0:	44 8b 15 39 ef ab 00 	mov    0xabef39(%rip),%r10d        # ffffffff81057000 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE>
+ffffffff805980c7:	45 39 d1             	cmp    %r10d,%r9d
+ffffffff805980ca:	75 c4                	jne    ffffffff80598090 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x350>
+ffffffff805980cc:	89 c0                	mov    %eax,%eax
+ffffffff805980ce:	4c 29 c0             	sub    %r8,%rax
+ffffffff805980d1:	48 c1 e2 20          	shl    $0x20,%rdx
+ffffffff805980d5:	48 01 c2             	add    %rax,%rdx
+ffffffff805980d8:	48 89 d0             	mov    %rdx,%rax
+ffffffff805980db:	48 f7 e7             	mul    %rdi
+ffffffff805980de:	48 0f a4 c2 20       	shld   $0x20,%rax,%rdx
+ffffffff805980e3:	48 01 d1             	add    %rdx,%rcx
+ffffffff805980e6:	48 8b 1d 73 a7 f4 00 	mov    0xf4a773(%rip),%rbx        # ffffffff814e2860 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_648TSC_LAST.0>
+ffffffff805980ed:	48 39 d9             	cmp    %rbx,%rcx
+ffffffff805980f0:	76 30                	jbe    ffffffff80598122 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x3e2>
+ffffffff805980f2:	48 89 0d 67 a7 f4 00 	mov    %rcx,0xf4a767(%rip)        # ffffffff814e2860 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_648TSC_LAST.0>
+ffffffff805980f9:	48 89 cb             	mov    %rcx,%rbx
+ffffffff805980fc:	eb 24                	jmp    ffffffff80598122 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x3e2>
+ffffffff805980fe:	48 8b 05 f3 a6 f4 00 	mov    0xf4a6f3(%rip),%rax        # ffffffff814e27f8 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer4hpet4BASE.0>
+ffffffff80598105:	48 85 c0             	test   %rax,%rax
+ffffffff80598108:	74 0a                	je     ffffffff80598114 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x3d4>
+ffffffff8059810a:	e8 31 6e 05 00       	call   ffffffff805eef40 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer4hpet17read_time_nominal>
+ffffffff8059810f:	48 89 c3             	mov    %rax,%rbx
+ffffffff80598112:	eb 0e                	jmp    ffffffff80598122 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x3e2>
+ffffffff80598114:	48 8b 05 3d a7 f4 00 	mov    0xf4a73d(%rip),%rax        # ffffffff814e2858 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_647JIFFIES>
+ffffffff8059811b:	48 69 d8 a0 86 01 00 	imul   $0x186a0,%rax,%rbx
+ffffffff80598122:	c7 45 cc 00 00 00 00 	movl   $0x0,-0x34(%rbp)
+ffffffff80598129:	45 31 ed             	xor    %r13d,%r13d
+ffffffff8059812c:	48 8b 45 d0          	mov    -0x30(%rbp),%rax
+ffffffff80598130:	45 31 e4             	xor    %r12d,%r12d
+ffffffff80598133:	44 87 24 85 b8 8a 4d 	xchg   %r12d,-0x7eb27548(,%rax,4)
+ffffffff8059813a:	81 
+ffffffff8059813b:	45 85 e4             	test   %r12d,%r12d
+ffffffff8059813e:	0f 84 38 04 00 00    	je     ffffffff8059857c <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x83c>
+ffffffff80598144:	83 7d cc 00          	cmpl   $0x0,-0x34(%rbp)
+ffffffff80598148:	74 26                	je     ffffffff80598170 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x430>
+ffffffff8059814a:	f0 48 ff 05 86 09 f4 	lock incq 0xf40986(%rip)        # ffffffff814d8ad8 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq15WW_SOFTIRQ_RUNS>
+ffffffff80598151:	00 
+ffffffff80598152:	48 8b 05 e7 a6 f4 00 	mov    0xf4a6e7(%rip),%rax        # ffffffff814e2840 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_6410TSC_ACTIVE.0>
+ffffffff80598159:	48 85 c0             	test   %rax,%rax
+ffffffff8059815c:	75 2a                	jne    ffffffff80598188 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x448>
+ffffffff8059815e:	e9 9d 00 00 00       	jmp    ffffffff80598200 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x4c0>
+ffffffff80598163:	66 66 66 66 2e 0f 1f 	data16 data16 data16 cs nopw 0x0(%rax,%rax,1)
+ffffffff8059816a:	84 00 00 00 00 00 
+ffffffff80598170:	44 89 65 cc          	mov    %r12d,-0x34(%rbp)
+ffffffff80598174:	f0 48 ff 05 5c 09 f4 	lock incq 0xf4095c(%rip)        # ffffffff814d8ad8 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq15WW_SOFTIRQ_RUNS>
+ffffffff8059817b:	00 
+ffffffff8059817c:	48 8b 05 bd a6 f4 00 	mov    0xf4a6bd(%rip),%rax        # ffffffff814e2840 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_6410TSC_ACTIVE.0>
+ffffffff80598183:	48 85 c0             	test   %rax,%rax
+ffffffff80598186:	74 78                	je     ffffffff80598200 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x4c0>
+ffffffff80598188:	be 80 00 00 00       	mov    $0x80,%esi
+ffffffff8059818d:	eb 05                	jmp    ffffffff80598194 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x454>
+ffffffff8059818f:	90                   	nop
+ffffffff80598190:	ff ce                	dec    %esi
+ffffffff80598192:	74 6c                	je     ffffffff80598200 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x4c0>
+ffffffff80598194:	44 8b 0d 65 ee ab 00 	mov    0xabee65(%rip),%r9d        # ffffffff81057000 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE>
+ffffffff8059819b:	41 f6 c1 01          	test   $0x1,%r9b
+ffffffff8059819f:	75 ef                	jne    ffffffff80598190 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x450>
+ffffffff805981a1:	4c 8b 05 60 ee ab 00 	mov    0xabee60(%rip),%r8        # ffffffff81057008 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE+0x8>
+ffffffff805981a8:	48 8b 0d 61 ee ab 00 	mov    0xabee61(%rip),%rcx        # ffffffff81057010 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE+0x10>
+ffffffff805981af:	48 8b 3d 72 ee ab 00 	mov    0xabee72(%rip),%rdi        # ffffffff81057028 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE+0x28>
+ffffffff805981b6:	48 85 ff             	test   %rdi,%rdi
+ffffffff805981b9:	74 45                	je     ffffffff80598200 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x4c0>
+ffffffff805981bb:	0f ae e8             	lfence
+ffffffff805981be:	0f 31                	rdtsc
+ffffffff805981c0:	44 8b 15 39 ee ab 00 	mov    0xabee39(%rip),%r10d        # ffffffff81057000 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE>
+ffffffff805981c7:	45 39 d1             	cmp    %r10d,%r9d
+ffffffff805981ca:	75 c4                	jne    ffffffff80598190 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x450>
+ffffffff805981cc:	89 c0                	mov    %eax,%eax
+ffffffff805981ce:	4c 29 c0             	sub    %r8,%rax
+ffffffff805981d1:	48 c1 e2 20          	shl    $0x20,%rdx
+ffffffff805981d5:	48 01 c2             	add    %rax,%rdx
+ffffffff805981d8:	48 89 d0             	mov    %rdx,%rax
+ffffffff805981db:	48 f7 e7             	mul    %rdi
+ffffffff805981de:	48 0f a4 c2 20       	shld   $0x20,%rax,%rdx
+ffffffff805981e3:	48 01 d1             	add    %rdx,%rcx
+ffffffff805981e6:	48 8b 05 73 a6 f4 00 	mov    0xf4a673(%rip),%rax        # ffffffff814e2860 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_648TSC_LAST.0>
+ffffffff805981ed:	48 39 c1             	cmp    %rax,%rcx
+ffffffff805981f0:	76 3c                	jbe    ffffffff8059822e <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x4ee>
+ffffffff805981f2:	48 89 0d 67 a6 f4 00 	mov    %rcx,0xf4a667(%rip)        # ffffffff814e2860 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_648TSC_LAST.0>
+ffffffff805981f9:	48 89 c8             	mov    %rcx,%rax
+ffffffff805981fc:	eb 30                	jmp    ffffffff8059822e <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x4ee>
+ffffffff805981fe:	66 90                	xchg   %ax,%ax
+ffffffff80598200:	48 8b 05 f1 a5 f4 00 	mov    0xf4a5f1(%rip),%rax        # ffffffff814e27f8 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer4hpet4BASE.0>
+ffffffff80598207:	48 85 c0             	test   %rax,%rax
+ffffffff8059820a:	74 14                	je     ffffffff80598220 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x4e0>
+ffffffff8059820c:	e8 2f 6d 05 00       	call   ffffffff805eef40 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer4hpet17read_time_nominal>
+ffffffff80598211:	eb 1b                	jmp    ffffffff8059822e <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x4ee>
+ffffffff80598213:	66 66 66 66 2e 0f 1f 	data16 data16 data16 cs nopw 0x0(%rax,%rax,1)
+ffffffff8059821a:	84 00 00 00 00 00 
+ffffffff80598220:	48 8b 05 31 a6 f4 00 	mov    0xf4a631(%rip),%rax        # ffffffff814e2858 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_647JIFFIES>
+ffffffff80598227:	48 69 c0 a0 86 01 00 	imul   $0x186a0,%rax,%rax
+ffffffff8059822e:	48 89 45 a8          	mov    %rax,-0x58(%rbp)
+ffffffff80598232:	4c 89 e8             	mov    %r13,%rax
+ffffffff80598235:	48 c1 e0 28          	shl    $0x28,%rax
+ffffffff80598239:	45 0f b7 f4          	movzwl %r12w,%r14d
+ffffffff8059823d:	49 09 c6             	or     %rax,%r14
+ffffffff80598240:	48 b8 00 00 00 00 00 	movabs $0x8000000000000000,%rax
+ffffffff80598247:	00 00 80 
+ffffffff8059824a:	49 09 c6             	or     %rax,%r14
+ffffffff8059824d:	eb 13                	jmp    ffffffff80598262 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x522>
+ffffffff8059824f:	90                   	nop
+ffffffff80598250:	4c 89 ff             	mov    %r15,%rdi
+ffffffff80598253:	ff d0                	call   *%rax
+ffffffff80598255:	45 0f b3 fc          	btr    %r15d,%r12d
+ffffffff80598259:	45 85 e4             	test   %r12d,%r12d
+ffffffff8059825c:	0f 84 6e 01 00 00    	je     ffffffff805983d0 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x690>
+ffffffff80598262:	48 8b 05 d7 a5 f4 00 	mov    0xf4a5d7(%rip),%rax        # ffffffff814e2840 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_6410TSC_ACTIVE.0>
+ffffffff80598269:	48 85 c0             	test   %rax,%rax
+ffffffff8059826c:	0f 84 7e 00 00 00    	je     ffffffff805982f0 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x5b0>
+ffffffff80598272:	be 80 00 00 00       	mov    $0x80,%esi
+ffffffff80598277:	eb 0b                	jmp    ffffffff80598284 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x544>
+ffffffff80598279:	0f 1f 80 00 00 00 00 	nopl   0x0(%rax)
+ffffffff80598280:	ff ce                	dec    %esi
+ffffffff80598282:	74 6c                	je     ffffffff805982f0 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x5b0>
+ffffffff80598284:	44 8b 0d 75 ed ab 00 	mov    0xabed75(%rip),%r9d        # ffffffff81057000 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE>
+ffffffff8059828b:	41 f6 c1 01          	test   $0x1,%r9b
+ffffffff8059828f:	75 ef                	jne    ffffffff80598280 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x540>
+ffffffff80598291:	4c 8b 05 70 ed ab 00 	mov    0xabed70(%rip),%r8        # ffffffff81057008 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE+0x8>
+ffffffff80598298:	48 8b 0d 71 ed ab 00 	mov    0xabed71(%rip),%rcx        # ffffffff81057010 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE+0x10>
+ffffffff8059829f:	48 8b 3d 82 ed ab 00 	mov    0xabed82(%rip),%rdi        # ffffffff81057028 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE+0x28>
+ffffffff805982a6:	48 85 ff             	test   %rdi,%rdi
+ffffffff805982a9:	74 45                	je     ffffffff805982f0 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x5b0>
+ffffffff805982ab:	0f ae e8             	lfence
+ffffffff805982ae:	0f 31                	rdtsc
+ffffffff805982b0:	44 8b 15 49 ed ab 00 	mov    0xabed49(%rip),%r10d        # ffffffff81057000 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE>
+ffffffff805982b7:	45 39 d1             	cmp    %r10d,%r9d
+ffffffff805982ba:	75 c4                	jne    ffffffff80598280 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x540>
+ffffffff805982bc:	89 c0                	mov    %eax,%eax
+ffffffff805982be:	4c 29 c0             	sub    %r8,%rax
+ffffffff805982c1:	48 c1 e2 20          	shl    $0x20,%rdx
+ffffffff805982c5:	48 01 c2             	add    %rax,%rdx
+ffffffff805982c8:	48 89 d0             	mov    %rdx,%rax
+ffffffff805982cb:	48 f7 e7             	mul    %rdi
+ffffffff805982ce:	48 0f a4 c2 20       	shld   $0x20,%rax,%rdx
+ffffffff805982d3:	48 01 d1             	add    %rdx,%rcx
+ffffffff805982d6:	48 8b 05 83 a5 f4 00 	mov    0xf4a583(%rip),%rax        # ffffffff814e2860 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_648TSC_LAST.0>
+ffffffff805982dd:	48 39 c1             	cmp    %rax,%rcx
+ffffffff805982e0:	76 3c                	jbe    ffffffff8059831e <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x5de>
+ffffffff805982e2:	48 89 0d 77 a5 f4 00 	mov    %rcx,0xf4a577(%rip)        # ffffffff814e2860 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_648TSC_LAST.0>
+ffffffff805982e9:	48 89 c8             	mov    %rcx,%rax
+ffffffff805982ec:	eb 30                	jmp    ffffffff8059831e <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x5de>
+ffffffff805982ee:	66 90                	xchg   %ax,%ax
+ffffffff805982f0:	48 8b 05 01 a5 f4 00 	mov    0xf4a501(%rip),%rax        # ffffffff814e27f8 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer4hpet4BASE.0>
+ffffffff805982f7:	48 85 c0             	test   %rax,%rax
+ffffffff805982fa:	74 14                	je     ffffffff80598310 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x5d0>
+ffffffff805982fc:	e8 3f 6c 05 00       	call   ffffffff805eef40 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer4hpet17read_time_nominal>
+ffffffff80598301:	eb 1b                	jmp    ffffffff8059831e <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x5de>
+ffffffff80598303:	66 66 66 66 2e 0f 1f 	data16 data16 data16 cs nopw 0x0(%rax,%rax,1)
+ffffffff8059830a:	84 00 00 00 00 00 
+ffffffff80598310:	48 8b 05 41 a5 f4 00 	mov    0xf4a541(%rip),%rax        # ffffffff814e2858 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_647JIFFIES>
+ffffffff80598317:	48 69 c0 a0 86 01 00 	imul   $0x186a0,%rax,%rax
+ffffffff8059831e:	48 29 d8             	sub    %rbx,%rax
+ffffffff80598321:	b9 00 00 00 00       	mov    $0x0,%ecx
+ffffffff80598326:	48 0f 43 c8          	cmovae %rax,%rcx
+ffffffff8059832a:	48 81 f9 1f 4e 00 00 	cmp    $0x4e1f,%rcx
+ffffffff80598331:	0f 87 38 02 00 00    	ja     ffffffff8059856f <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x82f>
+ffffffff80598337:	f3 45 0f bc fc       	tzcnt  %r12d,%r15d
+ffffffff8059833c:	41 83 ff 09          	cmp    $0x9,%r15d
+ffffffff80598340:	0f 87 53 07 00 00    	ja     ffffffff80598a99 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xd59>
+ffffffff80598346:	4a 8b 04 fd 68 87 4d 	mov    -0x7eb27898(,%r15,8),%rax
+ffffffff8059834d:	81 
+ffffffff8059834e:	48 85 c0             	test   %rax,%rax
+ffffffff80598351:	0f 84 fe fe ff ff    	je     ffffffff80598255 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x515>
+ffffffff80598357:	f0 42 ff 04 bd 40 87 	lock incl -0x7eb278c0(,%r15,4)
+ffffffff8059835e:	4d 81 
+ffffffff80598360:	48 8b 7d d0          	mov    -0x30(%rbp),%rdi
+ffffffff80598364:	48 83 ff 08          	cmp    $0x8,%rdi
+ffffffff80598368:	0f 83 3f 07 00 00    	jae    ffffffff80598aad <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xd6d>
+ffffffff8059836e:	4c 89 f9             	mov    %r15,%rcx
+ffffffff80598371:	48 c1 e1 30          	shl    $0x30,%rcx
+ffffffff80598375:	4c 09 f1             	or     %r14,%rcx
+ffffffff80598378:	48 89 0c fd b8 87 4d 	mov    %rcx,-0x7eb27848(,%rdi,8)
+ffffffff8059837f:	81 
+ffffffff80598380:	65 8b 0c 25 00 00 00 	mov    %gs:0x0,%ecx
+ffffffff80598387:	00 
+ffffffff80598388:	83 f9 07             	cmp    $0x7,%ecx
+ffffffff8059838b:	0f 87 bf fe ff ff    	ja     ffffffff80598250 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x510>
+ffffffff80598391:	89 c9                	mov    %ecx,%ecx
+ffffffff80598393:	48 8d 14 49          	lea    (%rcx,%rcx,2),%rdx
+ffffffff80598397:	48 8b 14 d5 18 9d 4a 	mov    -0x7eb562e8(,%rdx,8),%rdx
+ffffffff8059839e:	81 
+ffffffff8059839f:	48 85 d2             	test   %rdx,%rdx
+ffffffff805983a2:	0f 84 a8 fe ff ff    	je     ffffffff80598250 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x510>
+ffffffff805983a8:	48 c1 e1 04          	shl    $0x4,%rcx
+ffffffff805983ac:	48 89 91 e0 8a 4d 81 	mov    %rdx,-0x7eb27520(%rcx)
+ffffffff805983b3:	48 8b 15 9e a4 f4 00 	mov    0xf4a49e(%rip),%rdx        # ffffffff814e2858 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_647JIFFIES>
+ffffffff805983ba:	48 89 91 e8 8a 4d 81 	mov    %rdx,-0x7eb27518(%rcx)
+ffffffff805983c1:	e9 8a fe ff ff       	jmp    ffffffff80598250 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x510>
+ffffffff805983c6:	66 2e 0f 1f 84 00 00 	cs nopw 0x0(%rax,%rax,1)
+ffffffff805983cd:	00 00 00 
+ffffffff805983d0:	48 8b 05 69 a4 f4 00 	mov    0xf4a469(%rip),%rax        # ffffffff814e2840 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_6410TSC_ACTIVE.0>
+ffffffff805983d7:	48 85 c0             	test   %rax,%rax
+ffffffff805983da:	0f 84 80 00 00 00    	je     ffffffff80598460 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x720>
+ffffffff805983e0:	be 80 00 00 00       	mov    $0x80,%esi
+ffffffff805983e5:	eb 0d                	jmp    ffffffff805983f4 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x6b4>
+ffffffff805983e7:	66 0f 1f 84 00 00 00 	nopw   0x0(%rax,%rax,1)
+ffffffff805983ee:	00 00 
+ffffffff805983f0:	ff ce                	dec    %esi
+ffffffff805983f2:	74 6c                	je     ffffffff80598460 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x720>
+ffffffff805983f4:	44 8b 0d 05 ec ab 00 	mov    0xabec05(%rip),%r9d        # ffffffff81057000 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE>
+ffffffff805983fb:	41 f6 c1 01          	test   $0x1,%r9b
+ffffffff805983ff:	75 ef                	jne    ffffffff805983f0 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x6b0>
+ffffffff80598401:	4c 8b 05 00 ec ab 00 	mov    0xabec00(%rip),%r8        # ffffffff81057008 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE+0x8>
+ffffffff80598408:	48 8b 0d 01 ec ab 00 	mov    0xabec01(%rip),%rcx        # ffffffff81057010 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE+0x10>
+ffffffff8059840f:	48 8b 3d 12 ec ab 00 	mov    0xabec12(%rip),%rdi        # ffffffff81057028 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE+0x28>
+ffffffff80598416:	48 85 ff             	test   %rdi,%rdi
+ffffffff80598419:	74 45                	je     ffffffff80598460 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x720>
+ffffffff8059841b:	0f ae e8             	lfence
+ffffffff8059841e:	0f 31                	rdtsc
+ffffffff80598420:	44 8b 15 d9 eb ab 00 	mov    0xabebd9(%rip),%r10d        # ffffffff81057000 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE>
+ffffffff80598427:	45 39 d1             	cmp    %r10d,%r9d
+ffffffff8059842a:	75 c4                	jne    ffffffff805983f0 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x6b0>
+ffffffff8059842c:	89 c0                	mov    %eax,%eax
+ffffffff8059842e:	4c 29 c0             	sub    %r8,%rax
+ffffffff80598431:	48 c1 e2 20          	shl    $0x20,%rdx
+ffffffff80598435:	48 01 c2             	add    %rax,%rdx
+ffffffff80598438:	48 89 d0             	mov    %rdx,%rax
+ffffffff8059843b:	48 f7 e7             	mul    %rdi
+ffffffff8059843e:	48 0f a4 c2 20       	shld   $0x20,%rax,%rdx
+ffffffff80598443:	48 01 d1             	add    %rdx,%rcx
+ffffffff80598446:	48 8b 05 13 a4 f4 00 	mov    0xf4a413(%rip),%rax        # ffffffff814e2860 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_648TSC_LAST.0>
+ffffffff8059844d:	48 39 c1             	cmp    %rax,%rcx
+ffffffff80598450:	76 2f                	jbe    ffffffff80598481 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x741>
+ffffffff80598452:	48 89 0d 07 a4 f4 00 	mov    %rcx,0xf4a407(%rip)        # ffffffff814e2860 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_648TSC_LAST.0>
+ffffffff80598459:	48 89 c8             	mov    %rcx,%rax
+ffffffff8059845c:	eb 23                	jmp    ffffffff80598481 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x741>
+ffffffff8059845e:	66 90                	xchg   %ax,%ax
+ffffffff80598460:	48 8b 05 91 a3 f4 00 	mov    0xf4a391(%rip),%rax        # ffffffff814e27f8 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer4hpet4BASE.0>
+ffffffff80598467:	48 85 c0             	test   %rax,%rax
+ffffffff8059846a:	74 07                	je     ffffffff80598473 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x733>
+ffffffff8059846c:	e8 cf 6a 05 00       	call   ffffffff805eef40 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer4hpet17read_time_nominal>
+ffffffff80598471:	eb 0e                	jmp    ffffffff80598481 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x741>
+ffffffff80598473:	48 8b 05 de a3 f4 00 	mov    0xf4a3de(%rip),%rax        # ffffffff814e2858 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_647JIFFIES>
+ffffffff8059847a:	48 69 c0 a0 86 01 00 	imul   $0x186a0,%rax,%rax
+ffffffff80598481:	48 2b 45 a8          	sub    -0x58(%rbp),%rax
+ffffffff80598485:	b9 00 00 00 00       	mov    $0x0,%ecx
+ffffffff8059848a:	48 0f 43 c8          	cmovae %rax,%rcx
+ffffffff8059848e:	f0 48 01 0d ca 06 f4 	lock add %rcx,0xf406ca(%rip)        # ffffffff814d8b60 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq16WW_SOFTIRQ_TICKS>
+ffffffff80598495:	00 
+ffffffff80598496:	49 83 fd 09          	cmp    $0x9,%r13
+ffffffff8059849a:	0f 84 dc 00 00 00    	je     ffffffff8059857c <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x83c>
+ffffffff805984a0:	48 8b 05 99 a3 f4 00 	mov    0xf4a399(%rip),%rax        # ffffffff814e2840 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_6410TSC_ACTIVE.0>
+ffffffff805984a7:	48 85 c0             	test   %rax,%rax
+ffffffff805984aa:	0f 84 80 00 00 00    	je     ffffffff80598530 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x7f0>
+ffffffff805984b0:	be 80 00 00 00       	mov    $0x80,%esi
+ffffffff805984b5:	eb 0d                	jmp    ffffffff805984c4 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x784>
+ffffffff805984b7:	66 0f 1f 84 00 00 00 	nopw   0x0(%rax,%rax,1)
+ffffffff805984be:	00 00 
+ffffffff805984c0:	ff ce                	dec    %esi
+ffffffff805984c2:	74 6c                	je     ffffffff80598530 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x7f0>
+ffffffff805984c4:	44 8b 0d 35 eb ab 00 	mov    0xabeb35(%rip),%r9d        # ffffffff81057000 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE>
+ffffffff805984cb:	41 f6 c1 01          	test   $0x1,%r9b
+ffffffff805984cf:	75 ef                	jne    ffffffff805984c0 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x780>
+ffffffff805984d1:	4c 8b 05 30 eb ab 00 	mov    0xabeb30(%rip),%r8        # ffffffff81057008 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE+0x8>
+ffffffff805984d8:	48 8b 0d 31 eb ab 00 	mov    0xabeb31(%rip),%rcx        # ffffffff81057010 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE+0x10>
+ffffffff805984df:	48 8b 3d 42 eb ab 00 	mov    0xabeb42(%rip),%rdi        # ffffffff81057028 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE+0x28>
+ffffffff805984e6:	48 85 ff             	test   %rdi,%rdi
+ffffffff805984e9:	74 45                	je     ffffffff80598530 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x7f0>
+ffffffff805984eb:	0f ae e8             	lfence
+ffffffff805984ee:	0f 31                	rdtsc
+ffffffff805984f0:	44 8b 15 09 eb ab 00 	mov    0xabeb09(%rip),%r10d        # ffffffff81057000 <_RNvNtNtCskM3lJAAH1t5_3rux2mm4vdso14VDSO_DATA_PAGE>
+ffffffff805984f7:	45 39 d1             	cmp    %r10d,%r9d
+ffffffff805984fa:	75 c4                	jne    ffffffff805984c0 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x780>
+ffffffff805984fc:	89 c0                	mov    %eax,%eax
+ffffffff805984fe:	4c 29 c0             	sub    %r8,%rax
+ffffffff80598501:	48 c1 e2 20          	shl    $0x20,%rdx
+ffffffff80598505:	48 01 c2             	add    %rax,%rdx
+ffffffff80598508:	48 89 d0             	mov    %rdx,%rax
+ffffffff8059850b:	48 f7 e7             	mul    %rdi
+ffffffff8059850e:	48 0f a4 c2 20       	shld   $0x20,%rax,%rdx
+ffffffff80598513:	48 01 d1             	add    %rdx,%rcx
+ffffffff80598516:	48 8b 05 43 a3 f4 00 	mov    0xf4a343(%rip),%rax        # ffffffff814e2860 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_648TSC_LAST.0>
+ffffffff8059851d:	48 39 c1             	cmp    %rax,%rcx
+ffffffff80598520:	76 2f                	jbe    ffffffff80598551 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x811>
+ffffffff80598522:	48 89 0d 37 a3 f4 00 	mov    %rcx,0xf4a337(%rip)        # ffffffff814e2860 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_648TSC_LAST.0>
+ffffffff80598529:	48 89 c8             	mov    %rcx,%rax
+ffffffff8059852c:	eb 23                	jmp    ffffffff80598551 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x811>
+ffffffff8059852e:	66 90                	xchg   %ax,%ax
+ffffffff80598530:	48 8b 05 c1 a2 f4 00 	mov    0xf4a2c1(%rip),%rax        # ffffffff814e27f8 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer4hpet4BASE.0>
+ffffffff80598537:	48 85 c0             	test   %rax,%rax
+ffffffff8059853a:	74 07                	je     ffffffff80598543 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x803>
+ffffffff8059853c:	e8 ff 69 05 00       	call   ffffffff805eef40 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer4hpet17read_time_nominal>
+ffffffff80598541:	eb 0e                	jmp    ffffffff80598551 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x811>
+ffffffff80598543:	48 8b 05 0e a3 f4 00 	mov    0xf4a30e(%rip),%rax        # ffffffff814e2858 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_647JIFFIES>
+ffffffff8059854a:	48 69 c0 a0 86 01 00 	imul   $0x186a0,%rax,%rax
+ffffffff80598551:	49 ff c5             	inc    %r13
+ffffffff80598554:	48 29 d8             	sub    %rbx,%rax
+ffffffff80598557:	b9 00 00 00 00       	mov    $0x0,%ecx
+ffffffff8059855c:	48 0f 43 c8          	cmovae %rax,%rcx
+ffffffff80598560:	48 81 f9 1f 4e 00 00 	cmp    $0x4e1f,%rcx
+ffffffff80598567:	0f 86 bf fb ff ff    	jbe    ffffffff8059812c <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x3ec>
+ffffffff8059856d:	eb 0d                	jmp    ffffffff8059857c <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x83c>
+ffffffff8059856f:	48 8b 45 d0          	mov    -0x30(%rbp),%rax
+ffffffff80598573:	f0 44 09 24 85 b8 8a 	lock or %r12d,-0x7eb27548(,%rax,4)
+ffffffff8059857a:	4d 81 
+ffffffff8059857c:	65 8b 04 25 00 00 00 	mov    %gs:0x0,%eax
+ffffffff80598583:	00 
+ffffffff80598584:	89 c7                	mov    %eax,%edi
+ffffffff80598586:	83 f8 08             	cmp    $0x8,%eax
+ffffffff80598589:	0f 83 2f 05 00 00    	jae    ffffffff80598abe <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xd7e>
+ffffffff8059858f:	48 c1 e7 07          	shl    $0x7,%rdi
+ffffffff80598593:	48 8b 87 d8 6d bf 80 	mov    -0x7f409228(%rdi),%rax
+ffffffff8059859a:	be 00 00 00 80       	mov    $0x80000000,%esi
+ffffffff8059859f:	48 39 f0             	cmp    %rsi,%rax
+ffffffff805985a2:	0f 82 35 01 00 00    	jb     ffffffff805986dd <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x99d>
+ffffffff805985a8:	b9 00 ff ff ff       	mov    $0xffffff00,%ecx
+ffffffff805985ad:	f0 0f c1 48 04       	lock xadd %ecx,0x4(%rax)
+ffffffff805985b2:	89 ca                	mov    %ecx,%edx
+ffffffff805985b4:	81 e2 00 ff 00 00    	and    $0xff00,%edx
+ffffffff805985ba:	81 fa 00 01 00 00    	cmp    $0x100,%edx
+ffffffff805985c0:	75 29                	jne    ffffffff805985eb <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x8ab>
+ffffffff805985c2:	48 ba 15 7c 4a 7f b9 	movabs $0x9e3779b97f4a7c15,%rdx
+ffffffff805985c9:	79 37 9e 
+ffffffff805985cc:	48 0f af d0          	imul   %rax,%rdx
+ffffffff805985d0:	48 c1 ea 35          	shr    $0x35,%rdx
+ffffffff805985d4:	48 6b d2 78          	imul   $0x78,%rdx,%rdx
+ffffffff805985d8:	48 c7 82 50 d0 16 81 	movq   $0x0,-0x7ee92fb0(%rdx)
+ffffffff805985df:	00 00 00 00 
+ffffffff805985e3:	48 c7 40 28 00 00 00 	movq   $0x0,0x28(%rax)
+ffffffff805985ea:	00 
+ffffffff805985eb:	81 c1 00 ff ff ff    	add    $0xffffff00,%ecx
+ffffffff805985f1:	0f 89 e6 00 00 00    	jns    ffffffff805986dd <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x99d>
+ffffffff805985f7:	c7 40 04 00 00 00 00 	movl   $0x0,0x4(%rax)
+ffffffff805985fe:	48 c7 40 38 00 00 00 	movq   $0x0,0x38(%rax)
+ffffffff80598605:	00 
+ffffffff80598606:	48 c7 40 28 00 00 00 	movq   $0x0,0x28(%rax)
+ffffffff8059860d:	00 
+ffffffff8059860e:	48 c7 40 30 00 00 00 	movq   $0x0,0x30(%rax)
+ffffffff80598615:	00 
+ffffffff80598616:	48 8b 0d 3b a2 f4 00 	mov    0xf4a23b(%rip),%rcx        # ffffffff814e2858 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_647JIFFIES>
+ffffffff8059861d:	48 8b 05 24 24 25 01 	mov    0x1252424(%rip),%rax        # ffffffff817eaa48 <_RNvNvNtNtCskM3lJAAH1t5_3rux7process4task24preempt_underflow_report4LAST>
+ffffffff80598624:	48 89 ca             	mov    %rcx,%rdx
+ffffffff80598627:	48 29 c2             	sub    %rax,%rdx
+ffffffff8059862a:	48 83 fa 64          	cmp    $0x64,%rdx
+ffffffff8059862e:	0f 82 a9 00 00 00    	jb     ffffffff805986dd <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x99d>
+ffffffff80598634:	f0 48 0f b1 0d 0b 24 	lock cmpxchg %rcx,0x125240b(%rip)        # ffffffff817eaa48 <_RNvNvNtNtCskM3lJAAH1t5_3rux7process4task24preempt_underflow_report4LAST>
+ffffffff8059863b:	25 01 
+ffffffff8059863d:	0f 85 9a 00 00 00    	jne    ffffffff805986dd <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x99d>
+ffffffff80598643:	0f b6 05 de 09 c1 00 	movzbl 0xc109de(%rip),%eax        # ffffffff811a9028 <_RNvNtNtCskM3lJAAH1t5_3rux3dfx10leakorigin7ENABLED.0>
+ffffffff8059864a:	84 c0                	test   %al,%al
+ffffffff8059864c:	0f 84 8b 00 00 00    	je     ffffffff805986dd <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x99d>
+ffffffff80598652:	65 8b 04 25 00 00 00 	mov    %gs:0x0,%eax
+ffffffff80598659:	00 
+ffffffff8059865a:	89 c7                	mov    %eax,%edi
+ffffffff8059865c:	83 f8 08             	cmp    $0x8,%eax
+ffffffff8059865f:	0f 83 59 04 00 00    	jae    ffffffff80598abe <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xd7e>
+ffffffff80598665:	48 c1 e7 07          	shl    $0x7,%rdi
+ffffffff80598669:	48 8b 87 d8 6d bf 80 	mov    -0x7f409228(%rdi),%rax
+ffffffff80598670:	48 39 f0             	cmp    %rsi,%rax
+ffffffff80598673:	72 68                	jb     ffffffff805986dd <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x99d>
+ffffffff80598675:	0f b6 0d ac 09 c1 00 	movzbl 0xc109ac(%rip),%ecx        # ffffffff811a9028 <_RNvNtNtCskM3lJAAH1t5_3rux3dfx10leakorigin7ENABLED.0>
+ffffffff8059867c:	84 c9                	test   %cl,%cl
+ffffffff8059867e:	74 5d                	je     ffffffff805986dd <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x99d>
+ffffffff80598680:	48 b9 15 7c 4a 7f b9 	movabs $0x9e3779b97f4a7c15,%rcx
+ffffffff80598687:	79 37 9e 
+ffffffff8059868a:	48 0f af c8          	imul   %rax,%rcx
+ffffffff8059868e:	48 c1 e9 35          	shr    $0x35,%rcx
+ffffffff80598692:	48 6b c9 78          	imul   $0x78,%rcx,%rcx
+ffffffff80598696:	48 8b 91 60 d0 16 81 	mov    -0x7ee92fa0(%rcx),%rdx
+ffffffff8059869d:	48 39 c2             	cmp    %rax,%rdx
+ffffffff805986a0:	75 3b                	jne    ffffffff805986dd <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x99d>
+ffffffff805986a2:	8b 05 18 1c 66 00    	mov    0x661c18(%rip),%eax        # ffffffff80bfa2c0 <_RNvNvNtNtCskM3lJAAH1t5_3rux3dfx10leakorigin16report_outermost7OBUDGET>
+ffffffff805986a8:	85 c0                	test   %eax,%eax
+ffffffff805986aa:	74 31                	je     ffffffff805986dd <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x99d>
+ffffffff805986ac:	8d 50 ff             	lea    -0x1(%rax),%edx
+ffffffff805986af:	f0 0f b1 15 09 1c 66 	lock cmpxchg %edx,0x661c09(%rip)        # ffffffff80bfa2c0 <_RNvNvNtNtCskM3lJAAH1t5_3rux3dfx10leakorigin16report_outermost7OBUDGET>
+ffffffff805986b6:	00 
+ffffffff805986b7:	75 24                	jne    ffffffff805986dd <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x99d>
+ffffffff805986b9:	48 8d 81 28 d0 16 81 	lea    -0x7ee92fd8(%rcx),%rax
+ffffffff805986c0:	48 8b 48 40          	mov    0x40(%rax),%rcx
+ffffffff805986c4:	8b 48 6c             	mov    0x6c(%rax),%ecx
+ffffffff805986c7:	8b 48 70             	mov    0x70(%rax),%ecx
+ffffffff805986ca:	85 c9                	test   %ecx,%ecx
+ffffffff805986cc:	74 04                	je     ffffffff805986d2 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x992>
+ffffffff805986ce:	48 8b 48 50          	mov    0x50(%rax),%rcx
+ffffffff805986d2:	48 8b 0d 7f a1 f4 00 	mov    0xf4a17f(%rip),%rcx        # ffffffff814e2858 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_647JIFFIES>
+ffffffff805986d9:	48 8b 40 48          	mov    0x48(%rax),%rax
+ffffffff805986dd:	65 8b 04 25 00 00 00 	mov    %gs:0x0,%eax
+ffffffff805986e4:	00 
+ffffffff805986e5:	83 f8 07             	cmp    $0x7,%eax
+ffffffff805986e8:	77 1f                	ja     ffffffff80598709 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x9c9>
+ffffffff805986ea:	89 c0                	mov    %eax,%eax
+ffffffff805986ec:	48 c1 e0 04          	shl    $0x4,%rax
+ffffffff805986f0:	48 c7 80 e0 8a 4d 81 	movq   $0x0,-0x7eb27520(%rax)
+ffffffff805986f7:	00 00 00 00 
+ffffffff805986fb:	48 8b 0d 56 a1 f4 00 	mov    0xf4a156(%rip),%rcx        # ffffffff814e2858 <_RNvNtNtNtCskM3lJAAH1t5_3rux7drivers5timer6x86_647JIFFIES>
+ffffffff80598702:	48 89 88 e8 8a 4d 81 	mov    %rcx,-0x7eb27518(%rax)
+ffffffff80598709:	48 8b 7d d0          	mov    -0x30(%rbp),%rdi
+ffffffff8059870d:	48 83 ff 08          	cmp    $0x8,%rdi
+ffffffff80598711:	0f 83 96 03 00 00    	jae    ffffffff80598aad <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xd6d>
+ffffffff80598717:	48 c7 04 fd b8 87 4d 	movq   $0x0,-0x7eb27848(,%rdi,8)
+ffffffff8059871e:	81 00 00 00 00 
+ffffffff80598723:	48 c7 04 fd 78 8a 4d 	movq   $0x0,-0x7eb27588(,%rdi,8)
+ffffffff8059872a:	81 00 00 00 00 
+ffffffff8059872f:	65 8b 04 25 00 00 00 	mov    %gs:0x0,%eax
+ffffffff80598736:	00 
+ffffffff80598737:	89 c7                	mov    %eax,%edi
+ffffffff80598739:	83 f8 08             	cmp    $0x8,%eax
+ffffffff8059873c:	0f 83 7c 03 00 00    	jae    ffffffff80598abe <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xd7e>
+ffffffff80598742:	48 c1 e7 07          	shl    $0x7,%rdi
+ffffffff80598746:	48 8b 9f d8 6d bf 80 	mov    -0x7f409228(%rdi),%rbx
+ffffffff8059874d:	48 89 5d a0          	mov    %rbx,-0x60(%rbp)
+ffffffff80598751:	4c 8b 75 b0          	mov    -0x50(%rbp),%r14
+ffffffff80598755:	49 39 de             	cmp    %rbx,%r14
+ffffffff80598758:	0f 84 e2 01 00 00    	je     ffffffff80598940 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xc00>
+ffffffff8059875e:	41 8b 46 04          	mov    0x4(%r14),%eax
+ffffffff80598762:	8b 4b 04             	mov    0x4(%rbx),%ecx
+ffffffff80598765:	89 45 c8             	mov    %eax,-0x38(%rbp)
+ffffffff80598768:	89 4d c4             	mov    %ecx,-0x3c(%rbp)
+ffffffff8059876b:	e8 80 ca d8 ff       	call   ffffffff803251f0 <_RNvNtCskM3lJAAH1t5_3rux6printk21try_console_emit_lock>
+ffffffff80598770:	48 c7 85 10 ff ff ff 	movq   $0x0,-0xf0(%rbp)
+ffffffff80598777:	00 00 00 00 
+ffffffff8059877b:	48 c7 85 18 ff ff ff 	movq   $0x0,-0xe8(%rbp)
+ffffffff80598782:	00 00 00 00 
+ffffffff80598786:	48 c7 85 20 ff ff ff 	movq   $0x0,-0xe0(%rbp)
+ffffffff8059878d:	00 00 00 00 
+ffffffff80598791:	48 c7 85 28 ff ff ff 	movq   $0x0,-0xd8(%rbp)
+ffffffff80598798:	00 00 00 00 
+ffffffff8059879c:	48 c7 85 30 ff ff ff 	movq   $0x0,-0xd0(%rbp)
+ffffffff805987a3:	00 00 00 00 
+ffffffff805987a7:	48 c7 85 38 ff ff ff 	movq   $0x0,-0xc8(%rbp)
+ffffffff805987ae:	00 00 00 00 
+ffffffff805987b2:	48 c7 85 40 ff ff ff 	movq   $0x0,-0xc0(%rbp)
+ffffffff805987b9:	00 00 00 00 
+ffffffff805987bd:	48 c7 85 48 ff ff ff 	movq   $0x0,-0xb8(%rbp)
+ffffffff805987c4:	00 00 00 00 
+ffffffff805987c8:	48 c7 85 50 ff ff ff 	movq   $0x0,-0xb0(%rbp)
+ffffffff805987cf:	00 00 00 00 
+ffffffff805987d3:	48 c7 85 58 ff ff ff 	movq   $0x0,-0xa8(%rbp)
+ffffffff805987da:	00 00 00 00 
+ffffffff805987de:	48 c7 85 60 ff ff ff 	movq   $0x0,-0xa0(%rbp)
+ffffffff805987e5:	00 00 00 00 
+ffffffff805987e9:	48 c7 85 68 ff ff ff 	movq   $0x0,-0x98(%rbp)
+ffffffff805987f0:	00 00 00 00 
+ffffffff805987f4:	48 c7 85 70 ff ff ff 	movq   $0x0,-0x90(%rbp)
+ffffffff805987fb:	00 00 00 00 
+ffffffff805987ff:	48 c7 85 78 ff ff ff 	movq   $0x0,-0x88(%rbp)
+ffffffff80598806:	00 00 00 00 
+ffffffff8059880a:	48 c7 45 80 00 00 00 	movq   $0x0,-0x80(%rbp)
+ffffffff80598811:	00 
+ffffffff80598812:	48 c7 45 88 00 00 00 	movq   $0x0,-0x78(%rbp)
+ffffffff80598819:	00 
+ffffffff8059881a:	88 45 98             	mov    %al,-0x68(%rbp)
+ffffffff8059881d:	48 c7 45 90 00 00 00 	movq   $0x0,-0x70(%rbp)
+ffffffff80598824:	00 
+ffffffff80598825:	41 8b 86 10 1f 00 00 	mov    0x1f10(%r14),%eax
+ffffffff8059882c:	89 45 c0             	mov    %eax,-0x40(%rbp)
+ffffffff8059882f:	8b 83 10 1f 00 00    	mov    0x1f10(%rbx),%eax
+ffffffff80598835:	89 45 bc             	mov    %eax,-0x44(%rbp)
+ffffffff80598838:	48 8d 45 d0          	lea    -0x30(%rbp),%rax
+ffffffff8059883c:	48 89 85 90 fe ff ff 	mov    %rax,-0x170(%rbp)
+ffffffff80598843:	48 c7 85 98 fe ff ff 	movq   $0xffffffff80621050,-0x168(%rbp)
+ffffffff8059884a:	50 10 62 80 
+ffffffff8059884e:	48 8d 45 b0          	lea    -0x50(%rbp),%rax
+ffffffff80598852:	48 89 85 a0 fe ff ff 	mov    %rax,-0x160(%rbp)
+ffffffff80598859:	48 c7 85 a8 fe ff ff 	movq   $0xffffffff8061fc00,-0x158(%rbp)
+ffffffff80598860:	00 fc 61 80 
+ffffffff80598864:	48 8d 45 c0          	lea    -0x40(%rbp),%rax
+ffffffff80598868:	48 89 85 b0 fe ff ff 	mov    %rax,-0x150(%rbp)
+ffffffff8059886f:	48 c7 85 b8 fe ff ff 	movq   $0xffffffff8061eea0,-0x148(%rbp)
+ffffffff80598876:	a0 ee 61 80 
+ffffffff8059887a:	48 8d 45 c8          	lea    -0x38(%rbp),%rax
+ffffffff8059887e:	48 89 85 c0 fe ff ff 	mov    %rax,-0x140(%rbp)
+ffffffff80598885:	48 c7 85 c8 fe ff ff 	movq   $0xffffffff80621560,-0x138(%rbp)
+ffffffff8059888c:	60 15 62 80 
+ffffffff80598890:	48 8d 45 a0          	lea    -0x60(%rbp),%rax
+ffffffff80598894:	48 89 85 d0 fe ff ff 	mov    %rax,-0x130(%rbp)
+ffffffff8059889b:	48 c7 85 d8 fe ff ff 	movq   $0xffffffff8061fc00,-0x128(%rbp)
+ffffffff805988a2:	00 fc 61 80 
+ffffffff805988a6:	48 8d 45 bc          	lea    -0x44(%rbp),%rax
+ffffffff805988aa:	48 89 85 e0 fe ff ff 	mov    %rax,-0x120(%rbp)
+ffffffff805988b1:	48 c7 85 e8 fe ff ff 	movq   $0xffffffff8061eea0,-0x118(%rbp)
+ffffffff805988b8:	a0 ee 61 80 
+ffffffff805988bc:	48 8d 45 c4          	lea    -0x3c(%rbp),%rax
+ffffffff805988c0:	48 89 85 f0 fe ff ff 	mov    %rax,-0x110(%rbp)
+ffffffff805988c7:	48 c7 85 f8 fe ff ff 	movq   $0xffffffff80621560,-0x108(%rbp)
+ffffffff805988ce:	60 15 62 80 
+ffffffff805988d2:	48 8d 45 cc          	lea    -0x34(%rbp),%rax
+ffffffff805988d6:	48 89 85 00 ff ff ff 	mov    %rax,-0x100(%rbp)
+ffffffff805988dd:	48 c7 85 08 ff ff ff 	movq   $0xffffffff806214e0,-0xf8(%rbp)
+ffffffff805988e4:	e0 14 62 80 
+ffffffff805988e8:	48 8d bd 10 ff ff ff 	lea    -0xf0(%rbp),%rdi
+ffffffff805988ef:	48 8d 8d 90 fe ff ff 	lea    -0x170(%rbp),%rcx
+ffffffff805988f6:	48 c7 c6 80 df 63 80 	mov    $0xffffffff8063df80,%rsi
+ffffffff805988fd:	48 c7 c2 f0 66 66 80 	mov    $0xffffffff806666f0,%rdx
+ffffffff80598904:	e8 47 4c 08 00       	call   ffffffff8061d550 <_RNvNtCshgE7ic3rT0S_4core3fmt5write>
+ffffffff80598909:	48 8b 75 90          	mov    -0x70(%rbp),%rsi
+ffffffff8059890d:	48 85 f6             	test   %rsi,%rsi
+ffffffff80598910:	74 21                	je     ffffffff80598933 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xbf3>
+ffffffff80598912:	48 81 fe 81 00 00 00 	cmp    $0x81,%rsi
+ffffffff80598919:	0f 83 67 01 00 00    	jae    ffffffff80598a86 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xd46>
+ffffffff8059891f:	48 8d bd 10 ff ff ff 	lea    -0xf0(%rbp),%rdi
+ffffffff80598926:	e8 35 0f d1 ff       	call   ffffffff802a9860 <_RNvMs1_NtCskM3lJAAH1t5_3rux7consoleNtB5_4Uart10puts_batch>
+ffffffff8059892b:	48 c7 45 90 00 00 00 	movq   $0x0,-0x70(%rbp)
+ffffffff80598932:	00 
+ffffffff80598933:	80 7d 98 01          	cmpb   $0x1,-0x68(%rbp)
+ffffffff80598937:	75 07                	jne    ffffffff80598940 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xc00>
+ffffffff80598939:	c6 05 18 17 a2 00 00 	movb   $0x0,0xa21718(%rip)        # ffffffff80fba058 <_RNvNtCskM3lJAAH1t5_3rux6printk17CONSOLE_EMIT_LOCK>
+ffffffff80598940:	e8 3b b0 e2 ff       	call   ffffffff803c3980 <_RNvNtNtCskM3lJAAH1t5_3rux3dfx7syscost2on>
+ffffffff80598945:	84 c0                	test   %al,%al
+ffffffff80598947:	0f 84 c3 00 00 00    	je     ffffffff80598a10 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xcd0>
+ffffffff8059894d:	65 8b 04 25 00 00 00 	mov    %gs:0x0,%eax
+ffffffff80598954:	00 
+ffffffff80598955:	83 f8 07             	cmp    $0x7,%eax
+ffffffff80598958:	0f 87 b2 00 00 00    	ja     ffffffff80598a10 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xcd0>
+ffffffff8059895e:	89 c1                	mov    %eax,%ecx
+ffffffff80598960:	0f b6 81 68 49 a3 80 	movzbl -0x7f5cb698(%rcx),%eax
+ffffffff80598967:	84 c0                	test   %al,%al
+ffffffff80598969:	0f 84 a1 00 00 00    	je     ffffffff80598a10 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xcd0>
+ffffffff8059896f:	0f b6 81 70 49 a3 80 	movzbl -0x7f5cb690(%rcx),%eax
+ffffffff80598976:	84 c0                	test   %al,%al
+ffffffff80598978:	0f 84 92 00 00 00    	je     ffffffff80598a10 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xcd0>
+ffffffff8059897e:	0f b6 f8             	movzbl %al,%edi
+ffffffff80598981:	40 80 ff 05          	cmp    $0x5,%dil
+ffffffff80598985:	0f 83 55 01 00 00    	jae    ffffffff80598ae0 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xda0>
+ffffffff8059898b:	0f b6 84 8f 47 49 a3 	movzbl -0x7f5cb6b9(%rdi,%rcx,4),%eax
+ffffffff80598992:	80 
+ffffffff80598993:	3c 02                	cmp    $0x2,%al
+ffffffff80598995:	75 79                	jne    ffffffff80598a10 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xcd0>
+ffffffff80598997:	0f 31                	rdtsc
+ffffffff80598999:	89 c0                	mov    %eax,%eax
+ffffffff8059899b:	48 c1 e2 20          	shl    $0x20,%rdx
+ffffffff8059899f:	48 09 c2             	or     %rax,%rdx
+ffffffff805989a2:	48 8b 04 cd 48 48 a3 	mov    -0x7f5cb7b8(,%rcx,8),%rax
+ffffffff805989a9:	80 
+ffffffff805989aa:	31 f6                	xor    %esi,%esi
+ffffffff805989ac:	48 89 d7             	mov    %rdx,%rdi
+ffffffff805989af:	48 29 c7             	sub    %rax,%rdi
+ffffffff805989b2:	48 0f 43 f7          	cmovae %rdi,%rsi
+ffffffff805989b6:	48 89 c8             	mov    %rcx,%rax
+ffffffff805989b9:	48 c1 e0 05          	shl    $0x5,%rax
+ffffffff805989bd:	f0 48 01 b0 58 45 a3 	lock add %rsi,-0x7f5cbaa8(%rax)
+ffffffff805989c4:	80 
+ffffffff805989c5:	f0 48 ff 80 58 46 a3 	lock incq -0x7f5cb9a8(%rax)
+ffffffff805989cc:	80 
+ffffffff805989cd:	48 8d b8 48 47 a3 80 	lea    -0x7f5cb8b8(%rax),%rdi
+ffffffff805989d4:	48 8b 80 58 47 a3 80 	mov    -0x7f5cb8a8(%rax),%rax
+ffffffff805989db:	0f 1f 44 00 00       	nopl   0x0(%rax,%rax,1)
+ffffffff805989e0:	48 39 c6             	cmp    %rax,%rsi
+ffffffff805989e3:	76 08                	jbe    ffffffff805989ed <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xcad>
+ffffffff805989e5:	f0 48 0f b1 77 10    	lock cmpxchg %rsi,0x10(%rdi)
+ffffffff805989eb:	75 f3                	jne    ffffffff805989e0 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xca0>
+ffffffff805989ed:	0f b6 81 70 49 a3 80 	movzbl -0x7f5cb690(%rcx),%eax
+ffffffff805989f4:	0f b6 c0             	movzbl %al,%eax
+ffffffff805989f7:	31 f6                	xor    %esi,%esi
+ffffffff805989f9:	48 83 e8 01          	sub    $0x1,%rax
+ffffffff805989fd:	48 0f 43 f0          	cmovae %rax,%rsi
+ffffffff80598a01:	40 88 b1 70 49 a3 80 	mov    %sil,-0x7f5cb690(%rcx)
+ffffffff80598a08:	48 89 14 cd 48 48 a3 	mov    %rdx,-0x7f5cb7b8(,%rcx,8)
+ffffffff80598a0f:	80 
+ffffffff80598a10:	48 8b 45 d0          	mov    -0x30(%rbp),%rax
+ffffffff80598a14:	c7 04 85 68 8b 4d 81 	movl   $0x0,-0x7eb27498(,%rax,4)
+ffffffff80598a1b:	00 00 00 00 
+ffffffff80598a1f:	8b 04 85 b8 8a 4d 81 	mov    -0x7eb27548(,%rax,4),%eax
+ffffffff80598a26:	85 c0                	test   %eax,%eax
+ffffffff80598a28:	0f 95 c0             	setne  %al
+ffffffff80598a2b:	48 81 c4 48 01 00 00 	add    $0x148,%rsp
+ffffffff80598a32:	5b                   	pop    %rbx
+ffffffff80598a33:	41 5c                	pop    %r12
+ffffffff80598a35:	41 5d                	pop    %r13
+ffffffff80598a37:	41 5e                	pop    %r14
+ffffffff80598a39:	41 5f                	pop    %r15
+ffffffff80598a3b:	5d                   	pop    %rbp
+ffffffff80598a3c:	c3                   	ret
+ffffffff80598a3d:	0f b6 81 78 49 a3 80 	movzbl -0x7f5cb688(%rcx),%eax
+ffffffff80598a44:	48 c7 c7 40 6a 1f 81 	mov    $0xffffffff811f6a40,%rdi
+ffffffff80598a4b:	3c fe                	cmp    $0xfe,%al
+ffffffff80598a4d:	74 15                	je     ffffffff80598a64 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xd24>
+ffffffff80598a4f:	0f b6 c0             	movzbl %al,%eax
+ffffffff80598a52:	3c 60                	cmp    $0x60,%al
+ffffffff80598a54:	0f 83 fc f5 ff ff    	jae    ffffffff80598056 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x316>
+ffffffff80598a5a:	c1 e0 05             	shl    $0x5,%eax
+ffffffff80598a5d:	48 8d b8 10 f1 1e 81 	lea    -0x7ee10ef0(%rax),%rdi
+ffffffff80598a64:	f0 4c 01 47 10       	lock add %r8,0x10(%rdi)
+ffffffff80598a69:	48 8b 47 18          	mov    0x18(%rdi),%rax
+ffffffff80598a6d:	0f 1f 00             	nopl   (%rax)
+ffffffff80598a70:	49 39 c0             	cmp    %rax,%r8
+ffffffff80598a73:	0f 86 dd f5 ff ff    	jbe    ffffffff80598056 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x316>
+ffffffff80598a79:	f0 4c 0f b1 47 18    	lock cmpxchg %r8,0x18(%rdi)
+ffffffff80598a7f:	75 ef                	jne    ffffffff80598a70 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0xd30>
+ffffffff80598a81:	e9 d0 f5 ff ff       	jmp    ffffffff80598056 <_RNvNtNtCskM3lJAAH1t5_3rux9interrupt7softirq12___do_softirq+0x316>
+ffffffff80598a86:	ba 80 00 00 00       	mov    $0x80,%edx
+ffffffff80598a8b:	31 ff                	xor    %edi,%edi
+ffffffff80598a8d:	48 c7 c1 50 04 64 80 	mov    $0xffffffff80640450,%rcx
+ffffffff80598a94:	e8 f7 5b 08 00       	call   ffffffff8061e690 <_RNvNtNtCshgE7ic3rT0S_4core5slice5index16slice_index_fail>
+ffffffff80598a99:	be 0a 00 00 00       	mov    $0xa,%esi
+ffffffff80598a9e:	4c 89 ff             	mov    %r15,%rdi
+ffffffff80598aa1:	48 c7 c2 d8 66 66 80 	mov    $0xffffffff806666d8,%rdx
+ffffffff80598aa8:	e8 c4 5c 08 00       	call   ffffffff8061e771 <_RNvNtCshgE7ic3rT0S_4core9panicking18panic_bounds_check>
+ffffffff80598aad:	be 08 00 00 00       	mov    $0x8,%esi
+ffffffff80598ab2:	48 c7 c2 a8 67 66 80 	mov    $0xffffffff806667a8,%rdx
+ffffffff80598ab9:	e8 b3 5c 08 00       	call   ffffffff8061e771 <_RNvNtCshgE7ic3rT0S_4core9panicking18panic_bounds_check>
+ffffffff80598abe:	be 08 00 00 00       	mov    $0x8,%esi
+ffffffff80598ac3:	48 c7 c2 d8 a3 66 80 	mov    $0xffffffff8066a3d8,%rdx
+ffffffff80598aca:	e8 a2 5c 08 00       	call   ffffffff8061e771 <_RNvNtCshgE7ic3rT0S_4core9panicking18panic_bounds_check>
+ffffffff80598acf:	be 08 00 00 00       	mov    $0x8,%esi
+ffffffff80598ad4:	48 c7 c2 a8 66 66 80 	mov    $0xffffffff806666a8,%rdx
+ffffffff80598adb:	e8 91 5c 08 00       	call   ffffffff8061e771 <_RNvNtCshgE7ic3rT0S_4core9panicking18panic_bounds_check>
+ffffffff80598ae0:	48 ff cf             	dec    %rdi
+ffffffff80598ae3:	be 04 00 00 00       	mov    $0x4,%esi
+ffffffff80598ae8:	48 c7 c2 98 6e 65 80 	mov    $0xffffffff80656e98,%rdx
+ffffffff80598aef:	e8 7d 5c 08 00       	call   ffffffff8061e771 <_RNvNtCshgE7ic3rT0S_4core9panicking18panic_bounds_check>
+ffffffff80598af4:	be 04 00 00 00       	mov    $0x4,%esi
+ffffffff80598af9:	48 c7 c2 b0 6e 65 80 	mov    $0xffffffff80656eb0,%rdx
+ffffffff80598b00:	e8 6c 5c 08 00       	call   ffffffff8061e771 <_RNvNtCshgE7ic3rT0S_4core9panicking18panic_bounds_check>
