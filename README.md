@@ -98,7 +98,7 @@ make ci                    # full unattended pass: build → boot regressions �
 | Surface | Standing |
 |---|---|
 | In-kernel suite (`make test`) | 1,267 riscv64 · 1,263 x86_64 · 1,119 aarch64, all green |
-| Linux Test Project | **1,136 / 1,869** (current expected; 2026-11-15 audited scan 1,122 + 11 tail fixes merged at b3eb4b16e) |
+| Linux Test Project | **1,139 / 1,869** (current expected; 2026-11-15 audited scan 1,122 + 11 tail fixes merged at b3eb4b16e) |
 | Formal verification | 157 Kani harnesses · 1,104 proptests · 4 SPIN models · Miri |
 | Performance (same-rig KVM A/B vs Linux) | lmbench: 10 of 14 paired rows at parity or ahead (best 4.2×, worst deficit 1.61×) · Geekbench 5: SC 2440 / MC 7709 (best-of-runs; 113% / 110% vs the 4-CPU anchor) · fs flush 128 MB (x86_64 KVM): fsync 11.55→3.04 s, msync 13.95→3.31 s, sync 11.30→3.31 s |
 | Boot-parameter matrix (riscv64) | smp{2,4,6,8} × mem{1,2,4,8}G — 16/16 cells clean (previously several panic/hang cells) |
