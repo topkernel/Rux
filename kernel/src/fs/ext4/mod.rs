@@ -239,6 +239,30 @@ impl Ext4FileSystem {
         self.group_descs.lock().len()
     }
 
+    /// Estimated free blocks of the whole fs: the sum of the in-memory
+    /// group-descriptor free counts (falloc-wedge lane, 2026-11-16).
+    /// The delayed-allocation write path defers block allocation to
+    /// writeback, so a full filesystem kept ACCEPTING writes — pages
+    /// piled up dirty, their flushes failed -ENOSPC forever, and an
+    /// ENOSPC fill (LTP tst_fill_fs) never terminated (the fallocate05
+    /// timeout face; FLUSH-FAIL wrote=-28 census, run/f05h). The
+    /// reference kernel's eager-allocation fses surface ENOSPC at
+    /// write(); the write path uses this estimate for the same contract
+    /// (extending write on a zero-free fs fails before dirtying).
+    /// ESTIMATE: lo-word only (64BIT fses carry hi words — a group with
+    /// free % 65536 == 0 undercounts; the consumers only test ==0, and
+    /// the allocator's own u16 counters saturate the same way), and it
+    /// may lag concurrent allocation by the group_descs lock hold — a
+    /// false PASS costs a flush-time ENOSPC (the delayed latitude), a
+    /// false FAIL needs every group at 0 while blocks exist.
+    pub fn est_free_blocks(&self) -> u64 {
+        let descs = self.group_descs.lock();
+        descs
+            .iter()
+            .map(|d| d.bg_free_blocks_count_lo as u64)
+            .sum()
+    }
+
     /// Initialize ext4 filesystem
     ///
     /// Read superblock and block group descriptors

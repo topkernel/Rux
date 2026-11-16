@@ -2675,6 +2675,238 @@ impl PageCache {
         freed
     }
 
+    /// Dirty-work collect, shared by [`shrink_reclaim`] and
+    /// [`writeback_recover`] (falloc-wedge lane, 2026-11-16).
+    ///
+    /// Fills `work` with up to `work.len()` (fs_id, ino, first_idx,
+    /// last_idx) dirty windows. FULL-TABLE WALK with a rotating start
+    /// and EARLY EXIT (falloc-wedge round 2): the first cut scanned a
+    /// rotating 512-slot window per call, which covers the 32768-slot
+    /// table only once per 64 calls — under the fill balloon (a handful
+    /// of dirty inodes among 32k slots) the recovery pass found the
+    /// balloon inode once per ~64 watermark trips and the mark never
+    /// un-tripped (every 4 KiB write then paid a synchronous flush of
+    /// itself; measured on the fallocate05 fill, run/f05e). The walk
+    /// now scans slots until the work array is full; the rotating start
+    /// spreads WHICH dirty inodes are found first across calls. The
+    /// monopolist bound from the pcachewedge lane is kept where it
+    /// matters: the per-inode iteration stays capped (MAX_INODE_SCAN
+    /// BTree steps — a giant inode cannot monopolize the wlock), and an
+    /// empty/clean slot costs one atomic load, so the worst-case walk
+    /// (nothing dirty anywhere) is 32768 atomic loads plus a bounded
+    /// per-dirty-inode peek, not a BTree marathon.
+    fn collect_wb_work(
+        &self,
+        work: &mut [(u64, u64, u64, u64)],
+        window_pages: u64,
+    ) -> usize {
+        const MAX_INODE_SCAN: usize = 2048;
+        static COLLECT_CURSOR: AtomicUsize = AtomicUsize::new(0);
+        let mut n_work = 0usize;
+        let _w = self.wlock.lock();
+        let start = COLLECT_CURSOR.fetch_add(1, Ordering::Relaxed) % PC_TABLE_CAP;
+        'outer: for k in 0..PC_TABLE_CAP {
+            let si = (start + k) % PC_TABLE_CAP;
+            let p = self.slots[si].0.load(Ordering::Acquire);
+            if p.is_null() || p as usize == PC_TOMBSTONE_BITS {
+                continue;
+            }
+            // SAFETY: wlock excludes removal, so the slot's reference is
+            // stable and the entry is alive.
+            let entry = unsafe { &*p };
+            let g = entry.lock.lock();
+            let mut first: Option<u64> = None;
+            let mut last: u64 = 0;
+            let mut stepped = 0usize;
+            for (&idx, page) in g.iter() {
+                stepped += 1;
+                if stepped > MAX_INODE_SCAN {
+                    break; // giant inode — the flush below takes the whole range
+                }
+                if page.invalidated
+                    || page.count_locked() != 0
+                    || !page.dirty.load(Ordering::Acquire)
+                {
+                    continue;
+                }
+                if first.is_none() {
+                    first = Some(idx);
+                }
+                last = idx;
+                if idx - first.unwrap_or(idx) + 1 >= window_pages {
+                    break;
+                }
+            }
+            if let Some(first) = first {
+                work[n_work] = (entry.fs_id, entry.ino, first, last);
+                n_work += 1;
+                if n_work == work.len() {
+                    break 'outer;
+                }
+            }
+        }
+        n_work
+    }
+
+    /// Targeted clean eviction for ONE inode (falloc-wedge lane,
+    /// 2026-11-16): frees up to `want` clean, unpinned, unmapped pages
+    /// of (fs_id, ino) directly from its map. The writer-side watermark
+    /// recovery needs the pages it just flushed to actually RETURN to
+    /// the zone — the generic shrink walks the LRU tail, and while a
+    /// dirty balloon dominates the tail (the fill: 120k dirty parent
+    /// backing pages, measured run/f05e) the freshly-cleaned pages
+    /// behind it are unreachable (EV_SCAN_EXHAUST treadmill, 0-41 pages
+    /// freed per recovery). Same candidate rule as every evict path:
+    /// pinned (cache pin), dirty, or mapped (PCACHE_RO alias) pages
+    /// stay; removal under the entry lock, LRU/frame release after it
+    /// drops (the standing lock order). An emptied map is left in place
+    /// — the insert path revives it (the balloon inodes are written
+    /// again within the same phase).
+    pub fn evict_clean_inode(&self, fs_id: u64, ino: u64, want: usize) -> usize {
+        if want == 0 {
+            return 0;
+        }
+        let key = cache_key(fs_id, ino);
+        let Some(entry) = self.lookup_claimed(key) else {
+            return 0;
+        };
+        const BATCH: usize = 128;
+        let mut freed = 0usize;
+        while freed < want {
+            // Pass 1 (entry lock): collect up to min(BATCH, want-freed)
+            // victim indices and remove them from the map — removal
+            // under the lock is what keeps a concurrent get() from
+            // pinning a victim. The want bound holds for the RETURN
+            // value (callers budget by it), so the batch must not
+            // overshoot the remainder.
+            let limit = core::cmp::min(BATCH, want - freed);
+            let mut victims: [(u64, usize); BATCH] = [(0, 0); BATCH];
+            let mut n = 0usize;
+            {
+                let mut g = entry.lock.lock();
+                let mut it = g.iter();
+                while n < limit {
+                    let Some((&idx, page)) = it.next() else {
+                        break;
+                    };
+                    if page.count_locked() != 0 || page.dirty.load(Ordering::Acquire) {
+                        continue;
+                    }
+                    let pd = pfn_to_page_mut(page.pfn);
+                    if !pd.is_null() && unsafe { (*pd).is_mapped() } {
+                        continue;
+                    }
+                    victims[n] = (idx, page.pfn);
+                    n += 1;
+                }
+                for k in 0..n {
+                    if let Some(removed) = g.remove(&victims[k].0) {
+                        dirty_account_removed(&removed);
+                    }
+                }
+            }
+            if n == 0 {
+                break;
+            }
+            // Pass 2 (locks dropped): LRU unlink + frame release — no
+            // allocation, same funnel as every eviction arm.
+            for k in 0..n {
+                let pfn = victims[k].1;
+                let pd = pfn_to_page_mut(pfn);
+                if !pd.is_null() {
+                    unsafe {
+                        lru::page_remove_lru(&*pd);
+                    }
+                }
+                release_page_frame(pfn);
+                self.total_pages.fetch_sub(1, Ordering::Relaxed);
+                STAT_EVICTIONS.fetch_add(1, Ordering::Relaxed);
+                EV_FREED.fetch_add(1, Ordering::Relaxed);
+                freed += 1;
+            }
+        }
+        drop(entry);
+        freed
+    }
+
+    /// Writer-side dirty-writeback recovery (falloc-wedge lane,
+    /// 2026-11-16) — the duty-cycle back end of ext4_buffered_write's
+    /// dirty-balloon watermark. Flushing the WRITER's own inode is not
+    /// enough to recover the mark: the balloon's bulk is the backing
+    /// file of a loop device fed by every flushed page of the stacked
+    /// fs (a different inode entirely), and until IT is flushed nothing
+    /// becomes evictable and the mark stays tripped (measured: every
+    /// 4 KiB fill write then paid a synchronous flush of itself). This
+    /// pass first frees ALREADY-clean pages (reference order — free
+    /// clean before writing back), then collects dirty inodes
+    /// system-wide (full-table walk, monopolist-bounded per inode) and
+    /// flushes each WHOLE through the run-batched engine (the fast
+    /// class: 23890 pages in ~3.8 s on the repro rig), evicting each
+    /// flushed inode's now-clean pages directly (evict_clean_inode) —
+    /// which is what actually raises nr_free and un-trips the
+    /// watermark.
+    ///
+    /// Re-entry discipline: identical to shrink_reclaim — degrades to
+    /// clean-only when the current task holds a loop io claim (a loop
+    /// backing write must not nest writeback for fses stacked on the
+    /// same loop) or when another writeback engine is mid-flight.
+    /// Returns pages freed by the clean-evict stages.
+    pub fn writeback_recover(&self, want: usize) -> usize {
+        const MAX_WB_INODES: usize = 4;
+        SR_CALLS.fetch_add(1, Ordering::Relaxed);
+        if crate::sched::current_is_dying() {
+            return self.shrink(want);
+        }
+        if crate::drivers::loop_dev::loop_io_claim_held_by_current() {
+            SR_LOOP_DEFER.fetch_add(1, Ordering::Relaxed);
+            return self.shrink(want);
+        }
+        if WRITEBACK_GUARD
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            SR_GUARD_HITS.fetch_add(1, Ordering::Relaxed);
+            return self.shrink(want);
+        }
+        // Stage 1: already-clean pages, generic paths (LRU tail, then
+        // the windowed fallback). Cheap when the tail is clean; cheap
+        // to fail when a dirty balloon owns the tail.
+        let mut freed = self.shrink(want);
+        let mut remaining = want.saturating_sub(freed);
+        if remaining > 0 {
+            let mut work: [(u64, u64, u64, u64); MAX_WB_INODES] = [(0, 0, 0, 0); MAX_WB_INODES];
+            // window_pages=1: the collect only IDENTIFIES dirty inodes
+            // (one dirty page is enough); the flush below hands the
+            // WHOLE inode range to ext4_flush_dirty_inode, whose chunked
+            // collect/write/complete cycles already bound every
+            // per-inode lock hold.
+            let n_work = self.collect_wb_work(&mut work, 1);
+            for i in 0..n_work {
+                if remaining == 0 {
+                    break;
+                }
+                let (fs_id, ino, _first, _last) = work[i];
+                SR_FLUSH_INODES.fetch_add(1, Ordering::Relaxed);
+                // Liveness: the same writeback resolver shrink_reclaim
+                // uses (icache first, then a fresh inode from the
+                // live-instance registry) — a cache miss may cost
+                // performance, never data.
+                if let Some(inode) = crate::fs::ext4::resolve_writeback_inode(fs_id, ino) {
+                    crate::fs::ext4::file::ext4_flush_dirty_inode(&inode, 0, u64::MAX);
+                }
+                // The pages this flush cleaned are THIS inode's — evict
+                // them directly instead of hoping the LRU tail reaches
+                // them past the rest of the balloon.
+                let f2 = self.evict_clean_inode(fs_id, ino, remaining);
+                freed += f2;
+                remaining -= f2;
+            }
+        }
+        WRITEBACK_GUARD.store(false, Ordering::Release);
+        SR_CLEAN_FREED.fetch_add(freed as u64, Ordering::Relaxed);
+        freed
+    }
+
     /// Reclaim-time dirty writeback (the session-24 "v2" item). Direct
     /// reclaim ONLY: the plain shrink() evicts clean pages alone — a
     /// DIRTY entry (unflushed MAP_SHARED stores of a mapping that has
@@ -2755,46 +2987,27 @@ impl PageCache {
             // dirty forever (the Linux dirty-threshold insight: writeback
             // starts far below the memory wall).
             let mut work: [(u64, u64, u64, u64); MAX_WB_INODES] = [(0, 0, 0, 0); MAX_WB_INODES];
-            let mut n_work = 0usize;
-            {
-                let _w = self.wlock.lock();
-                'outer: for si in 0..PC_TABLE_CAP {
-                    let p = self.slots[si].0.load(Ordering::Acquire);
-                    if p.is_null() || p as usize == PC_TOMBSTONE_BITS {
-                        continue;
-                    }
-                    // SAFETY: wlock excludes removal, so the slot's
-                    // reference is stable and the entry is alive.
-                    let entry = unsafe { &*p };
-                    let g = entry.lock.lock();
-                    let mut first: Option<u64> = None;
-                    let mut last: u64 = 0;
-                    for (&idx, page) in g.iter() {
-                        if page.invalidated
-                            || page.count_locked() != 0
-                            || !page.dirty.load(Ordering::Acquire)
-                        {
-                            continue;
-                        }
-                        if first.is_none() {
-                            first = Some(idx);
-                        }
-                        last = idx;
-                        if idx - first.unwrap_or(idx) + 1 >= WB_WINDOW {
-                            break;
-                        }
-                    }
-                    if let Some(first) = first {
-                        work[n_work] = (entry.fs_id, entry.ino, first, last);
-                        n_work += 1;
-                        if n_work == MAX_WB_INODES {
-                            break 'outer;
-                        }
-                    }
-                }
-            }
+            let n_work = self.collect_wb_work(&mut work, WB_WINDOW);
             if n_work == 0 {
+                SR_NO_DIRTY.fetch_add(1, Ordering::Relaxed);
                 break; // no flushable dirty pages anywhere
+            }
+            // RE-ENTRY DISCIPLINE (falloc-wedge lane, 2026-11-16): no
+            // synchronous writeback under a held io lock. If the current
+            // task is inside a loop device's backing-file I/O (the io
+            // claim is held), flushing a dirty inode whose fs is stacked
+            // on that same loop would re-enter loop_request_fn with the
+            // claim already ours — the EDEADLK arm, pages stay dirty,
+            // and this loop burns I/O budget re-deriving that. The
+            // reference kernel never runs loop writeback in the I/O
+            // submitter's context (loop I/O is dispatched from the
+            // device's own worker); our degrade is the same discipline:
+            // clean-only here, the deferred pages are flushed by the
+            // writer-side dirty-balloon watermark or a later reclaim
+            // outside any io claim.
+            if crate::drivers::loop_dev::loop_io_claim_held_by_current() {
+                SR_LOOP_DEFER.fetch_add(1, Ordering::Relaxed);
+                break;
             }
             // Re-entrancy gate: nested reclaim (from inside ext4 write's
             // own allocations) degrades to clean-only.
@@ -2802,6 +3015,7 @@ impl PageCache {
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_err()
             {
+                SR_GUARD_HITS.fetch_add(1, Ordering::Relaxed);
                 break;
             }
             for i in 0..n_work {
@@ -2813,6 +3027,7 @@ impl PageCache {
                 // dirty frames of any inode the bounded icache had
                 // evicted — a cache miss may cost performance, never
                 // data.
+                SR_FLUSH_INODES.fetch_add(1, Ordering::Relaxed);
                 if let Some(inode) = crate::fs::ext4::resolve_writeback_inode(fs_id, ino) {
                     crate::fs::ext4::file::ext4_flush_dirty_inode(
                         &inode,
