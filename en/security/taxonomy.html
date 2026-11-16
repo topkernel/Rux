@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Defect taxonomy · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">Home</a>
+      <a href="../architecture/design.html">Architecture</a>
+      <a href="../performance/index.html">Performance</a>
+      <a href="index.html">Security</a>
+      <a href="../testing/index.html">Testing</a>
+      <a href="../debugging/index.html">Debugging</a>
+      <a href="../guides/getting-started.html">Getting started</a>
+      <a href="../progress/roadmap.html">Progress</a>
+      <a href="../guestbook.html">Feedback</a>
+      <span class="lang-sw"><a class="on" href="../../security/taxonomy.html">中文</a><a href="taxonomy.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">Security</div>
+    <a href="index.html">Security overview</a>
+    <a href="formal.html">Formal verification</a>
+    <a href="unsafe.html">Layered unsafe ledger</a>
+    <a class="on" href="taxonomy.html">Defect taxonomy</a>
+    <a href="hardening.html">Hardening &amp; gaps</a>
+    <div class="grp">Performance</div>
+    <a href="../performance/index.html">Performance overview</a>
+    <a href="../performance/lmbench.html">lmbench</a>
+    <a href="../performance/geekbench.html">Geekbench 5</a>
+    <a href="../performance/fio.html">fio</a>
+    <a href="../performance/rttests.html">rt-tests</a>
+    <a href="../performance/microbench.html">Internal microbenchmarks</a>
+    <div class="grp">Architecture</div>
+    <a href="../architecture/design.html">Design deep-dive</a>
+    <a href="../architecture/scheduler.html">Scheduler</a>
+    <a href="../architecture/memory.html">Memory management</a>
+    <a href="../architecture/filesystem.html">Filesystem</a>
+    <a href="../architecture/ipc.html">IPC</a>
+    <a href="../architecture/boot.html">Boot flow</a>
+    <a href="../architecture/interrupts.html">Interrupts &amp; timers</a>
+    <a href="../architecture/structure.html">Code layout</a>
+    <a href="../architecture/riscv64.html">Porting guide</a>
+    <a href="../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Testing</div>
+    <a href="../testing/index.html">Overview</a>
+    <a href="../testing/ci-pipeline.html">CI pipeline</a>
+    <a href="../testing/ltp.html">LTP scan</a>
+    <a href="../testing/ltp-full.html">LTP full cases</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT audit</a>
+    <a href="../testing/stability.html">Stability</a>
+    <a href="../testing/stress.html">Stress</a>
+    <a href="../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Debugging</div>
+    <a href="../debugging/index.html">Debugging guide</a>
+    <a href="../debugging/tracepoints.html">Tracepoints</a>
+    <a href="../debugging/perf.html">Performance debugging</a>
+    <a href="../debugging/locks.html">Lock debugging</a>
+    <a href="../debugging/memory.html">Memory forensics</a>
+    <a href="../debugging/panic.html">Panic &amp; symbols</a>
+    <div class="grp">Guides</div>
+    <a href="../guides/getting-started.html">Getting started</a>
+    <a href="../guides/development.html">Contributing</a>
+    <a href="../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../progress/roadmap.html">Roadmap</a>
+    <a href="../progress/changelog.html">Changelog</a>
+    <div class="grp">Community</div>
+    <a href="../guestbook.html">Guestbook</a>
+  </aside>
+
+    <article class="doc-main">
+    <h1>The defect taxonomy</h1>
+    <div class="sub">Every memory-corruption defect in the project's history adjudicated individually: methodology, the residency split, representative rows, the panic-surface containment and the negative-result archive — data answering "is a Rust kernel actually safe" · Canonical: docs/architecture/safety-and-performance.md §2</div>
+
+    <h2 id="method"><span class="anchor">§1</span>Methodology</h2>
+    <ul>
+      <li><b>Corpus</b>: every <b>3,358 deduplicated non-merge commit subject</b> reachable from main (2,702 kernel-code subjects) + the hunt-ledger entries.</li>
+      <li><b>Screening</b>: 169 candidate commits matching corruption/race/panic vocabulary, <b>each individually adjudicated</b>, finalized over three sweeps (2026-11-03).</li>
+      <li><b>Residency determination</b>: each memory-corruption row's fix diff is inspected block by block to establish whether the defect lived in an explicit unsafe block, arch assembly, an unsafe interior (UnsafeCell allocator metadata, raw-pointer protocols), or safe code.</li>
+      <li><b>Accounting discipline</b>: containment-only commits do not count as defects; revert-and-reland pairs count once; instrument false positives do not count as kernel defects.</li>
+    </ul>
+
+    <h2 id="headline"><span class="anchor">§2</span>The headline statistics</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Measure</th><th class="num">Count</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td>Memory-corruption-class defects (all history)</td><td class="num"><b>33</b></td><td>each with its fix commit and reproduction/regression evidence</td></tr>
+        <tr><td>— defect inside an explicit unsafe block / arch assembly / unsafe interior</td><td class="num">23</td><td>raw-pointer protocols, UnsafeCell allocator metadata, trap assembly</td></tr>
+        <tr><td>— defect in safe code</td><td class="num">10</td><td>every one in a class safe Rust does not type-check today: ownership/refcount/lock-protocol/stack-depth decisions executed through a trusted unsafe boundary or an unguarded stack</td></tr>
+        <tr><td>Pointer-expression classes (index overrun / iterator invalidation / wild pointer arithmetic / format strings)</td><td class="num"><b>0</b></td><td>the expression-level classes that dominate C-kernel CVE history are compile errors here</td></tr>
+        <tr><td>Caught by review before any boot</td><td class="num">6 / 33</td><td>review works as an independent defense line</td></tr>
+      </tbody>
+    </table></div>
+    <p class="callout"><b>The methodology's self-correction, on record</b>: a draft claimed "zero defects in safe code" — the full-history sweep falsified it (10 safe ownership-class defects), and the final version uses the residency basis. Conclusions follow data, not narrative.</p>
+
+    <h2 id="rows"><span class="anchor">§3</span>Representative rows</h2>
+    <h3>Unsafe-class (3 examples)</h3>
+    <ul>
+      <li><b>kthread pt_regs zeroing</b>: a write_bytes element-count of 168×168 B overran by 28,224 bytes across adjacent pages (live buffer-cache/inode blocks zeroed) (d047afad).</li>
+      <li><b>x86 entry EFLAGS.DF dirty</b>: a user-set DF not cleared reversed rep movsb copies (the scribble engine's root cause) (e7070224).</li>
+      <li><b>buddy split left the final block unmarked as allocated</b>: the same memory handed out twice (FdTable 8KB Vec corrupted, fork hangs) (016b3fa1; allocator-interior UnsafeCell metadata).</li>
+    </ul>
+    <h3>Safe-class (3 examples — all in the type system's blind spots today)</h3>
+    <ul>
+      <li><b>vmscan freed at refcount ≤ 0</b> (the zone double-free enabler) (f4b67f66) → motivated the checked-Refcount-newtype proposal (a <a href="hardening.html">hardening gap</a> on record).</li>
+      <li><b>The GRQ keyed-lock swap discarded the returned guard</b>: the lock released silently at end-of-statement and every critical section ran unexcluded; convicted by a 13-boot paired bisection; keyed guards carry #[must_use] since — the same API-shape bug is now a compile warning (2b092c49/623c4736/75dbf637).</li>
+      <li><b>PCACHE_SHARED defined as bit 10</b>: bit 10 is PPN[0] in Sv39, so every shared mapping aliased a frame 4 KiB off the cache page (silent neighbor-page corruption); <b>caught by snapshot review before any boot ran</b> (6b49140b).</li>
+    </ul>
+    <h3>Caught-in-review examples (selection)</h3>
+    <ul>
+      <li>aarch64 boot.S DTB-pointer register clobber (6e808eea); devfs Arc::as_ptr without an owning clone (the "safe storage → unsafe deref" boundary) (69f45692); an unchecked io_uring SQE index in a raw-pointer read (5465735f); recvmsg re-fetching the user iovec after validation (a safe-code TOCTOU) (32fd359f).</li>
+    </ul>
+
+    <h2 id="boundary"><span class="anchor">§4</span>Boundary rows (listed separately, not in the 33)</h2>
+    <ul>
+      <li>mremap in-place expansion over merged-VMA neighbours (56fc7e8b); the R71 file-position race (c17f6ec0); VMA surgery atomicity (56b2baeb); ext4 stale extents (2f9763fc); the per-task program break (A/B 3/12 boots hit → 0/12) (c127e4bc1/f6e3b8837) — semantic-level defects are filed separately to avoid confusing them with the memory-corruption class.</li>
+    </ul>
+
+    <h2 id="panic"><span class="anchor">§5</span>The panic surface: designed, not latent</h2>
+    <p>The kernel's panic paths are a <b>designed surface</b>: every found instance is eliminated with a regression test, not filed away as a CVE class. The governing principle: <b>loud failure beats silent corruption</b> — a bounds check turns an overrunning write into a panic instead of letting the damage propagate.</p>
+    <ul>
+      <li>Evidence: the pcp refill race's racing store hit a bounds-checked index and panicked explicitly ("the len is 32 but the index is 32", 165ee5fce) — the race existed but the corruption was unreachable.</li>
+      <li>The containment list (selection): the UTF-8 printer family (a non-UTF-8 comm broke the panic printer at t=209s, f0c57182/3ad32b9e), the stale negative-memo null dereference (ea26d923), the mmprof scalar-slot namespace (276c2e70), the dfx switch-table overrun (363401cd), the memwatch PFN bound (cbd41b40), the R81 garbage-pid case (2c044bb5), the R73 stack-walk bound (9777f195), taskdump (bf995f2a), the ext4 empty index root (b70a5deb), aarch64 trap-report regs[31] (363ac70b), binder dead-proc expect → bounded warning (619bf4b6), the timer same-CPU IRQ-reentrancy family (186a00b6), Wave-1's eleven items (83d0b691), get_cwd UB + UTF-8 cmdline (830e3f8c).</li>
+    </ul>
+
+    <h2 id="negative"><span class="anchor">§6</span>The negative-result archive (with receipts)</h2>
+    <ul>
+      <li>Instruments get convicted too: PTGUARD/FREEGUARD were misdiagnoses (e61f7a3a); the first PT_LEDGER hash design produced false DOUBLE-FREE reports plus real frame leaks (626658991200); the 2b092c49 "latent GRQ race" theory was wrong. <b>Negative results with receipts stay in the record</b> — the adjudication discipline is itself audited.</li>
+    </ul>
+
+    <h2 id="verdict"><span class="anchor">§7</span>The verdict: what these numbers support</h2>
+    <ul>
+      <li><b>The class-elimination argument holds</b>: zero expression-level defects is consistent with safe code's structural immunity; 23 of 33 defects reside in explicitly audited unsafe — self-consistent with the layered model where the unsafe surface IS the TCB (12.9% of area, the <a href="unsafe.html">ledger</a>).</li>
+      <li><b>The residual class is named and addressed</b>: the 10 safe-class defects are all ownership/refcount/lock-protocol/stack-depth decisions — precisely the targets of model checking and property testing (loom lock protocols, Kani INV-M tables, proptest refcounts); the hardening register lists checked Refcount and stack-depth analysis as closure items.</li>
+      <li><b>The defense lines work</b>: 6/33 caught by review before any boot; panic surfaces contained instance by instance; instrument misjudgments archived.</li>
+      <li><b>A statement without hedging</b>: 33 defects over 3,358 commits ≈ 1% of all commits carried a memory-corruption defect, each with a fix and regression evidence — this is the empirical baseline for "safe enough", not an assertion.</li>
+    </ul>
+
+    <div class="callout">Reproduce and canonical source: docs/architecture/safety-and-performance.md §2 (the full 33-row table + boundary rows + the panic containment list + the negative-result archive). Related: <a href="unsafe.html">the layered unsafe ledger</a>, <a href="formal.html">formal verification</a>.</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to home</a></span>
+
+      <span class="foot-stats">Site visits <span id="busuanzi_value_site_pv"></span> · Visitors <span id="busuanzi_value_site_uv"></span></span></div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>

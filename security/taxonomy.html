@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>缺陷分类学 · Rux</title>
+<link rel="stylesheet" href="../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">首页</a>
+      <a href="../architecture/design.html">架构设计</a>
+      <a href="../performance/index.html">性能</a>
+      <a href="index.html">安全</a>
+      <a href="../testing/index.html">测试</a>
+      <a href="../debugging/index.html">调试</a>
+      <a href="../guides/getting-started.html">快速入门</a>
+      <a href="../progress/roadmap.html">项目进展</a>
+      <a href="../guestbook.html">留言</a>
+      <span class="lang-sw"><a class="on" href="taxonomy.html">中文</a><a href="../en/security/taxonomy.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">安全</div>
+    <a href="index.html">安全总览</a>
+    <a href="formal.html">形式验证</a>
+    <a href="unsafe.html">分层 unsafe 台账</a>
+    <a class="on" href="taxonomy.html">缺陷分类学</a>
+    <a href="hardening.html">运行时强化与缺口</a>
+    <div class="grp">性能</div>
+    <a href="../performance/index.html">性能总览</a>
+    <a href="../performance/lmbench.html">lmbench</a>
+    <a href="../performance/geekbench.html">Geekbench 5</a>
+    <a href="../performance/fio.html">fio</a>
+    <a href="../performance/rttests.html">rt-tests</a>
+    <a href="../performance/microbench.html">内部微基准</a>
+    <div class="grp">架构设计</div>
+    <a href="../architecture/design.html">架构与模块设计</a>
+    <a href="../architecture/scheduler.html">调度器</a>
+    <a href="../architecture/memory.html">内存管理</a>
+    <a href="../architecture/filesystem.html">文件系统</a>
+    <a href="../architecture/ipc.html">进程间通信</a>
+    <a href="../architecture/boot.html">启动流程</a>
+    <a href="../architecture/interrupts.html">中断与时钟</a>
+    <a href="../architecture/structure.html">代码结构</a>
+    <a href="../architecture/riscv64.html">架构移植指南</a>
+    <a href="../architecture/kernel-lock.html">锁序不变量</a>
+    <div class="grp">测试</div>
+    <a href="../testing/index.html">测试总览</a>
+    <a href="../testing/ci-pipeline.html">CI 流水线</a>
+    <a href="../testing/ltp.html">LTP 兼容扫描</a>
+    <a href="../testing/ltp-full.html">LTP 全量用例</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT 审计</a>
+    <a href="../testing/stability.html">稳定性</a>
+    <a href="../testing/stress.html">压力</a>
+    <a href="../testing/gnome-retrospective.html">回溯报告</a>
+    <div class="grp">调试</div>
+    <a href="../debugging/index.html">调试指南</a>
+    <a href="../debugging/tracepoints.html">tracepoint 框架</a>
+    <a href="../debugging/perf.html">性能调试</a>
+    <a href="../debugging/locks.html">锁调试</a>
+    <a href="../debugging/memory.html">内存取证</a>
+    <a href="../debugging/panic.html">panic 与符号化</a>
+    <div class="grp">开发指南</div>
+    <a href="../guides/getting-started.html">快速入门</a>
+    <a href="../guides/development.html">参与开发</a>
+    <a href="../guides/configuration.html">内核配置</a>
+    <div class="grp">项目进展</div>
+    <a href="../progress/roadmap.html">路线图</a>
+    <a href="../progress/changelog.html">更新日志</a>
+    <div class="grp">互动</div>
+    <a href="../guestbook.html">留言板</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>缺陷分类学</h1>
+    <div class="sub">全史内存破坏类缺陷逐条裁定:方法论、居留地统计、代表行、panic 面收编与负结果档案 —— 用数据回答"Rust 内核到底安不安全" · 正本:docs/architecture/safety-and-performance.md §2</div>
+
+    <h2 id="method"><span class="anchor">§1</span>方法论</h2>
+    <ul>
+      <li><b>语料</b>:main 可达的全部 <b>3,358 个去重非合并提交</b>主题(其中 2,702 个内核代码主题)+ 排查台账条目。</li>
+      <li><b>筛选</b>:以破坏/竞态/panic 词汇匹配出 169 个候选提交,<b>逐条人工裁定</b>,三轮清扫定稿(2026-11-03)。</li>
+      <li><b>居留地判定</b>:每个内存破坏行的修复 diff 逐块审读,确定缺陷驻留于显式 unsafe 块/架构汇编/unsafe 内部(UnsafeCell 分配器元数据、raw 指针协议)还是 safe 代码。</li>
+      <li><b>口径纪律</b>:仅遏制性提交不计为缺陷;revert-reland 对计一次;仪器误报不计入内核缺陷。</li>
+    </ul>
+
+    <h2 id="headline"><span class="anchor">§2</span>主统计</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>口径</th><th class="num">数量</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td>内存破坏类缺陷(全史)</td><td class="num"><b>33</b></td><td>逐条带修复 commit 与复现/回归证据</td></tr>
+        <tr><td>—— 缺陷位于显式 unsafe 块/架构汇编/unsafe 内部</td><td class="num">23</td><td>raw 指针协议、UnsafeCell 分配器元数据、trap 汇编</td></tr>
+        <tr><td>—— 缺陷位于 safe 代码</td><td class="num">10</td><td>全部是安全 Rust 当今<b>不类型检查</b>的类别:所有权/引用计数/锁协议/栈深决策,且经受信 unsafe 边界或无守护栈执行</td></tr>
+        <tr><td>指针表达式类(索引越界/迭代器失效/野指针运算/格式串)</td><td class="num"><b>0</b></td><td>统治 C 内核 CVE 史的表达式级类别在此为编译错误</td></tr>
+        <tr><td>任何启动之前被代码评审捕获</td><td class="num">6 / 33</td><td>评审作为独立防线有效</td></tr>
+      </tbody>
+    </table></div>
+    <p class="callout"><b>方法论自纠记录</b>:初稿曾主张"safe 代码零缺陷"—— 全史扫描将其证伪(10 例 safe 所有权类),定稿改用居留地口径。结论由数据决定,不由叙事决定。</p>
+
+    <h2 id="rows"><span class="anchor">§3</span>代表行</h2>
+    <h3>unsafe 类(3 例)</h3>
+    <ul>
+      <li><b>kthread pt_regs 零化</b>:write_bytes 元素计数 168×168B,越界 28,224 字节覆盖相邻页(活 buffer-cache/inode 块被清零)(d047afad)。</li>
+      <li><b>x86 入口 EFLAGS.DF 脏标志</b>:用户态置 DF 未清,rep movsb 反向拷贝(scribble 引擎根因)(e7070224)。</li>
+      <li><b>buddy split 终块未标已分配</b>:同一内存块重复分发(FdTable 8KB Vec 破坏、fork 挂起)(016b3fa1;分配器内部 UnsafeCell 元数据)。</li>
+    </ul>
+    <h3>safe 类(3 例 —— 全部是类型系统今天的盲区)</h3>
+    <ul>
+      <li><b>vmscan 引用计数 ≤0 仍释放</b>(zone 双重释放的使能者)(f4b67f66)→ 催化 checked Refcount newtype 提案(<a href="hardening.html">硬化缺口</a>在册)。</li>
+      <li><b>GRQ 键控锁 swap 丢弃返回 guard</b>:锁于语句末静默释放,全部临界区未互斥;13 启动配对二分定罪;此后键控 guard 全部 #[must_use] —— 同型 API 缺陷现为编译警告(2b092c49/623c4736/75dbf637)。</li>
+      <li><b>PCACHE_SHARED 定为 bit 10</b>:Sv39 中 bit 10 是 PPN[0],全部共享映射错位 4KiB 别名相邻帧(静默邻居页破坏);<b>快照评审在任何启动之前捕获</b>(6b49140b)。</li>
+    </ul>
+    <h3>评审捕获类(节选)</h3>
+    <ul>
+      <li>aarch64 boot.S DTB 指针寄存器占用(6e808eea);devfs Arc::as_ptr 无属主克隆("safe 存储 → unsafe 解引用"边界)(69f45692);io_uring SQE 索引未检裸读(5465735f);recvmsg 校验后重取用户 iovec(safe TOCTOU)(32fd359f)。</li>
+    </ul>
+
+    <h2 id="boundary"><span class="anchor">§4</span>边界行(单列,不入 33 例)</h2>
+    <ul>
+      <li>mremap 原位扩展越合并邻居(56fc7e8b);R71 文件位置竞态(c17f6ec0);VMA 手术原子性(56b2baeb);ext4 陈旧 extent(2f9763fc);per-task program break(A/B 3/12 启动命中 → 0/12)(c127e4bc1/f6e3b8837)—— 语义级缺陷单独成档,避免与内存破坏类混淆。</li>
+    </ul>
+
+    <h2 id="panic"><span class="anchor">§5</span>panic 面:设计面而非潜伏面</h2>
+    <p>内核的 panic 路径是<b>设计出来的表面</b>:每个已发现实例以回归测试消除,而非归档为 CVE 类。判据原则:<b>响亮失败优于静默破坏</b> —— 边界检查把越界写拦截为 panic,而非让损坏继续传播。</p>
+    <ul>
+      <li>实证:pcp refill 竞态的越界存储命中边界检查,以显式 panic 终止("the len is 32 but the index is 32",165ee5fce)—— 竞态存在但破坏不可达。</li>
+      <li>收编清单(节选):UTF-8 打印机族(非 UTF-8 comm 在 t=209s 击穿 panic 打印机,f0c57182/3ad32b9e)、负向查找缓存空解引用(ea26d923)、mmprof 槽命名空间(276c2e70)、dfx 开关表越界(363401cd)、memwatch PFN 界(cbd41b40)、R81 垃圾 pid(2c044bb5)、R73 栈走查界(9777f195)、taskdump(bf995f2a)、ext4 空索引根(b70a5deb)、aarch64 trap-report regs[31](363ac70b)、binder dead-proc expect→有界告警(619bf4b6)、定时器同 CPU IRQ 重入族(186a00b6)、Wave-1 十一项(83d0b691)、get_cwd UB + UTF-8 cmdline(830e3f8c)。</li>
+    </ul>
+
+    <h2 id="negative"><span class="anchor">§6</span>负结果档案(带收据)</h2>
+    <ul>
+      <li>仪器同样被定罪:PTGUARD/FREEGUARD 为误诊(e61f7a3a);首版 PT_LEDGER 哈希设计产生假 DOUBLE-FREE 报告加真实帧泄漏(626658991200);2b092c49 的"潜伏 GRQ 竞态"理论错误。<b>带收据的负结果保留在档案中</b> —— 判定纪律本身受审计。</li>
+    </ul>
+
+    <h2 id="verdict"><span class="anchor">§7</span>结论:这些数字支持什么</h2>
+    <ul>
+      <li><b>类别论证成立</b>:表达式级缺陷类(0 例)与 safe 代码的结构性免疫一致;33 例中 23 例驻留于显式 audited unsafe —— 与"unsafe 面即 TCB"的分层模型自洽(12.9% 面积,<a href="unsafe.html">台账页</a>)。</li>
+      <li><b>残余类明确</b>:10 例 safe 类全部是所有权/引用计数/锁协议/栈深决策 —— 恰是模型检查与属性测试的靶(loom 锁协议、Kani INV-M 表、proptest 引用计数);硬化登记册将 checked Refcount、栈深分析列为闭合项。</li>
+      <li><b>防线有效</b>:6/33 在任何启动前被评审捕获;panic 面逐实例收编;仪器误判有档案。</li>
+      <li><b>不含糊的表述</b>:33 例/3,358 提交 ≈ 全史 1% 提交携带内存破坏缺陷,且全部带修复与回归证据 —— 这是"足够安全"的实证基线,而非断言。</li>
+    </ul>
+
+    <div class="callout">复现与正本:docs/architecture/safety-and-performance.md §2(全表 33 行 + 边界行 + panic 收编清单 + 负结果档案)。相关:<a href="unsafe.html">分层 unsafe 台账</a>、<a href="formal.html">形式验证</a>。</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">返回首页</a></span>
+
+      <span class="foot-stats">本站访问 <span id="busuanzi_value_site_pv"></span> 次 · 访客 <span id="busuanzi_value_site_uv"></span> 人</span></div>
+  </div>
+</footer>
+
+<script src="../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>

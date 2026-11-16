@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>运行时强化与缺口 · Rux</title>
+<link rel="stylesheet" href="../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">首页</a>
+      <a href="../architecture/design.html">架构设计</a>
+      <a href="../performance/index.html">性能</a>
+      <a href="index.html">安全</a>
+      <a href="../testing/index.html">测试</a>
+      <a href="../debugging/index.html">调试</a>
+      <a href="../guides/getting-started.html">快速入门</a>
+      <a href="../progress/roadmap.html">项目进展</a>
+      <a href="../guestbook.html">留言</a>
+      <span class="lang-sw"><a class="on" href="hardening.html">中文</a><a href="../en/security/hardening.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">安全</div>
+    <a href="index.html">安全总览</a>
+    <a href="formal.html">形式验证</a>
+    <a href="unsafe.html">分层 unsafe 台账</a>
+    <a href="taxonomy.html">缺陷分类学</a>
+    <a class="on" href="hardening.html">运行时强化与缺口</a>
+    <div class="grp">性能</div>
+    <a href="../performance/index.html">性能总览</a>
+    <a href="../performance/lmbench.html">lmbench</a>
+    <a href="../performance/geekbench.html">Geekbench 5</a>
+    <a href="../performance/fio.html">fio</a>
+    <a href="../performance/rttests.html">rt-tests</a>
+    <a href="../performance/microbench.html">内部微基准</a>
+    <div class="grp">架构设计</div>
+    <a href="../architecture/design.html">架构与模块设计</a>
+    <a href="../architecture/scheduler.html">调度器</a>
+    <a href="../architecture/memory.html">内存管理</a>
+    <a href="../architecture/filesystem.html">文件系统</a>
+    <a href="../architecture/ipc.html">进程间通信</a>
+    <a href="../architecture/boot.html">启动流程</a>
+    <a href="../architecture/interrupts.html">中断与时钟</a>
+    <a href="../architecture/structure.html">代码结构</a>
+    <a href="../architecture/riscv64.html">架构移植指南</a>
+    <a href="../architecture/kernel-lock.html">锁序不变量</a>
+    <div class="grp">测试</div>
+    <a href="../testing/index.html">测试总览</a>
+    <a href="../testing/ci-pipeline.html">CI 流水线</a>
+    <a href="../testing/ltp.html">LTP 兼容扫描</a>
+    <a href="../testing/ltp-full.html">LTP 全量用例</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT 审计</a>
+    <a href="../testing/stability.html">稳定性</a>
+    <a href="../testing/stress.html">压力</a>
+    <a href="../testing/gnome-retrospective.html">回溯报告</a>
+    <div class="grp">调试</div>
+    <a href="../debugging/index.html">调试指南</a>
+    <a href="../debugging/tracepoints.html">tracepoint 框架</a>
+    <a href="../debugging/perf.html">性能调试</a>
+    <a href="../debugging/locks.html">锁调试</a>
+    <a href="../debugging/memory.html">内存取证</a>
+    <a href="../debugging/panic.html">panic 与符号化</a>
+    <div class="grp">开发指南</div>
+    <a href="../guides/getting-started.html">快速入门</a>
+    <a href="../guides/development.html">参与开发</a>
+    <a href="../guides/configuration.html">内核配置</a>
+    <div class="grp">项目进展</div>
+    <a href="../progress/roadmap.html">路线图</a>
+    <a href="../progress/changelog.html">更新日志</a>
+    <a href="../progress/quickref.html">命令速查</a>
+    <div class="grp">互动</div>
+    <a href="../guestbook.html">留言板</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>运行时强化与缺口</h1>
+    <div class="sub">六层防御模型、用户/内核边界强化的实测代价、内核自护机制与诚实缺口登记册 —— 每个缺口写明闭合形态 · 正本:docs/architecture/security-design.md、security-posture.md、safety-and-performance.md §5</div>
+
+    <h2 id="model"><span class="anchor">§1</span>六层防御模型</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>层</th><th>机制</th><th>实测代价</th><th>Rux 现状</th></tr></thead>
+      <tbody>
+        <tr><td>L1 语言级隔离</td><td>类型系统 + forbid(unsafe_code) 分层</td><td>~0</td><td>已具备(<a href="unsafe.html">分层台账</a>)</td></tr>
+        <tr><td>L2 系统调用边界</td><td>uaccess + 入口校验</td><td>~55 ns / AC 括号</td><td>已具备(本页 §2)</td></tr>
+        <tr><td>L3 特权模型</td><td>能力位、seccomp</td><td>每判定一次原子操作</td><td>已具备(本页 §3)</td></tr>
+        <tr><td>L4 硬件辅助</td><td>SMAP/SUM、(MPK/MTE 为登记方向)</td><td>20–26 周期(MPK 参照)</td><td>已具备(本页 §2)</td></tr>
+        <tr><td>L5 TCB 形式验证</td><td>Kani/SPIN/loom/Miri/proptest</td><td>离线</td><td>已具备(<a href="formal.html">形式验证</a>)</td></tr>
+        <tr><td>L6 运行时缓解</td><td>eBPF 类观测/缓解通道</td><td>~1% CPU(参照)</td><td><span class="chip bad">缺</span>(缺口登记册)</td></tr>
+      </tbody>
+    </table></div>
+    <p>排序原则:<b>类型系统优先,硬件次之,验证第三,运行时缓解最后</b> —— 检查发生得越早,快路径上残留的越少。</p>
+
+    <h2 id="ub"><span class="anchor">§2</span>用户/内核边界</h2>
+    <ul>
+      <li><b>SMAP(x86_64,D-18 演进)</b>:CR4.SMAP 自 CPUID 判定位启用(曾有 G1 期 EDX/EBX 位错判缺陷,763e9f3c 修复 + 启动日志对活 CR4/CPUID 断言 + 每 boot smap_report);最初 pushfq/orq/popfq 序列(~100+ 周期/对)后演化为 SMAP-gated stac/clac —— CPUID SMAP 位蕴含 STAC/CLAC 存在,2 周期旗标写;<b>fixup 标签同时清 AC</b>(拷贝中途故障落于 AC 仍置位的状态);文档口径 ~55 ns/括号。SMAP-VIOL 信标全 suite 零命中。</li>
+      <li><b>SUM(riscv64)</b>:sstatus.SUM 恒 0 —— 内核仅经 uaccess 异常路径达用户内存;sret 返回 U 态时 SUM=0 为 ABI;任何 SUM=1 启动打印即回归。</li>
+      <li><b>例外表 + fixup</b>:riscv64 .ex_table(insn, fixup);x86_64 可重启 rep-movsb;每个访问器 access_ok(addr,n);故障返回短读/EFAULT,不 panic(LTP x86-r2 N1 证据:37 个 EFAULT 族用例经 fixup 通过);~150 调用点。表完整性由脚本守卫(scripts/verify_exception_table.py:每项必须指向访存指令、fixup 必须指向可执行代码 —— 防标签错位类缺陷)。</li>
+      <li><b>无恒等 MMIO 窗(D-17)</b>:设备地址经内核侧别名区,bootstrap 恒等映射启动后摘除 —— 坏用户指针故障,而非返回内核字节(x86_64 套件 1194/1194 含此前红的 EFAULT 行)。</li>
+      <li><b>取证信标</b>:PF-NOCTX(SMAP 开、AC 清、用户区间 no_context 故障 = 裸用户指针解引用,oops 机制污染前点名 rip/addr)。</li>
+    </ul>
+
+    <h2 id="user"><span class="anchor">§3</span>用户态特权面</h2>
+    <ul>
+      <li><b>用户 W^X</b>:NX 映射、PT_GNU_STACK 语义、READ_IMPLIES_EXEC personality —— 三项曾缺失/被忽略,按参考语义修复(1de56837)。</li>
+      <li><b>seccomp</b>:经典 BPF 子集解释器(LD|W|ABS/IMM、JMP|JEQ/JGT/JGE/JSET|K、RET|K;上限 4096 指令;越界载入与落尾 kill),门控位于两条 trap 路径的派发前;STRICT/FILTER 双模式;kill 动作队列 SIGKILL;fork 继承。PR_SET_NO_NEW_PRIVS 单向、跨 fork+exec 粘滞、门控非特权挂载(LTP prctl02 PASS)。登记的接受性分歧:单过滤器,无 TSYNC/TRACE/NOTIF。</li>
+      <li><b>能力模型</b>:41 个 CAP_* UAPI 常数(CAP_VALID_MASK = 2^41−1);审计后 23 个被咨询点 + 六个此前从未检查的能力经 4e75d849 接线(NET_RAW/NET_ADMIN/SYS_PACCT/SETFCAP/DAC_READ_SEARCH/PERFMON);执法门点 ~18(参考 ~120 —— 广度差距在缺口登记册)。</li>
+      <li><b>secure-exec 环境清洗(D-9)</b>:AT_SECURE 迁移时<b>内核</b>在安装 envp 前删除全部 LD_* —— 不依赖 libc 行为的纵深防御(静态链接自定义加载器同样受保护);登记代价:secure-exec 进程的 /proc/[pid]/environ 不列 LD_*。</li>
+      <li><b>OOM 评分语义</b>:oom_badness 形态(resident 基线 + oom_score_adj),评分规则由 10 项属性测试钉住(免疫/饱和规避/对称性)。</li>
+    </ul>
+
+    <h2 id="self"><span class="anchor">§4</span>内核自护</h2>
+    <ul>
+      <li><b>内核栈护栏</b>:栈底 canary(0xCAFE_F00D_DEAD_BEEF,volatile 写)+ 归还缓存前校验(R18-2 —— 被破坏值即任务越过栈底写入相邻堆页的直接证据,STACK-OVERFLOW 打印)+ FREED_STACKS 32 项环(故障 rsp 落于已释放栈时点名释放者)+ dfx 门控的 0xC3 自由涂绘;打包内核栈 slab(D-2)3445 活任务零 canary 命中。编译器栈保护为在册缺口(见 §6)。</li>
+      <li><b>延迟释放隔离</b>:MmStruct/Task 进 16384 项墙钟环(1500 ms 排水)—— procfs 未记账借用者的 use-after-free 窗口结构性关闭。</li>
+      <li><b>失败纪律</b>:Oops/panic 参考报告形状(CSR + 全 GPR + 32 帧回溯 + 符号化)、panic_on_oops sysctl、panic= 重启参数、pstore console。</li>
+      <li><b>可观测安全网</b>:统一 tracepoint(69 事件/17 组)、census/heal 自愈(MISS=0 入门禁)、自旋看门狗、kallsyms 符号化回溯 —— 缺陷的定位时间本身是安全性质的组成部分。</li>
+    </ul>
+
+    <h2 id="gaps"><span class="anchor">§5</span>诚实缺口登记册</h2>
+    <h3>部分具备</h3>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>项</th><th>现状</th><th>闭合形态</th></tr></thead>
+      <tbody>
+        <tr><td>lockdep 类调试</td><td>键控嵌套 = 编译事实(D-11)+ preempt 计数普查 MISS=0;全树运行期持锁图缺</td><td>键化扩展至其余嵌套对;debug 构建持锁位图为直落形态</td></tr>
+        <tr><td>引用计数硬化</td><td>页/帧引用为普通原子 —— 分类学 10 例 safe 类中 2 例正是本类</td><td>类型化 Refcount:递减至零为唯一 free 路径</td></tr>
+        <tr><td>算术溢出检查</td><td>release profile 关闭(开发开启)</td><td>一行配置 + 经合并门的实测启动/性能成本</td></tr>
+        <tr><td>KASAN 式毒化</td><td>任务页涂绘 + 头部审计 + buddy 元数据影子(dfx 门控);small_alloc 无 redzone</td><td>构建旗标 redzone + small_alloc/slab 释放即毒化</td></tr>
+        <tr><td>LSM 面</td><td>hook 存在;selinuxfs 为标签兼容挂载、构造性 permissive</td><td>策略解析 + AVC 判定</td></tr>
+        <tr><td>命名空间</td><td>PID/IPC 真实(1bde7490);net/user/mount 为桩</td><td>按参考语义逐个实现</td></tr>
+        <tr><td>能力执法广度</td><td>41 常数、~18 门点(参考 ~120)</td><td>按咨询面清单逐点接线</td></tr>
+      </tbody>
+    </table></div>
+    <h3>缺席</h3>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>项</th><th>现状</th><th>闭合形态</th></tr></thead>
+      <tbody>
+        <tr><td>KASLR</td><td>偏移字段与管道存在;无 boot 熵源接线</td><td>入口 RDRAND/seed + 启动打印变化偏移</td></tr>
+        <tr><td>内核 text/rodata W^X</td><td>镜像映射 RWX(riscv64)/ RW 无 NX(x86_64);无 mark_rodata_ro</td><td>init 后 RO 翻转 + dfx 页表走查 tripwire</td></tr>
+        <tr><td>编译器栈保护</td><td>无(stack canary 为内核侧自建,非编译器生成)</td><td>rustc stack-protector 属性 + 构建旗标,成本经门实测</td></tr>
+        <tr><td>硬化 usercopy</td><td>仅 access_ok 边界</td><td>uaccess 胶囊内的逐对象 usercopy 区间检查</td></tr>
+        <tr><td>模块签名</td><td>当前无运行期代码加载(注册面),议题暂空</td><td>真实加载器落地时随行签名校验</td></tr>
+        <tr><td>KCSAN 类检查器</td><td>缺;残余 safe 竞态为协议级</td><td>watchpoint 检查器为立项级工程;loom/Kani 镜像覆盖原语子集</td></tr>
+        <tr><td>kptr_restrict / kallsyms 掩蔽</td><td>/proc/kallsyms 对全部读者显示真地址</td><td>掩蔽旋钮 + 默认掩蔽</td></tr>
+        <tr><td>eBPF 类运行时缓解通道</td><td>缺</td><td>按参考语义立项</td></tr>
+      </tbody>
+    </table></div>
+    <p>posture 汇总(security-posture.md 21 行口径):<b>7 行已具备、3 行 quick、10 行立项级、1 行登记接受</b>。</p>
+
+    <h2 id="stories"><span class="anchor">§6</span>验证-强化协同的实例</h2>
+    <ul>
+      <li><b>Ub 24.04 冻结案的内核无罪判定</b>:以逐事件取证链证明冻结前唯一一次 WAKE(val=1, ret=1) 已投递、WAIT/WAKE 路径无内核侧用户 futex 字写入 —— 内核在词句层面被排除,用户态锁定责任。安全性论证的可信度来自"内核也会被排除"的记录。</li>
+      <li><b>SMAP 启用的二分演化</b>:STAC/CLAC 在 TCG 无条件 #UD(二分实证)→ pushfq 括号(~100+ 周期)→ SMAP-gated stac/clac(2 周期)—— 安全机制的成本曲线本身被测量驱动,不是一次性取舍。</li>
+      <li><b>D-19 类型化定时器轮</b>:六类历史缺陷类(混时钟域比较/periodic 误用/双重取消等)成为编译错,同 rig A/B 同时给出性能改进(arm 锁 924→697 ns)—— 强化与性能同向的实例。</li>
+    </ul>
+
+    <div class="callout">正本:docs/architecture/security-design.md(六层模型 + 度量表)、docs/development/security-posture.md(21 行 posture)、docs/architecture/safety-and-performance.md §5(缺口登记册)、docs/architecture/design-divergences.md(D-9/D-17/D-18)。相关:<a href="formal.html">形式验证</a>、<a href="taxonomy.html">缺陷分类学</a>、<a href="unsafe.html">分层 unsafe 台账</a>。</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">返回首页</a></span>
+
+      <span class="foot-stats">本站访问 <span id="busuanzi_value_site_pv"></span> 次 · 访客 <span id="busuanzi_value_site_uv"></span> 人</span></div>
+  </div>
+</footer>
+
+<script src="../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>

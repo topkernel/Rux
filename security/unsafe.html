@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>分层 unsafe 台账 · Rux</title>
+<link rel="stylesheet" href="../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">首页</a>
+      <a href="../architecture/design.html">架构设计</a>
+      <a href="../performance/index.html">性能</a>
+      <a href="index.html">安全</a>
+      <a href="../testing/index.html">测试</a>
+      <a href="../debugging/index.html">调试</a>
+      <a href="../guides/getting-started.html">快速入门</a>
+      <a href="../progress/roadmap.html">项目进展</a>
+      <a href="../guestbook.html">留言</a>
+      <span class="lang-sw"><a class="on" href="unsafe.html">中文</a><a href="../en/security/unsafe.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">安全</div>
+    <a href="index.html">安全总览</a>
+    <a href="formal.html">形式验证</a>
+    <a class="on" href="unsafe.html">分层 unsafe 台账</a>
+    <a href="taxonomy.html">缺陷分类学</a>
+    <a href="hardening.html">运行时强化与缺口</a>
+    <div class="grp">性能</div>
+    <a href="../performance/index.html">性能总览</a>
+    <a href="../performance/lmbench.html">lmbench</a>
+    <a href="../performance/geekbench.html">Geekbench 5</a>
+    <a href="../performance/fio.html">fio</a>
+    <a href="../performance/rttests.html">rt-tests</a>
+    <a href="../performance/microbench.html">内部微基准</a>
+    <div class="grp">架构设计</div>
+    <a href="../architecture/design.html">架构与模块设计</a>
+    <a href="../architecture/scheduler.html">调度器</a>
+    <a href="../architecture/memory.html">内存管理</a>
+    <a href="../architecture/filesystem.html">文件系统</a>
+    <a href="../architecture/ipc.html">进程间通信</a>
+    <a href="../architecture/boot.html">启动流程</a>
+    <a href="../architecture/interrupts.html">中断与时钟</a>
+    <a href="../architecture/structure.html">代码结构</a>
+    <a href="../architecture/riscv64.html">架构移植指南</a>
+    <a href="../architecture/kernel-lock.html">锁序不变量</a>
+    <div class="grp">测试</div>
+    <a href="../testing/index.html">测试总览</a>
+    <a href="../testing/ci-pipeline.html">CI 流水线</a>
+    <a href="../testing/ltp.html">LTP 兼容扫描</a>
+    <a href="../testing/ltp-full.html">LTP 全量用例</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT 审计</a>
+    <a href="../testing/stability.html">稳定性</a>
+    <a href="../testing/stress.html">压力</a>
+    <a href="../testing/gnome-retrospective.html">回溯报告</a>
+    <div class="grp">调试</div>
+    <a href="../debugging/index.html">调试指南</a>
+    <a href="../debugging/tracepoints.html">tracepoint 框架</a>
+    <a href="../debugging/perf.html">性能调试</a>
+    <a href="../debugging/locks.html">锁调试</a>
+    <a href="../debugging/memory.html">内存取证</a>
+    <a href="../debugging/panic.html">panic 与符号化</a>
+    <div class="grp">开发指南</div>
+    <a href="../guides/getting-started.html">快速入门</a>
+    <a href="../guides/development.html">参与开发</a>
+    <a href="../guides/configuration.html">内核配置</a>
+    <div class="grp">项目进展</div>
+    <a href="../progress/roadmap.html">路线图</a>
+    <a href="../progress/changelog.html">更新日志</a>
+    <a href="../progress/quickref.html">命令速查</a>
+    <div class="grp">互动</div>
+    <a href="../guestbook.html">留言板</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>分层 unsafe 台账</h1>
+    <div class="sub">内存安全 TCB 的定义、分层规则、逐目录预算与收缩路线 —— 回答"unsafe 到底有多少、在哪、受什么约束" · 正本:docs/architecture/kernel-layers.md、docs/development/tcb-ledger.md(脚本生成)</div>
+
+    <h2 id="definition"><span class="anchor">§1</span>内存安全 TCB 的定义</h2>
+    <p>本内核的内存安全 TCB(可信计算基)定义为:<b>内存安全性依赖人工评审而非 Rust 编译器的代码 —— 即每个 unsafe 块内的全部行</b>。其余代码内存安全由构造保证(编译器强制)。工程目标是以语言级隔离赋予宏内核<b>接近微内核的安全性</b>:将 unsafe TCB 收缩到一个小的特权 Framework 层。</p>
+    <div class="callout"><b>诚实边界(每份台账报告携带)</b>:Rust 的 unsafe 纪律只覆盖意外内存不安全。它不是对逻辑缺陷、ABI/规范违反或构建链污染的证明 —— 后者由形式验证、缺陷分类学与压力测试承担(见本栏其他页)。</div>
+
+    <h2 id="layers"><span class="anchor">§2</span>分层规则</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>层</th><th>内容</th><th>unsafe 政策</th></tr></thead>
+      <tbody>
+        <tr><td><b>Framework</b></td><td>硬件/特权 TCB:trap 入口、页表、上下文切换、裸 MMIO/DMA、uaccess、底层同步原语(arch/、mm/、interrupt/、virtio·intc·timer·pci 核心、console/printk/sbi/main/init 等)</td><td>允许 unsafe;每个块须携带 <code>// SAFETY:</code> 不变量注释,覆盖率入台账</td></tr>
+        <tr><td><b>service</b></td><td>全部面向用户态的层(syscall、fs、ipc、net、process、sched 上层、cgroup、procfs…)</td><td><code>#![forbid(unsafe_code)]</code> 为目标态(当前 47 文件编译期禁止 + 56 文件已无 unsafe)</td></tr>
+        <tr><td><b>diagnostics</b></td><td>dfx/ 取证仪、裸内存工具</td><td>单独统计 —— 诊断工具的 churn 不得藏进 Framework 桶</td></tr>
+        <tr><td><b>test</b></td><td>测试代码</td><td>不入头条口径</td></tr>
+      </tbody>
+    </table></div>
+    <ul>
+      <li>分类器为<b>最长前缀匹配</b>;未匹配路径默认落入 service —— <b>新文件从最安全的桶开始,晋升须显式操作</b>。</li>
+      <li><b>胶囊边界</b>(Tock 模式):系统调用入口统一校验并翻译用户指针;内核其余部分不直接触用户内存。syscall/io.rs 的 69 个 unsafe token 清零是该模式的实例 —— 用户拷贝改走 arch/uaccess_safe.rs 的地址/切片类型化 copy_in/copy_out(Framework 新模块)。</li>
+    </ul>
+
+    <h2 id="numbers"><span class="anchor">§3</span>台账数字(脚本生成,双口径)</h2>
+    <h3>行口径(scripts/tcb_ledger.py,花括号匹配 unsafe 跨度,剥离注释与字面量)</h3>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>目录</th><th class="num">unsafe 行</th><th class="num">unsafe 密度</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td>全内核</td><td class="num">20,926 / 162,677 行(263 文件,2,494 个 unsafe 块)</td><td class="num"><b>12.9%</b></td><td>预算规则:该百分比只降不升,升须逐发布说明</td></tr>
+        <tr><td>fs</td><td class="num">5,352</td><td class="num">12.6%</td><td>ext4 + 页缓存是预算大头</td></tr>
+        <tr><td>syscall</td><td class="num">3,955</td><td class="num">15.8%</td><td>胶囊边界层</td></tr>
+        <tr><td>process / drivers</td><td class="num">2,807 / 2,131</td><td class="num">24.6% / 15.7%</td><td>process 密度最高(trap/上下文汇编毗邻)</td></tr>
+        <tr><td>sched</td><td class="num">—</td><td class="num">17.6%</td><td>GRQ/切换路径</td></tr>
+        <tr><td>mm</td><td class="num">2,194</td><td class="num">6.8%</td><td>分配器内部 unsafe 内聚于原语</td></tr>
+        <tr><td>sync</td><td class="num">—</td><td class="num"><b>2.8%</b></td><td>目标形态的实例:每原语一个小 unsafe 核心,safe API 在上</td></tr>
+      </tbody>
+    </table></div>
+    <p>外部参照:Asterinas(USENIX ATC'25,同类 Rust 内核)按同口径报告内存安全 TCB ~14% —— 本内核在同一轴线上(12.9%)。</p>
+    <h3>token 口径(scripts/gen_tcb_ledger.py,分层规则表与 kernel-layers.md 同源)</h3>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>桶</th><th class="num">unsafe token</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td>service</td><td class="num">3,158</td><td>收缩目标所在(基线 10-29:3,085;forbid 文件 0 → 47)</td></tr>
+        <tr><td>Framework</td><td class="num">1,340</td><td>逐块 SAFETY 注释覆盖 3,207/5,009 = <b>64%</b></td></tr>
+        <tr><td>diagnostics</td><td class="num">193</td><td>dfx 仪</td></tr>
+        <tr><td>test</td><td class="num">80</td><td>不入头条</td></tr>
+      </tbody>
+    </table></div>
+    <p>service token 热点:syscall 722、fs 556、ipc 295、process 277、net 223、mm 219、sched 207。</p>
+
+    <h2 id="forbid"><span class="anchor">§4</span>forbid 运动与收缩路线</h2>
+    <ul>
+      <li>第一轮(2026-10-29):113 文件带 <code>#![forbid(unsafe_code)]</code>(46 service);第二轮(2026-10-31):首个具名收缩目标 syscall/io.rs —— 69 token → 0。</li>
+      <li>目标(登记于 security-design.md):forbid 文件 47 → 90,带 unsafe 的 service 文件 123 → 60(两个季度窗口)。</li>
+      <li>SAFETY 注释覆盖 64% → <b>95%</b>(class 2-3 块)为目标。</li>
+      <li>分级审计计划:class 1(带检查的访问器读)→ class 3(裸指针 + 手写不变量);台账头条将增加 <b>"service 层 class-3 token 数"</b> —— 真正预测现场缺陷的量。审计覆盖门:scripts/review_coverage.py --check 在树内出现台账未登记文件时使构建失败。</li>
+    </ul>
+
+    <h2 id="argument"><span class="anchor">§5</span>分层论证:为什么这个形状值得信任</h2>
+    <ul>
+      <li><b>类消除论证</b>(对照 C 内核 CVE 史):越界写(bounds-checked slice)、Arc 属主的 use-after-free/double-free、类型化共享态数据竞争(Send/Sync)、迭代器失效(borrowck)、格式串注入(typed formatting)—— 这些主导类别在 safe 代码中<b>不可表达</b>;缺陷分类学的 0 例指针表达式缺陷是同一条论证的实证面(见 <a href="taxonomy.html">分类学</a>)。</li>
+      <li><b>密度论证</b>:sync 目录 2.8% 的 unsafe 密度是分层设计的活样本 —— unsafe 面积与原语复杂度成正比、与 API 面积无关。</li>
+      <li><b>配对论证</b>:每个 Framework 原语配 (a) Kani harness,(b) proptest,(c) Framework 收缩后 Verus 函数规约(登记的下一步,先做页标志/引用计数代数);RustBelt 作为信任锚引用而非构建依赖。</li>
+      <li><b>预算论证</b>:12.9% 的单调下降规则 + 每处新增 unsafe 须在 commit body 说明"为什么 safe 不可能"—— TCB 增长被流程约束而非约定约束。</li>
+    </ul>
+
+    <div class="callout">复现:python3 scripts/gen_tcb_ledger.py --markdown(分层 token 口径);python3 scripts/tcb_ledger.py(行口径)。正本:docs/architecture/kernel-layers.md(分层规则 + forbid 运动)、docs/development/tcb-ledger.md(生成台账)。相关:<a href="formal.html">形式验证</a>(Kani 证 unsafe)、<a href="taxonomy.html">缺陷分类学</a>(居留地实证)。</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">返回首页</a></span>
+
+      <span class="foot-stats">本站访问 <span id="busuanzi_value_site_pv"></span> 次 · 访客 <span id="busuanzi_value_site_uv"></span> 人</span></div>
+  </div>
+</footer>
+
+<script src="../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>

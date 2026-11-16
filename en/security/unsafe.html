@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Layered unsafe ledger · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">Home</a>
+      <a href="../architecture/design.html">Architecture</a>
+      <a href="../performance/index.html">Performance</a>
+      <a href="index.html">Security</a>
+      <a href="../testing/index.html">Testing</a>
+      <a href="../debugging/index.html">Debugging</a>
+      <a href="../guides/getting-started.html">Getting started</a>
+      <a href="../progress/roadmap.html">Progress</a>
+      <a href="../guestbook.html">Feedback</a>
+      <span class="lang-sw"><a class="on" href="../../security/unsafe.html">中文</a><a href="unsafe.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">Security</div>
+    <a href="index.html">Security overview</a>
+    <a href="formal.html">Formal verification</a>
+    <a class="on" href="unsafe.html">Layered unsafe ledger</a>
+    <a href="taxonomy.html">Defect taxonomy</a>
+    <a href="hardening.html">Hardening &amp; gaps</a>
+    <div class="grp">Performance</div>
+    <a href="../performance/index.html">Performance overview</a>
+    <a href="../performance/lmbench.html">lmbench</a>
+    <a href="../performance/geekbench.html">Geekbench 5</a>
+    <a href="../performance/fio.html">fio</a>
+    <a href="../performance/rttests.html">rt-tests</a>
+    <a href="../performance/microbench.html">Internal microbenchmarks</a>
+    <div class="grp">Architecture</div>
+    <a href="../architecture/design.html">Design deep-dive</a>
+    <a href="../architecture/scheduler.html">Scheduler</a>
+    <a href="../architecture/memory.html">Memory management</a>
+    <a href="../architecture/filesystem.html">Filesystem</a>
+    <a href="../architecture/ipc.html">IPC</a>
+    <a href="../architecture/boot.html">Boot flow</a>
+    <a href="../architecture/interrupts.html">Interrupts &amp; timers</a>
+    <a href="../architecture/structure.html">Code layout</a>
+    <a href="../architecture/riscv64.html">Porting guide</a>
+    <a href="../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Testing</div>
+    <a href="../testing/index.html">Overview</a>
+    <a href="../testing/ci-pipeline.html">CI pipeline</a>
+    <a href="../testing/ltp.html">LTP scan</a>
+    <a href="../testing/ltp-full.html">LTP full cases</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT audit</a>
+    <a href="../testing/stability.html">Stability</a>
+    <a href="../testing/stress.html">Stress</a>
+    <a href="../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Debugging</div>
+    <a href="../debugging/index.html">Debugging guide</a>
+    <a href="../debugging/tracepoints.html">Tracepoints</a>
+    <a href="../debugging/perf.html">Performance debugging</a>
+    <a href="../debugging/locks.html">Lock debugging</a>
+    <a href="../debugging/memory.html">Memory forensics</a>
+    <a href="../debugging/panic.html">Panic &amp; symbols</a>
+    <div class="grp">Guides</div>
+    <a href="../guides/getting-started.html">Getting started</a>
+    <a href="../guides/development.html">Contributing</a>
+    <a href="../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../progress/roadmap.html">Roadmap</a>
+    <a href="../progress/changelog.html">Changelog</a>
+    <a href="../progress/quickref.html">Commands</a>
+    <div class="grp">Community</div>
+    <a href="../guestbook.html">Guestbook</a>
+  </aside>
+
+    <article class="doc-main">
+    <h1>The layered unsafe ledger</h1>
+    <div class="sub">The memory-safety TCB's definition, layering rules, per-directory budget and the shrink roadmap — answering "how much unsafe exists, where, and under what constraints" · Canonical: docs/architecture/kernel-layers.md, docs/development/tcb-ledger.md (script-generated)</div>
+
+    <h2 id="definition"><span class="anchor">§1</span>Defining the memory-safety TCB</h2>
+    <p>This kernel's memory-safety TCB (trusted computing base) is defined as: <b>the code whose memory safety depends on human review rather than the Rust compiler — i.e. every line inside an unsafe block</b>. Everything else is memory-safe by construction (compiler-enforced). The engineering goal is to give a monolithic kernel <b>microkernel-adjacent safety</b> through language-level isolation: shrink the unsafe TCB into a small privileged Framework layer.</p>
+    <div class="callout"><b>The honest boundary (carried by every ledger report)</b>: Rust's unsafe discipline covers accidental memory unsafety only. It is not a proof against logic bugs, ABI/spec violations, or compromised build tooling — those are carried by formal verification, the defect taxonomy, and stress testing (the other pages of this section).</div>
+
+    <h2 id="layers"><span class="anchor">§2</span>The layering rules</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Layer</th><th>Contents</th><th>unsafe policy</th></tr></thead>
+      <tbody>
+        <tr><td><b>Framework</b></td><td>the hardware/privilege TCB: trap entry, page tables, context switch, raw MMIO/DMA, uaccess, low-level sync primitives (arch/, mm/, interrupt/, the virtio·intc·timer·pci cores, console/printk/sbi/main etc.)</td><td>unsafe permitted; every block carries a <code>// SAFETY:</code> invariant comment, coverage tracked in the ledger</td></tr>
+        <tr><td><b>service</b></td><td>everything userspace-facing (syscall, fs, ipc, net, process, the sched upper layer, cgroup, procfs...)</td><td><code>#![forbid(unsafe_code)]</code> is the target state (currently 47 files compile-time forbidden + 56 files already unsafe-free)</td></tr>
+        <tr><td><b>diagnostics</b></td><td>dfx/ forensic instruments, raw-memory tooling</td><td>reported separately — diagnostic churn must not hide inside the Framework bucket</td></tr>
+        <tr><td><b>test</b></td><td>test code</td><td>excluded from the headline figure</td></tr>
+      </tbody>
+    </table></div>
+    <ul>
+      <li>The classifier is <b>longest-prefix match</b>; unmatched paths default to service — <b>new files start in the safest bucket and promotion is an explicit act</b>.</li>
+      <li><b>The capsule boundary</b> (the Tock pattern): the syscall entry validates and translates user pointers uniformly; the rest of the kernel does not touch user memory directly. syscall/io.rs going from 69 unsafe tokens to zero is a worked instance — user copies now go through arch/uaccess_safe.rs's address/slice-typed copy_in/copy_out (a new Framework module).</li>
+    </ul>
+
+    <h2 id="numbers"><span class="anchor">§3</span>Ledger numbers (script-generated, two accounting bases)</h2>
+    <h3>Line basis (scripts/tcb_ledger.py, brace-matched unsafe spans, comments and literals stripped)</h3>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Directory</th><th class="num">unsafe lines</th><th class="num">unsafe density</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Whole kernel</td><td class="num">20,926 / 162,677 lines (263 files, 2,494 unsafe blocks)</td><td class="num"><b>12.9%</b></td><td>budget rule: the percentage only goes down, or an increase is justified per release</td></tr>
+        <tr><td>fs</td><td class="num">5,352</td><td class="num">12.6%</td><td>ext4 + page cache carry the budget</td></tr>
+        <tr><td>syscall</td><td class="num">3,955</td><td class="num">15.8%</td><td>the capsule boundary layer</td></tr>
+        <tr><td>process / drivers</td><td class="num">2,807 / 2,131</td><td class="num">24.6% / 15.7%</td><td>process is the densest (trap/context-switch adjacency)</td></tr>
+        <tr><td>sched</td><td class="num">—</td><td class="num">17.6%</td><td>the GRQ/switch paths</td></tr>
+        <tr><td>mm</td><td class="num">2,194</td><td class="num">6.8%</td><td>allocator unsafety is cohesive inside the primitives</td></tr>
+        <tr><td>sync</td><td class="num">—</td><td class="num"><b>2.8%</b></td><td>the shape's living instance: one small unsafe core per primitive, a safe API above it</td></tr>
+      </tbody>
+    </table></div>
+    <p>External reference point: Asterinas (USENIX ATC'25, a same-class Rust kernel) reports a memory-safety TCB of ~14% under the same kind of measurement — this kernel sits on the same axis at 12.9%.</p>
+    <h3>Token basis (scripts/gen_tcb_ledger.py; the rule table mirrors kernel-layers.md)</h3>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Bucket</th><th class="num">unsafe tokens</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>service</td><td class="num">3,158</td><td>the shrink target (baseline 10-29: 3,085; forbid files 0 → 47)</td></tr>
+        <tr><td>Framework</td><td class="num">1,340</td><td>SAFETY-comment coverage 3,207/5,009 = <b>64%</b></td></tr>
+        <tr><td>diagnostics</td><td class="num">193</td><td>dfx instruments</td></tr>
+        <tr><td>test</td><td class="num">80</td><td>excluded from the headline</td></tr>
+      </tbody>
+    </table></div>
+    <p>Service-token hotspots: syscall 722, fs 556, ipc 295, process 277, net 223, mm 219, sched 207.</p>
+
+    <h2 id="forbid"><span class="anchor">§4</span>The forbid campaign and the shrink roadmap</h2>
+    <ul>
+      <li>Session 1 (2026-10-29): 113 files carry <code>#![forbid(unsafe_code)]</code> (46 service); Session 2 (2026-10-31): the first named shrink target, syscall/io.rs — 69 tokens → 0.</li>
+      <li>Targets (recorded in security-design.md): forbid files 47 → 90, unsafe-bearing service files 123 → 60 (a two-quarter window).</li>
+      <li>SAFETY-comment coverage 64% → <b>95%</b> (class 2-3 blocks) is the goal.</li>
+      <li>The graded-audit plan: class 1 (checked accessor reads) → class 3 (raw pointers with hand-rolled invariants); the ledger's headline will add <b>"class-3 tokens in service code"</b> — the number that actually predicts field bugs. The audit-coverage gate: scripts/review_coverage.py --check fails the build when the tree gains a file the map does not know about.</li>
+    </ul>
+
+    <h2 id="argument"><span class="anchor">§5</span>The layering argument: why this shape deserves trust</h2>
+    <ul>
+      <li><b>Class elimination (compile time)</b>, against C-kernel CVE history: buffer overruns (bounds-checked slices), Arc-owned use-after-free/double-free, data races on typed shared state (Send/Sync), iterator invalidation (borrowck), format-string injection (typed formatting) — the dominant classes are <b>unrepresentable in safe code</b>; the taxonomy's zero pointer-expression defects is the empirical face of the same argument (see <a href="taxonomy.html">taxonomy</a>).</li>
+      <li><b>The density argument</b>: sync at 2.8% unsafe density is the layering's living sample — unsafe area scales with primitive complexity, not API surface.</li>
+      <li><b>The pairing argument</b>: every Framework primitive carries (a) a Kani harness, (b) a proptest, and (c) — as the Framework shrinks — a Verus function spec (the registered next step, page-flag/refcount algebra first); RustBelt is cited as the trust anchor, not a build dependency.</li>
+      <li><b>The budget argument</b>: the monotone-down rule on 12.9% + every newly added unsafe requiring a commit-body explanation of "why safe code was not possible" — TCB growth is constrained by process, not convention.</li>
+    </ul>
+
+    <div class="callout">Reproduce: python3 scripts/gen_tcb_ledger.py --markdown (the layered token basis); python3 scripts/tcb_ledger.py (the line basis). Canonical: docs/architecture/kernel-layers.md (the rules + forbid campaign), docs/development/tcb-ledger.md (the generated ledger). Related: <a href="formal.html">formal verification</a> (Kani proving unsafe), <a href="taxonomy.html">defect taxonomy</a> (the residency evidence).</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to home</a></span>
+
+      <span class="foot-stats">Site visits <span id="busuanzi_value_site_pv"></span> · Visitors <span id="busuanzi_value_site_uv"></span></span></div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>

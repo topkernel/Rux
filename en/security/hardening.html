@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hardening &amp; gaps · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">Home</a>
+      <a href="../architecture/design.html">Architecture</a>
+      <a href="../performance/index.html">Performance</a>
+      <a href="index.html">Security</a>
+      <a href="../testing/index.html">Testing</a>
+      <a href="../debugging/index.html">Debugging</a>
+      <a href="../guides/getting-started.html">Getting started</a>
+      <a href="../progress/roadmap.html">Progress</a>
+      <a href="../guestbook.html">Feedback</a>
+      <span class="lang-sw"><a class="on" href="../../security/hardening.html">中文</a><a href="hardening.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">Security</div>
+    <a href="index.html">Security overview</a>
+    <a href="formal.html">Formal verification</a>
+    <a href="unsafe.html">Layered unsafe ledger</a>
+    <a href="taxonomy.html">Defect taxonomy</a>
+    <a class="on" href="hardening.html">Hardening &amp; gaps</a>
+    <div class="grp">Performance</div>
+    <a href="../performance/index.html">Performance overview</a>
+    <a href="../performance/lmbench.html">lmbench</a>
+    <a href="../performance/geekbench.html">Geekbench 5</a>
+    <a href="../performance/fio.html">fio</a>
+    <a href="../performance/rttests.html">rt-tests</a>
+    <a href="../performance/microbench.html">Internal microbenchmarks</a>
+    <div class="grp">Architecture</div>
+    <a href="../architecture/design.html">Design deep-dive</a>
+    <a href="../architecture/scheduler.html">Scheduler</a>
+    <a href="../architecture/memory.html">Memory management</a>
+    <a href="../architecture/filesystem.html">Filesystem</a>
+    <a href="../architecture/ipc.html">IPC</a>
+    <a href="../architecture/boot.html">Boot flow</a>
+    <a href="../architecture/interrupts.html">Interrupts &amp; timers</a>
+    <a href="../architecture/structure.html">Code layout</a>
+    <a href="../architecture/riscv64.html">Porting guide</a>
+    <a href="../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Testing</div>
+    <a href="../testing/index.html">Overview</a>
+    <a href="../testing/ci-pipeline.html">CI pipeline</a>
+    <a href="../testing/ltp.html">LTP scan</a>
+    <a href="../testing/ltp-full.html">LTP full cases</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT audit</a>
+    <a href="../testing/stability.html">Stability</a>
+    <a href="../testing/stress.html">Stress</a>
+    <a href="../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Debugging</div>
+    <a href="../debugging/index.html">Debugging guide</a>
+    <a href="../debugging/tracepoints.html">Tracepoints</a>
+    <a href="../debugging/perf.html">Performance debugging</a>
+    <a href="../debugging/locks.html">Lock debugging</a>
+    <a href="../debugging/memory.html">Memory forensics</a>
+    <a href="../debugging/panic.html">Panic &amp; symbols</a>
+    <div class="grp">Guides</div>
+    <a href="../guides/getting-started.html">Getting started</a>
+    <a href="../guides/development.html">Contributing</a>
+    <a href="../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../progress/roadmap.html">Roadmap</a>
+    <a href="../progress/changelog.html">Changelog</a>
+    <a href="../progress/quickref.html">Commands</a>
+    <div class="grp">Community</div>
+    <a href="../guestbook.html">Guestbook</a>
+  </aside>
+
+    <article class="doc-main">
+    <h1>Runtime hardening &amp; gaps</h1>
+    <div class="sub">The six-layer defense model, the measured cost of user/kernel boundary hardening, the kernel self-protection mechanisms and the honest gaps register — every gap states its closure shape · Canonical: docs/architecture/security-design.md, security-posture.md, safety-and-performance.md §5</div>
+
+    <h2 id="model"><span class="anchor">§1</span>The six-layer defense model</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Layer</th><th>Mechanism</th><th>Measured cost</th><th>Status here</th></tr></thead>
+      <tbody>
+        <tr><td>L1 language isolation</td><td>the type system + forbid(unsafe_code) layering</td><td>~0</td><td>present (the <a href="unsafe.html">layered ledger</a>)</td></tr>
+        <tr><td>L2 syscall boundary</td><td>uaccess + entry validation</td><td>~55 ns per AC bracket</td><td>present (§2 here)</td></tr>
+        <tr><td>L3 privilege model</td><td>capabilities, seccomp</td><td>one atomic op per check</td><td>present (§3 here)</td></tr>
+        <tr><td>L4 hardware aids</td><td>SMAP/SUM (MPK/MTE as registered directions)</td><td>20–26 cycles (MPK reference)</td><td>present (§2 here)</td></tr>
+        <tr><td>L5 TCB formal verification</td><td>Kani/SPIN/loom/Miri/proptest</td><td>offline</td><td>present (<a href="formal.html">formal verification</a>)</td></tr>
+        <tr><td>L6 runtime mitigation</td><td>an eBPF-class observation/mitigation channel</td><td>~1% CPU (reference)</td><td><span class="chip bad">absent</span> (the gaps register)</td></tr>
+      </tbody>
+    </table></div>
+    <p>The ordering principle: <b>the type system first, hardware second, verification third, runtime mitigation last</b> — the earlier a check happens, the less remains on the fast path.</p>
+
+    <h2 id="ub"><span class="anchor">§2</span>The user/kernel boundary</h2>
+    <ul>
+      <li><b>SMAP (x86_64, the D-18 evolution)</b>: CR4.SMAP enabled from the CPUID-detected bit (a G1-era EDX/EBX bit misread defect was fixed in 763e9f3c with a boot-log assertion against live CR4/CPUID plus a per-boot smap_report); the original pushfq/orq/popfq sequence (~100+ cycles per pair) evolved into SMAP-gated stac/clac — the CPUID SMAP bit implies STAC/CLAC exist, at 2-cycle flag writes; <b>the fixup label also clears AC</b> (a fault mid-copy lands there with AC still set); the documented figure is ~55 ns per bracket. The SMAP-VIOL beacon reads zero across the suite.</li>
+      <li><b>SUM (riscv64)</b>: sstatus.SUM deliberately kept 0 — the kernel reaches user memory only via the uaccess exception paths; sret to U-mode with SUM=0 is the ABI; any SUM=1 boot print is a regression.</li>
+      <li><b>Exception tables + fixups</b>: riscv64 records (insn, fixup) in .ex_table; x86_64 uses restartable rep-movsb; every accessor runs access_ok(addr,n); a fault returns short/EFAULT and never panics (the LTP x86-r2 N1 evidence: 37 EFAULT-family tests pass through the fixups); ~150 call sites. Table integrity is script-guarded (scripts/verify_exception_table.py: every entry must point at a memory-access instruction and its fixup at executable code — guarding the label-placement bug class).</li>
+      <li><b>No identity MMIO window (D-17)</b>: device addresses go through kernel-side alias windows and the bootstrap identity map is unlinked after boot — a bad user pointer faults instead of returning kernel bytes (the x86_64 suite 1194/1194 including the previously-red EFAULT row).</li>
+      <li><b>Forensic beacons</b>: PF-NOCTX (SMAP on, AC clear, a user-range no_context fault = a raw user-pointer dereference, named before the oops machinery mangles the context).</li>
+    </ul>
+
+    <h2 id="user"><span class="anchor">§3</span>The user-space privilege surface</h2>
+    <ul>
+      <li><b>User W^X</b>: NX mappings, the PT_GNU_STACK semantics, the READ_IMPLIES_EXEC personality — all three were once missing or ignored, fixed to the reference semantics (1de56837).</li>
+      <li><b>seccomp</b>: a classic-BPF subset interpreter (LD|W|ABS/IMM, JMP|JEQ/JGT/JGE/JSET|K, RET|K; a 4096-instruction cap; out-of-bounds loads and fall-off-end kill), gated from BOTH trap paths before dispatch; STRICT and FILTER modes; kill actions queue SIGKILL; fork inheritance. PR_SET_NO_NEW_PRIVS is one-way, sticky across fork+exec, and gates unprivileged seccomp attach (LTP prctl02 PASS). The registered accepted divergence: a single filter, no TSYNC/TRACE/NOTIF.</li>
+      <li><b>The capability model</b>: 41 CAP_* UAPI constants (CAP_VALID_MASK = 2^41−1); after audit, 23 consulted points + six previously-never-checked capabilities wired by 4e75d849 (NET_RAW/NET_ADMIN/SYS_PACCT/SETFCAP/DAC_READ_SEARCH/PERFMON); ~18 enforcement gate sites (the reference ~120 — the breadth gap is in the gaps register).</li>
+      <li><b>Secure-exec environment scrubbing (D-9)</b>: on AT_SECURE transitions the <b>kernel</b> removes every LD_* variable from the envp it installs — defense in depth independent of libc behavior (static binaries with custom loaders are covered too); the registered cost: a secure-exec'd process's /proc/[pid]/environ does not list LD_*.</li>
+      <li><b>OOM scoring semantics</b>: the oom_badness shape (a resident-pages baseline + oom_score_adj), pinned by 10 property tests (immunity, saturation avoidance, symmetry).</li>
+    </ul>
+
+    <h2 id="self"><span class="anchor">§4</span>Kernel self-protection</h2>
+    <ul>
+      <li><b>Kernel-stack guards</b>: a bottom canary (0xCAFE_F00D_DEAD_BEEF, written volatile) verified before the stack returns to the cache (R18-2 — a smashed value is direct evidence the task ran past its stack into the adjacent heap page, printed as STACK-OVERFLOW) + the FREED_STACKS 32-entry ring (names the freer when a faulting rsp sits in a freed stack) + dfx-gated 0xC3 free-painting; the packed kernel-stack slab (D-2) ran 3,445 live tasks with zero canary hits. Compiler stack protection is a registered gap (§5).</li>
+      <li><b>Deferred-free quarantine</b>: MmStruct/Task enter a 16,384-entry wall-clock ring (a 1,500 ms drain) — the use-after-free window for unaccounted procfs borrowers is structurally closed.</li>
+      <li><b>Failure discipline</b>: oops/panic in the reference report shape (CSRs + all GPRs + a 32-frame backtrace + symbolization), the panic_on_oops sysctl, the panic= reboot parameter, the pstore console.</li>
+      <li><b>The observable safety net</b>: the unified tracepoints (69 events/17 groups), the census/heal self-repair (MISS=0 banked), the spinlock watchdog, kallsyms-symbolized backtraces — defect localization time is itself a security property.</li>
+    </ul>
+
+    <h2 id="gaps"><span class="anchor">§5</span>The honest gaps register</h2>
+    <h3>Partial</h3>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Item</th><th>Current state</th><th>Closure shape</th></tr></thead>
+      <tbody>
+        <tr><td>lockdep-class debugging</td><td>keyed nestings are compile facts (D-11) + the preempt-count census MISS=0; a runtime held-lock graph over the whole tree is absent</td><td>extend keying to the remaining nestings; a debug-build held-lock bitmap is the drop-in shape</td></tr>
+        <tr><td>refcount hardening</td><td>page/frame refcounts are plain atomics — 2 of the taxonomy's 10 safe-class defects are exactly this class</td><td>a typed Refcount with decrement-must-hit-zero-to-free as the only free path</td></tr>
+        <tr><td>arithmetic overflow checks</td><td>off in the release profile (on in dev)</td><td>one config line + the measured boot/perf cost through the merge gate</td></tr>
+        <tr><td>KASAN-style poisoning</td><td>task-page paint + header audits + the buddy-metadata shadow (dfx-gated); no redzones on small_alloc</td><td>build-flag redzones and poison-on-free in small_alloc/slab</td></tr>
+        <tr><td>the LSM surface</td><td>hooks exist; selinuxfs is a label-carrying compat mount, permissive by construction</td><td>policy parsing + AVC decisions</td></tr>
+        <tr><td>namespaces</td><td>PID/IPC real (1bde7490); net/user/mount are stubs</td><td>implement per the reference semantics one by one</td></tr>
+        <tr><td>capability enforcement breadth</td><td>41 constants, ~18 gate sites (the reference ~120)</td><td>wire per the consulted-surface list</td></tr>
+      </tbody>
+    </table></div>
+    <h3>Absent</h3>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Item</th><th>Current state</th><th>Closure shape</th></tr></thead>
+      <tbody>
+        <tr><td>KASLR</td><td>the offset field and plumbing exist; no boot entropy wired</td><td>RDRAND/seed at entry + a boot print of a varying offset</td></tr>
+        <tr><td>kernel text/rodata W^X</td><td>the image is mapped RWX (riscv64) / RW without NX (x86_64); no mark_rodata_ro pass</td><td>a post-init RO flip + a dfx page-table-walk tripwire</td></tr>
+        <tr><td>compiler stack protection</td><td>none (the stack canary is kernel-side, not compiler-generated)</td><td>the rustc stack-protector attribute + a build flag, the cost measured through the gate</td></tr>
+        <tr><td>hardened usercopy</td><td>access_ok bounds checks only</td><td>a per-object usercopy-region check at the uaccess capsules</td></tr>
+        <tr><td>module signing</td><td>no runtime code loading today (a registration surface only), so the topic is dormant</td><td>signature verification ships with the real loader</td></tr>
+        <tr><td>a KCSAN-class checker</td><td>absent; the residual safe races are protocol-level</td><td>a watchpoint checker is a project; the loom/Kani mirrors cover the primitive subset</td></tr>
+        <tr><td>kptr_restrict / kallsyms masking</td><td>/proc/kallsyms shows real addresses to every reader</td><td>a masking knob + masked default</td></tr>
+        <tr><td>an eBPF-class runtime mitigation channel</td><td>absent</td><td>project per the reference semantics</td></tr>
+      </tbody>
+    </table></div>
+    <p>Posture summary (the security-posture.md 21-row basis): <b>7 rows present, 3 quick, 10 project-grade, 1 accepted</b>.</p>
+
+    <h2 id="stories"><span class="anchor">§6</span>Verification-hardening worked instances</h2>
+    <ul>
+      <li><b>The Ubuntu 24.04 freeze exoneration</b>: a per-event forensic chain proved the one pre-freeze WAKE(val=1, ret=1) was delivered and that no kernel code writes user futex words on the WAIT/WAKE paths — the kernel excluded at the word level and the user side assigned responsibility. A security argument gains credibility from records where the kernel is also exonerated.</li>
+      <li><b>The SMAP-enablement bisection arc</b>: STAC/CLAC take an unconditional #UD under TCG (bisected) → the pushfq bracket (~100+ cycles) → SMAP-gated stac/clac (2 cycles) — the cost curve of a security mechanism was measurement-driven, not a one-time trade.</li>
+      <li><b>The D-19 typed timer wheel</b>: six historical defect classes (mixed clock-domain comparisons, periodic misuse, double cancels, stale ids) became compile errors while the same-rig A/B showed performance gains (arm-lock 924→697 ns) — an instance of hardening and performance pointing the same way.</li>
+    </ul>
+
+    <div class="callout">Canonical: docs/architecture/security-design.md (the six-layer model + the metrics table), docs/development/security-posture.md (the 21-row posture), docs/architecture/safety-and-performance.md §5 (the gaps register), docs/architecture/design-divergences.md (D-9/D-17/D-18). Related: <a href="formal.html">formal verification</a>, <a href="taxonomy.html">defect taxonomy</a>, <a href="unsafe.html">the layered unsafe ledger</a>.</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to home</a></span>
+
+      <span class="foot-stats">Site visits <span id="busuanzi_value_site_pv"></span> · Visitors <span id="busuanzi_value_site_uv"></span></span></div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>
