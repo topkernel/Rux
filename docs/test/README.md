@@ -18,6 +18,7 @@ code when that reads better, but the numbers land in this directory.
 | [formal-verification-report.md](formal-verification-report.md) | Kani / proptest / SPIN / Miri standing | 157 harnesses · 1104 proptests |
 | [test-coverage.md](test-coverage.md) | Coverage ledger (generated) | regenerated per change |
 | [ltp-tracking.md](ltp-tracking.md) | Live LTP tracker notes | per scan |
+| [pair-battery-2026-11-17.md](pair-battery-2026-11-17.md) | Same-image same-binary pair battery: fio / rt-tests / flush wall vs the reference kernel, per-row mechanisms + the optimization queue | 2026-11-17 |
 
 ## Conventions
 
