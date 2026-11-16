@@ -7232,9 +7232,33 @@ fn mem_file_close(file: &File) -> i32 {
     0
 }
 
+/// Mem-file poll (seq_poll parity): read-only procfs snapshot files
+/// answer DEFAULT_POLLMASK-shaped readiness — always readable/writable
+/// as requested. epoll_ctl ADD answers EPERM for poll-less files, so
+/// without this op every fd handed out by the /proc read shortcut was
+/// un-epollable: systemd's mount monitor (libmount mnt_monitor_get_fd:
+/// epoll_ctl of the /proc/self/mountinfo fd — "Failed to acquire watch
+/// file descriptor: Operation not permitted") and the swap unit watch
+/// (sd_event_add_io(fd, EPOLLPRI) on /proc/swaps — "Failed to watch
+/// /proc/swaps: Operation not permitted") both died on it (ub2404
+/// graphical boot, ub-gfx 2026-11-17). Reference: Linux seq_file poll
+/// unconditionally returns DEFAULT_POLLMASK.
+fn mem_file_poll(_file: &File, events: u16) -> u16 {
+    use crate::syscall::misc::poll_events::*;
+    let mut r = 0u16;
+    if events & POLLIN != 0 {
+        r |= POLLIN | POLLRDNORM;
+    }
+    if events & POLLOUT != 0 {
+        r |= POLLOUT | POLLWRNORM;
+    }
+    r
+}
+
 static MEM_FILE_OPS: FileOps = FileOps::builder()
     .read(mem_file_read)
     .lseek(mem_file_lseek)
+    .poll(mem_file_poll)
     .close(mem_file_close)
     .build();
 
