@@ -125,10 +125,11 @@ make rootfs    <span class="c"># ⑥ pack the minimal rootfs image</span></code>
     <h3>The minimal system (an mrsh shell)</h3>
     <pre><code>make run</code></pre>
     <p>Builds if needed, then enters the serial console at <code>/bin/sh</code>. Try <code>ls /</code>, <code>toybox cat /proc/cpuinfo</code>, <code>echo "Hello Rux!"</code>.</p>
-    <h3>Ubuntu 22.04 GNOME desktop (x86_64 + KVM)</h3>
+    <h3>Ubuntu desktop (24.04 default / the 22.04 GNOME chain, x86_64 + KVM)</h3>
     <pre><code>make ubuntu-run</code></pre>
-    <p>Builds (or reuses) the Ubuntu GNOME disk image and boots it in an SDL window; log in as <code>root / rux</code>. Overridable variables:</p>
-    <pre><code>SMP=1 make ubuntu-run      <span class="c"># single core (default SMP=4)</span>
+    <p>Builds the x86_64 release kernel and boots the full Ubuntu 24.04 desktop in an SDL window (systemd 255, multi-user + graphical targets, serial login <code>root / rux</code>; the default since the 2026-11-16 user directive). The 22.04 GNOME chain boots via the override:</p>
+    <pre><code>UBUNTU_IMG=work/gnome-x86.img UBUNTU_INIT=/sbin/runit make ubuntu-run  <span class="c"># the 22.04 GNOME desktop chain</span>
+SMP=1 make ubuntu-run      <span class="c"># single core (default SMP=4)</span>
 ACCEL=tcg make ubuntu-run  <span class="c"># disable KVM (KVM by default)</span>
 THREAD=single make ubuntu-run <span class="c"># single-threaded TCG for deterministic debugging</span></code></pre>
     <div class="callout warn"><b>Note:</b> the GUI entry point is <code>make ubuntu-run</code>. Shared images boot only with <code>-snapshot</code> + <code>file.locking=off</code> — the image itself is never written.</div>
@@ -145,14 +146,14 @@ console  [ok]   trap    [ok]   mm      [ok]
 sched    [ok]   fs      [ok]   driver  [ok]   smp [ok]
 init: loading /bin/sh
 $ _</code></pre>
-    <p>Ubuntu GNOME: init complete, framebuffer resolution, login-screen-ready lines — then the SDL window shows the desktop.</p>
+    <p>Ubuntu: systemd 255 units reaching ready, the multi-user/graphical targets hit, and the serial login prompt; the 22.04 GNOME chain (override variables) additionally shows the framebuffer resolution and login-screen-ready lines — then the SDL window shows the desktop.</p>
 
     <h2 id="test"><span class="anchor">§6</span>Running the tests</h2>
     <h3>The in-kernel suite</h3>
     <pre><code>make test                          <span class="c"># riscv64 (default)</span>
 PLATFORM=x86_64 make test          <span class="c"># x86_64</span>
 PLATFORM=aarch64 make test         <span class="c"># aarch64</span></code></pre>
-    <p>All assertions run inside the QEMU guest. Current baseline: <b>riscv64 1267/1267</b>, <b>x86_64 1263/1263</b> (2026-11-01, 73 test files) across memory / process / fs / ipc / signal / network / driver / syscall.</p>
+    <p>All assertions run inside the QEMU guest. Current baseline: <b>riscv64 1328/1328</b> (2026-11-16), <b>x86_64 1263/1263</b> (2026-11-01, 76 test files) across memory / process / fs / ipc / signal / network / driver / syscall.</p>
     <h3>LTP</h3>
     <pre><code>make ltp            <span class="c"># build LTP on the host (needs sdk; 1,838 official binaries)</span>
 <span class="c"># inside the Rux shell:</span>

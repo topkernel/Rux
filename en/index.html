@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Rux — A Linux ABI-compatible OS kernel written from scratch in Rust</title>
-<meta name="description" content="Rux is a Linux ABI-compatible operating system kernel written entirely in Rust: unmodified Ubuntu 22.04 boots to a GNOME Shell desktop and unmodified OpenHarmony boots all 135+ services. ~378k lines of Rust, 345+ syscalls, three architectures.">
+<meta name="description" content="Rux is a Linux ABI-compatible operating system kernel written entirely in Rust: unmodified Ubuntu 22.04 boots to a GNOME Shell desktop, 24.04 reaches the graphical targets with serial login, and unmodified OpenHarmony boots all 135+ services. ~387k lines of Rust, 345+ syscalls, three architectures.">
 <link rel="stylesheet" href="../css/style.css?v=16">
 </head>
 <body>
@@ -35,7 +35,7 @@
     <div>
       <span class="chip acc"><span class="dot o"></span>Built end-to-end by AI agents · humans review and merge</span>
       <h1>A Linux ABI-compatible kernel<br><span class="grad">written from scratch in Rust</span></h1>
-      <p class="lede">Every subsystem of Rux — scheduler, memory management, ext4, binder, the network stack and the verification framework — was implemented by AI agents; humans set goals, review and merge. <b>Unmodified Ubuntu 22.04</b> boots to a GNOME Shell desktop and <b>unmodified OpenHarmony</b> boots all 135+ services — no patches, no rebuilds, no configuration changes.</p>
+      <p class="lede">Every subsystem of Rux — scheduler, memory management, ext4, binder, the network stack and the verification framework — was implemented by AI agents; humans set goals, review and merge. <b>Unmodified Ubuntu 22.04</b> boots to a GNOME Shell desktop (stability-verified 5/5 boots), <b>unmodified Ubuntu 24.04</b> reaches the graphical targets through systemd 255 with serial login, and <b>unmodified OpenHarmony</b> boots all 135+ services — no patches, no rebuilds, no configuration changes.</p>
       <div class="hero-badges">
         <span class="chip">Rust no_std</span>
         <span class="chip">POSIX compatible</span>
@@ -52,13 +52,13 @@
     </div>
     <div class="terminal">
       <div class="terminal-bar"><i></i><i></i><i></i><span>rux — zsh</span></div>
-      <div class="terminal-body"><div class="ln"><span class="c"># ① Unmodified Ubuntu 22.04 → GNOME desktop (x86_64 + KVM)</span></div>
+      <div class="terminal-body"><div class="ln"><span class="c"># ① Unmodified Ubuntu 24.04 boots (x86_64 + KVM; make ubuntu-run default)</span></div>
 <div class="ln"><span class="p">$</span> make ubuntu-run</div>
 <div class="ln"><span class="dim">[</span> <span class="hi">rux</span> <span class="dim">] smp: 4 vCPU online (q35)</span></div>
 <div class="ln"><span class="dim">[</span> <span class="hi">rux</span> <span class="dim">] virtio-blk: root mounted (ext4)</span></div>
-<div class="ln"><span class="dim">[</span> <span class="hi">ubuntu</span> <span class="dim">] systemd 249 — user session up</span></div>
-<div class="ln"><span class="dim">[</span> <span class="hi">gdm</span> <span class="dim">] greeter ready … login ok</span></div>
-<div class="ln"><span class="ok">[ gnome-shell ] frame on screen ✓</span></div>
+<div class="ln"><span class="dim">[</span> <span class="hi">ubuntu</span> <span class="dim">] systemd 255 — multi-user + graphical targets</span></div>
+<div class="ln"><span class="dim">[</span> <span class="hi">gdm</span> <span class="dim">] started clean — no 90 s timeout</span></div>
+<div class="ln"><span class="ok">[ ttyS0 ] serial login prompt ✓ (root / rux)</span></div>
 <div class="ln"> </div>
 <div class="ln"><span class="c"># ② Unmodified OpenHarmony → all services</span></div>
 <div class="ln"><span class="p">$</span> ./oh-boot.sh --accel kvm</div>
@@ -68,7 +68,7 @@
 <div class="ln"> </div>
 <div class="ln"><span class="c"># ③ In-kernel test suite</span></div>
 <div class="ln"><span class="p">$</span> make test</div>
-<div class="ln"><span class="ok">1267 / 1267 passed ✓</span> <span class="dim">(riscv64)</span></div>
+<div class="ln"><span class="ok">1328 / 1328 passed ✓</span> <span class="dim">(riscv64)</span></div>
 <div class="ln"><span class="acc">▌</span> <span class="dim">ABI is the contract; internals are free.</span></div></div>
     </div>
   </div>
@@ -77,11 +77,11 @@
 <section class="section-tight">
   <div class="container">
     <div class="stats">
-      <div class="stat"><div class="v">378<em>k+</em></div><div class="l">lines of Rust</div></div>
+      <div class="stat"><div class="v">387<em>k+</em></div><div class="l">lines of Rust</div></div>
       <div class="stat"><div class="v">345<em>+</em></div><div class="l">syscalls</div></div>
-      <div class="stat"><div class="v">4200<em>+</em></div><div class="l">test cases</div></div>
+      <div class="stat"><div class="v">4300<em>+</em></div><div class="l">test cases</div></div>
       <div class="stat"><div class="v">3</div><div class="l">architectures</div></div>
-      <div class="stat"><div class="v">1133<em>/1869</em></div><div class="l">LTP passing</div></div>
+      <div class="stat"><div class="v">1139<em>/1869</em></div><div class="l">LTP passing</div></div>
       <div class="stat"><div class="v">19</div><div class="l">design divergences (registered)</div></div>
     </div>
   </div>
@@ -126,8 +126,8 @@
       <table>
         <thead><tr><th>Architecture</th><th>QEMU machine</th><th>Accel</th><th>Userspace</th><th>Status</th></tr></thead>
         <tbody>
-          <tr><td><b>x86_64</b></td><td class="mono">q35</td><td>KVM (primary)</td><td>Ubuntu 22.04 (glibc)</td><td><span class="chip ok"><span class="dot g"></span>GNOME desktop boots · main LTP/perf rig</span></td></tr>
-          <tr><td><b>riscv64</b></td><td class="mono">virt</td><td>TCG (MTTCG)</td><td>Ubuntu 22.04 / musl minimal rootfs</td><td><span class="chip ok"><span class="dot g"></span>Desktop + kernel suite 1267/1267</span></td></tr>
+          <tr><td><b>x86_64</b></td><td class="mono">q35</td><td>KVM (primary)</td><td>Ubuntu 22.04 + 24.04 (glibc)</td><td><span class="chip ok"><span class="dot g"></span>22.04 GNOME desktop 5/5 · 24.04 graphical targets + serial login · main LTP/perf rig</span></td></tr>
+          <tr><td><b>riscv64</b></td><td class="mono">virt</td><td>TCG (MTTCG)</td><td>Ubuntu 22.04 / musl minimal rootfs</td><td><span class="chip ok"><span class="dot g"></span>Desktop + kernel suite 1328/1328</span></td></tr>
           <tr><td><b>aarch64</b></td><td class="mono">virt (gic-version=3)</td><td>TCG</td><td>Interactive shell</td><td><span class="chip cyan"><span class="dot o"></span>shell / signals / kernel suite green</span></td></tr>
         </tbody>
       </table>
@@ -146,7 +146,7 @@
       <div class="card">
         <h3><span class="ico">📜</span>Compatibility as the constitution</h3>
         <p>POSIX and the Linux kernel ABI are the supreme constraints: LTP families pass family by family; distribution userspace runs unmodified.</p>
-        <div class="nums">345+ syscalls · LTP <b>1133/1869</b></div>
+        <div class="nums">345+ syscalls · LTP <b>1139/1869</b></div>
         <a class="more" href="architecture/design.html#divergences">Divergence register →</a>
       </div>
       <div class="card">
@@ -240,20 +240,20 @@
     <div class="card-grid grid-4">
       <div class="card">
         <h3><span class="ico">🧪</span>LTP compliance</h3>
-        <p>The full 1,869-case scan grew from 35 early passes to 1,122 on the 2026-11-15 audited round (net +29 over the previous audited 1,093); every round is archived and suspect rows are isolated-rerun twice before being called regressions; the TIMEOUT class is adjudicated row by row under the P0 rule. After the tail-fix round (the keyctl negative-case model, the mount-API negative families, splice06) landed its 11 isolation-verified tests in main, the current expected count is 1,133.</p>
-        <div class="nums">current <b>1133 / 1869</b> (audited 1122 + 11 tail fixes)</div>
+        <p>The full 1,869-case scan grew from 35 early passes to 1,122 on the 2026-11-15 audited round, then to the official corrected 1,138 of the 2026-11-16 confirmation scan (scan3 — all 17 expected gains materialized; the one real loss, tgkill03, root-caused and fixed); every round is archived and suspect rows are isolated-rerun twice before being called regressions; the TIMEOUT class is adjudicated row by row under the P0 rule. With the tgkill03 fix (procfs pid-dentry revalidation) merged to main, the current expected count is <b>1,139</b>.</p>
+        <div class="nums">current <b>1139 / 1869</b> (official scan3 1138 + the tgkill03 fix)</div>
         <a class="more" href="testing/ltp.html">LTP scan →</a>
       </div>
       <div class="card">
         <h3><span class="ico">🛡️</span>Stability &amp; stress</h3>
-        <p>Kernel suite green on three architectures, 2,100 s desktop gates ×3, census/heal self-correction MISS=0; a standing 11-QEMU concurrent stress cluster (randomized/fuzz/memstorm); the riscv64 boot-parameter matrix smp{2,4,6,8} × mem{1,2,4,8}G is clean in all sixteen cells (previously several panic/hang cells).</p>
-        <div class="nums">make test <b>1267/1267</b> · boot matrix <b>16/16</b></div>
+        <p>Kernel suite green on three architectures, 2,100 s desktop gates ×3, census/heal self-correction MISS=0; the 22.04 GNOME desktop stability-verified 5/5 boots on main 188+ commits past the previous campaign (shell up 5 s, desktop frame 9.1 s, zero panics/OOM/SIGSEGV); a standing 11-QEMU concurrent stress cluster (randomized/fuzz/memstorm); the riscv64 boot-parameter matrix smp{2,4,6,8} × mem{1,2,4,8}G is clean in all sixteen cells (previously several panic/hang cells).</p>
+        <div class="nums">make test <b>1328/1328</b> · boot matrix <b>16/16</b> · GNOME <b>5/5</b></div>
         <a class="more" href="testing/stability.html">Stability →</a>
       </div>
       <div class="card">
         <h3><span class="ico">📊</span>Performance</h3>
-        <p>Three gate tiers + six guarded domains. Same-rig KVM-vs-KVM vs Linux: 14 paired cases, 10 ahead or at parity (page fault 2.26–2.45×, mmap 4.2×, pipe 3.56×, exec/fork at parity), 4 behind (worst 1.61×); Geekbench 5 SC 2440 / MC 7709 (best-of-runs historical best, vs the Linux 4-CPU anchor 113% / 110%); filesystem flush 128 MB (x86_64 KVM): fsync 11.55→3.04 s, msync 13.95→3.31 s, sync 11.30→3.31 s.</p>
-        <div class="nums">14 paired cases · full ledger</div>
+        <p>Three gate tiers + six guarded domains. Same-rig vs Linux (2026-11-16 standing; the Linux column is a guest kernel in the same rig): lmbench 14 of 21 paired cases ahead or at parity (pipe 4.6×, context switch 4.0–4.5×, semaphore 2.9×), 7 behind (the plain-syscall band 1.2–2.5×, open worst at 1.9–2.5×); Geekbench 5 SC 2440 / MC 7709 (best-of-runs historical best, vs the Linux 4-CPU anchor 113% / 110%); filesystem flush 128 MB (x86_64 KVM): fsync 11.55→3.04 s, msync 13.95→3.31 s, sync 11.30→3.31 s.</p>
+        <div class="nums">14 of 21 paired cases · full ledger</div>
         <a class="more" href="performance/index.html">Performance →</a>
       </div>
       <div class="card">
@@ -289,7 +289,7 @@ make build PLATFORM=x86_64 <span class="c"># x86_64</span></code></pre>
       <div class="card">
         <h3><span class="ico">③</span>Run</h3>
         <pre><code>make run        <span class="c"># musl minimal rootfs → shell</span>
-make ubuntu-run <span class="c"># Ubuntu 22.04 → GNOME desktop</span></code></pre>
+make ubuntu-run <span class="c"># full Ubuntu 24.04 desktop (serial login: root / rux)</span></code></pre>
         <p>The serial port (<code>ttyS0</code>) is the primary log; GUI images boot with <code>-snapshot</code> so the shared image is never written.</p>
       </div>
     </div>
@@ -345,7 +345,7 @@ make ubuntu-run <span class="c"># Ubuntu 22.04 → GNOME desktop</span></code></
   <div class="container">
     <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
       <span>Rux Kernel · MIT License · <a href="https://github.com/topkernel/Rux">github.com/topkernel/Rux</a></span>
-      <span>~378,000 lines of Rust · built by AI agents under human direction · 2026</span>
+      <span>~387,000 lines of Rust · built by AI agents under human direction · 2026</span>
     
       <span class="foot-stats">Site traffic: <span id="busuanzi_value_site_pv"></span> views · <span id="busuanzi_value_site_uv"></span> visitors</span></div>
   </div>

@@ -66,27 +66,27 @@
 
   <article class="doc-main">
     <h1>代码结构</h1>
-    <div class="sub">仓库布局与内核源码地图 · 口径(main 98702db0,2026-11-15 复点,git ls-files + wc -l):kernel/ 623 文件 · 384,307 行(Rust 377,650);kernel/src 453 文件 · 354,945 行</div>
+    <div class="sub">仓库布局与内核源码地图 · 口径(main fe5538c4e,2026-11-16 复点,git ls-files + wc -l):kernel/ 626 文件 · 393,355 行(Rust 386,698);kernel/src 456 文件 · 363,936 行</div>
 
     <h2 id="kernel"><span class="anchor">§1</span>内核源码地图(kernel/src/)</h2>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>目录</th><th class="num">行数</th><th class="num">占比</th><th>内容</th></tr></thead>
         <tbody>
-          <tr><td class="mono">fs/</td><td class="num">67,491</td><td class="num">19.0%</td><td>ext4(12 文件)、jbd2、VFS、dcache、page_cache、bio/buffer、procfs/sysfs/debugfs/tracefs/tmpfs、pipe、xattr、inotify、locks、io_uring、elf</td></tr>
-          <tr><td class="mono">arch/</td><td class="num">48,089</td><td class="num">13.5%</td><td>riscv64 / x86_64 / aarch64:boot、trap、mm(page_fault)、cpu、uaccess、intc、SBI/MSR/寄存器</td></tr>
-          <tr><td class="mono">syscall/</td><td class="num">39,442</td><td class="num">11.1%</td><td>系统调用分发表与实现(胶囊边界:校验/翻译用户指针,uaccess_safe 类型化 copy_in/out)</td></tr>
-          <tr><td class="mono">drivers/</td><td class="num">25,413</td><td class="num">7.2%</td><td>virtio(blk/net/gpu/input,queue + PCI 传输层)、blkdev、intc、pci、gpu/drm、input、timer</td></tr>
-          <tr><td class="mono">ipc/</td><td class="num">21,409</td><td class="num">6.0%</td><td>binder(14,077 行,最大单文件)、access_token、SysV sem/msg/shm、POSIX MQ</td></tr>
-          <tr><td class="mono">net/</td><td class="num">20,669</td><td class="num">5.8%</td><td>SkBuff、eth、arp、ipv4/ipv6、icmp、udp、tcp(5,250 行)、unix(4,349 行)、netlink、raw</td></tr>
-          <tr><td class="mono">dfx/</td><td class="num">18,887</td><td class="num">5.3%</td><td>syscost、kallsyms、debugfs、taskdump、watchdog、memwatch、ledger(诊断层,单独统计 unsafe)</td></tr>
-          <tr><td class="mono">mm/</td><td class="num">18,895</td><td class="num">5.3%</td><td>memblock、buddy、slab、small_alloc、page fault、VMA、页缓存协作、kswapd、rmap</td></tr>
-          <tr><td class="mono">sync/</td><td class="num">18,788</td><td class="num">5.3%</td><td>自旋锁/休眠锁/futex(含 PI)、CpuLocal(D-7)、类型化锁键(D-11)</td></tr>
-          <tr><td class="mono">process/</td><td class="num">17,552</td><td class="num">4.9%</td><td>任务结构、fork/exit、信号、wait、pid、cgroup</td></tr>
-          <tr><td class="mono">sched/</td><td class="num">16,885</td><td class="num">4.8%</td><td>GRQ、fair/rt/deadline 调度类、wakewatch、census/heal</td></tr>
-          <tr><td class="mono">tests/</td><td class="num">15,236</td><td class="num">4.3%</td><td>76 个 guest 内测试文件(make test 宿主)</td></tr>
-          <tr><td class="mono">其他(interrupt/timer/io_uring/perf/security/module + 顶层 .rs)</td><td class="num">22,714</td><td class="num">6.4%</td><td>中断子系统、定时器轮、io_uring 雏形、perf 计数、LSM/capability、模块桩、init/panic/console 等 13 个顶层文件</td></tr>
-          <tr><td class="mono">trace/</td><td class="num">3,475</td><td class="num">1.0%</td><td>统一 trace-event 框架:事件侧 + tracefs 文件侧(61 事件/20 组)</td></tr>
+          <tr><td class="mono">fs/</td><td class="num">69,821</td><td class="num">19.2%</td><td>ext4(12 文件)、jbd2、VFS、dcache、page_cache、bio/buffer、procfs/sysfs/debugfs/tracefs/tmpfs、pipe、xattr、inotify、locks、io_uring、elf</td></tr>
+          <tr><td class="mono">arch/</td><td class="num">48,812</td><td class="num">13.4%</td><td>riscv64 / x86_64 / aarch64:boot、trap、mm(page_fault)、cpu、uaccess、intc、SBI/MSR/寄存器</td></tr>
+          <tr><td class="mono">syscall/</td><td class="num">41,083</td><td class="num">11.3%</td><td>系统调用分发表与实现(胶囊边界:校验/翻译用户指针,uaccess_safe 类型化 copy_in/out)</td></tr>
+          <tr><td class="mono">drivers/</td><td class="num">25,436</td><td class="num">7.0%</td><td>virtio(blk/net/gpu/input,queue + PCI 传输层)、blkdev、intc、pci、gpu/drm、input、timer</td></tr>
+          <tr><td class="mono">ipc/</td><td class="num">21,758</td><td class="num">6.0%</td><td>binder(14,144 行,最大单文件)、access_token、SysV sem/msg/shm、POSIX MQ</td></tr>
+          <tr><td class="mono">net/</td><td class="num">20,857</td><td class="num">5.7%</td><td>SkBuff、eth、arp、ipv4/ipv6、icmp、udp、tcp(5,250 行)、unix(4,372 行)、netlink、raw</td></tr>
+          <tr><td class="mono">sync/</td><td class="num">19,843</td><td class="num">5.5%</td><td>自旋锁/休眠锁/futex(含 PI)、CpuLocal(D-7)、类型化锁键(D-11)</td></tr>
+          <tr><td class="mono">mm/</td><td class="num">19,432</td><td class="num">5.3%</td><td>memblock、buddy、slab、small_alloc、page fault、VMA、页缓存协作、kswapd、rmap</td></tr>
+          <tr><td class="mono">dfx/</td><td class="num">19,395</td><td class="num">5.3%</td><td>syscost、kallsyms、debugfs、taskdump、watchdog、memwatch、ledger(诊断层,单独统计 unsafe)</td></tr>
+          <tr><td class="mono">process/</td><td class="num">17,709</td><td class="num">4.9%</td><td>任务结构、fork/exit、信号、wait、pid、cgroup</td></tr>
+          <tr><td class="mono">sched/</td><td class="num">17,291</td><td class="num">4.7%</td><td>GRQ、fair/rt/deadline 调度类、wakewatch、census/heal</td></tr>
+          <tr><td class="mono">tests/</td><td class="num">15,241</td><td class="num">4.2%</td><td>76 个 guest 内测试文件(make test 宿主)</td></tr>
+          <tr><td class="mono">其他(interrupt/timer/io_uring/perf/security/module + 顶层 .rs)</td><td class="num">23,463</td><td class="num">6.4%</td><td>中断子系统、定时器轮、io_uring 雏形、perf 计数、LSM/capability、模块桩、init/panic/console 等 13 个顶层文件</td></tr>
+          <tr><td class="mono">trace/</td><td class="num">3,795</td><td class="num">1.0%</td><td>统一 trace-event 框架:事件侧 + tracefs 文件侧(61 事件/20 组)</td></tr>
           <tr><td class="mono">verify/(kernel/verify,不在 kernel/src 合计内)</td><td class="num">28,216</td><td class="num">——</td><td>形式验证 crate:157 Kani harness、1104 proptests、4 SPIN 模型、Miri/loom 镜像</td></tr>
         </tbody>
       </table>

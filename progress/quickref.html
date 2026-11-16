@@ -75,7 +75,7 @@
         <tbody>
           <tr><td class="mono">make build</td><td>构建内核(默认 riscv64;PLATFORM=x86_64 / aarch64 切换)</td></tr>
           <tr><td class="mono">make run</td><td>QEMU 启动最小 rootfs(mrsh,/bin/sh)</td></tr>
-          <tr><td class="mono">make ubuntu-run</td><td>构建 + SDL 窗口启动 Ubuntu GNOME 桌面(KVM,root/rux)</td></tr>
+          <tr><td class="mono">make ubuntu-run</td><td>构建 + SDL 窗口启动完整 Ubuntu 24.04 桌面(默认,串口登录 root/rux;UBUNTU_IMG 覆盖可启动 22.04 GNOME 链)</td></tr>
           <tr><td class="mono">make test</td><td>内核内测试套件(可 PLATFORM= 切架构)</td></tr>
           <tr><td class="mono">make rootfs</td><td>制作最小根文件系统镜像(依赖 user+toybox+mrsh)</td></tr>
           <tr><td class="mono">make user / toybox / mrsh / sdk</td><td>用户态程序 / 200+ 工具箱 / POSIX shell / musl SDK</td></tr>

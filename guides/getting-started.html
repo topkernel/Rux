@@ -125,10 +125,11 @@ make rootfs    <span class="c"># ⑥ 打包最小根文件系统镜像</span></c
     <h3>最小系统(mrsh shell)</h3>
     <pre><code>make run</code></pre>
     <p>内核不存在时自动构建,随后进入串口控制台的 <code>/bin/sh</code>。可以体验 <code>ls /</code>、<code>toybox cat /proc/cpuinfo</code>、<code>echo "Hello Rux!"</code>。</p>
-    <h3>Ubuntu 22.04 GNOME 桌面(x86_64 + KVM)</h3>
+    <h3>Ubuntu 桌面(24.04 默认 / 22.04 GNOME 链,x86_64 + KVM)</h3>
     <pre><code>make ubuntu-run</code></pre>
-    <p>构建(或复用)Ubuntu GNOME 磁盘镜像并以 SDL 窗口启动,登录 <code>root / rux</code>。可覆盖变量:</p>
-    <pre><code>SMP=1 make ubuntu-run      <span class="c"># 单核(默认 SMP=4)</span>
+    <p>构建 x86_64 release 内核并以 SDL 窗口启动完整 Ubuntu 24.04 桌面(systemd 255,多用户 + 图形目标,串口登录 <code>root / rux</code>;2026-11-16 用户指令起为默认)。22.04 GNOME 链经覆盖变量启动:</p>
+    <pre><code>UBUNTU_IMG=work/gnome-x86.img UBUNTU_INIT=/sbin/runit make ubuntu-run  <span class="c"># 22.04 GNOME 桌面链</span>
+SMP=1 make ubuntu-run      <span class="c"># 单核(默认 SMP=4)</span>
 ACCEL=tcg make ubuntu-run  <span class="c"># 关 KVM(默认 KVM)</span>
 THREAD=single make ubuntu-run <span class="c"># 单线程 TCG,确定性调试用</span></code></pre>
     <div class="callout warn"><b>注意:</b>GUI 入口是 <code>make ubuntu-run</code>(部分旧文档提到的 <code>make gui</code> 已不作为入口)。另:共享镜像一律以 <code>-snapshot</code> + <code>file.locking=off</code> 启动,不写坏镜像本体。</div>
@@ -145,14 +146,14 @@ console  [ok]   trap    [ok]   mm      [ok]
 sched    [ok]   fs      [ok]   driver  [ok]   smp [ok]
 init: loading /bin/sh
 $ _</code></pre>
-    <p>Ubuntu GNOME 启动则依次出现登录前初始化完成、帧缓冲分辨率、登录界面就绪的日志;随后 SDL 窗口显示桌面。</p>
+    <p>Ubuntu 启动则依次出现 systemd 255 各单元就绪、multi-user/graphical 目标达成与串口登录提示符的日志;22.04 GNOME 链(覆盖变量)另见帧缓冲分辨率与登录界面就绪,随后 SDL 窗口显示桌面。</p>
 
     <h2 id="test"><span class="anchor">§6</span>跑测试</h2>
     <h3>内核自带套件</h3>
     <pre><code>make test                          <span class="c"># riscv64(默认)</span>
 PLATFORM=x86_64 make test          <span class="c"># x86_64</span>
 PLATFORM=aarch64 make test         <span class="c"># aarch64</span></code></pre>
-    <p>所有断言在 QEMU guest 内运行(内核 crate 无法承载宿主侧 <code>#[cfg(test)]</code>)。当前基线:<b>riscv64 1267/1267</b>、<b>x86_64 1263/1263</b>(2026-11-01,73 个测试文件),覆盖 memory / process / fs / ipc / signal / network / driver / syscall 八大类。</p>
+    <p>所有断言在 QEMU guest 内运行(内核 crate 无法承载宿主侧 <code>#[cfg(test)]</code>)。当前基线:<b>riscv64 1328/1328</b>(2026-11-16)、<b>x86_64 1263/1263</b>(2026-11-01,76 个测试文件),覆盖 memory / process / fs / ipc / signal / network / driver / syscall 八大类。</p>
     <h3>LTP 兼容性测试</h3>
     <pre><code>make ltp            <span class="c"># 宿主侧构建 LTP(需 sdk;1838 个官方二进制)</span>
 <span class="c"># 在 Rux shell 里:</span>

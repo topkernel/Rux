@@ -75,7 +75,7 @@
         <tbody>
           <tr><td class="mono">make build</td><td>build the kernel (riscv64 default; PLATFORM=x86_64 / aarch64 to switch)</td></tr>
           <tr><td class="mono">make run</td><td>boot the minimal rootfs in QEMU (mrsh, /bin/sh)</td></tr>
-          <tr><td class="mono">make ubuntu-run</td><td>build + boot the Ubuntu GNOME desktop in an SDL window (KVM, root/rux)</td></tr>
+          <tr><td class="mono">make ubuntu-run</td><td>build + boot the full Ubuntu 24.04 desktop in an SDL window (default; serial login root/rux — a UBUNTU_IMG override boots the 22.04 GNOME chain)</td></tr>
           <tr><td class="mono">make test</td><td>the in-kernel test suite (PLATFORM= switches architecture)</td></tr>
           <tr><td class="mono">make rootfs</td><td>build the minimal rootfs image (needs user+toybox+mrsh)</td></tr>
           <tr><td class="mono">make user / toybox / mrsh / sdk</td><td>userspace programs / the 200+ tool box / a POSIX shell / the musl SDK</td></tr>

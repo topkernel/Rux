@@ -72,7 +72,7 @@
     <div class="card-grid grid-2">
       <div class="card">
         <h3><span class="ico">🧪</span>LTP compliance scan</h3>
-        <p>The full 1,869-case LTP scan: the 2026-11-15 audited round <b>1122/1869</b> (60.0%) → current expected <b>1133/1869</b> (60.6%) after the tail fixes (x86_64+KVM). Distribution, the round trend, the isolated-rerun correction protocol and the NOT-OURS adjudication methodology.</p>
+        <p>The full 1,869-case LTP scan: the 2026-11-15 audited round <b>1122/1869</b> (60.0%) → the official 2026-11-16 confirmation scan (scan3) corrected <b>1138/1869</b> (60.9%) → current expected <b>1139/1869</b> with the tgkill03 fix merged (x86_64+KVM). Distribution, the round trend, the isolated-rerun correction protocol and the NOT-OURS adjudication methodology.</p>
         <a class="more" href="ltp.html">Open →</a>
       </div>
       <div class="card">
@@ -82,7 +82,7 @@
       </div>
       <div class="card">
         <h3><span class="ico">🛡️</span>Stability</h3>
-        <p>Kernel suite (riscv64 1267 / x86_64 1263 all green), formal verification standing, desktop session gates (2100 s ×3, 45 minutes zero panic), census/heal self-correction.</p>
+        <p>Kernel suite (riscv64 1328 / x86_64 1263 all green), formal verification standing, desktop session gates (2100 s ×3, 45 minutes zero panic), the 22.04 GNOME 5/5 stability verification, census/heal self-correction.</p>
         <a class="more" href="stability.html">Open →</a>
       </div>
       <div class="card">
@@ -114,9 +114,9 @@
       <table>
         <thead><tr><th>Report</th><th>What it measures</th><th>Latest</th></tr></thead>
         <tbody>
-          <tr><td>unit-test-report.md</td><td>In-kernel guest suite (make test), per architecture</td><td class="mono">1267/1267 riscv64 · 1263/1263 x86_64 · 2026-11-01</td></tr>
+          <tr><td>unit-test-report.md</td><td>In-kernel guest suite (make test), per architecture</td><td class="mono">1328/1328 riscv64 · 1263/1263 x86_64 · 2026-11-16</td></tr>
           <tr><td>integration-test-report.md</td><td>Multi-process unattended testing, probes, CI smoke gate</td><td class="mono">2026-11-01</td></tr>
-          <tr><td>ltp-report.md / ltp-tracking.md</td><td>LTP compatibility, both rigs (riscv64 TCG / x86_64 KVM)</td><td class="mono">audited 1122/1869 → expected 1133/1869 (x86+KVM) · 1028/1869 (riscv64)</td></tr>
+          <tr><td>ltp-report.md / ltp-tracking.md</td><td>LTP compatibility, both rigs (riscv64 TCG / x86_64 KVM)</td><td class="mono">official scan3 1138/1869 → expected 1139/1869 (x86+KVM) · 1028/1869 (riscv64)</td></tr>
           <tr><td>lmbench-report.md</td><td>lmbench per-case: Rux vs Linux (same rig)</td><td class="mono">2026-11-06 campaign table → Performance section</td></tr>
           <tr><td>geekbench-report.md</td><td>Geekbench 5: all 21 workloads vs Linux</td><td class="mono">MC 7709/7027 · SC 2440/2165 (best-of-runs)</td></tr>
           <tr><td>stress-fleet.md</td><td>Stress/stability/randomized/fuzz cluster design + results</td><td class="mono">standing (11 QEMUs)</td></tr>
@@ -130,10 +130,10 @@
 
     <h2 id="forms"><span class="anchor">§3</span>Test forms</h2>
     <ul>
-      <li><b>In-kernel suite (make test)</b>: 73 test files across eight domains (memory / process / fs / ipc / signal / network / driver / syscall); all assertions run inside the QEMU guest (a kernel crate cannot host host-side <code>#[cfg(test)]</code>). The CI smoke gate (smoke.yml) runs the riscv64 leg on every push.</li>
+      <li><b>In-kernel suite (make test)</b>: 76 test files across eight domains (memory / process / fs / ipc / signal / network / driver / syscall); all assertions run inside the QEMU guest (a kernel crate cannot host host-side <code>#[cfg(test)]</code>). The CI smoke gate (smoke.yml) runs the riscv64 leg on every push.</li>
       <li><b>Integration cluster</b>: multi-process unattended runs + probe matrix (integration-test-report.md); the GUI has a 23-check pixel/serial gate (<code>test/ubuntu-gui/verify.py</code>) with pixel-identical cross-boot comparison (convcheck).</li>
       <li><b>Formal verification</b>: 1104 proptests binding on every push; Kani (157 harnesses) / SPIN / Miri nightly (see the <a href="../security/index.html#formal">Security section</a>).</li>
-      <li><b>4,200+ test cases</b> in the repository (suite + probes + benchmarks + proofs).</li>
+      <li><b>4,300+ test cases</b> in the repository (in-kernel suite 1,328 + LTP passes 1,139 + the LTP inventory 1,838 = 4,305, plus probes and benchmarks).</li>
     </ul>
 
     <h2 id="discipline"><span class="anchor">§4</span>Method and adjudication discipline</h2>
