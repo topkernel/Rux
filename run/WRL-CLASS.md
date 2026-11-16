@@ -88,6 +88,10 @@ plain main, the item-2 jackpot), w3 (fixed kernel, instrument validation).
 (HUNG_TASK_CHECK_INTERVAL_SECS = 120/2). For every binder pool thread with
 `read_wait_since != 0` (parked in the blocking read of BINDER_WRITE_READ)
 and age ≥ 15 s it kicks the thread (`wake_thread`) and bumps `rekick_count`.
+The wait queues involved are the per-thread kernel wait queues of the
+binder pool (`BinderThread.wait`) — NOT futexes and NOT the proc todo:
+every census row is a thread parked in the binder read ioctl itself.
+The kick outcome counters (wok/wno) count transitions of that queue.
 The counters (`rekick_count`, `rekicked`, `kick_wake_ok`, `kick_wake_refused`,
 `read_wait_since`) reset ONLY when the thread parks in a NEW ioctl
 (binder.rs, the reset block before `wait_event_interruptible!`). A row
