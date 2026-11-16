@@ -2826,6 +2826,15 @@ unsafe fn __schedule() {
     // (now() short-circuits to 0, add() to a no-op).
     let cc_t0 = crate::dfx::cctx::now();
     crate::dfx::cctx::bump(&crate::dfx::cctx::SCH_N);
+    // runq-strand lane: per-CPU schedule-entry count — the monopolist
+    // census reads its per-burst delta (frozen = a CPU that stopped
+    // scheduling; the strand producer's signature).
+    {
+        let cpu_id = crate::arch::cpu_id() as u64 as usize;
+        if cpu_id < MAX_CPUS {
+            SCHED_CALLS[cpu_id].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
     clear_need_resched();
 
     // Context switch is an RCU quiescent state.
@@ -6063,6 +6072,165 @@ pub fn grq_diag_cfs_linked(task: *mut crate::process::task::Task) -> Option<bool
     Some(guard.cfs_rq.is_linked(task))
 }
 
+/// Per-CPU count of __schedule() entries (runq-strand lane): the
+/// monopolist detector's truth source. A CPU executing a preemptible
+/// workload calls schedule() hundreds of times per 5 s burst; a CPU
+/// held by an unpreemptible kernel loop (or a task whose preemption
+/// requests are all refused) stops calling it entirely. One relaxed
+/// fetch_add per schedule — same cost class as the cctx probe's
+/// existing per-schedule counters.
+pub static SCHED_CALLS: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+
+/// MONOPOLIST census (runq-strand lane, 121st): the RUNQ-STRAND census
+/// names the victims; this names their CULPRITS. The cotask-decode
+/// campaign's frozen-skipall evidence (walks stop completing while 50+
+/// entries stay linked and every CPU reads busy with FIXED pids for
+/// minutes) says the strand is produced by CPUs that never reach a
+/// schedule() again — incumbents monopolizing their harts. A CPU is a
+/// MONOPOLIST when the SAME real task holds its slot across a full
+/// 5 s burst while SCHED_CALLS for that CPU advances by < 20 (a
+/// preemptible holder re-picks itself through the walk hundreds of
+/// times per burst; a frozen counter means schedule() stopped running
+/// there). The row carries identity, preempt_count, need_resched, exec
+/// activation, and the last timer-tick stamp of WHERE the CPU was
+/// interrupted (TICK_ENTRY_RIP + CS ring bits: kernel vs user mode +
+/// stamp age). A kernel-mode RIP constant across bursts names the
+/// unpreemptible spin loop (symbolize offline); a user-mode RIP with a
+/// live need_resched names a broken user-return preempt gate; a stale
+/// stamp names a halted/tick-starved CPU. Runs under dfx=fuxstuck (the
+/// futex census burst calls it, right after runq_strand_census); the
+/// stamps themselves ride the tick (TICK_ENTRY_* are always on, same
+/// as leg-33B). Prints only when at least one monopolist exists —
+/// quiet boots pay nothing.
+pub fn monopolist_census(now_j: u64) {
+    use core::sync::atomic::Ordering::{Acquire, Relaxed};
+    use core::fmt::Write as _;
+
+    static LINES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    struct Prev {
+        pid: core::sync::atomic::AtomicU32,
+        sched: core::sync::atomic::AtomicU64,
+    }
+    static PREV: [Prev; MAX_CPUS] = {
+        #[allow(clippy::declare_interior_mutable_const)]
+        const ZERO: Prev = Prev {
+            pid: core::sync::atomic::AtomicU32::new(0),
+            sched: core::sync::atomic::AtomicU64::new(0),
+        };
+        [ZERO; MAX_CPUS]
+    };
+
+    let mut any = false;
+    let mut body = alloc::string::String::new();
+    for c in 0..MAX_CPUS {
+        let cur = cpu_state(c).current;
+        let pid = if cur.is_null() || cur == cpu_state(c).idle {
+            0
+        } else {
+            // SAFETY: per-CPU current is a valid task or idle (idle
+            // excluded above); diagnostic reads only.
+            let cur = unsafe { &*cur };
+            if cur.pid() == 0 {
+                0
+            } else {
+                cur.pid()
+            }
+        };
+        let sched_now = SCHED_CALLS[c].load(Relaxed);
+        let prev_pid = PREV[c].pid.swap(pid, Relaxed);
+        let prev_sched = PREV[c].sched.swap(sched_now, Relaxed);
+        // Skip the first burst for a holder (no delta yet).
+        let held_over_burst = pid != 0 && prev_pid == pid;
+        let sched_dx = sched_now.saturating_sub(prev_sched);
+        if !held_over_burst || sched_dx >= 20 {
+            continue;
+        }
+        // SAFETY: revalidated above (non-null, non-idle, pid != 0).
+        let cur = unsafe { &*cpu_state(c).current };
+        let se = cur.sched_entity();
+        let act_ms = se
+            .sum_exec_runtime
+            .load(Relaxed)
+            .saturating_sub(se.prev_sum_exec_runtime.load(Relaxed))
+            / 1_000_000;
+        any = true;
+        if LINES.load(Relaxed) > 400 {
+            continue;
+        }
+        let trip = crate::interrupt::preempt::TICK_ENTRY_RIP[c].load(Relaxed);
+        let tcs = crate::interrupt::preempt::TICK_ENTRY_CS[c].load(Relaxed);
+        let tpid = crate::interrupt::preempt::TICK_ENTRY_PID[c].load(Relaxed);
+        let tjif = crate::interrupt::preempt::TICK_ENTRY_JIF[c].load(Relaxed);
+        // SAFETY: NEED_RESCHED is an AtomicBool array sized MAX_CPUS;
+        // static mut access is single-word atomic reads here.
+        let nrs = unsafe { NEED_RESCHED[c].load(Acquire) } as u8;
+        let mode = if tcs & 3 == 3 { 'U' } else { 'K' };
+        let stamp_age = now_j.saturating_sub(tjif);
+        let _ = write!(
+            body,
+            " |c{}={}({}) sdx={} act={}ms pc={:#x} nrs={} rip={:#x}{}jif={} spid={}",
+            c,
+            cur.pid(),
+            core::str::from_utf8(cur.comm()).unwrap_or("").trim_end_matches('\0'),
+            sched_dx,
+            act_ms,
+            cur.preempt_count(),
+            nrs,
+            trip,
+            mode,
+            stamp_age,
+            tpid,
+        );
+        // Kernel-mode holder: capture the live call chain — scan down
+        // from below the entry frame, keeping kernel-text words (the
+        // same contract TXN-HANG-STK's top-dn walk uses; for an ON-CPU
+        // task the frames under the entry frame are the current
+        // syscall's chain, symbolized offline with addr2line).
+        #[cfg(feature = "x86_64")]
+        if mode == 'K' {
+            if let Some(top) = cur.kernel_stack_top_checked() {
+                let base = top.wrapping_sub(
+                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                );
+                let mut stk = alloc::string::String::new();
+                let mut kept = 0usize;
+                // SAFETY: entry-frame read of this task's pinned
+                // kernel-stack pages (kernel_stack_top_checked
+                // contract); diagnostic reads only.
+                unsafe {
+                    let mut p = (base as *const u64).wrapping_sub(1);
+                    for _ in 0..64 {
+                        if kept >= 14 {
+                            break;
+                        }
+                        let v = p.read_volatile();
+                        if (0xffffffff8000_0000..0xffffffff8200_0000).contains(&v) {
+                            let _ = write!(stk, " {v:#x}");
+                            kept += 1;
+                        }
+                        p = p.wrapping_sub(1);
+                    }
+                }
+                if kept > 0 {
+                    let _ = write!(body, "\nMONOPOLIST-STK c={} pid={}{}", c, cur.pid(), stk);
+                }
+            }
+        }
+    }
+    if !any || LINES.load(Relaxed) > 400 {
+        return;
+    }
+    LINES.fetch_add(1, Relaxed);
+    // HOTPATH-PRINT: fuxstuck graph-burst gate.
+    crate::pr_warn!(
+        "MONOPOLIST nrrun={} j={}{}",
+        GlobalRunQueue::grq_nr_running(),
+        now_j,
+        body
+    );
+}
+
 /// RUNQ-STRAND census (59th session, ohc74 close() strand): scan every
 /// burst for tasks in the PICKABLE-by-ownership shape — on_rq, state
 /// RUNNING, claim == -1, on_cpu == false, no CPU's current slot — whose
@@ -6295,7 +6463,7 @@ pub fn runq_strand_census(now_j: u64) {
                     );
                     // HOTPATH-PRINT: fuxstuck graph-burst gate.
                     crate::pr_warn!(
-                        "RUNQ-STRAND tid={} tgid={} ({}) age={}s exec_frozen={}ms linked={} aff={:#x} throttled={} pol={:?} claim={} pk={:#x} ts={}ms skips={} vr={:#x} min_vr=?{}{}",
+                        "RUNQ-STRAND tid={} tgid={} ({}) age={}s exec_frozen={}ms linked={} aff={:#x} throttled={} pol={:?} claim={} pk={:#x} ts={}ms skips={} vr={:#x} nrrun={} min_vr=?{}{}",
                         tk.pid(),
                         tk.tgid(),
                         core::str::from_utf8(tk.comm()).unwrap_or("").trim_end_matches('\0'),
@@ -6310,6 +6478,7 @@ pub fn runq_strand_census(now_j: u64) {
                         tk.get_time_slice() * 1000 / crate::config::KERNEL_HZ as u32,
                         skips,
                         vr,
+                        GlobalRunQueue::grq_nr_running(),
                         wall_s,
                         inc_s
                     );
@@ -6396,25 +6565,25 @@ pub fn runq_strand_census(now_j: u64) {
                     .load(core::sync::atomic::Ordering::Relaxed)
                     .saturating_sub(se.prev_sum_exec_runtime.load(core::sync::atomic::Ordering::Relaxed))
                     / 1_000_000;
-                // 60th: incumbent policy/prio — an RT-class incumbent
-                // (FIFO/RR) explains CFS strands without any pick bug.
+                // runq-strand lane: COMPACT form — the old long form
+                // (comm + act + pc + pol + prio) blew the printk record
+                // cap after c0, so 7 of 8 incumbents were NEVER visible
+                // on the strand rows. pid/pc/act identifies each CPU's
+                // holder; comm/policy ride the MONOPOLIST line.
                 let _ = write!(
                     inc_s,
-                    " c{}={}({}/act{}ms/pc{}/pol{}pr{})",
+                    " c{}={}/pc{:#x}/act{}s",
                     c,
                     cur.pid(),
-                    core::str::from_utf8(cur.comm()).unwrap_or("").trim_end_matches('\0'),
-                    act_ms,
                     cur.preempt_count(),
-                    cur.policy() as u8 as u64,
-                    cur.prio()
+                    act_ms / 1000
                 );
             }
             }
         }
         // HOTPATH-PRINT: fuxstuck graph-burst gate.
         crate::pr_warn!(
-            "RUNQ-STRAND tid={} tgid={} ({}) age={}s exec_frozen={}ms linked={} aff={:#x} throttled={} pol={:?} claim={} pk={:#x} ts={}ms skips={} vr={:#x} min_vr={:#x}{}{}",
+            "RUNQ-STRAND tid={} tgid={} ({}) age={}s exec_frozen={}ms linked={} aff={:#x} throttled={} pol={:?} claim={} pk={:#x} ts={}ms skips={} vr={:#x} nrrun={} min_vr={:#x}{}{}",
             tk.pid(),
             tk.tgid(),
             core::str::from_utf8(tk.comm()).unwrap_or("").trim_end_matches('\0'),
@@ -6429,6 +6598,7 @@ pub fn runq_strand_census(now_j: u64) {
             tk.get_time_slice() * 1000 / crate::config::KERNEL_HZ as u32,
             skips,
             vr,
+            GlobalRunQueue::grq_nr_running(),
             min_vr,
             wall_s,
             inc_s
