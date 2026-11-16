@@ -1912,25 +1912,34 @@ pub fn sys_gettid(_args: SyscallArgs) -> i64 {
 /// U1c: when the parent lives in a different (ancestor) pid namespace it
 /// is invisible — the namespace init reports 0, like Linux.
 pub fn sys_getppid(_args: SyscallArgs) -> i64 {
+    // Reference shape (getpid.c): task_tgid_vnr(rcu_dereference(
+    // current->real_parent)) — the parent Task pointer is followed
+    // directly and the pid translated only by namespace comparison,
+    // with NO pid-hash lookup. The old shape resolved ppid through
+    // find_task_by_pid on every call (the perf-sample histogram showed
+    // pid_hash_lookup in the null-syscall hot path).
     if let Some(current) = crate::sched::current() {
-        // SAFETY: current is a valid task; group_leader_ptr() heals NULL.
+        // SAFETY: current is valid; group_leader_ptr heals NULL and
+        // parent_task_ptr applies the same plausibility screen ppid()
+        // uses (a non-leader's parent field can be an unlinked snapshot).
         unsafe {
             let leader = (*current).group_leader_ptr();
-            let ppid = (*leader).ppid();
-            if ppid == 0 {
+            let parent = (*leader).parent_task_ptr();
+            if parent.is_null() {
                 return 0;
             }
-            match crate::process::find_task_by_pid(ppid) {
-                Some(p) => {
-                    if crate::process::ns::task_same_pid_ns(&*current, p) {
-                        p.ns_pid_local() as i64
-                    } else {
-                        // Parent in another namespace: invisible from here.
-                        // Only the ns init legitimately sees this.
-                        0
-                    }
-                }
-                None => 0,
+            // SAFETY: parent passed the plausibility screen; for a live
+            // leader it was set by add_child() and remains valid while
+            // this task is alive (ppid()'s discipline). Read-only use.
+            let parent = &*parent;
+            if crate::process::ns::task_same_pid_ns(&*leader, parent) {
+                // Same pid namespace: the ns-local pid is a plain field
+                // read (task_tgid_vnr fast case).
+                parent.ns_pid_local() as i64
+            } else {
+                // Parent in another namespace: invisible from here.
+                // Only the ns init legitimately sees this.
+                0
             }
         }
     } else {
