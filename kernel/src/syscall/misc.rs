@@ -370,7 +370,7 @@ pub fn epoll_notify_file(file_id: u64) {
         let n = EPN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         if n < 400
             && (n < 40 || n % 10 == 0)
-            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::EpollTrace)
+            && crate::trace::EVENT_EPOLL_DELIVERY.armed()
         {
             crate::pr_warn!(
                 "epollnotify#{}: registry_total={} this_fid={:#x}",
@@ -3393,7 +3393,7 @@ pub fn param_stall_dump() {
     // PROVABLY "watched but zero events" vs "never watched" (the 118th's
     // watch-add was guarded by current().is_none() which never fires in
     // tick context — see trap.rs WW-P1-WATCH-ADD).
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+    if crate::trace::EVENT_SCHEDTRACE.armed() {
         let mut p1_watched = false;
         for (i, w) in crate::sched::sched::WW_WATCH.iter().enumerate() {
             let t = w.load(core::sync::atomic::Ordering::Relaxed);
@@ -3969,7 +3969,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
         let mut probe_rev: [u16; PROBE_CAP] = [0; PROBE_CAP];
         let probe_n = core::sync::atomic::AtomicUsize::new(0);
         let probe_armed = crate::process::current_pid() == 1
-            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::EpollTrace);
+            && crate::trace::EVENT_EPOLL_DELIVERY.armed();
         // P3 wiring set (see the event-driven wait block below): hoisted
         // so the per-round build never allocates under the entries lock.
         // EPOLL_WIRE_CAP bounds it — an interest set larger than the cap
@@ -4034,7 +4034,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                 // RETIRED (probe-retire): unconditional; behind the
                 // existing epoll delivery trace switch (dfx=epolltrace),
                 // the switch whose doc names this hunt.
-                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::EpollTrace) {
+                if crate::trace::EVENT_EPOLL_DELIVERY.armed() {
                     static USTRV_N: core::sync::atomic::AtomicUsize =
                         core::sync::atomic::AtomicUsize::new(0);
                     if USTRV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
@@ -4191,9 +4191,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                 // registration did not subscribe to them — they are not
                 // maskable. Only the I/O readiness bits honor entry.events.
                 let report_mask = entry.events | EPOLLERR | EPOLLHUP;
-                if crate::dfx::switches::enabled(
-                    crate::dfx::switches::DfxSwitch::EpollTrace,
-                ) || crate::trace::EVENT_EPOLL_DELIVERY.armed() {
+                if crate::trace::EVENT_EPOLL_DELIVERY.armed() || crate::trace::EVENT_EPOLL_DELIVERY.armed() {
                     trace_fds.push((
                         entry.fd,
                         ep_events & report_mask,
@@ -4308,9 +4306,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
             // dfx=epolltrace: who got woken by which fd. Rate-limited to the
             // first 400 deliveries plus every 2000th after, so a spinning
             // waiter does not flood the serial console.
-            if crate::dfx::switches::enabled(
-                crate::dfx::switches::DfxSwitch::EpollTrace,
-            ) {
+            if crate::trace::EVENT_EPOLL_DELIVERY.armed() {
                 use core::sync::atomic::{AtomicU64, Ordering};
                 static N: AtomicU64 = AtomicU64::new(0);
                 let n = N.fetch_add(1, Ordering::Relaxed);
@@ -4381,7 +4377,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
             // dfx=epolltrace: an EINTR-storm burns a waiter at ~100% CPU
             // with ZERO ready deliveries (invisible to the delivery trace).
             // Rate-limited print of the pending mask so a storm is obvious.
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::EpollTrace)
+            if crate::trace::EVENT_EPOLL_DELIVERY.armed()
             {
                 use core::sync::atomic::{AtomicU64, Ordering};
                 static N: AtomicU64 = AtomicU64::new(0);
@@ -4569,7 +4565,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
         if timer_id == 0 {
             // Timer pool exhausted: degrade to a single yield rather than
             // sleep forever (nothing else is guaranteed to wake us).
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::EpollTrace)
+            if crate::trace::EVENT_EPOLL_DELIVERY.armed()
             {
                 use core::sync::atomic::{AtomicU64, Ordering};
                 static N: AtomicU64 = AtomicU64::new(0);

@@ -665,7 +665,7 @@ crate::pr_err!(
                 }
                 // Replay this pid's final syscalls from the global ring.
                 // Recorded only under dfx=sysring (perf lane 2026-11).
-                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SysRing) {
+                if crate::trace::EVENT_SYSRING.armed() {
                     use core::sync::atomic::Ordering::Relaxed;
                     use crate::syscall::dispatch::{SYSCALL_RING, SYSCALL_CURSOR};
                     let pid = crate::sched::get_current_pid();

@@ -1066,9 +1066,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 else {
                                     // oh-svc T1 attribution tap (known-gap 4):
                                     // dfx=ohhunt gates it.
-                                    if crate::dfx::switches::enabled(
-                                        crate::dfx::switches::DfxSwitch::OhHunt,
-                                    ) {
+                                    if crate::trace::EVENT_OHHUNT.armed() {
                                         crate::pr_warn!(
                                             "drm: mmap resolve failed fd={} off={:#x} len={} prime={} drm={}",
                                             fd,
@@ -1105,9 +1103,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                         let n =
                                             PEMAP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                                         if n < 20
-                                            && crate::dfx::switches::enabled(
-                                                crate::dfx::switches::DfxSwitch::OhHunt,
-                                            )
+                                            && crate::trace::EVENT_OHHUNT.armed()
                                         {
                                             crate::pr_warn!(
                                                 "drm: mmap placement-ENOMEM pid={} fd={} len={:#x} err={}",

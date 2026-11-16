@@ -91,7 +91,7 @@ pub static REF_CUR: AtomicUsize = AtomicUsize::new(0);
 /// `dfx=mmforensics` is armed; takes no locks (safe under PTE locks).
 #[inline]
 pub fn note_ref(page: *const crate::mm::page_desc::Page, kind: u8, site: u8, old: i32) {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::MmForensics) {
+    if !crate::trace::EVENT_MMFORENSICS.armed() {
         return;
     }
     // SAFETY: the caller passes a valid page descriptor it is operating on.
@@ -304,7 +304,7 @@ fn ring_history(ppn: u64) {
 /// Deep capture of one frame's tracking state. Rate-limited; a no-op
 /// unless `dfx=mmforensics` armed the switch.
 pub fn capture_frame(pfn: usize, why: &'static str) {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::MmForensics) {
+    if !crate::trace::EVENT_MMFORENSICS.armed() {
         return;
     }
     if CAPTURES.fetch_add(1, Ordering::Relaxed) >= 4 {

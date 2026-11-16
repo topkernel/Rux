@@ -1167,7 +1167,7 @@ pub fn free_pages(addr: usize, order: usize) {
     // hold the fresh evidence — the install sites, the transition
     // sequence) and REFUSE the free (quarantine-leak), so the frame
     // never re-enters circulation and scrambles the trail.
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::MmForensics) {
+    if crate::trace::EVENT_MMFORENSICS.armed() {
         let pd = crate::mm::page_desc::pfn_to_page(phys_to_pfn(addr));
         if !pd.is_null() {
             // SAFETY: read-only descriptor access on the diagnostic path.
@@ -1302,9 +1302,7 @@ pub fn free_pages(addr: usize, order: usize) {
                 // perturbs timing enough to soft-lockup the box. The count
                 // is readable from the FOREIGN report below.
                 TEXT_OWN_FREES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            } else if crate::dfx::switches::enabled(
-                crate::dfx::switches::DfxSwitch::MmForensics,
-            ) {
+            } else if crate::trace::EVENT_MMFORENSICS.armed() {
                 crate::mm::page_desc::text_stamp_remove(pfn);
                 #[cfg(feature = "riscv64")]
                 {

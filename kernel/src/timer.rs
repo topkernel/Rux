@@ -1015,7 +1015,7 @@ pub fn timer_softirq_handler(_nr: usize) {
     // dfx=schedtrace reaper forensics (125th waitid leg): 1 Hz zombie-
     // linger scan — names un-reaped children and what the non-reaping
     // parent is blocked on instead (dfx/reaper.rs).
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace)
+    if crate::trace::EVENT_SCHEDTRACE.armed()
         && current.saturating_sub(LAST_REAPER_SCAN.load(Ordering::Relaxed)) >= 100
     {
         LAST_REAPER_SCAN.store(current, Ordering::Relaxed);

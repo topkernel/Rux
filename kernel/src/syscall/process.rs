@@ -1486,7 +1486,7 @@ pub fn sys_exit_group(args: SyscallArgs) -> i64 {
             .count() >= 4;
         if deep {
             // Ring recorded only under dfx=sysring (perf lane 2026-11).
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SysRing) {
+            if crate::trace::EVENT_SYSRING.armed() {
                 use core::sync::atomic::Ordering::Relaxed;
                 let pid = unsafe { crate::process::current_pid() } as u32;
                 let mut picks: [(u32, u64, u64, u64); 12] = [(0, 0, 0, 0); 12];
@@ -1519,6 +1519,10 @@ pub fn sys_exit_group(args: SyscallArgs) -> i64 {
                         a1,
                         ret as i64
                     );
+                    // dfx-migrate: the replayed ring row also records
+                    // into the unified framework (rux:sysring — the
+                    // event is also the family's arm switch).
+                    crate::trace::trace_sysring(pid, nr, a0, a1, ret);
                 }
             } else {
                 crate::pr_warn!(

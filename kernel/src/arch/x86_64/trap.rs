@@ -1232,9 +1232,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                             core::sync::atomic::AtomicBool::new(false);
                         if !PS_DONE2.load(core::sync::atomic::Ordering::Relaxed)
                             && crate::drivers::timer::get_jiffies() >= 24_000
-                            && crate::dfx::switches::enabled(
-                                crate::dfx::switches::DfxSwitch::SchedTrace,
-                            )
+                            && crate::trace::EVENT_SCHEDTRACE.armed()
                             && !PS_DONE2.swap(true, core::sync::atomic::Ordering::AcqRel)
                         {
                             crate::pr_warn!("=== SECOND DUMP (240s trend) ===");
@@ -1242,9 +1240,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                         }
                         if !PS_DONE.load(core::sync::atomic::Ordering::Relaxed)
                             && crate::drivers::timer::get_jiffies() >= 18_000
-                            && crate::dfx::switches::enabled(
-                                crate::dfx::switches::DfxSwitch::SchedTrace,
-                            )
+                            && crate::trace::EVENT_SCHEDTRACE.armed()
                             && !PS_DONE.swap(true, core::sync::atomic::Ordering::AcqRel)
                         {
                             crate::syscall::misc::param_stall_dump();
@@ -3614,7 +3610,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
             // in-flight syscall for interrupt-time crashes. The ring is
             // recorded only under dfx=sysring (perf lane 2026-11) — say
             // so instead of replaying a stale/zero ring.
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SysRing) {
+            if crate::trace::EVENT_SYSRING.armed() {
                 use crate::syscall::dispatch::{SYSCALL_CURSOR, SYSCALL_RING};
                 let cur = SYSCALL_CURSOR.load(core::sync::atomic::Ordering::Relaxed);
                 let len = SYSCALL_RING.len();

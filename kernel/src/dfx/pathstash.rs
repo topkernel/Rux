@@ -60,7 +60,7 @@ pub fn stash_open(path: &str) {
 /// always shows its own file. Arm-gated on TxnHang (leg-29A: sc310's
 /// hiview handler sat in fdatasync 43 min with only a raw fd known).
 pub fn stash_file(op: u32, path: &str) {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang) {
+    if !crate::trace::EVENT_TXNHANG.armed() {
         return;
     }
     // current_pid() is the task (thread) id — the same id TXN-HANG
@@ -89,7 +89,7 @@ pub fn stash_file(op: u32, path: &str) {
 /// leg 44). The switch check runs BEFORE `f`; with TxnHang off this is
 /// one atomic load and no allocation.
 pub fn stash_file_lazy(op: u32, f: impl FnOnce() -> alloc::string::String) {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang) {
+    if !crate::trace::EVENT_TXNHANG.armed() {
         return;
     }
     let path = f();

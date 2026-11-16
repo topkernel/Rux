@@ -1222,7 +1222,7 @@ fn is_inst(pid: u32) -> bool {
 }
 
 fn txnhunt_on() -> bool {
-    crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang)
+    crate::trace::EVENT_TXNHANG.armed()
 }
 
 /// True when `pid` is the accountmgr process. Latches the pid once from
@@ -1271,7 +1271,7 @@ static DEATHCB_TIDS: [core::sync::atomic::AtomicU32; 8] =
 static DEATHCB_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 fn deathcb_open(tid: u32) -> bool {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang) {
+    if !crate::trace::EVENT_TXNHANG.armed() {
         return false;
     }
     DEATHCB_TIDS
@@ -1281,7 +1281,7 @@ fn deathcb_open(tid: u32) -> bool {
 
 /// Open the window at DeadBinder staging (budget-gated print).
 fn deathcb_mark(pid: u32, tid: u32, desc: u32, cookie: u64, todo_len: usize) {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang) {
+    if !crate::trace::EVENT_TXNHANG.armed() {
         return;
     }
     if !DEATHCB_TIDS
@@ -1316,7 +1316,7 @@ fn deathcb_mark(pid: u32, tid: u32, desc: u32, cookie: u64, todo_len: usize) {
 
 /// Close the window at BC_DEAD_BINDER_DONE.
 fn deathcb_close(pid: u32, tid: u32) {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang) {
+    if !crate::trace::EVENT_TXNHANG.armed() {
         return;
     }
     for s in DEATHCB_TIDS.iter() {
@@ -5104,7 +5104,7 @@ pub fn txn_owing_of(tgid: u32, tid: u32) -> (usize, u64, u32) {
 /// end-to-end. Rate-capped to one burst per 5 s; bounded (8 + 8 lines);
 /// zero cost when dfx=txnhunt is off.
 pub fn txn_hang_audit() {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang) {
+    if !crate::trace::EVENT_TXNHANG.armed() {
         return;
     }
     let now = crate::drivers::timer::get_jiffies() as u32;
@@ -5634,6 +5634,22 @@ pub fn txn_hang_audit() {
             a0,
             a1
         );
+        // dfx-migrate: the hit also records into the unified framework
+        // (rux:txnhang — the event is also the family's arm switch, so
+        // it is armed by construction here). The SRV/OWE/STK companion
+        // lines below stay serial-only.
+        crate::trace::trace_txnhang(
+            h.id,
+            h.code,
+            h.cpid,
+            h.ctid,
+            h.spid,
+            h.stid,
+            h.exec_ms as u64,
+            state,
+            rip,
+            a0,
+        );
         // SRV-SCHED (51st session): scheduler truth for the hung server —
         // state/linkage/ownership/slot/exec-clock. Discriminates the
         // state=RUNNING hung shapes: linked-but-starved (linked=1,
@@ -6112,7 +6128,7 @@ fn bc_name(cmd: u32) -> &'static str {
 ///      decode + prints happen after the guard drops (sc207). Bounded
 ///     (24 lines + 1 census line); zero cost when dfx=txnhunt is off.
 pub fn bwr_park_audit() {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang) {
+    if !crate::trace::EVENT_TXNHANG.armed() {
         return;
     }
     let now = crate::drivers::timer::get_jiffies() as u32;
@@ -6506,7 +6522,7 @@ pub fn bwr_park_audit() {
         // unlock never comes (the waiter-pool census misses waiters
         // parked after the pool fills). dfx=fuxstuck gates the walker.
         let chain_txt = if park == "FUTEX"
-            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck)
+            && crate::trace::EVENT_FUXSTUCK.armed()
             && !task.is_null()
         {
             match crate::sync::futex::ffrt_chain_walk(task, a0 as usize) {
@@ -6635,7 +6651,7 @@ pub fn bwr_park_audit() {
             if (eligible && budget_ok || is_owner)
                 && park == "FUTEX"
                 && !task.is_null()
-                && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck)
+                && crate::trace::EVENT_FUXSTUCK.armed()
             {
                 match crate::sync::futex::ffrt_mutex_scan(task) {
                     Some(t) => {
@@ -6772,7 +6788,7 @@ pub fn bwr_park_audit() {
             // tid 785, looper=0x0, on a 2 s transient park at 38 s and
             // stole the slots).
             && s.looper != 0
-            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck)
+            && crate::trace::EVENT_FUXSTUCK.armed()
             && a0 as u64 >= 0x1000
         {
             crate::sync::futex::fuxpark_latch(a0 as u64, s.tid, s.pid as u32);
@@ -6865,7 +6881,7 @@ pub fn bwr_park_audit() {
             && s.looper != 0
             && s.read_wait_since != 0
             && now.wrapping_sub(s.read_wait_since as u32) > 300
-            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck)
+            && crate::trace::EVENT_FUXSTUCK.armed()
         {
             // hw1: per-tgid gates (see census_tgid_due) — same
             // starvation class as the FUTEX twin above.
@@ -8361,7 +8377,7 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
                 // actually received — token_src is the serviced txn's
                 // sender tgid (0 = stack empty / not stamped), pid_out
                 // the t_from-gated pid field.
-                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang)
+                if crate::trace::EVENT_TXNHANG.armed()
                     && is_inst(proc.pid)
                 {
                     static GSI_N: core::sync::atomic::AtomicUsize =
