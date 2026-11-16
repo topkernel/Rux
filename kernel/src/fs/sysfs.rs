@@ -1558,6 +1558,18 @@ fn build_tree() -> Arc<KObject> {
         },
     );
 
+    // /sys/power/wakeup_count (why-slow): Linux exposes the pending
+    // wakeup-event counter; OH init chowns/chmods it at boot (the missing
+    // node was an ours-only error row in the boot error-stream diff).
+    // Read returns 0 pending events (no wakeup sources on this platform);
+    // a write consumes the counter (success — Linux's no-pending store).
+    attr_rw(
+        &power,
+        "wakeup_count",
+        || b"0\n".to_vec(),
+        |_buf| 0,
+    );
+
     // ---------------- /sys/dev + /sys/block ----------------
     // /sys/dev/{block,char} and /sys/block entries are created dynamically
     // by register_block_disk()/register_input_event(); only the tty char
