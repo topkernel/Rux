@@ -360,6 +360,20 @@ fn apply_mnt_flags(
     new_flags: crate::fs::mount::MntFlags,
 ) {
     *mnt.flags.lock() = new_flags;
+    // The ext4 op-layer ro latch is PER FILESYSTEM INSTANCE, and a bind
+    // copy SHARES the instance with the original mount (mnt.root is the
+    // same inode). Only the init mount namespace may close/open the
+    // instance-wide latch: a private namespace re-flagging its own
+    // ns-attached bind copy RO (gdm-hunt, 2026-11-16: the 24.04
+    // executor's `mount-rootfs` bind re-flag, MS_BIND|MS_REMOUNT|
+    // MS_RDONLY) must not read-only the real filesystem for everyone
+    // else — logind's StateDirectory mkdir, gdm's `2>/var/gdm-err.txt`
+    // and the PrivateTmp setup all died EROFS from exactly that leak.
+    // The sandbox itself keeps its RO enforcement inside the namespace
+    // through the per-mount mnt.flags guard (path_on_readonly_mount).
+    if !crate::process::ns::in_init_mnt_ns() {
+        return;
+    }
     // Keep the underlying ext4's own ro latch in sync — its
     // op-layer EROFS guard reads fs.read_only (sc21), so a
     // remount,rw must reopen writes and remount,ro close them
