@@ -635,6 +635,13 @@ pub fn alloc_block_with_prealloc(
     goal_group: u32,
     ino: u32,
 ) -> Result<u64, i32> {
+    // Same serialization as BlockAllocator::alloc_block (q.v.): this
+    // path runs its OWN read-scan-mark-write on the bitmap for the
+    // prealloc window (Phase 3) — unlocked it races any other allocator
+    // and loses ITS bit, after which the window's blocks get handed to
+    // a second owner (cook5 evidence: inode 265's extent metadata vs
+    // inode 335's window data on the same physical blocks).
+    let _alloc_guard = super::EXT4_BIG_LOCK.lock();
     // Phase 1: Check prealloc cache
     {
         let mut prealloc = fs.prealloc.lock();
