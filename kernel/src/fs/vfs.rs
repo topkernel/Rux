@@ -3455,7 +3455,17 @@ fn inode_nlink(inode: &Inode) -> u32 {
 /// (mkdir, rmdir, unlink, etc.)
 fn lookup_parent_dir(pathname: &str) -> Result<(VfsPath, String), i32> {
     let (parent_path, name) = path_parent_and_name(pathname)?;
-    let parent_vpath = path_lookup(&parent_path, lookup_flags::LOOKUP_DIRECTORY)?;
+    // The PARENT's final component is an intermediate component of the
+    // operand path — Linux link_path_walk resolves it WITH symlink
+    // following (mkdir "symdir/x" creates inside symdir's target). The
+    // old lookup_flags::LOOKUP_DIRECTORY argument (0x2) numerically
+    // aliased the top-level LOOKUP_NOFOLLOW bit and silently suppressed
+    // that follow: creating/renaming through a symlinked directory
+    // failed ENOTDIR, and the 42-43-hop ../-chains of LTP rename11 /
+    // renameat01 returned ENOTDIR where the reference answers ELOOP
+    // (the ELOOP fires one hop later for deeper chains, which is why
+    // only that window was wrong).
+    let parent_vpath = path_lookup(&parent_path, 0)?;
 
     // Verify it's a directory
     if let Some(ref inode) = parent_vpath.inode {
