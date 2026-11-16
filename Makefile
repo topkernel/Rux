@@ -7,6 +7,11 @@
 # ---- Ubuntu native desktop (udesk) ----
 # Image and kernel artifacts
 UBUNTU_IMG ?= work/gnome-x86.img
+# Which x86_64 kernel profile `make ubuntu-run` builds and boots.
+# RELEASE by default — that is the shape the user boots, and the shape
+# the release perf gates measure. Override with UBUNTU_PROFILE=debug
+# for the debug build.
+UBUNTU_PROFILE ?= release
 KERNEL_BIN ?= target/riscv64gc-unknown-none-elf/debug/rux
 # The distro QEMU build has the SDL display backend; the custom 10.2.2 in
 # /usr/local/bin is compiled without display backends (none/dbus only).
@@ -105,9 +110,20 @@ ubuntu-image:
 # Boot the Ubuntu GNOME desktop (x86_64, KVM by default — ACCEL=tcg
 # to override). Native SDL window (WSLg); keyboard works in the window
 # AND in this terminal (serial). Login: root / rux.
-ubuntu-run: build $(UBUNTU_IMG)
+#
+# The x86_64 kernel is BUILT here (build-x86-$(UBUNTU_PROFILE)) and its
+# path is passed in explicitly: the target used to depend on the
+# riscv64 `build` and boot whatever x86 bzImage happened to sit in
+# target/, so a stale binary could be booted with a fresh tree checked
+# out (the 2026-11-16 dev-ttyS0.device timeout: an x86 bzImage built
+# before the uevent/netlink merge, booted from a post-merge tree).
+ubuntu-run: build-x86-$(UBUNTU_PROFILE) $(UBUNTU_IMG)
 	@echo "Starting Ubuntu GNOME desktop (x86_64, KVM, SDL window)..."
-	@ROOTFS=$(UBUNTU_IMG) INIT=/sbin/runit NOBUILD=1 bash scripts/test/run-x86-ub.sh gui
+	@ROOTFS=$(UBUNTU_IMG) INIT=$(UBUNTU_INIT) NOBUILD=1 \
+	 PROFILE=$(UBUNTU_PROFILE) \
+	 KERNEL_ELF=$(CURDIR)/target/x86_64-unknown-none/$(UBUNTU_PROFILE)/rux \
+	 BZIMAGE=$(CURDIR)/target/x86_64-unknown-none/$(UBUNTU_PROFILE)/bzImage \
+	 bash scripts/test/run-x86-ub.sh gui
 
 # Image rule: built on demand by ubuntu-run, refreshed by `make ubuntu-image`.
 $(UBUNTU_IMG):

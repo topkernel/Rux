@@ -20,7 +20,22 @@
 #                       setup_device_mappings); verified booting 8G SMP8
 #                       KVM to the GNOME stage with zero virtio faults.
 #   QEMU=qemu-system-x86_64
+#   PROFILE=debug|release
+#                       which cargo profile the booted kernel comes from
+#                       (default debug). `make ubuntu-run` builds the
+#                       RELEASE kernel itself and passes the release
+#                       paths in explicitly (KERNEL_ELF/BZIMAGE).
+#   KERNEL_ELF / BZIMAGE
+#                       explicit kernel paths (override PROFILE)
 #   NOBUILD=1            skip the kernel build step
+#
+# The script prints the identity of the kernel it boots (path, size,
+# mtime) and warns when that binary is OLDER than the kernel sources —
+# a stale bzImage is indistinguishable from a fresh one at runtime, and
+# a boot that "still shows the old bug" is usually exactly that (ttydev
+# lane, 2026-11-16: an x86 bzImage built before the uevent/netlink merge
+# was booted with the post-merge tree checked out, and the
+# dev-ttyS0.device timeout was blamed on the tree).
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -35,8 +50,9 @@ ROOTFS="${ROOTFS:-work/ubuntu-x86.img}"
 SMP="${SMP:-8}"
 MEM="${MEM:-8G}"
 QEMU="${QEMU:-qemu-system-x86_64}"
-KERNEL_ELF="target/x86_64-unknown-none/debug/rux"
-BZIMAGE="target/x86_64-unknown-none/debug/bzImage"
+PROFILE="${PROFILE:-debug}"
+KERNEL_ELF="${KERNEL_ELF:-target/x86_64-unknown-none/$PROFILE/rux}"
+BZIMAGE="${BZIMAGE:-target/x86_64-unknown-none/$PROFILE/bzImage}"
 
 if [ ! -f "$ROOTFS" ]; then
     echo "rootfs image missing: $ROOTFS" >&2
@@ -46,13 +62,27 @@ fi
 
 if [ "${NOBUILD:-0}" != "1" ]; then
     export PATH="$HOME/.cargo/bin:$PATH"
-    cargo build --target x86_64-unknown-none --no-default-features --features x86_64
+    if [ "$PROFILE" = "release" ]; then
+        # The Makefile target owns the release profile (it also runs the
+        # symbol pass); reuse it instead of rebuilding here.
+        make -C build PLATFORM=x86_64 build-release
+    else
+        cargo build --target x86_64-unknown-none --no-default-features --features x86_64
+    fi
     python3 build/mkbzimage.py "$KERNEL_ELF" "$BZIMAGE"
 fi
 
 if [ ! -f "$BZIMAGE" ]; then
     echo "kernel not built: $BZIMAGE" >&2
     exit 1
+fi
+
+echo "kernel: $BZIMAGE ($(stat -c '%s bytes, built %y' "$BZIMAGE"))"
+if [ -n "$(find "$WT/kernel/src" "$WT/kernel/build.rs" "$WT/Cargo.toml" \
+            -newer "$BZIMAGE" -print -quit 2>/dev/null)" ]; then
+    echo "WARNING: $BZIMAGE is OLDER than the kernel sources — this is a" >&2
+    echo "         STALE kernel binary; the boot will not show the current" >&2
+    echo "         tree's behaviour. Rebuild it (make build-x86-release)." >&2
 fi
 
 EXTRA=()
