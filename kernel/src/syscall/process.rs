@@ -1343,6 +1343,37 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
     } else {
         0
     };
+    // uevent hunt (serial-getty chain): any exec carrying a
+    // KOBJECT_UEVENT netlink fd — the socket-activation shape (udevd
+    // inherits pid1's bound monitor). One line per such exec, with each
+    // fd's CLOEXEC state (LISTEN_FDS fds must pass with CLOEXEC CLEAR).
+    {
+        static UEEX_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if UEEX_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
+            if let Some(ft) = crate::sched::get_current_fdtable() {
+                let mut hits: alloc::vec::Vec<(usize, bool)> = alloc::vec::Vec::new();
+                for fd in 0..16usize {
+                    if let Some(f) = ft.get_file(fd) {
+                        if let Some((nl, _)) = crate::net::netlink::netlink_file_of_file(&f) {
+                            if nl.protocol == crate::net::netlink::NETLINK_KOBJECT_UEVENT {
+                                hits.push((fd, ft.get_fd_cloexec(fd)));
+                            }
+                        }
+                    }
+                }
+                if !hits.is_empty() {
+                    crate::pr_info!(
+                        "UEEXEC[{}] pid={} path='{}' uevent-fds={:?}",
+                        UEEX_N.load(core::sync::atomic::Ordering::Relaxed),
+                        crate::process::current_pid(),
+                        pathname_str,
+                        hits
+                    );
+                }
+            }
+        }
+    }
     let rc = do_execve(pathname_str, &argv, &envp, 0) as i64;
     if fp_t_exec != 0 {
         crate::dfx::forkprof::add(crate::dfx::forkprof::P_EXEC_TOTAL, fp_t_exec);

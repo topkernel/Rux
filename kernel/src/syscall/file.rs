@@ -4037,6 +4037,43 @@ fn fill_statfs_for_inode(inode: &crate::fs::inode::Inode, buf: &mut Statfs) {
         buf.f_flags = 0; // rw — verify_selinuxmnt rejects ST_RDONLY
         return;
     }
+    if inode
+        .ops
+        .is_some_and(|o| core::ptr::eq(o as *const _, &crate::fs::sysfs::SYSFS_INODE_OPS as *const _))
+    {
+        // sysfs: f_type MUST be SYSFS_MAGIC (0x62656572) — systemd's
+        // sd-device device_set_syspath() ends with fd_is_fs_type(fd,
+        // SYSFS_MAGIC) on the chased device directory and refuses
+        // EVERY device whose syspath is not sysfs-backed ("outside of
+        // sysfs, refusing", -ENODEV). With the rootfs fallback magic
+        // here, sd_device_new_from_syspath() rejected every /sys
+        // device: udevadm info answered "No such device",
+        // systemd-udev-trigger enumerated zero devices, udevd never
+        // saw a coldboot event, dev-*.device units timed out, and
+        // serial-getty@ttyS0 failed its dependency (ub2404, 2026-11-16).
+        fill_rootfs_statfs(buf);
+        buf.f_type = 0x6265_6572; // SYSFS_MAGIC
+        buf.f_fsid = [crate::fs::inode::stat_dev_user(inode.fs_id) as u32, 0];
+        return;
+    }
+    if inode
+        .ops
+        .is_some_and(|o| core::ptr::eq(o as *const _, &crate::fs::devfs::DEVFS_INODE_OPS as *const _))
+    {
+        // devfs (/dev): f_type MUST be DEVTMPFS_SUPER_MAGIC (0x958458f6)
+        // — systemd's dev_is_devtmpfs() gates sd-device-monitor's
+        // MONITOR_GROUP_UDEV subscription: with /run/udev/control not
+        // yet created (before udevd starts) AND /dev not reporting
+        // devtmpfs, device_monitor_new_full() downgrades PID 1's
+        // monitor to MONITOR_GROUP_NONE ("The udev service seems not
+        // to be active, disabling the monitor") — nl_groups=0, zero
+        // events received, and every dev-*.device unit times out
+        // (ub2404 serial-getty chain, 2026-11-16).
+        fill_rootfs_statfs(buf);
+        buf.f_type = 0x9584_58f6; // DEVTMPFS_SUPER_MAGIC
+        buf.f_fsid = [crate::fs::inode::stat_dev_user(inode.fs_id) as u32, 0];
+        return;
+    }
     fill_rootfs_statfs(buf);
     buf.f_fsid = [crate::fs::inode::stat_dev_user(inode.fs_id) as u32, 0];
 }
@@ -6846,13 +6883,23 @@ pub fn sys_open_tree(args: SyscallArgs) -> i64 {
     let probe_root = alloc::sync::Arc::new(crate::fs::dentry::Dentry::new(
         alloc::string::String::from("/"),
     ));
-    let submounts = if flags & AT_RECURSIVE != 0 {
-        crate::fs::vfs::vfs_collect_submounts(&anc, &probe_root)
+    let (submounts, submount_src_base) = if flags & AT_RECURSIVE != 0 {
+        (
+            crate::fs::vfs::vfs_collect_submounts(&anc, &probe_root),
+            Some(anc.clone()),
+        )
     } else {
-        alloc::vec::Vec::new()
+        (alloc::vec::Vec::new(), None)
     };
 
-    let file = fapi::make_detached_mount(root_inode, mnt_flags, &fs_type, &source, submounts);
+    let file = fapi::make_detached_mount(
+        root_inode,
+        mnt_flags,
+        &fs_type,
+        &source,
+        submounts,
+        submount_src_base,
+    );
     match fapi::install_fd_with(file, flags & fapi::OPEN_TREE_CLOEXEC != 0) {
         Ok(fd) => fd as i64,
         Err(e) => e as i64,
@@ -7082,14 +7129,18 @@ pub fn sys_move_mount(args: SyscallArgs) -> i64 {
                 }
             }
             // open_tree(AT_RECURSIVE) clones: materialize inside the
-            // now-attached root.
-            let submounts = from_mfd
-                .as_ref()
-                .and_then(|f| fapi::mountfd_of(f))
-                .map(|mfd| core::mem::take(&mut mfd.submounts))
-                .unwrap_or_default();
+            // now-attached root (with the recorded source subtree root
+            // as the source-side fallback cursor's base).
+            let mfd_ref = from_mfd.as_ref().and_then(|f| fapi::mountfd_of(f));
+            let (submounts, src_base) = match mfd_ref {
+                Some(mfd) => (
+                    core::mem::take(&mut mfd.submounts),
+                    mfd.submount_src_base.clone(),
+                ),
+                None => (alloc::vec::Vec::new(), None),
+            };
             if !submounts.is_empty() {
-                crate::fs::vfs::vfs_clone_submounts(&mnt.root, &submounts);
+                crate::fs::vfs::vfs_clone_submounts(&mnt.root, src_base.as_ref(), &submounts);
             }
             0
         }
@@ -7373,6 +7424,7 @@ pub fn sys_fsmount(args: SyscallArgs) -> i64 {
         &fc.fs_type,
         &source,
         alloc::vec::Vec::new(),
+        None,
     );
     match fapi::install_fd_with(mfile, args[1] & fapi::FSMOUNT_CLOEXEC != 0) {
         Ok(fd) => fd as i64,

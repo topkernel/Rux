@@ -2714,6 +2714,55 @@ fn epoll_chain_depth(
 /// # Returns
 /// Returns 0 on success, negative error code on failure
 pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
+    // uevent hunt (serial-getty chain): every epoll registration of a
+    // KOBJECT_UEVENT netlink socket — did udevd arm the socket-activation
+    // monitor fd at all, and as which fd number? Budgeted.
+    {
+        static UEC_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if UEC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
+            if let Some(ft) = crate::sched::get_current_fdtable() {
+                if let Some(f) = ft.get_file(args[2] as usize) {
+                    if let Some((nl, _)) = crate::net::netlink::netlink_file_of_file(&f) {
+                        if nl.protocol == crate::net::netlink::NETLINK_KOBJECT_UEVENT {
+                            // events mask (ADD/MOD only — DEL passes none)
+                            let mut evs = 0u32;
+                            if (args[1] as i32) == 1 || (args[1] as i32) == 3 {
+                                let p = args[3] as *const u8;
+                                if !p.is_null()
+                                    && crate::arch::uaccess::access_ok(p as usize, 12)
+                                {
+                                    let mut b = [0u8; 12];
+                                    if unsafe {
+                                        crate::arch::uaccess::copy_from_user(
+                                            b.as_mut_ptr(),
+                                            p,
+                                            12,
+                                        )
+                                    } == 0
+                                    {
+                                        evs = u32::from_le_bytes(
+                                            b[0..4].try_into().unwrap(),
+                                        );
+                                    }
+                                }
+                            }
+                            crate::pr_info!(
+                                "UEEPCTL[{}] pid={} op={} fd={} sock={:#x} qlen={} events={:#x}",
+                                UEC_N.load(core::sync::atomic::Ordering::Relaxed),
+                                crate::process::current_pid(),
+                                args[1] as i32,
+                                args[2] as i32,
+                                alloc::sync::Arc::as_ptr(&nl) as usize,
+                                nl.recv_queue_len(),
+                                evs
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
     // 120th input hunt: evdev-backed fds entering/leaving an epoll — the
     // datum that says whether the input framework's reader is armed.
     {
@@ -3961,6 +4010,30 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
             // messages wedged every client past maxevents while the server
             // kept spinning on the fds it still saw).
             if ready_events.len() >= maxevents as usize {
+                // uevent hunt (serial-getty chain): a scan truncated at
+                // maxevents leaves every LATER entry unreported — with
+                // maxevents=1 (sd-event's one-event-per-iteration shape)
+                // a perpetually-ready EARLIER entry starves the rest
+                // (Linux's ready-list delivery re-queues still-ready fds
+                // at the TAIL, so no fd starves). Name the truncation
+                // with the first skipped fd and its live verdict.
+                static USTRV_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if USTRV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
+                    let mut ids = alloc::string::String::new();
+                    for e in ready_events.iter().take(4) {
+                        let (ev, d) = (e.events, { let d = e.data; d });
+                        ids.push_str(&alloc::format!("{:#x}/{} ", ev, d));
+                    }
+                    crate::pr_warn!(
+                        "UESTARVE[{}] pid={} maxevents={} delivered=[{}] skipped_fd={}",
+                        USTRV_N.load(core::sync::atomic::Ordering::Relaxed),
+                        crate::process::current_pid(),
+                        maxevents,
+                        ids,
+                        entry.fd
+                    );
+                }
                 break;
             }
             // R32-B9: the registration binds to the open file description

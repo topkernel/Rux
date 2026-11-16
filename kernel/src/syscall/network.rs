@@ -2006,15 +2006,37 @@ pub fn sys_setsockopt(args: SyscallArgs) -> i64 {
     }
     if let Some(nlsock) = crate::net::netlink::netlink_socket_from_fd(fd) {
         // SOL_NETLINK (270): NETLINK_ADD_MEMBERSHIP (1) /
-        // NETLINK_DROP_MEMBERSHIP (2) / NETLINK_PKTINFO (3) etc. —
-        // accept and ignore. Rux's uevent broadcast fans every kernel
-        // uevent out to ALL NETLINK_KOBJECT_UEVENT sockets already, so
-        // group membership is bookkeeping-only. Returning an error here
-        // killed systemd-logind's device monitor
+        // NETLINK_DROP_MEMBERSHIP (2) update the socket's group
+        // subscription mask (the reference's
+        // netlink_update_subscription_socket_bit — membership is one
+        // bit, group N -> mask bit N-1). This is how sd-device-monitor
+        // subscribes: it binds sockaddr_nl.nl_groups=0 and JOINS its
+        // group here (ub2404: pid 1's device monitor joins group 2, the
+        // udev-processed event feed — with membership ignored it bound
+        // groups=0x0, received nothing, and every dev-*.device unit
+        // timed out taking serial-getty@ttyS0's dependency with it).
+        // Everything else (NETLINK_PKTINFO etc.) is accept-and-ignore;
+        // an error here once killed systemd-logind's device monitor
         // ("Failed to create udev watchers") and with it the whole gdm
         // login chain (gdm bring-up r3).
         const SOL_NETLINK_LEVEL: i32 = 270;
         if level == SOL_NETLINK_LEVEL {
+            if optname == 1 || optname == 2 {
+                let group = match read_i32(4) {
+                    Some(v) if (1..=32).contains(&v) => v as u32,
+                    _ => return -(errno::EINVAL as i64),
+                };
+                let bit = 1u32 << (group - 1);
+                if optname == 1 {
+                    nlsock
+                        .groups
+                        .fetch_or(bit, core::sync::atomic::Ordering::AcqRel);
+                } else {
+                    nlsock
+                        .groups
+                        .fetch_and(!bit, core::sync::atomic::Ordering::AcqRel);
+                }
+            }
             return 0;
         }
         return match level {
@@ -4453,18 +4475,37 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
         None => return -(errno::EBADF as i64),
     };
 
-    // Check buffer pointer validity
-    if buf_ptr.is_null() {
-        return -(errno::EFAULT as i64);
-    }
-
-    // Validate user buffer pointer
-    if !crate::arch::uaccess::access_ok(buf_ptr as usize, len) {
-        return -(errno::EFAULT as i64);
+    // Linux never touches the receive buffer when len == 0 — a NULL
+    // buffer with a zero length is LEGAL there, and sd-netlink's
+    // datagram size probe is exactly that shape:
+    //     recv(fd, NULL, 0, MSG_PEEK | MSG_TRUNC)
+    // which must return the pending datagram's length without
+    // dequeuing it (the reference's skb_recv_datagram(MSG_PEEK) with
+    // `copied = skb->len` under MSG_TRUNC — netlink_recvmsg). EFAULT is
+    // only for a buffer the kernel would actually write (ub2404:
+    // systemd-udevd spun forever on EFAULT from the old unconditional
+    // NULL check, the 11 coldboot uevents never drained, and
+    // serial-getty@ttyS0 failed its dev-ttyS0.device dependency).
+    if len > 0 {
+        if buf_ptr.is_null() {
+            return -(errno::EFAULT as i64);
+        }
+        // Validate user buffer pointer
+        if !crate::arch::uaccess::access_ok(buf_ptr as usize, len) {
+            return -(errno::EFAULT as i64);
+        }
     }
 
     if len == 0 {
-        return 0;
+        // Zero-length receive: only the netlink family has the PEEK|
+        // TRUNC size-report arm below; every other family keeps the
+        // plain zero-length receive (nothing copied, nothing dequeued).
+        let nl_size_probe = (flags & MSG_PEEK) != 0
+            && (flags & MSG_TRUNC) != 0
+            && crate::net::netlink::netlink_file_of_file(&file).is_some();
+        if !nl_size_probe {
+            return 0;
+        }
     }
 
     // P0-1: AF_UNIX — receive into a kernel buffer, report the sender path.
@@ -4573,6 +4614,27 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
 
     // P0-2: AF_NETLINK — one rtnetlink message + sockaddr_nl source.
     if let Some((nlsock, file_nonblock)) = crate::net::netlink::netlink_file_of_file(&file) {
+        // Zero-length PEEK|TRUNC size probe (sd-netlink's
+        // socket_read_message): report the pending datagram's full
+        // length WITHOUT dequeue — the reference's netlink_recvmsg with
+        // MSG_PEEK skips skb_free_datagram and MSG_TRUNC makes
+        // `copied = skb->len`. The gate above routed only this exact
+        // shape (netlink fd + both flags) here; a PEEK without TRUNC
+        // copies min(len=0, skb->len) = 0 and also does not dequeue.
+        if len == 0 {
+            let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
+            let deadline = nlsock.rcvtimeo_deadline();
+            return match crate::net::netlink::netlink_peek_len(&nlsock, nonblock, deadline) {
+                Ok(n) => {
+                    if (flags & MSG_TRUNC) != 0 {
+                        n as i64
+                    } else {
+                        0
+                    }
+                }
+                Err(e) => e as i64,
+            };
+        }
         let stage = len.min(crate::syscall::io::RW_CHUNK);
         let mut kbuf = alloc::vec::Vec::new();
         if kbuf.try_reserve_exact(stage).is_err() {

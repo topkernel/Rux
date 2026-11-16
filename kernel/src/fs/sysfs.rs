@@ -479,6 +479,22 @@ fn add_uevent_attr(dev: &Arc<KObject>) {
                 Some(a) => a,
                 None => return errno::Errno::InvalidArgument.as_neg_i32(),
             };
+            // uevent hunt (serial-getty chain): every userspace-triggered
+            // uevent write (udevadm trigger writes "add" to every device's
+            // uevent file). Budgeted.
+            {
+                static UES_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if UES_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
+                    crate::pr_info!(
+                        "UESTORE[{}] pid={} dev={} action='{}'",
+                        UES_N.load(core::sync::atomic::Ordering::Relaxed),
+                        crate::process::current_pid(),
+                        devpath,
+                        action
+                    );
+                }
+            }
             if let Some((major, minor)) = devno {
                 let maj = format!("{}", major);
                 let min = format!("{}", minor);
