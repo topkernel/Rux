@@ -880,7 +880,15 @@ pub fn ext4_file_write(
                     // blocks than it adds) — applied with saturation below.
                     let mut ext_meta: i64 = 0;
                     match crate::fs::ext4::extent::ext4_ext_materialize_block(
-                        fs, &mut inode.block, block_index, &mut ext_meta,
+                        fs,
+                        &mut inode.block,
+                        block_index,
+                        &mut ext_meta,
+                        crate::fs::ext4::csum::dir_csum_seed(
+                            fs.csum_seed,
+                            inode.ino,
+                            inode.generation,
+                        ),
                     ) {
                         Ok(Some(phys)) => {
                             inode.blocks = apply_meta_delta(inode.blocks, ext_meta);
@@ -925,7 +933,17 @@ pub fn ext4_file_write(
                                 // buffered write on a fragmented ext4).
                                 let mut hm: i64 = 0;
                                 match crate::fs::ext4::extent::ext4_ext_insert_written(
-                                    fs, &mut inode.block, block_index, new_block, 1, &mut hm,
+                                    fs,
+                                    &mut inode.block,
+                                    block_index,
+                                    new_block,
+                                    1,
+                                    &mut hm,
+                                    crate::fs::ext4::csum::dir_csum_seed(
+                                        fs.csum_seed,
+                                        inode.ino,
+                                        inode.generation,
+                                    ),
                                 ) {
                                     Ok(()) => {
                                         inode.blocks = apply_meta_delta(inode.blocks, hm);
@@ -1206,7 +1224,9 @@ pub fn preallocate_unwritten_extents(
             len: run_len as u16,
             unwritten: true,
         };
-        crate::fs::ext4::extent::ext4_ext_append(fs, &mut inode.block, &ext, &mut meta_sectors)?;
+        let csum_seed =
+            crate::fs::ext4::csum::dir_csum_seed(fs.csum_seed, inode.ino, inode.generation);
+        crate::fs::ext4::extent::ext4_ext_append(fs, &mut inode.block, &ext, &mut meta_sectors, csum_seed)?;
         inode.blocks += sectors_per_block * run_len as u64;
         logical_block += run_len as u64;
     }
@@ -1278,7 +1298,9 @@ fn allocate_blocks_with_extents(
             len: run_len as u16,
             unwritten: false,
         };
-        crate::fs::ext4::extent::ext4_ext_append(fs, &mut inode.block, &ext, &mut meta_sectors)?;
+        let csum_seed =
+            crate::fs::ext4::csum::dir_csum_seed(fs.csum_seed, inode.ino, inode.generation);
+        crate::fs::ext4::extent::ext4_ext_append(fs, &mut inode.block, &ext, &mut meta_sectors, csum_seed)?;
         inode.blocks += sectors_per_block * run_len as u64;
         logical_block += run_len as u64;
     }
