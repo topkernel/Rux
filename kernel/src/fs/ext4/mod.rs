@@ -1782,6 +1782,7 @@ pub fn create_file(path: &str, mode: u32) -> Result<alloc::sync::Arc<Inode>, i32
             atime: 0,
             mtime: 0,
             ctime: 0,
+            generation: 0,
         };
 
         // Initialize extent header in i_block
@@ -1961,8 +1962,13 @@ pub fn ext4_fallocate_on(
                             kept.push(*e);
                         }
                     }
+                    let csum_seed = crate::fs::ext4::csum::dir_csum_seed(
+                        fs.csum_seed,
+                        ext4_inode.ino,
+                        ext4_inode.generation,
+                    );
                     let meta_delta = crate::fs::ext4::extent::ext4_ext_rebuild_deferred(
-                        fs, &mut ext4_inode.block, &kept, &mut r108_punch_meta,
+                        fs, &mut ext4_inode.block, &kept, &mut r108_punch_meta, csum_seed,
                     )?;
                     // R108: the punched map (rebuilt above) is published
                     // durably by the write_inode_disk at the tail of this
@@ -2663,8 +2669,13 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                                 kept.push(*e);
                             }
                         }
+                        let csum_seed = crate::fs::ext4::csum::dir_csum_seed(
+                            fs.csum_seed,
+                            ext4_inode.ino,
+                            ext4_inode.generation,
+                        );
                         let meta_delta = match crate::fs::ext4::extent::ext4_ext_rebuild_deferred(
-                            fs, &mut ext4_inode.block, &kept, &mut r108_drop_meta,
+                            fs, &mut ext4_inode.block, &kept, &mut r108_drop_meta, csum_seed,
                         ) {
                             Ok(d) => d,
                             Err(e) => return e,

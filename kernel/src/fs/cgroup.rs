@@ -101,6 +101,13 @@ fn control_file_by_name(name: &[u8]) -> Option<CgroupFileKind> {
 struct CgroupInoData {
     node: Arc<CgroupNode>,
     kind: CgroupFileKind,
+    /// setattr overrides (Linux cgroupfs stores iattr): root chmod/chown
+    /// on cgroup control files SUCCEEDS on Linux — OH init chmods/chowns
+    /// /dev/memcg, /dev/pids, /dev/cpuset, /dev/frz roots at boot and the
+    /// old EPERM was an ours-only error family (why-slow diff).
+    mode_ovr: core::sync::atomic::AtomicU32,
+    uid: core::sync::atomic::AtomicU32,
+    gid: core::sync::atomic::AtomicU32,
 }
 
 /// Snapshot a node's Arc out of the hierarchy by matching an inode base.
@@ -571,7 +578,13 @@ fn make_file_inode(node: Arc<CgroupNode>, kind: CgroupFileKind) -> Arc<Inode> {
 /// freed either, and inode lifetimes are managed by the dentry/icache
 /// without a destroy hook we can rely on here.
 fn leak_ino_data(node: Arc<CgroupNode>, kind: CgroupFileKind) -> *mut u8 {
-    Box::into_raw(Box::new(CgroupInoData { node, kind })) as *mut u8
+    Box::into_raw(Box::new(CgroupInoData {
+            node,
+            kind,
+            mode_ovr: core::sync::atomic::AtomicU32::new(0),
+            uid: core::sync::atomic::AtomicU32::new(0),
+            gid: core::sync::atomic::AtomicU32::new(0),
+        })) as *mut u8
 }
 
 /// Read the private data back.
@@ -717,15 +730,20 @@ unsafe fn cgroupfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     };
 
     stat.st_ino = inode.ino;
-    stat.st_mode = inode.mode.bits();
+    let mode_ovr = data.mode_ovr.load(core::sync::atomic::Ordering::Relaxed);
+    stat.st_mode = if mode_ovr != 0 {
+        (inode.mode.bits() & !0o7777) | (mode_ovr & 0o7777)
+    } else {
+        inode.mode.bits()
+    };
     stat.st_size = if inode.mode.is_directory() {
         4096
     } else {
         generate_content(&data.node, data.kind).len() as i64
     };
     stat.st_nlink = if inode.mode.is_directory() { 2 } else { 1 };
-    stat.st_uid = 0;
-    stat.st_gid = 0;
+    stat.st_uid = data.uid.load(core::sync::atomic::Ordering::Relaxed) as u32;
+    stat.st_gid = data.gid.load(core::sync::atomic::Ordering::Relaxed) as u32;
     stat.st_rdev = 0;
     stat.st_blksize = 4096;
     stat.st_blocks = (stat.st_size + 511) / 512;
@@ -738,15 +756,48 @@ unsafe fn cgroupfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     0
 }
 
-/// cgroupfs setattr: ATTR_SIZE is a no-op (O_TRUNC on `echo x > file` must
-/// not fail); everything else is EPERM — the tree is kernel-owned (same
-/// policy as procfs).
+/// cgroupfs setattr: ATTR_SIZE is a no-op (O_TRUNC on `echo x > file`
+/// must not fail). ATTR_MODE/ATTR_UID/ATTR_GID/ATTR_UID_GID apply to the
+/// ino-data override fields and return 0 — Linux cgroupfs honors root
+/// chmod/chown (cgroupfs_setattr; OH init chmods/chowns the /dev/memcg,
+/// /dev/pids, /dev/cpuset and /dev/frz roots during boot; the old EPERM
+/// was an ours-only error family in the why-slow boot error-stream diff).
+/// Control-file CONTENT stays kernel-owned.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn cgroupfs_setattr(_inode: &Inode, attr: u32, _arg1: u64, _arg2: u64) -> i32 {
-    if attr == crate::fs::inode::setattr_attr::ATTR_SIZE {
+unsafe fn cgroupfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
+    use crate::fs::inode::setattr_attr;
+    if attr == setattr_attr::ATTR_SIZE {
         return 0;
     }
-    errno::Errno::OperationNotPermitted.as_neg_i32()
+    let data = match ino_data(inode) {
+        Some(d) => d,
+        None => return errno::Errno::OperationNotPermitted.as_neg_i32(),
+    };
+    match attr {
+        setattr_attr::ATTR_MODE => {
+            data.mode_ovr.store((arg1 as u32) & 0o7777, core::sync::atomic::Ordering::Relaxed);
+            let keep_type = inode.mode.bits() & crate::fs::inode::InodeMode::S_IFMT;
+            inode.update_cached_mode(crate::fs::inode::InodeMode::new(
+                keep_type | ((arg1 as u32) & 0o7777),
+            ));
+            0
+        }
+        setattr_attr::ATTR_UID => {
+            data.uid.store(arg1 as u32, core::sync::atomic::Ordering::Relaxed);
+            0
+        }
+        setattr_attr::ATTR_GID => {
+            data.gid.store(arg1 as u32, core::sync::atomic::Ordering::Relaxed);
+            0
+        }
+        setattr_attr::ATTR_UID_GID => {
+            data.uid.store(arg1 as u32, core::sync::atomic::Ordering::Relaxed);
+            data.gid.store(arg2 as u32, core::sync::atomic::Ordering::Relaxed);
+            0
+        }
+        setattr_attr::ATTR_ATIME | setattr_attr::ATTR_MTIME => 0,
+        _ => errno::Errno::OperationNotPermitted.as_neg_i32(),
+    }
 }
 
 /// cgroupfs open: snapshot control-file content for reads.

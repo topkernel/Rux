@@ -289,6 +289,32 @@ pub fn generate_route() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Generate /proc/net/fib_trie — the IPv4 FIB trie dump. OH init chmods
+/// this file during boot (init.cfg); on Linux it always exists, so a
+/// missing node was an ours-only chmod ENOENT in the boot error-stream
+/// diff. Content parity for readers: the route table rendered in the
+/// trie's "leaf/prefix" summary shape; an empty table prints just the
+/// header-less empty trie (matching Linux's empty-fs output: nothing).
+pub fn generate_fib_trie() -> Vec<u8> {
+    let routes = crate::net::ipv4::route::route_dump();
+    if routes.is_empty() {
+        return Vec::new();
+    }
+    let mut out = String::new();
+    for r in routes {
+        out.push_str(&alloc::format!(
+            "-----------
+ {}{}
+  /{} u{:x} \n",
+            hex_addr_v4(r.dst),
+            hex_addr_v4(r.mask),
+            hex_addr_v4(r.gateway),
+            r.flags.0,
+        ));
+    }
+    out.into_bytes()
+}
+
 // ============================================================================
 // /proc/net/sockstat
 // ============================================================================

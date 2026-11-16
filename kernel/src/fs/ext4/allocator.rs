@@ -60,6 +60,18 @@ impl<'a> BlockAllocator<'a> {
     /// 2. `goal_group ± 1, ± 2, ...` (spiral outward)
     /// 3. All groups from 0 (fallback)
     pub fn alloc_block(&self, goal_group: u32) -> Result<u64, i32> {
+        // Serialize every bitmap mutation (why-slow): the bitmap update
+        // is bread -> scan -> set -> dirty -> sync, and two concurrent
+        // creators (mkdir/create paths run WITHOUT the ext4 big lock)
+        // both bread the same bitmap block, each sets its own bit and
+        // syncs — the second sync overwrites the first bit: DOUBLE
+        // ALLOCATION. The loser's later alloc_meta_block memset ZEROES
+        // the winner's freshly written extent-tree node, leaving index
+        // entries that point at zeroed blocks (e2fsck: "invalid extent
+        // node", i_blocks mismatch; Linux mounts reject the fs). The
+        // lock is recursive per task, so paths that already hold it
+        // (buffered write, fallocate) re-enter harmlessly.
+        let _alloc_guard = super::EXT4_BIG_LOCK.lock();
         let block_groups = self.fs.group_count;
         crate::dfx::fsw::note_alloc_run();
 
@@ -102,6 +114,7 @@ impl<'a> BlockAllocator<'a> {
     /// minutes under TCG while holding EXT4_BIG_LOCK — every LTP test
     /// with .needs_device wedged the whole sweep.
     pub fn alloc_block_run(&self, goal_group: u32, want: u32) -> Result<Option<(u64, u32)>, i32> {
+        let _alloc_guard = super::EXT4_BIG_LOCK.lock(); // see alloc_block: bitmap RMW race
         let block_groups = self.fs.group_count;
         crate::dfx::fsw::note_alloc_run();
 
@@ -262,6 +275,7 @@ impl<'a> BlockAllocator<'a> {
 
     /// Free a block
     pub fn free_block(&self, block: u64) -> Result<(), i32> {
+        let _alloc_guard = super::EXT4_BIG_LOCK.lock(); // see alloc_block: bitmap RMW race
         self.free_block_run(block, 1)
     }
 
@@ -272,6 +286,7 @@ impl<'a> BlockAllocator<'a> {
     /// 300MB — 76800 per-block frees wedged the whole system through the
     /// block-I/O wait path).
     pub fn free_block_run(&self, start: u64, len: u64) -> Result<(), i32> {
+        let _alloc_guard = super::EXT4_BIG_LOCK.lock(); // see alloc_block: bitmap RMW race
         if len == 0 {
             return Ok(());
         }
@@ -620,6 +635,13 @@ pub fn alloc_block_with_prealloc(
     goal_group: u32,
     ino: u32,
 ) -> Result<u64, i32> {
+    // Same serialization as BlockAllocator::alloc_block (q.v.): this
+    // path runs its OWN read-scan-mark-write on the bitmap for the
+    // prealloc window (Phase 3) — unlocked it races any other allocator
+    // and loses ITS bit, after which the window's blocks get handed to
+    // a second owner (cook5 evidence: inode 265's extent metadata vs
+    // inode 335's window data on the same physical blocks).
+    let _alloc_guard = super::EXT4_BIG_LOCK.lock();
     // Phase 1: Check prealloc cache
     {
         let mut prealloc = fs.prealloc.lock();
@@ -755,6 +777,7 @@ impl<'a> InodeAllocator<'a> {
     /// # Returns
     /// Inode number on success, error code on failure
     pub fn alloc_inode(&self) -> Result<u32, i32> {
+        let _alloc_guard = super::EXT4_BIG_LOCK.lock(); // inode bitmap has the same RMW race
         let block_groups = self.fs.group_count;
         let inodes_per_group = self.fs.inodes_per_group as u64;
 
@@ -818,6 +841,7 @@ impl<'a> InodeAllocator<'a> {
     /// # Parameters
     /// - `ino`: Inode number to free
     pub fn free_inode(&self, ino: u32) -> Result<(), i32> {
+        let _alloc_guard = super::EXT4_BIG_LOCK.lock(); // inode bitmap has the same RMW race
         let inodes_per_group = self.fs.inodes_per_group as u64;
         let block_groups = self.fs.group_count as u64;
 

@@ -58,7 +58,7 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::errno;
 use crate::fs::superblock::{FileSystemType, SuperBlock};
@@ -1558,6 +1558,18 @@ fn build_tree() -> Arc<KObject> {
         },
     );
 
+    // /sys/power/wakeup_count (why-slow): Linux exposes the pending
+    // wakeup-event counter; OH init chowns/chmods it at boot (the missing
+    // node was an ours-only error row in the boot error-stream diff).
+    // Read returns 0 pending events (no wakeup sources on this platform);
+    // a write consumes the counter (success — Linux's no-pending store).
+    attr_rw(
+        &power,
+        "wakeup_count",
+        || b"0\n".to_vec(),
+        |_buf| 0,
+    );
+
     // ---------------- /sys/dev + /sys/block ----------------
     // /sys/dev/{block,char} and /sys/block entries are created dynamically
     // by register_block_disk()/register_input_event(); only the tty char
@@ -1983,6 +1995,9 @@ pub fn create_root_inode() -> Arc<Inode> {
         kobj: root.clone(),
         attr: None,
         link: None,
+        mode_ovr: AtomicU32::new(0),
+        uid: AtomicU32::new(0),
+        gid: AtomicU32::new(0),
     });
     let mut inode = Inode::new(1, InodeMode::new(InodeMode::S_IFDIR | 0o555));
     inode.fs_id = FS_ID_SYSFS;
@@ -2004,6 +2019,15 @@ pub struct SysfsEntryData {
     pub attr: Option<Arc<Attribute>>,
     /// symlink target (link inodes)
     pub link: Option<String>,
+    /// setattr overrides (kernfs iattr parity): chmod/chown by root
+    /// SUCCEEDS on Linux sysfs (kernfs_iop_setattr stores iattr) — OH
+    /// init chmods/chowns /sys/power/* and cgroup roots during boot and
+    /// the old EPERM made every one of those rows an error (the boot
+    /// error-stream diff vs the reference showed them ours-only).
+    /// 0 = no override (getattr falls back to the built-in mode/uid 0).
+    pub mode_ovr: AtomicU32,
+    pub uid: AtomicU32,
+    pub gid: AtomicU32,
 }
 
 /// Recover the entry data from an inode.
@@ -2074,6 +2098,9 @@ unsafe fn sysfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>
         kobj,
         attr,
         link,
+        mode_ovr: AtomicU32::new(0),
+        uid: AtomicU32::new(0),
+        gid: AtomicU32::new(0),
     });
 
     let mut inode = Inode::new(node_ino, mode);
@@ -2092,8 +2119,12 @@ unsafe fn sysfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     };
 
     stat.st_ino = inode.ino;
+    // setattr overrides first (kernfs iattr): a chmod/chown by root
+    // replaces the built-in permission word / owner ids.
+    let mode_ovr = entry.mode_ovr.load(Ordering::Relaxed);
     if let Some(attr) = entry.attr.as_ref() {
-        stat.st_mode = InodeMode::S_IFREG | attr.mode;
+        stat.st_mode = InodeMode::S_IFREG
+            | if mode_ovr != 0 { mode_ovr & 0o7777 } else { attr.mode };
         // Linux sysfs stats attribute files as 4096 regardless of content.
         stat.st_size = 4096;
         stat.st_nlink = 1;
@@ -2102,12 +2133,12 @@ unsafe fn sysfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
         stat.st_size = target.len() as i64;
         stat.st_nlink = 1;
     } else {
-        stat.st_mode = InodeMode::S_IFDIR | 0o755;
+        stat.st_mode = InodeMode::S_IFDIR | if mode_ovr != 0 { mode_ovr & 0o7777 } else { 0o755 };
         stat.st_size = 4096;
         stat.st_nlink = 2;
     }
-    stat.st_uid = 0;
-    stat.st_gid = 0;
+    stat.st_uid = entry.uid.load(Ordering::Relaxed) as u32;
+    stat.st_gid = entry.gid.load(Ordering::Relaxed) as u32;
     stat.st_rdev = 0;
     stat.st_blksize = 4096;
     stat.st_blocks = (stat.st_size + 511) / 512;
@@ -2121,13 +2152,49 @@ unsafe fn sysfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
 }
 
 /// sysfs setattr: ATTR_SIZE is a no-op (O_TRUNC on `echo x > file` must
-/// not fail); everything else is EPERM — the tree is kernel-owned.
+/// not fail). ATTR_MODE/ATTR_UID/ATTR_GID/ATTR_UID_GID apply to the
+/// entry's override fields and return 0 — Linux kernfs (kernfs_iop_
+/// setattr) stores these for root callers, and OH init's boot-time
+/// chmod/chown of /sys/power/* and the cgroup roots must not see EPERM
+/// (the why-slow error-stream diff: those rows were ours-only). The
+/// tree CONTENT stays kernel-owned; only the metadata words move.
 /// SAFETY: VFS callback contract.
-unsafe fn sysfs_setattr(_inode: &Inode, attr: u32, _arg1: u64, _arg2: u64) -> i32 {
-    if attr == crate::fs::inode::setattr_attr::ATTR_SIZE {
+unsafe fn sysfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
+    use crate::fs::inode::setattr_attr;
+    if attr == setattr_attr::ATTR_SIZE {
         return 0;
     }
-    errno::Errno::OperationNotPermitted.as_neg_i32()
+    let entry = match entry_of(inode) {
+        Some(e) => e,
+        None => return errno::Errno::OperationNotPermitted.as_neg_i32(),
+    };
+    match attr {
+        setattr_attr::ATTR_MODE => {
+            entry.mode_ovr.store((arg1 as u32) & 0o7777, Ordering::Relaxed);
+            // Preserve the cached file TYPE (dirs must stay dirs for the
+            // lock-free type checks); only the permission bits move.
+            let keep_type = inode.mode.bits() & InodeMode::S_IFMT;
+            inode.update_cached_mode(InodeMode::new(
+                keep_type | ((arg1 as u32) & 0o7777),
+            ));
+            0
+        }
+        setattr_attr::ATTR_UID => {
+            entry.uid.store(arg1 as u32, Ordering::Relaxed);
+            0
+        }
+        setattr_attr::ATTR_GID => {
+            entry.gid.store(arg1 as u32, Ordering::Relaxed);
+            0
+        }
+        setattr_attr::ATTR_UID_GID => {
+            entry.uid.store(arg1 as u32, Ordering::Relaxed);
+            entry.gid.store(arg2 as u32, Ordering::Relaxed);
+            0
+        }
+        setattr_attr::ATTR_ATIME | setattr_attr::ATTR_MTIME => 0,
+        _ => errno::Errno::OperationNotPermitted.as_neg_i32(),
+    }
 }
 
 /// sysfs readlink.

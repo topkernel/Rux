@@ -469,6 +469,26 @@ pub fn do_mount(
             );
             register_mount("debugfs", target, "debugfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
         }
+        // pstore (why-slow lane): OH init.virt.cfg mounts pstore on
+        // /sys/fs/pstore every boot; Linux's pstore fs is built-in, so
+        // the reference's mount succeeds and ours answered EINVAL — an
+        // ours-only error row in the boot error-stream diff. Mount the
+        // EXISTING sysfs pstore subtree (pstore-lite already publishes
+        // the previous boot's record there, named like the reference's
+        // ramoops backends) so content survives the mount-over.
+        "pstore" => {
+            // Prefer the sysfs pstore subtree (pstore-lite record files);
+            // fall back to an empty sysfs root when the lookup misses.
+            let inode = match crate::fs::vfs::path_lookup("/sys/fs/pstore", 0) {
+                Ok(p) => match p.inode {
+                    Some(i) => i,
+                    None => crate::fs::sysfs::create_root_inode(),
+                },
+                Err(_) => crate::fs::sysfs::create_root_inode(),
+            };
+            crate::fs::vfs::vfs_mount(target, inode, mnt_flags);
+            register_mount(fs_type, target, "pstore", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+        }
         "tracefs" => {
             if crate::fs::tracefs::tracefs_root().is_none() {
                 crate::fs::tracefs::init_tracefs()?;

@@ -1279,13 +1279,36 @@ unsafe fn read_node(
     Ok(data)
 }
 
-/// Write one external node back to disk (dirty + sync).
+/// Write one external node back to disk (dirty + sync). When the fs has
+/// metadata_csum, the extent-tree tail checksum is (re)computed first:
+/// Linux's __ext4_ext_check rejects any non-root extent block whose
+/// ext4_extent_tail.et_checksum does not verify ("extent tree corrupted",
+/// -EFSBADCRC), which killed the reference kernel's boot on a
+/// Rux-populated userdata (why-slow lane, wsref1: SaInit0 EIO storm).
+/// Coverage block[0..len-4] equals Linux's EXT4_EXTENT_TAIL_OFFSET(eh)
+/// because external_node_cap derives eh_max the same way ((block_size-12)
+/// /12 entries => tail lands at 12+eh_max*12 == block_size-4). The seed
+/// is the per-inode chain (sb csum seed -> ino -> i_generation), supplied
+/// by the caller via `csum_seed`. The READ side stays permissive (no
+/// verify): images written by pre-fix kernels carry zero tails and must
+/// keep working on Rux.
 /// SAFETY: blk is a valid filesystem block; data.len() == fs.block_size.
 unsafe fn write_node(
     fs: &crate::fs::ext4::Ext4FileSystem,
     blk: u64,
     data: &[u8],
+    csum_seed: u32,
 ) -> Result<(), i32> {
+    if fs.metadata_csum && data.len() >= 4 {
+        let mut sealed = alloc::vec::Vec::from(data);
+        crate::fs::ext4::csum::extent_block_csum_set(csum_seed, &mut sealed);
+        let bh = bio::bread(fs.device, blk).ok_or(errno::Errno::IOError.as_neg_i32())?;
+        (*bh).b_data.copy_from_slice(&sealed);
+        (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+        let sync_res = bio::sync_dirty_buffer(bh);
+        bio::brelse(bh);
+        return sync_res;
+    }
     let bh = bio::bread(fs.device, blk).ok_or(errno::Errno::IOError.as_neg_i32())?;
     (*bh).b_data.copy_from_slice(data);
     (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
@@ -1317,6 +1340,7 @@ fn append_node(
     depth: u16,
     e: &RawExtent,
     meta_sectors: &mut u64,
+    csum_seed: u32,
 ) -> Result<Option<SplitIdx>, i32> {
     if depth == 0 {
         let n = node_header(data).eh_entries as usize;
@@ -1363,7 +1387,7 @@ fn append_node(
         unsafe { node_extents_mut(&mut nd, ext_cap)[0] = e.to_disk() };
         node_header_mut(&mut nd).eh_entries = 1;
         // SAFETY: blk was just allocated (valid fs block).
-        unsafe { write_node(fs, blk, &nd)? };
+        unsafe { write_node(fs, blk, &nd, csum_seed)? };
         Ok(Some(SplitIdx { ei_block: e.ee_block, child: blk }))
     } else {
         let n = node_header(data).eh_entries as usize;
@@ -1377,10 +1401,10 @@ fn append_node(
         };
         // SAFETY: last_child is a valid fs block read from the index node.
         let mut child = unsafe { read_node(fs, last_child)? };
-        match append_node(fs, &mut child, external_node_cap(fs), depth - 1, e, meta_sectors)? {
+        match append_node(fs, &mut child, external_node_cap(fs), depth - 1, e, meta_sectors, csum_seed)? {
             None => {
                 // SAFETY: last_child valid.
-                unsafe { write_node(fs, last_child, &child)? };
+                unsafe { write_node(fs, last_child, &child, csum_seed)? };
                 Ok(None)
             }
             Some(split) => {
@@ -1414,7 +1438,7 @@ fn append_node(
                     }
                     node_header_mut(&mut nd).eh_entries = 1;
                     // SAFETY: blk just allocated.
-                    unsafe { write_node(fs, blk, &nd)? };
+                    unsafe { write_node(fs, blk, &nd, csum_seed)? };
                     Ok(Some(SplitIdx { ei_block: split.ei_block, child: blk }))
                 }
             }
@@ -1432,6 +1456,7 @@ pub fn ext4_ext_append(
     i_block: &mut [u32; 15],
     e: &RawExtent,
     meta_sectors: &mut u64,
+    csum_seed: u32,
 ) -> Result<(), i32> {
     // Work on a byte image of the 60-byte root.
     let mut root = alloc::vec![0u8; 60];
@@ -1443,7 +1468,7 @@ pub fn ext4_ext_append(
         init_node_header(&mut root, 0, ROOT_NODE_CAP as u16);
     }
 
-    match append_node(fs, &mut root, ROOT_NODE_CAP, depth, e, meta_sectors)? {
+    match append_node(fs, &mut root, ROOT_NODE_CAP, depth, e, meta_sectors, csum_seed)? {
         None => {}
         Some(split) => {
             // The root itself overflowed. Promote: move the current root
@@ -1458,7 +1483,7 @@ pub fn ext4_ext_append(
             // layout, more slots).
             node_header_mut(&mut down_data).eh_max = external_node_cap(fs) as u16;
             // SAFETY: down just allocated.
-            unsafe { write_node(fs, down, &down_data)? };
+            unsafe { write_node(fs, down, &down_data, csum_seed)? };
             let new_depth = old_depth + 1;
             init_node_header(&mut root, new_depth, old_cap);
             // SAFETY: root 60B holds 4 index entries per contract.
@@ -1663,6 +1688,7 @@ pub fn ext4_ext_rebuild(
     fs: &crate::fs::ext4::Ext4FileSystem,
     i_block: &mut [u32; 15],
     exts: &[RawExtent],
+    csum_seed: u32,
 ) -> Result<i64, i32> {
     let mut freed: u64 = 0;
     ext4_ext_free_index_blocks(fs, i_block, &mut freed)?;
@@ -1674,7 +1700,7 @@ pub fn ext4_ext_rebuild(
     );
     let mut added: u64 = 0;
     for e in exts {
-        ext4_ext_append(fs, i_block, e, &mut added)?;
+        ext4_ext_append(fs, i_block, e, &mut added, csum_seed)?;
     }
     Ok(added as i64 - freed as i64)
 }
@@ -1695,6 +1721,7 @@ pub fn ext4_ext_rebuild_deferred(
     i_block: &mut [u32; 15],
     exts: &[RawExtent],
     deferred_meta: &mut alloc::vec::Vec<u64>,
+    csum_seed: u32,
 ) -> Result<i64, i32> {
     let mut freed: u64 = 0;
     ext4_ext_collect_index_blocks(fs, i_block, deferred_meta)?;
@@ -1709,7 +1736,7 @@ pub fn ext4_ext_rebuild_deferred(
     );
     let mut added: u64 = 0;
     for e in exts {
-        ext4_ext_append(fs, i_block, e, &mut added)?;
+        ext4_ext_append(fs, i_block, e, &mut added, csum_seed)?;
     }
     Ok(added as i64 - freed as i64)
 }
@@ -1794,6 +1821,7 @@ pub fn ext4_ext_materialize_block(
     i_block: &mut [u32; 15],
     logical_block: u64,
     meta_delta: &mut i64,
+    csum_seed: u32,
 ) -> Result<Option<u64>, i32> {
     // Resolve the covering node: the inline root (depth 0) or the
     // external leaf reached through the index walk.
@@ -1860,7 +1888,7 @@ pub fn ext4_ext_materialize_block(
         match node_blk {
             Some(blk) => {
                 // SAFETY: blk from the tree walk.
-                unsafe { write_node(fs, blk, &node)? };
+                unsafe { write_node(fs, blk, &node, csum_seed)? };
             }
             None => {
                 // Root: copy the 60-byte image back.
@@ -1893,7 +1921,7 @@ pub fn ext4_ext_materialize_block(
         if !spliced {
             return Err(errno::Errno::IOError.as_neg_i32());
         }
-        let delta = ext4_ext_rebuild(fs, i_block, &all)?;
+        let delta = ext4_ext_rebuild(fs, i_block, &all, csum_seed)?;
         // SIGNED accumulation: a shrinking rebuild has delta < 0. The
         // old u64 form folded a negative delta into ~u64::MAX and the
         // caller's `i_blocks += hm` then overflow-panicked the kernel
@@ -1915,6 +1943,7 @@ pub fn ext4_ext_insert_written(
     phys: u64,
     len: u16,
     meta_delta: &mut i64,
+    csum_seed: u32,
 ) -> Result<(), i32> {
     {
         let root = unsafe { core::slice::from_raw_parts(i_block.as_ptr() as *const u8, 60) };
@@ -1937,7 +1966,7 @@ pub fn ext4_ext_insert_written(
                 .position(|e| e.ee_block as u64 > ee_block)
                 .unwrap_or(all.len());
             all.insert(pos, RawExtent { ee_block: ee_block as u32, phys, len, unwritten: false });
-            let delta = ext4_ext_rebuild(fs, i_block, &all)?;
+            let delta = ext4_ext_rebuild(fs, i_block, &all, csum_seed)?;
             // SIGNED accumulation — see the rebuild-fallback note in
             // ext4_ext_materialize_block above.
             *meta_delta += delta;
@@ -1982,7 +2011,7 @@ pub fn ext4_ext_insert_written(
             // SAFETY: ne.len() <= cap.
             unsafe { node_extents_mut(&mut leaf, cap)[..ne.len()].copy_from_slice(&ne) };
             // SAFETY: leaf_blk valid.
-            unsafe { write_node(fs, leaf_blk, &leaf)? };
+            unsafe { write_node(fs, leaf_blk, &leaf, csum_seed)? };
             return Ok(());
         }
     }
@@ -2002,7 +2031,7 @@ pub fn ext4_ext_insert_written(
         // SAFETY: new_entries.len() <= cap.
         unsafe { node_extents_mut(&mut leaf, cap)[..new_entries.len()].copy_from_slice(&new_entries) };
         // SAFETY: leaf_blk valid.
-        unsafe { write_node(fs, leaf_blk, &leaf)? };
+        unsafe { write_node(fs, leaf_blk, &leaf, csum_seed)? };
         Ok(())
     } else {
         // Leaf full: whole-tree rebuild with the entry inserted sorted.
@@ -2012,7 +2041,7 @@ pub fn ext4_ext_insert_written(
             .position(|e| e.ee_block as u64 > ee_block)
             .unwrap_or(all.len());
         all.insert(pos, RawExtent { ee_block: ee_block as u32, phys, len, unwritten: false });
-        let delta = ext4_ext_rebuild(fs, i_block, &all)?;
+        let delta = ext4_ext_rebuild(fs, i_block, &all, csum_seed)?;
         // SIGNED accumulation — see the rebuild-fallback note in
         // ext4_ext_materialize_block above.
         *meta_delta += delta;

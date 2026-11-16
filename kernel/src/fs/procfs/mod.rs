@@ -37,7 +37,7 @@ use alloc::vec::Vec;
 use alloc::string::String;
 use alloc::format;
 use crate::sync::spinlock::Spinlock;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::fs::superblock::{SuperBlock, SuperBlockFlags, FileSystemType};
 use crate::fs::inode::{Inode, InodeMode, Ino, INodeOps};
@@ -252,6 +252,14 @@ pub struct ProcFSNode {
     /// fd of /proc/[pid]/fdinfo/<fd> nodes (content is generated per fd;
     /// pid + fd address the descriptor, see pid::generate_fdinfo).
     pub fdinfo_fd: Option<u32>,
+    /// setattr overrides (Linux proc_root_init inodes carry iattr): root
+    /// chmod/chown on proc files SUCCEEDS on Linux — OH init chmods
+    /// /proc/net/fib_trie and friends during boot and the old EPERM was
+    /// an ours-only error row (why-slow boot error-stream diff).
+    /// 0 = no override.
+    pub mode_ovr: AtomicU32,
+    pub uid: AtomicU32,
+    pub gid: AtomicU32,
 }
 
 impl ProcFSNode {
@@ -272,6 +280,9 @@ impl ProcFSNode {
             pid_file_kind: None,
             sysctl_write: None,
             fdinfo_fd: None,
+        mode_ovr: AtomicU32::new(0),
+        uid: AtomicU32::new(0),
+        gid: AtomicU32::new(0),
         }
     }
 
@@ -292,6 +303,9 @@ impl ProcFSNode {
             pid_file_kind: None,
             sysctl_write: None,
             fdinfo_fd: None,
+        mode_ovr: AtomicU32::new(0),
+        uid: AtomicU32::new(0),
+        gid: AtomicU32::new(0),
         }
     }
 
@@ -313,6 +327,9 @@ impl ProcFSNode {
             pid_file_kind: None,
             sysctl_write: None,
             fdinfo_fd: None,
+        mode_ovr: AtomicU32::new(0),
+        uid: AtomicU32::new(0),
+        gid: AtomicU32::new(0),
         }
     }
 
@@ -333,6 +350,9 @@ impl ProcFSNode {
             pid_file_kind: None,
             sysctl_write: None,
             fdinfo_fd: None,
+        mode_ovr: AtomicU32::new(0),
+        uid: AtomicU32::new(0),
+        gid: AtomicU32::new(0),
         }
     }
 
@@ -359,6 +379,9 @@ impl ProcFSNode {
             pid_file_kind: None,
             sysctl_write: Some(write),
             fdinfo_fd: None,
+        mode_ovr: AtomicU32::new(0),
+        uid: AtomicU32::new(0),
+        gid: AtomicU32::new(0),
         }
     }
 
@@ -380,6 +403,9 @@ impl ProcFSNode {
             pid_file_kind: None,
             sysctl_write: None,
             fdinfo_fd: None,
+        mode_ovr: AtomicU32::new(0),
+        uid: AtomicU32::new(0),
+        gid: AtomicU32::new(0),
         }
     }
 
@@ -697,6 +723,11 @@ self.create_dynamic_file("cgroups", || {
         net_dir.add_child(Arc::new(ProcFSNode::new_dynamic_file(
             b"route".to_vec(),
             net::generate_route,
+            self.alloc_ino(),
+        )));
+        net_dir.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"fib_trie".to_vec(),
+            net::generate_fib_trie,
             self.alloc_ino(),
         )));
         net_dir.add_child(Arc::new(ProcFSNode::new_dynamic_file(
@@ -1769,14 +1800,20 @@ unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     } else {
         InodeMode::S_IFREG | 0o444  // read-only file
     };
+    // setattr override (kernfs/proc iattr parity): a root chmod replaces
+    // the synthesized permission bits; type bits stay synthesized.
+    let mode_ovr = node.mode_ovr.load(Ordering::Relaxed);
+    if mode_ovr != 0 {
+        stat.st_mode = (stat.st_mode & !0o7777) | (mode_ovr & 0o7777);
+    }
     // Avoid calling node.size() here — it regenerates full file content
     // (via content_generator) just to get the length, which is expensive
     // and can cause slab allocator issues in stat context.
     // Use a cached/approximate size instead.
     stat.st_size = node.cached_size.load(Ordering::Relaxed) as i64;
     stat.st_nlink = if node.is_dir() { 2 } else { 1 };
-    stat.st_uid = 0;
-    stat.st_gid = 0;
+    stat.st_uid = node.uid.load(Ordering::Relaxed) as u32;
+    stat.st_gid = node.gid.load(Ordering::Relaxed) as u32;
     stat.st_rdev = 0;
     stat.st_blksize = 4096;
     stat.st_blocks = (stat.st_size as i64 + 511) / 512;
@@ -1960,6 +1997,9 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
             pid_file_kind: Some(kind),
             sysctl_write: None,
             fdinfo_fd: None,
+        mode_ovr: AtomicU32::new(0),
+        uid: AtomicU32::new(0),
+        gid: AtomicU32::new(0),
         });
         let raw_ptr = Arc::into_raw(proc_node) as *mut u8;
 
@@ -2017,6 +2057,9 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
             pid_file_kind: Some(kind),
             sysctl_write: None,
             fdinfo_fd: None,
+        mode_ovr: AtomicU32::new(0),
+        uid: AtomicU32::new(0),
+        gid: AtomicU32::new(0),
         });
         let raw_ptr = Arc::into_raw(proc_node) as *mut u8;
         let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFREG | 0o644));
@@ -2062,6 +2105,9 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
             pid_file_kind: None,
             sysctl_write: None,
             fdinfo_fd: Some(fd),
+        mode_ovr: AtomicU32::new(0),
+        uid: AtomicU32::new(0),
+        gid: AtomicU32::new(0),
         });
         let raw_ptr = Arc::into_raw(proc_node) as *mut u8;
         let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFREG | 0o444));
@@ -2308,14 +2354,47 @@ fn procfs_file_close(file: &crate::fs::File) -> i32 {
 }
 
 /// ProcFS setattr: ATTR_SIZE is a no-op (O_TRUNC on `echo x > file` must
-/// not fail; procfs files have no persistent size). Other attributes
-/// (chmod/chown/truncate-to-value) are EPERM — the tree is kernel-owned.
+/// not fail; procfs files have no persistent size). ATTR_MODE/ATTR_UID/
+/// ATTR_GID/ATTR_UID_GID apply to the node's override fields and return
+/// 0 — Linux proc inodes honor root chmod/chown (OH init chmods
+/// /proc/net/fib_trie at boot; the old EPERM was an ours-only error row
+/// in the why-slow boot error-stream diff). Content stays kernel-owned.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn procfs_setattr(_inode: &Inode, attr: u32, _arg1: u64, _arg2: u64) -> i32 {
-    if attr == crate::fs::inode::setattr_attr::ATTR_SIZE {
+unsafe fn procfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
+    use crate::fs::inode::setattr_attr;
+    if attr == setattr_attr::ATTR_SIZE {
         return 0;
     }
-    errno::Errno::OperationNotPermitted.as_neg_i32()
+    let node_ptr = match inode.private_data {
+        Some(ptr) => ptr,
+        None => return errno::Errno::OperationNotPermitted.as_neg_i32(),
+    };
+    let node = &*(node_ptr as *const ProcFSNode);
+    match attr {
+        setattr_attr::ATTR_MODE => {
+            node.mode_ovr.store((arg1 as u32) & 0o7777, Ordering::Relaxed);
+            let keep_type = inode.mode.bits() & InodeMode::S_IFMT;
+            inode.update_cached_mode(InodeMode::new(
+                keep_type | ((arg1 as u32) & 0o7777),
+            ));
+            0
+        }
+        setattr_attr::ATTR_UID => {
+            node.uid.store(arg1 as u32, Ordering::Relaxed);
+            0
+        }
+        setattr_attr::ATTR_GID => {
+            node.gid.store(arg1 as u32, Ordering::Relaxed);
+            0
+        }
+        setattr_attr::ATTR_UID_GID => {
+            node.uid.store(arg1 as u32, Ordering::Relaxed);
+            node.gid.store(arg2 as u32, Ordering::Relaxed);
+            0
+        }
+        setattr_attr::ATTR_ATIME | setattr_attr::ATTR_MTIME => 0,
+        _ => errno::Errno::OperationNotPermitted.as_neg_i32(),
+    }
 }
 
 /// ProcFS regular-file poll (proc_reg_poll → seq_poll parity): seq files

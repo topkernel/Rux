@@ -138,6 +138,10 @@ pub struct Ext4Inode {
     pub mtime: u32,
     /// Creation time
     pub ctime: u32,
+    /// Inode generation (metadata_csum seed chain + NFS handle
+    /// generation; preserved through read-modify-write even for callers
+    /// that never touch it).
+    pub generation: u32,
 }
 
 impl Ext4Inode {
@@ -159,6 +163,7 @@ impl Ext4Inode {
         d.set_blocks_high((self.blocks >> 32) as u16);
         d.i_flags = self.flags;
         d.i_block = self.block;
+        d.i_generation = self.generation;
         d
     }
 
@@ -177,6 +182,7 @@ impl Ext4Inode {
             atime: disk.i_atime,
             mtime: disk.i_mtime,
             ctime: disk.i_ctime,
+            generation: disk.i_generation,
         }
     }
 
