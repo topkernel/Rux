@@ -2725,12 +2725,23 @@ impl PageCache {
         const WB_WINDOW: u64 = 16;
 
         let mut freed = 0usize;
+        SR_CALLS.fetch_add(1, Ordering::Relaxed);
         for _round in 0..MAX_WB_ROUNDS {
+            // Reference fatal_signal_pending discipline (falloc-wedge):
+            // a task killed mid-reclaim (the OOM killer selected the gate
+            // holder, or LTP's timeout SIGKILL) must unwind through here
+            // instead of carrying the gate through more flush I/O — the
+            // wedge boots held the gate for minutes after the kill.
+            if crate::sched::current_is_dying() {
+                break;
+            }
             let remaining = nr_to_scan.saturating_sub(freed);
             if remaining == 0 {
                 break;
             }
+            let before = freed;
             freed += self.shrink(remaining);
+            SR_CLEAN_FREED.fetch_add((freed - before) as u64, Ordering::Relaxed);
 
             if freed >= nr_to_scan {
                 break;

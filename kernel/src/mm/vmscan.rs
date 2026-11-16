@@ -249,6 +249,15 @@ pub fn balance_pgdat(order: i32) -> usize {
 
     let mut priority = DEF_PRIORITY;
     while priority >= 1 && sc.nr_reclaimed < sc.nr_to_reclaim {
+        // Reference fatal_signal_pending discipline (falloc-wedge): a
+        // killed direct reclaimer unwinds between priorities instead of
+        // walking all twelve with a pending SIGKILL (the wedge boots'
+        // holder completed rounds for minutes after the OOM kill).
+        // kswapd shares this entry point and is never "dying" short of
+        // kthread_stop.
+        if crate::sched::current_is_dying() {
+            break;
+        }
         sc.priority = priority;
         shrink_node(&mut sc);
         priority -= 1;
@@ -343,6 +352,14 @@ pub fn drain_file_cache_before_oom(nr_to_reclaim: usize) -> usize {
     let mut passes = 0usize;
 
     while freed_total < nr_to_reclaim && passes < MAX_PASSES {
+        // Reference fatal_signal_pending discipline (falloc-wedge): the
+        // drain's chunked flush loops are where a killed gate holder
+        // burned minutes on the wedge boots — unwind on a fatal signal
+        // (kthreads are never "dying" short of kthread_stop, so kswapd's
+        // shared entry here is unaffected).
+        if crate::sched::current_is_dying() {
+            break;
+        }
         passes += 1;
         super::page_alloc::gate_note_deep_pass(0);
         let want = core::cmp::min(CHUNK, nr_to_reclaim - freed_total);
