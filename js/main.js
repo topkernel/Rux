@@ -65,6 +65,36 @@
     });
   }, { passive: true });
 
+
+  /* 文档侧栏分组:按 .grp 包裹为 .gwrap 容器
+     桌面端 CSS display:contents,布局不变;移动端(≤1020px)可折叠,当前组默认展开 */
+  document.querySelectorAll('.doc-side').forEach(function (aside) {
+    if (aside.dataset.grouped) return;
+    aside.dataset.grouped = '1';
+    var children = Array.prototype.slice.call(aside.childNodes);
+    var wrap = null;
+    var groups = [];
+    children.forEach(function (node) {
+      if (node.nodeType === 1 && node.classList.contains('grp')) {
+        wrap = document.createElement('div');
+        wrap.className = 'gwrap';
+        aside.insertBefore(wrap, node);
+        wrap.appendChild(node);
+        groups.push(wrap);
+      } else if (wrap && (node.nodeType === 1 || (node.nodeType === 3 && node.textContent.trim()))) {
+        wrap.appendChild(node);
+      }
+    });
+    groups.forEach(function (g) {
+      var hasCurrent = !!g.querySelector('a.on');
+      if (!hasCurrent) g.classList.add('folded');
+      var head = g.querySelector('.grp');
+      if (head) {
+        head.addEventListener('click', function () { g.classList.toggle('folded'); });
+      }
+    });
+  });
+
   // 滚动显现 + 数字滚动(animation-on-scroll 模式,once=true)
   if (!('IntersectionObserver' in window) || reduced) return;
 
