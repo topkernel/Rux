@@ -955,11 +955,15 @@ pub fn timer_softirq_handler(_nr: usize) {
     // syscall — the children live ~10 s between LIFECYCLE_TIMEOUT and
     // the AMS restart, so every other dump sees one — without
     // distorting the boot it is diagnosing.
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::PeriodicDump)
+    if crate::trace::EVENT_TASKDUMP.armed()
         && current.saturating_sub(LAST_PERIODIC_DUMP.load(Ordering::Relaxed)) >= 3000
     {
         LAST_PERIODIC_DUMP.store(current, Ordering::Relaxed);
-        crate::dfx::taskdump::dump_all_tasks("periodic");    }
+        // dfx-migrate: rux:taskdump kind=PERIODIC row + the serial dump
+        // (echo consumer of the same event).
+        crate::trace::trace_taskdump(1, current);
+        crate::dfx::taskdump::dump_all_tasks("periodic");
+    }
 
     // lmbench-fix lane: sweep the unlinked-RUNNING phantom (the
     // lat_sem/lat_connect/bw_tcp wedge family — a task frozen
@@ -1015,7 +1019,7 @@ pub fn timer_softirq_handler(_nr: usize) {
     // dfx=schedtrace reaper forensics (125th waitid leg): 1 Hz zombie-
     // linger scan — names un-reaped children and what the non-reaping
     // parent is blocked on instead (dfx/reaper.rs).
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace)
+    if crate::trace::EVENT_SCHEDTRACE.armed()
         && current.saturating_sub(LAST_REAPER_SCAN.load(Ordering::Relaxed)) >= 100
     {
         LAST_REAPER_SCAN.store(current, Ordering::Relaxed);

@@ -3571,7 +3571,7 @@ impl Task {
             // WAKE-REFUSE-PT1 (runq-strand hunt) — RETIRED (probe-retire):
             // behind dfx=schedtrace like the rest of the refusal-point
             // family; also fixes a latent null-deref in the print itself.
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+            if crate::trace::EVENT_SCHEDTRACE.armed() {
                 static RF: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
                 let rn = RF.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 if rn < 12 { crate::pr_warn!("WAKE-REFUSE-PT1 tid=0"); }
@@ -3615,7 +3615,7 @@ impl Task {
             // WAKE-REFUSE-PT2 — RETIRED (probe-retire): dfx=schedtrace
             // gates the refusal-point family; the wild-pointer DROP itself
             // stays unconditional (crash-class guard above).
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+            if crate::trace::EVENT_SCHEDTRACE.armed() {
                 static RF: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
                 let rn = RF.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 if rn < 12 { crate::pr_warn!("WAKE-REFUSE-PT2 tid=0x{:x}", task as usize); }
@@ -3639,7 +3639,7 @@ impl Task {
                 for &b in MSG { unsafe { putchar(b); } }
                 // WAKE-REFUSE-PT3 — RETIRED (probe-retire): dfx=schedtrace
                 // gates the refusal-point family; the poison DROP stays.
-                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+                if crate::trace::EVENT_SCHEDTRACE.armed() {
                     static RF: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
                     let rn = RF.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     if rn < 12 { crate::pr_warn!("WAKE-REFUSE-PT3 tid={} (poison)", pid); }
@@ -3802,7 +3802,7 @@ impl Task {
                         // (probe-retire): the wake-refusal census COUNTERS
                         // stay always-on (merge-gate band); the per-event
                         // serial lines move behind dfx=schedtrace.
-                        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace)
+                        if crate::trace::EVENT_SCHEDTRACE.armed()
                             && !mid_pick
                             && W2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16
                         {
@@ -3821,6 +3821,16 @@ impl Task {
                                 (*task).pick_state(),
                                 (*task).ti_cpu(),
                                 w2
+                            );
+                            // dfx-migrate: the refusal also records into
+                            // the unified framework (rux:schedtrace
+                            // kind=WAKE_REFUSED — the event is also the
+                            // family's arm switch).
+                            crate::trace::trace_schedtrace(
+                                1,
+                                pid as u32,
+                                (*task).state().bits() as u64,
+                                (*task).ti_cpu() as u64,
                             );
                                 // 118th monopolist capture: a RUNNING+on_cpu refusal
                                 // target with preempt_count>=2 is a REAL leaked-base
@@ -3854,7 +3864,7 @@ impl Task {
                         }
                     // WAKE-REFUSE-PT4 — RETIRED (probe-retire):
                     // dfx=schedtrace gates the refusal-point family.
-                    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+                    if crate::trace::EVENT_SCHEDTRACE.armed() {
                         static RF4: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
                         let rn = RF4.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                         if rn < 12 {
@@ -4012,7 +4022,7 @@ impl Task {
                     // the loudest refusal-point arm (a benign scheduler
                     // race outcome, ~12 lines every ordinary boot); behind
                     // dfx=schedtrace. The heal + resched logic is unchanged.
-                    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+                    if crate::trace::EVENT_SCHEDTRACE.armed() {
                         static RF5: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
                         let rn = RF5.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                         if rn < 12 {

@@ -1410,7 +1410,7 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
         // kill-storm census printed on the crash-restart loops of every
         // perf boot).
         if (sig == 9 || sig == 15)
-            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SigTrace)
+            && crate::trace::EVENT_SIGTRACE.armed()
         {
             static DQ_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
@@ -1971,7 +1971,7 @@ unsafe fn setup_frame_aarch64(
     // frame boundary (arm64 ABI; the reference kernel zeroes x29 here).
     regs.regs[29] = 0;
 
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SigTrace) {
+    if crate::trace::EVENT_SIGTRACE.armed() {
         crate::pr_info!(
             "SIGTRACE setup pid={} sig={} sp={:#x} frame={:#x} handler={:#x} restorer={:#x} ->pc={:#x}",
             (*task).pid(),
@@ -1981,6 +1981,17 @@ unsafe fn setup_frame_aarch64(
             action.sa_handler,
             regs.regs[30],
             regs.pc
+        );
+        // dfx-migrate: the frame row also records into the unified
+        // framework (rux:sigtrace kind=FRAME_SETUP — the event is also
+        // the family's arm switch).
+        crate::trace::trace_sigtrace(
+            0,
+            (*task).pid() as u32,
+            sig,
+            user_sp as u64,
+            frame_addr as u64,
+            action.sa_handler as u64,
         );
     }
 
@@ -2313,7 +2324,7 @@ unsafe fn restore_sigcontext_aarch64(
     // Restore signal mask — SIGKILL/SIGSTOP can never be blocked
     (*task).sigmask = frame.uc.uc_sigmask & !((1u64 << 8) | (1u64 << 18));
 
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SigTrace) {
+    if crate::trace::EVENT_SIGTRACE.armed() {
         crate::pr_info!(
             "SIGTRACE restore pid={} frame={:#x} copied={} ->pc={:#x} sp={:#x} x29={:#x} x0={:#x}",
             (*task).pid(),
@@ -2323,6 +2334,15 @@ unsafe fn restore_sigcontext_aarch64(
             regs.sp,
             regs.regs[29],
             regs.regs[0]
+        );
+        // dfx-migrate: rux:sigtrace kind=FRAME_RESTORE.
+        crate::trace::trace_sigtrace(
+            1,
+            (*task).pid() as u32,
+            0,
+            regs.sp as u64,
+            frame_addr as u64,
+            regs.pc as u64,
         );
     }
 
@@ -3110,7 +3130,7 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
         // teardown — every one paid the emit lock + serial line for
         // this CLOSED hunt (100th's fresh record: 3.7k samples through
         // acquire_emit_lock on the signal/kill paths).
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SigTrace)
+        if crate::trace::EVENT_SIGTRACE.armed()
             && TK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4000
         {
             let (cp, cc) = crate::sched::current()
@@ -3150,12 +3170,17 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
         // exec-VMA map and scans the user stack — gated behind
         // dfx=ohhunt so ordinary userspace aborts (glibc assertions in
         // LTP runs included) cost nothing.
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::OhHunt)
+        if crate::trace::EVENT_OHHUNT.armed()
             && ABORT_N.load(core::sync::atomic::Ordering::Relaxed) < 8
             && LAST_TGID.load(core::sync::atomic::Ordering::Relaxed) != tid
             && ABORT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8
         {
             LAST_TGID.store(tid, core::sync::atomic::Ordering::Relaxed);
+            // dfx-migrate: the abort also records into the unified
+            // framework (rux:ohhunt kind=SIGABRT — the event is also
+            // the family's arm switch). a=the dying tid, b=the raiser.
+            let raiser = crate::sched::current().map(|t| unsafe { (*t).pid() as u64 }).unwrap_or(0);
+            crate::trace::trace_ohhunt(3, tid, raiser, 0);
             abort_reason_dump(tid);
         }
     }
@@ -3252,7 +3277,7 @@ fn send_signal_g(pid: u32, sig: i32, group: i32) -> Result<(), i32> {
         // OH boot lane 2026-11-12: dfx-gated (sigtrace), same as the
         // TKSIG twin — the OH install churn's kill/term volume put this
         // print on the hot path of every service restart.
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SigTrace)
+        if crate::trace::EVENT_SIGTRACE.armed()
             && KS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4000
         {
             let (cp, cc) = crate::sched::current()
@@ -3431,7 +3456,7 @@ unsafe fn send_signal_locked_info(
     // behind the existing signal-family switch (dfx=sigtrace) — the same
     // gate the other signal forensics in this file use — so an ordinary
     // boot is silent and a signal hunt can still arm it.
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SigTrace)
+    if crate::trace::EVENT_SIGTRACE.armed()
         && (sig == Signal::SIGKILL as i32
             || sig == Signal::SIGTERM as i32
             || sig == Signal::SIGSEGV as i32

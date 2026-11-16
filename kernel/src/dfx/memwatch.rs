@@ -22,8 +22,10 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 use super::taskdump::{taskdump_dec, taskdump_raw_line};
 
-/// Runtime switch state (set by `dfx=memwatch` on the cmdline).
-pub static ENABLED: AtomicBool = AtomicBool::new(false);
+// dfx-migrate: the runtime switch state now lives in the unified
+// trace framework — `rux:memwatch` IS the switch (armed via
+// trace_event=, tracefs set_event, or the retired dfx=memwatch boot
+// alias). No local static: armed() reads the event directly.
 
 /// Dealloc-refusal diagnostics (buddy_allocator.rs dealloc early-returns).
 /// Every refused free permanently leaks the block's pages — a nonzero,
@@ -83,7 +85,7 @@ fn bucket(size: usize) -> usize {
 /// the allocator prologue short and single-sourced).
 #[inline]
 pub fn armed() -> bool {
-    ENABLED.load(Ordering::Relaxed)
+    crate::trace::EVENT_MEMWATCH.armed()
 }/// Realloc call-site histogram: (new_size bucket, frame chain) -> count.
 /// Captured in the allocator's explicit realloc() via an 8-deep frame
 /// walk (see buddy_allocator.rs) — deep enough to clear the whole
@@ -305,7 +307,7 @@ fn sanitized_ra(ra: u64) -> u64 {
 /// of GlobalAlloc::realloc (into __rust_realloc); deeper entries climb
 /// the growth machinery into the kernel caller.
 pub fn note_realloc(new_size: usize, frames: &[u64; SITE_FRAMES]) {
-    if !ENABLED.load(Ordering::Relaxed) {
+    if !armed() {
         return;
     }
     let b = bucket(new_size);
@@ -334,7 +336,7 @@ pub fn note_realloc(new_size: usize, frames: &[u64; SITE_FRAMES]) {
 /// `ptr`/`heap_start` feed the page->site table so the matching free can
 /// be attributed back to THIS site (live counting).
 pub fn note_alloc(ptr: *mut u8, heap_start: usize, size: usize, frames: &[u64; SITE_FRAMES]) {
-    if !ENABLED.load(Ordering::Relaxed) {
+    if !armed() {
         return;
     }
     let b = bucket(size);
@@ -535,7 +537,7 @@ fn mark_pages(ptr: usize, heap_start: usize, size: usize, sid: usize, set: bool)
 
 /// Attribute one free to the site that allocated the block.
 pub fn note_free(ptr: *mut u8, heap_start: usize, size: usize) {
-    if !ENABLED.load(Ordering::Relaxed) {
+    if !armed() {
         return;
     }
     FREE_BINS[bucket(size)].fetch_add(1, Ordering::Relaxed);
@@ -680,7 +682,7 @@ fn psite_intern(frames: &[u64; SITE_FRAMES]) -> usize {
 
 /// Record one physical-page allocation (order-sized block).
 pub fn note_page_alloc(phys: usize, order: usize, frames: &[u64; SITE_FRAMES]) {
-    if !ENABLED.load(Ordering::Relaxed) || phys == 0 {
+    if !armed() || phys == 0 {
         return;
     }
     let table = ppage_site_table();
@@ -710,7 +712,7 @@ pub fn note_page_alloc(phys: usize, order: usize, frames: &[u64; SITE_FRAMES]) {
 /// Record one physical-page free: attribute it back to the site that
 /// stamped the block's first PFN.
 pub fn note_page_free(phys: usize, order: usize) {
-    if !ENABLED.load(Ordering::Relaxed) || phys == 0 {
+    if !armed() || phys == 0 {
         return;
     }
     PGFREE_TOTAL.fetch_add(1, Ordering::Relaxed);
@@ -860,7 +862,7 @@ pub fn dump_mem() {
     // buddy_stats() does not maintain counters; use memwatch totals when
     // the switch is on (they started at dfx init, close enough for rates)
     let (mut at, mut ft) = (0u64, 0u64);
-    if ENABLED.load(Ordering::Relaxed) {
+    if armed() {
         for i in 0..NUM_BINS {
             at += ALLOC_BINS[i].load(Ordering::Relaxed) as u64;
             ft += FREE_BINS[i].load(Ordering::Relaxed) as u64;
@@ -897,9 +899,21 @@ pub fn dump_mem() {
     put_dec(DEALLOC_MISALIGNED.load(Ordering::Relaxed) as u64);
     taskdump_raw_line(b"\n");
 
-    if !ENABLED.load(Ordering::Relaxed) {
+    if !armed() {
         return;
     }
+    // dfx-migrate: the report totals also record into the unified
+    // framework (rux:memwatch — the event is also the family's arm
+    // switch). record() is atomics-only, safe from this raw-UART
+    // context; the render happens at read time.
+    crate::trace::trace_memwatch(
+        (st.used_bytes / 1024) as u64,
+        at / 1024,
+        ft / 1024,
+        (DEALLOC_OUTSIDE.load(Ordering::Relaxed)
+            + DEALLOC_BIGORDER.load(Ordering::Relaxed)
+            + DEALLOC_MISALIGNED.load(Ordering::Relaxed)) as u64,
+    );
     dump_heap_ledger();
     dump_page_ledger();
 }
@@ -913,7 +927,7 @@ pub fn dump_mem() {
 /// buddy lock or allocating a single byte would wedge the very print we
 /// die on.
 pub fn dump_heap_ledger() {
-    if !ENABLED.load(Ordering::Relaxed) {
+    if !armed() {
         return;
     }
 

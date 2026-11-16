@@ -954,7 +954,7 @@ fn unix_wait_round(
     };
 
     // 123rd (final hop): name the socket whose queue the reader parks on.
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+    if crate::trace::EVENT_SCHEDTRACE.armed() {
         static WQ_N: core::sync::atomic::AtomicU32 =
             core::sync::atomic::AtomicU32::new(0);
         let n = WQ_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -1306,7 +1306,7 @@ fn unix_recvmsg_user(
 // value in a live socket's err field; log the caller whenever a change
 // is observed at the recv gate (rate-limited). dfx=schedtrace-gated.
 fn err_latch_watchdog(sock: &Arc<UnixSocket>) {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+    if !crate::trace::EVENT_SCHEDTRACE.armed() {
         return;
     }
     static LAST: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
@@ -1857,7 +1857,7 @@ impl ErrLatch {
         *self.inner.lock()
     }
     pub fn store(&self, v: i32) {
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+        if crate::trace::EVENT_SCHEDTRACE.armed() {
             let prev = *self.inner.lock();
             if prev != v {
                 static WN: core::sync::atomic::AtomicU32 =

@@ -2437,7 +2437,7 @@ impl CfsRunQueue {
             // into a per-task history so the strand report (wakewatch
             // check_picked) can name WHY the victim sat unpicked for
             // the whole strand window. Armed only under dfx=schedtrace.
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+            if crate::trace::EVENT_SCHEDTRACE.armed() {
                 note_pick_skip(task, skip_reason as u8);
             }
             // 63rd (strand-wall hunt): decision-time refusal evidence,
@@ -2535,7 +2535,7 @@ impl CfsRunQueue {
             let last = LAST_REPORT.load(core::sync::atomic::Ordering::Acquire);
             // serial-clean: this canary fires on benign mid-switch-out
             // transients too — print only behind dfx=schedtrace.
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace)
+            if crate::trace::EVENT_SCHEDTRACE.armed()
                 && now.wrapping_sub(last) >= 100
                 && LAST_REPORT
                     .compare_exchange(

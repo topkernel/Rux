@@ -90,7 +90,7 @@ static EXIT_MAP: crate::sync::spinlock::Spinlock<[ExitRec; EXIT_MAP_LEN]> =
 /// The gate for every arm here (dfx=schedtrace).
 #[inline]
 pub fn on() -> bool {
-    crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace)
+    crate::trace::EVENT_SCHEDTRACE.armed()
 }
 
 /// jiffies → "123.4s" seconds string (one decimal).

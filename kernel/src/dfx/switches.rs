@@ -17,19 +17,19 @@
 //! lock/unlock pair and is therefore a build-time opt-in used by the
 //! wedge-hunting harness (test/hunt-wedge.sh).
 //!
-//! Switch catalog:
-//! - `watchdog` — spinlock deadlock warnings also dump all task states
-//!   (the deadlock print itself is always on; this only gates the extra
-//!   task snapshot after it).
-//! - `taskdump` — manual task-state snapshots via the DFX sysrq hook
-//!   (same dump code path, different trigger).
-//! - `schedtrace` — scheduler lifecycle forensic prints: the deferred
-//!   exit-notify delivery log (EXITNOTIFY lines, one per child exit —
-//!   a bare `ls` in the shell fires one) and the R56 orphan-harvest
-//!   diagnostics (R56-ORPHAN-HARVESTED / ORPHAN-CTX parked-context
-//!   dumps from the idle-loop harvester). All are hunt aids for the
-//!   dbus-activation and reparent-safety investigations; they pollute
-//!   the structured boot table, so they are OFF unless requested.
+//! Switch catalog (see the RETIRED TOKENS note below for the ones
+//! that already moved to the unified trace framework):
+//!
+//! RETIRED TOKENS (dfx-migrate rounds, 2026-11): the hunt families that
+//! lived here as `schedtrace`, `fuxstuck`, `txnhunt`, `mmforensics`,
+//! `sysring`, `ohhunt`, `sigtrace`, `futextrace`, `epolltrace`, and the
+//! debug aids `taskdump`, `periodic`, `watchdog`, `memwatch` moved
+//! into the unified trace framework (`kernel/src/trace/`) — each
+//! family's gate is now a `rux:` trace event, its serial prints are
+//! echo consumers of that event's enable, and the old `dfx=` token is
+//! a boot alias that arms the events (see `retired_trace_events`). The
+//! table above is the frozen remainder; per the observability policy
+//! it must not grow — new observability goes through tracepoints.
 
 // Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
@@ -48,29 +48,21 @@ use core::sync::atomic::{AtomicBool, Ordering};
 macro_rules! dfx_switch_table {
     ($m:ident) => {
         $m! {
-            WatchdogDump => "watchdog",
-            TaskDumpKey => "taskdump",
-            PeriodicDump => "periodic",
-            MemWatch => "memwatch",
-            MmForensics => "mmforensics",
             Scribble => "scribble",
             ScribblePark => "scribblepark",
             ScribblePid1 => "scribblepid1",
             ScribbleSweep => "scribblesweep",
             InputTrace => "inputtrace",
             DbFileTrace => "dbtrace",
-            EpollTrace => "epolltrace",
             EpollScan => "epollscan",
             ClaimInject => "claiminject",
             Strace1 => "strace1",
-            SchedTrace => "schedtrace",
             Steptrace => "steptrace",
             WriteTrace => "writetrace",
             OncpuInject => "oncpuinject",
             Ledger => "ledger",
             BinderTrace => "bindertrace",
             SyscallTrace => "syscalltrace",
-            FutexTrace => "futextrace",
             MonoWatch => "monowatch",
             TcpTrace => "tcptrace",
             SleepSnap => "sleepsnap",
@@ -85,7 +77,6 @@ macro_rules! dfx_switch_table {
             LeakHunt => "leakhunt",
             AcqDiv => "acqdiv",
             WwCensus => "wwcensus",
-            TxnHang => "txnhunt",
             TreeHunt => "treehunt",
             SfdDbg => "sfddbg",
             Ams46 => "ams46",
@@ -96,18 +87,14 @@ macro_rules! dfx_switch_table {
             ExecCost => "execcost",
             ThPark => "thpark",
             RipSample => "ripsample",
-            OhHunt => "ohhunt",
             TfdCensus => "tfdcensus",
             ScmTap => "scmtap",
-            SigTrace => "sigtrace",
             SysForensic => "sysforensic",
-            SysRing => "sysring",
             FilerdProbe => "filerd",
             LostParkTrace => "lostpark",
             AllocWatch => "allocwatch",
             SyncGuard => "syncguard",
             SyncWatch => "syncwatch",
-            FuxStuck => "fuxstuck",
             PctlMon => "pctlmon",
             Pid1Spin => "pid1spin",
         }
@@ -119,22 +106,6 @@ pub(crate) use dfx_switch_table;
 /// Runtime DFX switches, indexed by name on the `dfx=` cmdline parameter.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DfxSwitch {
-    /// Deadlock watchdog prints a full task-state snapshot afterwards.
-    WatchdogDump,
-    /// The UART sysrq-style trigger for on-demand task snapshots is armed.
-    TaskDumpKey,
-    /// Periodic task snapshots (every PERIODIC_SECS) from the timer
-    /// softirq — catches silent hangs that never trip any watchdog.
-    PeriodicDump,
-    /// Heap-leak hunt: size-class alloc/free counters + big-object call
-    /// site histogram, reported with the periodic dump (see memwatch.rs).
-    MemWatch,
-    /// mm forensic rings: PTE-install ledger (PTEI_RING), double-teardown
-    /// detector (FUT_RING scan) and PT stamp/free rings. All per-PTE or
-    /// per-exit costs on the fork/exit hot path — OFF in production boots
-    /// (LTP fork_procs lost seconds per 1000 forks to them); enable only
-    /// while hunting the fake-OOM / stale-tree families.
-    MmForensics,
     /// Byte-level scribble hunter (dfx/scribble.rs): shadow-canary over
     /// every live Task's thread.{fs,gs,sp,ret} + parked pt_regs control
     /// words, verified at switch-out quiesce and from the timer tick.
@@ -159,10 +130,6 @@ pub enum DfxSwitch {
     /// (I:/G:/Q:/S:/E:/V: prefix) print offset+content, catching the
     /// "G:\n" splice that breaks sd-device tag loading.
     DbFileTrace,
-    /// epoll delivery trace: every (rate-limited) epoll_wait return prints
-    /// pid/comm plus each ready fd's number and event bits — hunts
-    /// permanently ready fds that spin epoll_pwait/ppoll callers.
-    EpollTrace,
     /// epoll SCAN trace (leg-9): one raw-console line per epoll_wait
     /// interest scan (pid, entries seen, ready collected) — splits
     /// "the scan never ran" from "the scan ran and found nothing".
@@ -183,9 +150,6 @@ pub enum DfxSwitch {
     /// "library not found" can be attributed to the failing step instead
     /// of guessed at.
     Strace1,
-    /// Scheduler lifecycle forensic prints (EXITNOTIFY delivery log +
-    /// R56 orphan-harvest diagnostics). See the module doc for details.
-    SchedTrace,
     /// Per-syscall return line + per-trap vector line. Used during the
     /// SIGHUP / fake-crash hunts; left on, every syscall printed two
     /// lines (trap entry + return) — a single OH boot wrote a 2.7GB
@@ -238,13 +202,6 @@ pub enum DfxSwitch {
     /// exact syscall the server main thread is parked in. OFF unless
     /// asked for with dfx=sleepsnap.
     SleepSnap,
-    /// Futex wake-miss probe (b133 hunt): when a FUTEX_WAKE wants more
-    /// waiters than it finds, scan every bucket for same-uaddr waiters
-    /// under a non-matching key and report both mm identities — the
-    /// lost-wake signature when a PRIVATE-futex waiter and its waker
-    /// disagree on the address-space identity. Rate-limited to 32 lines;
-    /// the scan walks all buckets so it stays behind this switch.
-    FutexTrace,
     /// CLOCK_MONOTONIC jump tripwire (timer-lane hunt): ~1 Hz samples of
     /// the shared timebase from the timer softirq; reports backward
     /// motion or multi-second spikes with the active clocksource named
@@ -358,15 +315,6 @@ pub enum DfxSwitch {
     /// opt-in via `dfx=wwcensus` (census/forensics boots keep them by
     /// passing the token; ordinary boots get a clean prompt).
     WwCensus,
-    /// dfx=txnhunt (leg-27): in-flight binder transaction audit at ~1 Hz
-    /// — any sync txn picked up by its server but unreplied for >= 1 s
-    /// gets a TXN-HANG line naming the server thread's task state, the
-    /// syscall/rip of its entry frame, and every other in-flight txn
-    /// issued from that server's process (the synchronous fan-out chain
-    /// inside the handler). Answers "what does the 15 s samgr handler
-    /// spend its time on" without waiting for the 60 s khungtaskd
-    /// cadence. Purely diagnostic; OFF by default.
-    TxnHang,
     /// dfx=treehunt (leg-29A): ~1 Hz process-tree invariant validator —
     /// flags live tasks whose parent pointer names implausible (freed/
     /// recycled) memory and thread-group members whose parent snapshot
@@ -452,17 +400,6 @@ pub enum DfxSwitch {
     /// tasks (page-bucketed histogram + utime/stime split), reported
     /// every 60 s from the tick path. OFF by default.
     RipSample,
-    /// OH graphics hunt taps (oh-svc/oh-launcher lanes, known-gap 4):
-    /// the drm ioctl traces in sys_ioctl (MAP_DUMB / ioctl-fail /
-    /// foreign-prime-import), the drm mmap placement/resolve attribution
-    /// in sys_mmap, the prime-import compose-content probe (a full
-    /// buffer scan per import — pure diagnostic output) and the
-    /// SIGABRT first-raise dump (exec-VMA map + stack scan). All hunt
-    /// instrumentation for the render_service abort / black-screen
-    /// campaigns; they add per-ioctl/per-import/per-abort cost and
-    /// pollute the structured boot table. OFF by default — enable with
-    /// `dfx=ohhunt` when the graphics lanes are hunting.
-    OhHunt,
     /// dfx=tfdcensus (oh-launcher lane): windowed timerfd_create caller
     /// census — the syscost boots showed a 4k/s timerfd_create storm
     /// (833k calls by t=240s, several CPUs of kernel work) whose caller
@@ -480,27 +417,12 @@ pub enum DfxSwitch {
     /// fd dies between logind → dbus-daemon → pam (the "Session c1
     /// logged out" milliseconds-after-create shape). OFF by default.
     ScmTap,
-    /// dfx=sigtrace (aa64-ltp lane): aarch64 signal-delivery forensics —
-    /// one line per setup_frame_aarch64 (pid, sig, sp_before, frame_addr,
-    /// handler, restorer, pc) and one per restore_sigcontext_aarch64
-    /// (pid, frame_addr, restored pc/sp/x29). For hunting the LTP
-    /// tst_test parent SIGSEGV class (garbage FILE* = child pid). OFF by
-    /// default.
-    SigTrace,
     /// dfx=sysforensic (perf-syscall lane): arms the per-syscall forensic
     /// instruments the dispatcher carried unconditionally before the perf
     /// sprint — the SYSCALL_RING double-record, the per-task fail rings,
     /// the comm-scanning sc-hooks. OFF in production boots (p1_null paid
     /// 12 atomics per syscall for them).
     SysForensic,
-    /// Forensic SYSCALL_RING (dispatch.rs): the global 2048-entry ring
-    /// of (pid, nr, a0, a1, ret) recorded at syscall ENTRY and EXIT,
-    /// replayed by the KERNPANIC printer and the NOVMA handlers to
-    /// reconstruct the victim's final syscall sequence. Superseded by
-    /// SysForensic (which gates the ring together with the other
-    /// per-syscall instruments); kept as an alias so hunt scripts
-    /// written against `dfx=sysring` keep working.
-    SysRing,
     /// dfx=filerd (perf-filerd lane): cached-file read(2) cost anatomy —
     /// RDTSC phase counters (lock/pin/copy/unpin/epilog) around the ext4
     /// read fast path, reported via /proc/filerd. Built to attribute the
@@ -541,14 +463,6 @@ pub enum DfxSwitch {
     /// work on a busy thread's todo, a delivery shape the reference
     /// avoids via waiting_threads).
     SyncWatch,
-    /// Futex-stuck census (sync/futex.rs futex_stuck_census, timer 1 Hz
-    /// heartbeat): park-time stamp per futex wait (Waiter::park_j) + a
-    /// one-burst-per-5s report of waits >= 10 s naming uaddr/mm/tgid/tid,
-    /// the stuck thread's entry-frame syscall, and the owning tgid's
-    /// thread-state histogram — the per-condvar producer-starvation
-    /// adjudication for the OH post-creation stall web (useriam FFRT /
-    /// DB_TaskExecutor families). Zero cost when off.
-    FuxStuck,
     /// Param-service socket monitor (66th, the 105-timeout hunt): the
     /// PCTL-SEND tap without hilogtap's record-scan cost, plus the
     /// connect/accept/close lifecycle of every paramservice-classified
@@ -566,7 +480,7 @@ pub enum DfxSwitch {
     Pid1Spin,
 }
 
-const SWITCH_COUNT: usize = 62;
+const SWITCH_COUNT: usize = 49;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -599,80 +513,62 @@ macro_rules! build_name {
 impl DfxSwitch {
     fn index(self) -> usize {
         match self {
-            DfxSwitch::WatchdogDump => 0,
-            DfxSwitch::TaskDumpKey => 1,
-            DfxSwitch::PeriodicDump => 2,
-            DfxSwitch::MemWatch => 3,
-            DfxSwitch::MmForensics => 4,
-            DfxSwitch::Scribble => 5,
-            DfxSwitch::ScribblePark => 6,
-            DfxSwitch::ScribblePid1 => 7,
-            DfxSwitch::ScribbleSweep => 8,
-            DfxSwitch::InputTrace => 9,
-            DfxSwitch::EpollTrace => 10,
-            DfxSwitch::ClaimInject => 11,
-            DfxSwitch::Strace1 => 12,
-            DfxSwitch::SchedTrace => 13,
-            DfxSwitch::Steptrace => 14,
-            // 15 used to be shared by WriteTrace AND OncpuInject (both
-            // mapped to 15) — `dfx=writetrace` silently armed the
-            // adjudication injector (and vice versa). Split while adding
-            // the Ledger switch: each switch now owns its bit.
-            DfxSwitch::WriteTrace => 15,
-            DfxSwitch::OncpuInject => 16,
-            DfxSwitch::Ledger => 17,
-            DfxSwitch::BinderTrace => 18,
-            DfxSwitch::SyscallTrace => 19,
-            DfxSwitch::SleepSnap => 23,
-            DfxSwitch::FutexTrace => 20,
-            DfxSwitch::MonoWatch => 21,
-            DfxSwitch::TcpTrace => 22,
-            DfxSwitch::SockSnap => 24,
-            DfxSwitch::DataTap => 25,
-            DfxSwitch::WildWatch => 26,
-            DfxSwitch::MetaWatch => 27,
-            DfxSwitch::ParkDump => 28,
-            DfxSwitch::Schb => 29,
-            DfxSwitch::KsProbe => 30,
-            DfxSwitch::R83HeapScan => 31,
-            DfxSwitch::LeakHunt => 32,
-            DfxSwitch::WwCensus => 33,
-            DfxSwitch::TxnHang => 34,
-            DfxSwitch::TreeHunt => 35,
-            DfxSwitch::SfdDbg => 36,
-            DfxSwitch::Ams46 => 37,
-            DfxSwitch::VmaProbe => 38,
-            // Index renumbering note (merge of 584c1105): main claimed
-            // 39/40 for poolcensus/slowtask; EpollScan (perf-audit lane)
-            // moves 39 -> 41. Cmdline lookup is by name, so the shift is
-            // invisible to users; indices only key the SWITCHES array.
-            DfxSwitch::PoolCensus => 39,
-            DfxSwitch::SlowTask => 40,
-            DfxSwitch::EpollScan => 41,
-            DfxSwitch::ExtHunt => 42,
-            DfxSwitch::ExecCost => 43,
-            DfxSwitch::ThPark => 44,
-            DfxSwitch::RipSample => 45,
-            DfxSwitch::DbFileTrace => 46,
-            DfxSwitch::OhHunt => 47,
-            DfxSwitch::TfdCensus => 48,
-            DfxSwitch::ScmTap => 49,
-            DfxSwitch::SigTrace => 50,
-            DfxSwitch::SysForensic => 51,
-            DfxSwitch::SysRing => 52,
-            DfxSwitch::FilerdProbe => 53,
-            DfxSwitch::LostParkTrace => 54,
-            DfxSwitch::AcqDiv => 55,
-            // AllocWatch arrives after FilerdProbe/LostParkTrace on
-            // main, so it takes 56 (its lane-local index of 53 belonged
-            // to a table without those two). Lookup is by name; indices
-            // only key the SWITCHES array.
-            DfxSwitch::AllocWatch => 56,
-            DfxSwitch::SyncGuard => 57,
-            DfxSwitch::SyncWatch => 58,
-            DfxSwitch::FuxStuck => 59,
-            DfxSwitch::PctlMon => 60,
-            DfxSwitch::Pid1Spin => 61,
+            // Renumbering note (dfx-migrate round): the nine rows that
+            // moved to the unified trace framework (epolltrace,
+            // schedtrace, futextrace, txnhunt, ohhunt, sigtrace,
+            // sysring, mmforensics, fuxstuck) left the table, so the
+            // surviving switches re-compact to 0..48 in table order.
+            // Cmdline lookup is by name, so the shift is invisible to
+            // users; indices only key the SWITCHES array.
+            DfxSwitch::Scribble => 0,
+            DfxSwitch::ScribblePark => 1,
+            DfxSwitch::ScribblePid1 => 2,
+            DfxSwitch::ScribbleSweep => 3,
+            DfxSwitch::InputTrace => 4,
+            DfxSwitch::DbFileTrace => 5,
+            DfxSwitch::EpollScan => 6,
+            DfxSwitch::ClaimInject => 7,
+            DfxSwitch::Strace1 => 8,
+            DfxSwitch::Steptrace => 9,
+            DfxSwitch::WriteTrace => 10,
+            DfxSwitch::OncpuInject => 11,
+            DfxSwitch::Ledger => 12,
+            DfxSwitch::BinderTrace => 13,
+            DfxSwitch::SyscallTrace => 14,
+            DfxSwitch::MonoWatch => 15,
+            DfxSwitch::TcpTrace => 16,
+            DfxSwitch::SleepSnap => 17,
+            DfxSwitch::SockSnap => 18,
+            DfxSwitch::DataTap => 19,
+            DfxSwitch::WildWatch => 20,
+            DfxSwitch::MetaWatch => 21,
+            DfxSwitch::ParkDump => 22,
+            DfxSwitch::Schb => 23,
+            DfxSwitch::KsProbe => 24,
+            DfxSwitch::R83HeapScan => 25,
+            DfxSwitch::LeakHunt => 26,
+            DfxSwitch::AcqDiv => 27,
+            DfxSwitch::WwCensus => 28,
+            DfxSwitch::TreeHunt => 29,
+            DfxSwitch::SfdDbg => 30,
+            DfxSwitch::Ams46 => 31,
+            DfxSwitch::VmaProbe => 32,
+            DfxSwitch::PoolCensus => 33,
+            DfxSwitch::SlowTask => 34,
+            DfxSwitch::ExtHunt => 35,
+            DfxSwitch::ExecCost => 36,
+            DfxSwitch::ThPark => 37,
+            DfxSwitch::RipSample => 38,
+            DfxSwitch::TfdCensus => 39,
+            DfxSwitch::ScmTap => 40,
+            DfxSwitch::SysForensic => 41,
+            DfxSwitch::FilerdProbe => 42,
+            DfxSwitch::LostParkTrace => 43,
+            DfxSwitch::AllocWatch => 44,
+            DfxSwitch::SyncGuard => 45,
+            DfxSwitch::SyncWatch => 46,
+            DfxSwitch::PctlMon => 47,
+            DfxSwitch::Pid1Spin => 48,
         }
     }
 
@@ -695,10 +591,12 @@ pub fn enabled(switch: DfxSwitch) -> bool {
 /// busy-poll UART emit charged to the printing task, plus hilogd's
 /// /dev/kmsg drain). They had only the `sprobe=0` silencer before, so
 /// the default was ON. This gate flips the default: armed ONLY when
-/// `dfx=ohhunt` is on the cmdline, or the legacy `sprobe=1` opt-in.
-/// Hunt rigs that still want the prints add one of those two tokens.
+/// the unified-framework event `rux:ohhunt` is armed (`trace_event=`,
+/// `set_event`, or the retired `dfx=ohhunt` boot token — see
+/// `retired_trace_events`), or the legacy `sprobe=1` opt-in. Hunt
+/// rigs that still want the prints add one of those tokens.
 pub fn oh_hunt_prints_on() -> bool {
-    enabled(DfxSwitch::OhHunt)
+    crate::trace::EVENT_OHHUNT.armed()
         || crate::cmdline::get_param("sprobe").map(|v| v == "1").unwrap_or(false)
 }
 
@@ -809,34 +707,20 @@ pub fn trace_alias(switch: DfxSwitch) -> Option<&'static [&'static crate::trace:
         // The ledger's ready-to-port wave. (WwCensus is deliberately
         // ABSENT: the ledger keeps the wild-write tripwires frozen —
         // they are active detectors, not passive observability.)
-        DfxSwitch::SchedTrace
-        | DfxSwitch::Schb
-        | DfxSwitch::PeriodicDump
-        | DfxSwitch::TaskDumpKey
-        | DfxSwitch::ParkDump
-        | DfxSwitch::SleepSnap => Some(SCHED),
-        DfxSwitch::SyscallTrace | DfxSwitch::SysForensic | DfxSwitch::SysRing => {
-            Some(RAW_SYSCALLS)
-        }
-        DfxSwitch::ExecCost | DfxSwitch::OhHunt | DfxSwitch::TreeHunt => Some(SCHED_AND_SYSCALLS),
-        DfxSwitch::SigTrace => Some(SIGNAL),
-        DfxSwitch::BinderTrace | DfxSwitch::DbFileTrace | DfxSwitch::TxnHang => Some(BINDER),
-        // The futex family: reference-shaped visibility only (see the
-        // doc comment above).
-        DfxSwitch::FutexTrace | DfxSwitch::FuxStuck | DfxSwitch::ThPark => {
-            Some(SCHED_AND_SYSCALLS)
-        }
+        DfxSwitch::Schb | DfxSwitch::ParkDump | DfxSwitch::SleepSnap => Some(SCHED),
+        DfxSwitch::SyscallTrace | DfxSwitch::SysForensic => Some(RAW_SYSCALLS),
+        DfxSwitch::ExecCost | DfxSwitch::TreeHunt => Some(SCHED_AND_SYSCALLS),
+        DfxSwitch::BinderTrace | DfxSwitch::DbFileTrace => Some(BINDER),
+        DfxSwitch::ThPark => Some(SCHED_AND_SYSCALLS),
         // The round-2 kmem wave: allocator watches map onto the kmem
-        // events (the ledger's allocwatch/leakhunt/mmforensics/vmap/
-        // poolcensus/monowatch row) and memwatch's partial row
-        // (oom:mark_victim + the mm family).
+        // events (the ledger's allocwatch/leakhunt/vmap/poolcensus/
+        // monowatch row) and memwatch's partial row (oom:mark_victim +
+        // the mm family).
         DfxSwitch::AllocWatch
         | DfxSwitch::LeakHunt
-        | DfxSwitch::MmForensics
         | DfxSwitch::VmaProbe
         | DfxSwitch::PoolCensus
         | DfxSwitch::MonoWatch => Some(KMEM),
-        DfxSwitch::MemWatch => Some(MM_PARTIAL),
         // The ledger's writetrace row (partial): the kernel-fault and
         // block-request views of the write path.
         DfxSwitch::WriteTrace => Some(WRITE_TRACE),
@@ -845,9 +729,148 @@ pub fn trace_alias(switch: DfxSwitch) -> Option<&'static [&'static crate::trace:
         // serial probes keep working alongside, per the ledger's
         // do-not-delete rule).
         DfxSwitch::SfdDbg | DfxSwitch::ExtHunt | DfxSwitch::FilerdProbe => Some(EXT4_JBD2),
-        // The round-3 epoll wave: epollscan/epolltrace arm the rux:
-        // epoll family.
-        DfxSwitch::EpollScan | DfxSwitch::EpollTrace => Some(EPOLL),
+        // The round-3 epoll wave: epollscan arms the rux: epoll family.
+        DfxSwitch::EpollScan => Some(EPOLL),
+        _ => None,
+    }
+}
+
+/// The RETIRED dfx= tokens — the dfx-migrate migration ledger.
+///
+/// Round 3 of the dfx-trace migration moved nine switch families out
+/// of the bespoke table and into the unified trace framework: each
+/// family's gate is now a `rux:` trace event (armed via `trace_event=`
+/// or tracefs `set_event`), the bespoke serial prints became echo
+/// consumers of that same enable, and the old `dfx=` token survives as
+/// a boot ALIAS that arms the events the family used to arm — the
+/// retired family's own event FIRST, then the same reference-family
+/// events `trace_alias` armed for it before the migration (so an
+/// alias-armed boot records the identical timeline a pre-migration
+/// `dfx=` boot recorded, plus the new family event).
+///
+/// The switch table above SHRINKS with every row that moves here; this
+/// table is the compatibility tail, not a second switch catalog.
+pub fn retired_trace_events(name: &str) -> Option<&'static [&'static crate::trace::TraceEvent]> {
+    use crate::trace;
+    static FUXSTUCK: &[&trace::TraceEvent] = &[
+        &trace::EVENT_FUXSTUCK,
+        &trace::EVENT_SCHED_SWITCH,
+        &trace::EVENT_SCHED_WAKING,
+        &trace::EVENT_SCHED_WAKEUP,
+        &trace::EVENT_SCHED_WAKEUP_NEW,
+        &trace::EVENT_SCHED_PROCESS_FORK,
+        &trace::EVENT_SCHED_PROCESS_EXIT,
+        &trace::EVENT_SCHED_PROCESS_FREE,
+        &trace::EVENT_SCHED_PROCESS_WAIT,
+        &trace::EVENT_SCHED_MIGRATE_TASK,
+        &trace::EVENT_SYS_ENTER,
+        &trace::EVENT_SYS_EXIT,
+    ];
+    static TXNHUNT: &[&trace::TraceEvent] = &[
+        &trace::EVENT_TXNHANG,
+        &trace::EVENT_BINDER_TRANSACTION,
+        &trace::EVENT_BINDER_TRANSACTION_RECEIVED,
+        &trace::EVENT_BINDER_TRANSACTION_ALLOC_BUF,
+        &trace::EVENT_BINDER_TRANSACTION_BUFFER_RELEASE,
+        &trace::EVENT_BINDER_WAIT_FOR_WORK,
+    ];
+    static SCHEDTRACE: &[&trace::TraceEvent] = &[
+        &trace::EVENT_SCHEDTRACE,
+        &trace::EVENT_SCHED_SWITCH,
+        &trace::EVENT_SCHED_WAKING,
+        &trace::EVENT_SCHED_WAKEUP,
+        &trace::EVENT_SCHED_WAKEUP_NEW,
+        &trace::EVENT_SCHED_PROCESS_FORK,
+        &trace::EVENT_SCHED_PROCESS_EXIT,
+        &trace::EVENT_SCHED_PROCESS_FREE,
+        &trace::EVENT_SCHED_PROCESS_WAIT,
+        &trace::EVENT_SCHED_MIGRATE_TASK,
+    ];
+    static MMFORENSICS: &[&trace::TraceEvent] = &[
+        &trace::EVENT_MMFORENSICS,
+        &trace::EVENT_KMALLOC,
+        &trace::EVENT_KFREE,
+        &trace::EVENT_MM_PAGE_ALLOC,
+        &trace::EVENT_MM_PAGE_FREE,
+    ];
+    static SYSRING: &[&trace::TraceEvent] = &[
+        &trace::EVENT_SYSRING,
+        &trace::EVENT_SYS_ENTER,
+        &trace::EVENT_SYS_EXIT,
+    ];
+    static OHHUNT: &[&trace::TraceEvent] = &[
+        &trace::EVENT_OHHUNT,
+        &trace::EVENT_SCHED_SWITCH,
+        &trace::EVENT_SCHED_WAKING,
+        &trace::EVENT_SCHED_WAKEUP,
+        &trace::EVENT_SCHED_WAKEUP_NEW,
+        &trace::EVENT_SCHED_PROCESS_FORK,
+        &trace::EVENT_SCHED_PROCESS_EXIT,
+        &trace::EVENT_SCHED_PROCESS_FREE,
+        &trace::EVENT_SCHED_PROCESS_WAIT,
+        &trace::EVENT_SCHED_MIGRATE_TASK,
+        &trace::EVENT_SYS_ENTER,
+        &trace::EVENT_SYS_EXIT,
+    ];
+    static SIGTRACE: &[&trace::TraceEvent] =
+        &[&trace::EVENT_SIGTRACE, &trace::EVENT_SIGNAL_GENERATE];
+    static FUTEXTRACE: &[&trace::TraceEvent] = &[
+        &trace::EVENT_FUTEX_MISS,
+        &trace::EVENT_SCHED_SWITCH,
+        &trace::EVENT_SCHED_WAKING,
+        &trace::EVENT_SCHED_WAKEUP,
+        &trace::EVENT_SCHED_WAKEUP_NEW,
+        &trace::EVENT_SCHED_PROCESS_FORK,
+        &trace::EVENT_SCHED_PROCESS_EXIT,
+        &trace::EVENT_SCHED_PROCESS_FREE,
+        &trace::EVENT_SCHED_PROCESS_WAIT,
+        &trace::EVENT_SCHED_MIGRATE_TASK,
+        &trace::EVENT_SYS_ENTER,
+        &trace::EVENT_SYS_EXIT,
+    ];
+    static EPOLLTRACE: &[&trace::TraceEvent] = &[
+        &trace::EVENT_EPOLL_CTL_INSERT,
+        &trace::EVENT_EPOLL_CTL_REMOVE,
+        &trace::EVENT_EPOLL_WAIT_SCAN,
+        &trace::EVENT_EPOLL_WAIT_EXIT,
+        &trace::EVENT_EPOLL_DELIVERY,
+    ];
+    static TASKDUMP: &[&trace::TraceEvent] = &[
+        &trace::EVENT_TASKDUMP,
+        &trace::EVENT_SCHED_SWITCH,
+        &trace::EVENT_SCHED_WAKING,
+        &trace::EVENT_SCHED_WAKEUP,
+        &trace::EVENT_SCHED_WAKEUP_NEW,
+        &trace::EVENT_SCHED_PROCESS_FORK,
+        &trace::EVENT_SCHED_PROCESS_EXIT,
+        &trace::EVENT_SCHED_PROCESS_FREE,
+        &trace::EVENT_SCHED_PROCESS_WAIT,
+        &trace::EVENT_SCHED_MIGRATE_TASK,
+    ];
+    static MEMWATCH: &[&trace::TraceEvent] = &[
+        &trace::EVENT_MEMWATCH,
+        &trace::EVENT_MARK_VICTIM,
+        &trace::EVENT_KMALLOC,
+        &trace::EVENT_KFREE,
+        &trace::EVENT_MM_PAGE_ALLOC,
+        &trace::EVENT_MM_PAGE_FREE,
+    ];
+    static WATCHDOG: &[&trace::TraceEvent] = &[&trace::EVENT_TASKDUMP];
+    match name {
+        "taskdump" | "periodic" => Some(TASKDUMP),
+        // The old watchdog switch had no trace alias; the retired token
+        // arms only the family event.
+        "watchdog" => Some(WATCHDOG),
+        "memwatch" => Some(MEMWATCH),
+        "fuxstuck" => Some(FUXSTUCK),
+        "txnhunt" => Some(TXNHUNT),
+        "schedtrace" => Some(SCHEDTRACE),
+        "mmforensics" => Some(MMFORENSICS),
+        "sysring" => Some(SYSRING),
+        "ohhunt" => Some(OHHUNT),
+        "sigtrace" => Some(SIGTRACE),
+        "futextrace" => Some(FUTEXTRACE),
+        "epolltrace" => Some(EPOLLTRACE),
         _ => None,
     }
 }
@@ -866,9 +889,6 @@ pub fn set(switch: DfxSwitch, on: bool) {
             }
             crate::trace::set_tracing_on(true);
         }
-    }
-    if let DfxSwitch::MemWatch = switch {
-        super::memwatch::ENABLED.store(on, Ordering::Relaxed);
     }
     if let DfxSwitch::FilerdProbe = switch {
         super::filerd::set_enabled(on);
@@ -940,7 +960,25 @@ pub fn init_from_cmdline() {
                 crate::pr_info!("dfx: runtime switch '{}' enabled", name);
             }
             None => {
-                crate::pr_warn!("dfx: unknown switch '{}' ignored", name);
+                // Retired tokens (dfx-migrate round): the family now
+                // lives in the unified trace framework — arm its events
+                // instead, exactly what the switch armed before.
+                match retired_trace_events(name) {
+                    Some(events) => {
+                        for e in events.iter() {
+                            e.enabled.store(true, Ordering::Relaxed);
+                        }
+                        crate::trace::set_tracing_on(true);
+                        crate::pr_info!(
+                            "dfx: token '{}' retired; armed trace events (first: {})",
+                            name,
+                            events[0].full_name()
+                        );
+                    }
+                    None => {
+                        crate::pr_warn!("dfx: unknown switch '{}' ignored", name);
+                    }
+                }
             }
         }
     }

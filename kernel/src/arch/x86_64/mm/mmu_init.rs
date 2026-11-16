@@ -560,9 +560,7 @@ impl PtLedger {
             PT_STAMP_RING[idx].ppn.store(ppn, Relaxed);
             PT_STAMP_RING[idx].pid.store(pid, Relaxed);
             PT_STAMP_RING[idx].site.store(b'S' as u64, Relaxed);
-            let root = if crate::dfx::switches::enabled(
-                crate::dfx::switches::DfxSwitch::MmForensics,
-            ) {
+            let root = if crate::trace::EVENT_MMFORENSICS.armed() {
                 crate::sched::current()
                     .and_then(|t| t.address_space().map(|mm| mm.root_ppn()))
                     .unwrap_or(0)
@@ -889,7 +887,7 @@ pub fn pte_install_log(root_ppn: u64, va: u64, ppn: u64) {
     // Hot path (every user PTE install — a fork copies hundreds of them):
     // the ring writes are forensic-only and cost 4 emulated atomics per
     // copied PTE under TCG. Behind the dfx=mmforensics runtime switch.
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::MmForensics) {
+    if !crate::trace::EVENT_MMFORENSICS.armed() {
         return;
     }
     let i = PTEI_CUR.fetch_add(1, Relaxed) % PTEI_RING.len();
@@ -928,7 +926,7 @@ pub unsafe fn free_user_page_tables(
     // MmStructs ended up owning one page-table tree — the second walk
     // chases recycled frames full of foreign data. Behind the
     // dfx=mmforensics runtime switch (see pte_install_log).
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::MmForensics) {
+    if crate::trace::EVENT_MMFORENSICS.armed() {
         use core::sync::atomic::Ordering::Relaxed;
         for k in 0..FUT_RING.len() {
             if FUT_RING[k].root.load(Relaxed) == root_ppn && root_ppn != 0 {
@@ -938,6 +936,16 @@ pub unsafe fn free_user_page_tables(
                         root_ppn, k,
                         FUT_RING[k].pid.load(Relaxed),
                         crate::sched::get_current_pid()
+                    );
+                    // dfx-migrate: the double-teardown hit also records
+                    // into the unified framework (rux:mmforensics
+                    // kind=FUT_REPEAT; b packs prev<<32|now pid).
+                    crate::trace::trace_mmforensics(
+                        0,
+                        root_ppn,
+                        (FUT_RING[k].pid.load(Relaxed) << 32)
+                            | crate::sched::get_current_pid() as u64,
+                        crate::sched::get_current_pid() as u32,
                     );
                 }
                 // Consume the matched entry even past the report cap —

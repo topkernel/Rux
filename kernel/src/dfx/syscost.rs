@@ -1631,7 +1631,7 @@ pub fn dump() {
     // The spin comm is known (hilogd.server); this names its fd and return
     // values at EVERY dump cadence — the hung-task one-shot replay caught
     // only the first (too-early) wedge phase (u2v4 @181s).
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SysRing) {
+    if crate::trace::EVENT_SYSRING.armed() {
         use crate::syscall::dispatch::{SYSCALL_CURSOR, SYSCALL_RING};
         let cur = SYSCALL_CURSOR.load(Ordering::Relaxed);
         let len = SYSCALL_RING.len();

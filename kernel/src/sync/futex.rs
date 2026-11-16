@@ -187,7 +187,7 @@ pub static FUXW_RINGS: [Spinlock<(usize, [FuxWakeOp; FUXW_RING_SZ])>; FUXW_NRING
 /// (ohc74 booted past appfwk.ready with it, the only such boot in the
 /// campaign).
 pub fn fuxw_push(cmd: u8, uaddr: u64, ret: i32) {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck) {
+    if !crate::trace::EVENT_FUXSTUCK.armed() {
         return;
     }
     // 80th (ohw126 AMS park): immediate per-word wake verdict line. The
@@ -503,7 +503,7 @@ impl FutexKey {
         // process wake (parent WAIT vs exec'd child WAKE on a MAP_SHARED
         // page) shows which side resolved which frame. Gated behind
         // dfx=futextrace (console-cost discipline; see FXDV2 note).
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FutexTrace) {
+        if crate::trace::EVENT_FUTEX_MISS.armed() {
             static FXK_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             let n = FXK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -3587,7 +3587,7 @@ pub fn sqwalk_step_deep(tgid: u32, word: u64, deep: bool) {
     if cfg!(not(target_arch = "x86_64")) || tgid == 0 || !sqw_canon(word) {
         return;
     }
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck) {
+    if !crate::trace::EVENT_FUXSTUCK.armed() {
         return;
     }
     // Sticky word (ohw145 lesson: THREE deep-frozen words in one boot
@@ -3670,7 +3670,7 @@ pub fn sqwalk_slice() {
     if cfg!(not(target_arch = "x86_64")) {
         return;
     }
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck) {
+    if !crate::trace::EVENT_FUXSTUCK.armed() {
         return;
     }
     if SQW_RAWDONE.load(Relaxed) != 0 || SQW_WORD.load(Relaxed) == 0 {
@@ -4705,7 +4705,7 @@ pub fn futex_stuck_census() {
     use alloc::vec::Vec;
     use core::sync::atomic::Ordering::Relaxed;
 
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck) {
+    if !crate::trace::EVENT_FUXSTUCK.armed() {
         return;
     }
     let now = crate::drivers::timer::get_jiffies();
@@ -5904,6 +5904,22 @@ pub fn futex_stuck_census() {
             h.map(|h| h.int_other).unwrap_or(0),
             h.map(|h| h.unint).unwrap_or(0),
         );
+        // dfx-migrate: the census row also records into the unified
+        // framework (rux:fuxstuck — the event is also the family's arm
+        // switch, so it is armed by construction here). The record
+        // carries the row's identifying fields; the serial line above
+        // keeps the full context dump.
+        crate::trace::trace_fuxstuck(
+            g.tgid,
+            g.rep_tid,
+            g.uaddr as u64,
+            g.rep_mm as u64,
+            g.n as u32,
+            g.min_age,
+            g.max_age,
+            g.rep_sys as i32,
+            g.rep_epc,
+        );
         // neverword lane (forensic-only, not for main): EventRunner-named
         // standing park >= 60 s gets the CTD decode UNCONDITIONALLY. The
         // lr-series f2 boot proved the W-trigger's 2-per-burst budget is
@@ -6834,7 +6850,7 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
     // offline against the stuck-park births (FUX-CTX groups by word).
     if ret == 0
         && (0x7ff0_8000_0000..=0x7ff0_9fff_ffff).contains(&uaddr)
-        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck)
+        && crate::trace::EVENT_FUXSTUCK.armed()
     {
         static MISS0_N: core::sync::atomic::AtomicU32 =
             core::sync::atomic::AtomicU32::new(0);
@@ -6865,7 +6881,7 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
     // and uncontended FUTEX_WAKEs (every pthread_mutex_unlock) must not
     // pay for it.
     if ret < nr_wake as i64
-        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FutexTrace)
+        && crate::trace::EVENT_FUTEX_MISS.armed()
     {
         static MISS_REPORTS: core::sync::atomic::AtomicU32 =
             core::sync::atomic::AtomicU32::new(0);
@@ -6927,6 +6943,10 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
                             bi,
                             name
                         );
+                        // dfx-migrate: the hit also records into the
+                        // unified framework (rux:futex_miss carries the
+                        // two mm identities — the lost-wake signature).
+                        crate::trace::trace_futex_miss(uaddr as u64, mm as u64, wmm as u64, 1);
                     }
                 }
                 idx = next;
@@ -8123,7 +8143,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
         if matches!(cmd, FUTEX_WAIT | FUTEX_WAIT_BITSET)
             && (val == 1 || val == 2)
             && RWFRZ_EXIT_WATCH_TGID.load(Relaxed) == 0
-            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FutexTrace)
+            && crate::trace::EVENT_FUTEX_MISS.armed()
         {
             if let Some(t) = crate::sched::current() {
                 // SAFETY: read-only tgid of the current task.
@@ -8174,9 +8194,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
             && ctde_uaddr & 0xffff_ffff_f000 == CTDE_PAGE
             && val & 0x8000_0000 != 0
             && val & 0x7fff_ffff >= 2
-            && crate::dfx::switches::enabled(
-                crate::dfx::switches::DfxSwitch::FuxStuck,
-            )
+            && crate::trace::EVENT_FUXSTUCK.armed()
         {
             const CTDE_SLOTS: usize = 8;
             static CTDE_TGID: [core::sync::atomic::AtomicU32; CTDE_SLOTS] =
@@ -8288,7 +8306,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
     // polled-16550 time). The hunt is gated behind dfx=futextrace (the
     // same switch as the wake-miss scan in futex_wake_in_mm); the
     // sc184/sc185 hunts re-arm with the flag.
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FutexTrace)
+    if crate::trace::EVENT_FUTEX_MISS.armed()
     {
         use core::sync::atomic::Ordering::Relaxed;
         let cur_tgid =
@@ -8460,7 +8478,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
         // 'samgr-dark' boot family. Hunt with dfx=futextrace, never by
         // default.
         if (0x7ff0_0000_0000..0x7ff0_0010_0000).contains(&uaddr)
-            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FutexTrace)
+            && crate::trace::EVENT_FUTEX_MISS.armed()
         {
             use core::sync::atomic::Ordering::Relaxed as R2;
             let n = FXDV2_N.fetch_add(1, R2);
@@ -8640,7 +8658,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                 .map(|t| unsafe { (*t).tgid() == sp })
                 .unwrap_or(false);
             if mine
-                && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang)
+                && crate::trace::EVENT_TXNHANG.armed()
                 && crate::drivers::timer::get_jiffies() <= 7000
             {
                 static SMW_N: core::sync::atomic::AtomicUsize =
@@ -9261,9 +9279,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
     {
         const STK_PAGE: usize = 0x7fffffffc000;
         if uaddr & !0xfff == STK_PAGE
-            && crate::dfx::switches::enabled(
-                crate::dfx::switches::DfxSwitch::FutexTrace,
-            )
+            && crate::trace::EVENT_FUTEX_MISS.armed()
         {
             // Budget raised 150 -> 400 for sc119: the page is 3 pages below
             // the stack top of EVERY x86_64 process, so ANY main-thread
@@ -9385,7 +9401,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
     // family; the sc156 hunt re-arms with the flag.
     if matches!(op & FUTEX_CMD_MASK, FUTEX_WAIT | FUTEX_WAIT_BITSET)
         && timeout != 0
-        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FutexTrace)
+        && crate::trace::EVENT_FUTEX_MISS.armed()
     {
         if let Some(t) = crate::sched::current() {
             let tk = unsafe { &*t };
@@ -11774,7 +11790,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
     // now sits behind the existing futex-hunt switch (dfx=futextrace).
     // The only functional action inside is watch-slot bookkeeping; the
     // explicit rwfrzwatch= cmdline pre-arm above stays available.
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FutexTrace) {
+    if !crate::trace::EVENT_FUTEX_MISS.armed() {
         return;
     }
     // sc83: scanner liveness heartbeat — one line per minute. sc82 lost

@@ -1688,6 +1688,326 @@ tracepoints! {
             ps_render(args[4])
         )
     };
+
+    /// rux:fuxstuck — one FUX-STUCK census row of the futex-stuck
+    /// census (dfx-migrate migration of the bespoke `dfx=fuxstuck`
+    /// switch; the event IS the family's gate — arm it via
+    /// `trace_event=` or `set_event`, and the census, the RWFRZ freeze
+    /// machinery, the reader scans and the wake-verdict hooks all run,
+    /// with their serial prints as echo consumers of this same enable).
+    /// The row carries the representative waiter of one stuck word:
+    /// tgid/tid, the uaddr and mm identity, waiter count, the park-age
+    /// window in seconds, and the stuck thread's entry syscall/epc.
+    /// The full FUX-STUCK serial line carries more context (fval, fto,
+    /// the tgidthr histogram) — the record carries what identifies the
+    /// hit offline.
+    EVENT_FUXSTUCK / fuxstuck_fmt / trace_fuxstuck :
+        "rux", "fuxstuck", 61,
+    print: "\"tgid=%d tid=%d uaddr=%#lx mm=%#lx n=%u age=%us..%us sys=%d epc=%#lx\", REC->tgid, REC->tid, REC->uaddr, REC->mm, REC->n, REC->age_min, REC->age_max, REC->sys, REC->epc",
+    fields: "\tfield:pid_t tgid;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:pid_t tid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long uaddr;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long mm;\toffset:24;\tsize:8;\tsigned:0;\n\
+             \tfield:__u32 n;\toffset:32;\tsize:4;\tsigned:0;\n\
+             \tfield:__u32 age_min;\toffset:36;\tsize:4;\tsigned:0;\n\
+             \tfield:__u32 age_max;\toffset:40;\tsize:4;\tsigned:0;\n\
+             \tfield:int sys;\toffset:44;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long epc;\toffset:48;\tsize:8;\tsigned:0;\n",
+    call (tgid: u32, tid: u32, uaddr: u64, mm: u64, n: u32, age_min: u32,
+          age_max: u32, sys: i32, epc: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "tgid={} tid={} uaddr={:#x} mm={:#x} n={} age={}s..{}s sys={} epc={:#x}",
+            args[0] as u32,
+            args[1] as u32,
+            args[2],
+            args[3],
+            args[4] as u32,
+            args[5] as u32,
+            args[6] as u32,
+            args[7] as i32,
+            args[8],
+        )
+    };
+
+    /// rux:txnhang — one TXN-HANG hit of the in-flight binder
+    /// transaction audit (dfx-migrate migration of `dfx=txnhunt`;
+    /// the event IS the family's gate). A sync transaction picked up
+    /// by its server but unreplied for >= 1 s: the txn id and code,
+    /// both ends (from pid.tid -> to pid.tid), the age, and the
+    /// server thread's state/entry-rip/first-arg. The TXN-HANG-SRV /
+    /// -OWE / -STK / -HLD companion lines stay serial-only (their
+    /// context is multi-line); this record is the greppable hit row.
+    EVENT_TXNHANG / txnhang_fmt / trace_txnhang :
+        "rux", "txnhang", 62,
+    print: "\"txn=%llu code=%u from=%d.%d to=%d.%d exec_ms=%llu state=%#lx rip=%#lx a0=%#lx\", REC->txn, REC->code, REC->from_pid, REC->from_tid, REC->to_pid, REC->to_tid, REC->exec_ms, REC->state, REC->rip, REC->a0",
+    fields: "\tfield:unsigned long long txn;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned int code;\toffset:16;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t from_pid;\toffset:20;\tsize:4;\tsigned:1;\n\
+             \tfield:pid_t from_tid;\toffset:24;\tsize:4;\tsigned:1;\n\
+             \tfield:pid_t to_pid;\toffset:28;\tsize:4;\tsigned:1;\n\
+             \tfield:pid_t to_tid;\toffset:32;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long long exec_ms;\toffset:40;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long state;\toffset:48;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long rip;\toffset:56;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long a0;\toffset:64;\tsize:8;\tsigned:0;\n",
+    call (txn: u64, code: u32, from_pid: u32, from_tid: u32, to_pid: u32,
+          to_tid: u32, exec_ms: u64, state: u64, rip: u64, a0: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "txn={} code={} from={}.{} to={}.{} exec_ms={} state={:#x} rip={:#x} a0={:#x}",
+            args[0],
+            args[1] as u32,
+            args[2] as i32,
+            args[3] as i32,
+            args[4] as i32,
+            args[5] as i32,
+            args[6],
+            args[7],
+            args[8],
+            args[9],
+        )
+    };
+
+    /// rux:schedtrace — one scheduler-forensics hit row (dfx-migrate
+    /// migration of `dfx=schedtrace`; the event IS the family's gate —
+    /// EXITNOTIFY delivery log, WAKE-REFUSED evidence, R56 orphan
+    /// harvest, ENQ-CLAIMED stamping, the wakewatch mini-ring dumps and
+    /// the reaper zombie scan all key off it). `kind` names the probe:
+    ///   0 EXITNOTIFY      — a child-exit notification was delivered
+    ///                       (a=child pid, b=parent pid)
+    ///   1 WAKE_REFUSED    — a wake was refused with the target still
+    ///                       sleeping (a=pid, b=state bits)
+    ///   2 ORPHAN_HARVEST  — the idle-loop harvester re-linked a live
+    ///                       orphaned task (a=pid, b=cpu slot or 0)
+    ///   3 ENQ_CLAIMED     — an enqueue claimed a CPU for the task
+    ///                       (a=pid, b=claim/cpu word)
+    EVENT_SCHEDTRACE / schedtrace_fmt / trace_schedtrace :
+        "rux", "schedtrace", 63,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", __print_symbolic(REC->kind, { 0, \"EXITNOTIFY\" }, { 1, \"WAKE_REFUSED\" }, { 2, \"ORPHAN_HARVEST\" }, { 3, \"ENQ_CLAIMED\" }), REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = match args[0] as u32 {
+            0 => "EXITNOTIFY",
+            1 => "WAKE_REFUSED",
+            2 => "ORPHAN_HARVEST",
+            3 => "ENQ_CLAIMED",
+            _ => "?",
+        };
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:mmforensics — one mm-forensics hit row (dfx-migrate
+    /// migration of `dfx=mmforensics`; the event IS the family's gate —
+    /// the PTEI/PT_STAMP/PT_FREE rings, the double-teardown detector
+    /// and capture_frame all key off it). `kind` names the hit:
+    ///   0 FUT_REPEAT — a page-table root was torn down twice (the
+    ///                  double-own bug signature; a=root ppn,
+    ///                  b=prev pid<<32|now pid)
+    ///   1 PTEI       — a PTE install landed in the forensic ring
+    ///                  (a=root ppn, b=va, pid=recording task)
+    ///   2 PT_STAMP   — a table alloc/free stamp (a=ppn, b=site char)
+    ///   3 CAPTURE    — a suspect frame was captured (a=pfn,
+    ///                  b=first 8 bytes of the why-tag)
+    EVENT_MMFORENSICS / mmforensics_fmt / trace_mmforensics :
+        "rux", "mmforensics", 64,
+    print: "\"kind=%s root=%#lx b=%#lx pid=%d\", __print_symbolic(REC->kind, { 0, \"FUT_REPEAT\" }, { 1, \"PTEI\" }, { 2, \"PT_STAMP\" }, { 3, \"CAPTURE\" }), REC->root, REC->b, REC->pid",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned long root;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:32;\tsize:4;\tsigned:1;\n",
+    call (kind: u32, root: u64, b: u64, pid: u32),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = match args[0] as u32 {
+            0 => "FUT_REPEAT",
+            1 => "PTEI",
+            2 => "PT_STAMP",
+            3 => "CAPTURE",
+            _ => "?",
+        };
+        format!("kind={} root={:#x} b={:#x} pid={}", kind, args[1], args[2], args[3] as i32)
+    };
+
+    /// rux:sysring — one row of the forensic SYSCALL_RING's replayed
+    /// views (dfx-migrate migration of `dfx=sysring`; the event IS the
+    /// family's gate — the ring record at syscall exit, the panic/NOVMA
+    /// replays and the childexit dump all key off it). The record
+    /// mirrors one ring entry: pid, nr, a0, a1, ret. The raw per-
+    /// syscall stream already lives in raw_syscalls:sys_enter/sys_exit;
+    /// this event carries the ring REPLAY rows (childexit sequence,
+    /// census tail) that the hunts grep off the serial.
+    EVENT_SYSRING / sysring_fmt / trace_sysring :
+        "rux", "sysring", 65,
+    print: "\"pid=%d nr=%u a0=%#lx a1=%#lx ret=%#lx\", REC->pid, REC->nr, REC->a0, REC->a1, REC->ret",
+    fields: "\tfield:pid_t pid;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:__u32 nr;\toffset:12;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned long a0;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long a1;\toffset:24;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long ret;\toffset:32;\tsize:8;\tsigned:0;\n",
+    call (pid: u32, nr: u32, a0: u64, a1: u64, ret: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "pid={} nr={} a0={:#x} a1={:#x} ret={:#x}",
+            args[0] as i32,
+            args[1] as u32,
+            args[2],
+            args[3],
+            args[4],
+        )
+    };
+
+    /// rux:ohhunt — one OH graphics-hunt tap row (dfx-migrate migration
+    /// of `dfx=ohhunt`; the event IS the family's gate — the drm ioctl
+    /// traces, the mmap placement attribution, the prime-import probe,
+    /// the SIGABRT first-raise dump, the mount/bindwalk taps and the
+    /// NOBLEDBG/UNIXCONNECT lines all key off it, with `sprobe=1` as
+    /// the legacy opt-in alias). `kind` names the tap:
+    ///   0 DRM_IOCTL    — a drm ioctl of interest (a=cmd, b=ret)
+    ///   1 MMAP_PLACE   — a drm mmap placement (a=va, b=pgoff)
+    ///   2 PRIME_IMPORT — a foreign prime import (a=fd, b=size)
+    ///   3 SIGABRT      — first SIGABRT raise (a=pid, b=rip)
+    ///   4 MOUNT_TAP    — a mount/pivot_root step (a=flag word, b=id)
+    ///   5 DBG_LINE     — a NOBLEDBG/UNIXCONNECT style lifecycle line
+    ///                    (a/b=the line's two payload words)
+    EVENT_OHHUNT / ohhunt_fmt / trace_ohhunt :
+        "rux", "ohhunt", 66,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", __print_symbolic(REC->kind, { 0, \"DRM_IOCTL\" }, { 1, \"MMAP_PLACE\" }, { 2, \"PRIME_IMPORT\" }, { 3, \"SIGABRT\" }, { 4, \"MOUNT_TAP\" }, { 5, \"DBG_LINE\" }), REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = match args[0] as u32 {
+            0 => "DRM_IOCTL",
+            1 => "MMAP_PLACE",
+            2 => "PRIME_IMPORT",
+            3 => "SIGABRT",
+            4 => "MOUNT_TAP",
+            5 => "DBG_LINE",
+            _ => "?",
+        };
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:sigtrace — one signal-delivery forensics row (dfx-migrate
+    /// migration of `dfx=sigtrace`; the event IS the family's gate).
+    /// `kind`: 0 FRAME_SETUP (setup_frame: sp before, frame addr,
+    /// handler pc) 1 FRAME_RESTORE (restore_sigcontext: frame addr,
+    /// restored pc) 2 SIGDEATH (a signal took a task down: a=sig,
+    /// b=code) 3 SFDDBG (a signalfd disposition trace: a=sig,
+    /// b=disposition bits).
+    EVENT_SIGTRACE / sigtrace_fmt / trace_sigtrace :
+        "rux", "sigtrace", 67,
+    print: "\"kind=%s pid=%d sig=%d sp=%#lx frame=%#lx pc=%#lx\", __print_symbolic(REC->kind, { 0, \"FRAME_SETUP\" }, { 1, \"FRAME_RESTORE\" }, { 2, \"SIGDEATH\" }, { 3, \"SFDDBG\" }), REC->pid, REC->sig, REC->sp, REC->frame, REC->pc",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:int sig;\toffset:16;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long sp;\toffset:24;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long frame;\toffset:32;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long pc;\toffset:40;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, sig: i32, sp: u64, frame: u64, pc: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = match args[0] as u32 {
+            0 => "FRAME_SETUP",
+            1 => "FRAME_RESTORE",
+            2 => "SIGDEATH",
+            3 => "SFDDBG",
+            _ => "?",
+        };
+        format!(
+            "kind={} pid={} sig={} sp={:#x} frame={:#x} pc={:#x}",
+            kind,
+            args[1] as i32,
+            args[2] as i32,
+            args[3],
+            args[4],
+            args[5],
+        )
+    };
+
+    /// rux:futex_miss — the futex wake-miss probe's hit row (dfx-migrate
+    /// migration of `dfx=futextrace`; the event IS the family's gate).
+    /// A FUTEX_WAKE wanted more waiters than it found on its key; the
+    /// probe scanned every bucket for same-uaddr waiters under a
+    /// non-matching key. The row carries the uaddr, the waker's and
+    /// the waiter's mm identities (the lost-wake signature when they
+    /// disagree) and the scan's found count.
+    EVENT_FUTEX_MISS / futex_miss_fmt / trace_futex_miss :
+        "rux", "futex_miss", 68,
+    print: "\"uaddr=%#lx waker_mm=%#lx waiter_mm=%#lx found=%d\", REC->uaddr, REC->waker_mm, REC->waiter_mm, REC->found",
+    fields: "\tfield:unsigned long uaddr;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long waker_mm;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long waiter_mm;\toffset:24;\tsize:8;\tsigned:0;\n\
+             \tfield:int found;\toffset:32;\tsize:4;\tsigned:1;\n",
+    call (uaddr: u64, waker_mm: u64, waiter_mm: u64, found: i32),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "uaddr={:#x} waker_mm={:#x} waiter_mm={:#x} found={}",
+            args[0],
+            args[1],
+            args[2],
+            args[3] as i32,
+        )
+    };
+
+    /// rux:taskdump — one task-state snapshot trigger (dfx-migrate
+    /// migration of the `dfx=taskdump` / `dfx=periodic` / `dfx=watchdog`
+    /// debug aids; the event IS the gate for all three triggers). The
+    /// multi-line dump itself stays serial (echo); this record names the
+    /// trigger and when it fired. `kind`:
+    ///   0 SYSRQ   — the UART magic/sysrq hook (old dfx=taskdump)
+    ///   1 PERIODIC — the timer-cadence snapshot (old dfx=periodic)
+    ///   2 WATCHDOG — the snapshot after a spinlock deadlock print
+    ///                (old dfx=watchdog)
+    /// a carries the trigger's discriminator (jiffies at fire, or the
+    /// watchdog's lock address).
+    EVENT_TASKDUMP / taskdump_fmt / trace_taskdump :
+        "rux", "taskdump", 69,
+    print: "\"kind=%s a=%#lx\", __print_symbolic(REC->kind, { 0, \"SYSRQ\" }, { 1, \"PERIODIC\" }, { 2, \"WATCHDOG\" }), REC->a",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, a: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = match args[0] as u32 {
+            0 => "SYSRQ",
+            1 => "PERIODIC",
+            2 => "WATCHDOG",
+            _ => "?",
+        };
+        format!("kind={} a={:#x}", kind, args[1])
+    };
+
+    /// rux:memwatch — the heap-leak census's gate row (dfx-migrate
+    /// migration of `dfx=memwatch`; the event IS the switch — the
+    /// allocator-prologue counters, the size-class histograms and the
+    /// periodic report all key off it). Each periodic report records
+    /// one row with the census totals: buddy used kB, memwatch
+    /// alloc/free totals kB, and the dealloc-refusal (silent page
+    /// leak) counter. The report itself stays on the raw-UART echo
+    /// path (no printk, no allocation — record() is atomics-only, so
+    /// it is safe from the same contexts).
+    EVENT_MEMWATCH / memwatch_fmt / trace_memwatch :
+        "rux", "memwatch", 70,
+    print: "\"used_kb=%lu alloc_kb=%lu free_kb=%lu dref=%llu\", REC->used_kb, REC->alloc_kb, REC->free_kb, REC->dref",
+    fields: "\tfield:unsigned long used_kb;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long alloc_kb;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long free_kb;\toffset:24;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long long dref;\toffset:32;\tsize:8;\tsigned:0;\n",
+    call (used_kb: u64, alloc_kb: u64, free_kb: u64, dref: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "used_kb={} alloc_kb={} free_kb={} dref={}",
+            args[0],
+            args[1],
+            args[2],
+            args[3],
+        )
+    };
 }
 
 /// The trace_marker pseudo-event. NOT in EVENTS on purpose: a marker

@@ -1247,13 +1247,22 @@ fn process_deferred_exit_pid(packed: i64) {
     // delivered exit notification (parent, child, signal rc).
     // serial-clean: default off — available only behind dfx=schedtrace
     // (it fired on every child exit and polluted every boot log).
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+    if crate::trace::EVENT_SCHEDTRACE.armed() {
         static EN_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if EN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 150 {
             crate::pr_info!(
                 "EXITNOTIFY: child={} parent={}",
                 child_pid, parent_pid
+            );
+            // dfx-migrate: the row also records into the unified
+            // framework (rux:schedtrace kind=EXITNOTIFY — the event is
+            // also the family's arm switch).
+            crate::trace::trace_schedtrace(
+                0,
+                child_pid as u32,
+                parent_pid as u64,
+                0,
             );
         }
     }
@@ -1569,8 +1578,8 @@ pub fn preempt_check_wake(task: *mut Task) {
 /// gate too. One relaxed switch-table load per event.
 #[inline]
 pub fn sched_hist_armed() -> bool {
-    crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck)
-        || crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace)
+    crate::trace::EVENT_FUXSTUCK.armed()
+        || crate::trace::EVENT_SCHEDTRACE.armed()
 }
 
 /// Append one event to `task`'s persistent scheduler-history ring
@@ -4643,7 +4652,7 @@ pub fn ww_tail_fill(ix: usize) -> u64 {
 #[inline]
 #[track_caller]
 pub fn ww_record(task: *mut Task, code: u32) {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+    if !crate::trace::EVENT_SCHEDTRACE.armed() {
         return;
     }
     // Watch-list filter: a 64-way cached-atomic scan per event is
@@ -4731,7 +4740,7 @@ pub fn ww_record(task: *mut Task, code: u32) {
 /// K=pick_publish R=wake_refused A=affirm. Reader-side only; called
 /// from the binder-stall census (no GRQ held — the ring is atomics).
 pub fn ww_append_dump<W: core::fmt::Write>(out: &mut W, task: *mut Task, now: u64) {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+    if !crate::trace::EVENT_SCHEDTRACE.armed() {
         return;
     }
     const TAGS: [(u32, char); 9] = [
@@ -10069,15 +10078,17 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
                     // never set (R46 family): wake_up_enqueue's GRQ-locked
                     // phantom path verifies linkage/ownership and heals.
                     if wake_up_enqueue(t)
-                        && crate::dfx::switches::enabled(
-                            crate::dfx::switches::DfxSwitch::SchedTrace,
-                        )
+                        && crate::trace::EVENT_SCHEDTRACE.armed()
                     {
                         // R80 (diag): name the healed pid — the v1-r1 wedge
                         // printed hundreds of anonymous harvest lines while
                         // the actual blocker (a LIVE-mark phantom) was
                         // refused elsewhere and never named.
                         r56_print_pid(b"R56-ORPHAN-HARVESTED pid=", pid, b"\n");
+                        // dfx-migrate: the harvest also records into the
+                        // unified framework (rux:schedtrace
+                        // kind=ORPHAN_HARVEST).
+                        crate::trace::trace_schedtrace(2, pid as u32, 0, 0);
                         // R80 (diag, producer hunt): the v2 storm showed
                         // pids 306/336/338 cycling orphan -> heal -> orphan
                         // every ~200ms through THIS plain-insert path (no
@@ -10100,10 +10111,11 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
                         // wake_up_enqueue heals the slot and admits the
                         // re-link.
                         if wake_up_enqueue(t) {
-                            if crate::dfx::switches::enabled(
-                                crate::dfx::switches::DfxSwitch::SchedTrace,
-                            ) {
+                            if crate::trace::EVENT_SCHEDTRACE.armed() {
                                 r56_print_pid(b"R56-ORPHAN-HARVESTED pid=", pid, b"\n");
+                                // dfx-migrate: rux:schedtrace
+                                // kind=ORPHAN_HARVEST (slot-resync face).
+                                crate::trace::trace_schedtrace(2, pid as u32, c as u64, 0);
                             }
                         }
                     } else if (*t).preempt_count() == 0

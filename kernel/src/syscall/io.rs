@@ -737,9 +737,7 @@ fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, bu
                 // recursion through this very path) with a reentrancy
                 // guard; direct prints are release no-ops.
                 if first_err == -5
-                    && crate::dfx::switches::enabled(
-                        crate::dfx::switches::DfxSwitch::EpollTrace,
-                    )
+                    && crate::trace::EVENT_EPOLL_DELIVERY.armed()
                 {
                     eio_report(fd, file, &kernel_buf[..core::cmp::min(chunk, 24)]);
                 }
@@ -1243,7 +1241,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                 // isolation (glmprobe). Trace the MAP_DUMB requests and
                 // every failing drm ioctl. Gated behind dfx=ohhunt
                 // (known-gap 4: hunt taps off the hot path by default).
-                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::OhHunt)
+                if crate::trace::EVENT_OHHUNT.armed()
                     && request == 0xc010_64b3
                 {
                     // struct drm_mode_map_dumb: handle@0 (read via uaccess;
@@ -1266,7 +1264,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                     }
                 }
                 if ret < 0
-                    && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::OhHunt)
+                    && crate::trace::EVENT_OHHUNT.armed()
                 {
                     static IOCTLFAIL_N: core::sync::atomic::AtomicU32 =
                         core::sync::atomic::AtomicU32::new(0);

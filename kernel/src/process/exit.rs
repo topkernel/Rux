@@ -233,7 +233,7 @@ pub fn kill_other_threads(current: *mut Task) {
         // teardown: the victim-name walk + pr_err rode that hot path
         // (873 samples through acquire_emit_lock in the 100th's record).
     if !victims.is_empty()
-        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SigTrace)
+        && crate::trace::EVENT_SIGTRACE.armed()
     {
         // SAFETY: current is a valid, running task.
         let ccomm = unsafe { (*current).comm_str() };
@@ -914,7 +914,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         use core::sync::atomic::Ordering::Relaxed as Relaxed2;
         static HWEXIT_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck)
+        if crate::trace::EVENT_FUXSTUCK.armed()
             && HWEXIT_N.fetch_add(1, Relaxed2) < 96
         {
             let owner_tid = crate::sync::futex::FUXWATCH_OWNER_TID.load(Relaxed2);
@@ -1051,7 +1051,7 @@ pub fn do_exit(exit_code: i32) -> ! {
             "samgr",
             "huks_service",
         ];
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck)
+        if crate::trace::EVENT_FUXSTUCK.armed()
             && UIEXIT_N.load(Rel) < 96
         {
             let comm_matches = |raw: &[u8; 16]| -> bool {
@@ -1215,7 +1215,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         let tgid = unsafe { (*current).tgid() };
         let is_leader = dying_pid == tgid;
         if !is_leader
-            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang)
+            && crate::trace::EVENT_TXNHANG.armed()
             && tgid != 0
             && tgid == crate::ipc::binder::binder_sareg_samgr_pid()
             && THEXIT_N.fetch_add(1, Relaxed) < 64
@@ -1580,7 +1580,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         // per ub2404 boot — every service that died of a signal). It now
         // lives behind the existing signal-family switch (dfx=sigtrace).
         if exit_code < 0
-            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SigTrace)
+            && crate::trace::EVENT_SIGTRACE.armed()
         {
             let comm_raw = (*current).comm();
             let comm_len = comm_raw.iter().position(|&b| b == 0).unwrap_or(comm_raw.len());
