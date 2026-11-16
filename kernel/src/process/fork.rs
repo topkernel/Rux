@@ -298,8 +298,8 @@ const CLONE_KNOWN_FLAGS: u64 = CLONE_VM
     | CLONE_NEWPID      // 0x20000000
     | CLONE_NEWNET      // 0x40000000
     | CLONE_IO          // 0x80000000
-    | CLONE_CLEAR_SIGHAND; // 0x100000000 (clone3-only; glibc posix_spawn)
-    | CLONE_INTO_CGROUP;  // 0x200000000 (clone3, LTP clone303)
+    | CLONE_CLEAR_SIGHAND  // 0x100000000 (clone3-only; glibc posix_spawn)
+    | CLONE_INTO_CGROUP;   // 0x200000000 (clone3, LTP clone303)
 /// CLONE_CLEAR_SIGHAND (uapi, 1<<32): reset every signal handler of the
 /// child to SIG_DFL (kernel flush_signal_handlers). glibc's posix_spawn
 /// requests it with CLONE_VM|CLONE_VFORK so the spawn helper starts with
