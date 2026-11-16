@@ -113,7 +113,7 @@
       <table>
         <thead><tr><th>Case</th><th class="num">Rux</th><th class="num">Linux (same-rig guest)</th><th>Verdict</th><th>Optimization direction</th></tr></thead>
         <tbody>
-          <tr><td class="mono">lat_syscall open</td><td class="num">0.756–1.00 µs</td><td class="num">0.394–0.397 µs</td><td><span class="chip bad">behind 1.9–2.5×</span> (±30% boot variance)</td><td>path-resolution tail + fd install</td></tr>
+          <tr><td class="mono">lat_syscall open</td><td class="num">0.86–0.87 µs (±1% variance, 4/4 stable after fdreap silence)</td><td class="num">0.394–0.397 µs</td><td><span class="chip bad">behind 1.9–2.2×</span></td><td>path-walk loop (598 ns) + File build/install (950 ns)</td></tr>
           <tr><td class="mono">lat_syscall read</td><td class="num">0.103–0.108 µs</td><td class="num">0.060–0.062 µs</td><td><span class="chip bad">behind 1.7–1.8×</span></td><td>fill/copy tail (SMAP AC brackets)</td></tr>
           <tr><td class="mono">lat_syscall stat</td><td class="num">0.32–0.45 µs</td><td class="num">0.239 µs</td><td><span class="chip bad">behind 1.4–1.9×</span> (±30% boot variance)</td><td>path resolution</td></tr>
           <tr><td class="mono">lat_syscall write</td><td class="num">0.081 µs</td><td class="num">0.0597–0.0600 µs</td><td><span class="chip bad">behind 1.35×</span> (fdget borrow + PT_REGS gating, −7% cumulative)</td><td>fill/copy tail</td></tr>

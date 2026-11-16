@@ -113,7 +113,7 @@
       <table>
         <thead><tr><th>用例</th><th class="num">Rux</th><th class="num">Linux(同 rig guest)</th><th>结论</th><th>优化方向</th></tr></thead>
         <tbody>
-          <tr><td class="mono">lat_syscall open</td><td class="num">0.756–1.00 µs</td><td class="num">0.394–0.397 µs</td><td><span class="chip bad">落后 1.9–2.5×</span>(靴间方差 ±30%)</td><td>路径解析尾部 + fd 装配</td></tr>
+          <tr><td class="mono">lat_syscall open</td><td class="num">0.86–0.87 µs(±1% 方差,fdreap 静默后 4/4 稳定)</td><td class="num">0.394–0.397 µs</td><td><span class="chip bad">落后 1.9–2.2×</span></td><td>路径走查 loop(598ns)+ File 构造/装配(950ns)</td></tr>
           <tr><td class="mono">lat_syscall read</td><td class="num">0.103–0.108 µs</td><td class="num">0.060–0.062 µs</td><td><span class="chip bad">落后 1.7–1.8×</span></td><td>fill/copy 尾部(SMAP AC 括号)</td></tr>
           <tr><td class="mono">lat_syscall stat</td><td class="num">0.32–0.45 µs</td><td class="num">0.239 µs</td><td><span class="chip bad">落后 1.4–1.9×</span>(靴间方差 ±30%)</td><td>路径解析</td></tr>
           <tr><td class="mono">lat_syscall write</td><td class="num">0.081 µs</td><td class="num">0.0597–0.0600 µs</td><td><span class="chip bad">落后 1.35×</span>(fdget 直借+PT_REGS 门控,累计 −7%)</td><td>fill/copy 尾部</td></tr>
