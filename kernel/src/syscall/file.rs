@@ -3953,6 +3953,28 @@ fn fill_statfs_for_inode(inode: &crate::fs::inode::Inode, buf: &mut Statfs) {
         buf.f_fsid = [crate::fs::inode::stat_dev_user(inode.fs_id) as u32, 0];
         return;
     }
+    if inode
+        .ops
+        .is_some_and(|o| core::ptr::eq(o as *const _, &crate::fs::sysfs::SYSFS_INODE_OPS as *const _))
+    {
+        // sysfs: f_type MUST be SYSFS_MAGIC (0x62656572) — sd-device's
+        // device_set_syspath() runs fd_is_fs_type(fd, SYSFS_MAGIC) on
+        // every syspath it verifies (SYSTEMD_DEVICE_VERIFY_SYSFS
+        // default-on) and answers ENODEV "the syspath ... is outside of
+        // sysfs, refusing" for any other magic. With the rootfs-fallback
+        // magic leaking here, EVERY sd-device consumer failed: udevadm
+        // trigger/info "No such device", and udevd could not open ANY
+        // device from the coldboot-replay "add" uevents — no udev db
+        // entries, no processed-device "change" broadcast, dev-ttyS0.
+        // device never plugged, serial-getty@ttyS0 dead (ub2404,
+        // 2026-11-16 probe: "sd-device: the syspath ... is outside of
+        // sysfs, refusing").
+        const SYSFS_MAGIC_STATFS: u64 = 0x6265_6572;
+        fill_rootfs_statfs(buf);
+        buf.f_type = SYSFS_MAGIC_STATFS;
+        buf.f_fsid = [crate::fs::inode::stat_dev_user(inode.fs_id) as u32, 0];
+        return;
+    }
     // debugfs/tracefs (own inode ops; sys-kernel-debug.mount /
     // sys-kernel-tracing.mount verify the magic by statfs — tracing
     // FAILED as a unit while answering the rootfs fallback magic).
@@ -7697,10 +7719,9 @@ pub fn sys_mount_setattr(args: SyscallArgs) -> i64 {
     if userns_fd != 0 {
         return -(errno::EINVAL as i64);
     }
-    if let Err(e) = fapi::validate_mount_attr(attr_set) {
-        return e as i64;
-    }
-    if let Err(e) = fapi::validate_mount_attr(attr_clr) {
+    // PAIR validation (the reference validates attr_set/attr_clr together:
+    // the atime enum transition idiom — see validate_mount_attr_pair).
+    if let Err(e) = fapi::validate_mount_attr_pair(attr_set, attr_clr) {
         return e as i64;
     }
     // Propagation changes: accept any single bit (or none) as a no-op —
