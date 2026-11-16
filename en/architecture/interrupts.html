@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Interrupts &amp; timers · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">Home</a>
+      <a href="design.html">Architecture</a>
+      <a href="../performance/index.html">Performance</a>
+      <a href="../security/index.html">Security</a>
+      <a href="../testing/index.html">Testing</a>
+      <a href="../debugging/index.html">Debugging</a>
+      <a href="../guides/getting-started.html">Getting started</a>
+      <a href="../progress/roadmap.html">Progress</a>
+      <a href="../guestbook.html">Feedback</a>
+      <span class="lang-sw"><a class="on" href="../../architecture/interrupts.html">中文</a><a href="interrupts.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="design.html">Design deep-dive</a>
+    <a href="scheduler.html">Scheduler</a>
+    <a href="memory.html">Memory management</a>
+    <a href="filesystem.html">Filesystem</a>
+    <a href="ipc.html">IPC</a>
+    <a href="boot.html">Boot flow</a>
+    <a class="on" href="interrupts.html">Interrupts &amp; timers</a>
+    <a href="structure.html">Code layout</a>
+    <a href="riscv64.html">Porting guide</a>
+    <a href="kernel-lock.html">Lock ordering</a>
+    <div class="grp">Debugging</div>
+    <a href="../debugging/index.html">Debugging guide</a>
+    <a href="../debugging/tracepoints.html">Tracepoints</a>
+    <a href="../debugging/perf.html">Performance debugging</a>
+    <a href="../debugging/locks.html">Lock debugging</a>
+    <a href="../debugging/memory.html">Memory forensics</a>
+    <a href="../debugging/panic.html">Panic &amp; symbols</a>
+    <div class="grp">Performance</div>
+    <a href="../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../security/index.html">Security &amp; verification</a>
+    <div class="grp">Testing</div>
+    <a href="../testing/index.html">Overview</a>
+    <a href="../testing/ci-pipeline.html">CI pipeline</a>
+    <a href="../testing/ltp.html">LTP scan</a>
+    <a href="../testing/ltp-full.html">LTP full cases</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT audit</a>
+    <a href="../testing/stability.html">Stability</a>
+    <a href="../testing/stress.html">Stress</a>
+    <a href="../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../guides/getting-started.html">Getting started</a>
+    <a href="../guides/development.html">Contributing</a>
+    <a href="../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../progress/roadmap.html">Roadmap</a>
+    <a href="../progress/changelog.html">Changelog</a>
+    <a href="../progress/quickref.html">Commands</a>
+    <div class="grp">Community</div>
+    <a href="../guestbook.html">Guestbook</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>Interrupts &amp; timers</h1>
+    <div class="sub">kernel/src/interrupt/ + drivers/intc/ + drivers/timer/ + timer/ · The IRQ framework, softirqs, the preemption model, IF=0 discipline, the typed timer wheel, NOHZ and the vDSO — mechanisms and measured numbers · Sources: design-divergences.md (D-19), docs/development/perf-gate-baseline.md (the interrupt guarded domain)</div>
+
+    <h2 id="frame"><span class="anchor">§1</span>The interrupt framework</h2>
+    <ul>
+      <li><b>The irq_desc model</b> (kernel/src/interrupt/): one descriptor per IRQ holding the action chain; the irq_chip function-pointer table abstracts controller operations; irq_domain performs the hwirq→virq mapping; request_irq/free_irq/request_nmi form the registration surface.</li>
+      <li><b>Dispatch</b>: riscv64 claims the highest-priority pending IRQ from the PLIC and enters the IRQ framework, with EOI performed by the flow handler via irq_chip.irq_eoi; x86_64 enters trap_handler directly by vector; aarch64 uses the GICv3 claim/EOI pair.</li>
+    </ul>
+
+    <h2 id="vectors"><span class="anchor">§2</span>Vector layout (per architecture)</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Arch</th><th>Layout</th></tr></thead>
+      <tbody>
+        <tr><td>x86_64</td><td>LAPIC timer <b>0xE0</b>; dedicated IPI vectors <b>0xE1–0xE5</b> (CALL_FUNCTION/RESCHEDULE/TLB_FLUSH/STOP/IRQ_WORK — one vector per IPI type, skipping the pending-bit handshake); PIC remapped master 0x20-0x27 / slave 0x28-0x2F (IRQ0=32); syscall 0x80; spurious 0xFF. External interrupts stay on the 8259 (virtual wire): LVT LINT0 = ExtINT — every EOI must call both the APIC eoi and pic_send_eoi (a leftover in-service state wedges all further interrupt delivery).</td></tr>
+        <tr><td>riscv64</td><td>PLIC at 0x0c000000 (accessed through the kernel-side MMIO alias; the identity low window is not cloneable by user MAP_FIXED); two contexts per hart, S-mode = 2·hart+1; the priority layering: UART (irq 10) = 5, virtio-mmio (1..=8) = 3, everything else at base — pre-fix, every IRQ had priority 1 and the console could not preempt bulk device traffic. The CLINT is M-mode only (OpenSBI v1.3+); S-mode goes through SBI; IPIs use the SBI IPI extension.</td></tr>
+        <tr><td>aarch64</td><td>GICv3: INTIDs 0-15 are SGIs (INTID 0 carries the IPI bitmap), 16-31 PPIs (INTID 27 = PPI 11 = the EL1 virtual timer), 32+ SPIs (PL011 = SPI 1); the CPU interface uses the ICC_* system registers; GICD_CTLR under DS=1: bit 1 = Grp1NS enable (writing the secure-world encoding leaves Group-1 forwarding off — zero IRQ exceptions, the timer PPI latched in GICR_ISPENDINGR); SGIs go via ICC_SGI1R (TargetList/INTID).</td></tr>
+      </tbody>
+    </table></div>
+
+    <h2 id="preempt"><span class="anchor">§3</span>Preemption model and the IRQ-off discipline</h2>
+    <ul>
+      <li><b>preempt_count bit layout</b>: PREEMPT [0:7], SOFTIRQ [8:15], HARDIRQ [16:19], NMI [20:23], PREEMPT_ACTIVE bit 26; the count lives on the Task struct; <code>preemptible()</code> = count==0.</li>
+      <li><b>irq_enter/exit spans a context switch</b>: HARDIRQ_OFFSET is booked by the task that entered — the tick handler may switch inside the bracket, so the per-CPU booked-task stack releases on the booked task; a split is the producer of the "leaked 0x10000 face" (the 119th epoll-pwait conviction).</li>
+      <li><b>Kernel preemption defaults off</b> (explicit schedule() voluntary points); the <code>kpreempt=</code> boot param arms the irq-exit preemption hook; the A/B reads flat for hog regimes and the default stays off.</li>
+      <li><b>The IF=0 discipline and the official measurement</b>: the EFLAGS-pair probe (syscost v3) reads the real IF flag at every hook and adjudicates the model against it — a modeled-open segment found with IF=1 is a leak, closed into the HEAL counters; the HARDIRQ/SOFTIRQ/UART zones split separately; REST call sites attribute via #[track_caller] into a 96-slot table. Official share: <b>IF=0 = 20.4 ±3pp</b> (pa115debt1; the historical anchor pa27 = 25.7%, the drop's mechanism being phantom-bits moving softirq dispatch out of the irq_exit IF=0 window into schedulable ksoftirqd); the longest closed cli segment in the REST zone is <b>6–9 ms</b> (band ≤10 ms; the former 594–599 ms one-shots are gone); the 210 ms hardirq-frame one-shot is a named watch row (the starvation bound of inline dispatch).</li>
+    </ul>
+
+    <h2 id="softirq"><span class="anchor">§4</span>The softirq model</h2>
+    <ul>
+      <li><b>10 types</b>: Hi/Timer/NetTx/NetRx/Block/IrqPoll/Tasklet/Sched/Hrtimer/Rcu; a per-CPU pending bitmap plus per-CPU/per-vector raise counters (feeding /proc/softirqs).</li>
+      <li><b>Dispatch</b>: raised from hardirq; processed in <code>__do_softirq()</code> at irq_exit, overflowing into ksoftirqd. A double budget bound: <code>MAX_SOFTIRQ_RESTART = 10</code> rounds + <code>2 ms</code> of wall clock (the reference MAX_SOFTIRQ_TIME shape) — rationale: an unbounded irq-exit budget once let a timer/IO storm pin both CPUs in IRQ context (93% si_busy) with zero scheduling picks.</li>
+      <li><b>ksoftirqd</b>: one per CPU; schedules on need_resched inside the drain loop (the phantom-bits fairness rule: otherwise a feedback-heavy backlog lets the kthread monopolize its CPU through thousands of 2 ms windows); the re-check-before-schedule lost-wake pattern (the run_ksoftirqd shape).</li>
+      <li><b>Window progress records</b>: SOFTIRQ_WIN packed {open|handler bit|restart_count|pending} + SOFTIRQ_WIN_T0, cross-CPU readable — external forensics for wedged windows; a softirq handler booking SOFTIRQ_OFFSET plus a heal landing mid-window wedges the machine (the VW-WEDGE conviction, 29 completions lost).</li>
+    </ul>
+
+    <h2 id="controllers"><span class="anchor">§5</span>The timer subsystem and the typed wheel (D-19)</h2>
+    <ul>
+      <li><b>Time base</b>: nominal 10 MHz (100 ns/cycle); the x86_64 timekeeper is the TSC via multiply-shift with HPET calibration (a 1 Hz resync gated), all state in the vDSO data page; the riscv64 time CSR is naturally 10 MHz; aarch64 uses the EL1 virtual timer (CNTV_CVAL).</li>
+      <li><b>Wheel shape</b>: 64 buckets per level, three levels (granularity 1/64/4096 jiffies, total span 262144 jiffies ≈ 43.7 min at HZ=100) plus a FAR list for deeper horizons (rescanned every 4096 jiffies ≈ 41 s); per-pass work is O(due entries); plain fixed .bss storage with the single TIMER_TABLE lock; <b>delivery outside the lock</b> (R12-3).</li>
+      <li><b>Six historical bug classes eliminated by the type system</b>: mixed clock-domain comparison (Deadline&lt;JiffyClock&gt;/&lt;HresClock&gt; mixing = compile error), one-shot action leak (the Action enum is exclusive: Wake/Signal/TimerFd), periodicity misuse (Option&lt;NonZeroU64&gt;), the silent if/else-if delivery chain, slot-lifecycle misuse (FiredToken by value), and delivery-context overreach (a SoftirqCtx ZST pins delivery to softirq context). On the real tree: six misuses were all rejected by rustc (E0308/E0599/E0061/E0382).</li>
+      <li><b>Caller-side guards</b>: WakeArmed owns one registration id (not Copy/Clone — a double cancel is unrepresentable); cancel(self) consumes into the WakeSpent tombstone; Drop cancels an unconsumed guard (the pool-exhaustion wedge class); hres arms bake in the hart re-program (an hres sleep whose caller forgets the re-program waits for the next 10 ms grid tick).</li>
+      <li><b>Same-rig A/B</b> (s5-boot, OH image, KVM q35 smp2/4G, syscost=1, 780 s; A = the old flat-table kernel, B = the typed wheel): timer arm lock hold 924→<b>697 ns</b>, pending 1288→868 ns, del 1291→862 ns (volume matched within 0.1%); nanosleep average 772.6→<b>662.7 ms</b>; pbench p2_ctxsw 12.198 vs 15.400 µs. Cost: slot 56→64 B (a 66 KB .bss pool).</li>
+      <li>Superseded shape: a flat 1024-slot array whose expiry was re-checked on every softirq pass, with timer classes encoded as runtime flag combinations.</li>
+    </ul>
+
+    <h2 id="nohz"><span class="anchor">§6</span>NOHZ / tick-sched</h2>
+    <ul>
+      <li>A function-for-function mirror of the reference tick-sched.c (check_tick_dependency, tick_nohz_stop/restart_sched_tick, tick_nohz_irq_exit, the nohz_full= parameter); per-CPU TickSched{inidle, tick_stopped, tick_dep_mask, next_tick}; tick_dep bits POSIX_TIMER/PERF_EVENTS/SCHED/CLOCK_UNSTABLE/RCU/RCU_EXP.</li>
+      <li><b>Structural mappings</b> (recorded in the rust-native register): per-rq → GRQ (the SCHED dependency is evaluated on the fly by can_stop_full_tick; the 0→1 kick kept as a resched IPI from the enqueue edge); clockevent KTIME_MAX arm → timer_arm_oneshot(u64::MAX) (the u32 count clamp parks the LAPIC at max delta); tick_do_timer_cpu → the boot CPU with sleep capped at TIMEKEEPING_MAX_DEFERMENT (10 s); perf: the dep tracks any armed sampling event — Rux software sampling rides the tick, recorded as a divergence (the reference's per-event hrtimer swevent is the follow-up).</li>
+      <li>Wired on x86_64; the other architectures keep their grid-glue set_next_trigger. Non-nohz_full CPUs keep the byte-identical grid path.</li>
+      <li><b>Measured</b> (4+4 interleaved lmbench lat_syscall,null runs, 6 hostile external QEMUs): the main tip passes 0/10; nohz_full=1 → <b>11/12 (92%)</b>; p1_null median 0.050 vs 0.060 µs (−17%); both census bands hold exactly; GRQ average hold 699 ns (a release-class cross-class reading, not comparable to the debug band); a pre-nohz parent control confirmed the p2 drift belongs to board spread, not the nohz change.</li>
+    </ul>
+
+    <h2 id="vdso"><span class="anchor">§7</span>The vDSO</h2>
+    <ul>
+      <li><b>Structure</b>: every execve installs a two-page user mapping — a data page (RW, the kernel-updated time base) and a code page (RX, a minimal ELF with three symbols); AT_SYSINFO_EHDR points at the code page; glibc/musl call __vdso_clock_gettime/gettimeofday/clock_getres directly.</li>
+      <li><b>Clock set</b>: REALTIME(0)/MONOTONIC(1)/MONOTONIC_RAW(4)/BOOTTIME(7)/TAI(11 = REALTIME + 37); on x86_64 any other clockid falls back inside the vDSO to the real syscall.</li>
+      <li><b>Bit-equivalence design</b> (x86_64, the unified track): read_time()'s TSC branch and the vDSO functions compute the same value from <b>the same words with the same integer operations</b> — nom(t) = base_mono_nom + ((tsc(t) − cycle_last) × mult) &gt;&gt; 32, integer-associative so the two tracks are bit-identical (what LTP clock_gettime04 demands); base_mono_nom is nominal-domain and monotone; the seq word doubles as the writer lock (cmpxchg even→odd), closing the multi-writer publication tear; the data page is user-RO — precisely because the kernel trusts its words.</li>
+      <li><b>The rejected fast path (on record)</b>: per-CPU correction publication carried the TSC_CPU_OFF spread — tsleep2 −356 ms at t&lt;1 s; the syscall-vs-vdso spread to +1.2 ms; a clock_gettime04 residual of −4582 ns. The unified track replaces the correction chain with bit-equivalence.</li>
+      <li><b>The riscv64 lesson</b>: the seq word must be read THROUGH the page pointer — a former separate VDSO_SEQ static was never aliased to the page, so a reader descheduled between its base_tsc and base_mono_ns loads paired a stale tsc with a fresh mono (a vDSO clock ahead of the syscall clock by the whole preemption gap; LTP clock_gettime04 "Time travelled backwards −454618735 ns").</li>
+      <li><b>Measured</b> (name-only same-rig A/B, tok-r4fix vehicle, KVM q35 SMP2 4G, 780 s): clock_gettime syscalls per OH boot <b>8,259,773 → 0</b> (−29.4 CPU-s = −2.0% of the machine, −26% of total syscall volume), the nanosleep average and the GRQ lock-site average flat, zero panics on both arms; LTP clock_gettime04 6/6 including the vdso variants and both COARSE clocks.</li>
+    </ul>
+
+    <h2 id="ipi"><span class="anchor">§8</span>IPI costs and TLB shootdowns</h2>
+    <ul>
+      <li>The resched IPI sender side alone is 935–1139 ns; IPI+halt exit ~2–5 µs of KVM exit; wakes inside the 120 µs polling idle window elide the IPI (Dekker SeqCst pairing for lost-wake safety).</li>
+      <li><b>The TLB-shootdown lazy mm_cpumask</b>: pre-fix, every munmap/fork-COW/mprotect/COW fault broadcast a full-flush IPI to all CPUs — a pristine OH boot counted 4,031,356 by t=200s (~20k/s); the per-mm cpu_mask (set at switch-in, cleared at switch-away, grow-only under PCID) reduces this to <b>10,209 (−99.7%)</b> with flush semantics unchanged. Mechanism details on the <a href="memory.html#vma">memory-management §10</a>.</li>
+    </ul>
+
+    <div class="callout">Code: <code>kernel/src/interrupt/</code> (preempt/softirq/ksoftirqd/irqchip), <code>kernel/src/drivers/intc/</code> (apic/plic/clint/gicv3), <code>kernel/src/drivers/timer/</code>, <code>kernel/src/timer/</code> (wheel/oneshot/nohz), <code>kernel/src/mm/vdso.rs</code>. Divergence: D-19 (the typed wheel). Gate bands (the interrupt guarded domain): IF=0 20.4±3pp, max cli REST ≤10 ms, SOFTIRQ 3.1±2pp. Instruments: the syscost IF=0 EFLAGS-pair probe, tick-mode shares, rux:schedtrace (see <a href="../debugging/perf.html">performance debugging</a>).</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to home</a></span>
+
+      <span class="foot-stats">Site visits <span id="busuanzi_value_site_pv"></span> · Visitors <span id="busuanzi_value_site_uv"></span></span></div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>

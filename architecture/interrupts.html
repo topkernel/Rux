@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>中断与时钟 · Rux</title>
+<link rel="stylesheet" href="../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">首页</a>
+      <a href="design.html">架构设计</a>
+      <a href="../performance/index.html">性能</a>
+      <a href="../security/index.html">安全</a>
+      <a href="../testing/index.html">测试</a>
+      <a href="../debugging/index.html">调试</a>
+      <a href="../guides/getting-started.html">快速入门</a>
+      <a href="../progress/roadmap.html">项目进展</a>
+      <a href="../guestbook.html">留言</a>
+      <span class="lang-sw"><a class="on" href="interrupts.html">中文</a><a href="../en/architecture/interrupts.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">架构设计</div>
+    <a href="design.html">架构与模块设计</a>
+    <a href="scheduler.html">调度器</a>
+    <a href="memory.html">内存管理</a>
+    <a href="filesystem.html">文件系统</a>
+    <a href="ipc.html">进程间通信</a>
+    <a href="boot.html">启动流程</a>
+    <a class="on" href="interrupts.html">中断与时钟</a>
+    <a href="structure.html">代码结构</a>
+    <a href="riscv64.html">架构移植指南</a>
+    <a href="kernel-lock.html">锁序不变量</a>
+    <div class="grp">调试</div>
+    <a href="../debugging/index.html">调试指南</a>
+    <a href="../debugging/tracepoints.html">tracepoint 框架</a>
+    <a href="../debugging/perf.html">性能调试</a>
+    <a href="../debugging/locks.html">锁调试</a>
+    <a href="../debugging/memory.html">内存取证</a>
+    <a href="../debugging/panic.html">panic 与符号化</a>
+    <div class="grp">性能</div>
+    <a href="../performance/index.html">性能测试</a>
+    <div class="grp">安全</div>
+    <a href="../security/index.html">安全与形式验证</a>
+    <div class="grp">测试</div>
+    <a href="../testing/index.html">测试总览</a>
+    <a href="../testing/ci-pipeline.html">CI 流水线</a>
+    <a href="../testing/ltp.html">LTP 兼容扫描</a>
+    <a href="../testing/ltp-full.html">LTP 全量用例</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT 审计</a>
+    <a href="../testing/stability.html">稳定性</a>
+    <a href="../testing/stress.html">压力</a>
+    <a href="../testing/gnome-retrospective.html">回溯报告</a>
+    <div class="grp">开发指南</div>
+    <a href="../guides/getting-started.html">快速入门</a>
+    <a href="../guides/development.html">参与开发</a>
+    <a href="../guides/configuration.html">内核配置</a>
+    <div class="grp">项目进展</div>
+    <a href="../progress/roadmap.html">路线图</a>
+    <a href="../progress/changelog.html">更新日志</a>
+    <a href="../progress/quickref.html">命令速查</a>
+    <div class="grp">互动</div>
+    <a href="../guestbook.html">留言板</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>中断与时钟</h1>
+    <div class="sub">kernel/src/interrupt/ + drivers/intc/ + drivers/timer/ + timer/ · 中断框架、softirq、抢占模型、IF=0 纪律、类型化定时器轮、NOHZ 与 vDSO —— 机制与实测数据 · 依据:design-divergences.md(D-19)、docs/development/perf-gate-baseline.md(中断守护域)</div>
+
+    <h2 id="frame"><span class="anchor">§1</span>中断框架</h2>
+    <ul>
+      <li><b>irq_desc 模型</b>(kernel/src/interrupt/):每 IRQ 一个描述符,持 action 链;irq_chip 函数指针表抽象控制器操作;irq_domain 承担 hwirq→virq 映射;request_irq/free_irq/request_nmi 构成注册面。</li>
+      <li><b>派发</b>:riscv64 由 PLIC claim 最高优先 pending 项后进入 IRQ 框架,EOI 由流处理器经 irq_chip.irq_eoi 完成;x86_64 按向量直入 trap_handler;aarch64 经 GICv3 claim/EOI 对。</li>
+    </ul>
+
+    <h2 id="vectors"><span class="anchor">§2</span>向量布局(按架构)</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>架构</th><th>布局</th></tr></thead>
+      <tbody>
+        <tr><td>x86_64</td><td>LAPIC 定时器 <b>0xE0</b>;IPI 专线 <b>0xE1–0xE5</b>(CALL_FUNCTION/RESCHEDULE/TLB_FLUSH/STOP/IRQ_WORK —— 按类型专用向量,省去 pending-bit 握手);PIC 重映射主 0x20-0x27/从 0x28-0x2F(IRQ0=32);系统调用 0x80;伪中断 0xFF。外设中断保持在 8259(virtual wire):LVT LINT0 = ExtINT —— 每次 EOI 须同时调用 APIC eoi 与 pic_send_eoi(遗留 in-service 状态将阻塞后续全部中断投递)。</td></tr>
+        <tr><td>riscv64</td><td>PLIC 基址 0x0c000000(经内核侧 MMIO 别名访问,恒等低窗对用户 MAP_FIXED 不可克隆);每 hart 两上下文,S 态 = 2·hart+1;优先级分层:UART(irq 10)= 5、virtio-mmio(1..=8)= 3、其余基线 —— 修复前全部 IRQ 优先级 1,控制台无法优先于批量设备流。CLINT 为 M 态专用(OpenSBI v1.3+),S 态经 SBI;IPI 走 SBI IPI 扩展。</td></tr>
+        <tr><td>aarch64</td><td>GICv3:INTID 0-15 SGI(INTID 0 承载 IPI 位图)、16-31 PPI(INTID 27 = PPI 11 = EL1 虚拟定时器)、32+ SPI(PL011 = SPI 1);CPU 接口经 ICC_* 系统寄存器;GICD_CTLR 于 DS=1 下 bit1 = Grp1NS 使能(写入 secure 编码将使 Group-1 转发关闭 —— 零 IRQ 异常,定时器 PPI 锁存于 GICR_ISPENDINGR);SGI 经 ICC_SGI1R(TargetList/INTID)。</td></tr>
+      </tbody>
+    </table></div>
+
+    <h2 id="preempt"><span class="anchor">§3</span>抢占模型与中断关闭纪律</h2>
+    <ul>
+      <li><b>preempt_count 位布局</b>:PREEMPT [0:7]、SOFTIRQ [8:15]、HARDIRQ [16:19]、NMI [20:23]、PREEMPT_ACTIVE bit 26;计数位于 Task 结构;<code>preemptible()</code> = count==0。</li>
+      <li><b>irq_enter/exit 跨上下文切换</b>:HARDIRQ_OFFSET 由进行簿记的任务持有 —— tick 处理器可在括号内切换,故 per-CPU booked-task 栈于簿记任务上释放;拆分即"泄漏 0x10000 面"的产生器(第 119 次 epoll-pwait 定罪)。</li>
+      <li><b>内核抢占默认关闭</b>(显式 schedule() 自愿点);<code>kpreempt=</code> 引导参数武装 irq-exit 抢占钩子;A/B 对 hog 场景持平,维持默认。</li>
+      <li><b>IF=0 纪律与官方测量</b>:EFLAGS 对探针(syscost v3)逐钩子读取真实 IF 标志并对模型裁决 —— 模型开启而实测 IF=1 的段判为泄漏,闭合入 HEAL 计数;HARDIRQ/SOFTIRQ/UART 三区段分离;REST 调用点经 #[track_caller] 归因至 96 槽表。官方份额:<b>IF=0 = 20.4 ±3pp</b>(pa115debt1;历史锚 pa27 = 25.7%,下降机制 = phantom-bits 将 softirq 派发移出 irq_exit 的 IF=0 窗、转入可调度的 ksoftirqd);REST 区最长闭合 cli 段 <b>6–9 ms</b>(带 ≤10 ms;曾经的 594–599 ms 一次性段已消除);hardirq 帧一次性 210 ms 为具名 watch 行(内联派发的饥饿上界)。</li>
+    </ul>
+
+    <h2 id="softirq"><span class="anchor">§4</span>softirq 模型</h2>
+    <ul>
+      <li><b>10 类</b>:Hi/Timer/NetTx/NetRx/Block/IrqPoll/Tasklet/Sched/Hrtimer/Rcu;per-CPU pending 位图 + per-CPU/per-向量 raise 计数(供 /proc/softirqs)。</li>
+      <li><b>派发</b>:硬中断 raise;irq_exit 时 <code>__do_softirq()</code> 处理,溢出转 ksoftirqd。预算双界:<code>MAX_SOFTIRQ_RESTART = 10</code> 轮 + <code>2 ms</code> 墙钟(参考 MAX_SOFTIRQ_TIME 形态)—— 依据:无界 irq-exit 预算曾使 timer/IO 风暴将双 CPU 钉在 IRQ 上下文(93% si_busy),调度零拣选。</li>
+      <li><b>ksoftirqd</b>:每 CPU 一个;排空循环内 need_resched 时 schedule()(幻影位公平性:否则反馈型积压使 kthread 经数千个 2 ms 窗独占其 CPU);睡眠前复查的丢失唤醒模式(run_ksoftirqd 形态)。</li>
+      <li><b>窗口进度记录</b>:SOFTIRQ_WIN 紧凑打包 {open|handler bit|restart_count|pending} + SOFTIRQ_WIN_T0,跨 CPU 可读 —— 楔死窗口的外部取证;softirq 处理器投递簿记 SOFTIRQ_OFFSET,heal 落于窗口中段将楔死整机(VW-WEDGE 定罪,29 个完成项丢失)。</li>
+    </ul>
+
+    <h2 id="controllers"><span class="anchor">§5</span>定时器子系统与类型化定时器轮(D-19)</h2>
+    <ul>
+      <li><b>时间基准</b>:标称时基 10 MHz(100 ns/周期);x86_64 timekeeper = TSC 乘移换算 + HPET 校准(1 Hz 重同步门控),全部状态驻留 vDSO 数据页;riscv64 时间 CSR 天然 10 MHz;aarch64 EL1 虚拟定时器(CNTV_CVAL)。</li>
+      <li><b>轮形态</b>:每级 64 桶,三级(粒度 1/64/4096 jiffy,总跨度 262144 jiffy ≈ HZ=100 下 43.7 min)加 FAR 深远景表(每 4096 jiffy ≈ 41 s 重扫);每趟工作量 O(到期项);纯 .bss 定长存储,单锁 TIMER_TABLE;<b>投递在锁外</b>(R12-3)。</li>
+      <li><b>被类型系统消灭的六类历史缺陷</b>:时钟域混比(Deadline&lt;JiffyClock&gt;/&lt;HresClock&gt; 混比 = 编译错)、一次性动作泄漏(Action 枚举互斥:Wake/Signal/TimerFd)、periodic 误用(Option&lt;NonZeroU64&gt;)、静默 if/else-if 投递链、slot 生命周期误用(FiredToken 按值)、投递上下文越权(SoftirqCtx ZST 钉死 softirq-only 投递)。同树实测:六处误用全部被 rustc 拒绝(E0308/E0599/E0061/E0382)。</li>
+      <li><b>调用方侧守卫</b>:WakeArmed 持有一个注册 id(非 Copy/Clone —— 双重取消不可表达);cancel(self) 消费为 WakeSpent 墓碑;Drop 对未消费守卫自动取消(池耗尽楔死类);hres 装载内嵌 hart 重编程(遗漏重编程的 hres 睡眠将等待下一个 10 ms 网格 tick)。</li>
+      <li><b>同 rig A/B</b>(s5-boot,OH 镜像,KVM q35 smp2/4G,syscost=1,780 s;A = 旧平面表内核,B = 类型化轮):定时器 arm 锁持锁 924→<b>697 ns</b>,pending 1288→868 ns,del 1291→862 ns(量级匹配 n 差 &lt;0.1%);nanosleep 均值 772.6→<b>662.7 ms</b>;pbench p2_ctxsw 12.198 vs 15.400 µs。代价:槽 56→64 B(池 66 KB .bss)。</li>
+      <li>取代的旧形态:1024 槽平面数组 + 每趟 softirq 全量复查到期 + 运行期标志组合编码的定时器类。</li>
+    </ul>
+
+    <h2 id="nohz"><span class="anchor">§6</span>NOHZ / tick-sched</h2>
+    <ul>
+      <li>照参考 tick-sched.c 逐函数映射(check_tick_dependency、tick_nohz_stop/restart_sched_tick、tick_nohz_irq_exit、nohz_full= 参数);per-CPU TickSched{inidle, tick_stopped, tick_dep_mask, next_tick};tick_dep 位集 POSIX_TIMER/PERF_EVENTS/SCHED/CLOCK_UNSTABLE/RCU/RCU_EXP。</li>
+      <li><b>结构性映射</b>(登记于 rust-native-register):per-rq → GRQ(SCHED 依赖由 can_stop_full_tick 即时评估;0→1 kick 保留为入队边沿 resched IPI);clockevent KTIME_MAX → timer_arm_oneshot(u64::MAX)(u32 计数钳制将 LAPIC 停于最大增量);tick_do_timer_cpu → boot CPU,睡眠上限 TIMEKEEPING_MAX_DEFERMENT(10 s);perf:dep 跟踪任意武装采样事件 —— Rux 软件采样骑 tick,登记为分歧(参考的 per-event hrtimer swevent 为后续项)。</li>
+      <li>x86_64 已接线;其余架构保持网格粘合 set_next_trigger。非 nohz_full CPU 保持逐字节网格路径。</li>
+      <li><b>实测</b>(4+4 交错 lmbench lat_syscall,null,6 个对抗性外部 QEMU):main tip 0/10 通过;nohz_full=1 → <b>11/12(92%)</b>;p1_null 中位 0.050 vs 0.060 µs(−17%);两条 census 带精确保持;GRQ 平均持锁 699 ns(release 类跨类读数,不作 debug 带比较);pre-nohz 父版对照确认 p2 读数漂移属板间离散而非 nohz 变更。</li>
+    </ul>
+
+    <h2 id="vdso"><span class="anchor">§7</span>vDSO</h2>
+    <ul>
+      <li><b>结构</b>:每次 execve 安装双页用户映射 —— 数据页(RW,内核更新时基)+ 代码页(RX,极小 ELF 三符号);AT_SYSINFO_EHDR 指向代码页;glibc/musl 直调 __vdso_clock_gettime/gettimeofday/clock_getres。</li>
+      <li><b>时钟集</b>:REALTIME(0)/MONOTONIC(1)/MONOTONIC_RAW(4)/BOOTTIME(7)/TAI(11 = REALTIME + 37);x86_64 其余 clockid 在 vDSO 内部回退至真实系统调用。</li>
+      <li><b>位等价设计</b>(x86_64,统一轨):read_time() 的 TSC 分支与 vDSO 函数从<b>同一组字、同一整数运算</b>计算同一值 —— nom(t) = base_mono_nom + ((tsc(t) − cycle_last) × mult) &gt;&gt; 32,整数可结合性使双轨位等价(LTP clock_gettime04 的要求);base_mono_nom 为标称域单调;seq 字兼任写者锁(cmpxchg even→odd),闭合多写者发布撕裂;数据页用户态只读 —— 正因内核信任其字。</li>
+      <li><b>被否决的快路径(登记)</b>:per-CPU 修正发布携带 TSC_CPU_OFF 离散 —— tsleep2 −356 ms @t&lt;1s;syscall-vs-vdso 离散至 +1.2 ms;clock_gettime04 残余 −4582 ns。统一轨以位等价取代修正链。</li>
+      <li><b>riscv64 教训</b>:seq 字必须经页指针读取 —— 曾有的独立 VDSO_SEQ 静态与页未别名化,读者在 base_tsc 与 base_mono_ns 两次载入间被去调度即配对过期 tsc 与新鲜 mono(vDSO 时钟领先系统调用时钟整个抢占间隙;LTP clock_gettime04 "Time travelled backwards −454618735 ns")。</li>
+      <li><b>实测</b>(同名同 rig A/B,tok-r4fix 载具,KVM q35 SMP2 4G,780 s):OH 启动 clock_gettime 系统调用 <b>8,259,773 → 0</b>(−29.4 CPU-s = 整机 −2.0%,总系统调用量 −26%),nanosleep 均值与 GRQ 锁点均值持平,双侧零 panic;LTP clock_gettime04 6/6 含 vdso 变体与双 COARSE 时钟。</li>
+    </ul>
+
+    <h2 id="ipi"><span class="anchor">§8</span>IPI 成本与 TLB 冲刷</h2>
+    <ul>
+      <li>resched IPI 发送端 935–1139 ns;IPI+halt 退出 ~2–5 µs KVM exit;120 µs 轮询空闲窗内唤醒免 IPI(Dekker SeqCst 配对保丢失唤醒安全)。</li>
+      <li><b>TLB shootdown 懒 mm_cpumask</b>:修复前每次 munmap/fork-COW/mprotect/COW 故障向全部 CPU 广播全冲刷 IPI —— OH 纯净启动 t=200s 计 4,031,356 次(~20k/s);per-mm cpu_mask(切入置位/切出清除,PCID 下只增)降至 <b>10,209(−99.7%)</b>,冲刷语义不变。机制细节见<a href="memory.html#vma">内存管理 §10</a>。</li>
+    </ul>
+
+    <div class="callout">代码:<code>kernel/src/interrupt/</code>(preempt/softirq/ksoftirqd/irqchip)、<code>kernel/src/drivers/intc/</code>(apic/plic/clint/gicv3)、<code>kernel/src/drivers/timer/</code>、<code>kernel/src/timer/</code>(wheel/oneshot/nohz)、<code>kernel/src/mm/vdso.rs</code>。分歧登记:D-19(类型化轮)。门禁带(中断守护域):IF=0 20.4±3pp、max cli REST ≤10 ms、SOFTIRQ 3.1±2pp。仪器:syscost 的 IF=0 EFLAGS 对探针、tick-mode 份额、rux:schedtrace(见 <a href="../debugging/perf.html">性能调试</a>)。</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">返回首页</a></span>
+
+      <span class="foot-stats">本站访问 <span id="busuanzi_value_site_pv"></span> 次 · 访客 <span id="busuanzi_value_site_uv"></span> 人</span></div>
+  </div>
+</footer>
+
+<script src="../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>
