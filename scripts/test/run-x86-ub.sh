@@ -35,8 +35,10 @@ ROOTFS="${ROOTFS:-work/ubuntu-x86.img}"
 SMP="${SMP:-8}"
 MEM="${MEM:-8G}"
 QEMU="${QEMU:-qemu-system-x86_64}"
-KERNEL_ELF="target/x86_64-unknown-none/debug/rux"
-BZIMAGE="target/x86_64-unknown-none/debug/bzImage"
+# Env overrides (the run-oh.sh pattern): KERNEL_ELF/BZIMAGE let callers
+# point at the release build — make ubuntu-run boots the release bzImage.
+KERNEL_ELF="${KERNEL_ELF:-target/x86_64-unknown-none/debug/rux}"
+BZIMAGE="${BZIMAGE:-target/x86_64-unknown-none/debug/bzImage}"
 
 if [ ! -f "$ROOTFS" ]; then
     echo "rootfs image missing: $ROOTFS" >&2

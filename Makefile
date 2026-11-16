@@ -6,7 +6,13 @@
 
 # ---- Ubuntu native desktop (udesk) ----
 # Image and kernel artifacts
-UBUNTU_IMG ?= work/gnome-x86.img
+# 2026-11-16 (user directive): make ubuntu-run boots the FULL Ubuntu
+# 24.04 desktop image (debootstrap-noble + ubuntu-desktop, systemd 255)
+# from the image store — serial login root/rux. The runit-assembled GNOME
+# chain stays available as the override:
+#   UBUNTU_IMG=work/gnome-x86.img UBUNTU_INIT=/sbin/runit make ubuntu-run
+UBUNTU_IMG ?= /home/william/rux-images/ubuntu/ub2404.img
+UBUNTU_INIT ?= /sbin/init
 KERNEL_BIN ?= target/riscv64gc-unknown-none-elf/debug/rux
 # The distro QEMU build has the SDL display backend; the custom 10.2.2 in
 # /usr/local/bin is compiled without display backends (none/dbus only).
@@ -106,8 +112,8 @@ ubuntu-image:
 # to override). Native SDL window (WSLg); keyboard works in the window
 # AND in this terminal (serial). Login: root / rux.
 ubuntu-run: build $(UBUNTU_IMG)
-	@echo "Starting Ubuntu GNOME desktop (x86_64, KVM, SDL window)..."
-	@ROOTFS=$(UBUNTU_IMG) INIT=/sbin/runit NOBUILD=1 bash scripts/test/run-x86-ub.sh gui
+	@echo "Starting full Ubuntu 24.04 (x86_64, KVM, SDL window; serial login root/rux)..."
+	@ROOTFS=$(UBUNTU_IMG) INIT=$(UBUNTU_INIT) NOBUILD=1 bash scripts/test/run-x86-ub.sh gui
 
 # Image rule: built on demand by ubuntu-run, refreshed by `make ubuntu-image`.
 $(UBUNTU_IMG):
