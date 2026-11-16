@@ -1388,6 +1388,19 @@ pub fn fuxpark_latch(word: u64, tid: u32, tgid: u32) {
             .is_ok()
         {
             FUXWATCH2_TGID.store(tgid, Relaxed);
+            // neverword lane (nw1 conviction): the FIRST slot-2 latch
+            // reopened the done-set with slot 1's page still W-cleared
+            // in every mm the arm round had covered — those mms left
+            // the ledger with present-RO PTEs, and the fault hook
+            // (mm_armed now false) fell them to do_page_fault ->
+            // SEGV_ACCERR. nw1 t=6.56-6.71: slot1 armed samgr
+            // (0x3fbf13e6a8), the hilogd decode latched slot 2 on the
+            // SAME word ~55 ms later, samgr tid 361's musl arena CAS
+            // faulted on the abandoned page, the group died, init
+            // rebooted (panic) at 10.1 s. Retire slot 1's page (walks
+            // the ledger — MUST precede the reopen) so every armed mm
+            // gets W back before the ledger is cleared.
+            fuxwatch_retire_page(s1);
             reopen_done_set();
             arm_print(2, word);
         }
@@ -5891,6 +5904,22 @@ pub fn futex_stuck_census() {
             h.map(|h| h.int_other).unwrap_or(0),
             h.map(|h| h.unint).unwrap_or(0),
         );
+        // neverword lane (forensic-only, not for main): EventRunner-named
+        // standing park >= 60 s gets the CTD decode UNCONDITIONALLY. The
+        // lr-series f2 boot proved the W-trigger's 2-per-burst budget is
+        // consumed every burst by older standing words (storage_daemon
+        // parked 8 s, bluetooth 12 s ...) iterated ahead of foundation's
+        // FRESH-tail group (parked 10.5 s): CTD-END W fired for tgids
+        // 421/438/637/641 only, never for foundation 709 — the launcher
+        // wall's word never decoded. The DONE latch inside ctd_decode
+        // makes this at-most-once per tgid per boot.
+        if is_fresh
+            && g.max_age >= 60
+            && g.uaddr > 0x1000
+            && comm_s.starts_with("EventRunner")
+        {
+            ctd_decode(g.tgid, g.uaddr as u64, "V");
+        }
         // 118th (mouse-endgame): standing-word holder scan. A group whose
         // park has stood >= 60 s names a lock that will never turn again;
         // the TXN-HANG parkv arm only latches rwfrz_reader_scan for looper
@@ -5906,12 +5935,12 @@ pub fn futex_stuck_census() {
         // arm already runs in this heartbeat slot.
         if g.max_age >= 60 && g.uaddr > 0x1000 {
             use core::sync::atomic::Ordering::Relaxed;
-            static SCAN_TGID: [core::sync::atomic::AtomicU32; 8] =
-                [const { core::sync::atomic::AtomicU32::new(0) }; 8];
-            static SCAN_WORD: [core::sync::atomic::AtomicU64; 8] =
-                [const { core::sync::atomic::AtomicU64::new(0) }; 8];
-            static SCAN_J: [core::sync::atomic::AtomicU32; 8] =
-                [const { core::sync::atomic::AtomicU32::new(0) }; 8];
+            static SCAN_TGID: [core::sync::atomic::AtomicU32; 24] =
+                [const { core::sync::atomic::AtomicU32::new(0) }; 24];
+            static SCAN_WORD: [core::sync::atomic::AtomicU64; 24] =
+                [const { core::sync::atomic::AtomicU64::new(0) }; 24];
+            static SCAN_J: [core::sync::atomic::AtomicU32; 24] =
+                [const { core::sync::atomic::AtomicU32::new(0) }; 24];
             static SCAN_BURST: core::sync::atomic::AtomicU32 =
                 core::sync::atomic::AtomicU32::new(0);
             static SCAN_USED: core::sync::atomic::AtomicU32 =
@@ -5928,7 +5957,7 @@ pub fn futex_stuck_census() {
             let used = SCAN_USED.load(Relaxed);
             let mut slot_due = false;
             let mut slot_ix = usize::MAX;
-            for i in 0..8 {
+            for i in 0..24 {
                 let t = SCAN_TGID[i].load(Relaxed);
                 let w = SCAN_WORD[i].load(Relaxed);
                 if t == g.tgid && w == g.uaddr as u64 {
@@ -5943,7 +5972,7 @@ pub fn futex_stuck_census() {
                 }
             }
             if slot_due
-                && used < 2
+                && used < 8
                 && slot_ix != usize::MAX
                 && SCAN_USED
                     .compare_exchange(used, used + 1, Relaxed, Relaxed)
