@@ -69,8 +69,17 @@ ifeq ($(PLATFORM),x86_64)
 endif
 
 # Release build (without debug logs, per active configuration)
+#
+# The symbol pass (build/gen-ksyms.py) runs here exactly like it does in
+# the debug `build` target: without it the release kernel ships with the
+# build.rs placeholder table, so /proc/kallsyms and the symbolized stack
+# traces are EMPTY in the binary the x86 release flows actually boot
+# (make ubuntu-run / make oh-run). The second cargo pass re-embeds the
+# generated table.
 build-release:
 	@echo "Building Rux kernel (Release, platform=$(PLATFORM))..."
+	@cd $(PROJECT_ROOT) && cargo build --target $(CARGO_TARGET) $(CARGO_FEATURE_FLAGS) --release
+	@cd $(PROJECT_ROOT) && python3 build/gen-ksyms.py $(PROJECT_ROOT)/target/$(CARGO_TARGET)/release/rux $(CARGO_TARGET) kernel/src/dfx/ksyms_generated.rs
 	@cd $(PROJECT_ROOT) && cargo build --target $(CARGO_TARGET) $(CARGO_FEATURE_FLAGS) --release
 ifeq ($(PLATFORM),x86_64)
 	@cd $(PROJECT_ROOT) && python3 build/mkbzimage.py $(PROJECT_ROOT)/target/$(CARGO_TARGET)/release/rux $(PROJECT_ROOT)/target/$(CARGO_TARGET)/release/bzImage

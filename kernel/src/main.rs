@@ -1461,6 +1461,23 @@ pub extern "C" fn rust_main() -> ! {
         puts_bytes(env!("CARGO_PKG_VERSION").as_bytes());
         const END: &[u8] = b" ]\n\n";
         puts_bytes(END);
+
+        // Build identity — the commit this binary was cut from and the
+        // profile it was compiled with. A booted kernel that cannot name
+        // its own source tree is how a STALE binary gets mistaken for a
+        // fresh one: the boot shows the old behaviour while the checked
+        // out tree already carries the fix (ttydev lane, 2026-11-16: an
+        // x86 bzImage built before the uevent/netlink merge was booted
+        // with the post-merge tree, and the dev-ttyS0.device timeout was
+        // blamed on the tree instead of on the binary).
+        puts_bytes(GREEN);
+        puts_bytes(b"  build ");
+        puts_bytes(option_env!("RUX_GIT_COMMIT").unwrap_or("unknown").as_bytes());
+        puts_bytes(b" ");
+        puts_bytes(option_env!("RUX_BUILD_PROFILE").unwrap_or("unknown").as_bytes());
+        puts_bytes(b" ");
+        puts_bytes(option_env!("BUILD_TIME").unwrap_or("unknown").as_bytes());
+        puts_bytes(b"\n");
         puts_bytes(RESET);
     }
 
