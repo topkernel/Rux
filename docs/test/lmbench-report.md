@@ -54,6 +54,40 @@ python3 userspace/lmbench/make-report.py run/lmbench-rux.txt run/lmbench-linux.t
 
 <!--RESULTS-->
 
+## fdreap silence round (2026-11-17, patrol 3): open stability fixed
+
+The fdreap serial-report budget (1/8192) turned out to fix more than
+the sampler: paired open boots (4v4, CCD0 + performance governor +
+warmer) — **base (11-16 main) 0/4 complete (all calibration-TIMEOUT),
+opt (fdreap silence + rounds 1-2) 4/4 at 0.863-0.875 µs (±1% boot
+variance, in standing band)**. The GP-BOUND episodes exist ONLY in
+boots with concurrent serial printing (the sampler's own stdout racing
+the defer report for the polled-UART line) — plain battery boots show
+ZERO GP-BOUND and ZERO defers with the budget applied: the defer storm
+was a serial-print secondary effect, not an open/close-path constant,
+and the rcu-semantic special lane is DEMOTED to an observation item.
+
+Open remains 0.86-0.87 µs (in band; 2× target 0.197 µs needs the
+path-walk loop 598 ns + TAIL 950 ns reductions — deep water, queued
+behind the sampling-tool fix).
+
+## fdreap silence round (2026-11-17, patrol 3): open stability fixed
+
+The fdreap serial-report budget (1/8192) turned out to fix more than
+the sampler: paired open boots (4v4, CCD0 + performance governor +
+warmer) — **base (11-16 main) 0/4 complete (all calibration-TIMEOUT),
+opt (fdreap silence + rounds 1-2) 4/4 at 0.863-0.875 µs (±1% boot
+variance, in standing band)**. The GP-BOUND episodes exist ONLY in
+boots with concurrent serial printing (the sampler's own stdout racing
+the defer report for the polled-UART line) — plain battery boots show
+ZERO GP-BOUND and ZERO defers with the budget applied: the defer storm
+was a serial-print secondary effect, not an open/close-path constant,
+and the rcu-semantic special lane is DEMOTED to an observation item.
+
+Open remains 0.86-0.87 µs (in band; 2× target 0.197 µs needs the
+path-walk loop 598 ns + TAIL 950 ns reductions — deep water, queued
+behind the sampling-tool fix).
+
 ## fork/exec phase anatomy (2026-11-17, forkprof=2, 61-69k samples, nohz_full=1)
 
 lat_proc fork 44.3 µs decomposed (per-fork kernel-side costs):
