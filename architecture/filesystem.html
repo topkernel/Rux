@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>文件系统 · Rux</title>
+<link rel="stylesheet" href="../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">首页</a>
+      <a href="design.html">架构设计</a>
+      <a href="../performance/index.html">性能</a>
+      <a href="../security/index.html">安全</a>
+      <a href="../testing/index.html">测试</a>
+      <a href="../debugging/index.html">调试</a>
+      <a href="../guides/getting-started.html">快速入门</a>
+      <a href="../progress/roadmap.html">项目进展</a>
+      <a href="../guestbook.html">留言</a>
+      <span class="lang-sw"><a class="on" href="filesystem.html">中文</a><a href="../en/architecture/filesystem.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">架构设计</div>
+    <a href="design.html">架构与模块设计</a>
+    <a href="scheduler.html">调度器</a>
+    <a href="memory.html">内存管理</a>
+    <a class="on" href="filesystem.html">文件系统</a>
+    <a href="ipc.html">进程间通信</a>
+    <a href="boot.html">启动流程</a>
+    <a href="interrupts.html">中断与时钟</a>
+    <a href="structure.html">代码结构</a>
+    <a href="riscv64.html">架构移植指南</a>
+    <a href="kernel-lock.html">锁序不变量</a>
+    <div class="grp">调试</div>
+    <a href="../debugging/index.html">调试指南</a>
+    <a href="../debugging/tracepoints.html">tracepoint 框架</a>
+    <a href="../debugging/perf.html">性能调试</a>
+    <a href="../debugging/locks.html">锁调试</a>
+    <a href="../debugging/memory.html">内存取证</a>
+    <a href="../debugging/panic.html">panic 与符号化</a>
+    <div class="grp">性能</div>
+    <a href="../performance/index.html">性能测试</a>
+    <div class="grp">安全</div>
+    <a href="../security/index.html">安全与形式验证</a>
+    <div class="grp">测试</div>
+    <a href="../testing/index.html">测试总览</a>
+    <a href="../testing/ci-pipeline.html">CI 流水线</a>
+    <a href="../testing/ltp.html">LTP 兼容扫描</a>
+    <a href="../testing/ltp-full.html">LTP 全量用例</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT 审计</a>
+    <a href="../testing/stability.html">稳定性</a>
+    <a href="../testing/stress.html">压力</a>
+    <a href="../testing/gnome-retrospective.html">回溯报告</a>
+    <div class="grp">开发指南</div>
+    <a href="../guides/getting-started.html">快速入门</a>
+    <a href="../guides/development.html">参与开发</a>
+    <a href="../guides/configuration.html">内核配置</a>
+    <div class="grp">项目进展</div>
+    <a href="../progress/roadmap.html">路线图</a>
+    <a href="../progress/changelog.html">更新日志</a>
+    <a href="../progress/quickref.html">命令速查</a>
+    <div class="grp">互动</div>
+    <a href="../guestbook.html">留言板</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>文件系统</h1>
+    <div class="sub">kernel/src/fs/ · VFS 与 dcache、ext4/jbd2、bio/buffer cache、/proc 派生与文件操作声明 —— 机制、数据结构与实测数据 · 规模:ext4 17,486 行 + jbd2 3,899 行 · 依据:design-divergences.md(D-4/D-6/D-8/D-12/D-13)、docs/development/f4-ext4-route-map.md</div>
+
+    <h2 id="vfs"><span class="anchor">§1</span>VFS:dentry / inode / 挂载</h2>
+    <ul>
+      <li><b>Dentry 结构</b>(dentry.rs):名称/父项/子表(BTreeMap)/inode 在 Spinlock 下;外加原子镜像 —— ref_count、negative、is_mountpoint(AtomicBool:"一次 Relaxed 载入替代 vfsmount 自旋锁")、inode_ptr(AtomicPtr 无锁镜像)。</li>
+      <li><b>挂载点回指针为 Weak</b>:挂载点 dentry 持有 vfsmount,vfsmount 反向强持有该 dentry —— 强回边将构成 Arc 环,故以 Weak 断环。</li>
+      <li><b>二级 dcache</b>:256 桶 FNV-1a 哈希表 + LRU 淘汰(DCACHE_SIZE=256);路径构建 build_path_rooted 对齐参考 prepend_path()(含 chroot 语义与 getcwd ENOENT),深度上限 256。</li>
+      <li><b>挂载命名空间</b>:全局 MOUNT_TABLE 仅承担启动簿记与 init-ns 播种;<b>权威视图为每命名空间的 MountNamespace</b>(sc98:私有命名空间挂载曾向全局表泵入死行 —— OH appspawn 子进程每次 spawn 约 50 个沙箱 bind)。MntFlags 位集含 MNT_READONLY/SHARED/SLAVE/UNBINDABLE/NOSYMFOLLOW;MS_* 翻译集中于 mount.rs;MOUNT_SEQ 全局挂接序保证 MS_REC 克隆先父后子。</li>
+      <li><b>fd 表</b>:get_file 为 RCU 型读者 —— 单次裸槽载入 + 单次 RMW;get_file 每启动执行 1.3 亿次以上,retired 槽排水握手(FdTable lever-B 协议)是该协议首次成型处,后泛化至 dentry reader bank。</li>
+    </ul>
+
+    <h2 id="walkclaim"><span class="anchor">§2</span>WalkClaim reader bank:无锁路径遍历</h2>
+    <p>路径解析的每组件曾付两对自旋锁(children 锁 + inode 锁)。WalkClaim 协议将其消除:</p>
+    <ul>
+      <li><b>读者侧</b>:16 个 cache 行填充的 per-CPU reader bank 计数器;WalkClaim::acquire = 对本 CPU bank 的 SeqCst 递增,Drop 递减;越界 cpu id 降级至 DENTRY_SLOW_READ irqsave 锁。</li>
+      <li><b>写者侧</b>:变更时递增 children_ver,并将被移除的 Arc 停放进 DENTRY_RET_DENTRY/RET_INODE retired 列表;dentry_drain_if_quiescent 以 SeqCst 栅栏 + 全 bank 归零扫描判定静息(64 次扫描预算,超限延后并计入 DRAIN_DEFERS),释放动作置于慢锁下。</li>
+      <li><b>记忆化命中路径</b>:版本检查 + 每槽 seqlock 对 + 单次名称比较 —— 无锁、无引用计数流量;miss 路径于 children 锁下回填。</li>
+      <li><b>实测</b>:每组件两对自旋锁计 ~39 ns + ~20 ns(fsw pathcost 探针);A/B:stat 0.643→<b>0.423 µs</b>,open 1.128→<b>0.889 µs</b>。首次落地曾回滚(724867a0),陈旧 memo 路由加固后重落地(ea26d923)。</li>
+    </ul>
+    <h3>负向查找缓存(negative memo)</h3>
+    <ul>
+      <li>负向 dentry 以<b>父 inode 的内容代际编号</b>(neg_gen)盖章 —— bind-mount 别名是同一 inode 上的独立 dentry,任一别名上的变更使全部别名下的 memo 失效。</li>
+      <li>每父目录上限 32 项(NEG_MEMO_CAP,防止单次 ENOENT 一个 Dentry+String 的 ALLOCTHROUGH 家族);容量满即淘汰,正向子项永不被替换;仅对"内容仅经 VFS 变更的文件系统"(ext4)启用 —— procfs/devfs/sysfs 永不 memo。</li>
+      <li><b>oracle 实测</b>:negstorm 探针(create/link/rename-in/mkdir/symlink churn,8/16 worker,180 s)累计 475k 次负命中、963k 次陈旧归一化,<b>零</b>陈旧负交付、零幽灵项、零校验失败。</li>
+    </ul>
+
+    <h2 id="ext4"><span class="anchor">§3</span>ext4(12 文件,17,486 行)</h2>
+    <h3>挂载特性门</h3>
+    <ul>
+      <li><code>KNOWN_INCOMPAT = FILETYPE|RECOVER|EXTENTS|B64BIT|FLEX_BG|ENCRYPT</code> —— <b>ENCRYPT 是文件系统能力位,接受不拒</b>:拒绝它曾以 ENODEV 挡死 OH 原装 userdata 分区(/data 不可用,全服务 mkdir 风暴 err=2/5)。REJECTED 集 = COMPRESSION|JOURNAL_DEV|META_BG|MMP|EA_INODE|DIRDATA|CSUM_SEED|LARGEDIR|INLINE_DATA;未知 incompat 拒绝挂载;BIGALLOC 与 METADATA_CSUM 直接拒绝(附 sb 校验)。</li>
+      <li>ext3 为 ext4 驱动的别名(参考 ≥ 4.3 同形态);首个 ext4 挂载 = 根实例(执行日志重放),后续盘走独立实例;对活 ext4 的重复挂载以 EBUSY 拒绝 —— 避免对活日志重跑恢复。</li>
+    </ul>
+    <h3>读路径:缺失窗口批填充(D-12)</h3>
+    <ul>
+      <li>页缓存 miss 时,<b>一次往返填满整个缺失窗口</b>:fill_page_cache_batch 解析各未缓存页的物理块,将物理连续段合并为单个多块设备请求(bread_async_multi,≤64 块 / 128 KiB 每请求,≤512 块每批),并以单次睡眠/唤醒排水整批。</li>
+      <li>定量动机:修复前每页 miss 支付一次同步 submit/sleep/wake(TCG 下 ~1.8 ms)—— 桌面级镜像在可接受时间内启动的前提是本设计。一致性守卫:block_cached 于首个已缓存块处切分连续段("Xorg xkbcomp 教训")。</li>
+      <li>已知代价:整条 miss 路径位于 EXT4_BIG_LOCK 下(正确性优先的登记取舍)。</li>
+    </ul>
+    <h3>写路径:批量元数据发布 + 释放即弃(D-13)</h3>
+    <ul>
+      <li><b>发布批处理</b>:bio::publication_batch_drain 仅在 ext4_journal_stop 关闭且待发布队列越过 PUB_BATCH=64 时触发(PUB_HIGH_WATER=2 批)。</li>
+      <li><b>释放即弃</b>:free_block_run 丢弃脏且无引用的 buffer-cache 项并 jbd2_journal_forget —— 死块不写回。</li>
+      <li><b>整块覆写免读</b>:getblk_overwrite 跳过读-改-写。</li>
+      <li><b>实测</b>:p6_mkdrmdir 中位 29,796 → 3,742(批发布)→ <b>2,107 µs</b>(释放即弃),p99 54 → 16.4 ms。</li>
+    </ul>
+    <h3>jbd2 直写 commit(D-8)</h3>
+    <ul>
+      <li>commit 将事务 buffer <b>直写其最终落盘位置</b>,并在同一次 commit 中前推 log tail/head 越过日志区记录 —— 已完成的 commit <b>不留任何可重放物</b>(恢复自 s_start 起);revoke-cancel 机制(JBD2_FLAG_REVOKE_CANCEL)因此整段不需要。</li>
+      <li>收益:每操作同步日志提交(描述符 + 拷贝 + revoke + commit + 超级块,8–12 次往返)消失,删除类操作与写同批化(p6_mkdrmdir 52–58 ms 强类中位 → 个位数 ms)。</li>
+      <li><b>磁盘格式未变</b>:日志镜像挂载/恢复 = e2fsck,与参考实现 write-back 挂载一致;校验层对 mke2fs 1.47.2 输出逐位验证(crc32c 于 0x3FC)。</li>
+    </ul>
+    <h3>崩溃窗一致性</h3>
+    <ul>
+      <li><b>map 先于 free 的持久化顺序</b>(R108):punch 的释放延迟至"重建后的映射已发布"之后 —— 对陈旧盘上映射执行释放是双重分配的毒窗;崩溃序与位图/GD/SB 延迟写及 revoke 记录协同。</li>
+      <li><b>e2fsck 互操作</b>:inode 创建盖章 i_extra_isize = 32(参考 s_want_extra_isize);R109 维护 bg_itable_unused(自组 inode 位图刷新,e2fsck 校验该字段);首个内核写镜像通过 e2fsck -n 零问题。</li>
+    </ul>
+    <h3>fallocate</h3>
+    <ul>
+      <li>PUNCH_HOLE 全实现(2026-11-16):punch 前对未冲刷缓冲写执行 writeback(LTP fallocate06 clear-check);"对齐内部 + 清零边缘" —— 完全覆盖块释放,部分覆盖边缘块原位清零;任意深度经 gather/classify/rebuild(间接块文件同覆盖);R108 延迟释放;EFBIG 守卫修 EFBIG 泄漏(~500MB)。</li>
+      <li>tmpfs fallocate 独立实现分配并 punch(shmem 语义);fallocate epilogue 保留延迟分配脏页。</li>
+    </ul>
+    <h3>xattr / ACL / 目录索引</h3>
+    <ul>
+      <li>security.* 需 CAP_SYS_ADMIN(security.capability 例外,取 CAP_SETFCAP,commoncap 规则);system.*(POSIX ACL)按 owner/CAP_FOWNER 接受;security.selinux 永不落盘(标签由内核持有)。</li>
+      <li>htree 目录(EXT4_INDEX_FL)可读;写路径拒绝 EOPNOTSUPP —— 能力边界如实暴露而非静默降级。</li>
+    </ul>
+
+    <h2 id="bio"><span class="anchor">§4</span>bio / buffer cache</h2>
+    <ul>
+      <li><b>BufferHead 五态</b>:BH_Uptodate/Dirty/Lock/Req/Mapped;hash 链 CacheEntry + LRU;锁序文档化:bucket 锁 → LRU 锁 → per-buffer 状态锁。桶数 64→2048 扩容登记。</li>
+      <li><b>10 秒设备停顿纪律</b>:WAIT_DEADLINE_JIFFIES = 10 s —— 超时后<b>泄漏</b>(不释放)设备可能仍 DMA 的 buffer;宁可泄漏不产生写后破坏。</li>
+      <li><b>写规划闭包</b>:fsync 1092 s 事故(lb229:252 个相同 5 s TXN-HANG 样本钉住单任务于 WritePlan::push_entry 全窗;KV 负载爬行 550–1100 s vs 健康 ~40 s 类)—— 修复为<b>3 轮上限 + 保守线性回退</b>;index+worklist 定点闭包方案因在 journal/淘汰自旋锁上下文分配而<b>实测撤回</b>。</li>
+      <li><b>异步读批</b>:bread_async_multi(128 KiB 请求);<b>plugged span writeback</b>:提交 N 个请求不等待,整批单次等待(fsync 冲刷墙 ~2048 个串行 span @128MB ≈ 6.2 s → 批化);MAX_WRITE_BATCH = 32(32×64 KiB = 2 MiB 私有暂存,DMA 拷贝纪律,按提交序定序)。</li>
+    </ul>
+
+    <h2 id="procfile"><span class="anchor">§5</span>procfile!:声明式 /proc 格式化器(D-4)</h2>
+    <ul>
+      <li>一个字段声明表同时派生渲染器、形状测试与字节快照 —— 格式与数据不再可能漂移;声明形式 kv / pad(meminfo 宽度 16/8)/ cols(行函数参数表由列清单派生)/ kvtab(/proc/[pid]/status,STATUS_FIELDS 以活渲染钉住)/ kvtab_pad(/proc/cpuinfo)。</li>
+      <li>转换名单:vmstat(字节级一致)、meminfo(列精确)、stat/schedstat(顺序单位钉住)、diskstats、status、cpuinfo。动态行数的文件(interrupts/intr/softirqs)按设计保持显式实现。</li>
+      <li>已知代价:约 18 个手写文件残留;曾有一次五个字节格式缺陷通过评审进入合并树 —— 形状测试与快照测试由该事件制度化。</li>
+    </ul>
+
+    <h2 id="fileops"><span class="anchor">§6</span>FileOps 能力声明式构建器(D-6)</h2>
+    <ul>
+      <li>每槽位一个 const 构建器方法,重复安装即 const panic = 编译错;缺失操作的 errno 映射收敛于单点 File::missing_op_errno(Read/Write → EINVAL,LSeek → ESPIPE 等)。</li>
+      <li><b>支付过的事故</b>:合法 epoll fd 上 read() 因 read 槽为 NULL 返回 EBADF,OH 事件循环以错误 errno 空转 <b>155,991</b> 次 —— EBADF 语义是"fd 已关",EINVAL 才引导事件循环进入正确错误路径。</li>
+      <li>迁移已全部完成:树内每张 FileOps 表均为能力声明(含最后两张 drm 表);首批转换:epoll/eventfd/timerfd/signalfd/pipe/inotify。</li>
+    </ul>
+
+    <h2 id="misc"><span class="anchor">§7</span>pipe / io_uring / inotify / epoll</h2>
+    <ul>
+      <li><b>pipe</b>:容量 64 KiB(PIPE_BUF_SIZE,经 review 5.2 自 16 KiB 提升),PIPE_BUF = 4096 原子写(对齐参考默认);容量+1 槽位分配缺陷修复(LTP pipe2_04:65536 字节满写曾返回 65535)。</li>
+      <li><b>io_uring</b>:Linux 5.1+ ABI;SQ/CQ 环 mmap(IORING_FEAT_SINGLE_MMAP);操作在 enter 上下文同步执行;操作集 NOP/FSYNC/CLOSE/READ/WRITE/FADVISE。</li>
+      <li><b>inotify</b>:完整实现 —— 排队事件、watch 表、max_queued_events、fdinfo watches、init1/add_watch。</li>
+      <li><b>epoll</b>:兴趣集为 intrusive EpollEntry 链表(sentinel 头结点)—— 取代 Vec&lt;EpollEntry&gt; 在武装路径上的分配与扩容;唤醒注册表分片同为 intrusive EpollWakeNode 链;<b>武装路径零分配</b>。rux:epoll_* 事件族为登记的 rux: 自有族(参考实现无 epoll 事件)。</li>
+    </ul>
+
+    <h2 id="nums"><span class="anchor">§8</span>基准数字汇总</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>指标(2026-11-01 board,main@afc41b8b,KVM)</th><th>重锚前</th><th>后</th></tr></thead>
+      <tbody>
+        <tr><td>stat</td><td class="num">200.9 µs</td><td class="num">71.1 µs</td></tr>
+        <tr><td>openclose</td><td class="num">512.9 µs</td><td class="num">156.3 µs</td></tr>
+        <tr><td>read_cached</td><td class="num">546.8 µs</td><td class="num">203.7 µs</td></tr>
+        <tr><td>append</td><td class="num">657.2 µs</td><td class="num">77.4 µs</td></tr>
+        <tr><td>mkdir+rmdir</td><td class="num">22.8 ms</td><td class="num">2.76 ms</td></tr>
+        <tr><td>unlink</td><td class="num">1,141 µs</td><td class="num">808 µs</td></tr>
+        <tr><td>buffer cache 命中率</td><td colspan="2" class="num">99.1%(门禁 ≥ 基线;pa29: bread 2.81M / 设备读 25k)</td></tr>
+      </tbody>
+    </table></div>
+    <p class="callout">诚实差距登记:p6_mkdrmdir 对标同机参考 153 µs 仍差 ~14×——差距归因于共享的系统调用与路径查找固定开销,而非文件系统本体;写 fsync 14.2 ms 中位为当前门禁锚(串行 span 批化后再评)。</p>
+
+    <div class="callout">代码:<code>kernel/src/fs/</code>(dentry / mount / file / fdreap / page_cache / bio / ext4/* / jbd2/* / procfs/* / pipe / inotify)与 <code>kernel/src/io_uring/</code>。分歧登记:D-4/D-6/D-8/D-12/D-13。仪器:fsw 计数器(fsw=1)、rux:epoll_* / ext4:* / jbd2:* trace 族(见 <a href="../debugging/tracepoints.html">tracepoint 框架</a>)。</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">返回首页</a></span>
+
+      <span class="foot-stats">本站访问 <span id="busuanzi_value_site_pv"></span> 次 · 访客 <span id="busuanzi_value_site_uv"></span> 人</span></div>
+  </div>
+</footer>
+
+<script src="../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>

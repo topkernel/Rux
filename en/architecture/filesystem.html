@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Filesystem · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">Home</a>
+      <a href="design.html">Architecture</a>
+      <a href="../performance/index.html">Performance</a>
+      <a href="../security/index.html">Security</a>
+      <a href="../testing/index.html">Testing</a>
+      <a href="../debugging/index.html">Debugging</a>
+      <a href="../guides/getting-started.html">Getting started</a>
+      <a href="../progress/roadmap.html">Progress</a>
+      <a href="../guestbook.html">Feedback</a>
+      <span class="lang-sw"><a class="on" href="../../architecture/filesystem.html">中文</a><a href="filesystem.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="design.html">Design deep-dive</a>
+    <a href="scheduler.html">Scheduler</a>
+    <a href="memory.html">Memory management</a>
+    <a class="on" href="filesystem.html">Filesystem</a>
+    <a href="ipc.html">IPC</a>
+    <a href="boot.html">Boot flow</a>
+    <a href="interrupts.html">Interrupts &amp; timers</a>
+    <a href="structure.html">Code layout</a>
+    <a href="riscv64.html">Porting guide</a>
+    <a href="kernel-lock.html">Lock ordering</a>
+    <div class="grp">Debugging</div>
+    <a href="../debugging/index.html">Debugging guide</a>
+    <a href="../debugging/tracepoints.html">Tracepoints</a>
+    <a href="../debugging/perf.html">Performance debugging</a>
+    <a href="../debugging/locks.html">Lock debugging</a>
+    <a href="../debugging/memory.html">Memory forensics</a>
+    <a href="../debugging/panic.html">Panic &amp; symbols</a>
+    <div class="grp">Performance</div>
+    <a href="../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../security/index.html">Security &amp; verification</a>
+    <div class="grp">Testing</div>
+    <a href="../testing/index.html">Overview</a>
+    <a href="../testing/ci-pipeline.html">CI pipeline</a>
+    <a href="../testing/ltp.html">LTP scan</a>
+    <a href="../testing/ltp-full.html">LTP full cases</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT audit</a>
+    <a href="../testing/stability.html">Stability</a>
+    <a href="../testing/stress.html">Stress</a>
+    <a href="../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../guides/getting-started.html">Getting started</a>
+    <a href="../guides/development.html">Contributing</a>
+    <a href="../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../progress/roadmap.html">Roadmap</a>
+    <a href="../progress/changelog.html">Changelog</a>
+    <a href="../progress/quickref.html">Commands</a>
+    <div class="grp">Community</div>
+    <a href="../guestbook.html">Guestbook</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>Filesystem</h1>
+    <div class="sub">kernel/src/fs/ · VFS and the dcache, ext4/jbd2, bio/buffer cache, /proc derivation and file-ops declaration — mechanisms, data structures and measured numbers · Scale: ext4 17,486 lines + jbd2 3,899 lines · Sources: design-divergences.md (D-4/D-6/D-8/D-12/D-13), docs/development/f4-ext4-route-map.md</div>
+
+    <h2 id="vfs"><span class="anchor">§1</span>VFS: dentry / inode / mounts</h2>
+    <ul>
+      <li><b>Dentry structure</b> (dentry.rs): name/parent/children (BTreeMap)/inode under a Spinlock, plus atomic mirrors — ref_count, negative, is_mountpoint (AtomicBool: "one Relaxed load instead of the vfsmount spinlock"), and inode_ptr (a lock-free AtomicPtr mirror).</li>
+      <li><b>The mount-point back pointer is Weak</b>: the mount-point dentry holds the vfsmount, and the vfsmount strongly holds this dentry — a strong back edge would form an Arc cycle, so Weak breaks it.</li>
+      <li><b>Second-level dcache</b>: a 256-bucket FNV-1a hash table with LRU eviction (DCACHE_SIZE=256); path construction (build_path_rooted) mirrors the reference prepend_path() including chroot semantics and getcwd ENOENT, with a depth cap of 256.</li>
+      <li><b>Mount namespaces</b>: the global MOUNT_TABLE handles only boot-time bookkeeping and init-ns seeding; <b>the authoritative view is the per-namespace MountNamespace</b> (sc98: private-namespace mounts once pumped dead rows into the global table — OH appspawn children issue ~50 sandbox binds per spawn). The MntFlags bit set covers MNT_READONLY/SHARED/SLAVE/UNBINDABLE/NOSYMFOLLOW; MS_* translation is concentrated in mount.rs; the global MOUNT_SEQ attach sequence guarantees MS_REC clones attach parents before children.</li>
+      <li><b>fd table</b>: get_file is an RCU-style reader — one raw slot load plus one RMW; get_file runs 130M+ times per boot, and the retired-slot drain handshake (the FdTable lever-B protocol) is where that protocol was first shaped, later generalized to the dentry reader banks.</li>
+    </ul>
+
+    <h2 id="walkclaim"><span class="anchor">§2</span>WalkClaim reader bank: lock-free path walking</h2>
+    <p>Every path component once paid two spinlock pairs (children + inode). The WalkClaim protocol eliminates them:</p>
+    <ul>
+      <li><b>Reader side</b>: 16 cacheline-padded per-CPU reader-bank counters; WalkClaim::acquire is a SeqCst increment of this CPU's bank and Drop decrements; an out-of-range cpu id degrades to the DENTRY_SLOW_READ irqsave lock.</li>
+      <li><b>Writer side</b>: mutations bump children_ver and park the removed Arcs in the DENTRY_RET_DENTRY/RET_INODE retired lists; dentry_drain_if_quiescent adjudicates quiescence with a SeqCst fence plus a scan for all banks at zero (64-scan budget; past the budget it defers and counts DRAIN_DEFERS), and the release happens under the slow lock.</li>
+      <li><b>Memo hit path</b>: version check + a per-slot seqlock pair + one name compare — no lock, no refcount traffic; the miss path refills under the children lock.</li>
+      <li><b>Measured</b>: the two per-component spinlock pairs totaled ~39 ns + ~20 ns per component (fsw pathcost probe); A/B: stat 0.643→<b>0.423 µs</b>, open 1.128→<b>0.889 µs</b>. The first landing was reverted (724867a0) and re-landed after stale-memo routing was hardened (ea26d923).</li>
+    </ul>
+    <h3>Negative memo cache</h3>
+    <ul>
+      <li>Negative dentries are stamped with the <b>parent inode's content generation</b> (neg_gen) — bind-mount aliases are separate dentries over one inode, so a mutation through ANY alias invalidates memos cached under every alias.</li>
+      <li>A per-parent cap of 32 entries (NEG_MEMO_CAP, defending the one-Dentry-plus-String-per-ENOENT ALLOCTHROUGH family); eviction at the cap, positive children never replaced; enabled only for filesystems whose content changes exclusively through VFS mutations (ext4) — procfs/devfs/sysfs never memo.</li>
+      <li><b>Oracle measurements</b>: the negstorm probe (create/link/rename-in/mkdir/symlink churn, 8/16 workers, 180 s) accumulated 475k negative hits and 963k stale normalizations with <b>zero</b> stale-negative deliveries, ghost entries, or verification failures.</li>
+    </ul>
+
+    <h2 id="ext4"><span class="anchor">§3</span>ext4 (12 files, 17,486 lines)</h2>
+    <h3>Mount feature gates</h3>
+    <ul>
+      <li><code>KNOWN_INCOMPAT = FILETYPE|RECOVER|EXTENTS|B64BIT|FLEX_BG|ENCRYPT</code> — <b>ENCRYPT is a filesystem capability flag and is accepted, not refused</b>: refusing it once blocked the stock OH userdata partition with ENODEV (/data dead, the whole service mkdir storm failing err=2/5). The REJECTED set = COMPRESSION|JOURNAL_DEV|META_BG|MMP|EA_INODE|DIRDATA|CSUM_SEED|LARGEDIR|INLINE_DATA; unknown incompat features refuse the mount; BIGALLOC and METADATA_CSUM refuse outright (with sb checksum validation).</li>
+      <li>ext3 is the ext4 driver's alias (the reference ≥ 4.3 form); the first ext4 mount is THE root instance (journal replay) and additional disks take separate instances; re-mounting a live ext4 is refused with EBUSY — journal recovery must not re-run on a live journal.</li>
+    </ul>
+    <h3>Read path: miss-window batch fill (D-12)</h3>
+    <ul>
+      <li>On a page-cache miss, <b>the whole miss window is filled in one round trip</b>: fill_page_cache_batch resolves each uncached page's physical block, coalesces physically-contiguous runs into single multi-block device requests (bread_async_multi, ≤64 blocks / 128 KiB per request, ≤512 blocks per batch), and drains everything with one sleep/wake cycle.</li>
+      <li>Quantified motivation: pre-fix, each page miss paid one synchronous submit/sleep/wake (~1.8 ms under TCG) — starting desktop-scale images in acceptable time requires this design. The coherency guard: block_cached splits runs at the first already-cached block ("the Xorg xkbcomp lesson").</li>
+      <li>Known cost: the entire miss path sits under EXT4_BIG_LOCK (a registered correctness-first trade).</li>
+    </ul>
+    <h3>Write path: batched metadata publish + discard-on-free (D-13)</h3>
+    <ul>
+      <li><b>Publication batching</b>: bio::publication_batch_drain fires only at ext4_journal_stop close once the pending queue crosses PUB_BATCH=64 (PUB_HIGH_WATER=2 batches).</li>
+      <li><b>Discard-on-free</b>: free_block_run drops dirty, unreferenced buffer-cache entries and jbd2_journal_forget — dead blocks are never written back.</li>
+      <li><b>Full-block overwrite skip read</b>: getblk_overwrite eliminates the read-modify-write.</li>
+      <li><b>Measured</b>: p6_mkdrmdir median 29,796 → 3,742 (publication batching) → <b>2,107 µs</b> (discard-on-free), p99 54 → 16.4 ms.</li>
+    </ul>
+    <h3>jbd2 direct-write commit (D-8)</h3>
+    <ul>
+      <li>commit syncs the transaction's buffers <b>through to their final on-disk locations</b> and advances the log tail/head past the transaction's journal-area records in the same commit — a completed commit <b>leaves nothing replayable</b> (recovery starts at s_start); the revoke-cancel machinery (JBD2_FLAG_REVOKE_CANCEL) is therefore unnecessary in full.</li>
+      <li>Benefit: the per-op synchronous journal commit (descriptor + copies + revoke + commit + superblock, 8–12 round trips) disappears, and delete-class operations batch like writes (p6_mkdrmdir 52–58 ms strong-median class → single-digit ms).</li>
+      <li><b>The on-disk format is unchanged</b>: journal image mount/replay = e2fsck, matching the reference's write-back mount; the checksum layer is verified bit-for-bit against mke2fs 1.47.2 output (crc32c at 0x3FC).</li>
+    </ul>
+    <h3>Crash-window consistency</h3>
+    <ul>
+      <li><b>The map-before-free durability order</b> (R108): punch frees are deferred until "the rebuilt mapping is published" — freeing against the stale on-disk map is the double-allocation poison window; crash ordering rides the bitmap/GD/SB deferred writes plus revoke records.</li>
+      <li><b>e2fsck interop</b>: inode creation stamps i_extra_isize = 32 (the reference's s_want_extra_isize); R109 maintains bg_itable_unused (refreshed from the group's inode bitmap; e2fsck validates the field); the first kernel-written image passed e2fsck -n with no problems.</li>
+    </ul>
+    <h3>fallocate</h3>
+    <ul>
+      <li>PUNCH_HOLE full implementation (2026-11-16): writeback of unflushed buffered writes before the punch (LTP fallocate06 clear-check); "aligned interior + zeroed edges" — fully-covered blocks are freed, partially-covered edge blocks are zeroed in place; any depth via gather/classify/rebuild (indirect-block files covered); R108 deferred frees; an EFBIG guard fixing the EFBIG leak (~500 MB).</li>
+      <li>tmpfs fallocate is a separate implementation that allocates and punches (shmem semantics); the fallocate epilogue keeps dirty delayed-allocation pages.</li>
+    </ul>
+    <h3>xattr / ACL / directory index</h3>
+    <ul>
+      <li>security.* requires CAP_SYS_ADMIN (except security.capability, which takes CAP_SETFCAP — the commoncap rule); system.* (POSIX ACLs) is accepted for owner/CAP_FOWNER; security.selinux is never stored (labels are owned by the kernel).</li>
+      <li>htree directories (EXT4_INDEX_FL) are readable; the write path refuses with EOPNOTSUPP — the capability boundary is exposed honestly rather than silently degraded.</li>
+    </ul>
+
+    <h2 id="bio"><span class="anchor">§4</span>bio / buffer cache</h2>
+    <ul>
+      <li><b>BufferHead five states</b>: BH_Uptodate/Dirty/Lock/Req/Mapped; hash-chained CacheEntry with LRU; documented lock order: bucket lock → LRU lock → per-buffer state lock. The 64→2048 bucket growth is on record.</li>
+      <li><b>The 10-second device-stall discipline</b>: WAIT_DEADLINE_JIFFIES = 10 s — past the deadline the buffers the device may still be DMAing into are <b>leaked</b> (never freed); leaking is preferred over post-write corruption.</li>
+      <li><b>The write-planning closure</b>: the fsync 1092 s incident (lb229: 252 identical 5 s TXN-HANG samples pinned one task inside WritePlan::push_entry for the whole window; the KV load crawled 550–1100 s vs the healthy ~40 s class) — fixed with a <b>3-round cap plus a conservative linear fallback</b>; the index+worklist fixpoint closure was measured and <b>reverted</b> (it allocated from journal/eviction spinlock contexts).</li>
+      <li><b>Async read batching</b>: bread_async_multi (128 KiB requests); <b>plugged span writeback</b>: submit N requests without waiting, then wait once for the whole batch (the fsync flush wall, ~2048 serialized spans at 128 MB ≈ 6.2 s, becomes batched); MAX_WRITE_BATCH = 32 (32×64 KiB = 2 MiB private staging, DMA copy discipline, ordered by submission ordinal).</li>
+    </ul>
+
+    <h2 id="procfile"><span class="anchor">§5</span>procfile!: declarative /proc formatters (D-4)</h2>
+    <ul>
+      <li>One field-declaration table derives the renderer, the shape tests, and the byte snapshots — format and data can no longer drift; declaration forms are kv / pad (meminfo widths 16/8) / cols (the row function's argument list derives from the column list) / kvtab (/proc/[pid]/status, STATUS_FIELDS pinned against a live render) / kvtab_pad (/proc/cpuinfo).</li>
+      <li>Converted files: vmstat (byte-identical), meminfo (column-exact), stat/schedstat (order unit-pinned), diskstats, status, cpuinfo. Dynamic-arity files (interrupts/intr/softirqs) stay explicit by design.</li>
+      <li>Known costs: ~18 hand-written files remain; once, five byte-format defects survived review into a merged tree — shape and snapshot tests were institutionalized by that event.</li>
+    </ul>
+
+    <h2 id="fileops"><span class="anchor">§6</span>The FileOps capability builder (D-6)</h2>
+    <ul>
+      <li>One const builder method per slot; a duplicate install is a const panic = a compile error; the errno mapping for missing ops converges at the single point File::missing_op_errno (Read/Write → EINVAL, LSeek → ESPIPE, etc.).</li>
+      <li><b>The incident it paid for</b>: read() on a valid epoll fd returned EBADF because the read slot was NULL, and an OH event loop spun <b>155,991</b> iterations on the wrong errno — EBADF means "fd closed", while EINVAL steers the event loop into its correct error path.</li>
+      <li>The migration is complete: every FileOps table in the tree is a capability declaration (including the last two drm tables); the first conversions were epoll/eventfd/timerfd/signalfd/pipe/inotify.</li>
+    </ul>
+
+    <h2 id="misc"><span class="anchor">§7</span>pipe / io_uring / inotify / epoll</h2>
+    <ul>
+      <li><b>pipe</b>: 64 KiB capacity (PIPE_BUF_SIZE, raised from 16 KiB per review 5.2), PIPE_BUF = 4096 atomic writes (matching the reference default); the capacity+1 slot-allocation defect is fixed (LTP pipe2_04: a full 65536-byte write once returned 65535).</li>
+      <li><b>io_uring</b>: the Linux 5.1+ ABI; SQ/CQ ring mmap (IORING_FEAT_SINGLE_MMAP); operations execute synchronously in the enter context; op set NOP/FSYNC/CLOSE/READ/WRITE/FADVISE.</li>
+      <li><b>inotify</b>: fully implemented — queued events, watch table, max_queued_events, fdinfo watches, init1/add_watch.</li>
+      <li><b>epoll</b>: the interest set is an intrusive EpollEntry list (sentinel-headed) — replacing a Vec&lt;EpollEntry&gt; that allocated on the armed path (and on growth); the wake-registry shard is likewise an intrusive EpollWakeNode list; <b>zero allocation on the armed path</b>. The rux:epoll_* events are a registered rux: family of our own (the reference has no epoll events).</li>
+    </ul>
+
+    <h2 id="nums"><span class="anchor">§8</span>Benchmark numbers</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Metric (2026-11-01 board, main@afc41b8b, KVM)</th><th>Before re-anchor</th><th>After</th></tr></thead>
+      <tbody>
+        <tr><td>stat</td><td class="num">200.9 µs</td><td class="num">71.1 µs</td></tr>
+        <tr><td>openclose</td><td class="num">512.9 µs</td><td class="num">156.3 µs</td></tr>
+        <tr><td>read_cached</td><td class="num">546.8 µs</td><td class="num">203.7 µs</td></tr>
+        <tr><td>append</td><td class="num">657.2 µs</td><td class="num">77.4 µs</td></tr>
+        <tr><td>mkdir+rmdir</td><td class="num">22.8 ms</td><td class="num">2.76 ms</td></tr>
+        <tr><td>unlink</td><td class="num">1,141 µs</td><td class="num">808 µs</td></tr>
+        <tr><td>buffer cache hit rate</td><td colspan="2" class="num">99.1% (gate ≥ baseline; pa29: bread 2.81M / device reads 25k)</td></tr>
+      </tbody>
+    </table></div>
+    <p class="callout">Honest gaps on record: p6_mkdrmdir remains ~14× from the same-rig reference's 153 µs — the gap is attributed to the shared syscall and path-lookup fixed costs, not the filesystem itself; the write_fsync 14.2 ms median is the current gate anchor (to be re-evaluated after span-writeback batching).</p>
+
+    <div class="callout">Code: <code>kernel/src/fs/</code> (dentry / mount / file / fdreap / page_cache / bio / ext4/* / jbd2/* / procfs/* / pipe / inotify) and <code>kernel/src/io_uring/</code>. Divergences: D-4/D-6/D-8/D-12/D-13. Instruments: the fsw counters (fsw=1), the rux:epoll_* / ext4:* / jbd2:* trace families (see <a href="../debugging/tracepoints.html">tracepoints</a>).</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to home</a></span>
+
+      <span class="foot-stats">Site visits <span id="busuanzi_value_site_pv"></span> · Visitors <span id="busuanzi_value_site_uv"></span></span></div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>
