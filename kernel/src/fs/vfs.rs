@@ -2935,6 +2935,48 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                 }
             }
         }
+        // (scan3) procfs pid-dir revalidation (Linux proc_flush_task /
+        // d_revalidate shape): a cached POSITIVE dentry for /proc/<pid>
+        // or /proc/<tgid>/task/<tid> outlives its task — nothing dropped
+        // it at free_pid time, and the walk answered from the dentry tree
+        // without re-asking procfs. Observable contract break: access(2)
+        // kept reporting success for a dead pid forever while stat(2)
+        // (whose procfs getattr consults the pid table) answered ENOENT
+        // on the very same path. LTP tgkill03 polls access() after
+        // pthread_join; one lookup landing inside the exit window
+        // (join wake → free_pid, measured 12µs..12ms) poisoned the
+        // dentry for the whole test budget. Fix: on a procfs pid-shape
+        // cache hit, verify the pid is still alive; a stale child is
+        // detached and re-resolved through the filesystem, which answers
+        // ENOENT via is_valid_pid. Scope: pid-shape inodes only
+        // (private_data None, ino < 10000 — pid dirs and task-dir tid
+        // aliases both use ino == pid; synthetic pid*10000+off dirs are
+        // unreachable once their pid dir dies, and pid values ≥ 10000
+        // are skipped to avoid ino aliasing with the offset ranges).
+        // Non-procfs walks pay exactly one fs_id compare here.
+        if let Some(p) = found {
+            // SAFETY: p is protected by the claim (memo/map-held).
+            let child = unsafe { &*p };
+            if !child.is_negative() {
+                // SAFETY: raw mirror read under the walk claim (same
+                // contract as inode_ptr_walk's callers below); the claim
+                // blocks the drain, no Arc traffic on the hot path.
+                let ino_ptr = child.inode_ptr_walk(cl);
+                if !ino_ptr.is_null() {
+                    // SAFETY: non-null and claim-protected (see above).
+                    let inode = unsafe { &*ino_ptr };
+                    if inode.fs_id == crate::fs::inode::FS_ID_PROCFS
+                        && inode.private_data.is_none()
+                        && inode.ino < 10000
+                        && inode.ino != 1 // procfs sb root (ino 1) is not a pid dir
+                        && !crate::fs::procfs::pid::is_valid_pid(inode.ino)
+                    {
+                        cur_d.remove_child(component);
+                        found = None;
+                    }
+                }
+            }
+        }
         let child_raw: *const Dentry = match found {
             Some(p) => p,
             None => {
