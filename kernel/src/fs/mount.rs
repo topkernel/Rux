@@ -52,6 +52,19 @@ pub fn register_mount(device: &str, mount_point: &str, fs_type: &str, flags: &st
     crate::process::ns::ns_register_mount(device, mount_point, fs_type, flags);
 }
 
+/// Is `target` already registered as a mount of filesystem type
+/// `fs_type`? (launcher-errno lane: the single-instance filesystems the
+/// kernel automounts — debugfs at /sys/kernel/debug — answer EBUSY to a
+/// second mount(2) at the same point on the OH reference; a stacked
+/// second mount would shadow the kernel's own submounts, e.g. the
+/// tracefs instance at /sys/kernel/debug/tracing.)
+pub fn mounted_as(fs_type: &str, target: &str) -> bool {
+    let table = MOUNT_TABLE.lock();
+    table
+        .iter()
+        .any(|(_, mp, f, _)| f == fs_type && mp == target)
+}
+
 /// Raw global registry snapshot + the hardcoded rootfs row (init-namespace
 /// seed for process::ns::init_mnt_ns).
 pub fn get_global_mounts() -> Vec<(String, String, String, String)> {
@@ -533,6 +546,18 @@ pub fn do_mount(
         // either mounts the boot instance at the requested point or, if
         // boot did not create it (feature-gated), creates it now.
         "debugfs" => {
+            // Single-instance semantics (launcher-errno lane): the
+            // kernel automounts debugfs at /sys/kernel/debug; on the OH
+            // reference init's later `mount debugfs ... /sys/kernel/
+            // debug` answers EBUSY (err 16 in the reference boot error
+            // stream) and the kernel's own submounts under it — the
+            // tracefs instance at /sys/kernel/debug/tracing — stay
+            // visible. Our old arm stacked a second debugfs mount that
+            // SHADOWED the tracefs alias (every /sys/kernel/debug/
+            // tracing chmod then ENOENT — an ours-only error family).
+            if mounted_as("debugfs", target) {
+                return Err(errno::Errno::DeviceOrResourceBusy.as_neg_i32());
+            }
             if crate::fs::debugfs::debugfs_root().is_none() {
                 crate::fs::debugfs::init_debugfs()?;
             }

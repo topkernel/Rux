@@ -1165,6 +1165,9 @@ struct ErrSlot {
     comm: [AtomicU8; 16],
     /// First-seen a0 (fd or path pointer, depending on the syscall).
     a0: AtomicU64,
+    /// First-seen PATH STRING (NUL-padded snapshot; only meaningful for
+    /// path-taking syscalls — the pointer is read ONCE at cell creation).
+    path: [AtomicU8; 64],
 }
 
 const EMPTY_ERR: ErrSlot = ErrSlot {
@@ -1174,6 +1177,7 @@ const EMPTY_ERR: ErrSlot = ErrSlot {
     first_ms: AtomicU64::new(0),
     comm: [const { AtomicU8::new(0) }; 16],
     a0: AtomicU64::new(0),
+    path: [const { AtomicU8::new(0) }; 64],
 };
 
 static ERR_CENSUS: [ErrSlot; 96] = [const { EMPTY_ERR }; 96];
@@ -1185,8 +1189,10 @@ fn boot_ms() -> u64 {
 }
 
 /// Record one failing syscall (ret < 0, ret != -EAGAIN). Called from the
-/// syscall exit path; zero cost when syscost is off.
-pub fn note_errno(nr: usize, ret: i64, a0: u64) {
+/// syscall exit path; zero cost when syscost is off. For path-taking
+/// syscalls the first-seen PATH STRING is snapshotted (one safe 64-byte
+/// user read, only at cell creation).
+pub fn note_errno(nr: usize, ret: i64, a0: u64, a1: u64) {
     use core::sync::atomic::Ordering::Relaxed;
     if !on() {
         return;
@@ -1210,6 +1216,21 @@ pub fn note_errno(nr: usize, ret: i64, a0: u64) {
         Some(t) => unsafe { *(*t).comm() },
         None => [0; 16],
     };
+    // Which argument is the path (x86_64-generic table: open/stat family
+    // paths in a0; *at family paths in a1). 0 = not a path syscall.
+    let path_ptr = match nr {
+        2 | 4 | 6 | 21 | 83 | 87 | 90 => a0,   // open stat lstat access mkdir unlink chmod
+        257 | 332 => a1,                        // openat statx
+        _ => 0,
+    };
+    let mut path = [0u8; 64];
+    if path_ptr != 0 && path_ptr > 0x1000 {
+        if let Some(bytes) =
+            crate::arch::uaccess_safe::read_user::<[u8; 64]>(path_ptr as usize)
+        {
+            path = bytes;
+        }
+    }
     for i in 0..ERR_CENSUS.len() {
         if ERR_CENSUS[i].n.load(Relaxed) != 0 {
             continue;
@@ -1221,6 +1242,9 @@ pub fn note_errno(nr: usize, ret: i64, a0: u64) {
             ERR_CENSUS[i].comm[j].store(comm[j], Relaxed);
         }
         ERR_CENSUS[i].a0.store(a0, Relaxed);
+        for j in 0..64 {
+            ERR_CENSUS[i].path[j].store(path[j], Relaxed);
+        }
         ERR_CENSUS[i].n.store(1, Relaxed);
         return;
     }
@@ -1750,6 +1774,32 @@ pub fn dump() {
                 first_ms % 1000,
                 name,
                 a0
+            );
+        }
+        // Path strings (cells with a snapshot; separate pass so the main
+        // line format stays diff-stable with earlier boots).
+        for i in 0..ERR_CENSUS.len() {
+            if ERR_CENSUS[i].n.load(Relaxed) == 0 {
+                continue;
+            }
+            let mut path = [0u8; 64];
+            for j in 0..64 {
+                path[j] = ERR_CENSUS[i].path[j].load(Relaxed);
+            }
+            if path[0] == 0 {
+                continue;
+            }
+            let text = core::str::from_utf8(&path)
+                .unwrap_or("?")
+                .split('\0')
+                .next()
+                .unwrap_or("?");
+            crate::pr_warn!(
+                "SYSCOST t={}s errno-path: nr={} err={} path={}",
+                secs,
+                ERR_CENSUS[i].nr.load(Relaxed),
+                ERR_CENSUS[i].err.load(Relaxed),
+                text
             );
         }
     }

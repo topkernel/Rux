@@ -239,7 +239,8 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         // the idle-park storm would drown the signal) feeds the
         // per-(nr, errno) census. Two compares when syscost is off.
         if rv < 0 && rv != -11 {
-            crate::dfx::syscost::note_errno(sc_nr, rv, syscall_get_arguments(regs)[0]);
+            let sc_args = syscall_get_arguments(regs);
+            crate::dfx::syscost::note_errno(sc_nr, rv, sc_args[0], sc_args[1]);
         }
     }
     crate::dfx::syscost::exit(sc_nr, sc_t0);
