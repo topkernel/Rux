@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>锁调试 · Rux</title>
+<link rel="stylesheet" href="../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">首页</a>
+      <a href="../architecture/design.html">架构设计</a>
+      <a href="../performance/index.html">性能</a>
+      <a href="../security/index.html">安全</a>
+      <a href="../testing/index.html">测试</a>
+      <a href="index.html">调试</a>
+      <a href="../guides/getting-started.html">快速入门</a>
+      <a href="../progress/roadmap.html">项目进展</a>
+      <a href="../guestbook.html">留言</a>
+      <span class="lang-sw"><a class="on" href="locks.html">中文</a><a href="../en/debugging/locks.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">架构设计</div>
+    <a href="../architecture/design.html">架构与模块设计</a>
+    <a href="../architecture/scheduler.html">调度器</a>
+    <a href="../architecture/memory.html">内存管理</a>
+    <a href="../architecture/filesystem.html">文件系统</a>
+    <a href="../architecture/ipc.html">进程间通信</a>
+    <a href="../architecture/boot.html">启动流程</a>
+    <a href="../architecture/interrupts.html">中断与时钟</a>
+    <a href="../architecture/structure.html">代码结构</a>
+    <a href="../architecture/riscv64.html">架构移植指南</a>
+    <a href="../architecture/kernel-lock.html">锁序不变量</a>
+    <div class="grp">调试</div>
+    <a href="index.html">调试指南</a>
+    <a href="tracepoints.html">tracepoint 框架</a>
+    <a href="perf.html">性能调试</a>
+    <a class="on" href="locks.html">锁调试</a>
+    <a href="memory.html">内存取证</a>
+    <a href="panic.html">panic 与符号化</a>
+    <div class="grp">性能</div>
+    <a href="../performance/index.html">性能测试</a>
+    <div class="grp">安全</div>
+    <a href="../security/index.html">安全与形式验证</a>
+    <div class="grp">测试</div>
+    <a href="../testing/index.html">测试总览</a>
+    <a href="../testing/ci-pipeline.html">CI 流水线</a>
+    <a href="../testing/ltp.html">LTP 兼容扫描</a>
+    <a href="../testing/ltp-full.html">LTP 全量用例</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT 审计</a>
+    <a href="../testing/stability.html">稳定性</a>
+    <a href="../testing/stress.html">压力</a>
+    <a href="../testing/gnome-retrospective.html">回溯报告</a>
+    <div class="grp">开发指南</div>
+    <a href="../guides/getting-started.html">快速入门</a>
+    <a href="../guides/development.html">参与开发</a>
+    <a href="../guides/configuration.html">内核配置</a>
+    <div class="grp">项目进展</div>
+    <a href="../progress/roadmap.html">路线图</a>
+    <a href="../progress/changelog.html">更新日志</a>
+    <a href="../progress/quickref.html">命令速查</a>
+    <div class="grp">互动</div>
+    <a href="../guestbook.html">留言板</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>锁调试</h1>
+    <div class="sub">锁序缺陷的四道防线:编译期锁键、运行期看门狗、模型检查、自动捕获 —— 每道防线的设计、覆盖面与实战记录 · 正本:docs/architecture/lock-ordering.md(INV-LOCK-*)、kernel/src/sync/、kernel/verify/</div>
+
+    <h2 id="layers"><span class="anchor">§1</span>锁序层级(设计侧输入)</h2>
+    <p><code>docs/architecture/lock-ordering.md</code> 维护具名锁序层级(INV-LOCK-*):Level 0 IRQ → Level 1 preempt → Level 2a GRQ → Level 3a zone / 3b futex bucket → Level 4 waiter slot;SleepMutex 位于层级之外;VFS_MUTATION_LOCK → EXT4_BIG_LOCK → I/O 为文件侧序;INV-LOCK-8 系规则约束嵌套细节。任何新锁对先在此具名,再决定是否上编译期键。</p>
+
+    <h2 id="typed-keys"><span class="anchor">§2</span>防线一:类型化锁键(D-11,编译期)</h2>
+    <ul>
+      <li><b>机制</b>:锁序类携带零尺寸键类型(<code>GrqKey</code>、<code>FutexBucketKey</code>、<code>NetQueueKey</code>、<code>NetStatsKey</code>);一条允许的嵌套是显式的 <code>impl CanNestInside&lt;Outer&gt; for Inner</code>;持锁 guard 铸造零尺寸 NestProof,获取嵌套锁须消费 proof(<code>lock_nested</code>/<code>lock_irqsave_nested</code>)—— impl 不存在则不编译。<b>运行时成本为零</b>(键为 PhantomData;获取路径内联为原协议指令)。</li>
+      <li><b>覆盖切片</b>:GRQ 本锁(RawSpinlock→KeyedRawSpinlock&lt;GrqKey&gt;);futex 哈希桶 + 唤醒链(桶内唤醒嵌套 GRQ 是日常路径,反向 = 全机死锁);futex WAITER_POOL 槽锁。</li>
+      <li><b>实战记录(2b092c49 撤回事件)</b>:首次 GRQ 键化因 API 形态缺陷失败 —— <code>KeyedRawSpinlock::lock()</code> 返回 guard,而既有的裸 <code>self.lock.lock();</code> 语句<b>丢弃</b>了它,Drop 在语句末释放锁:每个"持 GRQ"区段实际未排除(13 启动配对二分:6/6 x86 exitwalk 启动在 CFS timeline btree 遍历 panic,riscv64 R74 双重运行)。定罪 623c4736、根因 75dbf637;两键化 guard 类型此后 <code>#[must_use]</code>;协议封装层永不触碰返回 guard 的 lock(取 surface lock_claim/try_lock_claim/unlock)。该事故成为 guard 所有权纪律的实例教材。</li>
+    </ul>
+
+    <h2 id="watchdog"><span class="anchor">§3</span>防线二:自旋看门狗(运行期)</h2>
+    <ul>
+      <li><code>RawSpinlock::DEADLOCK_WARN_ITERS = 100,000,000</code>:自旋计数越限打印告警(SBI 直写,不依赖 printk;含 cpu、锁地址、ra)。</li>
+      <li><code>dfx=watchdog</code>:告警后自动全任务快照(taskdump 路径)。</li>
+      <li>编译期 feature <code>dfx-lock-owner</code>:每次加/解锁一次原子存储;告警携带 <code>holder=&lt;cpu&gt;</code> + 持有者任务 + 堆跨度 + 每唯一锁一次 REMOTE-BT 跨 CPU 栈捕获(经 IRQ_WORK IPI)—— 持有者自陷于 IF=0 时其自身 tick 已死,必须由观察者点名。</li>
+    </ul>
+
+    <h2 id="model-checking"><span class="anchor">§4</span>防线三:模型检查与形式验证</h2>
+    <ul>
+      <li><b>SPIN</b>(<code>kernel/verify/spin/</code>,4 模型:lock_ordering/futex_wait_wake/interrupt_preempt/sched_enqueue_dequeue):对已文档化路径做无死锁证明;关键嵌套(INV-LOCK-5:bucket_lock → GRQ 允许,GRQ → bucket 禁止)在模型中显式。</li>
+      <li><b>Kani</b>:159 个 <code>#[kani::proof]</code> harness 对全输入证明核心 unsafe 代码与协议不变量。</li>
+      <li><b>loom</b>:SleepMutex 提取的状态机交错模型检查(8 场景)—— 启用头 90 秒即抓到一个真实 pid-0 递归缺陷(011a71c5);Kani 证 INV-M1..M5。</li>
+      <li>三者共同覆盖"未具名锁对 + 未建模路径"之外的抽象层:具体路径由 SPIN,具体代码由 Kani,并发交错由 loom。</li>
+    </ul>
+
+    <h2 id="lockdep-lite"><span class="anchor">§5</span>lockdep-lite(运行期锁序记录:状态如实)</h2>
+    <p>参考内核 lockdep 的形态(锁类图 + 运行期环检测)在 Rux 的实现位置:<b>规划中,未进主线</b>。缺口表(<code>docs/development/dfx-align-plan.md</code>)登记 Locking | lockdep 类 | absent;P0(静态锁序注册表 + 启动期校验)与 P1(运行期获取记录 + 新边即时查环 + 双锁名/获取点 splat)在实现线分支上,过门禁前不并入。本页列出的三道防线是当前主线上的实际覆盖 —— 声明这一差距本身是可观测性诚实的一部分。</p>
+
+    <h2 id="hunt-wedge"><span class="anchor">§6</span>hunt-wedge:挂起自动捕获</h2>
+    <pre><code>./scripts/test/hunt-wedge.sh [rounds]   <span class="c"># 默认 6 轮;捕获即停。退出码 0=抓到, 2=未复现</span></code></pre>
+    <ul>
+      <li>自动构建带 <code>dfx-lock-owner</code> 的内核,循环注入 smoke + nettest + pipe-bomb 负载;盯两类挂起 —— A 类:锁死锁告警;B 类:管道 &gt;30 s 无输出。</li>
+      <li>命中即经 QEMU monitor 抓每 CPU 寄存器/栈/反汇编至 <code>/tmp/rux-hunt/</code>,并保留当轮 kernel.elf。</li>
+      <li>分析三步:hunt.log 分类挂起类型 → <code>addr2line -e /tmp/rux-hunt/kernel.elf -f -C</code> 符号化 hunt.dump 的 pc=/ra= → 扫栈字中内核 ra 值还原调用链。</li>
+    </ul>
+
+    <h2 id="practices"><span class="anchor">§7</span>实践守则</h2>
+    <ol>
+      <li><b>先怀疑自己的锁序</b>:出现死锁嫌疑时,第一步是对照 lock-ordering.md 复核调用链的每一层获取序,而非直接怀疑硬件或调度器。</li>
+      <li><b>新锁对必具名</b>:进入 lock-ordering.md 层级;高频且易错的嵌套对上编译期键(D-11)。</li>
+      <li><b>guard 纪律</b>:keyed lock 返回值必须绑定(#[must_use] 强制);协议封装走 claim surface。</li>
+      <li><b>告警读法</b>:看门狗告警的三要素 = 自旋 CPU、锁地址、ra —— 锁地址定对象,ra 定获取点;配 dfx-lock-owner 的 holder 行交叉定位持有者。</li>
+      <li><b>复现</b>:THREAD=single make run 确定性复现;hunt-wedge 自动化注入。</li>
+    </ol>
+
+    <div class="callout">正本:<code>docs/architecture/lock-ordering.md</code>(INV-LOCK 全表)、<code>docs/architecture/design-divergences.md</code> D-11。代码:<code>kernel/src/sync/</code>(spinlock/preempt/percpu)、<code>kernel/verify/</code>(spin/kani/loom)。观测:lock 组事件 + rux:spinwatch(见 <a href="tracepoints.html">tracepoint 框架</a>);<code>dfx-lock-owner</code> feature。</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">返回首页</a></span>
+
+      <span class="foot-stats">本站访问 <span id="busuanzi_value_site_pv"></span> 次 · 访客 <span id="busuanzi_value_site_uv"></span> 人</span></div>
+  </div>
+</footer>
+
+<script src="../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>

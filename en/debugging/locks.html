@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lock debugging · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">Home</a>
+      <a href="../architecture/design.html">Architecture</a>
+      <a href="../performance/index.html">Performance</a>
+      <a href="../security/index.html">Security</a>
+      <a href="../testing/index.html">Testing</a>
+      <a href="index.html">Debugging</a>
+      <a href="../guides/getting-started.html">Getting started</a>
+      <a href="../progress/roadmap.html">Progress</a>
+      <a href="../guestbook.html">Feedback</a>
+      <span class="lang-sw"><a class="on" href="../../debugging/locks.html">中文</a><a href="locks.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="../architecture/design.html">Design deep-dive</a>
+    <a href="../architecture/scheduler.html">Scheduler</a>
+    <a href="../architecture/memory.html">Memory management</a>
+    <a href="../architecture/filesystem.html">Filesystem</a>
+    <a href="../architecture/ipc.html">IPC</a>
+    <a href="../architecture/boot.html">Boot flow</a>
+    <a href="../architecture/interrupts.html">Interrupts &amp; timers</a>
+    <a href="../architecture/structure.html">Code layout</a>
+    <a href="../architecture/riscv64.html">Porting guide</a>
+    <a href="../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Debugging</div>
+    <a href="index.html">Debugging guide</a>
+    <a href="tracepoints.html">Tracepoints</a>
+    <a href="perf.html">Performance debugging</a>
+    <a class="on" href="locks.html">锁调试</a>
+    <a href="memory.html">Memory forensics</a>
+    <a href="panic.html">Panic &amp; symbols</a>
+    <div class="grp">Performance</div>
+    <a href="../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../security/index.html">Security &amp; verification</a>
+    <div class="grp">Testing</div>
+    <a href="../testing/index.html">Overview</a>
+    <a href="../testing/ci-pipeline.html">CI pipeline</a>
+    <a href="../testing/ltp.html">LTP scan</a>
+    <a href="../testing/ltp-full.html">LTP full cases</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT audit</a>
+    <a href="../testing/stability.html">Stability</a>
+    <a href="../testing/stress.html">Stress</a>
+    <a href="../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../guides/getting-started.html">Getting started</a>
+    <a href="../guides/development.html">Contributing</a>
+    <a href="../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../progress/roadmap.html">Roadmap</a>
+    <a href="../progress/changelog.html">Changelog</a>
+    <a href="../progress/quickref.html">Commands</a>
+    <div class="grp">Community</div>
+    <a href="../guestbook.html">Guestbook</a>
+  </aside>
+
+    <article class="doc-main">
+    <h1>Lock debugging</h1>
+    <div class="sub">Four defense lines against lock-ordering defects: compile-time lock keys, the runtime watchdog, model checking, and automated capture — each line's design, coverage and field records · Canonical doc: docs/architecture/lock-ordering.md (INV-LOCK-*), kernel/src/sync/, kernel/verify/</div>
+
+    <h2 id="layers"><span class="anchor">§1</span>The lock-order hierarchy (the design-side input)</h2>
+    <p><code>docs/architecture/lock-ordering.md</code> maintains the named lock-order hierarchy (INV-LOCK-*): Level 0 IRQ → Level 1 preempt → Level 2a GRQ → Level 3a zone / 3b futex bucket → Level 4 waiter slot; SleepMutex sits outside the hierarchy; VFS_MUTATION_LOCK → EXT4_BIG_LOCK → I/O is the filesystem-side order; the INV-LOCK-8 rules constrain nesting details. Any new lock pair is named here first, then decides whether it earns a compile-time key.</p>
+
+    <h2 id="typed-keys"><span class="anchor">§2</span>Defense line 1: typed lock keys (D-11, compile time)</h2>
+    <ul>
+      <li><b>Mechanism</b>: lock-order classes carry zero-sized key types (<code>GrqKey</code>, <code>FutexBucketKey</code>, <code>NetQueueKey</code>, <code>NetStatsKey</code>); a permitted nesting is an explicit <code>impl CanNestInside&lt;Outer&gt; for Inner</code>; a held guard mints a zero-sized NestProof, and acquiring the nested lock consumes the proof (<code>lock_nested</code>/<code>lock_irqsave_nested</code>) — without the impl it does not compile. <b>Zero runtime cost</b> (the key is PhantomData; the acquire paths inline to the raw protocol's instructions).</li>
+      <li><b>Covered slices</b>: the GRQ lock itself (RawSpinlock→KeyedRawSpinlock&lt;GrqKey&gt;); the futex hash buckets + the wake chain (waking under the bucket lock with GRQ nested is the everyday path; the reverse is a machine-wide deadlock); the futex WAITER_POOL slot locks.</li>
+      <li><b>Field record (the 2b092c49 withdrawal incident)</b>: the first GRQ keying failed on an API-shape bug — <code>KeyedRawSpinlock::lock()</code> returns a guard, but a pre-existing bare <code>self.lock.lock();</code> statement <b>discarded</b> it, and Drop released the lock at statement end: every "GRQ-held" section actually ran unexcluded (a 13-boot paired bisection: 6/6 x86 exitwalk boots panicked in the CFS timeline btree walk, riscv64 R74 double-run). Convicted in 623c4736, root-caused in 75dbf637; both keyed guard types are <code>#[must_use]</code> since; protocol wrappers never touch the guard-returning lock (the claim surface lock_claim/try_lock_claim/unlock). The incident is the working textbook for guard-ownership discipline.</li>
+    </ul>
+
+    <h2 id="watchdog"><span class="anchor">§3</span>Defense line 2: the spin watchdog (runtime)</h2>
+    <ul>
+      <li><code>RawSpinlock::DEADLOCK_WARN_ITERS = 100,000,000</code>: past the spin threshold a warning prints (SBI-direct, independent of printk; cpu, lock address, ra).</li>
+      <li><code>dfx=watchdog</code>: an automatic whole-task snapshot follows the warning (the taskdump path).</li>
+      <li>The compile-time feature <code>dfx-lock-owner</code>: one atomic store per lock/unlock; the warning carries <code>holder=&lt;cpu&gt;</code> + the holder task + the heap span + one REMOTE-BT cross-CPU stack capture per unique lock (via an IRQ_WORK IPI) — a holder stuck at IF=0 has a dead tick of its own and must be named by an observer.</li>
+    </ul>
+
+    <h2 id="model-checking"><span class="anchor">§4</span>Defense line 3: model checking and formal verification</h2>
+    <ul>
+      <li><b>SPIN</b> (<code>kernel/verify/spin/</code>, 4 models: lock_ordering/futex_wait_wake/interrupt_preempt/sched_enqueue_dequeue): deadlock-freedom proofs over documented paths; the key nesting (INV-LOCK-5: bucket_lock → GRQ allowed, GRQ → bucket forbidden) is explicit in the model.</li>
+      <li><b>Kani</b>: 159 <code>#[kani::proof]</code> harnesses prove the core unsafe code and protocol invariants for all inputs.</li>
+      <li><b>loom</b>: an interleaving model check of the extracted SleepMutex state machine (8 scenarios) — within its first 90 seconds it caught a real pid-0 recursion defect (011a71c5); Kani proves INV-M1..M5.</li>
+      <li>Together the three cover the layers beyond "unnamed lock pairs + unmodeled paths": concrete paths by SPIN, concrete code by Kani, concurrent interleavings by loom.</li>
+    </ul>
+
+    <h2 id="lockdep-lite"><span class="anchor">§5</span>lockdep-lite (runtime order recording: the honest status)</h2>
+    <p>The reference kernel's lockdep shape (a lock-class graph + runtime cycle detection) has this position in Rux: <b>planned, not in main</b>. The gap table (<code>docs/development/dfx-align-plan.md</code>) records Locking | lockdep-class | absent; P0 (a static lock-order registry + boot-time validation) and P1 (runtime acquire recording + cycle detection on new edges + two-lock-name/acquire-point splats) live on the implementation branch and will not merge before passing the gate. The three defense lines above are the actual coverage on main — stating this gap is itself part of observability honesty.</p>
+
+    <h2 id="hunt-wedge"><span class="anchor">§6</span>hunt-wedge: automated hang capture</h2>
+    <pre><code>./scripts/test/hunt-wedge.sh [rounds]   <span class="c"># 6 rounds default; stops on capture. exit 0=captured, 2=not reproduced</span></code></pre>
+    <ul>
+      <li>Builds a kernel with <code>dfx-lock-owner</code> automatically, then loops smoke + nettest + pipe-bomb workloads; watches two hang classes — class A: lock-deadlock warnings; class B: a pipe silent for &gt;30 s.</li>
+      <li>On a hit, captures per-CPU registers/stacks/disassembly through the QEMU monitor into <code>/tmp/rux-hunt/</code> and keeps that round's kernel.elf.</li>
+      <li>The three-step analysis: classify the hang from hunt.log → symbolize hunt.dump's pc=/ra= with <code>addr2line -e /tmp/rux-hunt/kernel.elf -f -C</code> → scan the stack words for kernel ra values to restore the call chain.</li>
+    </ul>
+
+    <h2 id="practices"><span class="anchor">§7</span>Working practices</h2>
+    <ol>
+      <li><b>Suspect your own lock order first</b>: when a deadlock is suspected, the first step is re-checking every acquire level of the call chain against lock-ordering.md — not blaming the hardware or the scheduler.</li>
+      <li><b>Every new lock pair gets named</b>: into the lock-ordering.md hierarchy; frequent, error-prone nesting pairs earn a compile-time key (D-11).</li>
+      <li><b>Guard discipline</b>: keyed-lock return values must bind (#[must_use] enforces it); protocol wrappers use the claim surface.</li>
+      <li><b>Reading a warning</b>: the watchdog's three facts = the spinning CPU, the lock address, the ra — the address identifies the object, the ra the acquire point; cross-locate the holder with the dfx-lock-owner holder line.</li>
+      <li><b>Reproduction</b>: THREAD=single make run for deterministic reproduction; hunt-wedge for automated injection.</li>
+    </ol>
+
+    <div class="callout">Canonical doc: <code>docs/architecture/lock-ordering.md</code> (the full INV-LOCK table), <code>docs/architecture/design-divergences.md</code> D-11. Code: <code>kernel/src/sync/</code> (spinlock/preempt/percpu), <code>kernel/verify/</code> (spin/kani/loom). Observation: the lock event group + rux:spinwatch (see <a href="tracepoints.html">tracepoints</a>); the <code>dfx-lock-owner</code> feature.</div>
+  
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to home</a></span>
+
+      <span class="foot-stats">Site visits <span id="busuanzi_value_site_pv"></span> · Visitors <span id="busuanzi_value_site_uv"></span></span></div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>
