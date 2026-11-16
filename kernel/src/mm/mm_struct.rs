@@ -367,6 +367,16 @@ impl MmFlags {
     pub const MMF_OOM_DISABLE: u64 = 0x00000010;
     /// OOM score adjustment
     pub const MMF_OOM_SCORE_ADJ: u64 = 0x00000020;
+    /// coredump_filter byte (LIVE core-filter semantics, /proc/[pid]/
+    /// coredump_filter rw): stored in bits 16-23. Default 0x33 — the
+    /// reference's filter (anon private + anon shared + ELF headers +
+    /// private hugetlb); our dump plan reads the class bits it
+    /// implements (anon private bit 0, anon shared bit 1, file private
+    /// bit 2, file shared bit 3).
+    pub const MMF_DUMP_FILTER_SHIFT: u64 = 16;
+    pub const MMF_DUMP_FILTER_MASK: u64 = 0xFF << MMF_DUMP_FILTER_SHIFT;
+    /// Reference default filter: bits 0|1|4|5.
+    pub const MMF_DUMP_FILTER_DEFAULT: u64 = 0x33 << MMF_DUMP_FILTER_SHIFT;
 }
 
 impl MmStruct {
@@ -459,7 +469,7 @@ impl MmStruct {
             mm_users: AtomicI32::new(1),
             mm_count: AtomicI32::new(1),
             // Other
-            flags: AtomicU64::new(0),
+            flags: AtomicU64::new(MmFlags::MMF_DUMP_FILTER_DEFAULT),
             owner_pid: AtomicI32::new(-1),
             exe_text_key: Spinlock::new(None),
             cpu_mask: AtomicU64::new(0),
@@ -1093,6 +1103,24 @@ impl MmStruct {
     #[inline]
     pub fn has_flag(&self, flag: u64) -> bool {
         self.flags.load(Ordering::Acquire) & flag != 0
+    }
+
+    /// Read the coredump_filter byte (bits 16-23 of mm flags).
+    #[inline]
+    pub fn core_filter(&self) -> u32 {
+        ((self.flags.load(Ordering::Acquire) & Self::MMF_DUMP_FILTER_MASK)
+            >> Self::MMF_DUMP_FILTER_SHIFT) as u32
+    }
+
+    /// Write the coredump_filter byte (returns the previous value).
+    #[inline]
+    pub fn set_core_filter(&self, filter: u32) -> u32 {
+        let prev = self.core_filter();
+        let f = self.flags.load(Ordering::Acquire);
+        let next = (f & !Self::MMF_DUMP_FILTER_MASK)
+            | (((filter as u64) & 0xFF) << Self::MMF_DUMP_FILTER_SHIFT);
+        self.flags.store(next, Ordering::Release);
+        prev
     }
 
     // ==================== Owner ====================

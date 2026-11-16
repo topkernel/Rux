@@ -1299,6 +1299,32 @@ pub fn generate_oom_score_adj(pid: u64) -> Vec<u8> {
     format!("{}\n", adj).into_bytes()
 }
 
+/// Generate /proc/[pid]/coredump_filter content
+///
+/// The mm's core-dump class filter byte, printed like the reference's
+/// kstrtox output ("00000033" + newline; the default 0x33 = anon
+/// private + anon shared + ELF headers + private hugetlb). LTP
+/// madvise08 scans it with "%x" in setup and TCONFs when the file is
+/// missing.
+pub fn generate_core_filter(pid: u64) -> Vec<u8> {
+    let task = if crate::process::current_pid() as u64 == pid {
+        crate::process::current_task()
+    } else {
+        crate::process::find_task_by_pid(pid as u32)
+    };
+    let filter = match task {
+        Some(t) => {
+            // SAFETY: task is a live entry from the process table.
+            match unsafe { (*t).address_space_arc() } {
+                Some(mm) => mm.core_filter(),
+                None => 0,
+            }
+        }
+        None => 0,
+    };
+    format!("{:08x}\n", filter).into_bytes()
+}
+
 // ============================================================================
 // /proc/[pid]/attr/* — SELinux label files (OH Phase 2)
 // ============================================================================

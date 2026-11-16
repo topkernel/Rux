@@ -855,7 +855,13 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
             // with ENOMEM, like Linux's memcg charge failure here.
             // Simplification: virtual mapping length is the charge unit
             // (an RSS approximation); uncharge happens at munmap/exit.
-            if !crate::sched::cgroup::cgroup_memory_charge(actual_length) {
+            // The memory.stat class follows the mapping kind.
+            let cg_class = if map_flags & map::MAP_ANONYMOUS != 0 {
+                crate::sched::cgroup::MemClass::Anon
+            } else {
+                crate::sched::cgroup::MemClass::File
+            };
+            if !crate::sched::cgroup::cgroup_memory_charge_class(actual_length, cg_class) {
                 static NC: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
                 if NC.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
@@ -2265,6 +2271,11 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                             crate::mm::page::VirtAddr::new(range_start),
                             full_flags,
                         );
+                        // Vma::new forces VM_DUMPABLE (fresh-mapping
+                        // default); a split must carry the source VMA's
+                        // EXACT bits (MADV_DONTDUMP'd ranges survive
+                        // mprotect with the bit still cleared).
+                        h.set_flags(full_flags);
                         h.set_type(old_type);
                         h.set_origin(old_origin);
                         h.set_file_fd(old_fd);
@@ -2282,6 +2293,8 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                             crate::mm::page::VirtAddr::new(v_end),
                             full_flags,
                         );
+                        // Exact flags (see head piece — VM_DUMPABLE note).
+                        t.set_flags(full_flags);
                         t.set_type(old_type);
                         t.set_origin(old_origin);
                         t.set_file_fd(old_fd);
@@ -2296,13 +2309,16 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                     // new permission bits, non-permission flags preserved.
                     let cov_start = v_start.max(range_start);
                     let cov_end = v_end.min(range_end);
+                    let cov_flags = crate::mm::vma::VmaFlags::from_bits(
+                        (full_flags.bits() & !0x7) | perm_bits,
+                    );
                     let mut cov = crate::mm::vma::Vma::new(
                         crate::mm::page::VirtAddr::new(cov_start),
                         crate::mm::page::VirtAddr::new(cov_end),
-                        crate::mm::vma::VmaFlags::from_bits(
-                            (full_flags.bits() & !0x7) | perm_bits,
-                        ),
+                        cov_flags,
                     );
+                    // Exact flags (VM_DUMPABLE survives a cleared source).
+                    cov.set_flags(cov_flags);
                     cov.set_type(old_type);
                     cov.set_origin(crate::mm::vma::VmaOrigin::from_bits(
                         crate::mm::vma::VmaOrigin::MPROTECT,
@@ -3429,7 +3445,136 @@ pub fn sys_madvise(args: [u64; 6]) -> i64 {
             0
         }
         MADV_DONTDUMP | MADV_DODUMP => {
-            // Core dump related, ignored in simplified implementation
+            // Core-dump advice (LTP madvise08): clear/set the VM_DUMPABLE
+            // bit on every VMA in the advised range, splitting at the
+            // boundaries exactly like mprotect (head/tail keep the
+            // original stamp; the covered piece carries the change).
+            // The dump plan additionally filters by the mm's
+            // coredump_filter class bits, so a DUMPABLE VMA still needs
+            // its class bit set in /proc/self/coredump_filter.
+            let dumpable = advice == MADV_DODUMP;
+            let range_start = addr;
+            let range_end = end_of_range;
+            let mut vma_mgr = address_space.vma_write();
+
+            let mut starts: alloc::vec::Vec<crate::mm::page::VirtAddr> =
+                alloc::vec::Vec::new();
+            for v in vma_mgr.iter() {
+                if v.end().as_usize() > range_start
+                    && v.start().as_usize() < range_end
+                {
+                    starts.push(v.start());
+                }
+            }
+
+            for start in starts {
+                let pinned_file = address_space.get_vma_file(start.as_usize());
+                let vma = match vma_mgr.find_mut(start) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                let v_start = vma.start().as_usize();
+                let v_end = vma.end().as_usize();
+                if v_end <= range_start || v_start >= range_end {
+                    continue;
+                }
+
+                let full_flags = vma.flags();
+                let old_type = vma.vma_type();
+                let old_fd = vma.file_fd();
+                let old_fsz = vma.file_size();
+                let old_off = vma.offset();
+                let old_origin = vma.origin();
+
+                let build =
+                    |s: usize,
+                     e: usize,
+                     off: usize,
+                     flags: crate::mm::vma::VmaFlags,
+                     origin: crate::mm::vma::VmaOrigin| {
+                        let mut piece = crate::mm::vma::Vma::new(
+                            crate::mm::page::VirtAddr::new(s),
+                            crate::mm::page::VirtAddr::new(e),
+                            flags,
+                        );
+                        piece.set_type(old_type);
+                        piece.set_origin(origin);
+                        piece.set_file_fd(old_fd);
+                        piece.set_file_size(old_fsz);
+                        piece.set_offset(off);
+                        // Vma::new forces VM_DUMPABLE as the default for
+                        // fresh mappings; a split must carry the source
+                        // VMA's EXACT bits (a DONTDUMP'd range keeps the
+                        // bit cleared across head/tail/covered pieces).
+                        piece.set_flags(flags);
+                        piece
+                    };
+
+                // Head piece [v_start, range_start): keep original flags.
+                let head = if v_start < range_start {
+                    Some(build(
+                        v_start,
+                        range_start,
+                        old_off,
+                        full_flags,
+                        old_origin,
+                    ))
+                } else {
+                    None
+                };
+                // Tail piece [range_end, v_end): keep original flags.
+                let tail = if v_end > range_end {
+                    Some(build(
+                        range_end,
+                        v_end,
+                        old_off + (range_end - v_start),
+                        full_flags,
+                        old_origin,
+                    ))
+                } else {
+                    None
+                };
+
+                // Covered piece: DUMPABLE per the advice, everything else
+                // preserved (no permission change — origin stamp kept).
+                let cov_start = v_start.max(range_start);
+                let cov_end = v_end.min(range_end);
+                let mut cov_flags = full_flags.bits();
+                if dumpable {
+                    cov_flags |= crate::mm::vma::VmaFlags::DUMPABLE;
+                } else {
+                    cov_flags &= !crate::mm::vma::VmaFlags::DUMPABLE;
+                }
+                let cov = build(
+                    cov_start,
+                    cov_end,
+                    old_off + (cov_start - v_start),
+                    crate::mm::vma::VmaFlags::from_bits(cov_flags),
+                    old_origin,
+                );
+
+                let _ = vma_mgr.remove(crate::mm::page::VirtAddr::new(v_start));
+                address_space.unpin_vma_file(v_start);
+                if let Some(h) = head {
+                    let hs = h.start().as_usize();
+                    let _ = vma_mgr.add(h);
+                    if let Some(f) = pinned_file.as_ref() {
+                        address_space.pin_vma_file(hs, f.clone());
+                    }
+                }
+                let cs = cov.start().as_usize();
+                let _ = vma_mgr.add(cov);
+                if let Some(f) = pinned_file.as_ref() {
+                    address_space.pin_vma_file(cs, f.clone());
+                }
+                if let Some(t) = tail {
+                    let ts = t.start().as_usize();
+                    let _ = vma_mgr.add(t);
+                    if let Some(f) = pinned_file.as_ref() {
+                        address_space.pin_vma_file(ts, f.clone());
+                    }
+                }
+            }
             0
         }
         _ => {

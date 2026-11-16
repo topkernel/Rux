@@ -70,10 +70,16 @@ pub enum CgroupFileKind {
     PidsCurrent = 11,
     /// cgroup v1 compat alias for cgroup.procs
     Tasks = 12,
+    /// cgroup.kill (writable): SIGKILL every member task (reference
+    /// 5.14+, LTP cgroup_core03).
+    CgroupKill = 13,
+    /// memory.stat (read-only): per-class memory usage rows (v2 key
+    /// names; LTP memcontrol02 reads anon/file).
+    MemoryStat = 14,
 }
 
 /// (name, kind, writable) for every control file, readdir order.
-const CONTROL_FILES: [(&str, CgroupFileKind, bool); 12] = [
+const CONTROL_FILES: [(&str, CgroupFileKind, bool); 14] = [
     ("cgroup.procs", CgroupFileKind::CgroupProcs, true),
     ("cgroup.controllers", CgroupFileKind::CgroupControllers, false),
     ("cgroup.subtree_control", CgroupFileKind::CgroupSubtreeControl, true),
@@ -83,8 +89,10 @@ const CONTROL_FILES: [(&str, CgroupFileKind, bool); 12] = [
     ("cpu.stat", CgroupFileKind::CpuStat, false),
     ("memory.max", CgroupFileKind::MemoryMax, true),
     ("memory.current", CgroupFileKind::MemoryCurrent, false),
+    ("memory.stat", CgroupFileKind::MemoryStat, false),
     ("pids.max", CgroupFileKind::PidsMax, true),
     ("pids.current", CgroupFileKind::PidsCurrent, false),
+    ("cgroup.kill", CgroupFileKind::CgroupKill, true),
     ("tasks", CgroupFileKind::Tasks, true),
 ];
 
@@ -203,6 +211,22 @@ fn generate_memory_current(node: &CgroupNode) -> Vec<u8> {
     format!("{}\n", cgroup::node_memory_current(node)).into_bytes()
 }
 
+/// memory.stat (v2 key names, reference net/core order for the first/// block). anon/file carry the real per-class charges; the remaining
+/// rows exist so parsers find their keys (honest zeros — this kernel
+/// does not account those classes yet).
+fn generate_memory_stat(node: &CgroupNode) -> Vec<u8> {
+    let anon = cgroup::node_memory_anon(node);
+    let file = cgroup::node_memory_file(node);
+    let current = cgroup::node_memory_current(node);
+    format!(
+        "anon {}\nfile {}\nkernel 0\nkernel_stack 0\npagetables 0\n\
+         sock 0\nshmem 0\nfile_mapped 0\nfile_dirty 0\nfile_writeback 0\n\
+         anon_thp 0\nfile_thp 0\nshmem_thp 0\ntotal_memory {}\n",
+        anon, file, current
+    )
+    .into_bytes()
+}
+
 fn generate_pids_max(node: &CgroupNode) -> Vec<u8> {
     let max = node.controllers.lock_irqsave().pids_max.load(Ordering::Acquire);
     if max == LIMIT_MAX {
@@ -228,6 +252,8 @@ fn generate_content(node: &CgroupNode, kind: CgroupFileKind) -> Vec<u8> {
         CgroupFileKind::CpuStat => generate_cpu_stat(node),
         CgroupFileKind::MemoryMax => generate_memory_max(node),
         CgroupFileKind::MemoryCurrent => generate_memory_current(node),
+        CgroupFileKind::MemoryStat => generate_memory_stat(node),
+        CgroupFileKind::CgroupKill => b"0\n".to_vec(),
         CgroupFileKind::PidsMax => generate_pids_max(node),
         CgroupFileKind::PidsCurrent => generate_pids_current(node),
     }
@@ -356,6 +382,42 @@ fn apply_pids_max(node: &CgroupNode, input: &str) -> i32 {
     0
 }
 
+/// cgroup.kill write: "1" SIGKILLs every member task (reference 5.14+
+/// semantics: the kill also covers descendants; "0" is a no-op — the
+/// file reads back whether a kill was requested, never clears one).
+/// Membership drains through cgroup_exit as each task dies, so the
+/// follow-up cgroup.procs read observes the list shrinking (LTP
+/// cgroup_core03 asserts count 0 after reaping).
+fn apply_cgroup_kill(node: &Arc<CgroupNode>, input: &str) -> i32 {
+    match input.trim() {
+        "1" => {}
+        "0" | "" => return 0,
+        _ => return errno::Errno::InvalidArgument.as_neg_i32(),
+    }
+    // Snapshot the subtree membership first (the kill walk must not hold
+    // a node tasks lock across the signal — SIGKILL delivery can run
+    // exit paths that take the same lock).
+    let mut victims: Vec<u32> = Vec::new();
+    {
+        let mut stack: Vec<&CgroupNode> = Vec::new();
+        // SAFETY: nodes are never freed.
+        stack.push(unsafe { &*(Arc::as_ptr(node) as *const CgroupNode) });
+        while let Some(n) = stack.pop() {
+            victims.extend(n.tasks.lock_irqsave().iter().copied());
+            for child in n.children.lock_irqsave().values() {
+                // SAFETY: child Arcs keep the nodes alive.
+                stack.push(unsafe {
+                    &*(Arc::as_ptr(child) as *const CgroupNode)
+                });
+            }
+        }
+    }
+    for pid in victims {
+        let _ = crate::signal::send_signal(pid, 9); // SIGKILL
+    }
+    0
+}
+
 fn apply_content(node: &Arc<CgroupNode>, kind: CgroupFileKind, buf: &[u8]) -> i32 {
     let input = trim(buf);
     match kind {
@@ -372,6 +434,7 @@ fn apply_content(node: &Arc<CgroupNode>, kind: CgroupFileKind, buf: &[u8]) -> i3
             // SAFETY: see above.
             apply_memory_max(unsafe { &*(Arc::as_ptr(node) as *const CgroupNode) }, input)
         }
+        CgroupFileKind::CgroupKill => apply_cgroup_kill(node, input),
         CgroupFileKind::PidsMax => {
             // SAFETY: see above.
             apply_pids_max(unsafe { &*(Arc::as_ptr(node) as *const CgroupNode) }, input)
@@ -593,6 +656,38 @@ unsafe fn ino_data(inode: &Inode) -> Option<&'static CgroupInoData> {
     inode
         .private_data
         .map(|p| &*(p as *const CgroupInoData))
+}
+
+/// Resolve a cgroup DIRECTORY fd to its node — the clone3
+/// CLONE_INTO_CGROUP face (LTP clone303 passes a dirfd opened on the
+/// cgroup). Reference order (kernel/fork.c cgroup_css_set_fork): an
+/// unknown fd is EBADF, a non-directory or non-cgroupfs file is
+/// ENOTDIR.
+pub fn cgroup_node_from_fd(
+    fd: usize,
+) -> Result<alloc::sync::Arc<crate::sched::cgroup::CgroupNode>, i32> {
+    use crate::fs::inode::FS_ID_CGROUPFS;
+    let fdtable = crate::sched::get_current_fdtable()
+        .ok_or(errno::Errno::BadFileDescriptor.as_neg_i32())?;
+    let file = fdtable
+        .get_file(fd)
+        .ok_or(errno::Errno::BadFileDescriptor.as_neg_i32())?;
+    // SAFETY: inode is stored once at open time; read-only access here.
+    let inode = unsafe { (*file.inode.get()).clone() };
+    let inode = inode.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+    if inode.fs_id != FS_ID_CGROUPFS {
+        return Err(errno::Errno::NotADirectory.as_neg_i32());
+    }
+    if !inode.mode.is_dir() {
+        return Err(errno::Errno::NotADirectory.as_neg_i32());
+    }
+    // SAFETY: the leaked CgroupInoData outlives this call (never freed).
+    let data = unsafe { ino_data(&inode) }
+        .ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+    if data.kind != CgroupFileKind::Dir {
+        return Err(errno::Errno::NotADirectory.as_neg_i32());
+    }
+    Ok(data.node.clone())
 }
 
 // ============================================================================

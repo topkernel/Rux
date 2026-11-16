@@ -88,6 +88,32 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
     let flags = flags & 0xffff_ffff;
     let stack = args[1];
     let parent_tid = args[2] as *mut i32;
+
+    // CLONE_PIDFD: the pointer rides parent_tid (kernel_clone_args) and
+    // must be writable BEFORE the child is created — same pre-child
+    // fault probe as clone3's (do_clone runs after the COW mm copy has
+    // write-protected the parent's pages, so the check cannot live
+    // there; LTP clone302 "invalid pidfd" arms an unwritable word).
+    if flags & 0x00001000 != 0 && !parent_tid.is_null() {
+        let root = crate::sched::current()
+            .and_then(|t| t.address_space())
+            .map(|a| a.root_ppn());
+        let ok = match root {
+            Some(root_ppn) => unsafe {
+                crate::arch::mm::mm_ops::PageTableWalker::walk(
+                    root_ppn,
+                    parent_tid as usize as u64 & !0xfff,
+                )
+                .map(|(_, pte)| pte & crate::arch::mm::PageTableEntry::W != 0
+                    && pte & crate::arch::mm::PageTableEntry::U != 0)
+                .unwrap_or(false)
+            },
+            None => false,
+        };
+        if !ok {
+            return -(errno::EFAULT as i64);
+        }
+    }
     // clone syscall argument ORDER differs by arch (verified against
     // toolchain/musl-1.2.5 clone.s for both):
     //
@@ -202,6 +228,15 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
         parent_tid,
         child_tid,
         tls,
+        // Legacy CLONE_PIDFD reuses the parent_tid argument as the
+        // pidfd pointer (kernel_clone_args: pidfd = args->parent_tidptr
+        // when the flag is set; kernel/fork.c writes the fd there).
+        pidfd: if flags & 0x00001000 != 0 {
+            args[2] as *mut u32
+        } else {
+            core::ptr::null_mut()
+        },
+        cgroup: None,
         exit_signal,
     };
 
@@ -7015,9 +7050,6 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
     {
         return -(errno::EFAULT as i64);
     }
-    if size > 64 && buf[64..size].iter().any(|&b| b != 0) {
-        return -(errno::E2BIG as i64);
-    }
 
     let rd64 = |off: usize| u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
     let flags = rd64(0);
@@ -7028,6 +7060,23 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
     let stack = rd64(40);
     let stack_size = rd64(48);
     let tls = rd64(56);
+    // The 5.5/5.7 extension fields (CLONE_ARGS_SIZE_VER1 = 88):
+    // set_tid, set_tid_size, cgroup. copy_struct_from_user semantics:
+    // a caller passing more than we implement must keep the tail zero
+    // (E2BIG); bytes inside the KNOWN 88-byte struct are decoded, not
+    // treated as padding. LTP clone303 passes size 88 with cgroup set.
+    const CLONE_ARGS_SIZE_VER1: usize = 88;
+    if size > CLONE_ARGS_SIZE_VER1 && buf[CLONE_ARGS_SIZE_VER1..size].iter().any(|&b| b != 0) {
+        return -(errno::E2BIG as i64);
+    }
+    let set_tid_size = if size >= CLONE_ARGS_SIZE_VER1 { rd64(72) } else { 0 };
+    let cgroup_fd = if size >= CLONE_ARGS_SIZE_VER1 { rd64(80) } else { 0 };
+    // CLONE_SET_TID (restore-by-fork) is not implemented: a nonzero
+    // set_tid_size is EINVAL like the pre-5.5 kernels answer ENOSYS-
+    // adjacent shapes (no caller in the guest sets it today).
+    if set_tid_size != 0 {
+        return -(errno::EINVAL as i64);
+    }
 
     // clone3 keeps the exit signal in its own field; legacy CSIGNAL bits
     // in flags are rejected (kernel/fork.c clone3: "make the CSIGNAL bits
@@ -7051,8 +7100,8 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
     // CLONE_PIDFD: the pidfd field points at the user word that receives
     // the new pidfd. Probe it for writability now (before the child is
     // created): an unmapped/word address fails EFAULT (LTP clone302
-    // "invalid pidfd"). Writing the actual fd stays future work — only
-    // the fault probe is observable by current callers.
+    // "invalid pidfd"). The actual fd is installed and written by
+    // do_clone's CLONE_PIDFD block (the pointer rides CloneArgs.pidfd).
     if flags & 0x00001000 != 0 && !pidfd_ptr.is_null() {
         let root = crate::sched::current()
             .and_then(|t| t.address_space())
@@ -7070,6 +7119,14 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
             None => false,
         };
         if !ok {
+            static PF: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if PF.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+                crate::pr_warn!(
+                    "clone3-pidfd: probe fail target={:#x}",
+                    pidfd_ptr as usize,
+                );
+            }
             return -(errno::EFAULT as i64);
         }
     }
@@ -7078,6 +7135,20 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
     // clone's a1 semantics when stack_size is present; if a caller passes
     // a range we honor sp = stack + size like musl's gcompat handling.
     let sp = if stack_size > 0 { stack.wrapping_add(stack_size) } else { stack };
+
+    // CLONE_INTO_CGROUP (0x200000000, clone3 + cgroup fd, LTP clone303):
+    // resolve the target cgroup node now so a bad fd fails the syscall
+    // BEFORE a child is created (reference kernel/fork.c
+    // cgroup_css_set_fork: EBADF unknown fd, ENOTDIR non-dir).
+    const CLONE_INTO_CGROUP: u64 = 0x0000_0002_0000_0000;
+    let cgroup_target = if flags & CLONE_INTO_CGROUP != 0 {
+        match crate::fs::cgroup::cgroup_node_from_fd(cgroup_fd as usize) {
+            Ok(node) => Some(node),
+            Err(e) => return e as i64,
+        }
+    } else {
+        None
+    };
 
     // F12 heap-reserve gate — same rationale as sys_clone.
     if clone_heap_reserve_low() {
@@ -7090,6 +7161,8 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
         parent_tid,
         child_tid,
         tls,
+        pidfd: pidfd_ptr,
+        cgroup: cgroup_target,
         exit_signal: exit_signal as u8,
     };
 
