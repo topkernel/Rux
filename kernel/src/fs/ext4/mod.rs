@@ -1900,9 +1900,50 @@ pub fn ext4_fallocate_on(
 
         let _ext4_guard = EXT4_BIG_LOCK.lock();
 
+        // PUNCH-PATH DATA SYNC (falloc-wedge lane, 2026-11-16): a punch
+        // on a file whose buffered writes are still unflushed must first
+        // WRITE THOSE PAGES BACK — the reference ext4_punch_hole starts
+        // with filemap_write_and_wait_range(). Without it, the on-disk
+        // inode still carried the pre-write size (0 for a fresh file)
+        // and no extents, so the punch clamped to an empty range and
+        // returned SUCCESS as a no-op while the page cache kept serving
+        // the original bytes (LTP fallocate06's clear-check and the
+        // punchprobe: every hole byte read back nonzero,
+        // run/shell-punch3.log). Flushing materializes the data blocks
+        // and the on-disk size the punch then operates on. Callers hold
+        // no loop io claim (syscall context), so the writeback engine's
+        // re-entry discipline is satisfied; WRITEBACK_GUARD serializes
+        // against concurrent flush engines.
+        if mode & FALLOC_FL_PUNCH_HOLE != 0 {
+            let fs_id = fs as *const Ext4FileSystem as u64;
+            if let Some(vfs_ino) = crate::fs::ext4::resolve_writeback_inode(fs_id, ino as u64) {
+                crate::fs::ext4::file::ext4_flush_dirty_inode(
+                    &vfs_ino,
+                    0,
+                    u64::MAX,
+                );
+            }
+        }
+
         let mut ext4_inode = fs.read_inode(ino)?;
         if !ext4_inode.is_reg() {
             return Err(errno::Errno::DeviceOrResourceBusy.as_neg_i32()); // EBADR-ish
+        }
+        // falloc-wedge debug (bounded): name the punch's starting state.
+        if mode & FALLOC_FL_PUNCH_HOLE != 0 {
+            static PDBG: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if PDBG.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4 {
+                crate::pr_info!(
+                    "PUNCH-DBG ino={} off={} len={} disk_size={} extent={} i_blocks={}",
+                    ino,
+                    offset,
+                    len,
+                    ext4_inode.size,
+                    ext4_inode.has_extent(),
+                    ext4_inode.blocks
+                );
+            }
         }
 
         let block_size = fs.block_size as u64;
@@ -1917,8 +1958,79 @@ pub fn ext4_fallocate_on(
             if offset >= file_end {
                 return Ok(()); // nothing to punch
             }
-            let punch_first = offset / block_size;
-            let punch_last = (file_end - offset).div_ceil(block_size) + punch_first; // exclusive
+            // ALIGNED INTERIOR + ZEROED EDGES (falloc-wedge round 3,
+            // 2026-11-16): only blocks FULLY covered by the range are
+            // freed; partial edge blocks are zeroed IN PLACE, allocation
+            // kept — the reference ext4_punch_hole shape (non-bigalloc).
+            // The first cut floored/ceiled the range to block
+            // granularity, so a MISALIGNED punch clobbered the bytes
+            // just outside the range (LTP fallocate06's clear-check:
+            // memcmp of the prefix before the punched range failed,
+            // run/shell-f06c.log).
+            let interior_first = (offset + block_size - 1) / block_size;
+            let interior_last_excl = file_end / block_size;
+            let punch_first = interior_first;
+            let punch_last = interior_last_excl; // exclusive
+            // Edge byte ranges to zero in place (outside the interior).
+            let head_zero = (offset, core::cmp::min(file_end, interior_first * block_size));
+            let tail_zero = (
+                core::cmp::max(offset, interior_last_excl * block_size),
+                file_end,
+            );
+            // Zero the partial edge blocks IN PLACE (byte-sliced,
+            // allocation kept). Runs BEFORE the interior rebuild — the
+            // map is still the pre-punch one, so phys resolution is
+            // exact for both extent and indirect files. Missing blocks
+            // (holes) need nothing — they already read as zeros.
+            {
+                // phys of one file block, from the pre-punch map.
+                let resolve = |blk: u64| -> Option<u64> {
+                    if ext4_inode.has_extent() {
+                        let exts = crate::fs::ext4::extent::ext4_ext_gather(
+                            fs,
+                            &ext4_inode.block,
+                        )
+                        .ok()?;
+                        exts.iter()
+                            .find(|e| {
+                                blk >= e.ee_block as u64 && blk < e.ee_block as u64 + e.len as u64
+                            })
+                            .map(|e| e.phys + (blk - e.ee_block as u64))
+                    } else if blk < 12 {
+                        let b = ext4_inode.block[blk as usize];
+                        if b != 0 { Some(b as u64) } else { None }
+                    } else {
+                        let ind = ext4_inode.block[12] as u64;
+                        if ind == 0 { return None; }
+                        let bh = crate::fs::bio::bread(fs.device, ind)?;
+                        let o = ((blk - 12) * 4) as usize;
+                        let d = &(*bh).b_data;
+                        let b = u32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]]);
+                        crate::fs::bio::brelse(bh);
+                        if b != 0 { Some(b as u64) } else { None }
+                    }
+                };
+                for &(zfrom, zto) in &[head_zero, tail_zero] {
+                    let mut off = zfrom;
+                    while off < zto {
+                        let blk = off / block_size;
+                        let in_blk = off % block_size;
+                        let n = core::cmp::min(zto - off, block_size - in_blk);
+                        if let Some(phys) = resolve(blk) {
+                            if phys != 0 {
+                                if let Some(bh) = crate::fs::bio::bread(fs.device, phys) {
+                                    let d = &mut (*bh).b_data;
+                                    d[(in_blk as usize)..(in_blk + n) as usize].fill(0);
+                                    (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                                    let _ = crate::fs::bio::sync_dirty_buffer(bh);
+                                    crate::fs::bio::brelse(bh);
+                                }
+                            }
+                        }
+                        off += n;
+                    }
+                }
+            }
 
             // R108: punch frees collected by the extent branch, drained
             // after the tail write_inode_disk publishes the punched map.
@@ -1957,30 +2069,51 @@ pub fn ext4_fallocate_on(
                             r108_punch_runs.push((phys, ext_len));
                             freed_sectors += ext_len * (block_size / 512);
                         } else if ext_first < punch_last && ext_last > punch_first {
-                            // Partially covered: ZERO the overlapped blocks in
-                            // place; allocation kept (documented above).
+                            // Partially covered (falloc-wedge lane,
+                            // 2026-11-16): SPLIT at the punch boundaries and
+                            // free the covered middle — the reference
+                            // kernel's ext4_ext_remove_space shape. The old
+                            // arm zeroed the covered blocks in place and
+                            // KEPT the allocation, so punching any proper
+                            // prefix of an extent returned NO space (LTP
+                            // fallocate05's dealloc step: punch [0,64) of a
+                            // 256-block extent freed nothing and the
+                            // follow-up write ENOSPC'd, run/shell-f05.log).
                             let z_from = punch_first.max(ext_first);
                             let z_to = punch_last.min(ext_last);
-                            for b in z_from..z_to {
-                                let phys_b = phys + (b - ext_first);
-                                if phys_b == 0 {
-                                    continue;
-                                }
-                                if let Some(bh) = crate::fs::bio::bread(fs.device, phys_b) {
-                                    for byte in (*bh).b_data.iter_mut() {
-                                        *byte = 0;
-                                    }
-                                    (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-                                    let _ = crate::fs::bio::sync_dirty_buffer(bh);
-                                    crate::fs::bio::brelse(bh);
-                                }
+                            // Left survivor [ext_first, z_from): same
+                            // phys origin, unchanged unwritten flag (a
+                            // kept preallocated range must stay unwritten
+                            // — masked lengths turn never-materialized
+                            // blocks into "written" and reads would fetch
+                            // disk garbage instead of zeros).
+                            if z_from > ext_first {
+                                kept.push(crate::fs::ext4::extent::RawExtent {
+                                    ee_block: ext_first as u32,
+                                    phys,
+                                    len: (z_from - ext_first) as u16,
+                                    unwritten: e.unwritten,
+                                });
                             }
-                            // Keep the RAW entry — the unwritten flag on a
-                            // kept preallocated range must survive (masked
-                            // lengths turn never-materialized blocks into
-                            // "written" and reads would fetch disk garbage
-                            // instead of zeros).
-                            kept.push(*e);
+                            // Right survivor [z_to, ext_last): phys shifted
+                            // past the freed middle.
+                            if ext_last > z_to {
+                                kept.push(crate::fs::ext4::extent::RawExtent {
+                                    ee_block: z_to as u32,
+                                    phys: phys + (z_to - ext_first),
+                                    len: (ext_last - z_to) as u16,
+                                    unwritten: e.unwritten,
+                                });
+                            }
+                            // Covered middle: FREED (written and unwritten
+                            // alike — a punched preallocated range
+                            // deallocates, Linux semantics). R108: freed
+                            // after the punched map is durable.
+                            r108_punch_runs.push((
+                                phys + (z_from - ext_first),
+                                z_to - z_from,
+                            ));
+                            freed_sectors += (z_to - z_from) * (block_size / 512);
                         } else {
                             kept.push(*e);
                         }
@@ -1999,16 +2132,55 @@ pub fn ext4_fallocate_on(
                         .saturating_add_signed(meta_delta);
                 }
             } else {
-                // Indirect-block files: zero the covered direct blocks in
-                // place (allocation retained) — conservative hole semantics.
-                let first = (offset / block_size) as usize;
-                let last = ((file_end.saturating_sub(1)) / block_size) as usize;
+                // Indirect-block files (falloc-wedge lane, 2026-11-16):
+                // FREE the interior blocks instead of zeroing them in
+                // place — the old arm returned no space, so a punch on an
+                // indirect file (ext2/ext3 mounts) never made room (LTP
+                // fallocate05's dealloc step, run/shell-f05.log). Direct
+                // pointers of the ALIGNED INTERIOR are freed and cleared
+                // (partial edge blocks were zeroed above, allocation
+                // kept); the singly-indirect range frees its data blocks
+                // and zeroes the matching entries (the indirect block
+                // itself survives while any entry remains — bounded
+                // one-block conservatism; unlink/truncate reclaim it).
+                // Deeper indirection keeps nothing to free here (edge
+                // zeroing above already covered its bytes; interior
+                // blocks past the singly range are left allocated —
+                // bounded, noted). All bitmap frees ride the R108 drain
+                // below (map durable first, frees after).
+                if interior_first >= interior_last_excl {
+                    // Whole range inside (at most) the two edge blocks —
+                    // nothing to free, the edge zeroing did everything.
+                } else {
+                let first = interior_first as usize;
+                let last = (interior_last_excl - 1) as usize;
+                let mut freed_indirect_blocks: u64 = 0;
                 for i in first..=last.min(11) {
                     let b = ext4_inode.block[i];
                     if b != 0 {
-                        if let Some(bh) = crate::fs::bio::bread(fs.device, b as u64) {
-                            for byte in (*bh).b_data.iter_mut() {
-                                *byte = 0;
+                        r108_punch_drain.push((b as u64, 1));
+                        freed_indirect_blocks += 1;
+                        ext4_inode.block[i] = 0;
+                    }
+                }
+                if last >= 12 && ext4_inode.block[12] != 0 {
+                    let ind_blk = ext4_inode.block[12] as u64;
+                    let ents_per_blk = (fs.block_size / 4) as usize;
+                    let ent_first = first.saturating_sub(12);
+                    let ent_last_excl = core::cmp::min(last.saturating_sub(12) + 1, ents_per_blk);
+                    if ent_first < ent_last_excl {
+                        if let Some(bh) = crate::fs::bio::bread(fs.device, ind_blk) {
+                            let data = &mut (*bh).b_data;
+                            for ei in ent_first..ent_last_excl {
+                                let o = ei * 4;
+                                let b = u32::from_le_bytes([
+                                    data[o], data[o + 1], data[o + 2], data[o + 3],
+                                ]);
+                                if b != 0 {
+                                    r108_punch_drain.push((b as u64, 1));
+                                    freed_indirect_blocks += 1;
+                                    data[o..o + 4].fill(0);
+                                }
                             }
                             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
                             let _ = crate::fs::bio::sync_dirty_buffer(bh);
@@ -2016,11 +2188,54 @@ pub fn ext4_fallocate_on(
                         }
                     }
                 }
+                if freed_indirect_blocks > 0 {
+                    ext4_inode.blocks = ext4_inode
+                        .blocks
+                        .saturating_sub(freed_indirect_blocks * (block_size / 512));
+                }
+                }
             }
 
-            // Page cache may hold the old contents.
-            crate::fs::page_cache::get_page_cache()
-                .invalidate_inode(fs as *const Ext4FileSystem as u64, ino as u64);
+            // PAGE-CACHE DISCIPLINE (falloc-wedge root cause, 2026-11-16):
+            // kill ONLY the punched range's cached state — the reference
+            // ext4_punch_hole runs truncate_pagecache_range(offset, end),
+            // never a whole-inode invalidation. The whole-inode
+            // invalidate_inode that ran here dropped STILL-DIRTY
+            // delayed-allocation pages of the whole file — outside the
+            // punched range those frames are the only copy of
+            // acknowledged writes (LTP fallocate05/06 data loss;
+            // punchprobe3 caught it with NO flush involved). Pages FULLY
+            // covered by [offset, file_end) die; partial EDGE pages keep
+            // their frames (they hold live bytes outside the range) with
+            // the punched slice zeroed in-frame — the same discipline
+            // tmpfs punch_hole uses. The pre-sync above flushed the dirty
+            // set, so the dropped pages are clean; a page still dirty
+            // after a failed flush inside the punched range dies with the
+            // punch — its data is deleted by definition.
+            {
+                let cache = crate::fs::page_cache::get_page_cache();
+                let fs_id = fs as *const Ext4FileSystem as u64;
+                let ps = crate::mm::PAGE_SIZE as u64;
+                let first_full = offset.div_ceil(ps);
+                let last_full = file_end / ps; // exclusive
+                if last_full > first_full {
+                    cache.invalidate_inode_span(fs_id, ino as u64, first_full, last_full);
+                }
+                // Zero the punched byte range in surviving live frames
+                // (partial edges, plus pinned/mapped pages the span
+                // invalidate left as marked): readers must see zeros.
+                const ZCHUNK: usize = 65536;
+                let total = (file_end - offset) as usize;
+                if total > 0 {
+                    let zeros = alloc::vec![0u8; ZCHUNK.min(total)];
+                    let mut off = offset;
+                    while off < file_end {
+                        let n = ((file_end - off) as usize).min(zeros.len());
+                        cache.writeback_update_range_stale(fs_id, ino as u64, off, &zeros[..n]);
+                        off += n as u64;
+                    }
+                }
+            }
 
             let sec = crate::drivers::rtc::wall_secs() as u32;
             ext4_inode.mtime = sec;

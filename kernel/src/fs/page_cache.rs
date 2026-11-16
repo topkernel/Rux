@@ -2014,11 +2014,32 @@ impl PageCache {
     /// every page index < ceil(new_size/PAGE) (its partial last page's
     /// tail is zeroed in-frame by the caller via
     /// `writeback_update_range_stale`, mirroring the node-side tail zero).
+    pub fn invalidate_inode_range(&self, fs_id: u64, ino: u64, from_page: u64) {
+        self.invalidate_inode_span(fs_id, ino, from_page, u64::MAX);
+    }
+
+    /// Span-bounded twin of `invalidate_inode` (falloc-wedge lane,
+    /// 2026-11-16): only pages at index in [from_page, to_page_excl) are
+    /// touched — ext4 PUNCH_HOLE kills exactly its fully-covered pages
+    /// with this (the reference truncate_pagecache_range shape); the
+    /// punch's partial EDGE pages must survive (they hold live bytes
+    /// outside the punched range) and are zero-sliced by the caller via
+    /// `writeback_update_range_stale`. The whole-inode form must NOT be
+    /// used for range deletions: it drops STILL-DIRTY delayed-allocation
+    /// pages too, and outside the deleted range those frames are the
+    /// ONLY copy of already-acknowledged writes (the fallocate05/06
+    /// data-loss face).
     /// Same invariants as the whole-entry form: unreferenced frames are
     /// freed here; pinned/mapped ones are marked and die on their final
     /// put/eviction; no allocation under any lock (fixed 64-entry doom
     /// list, multi-pass loop).
-    pub fn invalidate_inode_range(&self, fs_id: u64, ino: u64, from_page: u64) {
+    pub fn invalidate_inode_span(
+        &self,
+        fs_id: u64,
+        ino: u64,
+        from_page: u64,
+        to_page_excl: u64,
+    ) {
         let key = cache_key(fs_id, ino);
         let Some(entry) = self.lookup_claimed(key) else {
             return;
@@ -2030,8 +2051,8 @@ impl PageCache {
             let emptied = {
                 let mut g = entry.lock.lock();
                 for (&idx, page) in g.iter_mut() {
-                    if idx < from_page {
-                        continue; // kept by the truncate: not this call's business
+                    if idx < from_page || idx >= to_page_excl {
+                        continue; // outside the doomed span: not this call's business
                     }
                     if n == PASS_MAX {
                         break;
