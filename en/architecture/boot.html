@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Boot flow · Rux</title>
-<link rel="stylesheet" href="../../css/style.css?v=16">
+<link rel="stylesheet" href="../../css/style.css?v=18">
 </head>
 <body>
 
@@ -29,18 +29,29 @@
 
 <main>
 <div class="container doc">
-              <aside class="doc-side">
+  <aside class="doc-side">
     <div class="grp">Architecture</div>
     <a href="design.html">Design deep-dive</a>
-    <a href="structure.html">Code layout</a>
-    <a class="on" href="boot.html">Boot flow</a>
+    <a href="scheduler.html">Scheduler</a>
     <a href="memory.html">Memory management</a>
+    <a href="filesystem.html">Filesystem</a>
+    <a href="ipc.html">IPC</a>
+    <a class="on" href="boot.html">Boot flow</a>
+    <a href="interrupts.html">Interrupts &amp; timers</a>
+    <a href="structure.html">Code layout</a>
     <a href="riscv64.html">Porting guide</a>
     <a href="kernel-lock.html">Lock ordering</a>
+    <div class="grp">Debugging</div>
+    <a href="../debugging/index.html">Debugging guide</a>
+    <a href="../debugging/tracepoints.html">Tracepoints</a>
+    <a href="../debugging/perf.html">Performance debugging</a>
+    <a href="../debugging/locks.html">Lock debugging</a>
+    <a href="../debugging/memory.html">Memory forensics</a>
+    <a href="../debugging/panic.html">Panic &amp; symbols</a>
     <div class="grp">Performance</div>
     <a href="../performance/index.html">Performance</a>
     <div class="grp">Security</div>
-    <a href="../security/index.html">Security & verification</a>
+    <a href="../security/index.html">Security &amp; verification</a>
     <div class="grp">Testing</div>
     <a href="../testing/index.html">Overview</a>
     <a href="../testing/ci-pipeline.html">CI pipeline</a>
@@ -50,8 +61,6 @@
     <a href="../testing/stability.html">Stability</a>
     <a href="../testing/stress.html">Stress</a>
     <a href="../testing/gnome-retrospective.html">Retrospective</a>
-    <div class="grp">Debugging</div>
-    <a href="../debugging/index.html">Debugging guide</a>
     <div class="grp">Guides</div>
     <a href="../guides/getting-started.html">Getting started</a>
     <a href="../guides/development.html">Contributing</a>
@@ -66,43 +75,72 @@
 
   <article class="doc-main">
     <h1>Boot flow</h1>
-    <div class="sub">Firmware handshake to init, per architecture — source: docs/architecture/boot.md and the arch/ sources</div>
+    <div class="sub">kernel/src/arch/*/ + main.rs · The three boot protocols, early memory, kernel image layout, SMP bring-up, trap/syscall entry and the device-address discipline · Sources: docs/architecture/boot.md, riscv64.md, aarch64.md, design-divergences.md (D-17/D-18)</div>
 
-    <h2 id="rv"><span class="anchor">§1</span>riscv64</h2>
-    <pre><code>QEMU -kernel rux
-  └─ OpenSBI (fw_dynamic)   M-mode
-       └─ S-mode _start      a0=hartid, a1=DTB, other harts parked
-            ├─ early stvec, tp (per-CPU area), Sv39 kernel page table
-            └─ boot hart initializes every subsystem → others wfi for SMP_INIT_DONE</code></pre>
+    <h2 id="invariants"><span class="anchor">§1</span>Boot invariants</h2>
+    <p>All three architectures share an explicitly recorded set of boot invariants (boot.md):</p>
     <ul>
-      <li>SBI calls used: PUT_CHAR / SHUTDOWN / HART_START (0x48534D) / SEND_IPI (0x735049).</li>
-      <li>Timer: the Sstc extension writes <code>stimecmp</code> directly (no per-tick SBI ecall).</li>
+      <li><b>Pre-allocator code uses static BSS pools only</b> — every early-stage data structure is self-sufficient without a heap;</li>
+      <li><b>The boot CPU owns all early initialization</b>; secondaries spin on a release flag until the scheduler exists;</li>
+      <li><b>The init= resolution and the PID-1 contract sit at the end of rust_main</b> — the ltpscan and lmbench runners are themselves PID-1 ELFs.</li>
+    </ul>
+    <p>Generic sequence (all three ports): early arch bring-up (page tables, serial) → memory init (memblock, zones, vmemmap, the small-object allocator) → traps/IRQs → scheduler and init task → driver probe → mount root → run init.</p>
+
+    <h2 id="riscv64"><span class="anchor">§2</span>riscv64: OpenSBI M→S</h2>
+    <ul>
+      <li><b>Boot chain</b>: QEMU loads OpenSBI (fw_dynamic) in M-mode and hands the S-mode kernel the entry at <code>_start</code> (a0 = hartid, a1 = DTB pointer); boot.S sets the stack, clears BSS PC-relative, builds the trampoline page table (first 2 MB kernel VA→PA) then the full early page table, enables the MMU and jumps to VA to enter rust_main.</li>
+      <li><b>SMP bring-up</b>: OpenSBI HSM starts all harts; the first to reach init() via CAS becomes the boot hart; the rest wait on <code>SMP_INIT_DONE</code> with wfi.</li>
+      <li><b>The R87 secondary bring-up window (lesson)</b>: secondaries once waited with the timer already enabled + wfi — during the whole BSP tail (fs mounts, drivers, init spawn; scales with -m), every tick could exit through irq_exit preemption into __schedule() while PER_CPU[hart] was still a zeroed slot; the zero slot triggered heal chains, the hart executed enqueued tasks while holding its boot stack, and slot fights booked the wrong prev at a context switch — mixed-context save (one task's registers written into another's thread record), detonating as the "kill the idle task" KERNPANIC. Fix: spin (not wfi — QEMU's wfi only wakes on an ENABLED pending interrupt) until is_boot_complete, and enable timer/external/software interrupts only AFTER init_secondary publishes PER_CPU[hart]. Companion finding: boot.S zeroes sie on every hart while ipi::init only sets SSIE on the boot hart — without per-hart SSIE, a secondary ran with all IPIs masked (resched/TLB/call-function pending forever; tick-quantized futex wake→run 9118 µs vs 24 µs same-hart). The rule on record: <b>a secondary hart takes no interrupts until its per-CPU state is fully initialized and it has entered the idle loop</b> (the reference kernel's own rule).</li>
+      <li><b>Per-CPU interrupt stacks</b>: 16 KB per CPU, 16-byte aligned; used for kernel-mode traps (user traps use task kernel stacks).</li>
     </ul>
 
-    <h2 id="x86"><span class="anchor">§2</span>x86_64 (q35)</h2>
-    <pre><code>multiboot1 ELF → 64-bit stub → rust_main
-  └─ SIPI trampoline wakes the APs
-       ├─ bzImage boot protocol: the same image boots on loaders expecting it
-       └─ the bootstrap PML4's low identity window is UNLINKed right after the
-          boot-stack switch (divergence D-17)</code></pre>
-
-    <h2 id="aa"><span class="anchor">§3</span>aarch64 (QEMU virt)</h2>
-    <pre><code>QEMU -M virt,gic-version=3 -kernel rux   <span class="c"># bare ELF, no boot protocol</span>
-  └─ a complete QEMU-virt DTB blob embedded (exported by build.rs)
-       ├─ EL2 → EL1h: HCR_EL2=RW, interrupts routed to EL1, both timers enabled,
-       │  CPACR_EL1.FPEN
-       └─ the early TTBR0 identity window (phys [0,2GB)) is torn down after SMP starts</code></pre>
-    <div class="callout warn"><b>aarch64 requires <code>-M virt,gic-version=3</code></b>; the cmdline comes from the embedded DTB's /chosen/bootargs.</div>
-
-    <h2 id="sig"><span class="anchor">§4</span>Serial markers of a successful boot</h2>
-    <p>Minimal system: the OpenSBI banner → the Rux ASCII banner → the module init table (console/trap/mm/sched/fs/driver/smp all <code>[ok]</code>) → <code>init: loading /bin/sh</code> → the shell prompt.</p>
-    <p>x86_64 Ubuntu: init complete → framebuffer resolution → login screen ready; boot-to-login ~4.5 s on 4 vCPUs MTTCG.</p>
-
-    <h2 id="cmd"><span class="anchor">§5</span>Boot parameters and image discipline</h2>
+    <h2 id="x8664"><span class="anchor">§3</span>x86_64: multiboot1 + bzImage dual protocol</h2>
     <ul>
-      <li>A typical kernel cmdline: <code>root=/dev/vda rw init=/sbin/init console=ttyS0</code> (+ optional <code>debug=</code> flags, effective on riscv64/x86_64; not available on aarch64 because the EL2 trampoline destroys the DTB pointer before cmdline parsing — compile-time features instead).</li>
-      <li>Shared images boot only with <code>-snapshot</code> + <code>file.locking=off</code>; never hand-write QEMU commands for standard flows — the parameters live in the Makefile and the existing driver scripts.</li>
+      <li><b>The multiboot1 path</b>: QEMU <code>-kernel</code> ELF, entered in 32-bit protected mode (eax = 0x2BADB002, ebx = the multiboot info pointer); boot.S saves the pointer, builds the early page tables (identity low + higher-half kernel map) and enables long mode; the multiboot blob lives in low memory — <b>everything needed is copied into kernel BSS immediately</b> (memory map, cmdline, bootloader name), because the bootstrap identity mapping dies once the real page tables install.</li>
+      <li><b>The bzImage path</b> (Linux boot-protocol header + 16-bit trampoline): 16-bit → protected mode (hardcoded absolute far jumps) → 0x100000 (the 32-bit boot stub) → long mode → kernel; the same image boots where a Linux-boot-protocol loader is expected.</li>
+      <li><b>Lifecycle of the bootstrap identity map</b>: the bootstrap PML4 carries the low identity window (serving only the boot stack); after <code>mm::init()</code> builds the real higher-half tables and switches CR3, <b>PML4[0] is UNLINKED immediately after the stack switch</b> (drop_bootstrap_identity) — no low identity window exists at runtime (D-17, §7).</li>
+      <li><b>Above-4G BARs</b>: the host bridge may place virtio 64-bit BARs at arbitrary above-4G addresses — two static alias windows plus a dynamic ioremap arena (K1-BAR); ECAM at the q35 MMCONFIG 0xb0000000; IOAPIC/LAPIC map above the 2 GB bootstrap coverage so walks allocate fresh PMD tables rather than demoting bootstrap leaves.</li>
     </ul>
+
+    <h2 id="aarch64"><span class="anchor">§4</span>aarch64: firmware-less ELF + embedded DTB</h2>
+    <ul>
+      <li><b>Boot form</b>: QEMU <code>-kernel</code> with a plain ELF follows no image protocol — no DTB pointer in x0, and -append/-dtb are ignored; the kernel embeds a full QEMU-virt DTB blob in .rodata (symbol aarch64_virt_dtb; build.rs dumps it from <code>qemu-system-aarch64 -M virt,gic-version=3 -cpu cortex-a72</code> when the .dtb file is absent); the cmdline comes from the blob's /chosen/bootargs. <b>Every boot requires -M virt,gic-version=3</b> (the default virt is GICv2; both the driver and the embedded DTB are v3).</li>
+      <li><b>Entry</b>: EL2 → drop to EL1h (HCR_EL2 = RW only; all interrupt routing stays at EL1; CNTHCTL opens both timers; CPACR_EL1 FPEN set — NEON traps otherwise).</li>
+      <li><b>Identity-window lifecycle</b>: the TTBR0 identity window covers physical [0,2GB) and is torn down after SMP start — <b>cpu_started(n) ⇒ core n needs no low addresses</b> (the secondary stub installs the high-VA VBAR BEFORE reporting itself started; that ordering legitimizes the teardown); the boot core's TTBR0 parks on the kernel root plus a broadcast vmalle1is clears cached translations; low-address usercopies fault into the exception-table fixup → −EFAULT.</li>
+      <li><b>Memory map</b>: linear map phys P → PAGE_OFFSET + P; the kernel image has a 32 MB window; the kernel-side MMIO alias sits at VMALLOC_START (the low window covers physical [0,1GB)); a second window maps the PCI ECAM (physical 0x40_1000_0000, 256 MB, fixed across RAM sizes).</li>
+    </ul>
+
+    <h2 id="layout"><span class="anchor">§5</span>Kernel image layout and static reserves</h2>
+    <ul>
+      <li><b>Link-time ASSERTs guard the windows</b>: riscv64 <code>ASSERT(_end &lt;= 0xffffffff81c00000, ...)</code> — the window grew through LAYOUT-2..6 (12→14→18→20→24→26→28 MB; the D-3 symbol table's +3.1 MB once required moving the window, heap base and RAM reservation together); x86_64 <code>ASSERT(__kernel_lma_end &lt;= 0x28000000, ...)</code> (40 MB) — historically x86_64 had no guard, and an image outgrowing the window silently corrupted boots (the unreserved live .bss tail).</li>
+      <li><b>memblock reserves track the real image end</b> (2df7b612): the static 30 MB reserve once trailed the 31.4 MB SMP8 image by 368 KB — the buddy handed out live .bss, kernel_layout() read garbage, every create_user_address_space root page was rejected, and exec /init failed ENOMEM (misread upstream as "ramfs ELF phdr corruption"; the file bytes were intact). Fix: reserve max(KERNEL_RESERVE_SIZE, kernel_image_phys_end()).</li>
+      <li><b>Numeric incidents</b>: a one-digit KERNEL_RESERVE_SIZE 640 MB→40 MB typo (the fake-OOM engine — 351 MB→951 MB of false seeding, 16/16 boots zero OOM); the riscv64 heap base once sat 2 MB inside the image window (the image .bss including the boot stack grew past the heap base; unit-test boots panicked). The rust_main_tail layout guard halts when the image overlaps the heap base.</li>
+      <li>Kernel.toml sizing policy: kernel_heap_size = 1024 MB (the OH context: a 512 MB window once sat at ~513/524 MiB, the clone heap-reserve gate &lt;8 MiB tripped, every pthread_create returned EAGAIN, and FFRT services aborted).</li>
+    </ul>
+
+    <h2 id="entry"><span class="anchor">§6</span>Trap/syscall entry and uaccess</h2>
+    <ul>
+      <li><b>riscv64</b>: PtRegs 288 bytes #[repr(C)] (a separate orig_a0 slot for syscall rollback); the sscratch/tp swap protocol discriminates the trap source (kernel = sscratch 0; user = sscratch holds the task pointer) with an early-boot fallback; the kernel trap path: per-CPU interrupt-stack selection (via ti_cpu; skipped when nested) → a 288-byte PtRegs → save 31 GPRs → CSRs read after registers → acquire the kernel big lock amoswap.d.aq → clear sscratch. The user-trap exit: save ti_kernel_sp → the signal/resched loop → restore sstatus/sepc/GPRs → release the lock amoswap.d.rl → sc.d clears the LR/SC reservation → restore sscratch → fence → sret.</li>
+      <li><b>x86_64</b>: STAR = (0x23&lt;&lt;48)|(0x08&lt;&lt;32) — SYSCALL enters CS=0x08/SS=0x10 and SYSRET64 returns CS=0x33/SS=0x2b; FMASK = TF|IF|DF — syscalls enter with IF clear, and handle_syscall re-enables interrupts immediately (the reference's own discipline: running a syscall at IF=0 starves ticks/softlockup/preemption; the user rflags are saved untouched so iretq restores user IF); the fast path SYSRETs (with the rcx/r11 mirror checks), everything else IRETQs; fixup_bad_iret matches the reference (the frame owner dies, the system lives); the #UD handler routes user #UD through force_sig_fault(SIGILL) — the OH processdump/CFI reporter runs.</li>
+      <li><b>aarch64</b>: SVC leaves ELR at the instruction AFTER svc — the syscall path never rewinds the PC; ERESTARTSYS rewinds pc −= 4 onto the svc; syscall number x8, args x0-x5, return x0; the pt_regs.syscallno slot plus orig_x0.</li>
+      <li><b>Exception tables</b>: riscv64 records (insn, fixup) pairs in <code>.ex_table</code>; a uaccess fault looks up the fixup and jumps there, returning the uncopied byte count; x86_64 has the same fixup_exception shape. uaccess: riscv64 brackets copies with the SUM bit (sstatus 18) plus a three-phase asm copy (align / 8×-unrolled word copy, WORD_COPY_MIN = 71 bytes); x86_64 uses uaccess_safe.rs + AC brackets (D-18: <b>a pushfq/orq/popfq sequence replaces STAC/CLAC</b> — the STAC/CLAC encodings take an unconditional #UD under QEMU TCG, proven by bisection; the bracket costs ~55 ns and boots on both hardware and TCG; the SMAP-VIOL beacon verifies silence every boot); the PF-NOCTX beacon: SMAP on, AC clear, the fault address in user range and a no_context fault = a raw user-pointer dereference — naming rip/addr before the oops machinery mangles context (capped at 8 prints; "the audit loop is: run the tests, read this line, convert the site to uaccess, repeat").</li>
+    </ul>
+
+    <h2 id="arena"><span class="anchor">§7</span>The device MMIO alias arena (D-17, x86_64)</h2>
+    <ul>
+      <li><b>Mechanism</b>: device MMIO is reached exclusively through kernel-side alias windows (two static windows + a dynamic ioremap arena, IOREMAP_ARENA 256 GB); the bootstrap identity map is UNLINKED after the boot-stack switch — <b>no low identity window exists at runtime</b>; firmware-placed low MMIO (the RTC page at 0x101000 etc.) also maps into the arena.</li>
+      <li><b>ioremap_bar_kernel</b>: checks the fixed window first (never burning arena space); a re-registration check (two capabilities sharing one BAR); fresh chunks are 2 MB-aligned and advance DYN_BAR_CURSOR atomically; the DYN_BARS registry (when full, the BAR stays on the identity fallback and warns "user-CR3 MMIO on it will KERNPANIC"); the USER_MMS_EXIST guard warns when mapping after user mms exist (existing user CR3s will not see the new arena link); the call contract is the single-threaded boot context (PCI probe).</li>
+      <li><b>Advantage</b>: one MMIO discipline under every CR3 — trap-context device access cannot fault under a user page table; the uaccess contract has no identity hole (a copy_from_user at low user addresses faults instead of reading physical memory — the prlimit64 EFAULT gap this closed). Compatibility: the x86_64 suite 1194/1194 (including the previously-red EFAULT row); guards = the PF-NOCTX and SMAP-VIOL beacons silent.</li>
+    </ul>
+
+    <h2 id="config"><span class="anchor">§8</span>The Kernel.toml configuration system</h2>
+    <ul>
+      <li>build.rs parses Kernel.toml (base) and an optional build/.config overlay — wholesale replacement was once a footgun; the active cargo feature (platform) wins over Kernel.toml's default; the generated config.rs must not be hand-edited.</li>
+      <li>The config carries [general]/[platform]/[memory] plus the arch-gated kernel-stack policy (D-2's kernel_stack_size_x86_64); MAX_CPUS reaches trap.S from config (a compile-time clamp).</li>
+      <li>print_status boot-table rows: each row is staged into one 80-byte buffer and emitted as ONE batched console write (per-byte putchar once paid a full UART irqsave lock pair plus 16550 per-register traffic × ~150 rows).</li>
+    </ul>
+
+    <div class="callout">Canonical docs: docs/architecture/boot.md (the three-port current state), riscv64.md (the riscv deep walk), aarch64.md (the aarch64 canonical map), memory.md (memory init). Code: kernel/src/arch/{riscv64,x86_64,aarch64}/, kernel/build.rs.</div>
   </article>
 </div>
 </main>
@@ -111,13 +149,13 @@
   <div class="container">
     <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
       <span>Rux Kernel · MIT License</span>
-      <span><a href="../index.html">Back to top page</a></span>
-    
-      <span class="foot-stats">Site traffic: <span id="busuanzi_value_site_pv"></span> views · <span id="busuanzi_value_site_uv"></span> visitors</span></div>
+      <span><a href="../index.html">Back to home</a></span>
+
+      <span class="foot-stats">Site visits <span id="busuanzi_value_site_pv"></span> · Visitors <span id="busuanzi_value_site_uv"></span></span></div>
   </div>
 </footer>
 
-<script src="../../js/main.js?v=16"></script>
+<script src="../../js/main.js?v=18"></script>
 <script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
 </body>
 </html>
