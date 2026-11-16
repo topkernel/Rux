@@ -118,8 +118,8 @@
           <tr><td class="mono">lat_syscall open</td><td class="num">0.756–1.00 µs</td><td class="num">0.394–0.397 µs</td><td><span class="chip bad">behind 1.9–2.5×</span> (±30% boot variance)</td><td>path-resolution tail + fd install</td></tr>
           <tr><td class="mono">lat_syscall read</td><td class="num">0.103–0.108 µs</td><td class="num">0.060–0.062 µs</td><td><span class="chip bad">behind 1.7–1.8×</span></td><td>fill/copy tail (SMAP AC brackets)</td></tr>
           <tr><td class="mono">lat_syscall stat</td><td class="num">0.32–0.45 µs</td><td class="num">0.239 µs</td><td><span class="chip bad">behind 1.4–1.9×</span> (±30% boot variance)</td><td>path resolution</td></tr>
-          <tr><td class="mono">lat_syscall write</td><td class="num">0.082 µs</td><td class="num">0.0597–0.0600 µs</td><td><span class="chip bad">behind 1.4×</span> (−6% after the fdget borrow)</td><td>fill/copy tail</td></tr>
-          <tr><td class="mono">lat_syscall null</td><td class="num">0.045 µs</td><td class="num">0.0345–0.0430 µs</td><td><span class="chip bad">behind 1.1–1.3×</span> (−12% after getppid O(1))</td><td>syscall entry floor</td></tr>
+          <tr><td class="mono">lat_syscall write</td><td class="num">0.081 µs</td><td class="num">0.0597–0.0600 µs</td><td><span class="chip bad">behind 1.35×</span> (fdget borrow + PT_REGS gating, −7% cumulative)</td><td>fill/copy tail</td></tr>
+          <tr><td class="mono">lat_syscall null</td><td class="num">0.0435 µs</td><td class="num">0.0345–0.0430 µs</td><td><span class="chip bad">behind 1.0–1.25×</span> (−15% after getppid O(1))</td><td>syscall entry floor</td></tr>
           <tr><td class="mono">lat_proc fork</td><td class="num">37.8–40.3 µs</td><td class="num">33.9 µs</td><td><span class="chip bad">behind 1.11–1.19×</span></td><td>measurable again after NOHZ; keep converging</td></tr>
           <tr><td class="mono">lat_proc exec</td><td class="num">40.6 µs</td><td class="num">37.6 µs</td><td><span class="chip bad">behind 1.08×</span></td><td>near parity band</td></tr>
         </tbody>
