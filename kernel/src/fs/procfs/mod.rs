@@ -2305,11 +2305,30 @@ unsafe fn procfs_setattr(_inode: &Inode, attr: u32, _arg1: u64, _arg2: u64) -> i
     errno::Errno::OperationNotPermitted.as_neg_i32()
 }
 
+/// ProcFS regular-file poll (proc_reg_poll → seq_poll parity): seq files
+/// answer DEFAULT_POLLMASK — always readable/writable as requested. This
+/// is what lets libmount's kernel monitor (systemd's mount-table watch)
+/// epoll-add /proc/self/mountinfo (EPOLLIN|EPOLLET); epoll_ctl answers
+/// EPERM for poll-less files, so without this op the monitor's kernel
+/// source never armed.
+fn procfs_file_poll(_file: &crate::fs::File, events: u16) -> u16 {
+    use crate::syscall::misc::poll_events::*;
+    let mut r = 0u16;
+    if events & POLLIN != 0 {
+        r |= POLLIN | POLLRDNORM;
+    }
+    if events & POLLOUT != 0 {
+        r |= POLLOUT | POLLWRNORM;
+    }
+    r
+}
+
 /// ProcFS file operations table
 pub static PROCFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
     .read(procfs_file_read)
     .write(procfs_file_write)
     .lseek(procfs_file_lseek)
+    .poll(procfs_file_poll)
     .close(procfs_file_close)
     .build();
 

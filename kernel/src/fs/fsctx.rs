@@ -594,6 +594,48 @@ pub fn validate_mount_attr(attr: u64) -> Result<(), i32> {
     Ok(())
 }
 
+/// mount_setattr() PAIR validation (fs/namespace.c mount_setattr's
+/// build_mount_kattr): the MOUNT_ATTR_<atime> values are an enum, not a
+/// bitmap — switching atime requires the FULL MOUNT_ATTR__ATIME field in
+/// attr_clr, and attr_set's atime bits are only legal in that idiom;
+/// attr_set atime bits without the clr field are EINVAL, as is a partial
+/// clr field. This is the exact shape util-linux 2.39's libmount sends
+/// for every classic-flag mount ("-o nosuid,nodev,noexec,relatime":
+/// attr_set = NOSUID|NODEV|NOEXEC|RELATIME, attr_clr = MOUNT_ATTR__ATIME)
+/// — validating set and clr independently made that idiom EINVAL and
+/// each mount unit's mount(8) died on its post-mount flag pass
+/// (sys-kernel-debug/tracing, dev-mqueue "Failed to mount" class).
+/// MOUNT_ATTR_IDMAP stays rejected in attr_set (no idmapped mounts);
+/// clearing it is a no-op here (nothing is ever idmapped).
+pub fn validate_mount_attr_pair(attr_set: u64, attr_clr: u64) -> Result<(), i32> {
+    if attr_set & !(MOUNT_ATTR_KNOWN_SET | MOUNT_ATTR_IDMAP) != 0
+        || attr_clr & !(MOUNT_ATTR_KNOWN_SET | MOUNT_ATTR_IDMAP) != 0
+    {
+        return Err(-crate::syscall::errno::EINVAL);
+    }
+    if attr_set & MOUNT_ATTR_IDMAP != 0 {
+        return Err(-crate::syscall::errno::EINVAL);
+    }
+    if attr_clr & MOUNT_ATTR__ATIME != 0 {
+        if attr_clr & MOUNT_ATTR__ATIME != MOUNT_ATTR__ATIME {
+            return Err(-crate::syscall::errno::EINVAL);
+        }
+        match attr_set & MOUNT_ATTR__ATIME {
+            x if x == MOUNT_ATTR_RELATIME
+                || x == MOUNT_ATTR_NOATIME
+                || x == MOUNT_ATTR_STRICTATIME => {}
+            _ => return Err(-crate::syscall::errno::EINVAL),
+        }
+    } else if attr_set & MOUNT_ATTR__ATIME != 0 {
+        return Err(-crate::syscall::errno::EINVAL);
+    }
+    Ok(())
+}
+
+/// MOUNT_ATTR_RELATIME (the enum's zero value — "relatime" is the
+/// default; a set-field value of 0 selects it explicitly).
+pub const MOUNT_ATTR_RELATIME: u64 = 0x0000_0000;
+
 /// MOUNT_ATTR bits → MntFlags for a fresh fsmount (attr_flags argument).
 pub fn attr_flags_to_mnt(attr: u64) -> MntFlags {
     mount_attr_apply(MntFlags::new(0), attr, 0)
