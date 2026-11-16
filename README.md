@@ -10,7 +10,7 @@
 [![Tests](https://img.shields.io/badge/tests-4%2C200%2B%20cases-brightgreen.svg)](#numbers)
 [![Code](https://img.shields.io/badge/code-~378%2C000%20lines-blue.svg)](docs/architecture/structure.md)
 
-Unmodified Ubuntu 22.04 boots to a GNOME Shell desktop.
+Unmodified Ubuntu boots: 22.04 to an interactive GNOME Shell desktop (5/5 stability-verified across 188+ commits); 24.04 through systemd 255 to multi-user + graphical targets with serial login.
 Unmodified OpenHarmony boots 135+ services to an interactive launcher.
 No userspace patches, rebuilds, or configuration changes.
 
@@ -68,7 +68,7 @@ Stock OH x86_64_virt image: samgr, render_service, 135+ services,
 interactive launcher, `hdc shell` into the live guest.
 
 ```bash
-make ubuntu-image && make ubuntu-run    # Ubuntu GNOME desktop (login: root / rux)
+make ubuntu-run    # full Ubuntu 24.04 desktop (serial login: root / rux)
 make oh-image && make oh-run            # OpenHarmony launcher (images: see note)
 ```
 
