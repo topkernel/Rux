@@ -1262,7 +1262,13 @@ fn set_crtc(arg: usize) -> i64 {
         return 0; // dpms-off style disable: accept
     }
     let req_h = u16::from_ne_bytes(b[36 + 4..36 + 6].try_into().unwrap()) as u32;
-    let req_v = u16::from_ne_bytes(b[36 + 10..36 + 12].try_into().unwrap()) as u32;
+    // drm_mode_modeinfo field order (uapi): clock, hdisplay, hsync_start,
+    // hsync_end, htotal, hskew, vdisplay... — vdisplay is +14, NOT +10
+    // (+10 is htotal). Reading htotal here rejected every non-square
+    // native mode with EINVAL: gdm's Xorg (1280x800, vdisplay 800 vs
+    // htotal 1360) died in "modeset(0): failed to set mode" and the
+    // greeter retry-looped 11 times per attempt (gdm-hunt, 2026-11-16).
+    let req_v = u16::from_ne_bytes(b[36 + 14..36 + 16].try_into().unwrap()) as u32;
     let cur = current_mode();
     if req_h != cur.hdisplay as u32 || req_v != cur.vdisplay as u32 {
         return -22; // EINVAL: only the native mode is supported
