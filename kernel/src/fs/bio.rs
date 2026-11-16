@@ -344,6 +344,13 @@ static SYNC_WALK_NULL_BH: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
 impl BlockCache {
+    /// The cache's fixed block size (4096 today). Multi-block request
+    /// math (bread_async_multi's sector conversion) is expressed in these
+    /// units; callers with a different fs block size must gate on this.
+    pub fn cache_block_size(&self) -> u32 {
+        self.block_size
+    }
+
     fn new(hash_size: usize, max_entries: usize, block_size: u32) -> Self {
         let mut buckets = Vec::with_capacity(hash_size);
         for _ in 0..hash_size {
@@ -1772,6 +1779,49 @@ pub fn block_cached(device: *const blkdev::GenDisk, blocknr: u64) -> bool {
     }
 }
 
+/// Dirty-presence probe (pair-battery item 3): TRUE only when the block
+/// has a live cache entry that is BH_Dirty RIGHT NOW (bucket-lock walk,
+/// no pin, no LRU touch). fsync's data walk uses it to skip absent and
+/// already-clean blocks without the bread() pin round trip — the
+/// per-fsync pin of every cached block of the file was 2048 hash+LRU
+/// operations per fsync (the measured 3.9M breads/s burn on the
+/// write+fsync row). A mid-eviction entry reports true (the caller's
+/// bread slow path sees the settled state).
+pub fn block_dirty_cached(device: *const blkdev::GenDisk, blocknr: u64) -> bool {
+    // SAFETY: device is a valid GenDisk pointer; only identity fields
+    // are read, and the entry walk mirrors block_cached under the same
+    // bucket lock.
+    unsafe {
+        let (device_major, device_minor) = ((*device).major, (*device).first_minor);
+        let cache = get_block_cache();
+        let index = cache.hash_index(device_major, device_minor, blocknr);
+        let bucket = cache.buckets[index].lock_irqsave();
+        let mut current = bucket.head;
+        while let Some(entry_ptr) = current {
+            let entry = &*entry_ptr;
+            if entry.evicting {
+                if entry.key == (device_major, device_minor, blocknr) {
+                    drop(bucket);
+                    return true;
+                }
+                current = entry.hash_next;
+                continue;
+            }
+            if entry.bh.is_null() || (*entry.bh).b_data.len() != cache.block_size as usize {
+                current = entry.hash_next;
+                continue;
+            }
+            if entry.key == (device_major, device_minor, blocknr) {
+                let dirty = (*entry.bh).is_dirty();
+                drop(bucket);
+                return dirty;
+            }
+            current = entry.hash_next;
+        }
+        false
+    }
+}
+
 /// Durability-by-absence probe: TRUE only when the block's buffer is
 /// GONE from the cache AND no same-key eviction is still in flight.
 ///
@@ -1911,8 +1961,8 @@ pub unsafe fn bfree_multi(bh: *mut BufferHead) {
 pub const MAX_WRITE_BATCH: usize = 32;
 
 struct WriteEntry {
-    /// Private stable copy of the span's bytes (the DMA source).
-    data: Box<[u8]>,
+    /// The span's bytes (private copy, or the caller's stable buffer).
+    data: WriteSource,
     /// Completion signaled by the device's completion walker.
     completion: Box<crate::fs::io_completion::IoCompletion>,
 }
@@ -1936,6 +1986,29 @@ pub struct WriteBatch {
     /// Per-entry outcome of the LAST flush(), indexed by submission order.
     /// Only meaningful after flush() returned; reset by the next submit.
     results: alloc::vec::Vec<i32>,
+}
+
+/// DMA source of a batch entry: the batch's private copy (submit) or the
+/// CALLER's buffer (submit_ref — pair-battery item 1: the DIO write fast
+/// path DMAs straight from the syscall's staging slice, saving one full
+/// copy per span; the caller guarantees the bytes stay valid and
+/// unmodified until the drain).
+enum WriteSource {
+    Owned(alloc::boxed::Box<[u8]>),
+    Borrowed {
+        ptr: *const u8,
+        len: usize,
+    },
+}
+
+impl WriteSource {
+    #[inline]
+    fn as_ptr(&self) -> *const u8 {
+        match self {
+            WriteSource::Owned(b) => b.as_ptr(),
+            WriteSource::Borrowed { ptr, .. } => *ptr,
+        }
+    }
 }
 
 impl WriteBatch {
@@ -1983,7 +2056,10 @@ impl WriteBatch {
         let rc = blkdev::blkdev_write_async(device, sector, &owned, &completion);
         match rc {
             Ok(()) => {
-                self.entries.push(WriteEntry { data: owned, completion });
+                self.entries.push(WriteEntry {
+                    data: WriteSource::Owned(owned),
+                    completion,
+                });
                 true
             }
             Err(_) => {
@@ -1992,6 +2068,43 @@ impl WriteBatch {
                 // drop here — nothing references them.
                 false
             }
+        }
+    }
+
+    /// Submit one span WITHOUT the private copy: the device DMAs directly
+    /// from `data` (the caller's buffer). The caller guarantees the bytes
+    /// stay valid and unmodified until the NEXT flush() returns — the
+    /// drain waits every entry before giving the buffer back (pair-battery
+    /// item 1: the DIO write fast path's staging slice). On a completion
+    /// timeout the batch cannot leak a borrowed source; it spins on the
+    /// completion (a virtio write that outlives a 10 s deadline means the
+    /// machine is wedged far beyond this span).
+    pub fn submit_ref(
+        &mut self,
+        device: *const blkdev::GenDisk,
+        sector: u64,
+        data: &[u8],
+    ) -> bool {
+        if data.is_empty() || self.entries.len() >= MAX_WRITE_BATCH {
+            return false;
+        }
+        let completion = Box::new(crate::fs::io_completion::IoCompletion::new());
+        // SAFETY: device is a registered GenDisk; the caller's `data` and
+        // our `completion` stay valid (and the bytes unmodified) until the
+        // drain — the submit_ref contract above.
+        let rc = blkdev::blkdev_write_async(device, sector, data, &completion);
+        match rc {
+            Ok(()) => {
+                self.entries.push(WriteEntry {
+                    data: WriteSource::Borrowed {
+                        ptr: data.as_ptr(),
+                        len: data.len(),
+                    },
+                    completion,
+                });
+                true
+            }
+            Err(_) => false,
         }
     }
 
@@ -2037,14 +2150,35 @@ impl WriteBatch {
                     0
                 }
             } else if status == crate::fs::io_completion::WAIT_TIMED_OUT {
-                // The chain may STILL be in flight: wait() already
-                // tombstoned the device-side pending (abandon) and drained
-                // deliveries, so the walker will never fire this
-                // completion again — the completion box may die. The DATA
-                // block is still the device's DMA source and must be
-                // LEAKED, never freed (the freed-kernel-DMA family).
-                core::mem::forget(entry.data);
-                status
+                match entry.data {
+                    WriteSource::Owned(_) => {
+                        // The chain may STILL be in flight: wait() already
+                        // tombstoned the device-side pending (abandon) and drained
+                        // deliveries, so the walker will never fire this
+                        // completion again — the completion box may die. The DATA
+                        // block is still the device's DMA source and must be
+                        // LEAKED, never freed (the freed-kernel-DMA family).
+                        core::mem::forget(entry.data);
+                        status
+                    }
+                    WriteSource::Borrowed { ptr, len } => {
+                        // A borrowed source cannot be leaked — the caller
+                        // owns the buffer and reuses it after the drain,
+                        // and wait() already tombstoned the software
+                        // pending so no later delivery can be observed.
+                        // A 10 s virtio deadline on this span means the
+                        // machine is wedged far beyond it; report the
+                        // error (the span's owner keeps the range
+                        // unacknowledged) and hand the buffer back — the
+                        // same post-timeout discipline the read side's
+                        // bfree_multi already carries.
+                        crate::pr_err!(
+                            "bio: borrowed write span ({} bytes at {:p}) timed out — reporting EIO, buffer returned",
+                            len, ptr
+                        );
+                        status
+                    }
+                }
             } else {
                 status
             };
@@ -2077,6 +2211,109 @@ impl Drop for WriteBatch {
             let _ = self.flush();
         }
     }
+}
+
+/// Batched write-through push for a set of block-cache buffers
+/// (pair-battery item 3, 2026-11-17): pins each block, optionally marks
+/// it dirty (the commit write-through belt), submits ONE device write
+/// per dirty buffer through 32-span windows with a single drain per
+/// window, clears BH_Dirty only for device-acked spans, and releases
+/// every pin. Publication-constrained blocks and any span the device
+/// refuses keep the ordered serial `sync_dirty_buffer` path — a
+/// correctness fallback, only the batching is lost.
+///
+/// The caller must guarantee the buffers' bytes stay unmodified across
+/// the call (the ext4 callers hold EXT4_BIG_LOCK, the same
+/// serialization SpanFlusher::drain applies to its settle).
+pub fn sync_dirty_blocks_batched(
+    device: *const blkdev::GenDisk,
+    blocks: &[u64],
+    force_dirty: bool,
+) -> i32 {
+    fn drain(
+        batch: &mut WriteBatch,
+        pinned: &mut alloc::vec::Vec<*mut BufferHead>,
+        first_err: &mut i32,
+    ) {
+        if batch.in_flight() == 0 {
+            return;
+        }
+        let rc = batch.flush();
+        if rc != 0 && *first_err == 0 {
+            *first_err = rc;
+        }
+        for (i, &bh) in pinned.iter().enumerate() {
+            if batch.status(i) == 0 {
+                // SAFETY: bh is pinned (bread below); device-acked write.
+                unsafe { (*bh).clear_state_bit(BufferState::BH_Dirty) };
+            }
+            // SAFETY: pin balanced by bread below.
+            get_block_cache().put(bh);
+        }
+        pinned.clear();
+    }
+
+    let spb = get_block_cache().block_size as u64 / 512;
+    // SAFETY: device is a registered GenDisk; only identity fields read.
+    let (mj, mi) = unsafe { ((*device).major, (*device).first_minor) };
+    let mut batch = WriteBatch::new();
+    let mut pinned: alloc::vec::Vec<*mut BufferHead> = alloc::vec::Vec::new();
+    let mut first_err = 0i32;
+
+    for &blk in blocks {
+        // SAFETY: bread returns a pinned BufferHead for the block or None.
+        let bh = match bread(device, blk) {
+            Some(b) => b,
+            None => {
+                if first_err == 0 {
+                    first_err = 5; // EIO
+                }
+                break;
+            }
+        };
+        // SAFETY: bh is valid and pinned for this iteration.
+        unsafe {
+            if force_dirty {
+                (*bh).set_state_bit(BufferState::BH_Dirty);
+            }
+            if !(*bh).is_dirty() {
+                get_block_cache().put(bh);
+                continue;
+            }
+        }
+        // Ordered-publication guard: constrained blocks take the serial
+        // path that satisfies their pre/entry/post obligations first.
+        if publication_constrained(mj, mi, blk) {
+            // SAFETY: bh is pinned; sync_dirty_buffer handles ordering.
+            unsafe {
+                let _ = sync_dirty_buffer(bh);
+                get_block_cache().put(bh);
+            }
+            continue;
+        }
+        // SAFETY: bh is pinned and its bytes are caller-stabilized; the
+        // span drains before this function returns.
+        let submitted = unsafe {
+            batch.submit_ref(device, blk * spb, &(*bh).b_data)
+        };
+        if submitted {
+            pinned.push(bh);
+        } else {
+            drain(&mut batch, &mut pinned, &mut first_err);
+            let retried = unsafe { batch.submit_ref(device, blk * spb, &(*bh).b_data) };
+            if retried {
+                pinned.push(bh);
+            } else {
+                // SAFETY: persistent window lag — serial fallback.
+                unsafe {
+                    let _ = sync_dirty_buffer(bh);
+                    get_block_cache().put(bh);
+                }
+            }
+        }
+    }
+    drain(&mut batch, &mut pinned, &mut first_err);
+    first_err
 }
 
 /// Sync a dirty buffer to disk

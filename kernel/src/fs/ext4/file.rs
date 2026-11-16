@@ -59,18 +59,387 @@ pub fn ext4_file_read(
 
     let block_size = fs.block_size as usize;
 
+    // BATCHED O_DIRECT (pair-battery item 1, 2026-11-17): the per-block
+    // body below served every 4 KiB block with its own synchronous
+    // bread round trip — a 1 MiB direct read was 256 serialized device
+    // waits (226x off the reference's single 1 MiB request). Resolve the
+    // request's blocks into physically-consecutive runs, submit each run
+    // as ONE multi-block request (bio::bread_async_multi — the batching
+    // the page-cache fill has used since the readahead window), keep a
+    // window of runs in flight, and wait ONCE per window: requests
+    // behind the first complete while the first is waited on. Fall back
+    // to the per-block body when the fs block size differs from the
+    // block cache's fixed 4096 (multi-block sector math is cache-block
+    // based) or per-run on any async failure.
+    if block_size == bio::get_block_cache().cache_block_size() as usize && inode.has_extent() {
+        if let Some(n) = ext4_dio_read_batched(fs, inode, offset, buf, to_read, block_size) {
+            return Ok(n);
+        }
+    }
+
+    ext4_file_read_perblock(fs, inode, offset, buf, to_read, block_size)
+}
+
+/// Batched O_DIRECT read body (pair-battery item 1, 2026-11-17).
+///
+/// DMAs straight into the CALLER's buffer: `buf` is the syscall layer's
+/// staging slice (buddy-backed, physically contiguous), alive for the
+/// whole call; every request drains before this returns, so the slice is
+/// never a live DMA target after return. Whole 4 KiB-aligned runs of
+/// physically-consecutive, block-cache-absent blocks ride ONE
+/// multi-block device request each (a 1 MiB sequential direct read is
+/// four 256 KiB requests in flight, waited once); head/tail partial
+/// blocks, holes and any async failure fall back to per-block bread
+/// serves. Returns None when the device has no async read path at all
+/// (first submission fails) — the caller re-runs the per-block body.
+fn ext4_dio_read_batched(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    inode: &crate::fs::ext4::inode::Ext4Inode,
+    offset: u64,
+    buf: &mut [u8],
+    to_read: usize,
+    block_size: usize,
+) -> Option<usize> {
+    use crate::fs::io_completion::IoCompletion;
+
+    const MAX_BATCH: usize = 64;
+    const MAX_BLOCKS_PER_WINDOW: u64 = 512;
+    const MAX_MERGE_BLOCKS: u64 = 64;
+    let sectors_per_block = (block_size / 512) as u64;
+
+    let mut completions: [IoCompletion; MAX_BATCH] = [const { IoCompletion::new() }; MAX_BATCH];
+    // Per in-flight request: (dst offset in buf, file offset, bytes).
+    let mut req_dst = [0usize; MAX_BATCH];
+    let mut req_off = [0u64; MAX_BATCH];
+    let mut req_len = [0usize; MAX_BATCH];
+    let mut count = 0usize;
+    let mut blocks_in_window: u64 = 0;
+    // Set once the async path proves usable; until then a submission
+    // failure falls back to the per-block body.
+    let mut async_ok = false;
+
+    let mut total_read = 0usize;
+    let mut current_offset = offset;
+    let mut buf_offset = 0usize;
+
+    // Serve exactly one block's window (from `file_off`, `dst_off`)
+    // through the synchronous per-block path: hole -> zeroes, else
+    // bread + copy. Returns bytes served, or None on I/O error.
+    fn serve_one_block(
+        fs: &crate::fs::ext4::Ext4FileSystem,
+        inode: &crate::fs::ext4::inode::Ext4Inode,
+        file_off: u64,
+        dst_off: usize,
+        buf: &mut [u8],
+        take: usize,
+        block_size: usize,
+    ) -> Option<usize> {
+        let block_index = file_off / block_size as u64;
+        let block_offset = (file_off % block_size as u64) as usize;
+        let phys = match inode.get_data_block(fs, block_index) {
+            Ok(b) => b,
+            Err(_) => return None,
+        };
+        let avail = block_size - block_offset;
+        let len = core::cmp::min(take, avail);
+        if phys == 0 {
+            crate::fs::ext4::extent::exthunt_read_hole(
+                inode.ino,
+                &inode.block,
+                block_index,
+            );
+            for i in 0..len {
+                buf[dst_off + i] = 0;
+            }
+            return Some(len);
+        }
+        // SAFETY: bio::bread returns a valid pinned BufferHead; b_data
+        // is block_size bytes.
+        unsafe {
+            let bh = match bio::bread(fs.device, phys) {
+                Some(b) => b,
+                None => return None,
+            };
+            let data = &(*bh).b_data;
+            crate::fs::ext4::extent::exthunt_rd_od(
+                inode.ino as u64,
+                block_index,
+                phys,
+                data[0],
+                data[1],
+                data.as_ptr(),
+            );
+            buf[dst_off..dst_off + len]
+                .copy_from_slice(&data[block_offset..block_offset + len]);
+            bio::brelse(bh);
+        }
+        Some(len)
+    }
+
+    // Drain the window: wait each request; a failed request is re-served
+    // per-block synchronously (a second failure cuts the read short at
+    // that request's start — POSIX short read).
+    macro_rules! drain {
+        () => {{
+            let mut cut_at = usize::MAX;
+            for i in 0..count {
+                let rc = completions[i].wait();
+                let mut served = false;
+                if rc == 0 {
+                    // Zero-serve/attribution guard: the walker stamps the
+                    // DMA target pointer of the chain it completed.
+                    let token = completions[i].delivered_token();
+                    let dst = req_dst[i];
+                    let len = req_len[i];
+                    let expect = buf[dst..].as_ptr() as usize;
+                    if token == 0 || token == expect {
+                        served = true;
+                        if dst + len > total_read {
+                            total_read = dst + len;
+                        }
+                    } else {
+                        crate::pr_err!(
+                            "ext4 dio: misattributed read completion (token {:x} != {:x})",
+                            token, expect
+                        );
+                    }
+                }
+                if !served {
+                    // Per-block re-serve of the failed request's range.
+                    let mut off = req_off[i];
+                    let mut dst = req_dst[i];
+                    let mut left = req_len[i];
+                    while left > 0 {
+                        match serve_one_block(fs, inode, off, dst, buf, left, block_size) {
+                            Some(n) => {
+                                off += n as u64;
+                                dst += n;
+                                left -= n;
+                            }
+                            None => {
+                                cut_at = cut_at.min(dst);
+                                break;
+                            }
+                        }
+                    }
+                    if left == 0 && dst > total_read {
+                        total_read = dst;
+                    } else if left > 0 {
+                        cut_at = cut_at.min(dst);
+                    }
+                }
+                completions[i].reset();
+            }
+            count = 0;
+            blocks_in_window = 0;
+            if cut_at != usize::MAX && cut_at < total_read {
+                total_read = cut_at;
+            }
+            buf_offset = total_read;
+            current_offset = offset + total_read as u64;
+        }};
+    }
+
+    while buf_offset < to_read {
+        let block_offset = (current_offset % block_size as u64) as usize;
+        let remaining = to_read - buf_offset;
+
+        // Head/tail partial block: per-block serve (DMA must stay
+        // sector-aligned inside the destination).
+        if block_offset != 0 || remaining < block_size {
+            match serve_one_block(fs, inode, current_offset, buf_offset, buf, remaining, block_size)
+            {
+                Some(n) => {
+                    total_read += n;
+                    buf_offset += n;
+                    current_offset += n as u64;
+                    continue;
+                }
+                None => {
+                    drain!();
+                    return Some(total_read.min(buf_offset));
+                }
+            }
+        }
+
+        let block_index = current_offset / block_size as u64;
+        let full_blocks_available = remaining / block_size;
+
+        // ONE extent walk resolves the maximal run (pair-battery item 1):
+        // per-block get_data_block paid 1-2 cached breads per 4 KiB on
+        // depth>=1 files (512 per 1 MiB read — the fsw br=25k signature).
+        let (run_phys, run_avail, run_unwritten) = match crate::fs::ext4::extent::ext4_ext_get_run(
+            fs,
+            inode.ino,
+            &inode.block,
+            block_index,
+        ) {
+            Ok(v) => v,
+            Err(_) => {
+                drain!();
+                if total_read > 0 {
+                    return Some(total_read);
+                }
+                return None;
+            }
+        };
+
+        // Unwritten extent or hole: zero-serve the known stretch (the
+        // resolver reports the distance to the next extent; 0 = unknown
+        // ahead — one block at a time).
+        if run_phys == 0 {
+            let zero_blocks = if run_unwritten {
+                run_avail.max(1)
+            } else {
+                run_avail
+            };
+            let zero_len = if zero_blocks > 0 {
+                core::cmp::min(remaining, zero_blocks as usize * block_size)
+            } else {
+                core::cmp::min(remaining, block_size)
+            };
+            crate::fs::ext4::extent::exthunt_read_hole(
+                inode.ino,
+                &inode.block,
+                block_index,
+            );
+            for i in 0..zero_len {
+                buf[buf_offset + i] = 0;
+            }
+            total_read += zero_len;
+            buf_offset += zero_len;
+            current_offset += zero_len as u64;
+            continue;
+        }
+
+        // Trim the run: request bounds, window budget, merge cap, and the
+        // conservative block-cache split (a cached member may hold dirty
+        // bytes the disk does not have).
+        let mut n: u64 = core::cmp::min(
+            core::cmp::min(run_avail, full_blocks_available as u64),
+            MAX_MERGE_BLOCKS,
+        );
+        if blocks_in_window + n > MAX_BLOCKS_PER_WINDOW {
+            n = MAX_BLOCKS_PER_WINDOW.saturating_sub(blocks_in_window).max(1);
+        }
+        if n > 1 {
+            let mut k: u64 = 1;
+            while k < n {
+                if bio::block_cached(fs.device, run_phys + k) {
+                    break;
+                }
+                k += 1;
+            }
+            n = k;
+        }
+        // A single block that the cache holds: per-block serve (bread
+        // serves the cached, possibly dirty, truth).
+        if n == 1 && bio::block_cached(fs.device, run_phys) {
+            match serve_one_block(fs, inode, current_offset, buf_offset, buf, remaining, block_size)
+            {
+                Some(n2) => {
+                    total_read += n2;
+                    buf_offset += n2;
+                    current_offset += n2 as u64;
+                    continue;
+                }
+                None => {
+                    drain!();
+                    return Some(total_read.min(buf_offset));
+                }
+            }
+        }
+
+        if count == MAX_BATCH || blocks_in_window + n > MAX_BLOCKS_PER_WINDOW {
+            drain!();
+        }
+
+        let span_bytes = n as usize * block_size;
+        // SAFETY-free: buf[buf_offset..] is the caller's live staging
+        // slice; the completion drains before return.
+        let submitted = {
+            let dst = buf[buf_offset..buf_offset + span_bytes].as_mut_ptr();
+            let slice = unsafe {
+                core::slice::from_raw_parts_mut(dst, span_bytes)
+            };
+            crate::drivers::blkdev::blkdev_read_async(
+                fs.device,
+                run_phys * sectors_per_block,
+                slice,
+                &completions[count],
+            )
+        };
+        match submitted {
+            Ok(()) => {
+                async_ok = true;
+                crate::fs::ext4::extent::exthunt_rd_batch(
+                    inode.ino as u64,
+                    block_index,
+                    run_phys,
+                    n as u32,
+                );
+                req_dst[count] = buf_offset;
+                req_off[count] = current_offset;
+                req_len[count] = span_bytes;
+                count += 1;
+                blocks_in_window += n;
+                buf_offset += span_bytes;
+                current_offset += span_bytes as u64;
+            }
+            Err(_) => {
+                if !async_ok {
+                    // No async path at all: caller re-runs per-block body.
+                    return None;
+                }
+                drain!();
+                // Re-serve this run per-block after the window drain.
+                let mut off = current_offset;
+                let mut dst = buf_offset;
+                let mut left = span_bytes.min(to_read - buf_offset);
+                while left > 0 {
+                    match serve_one_block(fs, inode, off, dst, buf, left, block_size) {
+                        Some(nk) => {
+                            off += nk as u64;
+                            dst += nk;
+                            left -= nk;
+                        }
+                        None => {
+                            total_read = total_read.min(dst);
+                            buf_offset = total_read;
+                            return Some(total_read);
+                        }
+                    }
+                }
+                total_read = dst;
+                buf_offset = dst;
+                current_offset = off;
+            }
+        }
+    }
+
+    drain!();
+    Some(total_read)
+}
+
+/// The pre-batching per-block O_DIRECT read body (2026-11-15 dio-data
+/// shape): one extent lookup + one synchronous bread round trip per 4 KiB
+/// block. Kept as the fallback for fs block sizes the multi-block path
+/// cannot express (block-cache block size is fixed 4096) and for devices
+/// without an async read path.
+fn ext4_file_read_perblock(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    inode: &crate::fs::ext4::inode::Ext4Inode,
+    offset: u64,
+    buf: &mut [u8],
+    to_read: usize,
+    block_size: usize,
+) -> Result<usize, i32> {
+    let file_size = inode.get_size();
+
     let mut total_read = 0;
     let mut current_offset = offset as usize;
     let mut buf_offset = 0;
 
-    // Per-block lazy resolution (dio-data, 2026-11-15): the old body
-    // materialized the WHOLE file mapping via get_data_blocks per call —
-    // O(file blocks) extent lookups PLUS a file-sized Vec allocation PER
-    // read. The dio_read O_DIRECT shape (64 KiB pread chunks of a 128 MiB
-    // file) paid 32768 lookups + a 256 KiB alloc per chunk: ~16.7M lookups
-    // per 32 MiB pread, which alone blew the test's 30s wall (the
-    // dominant dio_read timeout face). Resolve only the blocks this read
-    // touches — exactly the buffered sibling's shape (read_data).
     while total_read < to_read {
         let block_index = current_offset / block_size;
         let block_offset = current_offset % block_size;
@@ -813,6 +1182,7 @@ pub fn ext4_file_write(
     inode: &mut crate::fs::ext4::inode::Ext4Inode,
     offset: u64,
     buf: &[u8],
+    dio_fast: bool,
 ) -> Result<usize, i32> {
     let block_size = fs.block_size as u64;
     let to_write = buf.len() as u64;
@@ -831,13 +1201,62 @@ pub fn ext4_file_write(
     // every free block zeroing data the writer never asked for, burns
     // minutes of synchronous I/O under TCG (the r9 sweep's openat02 30s
     // timeout + livelock), and leaves the filesystem full for every
-    // later test (294 TBROK ENOSPC mkdtemp failures). Holes in the skipped
+    // later test (294 TBROK mkdtemp failures). Holes in the skipped
     // range stay holes; the per-block loop below allocates a missing
     // block on first touch, and reads of holes zero-fill.
     if needed_blocks > current_blocks {
         let first_touched = offset / block_size;
         allocate_blocks_for_file(fs, inode, needed_blocks,
                                  core::cmp::max(current_blocks, first_touched))?;
+    }
+
+    // DIRECT FAST RUNS (pair-battery item 1, 2026-11-17): for O_DIRECT
+    // writes, full-block spans whose physical blocks are consecutive and
+    // absent from the block cache go to the device DIRECTLY from the
+    // caller's buffer (WriteBatch::submit_ref — the syscall staging
+    // slice; no block-cache entry is created, no private copy made, the
+    // batch drains before this function returns so the caller's bytes
+    // stay the DMA source exactly as long as the device needs them).
+    // Head/tail partial blocks, holes, unwritten extents and cached
+    // blocks keep the per-block body below (buffer-cache RMW truth).
+    // Bound: 64-block spans (256 KiB — the proven contiguous-span shape).
+    const DIO_MAX_MERGE: u64 = 64;
+    let mut dio_batch: Option<bio::WriteBatch> = if dio_fast && fs.block_size == 4096 {
+        Some(bio::WriteBatch::new())
+    } else {
+        None
+    };
+    // Per in-flight span: (dst offset in buf, byte len), submission order.
+    let mut dio_spans: alloc::vec::Vec<(usize, usize)> = alloc::vec::Vec::new();
+    // Byte offset (in buf) of the first failed direct span — a short
+    // write cuts total_written back to it even if later spans landed.
+    let mut dio_fail_at: Option<usize> = None;
+    // Set when a direct span failed: later iterations keep the per-block
+    // body (ordering after a lost span is not worth re-plumbing).
+    let mut dio_dead = false;
+
+    // Drain the current direct window. Must run where `batch` (the
+    // as_mut binding) is in scope. Records the first failed span's dst.
+    macro_rules! dio_drain {
+        ($batch:expr) => {{
+            let n = $batch.in_flight();
+            let rc = $batch.flush();
+            let mut any_failed = rc != 0;
+            if any_failed {
+                let mut cut = dio_fail_at.unwrap_or(usize::MAX);
+                for si in 0..n {
+                    if $batch.status(si) != 0 {
+                        if let Some(&(off, _)) = dio_spans.get(si) {
+                            cut = cut.min(off);
+                        }
+                        break;
+                    }
+                }
+                dio_fail_at = Some(cut);
+            }
+            dio_spans.clear();
+            any_failed
+        }};
     }
 
     // Write data
@@ -865,6 +1284,84 @@ pub fn ext4_file_write(
     'block_loop: while total_written < to_write as usize {
         let block_index = current_offset / block_size;
         let block_offset = (current_offset % block_size) as usize;
+
+        // Direct fast run: block-aligned, >= 1 full block left, extent
+        // resolves, no block-cache entry inside the run.
+        if !dio_dead {
+            if let Some(batch) = dio_batch.as_mut() {
+                let remaining_full = (to_write as usize - total_written) / block_size as usize;
+                if block_offset == 0 && remaining_full >= 1 {
+                    // ONE extent walk for the maximal run (same resolver
+                    // as the read side — per-block lookups paid 1-2
+                    // cached breads per 4 KiB on depth>=1 files).
+                    let (mut first_phys, run_avail, _uw) = if inode.has_extent() {
+                        match crate::fs::ext4::extent::ext4_ext_get_run(
+                            fs,
+                            inode.ino,
+                            &inode.block,
+                            block_index,
+                        ) {
+                            Ok(v) => v,
+                            Err(_) => (0, 0, false),
+                        }
+                    } else {
+                        (0, 0, false)
+                    };
+                    if first_phys != 0 && run_avail > 0 && remaining_full >= 1 {
+                        let mut n: u64 = core::cmp::min(
+                            core::cmp::min(run_avail, remaining_full as u64),
+                            DIO_MAX_MERGE,
+                        );
+                        if n > 1 {
+                            let mut k: u64 = 1;
+                            while k < n {
+                                if bio::block_cached(fs.device, first_phys + k) {
+                                    break;
+                                }
+                                k += 1;
+                            }
+                            n = k;
+                        }
+                        // Cached single block: the buffer cache holds the
+                        // truth (possibly dirty) — the per-block body
+                        // below serves it; no direct submission.
+                        if n == 1 && bio::block_cached(fs.device, first_phys) {
+                            n = 0;
+                        }
+                        let span_bytes = n as usize * block_size as usize;
+                        let mut submitted = batch.submit_ref(
+                            fs.device,
+                            first_phys * sectors_per_block,
+                            &buf[buf_offset..buf_offset + span_bytes],
+                        );
+                        if !submitted {
+                            // Window full: drain, retry once. A failed
+                            // drain kills the fast path for this call.
+                            if dio_drain!(batch) {
+                                dio_dead = true;
+                            } else {
+                                submitted = batch.submit_ref(
+                                    fs.device,
+                                    first_phys * sectors_per_block,
+                                    &buf[buf_offset..buf_offset + span_bytes],
+                                );
+                            }
+                        }
+                        if submitted && !dio_dead {
+                            dio_spans.push((buf_offset, span_bytes));
+                            total_written += span_bytes;
+                            buf_offset += span_bytes;
+                            current_offset += span_bytes as u64;
+                            continue;
+                        }
+                        // Device cannot take the async write (or the
+                        // window drain failed): per-block body below
+                        // handles this block (correctness unchanged).
+                    }
+                }
+            }
+        }
+
 
         // Get data block number (supports indirect blocks)
         let block_num = match inode.get_data_block(fs, block_index) {
@@ -1083,6 +1580,27 @@ pub fn ext4_file_write(
             total_written += write_in_block;
             buf_offset += write_in_block;
             current_offset += write_in_block as u64;
+        }
+    }
+
+    // Drain the direct fast runs (device-ack every span before the
+    // caller's buffer goes back to userspace). A failed span truncates
+    // the reported count to its start — bytes after it may or may not
+    // have landed, and POSIX allows the short count (the per-block
+    // path's partial-write discipline, span-granular).
+    if let Some(mut batch) = dio_batch.take() {
+        if batch.in_flight() > 0 {
+            if dio_drain!(batch) {
+                crate::pr_err!(
+                    "ext4: direct write span batch failure — truncating to confirmed bytes"
+                );
+            }
+        }
+    }
+    if let Some(fail_at) = dio_fail_at {
+        let confirmed = fail_at.min(total_written);
+        if confirmed < total_written {
+            total_written = confirmed;
         }
     }
 
@@ -1508,6 +2026,12 @@ fn ext4_sync_file_inner(
     fs: &crate::fs::ext4::Ext4FileSystem,
     inode: &crate::fs::ext4::inode::Ext4Inode,
 ) -> Result<(), i32> {
+    // Big-lock bracket for the whole durability point (pair-battery item
+    // 3): the batched windows below DMA straight from pinned buffer
+    // bytes, which must not change under a racing write core mid-window
+    // — the same serialization SpanFlusher::drain applies to its settle.
+    // Task-recursive: the flush/write machinery re-entering is legal.
+    let _sync_guard = crate::fs::ext4::EXT4_BIG_LOCK.lock();
     // Durability point for THIS task's own publications only (per-cookie
     // scoped flush). fsync(F) must persist F's data and the metadata
     // needed to retrieve it — and, when the caller is the file's creator,
@@ -1523,38 +2047,97 @@ fn ext4_sync_file_inner(
     // sync_dirty_buffer / eviction / commit write-through).
     let _ = bio::flush_publications_scoped();
 
-    // Sync all data blocks of file
-    let blocks = inode.get_data_blocks(fs)?;
-
-    for block in blocks {
-        if block == 0 {
-            continue; // sparse hole
-        }
-        // DURABILITY-BY-ABSENCE: a block whose buffer left the cache was
-        // synchronously written at its eviction (bio evict_one Phase 4) —
-        // its latest content is already on disk, so fsync owes it nothing.
-        // Re-reading it (the old shape) paid one synchronous 4 KiB read
-        // per absent block: a file larger than the 8192-entry buffer cache
-        // turns the cache over and the loop re-reads ~every block the
-        // preceding flush just persisted (measured: ~3 s of the 6.4 s
-        // 128 MB fsync wall). Mid-eviction keys take the slow path —
-        // their sync write may still be in flight.
-        // SAFETY: fs.device is the fs's registered GenDisk.
-        if unsafe { bio::block_absent_durable(fs.device, block) } {
-            continue;
-        }
-        // SAFETY: bio::bread returns a valid BufferHead on success.
-        unsafe {
-            let bh = bio::bread(fs.device, block)
-                .ok_or(errno::Errno::IOError.as_neg_i32())?;
-
-            let sync_res = if (*bh).is_dirty() {
-                bio::sync_dirty_buffer(bh)
-            } else {
-                Ok(())
+    // RUN-BASED data sync (pair-battery item 3, 2026-11-17): the old
+    // shape materialized the WHOLE file map (one extent lookup per block,
+    // a Vec per fsync) then walked every block with a cache probe. For an
+    // extent file, ONE extent-tree walk per run resolves the whole span
+    // (an 8 MiB file is 1-3 extents, not 2048 lookups); absent-durable
+    // blocks skip without a pin; the surviving dirty blocks go out in
+    // ONE batched window (bio::sync_dirty_blocks_batched — a single
+    // device drain) instead of one serialized round trip each. This is
+    // the measured 691 us -> sub-200 us fsync class on the fio
+    // write+fsync row. Indirect-mapped files keep the old per-block
+    // walk (get_data_blocks handles the indirect chains).
+    if inode.has_extent() {
+        const WALK_CHUNK: usize = 4096;
+        let bs = fs.block_size as u64;
+        let total_blocks = (inode.get_size() + bs - 1) / bs;
+        let mut batch: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+        let mut blk: u64 = 0;
+        let mut walk_err: Option<i32> = None;
+        while blk < total_blocks {
+            let (phys, avail, _uw) = match crate::fs::ext4::extent::ext4_ext_get_run(
+                fs,
+                inode.ino,
+                &inode.block,
+                blk,
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    walk_err = Some(e);
+                    break;
+                }
             };
-            bio::brelse(bh);
-            sync_res?;
+            if phys == 0 {
+                blk += avail.max(1);
+                continue;
+            }
+            let n = core::cmp::min(avail, total_blocks - blk);
+            // DIRTY-ONLY FILTER: a block whose buffer is absent (its
+            // eviction synced it) or clean (already persisted) owes the
+            // fsync nothing. The no-pin `block_dirty_cached` probe
+            // replaces the old absent-check + bread pin of EVERY cached
+            // block — 2048 hash+LRU pins per fsync of an 8 MiB file was
+            // the 3.9M breads/s CPU burn (fsw br=59M on the battery row).
+            // SAFETY: fs.device is the fs's registered GenDisk.
+            for k in 0..n {
+                if unsafe { bio::block_dirty_cached(fs.device, phys + k) } {
+                    batch.push(phys + k);
+                }
+            }
+            blk += n;
+            if batch.len() >= WALK_CHUNK {
+                let rc = bio::sync_dirty_blocks_batched(fs.device, &batch, false);
+                batch.clear();
+                if rc != 0 {
+                    return Err(rc);
+                }
+            }
+        }
+        if let Some(e) = walk_err {
+            return Err(e);
+        }
+        if !batch.is_empty() {
+            let rc = bio::sync_dirty_blocks_batched(fs.device, &batch, false);
+            if rc != 0 {
+                return Err(rc);
+            }
+        }
+    } else {
+        // Sync all data blocks of file (indirect-mapped shape)
+        let blocks = inode.get_data_blocks(fs)?;
+
+        for block in blocks {
+            if block == 0 {
+                continue; // sparse hole
+            }
+            // SAFETY: fs.device is the fs's registered GenDisk.
+            if unsafe { bio::block_absent_durable(fs.device, block) } {
+                continue;
+            }
+            // SAFETY: bio::bread returns a valid BufferHead on success.
+            unsafe {
+                let bh = bio::bread(fs.device, block)
+                    .ok_or(errno::Errno::IOError.as_neg_i32())?;
+
+                let sync_res = if (*bh).is_dirty() {
+                    bio::sync_dirty_buffer(bh)
+                } else {
+                    Ok(())
+                };
+                bio::brelse(bh);
+                sync_res?;
+            }
         }
     }
 
@@ -1566,17 +2149,21 @@ fn ext4_sync_file_inner(
     // O_TRUNC size rewrite of open(O_CREAT|O_TRUNC) — size is metadata
     // fsync must persist). Only the third state needs help; syncing the
     // block is idempotent for the other two.
+    //
+    // Pair-battery item 3: the no-pin dirty probe skips the bread pin on
+    // the common clean path; a dirty table block rides the SAME batched
+    // window the data walk used (one drain) instead of its own serial
+    // round trip.
     if let Some(tbl_blk) = super::inode::inode_table_block_of(fs, inode.ino) {
-        // SAFETY: bio::bread returns a valid BufferHead on success.
-        unsafe {
-            if let Some(bh) = bio::bread(fs.device, tbl_blk) {
-                let sync_res = if (*bh).is_dirty() {
-                    bio::sync_dirty_buffer(bh)
-                } else {
-                    Ok(())
-                };
-                bio::brelse(bh);
-                sync_res?;
+        // SAFETY: fs.device is the fs's registered GenDisk (probe only).
+        if unsafe { bio::block_dirty_cached(fs.device, tbl_blk) } {
+            let rc = bio::sync_dirty_blocks_batched(
+                fs.device,
+                core::slice::from_ref(&tbl_blk),
+                false,
+            );
+            if rc != 0 {
+                return Err(rc);
             }
         }
     }
@@ -2024,6 +2611,7 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
                     | crate::fs::file::FileFlags::O_DSYNC) == 0,
                 buf,
                 &[0],
+                durability & crate::fs::file::FileFlags::O_DIRECT != 0,
             )
         };
         if written > 0 {
@@ -2033,6 +2621,29 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
                 offset + written as u64
             };
             file.set_pos(end);
+            // O_DIRECT write-return durability (pair-battery item 1,
+            // 2026-11-17): the core leaves the range's data blocks
+            // BH_Dirty in the block cache; a direct write is contractually
+            // on the device when write(2) returns (the reference's DIO
+            // submits bios and waits). Push the written range through the
+            // plugged span pipeline (ONE batched submit + drain — a 1 MiB
+            // contiguous write is one span) instead of leaving 256 dirty
+            // victims to serialized one-at-a-time eviction syncs (the
+            // measured 10.6 ms 1 MiB DIO write class). no-op for block
+            // sizes the span machinery cannot express.
+            if durability & crate::fs::file::FileFlags::O_DIRECT != 0 && !fs.read_only {
+                let mut stage: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+                let mut flusher = SpanFlusher::new();
+                run_sync_spans(
+                    fs,
+                    inode,
+                    end - written as u64,
+                    written as usize,
+                    &mut stage,
+                    &mut flusher,
+                );
+                flusher.drain();
+            }
         }
         written
     }
@@ -2072,7 +2683,7 @@ pub unsafe fn ext4_file_write_at_vfs(file: &File, offset: u64, buf: *const u8, c
         if durability == 0 && inode.mode.is_regular_file() && !(*fs_ptr).read_only {
             ext4_buffered_write(&*fs_ptr, inode, offset, data)
         } else {
-            ext4_write_at_core(
+            let written = ext4_write_at_core(
                 &*fs_ptr,
                 inode.ino as u32,
                 Some(inode),
@@ -2081,7 +2692,28 @@ pub unsafe fn ext4_file_write_at_vfs(file: &File, offset: u64, buf: *const u8, c
                     | crate::fs::file::FileFlags::O_DSYNC) == 0,
                 data,
                 &[0],
-            )
+                durability & crate::fs::file::FileFlags::O_DIRECT != 0,
+            );
+            // O_DIRECT write-return durability — see the write(2) twin
+            // (pair-battery item 1): plugged span drain of the written
+            // range so a direct pwrite is device-acked at return.
+            if written > 0
+                && durability & crate::fs::file::FileFlags::O_DIRECT != 0
+                && !(*fs_ptr).read_only
+            {
+                let mut stage: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+                let mut flusher = SpanFlusher::new();
+                run_sync_spans(
+                    &*fs_ptr,
+                    inode,
+                    offset,
+                    written as usize,
+                    &mut stage,
+                    &mut flusher,
+                );
+                flusher.drain();
+            }
+            written
         }
     }
 }
@@ -2098,7 +2730,7 @@ pub fn ext4_kernel_write_at(
 ) -> isize {
     // SAFETY: fs is a valid Ext4FileSystem reference; the core owns all
     // locking and operates on (fs, ino) exactly like the fd paths.
-    unsafe { ext4_write_at_core(fs, ext4_ino, None, offset, true, buf, &[0]) }
+    unsafe { ext4_write_at_core(fs, ext4_ino, None, offset, true, buf, &[0], false) }
 }
 
 /// Buffered (delayed-allocation) write for regular files — the reference
@@ -2356,7 +2988,7 @@ unsafe fn ext4_buffered_write(
             // place, writeback_populate_range).
             // SAFETY: same (fs, ino, inode) discipline as write_vfs.
             let r = unsafe {
-                ext4_write_at_core(fs, inode.ino as u32, Some(inode), file_off, true, src, &[0])
+                ext4_write_at_core(fs, inode.ino as u32, Some(inode), file_off, true, src, &[0], false)
             };
             if r < 0 {
                 if copied > 0 && crate::trace::EVENT_EXT4_DA_WRITE_END.armed() {
@@ -2593,6 +3225,10 @@ unsafe fn ext4_write_at_core(
     // frame copied onto itself is a self-overlap; the run-batched flush
     // passes EVERY source frame of its staged run). `&[0]` = no skip.
     skip_pfns: &[u64],
+    // O_DIRECT fast arm (pair-battery item 1): the fd callers set this
+    // from the description's O_DIRECT bit — full-block runs then go to
+    // the device straight from the caller's staging slice.
+    dio_fast: bool,
 ) -> isize {
     // SMP serialization for the write path (review 5.5 high: 写路径/位图
     // RMW 无锁——SMP 位图丢更新双分配): allocation, bitmap RMW, group
@@ -2658,7 +3294,7 @@ unsafe fn ext4_write_at_core(
     };
 
     // Call internal write function
-    let result = match ext4_file_write(fs, &mut ext4_inode, offset, buf) {
+    let result = match ext4_file_write(fs, &mut ext4_inode, offset, buf, dio_fast) {
         Err(e) => e as isize,
         Ok(written_bytes) => {
             // CACHE COHERENCE TAIL (the klogd lesson, 2026-10-26): the
@@ -2928,6 +3564,7 @@ fn flush_run(
             true,
             &stage[..run_bytes],
             &skip_pfns,
+            false,
         )
     };
     if written == run_bytes as isize {
@@ -2953,7 +3590,7 @@ fn flush_run(
         // SAFETY: same discipline as the run write; src borrows the
         // staged bytes (the pinned frames' copy).
         let mut written =
-            unsafe { ext4_write_at_core(fs, inode.ino as u32, Some(inode), off, true, src, &[pfn]) };
+            unsafe { ext4_write_at_core(fs, inode.ino as u32, Some(inode), off, true, src, &[pfn], false) };
         if written != n_bytes as isize {
             let mut tries = 0u32;
             while tries < 3 {
@@ -2968,6 +3605,7 @@ fn flush_run(
                         true,
                         src,
                         &[pfn],
+                        false,
                     )
                 };
                 if written == n_bytes as isize {
@@ -3162,6 +3800,13 @@ fn run_sync_spans(
     let sectors_per_block = bs / 512;
     let n_blocks = (run_bytes as u64 + bs - 1) / bs;
     let first_block = off0 / bs;
+    // Stage sizing is THIS function's job (the flush-run caller pre-sizes
+    // only its own run; the O_DIRECT post-write drain passes an empty
+    // Vec): a maximal span covers every block of the range.
+    let stage_need = n_blocks as usize * bs as usize;
+    if stage.len() < stage_need {
+        stage.resize(stage_need, 0);
+    }
     // Serialized against racing write cores: the span assembly reads the
     // buffers' CURRENT bytes and the dirty-clear must not revert a
     // concurrent writer's newer buffer content (the same serialization

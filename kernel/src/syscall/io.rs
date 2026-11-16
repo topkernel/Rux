@@ -239,16 +239,29 @@ fn read_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: us
     // have — pipe reads still return as soon as data exists
     // (pipe capacity 16KB < RW_CHUNK).
     //
+    // O_DIRECT ext4 exception (pair-battery item 1, 2026-11-17): the
+    // batched direct reader inside ext4 coalesces a whole request into
+    // multi-block device reads; a 64 KiB chunk cap serialized a 1 MiB
+    // direct read into 16 windows. Stage whole MiBs for ext4 O_DIRECT.
+    const DIO_STAGE_MAX: usize = 1024 * 1024;
+    let stage_cap = if flags & crate::fs::file::FileFlags::O_DIRECT != 0
+        && ops.is_some_and(|o| core::ptr::eq(o as *const _, &crate::fs::ext4::file::EXT4_FILE_OPS as *const _))
+    {
+        DIO_STAGE_MAX
+    } else {
+        RW_CHUNK
+    };
+    //
     // UNINIT staging: the file layer fills exactly the `n`
     // bytes it returns before copy_to_user reads them, so
     // zero-filling the buffer was a 4KB memset per read(2) —
     // measurable on every hot path (file, pipe, tty).
-    let mut kernel_buf = crate::fs::file::alloc_staging_buf(count.min(RW_CHUNK));
+    let mut kernel_buf = crate::fs::file::alloc_staging_buf(count.min(stage_cap));
     let mut total: usize = 0;
     let mut user_ptr = buf;
     let mut remaining = count;
     loop {
-        let chunk = remaining.min(RW_CHUNK);
+        let chunk = remaining.min(stage_cap);
         if chunk == 0 {
             break;
         }
@@ -300,6 +313,27 @@ fn read_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: us
 /// - args[2]: count - number of bytes to read
 /// - args[3]: offset - file offset (signed)
 ///
+/// Staging-window cap for positional rw on ext4 O_DIRECT descriptors
+/// (pair-battery item 1): the batched direct path inside ext4 amortizes
+/// per-call costs (journal bracket, extent resolve, plugged drain) over
+/// the whole request, so pread64/pwrite64 stage whole MiBs instead of
+/// RW_CHUNK slices. Everything else keeps the 64 KiB bound.
+fn pw_stage_cap(file: &crate::fs::file::File, count: usize) -> usize {
+    const DIO_STAGE_MAX: usize = 1024 * 1024;
+    let _ = count;
+    if file.flags.load(core::sync::atomic::Ordering::Relaxed)
+        & crate::fs::file::FileFlags::O_DIRECT
+        != 0
+        && file
+            .get_ops()
+            .is_some_and(|o| core::ptr::eq(o as *const _, &crate::fs::ext4::file::EXT4_FILE_OPS as *const _))
+    {
+        DIO_STAGE_MAX
+    } else {
+        RW_CHUNK
+    }
+}
+
 /// # Returns
 /// Number of bytes read on success, negative errno on failure
 ///
@@ -330,14 +364,20 @@ pub fn sys_pread64(args: SyscallArgs) -> i64 {
                 // position-invariant read_at() instead.
                 // Chunked (SYSA-C1): bounded staging buffer, sequential
                 // offset advance; short read ends the loop.
-                let mut kernel_buf = crate::fs::file::alloc_staging_buf(count.min(RW_CHUNK));
+                // O_DIRECT ext4 exception (pair-battery item 1): the
+                // batched direct reader coalesces whole requests; stage
+                // MiBs so one pread carries the full request (fio's psync
+                // engine preads — the 64 KiB cap serialized a 1 MiB read
+                // into 16 windows).
+                let stage_cap = pw_stage_cap(&file, count);
+                let mut kernel_buf = crate::fs::file::alloc_staging_buf(count.min(stage_cap));
                 let mut total: usize = 0;
                 let mut err: i32 = 0;
                 let mut user_ptr = buf;
                 let mut remaining = count;
                 let mut cur_off = offset as u64;
                 loop {
-                    let chunk = remaining.min(RW_CHUNK);
+                    let chunk = remaining.min(stage_cap);
                     if chunk == 0 {
                         break;
                     }
@@ -709,13 +749,27 @@ fn write_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: u
     // count cannot OOM the kernel heap; a partial chunk write
     // ends the loop and returns what was accepted (POSIX
     // partial-write semantics).
-    let mut kernel_buf = crate::fs::file::alloc_staging_buf(count.min(RW_CHUNK));
+    //
+    // O_DIRECT ext4 exception (pair-battery item 1, 2026-11-17): one
+    // whole-MiB write call carries the request into ext4's journal
+    // bracket ONCE and lets the post-write plugged drain push the whole
+    // range as one span (the 64 KiB cap paid 16 brackets + 16 drains
+    // per 1 MiB direct write).
+    const DIO_STAGE_MAX: usize = 1024 * 1024;
+    let stage_cap = if flags & crate::fs::file::FileFlags::O_DIRECT != 0
+        && ops.is_some_and(|o| core::ptr::eq(o as *const _, &crate::fs::ext4::file::EXT4_FILE_OPS as *const _))
+    {
+        DIO_STAGE_MAX
+    } else {
+        RW_CHUNK
+    };
+    let mut kernel_buf = crate::fs::file::alloc_staging_buf(count.min(stage_cap));
     let mut total: usize = 0;
     let mut user_ptr = buf;
     let mut remaining = count;
     let mut first_err: i32 = 0;
     loop {
-        let chunk = remaining.min(RW_CHUNK);
+        let chunk = remaining.min(stage_cap);
         if chunk == 0 {
             break;
         }
@@ -1958,14 +2012,19 @@ pub fn sys_pwrite64(args: SyscallArgs) -> i64 {
             // shared fd position under concurrent I/O.
             // Chunked (SYSA-C1): bounded staging, sequential offset
             // advance; partial chunk write ends the loop.
-            let mut kernel_buf = crate::fs::file::alloc_staging_buf(count.min(RW_CHUNK));
+            // O_DIRECT ext4 exception (pair-battery item 1): one
+            // whole-MiB write call = one journal bracket + one plugged
+            // drain per direct pwrite (the 64 KiB cap paid 16 brackets
+            // per 1 MiB).
+            let stage_cap = pw_stage_cap(&file, count);
+            let mut kernel_buf = crate::fs::file::alloc_staging_buf(count.min(stage_cap));
             let mut total: usize = 0;
             let mut err: i32 = 0;
             let mut user_ptr = buf;
             let mut remaining = count;
             let mut cur_off = offset as u64;
             loop {
-                let chunk = remaining.min(RW_CHUNK);
+                let chunk = remaining.min(stage_cap);
                 if chunk == 0 {
                     break;
                 }

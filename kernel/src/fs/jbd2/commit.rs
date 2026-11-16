@@ -112,55 +112,18 @@ pub fn jbd2_journal_commit_transaction(
     // in <32B chunks blew the 30s wall clock) back to ~one wait.
     if commit_transaction.t_revoke_records.lock().is_empty() {
         crate::dfx::fsw::note_j_commit_fast(dirty_buffers.len());
-        let mut first_err: i32 = 0;
-        for (blocknr, _kind) in &dirty_buffers {
-            // Write-through semantics: every jbd2_journal_dirty_metadata
-            // caller (write_inode, namei's write_block_from_vec) modifies
-            // the buffer IN PLACE before registering the snapshot, and the
-            // buffer cache syncs dirty victims before eviction-reuse. The
-            // live buffer content is therefore always at least as new as
-            // the registered snapshot — bread may even return a
-            // post-eviction copy that already carries the update on disk.
-            //
-            // Re-applying the snapshot here (the old code) stomped the
-            // block with its REGISTRATION-TIME image. On SMP, a concurrent
-            // write(2) on another CPU touching the same shared block —
-            // the 4 KiB inode-table slot of a second file, the block
-            // bitmap, a group descriptor — between this transaction's
-            // registration and commit got silently REVERTED. The victim's
-            // on-disk inode then mapped freed-and-reallocated blocks:
-            // ftest05 read sibling files' data through its own extents and
-            // later truncates double-freed live blocks ("rm: I/O error",
-            // bad-verify, cross-file corruption).
-            //
-            // So: sync the LIVE content, never the snapshot. If the buffer
-            // was evicted in between, its on-disk copy was synced at
-            // eviction with content >= the snapshot, and bread restores
-            // that; syncing it again is a no-op.
-            // SAFETY: bio::bread on a valid device returns a buffer head
-            // for the cached block (cache hit) or a freshly-read one.
-            match bio::bread(device, *blocknr) {
-                Some(bh) => {
-                    // SAFETY: bh is valid; b_data is block_size bytes.
-                    unsafe {
-                        let bh_ref = &mut *bh;
-                        bh_ref.set_state_bit(bio::BufferState::BH_Dirty);
-                        // Sync writes the cached (current) content out.
-                        let sync_res = bio::sync_dirty_buffer(bh);
-                        // Release the cache reference taken by bread.
-                        bio::brelse(bh);
-                        if let Err(e) = sync_res {
-                            first_err = e;
-                            break;
-                        }
-                    }
-                }
-                None => {
-                    first_err = 5; // EIO
-                    break;
-                }
-            }
-        }
+        // BATCHED WRITE-THROUGH (pair-battery item 3): the old loop paid
+        // ONE SYNCHRONOUS device round trip per registered buffer — the
+        // measured 3.8 ms/fsync class (five-plus serialized 4 KiB writes
+        // per commit). Same write-through semantics as before (see the
+        // slow-path comment below for the live-content discipline), but
+        // all buffers submit first and ONE drain device-acks the window.
+        // The big lock matches SpanFlusher::drain's settle discipline
+        // (task-recursive — callers already holding it re-enter freely).
+        let blocks: alloc::vec::Vec<u64> =
+            dirty_buffers.iter().map(|(b, _)| *b).collect();
+        let _ext4_guard = crate::fs::ext4::EXT4_BIG_LOCK.lock();
+        let first_err = bio::sync_dirty_blocks_batched(device, &blocks, true);
         // Sequences advance; the log itself consumed no space (j_head,
         // j_tail, j_free unchanged).
         journal
@@ -190,30 +153,13 @@ pub fn jbd2_journal_commit_transaction(
     // through bio::sync_dirty_buffer's per-block publication-constraint
     // guard, exactly like the fast path.
     {
-        let mut first_err: i32 = 0;
-        for (blocknr, _kind) in &dirty_buffers {
-            // SAFETY: same contract as the fast path above — bread on a
-            // valid device returns a cached or freshly-read buffer head.
-            match bio::bread(device, *blocknr) {
-                Some(bh) => {
-                    // SAFETY: bh is valid; b_data is block_size bytes.
-                    unsafe {
-                        let bh_ref = &mut *bh;
-                        bh_ref.set_state_bit(bio::BufferState::BH_Dirty);
-                        let sync_res = bio::sync_dirty_buffer(bh);
-                        bio::brelse(bh);
-                        if let Err(e) = sync_res {
-                            first_err = e;
-                            break;
-                        }
-                    }
-                }
-                None => {
-                    first_err = EIO;
-                    break;
-                }
-            }
-        }
+        // BATCHED WRITE-THROUGH (pair-battery item 3) — same shape and
+        // rationale as the fast path above: one drain window instead of
+        // one serialized round trip per registered buffer.
+        let blocks: alloc::vec::Vec<u64> =
+            dirty_buffers.iter().map(|(b, _)| *b).collect();
+        let _ext4_guard = crate::fs::ext4::EXT4_BIG_LOCK.lock();
+        let first_err = bio::sync_dirty_blocks_batched(device, &blocks, true);
         if first_err != 0 {
             journal.abort(first_err);
             *commit_transaction.t_state.lock() = TransactionState::Finished;
