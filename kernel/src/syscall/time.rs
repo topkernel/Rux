@@ -1150,30 +1150,12 @@ pub fn sys_timer_create(args: SyscallArgs) -> i64 {
     let sigevent_ptr = args[1] as *const u8;
     let timerid_ptr = args[2] as *mut i32;
 
-    if timerid_ptr.is_null() {
-        return -(errno::EFAULT as i64);
-    }
-    if !crate::arch::uaccess::access_ok(timerid_ptr as usize, 4) {
-        return -(errno::EFAULT as i64);
-    }
-
-    // CLOCK_REALTIME (0), CLOCK_MONOTONIC (1) arm on the wall timer
-    // wheel; the CPU-time clocks (2/3) arm against sum_exec_runtime and
-    // are checked in scheduler_tick (LTP timer_settime01/timer_delete01
-    // create timers on all four). Reference posix-timers additionally
-    // accept BOOTTIME (7, monotonic-domain deadlines — no suspend here)
-    // and TAI (11, wall deadlines + the constant TAI offset).
-    // kselftest set-timer-lat covers both; the ALARM clockids (8/9/10)
-    // stay EINVAL (no alarmtimer infrastructure) which the test reads
-    // as its no-CAP_WAKE_ALARM unsupported path.
-    if !(0..=3).contains(&clockid)
-        && clockid != CLOCK_BOOTTIME as i32
-        && clockid != CLOCK_TAI as i32
-    {
-        return -(errno::EINVAL as i64);
-    }
-
-    // Parse sigevent for signal notification
+    // Reference timer_create (kernel/time/posix-timers.c): the sigevent
+    // is copy_from_user'd FIRST — EFAULT for a bad struct beats every
+    // other error, including the clockid EINVAL. The timer-id pointer is
+    // only written (and only EFAULT-checked) at the END.
+    // struct sigevent { sigval sigev_value; int sigev_signo @8;
+    // int sigev_notify @12; union { int _tid @16; ... } }
     let mut sigev_signo = crate::signal::Signal::SIGALRM as i32;
     let mut sigev_notify = 0; // SIGEV_SIGNAL
 
@@ -1181,7 +1163,6 @@ pub fn sys_timer_create(args: SyscallArgs) -> i64 {
         if !crate::arch::uaccess::access_ok(sigevent_ptr as usize, 64) {
             return -(errno::EFAULT as i64);
         }
-        // struct sigevent { sigval sigev_value, int sigev_signo, int sigev_notify, ... }
         // SAFETY: sigevent_ptr validated with access_ok(64); get_user goes
         // through the exception-table copy path (SUM=0 safe). An unreadable
         // struct must be EFAULT — the old unwrap_or(0) read it as
@@ -1199,11 +1180,65 @@ pub fn sys_timer_create(args: SyscallArgs) -> i64 {
                 Some(v) => v,
                 None => return -(errno::EFAULT as i64),
             };
-            if signo > 0 && signo <= 64 {
-                sigev_signo = signo;
-            }
+            sigev_signo = signo;
             sigev_notify = notify;
+
+            // good_sigevent() validation (LTP timer_create02):
+            // - sigev_notify outside {SIGEV_SIGNAL=0, SIGEV_NONE=1,
+            //   SIGEV_THREAD=2, SIGEV_THREAD_ID=4} -> EINVAL (the old
+            //   code stored any notify value verbatim and returned
+            //   SUCCESS for e.g. INT_MAX);
+            // - SIGEV_THREAD_ID must name a task in OUR thread group
+            //   (find_vpid + same_thread_group in the reference);
+            // - for every notify except SIGEV_NONE the signo must be a
+            //   valid signal 1..SIGRTMAX(64) — the old "fallback to
+            //   SIGALRM" arm silently accepted INT_MAX.
+            const SIGEV_NONE: i32 = 1;
+            const SIGEV_THREAD: i32 = 2;
+            const SIGEV_THREAD_ID: i32 = 4;
+            const SIGRTMAX: i32 = 64;
+            match notify {
+                0 | SIGEV_THREAD => {
+                    if signo <= 0 || signo > SIGRTMAX {
+                        return -(errno::EINVAL as i64);
+                    }
+                }
+                SIGEV_NONE => {}
+                SIGEV_THREAD_ID => {
+                    if signo <= 0 || signo > SIGRTMAX {
+                        return -(errno::EINVAL as i64);
+                    }
+                    // tid at union offset 16
+                    let tid = match crate::arch::uaccess::get_user(p.add(4)) {
+                        Some(v) => v,
+                        None => return -(errno::EFAULT as i64),
+                    };
+                    let same_group = crate::process::find_task_by_pid(tid as u32)
+                        .map(|t| t.tgid() == crate::process::current_task().map(|c| c.tgid()).unwrap_or(0))
+                        .unwrap_or(false);
+                    if !same_group {
+                        return -(errno::EINVAL as i64);
+                    }
+                }
+                _ => return -(errno::EINVAL as i64),
+            }
         }
+    }
+
+    // CLOCK_REALTIME (0), CLOCK_MONOTONIC (1) arm on the wall timer
+    // wheel; the CPU-time clocks (2/3) arm against sum_exec_runtime and
+    // are checked in scheduler_tick (LTP timer_settime01/timer_delete01
+    // create timers on all four). Reference posix-timers additionally
+    // accept BOOTTIME (7, monotonic-domain deadlines — no suspend here)
+    // and TAI (11, wall deadlines + the constant TAI offset).
+    // kselftest set-timer-lat covers both; the ALARM clockids (8/9/10)
+    // stay EINVAL (no alarmtimer infrastructure) which the test reads
+    // as its no-CAP_WAKE_ALARM unsupported path.
+    if !(0..=3).contains(&clockid)
+        && clockid != CLOCK_BOOTTIME as i32
+        && clockid != CLOCK_TAI as i32
+    {
+        return -(errno::EINVAL as i64);
     }
 
     // Allocate a stable, never-reused timer handle. Previously the id was
@@ -1235,13 +1270,20 @@ pub fn sys_timer_create(args: SyscallArgs) -> i64 {
         interval_ns: 0,
     };
 
+    // Reference order: copy_to_user(created_timer_id) runs BEFORE the
+    // timer becomes visible, and its failure unwinds the timer (EFAULT).
+    // The old code pushed first and IGNORED the put_user error — a bad
+    // timer-id pointer returned SUCCESS (LTP timer_create02 case 2).
+    // SAFETY: put_user is the exception-table copy path (SUM=0 safe).
+    let wrote = unsafe {
+        crate::arch::uaccess::put_user(timerid_ptr, user_timer_id)
+    };
+    if !wrote {
+        return -(errno::EFAULT as i64);
+    }
+
     let mut timers = task.posix_timers.lock();
     timers.push(state);
-    // SAFETY: timerid_ptr validated with access_ok(4); put_user is the
-    // exception-table copy path.
-    unsafe {
-        let _ = crate::arch::uaccess::put_user(timerid_ptr, user_timer_id);
-    }
 
     0
 }

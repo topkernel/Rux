@@ -3377,6 +3377,103 @@ pub fn create_vfs_inode_in(
 ///
 /// Builds an independent Ext4FileSystem on `disk` (an mkfs.ext2 image
 /// bound to /dev/loopN), reads its root inode, and returns a VFS root
+/// Per-device live-instance reuse table (the sget-by-bdev lookup — see
+/// the reuse block in `mount_loop_instance`). Rows are published at
+/// instance creation and invalidated when the device is re-bound
+/// (LOOP_SET_FD / LOOP_CLR_FD), when the on-disk superblock identity
+/// changed (a re-mkfs'd device — see `uuid` below), or when the instance
+/// is reclaimed at a failed mount. `disk` is the GenDisk address, `fs`
+/// the registered instance.
+struct LoopInstanceReuse {
+    disk: core::sync::atomic::AtomicU64,
+    fs: core::sync::atomic::AtomicU64,
+    /// On-disk superblock UUID (two LE u64 halves) captured at publish
+    /// time. mke2fs writes a FRESH random UUID on every run, so a UUID
+    /// mismatch is a reliable "the device image was re-created" signal:
+    /// the cached instance's parsed geometry (inode size, group layout,
+    /// 64bit feature) then describes a DEAD image and must not be
+    /// reused — LTP rename01 iterates ext2/ext3/ext4 variants over one
+    /// loop binding, and the ext4 variant's 64bit layout made the
+    /// ext2-era instance's read_inode(2) land on a non-directory block
+    /// (chdir(mntpoint) ENOTDIR).
+    uuid: [core::sync::atomic::AtomicU64; 2],
+}
+
+const LOOP_REUSE_SLOTS: usize = 8;
+
+static LOOP_INSTANCE_REUSE: [LoopInstanceReuse; LOOP_REUSE_SLOTS] = [const {
+    LoopInstanceReuse {
+        disk: core::sync::atomic::AtomicU64::new(0),
+        fs: core::sync::atomic::AtomicU64::new(0),
+        uuid: [
+            core::sync::atomic::AtomicU64::new(0),
+            core::sync::atomic::AtomicU64::new(0),
+        ],
+    }
+}; LOOP_REUSE_SLOTS];
+
+/// Read the on-disk superblock UUID of `disk` through the buffer cache
+/// (same read init() uses: block 0, byte offset 1024; s_uuid at +0x68).
+/// None when the block cannot be read.
+fn sb_uuid_of(disk: *const crate::drivers::blkdev::GenDisk) -> Option<(u64, u64)> {
+    // SAFETY: bread on a live GenDisk returns a valid BufferHead whose
+    // b_data covers the full block; brelse drops the reference.
+    unsafe {
+        let bh = crate::fs::bio::bread(disk, 0)?;
+        let data = (*bh).b_data.as_ptr();
+        let lo = core::ptr::read_unaligned(data.add(1024 + 0x68) as *const u64);
+        let hi = core::ptr::read_unaligned(data.add(1024 + 0x70) as *const u64);
+        crate::fs::bio::brelse(bh);
+        Some((lo.to_le(), hi.to_le()))
+    }
+}
+
+/// Publish a fresh instance for its device (replacing any stale row for
+/// the same disk). Called under EXT4_BIG_LOCK.
+fn loop_instance_publish(disk: *const crate::drivers::blkdev::GenDisk, fs_ptr: *mut Ext4FileSystem) {
+    use core::sync::atomic::Ordering;
+    let disk_bits = disk as u64;
+    let fs_bits = fs_ptr as u64;
+    let uuid = sb_uuid_of(disk).unwrap_or((0, 0));
+    for slot in LOOP_INSTANCE_REUSE.iter() {
+        let cur = slot.disk.load(Ordering::Acquire);
+        if cur == 0 || cur == disk_bits {
+            // Clear the fs word first: a reader that still sees the old
+            // disk match must not observe the new fs pointer half-way.
+            slot.fs.store(0, Ordering::Release);
+            slot.disk.store(disk_bits, Ordering::Release);
+            slot.uuid[0].store(uuid.0, Ordering::Release);
+            slot.uuid[1].store(uuid.1, Ordering::Release);
+            slot.fs.store(fs_bits, Ordering::Release);
+            return;
+        }
+    }
+    // Table full: this instance is simply not reusable — correctness
+    // unaffected (a fresh mount then reads the device, like pre-reuse).
+}
+
+/// Drop the reuse row for a device. The loop driver's re-bind path calls
+/// this (takes EXT4_BIG_LOCK); the mount-failure path uses the _locked
+/// variant (already under the lock — SleepMutex is not reentrant).
+pub fn loop_instance_invalidate(disk: *const crate::drivers::blkdev::GenDisk) {
+    let _ext4_guard = EXT4_BIG_LOCK.lock();
+    loop_instance_invalidate_locked(disk);
+}
+
+fn loop_instance_invalidate_locked(disk: *const crate::drivers::blkdev::GenDisk) {
+    use core::sync::atomic::Ordering;
+    let disk_bits = disk as u64;
+    for slot in LOOP_INSTANCE_REUSE.iter() {
+        if slot.disk.load(Ordering::Acquire) == disk_bits {
+            // fs first, then the key: a racing mount either sees the row
+            // gone (fresh instance) or the old fs with the key still set
+            // (instance stays registered — safe either way).
+            slot.fs.store(0, Ordering::Release);
+            slot.disk.store(0, Ordering::Release);
+        }
+    }
+}
+
 /// wired to THIS instance (private_data / fs_id / cached inode). The
 /// boot root keeps GLOBAL_EXT4_FS; all instance-specific operations
 /// resolve the filesystem from the inode (get_ext4_fs_from_inode).
@@ -3389,7 +3486,61 @@ pub fn mount_loop_instance(
     if disk.is_null() {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
+
+    // SUPERBLOCK REUSE (reference get_tree_bdev/sget shape): a mount of
+    // a device that already has a LIVE instance reuses it. Linux's sget
+    // searches for an existing superblock by bdev BEFORE reading one —
+    // so data written through an fd that outlived a MNT_DETACH umount
+    // (the detached mount keeps the sb alive) is visible to the very
+    // next mount of the same device: LTP umount2_01 writes 26 bytes
+    // through the open fd AFTER umount2(MNT_DETACH), remounts, and
+    // reads them back. A fresh instance answered from the on-disk inode
+    // (0 bytes — the write never had a flush opportunity between detach
+    // and remount) and the test TBROK'd at the read. The reuse key is
+    // the GenDisk pointer; LOOP_SET_FD/LOOP_CLR_FD invalidate the row
+    // (a re-bound loop is a NEW device image — the next mkfs must start
+    // from the disk, never from the stale in-memory instance).
     let _ext4_guard = EXT4_BIG_LOCK.lock();
+    {
+        use core::sync::atomic::Ordering;
+        for slot in LOOP_INSTANCE_REUSE.iter() {
+            if slot.disk.load(Ordering::Acquire) as *const blkdev::GenDisk == disk {
+                let fs_ptr =
+                    slot.fs.load(Ordering::Acquire) as *mut Ext4FileSystem;
+                if !fs_ptr.is_null() {
+                    // Identity guard: the row is only valid while the
+                    // on-disk superblock is the one the instance was
+                    // built from (mke2fs rotates the UUID every run —
+                    // see LoopInstanceReuse::uuid). A re-mkfs'd device
+                    // falls through to a fresh instance.
+                    if let Some((lo, hi)) = sb_uuid_of(disk) {
+                        if slot.uuid[0].load(Ordering::Acquire) != lo
+                            || slot.uuid[1].load(Ordering::Acquire) != hi
+                        {
+                            loop_instance_invalidate_locked(disk);
+                            break;
+                        }
+                    }
+                    // SAFETY: the slot's pointer is a registered instance
+                    // (published under EXT4_BIG_LOCK; cleared by the same
+                    // lock's invalidation path before any free).
+                    let fs_ref = unsafe { &*fs_ptr };
+                    // The requested read-only-ness only ever ADDS
+                    // restrictions at the VFS mount flags (do_mount
+                    // mirrors effective_ro); the instance itself stays
+                    // as it was mounted.
+                    let root = fs_ref
+                        .read_inode(2)
+                        .map(|ext4_inode| {
+                            create_vfs_inode_in(fs_ptr, 2, &ext4_inode)
+                        })
+                        .map_err(|_| errno::Errno::InvalidArgument.as_neg_i32())?;
+                    return Ok((root, fs_ref.read_only));
+                }
+            }
+        }
+    }
+
     let mut fs = alloc::boxed::Box::new(Ext4FileSystem::new(disk));
     fs.read_only = read_only;
     // Superblock/group/inode-table bootstrap; a non-ext image (missing
@@ -3420,6 +3571,10 @@ pub fn mount_loop_instance(
     // The writeback path resolves (fs_id, ino) through this registry
     // (fs_id IS the instance pointer for ext4-backed page-cache entries).
     ext4_instance_register(fs_ptr);
+    // Publish into the per-device reuse table (see the reuse block above
+    // for the sget-by-bdev rationale). Registered first: a reuse hit must
+    // never outlive the registry row.
+    loop_instance_publish(disk, fs_ptr);
     // SAFETY: fs_ptr is a leaked, valid instance pointer.
     let fs_ref = unsafe { &*fs_ptr };
     match fs_ref.read_inode(2) {
@@ -3427,7 +3582,10 @@ pub fn mount_loop_instance(
         Err(_) => {
             // Not a filesystem root (bad magic / inode 2): fail the mount
             // and reclaim the instance.
-            // Unregister BEFORE the reclaim (same invariant as unmount).
+            // Drop the reuse row BEFORE the reclaim (a published row must
+            // never name a freed instance), then unregister (same
+            // invariant as unmount).
+            loop_instance_invalidate_locked(disk);
             ext4_instance_unregister(fs_ptr);
             // SAFETY: reclaiming the just-leaked box.
             unsafe { drop(alloc::boxed::Box::from_raw(fs_ptr)) };
