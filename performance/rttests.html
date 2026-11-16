@@ -120,7 +120,7 @@
     <h2 id="pistress"><span class="anchor">§3</span>pi_stress</h2>
     <ul>
       <li>r1-r4:FAIL —— FUTEX_LOCK_PI 族当时未实现(ENOSYS)。</li>
-      <li><b>2026-11-17 复测</b>(当前 main,PI futex 已合 0b4d1752b):<span id="pi-now">glibc PI mutex 初始化路径返回 ENOTSUP("initializing mutex: Operation not supported")—— 内核侧 FUTEX_LOCK_PI 存在,但 glibc 的 PTHREAD_PRIO_INHERIT mutex 依赖链(robust 注册 + PI 语义)尚未全通;<span style="color:var(--text-3)">UAPI 兼容缺口登记,pi_stress 通过为验收目标。</span></li>
+      <li><b>2026-11-17 复测</b>(当前 main,PI futex 已合 0b4d1752b):<span id="pi-now">glibc PI mutex 初始化路径返回 ENOTSUP("initializing mutex: Operation not supported")—— 内核侧 FUTEX_LOCK_PI 存在,但 glibc 的 PTHREAD_PRIO_INHERIT mutex 依赖链(robust 注册 + PI 语义)尚未全通;<span style="color:var(--text-3)">UAPI 兼容缺口登记,pi_stress 通过为验收目标。</span></span></li>
     </ul>
 
     <h2 id="infra"><span class="anchor">§4</span>工具链与注入</h2>
