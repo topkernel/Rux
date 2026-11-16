@@ -1029,20 +1029,57 @@ pub fn netlink_send_unicast(
 
 /// recvmsg/recvfrom/read: pop exactly one response message (blocking
 /// per `nonblock`/`deadline`).
+///
+/// `peek` (MSG_PEEK): look at the FRONT message WITHOUT consuming it.
+/// `report_full` (MSG_TRUNC): the RETURN value is the full datagram
+/// size even when `buf` was shorter — Linux datagram recvmsg returns
+/// skb->len under MSG_TRUNC (the "how big is the next datagram" probe:
+/// systemd's next_datagram_size_fd() peeks with a zero-length iov and
+/// sizes its buffer from the return; sd-device-monitor runs that probe
+/// before EVERY receive). Without peek the probe CONSUMED each uevent
+/// and reported 0 — "Invalid message length (0), ignoring message."
+/// on every coldboot-replay add, udev db empty, dev-ttyS0.device dead.
+/// The returned usize is the number of bytes actually written to
+/// `buf`; callers needing the reported length use `min(ret, buf.len())`
+/// scatter discipline or the tuple below.
 pub fn netlink_recv(
     sock: &Arc<NetlinkSocket>,
     buf: &mut [u8],
     nonblock: bool,
     deadline: Option<u64>,
 ) -> Result<usize, i32> {
+    netlink_recv_ext(sock, buf, nonblock, deadline, false, false).map(|(copied, _)| copied)
+}
+
+/// Extended receive with MSG_PEEK/MSG_TRUNC semantics; returns
+/// (bytes_copied_into_buf, reported_length).
+pub fn netlink_recv_ext(
+    sock: &Arc<NetlinkSocket>,
+    buf: &mut [u8],
+    nonblock: bool,
+    deadline: Option<u64>,
+    peek: bool,
+    report_full: bool,
+) -> Result<(usize, usize), i32> {
     loop {
-        if let Some(msg) = sock.recv_queue.lock().pop_front() {
-            let n = msg.len().min(buf.len());
-            buf[..n].copy_from_slice(&msg[..n]);
-            return Ok(n);
+        // MSG_PEEK: clone the front without popping; normal receive pops.
+        // The queue lock is dropped before the copy (guard scoped).
+        let front = {
+            let mut q = sock.recv_queue.lock();
+            if peek {
+                q.front().cloned()
+            } else {
+                q.pop_front()
+            }
+        };
+        if let Some(msg) = front {
+            let copied = msg.len().min(buf.len());
+            buf[..copied].copy_from_slice(&msg[..copied]);
+            let reported = if report_full { msg.len() } else { copied };
+            return Ok((copied, reported));
         }
         if *sock.closed.lock() {
-            return Ok(0); // EOF
+            return Ok((0, 0)); // EOF
         }
         if nonblock {
             return Err(-11); // EAGAIN
@@ -1344,6 +1381,15 @@ pub fn netlink_file_of_file(file: &Arc<File>) -> Option<(Arc<NetlinkSocket>, boo
     // SAFETY: ops identity confirmed above.
     let socket = unsafe { netlink_of_file(file) }?;
     Some((socket, nonblock))
+}
+
+/// FIONREAD/SIOCINQ: the size of the FIRST queued datagram (Linux
+/// netlink SIOCINQ reports the front skb's length — datagram sockets
+/// answer per-message, not the summed byte count). sd-device-monitor's
+/// next_datagram_size_fd falls back to this when recv(NULL,0) probing
+/// is refused.
+pub fn netlink_fionread(sock: &Arc<NetlinkSocket>) -> usize {
+    sock.recv_queue.lock().front().map(|m| m.len()).unwrap_or(0)
 }
 
 /// Write a sockaddr_nl { AF_NETLINK, pid=0(kernel), groups } to user —

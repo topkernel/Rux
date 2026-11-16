@@ -3623,22 +3623,36 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
     crate::dfx::unixrd::addb(&crate::dfx::unixrd::RM_ALLOC_B, total_buf_len as u64);
 
     // P0-2: AF_NETLINK recvmsg — exactly one rtnetlink message per call,
-    // source address = kernel sockaddr_nl.
+    // source address = kernel sockaddr_nl. MSG_PEEK leaves the datagram
+    // queued; MSG_TRUNC reports the FULL datagram size (sd-device-
+    // monitor's next_datagram_size_fd probe — see netlink_recv_ext).
     if let Some((nlsock, file_nonblock)) = crate::net::netlink::netlink_file_of_file(&file) {
         let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
         let deadline = nlsock.rcvtimeo_deadline();
-        let n = match crate::net::netlink::netlink_recv(&nlsock, &mut buf, nonblock, deadline) {
-            Ok(n) => n,
+        let peek = (flags & MSG_PEEK) != 0;
+        let report_full = (flags & MSG_TRUNC) != 0;
+        let (copied, n) = match crate::net::netlink::netlink_recv_ext(
+            &nlsock,
+            &mut buf,
+            nonblock,
+            deadline,
+            peek,
+            report_full,
+        ) {
+            Ok(r) => r,
             Err(e) => return e as i64,
         };
+        // Scatter only the bytes actually staged into `buf` — `n` may
+        // exceed buf.len() under MSG_TRUNC (report-only).
+        let staged = core::cmp::min(copied, buf.len());
         let mut offset = 0usize;
         for &(iov_base, iov_len) in &iovs {
-            if offset >= n {
+            if offset >= staged {
                 break;
             }
             // sec-r1 TOCTOU fix: scatter from the kernel snapshot (the
             // validated iov_base/iov_len), not a re-fetch of user memory.
-            let copy_len = core::cmp::min(iov_len, n - offset);
+            let copy_len = core::cmp::min(iov_len, staged - offset);
             if copy_len > 0 {
                 // SAFETY: iov_base validated with access_ok at snapshot time.
                 let uncopied = unsafe {
@@ -4453,17 +4467,45 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
         None => return -(errno::EBADF as i64),
     };
 
-    // Check buffer pointer validity
-    if buf_ptr.is_null() {
+    // Check buffer pointer validity. A NULL buffer with len == 0 is a
+    // legal "size probe" shape (recv(fd, NULL, 0, MSG_PEEK|MSG_TRUNC) —
+    // systemd's next_datagram_size_fd sizes its receive buffer this way
+    // before EVERY sd-device-monitor receive); EFAULT only when there
+    // are bytes to land and the pointer cannot hold them.
+    if buf_ptr.is_null() && len > 0 {
         return -(errno::EFAULT as i64);
     }
 
     // Validate user buffer pointer
-    if !crate::arch::uaccess::access_ok(buf_ptr as usize, len) {
+    if len > 0 && !crate::arch::uaccess::access_ok(buf_ptr as usize, len) {
         return -(errno::EFAULT as i64);
     }
 
     if len == 0 {
+        // Datagram size probe: with MSG_TRUNC the caller learns the
+        // next datagram's FULL size even from a zero-length receive
+        // (Linux returns skb->len). Netlink answers here — an empty
+        // queue answers EAGAIN under nonblock, like a real receive.
+        const MSG_TRUNC_PROBE: i32 = 0x20;
+        if (flags & MSG_TRUNC_PROBE) != 0 {
+            if let Some((nlsock, file_nonblock)) =
+                crate::net::netlink::netlink_file_of_file(&file)
+            {
+                let peek = (flags & MSG_PEEK) != 0;
+                let deadline = nlsock.rcvtimeo_deadline();
+                return match crate::net::netlink::netlink_recv_ext(
+                    &nlsock,
+                    &mut [],
+                    file_nonblock || (flags & MSG_DONTWAIT) != 0,
+                    deadline,
+                    peek,
+                    true,
+                ) {
+                    Ok((_, reported)) => reported as i64,
+                    Err(e) => e as i64,
+                };
+            }
+        }
         return 0;
     }
 
@@ -4581,13 +4623,23 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
         kbuf.resize(stage, 0);
         let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
         let deadline = nlsock.rcvtimeo_deadline();
-        return match crate::net::netlink::netlink_recv(&nlsock, kbuf.as_mut_slice(), nonblock, deadline)
-        {
-            Ok(n) => {
-                if n > 0 {
+        // MSG_PEEK/MSG_TRUNC datagram semantics (same as recvmsg's
+        // AF_NETLINK arm — sd-device-monitor's size probe).
+        let peek = (flags & MSG_PEEK) != 0;
+        let report_full = (flags & MSG_TRUNC) != 0;
+        return match crate::net::netlink::netlink_recv_ext(
+            &nlsock,
+            kbuf.as_mut_slice(),
+            nonblock,
+            deadline,
+            peek,
+            report_full,
+        ) {
+            Ok((copied, n)) => {
+                if copied > 0 {
                     // SAFETY: buf_ptr validated with access_ok(len) above.
                     if unsafe {
-                        crate::arch::uaccess::copy_to_user(buf_ptr, kbuf.as_ptr(), n)
+                        crate::arch::uaccess::copy_to_user(buf_ptr, kbuf.as_ptr(), copied)
                     } != 0
                     {
                         return -(errno::EFAULT as i64);

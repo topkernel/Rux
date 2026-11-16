@@ -1806,12 +1806,16 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                 return -errno::EFAULT as i64;
             }
             // Real readable count (review批次1: previously hard-coded 0):
-            // pipes report their buffered bytes; regular files report
+            // pipes report their buffered bytes; netlink sockets report
+            // the FRONT datagram's size (Linux SIOCINQ — sd-device-
+            // monitor's size-probe fallback); regular files report
             // size - position; other objects report 0.
             let readable: i32 = crate::fs::file::get_file_fd_safe(fd as usize)
                 .map(|file| {
                     if let Some(n) = crate::fs::pipe::pipe_fionread(&file) {
                         n as i32
+                    } else if let Some((nlsock, _)) = crate::net::netlink::netlink_file_of_file(&file) {
+                        crate::net::netlink::netlink_fionread(&nlsock) as i32
                     } else if let Some(inode) = file.get_inode() {
                         let size = inode.get_size();
                         let pos = file.get_pos();
