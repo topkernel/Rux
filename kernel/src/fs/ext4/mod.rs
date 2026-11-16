@@ -827,6 +827,23 @@ impl Ext4FileSystem {
                         }
                     };
                     if name != "." && name != ".." {
+                        // (launcher-errno lane) Degrade, never panic: a
+                        // huge directory (the V0 vehicle's Linux-written
+                        // trees carry 100K+ entry dirs) must not reach
+                        // handle_alloc_error on the whole-dir Vec — the
+                        // le5 V0 boot died exactly there (ALLOCTHROW
+                        // 4 MiB inside ext4_readdir, kernel panic at
+                        // t=40 s). On reservation failure return the
+                        // PARTIAL list; the caller's pos-based walk
+                        // serves what was collected.
+                        if entries.try_reserve_exact(1).is_err() {
+                            crate::pr_err!(
+                                "ext4: list_dir partial: ino={} entries collected={} (heap budget)",
+                                dir.ino,
+                                entries.len()
+                            );
+                            return Ok(entries);
+                        }
                         entries.push(entry.clone());
                     }
 
@@ -3285,6 +3302,19 @@ unsafe fn ext4_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inode
             7 => file_type::DT_LNK,
             _ => file_type::DT_UNKNOWN,
         };
+        // (launcher-errno lane) same heap-budget guard as list_dir: the
+        // VfsDirEntry stage can also grow past the heap on huge dirs.
+        if entries
+            .try_reserve_exact(1)
+            .is_err()
+        {
+            crate::pr_err!(
+                "ext4: readdir partial: ino={} entries collected={} (heap budget)",
+                ext4_inode.ino,
+                entries.len()
+            );
+            break;
+        }
         entries.push(crate::fs::inode::VfsDirEntry {
             ino: entry.inode as u64,
             name: name_bytes.to_vec(),
