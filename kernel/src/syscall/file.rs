@@ -3992,6 +3992,27 @@ fn fill_statfs_for_inode(inode: &crate::fs::inode::Inode, buf: &mut Statfs) {
     buf.f_fsid = [crate::fs::inode::stat_dev_user(inode.fs_id) as u32, 0];
 }
 
+
+/// statfs/statvfs f_flags (ST_* bits) from the governing mount's
+/// MntFlags — statvfs().f_flag is how userspace observes mount_setattr
+/// results (LTP mount_setattr01). Paths on the root overlay (no mount
+/// object) keep f_flags 0.
+fn statfs_flags_of_dentry(d: &alloc::sync::Arc<crate::fs::dentry::Dentry>) -> Option<u64> {
+    use crate::fs::mount::MntFlags;
+    let m = crate::fs::vfs::vfs_governing_mount_of(d)?;
+    let bits = m.flags.lock().bits();
+    let mut f = 0u64;
+    if bits & MntFlags::MNT_READONLY != 0 { f |= 0x1; }       // ST_RDONLY
+    if bits & MntFlags::MNT_NOSUID != 0 { f |= 0x2; }         // ST_NOSUID
+    if bits & MntFlags::MNT_NODEV != 0 { f |= 0x4; }          // ST_NODEV
+    if bits & MntFlags::MNT_NOEXEC != 0 { f |= 0x8; }         // ST_NOEXEC
+    if bits & MntFlags::MNT_SYNCHRONOUS != 0 { f |= 0x10; }   // ST_SYNCHRONOUS
+    if bits & MntFlags::MNT_NOATIME != 0 { f |= 0x400; }      // ST_NOATIME
+    if bits & MntFlags::MNT_NODIRATIME != 0 { f |= 0x800; }   // ST_NODIRATIME
+    if bits & MntFlags::MNT_NOSYMFOLLOW != 0 { f |= 0x2000; } // ST_NOSYMFOLLOW
+    Some(f)
+}
+
 /// sys_statfs - Get filesystem statistics by path
 /// RISC-V syscall number: 43
 pub fn sys_statfs(args: SyscallArgs) -> i64 {
@@ -4026,6 +4047,12 @@ pub fn sys_statfs(args: SyscallArgs) -> i64 {
     match vpath.inode.as_ref() {
         Some(inode) => fill_statfs_for_inode(inode, &mut statfs_buf),
         None => fill_rootfs_statfs(&mut statfs_buf),
+    }
+    // f_flags from the governing mount (ST_* bits).
+    if let Some(d) = vpath.dentry.as_ref() {
+        if let Some(f) = statfs_flags_of_dentry(d) {
+            statfs_buf.f_flags = f;
+        }
     }
 
     // Copy to user space
@@ -4073,6 +4100,12 @@ pub fn sys_fstatfs(args: SyscallArgs) -> i64 {
                 match inode_opt.as_ref() {
                     Some(inode) => fill_statfs_for_inode(inode, &mut statfs_buf),
                     None => fill_rootfs_statfs(&mut statfs_buf),
+                }
+                // SAFETY: dentry written once at open time; read-only here.
+                if let Some(d) = (*file.dentry.get()).as_ref() {
+                    if let Some(f) = statfs_flags_of_dentry(d) {
+                        statfs_buf.f_flags = f;
+                    }
                 }
             }
             None => return -(errno::EBADF as i64),
@@ -6862,12 +6895,24 @@ pub fn sys_move_mount(args: SyscallArgs) -> i64 {
             }
         } else {
             let s = from_path.unwrap();
-            match resolve_user_path(from_dfd, args[1] as *const u8) {
-                Ok(abs) => {
-                    // The user string may itself be a magic link path
-                    // (/proc/self/fd/N): canonicalize to the resolved
-                    // dentry's path before looking the mount up.
-                    let abs = canonical_mount_path(&abs, s);
+            // A mount fd as the from-dirfd: the reference resolves the
+            // relative path against the fd's path (the mount's root);
+            // a missing child answers ENOENT. The generic dirfd walk
+            // rejects mount fds with ENOTDIR (they carry no directory
+            // inode in this model), so spell the base from the mount
+            // root first (LTP move_mount02 invalid-from-path).
+            let mountfd_base: Option<alloc::string::String> = (|| {
+                let f = unsafe { crate::fs::get_file_fd(from_dfd as usize) }?;
+                let mfd = fapi::mountfd_of(&f)?;
+                let base = mfd.mnt.root.get_mountpoint_back().map(|mp| mp.build_path())
+                    .unwrap_or_else(|| mfd.mnt.root.build_path());
+                Some(base)
+            })();
+            match mountfd_base {
+                Some(base) => {
+                    let mut abs = alloc::string::String::from(base.trim_end_matches('/'));
+                    abs.push('/');
+                    abs.push_str(s);
                     match crate::fs::vfs::path_lookup(&abs, 0) {
                         Ok(vp) => match vp.dentry {
                             Some(d) => match crate::fs::vfs::vfs_governing_mount_of(&d) {
@@ -6879,7 +6924,25 @@ pub fn sys_move_mount(args: SyscallArgs) -> i64 {
                         Err(e) => return e as i64,
                     }
                 }
-                Err(e) => return e as i64,
+                None => match resolve_user_path(from_dfd, args[1] as *const u8) {
+                    Ok(abs) => {
+                        // The user string may itself be a magic link path
+                        // (/proc/self/fd/N): canonicalize to the resolved
+                        // dentry's path before looking the mount up.
+                        let abs = canonical_mount_path(&abs, s);
+                        match crate::fs::vfs::path_lookup(&abs, 0) {
+                            Ok(vp) => match vp.dentry {
+                                Some(d) => match crate::fs::vfs::vfs_governing_mount_of(&d) {
+                                    Some(m) => (m, true),
+                                    None => return -(errno::EINVAL as i64),
+                                },
+                                None => return -(errno::EINVAL as i64),
+                            },
+                            Err(e) => return e as i64,
+                        }
+                    }
+                    Err(e) => return e as i64,
+                },
             }
         };
 
@@ -7075,10 +7138,64 @@ pub fn sys_fsopen(args: SyscallArgs) -> i64 {
 /// recording before FSCONFIG_CMD_CREATE; unknown keys on converted
 /// types are EINVAL (systemd's mount_option_supported probe); params
 /// after CREATE are EBUSY (vfs_parse_fs_param's phase check).
+///
+/// Argument validation follows the reference order exactly (fs/fsopen.c
+/// SYSCALL_DEFINE5(fsconfig)): fd<0 → EINVAL, then the per-command
+/// key/value/aux shape checks → EINVAL, THEN fdget → EBADF, then the
+/// fscontext-fops check → EINVAL (LTP fsconfig02's negative cases ride
+/// every one of these steps).
 pub fn sys_fsconfig(args: SyscallArgs) -> i64 {
-    let fd = args[0] as usize;
+    let fd_i = args[0] as u32 as i32;
     let cmd = args[1];
 
+    if fd_i < 0 {
+        return -(errno::EINVAL as i64);
+    }
+
+    // Per-command argument shape (uapi contract): which of key/value
+    // must be present and what aux means. AT_FDCWD is the one negative
+    // aux SET_PATH/SET_PATH_EMPTY accept.
+    const AT_FDCWD_I: i32 = -100;
+    let key_ptr = args[2];
+    let val_ptr = args[3];
+    let aux = args[4] as u32 as i32;
+    match cmd {
+        fapi::FSCONFIG_SET_FLAG => {
+            if key_ptr == 0 || val_ptr != 0 || aux != 0 {
+                return -(errno::EINVAL as i64);
+            }
+        }
+        fapi::FSCONFIG_SET_STRING => {
+            if key_ptr == 0 || val_ptr == 0 || aux != 0 {
+                return -(errno::EINVAL as i64);
+            }
+        }
+        fapi::FSCONFIG_SET_BINARY => {
+            if key_ptr == 0 || val_ptr == 0 || !(1..=(1024 * 1024)).contains(&aux) {
+                return -(errno::EINVAL as i64);
+            }
+        }
+        fapi::FSCONFIG_SET_PATH | fapi::FSCONFIG_SET_PATH_EMPTY => {
+            if key_ptr == 0 || val_ptr == 0 || (aux != AT_FDCWD_I && aux < 0) {
+                return -(errno::EINVAL as i64);
+            }
+        }
+        fapi::FSCONFIG_SET_FD => {
+            if key_ptr == 0 || val_ptr != 0 || aux < 0 {
+                return -(errno::EINVAL as i64);
+            }
+        }
+        fapi::FSCONFIG_CMD_CREATE
+        | fapi::FSCONFIG_CMD_CREATE_EXCL
+        | fapi::FSCONFIG_CMD_RECONFIGURE => {
+            if key_ptr != 0 || val_ptr != 0 || aux != 0 {
+                return -(errno::EINVAL as i64);
+            }
+        }
+        _ => return -(errno::EOPNOTSUPP as i64),
+    }
+
+    let fd = fd_i as usize;
     let file = match unsafe { crate::fs::get_file_fd(fd) } {
         Some(f) => f,
         None => return -(errno::EBADF as i64),
@@ -7174,9 +7291,6 @@ pub fn sys_fsconfig(args: SyscallArgs) -> i64 {
             if !crate::arch::uaccess::access_ok(args[3] as usize, 1) {
                 return -(errno::EFAULT as i64);
             }
-            if args[4] > 4096 {
-                return -(errno::EINVAL as i64);
-            }
             if fc.root.is_some() && !fc.reconfigure {
                 return -(errno::EBUSY as i64);
             }
@@ -7230,7 +7344,7 @@ pub fn sys_fsconfig(args: SyscallArgs) -> i64 {
             fc.params.push((key, None));
             0
         }
-        fapi::FSCONFIG_CMD_CREATE | fapi::FSCONFIG_CMD_CREATE_API => {
+        fapi::FSCONFIG_CMD_CREATE | fapi::FSCONFIG_CMD_CREATE_EXCL => {
             if fc.reconfigure {
                 return -(errno::EBUSY as i64);
             }
@@ -7249,7 +7363,7 @@ pub fn sys_fsconfig(args: SyscallArgs) -> i64 {
                 Err(e) => e as i64,
             }
         }
-        fapi::FSCONFIG_CMD_RECONFIGURE | fapi::FSCONFIG_CMD_RECONFIGURE_API => {
+        fapi::FSCONFIG_CMD_RECONFIGURE => {
             if fc.root.is_none() {
                 return -(errno::EINVAL as i64);
             }
