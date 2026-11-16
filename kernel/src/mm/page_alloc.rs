@@ -250,8 +250,17 @@ pub fn reclaim_gate_census() {
             .map(|z| z.nr_free())
             .unwrap_or(0)
     };
+    // falloc-wedge census addendum: the holder's last tick-interrupted RIP
+    // (TICK_ENTRY_RIP is per-CPU, sampled every tick) — names where a
+    // stranded holder is actually spinning, sampled once per second of
+    // strand instead of guessing from the phase enum.
+    let holder_rip = if tcpu != 0xFFFF {
+        crate::interrupt::preempt::TICK_ENTRY_RIP[tcpu as usize].load(Ordering::Relaxed)
+    } else {
+        0
+    };
     crate::pr_info!(
-        "GATE-CENSUS holder={} age={}j phase={} phase_age={}j rounds={} freed={} deep={} task_state={:#x} tcpu={} zone_free={} waiters={} exhausted={} selffight={} last_exh_pid={} last_exh_age={}j",
+        "GATE-CENSUS holder={} age={}j phase={} phase_age={}j rounds={} freed={} deep={} task_state={:#x} tcpu={} zone_free={} waiters={} exhausted={} selffight={} last_exh_pid={} last_exh_age={}j holder_rip={:#x}",
         holder,
         age,
         phase,
@@ -267,6 +276,7 @@ pub fn reclaim_gate_census() {
         GATE_SELF.load(Ordering::Relaxed),
         GATE_LAST_EXH_PID.load(Ordering::Relaxed),
         now.saturating_sub(GATE_LAST_EXH_J.load(Ordering::Relaxed)),
+        holder_rip,
     );
 }
 
@@ -738,6 +748,12 @@ pub fn oom_forensic_dump(site: &str) {
     // SP-7: per-page skip reasons — why anon candidates never reach the
     // swap write above.
     crate::println!("OOM-FORENSIC: {}", super::vmscan::vscan_census_line());
+    // falloc-wedge census: the page-cache reclaim/evict skip faces (same
+    // SP-7 shape — names the filter that holds the file LRU hostage).
+    crate::println!(
+        "OOM-FORENSIC: {}",
+        crate::fs::page_cache::pcache_reclaim_census_line()
+    );
     // Zone state: counters vs walkable chains
     // SAFETY: diagnostic read-only node access.
     if let Some(node) = unsafe { first_online_node_mut() } {
