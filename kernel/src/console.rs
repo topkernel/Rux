@@ -727,8 +727,9 @@ fn uart_rx_debug_magic(c: u8) {
     // SAFETY: RX-IRQ context only (single consumer), matching the riscv64
     // original these matchers were factored out of.
     unsafe {
-        // DFX taskdump magic trigger.
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TaskDumpKey) {
+        // DFX taskdump magic trigger (dfx-migrate: the rux:taskdump
+        // event IS the gate; kind=SYSRQ fires when the magic lands).
+        if crate::trace::EVENT_TASKDUMP.armed() {
             const MAGIC: &[u8; 5] = b"DUMP!";
             DUMP_MAGIC_POS = if DUMP_MAGIC_POS < MAGIC.len() && c == MAGIC[DUMP_MAGIC_POS] {
                 DUMP_MAGIC_POS + 1

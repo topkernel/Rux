@@ -1954,6 +1954,60 @@ tracepoints! {
             args[3] as i32,
         )
     };
+
+    /// rux:taskdump — one task-state snapshot trigger (dfx-migrate
+    /// migration of the `dfx=taskdump` / `dfx=periodic` / `dfx=watchdog`
+    /// debug aids; the event IS the gate for all three triggers). The
+    /// multi-line dump itself stays serial (echo); this record names the
+    /// trigger and when it fired. `kind`:
+    ///   0 SYSRQ   — the UART magic/sysrq hook (old dfx=taskdump)
+    ///   1 PERIODIC — the timer-cadence snapshot (old dfx=periodic)
+    ///   2 WATCHDOG — the snapshot after a spinlock deadlock print
+    ///                (old dfx=watchdog)
+    /// a carries the trigger's discriminator (jiffies at fire, or the
+    /// watchdog's lock address).
+    EVENT_TASKDUMP / taskdump_fmt / trace_taskdump :
+        "rux", "taskdump", 69,
+    print: "\"kind=%s a=%#lx\", __print_symbolic(REC->kind, { 0, \"SYSRQ\" }, { 1, \"PERIODIC\" }, { 2, \"WATCHDOG\" }), REC->a",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, a: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = match args[0] as u32 {
+            0 => "SYSRQ",
+            1 => "PERIODIC",
+            2 => "WATCHDOG",
+            _ => "?",
+        };
+        format!("kind={} a={:#x}", kind, args[1])
+    };
+
+    /// rux:memwatch — the heap-leak census's gate row (dfx-migrate
+    /// migration of `dfx=memwatch`; the event IS the switch — the
+    /// allocator-prologue counters, the size-class histograms and the
+    /// periodic report all key off it). Each periodic report records
+    /// one row with the census totals: buddy used kB, memwatch
+    /// alloc/free totals kB, and the dealloc-refusal (silent page
+    /// leak) counter. The report itself stays on the raw-UART echo
+    /// path (no printk, no allocation — record() is atomics-only, so
+    /// it is safe from the same contexts).
+    EVENT_MEMWATCH / memwatch_fmt / trace_memwatch :
+        "rux", "memwatch", 70,
+    print: "\"used_kb=%lu alloc_kb=%lu free_kb=%lu dref=%llu\", REC->used_kb, REC->alloc_kb, REC->free_kb, REC->dref",
+    fields: "\tfield:unsigned long used_kb;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long alloc_kb;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long free_kb;\toffset:24;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long long dref;\toffset:32;\tsize:8;\tsigned:0;\n",
+    call (used_kb: u64, alloc_kb: u64, free_kb: u64, dref: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "used_kb={} alloc_kb={} free_kb={} dref={}",
+            args[0],
+            args[1],
+            args[2],
+            args[3],
+        )
+    };
 }
 
 /// The trace_marker pseudo-event. NOT in EVENTS on purpose: a marker

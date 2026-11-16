@@ -17,16 +17,13 @@
 //! lock/unlock pair and is therefore a build-time opt-in used by the
 //! wedge-hunting harness (test/hunt-wedge.sh).
 //!
-//! Switch catalog:
-//! - `watchdog` — spinlock deadlock warnings also dump all task states
-//!   (the deadlock print itself is always on; this only gates the extra
-//!   task snapshot after it).
-//! - `taskdump` — manual task-state snapshots via the DFX sysrq hook
-//!   (same dump code path, different trigger).
+//! Switch catalog (see the RETIRED TOKENS note below for the ones
+//! that already moved to the unified trace framework):
 //!
-//! RETIRED TOKENS (dfx-migrate round, 2026-11): the hunt families that
+//! RETIRED TOKENS (dfx-migrate rounds, 2026-11): the hunt families that
 //! lived here as `schedtrace`, `fuxstuck`, `txnhunt`, `mmforensics`,
-//! `sysring`, `ohhunt`, `sigtrace`, `futextrace` and `epolltrace` moved
+//! `sysring`, `ohhunt`, `sigtrace`, `futextrace`, `epolltrace`, and the
+//! debug aids `taskdump`, `periodic`, `watchdog`, `memwatch` moved
 //! into the unified trace framework (`kernel/src/trace/`) — each
 //! family's gate is now a `rux:` trace event, its serial prints are
 //! echo consumers of that event's enable, and the old `dfx=` token is
@@ -51,10 +48,6 @@ use core::sync::atomic::{AtomicBool, Ordering};
 macro_rules! dfx_switch_table {
     ($m:ident) => {
         $m! {
-            WatchdogDump => "watchdog",
-            TaskDumpKey => "taskdump",
-            PeriodicDump => "periodic",
-            MemWatch => "memwatch",
             Scribble => "scribble",
             ScribblePark => "scribblepark",
             ScribblePid1 => "scribblepid1",
@@ -113,16 +106,6 @@ pub(crate) use dfx_switch_table;
 /// Runtime DFX switches, indexed by name on the `dfx=` cmdline parameter.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DfxSwitch {
-    /// Deadlock watchdog prints a full task-state snapshot afterwards.
-    WatchdogDump,
-    /// The UART sysrq-style trigger for on-demand task snapshots is armed.
-    TaskDumpKey,
-    /// Periodic task snapshots (every PERIODIC_SECS) from the timer
-    /// softirq — catches silent hangs that never trip any watchdog.
-    PeriodicDump,
-    /// Heap-leak hunt: size-class alloc/free counters + big-object call
-    /// site histogram, reported with the periodic dump (see memwatch.rs).
-    MemWatch,
     /// Byte-level scribble hunter (dfx/scribble.rs): shadow-canary over
     /// every live Task's thread.{fs,gs,sp,ret} + parked pt_regs control
     /// words, verified at switch-out quiesce and from the timer tick.
@@ -497,7 +480,7 @@ pub enum DfxSwitch {
     Pid1Spin,
 }
 
-const SWITCH_COUNT: usize = 53;
+const SWITCH_COUNT: usize = 49;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -534,62 +517,58 @@ impl DfxSwitch {
             // moved to the unified trace framework (epolltrace,
             // schedtrace, futextrace, txnhunt, ohhunt, sigtrace,
             // sysring, mmforensics, fuxstuck) left the table, so the
-            // surviving switches re-compact to 0..52 in table order.
+            // surviving switches re-compact to 0..48 in table order.
             // Cmdline lookup is by name, so the shift is invisible to
             // users; indices only key the SWITCHES array.
-            DfxSwitch::WatchdogDump => 0,
-            DfxSwitch::TaskDumpKey => 1,
-            DfxSwitch::PeriodicDump => 2,
-            DfxSwitch::MemWatch => 3,
-            DfxSwitch::Scribble => 4,
-            DfxSwitch::ScribblePark => 5,
-            DfxSwitch::ScribblePid1 => 6,
-            DfxSwitch::ScribbleSweep => 7,
-            DfxSwitch::InputTrace => 8,
-            DfxSwitch::DbFileTrace => 9,
-            DfxSwitch::EpollScan => 10,
-            DfxSwitch::ClaimInject => 11,
-            DfxSwitch::Strace1 => 12,
-            DfxSwitch::Steptrace => 13,
-            DfxSwitch::WriteTrace => 14,
-            DfxSwitch::OncpuInject => 15,
-            DfxSwitch::Ledger => 16,
-            DfxSwitch::BinderTrace => 17,
-            DfxSwitch::SyscallTrace => 18,
-            DfxSwitch::MonoWatch => 19,
-            DfxSwitch::TcpTrace => 20,
-            DfxSwitch::SleepSnap => 21,
-            DfxSwitch::SockSnap => 22,
-            DfxSwitch::DataTap => 23,
-            DfxSwitch::WildWatch => 24,
-            DfxSwitch::MetaWatch => 25,
-            DfxSwitch::ParkDump => 26,
-            DfxSwitch::Schb => 27,
-            DfxSwitch::KsProbe => 28,
-            DfxSwitch::R83HeapScan => 29,
-            DfxSwitch::LeakHunt => 30,
-            DfxSwitch::AcqDiv => 31,
-            DfxSwitch::WwCensus => 32,
-            DfxSwitch::TreeHunt => 33,
-            DfxSwitch::SfdDbg => 34,
-            DfxSwitch::Ams46 => 35,
-            DfxSwitch::VmaProbe => 36,
-            DfxSwitch::PoolCensus => 37,
-            DfxSwitch::SlowTask => 38,
-            DfxSwitch::ExtHunt => 39,
-            DfxSwitch::ExecCost => 40,
-            DfxSwitch::ThPark => 41,
-            DfxSwitch::RipSample => 42,
-            DfxSwitch::TfdCensus => 43,
-            DfxSwitch::ScmTap => 44,
-            DfxSwitch::SysForensic => 45,
-            DfxSwitch::FilerdProbe => 46,
-            DfxSwitch::LostParkTrace => 47,
-            DfxSwitch::AllocWatch => 48,
-            DfxSwitch::SyncGuard => 49,
-            DfxSwitch::SyncWatch => 50,
-            DfxSwitch::PctlMon => 51,
-            DfxSwitch::Pid1Spin => 52,
+            DfxSwitch::Scribble => 0,
+            DfxSwitch::ScribblePark => 1,
+            DfxSwitch::ScribblePid1 => 2,
+            DfxSwitch::ScribbleSweep => 3,
+            DfxSwitch::InputTrace => 4,
+            DfxSwitch::DbFileTrace => 5,
+            DfxSwitch::EpollScan => 6,
+            DfxSwitch::ClaimInject => 7,
+            DfxSwitch::Strace1 => 8,
+            DfxSwitch::Steptrace => 9,
+            DfxSwitch::WriteTrace => 10,
+            DfxSwitch::OncpuInject => 11,
+            DfxSwitch::Ledger => 12,
+            DfxSwitch::BinderTrace => 13,
+            DfxSwitch::SyscallTrace => 14,
+            DfxSwitch::MonoWatch => 15,
+            DfxSwitch::TcpTrace => 16,
+            DfxSwitch::SleepSnap => 17,
+            DfxSwitch::SockSnap => 18,
+            DfxSwitch::DataTap => 19,
+            DfxSwitch::WildWatch => 20,
+            DfxSwitch::MetaWatch => 21,
+            DfxSwitch::ParkDump => 22,
+            DfxSwitch::Schb => 23,
+            DfxSwitch::KsProbe => 24,
+            DfxSwitch::R83HeapScan => 25,
+            DfxSwitch::LeakHunt => 26,
+            DfxSwitch::AcqDiv => 27,
+            DfxSwitch::WwCensus => 28,
+            DfxSwitch::TreeHunt => 29,
+            DfxSwitch::SfdDbg => 30,
+            DfxSwitch::Ams46 => 31,
+            DfxSwitch::VmaProbe => 32,
+            DfxSwitch::PoolCensus => 33,
+            DfxSwitch::SlowTask => 34,
+            DfxSwitch::ExtHunt => 35,
+            DfxSwitch::ExecCost => 36,
+            DfxSwitch::ThPark => 37,
+            DfxSwitch::RipSample => 38,
+            DfxSwitch::TfdCensus => 39,
+            DfxSwitch::ScmTap => 40,
+            DfxSwitch::SysForensic => 41,
+            DfxSwitch::FilerdProbe => 42,
+            DfxSwitch::LostParkTrace => 43,
+            DfxSwitch::AllocWatch => 44,
+            DfxSwitch::SyncGuard => 45,
+            DfxSwitch::SyncWatch => 46,
+            DfxSwitch::PctlMon => 47,
+            DfxSwitch::Pid1Spin => 48,
         }
     }
 
@@ -728,11 +707,7 @@ pub fn trace_alias(switch: DfxSwitch) -> Option<&'static [&'static crate::trace:
         // The ledger's ready-to-port wave. (WwCensus is deliberately
         // ABSENT: the ledger keeps the wild-write tripwires frozen —
         // they are active detectors, not passive observability.)
-        DfxSwitch::Schb
-        | DfxSwitch::PeriodicDump
-        | DfxSwitch::TaskDumpKey
-        | DfxSwitch::ParkDump
-        | DfxSwitch::SleepSnap => Some(SCHED),
+        DfxSwitch::Schb | DfxSwitch::ParkDump | DfxSwitch::SleepSnap => Some(SCHED),
         DfxSwitch::SyscallTrace | DfxSwitch::SysForensic => Some(RAW_SYSCALLS),
         DfxSwitch::ExecCost | DfxSwitch::TreeHunt => Some(SCHED_AND_SYSCALLS),
         DfxSwitch::BinderTrace | DfxSwitch::DbFileTrace => Some(BINDER),
@@ -746,7 +721,6 @@ pub fn trace_alias(switch: DfxSwitch) -> Option<&'static [&'static crate::trace:
         | DfxSwitch::VmaProbe
         | DfxSwitch::PoolCensus
         | DfxSwitch::MonoWatch => Some(KMEM),
-        DfxSwitch::MemWatch => Some(MM_PARTIAL),
         // The ledger's writetrace row (partial): the kernel-fault and
         // block-request views of the write path.
         DfxSwitch::WriteTrace => Some(WRITE_TRACE),
@@ -861,7 +835,33 @@ pub fn retired_trace_events(name: &str) -> Option<&'static [&'static crate::trac
         &trace::EVENT_EPOLL_WAIT_EXIT,
         &trace::EVENT_EPOLL_DELIVERY,
     ];
+    static TASKDUMP: &[&trace::TraceEvent] = &[
+        &trace::EVENT_TASKDUMP,
+        &trace::EVENT_SCHED_SWITCH,
+        &trace::EVENT_SCHED_WAKING,
+        &trace::EVENT_SCHED_WAKEUP,
+        &trace::EVENT_SCHED_WAKEUP_NEW,
+        &trace::EVENT_SCHED_PROCESS_FORK,
+        &trace::EVENT_SCHED_PROCESS_EXIT,
+        &trace::EVENT_SCHED_PROCESS_FREE,
+        &trace::EVENT_SCHED_PROCESS_WAIT,
+        &trace::EVENT_SCHED_MIGRATE_TASK,
+    ];
+    static MEMWATCH: &[&trace::TraceEvent] = &[
+        &trace::EVENT_MEMWATCH,
+        &trace::EVENT_MARK_VICTIM,
+        &trace::EVENT_KMALLOC,
+        &trace::EVENT_KFREE,
+        &trace::EVENT_MM_PAGE_ALLOC,
+        &trace::EVENT_MM_PAGE_FREE,
+    ];
+    static WATCHDOG: &[&trace::TraceEvent] = &[&trace::EVENT_TASKDUMP];
     match name {
+        "taskdump" | "periodic" => Some(TASKDUMP),
+        // The old watchdog switch had no trace alias; the retired token
+        // arms only the family event.
+        "watchdog" => Some(WATCHDOG),
+        "memwatch" => Some(MEMWATCH),
         "fuxstuck" => Some(FUXSTUCK),
         "txnhunt" => Some(TXNHUNT),
         "schedtrace" => Some(SCHEDTRACE),
@@ -889,9 +889,6 @@ pub fn set(switch: DfxSwitch, on: bool) {
             }
             crate::trace::set_tracing_on(true);
         }
-    }
-    if let DfxSwitch::MemWatch = switch {
-        super::memwatch::ENABLED.store(on, Ordering::Relaxed);
     }
     if let DfxSwitch::FilerdProbe = switch {
         super::filerd::set_enabled(on);
