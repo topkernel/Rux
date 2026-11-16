@@ -160,6 +160,47 @@ impl RawSpinlock {
     /// 100M iterations ≈ 100-500ms depending on load/CAS latency.
     const DEADLOCK_WARN_ITERS: u32 = 100_000_000;
 
+    /// RUNQ-STRAND fix (121st): preempt-exit sampling period, in spin
+    /// iterations. Power of two so the check is a mask. At ~1-30ns per
+    /// TTAS iteration (native/KVM) this probes need_resched every
+    /// ~0.07-2ms — inside one tick period, so a preemptible spinner
+    /// yields within a single 10ms slice. The check itself is one
+    /// branch on a mask plus (rarely) a few loads; the uncontended
+    /// fast path never executes any of this.
+    const SPIN_PREEMPT_PERIOD: u32 = 65_536;
+
+    /// RUNQ-STRAND fix (121st): may this spinner call schedule()?
+    ///
+    /// Every in-kernel acquire of a raw spinlock is preempt-coupled
+    /// (Spinlock guards, GrqGuard, KeyedIrqGuard all add PREEMPT_OFFSET
+    /// around the raw claim), so `preempt_count() == 0` proves the
+    /// waiter holds NO spinlock at any nesting level and sits in no
+    /// interrupt/softirq nesting. The two producers of a count==0
+    /// spinner are (a) the tick-side PREEMPT-HEAL zeroing the count of
+    /// a task legitimately inside a slow acquire (a false heal — the
+    /// 121st census: accesstoken_ser/wallpaper_servi/netmanager spun
+    /// at RawSpinlock::lock+0x52 for 500+s with pc=0 and need_resched=1
+    /// after heals, each permanently monopolizing its CPU), and (b) a
+    /// future uncoupled raw caller. For both, rescheduling from the
+    /// WAIT loop is safe: nothing is acquired yet (the TTAS retry is
+    /// idempotent across a context switch), and the guards exclude the
+    /// deleted preemptible-wait's lost-park hazard (state must still be
+    /// RUNNING — a wait path that prepared INTERRUPTIBLE before a
+    /// guarded op must not sleep inside the acquire) and irq-off
+    /// contexts. This is the reference's preempt_schedule_irq contract
+    /// (a preemptible kernel loop must honor need_resched), placed at
+    /// the only point where the full guard set is checkable.
+    fn spin_may_preempt() -> bool {
+        crate::sched::need_resched()
+            && crate::interrupt::preempt::preempt_count() == 0
+            && crate::arch::cpu::get_interrupts_state()
+            && crate::sched::current()
+                .map(|t| {
+                    t.state().bits() == crate::process::task::TaskState::RUNNING
+                })
+                .unwrap_or(false)
+    }
+
     #[inline(never)]
     pub fn lock(&self) {
         // Capture caller's return address before spinning
@@ -179,6 +220,18 @@ impl RawSpinlock {
             }
             while self.locked.load(Ordering::Relaxed) != 0 {
                 spins = spins.wrapping_add(1);
+                // RUNQ-STRAND fix: a provably-preemptible waiter must not
+                // monopolize its CPU until the holder releases — yield
+                // once per period when the tick asked us to. schedule()
+                // clears need_resched at its entry, so the loop cannot
+                // re-fire recursively out of the scheduler's own locks.
+                if spins & (Self::SPIN_PREEMPT_PERIOD - 1) == 0
+                    && Self::spin_may_preempt()
+                {
+                    crate::sched::schedule();
+                    spins = 0;
+                    continue; // re-observe the lock word in the loop head
+                }
                 if spins == Self::DEADLOCK_WARN_ITERS {
                     Self::deadlock_warn(self as *const Self, caller_ra);
                     spins = 0; // continue spinning (might resolve)
@@ -580,6 +633,15 @@ impl<T> Spinlock<T> {
     /// reference design and is deleted — the lost-park hazard class
     /// (a caller inside a wait path's prepared window parked inside a
     /// spinlock acquire) is structurally impossible now.
+    ///
+    /// RUNQ-STRAND fix (121st) precision on that discipline: the raw
+    /// TTAS loop below CAN call schedule(), but only through
+    /// `spin_may_preempt()` — which requires preempt_count()==0 and is
+    /// therefore unreachable for THIS acquire (our own preempt_disable
+    /// guarantees count >= 1 for every Spinlock-guarded caller). The
+    /// exit exists solely for a waiter whose count was zeroed under it
+    /// (tick-side PREEMPT-HEAL false positive) or a future uncoupled
+    /// raw caller; see `spin_may_preempt` for the full guard set.
     #[inline]
     #[track_caller]
     pub fn lock(&self) -> SpinlockGuard<'_, T> {
