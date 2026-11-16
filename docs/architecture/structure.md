@@ -52,10 +52,10 @@ make up the remainder of the kernel/ totals above.*
 |-----------|-------|-------------|
 | **Kernel Unit Tests** | 73 files; 1267 cases riscv64 / 1263 x86_64, all green | In-guest suite via `make test` |
 | **Formal Verification** | 157 Kani harnesses; 1104 host proptests; 4 SPIN models; Miri nightly | Mirror-sync enforced; see docs/test/formal-verification-report.md |
-| **LTP** | 1093/1869 (x86_64 KVM, r27 audited official; raw 1084) · 1028/1869 (riscv64 TCG) | docs/test/ltp-report.md |
+| **LTP** | 1133/1869 current expected (x86_64 KVM; 2026-11-15 audited scan 1122 + 11 tail fixes) · 1028/1869 (riscv64 TCG) | docs/test/ltp-report.md |
 | **Benchmarks** | lmbench + Geekbench 5 dual-kernel baselines | docs/test/ |
 | **Linux LTP Tests** | 1,838 tests | Official LTP test suite (syscall, mem, fs, etc.) |
-| **Total** | **4,198 test cases (1,267 in-kernel riscv64 + 1,093 LTP passes + 1,838 LTP inventory) + 161 formal verification proofs** | Comprehensive kernel verification coverage |
+| **Total** | **4,238 test cases (1,267 in-kernel riscv64 + 1,133 LTP passes + 1,838 LTP inventory) + 161 formal verification proofs** | Comprehensive kernel verification coverage |
 
 ---
 
