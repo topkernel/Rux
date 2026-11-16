@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>tracepoint 框架 · Rux</title>
+<link rel="stylesheet" href="../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">首页</a>
+      <a href="../architecture/design.html">架构设计</a>
+      <a href="../performance/index.html">性能</a>
+      <a href="../security/index.html">安全</a>
+      <a href="../testing/index.html">测试</a>
+      <a href="index.html">调试</a>
+      <a href="../guides/getting-started.html">快速入门</a>
+      <a href="../progress/roadmap.html">项目进展</a>
+      <a href="../guestbook.html">留言</a>
+      <span class="lang-sw"><a class="on" href="tracepoints.html">中文</a><a href="../en/debugging/tracepoints.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">架构设计</div>
+    <a href="../architecture/design.html">架构与模块设计</a>
+    <a href="../architecture/scheduler.html">调度器</a>
+    <a href="../architecture/memory.html">内存管理</a>
+    <a href="../architecture/filesystem.html">文件系统</a>
+    <a href="../architecture/ipc.html">进程间通信</a>
+    <a href="../architecture/boot.html">启动流程</a>
+    <a href="../architecture/interrupts.html">中断与时钟</a>
+    <a href="../architecture/structure.html">代码结构</a>
+    <a href="../architecture/riscv64.html">架构移植指南</a>
+    <a href="../architecture/kernel-lock.html">锁序不变量</a>
+    <div class="grp">调试</div>
+    <a href="index.html">调试指南</a>
+    <a class="on" href="tracepoints.html">tracepoint 框架</a>
+    <a href="perf.html">性能调试</a>
+    <a href="locks.html">锁调试</a>
+    <a href="memory.html">内存取证</a>
+    <a href="panic.html">panic 与符号化</a>
+    <div class="grp">性能</div>
+    <a href="../performance/index.html">性能测试</a>
+    <div class="grp">安全</div>
+    <a href="../security/index.html">安全与形式验证</a>
+    <div class="grp">测试</div>
+    <a href="../testing/index.html">测试总览</a>
+    <a href="../testing/ci-pipeline.html">CI 流水线</a>
+    <a href="../testing/ltp.html">LTP 兼容扫描</a>
+    <a href="../testing/ltp-full.html">LTP 全量用例</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT 审计</a>
+    <a href="../testing/stability.html">稳定性</a>
+    <a href="../testing/stress.html">压力</a>
+    <a href="../testing/gnome-retrospective.html">回溯报告</a>
+    <div class="grp">开发指南</div>
+    <a href="../guides/getting-started.html">快速入门</a>
+    <a href="../guides/development.html">参与开发</a>
+    <a href="../guides/configuration.html">内核配置</a>
+    <div class="grp">项目进展</div>
+    <a href="../progress/roadmap.html">路线图</a>
+    <a href="../progress/changelog.html">更新日志</a>
+    <a href="../progress/quickref.html">命令速查</a>
+    <div class="grp">互动</div>
+    <a href="../guestbook.html">留言板</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>tracepoint 框架</h1>
+    <div class="sub">kernel/src/trace/ · 统一 trace-event 体系:单声明表派生事件全貌、tracefs 字节级对齐、两级门控与 per-CPU 环 —— 设计、全部事件清单与使用说明 · 观测性政策(2026-11-02):新增内核观测一律走本框架</div>
+
+    <h2 id="design"><span class="anchor">§1</span>设计:单声明表派生全部产物</h2>
+    <p>每个事件在 <code>tracepoints!</code> 声明表中恰好出现一次 —— 一行声明该事件的全部面貌:组/名/id/逐字 print fmt/字段表/类型化调用签名/渲染器。由这一行声明,宏派生过去由手写站点重复携带的三样产物:</p>
+    <ol>
+      <li><b>静态表行</b>(group/name/id/print_fmt/fields/enabled)—— 表即目录;</li>
+      <li><b>记录函数</b> <code>trace_&lt;name&gt;(field, ...) -> bool</code> —— 类型化实参打包入参槽,armed 检查在函数内部(<b>事件关闭时调用点只付实参求值</b>);</li>
+      <li><b>渲染器</b> <code>&lt;name&gt;_fmt</code> —— 文本输出与 format 文件共用。</li>
+    </ol>
+    <p>设计要点:</p>
+    <ul>
+      <li><b>print fmt 从参考主机的活文件逐字捕获</b> —— 文本格式与字段偏移与参考实现逐字节一致,任何宿主工具(解析 format 文件的事件分析器)无需修改即可工作。</li>
+      <li><b>一个声明 = 一次编辑</b>:表行、调用签名、文件形态是同一处修改 —— "格式与数据漂移"这类缺陷类在结构上不可表达(与 procfile! D-4 同一 derive 模式)。</li>
+      <li><b>实参上限 10 个 u64 槽</b>(TRACE_ARGS=10):一个 comm 占两槽;超界在编译期不可表达(PackArg trait 逐类型声明占用槽数)。</li>
+      <li><b>两级门控</b>:事件记录需事件自身 enable 与全局 tracing_on 同时开启;tracing_on 检查位于 record 内部、实参打包之后。</li>
+    </ul>
+
+    <h2 id="inventory"><span class="anchor">§2</span>事件清单(69 事件 / 17 组)</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>组</th><th>数</th><th>事件</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">rux</td><td class="num">20</td><td>rux 自有族(参考实现无对应事件):epoll_ctl_insert/epoll_ctl_remove/epoll_wait_scan/epoll_wait_exit/epoll_delivery、futex_miss、fuxstuck、hilog_census/hilog_kmsg/hilog_top、itimer_arm、memwatch、mmforensics、ohhunt、schedtrace、sigtrace、spinwatch/spinwatch_fd、sysring、taskdump、txnhang</td></tr>
+        <tr><td class="mono">sched</td><td class="num">9</td><td>sched_switch/sched_waking/sched_wakeup/sched_wakeup_new/sched_migrate_task/sched_process_fork/sched_process_exit/sched_process_free/sched_process_wait</td></tr>
+        <tr><td class="mono">ext4</td><td class="num">7</td><td>ext4_sync_file_enter/exit、ext4_ext_map_blocks_enter/exit、ext4_da_write_begin/end、ext4_free_blocks</td></tr>
+        <tr><td class="mono">net / binder / input</td><td class="num">5+5+4</td><td>net: udp_deliver/udp_wake/lo_xmit/sock_wait/pkt_drop;binder: binder_transaction/binder_transaction_received/binder_transaction_alloc_buf/binder_transaction_buffer_release/binder_wait_for_work;input: input_event/evdev_read/evdev_open/evdev_wake</td></tr>
+        <tr><td class="mono">kmem</td><td class="num">4</td><td>kmalloc/kfree/mm_page_alloc/mm_page_free</td></tr>
+        <tr><td class="mono">raw_syscalls / irq / exceptions / block / jbd2</td><td class="num">2+2+2+2+2</td><td>raw_syscalls: sys_enter/sys_exit;irq: irq_handler_entry/exit;exceptions: page_fault_user/kernel;block: block_rq_issue/complete;jbd2: jbd2_start_commit/jbd2_end_commit</td></tr>
+        <tr><td class="mono">vmscan / timer / signal / printk / oom</td><td class="num">各 1</td><td>mm_vmscan_lru_shrink_inactive、itimer_arm(计 rux)、signal_generate、printk:console、oom:mark_victim</td></tr>
+      </tbody>
+    </table></div>
+    <p class="callout">rux: 族为登记的设计分歧形态:参考内核无 epoll/input 专属事件,属自有事件族 —— 语义上对齐其事件模型(组/名/id/format),内容为本内核特有观测点。</p>
+
+    <h2 id="tracefs"><span class="anchor">§3</span>tracefs 文件树与使用</h2>
+    <p>挂载后文件树与参考实现逐文件对齐(标准名、标准 mode、字节格式自活主机 /sys/kernel/tracing 捕获):</p>
+    <pre><code>mount -t tracefs none /sys/kernel/tracing
+cd /sys/kernel/tracing
+ls
+<span class="c"># tracing_on  trace  trace_pipe  available_tracers  current_tracer
+# available_events  set_event  buffer_size_kb  snapshot  options/
+# events/&lt;group&gt;/{enable,filter,&lt;event&gt;/{enable,filter,id,format}}</span>
+
+cat events/sched/sched_wakeup/format     <span class="c"># 字段表 + print fmt(逐字节对齐参考)</span>
+cat events/sched/sched_wakeup/id         <span class="c"># 事件 id</span></code></pre>
+    <h3>典型会话</h3>
+    <pre><code>echo 1 &gt; tracing_on                                <span class="c"># 全局总开关(两级门控的第二级)</span>
+echo 1 &gt; events/sched/sched_switch/enable          <span class="c"># 武装单事件</span>
+echo 'sched:*' &gt; set_event                          <span class="c"># 按组批量武装(支持通配与否定 !event)</span>
+echo 'ext4:* jbd2:*' &gt; set_event                    <span class="c"># 多组</span>
+cat trace                                           <span class="c"># 读缓冲(读后不清;写 1 到 trace 清空)</span>
+cat trace_pipe                                      <span class="c"># 消费式读取,无表头</span>
+echo 4096 &gt; buffer_size_kb                          <span class="c"># 每 CPU 环大小(KiB)</span>
+echo 1 &gt; snapshot                                   <span class="c"># 存档当前环并重启活环;事后 cat snapshot</span>
+echo 0 &gt; tracing_on                                 <span class="c"># 停止记录(武装保留)</span></code></pre>
+    <h3>输出行格式</h3>
+    <pre><code>%16s-%-7d [%03d] %c%c%c%c%c %5lu.%06lu: %s: %s
+<span class="c">#      task      pid  cpu  irq 系列标志  时间戳        组:  内容</span>
+<span class="c"># 例:launcher-327  [002] d..1 1234.567890: sched:sched_switch: ...</span></code></pre>
+    <h3>环与一致性</h3>
+    <ul>
+      <li>per-CPU 环,逐 CPU 序列号,读侧时间戳合并 —— 尾延迟 p99 1.403→0.741 µs(−47%,观测自身的成本有测量)。</li>
+      <li>600 s 全武装浸泡 1.56M 环覆写零 panic —— 环满覆写路径经过验证。</li>
+    </ul>
+
+    <h2 id="cost"><span class="anchor">§3b</span>成本模型</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>状态</th><th>成本</th><th>验证方式</th></tr></thead>
+      <tbody>
+        <tr><td>事件禁用</td><td class="num">单次 load + test + branch(调用点仅付实参求值)</td><td>release 反汇编逐站点验证(全部 39 个内核站点 one-load:movzbl+test+jcc)</td></tr>
+        <tr><td>事件启用</td><td class="num">+13–19 ns/记录(纯写循环);+28–35 ns(epoll ping-pong 语境)</td><td>on/off 双臂微基准</td></tr>
+        <tr><td>镜像代价</td><td class="num">+24,576 字节(+0.182%)</td><td>构建体积对比</td></tr>
+        <tr><td>浸泡</td><td class="num">600 s 全武装零 panic</td><td>1.56M 环覆写验证</td></tr>
+      </tbody>
+    </table></div>
+    <p class="callout">门禁口径:trace 站点的存在不改变门禁带 —— armed 关闭态在反汇编层面即不可达路径;census 与 pbench 锚均在未武装配置上计测。</p>
+
+    <h2 id="dfx-alias"><span class="anchor">§4</span>dfx= 遗留开关到事件的映射</h2>
+    <p>旧散装开关表已冻结(见<a href="index.html#switches">调试指南</a>),其观测点迁移为 trace 事件,boot 参数 <code>dfx=开关名</code> 现为<b>武装对应事件族的别名</b>:</p>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>dfx= 别名</th><th>武装的 rux: 事件</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">dfx=taskdump</td><td>rux:taskdump(周期任务快照)</td></tr>
+        <tr><td class="mono">dfx=watchdog</td><td>自旋锁告警 + rux:taskdump 联动</td></tr>
+        <tr><td class="mono">dfx=memwatch</td><td>rux:memwatch(分配点记账)</td></tr>
+        <tr><td class="mono">dfx=mmforensics</td><td>rux:mmforensics(PTE 台账/双拆检测)</td></tr>
+        <tr><td class="mono">dfx=schedtrace</td><td>rux:schedtrace(调度步进)</td></tr>
+        <tr><td class="mono">dfx=sysring</td><td>rux:sysring(系统调用双录)</td></tr>
+        <tr><td class="mono">dfx=sigtrace</td><td>rux:sigtrace(信号链)</td></tr>
+        <tr><td class="mono">dfx=ohhunt</td><td>rux:ohhunt(drm ioctl/mmap/prime-import)</td></tr>
+        <tr><td class="mono">dfx=fuxstuck / txnhang / spinwatch / hilogcensus</td><td>对应 rux: 事件(专项狩猎观测点)</td></tr>
+      </tbody>
+    </table></div>
+    <p>retired 令牌完整表与映射实现见 <code>kernel/src/dfx/switches.rs</code>(trace alias 表);<code>/sys/kernel/debug/dfx/</code> 下有同一控制面的 debugfs 镜像。</p>
+
+    <h2 id="adding"><span class="anchor">§5</span>如何新增一个事件</h2>
+    <ol>
+      <li>在 <code>kernel/src/trace/mod.rs</code> 的 <code>tracepoints!</code> 表加一行:组/名/id/print fmt(自参考活文件逐字捕获,或对 rux: 族自拟)/字段表/call 签名/render。</li>
+      <li>调用点写 <code>trace_&lt;name&gt;(实参...)</code> —— 无需手写 armed 检查、打包或渲染。</li>
+      <li>guest 侧验证:<code>cat events/&lt;group&gt;/&lt;name&gt;/format</code> 与参考 format 逐字节比对(参考族),或与声明自洽(rux: 族)。</li>
+      <li>成本验证:release 反汇编确认调用点 one-load;双臂微基准给启用代价。</li>
+    </ol>
+    <p class="callout">政策依据:观测性政策(2026-11-02)—— 旧 dfx= 散装开关表冻结于 49 项不再增长;任何新观测点必须以 tracepoint 形态进入本框架。这是与参考实现对齐的接口决策(debugfs/tracefs 生态直接可用),而非内部偏好。</p>
+
+    <div class="callout">代码:<code>kernel/src/trace/mod.rs</code>(宏 + 声明表)、<code>kernel/src/trace/files.rs</code>(tracefs 文件树)。相关:<a href="perf.html">性能调试</a>(syscost/pbench)、<a href="locks.html">锁调试</a>(lock: 观测)、<a href="index.html">调试指南</a>(遗留开关表)。</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">返回首页</a></span>
+
+      <span class="foot-stats">本站访问 <span id="busuanzi_value_site_pv"></span> 次 · 访客 <span id="busuanzi_value_site_uv"></span> 人</span></div>
+  </div>
+</footer>
+
+<script src="../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>
