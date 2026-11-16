@@ -52,6 +52,19 @@ pub fn register_mount(device: &str, mount_point: &str, fs_type: &str, flags: &st
     crate::process::ns::ns_register_mount(device, mount_point, fs_type, flags);
 }
 
+/// Is `target` already registered as a mount of filesystem type
+/// `fs_type`? (launcher-errno lane: the single-instance filesystems the
+/// kernel automounts — debugfs at /sys/kernel/debug — answer EBUSY to a
+/// second mount(2) at the same point on the OH reference; a stacked
+/// second mount would shadow the kernel's own submounts, e.g. the
+/// tracefs instance at /sys/kernel/debug/tracing.)
+pub fn mounted_as(fs_type: &str, target: &str) -> bool {
+    let table = MOUNT_TABLE.lock();
+    table
+        .iter()
+        .any(|(_, mp, f, _)| f == fs_type && mp == target)
+}
+
 /// Raw global registry snapshot + the hardcoded rootfs row (init-namespace
 /// seed for process::ns::init_mnt_ns).
 pub fn get_global_mounts() -> Vec<(String, String, String, String)> {
@@ -397,6 +410,37 @@ pub fn do_mount(
             // hierarchy "name=systemd" is the only v1 consumer on this
             // rootfs, and it just needs the mount to succeed so the
             // cgroup.procs interface works (noble-desktop, 2026-11-13).
+            //
+            // cgroup v1 controller parity (launcher-errno lane, OH 6.6
+            // reference boot error stream): controller-bound v1 mounts
+            // FAIL with EINVAL on the reference — its kernel exposes
+            // the MEMORY controller only. OH init mounts /dev/cpuctl
+            // cpu, /dev/cpuset cpuset, /dev/pids pids and /dev/frz
+            // freezer (all EINVAL, logged and tolerated) plus
+            // /dev/memcg memory (succeeds). Our old behavior accepted
+            // every controller, so every follow-up chmod/chown/open row
+            // diverged (real cgroupfs nodes answering EPERM vs plain
+            // ENOENT on the reference's tmpfs dirs) — an ours-only
+            // error family. Mirror the reference: only the memory
+            // controller and generic mount tokens mount; any other
+            // controller token answers EINVAL.
+            if fs_type == "cgroup" {
+                if let Some(opts) = data {
+                    let disallowed = opts.split(',').any(|tok| {
+                        let tok = tok.trim();
+                        !tok.is_empty()
+                            && tok != "memory"
+                            && !tok.starts_with("name=")
+                            && !matches!(
+                                tok,
+                                "nodev" | "noexec" | "nosuid" | "rw" | "ro" | "remount"
+                            )
+                    });
+                    if disallowed {
+                        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+                    }
+                }
+            }
             crate::fs::cgroup::init_cgroupfs()
                 .map_err(|e| e as i32)?;
             crate::fs::cgroup::mount_cgroupfs(target)
@@ -438,6 +482,50 @@ pub fn do_mount(
             crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
             register_mount("securityfs", target, "securityfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
         }
+        // configfs (launcher-errno lane): OH's storage_daemon.cfg mounts
+        // configfs at /config and chowns /config/{hmdfs,sharefs} — on
+        // the reference the mount succeeds (a second mount answers
+        // EBUSY) and the two SUBSYSTEM dirs exist because the hmdfs /
+        // sharefs drivers register configfs subsystems. Rux has neither
+        // driver; the mount previously failed EINVAL, an ours-only
+        // error family (mount + both chowns + every later row). Mount
+        // a tmpfs instance tagged CONFIGFS_MAGIC, pre-populated with
+        // the two subsystem dirs, so the chown/chmod path matches.
+        // Divergence: userspace mkdir/rmdir inside the subsystem dirs
+        // behaves like tmpfs, not configfs (no subsystem item
+        // semantics) — no boot-path component on the OH image creates
+        // configfs items (audited oh-robot).
+        "configfs" => {
+            crate::fs::tmpfs::ensure_registered();
+            let mut root_inode = crate::fs::tmpfs::create_mount_instance(data);
+            crate::fs::tmpfs::tag_mount_instance_type(
+                &mut root_inode,
+                &crate::fs::tmpfs::CONFIGFS_INODE_OPS,
+            );
+            // Pre-create the hmdfs/sharefs subsystem dirs (the
+            // reference's driver-registered configfs groups) INSIDE the
+            // instance, before it is published by the mount.
+            if let Some(ops) = root_inode.ops {
+                if let Some(mkdir) = ops.mkdir {
+                    // SAFETY: root_inode is the freshly created instance
+                    // root; mkdir is the tmpfs mkdir twin.
+                    unsafe {
+                        let _ = mkdir(
+                            &root_inode,
+                            b"hmdfs",
+                            crate::fs::inode::InodeMode::new(0o755),
+                        );
+                        let _ = mkdir(
+                            &root_inode,
+                            b"sharefs",
+                            crate::fs::inode::InodeMode::new(0o755),
+                        );
+                    }
+                }
+            }
+            crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
+            register_mount("configfs", target, "configfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+        }
         "mqueue" => {
             crate::fs::tmpfs::ensure_registered();
             let mut root_inode = crate::fs::tmpfs::create_mount_instance(data);
@@ -458,6 +546,18 @@ pub fn do_mount(
         // either mounts the boot instance at the requested point or, if
         // boot did not create it (feature-gated), creates it now.
         "debugfs" => {
+            // Single-instance semantics (launcher-errno lane): the
+            // kernel automounts debugfs at /sys/kernel/debug; on the OH
+            // reference init's later `mount debugfs ... /sys/kernel/
+            // debug` answers EBUSY (err 16 in the reference boot error
+            // stream) and the kernel's own submounts under it — the
+            // tracefs instance at /sys/kernel/debug/tracing — stay
+            // visible. Our old arm stacked a second debugfs mount that
+            // SHADOWED the tracefs alias (every /sys/kernel/debug/
+            // tracing chmod then ENOENT — an ours-only error family).
+            if mounted_as("debugfs", target) {
+                return Err(errno::Errno::DeviceOrResourceBusy.as_neg_i32());
+            }
             if crate::fs::debugfs::debugfs_root().is_none() {
                 crate::fs::debugfs::init_debugfs()?;
             }

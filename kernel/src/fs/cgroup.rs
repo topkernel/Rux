@@ -76,10 +76,16 @@ pub enum CgroupFileKind {
     /// memory.stat (read-only): per-class memory usage rows (v2 key
     /// names; LTP memcontrol02 reads anon/file).
     MemoryStat = 14,
+    /// v1 memory-controller legacy file (OH 6.6 /dev/memcg parity)
+    MemoryOomControl = 15,
+    /// v1 memory-controller legacy file (OH 6.6 /dev/memcg parity)
+    CgroupEventControl = 16,
+    /// v1 memory-controller legacy file (OH 6.6 /dev/memcg parity)
+    MemoryPressureLevel = 17,
 }
 
 /// (name, kind, writable) for every control file, readdir order.
-const CONTROL_FILES: [(&str, CgroupFileKind, bool); 14] = [
+const CONTROL_FILES: [(&str, CgroupFileKind, bool); 17] = [
     ("cgroup.procs", CgroupFileKind::CgroupProcs, true),
     ("cgroup.controllers", CgroupFileKind::CgroupControllers, false),
     ("cgroup.subtree_control", CgroupFileKind::CgroupSubtreeControl, true),
@@ -94,6 +100,22 @@ const CONTROL_FILES: [(&str, CgroupFileKind, bool); 14] = [
     ("pids.current", CgroupFileKind::PidsCurrent, false),
     ("cgroup.kill", CgroupFileKind::CgroupKill, true),
     ("tasks", CgroupFileKind::Tasks, true),
+    // The v1 memory legacy files (launcher-errno lane): OH's
+    // memmgrservice.cfg chowns/chmods /dev/memcg/{memory.oom_control,
+    // cgroup.event_control, memory.pressure_level} at boot; on the
+    // reference all three EXIST under the memory-controller mount and
+    // the chmod/chown succeed. No OH userspace component reads or
+    // writes them at boot (audited oh-robot: cfg references only), so
+    // they exist for interface parity with content/read semantics per
+    // Linux v1: oom_control reports the two counters, event_control
+    // accepts the "<eventfd> <controlfd>" registration form (the
+    // notification itself is not delivered — documented gap),
+    // pressure_level reads empty. They appear on every cgroupfs mount
+    // (the tree is shared across mounts); systemd ignores unknown
+    // files on the v2 view.
+    ("memory.oom_control", CgroupFileKind::MemoryOomControl, true),
+    ("cgroup.event_control", CgroupFileKind::CgroupEventControl, true),
+    ("memory.pressure_level", CgroupFileKind::MemoryPressureLevel, false),
 ];
 
 /// Resolve a control-file name inside a cgroup directory.
@@ -254,8 +276,20 @@ fn generate_content(node: &CgroupNode, kind: CgroupFileKind) -> Vec<u8> {
         CgroupFileKind::CgroupKill => b"0\n".to_vec(),
         CgroupFileKind::PidsMax => generate_pids_max(node),
         CgroupFileKind::PidsCurrent => generate_pids_current(node),
+        CgroupFileKind::MemoryOomControl => {
+            let disable = OOM_KILL_DISABLE.load(Ordering::Relaxed);
+            alloc::format!("oom_kill_disable {}\noom_kill 0\n", disable).into_bytes()
+        }
+        // Write-side API (eventfd registration); reads back empty.
+        CgroupFileKind::CgroupEventControl => Vec::new(),
+        // Consumed via cgroup.event_control; reads back empty.
+        CgroupFileKind::MemoryPressureLevel => Vec::new(),
     }
 }
+
+/// The stored v1 oom_kill_disable flag (memory.oom_control write).
+static OOM_KILL_DISABLE: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(0);
 
 // ============================================================================
 // Content application (writes)
@@ -399,6 +433,38 @@ fn apply_content(node: &Arc<CgroupNode>, kind: CgroupFileKind, buf: &[u8]) -> i3
         CgroupFileKind::PidsMax => {
             // SAFETY: see above.
             apply_pids_max(unsafe { &*(Arc::as_ptr(node) as *const CgroupNode) }, input)
+        }
+        // memory.oom_control: "0"/"1" toggles oom_kill_disable (Linux
+        // v1 semantics; the flag is stored and reported, the killer
+        // policy itself does not consult it yet).
+        CgroupFileKind::MemoryOomControl => match input {
+            "0" | "1" => {
+                OOM_KILL_DISABLE.store(
+                    if input == "1" { 1 } else { 0 },
+                    Ordering::Relaxed,
+                );
+                0
+            }
+            _ => errno::Errno::InvalidArgument.as_neg_i32(),
+        },
+        // cgroup.event_control: the reference registration form is
+        // "<eventfd> <controlfd>" (two integers). Well-formed writes
+        // succeed (the notification delivery itself is a documented
+        // gap — no consumer on this image writes it); anything else is
+        // EINVAL, the reference's answer to a malformed registration.
+        CgroupFileKind::CgroupEventControl => {
+            let mut it = input.split_whitespace();
+            let ok = matches!(
+                (it.next(), it.next(), it.next()),
+                (Some(a), Some(b), None)
+            ) && input
+                .split_whitespace()
+                .all(|tok| tok.parse::<i64>().is_ok());
+            if ok {
+                0
+            } else {
+                errno::Errno::InvalidArgument.as_neg_i32()
+            }
         }
         // Read-only control files.
         _ => errno::Errno::InvalidArgument.as_neg_i32(),

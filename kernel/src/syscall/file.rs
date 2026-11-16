@@ -3957,6 +3957,7 @@ fn fill_statfs_for_inode(inode: &crate::fs::inode::Inode, buf: &mut Statfs) {
         const MQUEUE_MAGIC: u64 = 0x1980_0202;
         const SECURITYFS_MAGIC: u64 = 0x7363_6673;
         const DEVPTS_MAGIC: u64 = 0x1cd1;
+        const CONFIGFS_MAGIC: u64 = 0x6163_6773;
         let magic = if inode.ops.is_some_and(|o| {
             core::ptr::eq(o as *const _, &crate::fs::tmpfs::MQUEUE_INODE_OPS as *const _)
         }) {
@@ -3969,6 +3970,10 @@ fn fill_statfs_for_inode(inode: &crate::fs::inode::Inode, buf: &mut Statfs) {
             core::ptr::eq(o as *const _, &crate::fs::tmpfs::DEVPTS_INODE_OPS as *const _)
         }) {
             Some(DEVPTS_MAGIC)
+        } else if inode.ops.is_some_and(|o| {
+            core::ptr::eq(o as *const _, &crate::fs::tmpfs::CONFIGFS_INODE_OPS as *const _)
+        }) {
+            Some(CONFIGFS_MAGIC)
         } else {
             None
         };

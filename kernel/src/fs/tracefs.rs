@@ -260,7 +260,12 @@ pub fn create_root_inode() -> Arc<Inode> {
             return Arc::new(inode);
         }
     };
-    let entry = Box::new(TraceFsEntryData { node: root });
+    let entry = Box::new(TraceFsEntryData {
+        node: root,
+        mode_ovr: core::sync::atomic::AtomicU32::new(0),
+        uid: core::sync::atomic::AtomicU32::new(0),
+        gid: core::sync::atomic::AtomicU32::new(0),
+    });
     let mut inode = Inode::new(1, InodeMode::new(InodeMode::S_IFDIR | 0o755));
     inode.fs_id = FS_ID_TRACEFS;
     inode.ops = Some(&TRACEFS_INODE_OPS);
@@ -278,6 +283,14 @@ pub fn create_root_inode() -> Arc<Inode> {
 pub struct TraceFsEntryData {
     /// the node this inode stands for
     pub node: Arc<DebugFsNode>,
+    /// setattr overrides (Linux kernfs stores iattr for root callers —
+    /// kernfs_iop_setattr): OH init chmods/chowns the whole
+    /// /sys/kernel/tracing events tree during boot and every chmod
+    /// SUCCEEDS on the reference (the remaining ENOENT rows there are
+    /// events its kernel lacks). 0 = no override (the built-in mode).
+    pub mode_ovr: core::sync::atomic::AtomicU32,
+    pub uid: core::sync::atomic::AtomicU32,
+    pub gid: core::sync::atomic::AtomicU32,
 }
 
 /// Recover the entry data from an inode.
@@ -324,7 +337,12 @@ unsafe fn tracefs_iget(
         InodeMode::new(InodeMode::S_IFREG | node.mode)
     };
 
-    let entry = Box::new(TraceFsEntryData { node });
+    let entry = Box::new(TraceFsEntryData {
+        node,
+        mode_ovr: core::sync::atomic::AtomicU32::new(0),
+        uid: core::sync::atomic::AtomicU32::new(0),
+        gid: core::sync::atomic::AtomicU32::new(0),
+    });
     let mut inode = Inode::new(ino, mode);
     inode.fs_id = FS_ID_TRACEFS;
     inode.ops = Some(&TRACEFS_INODE_OPS);
@@ -335,22 +353,33 @@ unsafe fn tracefs_iget(
 /// tracefs getattr.
 /// SAFETY: VFS callback contract.
 unsafe fn tracefs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
+    use core::sync::atomic::Ordering::Relaxed;
     let entry = match entry_of(inode) {
         Some(e) => e,
         None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
     };
     stat.st_ino = inode.ino;
+    let perm = {
+        let ovr = entry.mode_ovr.load(Relaxed);
+        if ovr != 0 {
+            ovr
+        } else if entry.node.is_dir {
+            0o755
+        } else {
+            entry.node.mode
+        }
+    };
     if entry.node.is_dir {
-        stat.st_mode = InodeMode::S_IFDIR | 0o755;
+        stat.st_mode = InodeMode::S_IFDIR | perm;
         stat.st_size = 4096;
         stat.st_nlink = 2;
     } else {
-        stat.st_mode = InodeMode::S_IFREG | entry.node.mode;
+        stat.st_mode = InodeMode::S_IFREG | perm;
         stat.st_size = 4096;
         stat.st_nlink = 1;
     }
-    stat.st_uid = 0;
-    stat.st_gid = 0;
+    stat.st_uid = entry.uid.load(Relaxed);
+    stat.st_gid = entry.gid.load(Relaxed);
     stat.st_rdev = 0;
     stat.st_blksize = 4096;
     stat.st_blocks = 8;
@@ -365,13 +394,59 @@ unsafe fn tracefs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
 
 /// tracefs setattr: ATTR_SIZE is a no-op (the guest stdio writes the
 /// value and the newline as separate write() calls, so O_TRUNC must not
-/// fail); everything else is EPERM — the tree is kernel-owned.
+/// fail). ATTR_MODE/ATTR_UID/ATTR_GID/ATTR_UID_GID store iattr overrides
+/// and return 0 — Linux tracefs is kernfs, where root chmod/chown
+/// succeeds (kernfs_iop_setattr). OH init chmods the whole
+/// /sys/kernel/tracing tree (events/<g>/<e>/{enable,filter,format}, the
+/// per-event dirs, tracing_on, trace, set_event...) at boot; on the
+/// reference every chmod on an EXISTING node returns 0 — the old EPERM
+/// was the top ours-only error family in the why-slow/launcher-errno
+/// boot error-stream diff (~494 rows). File CONTENT stays kernel-owned.
 /// SAFETY: VFS callback contract.
-unsafe fn tracefs_setattr(_inode: &Inode, attr: u32, _arg1: u64, _arg2: u64) -> i32 {
-    if attr == crate::fs::inode::setattr_attr::ATTR_SIZE {
+unsafe fn tracefs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
+    use crate::fs::inode::setattr_attr;
+    if attr == setattr_attr::ATTR_SIZE {
         return 0;
     }
-    errno::Errno::OperationNotPermitted.as_neg_i32()
+    let entry = match entry_of(inode) {
+        Some(e) => e,
+        None => return errno::Errno::OperationNotPermitted.as_neg_i32(),
+    };
+    match attr {
+        setattr_attr::ATTR_MODE => {
+            entry
+                .mode_ovr
+                .store((arg1 as u32) & 0o7777, core::sync::atomic::Ordering::Relaxed);
+            let keep_type = inode.mode.bits() & crate::fs::inode::InodeMode::S_IFMT;
+            inode.update_cached_mode(crate::fs::inode::InodeMode::new(
+                keep_type | ((arg1 as u32) & 0o7777),
+            ));
+            0
+        }
+        setattr_attr::ATTR_UID => {
+            entry
+                .uid
+                .store(arg1 as u32, core::sync::atomic::Ordering::Relaxed);
+            0
+        }
+        setattr_attr::ATTR_GID => {
+            entry
+                .gid
+                .store(arg1 as u32, core::sync::atomic::Ordering::Relaxed);
+            0
+        }
+        setattr_attr::ATTR_UID_GID => {
+            entry
+                .uid
+                .store(arg1 as u32, core::sync::atomic::Ordering::Relaxed);
+            entry
+                .gid
+                .store(arg2 as u32, core::sync::atomic::Ordering::Relaxed);
+            0
+        }
+        setattr_attr::ATTR_ATIME | setattr_attr::ATTR_MTIME => 0,
+        _ => errno::Errno::OperationNotPermitted.as_neg_i32(),
+    }
 }
 
 /// tracefs readdir: the child entries of a directory.

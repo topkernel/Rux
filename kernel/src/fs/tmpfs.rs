@@ -1621,6 +1621,33 @@ pub static SECURITYFS_INODE_OPS: INodeOps = INodeOps {
     destroy_inode: Some(tmpfs_destroy_inode),
 };
 
+/// configfs twin (CONFIGFS_MAGIC 0x61636773 — launcher-errno lane: OH
+/// init mounts configfs at /config via storage_daemon.cfg and chowns
+/// the hmdfs/sharefs subsystem dirs; the mount previously failed
+/// EINVAL on Rux, an ours-only error family). The instance is
+/// pre-populated with the two subsystem dirs by the mount arm.
+pub static CONFIGFS_INODE_OPS: INodeOps = INodeOps {
+    lookup: Some(tmpfs_lookup),
+    create: Some(tmpfs_create),
+    link: Some(tmpfs_link),
+    unlink: Some(tmpfs_unlink),
+    symlink: Some(tmpfs_symlink),
+    mkdir: Some(tmpfs_mkdir),
+    rmdir: Some(tmpfs_rmdir),
+    mknod: Some(tmpfs_mknod),
+    rename: Some(tmpfs_rename),
+    readlink: Some(tmpfs_readlink),
+    get_file_ops: Some(tmpfs_get_file_ops),
+    readdir: Some(tmpfs_readdir),
+    readdir_cacheable: true,
+    open: None,
+    permission: None,
+    getattr: Some(tmpfs_getattr),
+    setattr: Some(tmpfs_setattr),
+    iget: Some(tmpfs_iget),
+    destroy_inode: Some(tmpfs_destroy_inode),
+};
+
 /// devpts twin (DEVPTS_MAGIC 0x1cd1 — devpts mounts are tmpfs-style
 /// instances; glibc's getpt()/posix_openpt probes /dev/pts with
 /// statfs).

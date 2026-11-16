@@ -3454,14 +3454,23 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
             return -(errno::EFAULT as i64);
         }
         total_buf_len += iov_len;
-        // R7-D4: bound the aggregate before the vec allocation (heap is
-        // 32MB; access_ok alone admits iov_len up to 256GB).
-        if total_buf_len > crate::syscall::io::RW_CHUNK.saturating_mul(4) {
-            return -(errno::EMSGSIZE as i64);
-        }
         iovs.push((iov_base, iov_len));
     }
     crate::dfx::unixrd::add(&crate::dfx::unixrd::RM_IOV_NS, ur_t_iov);
+    // (launcher-errno lane) The aggregate iovec length is NOT an error
+    // on Linux — recvmsg with a huge receive buffer is a normal shape.
+    // OH's sysevent_source recvmsg()s with a large iovec every poll;
+    // the old R7-D4 EMSGSIZE guard here turned EVERY receive into an
+    // error (the datagram never drained) — a retry-forever spin of
+    // 491,158 calls in one 60 s window (~8K/s, the whole boot). The
+    // heap discipline moves to the STAGING size: the unix DIRECT path
+    // stages nothing; the staged paths (the peek bounce and the other
+    // families' bounce below) cap the allocation at STAGED_MAX —
+    // datagrams are already bounded by the send-side gather limit, so
+    // a capped stage can only truncate what a too-small buffer would
+    // truncate on Linux.
+    const STAGED_MAX: usize = crate::syscall::io::RW_CHUNK.saturating_mul(4);
+    let staged_len = total_buf_len.min(STAGED_MAX);
 
     if total_buf_len == 0 {
         zero_controllen();
@@ -3490,8 +3499,8 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
         let ur_t_recv = crate::dfx::unixrd::now();
         let r = if peek {
             // MSG_PEEK: staged receive (bounce + scatter — see below).
-            let mut buf = alloc::vec![0u8; total_buf_len];
-            crate::dfx::unixrd::addb(&crate::dfx::unixrd::RM_ALLOC_B, total_buf_len as u64);
+            let mut buf = alloc::vec![0u8; staged_len];
+            crate::dfx::unixrd::addb(&crate::dfx::unixrd::RM_ALLOC_B, staged_len as u64);
             let rr = crate::net::unix::unix_recv_ctl(&usock, &mut buf, nonblock, deadline, peek);
             match rr {
                 Ok(rr) => {
@@ -3646,9 +3655,9 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
     // non-unix families reach here now (the unix non-peek receive copies
     // direct-to-user; the unix peek allocates its own bounce above).
     let ur_t_alloc = crate::dfx::unixrd::now();
-    let mut buf = alloc::vec![0u8; total_buf_len];
+    let mut buf = alloc::vec![0u8; staged_len];
     crate::dfx::unixrd::add(&crate::dfx::unixrd::RM_ALLOC_NS, ur_t_alloc);
-    crate::dfx::unixrd::addb(&crate::dfx::unixrd::RM_ALLOC_B, total_buf_len as u64);
+    crate::dfx::unixrd::addb(&crate::dfx::unixrd::RM_ALLOC_B, staged_len as u64);
 
     // P0-2: AF_NETLINK recvmsg — exactly one rtnetlink message per call,
     // source address = kernel sockaddr_nl. MSG_PEEK leaves the datagram
