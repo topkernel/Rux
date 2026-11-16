@@ -80,57 +80,37 @@
     <a href="../guestbook.html">留言板</a>
   </aside>
   <article class="doc-main">
-    <h1>rt-tests 延迟与调度压力</h1>
-    <div class="sub">cyclictest 轮次记录、hackbench 矩阵、pi_stress 状态与工具链注入协议 · 正本:qa-suites run/qa-suites-findings.md</div>
+    <h1>rt-tests(cyclictest / hackbench / pi_stress)</h1>
+    <div class="sub">实时延迟与调度压力的性能对照(同机同镜像同二进制),无数据项即失败 · 机位与方法</div>
 
-    <h2 id="cyclictest"><span class="anchor">§1</span>cyclictest(rt-tests v2.11,静态 musl)</h2>
-    <p>协议:<code>cyclictest -D 30 -i 1000 -m</code>(SCHED_OTHER)与 <code>-m -p 98</code>(SCHED_FIFO);30 s 窗、1000 µs 间隔、mlockall、30k 周期。机位同 fio 页(q35/KVM -cpu max smp2/2G,virtio-blk,每轮独立启动)。</p>
-    <h3>轮次记录(qa-suites 台账)</h3>
+    <h2 id="data"><span class="anchor">§1</span>数据(同机同镜像同二进制对照)</h2>
+    <p style="font-size:13.5px">两侧使用<b>同一镜像、同一 rt-tests v2.11 静态二进制、同一参数</b>,分别在 Rux(main debug)与 Linux(宿主 7.0.0 内核)于同一 guest 机位执行。cyclictest:30 s 窗、1000 µs 间隔、mlockall;hackbench:消息传递吞吐(秒,越低越好)。</p>
     <div class="tbl-wrap"><table>
-      <thead><tr><th>轮(内核)</th><th class="num">SCHED_OTHER:丢失/均值/最大(µs)</th><th class="num">SCHED_FIFO p98:丢失/均值/最大(µs)</th><th>备注</th></tr></thead>
-      <tbody>
-        <tr><td>r1(d08f8cd7)</td><td class="num">38 丢失 · avg 92 · max 2602</td><td class="num">42 丢失 · avg 95 · max 2132</td><td>基线轮</td></tr>
-        <tr><td>r2(0c8e4b79)</td><td class="num">38 · avg 95 · max 3149</td><td class="num">33 · avg 89 · max 1142</td><td>—</td></tr>
-        <tr><td>r3(66cd9918 + CLOCK_BOOTTIME/TAI 定时器修复)</td><td class="num">25 · avg 89 · <b>max 1289(−59%)</b></td><td class="num">2 · avg 87 · <b>max 396(−65%)</b></td><td>最大延迟降幅来自时钟域修复(255f86f5)</td></tr>
-        <tr><td>r4(合并 8d47783a)</td><td class="num">26 · avg 89 · max 1018(趋势 3149→1289→1018)</td><td class="num">28 · avg 89 · max 1857</td><td>FIFO max 波动未裁定(sched 域复核项);丢失率 &lt;0.1%、均值稳定 87–89</td></tr>
-        <tr><td>r4 隔离复跑(第 3 遍)</td><td class="num">29 · avg 88 · <b>max 667(最佳)</b></td><td class="num">27 · avg 88 · max 1352</td><td>—</td></tr>
-        <tr><td><b>2026-11-17 复测两轮(当前 main debug)</b></td><td class="num" id="cyc-other">r1:max 522 / r2:max 2922(快照前段);两轮末窗均出现单次 29.9/35.3 ms 峰值 —— 见注;avg 105–108 / min 54,丢失率 &lt;0.2%</td><td class="num" id="cyc-fifo">r1:max 28448 / r2:max 34566(均为末窗单次)· avg 103–104 · min 45–48</td><td>末窗峰值与宿主并发负载相关(其他 lane QEMU 同时运行);窗内 avg/丢失率与历史带一致;受控隔离值仍以 r3/r4 的 667/396 为准</td></tr>
+      <thead><tr><th>项</th><th class="num">Rux</th><th class="num">Linux(同机)</th><th>说明</th></tr></thead>
+      <tbody id="rt-rows">
+        <tr><td class="mono">cyclictest SCHED_OTHER(丢失/avg/max µs)</td><td class="num">PENDING</td><td class="num">PENDING</td><td>30k 周期</td></tr>
+        <tr><td class="mono">cyclictest SCHED_FIFO p98(丢失/avg/max µs)</td><td class="num">PENDING</td><td class="num">PENDING</td><td>实时策略路径</td></tr>
+        <tr><td class="mono">hackbench socketpair -g 20(秒)</td><td class="num">PENDING</td><td class="num">PENDING</td><td>进程间 socketpair 吞吐</td></tr>
+        <tr><td class="mono">hackbench pipe -p 20 -g 4(秒)</td><td class="num">PENDING</td><td class="num">PENDING</td><td>管道吞吐</td></tr>
+        <tr><td class="mono">hackbench thread -T 20 -g 4(秒)</td><td class="num">PENDING</td><td class="num">PENDING</td><td>线程形态</td></tr>
+        <tr><td class="mono">pi_stress -g 2 -D 20(完成反转数)</td><td class="num">PENDING</td><td class="num">PENDING</td><td>PI futex 路径吞吐</td></tr>
       </tbody>
     </table></div>
+    <p style="font-size:13px;color:var(--text-3)">无数据项即失败:hackbench inet ≥2 组在 Rux 无数字(回环非阻塞 connect 停滞,net 线在案);pi_stress 在 Rux 曾初始化失败(PI mutex UAPI 链)—— 本表以最新一轮双侧读数为准,失败项在行内如实显示。</p>
+
+    <h2 id="rig"><span class="anchor">§2</span>机位与方法</h2>
     <ul>
-      <li><b>已识别的宿主噪声源</b>:复测窗内同宿主存在其他 lane 的 QEMU 负载;末窗单次 29.8/28.4 ms 峰值与其相关,窗内统计(avg/丢失率)不受影响。干净宿主复测列入队列;历史 r3/r4 隔离值(667/396)为受控读数。</li>
-      <li><b>直方图模式未接</b>:cyclictest -h 直方图落盘与参考内核同机对照列均未采集 —— 列入补测队列(当前为 Rux 单列)。</li>
-      <li><b>配套内核侧读数</b>:pbench p7_sleep1ms 过冲 15.8 µs(nanosleep 1ms × 1e4,KVM 类);旧 tick 时代该读数 2094 µs vs 参考 14.64(143×),修复后进入 14.6 µs 类 —— 睡眠成本回归的证据链。nohz_full=1 对抗负载 A/B:lmbench lat_syscall,null 通过 0/10 → 11/12(92%),p1_null −17%。</li>
+      <li><b>对照对</b>:与 fio 页同一对内核、同一镜像(reflink)、同一次注入的二进制(源码 tar 包入 git,musl 静态构建;含 numa shim 与 musl sched_* ENOSYS 桩覆写)。</li>
+      <li><b>协议</b>:每侧一次启动顺序执行全部项(qsrun cmds 协议);cyclictest 直出统计行,hackbench 直出耗时行。</li>
     </ul>
 
-    <h2 id="hackbench"><span class="anchor">§2</span>hackbench</h2>
-    <div class="tbl-wrap"><table>
-      <thead><tr><th>形态</th><th class="num">读数(r1-r4)</th><th>结论</th></tr></thead>
-      <tbody>
-        <tr><td>socketpair 20 进程</td><td class="num">0.791–0.858 s</td><td class="chip ok">PASS</td></tr>
-        <tr><td>pipe -p 20</td><td class="num">0.406–0.420 s</td><td class="chip ok">PASS</td></tr>
-        <tr><td>线程 -T 20</td><td class="num">0.807–1.003 s</td><td class="chip ok">PASS</td></tr>
-        <tr><td>规模 -g 40 -l 500</td><td class="num">22.19–22.98 s</td><td class="chip ok">PASS</td></tr>
-        <tr><td>inet 1 组</td><td class="num">0.037 s</td><td class="chip ok">PASS</td></tr>
-        <tr><td>inet ≥2 组</td><td class="num">TIMEOUT-TERM(90 s 未完成)</td><td class="chip bad">F-1(P0,net 线)</td></tr>
-        <tr><td><b>2026-11-17 复测</b>(当前 main):inet 多组</td><td class="num">10 组/400 任务 T=90s TIMEOUT-TERM(Time: 91.487)</td><td class="chip bad">F-1 在当前 main 仍复现 —— 回环路径非阻塞 connect EINPROGRESS/全新启动挂起,net 线 P0 在案</td></tr>
-      </tbody>
-    </table></div>
-
-    <h2 id="pistress"><span class="anchor">§3</span>pi_stress</h2>
+    <h2 id="infra"><span class="anchor">§3</span>工具链</h2>
     <ul>
-      <li>r1-r4:FAIL —— FUTEX_LOCK_PI 族当时未实现(ENOSYS)。</li>
-      <li><b>2026-11-17 复测</b>(当前 main,PI futex 已合 0b4d1752b):<span id="pi-now">glibc PI mutex 初始化路径返回 ENOTSUP("initializing mutex: Operation not supported")—— 内核侧 FUTEX_LOCK_PI 存在,但 glibc 的 PTHREAD_PRIO_INHERIT mutex 依赖链(robust 注册 + PI 语义)尚未全通;<span style="color:var(--text-3)">UAPI 兼容缺口登记,pi_stress 通过为验收目标。</span></span></li>
+      <li>rt-tests v2.11 原版源码入库;构建脚本 userspace/tests/rttests/build-x86.sh;schedprobe(随启动注入)验证原生 sched_* 系统调用面。</li>
+      <li>扩展:<code>test/qrtests/run-suite-x86.sh "60 cyclictest -D 30 -i 1000 -m"</code>;直方图模式(-h 落盘)与参考内核列扩展在补测队列。</li>
     </ul>
 
-    <h2 id="infra"><span class="anchor">§4</span>工具链与注入</h2>
-    <ul>
-      <li>rt-tests v2.11 原版 tar 包入 git;musl 静态构建(run/rttests-bin/cyclictest、hackbench;pi_stress 为宿主 glibc 构建);构建含 numa shim 与 musl sched_* ENOSYS 桩覆写(F-3:工具链 libc.a 的 sched 系列为 ENOSYS 桩 —— 曾使 cyclictest 卡在 "unable to get scheduler parameters",覆写后解除)。</li>
-      <li>每次 QA 启动自动注入三件套;单独运行:<code>test/qrtests/run-suite-x86.sh "60 cyclictest -D 30 -i 1000 -m"</code>。</li>
-      <li>schedprobe(每 QA 启动注入)验证原生 sched_setparam/getscheduler/setscheduler 系统调用面 —— F-3 的证据探针。</li>
-    </ul>
-
-    <div class="callout">正本:qa-suites 工作树 run/qa-suites-findings.md(r1-r4 台账 + F-1/F-2/F-3 定性);原始 fleet 日志 run/qa-fleet/s*/cyclictest.log。</div>
+    <div class="callout">正本:qa-suites 工作树 run/qa-suites-findings.md;原始日志 run/bench-pair-1117/(双臂串口)。</div>
   </article>
 </div>
 </main>

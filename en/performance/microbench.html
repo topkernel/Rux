@@ -31,12 +31,13 @@
 <div class="container doc">
   <aside class="doc-side">
     <div class="grp">Performance</div>
-    <a href="../debugging/index.html">Performance overview</a>
+    <a href="index.html">Performance overview</a>
     <a href="lmbench.html">lmbench</a>
     <a href="geekbench.html">Geekbench 5</a>
     <a href="fio.html">fio</a>
     <a href="rttests.html">rt-tests</a>
-    <a href="microbench.html">Internal microbenchmarks</a><div class="grp">Architecture</div>
+    <a class="on" href="microbench.html">Internal microbenchmarks</a>
+<div class="grp">Architecture</div>
     <a href="../architecture/design.html">Design deep-dive</a>
     <a href="../architecture/scheduler.html">Scheduler</a>
     <a href="../architecture/memory.html">Memory management</a>
@@ -80,11 +81,37 @@
     <a href="../guestbook.html">Guestbook</a>
   </aside>
   <article class="doc-main">
-    <h1>Tier 1/2 gate bands, pbench anchors, the flush wall, the NOHZ A/B and the switch anatomy</h1>
-    <div class="sub">The gate collectors’ baselines and the internal benchmarks’ historical A/Bs — complementary to the external suites (lmbench/Geekbench/fio/rt-tests)</div>
+    <h1>Internal microbenchmarks</h1>
+    <div class="sub">The pbench and flush-wall probes compared on the same rig (newest round), the merge-gate Tier 1 bands, and the switch-cost anatomy · Canonical: docs/development/perf-gate-baseline.md</div>
 
-<h2 id="tier1"><span class="anchor">§7</span>Tier 1: quiet syscost boot census (KVM q35 smp2/4G, 780 s window)</h2>
-    <div class="tbl-wrap">
+    <h2 id="pbench"><span class="anchor">§1</span>pbench P1-P7 (same machine, same binary)</h2>
+    <p style="font-size:13.5px">The same static pbench binary (test/pbench.c) runs as init on Rux (main debug) and on Linux (the host 7.0.0 kernel), the same 192 MB ext4 image, the same q35/KVM rig (SMP2/1G); PBENCH lines are medians.</p>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Group</th><th>Measures</th><th class="num">Rux</th><th class="num">Linux (same rig)</th><th class="num">Ratio</th></tr></thead>
+      <tbody id="pb-rows">
+        <tr><td class="mono">p1_null</td><td>empty syscall (SYS_getuid, µs)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
+        <tr><td class="mono">p1_clock</td><td>clock_gettime (µs)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
+        <tr><td class="mono">p2_ctxsw</td><td>one pipe-ping-pong context switch (µs)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
+        <tr><td class="mono">p3a/p3b/p3c</td><td>the three fault classes (anon/COW/file, µs)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
+        <tr><td class="mono">p4_fork_exit / fork_exec</td><td>fork and exec (µs)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
+        <tr><td class="mono">p5a-p5c</td><td>the IPC family (pipe/unix dgram/stream, µs)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
+        <tr><td class="mono">p6 family</td><td>filesystem rows (stat/openclose/write_fsync/mkdrmdir/unlink/append, µs)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
+        <tr><td class="mono">p7_sleep1ms</td><td>nanosleep 1 ms overshoot (µs)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
+      </tbody>
+    </table></div>
+
+    <h2 id="flush"><span class="anchor">§2</span>The flush wall (the 32 MB full-sync writeback probe, same-rig comparison)</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Phase</th><th class="num">Rux</th><th class="num">Linux (same rig)</th><th>Notes</th></tr></thead>
+      <tbody id="fl-rows">
+        <tr><td class="mono">mmap-write 32M + msync(MS_SYNC) (s)</td><td class="num">PENDING</td><td class="num">PENDING</td><td>full dirty-page writeback</td></tr>
+        <tr><td class="mono">fsync (s)</td><td class="num">PENDING</td><td class="num">PENDING</td><td>the fsync path on the same data</td></tr>
+        <tr><td class="mono">sync + re-read (total wall clock, s)</td><td class="num">PENDING</td><td class="num">PENDING</td><td>the whole-wall-clock basis</td></tr>
+      </tbody>
+    </table></div>
+
+    <h2 id="tier1"><span class="anchor">§3</span>Tier 1: the quiet-boot census bands (the merge gate, current bands)</h2>
+<div class="tbl-wrap">
       <table>
         <thead><tr><th>Metric</th><th>Baseline / band</th></tr></thead>
         <tbody>
@@ -102,52 +129,15 @@
       </table>
     </div>
 
-    <h2 id="pbench"><span class="anchor">§8</span>Tier 2: pbench P1–P7 anchors (SMP-8 standard, re-banked 2026-11-08)</h2>
-    <div class="callout"><b>The SMP-8 standard</b> (user directive 2026-11-07): every launch boots with at least 8 CPUs (Kernel.toml <code>smp.max_cpus = 8</code>; the three-arch drivers default to <code>-smp 8</code>). The old anchors were measured at 2–4 real CPUs and cannot judge an 8-CPU run — cross-configuration comparison is as meaningless as debug-vs-strong. The anchors below = the SMP-8 same-rig A/B baseline (base 166e4516 vs per-mm-break c127e4bc, KVM q35 4G).</div>
-    <div class="tbl-wrap">
-      <table>
-        <thead><tr><th>Group</th><th>Content (test/pbench.c)</th><th class="num">Anchor (SMP-8 KVM, µs)</th></tr></thead>
-        <tbody>
-          <tr><td>P1</td><td>p1_null null syscall (N=1e6) / p1_clock_gettime (N=1e6)</td><td class="num">0.280 / —</td></tr>
-          <tr><td>P2</td><td>p2_ctxsw: 1-byte pipe ping-pong context switch (pinned)</td><td class="num"><b>0.756</b> (post per-mm-break; baseline 1.222 → 8 CPUs switch 38% faster)</td></tr>
-          <tr><td>P3</td><td>Page-fault family: p3a first-touch anon / p3b COW / p3c filemap / p3d concurrent</td><td class="num">p3b_cow 18.424 (+58% at SMP-8 — an honest gap, below)</td></tr>
-          <tr><td>P4</td><td>p4_fork_exit / p4_fork_exec (N=1e3)</td><td class="num">sub-ms class (r11: fork copy 910→574 ns, exit drop 4491→825 ns; exit body 17.9→7.3 µs)</td></tr>
-          <tr><td>P5</td><td>IPC family: p5a pipe round trip / p5b unix dgram / p5c stream write / p5e-p5f flow discriminators</td><td class="num">p5 family judged by gate bands</td></tr>
-          <tr><td>P6</td><td>Filesystem family: stat / openclose / getdents / read_cached / write_fsync / append / mkdir+rmdir / unlink</td><td class="num">write_fsync 8613.1 / mkdrmdir 269.8 / unlink 67.7 / append 6.402 (stat ±25% row noise)</td></tr>
-          <tr><td>P7</td><td>p7_sleep1ms: nanosleep(1ms) overshoot (med/p99/max, N=1e4)</td><td class="num">15.8 (probe basis)</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <p style="font-size:13px;color:var(--text-3)">Open cost (stated plainly): the COW fault's +58% at SMP-8 (12.07→18.42 µs) is the price of the SMP-8 standard, recorded as an honest gap in the safety-performance ledger; it matters for fork-heavy service graphs (OH/GNOME). The next optimization target is the COW fault path's cross-CPU shootdown, not the break handling itself. The four-configuration comparison (8/4 CPUs × base/fix) is in the baseline file's "Re-bank: SMP-8 standard" section.</p>
-
     
-    <h2 id="flush"><span class="anchor">§3</span>The filesystem flush wall (the fs-flush lane, the mtest06 shape)</h2>
-    <div class="tbl-wrap"><table>
-      <thead><tr><th>Size</th><th>Probe</th><th class="num">Before → after</th><th>Notes</th></tr></thead>
-      <tbody>
-        <tr><td>128 MB</td><td>mmap2time3</td><td class="num">fsync <b>11.546 → 6.181 s (−46%)</b>; msync(MS_SYNC) <b>13.950 → 3.307 s (4.2×)</b>; sync <b>11.300 → 3.308 s (−71%)</b></td><td>the memset segment 0.853→0.136 s; the I/O-phase sum 36.7→12.8 s</td></tr>
-        <tr><td>32 MB</td><td>mmap2time2</td><td class="num">fsync 2.851→1.758; msync 2.368→<b>0.274 (8.6×)</b>; sync 2.982→0.890; <b>the total wall clock 8.314 → 3.019 s (2.8×)</b></td><td>the second sample's total 2.873 s</td></tr>
-      </tbody>
-    </table></div>
+
+    <h2 id="cctx"><span class="anchor">§4</span>The context-switch cost anatomy (cctx segments, a mechanism note)</h2>
     <ul>
-      <li>Source: run-batched flush + coalesced span writeback (04e789690; the A/B base 3c464b9ec); same rig: x86_64 KVM q35 2G smp2, the LTP image, -snapshot; the fix came with the pbench fs-row gate A/B all within band (±20%), mmap2 TIMEOUT→PASS, and fsx -N10000 PASS.</li>
-      <li>The homepage's historical figure "fsync 11.55→3.04" conflated the 128 MB fsync row (→6.181) with the 32 MB total-wall-clock row (→3.019); this table is the corrected per-row basis.</li>
+      <li>The x86_64 switch machinery ~620 ns (schedule 125 + the GRQ lock 102 + pick 96 + the mm switch 202–295 + FPU 34 + FS/GS 54 + GPRs ~22) — the reference kernel's native switch machinery ~910 ns; after the fdget borrow + getppid O(1), the pbench p2_ctxsw pipe ping-pong reads <b>0.090–0.105 µs</b>.</li>
+      <li>The wake-side segments (WK_SEL/WK_ENQ/WK_DISP/IPI_N/IPI_NS) and the GRQ-hold decomposition are on <a href="../architecture/scheduler.html#instruments">scheduler §8</a>; the NOHZ hostile-load A/B (0/10→11/12) on <a href="../architecture/interrupts.html#nohz">interrupts &amp; timers §6</a>.</li>
     </ul>
 
-    <h2 id="nohz"><span class="anchor">§4</span>The NOHZ A/B (scheduling strands under a hostile load)</h2>
-    <ul>
-      <li>4+4 interleaved lmbench lat_syscall,null boots (a 35 s budget, 6 hostile external QEMUs): the main tip passes <b>0/10</b>; the churn fix alone 5/12 (42%); <b>nohz_full=1: 11/12 (92%)</b>; the p1_null median 0.050 vs 0.060 µs (−17%); both census bands hold exactly (TERM 8 / REFUSED 32).</li>
-      <li>Implementation: a function-for-function mirror of the reference tick-sched.c (details on <a href="../architecture/interrupts.html#nohz">interrupts &amp; timers §6</a>).</li>
-    </ul>
-
-    <h2 id="cctx"><span class="anchor">§5</span>The context-switch cost anatomy (cctx segments)</h2>
-    <ul>
-      <li>Per segment: the x86_64 switch machinery ~620 ns (schedule 125 + the GRQ lock 102 + pick 96 + the mm switch 202–295 + FPU 34 + FS/GS 54 + GPRs ~22) — the reference kernel's native switch machinery ~910 ns.</li>
-      <li>After the fdget borrow + getppid O(1): the pbench p2_ctxsw pipe ping-pong <b>0.090–0.105 µs</b> (from the 1.24–2.15 class, −90%+) — the sharpest scheduling-latency reading on file.</li>
-      <li>The wake-side segments (WK_SEL/WK_ENQ/WK_DISP/IPI_N/IPI_NS) and the GRQ-hold decomposition (runqueue accounting / dequeue-enqueue / pick / stats) are on <a href="../architecture/scheduler.html#instruments">scheduler §8</a>.</li>
-    </ul>
-
-    <div class="callout">Canonical: docs/development/perf-gate-baseline.md (anchors and bands), docs/development/perf-report.md (pbench design and history), the fs-flush worktree run/FS-FLUSH-FINDINGS.md.</div>
+    <div class="callout">Canonical: docs/development/perf-gate-baseline.md (anchors and bands), docs/development/perf-report.md (the pbench design). The Linux columns of pbench and the flush wall come from the two-sided battery (run/bench-pair-1117/, pbench-pair); each row carries its newest measured value.</div>
   </article>
 </div>
 </main>

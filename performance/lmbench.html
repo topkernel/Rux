@@ -81,10 +81,11 @@
   </aside>
   <article class="doc-main">
     <h1>lmbench 3.0-a9</h1>
-    <div class="sub">同机 KVM 对照的权威表(12 延迟行 + 8 带宽行)、方法学、perf-2x 战役与口径沿革 · 正本:docs/test/lmbench-report.md</div>
+    <div class="sub">最新状态:同机 KVM 对照权威表(12 延迟行 + 8 带宽行,每行取当前 main 最新实测值) · 正本:docs/test/lmbench-report.md</div>
 
-<h2 id="data"><span class="anchor">§2</span>lmbench 数据(同机 KVM 对照,21 项)</h2>
+<h2 id="data"><span class="anchor">§1</span>lmbench 数据(同机 KVM 对照,21 项)</h2>
     <p style="font-size:13.5px">数据来源:lmbench-report.md「Standing(2026-11-16,内核 main=017bf556b)」—— 唯一权威表,以下即该节数据。方法:两侧同 rig(q35/KVM/-cpu host/smp2/2G,宿主 CCD0 钉核 + performance 治理器 + 保温线程);Rux 启动带 nohz_full=1,每用例独立启动、失败行重试;Linux 列 = OHOS 6.6.101 内核在<b>同一 guest 机位</b>执行同一静态二进制,各 2 rep 取中位。切换/唤醒族对参考窗口敏感,比值只在同会话内有意义。</p>
+    <p style="font-size:13px;color:var(--text-3)">口径:每行取当前 main 的最新实测值(2026-11-16 全量轮;null/read/write 三行为 11-17 单行重测)。Rux 列 = debug/strong 按原轮口径;Linux 列 = 宿主 7.0.0 内核在<b>同一 guest 机位</b>执行同一静态二进制。</p>
     <h3>领先/持平组(14 项)</h3>
     <div class="tbl-wrap">
       <table>
@@ -126,25 +127,7 @@
     <div class="callout"><b>campaign 随役发现并修复的正确性 bug</b>(性能差距掩盖了它们):free 时的 stale-rsp0 UAF(fork 双稳态根因);call_rcu 零宽限期回调触发;唤醒监视器陈旧性判定反转;fdreap 每 tick 10 ms close 停滞;主线 munmap 末批 TLB flush 丢失(5b4a4bc7)。</div>
 
     
-    <h2 id="campaign"><span class="anchor">§3</span>perf-2x 战役(裸系统调用 + fork/exec 2× 目标)</h2>
-    <p>2026-11-16/17 三轮,主攻 lmbench 落后面(裸系统调用带与 fork/exec):</p>
-    <div class="tbl-wrap"><table>
-      <thead><tr><th>轮</th><th>内核</th><th>改动</th><th>实测</th></tr></thead>
-      <tbody>
-        <tr><td>round 2</td><td class="mono">34b339e01</td><td>fdget 无引用计数直借快路径 + getppid O(1) 任务指针</td><td>null <b>0.045 µs(−12%)</b>、write <b>0.082(−6%)</b>;校准稳定性:优化核 <b>14/15</b> 次启动收敛 vs 基线 <b>0/15</b>(getppid 哈希锁本身即抖动源);pbench p2_ctxsw <b>0.090–0.105 µs</b>(自 1.24–2.15 类,−90%+)</td></tr>
-        <tr><td>round 3</td><td class="mono">931623176</td><td>PT_REGS 门控(入口寄存器暂存精简)</td><td>write <b>0.0811 µs</b>(3 次取中位,历史最佳)、null <b>0.0435</b>、read <b>0.101</b></td></tr>
-      </tbody>
-    </table></div>
-    <p>对 2× 目标(Linux 列 ÷2)记分牌:null 0.0435(目标 0.0195)· read 0.101(0.030)· write 0.0811(0.030)· stat 0.34(0.120)· open 0.84(0.197)· fork 37.8(17)· exec 40.6(18.8)—— open 尾部解剖与后续杠杆在册(优化队列页)。</p>
-
-    <h2 id="history"><span class="anchor">§4</span>口径沿革与存档</h2>
-    <ul>
-      <li>上表为 2026-11-16 NOHZ 轮全量电池(12 延迟行 + 8 带宽行);perf-2x 三轮的最新裸系统调用值(null 0.0435/read 0.101/write 0.0811)为单行重测,尚未全量重跑 —— 两组数据分别标注,不混排。</li>
-      <li>历史口径:2026-11-15 gb-opt 29 行表、11-04 公平 KVM 表(含虚拟化税分析:pipe 4.85×/ctx 7.37×)与 r14 表均在 <code>docs/test/lmbench-report.md</code> 存档;失败行重试规则与 lat_fifo/bw_udp 上游缺陷弃用亦记录在案。</li>
-      <li>campaign 随役修复的正确性缺陷(性能差距掩盖下):free 时 stale-rsp0 UAF(fork 双稳态根因)、call_rcu 零宽限期回调、唤醒监视器陈旧性判定反转、fdreap 每 tick 10 ms close 停滞、主线 munmap 末批 TLB flush 丢失(5b4a4bc7)。</li>
-    </ul>
-
-    <h2 id="rerun"><span class="anchor">§5</span>复现</h2>
+    <h2 id="rerun"><span class="anchor">§3</span>复现</h2>
     <pre><code><span class="c"># 完整电池(每用例独立启动 + 重试规则)</span>
 cd userspace/lmbench && ./extract-lmbench.sh && ./build-lmbench.sh && ./build-rootfs.sh work/lmbench-x86.img && ./run-rux.sh
 <span class="c"># 快速通道(10 个头条用例,~3 分钟,标注 INDICATIVE)</span>

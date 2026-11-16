@@ -81,9 +81,9 @@
   </aside>
   <article class="doc-main">
     <h1>Geekbench 5.5.1</h1>
-    <div class="sub">总分演进(best-of-runs)、21 项逐负载对照表、机位与采集方法 · 正本:docs/test/geekbench-report.md</div>
+    <div class="sub">最新状态:总分(同机对照)+ 21 项逐负载对照 · 正本:docs/test/geekbench-report.md</div>
 
-<h2 id="data"><span class="anchor">§3</span>Geekbench 5 数据(5.5.1,9950X,KVM q35 smp4/4G,strong 内核;逐项表 2026-11-04,总分更新至 gb-opt 轮 2026-11-15)</h2>
+<h2 id="data"><span class="anchor">§1</span>数据(总分 + 21 项逐负载;逐项表 = 最近一次完整捕获,当前 main 重捕获进行中)</h2>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th></th><th class="num">Rux</th><th class="num">Linux(4-CPU 钉核)</th><th>结论</th></tr></thead>
@@ -93,7 +93,7 @@
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">机位注明:Linux 侧为宿主裸机 <code>taskset -c 0-3</code> 钉核(与 guest 4 vCPU 拓扑对齐;同机 KVM Linux 对照在补测队列)。总分口径 = best-of-runs(用户规则,已记录):多核历史最佳 7709(gb-opt 轮)、单核历史最佳 2440。单核口径:两次裸机自跑即差 ~15%(2549 vs 2165),±15% 内视为噪声;逐项表取自 2026-11-04 完整捕获(该轮单核总分 2115,quiet 历史最佳 2274,两者同噪声带)。</p>
+    <p style="font-size:13px;color:var(--text-3)">机位注明:Linux 侧为宿主裸机 <code>taskset -c 0-3</code> 钉核(与 guest 4 vCPU 拓扑对齐;同机 KVM Linux 对照在补测队列)。总分口径 = best-of-runs(用户规则,已记录):多核历史最佳 7709(gb-opt 轮)、单核历史最佳 2440。单核口径:两次裸机自跑即差 ~15%(2549 vs 2165),±15% 内视为噪声;逐项表为最近一次完整逐项捕获(当前 main 的逐项重捕获进行中,落地后替换)。</p>
 
     <h3>单核逐项(21 项全)</h3>
     <div class="tbl-wrap">
@@ -159,20 +159,7 @@
     <p style="font-size:13px;color:var(--text-3)">多核逐项的分化说明:11-04 捕获轮总分 7332 vs 7027(104%)由文本压缩(150%)、图像修补(120%)、语音识别(131%)、光线追踪(118%)等调度敏感项拉动;gb-opt 轮后多核 best-of-runs 7709 = 110%;单核 AES-XTS 修复后 105–106%(串口打印税已根因清除);Clang/PDF 渲染等单核余差待隔离复跑。</p>
 
     
-    <h2 id="standings"><span class="anchor">§2</span>总分演进(best-of-runs 口径)</h2>
-    <div class="tbl-wrap"><table>
-      <thead><tr><th>日期</th><th>内核</th><th class="num">单核</th><th class="num">多核</th><th>备注</th></tr></thead>
-      <tbody>
-        <tr><td>2026-11-01</td><td class="mono">—</td><td class="num">1941</td><td class="num">7139</td><td>首轮完整捕获</td></tr>
-        <tr><td>2026-11-02</td><td class="mono">—</td><td class="num">2274(quiet 最佳 2297)</td><td class="num">7114(7458)</td><td>AES-XTS 根因修复轮(串口打印税)</td></tr>
-        <tr><td>2026-11-04</td><td class="mono">8d81c5da</td><td class="num">2115</td><td class="num">7332</td><td>完整逐项捕获轮(下方两表)</td></tr>
-        <tr><td>2026-11-15</td><td class="mono">2649af4e3</td><td class="num">2365→2390→2423→<b>2440</b></td><td class="num">7420→7716→7644→<b>7709</b></td><td>gb-opt 四连跑;vs 4-CPU 参考 = <b>113% / 110%</b></td></tr>
-        <tr><td>2026-11-16</td><td class="mono">017bf556b</td><td class="num"><b>2440</b></td><td class="num"><b>7709</b></td><td>NOHZ 合并后对抗背景下重捕获 —— 与 11-15 逐位一致(确定性复现)</td></tr>
-      </tbody>
-    </table></div>
-    <p>参考锚:4-CPU 钉核原生 SC 2165 / MC 7027(宿主 32 线程全量 2549/20402 仅作天花板参照);单核两次裸机自跑即差 ~15%(2549 vs 2165)—— 单核 ±15% 内记为噪声带,best-of-runs 为既定口径。Geekbench 6.4.0 有意排除(无 Pro 许可证时 rc=255 不出分)。</p>
-
-    <h2 id="rig"><span class="anchor">§3</span>机位与采集方法</h2>
+    <h2 id="rig"><span class="anchor">§2</span>机位与采集方法</h2>
     <ul>
       <li><b>机位</b>:9950X 宿主,q35 KVM <code>-cpu host -smp 4 -m 4G</code>,strong 构建(build-release-opt);一次启动跑完整轮,外层预算 2700 s、in-guest 900 s。</li>
       <li><b>分数采集</b>:本地 TLS 捕获服务(自签 CA 经 debugfs 注入 guest /etc/hosts,将 browser.geekbench.com 钉至 10.0.2.2;:443 捕获服务接 HTTPS 上传 POST,parse-capture.py 解析)—— 分数不经外网,过程可重放。</li>
@@ -180,7 +167,7 @@
       <li><b>口径注</b>:上方逐项表为 11-04 完整捕获(该轮 SC 2115);单核 AES-XTS 取修复后复测值(8047/8140),低分历史为串口打印税伪影(AES-NI 经探针证实无损)。11-15/11-16 总分为四连跑 best;逐项重捕获在补测队列。</li>
     </ul>
 
-    <h2 id="rerun"><span class="anchor">§4</span>复现</h2>
+    <h2 id="rerun"><span class="anchor">§3</span>复现</h2>
     <pre><code><span class="c"># 完整流水线(镜像 reflink + CA 注入 + 捕获服务 + 解析)</span>
 cd /home/william/rux-agents/gb-opt && ./run/bench-pipeline.sh</code></pre>
     <div class="callout">镜像永久仓:/home/william/rux-images/testimages/geekbench-x86.img。正本:docs/test/geekbench-report.md(复现步骤逐条在案)。</div>

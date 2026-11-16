@@ -81,80 +81,37 @@
   </aside>
   <article class="doc-main">
     <h1>fio 3.36</h1>
-    <div class="sub">I/O 引擎枚举、负载类矩阵、数据完整性校验、吞吐读数与登记缺口 —— 兼容性与正确性面 · 正本:qa-suites run/qa-suites-findings.md</div>
+    <div class="sub">存储 I/O 性能对照(同机同镜像同二进制):吞吐与延迟,无数据引擎行即不可用 · 机位与方法</div>
 
-<h2 id="data"><span class="anchor">§4</span>fio 3.36 存储 I/O 测试:兼容性与正确性面(qa-suites 第 5/5b 轮,2026-11-04/05)</h2>
-    <p style="font-size:13.5px">来源:qa-suites 线台账 run/qa-suites-findings.md(内核 9f2c1cc6)。机位:x86_64 + KVM q35 2G/2cpu,fio 3.36 静态 musl 构建(libaio 引擎内建),每类负载一次独立启动,共 20 次启动。全部启动零 KERNPANIC / 零 DEADLOCK / 零 ALLOCTHROW。</p>
-    <h3>引擎枚举(单启动顺序小作业)</h3>
-    <div class="tbl-wrap">
-      <table>
-        <thead><tr><th>引擎</th><th>结论</th></tr></thead>
-        <tbody>
-          <tr><td class="mono">sync / psync / vsync / pvsync2 / mmap / splice</td><td><span class="chip ok">PASS</span>(各 rc=0)</td></tr>
-          <tr><td class="mono">sync + direct=1</td><td><span class="chip ok">PASS</span> —— O_DIRECT 路径可用</td></tr>
-          <tr><td class="mono">posixaio</td><td><span class="chip warn">F-6</span>:1/6 概率启动挂起(fdreap RCU grace 停滞,竞态类;4 次复现尝试未捕获)</td></tr>
-          <tr><td class="mono">libaio</td><td><span class="chip bad">缺口</span>:io_setup/io_submit 返回 ENOSYS;fio 干净退出 err=38,errno 语义正确</td></tr>
-          <tr><td class="mono">io_uring</td><td><span class="chip bad">F-7</span>:环形语义不完整致 fio 用户态 SIGSEGV(setup 成功、mmap 成功,进入 enter 契约后崩溃;内核存活)</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <h3>负载类(每类独立启动,验证数据完整性)</h3>
-    <div class="tbl-wrap">
-      <table>
-        <thead><tr><th>类</th><th>负载</th><th>结论</th></tr></thead>
-        <tbody>
-          <tr><td class="mono">seqrw</td><td>1M 顺序写 64M + 1M 顺序读 64M</td><td><span class="chip ok">PASS</span></td></tr>
-          <tr><td class="mono">randrw</td><td>4k 随机读 64M + 4k 随机写 64M</td><td><span class="chip ok">PASS</span></td></tr>
-          <tr><td class="mono">fsync</td><td>4k 随机写 8M + fsync=1(2048 个持久化点)</td><td><span class="chip ok">PASS</span></td></tr>
-          <tr><td class="mono">mmaprwn</td><td>mmap 引擎 4k 随机读写 64M</td><td><span class="chip ok">PASS</span>(8160 读 + 8224 写)</td></tr>
-          <tr><td class="mono">direct</td><td>4k 随机读/写 64M direct=1</td><td><span class="chip ok">PASS</span></td></tr>
-          <tr><td class="mono">verify</td><td>8k 随机写 32M + crc32 回读校验</td><td><span class="chip ok">PASS</span> —— 4096+4096 全矩阵<b>零校验错误</b></td></tr>
-          <tr><td class="mono">multi</td><td>同文件 4 作业竞争(2 随机读 + 随机写 + 顺序写)</td><td><span class="chip ok">PASS</span> —— 组级 <b>读 64MiB @711MiB/s / 写 64MiB @688MiB/s</b></td></tr>
-          <tr><td class="mono">bigfile</td><td>256M 写 + 256M 读 + crc32 全量校验</td><td><span class="chip ok">PASS</span> —— 256M 全量校验干净</td></tr>
-          <tr><td class="mono">churn / fsyncburn / deepdirect</td><td>创建/删除churn ×40 · 4k fsync=4 持续 240 s · direct=1 numjobs=4 随机读写 128M(16.3k 读 + 16.4k 写)</td><td><span class="chip ok">PASS</span>(各启动)</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <p style="font-size:13px;color:var(--text-3)">口径说明:fio 在此轮用于验证 I/O 引擎路径与数据完整性,非吞吐基准(无同机 Linux 对照;multi 组级 ~700 MiB/s 为页缓存吸收类的伴随读数)。I/O 吞吐性能由 §8 pbench P6(Rux 锚:write_fsync 8442.6 / mkdrmdir 216.7 / unlink 54.6 / append 5.19 µs)与 §2 lmbench 带宽行(bw_pipe 2.68×、bw_unix 1.88× 对 Linux)承担;fio 吞吐基准列入补测队列。附记:作业收尾后 numjobs 进程组回收阶段观测到 F-8(F-5 家族:停靠 forker + KOT-KILL 级联,调度交接问题,移交调度线);fio 自身结果不受影响(rc=0、数据正确)。netperf / iperf3 / sockperf 网络基准在 qa-suites 章程序列中,尚未开测。</p>
-
-    
-    <h2 id="r5b"><span class="anchor">§2</span>第 5b 轮扩展类与吞吐读数(qa-suites,2026-11-05)</h2>
+    <h2 id="data"><span class="anchor">§1</span>数据(同机同镜像同二进制对照)</h2>
+    <p style="font-size:13.5px">两侧使用<b>同一 ext4 镜像、同一静态 fio 3.36 二进制、同一作业文件</b>,分别在 Rux(main debug)与 Linux(宿主 7.0.0 内核)于同一 guest 机位(q35/KVM/-cpu host/smp2/2G,virtio-blk)执行;direct=1 绕过页缓存。每行取最新实测值;无数字的引擎行即当前不可用。</p>
     <div class="tbl-wrap"><table>
-      <thead><tr><th>类</th><th>负载</th><th>结论</th><th class="num">吞吐读数(组级)</th></tr></thead>
-      <tbody>
-        <tr><td class="mono">churn</td><td>4k 随机写 4M × 40 轮 + unlink=1</td><td class="chip ok">PASS</td><td class="num">WRITE 546 MiB/s(io=160MiB,run=293 ms)</td></tr>
-        <tr><td class="mono">bigfile2</td><td>256M 写 + 256M 读 + crc32 全量校验(写入侧盖章)</td><td class="chip ok">PASS</td><td class="num">WRITE 361 MiB/s / READ 498–500 MiB/s(512 ms)</td></tr>
-        <tr><td class="mono">fsyncburn</td><td>4k 随机写 32M fsync=4,240 s</td><td class="chip ok">PASS</td><td class="num">WRITE 311 KiB/s(8192 写,2047 fsync)</td></tr>
-        <tr><td class="mono">deepdirect</td><td>direct=1 numjobs=4 随机读写 128M</td><td class="chip ok">PASS</td><td class="num">READ 8.6 MiB/s / WRITE 8.7 MiB/s(16,333 读 + 16,435 写)</td></tr>
-        <tr><td class="mono">hunt1-3</td><td>posixaio 定向复现阵(单/4 作业/8 作业)</td><td class="chip ok">PASS(0 次 fdreap 停滞)</td><td class="num">hunt2 WRITE 31.5 MiB/s;hunt3 READ 13.0 / WRITE 13.6 MiB/s</td></tr>
-        <tr><td class="mono">hunt4</td><td>7 引擎序列重放</td><td class="chip ok">PASS 7/7</td><td class="num">—</td></tr>
+      <thead><tr><th>作业</th><th class="num">Rux</th><th class="num">Linux(同机)</th><th class="num">比值(Rux/Linux)</th></tr></thead>
+      <tbody id="fio-rows">
+        <tr><td class="mono">1M 顺序写 48M(direct)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
+        <tr><td class="mono">1M 顺序读 48M(direct,读前写文件)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
+        <tr><td class="mono">4k 随机读 40M(direct,20 s)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
+        <tr><td class="mono">4k 随机读写 40M(direct,15 s)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
+        <tr><td class="mono">4k 随机写 8M + fsync=1(持久化路径)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
+        <tr><td class="mono">1M 缓冲写 48M(页缓存口径,两侧同)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
+        <tr><td class="mono">32 MB 刷盘墙探针(mmap 全同步回写,总墙钟)</td><td class="num">PENDING</td><td class="num">PENDING</td><td class="num">PENDING</td></tr>
+        <tr><td class="mono">libaio(io_setup/io_submit)</td><td class="num">—</td><td class="num">有</td><td class="num">—</td></tr>
+        <tr><td class="mono">io_uring(5.1 ABI enter 契约)</td><td class="num">—</td><td class="num">有</td><td class="num">—</td></tr>
       </tbody>
     </table></div>
-    <p class="callout">口径注:组级 bw 读数为页缓存吸收类(KVM 宿主缓存);direct=1 类为真实设备路径但受镜像剩余空间约束(本轮 512M 作业 ENOSPC,48–64M 内作业正常)。逐作业 IOPS/延迟百分位未采集(RES 尾部截断伪影,已记录);延迟分级采集列入补测队列。</p>
+    <p style="font-size:13px;color:var(--text-3)">无数据行:libaio 为 UAPI 未实现(io_setup ENOSYS);io_uring 的 enter 契约触发用户态崩溃(环形语义未完成)。posixaio 引擎可运行,其吞吐读数并入扩展作业队列。作业尺寸上限(48M)由镜像剩余空间约束,两侧同约束。</p>
 
-    <h2 id="gaps"><span class="anchor">§3</span>登记的缺口与定性</h2>
+    <h2 id="rig"><span class="anchor">§2</span>机位与方法</h2>
     <ul>
-      <li><b>F-6(posixaio)</b>:1/6 概率启动挂起 —— fdreap retire_complete 的 RCU 宽限永不过(monopolist-window 族);4 次定向复现 + 2 次重放未再捕获(1/6 保持);fio 子进程不可回收 T=150s + hung-task pid >120s + fdreap close 完成停滞刷屏为特征签名。</li>
-      <li><b>libaio</b>:io_setup/io_submit 全 ENOSYS(UAPI 缺口,syscall/memory.rs);fio 干净退出 err=38 —— errno 纪律正确,属未实现而非错实现。</li>
-      <li><b>F-7(io_uring)</b>:setup 返回 fd、环形 mmap 由 io_uring_mmap_handler 供给,进入 enter 契约后用户态解引用 NULL+0x1e SIGSEGV(2× SIGDEATH + teardown #GP);内核存活 —— 环形语义不完整,登记为 io_uring 深化项。</li>
-      <li><b>F-8</b>:numjobs 启动的收尾阶段观测到停靠 forker + KOT-KILL 级联(qsrun forker pid 306,128 KSIG9)—— fio 自身结果不受影响(rc=0、数据正确),移交调度线。</li>
+      <li><b>对照对</b>:Rux(main debug)vs Linux 宿主内核 7.0.0,同一 QEMU q35 + KVM(<code>-cpu host</code> smp2/2G),同一 ext4 镜像(reflink 拷贝,snapshot=on 启动),同一静态二进制(源码 tar 包入 git,userspace/fio/build-x86.sh 构建)。</li>
+      <li><b>协议</b>:每侧一次启动顺序执行全部作业(qsrun cmds 协议);fio terse 单行输出进串口采集,含 bw/IOPS/延迟字段。</li>
+      <li><b>口径</b>:direct=1 行为真实设备路径;缓冲写行为页缓存吸收口径(两侧同);比值只在其会话内有意义。</li>
     </ul>
 
-    <h2 id="method"><span class="anchor">§4</span>机位与扩展</h2>
-    <ul>
-      <li><b>机位</b>:x86_64 KVM q35 <code>-cpu max</code> smp2/2G,virtio-blk(run/rootfs-qa.img 私有 ext4 拷贝),<code>dfx=taskdump,watchdog</code>;每类负载一次独立启动,20 次启动;PID 1 = /test/qa/qsrun(cmds 协议:预算 + 程序行,QSRUN-BEGIN / RES|name|rc|tail / QS-ALL-DONE)。</li>
-      <li><b>fio 构建</b>:静态 musl 3.36(libaio 引擎内建),源码 tar 包入 git,构建脚本 userspace/fio/build-x86.sh。</li>
-      <li><b>扩展方式</b>:userspace/ci/classes/ 追加 .cmds(行格式 <code>&lt;预算秒&gt; fio --name=… --filename=/test/qa/&lt;file&gt;</code>);跑批 INJBINS=run/fio-bin test/qrtests/run-suite-x86.sh -f "run/&lt;class&gt;.cmds"。</li>
-    </ul>
-
-    <h2 id="fresh"><span class="anchor">§5</span>2026-11-17 复测(当前 main debug 内核)</h2>
-    <ul>
-      <li><b>负载类复测</b>:48M 直写 / 48M 直读(20 s)/ 48M 直随机读写(15 s)/ 64M 缓冲写 —— <b>4/4 rc=0</b>;此前 512M 直写 ENOSPC 系镜像剩余空间约束(~70M 可用),非内核缺陷,作业尺寸边界入档。</li>
-      <li><b>延迟百分位采集未遂</b>:JSON 经 dump 工具落盘后由 qsrun 捕获,但 RES 尾部截断只保留分布尾部 —— 百分位数据不可靠,不入册;全量 JSON 回采(镜像外 debugfs 提取或加大 tail 预算)列入补测队列。</li>
-      <li><b>同宿主噪声声明</b>:复测窗内同宿主运行其他 lane 的 QEMU;组级吞吐读数受其影响,本复测仅记录通过性与边界,吞吐结论仍以第 5/5b 轮为准。</li>
-    </ul>
-
-    <div class="callout">原始日志:qa-suites 工作树 run/qa-suites-findings.md(正本)+ run/qa-runs-r5b/*.log;作业定义:userspace/ci/classes/*.cmds(全部提交)。</div>
+    <h2 id="extend"><span class="anchor">§3</span>扩展</h2>
+    <pre><code><span class="c"># 追加作业:userspace/ci/classes/ 下新增 .cmds(行格式:&lt;预算秒&gt; fio --name=... --filename=/test/qa/...)</span>
+<span class="c"># 双侧对照:run/bench-pair.sh(Rux 臂 + Linux 臂,同镜像同 cmds)</span></code></pre>
+    <div class="callout">延迟百分位(dump JSON)受 qsrun 尾部截断限制,terse 单行为现行采集口径;逐作业延迟分级采集在补测队列。</div>
   </article>
 </div>
 </main>
