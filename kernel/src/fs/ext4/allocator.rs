@@ -386,15 +386,21 @@ impl<'a> BlockAllocator<'a> {
         }
     }
 
-    /// JOURNAL DISCIPLINE (review 5.5: 两套 journal 纪律): bitmap blocks are
-    /// written here BYPASSING the jbd2 handle deliberately — the ext4
-    /// journaling model in this kernel is write-through with revoke records
-    /// emitted by the deletion paths (namei); allocator bitmaps are already
-    /// covered by EXT4_BIG_LOCK for mutual exclusion, and replaying a stale
-    /// bitmap from the log is prevented by the revoke record taken when the
-    /// freed blocks' owning metadata is journaled. Do NOT silently add
-    /// jbd2_journal_dirty_metadata here without extending commit space
-    /// accounting (see commit.rs).
+    /// JOURNAL DISCIPLINE (family b fix, ext4-corrupt lane): bitmap
+    /// blocks are now REGISTERED with the current jbd2 handle (when one
+    /// is active) so the op's commit syncs them together with the inode
+    /// table / extent-tree buffers of the SAME allocation. The old
+    /// deliberate bypass left the bitmap dirty-in-cache until an
+    /// out-of-band drain (eviction, global sync): the tree root
+    /// persisted at the op's own commit while the bitmap lingered — a
+    /// hard kill in between produced "block bitmap differences" (bits
+    /// set, tree never claimed — the c8/cook leak family, 23 blocks per
+    /// kill) and the reverse split produced double-allocations.
+    /// Registration costs no handle credits (dirty_metadata charges
+    /// nothing; the commit fast path sizes descriptors from the live
+    /// buffer count). Mutual exclusion stays with EXT4_BIG_LOCK; stale
+    /// replay is still suppressed by the deletion paths' revoke records.
+    /// Outside a handle the inline sync path is unchanged.
     fn write_block_bitmap(&self, bitmap_block: u64, bitmap: &[u8]) -> Result<(), i32> {
         // SAFETY: bh is from bio::bread; b_data is block_size bytes; bitmap fits within.
         unsafe {
@@ -402,6 +408,9 @@ impl<'a> BlockAllocator<'a> {
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
             (*bh).b_data.copy_from_slice(bitmap);
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+            if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
+                let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
+            }
             let sync_res = bio::sync_dirty_buffer(bh);
             bio::brelse(bh);
             sync_res?;
@@ -420,8 +429,9 @@ impl<'a> BlockAllocator<'a> {
         }
     }
 
-    /// JOURNAL DISCIPLINE: same deliberate jbd2 bypass as write_block_bitmap
-    /// (group descriptors are protected by EXT4_BIG_LOCK + revoke-on-free).
+    /// JOURNAL DISCIPLINE: registered with the current handle like
+    /// write_block_bitmap (family b fix — see its comment); without a
+    /// handle the deferred-dirty behavior is unchanged.
     fn update_group_desc_free_blocks(&self, group_idx: u64, free_blocks: u16) -> Result<(), i32> {
         let group_desc_size = self.fs.desc_size as usize;
         let group_desc_start_block = if self.fs.block_size == 1024 { 2 } else { 1 };
@@ -437,6 +447,9 @@ impl<'a> BlockAllocator<'a> {
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
             let free_blocks_ptr = (*bh).b_data.as_mut_ptr().add(desc_offset + BG_FREE_BLOCKS_OFF) as *mut u16;
             free_blocks_ptr.write_volatile(free_blocks);
+            if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
+                let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
+            }
             // metadata_csum write path: the read path verifies each group
             // descriptor's bg_checksum at MOUNT (mod.rs — a stale checksum
             // refuses the next mount), so every on-disk counter change must
@@ -485,6 +498,9 @@ impl<'a> BlockAllocator<'a> {
             let current = free_blocks_ptr.read_volatile();
             let new_count = (current as i64 + delta as i64) as u32;
             free_blocks_ptr.write_volatile(new_count);
+            if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
+                let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
+            }
             // metadata_csum write path: the read path verifies s_checksum
             // at mount — re-seal it over the full 1024-byte superblock
             // after any counter mutation (see also the free_inodes twin).
@@ -578,6 +594,9 @@ pub(crate) fn set_bitmap_csum_in_gd(
         }
         super::csum::group_desc_csum_set(fs.csum_seed, group_idx as u32, d);
         (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+        if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
+            let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
+        }
         bio::brelse(bh);
     }
     Ok(())
@@ -906,7 +925,8 @@ impl<'a> InodeAllocator<'a> {
         }
     }
 
-    /// Write back inode bitmap
+    /// Write back inode bitmap. JOURNAL DISCIPLINE: registered with the
+    /// current handle (family b fix — see write_block_bitmap).
     fn write_inode_bitmap(&self, bitmap_block: u64, bitmap: &[u8]) -> Result<(), i32> {
         // SAFETY: bh from bio::bread; b_data is block_size bytes; bitmap fits within.
         unsafe {
@@ -917,6 +937,9 @@ impl<'a> InodeAllocator<'a> {
             data.copy_from_slice(bitmap);
 
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+            if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
+                let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
+            }
             let sync_res = bio::sync_dirty_buffer(bh);
 
             bio::brelse(bh);
@@ -976,6 +999,9 @@ impl<'a> InodeAllocator<'a> {
             // Update free inode count (bg_free_inodes_count_lo offset in Ext4GroupDesc)
             let free_inodes_ptr = data.as_mut_ptr().add(desc_offset + 14) as *mut u16;
             free_inodes_ptr.write_volatile(free_inodes);
+            if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
+                let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
+            }
 
             // metadata_csum write path: re-seal this descriptor slot after
             // the counter change (see update_group_desc_free_blocks).
@@ -1060,7 +1086,19 @@ impl<'a> InodeAllocator<'a> {
         }
 
         // On-disk descriptor: bg_itable_unused_lo at slot offset 0x1C,
-        // bg_itable_unused_hi at 0x3A (desc_size >= 64), csum re-sealed.
+        // bg_itable_unused_hi at 0x32 (desc_size >= 64), csum re-sealed.
+        // Offset fix (ext4-corrupt lane, family a): the reference layout
+        // (linux-6.6 fs/ext4/ext4.h struct ext4_group_desc) puts the
+        // 64-bit tail's u32 hi pointers at 0x20/0x24/0x28, the u16 hi
+        // counters at 0x2C/0x2E/0x30/0x32 — so bg_itable_unused_hi is
+        // 0x32 and 0x3A is bg_inode_bitmap_csum_hi. This write used to
+        // zero 0x3A "as the hi half of unused", erasing the just-sealed
+        // inode-bitmap checksum hi word on EVERY inode alloc/free (the
+        // mark_inode_used/free_inode seal runs first, then this refresh
+        // undid half of it). e2fsck compares the full 32-bit csum with
+        // desc_size >= 64 and failed every cooked image with "group N
+        // inode bitmap does not match checksum" (c8 evidence: stored
+        // hi=0 vs calc hi=0x0649, lo matched — the zeroing signature).
         let group_desc_size = self.fs.desc_size as usize;
         let group_desc_start_block = if self.fs.block_size == 1024 { 2 } else { 1 };
         let desc_per_block = self.fs.block_size as u64 / group_desc_size as u64;
@@ -1076,8 +1114,8 @@ impl<'a> InodeAllocator<'a> {
                 (data.as_mut_ptr().add(desc_offset + 0x1C) as *mut u16)
                     .write_volatile(unused);
             }
-            if group_desc_size >= 64 && desc_offset + 0x3C <= data.len() {
-                (data.as_mut_ptr().add(desc_offset + 0x3A) as *mut u16)
+            if group_desc_size >= 64 && desc_offset + 0x34 <= data.len() {
+                (data.as_mut_ptr().add(desc_offset + 0x32) as *mut u16)
                     .write_volatile(0);
             }
             if self.fs.metadata_csum {
@@ -1091,6 +1129,9 @@ impl<'a> InodeAllocator<'a> {
                 }
             }
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+            if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
+                let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
+            }
             bio::brelse(bh);
         }
         Ok(())
@@ -1116,6 +1157,9 @@ impl<'a> InodeAllocator<'a> {
             let current = free_inodes_ptr.read_volatile();
             let new = (current as i32 + delta) as u32;
             free_inodes_ptr.write_volatile(new);
+            if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
+                let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
+            }
 
             // metadata_csum write path: re-seal s_checksum after the
             // counter change (see update_superblock_free_blocks).
