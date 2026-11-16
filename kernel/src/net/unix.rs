@@ -641,7 +641,7 @@ fn hilogtap_on() -> bool {
 /// protocol's full path (client send → queue → server read → reply)
 /// without the hilogtap CPU tax.
 fn pctlmon_on() -> bool {
-    crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::PctlMon)
+    crate::trace::EVENT_PCTLMON.armed()
 }
 
 // ============================================================================
@@ -1714,7 +1714,7 @@ pub fn unix_connect(
             // park never registered on this socket (poll_wait routing
             // bug); entries>0 with woken>0 but awakened==0 is the VW
             // sticky-skip lost wake (entry marked, task never scheduled).
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SockSnap) {
+            if crate::trace::EVENT_SOCKSNAP.armed() {
                 let name = server.bound_name.lock().clone();
                 if name.as_deref().map(|n| n.ends_with("Spawn")).unwrap_or(false) {
                     let (tot, won) = server.wait_queue.vw_queue_census();
@@ -2087,7 +2087,7 @@ pub fn unix_send(
         // for. Replies from appspawn ride the same socket in the other
         // direction (target = client socket, no Spawn bound name) and stay
         // silent — only requests print.
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SockSnap)
+        if crate::trace::EVENT_SOCKSNAP.armed()
             && !data.is_empty()
         {
             // leg-34: the Spawn classification is cached in tap_class at
@@ -3788,7 +3788,7 @@ pub fn unix_poll_unwait(file: &File, task: *mut crate::process::task::Task) {
 /// wedged server's listener is still registered anywhere. Purely
 /// diagnostic; self-gated, OFF unless dfx=socksnap is on the cmdline.
 pub fn unix_listener_snapshot() {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SockSnap) {
+    if !crate::trace::EVENT_SOCKSNAP.armed() {
         return;
     }
     let table = UNIX_TABLE.lock();
@@ -4222,7 +4222,7 @@ mod tests {
 /// Deduped on (tid, sys, fd, segs, charge): a queue that GROWS while
 /// its reader sleeps reprints — that line is the smoking gun.
 pub fn unix_park_audit() {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SleepSnap) {
+    if !crate::trace::EVENT_SLEEPSNAP.armed() {
         return;
     }
     use core::fmt::Write as _;

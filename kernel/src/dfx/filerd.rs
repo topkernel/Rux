@@ -36,11 +36,10 @@
 #![forbid(unsafe_code)]
 
 use core::sync::atomic::Ordering::Relaxed;
-use core::sync::atomic::{AtomicBool, AtomicU64};
+use core::sync::atomic::AtomicU64;
 
 /// Fast-path gate (one relaxed load). Published from the dfx cmdline
 /// switch by `set_enabled`; read on every instrumented read call.
-static ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Counter set. fetch_add on distinct cache lines; Relaxed is enough —
 /// the probe is diagnostic, not a sequencer.
@@ -64,15 +63,10 @@ filerd_counters! {
     MISS_N => "read calls that took the batch-fill (cache miss) path",
 }
 
-/// Enable/disable at runtime (dfx cmdline switch, sysrq hook, tests).
-pub fn set_enabled(on: bool) {
-    ENABLED.store(on, Relaxed);
-}
-
 /// Is the probe armed? One relaxed load on each instrumented call.
 #[inline]
 pub fn on() -> bool {
-    ENABLED.load(Relaxed)
+    crate::trace::EVENT_FILERD.armed()
 }
 
 /// Raw cycle timestamp (RDTSC on x86_64; arch counter elsewhere).

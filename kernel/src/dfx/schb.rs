@@ -40,7 +40,6 @@ use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::dfx::backtrace::ConsoleWriter;
-use crate::dfx::switches::{self, DfxSwitch};
 
 extern crate alloc;
 
@@ -105,7 +104,7 @@ static PROC_SEQ: AtomicU64 = AtomicU64::new(0);
 /// Record a binder-proc creation (called from `binder_open`). No-op
 /// unless `dfx=schb`. Bounded cost: one switch load + one spinlock store.
 pub fn note_proc_open(pid: u32) {
-    if !switches::enabled(DfxSwitch::Schb) {
+    if !crate::trace::EVENT_SCHB.armed() {
         return;
     }
     let seq = PROC_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
@@ -138,7 +137,7 @@ static PACE_SLOW: AtomicU64 = AtomicU64::new(0);
 /// captured at handle_cow_fault entry (callers pass it so the exit-side
 /// cost stays one read + adds). No-op unless `dfx=schb`.
 pub fn note_cow(j0: u64) {
-    if !switches::enabled(DfxSwitch::Schb) {
+    if !crate::trace::EVENT_SCHB.armed() {
         return;
     }
     PACE_COW.fetch_add(1, Ordering::Relaxed);
@@ -148,7 +147,7 @@ pub fn note_cow(j0: u64) {
 
 /// Record one direct-reclaim round (try_to_free_pages), same shape.
 pub fn note_drct(j0: u64) {
-    if !switches::enabled(DfxSwitch::Schb) {
+    if !crate::trace::EVENT_SCHB.armed() {
         return;
     }
     PACE_DRCT.fetch_add(1, Ordering::Relaxed);
@@ -159,7 +158,7 @@ pub fn note_drct(j0: u64) {
 
 /// Record one page-alloc slowpath entry (zone fastpath failed).
 pub fn note_slow() {
-    if !switches::enabled(DfxSwitch::Schb) {
+    if !crate::trace::EVENT_SCHB.armed() {
         return;
     }
     PACE_SLOW.fetch_add(1, Ordering::Relaxed);
@@ -258,7 +257,7 @@ pub fn oom_anat_dump() {
 /// the same late-boot slot as khungtaskd (secondaries online, timer
 /// wakeups routable).
 pub fn init() {
-    if !switches::enabled(DfxSwitch::Schb) {
+    if !crate::trace::EVENT_SCHB.armed() {
         return;
     }
     // Leg-17: `censusat=<secs>` — see CENSUS_AT_SECS above. Parsed here
@@ -426,6 +425,9 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
                 t_secs, max_pid, flow, comm_str(&young_comm), n_tasks, n_run, n_mark, n_s, n_d,
                 bprocs, bwait, bwait15, cow, cowj, drct, drctj, drctmax, slow, zfree, heapk
             );
+            // Ring row per beat (dfx-migrate round 5): the greppable
+            // heartbeat outside the serial stream.
+            crate::trace::trace_schb(0, max_pid, flow as u64, bwait15 as u64);
         }
 
         // Leg-16 anatomy line: decomposes heapK at the floor. procs =
@@ -525,6 +527,7 @@ fn wedge_census(t_secs: u64, pidmax: u32, plateau_secs: u64) {
             "SC-WEDGE t={}s pidmax={} plateau={}s census begin",
             t_secs, pidmax, plateau_secs
         );
+        crate::trace::trace_schb(1, pidmax, plateau_secs, 0);
     }
 
     // (1) Every binder read-wait thread regardless of age. stall_report

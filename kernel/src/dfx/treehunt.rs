@@ -41,7 +41,7 @@ static WINDOW_START: AtomicU64 = AtomicU64::new(0);
 static SEEN: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
 
 pub fn tick() {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TreeHunt) {
+    if !crate::trace::EVENT_TREEHUNT.armed() {
         return;
     }
     // Rate window: 64 lines per 60 s.
@@ -207,6 +207,7 @@ fn hit(pid: u32, kind: u32, ptr: usize, aux: u32) {
     if LINES.fetch_add(1, Ordering::Relaxed) >= 64 {
         return;
     }
+    crate::trace::trace_treehunt(kind, pid, ptr as u64, aux as u64);
     use core::fmt::Write;
     let mut w = crate::dfx::backtrace::ConsoleWriter::new();
     let name = match kind {

@@ -243,7 +243,7 @@ pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) ->
     // at publish entry means the R49 heal (or a scribble) reset the
     // ownership word inside the switch-out window — name it.
     if !prev.is_null()
-        && crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+        && crate::trace::EVENT_SCRIBBLE.armed()
         && !unsafe { (*prev).on_cpu() }
     {
         crate::dfx::scribble::switch_window_heal(prev as u64);
@@ -259,7 +259,7 @@ pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) ->
         // its whole prev-side bookkeeping through garbage (the
         // self-propagating half of the x86-scribble3 cascade). Report and
         // keep the previous current instead.
-        if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+        if crate::trace::EVENT_SCRIBBLE.armed()
             && !crate::dfx::scribble::task_plausible(next)
         {
             crate::dfx::scribble::bad_switch_arg(2, next as u64, prev as u64);
@@ -283,7 +283,7 @@ pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) ->
                 // protocol breach. Report through the scribble hunter
                 // when armed, then abort — the asm repairs nothing of
                 // next and returns with prev still running.
-                if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+                if crate::trace::EVENT_SCRIBBLE.armed() {
                     crate::dfx::scribble::double_run(
                         unsafe { (*next).pid() } as u64,
                         cpu as u64,

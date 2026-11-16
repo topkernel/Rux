@@ -3577,7 +3577,7 @@ unsafe fn send_signal_locked_info(
     // opt-in via dfx=sfddbg (every child exit reaches here on ordinary
     // boots too).
     if task.pid() == 1
-        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SfdDbg)
+        && crate::trace::EVENT_SFDDBG.armed()
     {
         static SFDDBG_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);

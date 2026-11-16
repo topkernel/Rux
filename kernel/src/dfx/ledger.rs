@@ -478,7 +478,7 @@ static LAST_SERIES: core::sync::atomic::AtomicU64 =
 const SERIES_PERIOD: u64 = 30 * 100; // 30 s at 100 Hz
 
 pub fn series_tick() {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Ledger) {
+    if !crate::trace::EVENT_LEDGER.armed() {
         return;
     }
     let current = crate::drivers::timer::get_jiffies();
@@ -486,6 +486,7 @@ pub fn series_tick() {
         return;
     }
     LAST_SERIES.store(current, Ordering::Relaxed);
+    crate::trace::trace_ledger(0, 0, current, 0);
     compact_line();
     census_line();
 }

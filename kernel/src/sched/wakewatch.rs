@@ -135,7 +135,7 @@ pub fn note_wake(task: *mut crate::process::Task) {
         .store(super::fair::ww_pick_walks(), Ordering::Release);
     // s16: wake-time tie-mass, only on census boots (O(nr) timeline
     // walk; note_wake is hot).
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WwCensus) {
+    if crate::trace::EVENT_WWCENSUS.armed() {
         let vr = unsafe { (*task).sched_entity().get_vruntime() };
         slot.wtie.store(
             crate::sched::sched::ww_cfs_tie_mass_vr(vr),
@@ -269,8 +269,7 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
             // this CPU is actually executing (tp=pid/pc), so a strand
             // incumbent with pc!=0 is attributed to the task that
             // really holds the CPU. One line per report, dfx-gated.
-            if crate::dfx::leakorigin::ENABLED
-                .load(core::sync::atomic::Ordering::Relaxed)
+            if crate::trace::EVENT_LEAKHUNT.armed()
             {
                 let tp = crate::arch::cpu::get_thread_id_of(c)
                     as *mut crate::process::Task;
@@ -388,7 +387,7 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
 pub fn heartbeat() {
     // Serial-noise policy: hunt instrument, prints only on dfx=wwcensus
     // boots; ordinary boots keep a clean serial prompt.
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WwCensus) {
+    if !crate::trace::EVENT_WWCENSUS.armed() {
         return;
     }
     let wake_n = WAKE_N.load(Ordering::Relaxed);
@@ -409,6 +408,7 @@ pub fn heartbeat() {
             crate::dfx::lostpark::dump_once(b"frozen");
         }
     }
+    crate::trace::trace_wwcensus(0, 0, wake_n, pick_n);
     crate::pr_info!(
         "WW: wakes={} picks={} avg_run={}ms stranded={} strand_max={}ms",
         wake_n,

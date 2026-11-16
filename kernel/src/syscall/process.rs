@@ -801,7 +801,7 @@ fn copy_envp_from_user(envp_ptr: *const *const u8) -> Result<alloc::vec::Vec<all
 /// afterwards. Purpose: decompose the p4_fork_exec reference gap
 /// (~1.1 ms exec vs ~11 us reference median).
 fn execcost_armed(n: u64) -> bool {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExecCost) {
+    if !crate::trace::EVENT_EXECCOST.armed() {
         return false;
     }
     n < 64 || n % 512 == 0
@@ -1211,7 +1211,7 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
     let exe_file_arc = Some(exec_file.file);
     let interp_file_arc = interp_exec.map(|f| f.file);
     if ec { ec_pre = crate::arch::cpu::read_time(); }
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace) {
+    if crate::trace::EVENT_SYSCALLTRACE.armed() {
         crate::pr_info!("LVMA-DBG pid {} exe_pin={} interp_pin={} path {}",
             crate::process::current_pid(),
             exe_file_arc.is_some(), interp_file_arc.is_some(), full_path.as_ref());

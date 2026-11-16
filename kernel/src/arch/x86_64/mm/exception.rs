@@ -171,7 +171,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
     // millions of user faults (demand paging every .so page); left on,
     // these three lines per fault dominated the serial log and slowed
     // TCG enough to change service-start races.
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Steptrace) {
+    if crate::trace::EVENT_STEPTRACE.armed() {
         crate::pr_debug!(
             "do_page_fault: addr={:#x}, rip={:#x}, type={:#x}, mode={}",
             fault_addr.bits(), regs.rip, access_type,

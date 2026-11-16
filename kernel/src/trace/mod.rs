@@ -2008,8 +2008,744 @@ tracepoints! {
             args[3],
         )
     };
-}
 
+    /// rux:schb — the soft-wedge heartbeat family (dfx-migrate round 5, retired
+    /// token `dfx=schb`; the event IS the family's gate — the schbd
+    /// kthread start, the COW/reclaim pace counters, the proc-open ring
+    /// and the wedge census all key off it). Each heartbeat beat records
+    /// one row; pid=pidmax, a=flow, b=bw15. The SC-HB / SC-ANAT /
+    /// SC-WEDGE serial lines stay as echo of the same enable.
+    EVENT_SCHB / schb_fmt / trace_schb :
+        "rux", "schb", 71,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", __print_symbolic(REC->kind, { 0, \"BEAT\" }, { 1, \"CENSUS\" }, { 2, \"PROC_OPEN\" }), REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = match args[0] {
+            0 => "BEAT",
+            1 => "CENSUS",
+            2 => "PROC_OPEN",
+            _ => "?",
+        };
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:parkdump — the futex park-dump family (retired token `dfx=parkdump`; the
+    /// event IS the gate — the RWFRZ writer-park dump and the APP-PARK
+    /// child dump with their APPMAP/fd-table companions). One row per
+    /// park dump: pid=the parked task, a=jiffies. The multi-line dumps
+    /// stay serial (echo consumers of the same enable).
+    EVENT_PARKDUMP / parkdump_fmt / trace_parkdump :
+        "rux", "parkdump", 72,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", __print_symbolic(REC->kind, { 0, \"RWFRZ_PARK\" }, { 1, \"APP_PARK\" }), REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = match args[0] {
+            0 => "RWFRZ_PARK",
+            1 => "APP_PARK",
+            _ => "?",
+        };
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:sleepsnap — the S-state entry-frame snapshot family (retired token
+    /// `dfx=sleepsnap`; the event IS the gate — the khungtaskd-cadence
+    /// snapshot of every S-state task's user entry frame). One row per
+    /// snapshot round: pid=task count sampled. The per-task lines stay
+    /// serial echo.
+    EVENT_SLEEPSNAP / sleepsnap_fmt / trace_sleepsnap :
+        "rux", "sleepsnap", 73,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", __print_symbolic(REC->kind, { 0, \"SNAP\" }), REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = match args[0] {
+            0 => "SNAP",
+            _ => "?",
+        };
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:ksprobe — the kernel-stack high-water probe (retired token `dfx=ksprobe`;
+    /// the event IS the gate — zero-at-alloc / scan-at-free over every
+    /// fresh kernel stack plus the SC-KREC stash; consumed by the
+    /// rux:schb anatomy lines, so boots that want the kHW column arm
+    /// both events). Gate-only this round: residue hits stay serial.
+    EVENT_KSPROBE / ksprobe_fmt / trace_ksprobe :
+        "rux", "ksprobe", 74,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", __print_symbolic(REC->kind, { 0, \"HIT\" }), REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = match args[0] {
+            0 => "HIT",
+            _ => "?",
+        };
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:wwcensus — the wakewatch/timer census heartbeat family (retired token
+    /// `dfx=wwcensus`; the event IS the gate — the WW/WW2/WW3 ~1 Hz
+    /// census lines, the wakewatch wake/pick line and the periodic
+    /// PREEMPT-LEAK reporter). Gate-only this round: every census line
+    /// is already the observation; the ring row per beat is the WW
+    /// summary (a=refused total).
+    EVENT_WWCENSUS / wwcensus_fmt / trace_wwcensus :
+        "rux", "wwcensus", 75,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", __print_symbolic(REC->kind, { 0, \"BEAT\" }, { 1, \"LEAK_REPORT\" }), REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = match args[0] {
+            0 => "BEAT",
+            1 => "LEAK_REPORT",
+            _ => "?",
+        };
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:bindertrace — the per-transaction binder trace (retired token `dfx=bindertrace`;
+    /// the event IS the gate for the `btx:` per-transaction lines).
+    /// Gate-only: the btx: line is the observation; the reference
+    /// binder:* events already carry the transaction timeline in the
+    /// ring.
+    EVENT_BINDERTRACE / bindertrace_fmt / trace_bindertrace :
+        "rux", "bindertrace", 76,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = args[0];
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:syscalltrace — the OH bring-up syscall-trace family (retired token
+    /// `dfx=syscalltrace`; the event IS the gate for the so-open /
+    /// FIXED-MAP / PROTNONE-MAP / mremap / GET_SENDER_INFO taps).
+    /// Gate-only: the prints are the observation; raw_syscalls:*
+    /// already carries the syscall boundary in the ring.
+    EVENT_SYSCALLTRACE / syscalltrace_fmt / trace_syscalltrace :
+        "rux", "syscalltrace", 77,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = args[0];
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:inputtrace — the input-event payload trace (retired token `dfx=inputtrace`;
+    /// the event IS the gate for the per-event evdev push records).
+    /// Gate-only: each pushed event prints one line (echo); volume
+    /// makes per-event ring rows noise.
+    EVENT_INPUTTRACE / inputtrace_fmt / trace_inputtrace :
+        "rux", "inputtrace", 78,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = args[0];
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:exthunt — the ext4 extent-tree hunt (retired token `dfx=exthunt`; the
+    /// event IS the gate — read-side walks that conclude hole/error on
+    /// a depth>=1 tree, and root promotions). One row per hit: a=ino,
+    /// b=iblock (HOLE) or new depth (PROMOTE). The header-byte dumps
+    /// stay serial echo.
+    EVENT_EXTHUNT / exthunt_fmt / trace_exthunt :
+        "rux", "exthunt", 79,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", __print_symbolic(REC->kind, { 0, \"HOLE\" }, { 1, \"PROMOTE\" }), REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = match args[0] {
+            0 => "HOLE",
+            1 => "PROMOTE",
+            _ => "?",
+        };
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:sfddbg — the signalfd probes (retired token `dfx=sfddbg`; the event IS
+    /// the gate — pid-1 signal delivery traces and the signalfd
+    /// registry notify hook). Gate-only: the prints are the
+    /// observation.
+    EVENT_SFDDBG / sfddbg_fmt / trace_sfddbg :
+        "rux", "sfddbg", 80,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = args[0];
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:dbtrace — the udev-db tmpfs tracer (retired token `dfx=dbtrace`; the
+    /// event IS the gate for the I:/G:/Q:/S:/E:/V: payload prints).
+    /// Gate-only.
+    EVENT_DBTRACE / dbtrace_fmt / trace_dbtrace :
+        "rux", "dbtrace", 81,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = args[0];
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:datatap — the /data namespace mutation tap (retired token `dfx=datatap`;
+    /// the event IS the gate — mkdir/rmdir/unlink/rename/chown/xattr
+    /// lines, bindwalk ENOENT dumps, negative-dentry hits). Gate-only:
+    /// every mutation prints one line (echo).
+    EVENT_DATATAP / datatap_fmt / trace_datatap :
+        "rux", "datatap", 82,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = args[0];
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:ams46 — the StartUser(46) lifecycle arsenal (retired token `dfx=ams46`;
+    /// the event IS the gate — enqueue/route/read/free/sweep/silence
+    /// traces plus the ~5 s node census). Gate-only: the census prints
+    /// are the observation.
+    EVENT_AMS46 / ams46_fmt / trace_ams46 :
+        "rux", "ams46", 83,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = args[0];
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:vmap — the VMA-origin adjudication taps (retired token `dfx=vmap`; the
+    /// event IS the gate — PROT_NONE mprotect and small anonymous
+    /// PROT_NONE mmap traces). Gate-only.
+    EVENT_VMAP / vmap_fmt / trace_vmap :
+        "rux", "vmap", 84,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = args[0];
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:poolcensus — the binder thread-pool census (retired token `dfx=poolcensus`;
+    /// the event IS the gate — the ~5 s per-proc pool census lines and
+    /// the POOL-SPAWN prints). One row per census round: a=procs with
+    /// todo or pool. The per-proc lines stay serial echo.
+    EVENT_POOLCENSUS / poolcensus_fmt / trace_poolcensus :
+        "rux", "poolcensus", 85,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", __print_symbolic(REC->kind, { 0, \"CENSUS\" }, { 1, \"SPAWN\" }), REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = match args[0] {
+            0 => "CENSUS",
+            1 => "SPAWN",
+            _ => "?",
+        };
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:slowtask — the slow-kernel-entry audit (retired token `dfx=slowtask`; the
+    /// event IS the gate — the ~4 s rounds of unchanged-entry tasks
+    /// with their parked kernel-stack chains). One row per reported
+    /// task: pid, a=syscall nr, b=epc.
+    EVENT_SLOWTASK / slowtask_fmt / trace_slowtask :
+        "rux", "slowtask", 86,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", __print_symbolic(REC->kind, { 0, \"SLOWTASK\" }, { 1, \"SUMMARY\" }), REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = match args[0] {
+            0 => "SLOWTASK",
+            1 => "SUMMARY",
+            _ => "?",
+        };
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:execcost — the execve per-stage cost ladder (retired token `dfx=execcost`;
+    /// the event IS the gate for the ladder/image lines). Gate-only:
+    /// the printed ladder is the observation.
+    EVENT_EXECCOST / execcost_fmt / trace_execcost :
+        "rux", "execcost", 87,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = args[0];
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:tfdcensus — the windowed timerfd_create caller census (retired token
+    /// `dfx=tfdcensus`; the event IS the gate — first 16 calls of
+    /// every 5 s window). Gate-only this round: the window prints are
+    /// the observation.
+    EVENT_TFDCENSUS / tfdcensus_fmt / trace_tfdcensus :
+        "rux", "tfdcensus", 88,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", __print_symbolic(REC->kind, { 0, \"WINDOW\" }), REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = match args[0] {
+            0 => "WINDOW",
+            _ => "?",
+        };
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:scmtap — the SCM_RIGHTS relay tap (retired token `dfx=scmtap`; the
+    /// event IS the gate — per sendmsg/recvmsg/drop fd-relay lines).
+    /// Gate-only.
+    EVENT_SCMTAP / scmtap_fmt / trace_scmtap :
+        "rux", "scmtap", 89,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = args[0];
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:sysforensic — the per-syscall forensic instruments (retired token
+    /// `dfx=sysforensic`; the event IS the gate — the fail rings, the
+    /// comm-scanning sc-hooks and the double-record tap). Gate-only.
+    EVENT_SYSFORENSIC / sysforensic_fmt / trace_sysforensic :
+        "rux", "sysforensic", 90,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = args[0];
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:filerd — the cached-read cost anatomy (retired token `dfx=filerd`; the
+    /// event IS the gate — the RDTSC phase counters on the ext4 read
+    /// fast path, reported via /proc/filerd). Gate-only: the report
+    /// file is the observation.
+    EVENT_FILERD / filerd_fmt / trace_filerd :
+        "rux", "filerd", 91,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = args[0];
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:lostpark — the SMP lost-park forensics (retired token `dfx=lostpark`; the
+    /// event IS the gate — the idle-loop lie detector, the wake-skip
+    /// census and the LOSTPARK ring). One row per ring dump: a=entries.
+    /// The per-event lines stay serial echo.
+    EVENT_LOSTPARK / lostpark_fmt / trace_lostpark :
+        "rux", "lostpark", 92,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", __print_symbolic(REC->kind, { 0, \"DUMP\" }), REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = match args[0] {
+            0 => "DUMP",
+            _ => "?",
+        };
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:allocwatch — the allocator class-lock holder watch (retired token
+    /// `dfx=allocwatch`; the event IS the gate — acquire stamps plus
+    /// the scheduler_tick cross-CPU scan). One row per stuck report:
+    /// pid=holder, a=site, b=held ms. The STUCK-CLASS lines stay
+    /// serial echo.
+    EVENT_ALLOCWATCH / allocwatch_fmt / trace_allocwatch :
+        "rux", "allocwatch", 93,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", __print_symbolic(REC->kind, { 0, \"STUCK\" }), REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = match args[0] {
+            0 => "STUCK",
+            _ => "?",
+        };
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:r83scan — the periodic 2 MiB-slice heap fingerprint scan (retired token
+    /// `dfx=r83scan`; the event IS the gate for the magic_scan sweep).
+    /// Gate-only: hit prints stay serial.
+    EVENT_R83SCAN / r83scan_fmt / trace_r83scan :
+        "rux", "r83scan", 94,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = args[0];
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:leakhunt — the preempt-leak origin probe (retired token `dfx=leakhunt`;
+    /// the event IS the engine gate — the outermost-acquire side
+    /// table, the user-return checks and the PREEMPT-LEAK reports all
+    /// key off it). Gate-only: the reports are the observation.
+    EVENT_LEAKHUNT / leakhunt_fmt / trace_leakhunt :
+        "rux", "leakhunt", 95,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = args[0];
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:acqdiv — the acquire-divergent live print (retired token `dfx=acqdiv`;
+    /// the event IS the gate for the ACQUIRE-DIVERGENT print inside
+    /// the leakorigin tap — it fires only when rux:leakhunt is armed
+    /// too; the retired boot token arms both). Gate-only.
+    EVENT_ACQDIV / acqdiv_fmt / trace_acqdiv :
+        "rux", "acqdiv", 96,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = args[0];
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:metawatch — the buddy-meta shadow audit (retired token `dfx=metawatch`;
+    /// the event IS the gate — the 10 s shadow free-set cross-check).
+    /// Gate-only: META-SMASH findings stay serial (multi-line).
+    EVENT_METAWATCH / metawatch_fmt / trace_metawatch :
+        "rux", "metawatch", 97,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = args[0];
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:scribble — the byte-level scribble hunter engine (retired token
+    /// `dfx=scribble`; the event IS the engine gate — the shadow
+    /// canary writes, the switch-out/timer verification and the CONS
+    /// report ring). The gdb-park companions (dfx=scribblepark /
+    /// -pid1 / -sweep) remain bespoke switches: parking a CPU for an
+    /// external debugger is an action, not observation.
+    EVENT_SCRIBBLE / scribble_fmt / trace_scribble :
+        "rux", "scribble", 98,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = args[0];
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:monowatch — the CLOCK_MONOTONIC jump tripwire (retired token
+    /// `dfx=monowatch`; the event IS the gate for the ~1 Hz timebase
+    /// samples). One row per jump/spike report: a=backwards ns,
+    /// b=spike ns.
+    EVENT_MONOWATCH / monowatch_fmt / trace_monowatch :
+        "rux", "monowatch", 99,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", __print_symbolic(REC->kind, { 0, \"JUMP\" }), REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = match args[0] {
+            0 => "JUMP",
+            _ => "?",
+        };
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:epollscan — the epoll interest-scan trace (retired token `dfx=epollscan`;
+    /// the event IS the gate for the per-epoll_wait scan lines; the
+    /// round-3 rux:epoll_* family carries the structured rows).
+    /// Gate-only.
+    EVENT_EPOLLSCAN / epollscan_fmt / trace_epollscan :
+        "rux", "epollscan", 100,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = args[0];
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:treehunt — the process-tree invariant validator (retired token
+    /// `dfx=treehunt`; the event IS the gate for the ~1 Hz walk). One
+    /// row per flagged task: pid, a=parent snapshot, b=leader
+    /// parent.
+    EVENT_TREEHUNT / treehunt_fmt / trace_treehunt :
+        "rux", "treehunt", 101,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", __print_symbolic(REC->kind, { 0, \"IMPLAUSIBLE\" }), REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = match args[0] {
+            0 => "IMPLAUSIBLE",
+            _ => "?",
+        };
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:tcptrace — the TCP per-segment forensics (retired token `dfx=tcptrace`;
+    /// the event IS the gate for the seq/ack/len/flags lines).
+    /// Gate-only: every segment prints (budget-capped echo).
+    EVENT_TCPTRACE / tcptrace_fmt / trace_tcptrace :
+        "rux", "tcptrace", 102,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = args[0];
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:strace1 — the PID 1 syscall trace (retired token `dfx=strace1`; the
+    /// event IS the gate for the per-syscall pathname-decoded lines).
+    /// Gate-only.
+    EVENT_STRACE1 / strace1_fmt / trace_strace1 :
+        "rux", "strace1", 103,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = args[0];
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:ripsample — the user-mode rip histogram rider (retired token
+    /// `dfx=ripsample`; the event IS the gate for the 60 s tick-path
+    /// sampling). Gate-only: the histogram report stays serial.
+    EVENT_RIPSAMPLE / ripsample_fmt / trace_ripsample :
+        "rux", "ripsample", 104,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = args[0];
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:socksnap — the AF_UNIX namespace + epoll interest dump (retired token
+    /// `dfx=socksnap`; the event IS the gate). One row per dump: pid=
+    /// listeners, a=epoll instances. The per-object lines stay serial
+    /// echo.
+    EVENT_SOCKSNAP / socksnap_fmt / trace_socksnap :
+        "rux", "socksnap", 105,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", __print_symbolic(REC->kind, { 0, \"SNAP\" }), REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = match args[0] {
+            0 => "SNAP",
+            _ => "?",
+        };
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:writetrace — the short-write printable capture (retired token
+    /// `dfx=writetrace`; the event IS the gate for the hex-prefixed
+    /// frame prints). Gate-only.
+    EVENT_WRITETRACE / writetrace_fmt / trace_writetrace :
+        "rux", "writetrace", 106,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = args[0];
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:ledger — the physical-accounting ledger (retired token `dfx=ledger`;
+    /// the event IS the gate — the UART `LEDGER!` magic and the
+    /// OOM-moment census). One row per census dump: a=used kb,
+    /// b=leaked kb estimate.
+    EVENT_LEDGER / ledger_fmt / trace_ledger :
+        "rux", "ledger", 107,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", __print_symbolic(REC->kind, { 0, \"CENSUS\" }), REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = match args[0] {
+            0 => "CENSUS",
+            _ => "?",
+        };
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:pid1spin — the pid-1 RUNNING-spin watch (retired token `dfx=pid1spin`;
+    /// the event IS the gate — the ~2 s heartbeat's kernel-entry
+    /// frame while init spins). One row per spin line: a=syscall nr,
+    /// b=user rip.
+    EVENT_PID1SPIN / pid1spin_fmt / trace_pid1spin :
+        "rux", "pid1spin", 108,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", __print_symbolic(REC->kind, { 0, \"SPIN\" }), REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = match args[0] {
+            0 => "SPIN",
+            _ => "?",
+        };
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:steptrace — the per-trap/per-return syscall trace (retired token
+    /// `dfx=steptrace`; the event IS the gate for the two-line
+    /// entry+return prints). Gate-only.
+    EVENT_STEPTRACE / steptrace_fmt / trace_steptrace :
+        "rux", "steptrace", 109,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = args[0];
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+
+    /// rux:pctlmon — the param-service socket monitor (dfx-migrate
+    /// round 5, retired token `dfx=pctlmon`; the event IS the family's
+    /// gate — the PCTL-SEND tap plus the connect/accept/close lifecycle
+    /// of every paramservice-classified unix socket with queue depths).
+    /// Gate-only: the lifecycle prints are the observation.
+    EVENT_PCTLMON / pctlmon_fmt / trace_pctlmon :
+        "rux", "pctlmon", 110,
+    print: "\"kind=%s pid=%d a=%#lx b=%#lx\", REC->kind, REC->pid, REC->a, REC->b",
+    fields: "\tfield:__u32 kind;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long a;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long b;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (kind: u32, pid: u32, a: u64, b: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let kind = args[0];
+        format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
+    };
+}
 /// The trace_marker pseudo-event. NOT in EVENTS on purpose: a marker
 /// is not an enable-gated tracepoint (the reference records marker
 /// writes whenever tracing is on, with no event switch), so it does

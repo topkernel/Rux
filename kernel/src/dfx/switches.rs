@@ -4,14 +4,6 @@
 //!
 //! Runtime-switchable DFX features.
 //!
-//! Expensive diagnostics are OFF by default and enabled per boot via the
-//! kernel command line, so production runs pay nothing unless a problem
-//! is being hunted:
-//!
-//! ```text
-//! -append "root=/dev/vda rw dfx=taskdump,watchdog ..."
-//! ```
-//!
 //! Compile-time features (`dfx-lock-owner` in Cargo.toml) gate the
 //! hottest hooks — the spinlock owner field costs two atomic stores per
 //! lock/unlock pair and is therefore a build-time opt-in used by the
@@ -20,16 +12,44 @@
 //! Switch catalog (see the RETIRED TOKENS note below for the ones
 //! that already moved to the unified trace framework):
 //!
-//! RETIRED TOKENS (dfx-migrate rounds, 2026-11): the hunt families that
-//! lived here as `schedtrace`, `fuxstuck`, `txnhunt`, `mmforensics`,
-//! `sysring`, `ohhunt`, `sigtrace`, `futextrace`, `epolltrace`, and the
-//! debug aids `taskdump`, `periodic`, `watchdog`, `memwatch` moved
-//! into the unified trace framework (`kernel/src/trace/`) — each
-//! family's gate is now a `rux:` trace event, its serial prints are
-//! echo consumers of that event's enable, and the old `dfx=` token is
-//! a boot alias that arms the events (see `retired_trace_events`). The
-//! table above is the frozen remainder; per the observability policy
-//! it must not grow — new observability goes through tracepoints.
+//! RETIRED TOKENS (dfx-migrate rounds 4/4b/5, 2026-11): the hunt
+//! families and debug aids that lived here — rounds 4/4b:
+//! `schedtrace`, `fuxstuck`, `txnhunt`, `mmforensics`, `sysring`,
+//! `ohhunt`, `sigtrace`, `futextrace`, `epolltrace`, `taskdump`,
+//! `periodic`, `watchdog`, `memwatch`; round 5: `schb`, `parkdump`,
+//! `sleepsnap`, `ksprobe`, `wwcensus`, `bindertrace`,
+//! `syscalltrace`, `inputtrace`, `exthunt`, `sfddbg`, `dbtrace`,
+//! `datatap`, `ams46`, `vmap`, `poolcensus`, `slowtask`, `execcost`,
+//! `tfdcensus`, `scmtap`, `sysforensic`, `filerd`, `lostpark`,
+//! `allocwatch`, `r83scan`, `leakhunt`, `acqdiv`, `metawatch`,
+//! `scribble`, `monowatch`, `epollscan`, `treehunt`, `tcptrace`,
+//! `strace1`, `ripsample`, `socksnap`, `writetrace`, `ledger`,
+//! `pid1spin`, `steptrace` — moved into the unified trace framework
+//! (`kernel/src/trace/`): each family's gate is now a `rux:` trace
+//! event, its serial prints are echo consumers of that event's
+//! enable, and the old `dfx=` token is a boot alias that arms the
+//! events (see `retired_trace_events`). Four further tokens
+//! (`thpark`, `syncguard`, `syncwatch`, `pctlmon`) name instruments
+//! whose probe bodies no longer exist — see `dead_dfx_tokens`.
+//!
+//! What survives here is deliberate, not leftover:
+//!
+//! - BEHAVIOR INJECTION (`claiminject`, `oncpuinject`): these CHANGE
+//!   kernel scheduling/rejection behavior to reproduce wedge shapes —
+//!   they are fault injectors, not observability, and have no
+//!   tracepoint form.
+//! - GDB-PARK ACTIONS (`scribblepark`, `scribblepid1`,
+//!   `scribblesweep`): they PARK a CPU at a chosen moment so an
+//!   external gdb session can arm watchpoints — an action taken on
+//!   the machine, not an observation of it. They arm the `rux:scribble`
+//!   detection engine as a side effect.
+//! - ACTIVE DETECTOR (`wildwatch`): its detection mechanism IS state
+//!   mutation — arming write-protects kernel page-table regions and
+//!   sets CR0.WP. The #PF hit dump rides the existing kernel fault
+//!   printer; arming must stay a boot-time switch.
+//!
+//! Per the observability policy the table must not grow — new
+//! observability goes through tracepoints.
 
 // Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
@@ -48,55 +68,12 @@ use core::sync::atomic::{AtomicBool, Ordering};
 macro_rules! dfx_switch_table {
     ($m:ident) => {
         $m! {
-            Scribble => "scribble",
+            ClaimInject => "claiminject",
+            OncpuInject => "oncpuinject",
             ScribblePark => "scribblepark",
             ScribblePid1 => "scribblepid1",
             ScribbleSweep => "scribblesweep",
-            InputTrace => "inputtrace",
-            DbFileTrace => "dbtrace",
-            EpollScan => "epollscan",
-            ClaimInject => "claiminject",
-            Strace1 => "strace1",
-            Steptrace => "steptrace",
-            WriteTrace => "writetrace",
-            OncpuInject => "oncpuinject",
-            Ledger => "ledger",
-            BinderTrace => "bindertrace",
-            SyscallTrace => "syscalltrace",
-            MonoWatch => "monowatch",
-            TcpTrace => "tcptrace",
-            SleepSnap => "sleepsnap",
-            SockSnap => "socksnap",
-            DataTap => "datatap",
             WildWatch => "wildwatch",
-            MetaWatch => "metawatch",
-            ParkDump => "parkdump",
-            Schb => "schb",
-            KsProbe => "ksprobe",
-            R83HeapScan => "r83scan",
-            LeakHunt => "leakhunt",
-            AcqDiv => "acqdiv",
-            WwCensus => "wwcensus",
-            TreeHunt => "treehunt",
-            SfdDbg => "sfddbg",
-            Ams46 => "ams46",
-            VmaProbe => "vmap",
-            PoolCensus => "poolcensus",
-            SlowTask => "slowtask",
-            ExtHunt => "exthunt",
-            ExecCost => "execcost",
-            ThPark => "thpark",
-            RipSample => "ripsample",
-            TfdCensus => "tfdcensus",
-            ScmTap => "scmtap",
-            SysForensic => "sysforensic",
-            FilerdProbe => "filerd",
-            LostParkTrace => "lostpark",
-            AllocWatch => "allocwatch",
-            SyncGuard => "syncguard",
-            SyncWatch => "syncwatch",
-            PctlMon => "pctlmon",
-            Pid1Spin => "pid1spin",
         }
     };
 }
@@ -106,34 +83,6 @@ pub(crate) use dfx_switch_table;
 /// Runtime DFX switches, indexed by name on the `dfx=` cmdline parameter.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DfxSwitch {
-    /// Byte-level scribble hunter (dfx/scribble.rs): shadow-canary over
-    /// every live Task's thread.{fs,gs,sp,ret} + parked pt_regs control
-    /// words, verified at switch-out quiesce and from the timer tick.
-    Scribble,
-    /// Also park (scribble_park breakpoint) on the first confirmed hit
-    /// so a gdb session can arm QEMU watchpoints on the victim address.
-    ScribblePark,
-    /// Park when pid 1 registers — the init task's Task struct and
-    /// kernel stack live at boot-fixed addresses for the whole run, so
-    /// a gdb session can arm persistent watchpoints on them.
-    ScribblePid1,
-    /// Park when the 64th task registers (early in the fork/exec storm)
-    /// so gdb can arm quiet-region watchpoints across the live set.
-    ScribbleSweep,
-    /// Input-event payload trace: every event pushed into the evdev queues
-    /// prints a one-line record (device, type, code, value) plus the push
-    /// count. Used to hunt phantom input streams; printing happens on the
-    /// event path so it is OFF in production boots.
-    InputTrace,
-    /// TEST-ONLY udev-db tracer (gdmr24 hunt; remove before merge):
-    /// tmpfs reads/writes whose payload is shaped like a udev db line
-    /// (I:/G:/Q:/S:/E:/V: prefix) print offset+content, catching the
-    /// "G:\n" splice that breaks sd-device tag loading.
-    DbFileTrace,
-    /// epoll SCAN trace (leg-9): one raw-console line per epoll_wait
-    /// interest scan (pid, entries seen, ready collected) — splits
-    /// "the scan never ran" from "the scan ran and found nothing".
-    EpollScan,
     /// Adjudication injector (GNOME-wedge hunt): every 50 jiffies the
     /// timer softirq leaks a claim of CPU 7 (nonexistent on any board we
     /// boot) onto every LINKED CFS task that shows {on_cpu=false,
@@ -142,99 +91,36 @@ pub enum DfxSwitch {
     /// deterministically (tasks stranded on the timeline, every pick
     /// skips them); with the pick-side stale-claim heal the system must
     /// keep scheduling. OFF unless explicitly requested; never enable in
-    /// production or LTP runs.
+    /// production or LTP runs. PERMANENT SWITCH (dfx-migrate round 5):
+    /// a fault injector changes kernel behavior — no tracepoint form.
     ClaimInject,
-    /// Syscall trace for PID 1 (loader hunts): the file/memory syscalls
-    /// ld.so issues (openat/fstat/stat/mmap/read/lseek/close/...) each
-    /// print one line with decoded pathnames and results, so a musl
-    /// "library not found" can be attributed to the failing step instead
-    /// of guessed at.
-    Strace1,
-    /// Per-syscall return line + per-trap vector line. Used during the
-    /// SIGHUP / fake-crash hunts; left on, every syscall printed two
-    /// lines (trap entry + return) — a single OH boot wrote a 2.7GB
-    /// serial log and the UART traffic slowed the system enough to cost
-    /// samgr the hdf_devmgr race. OFF unless asked for.
-    Steptrace,
     /// R85 (tail-phase PICK-SKIP wedge adjudication): every 50 jiffies,
     /// stamp the FULL lost-release ownership shape {on_cpu=true,
     /// claim=7(nonexistent), pk=LIVE} onto every LINKED CFS task that
-    /// shows the pickable {on_cpu=false, claim=-1}. This is the exact
-    /// terminal microstate of the pid-1 tail wedge (linked, marked,
-    /// owned by no slot and no in-flight switch). An unpatched kernel
+    /// shows the pickable {on_cpu=false, claim=-1}. An unpatched kernel
     /// strands the task forever (every pick skips it why=1); a kernel
     /// with the R85 pick-side ownership adjudication sweeps the poison
     /// within ~50 jiffies (STALE-ONCPU-RESET) and keeps scheduling. OFF
     /// unless explicitly requested; never enable in production or LTP
-    /// runs.
+    /// runs. PERMANENT SWITCH (dfx-migrate round 5): fault injector.
     OncpuInject,
-    /// Per-short-write printable capture (OH bring-up): binary hilog /
-    /// binder frames still leak past the printable-head filter and spam
-    /// the console; default OFF, enable with dfx=writetrace. Mirrors
-    /// main's d0fb238c+b18f683f (this branch adds fd + a hex prefix for
-    /// offline frame decoding).
-    WriteTrace,
-    /// Full physical-accounting ledger (fake-OOM family): arms the UART
-    /// magic "LEDGER!" for an on-demand census + reconciliation dump and
-    /// includes the OOM-moment ledger automatically. See dfx/ledger.rs.
-    Ledger,
-    /// Per-transaction binder trace (HDF devmgr<->devhost handshake hunt):
-    /// one "btx:" line per resolved BC_TRANSACTION/BC_REPLY (from pid,
-    /// target pid, handle, code, oneway/twoway, data sizes). Default
-    /// OFF - a full OH boot resolves tens of thousands of transactions.
-    BinderTrace,
-    /// OH bring-up syscall trace family (b128/b129 hunts): the per-dlopen
-    /// `so-open[...]` trace, per-mmap `FIXED-MAP`/`PROTNONE-MAP`, the
-    /// mremap ENTER/EXIT pair and the binder `GET_SENDER_INFO` round-trip
-    /// prints. All were unconditional pr_info during the dlopen-retry and
-    /// VMA-surgery hunts; at OH scale they emit ~57k lines per boot, and
-    /// OH's hilogd.rd_kmsg thread copies every one of them from /dev/kmsg
-    /// into /data log files — at KVM speed that single thread eats a
-    /// whole vCPU and starves samgr's in-flight transactions (b128/b129:
-    /// 130s+ binder stalls, the whole display chain queued behind samgr).
-    /// Same failure shape as Steptrace's 2.7GB serial log. OFF unless
-    /// asked for with dfx=syscalltrace.
-    SyscallTrace,
-    /// khungtaskd-cadence snapshot of every S-state task's user entry
-    /// frame (comm, tid, syscall nr, rip, a0/a1) — the appspawn-server
-    /// wedge hunt (b11): clients write to the AppSpawn socket and the
-    /// server never accepts, while its kickdog thread lives. Names the
-    /// exact syscall the server main thread is parked in. OFF unless
-    /// asked for with dfx=sleepsnap.
-    SleepSnap,
-    /// CLOCK_MONOTONIC jump tripwire (timer-lane hunt): ~1 Hz samples of
-    /// the shared timebase from the timer softirq; reports backward
-    /// motion or multi-second spikes with the active clocksource named
-    /// (see dfx/monowatch.rs). Near-zero cost; meant to ride along on
-    /// every hunt boot so clock jumps are caught live instead of
-    /// inferred from impossible probe totals afterwards.
-    MonoWatch,
-    /// TCP per-segment forensics (hdc file-send corruption hunt): every
-    /// inbound and outbound TCP segment prints seq/ack/len/flags plus
-    /// receiver rcv_nxt/rcv_wnd state, budget-limited. The b143
-    /// flags-only trace could not distinguish a data segment from a
-    /// zero-window probe or a dup-ACK storm; the first-send corruption
-    /// and mid-transfer connection drops need sequence-level timelines.
-    TcpTrace,
-    /// khungtaskd-cadence dump of the AF_UNIX namespace and every epoll
-    /// interest set (appspawn-server wedge hunt, b15): one line per
-    /// LISTENING socket (key, accept-queue depth, backlog, file id) and
-    /// one per epoll instance reachable through the wake registry
-    /// (registered fd, events mask, file id, ET snapshot). Cross-
-    /// referencing the listener's file id against the epoll entries
-    /// answers "is the listener still registered" without a guest-side
-    /// /proc. OFF unless asked for with dfx=socksnap.
-    SockSnap,
-    /// /data namespace mutation trace (el2/100 bundle-dir hunt, dt lane):
-    /// every mkdir/rmdir/unlink/rename/chown/xattr under /data prints one
-    /// line with its result, bindwalk ENOENTs dump the kernel's cached
-    /// children of the deepest resolved dir, and negative-dentry hits
-    /// under /data are named. sc21 showed the baked per-user-100 bundle
-    /// dirs replaced or emptied at runtime (el2/100/log -> ino 172,
-    /// el1/100/database -> ino 44; neither is the baked inode) with no
-    /// guest-side record of who did it — this tap answers that from the
-    /// kernel side. OFF unless asked for with dfx=datatap.
-    DataTap,
+    /// Also park (scribble_park breakpoint) on the first confirmed hit
+    /// so a gdb session can arm QEMU watchpoints on the victim address.
+    /// PERMANENT SWITCH (dfx-migrate round 5): parking a CPU for an
+    /// external debugger is an action, not observation. Arming it also
+    /// arms the `rux:scribble` detection engine.
+    ScribblePark,
+    /// Park when pid 1 registers — the init task's Task struct and
+    /// kernel stack live at boot-fixed addresses for the whole run, so
+    /// a gdb session can arm persistent watchpoints on them.
+    /// PERMANENT SWITCH (dfx-migrate round 5, gdb-park action); arms
+    /// `rux:scribble` as a side effect.
+    ScribblePid1,
+    /// Park when the 64th task registers (early in the fork/exec storm)
+    /// so gdb can arm quiet-region watchpoints across the live set.
+    /// PERMANENT SWITCH (dfx-migrate round 5, gdb-park action); arms
+    /// `rux:scribble` as a side effect.
+    ScribbleSweep,
     /// Wild-write attribution tripwire (wildwrite-hunt line): the hpet
     /// quiet-statics guard cluster (plus its canary page) goes READ-ONLY
     /// in the kernel page tables after init, in every alias (kernel-half
@@ -243,244 +129,14 @@ pub enum DfxSwitch {
     /// kernel-#PF printer hands over rip + rbp walk + KERNPANIC dump.
     /// The canary page is also checksum-verified from the timer cadence
     /// (DMA-class writers bypass PTEs). One arming print per boot; zero
-    /// traffic until a hit. See dfx/wildwatch.rs.
+    /// traffic until a hit. See dfx/wildwatch.rs. PERMANENT SWITCH
+    /// (dfx-migrate round 5): the detection mechanism itself mutates
+    /// kernel state (PTE write-bits + CR0.WP), so arming cannot be a
+    /// runtime-safe trace-event enable.
     WildWatch,
-    /// Buddy-meta shadow scan (wildwrite-hunt line): every 10 s the
-    /// timer cadence derives a shadow free set from the buddy free lists
-    /// and cross-checks INV-HEAP-1/2/3 against the per-page bitmap and
-    /// linkage; a lock-CONFIRMED persistent mismatch prints META-SMASH
-    /// with the finding details (the buddy face of the wild writer —
-    /// the ww-v2 order-18 grind). One arming print per boot; zero
-    /// traffic until a hit. See dfx/metawatch.rs.
-    MetaWatch,
-    /// Futex park-dump family (sc1xx launcher-chain hunts): the
-    /// RWFRZ-PARK writer-parking dump, the APP-PARK app-child dump and
-    /// its whole-VMA APPMAP table + fd-table companions. Each park event
-    /// prints hundreds-to-thousands of lines (sc179: 17.5k APPMAP lines
-    /// from 6 budgeted dumps), and every kernel line is copied by OH's
-    /// hilogd.rd_kmsg out of /dev/kmsg — the b128/b129 lesson: that one
-    /// thread eats a vCPU at KVM speed and starves samgr. The chain
-    /// questions these probes answered (routing, park sites, fd
-    /// identities) are settled; OFF unless a park needs re-diagnosing.
-    ParkDump,
-    /// Soft-wedge heartbeat (sc-series quiet-quiet hunt, session R): the
-    /// `schbd` kthread prints one ~90-byte heartbeat line every 10s
-    /// straight to the UART (pid frontier, task/binder waiter counts),
-    /// names each new binder process, and on a 60s pid-flow plateau fires
-    /// a one-shot census (all binder read-waiters regardless of age,
-    /// runnable/D-state scheduler views, stall_report with the loglevel
-    /// briefly lifted, and the printk-ring tail that carries quietcon's
-    /// diverted userspace console stream). At loglevel=3 every pr_warn!
-    /// census record is dropped BEFORE the ring (printk_bytes pre-filter),
-    /// so the quiet-quiet soft-wedge leaves no kernel evidence by design;
-    /// this switch is the budgeted replacement. See dfx/schb.rs.
-    Schb,
-    /// Leg-16 kstack high-water probe: zero-every-fresh-kernel-stack at
-    /// alloc + scan-at-free + the SC-KREC record stash. Adds a ~size-of-
-    /// stack memset to EVERY spawn — the anatomy is banked and the
-    /// sc218-224 pattern (probe-on boots lost the mid-boot RS lottery
-    /// 3-of-4, leg-15's probe-off boots won 3/3) argues it modulates the
-    /// race, so verification rolls run dfx=schb WITHOUT this token.
-    KsProbe,
-    /// R83/R74 wild-write hunt: the periodic 2MiB-slice kernel-heap
-    /// fingerprint scan (dfx/r83hunt.rs magic_scan). Runs read_volatile
-    /// sweeps over the heap from timer context; two boots were lost to
-    /// faults inside the sweep (including one read of a corrupted
-    /// va_pa_offset mid-scan), so the scan is opt-in like every other
-    /// dfx instrument. The cheap per-tick header audits stay
-    /// unconditional.
-    R83HeapScan,
-    /// Leak-origin probe (dfx/leakorigin.rs): records every task's
-    /// OUTERMOST PREEMPT_OFFSET acquire site and trips a report when a
-    /// task returns to userspace (or is seen parked, PREEMPT-LEAK class)
-    /// with a nonzero preempt_count — the producer of the leaked-count
-    /// wake-strand family, named at its acquire site. Hot-path cost when
-    /// armed: one side-table store per outermost guard acquire plus one
-    /// count load per user-mode trap return. OFF by default.
-    LeakHunt,
-    /// dfx=acqdiv (preempt-hunt Face C re-trial): arms the LIVE
-    /// ACQUIRE-DIVERGENT print inside leakorigin's outermost-acquire tap
-    /// (default record-only since 14d04456). The print fires between the
-    /// preempt_count read and the booking, from any context a lock
-    /// acquire can run in — including inside lock sections — so it is
-    /// hunt-only: never enable it on production or LTP boots. Its
-    /// ph5/ph5b wedge correlation is confounded (those boots also ran
-    /// the kpreempt hook armed by default, 192bfdce); this switch exists
-    /// to isolate it on a kpreempt-OFF tree.
-    AcqDiv,
-    /// The ~1 Hz wakewatch/timer census heartbeat lines (WW/WW2/WW3 and
-    /// the wakewatch wake/pick line) plus the periodic PREEMPT-LEAK
-    /// reporter. These are hunt instruments: they made the serial
-    /// unusable for interactive work when always on, so they are now
-    /// opt-in via `dfx=wwcensus` (census/forensics boots keep them by
-    /// passing the token; ordinary boots get a clean prompt).
-    WwCensus,
-    /// dfx=treehunt (leg-29A): ~1 Hz process-tree invariant validator —
-    /// flags live tasks whose parent pointer names implausible (freed/
-    /// recycled) memory and thread-group members whose parent snapshot
-    /// diverged from the leader's maintained parent. The E8-REPAR
-    /// "unlinked snapshot" family root-cause hunt (sc304 signal-Arc
-    /// Oops walked such a chain). Purely diagnostic; OFF by default.
-    TreeHunt,
-    /// dfx=sfddbg: the SFDDBG signalfd probes — every signal delivered
-    /// to pid 1 traced through the send path (disposition/block state/
-    /// pending-after) plus the signalfd-registry notify hook. Launcher
-    /// bring-up instrument; ordinary boots must keep a clean serial.
-    /// OFF by default.
-    SfdDbg,
-
-    /// dfx=ams46 (leg-30B): the Gate-1 arsenal — full lifecycle trace of
-    /// IAbilityManager::StartUser (code 46, interface token
-    /// "ohos.aafwk.AbilityManager") binder transactions: enqueue + route
-    /// (proc todo / child looper / async-slot park), read by which
-    /// foundation thread, buffer free + async-slot release, stale-sweep
-    /// reclaim, silence-rule retire, and a ~5 s node census (async slot
-    /// held, async_todo depth, target proc todo depth, waiting readers).
-    /// Adjudicates kernel-delivered vs foundation-dropped for the
-    /// accountmgr→AMS StartUser oneway that returns 0 but never executes
-    /// SwitchToUser inside foundation on walled draws. OFF by default.
-    Ams46,
-    /// dfx=poolcensus (leg-33B): binder thread-pool census for the
-    /// reader-exhaustion family — every ~5 s, one line per binder proc
-    /// that has queued todo or a worker pool: todo depth, max_threads,
-    /// requested_threads, worker/idle/client-per-thread looper state;
-    /// plus a rate-capped POOL-SPAWN print whenever the done:-shaped
-    /// BR_SPAWN_LOOPER emission fires (the sc329B fix's live proof).
-    /// Adjudicates kernel-issued spawn requests vs image-side pool
-    /// limits at the exact moment draining stops. OFF by default.
-    PoolCensus,
-    /// dfx=slowtask (leg-33B): slow-kernel-entry audit — every ~4 s,
-    /// tasks whose syscall entry (nr/epc) and sleep state persisted
-    /// unchanged across rounds get one SLOWTASK line with args and the
-    /// parked kernel-stack chain (same walker contract as TXN-HANG-STK,
-    /// deeper). fs-family syscalls always reported; lock-family waits
-    /// (futex/epoll/poll) only in the summary count unless they are the
-    /// oldest. Attributes the leaf of nested-call cascades (pwrite64 /
-    /// open / ftruncate stalls behind the foundation reader
-    /// exhaustion). OFF by default.
-    SlowTask,
-    /// dfx=vmap (leg-31B): VMA-origin adjudication arsenal, the syscall
-    /// side of the Vma origin stamp — traces the two syscall families
-    /// that establish PROT_NONE shapes (mprotect of a non-writable prot
-    /// on a sub-1MB range, and small anonymous PROT_NONE mmaps), with a
-    /// shared line budget. Together with the `origin=` field on the
-    /// fault-path VMA dumps it decides image-owned vs kernel-owned for
-    /// permission-shape faults (render_service's 2-page PROT_NONE piece
-    /// on top of a thread stack). OFF by default.
-    VmaProbe,
-    /// dfx=exthunt (ltp-fix-b leg-8): extent-tree lookup misses under
-    /// fire — every read-side walk that concludes "hole" or error for a
-    /// depth>=1 tree prints the root header and the first index block's
-    /// header bytes, and every root promotion (depth growth) prints the
-    /// new depth + down/split blocks. Adjudicates stale-reader vs
-    /// lost-index-block for the ftest04 all-zeros readback family.
-    /// OFF by default.
-    ExtHunt,
-    /// dfx=execcost (abi-review lane): per-stage execve cost breakdown
-    /// in raw clock ticks (read_time) — one ladder line (path lookup /
-    /// file read / interpreter read / creds / de_thread) and one image
-    /// line (address-space create / image map / stack / segment copy /
-    /// PTE tighten / VMA build / switch) per exec, rate-limited after
-    /// the first 64 execs. For decomposing the p4_fork_exec reference
-    /// gap; prints only when explicitly enabled. OFF by default.
-    ExecCost,
-    /// dfx=thpark (leg-40B family A): user-stack park dump of hung
-    /// binder SERVER threads from the txn-hunt audit — 48 frame words
-    /// above the parked syscall's entry sp, VMA+fileoff+instruction
-    /// bytes for offline symbolize against the image's libraries.
-    /// Names the image-side handler chain that entered a nested sync
-    /// txn (the mutual-ABBA candidate side, sc334B tid472<->841
-    /// shape). Deliberately SEPARATE from ParkDump: that switch also
-    /// arms the freeze-scan full-tgid dumps whose UART volume is the
-    /// known boot-timing dodge amplifier (sc186-188); this one is
-    /// latched (once per tid per boot, 2 per 5 s burst, 16 per boot).
-    /// OFF by default.
-    ThPark,
-    /// leg-40C perf rider: user-mode rip sampling for launcher-comm
-    /// tasks (page-bucketed histogram + utime/stime split), reported
-    /// every 60 s from the tick path. OFF by default.
-    RipSample,
-    /// dfx=tfdcensus (oh-launcher lane): windowed timerfd_create caller
-    /// census — the syscost boots showed a 4k/s timerfd_create storm
-    /// (833k calls by t=240s, several CPUs of kernel work) whose caller
-    /// the boot-start TFDC budget could never name. Behind this switch
-    /// the TFDC tap prints the first 16 calls of every 5s window, so
-    /// every boot phase names its storm caller. Purely diagnostic; OFF
-    /// by default.
-    TfdCensus,
-    /// dfx=scmtap (gdm session-fifo hunt, session 21): SCM_RIGHTS relay
-    /// tap — one line per unix sendmsg that attaches fds (TX), per
-    /// recvmsg that installs them (RX with the new fd numbers), per
-    /// drop (no control room / EFAULT / EMFILE / queue orphaned at
-    /// socket close), plus the fifo last-writer-close line. Answers,
-    /// from the kernel side, where the CreateSession reply's session
-    /// fd dies between logind → dbus-daemon → pam (the "Session c1
-    /// logged out" milliseconds-after-create shape). OFF by default.
-    ScmTap,
-    /// dfx=sysforensic (perf-syscall lane): arms the per-syscall forensic
-    /// instruments the dispatcher carried unconditionally before the perf
-    /// sprint — the SYSCALL_RING double-record, the per-task fail rings,
-    /// the comm-scanning sc-hooks. OFF in production boots (p1_null paid
-    /// 12 atomics per syscall for them).
-    SysForensic,
-    /// dfx=filerd (perf-filerd lane): cached-file read(2) cost anatomy —
-    /// RDTSC phase counters (lock/pin/copy/unpin/epilog) around the ext4
-    /// read fast path, reported via /proc/filerd. Built to attribute the
-    /// bw_file_rd 50x lmbench gap; see dfx/filerd.rs.
-    FilerdProbe,
-    /// dfx=lostpark (fix-lostpark lane): SMP lost-park forensics — the
-    /// idle-loop lie detector (a CPU about to idle while its per-CPU
-    /// current slot still names a real task, with the SLOT_WRITER tag
-    /// that names the slot's last writer) plus the wake-skip census for
-    /// wakes refused while nothing is runnable. Rate-limited direct-
-    /// console lines; OFF by default.
-    LostParkTrace,
-    /// Allocator class-lock holder watch (dfx/allocwatch.rs): mm sites
-    /// stamp (pid, site, class, jiffies) at small_alloc/slab/buddy
-    /// class-lock acquire; scheduler_tick scans ALL stamps cross-CPU and
-    /// reports any held >1 s with the holder's task state — a frozen
-    /// holder sits at IF=0 so its OWN tick is dead and every same-CPU
-    /// observer is blind to it (the OH allocator-freeze family,
-    /// 2026-11-02). OFF by default; Relaxed atomic stores per slow-path
-    /// acquire when on, nothing but one load when off.
-    AllocWatch,
-    /// Reference-parity sync-send guards as a DIAGNOSTIC (ipc/binder.rs
-    /// SYNCSEND-GUARD prints): log-only mode would still reject, so the
-    /// switch gates the REJECTION itself. The reference kernel enforces
-    /// these two checks always; enabling this switch on an OH boot names
-    /// which userspace sends violate the reference shape under our
-    /// bookkeeping (lb304: samgr's own early code-20/code-3 sends —
-    /// meaning our sender-thread state diverges from the reference's
-    /// BEFORE the guard, and that divergence is the real hunt target).
-    SyncGuard,
-    /// Log-only companion of SyncGuard: runs the same two reference
-    /// checks on every sync send but NEVER rejects (SYNCSEND-WATCH
-    /// prints). For the divergence hunt: a boot with syncwatch shows
-    /// which sender shapes trip the reference checks on a boot that
-    /// still PROCEEDS, and the print carries the discriminator fields
-    /// (stack-top from_tid — my own outgoing = userspace stacking the
-    /// reference rejects; todo-head to_tid — None means proc-addressed
-    /// work on a busy thread's todo, a delivery shape the reference
-    /// avoids via waiting_threads).
-    SyncWatch,
-    /// Param-service socket monitor (66th, the 105-timeout hunt): the
-    /// PCTL-SEND tap without hilogtap's record-scan cost, plus the
-    /// connect/accept/close lifecycle of every paramservice-classified
-    /// unix socket with queue depths — locates where an ohos.ctl.start
-    /// request dies (client send vs queued-unread vs dead connection).
-    /// Zero cost when off.
-    PctlMon,
-    /// pid=1 RUNNING-spin watch (69th, the 105-family hunt): ohw75
-    /// proved init goes 100%-CPU RUNNING and silent from t=34.7 while
-    /// every param child goes unread (the sole remaining 105 cause).
-    /// Every ~2 s of heartbeat, if pid 1 is on-CPU RUNNING, print its
-    /// kernel-entry frame (syscall nr, user rip, args) — for a
-    /// userspace spin the rip lands inside the spin loop; for a
-    /// syscall loop the nr names the call. Rate-capped; zero cost off.
-    Pid1Spin,
 }
 
-const SWITCH_COUNT: usize = 49;
+const SWITCH_COUNT: usize = 6;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -513,62 +169,20 @@ macro_rules! build_name {
 impl DfxSwitch {
     fn index(self) -> usize {
         match self {
-            // Renumbering note (dfx-migrate round): the nine rows that
-            // moved to the unified trace framework (epolltrace,
-            // schedtrace, futextrace, txnhunt, ohhunt, sigtrace,
-            // sysring, mmforensics, fuxstuck) left the table, so the
-            // surviving switches re-compact to 0..48 in table order.
-            // Cmdline lookup is by name, so the shift is invisible to
-            // users; indices only key the SWITCHES array.
-            DfxSwitch::Scribble => 0,
-            DfxSwitch::ScribblePark => 1,
-            DfxSwitch::ScribblePid1 => 2,
-            DfxSwitch::ScribbleSweep => 3,
-            DfxSwitch::InputTrace => 4,
-            DfxSwitch::DbFileTrace => 5,
-            DfxSwitch::EpollScan => 6,
-            DfxSwitch::ClaimInject => 7,
-            DfxSwitch::Strace1 => 8,
-            DfxSwitch::Steptrace => 9,
-            DfxSwitch::WriteTrace => 10,
-            DfxSwitch::OncpuInject => 11,
-            DfxSwitch::Ledger => 12,
-            DfxSwitch::BinderTrace => 13,
-            DfxSwitch::SyscallTrace => 14,
-            DfxSwitch::MonoWatch => 15,
-            DfxSwitch::TcpTrace => 16,
-            DfxSwitch::SleepSnap => 17,
-            DfxSwitch::SockSnap => 18,
-            DfxSwitch::DataTap => 19,
-            DfxSwitch::WildWatch => 20,
-            DfxSwitch::MetaWatch => 21,
-            DfxSwitch::ParkDump => 22,
-            DfxSwitch::Schb => 23,
-            DfxSwitch::KsProbe => 24,
-            DfxSwitch::R83HeapScan => 25,
-            DfxSwitch::LeakHunt => 26,
-            DfxSwitch::AcqDiv => 27,
-            DfxSwitch::WwCensus => 28,
-            DfxSwitch::TreeHunt => 29,
-            DfxSwitch::SfdDbg => 30,
-            DfxSwitch::Ams46 => 31,
-            DfxSwitch::VmaProbe => 32,
-            DfxSwitch::PoolCensus => 33,
-            DfxSwitch::SlowTask => 34,
-            DfxSwitch::ExtHunt => 35,
-            DfxSwitch::ExecCost => 36,
-            DfxSwitch::ThPark => 37,
-            DfxSwitch::RipSample => 38,
-            DfxSwitch::TfdCensus => 39,
-            DfxSwitch::ScmTap => 40,
-            DfxSwitch::SysForensic => 41,
-            DfxSwitch::FilerdProbe => 42,
-            DfxSwitch::LostParkTrace => 43,
-            DfxSwitch::AllocWatch => 44,
-            DfxSwitch::SyncGuard => 45,
-            DfxSwitch::SyncWatch => 46,
-            DfxSwitch::PctlMon => 47,
-            DfxSwitch::Pid1Spin => 48,
+            // Renumbering note (dfx-migrate round 5): the 43 rows that
+            // moved to the unified trace framework (39 families + the
+            // 4 dead tokens thpark/syncguard/syncwatch/pctlmon whose
+            // probe bodies no longer exist) left the table, so the six
+            // permanent switches (injection + gdb-park + the PTE-mutating
+            // wildwatch) compact to 0..5 in table order. Cmdline lookup
+            // is by name, so the shift is invisible to users; indices
+            // only key the SWITCHES array.
+            DfxSwitch::ClaimInject => 0,
+            DfxSwitch::OncpuInject => 1,
+            DfxSwitch::ScribblePark => 2,
+            DfxSwitch::ScribblePid1 => 3,
+            DfxSwitch::ScribbleSweep => 4,
+            DfxSwitch::WildWatch => 5,
         }
     }
 
@@ -600,33 +214,26 @@ pub fn oh_hunt_prints_on() -> bool {
         || crate::cmdline::get_param("sprobe").map(|v| v == "1").unwrap_or(false)
 }
 
-/// The ported-wave trace alias table (the migration ledger's port map).
+/// The retired dfx= tokens — the dfx-migrate migration ledger.
 ///
-/// Round 2 of the dfx-trace migration: enabling one of these `dfx=`
-/// switches ALSO arms its reference trace events and turns `tracing_on`
-/// on, so hunting scripts written against the bespoke switch keep
-/// working unchanged while the boot gains the reference event timeline
-/// (read through /sys/kernel/tracing) that the bespoke serial prints
-/// cannot carry. The bespoke prints themselves stay untouched until the
-/// hunts close (the ledger's do-not-delete rule).
+/// Rounds 4/4b/5 of the dfx-trace migration moved the switch families
+/// out of the bespoke table and into the unified trace framework: each
+/// family's gate is now a `rux:` trace event (armed via `trace_event=`
+/// or tracefs `set_event`), the bespoke serial prints became echo
+/// consumers of that same enable, and the old `dfx=` token survives as
+/// a boot ALIAS that arms the events the family used to arm — the
+/// retired family's own event FIRST, then the same reference-family
+/// events `trace_alias` armed for it before the migration (so an
+/// alias-armed boot records the identical timeline a pre-migration
+/// `dfx=` boot recorded, plus the new family event).
 ///
-/// Mapping notes:
-/// - the sched family (schedtrace/schb/periodic/taskdump/parkdump/
-///   sleepsnap/wwcensus) and the timeline switches (execcost/ohhunt/
-///   treehunt) map onto the sched:* events, per the ledger;
-/// - the syscall-family switches (syscalltrace/sysforensic/sysring) map
-///   onto raw_syscalls:sys_enter/sys_exit;
-/// - the futex-family switches (futextrace/fuxstuck/thpark) map onto
-///   raw_syscalls + the sched wake pair: the reference kernel has NO
-///   futex trace events (kernel/futex/* carries no tracepoints and
-///   include/trace/events/ has no futex.h — verified against the
-///   reference master), so the reference's own futex visibility IS the
-///   syscall boundary (uaddr/op in the sys_enter args) plus the wake
-///   outcome (sched_waking/sched_wakeup). No invented futex events;
-///   reference wins every dispute.
-pub fn trace_alias(switch: DfxSwitch) -> Option<&'static [&'static crate::trace::TraceEvent]> {
+/// The switch table above SHRANK with every row that moved here (62 →
+/// 49 in round 4, 49 → 6 in round 5); this table is the compatibility
+/// tail, not a second switch catalog.
+pub fn retired_trace_events(name: &str) -> Option<&'static [&'static crate::trace::TraceEvent]> {
     use crate::trace;
-    // The sched family: every sched:* event of the table.
+    // --- Reference-family event sets (the round-2 trace_alias table,
+    // folded here when round 5 removed the last switch that used them).
     static SCHED: &[&trace::TraceEvent] = &[
         &trace::EVENT_SCHED_SWITCH,
         &trace::EVENT_SCHED_WAKING,
@@ -653,7 +260,6 @@ pub fn trace_alias(switch: DfxSwitch) -> Option<&'static [&'static crate::trace:
         &trace::EVENT_SYS_ENTER,
         &trace::EVENT_SYS_EXIT,
     ];
-    static SIGNAL: &[&trace::TraceEvent] = &[&trace::EVENT_SIGNAL_GENERATE];
     static BINDER: &[&trace::TraceEvent] = &[
         &trace::EVENT_BINDER_TRANSACTION,
         &trace::EVENT_BINDER_TRANSACTION_RECEIVED,
@@ -667,21 +273,11 @@ pub fn trace_alias(switch: DfxSwitch) -> Option<&'static [&'static crate::trace:
         &trace::EVENT_MM_PAGE_ALLOC,
         &trace::EVENT_MM_PAGE_FREE,
     ];
-    static MM_PARTIAL: &[&trace::TraceEvent] = &[
-        &trace::EVENT_MARK_VICTIM,
-        &trace::EVENT_KMALLOC,
-        &trace::EVENT_KFREE,
-        &trace::EVENT_MM_PAGE_ALLOC,
-        &trace::EVENT_MM_PAGE_FREE,
-    ];
     static WRITE_TRACE: &[&trace::TraceEvent] = &[
         &trace::EVENT_PAGE_FAULT_KERNEL,
         &trace::EVENT_BLOCK_RQ_ISSUE,
         &trace::EVENT_BLOCK_RQ_COMPLETE,
     ];
-    // The round-3 ext4/jbd2 wave (the ledger's sfddbg/exthunt/filerd
-    // row): the fs write/sync/map/free funnels plus the journal commit
-    // bracket.
     static EXT4_JBD2: &[&trace::TraceEvent] = &[
         &trace::EVENT_EXT4_SYNC_FILE_ENTER,
         &trace::EVENT_EXT4_SYNC_FILE_EXIT,
@@ -693,9 +289,6 @@ pub fn trace_alias(switch: DfxSwitch) -> Option<&'static [&'static crate::trace:
         &trace::EVENT_JBD2_START_COMMIT,
         &trace::EVENT_JBD2_END_COMMIT,
     ];
-    // The round-3 rux:epoll wave (the ledger's epollscan/epolltrace row):
-    // the reference kernel carries no epoll trace events, so these are
-    // the documented-divergence rux: group events.
     static EPOLL: &[&trace::TraceEvent] = &[
         &trace::EVENT_EPOLL_CTL_INSERT,
         &trace::EVENT_EPOLL_CTL_REMOVE,
@@ -703,55 +296,7 @@ pub fn trace_alias(switch: DfxSwitch) -> Option<&'static [&'static crate::trace:
         &trace::EVENT_EPOLL_WAIT_EXIT,
         &trace::EVENT_EPOLL_DELIVERY,
     ];
-    match switch {
-        // The ledger's ready-to-port wave. (WwCensus is deliberately
-        // ABSENT: the ledger keeps the wild-write tripwires frozen —
-        // they are active detectors, not passive observability.)
-        DfxSwitch::Schb | DfxSwitch::ParkDump | DfxSwitch::SleepSnap => Some(SCHED),
-        DfxSwitch::SyscallTrace | DfxSwitch::SysForensic => Some(RAW_SYSCALLS),
-        DfxSwitch::ExecCost | DfxSwitch::TreeHunt => Some(SCHED_AND_SYSCALLS),
-        DfxSwitch::BinderTrace | DfxSwitch::DbFileTrace => Some(BINDER),
-        DfxSwitch::ThPark => Some(SCHED_AND_SYSCALLS),
-        // The round-2 kmem wave: allocator watches map onto the kmem
-        // events (the ledger's allocwatch/leakhunt/vmap/poolcensus/
-        // monowatch row) and memwatch's partial row (oom:mark_victim +
-        // the mm family).
-        DfxSwitch::AllocWatch
-        | DfxSwitch::LeakHunt
-        | DfxSwitch::VmaProbe
-        | DfxSwitch::PoolCensus
-        | DfxSwitch::MonoWatch => Some(KMEM),
-        // The ledger's writetrace row (partial): the kernel-fault and
-        // block-request views of the write path.
-        DfxSwitch::WriteTrace => Some(WRITE_TRACE),
-        // The round-3 ext4/jbd2 wave: the ledger's sfddbg/exthunt/filerd
-        // row now arms the reference ext4:/jbd2: family (the hunts'
-        // serial probes keep working alongside, per the ledger's
-        // do-not-delete rule).
-        DfxSwitch::SfdDbg | DfxSwitch::ExtHunt | DfxSwitch::FilerdProbe => Some(EXT4_JBD2),
-        // The round-3 epoll wave: epollscan arms the rux: epoll family.
-        DfxSwitch::EpollScan => Some(EPOLL),
-        _ => None,
-    }
-}
-
-/// The RETIRED dfx= tokens — the dfx-migrate migration ledger.
-///
-/// Round 3 of the dfx-trace migration moved nine switch families out
-/// of the bespoke table and into the unified trace framework: each
-/// family's gate is now a `rux:` trace event (armed via `trace_event=`
-/// or tracefs `set_event`), the bespoke serial prints became echo
-/// consumers of that same enable, and the old `dfx=` token survives as
-/// a boot ALIAS that arms the events the family used to arm — the
-/// retired family's own event FIRST, then the same reference-family
-/// events `trace_alias` armed for it before the migration (so an
-/// alias-armed boot records the identical timeline a pre-migration
-/// `dfx=` boot recorded, plus the new family event).
-///
-/// The switch table above SHRINKS with every row that moves here; this
-/// table is the compatibility tail, not a second switch catalog.
-pub fn retired_trace_events(name: &str) -> Option<&'static [&'static crate::trace::TraceEvent]> {
-    use crate::trace;
+    // --- Round 4/4b retired families.
     static FUXSTUCK: &[&trace::TraceEvent] = &[
         &trace::EVENT_FUXSTUCK,
         &trace::EVENT_SCHED_SWITCH,
@@ -856,6 +401,241 @@ pub fn retired_trace_events(name: &str) -> Option<&'static [&'static crate::trac
         &trace::EVENT_MM_PAGE_FREE,
     ];
     static WATCHDOG: &[&trace::TraceEvent] = &[&trace::EVENT_TASKDUMP];
+    // --- Round 5 retired families. Family event first, then the
+    // reference set the old trace_alias armed (families with no old
+    // alias arm only their family event).
+    static KSPROBE: &[&trace::TraceEvent] = &[&trace::EVENT_KSPROBE];
+    static WWCENSUS: &[&trace::TraceEvent] = &[&trace::EVENT_WWCENSUS];
+    static INPUTTRACE: &[&trace::TraceEvent] = &[&trace::EVENT_INPUTTRACE];
+    static DATATAP: &[&trace::TraceEvent] = &[&trace::EVENT_DATATAP];
+    static AMS46: &[&trace::TraceEvent] = &[&trace::EVENT_AMS46];
+    static SLOWTASK: &[&trace::TraceEvent] = &[&trace::EVENT_SLOWTASK];
+    static TFDCENSUS: &[&trace::TraceEvent] = &[&trace::EVENT_TFDCENSUS];
+    static SCMTAP: &[&trace::TraceEvent] = &[&trace::EVENT_SCMTAP];
+    static LOSTPARK: &[&trace::TraceEvent] = &[&trace::EVENT_LOSTPARK];
+    static R83SCAN: &[&trace::TraceEvent] = &[&trace::EVENT_R83SCAN];
+    static ACQDIV: &[&trace::TraceEvent] = &[&trace::EVENT_ACQDIV, &trace::EVENT_LEAKHUNT];
+    static METAWATCH: &[&trace::TraceEvent] = &[&trace::EVENT_METAWATCH];
+    static SCRIBBLE: &[&trace::TraceEvent] = &[&trace::EVENT_SCRIBBLE];
+    static TCPTRACE: &[&trace::TraceEvent] = &[&trace::EVENT_TCPTRACE];
+    static STRACE1: &[&trace::TraceEvent] = &[&trace::EVENT_STRACE1];
+    static RIPSAMPLE: &[&trace::TraceEvent] = &[&trace::EVENT_RIPSAMPLE];
+    static SOCKSNAP: &[&trace::TraceEvent] = &[&trace::EVENT_SOCKSNAP];
+    static LEDGER: &[&trace::TraceEvent] = &[&trace::EVENT_LEDGER];
+    static PID1SPIN: &[&trace::TraceEvent] = &[&trace::EVENT_PID1SPIN];
+    static PCTLMON: &[&trace::TraceEvent] = &[&trace::EVENT_PCTLMON];
+    static STEPTRACE: &[&trace::TraceEvent] = &[&trace::EVENT_STEPTRACE];
+    // thpark: the probe body was deleted before the migration (the
+    // txn-hunt audit carries the park questions now); the token still
+    // arms the timeline its old trace_alias armed.
+    static THPARK: &[&trace::TraceEvent] = &[
+        &trace::EVENT_SCHED_SWITCH,
+        &trace::EVENT_SCHED_WAKING,
+        &trace::EVENT_SCHED_WAKEUP,
+        &trace::EVENT_SCHED_WAKEUP_NEW,
+        &trace::EVENT_SCHED_PROCESS_FORK,
+        &trace::EVENT_SCHED_PROCESS_EXIT,
+        &trace::EVENT_SCHED_PROCESS_FREE,
+        &trace::EVENT_SCHED_PROCESS_WAIT,
+        &trace::EVENT_SCHED_MIGRATE_TASK,
+        &trace::EVENT_SYS_ENTER,
+        &trace::EVENT_SYS_EXIT,
+    ];
+    // Composed sets: family event + the reference families the old
+    // trace_alias armed (only where one existed).
+    static SCHB_ALIAS: &[&trace::TraceEvent] = &[
+        &trace::EVENT_SCHB,
+        &trace::EVENT_SCHED_SWITCH,
+        &trace::EVENT_SCHED_WAKING,
+        &trace::EVENT_SCHED_WAKEUP,
+        &trace::EVENT_SCHED_WAKEUP_NEW,
+        &trace::EVENT_SCHED_PROCESS_FORK,
+        &trace::EVENT_SCHED_PROCESS_EXIT,
+        &trace::EVENT_SCHED_PROCESS_FREE,
+        &trace::EVENT_SCHED_PROCESS_WAIT,
+        &trace::EVENT_SCHED_MIGRATE_TASK,
+    ];
+
+    static PARKDUMP_ALIAS: &[&trace::TraceEvent] = &[
+        &trace::EVENT_PARKDUMP,
+        &trace::EVENT_SCHED_SWITCH,
+        &trace::EVENT_SCHED_WAKING,
+        &trace::EVENT_SCHED_WAKEUP,
+        &trace::EVENT_SCHED_WAKEUP_NEW,
+        &trace::EVENT_SCHED_PROCESS_FORK,
+        &trace::EVENT_SCHED_PROCESS_EXIT,
+        &trace::EVENT_SCHED_PROCESS_FREE,
+        &trace::EVENT_SCHED_PROCESS_WAIT,
+        &trace::EVENT_SCHED_MIGRATE_TASK,
+    ];
+
+    static SLEEPSNAP_ALIAS: &[&trace::TraceEvent] = &[
+        &trace::EVENT_SLEEPSNAP,
+        &trace::EVENT_SCHED_SWITCH,
+        &trace::EVENT_SCHED_WAKING,
+        &trace::EVENT_SCHED_WAKEUP,
+        &trace::EVENT_SCHED_WAKEUP_NEW,
+        &trace::EVENT_SCHED_PROCESS_FORK,
+        &trace::EVENT_SCHED_PROCESS_EXIT,
+        &trace::EVENT_SCHED_PROCESS_FREE,
+        &trace::EVENT_SCHED_PROCESS_WAIT,
+        &trace::EVENT_SCHED_MIGRATE_TASK,
+    ];
+
+    static BINDERTRACE_ALIAS: &[&trace::TraceEvent] = &[
+        &trace::EVENT_BINDERTRACE,
+        &trace::EVENT_BINDER_TRANSACTION,
+        &trace::EVENT_BINDER_TRANSACTION_RECEIVED,
+        &trace::EVENT_BINDER_TRANSACTION_ALLOC_BUF,
+        &trace::EVENT_BINDER_TRANSACTION_BUFFER_RELEASE,
+        &trace::EVENT_BINDER_WAIT_FOR_WORK,
+    ];
+
+    static SYSCALLTRACE_ALIAS: &[&trace::TraceEvent] = &[
+        &trace::EVENT_SYSCALLTRACE,
+        &trace::EVENT_SYS_ENTER,
+        &trace::EVENT_SYS_EXIT,
+    ];
+
+    static EXTHUNT_ALIAS: &[&trace::TraceEvent] = &[
+        &trace::EVENT_EXTHUNT,
+        &trace::EVENT_EXT4_SYNC_FILE_ENTER,
+        &trace::EVENT_EXT4_SYNC_FILE_EXIT,
+        &trace::EVENT_EXT4_EXT_MAP_BLOCKS_ENTER,
+        &trace::EVENT_EXT4_EXT_MAP_BLOCKS_EXIT,
+        &trace::EVENT_EXT4_DA_WRITE_BEGIN,
+        &trace::EVENT_EXT4_DA_WRITE_END,
+        &trace::EVENT_EXT4_FREE_BLOCKS,
+        &trace::EVENT_JBD2_START_COMMIT,
+        &trace::EVENT_JBD2_END_COMMIT,
+    ];
+
+    static SFDDBG_ALIAS: &[&trace::TraceEvent] = &[
+        &trace::EVENT_SFDDBG,
+        &trace::EVENT_EXT4_SYNC_FILE_ENTER,
+        &trace::EVENT_EXT4_SYNC_FILE_EXIT,
+        &trace::EVENT_EXT4_EXT_MAP_BLOCKS_ENTER,
+        &trace::EVENT_EXT4_EXT_MAP_BLOCKS_EXIT,
+        &trace::EVENT_EXT4_DA_WRITE_BEGIN,
+        &trace::EVENT_EXT4_DA_WRITE_END,
+        &trace::EVENT_EXT4_FREE_BLOCKS,
+        &trace::EVENT_JBD2_START_COMMIT,
+        &trace::EVENT_JBD2_END_COMMIT,
+    ];
+
+    static DBTRACE_ALIAS: &[&trace::TraceEvent] = &[
+        &trace::EVENT_DBTRACE,
+        &trace::EVENT_BINDER_TRANSACTION,
+        &trace::EVENT_BINDER_TRANSACTION_RECEIVED,
+        &trace::EVENT_BINDER_TRANSACTION_ALLOC_BUF,
+        &trace::EVENT_BINDER_TRANSACTION_BUFFER_RELEASE,
+        &trace::EVENT_BINDER_WAIT_FOR_WORK,
+    ];
+
+    static VMAP_ALIAS: &[&trace::TraceEvent] = &[
+        &trace::EVENT_VMAP,
+        &trace::EVENT_KMALLOC,
+        &trace::EVENT_KFREE,
+        &trace::EVENT_MM_PAGE_ALLOC,
+        &trace::EVENT_MM_PAGE_FREE,
+    ];
+
+    static POOLCENSUS_ALIAS: &[&trace::TraceEvent] = &[
+        &trace::EVENT_POOLCENSUS,
+        &trace::EVENT_KMALLOC,
+        &trace::EVENT_KFREE,
+        &trace::EVENT_MM_PAGE_ALLOC,
+        &trace::EVENT_MM_PAGE_FREE,
+    ];
+
+    static EXECCOST_ALIAS: &[&trace::TraceEvent] = &[
+        &trace::EVENT_EXECCOST,
+        &trace::EVENT_SCHED_SWITCH,
+        &trace::EVENT_SCHED_WAKING,
+        &trace::EVENT_SCHED_WAKEUP,
+        &trace::EVENT_SCHED_WAKEUP_NEW,
+        &trace::EVENT_SCHED_PROCESS_FORK,
+        &trace::EVENT_SCHED_PROCESS_EXIT,
+        &trace::EVENT_SCHED_PROCESS_FREE,
+        &trace::EVENT_SCHED_PROCESS_WAIT,
+        &trace::EVENT_SCHED_MIGRATE_TASK,
+        &trace::EVENT_SYS_ENTER,
+        &trace::EVENT_SYS_EXIT,
+    ];
+
+    static SYSFORENSIC_ALIAS: &[&trace::TraceEvent] = &[
+        &trace::EVENT_SYSFORENSIC,
+        &trace::EVENT_SYS_ENTER,
+        &trace::EVENT_SYS_EXIT,
+    ];
+
+    static FILERD_ALIAS: &[&trace::TraceEvent] = &[
+        &trace::EVENT_FILERD,
+        &trace::EVENT_EXT4_SYNC_FILE_ENTER,
+        &trace::EVENT_EXT4_SYNC_FILE_EXIT,
+        &trace::EVENT_EXT4_EXT_MAP_BLOCKS_ENTER,
+        &trace::EVENT_EXT4_EXT_MAP_BLOCKS_EXIT,
+        &trace::EVENT_EXT4_DA_WRITE_BEGIN,
+        &trace::EVENT_EXT4_DA_WRITE_END,
+        &trace::EVENT_EXT4_FREE_BLOCKS,
+        &trace::EVENT_JBD2_START_COMMIT,
+        &trace::EVENT_JBD2_END_COMMIT,
+    ];
+
+    static ALLOCWATCH_ALIAS: &[&trace::TraceEvent] = &[
+        &trace::EVENT_ALLOCWATCH,
+        &trace::EVENT_KMALLOC,
+        &trace::EVENT_KFREE,
+        &trace::EVENT_MM_PAGE_ALLOC,
+        &trace::EVENT_MM_PAGE_FREE,
+    ];
+
+    static LEAKHUNT_ALIAS: &[&trace::TraceEvent] = &[
+        &trace::EVENT_LEAKHUNT,
+        &trace::EVENT_KMALLOC,
+        &trace::EVENT_KFREE,
+        &trace::EVENT_MM_PAGE_ALLOC,
+        &trace::EVENT_MM_PAGE_FREE,
+    ];
+
+    static MONOWATCH_ALIAS: &[&trace::TraceEvent] = &[
+        &trace::EVENT_MONOWATCH,
+        &trace::EVENT_KMALLOC,
+        &trace::EVENT_KFREE,
+        &trace::EVENT_MM_PAGE_ALLOC,
+        &trace::EVENT_MM_PAGE_FREE,
+    ];
+
+    static EPOLLSCAN_ALIAS: &[&trace::TraceEvent] = &[
+        &trace::EVENT_EPOLLSCAN,
+        &trace::EVENT_EPOLL_CTL_INSERT,
+        &trace::EVENT_EPOLL_CTL_REMOVE,
+        &trace::EVENT_EPOLL_WAIT_SCAN,
+        &trace::EVENT_EPOLL_WAIT_EXIT,
+        &trace::EVENT_EPOLL_DELIVERY,
+    ];
+
+    static TREEHUNT_ALIAS: &[&trace::TraceEvent] = &[
+        &trace::EVENT_TREEHUNT,
+        &trace::EVENT_SCHED_SWITCH,
+        &trace::EVENT_SCHED_WAKING,
+        &trace::EVENT_SCHED_WAKEUP,
+        &trace::EVENT_SCHED_WAKEUP_NEW,
+        &trace::EVENT_SCHED_PROCESS_FORK,
+        &trace::EVENT_SCHED_PROCESS_EXIT,
+        &trace::EVENT_SCHED_PROCESS_FREE,
+        &trace::EVENT_SCHED_PROCESS_WAIT,
+        &trace::EVENT_SCHED_MIGRATE_TASK,
+        &trace::EVENT_SYS_ENTER,
+        &trace::EVENT_SYS_EXIT,
+    ];
+
+    static WRITETRACE_ALIAS: &[&trace::TraceEvent] = &[
+        &trace::EVENT_WRITETRACE,
+        &trace::EVENT_PAGE_FAULT_KERNEL,
+        &trace::EVENT_BLOCK_RQ_ISSUE,
+        &trace::EVENT_BLOCK_RQ_COMPLETE,
+    ];;
     match name {
         "taskdump" | "periodic" => Some(TASKDUMP),
         // The old watchdog switch had no trace alias; the retired token
@@ -871,70 +651,109 @@ pub fn retired_trace_events(name: &str) -> Option<&'static [&'static crate::trac
         "sigtrace" => Some(SIGTRACE),
         "futextrace" => Some(FUTEXTRACE),
         "epolltrace" => Some(EPOLLTRACE),
+        // Round 5: the park/census dump family.
+        "schb" => Some(SCHB_ALIAS),
+        "parkdump" => Some(PARKDUMP_ALIAS),
+        "sleepsnap" => Some(SLEEPSNAP_ALIAS),
+        "thpark" => Some(THPARK),
+        // Round 5: detectors and taps.
+        "ksprobe" => Some(KSPROBE),
+        "wwcensus" => Some(WWCENSUS),
+        "bindertrace" => Some(BINDERTRACE_ALIAS),
+        "syscalltrace" => Some(SYSCALLTRACE_ALIAS),
+        "inputtrace" => Some(INPUTTRACE),
+        "exthunt" => Some(EXTHUNT_ALIAS),
+        "sfddbg" => Some(SFDDBG_ALIAS),
+        "dbtrace" => Some(DBTRACE_ALIAS),
+        "datatap" => Some(DATATAP),
+        "ams46" => Some(AMS46),
+        "vmap" => Some(VMAP_ALIAS),
+        "poolcensus" => Some(POOLCENSUS_ALIAS),
+        "slowtask" => Some(SLOWTASK),
+        "execcost" => Some(EXECCOST_ALIAS),
+        "tfdcensus" => Some(TFDCENSUS),
+        "scmtap" => Some(SCMTAP),
+        "sysforensic" => Some(SYSFORENSIC_ALIAS),
+        "filerd" => Some(FILERD_ALIAS),
+        "lostpark" => Some(LOSTPARK),
+        "allocwatch" => Some(ALLOCWATCH_ALIAS),
+        "r83scan" => Some(R83SCAN),
+        "leakhunt" => Some(LEAKHUNT_ALIAS),
+        "acqdiv" => Some(ACQDIV),
+        "metawatch" => Some(METAWATCH),
+        "scribble" => Some(SCRIBBLE),
+        "monowatch" => Some(MONOWATCH_ALIAS),
+        "epollscan" => Some(EPOLLSCAN_ALIAS),
+        "treehunt" => Some(TREEHUNT_ALIAS),
+        "tcptrace" => Some(TCPTRACE),
+        "strace1" => Some(STRACE1),
+        "ripsample" => Some(RIPSAMPLE),
+        "socksnap" => Some(SOCKSNAP),
+        "writetrace" => Some(WRITETRACE_ALIAS),
+        "ledger" => Some(LEDGER),
+        "pid1spin" => Some(PID1SPIN),
+        "pctlmon" => Some(PCTLMON),
+        "steptrace" => Some(STEPTRACE),
         _ => None,
     }
 }
 
-/// Force a switch on/off programmatically (used by tests and the sysrq hook).
+/// Retired dfx= tokens whose instruments NO LONGER EXIST — the probe
+/// bodies were removed when their hunts closed (dfx-migrate round 5
+/// found them dead: no call sites anywhere in the tree). The tokens
+/// are recognized so old hunt rigs get an honest notice instead of the
+/// generic unknown-switch warning, but there is nothing to arm:
+///
+/// - `thpark` — the user-stack park-dump rode the txn-hunt audit,
+///   which the round-4 `rux:txnhang` migration replaced; the token
+///   still arms the audit timeline (see `retired_trace_events`), so it
+///   is NOT in this list.
+/// - `syncguard` / `syncwatch` — the reference-parity same-proc
+///   transaction rejection became UNCONDITIONAL kernel behavior
+///   (9349d7459 "the wedge family's door"); the switch no longer
+///   gated anything.
+pub fn dead_dfx_token(name: &str) -> bool {
+    matches!(name, "syncguard" | "syncwatch")
+}
+
+/// Force a switch on/off programmatically (used by the debugfs control
+/// files under /sys/kernel/debug/dfx/).
 pub fn set(switch: DfxSwitch, on: bool) {
     SWITCHES[switch.index()].store(on, Ordering::Relaxed);
-    // The ported-wave alias (round 2, restored round 3 after the main
-    // merge dropped it): arming a switch with an alias also arms its
-    // reference events and the tracing master, so `dfx=` hunt boots
-    // gain the event timeline without touching their scripts.
-    if on {
-        if let Some(events) = trace_alias(switch) {
-            for e in events.iter() {
-                e.enabled.store(true, Ordering::Relaxed);
-            }
-            crate::trace::set_tracing_on(true);
-        }
-    }
-    if let DfxSwitch::FilerdProbe = switch {
-        super::filerd::set_enabled(on);
-    }
-    if let DfxSwitch::LeakHunt = switch {
-        super::leakorigin::ENABLED.store(on, Ordering::Relaxed);
-    }
-    if let DfxSwitch::AcqDiv = switch {
-        super::leakorigin::DIVERGENT_PRINT.store(on, Ordering::Relaxed);
-    }
-    if let DfxSwitch::Scribble = switch {
-        #[cfg(feature = "x86_64")]
-        super::scribble::ENABLED.store(on, core::sync::atomic::Ordering::Relaxed);
-    }
-    if let DfxSwitch::LostParkTrace = switch {
-        super::lostpark::arm();
-    }
-    if let DfxSwitch::ScribblePark = switch {
-        #[cfg(feature = "x86_64")]
-        {
+    // The gdb-park switches park the machine for an external debugger
+    // (an ACTION — why they stayed out of the trace framework) but
+    // they also need the scribble detection engine live, so arming
+    // them arms `rux:scribble` too.
+    #[cfg(feature = "x86_64")]
+    {
+        if let DfxSwitch::ScribblePark = switch {
             super::scribble::PARK.store(on, Ordering::Relaxed);
             if on {
-                #[cfg(feature = "x86_64")]
-                super::scribble::ENABLED.store(true, Ordering::Relaxed);
+                crate::trace::EVENT_SCRIBBLE
+                    .enabled
+                    .store(true, Ordering::Relaxed);
             }
         }
-    }
-    if let DfxSwitch::ScribbleSweep = switch {
-        #[cfg(feature = "x86_64")]
-        {
-            super::scribble::PARK_SWEEP.store(on, Ordering::Relaxed);
-            if on {
-                #[cfg(feature = "x86_64")]
-                super::scribble::ENABLED.store(true, Ordering::Relaxed);
-            }
-        }
-    }
-    if let DfxSwitch::ScribblePid1 = switch {
-        #[cfg(feature = "x86_64")]
-        {
+        if let DfxSwitch::ScribblePid1 = switch {
             super::scribble::PARK_PID1.store(on, Ordering::Relaxed);
             if on {
-                #[cfg(feature = "x86_64")]
-                super::scribble::ENABLED.store(true, Ordering::Relaxed);
+                crate::trace::EVENT_SCRIBBLE
+                    .enabled
+                    .store(true, Ordering::Relaxed);
             }
         }
+        if let DfxSwitch::ScribbleSweep = switch {
+            super::scribble::PARK_SWEEP.store(on, Ordering::Relaxed);
+            if on {
+                crate::trace::EVENT_SCRIBBLE
+                    .enabled
+                    .store(true, Ordering::Relaxed);
+            }
+        }
+    }
+    #[cfg(not(feature = "x86_64"))]
+    {
+        let _ = (switch, on);
     }
 }
 
@@ -960,7 +779,7 @@ pub fn init_from_cmdline() {
                 crate::pr_info!("dfx: runtime switch '{}' enabled", name);
             }
             None => {
-                // Retired tokens (dfx-migrate round): the family now
+                // Retired tokens (dfx-migrate rounds): the family now
                 // lives in the unified trace framework — arm its events
                 // instead, exactly what the switch armed before.
                 match retired_trace_events(name) {
@@ -976,7 +795,14 @@ pub fn init_from_cmdline() {
                         );
                     }
                     None => {
-                        crate::pr_warn!("dfx: unknown switch '{}' ignored", name);
+                        if dead_dfx_token(name) {
+                            crate::pr_info!(
+                                "dfx: token '{}' retired; instrument removed (no events to arm)",
+                                name
+                            );
+                        } else {
+                            crate::pr_warn!("dfx: unknown switch '{}' ignored", name);
+                        }
                     }
                 }
             }

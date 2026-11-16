@@ -1239,7 +1239,7 @@ pub fn vfs_bind_mount(
                 // known from debugfs, a divergence here separates "guest
                 // mutated the tree" (runtime inodes) from "dcache went
                 // stale/wrong" (baked inos but lookup still misses).
-                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::DataTap)
+                if crate::trace::EVENT_DATATAP.armed()
                     && source.starts_with("/data/")
                 {
                     if let Ok(p) = path_lookup(&ok_until, 0) {
@@ -2657,8 +2657,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     // exactly what the serial needs to answer). (perf-syscall lane)
     // Hunt instrumentation — the two sbx_want/sbx_noise byte scans ran
     // on EVERY lookup in every boot; now only on sysforensic boots.
-    let sbx_tracing = crate::dfx::switches::enabled(
-            crate::dfx::switches::DfxSwitch::SysForensic)
+    let sbx_tracing = crate::trace::EVENT_SYSFORENSIC.armed()
         && (sbx_want(normalized.as_ref()) || sbx_want(pathname))
         && !sbx_noise(normalized.as_ref())
         && !sbx_noise(pathname);
@@ -3168,7 +3167,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
             // under /data so the dt boot can attribute each
             // "invisible" dir to either this cache or a real
             // on-disk absence.
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::DataTap) {
+            if crate::trace::EVENT_DATATAP.armed() {
                 let mut prefix = String::new();
                 for c2 in components.iter().take(ci + 1) {
                     prefix.push('/');

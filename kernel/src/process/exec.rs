@@ -108,7 +108,7 @@ pub(crate) fn do_execve_elf(
     // switch, its own rate-limit counter (approximate lockstep; both lines
     // carry pid+path for pairing).
     static EXECCOST2_N: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-    let ec2 = crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExecCost);
+    let ec2 = crate::trace::EVENT_EXECCOST.armed();
     let ec2_n = if ec2 {
         EXECCOST2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
     } else {

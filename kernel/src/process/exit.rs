@@ -1392,9 +1392,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         // the syscall-trace hunt that added them: default off behind
         // dfx=syscalltrace (sc129/sc131/sc135 hunts re-arm with the flag).
         if !((*current).pid() == (*current).tgid())
-            && crate::dfx::switches::enabled(
-                crate::dfx::switches::DfxSwitch::SyscallTrace,
-            )
+            && crate::trace::EVENT_SYSCALLTRACE.armed()
         {
             use core::fmt::Write;
             let mut s = alloc::string::String::new();
@@ -3053,7 +3051,7 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
         // walk" (heartbeat silent) from "reaping an endless stream"
         // (heartbeat + reap prints every second).
         if current_pid == 1
-            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Pid1Spin)
+            && crate::trace::EVENT_PID1SPIN.armed()
         {
             use core::sync::atomic::{AtomicU64, Ordering as O2};
             static LAST_EJ: AtomicU64 = AtomicU64::new(0);
@@ -3119,7 +3117,7 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
             // census: the same pid repeating (claim/release bug) vs an
             // endless zombie stream (exit-path bug) is a one-look call.
             if current_pid == 1
-                && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Pid1Spin)
+                && crate::trace::EVENT_PID1SPIN.armed()
             {
                 use core::sync::atomic::{AtomicU64, Ordering as O2};
                 static LAST_J: AtomicU64 = AtomicU64::new(0);

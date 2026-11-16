@@ -278,7 +278,7 @@ pub fn push_event(&self, event: InputEvent) {
             // guest's event source reaches the device at all). Line
             // rides the taskdump funnel (obs-hygiene): one atomic write,
             // not per-byte uart_putc_raw the kmsg flood could splice.
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
+            if crate::trace::EVENT_INPUTTRACE.armed() {
                 let n = self.events_pushed.fetch_add(1, Ordering::Relaxed);
                 if n < 24 {
                     let nm: alloc::vec::Vec<u8> = self
@@ -734,7 +734,7 @@ fn evdev_file_read(file: &File, buf: &mut [u8]) -> isize {
                 // how many events remained after this one. If this prints
                 // during a gesture the delivery chain is complete and any
                 // remaining failure is consumer-side semantics.
-                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
+                if crate::trace::EVENT_INPUTTRACE.armed() {
                     static RD_N: core::sync::atomic::AtomicU32 =
                         core::sync::atomic::AtomicU32::new(0);
                     let rn = RD_N.fetch_add(1, Ordering::Relaxed);
@@ -817,7 +817,7 @@ pub fn trace_open(dev: &EvdevDevice, file: &File, node: u32) {
             itt_msg(b"\n");
         }
     }
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
+    if !crate::trace::EVENT_INPUTTRACE.armed() {
         return;
     }
     let nm: alloc::vec::Vec<u8> = dev
@@ -890,7 +890,7 @@ fn evdev_file_poll(file: &File, events: u16) -> u16 {
         // splitting "dispatch never ran" from "dispatch ran, reported
         // ready, but the waiter still idled". Rate-limited: first 600
         // then 1-in-50 (a spinning poller must not flood the console).
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
+        if crate::trace::EVENT_INPUTTRACE.armed() {
             use core::sync::atomic::{AtomicU64, Ordering};
             static PL_N: AtomicU64 = AtomicU64::new(0);
             let n = PL_N.fetch_add(1, Ordering::Relaxed);
@@ -1090,7 +1090,7 @@ pub fn evdev_file_ioctl(file: &File, cmd: u32, arg: usize) -> Option<i64> {
     // EV_SYN/EV_KEY/EV_ABS, or whose name/id ioctls return garbage, is
     // rejected by consumers after open (opened-but-never-read is the
     // signature). Budgeted, first 30 ioctls per boot.
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
+    if crate::trace::EVENT_INPUTTRACE.armed() {
         static IO_N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
         let n = IO_N.fetch_add(1, Ordering::Relaxed);
         if n < 400 && (cmd >> 30) == 2 {
@@ -1243,7 +1243,7 @@ pub fn evdev_file_ioctl(file: &File, cmd: u32, arg: usize) -> Option<i64> {
                 let ev = (nr - NR_BIT_BASE) as usize;
                 if ev == 0 {
                     let types = evtype_bitmap(&device.ev_bits);
-                    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
+                    if crate::trace::EVENT_INPUTTRACE.armed() {
                         static TY_N: core::sync::atomic::AtomicU32 =
                             core::sync::atomic::AtomicU32::new(0);
                         let tn = TY_N.fetch_add(1, Ordering::Relaxed);
@@ -1596,7 +1596,7 @@ pub fn push_input_event(is_pointer: bool, event: InputEvent) {
         }
     }
 
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
+    if crate::trace::EVENT_INPUTTRACE.armed() {
         static PN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
         let pn = PN.fetch_add(1, Ordering::Relaxed);
         if pn < 10 {
@@ -1619,7 +1619,7 @@ pub fn push_input_event(is_pointer: bool, event: InputEvent) {
     // enough to survive a phantom flood while keeping full detail in
     // the common case (a quiet -display none boot has no events at
     // all, so anything printed here IS the anomaly).
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
+    if crate::trace::EVENT_INPUTTRACE.armed() {
         use core::sync::atomic::{AtomicU64, Ordering};
         static TRACE_SEQ: AtomicU64 = AtomicU64::new(0);
         static TRACE_SYN_SEQ: AtomicU64 = AtomicU64::new(0);

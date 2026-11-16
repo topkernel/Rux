@@ -453,7 +453,7 @@ pub fn ext4_ext_get_block(
     // fewer entries) is distinguishable from a broken index block.
     if header.eh_depth >= 1
         && (r.is_err() || *r.as_ref().unwrap_or(&0) == 0)
-        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt)
+        && crate::trace::EVENT_EXTHUNT.armed()
     {
         use core::sync::atomic::{AtomicUsize, Ordering};
         static MISSES: AtomicUsize = AtomicUsize::new(0);
@@ -481,7 +481,7 @@ pub fn ext4_ext_get_block(
 /// from a legitimately sparse file: a file that already grew past its
 /// root (see EXT-HUNT-GROW) should never again report a shallow root.
 pub fn exthunt_read_hole(ino: u32, i_block: &[u32; 15], logical_block: u64) {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt) {
+    if !crate::trace::EVENT_EXTHUNT.armed() {
         return;
     }
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -492,6 +492,7 @@ pub fn exthunt_read_hole(ino: u32, i_block: &[u32; 15], logical_block: u64) {
     if HOLES.fetch_add(1, Ordering::Relaxed) >= 80 {
         return;
     }
+    crate::trace::trace_exthunt(0, ino, logical_block, 0);
     let header = get_extent_header(i_block);
     crate::pr_info!(
         "EXT-HUNT-READHOLE pid={} ino={} logical={} root[magic={:x} depth={} entries={} max={}]",
@@ -542,7 +543,7 @@ static HUNT_WATCH_NEXT: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
 fn hunt_on() -> bool {
-    crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt)
+    crate::trace::EVENT_EXTHUNT.armed()
 }
 
 fn hunt_watch(ino: u32) {
@@ -963,7 +964,7 @@ fn find_block_in_external_extent_ex(
             // reader will turn this Err into a hole (zeros). Dump the
             // block header + first bytes so zeros / foreign data / a
             // reverted header are distinguishable.
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt) {
+            if crate::trace::EVENT_EXTHUNT.armed() {
                 use core::sync::atomic::{AtomicUsize, Ordering};
                 static BADS: AtomicUsize = AtomicUsize::new(0);
                 if BADS.fetch_add(1, Ordering::Relaxed) < 40 {
@@ -1485,7 +1486,7 @@ pub fn ext4_ext_append(
             node_header_mut(&mut root).eh_entries = 2;
             // dfx=exthunt: the tree just grew one level — the event the
             // ftest04/zzprobe4 all-zeros family correlates with.
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt) {
+            if crate::trace::EVENT_EXTHUNT.armed() {
                 use core::sync::atomic::{AtomicUsize, Ordering};
                 static GROWS: AtomicUsize = AtomicUsize::new(0);
                 if GROWS.fetch_add(1, Ordering::Relaxed) < 20 {

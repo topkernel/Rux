@@ -361,8 +361,8 @@ fn stack_cache_alloc() -> *mut u8 {
     #[cfg(not(target_arch = "x86_64"))]
     let bottom = plain_kstack_alloc();
     if !bottom.is_null() {
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Schb)
-            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::KsProbe)
+        if crate::trace::EVENT_SCHB.armed()
+            && crate::trace::EVENT_KSPROBE.armed()
         {
             // Fresh stack is visible to nobody else yet: zero it so the
             // free-side scan can measure the true high-water, and count it.
@@ -484,8 +484,8 @@ fn stack_cache_free(stack_bottom: *mut u8) {
     // Leg-16 anatomy (dfx=schb,ksprobe): the high-water scan + record
     // stash lives in free_kernel_stack (needs self for comm/pid); this
     // side only keeps the live count honest for the SC-ANAT kN column.
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Schb)
-        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::KsProbe)
+    if crate::trace::EVENT_SCHB.armed()
+        && crate::trace::EVENT_KSPROBE.armed()
     {
         KSTACK_LIVE.fetch_sub(1, Ordering::Relaxed);
     }
@@ -4666,7 +4666,7 @@ fn preempt_underflow_report(
     // for a post-heal underflow that is the REAL guard the heal zeroed
     // (a guard held across a scheduler point); for a booking split it is
     // the phantom's home site. Rate-gate already passed above.
-    if crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+    if crate::trace::EVENT_LEAKHUNT.armed() {
         if let Some(task) = crate::sched::current() {
             crate::dfx::leakorigin::report_outermost(
                 b"UNDERFLOW-ORIGIN",
@@ -5477,8 +5477,8 @@ impl Task {
             // upstream), no locks held — safe to walk. Records stash the
             // surviving return addresses for the next schbd beat (the
             // in-context print was eaten by early-boot UART storms twice).
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Schb)
-                && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::KsProbe)
+            if crate::trace::EVENT_SCHB.armed()
+                && crate::trace::EVENT_KSPROBE.armed()
             {
                 let base = stack_bottom as usize;
                 let mut off = 8usize; // skip the canary slot

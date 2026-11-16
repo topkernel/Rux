@@ -42,7 +42,7 @@
 
 /// Whether the tap is armed (`dfx=scmtap`).
 pub fn enabled() -> bool {
-    super::switches::enabled(super::switches::DfxSwitch::ScmTap)
+    crate::trace::EVENT_SCMTAP.armed()
 }
 
 /// Current task's (pid, comm) for the tap lines; (0, "?") outside

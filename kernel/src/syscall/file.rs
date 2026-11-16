@@ -37,7 +37,7 @@ const PATH_MAX: usize = 4096;
 /// walked /system/app tree is the install branch firing). Budgeted;
 /// OFF unless dfx=ams46.
 fn bmsscan_on() -> bool {
-    crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Ams46)
+    crate::trace::EVENT_AMS46.armed()
 }
 
 #[inline]
@@ -319,7 +319,7 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
     // dfx=syscalltrace only: ungated, hilogd.rd_kmsg copies the whole
     // trace from /dev/kmsg and eats a vCPU at KVM speed (b128/b129).
     if full_path.ends_with(".so")
-        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace)
+        && crate::trace::EVENT_SYSCALLTRACE.armed()
     {
         // Per-pid budget: a flat counter let hdf_devhost (~pid 418,
         // every lib searched across ~15 dirs) consume the whole budget
@@ -1383,7 +1383,7 @@ pub fn sys_getdents(args: SyscallArgs) -> i64 {
 /// — neither is the baked inode 79/41), so every relevant syscall's
 /// path + result is recorded kernel-side while dfx=datatap is on.
 fn datatap_enabled(path: &str) -> bool {
-    crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::DataTap)
+    crate::trace::EVENT_DATATAP.armed()
         && (path.starts_with("/data/") || path == "/data")
 }
 

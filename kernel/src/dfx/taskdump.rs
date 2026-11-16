@@ -1650,7 +1650,7 @@ pub fn sleep_snapshot_early() {
 /// Rate-capped (first 40 audits, then every 10th); zero cost when off.
 pub fn pid1spin_audit() {
     use core::sync::atomic::Ordering;
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Pid1Spin) {
+    if !crate::trace::EVENT_PID1SPIN.armed() {
         return;
     }
     static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -1725,6 +1725,7 @@ pub fn pid1spin_audit() {
     };
     let prev = PREV_RIP.swap(rip, Ordering::Relaxed);
     let steady = prev != 0 && prev == rip;
+    crate::trace::trace_pid1spin(0, 1, sys, rip);
     crate::pr_warn!(
         "PID1SPIN #{} jiffies={} running={} on_cpu={} sys={} rip={:#x} a0={:#x} a1={:#x} a2={:#x}{}",
         n,

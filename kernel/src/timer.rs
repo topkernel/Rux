@@ -509,7 +509,7 @@ pub fn timer_softirq_handler(_nr: usize) {
             // Hunt instrument (serial-noise policy): the WW/WW2/WW3 census
             // lines print only on dfx=wwcensus boots; ordinary boots keep
             // a clean serial prompt.
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WwCensus) {
+            if crate::trace::EVENT_WWCENSUS.armed() {
                 ww_heartbeat(now_time);
             }
             // leg-27: in-flight binder txn hang audit (dfx=txnhunt,
@@ -996,7 +996,7 @@ pub fn timer_softirq_handler(_nr: usize) {
     // dfx=monowatch: ~1 Hz timebase jump tripwire (backward motion or
     // multi-second spikes, clocksource named) — same printk discipline
     // as the periodic dump above.
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::MonoWatch) {
+    if crate::trace::EVENT_MONOWATCH.armed() {
         crate::dfx::monowatch::tick(current);
     }
 
@@ -1012,7 +1012,7 @@ pub fn timer_softirq_handler(_nr: usize) {
     // dfx=metawatch: buddy-meta shadow audit on a 10 s cadence (the
     // buddy face of the wild writer — see dfx/metawatch.rs). Throttle
     // is internal to the module.
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::MetaWatch) {
+    if crate::trace::EVENT_METAWATCH.armed() {
         crate::dfx::metawatch::tick(current);
     }
 

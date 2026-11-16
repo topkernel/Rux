@@ -96,7 +96,7 @@ fn fs_family(sys: u64) -> bool {
 
 /// Audit entry point (timer heartbeat, ~1 Hz caller; fires every 4th).
 pub fn tick() {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SlowTask) {
+    if !crate::trace::EVENT_SLOWTASK.armed() {
         return;
     }
     let round = ROUND.fetch_add(1, Ordering::Relaxed);
@@ -149,9 +149,7 @@ unsafe fn audit(now: u64) {
         // per task every audit round while wedged-hunting — answers
         // "which bookkeeping class does the vanished task rest in"
         // (runqueue, slots, wakeable state, pid-hash presence).
-        if crate::dfx::switches::enabled(
-            crate::dfx::switches::DfxSwitch::LostParkTrace,
-        ) && tk.pid() != 0
+        if crate::trace::EVENT_LOSTPARK.armed() && tk.pid() != 0
             && tk.pid() != u32::MAX
         {
             static LPALL_N: core::sync::atomic::AtomicU32 =
@@ -184,9 +182,7 @@ unsafe fn audit(now: u64) {
             // else ever names or heals it. Report it with the same
             // aging/chain discipline so the wedge capture names the
             // vanished poster.
-            if crate::dfx::switches::enabled(
-                crate::dfx::switches::DfxSwitch::LostParkTrace,
-            ) && tk.pid() != 0
+            if crate::trace::EVENT_LOSTPARK.armed() && tk.pid() != 0
                 && tk.pid() != u32::MAX
             {
                 let owned = (0..crate::config::MAX_CPUS)
@@ -243,9 +239,7 @@ unsafe fn audit(now: u64) {
             // recheck and no wake path names it — the vanished-task
             // signature of the ping-pong wedge. Name it once per audit
             // round with its parked chain.
-            if crate::dfx::switches::enabled(
-                crate::dfx::switches::DfxSwitch::LostParkTrace,
-            ) && tk.pid() != 0
+            if crate::trace::EVENT_LOSTPARK.armed() && tk.pid() != 0
                 && tk.pid() != u32::MAX
             {
                 notes.push(Note {
@@ -381,6 +375,7 @@ unsafe fn audit(now: u64) {
             }
         }
         let comm = core::str::from_utf8(&comm_buf[..comm_len]).unwrap_or("?");
+        crate::trace::trace_slowtask(0, n.pid, n.sys, n.epc);
         crate::pr_warn!(
             "SLOWTASK pid={} comm='{}' state={:#x} sys={} epc={:#x} a0={:#x} a1={:#x} age={}s",
             n.pid,
@@ -397,6 +392,7 @@ unsafe fn audit(now: u64) {
         print_parked_chain(n.pid, n.epc);
     }
     if lock_lines > 0 {
+        crate::trace::trace_slowtask(1, 0, lock_lines as u64, now);
         crate::pr_warn!("SLOWTASK-SUMMARY lockfamily={} round_j={}", lock_lines, now);
     }
 }

@@ -622,7 +622,7 @@ impl BuddyAllocator {
                     // for the deferred audit printer (dfx=scribble,
                     // x86_64 — the dfx scribble module is x86-only).
                     #[cfg(feature = "x86_64")]
-                    if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+                    if crate::trace::EVENT_SCRIBBLE.armed() {
                         let frames = crate::dfx::scribble::audit_frames();
                         crate::dfx::scribble::audit_record(
                             crate::dfx::scribble::AUDIT_KIND_HANDOFF,
@@ -664,7 +664,7 @@ impl BuddyAllocator {
                 // R69: also record the event with a caller backtrace for
                 // the deferred audit printer (dfx=scribble, x86_64).
                 #[cfg(feature = "x86_64")]
-                if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+                if crate::trace::EVENT_SCRIBBLE.armed() {
                     let frames = crate::dfx::scribble::audit_frames();
                     crate::dfx::scribble::audit_record(
                         crate::dfx::scribble::AUDIT_KIND_DOUBLE_FREE,
@@ -1041,7 +1041,7 @@ impl BuddyAllocator {
         // aliased) and record with a caller backtrace either way.
         // IN_TASK_FREE marks the legitimate release path.
         #[cfg(feature = "x86_64")]
-        if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+        if crate::trace::EVENT_SCRIBBLE.armed()
             && !crate::sched::sched::IN_TASK_FREE.load(core::sync::atomic::Ordering::Acquire)
             && crate::sched::sched::task_page_is_owned(ptr)
         {
