@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>内存取证 · Rux</title>
+<link rel="stylesheet" href="../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">首页</a>
+      <a href="../architecture/design.html">架构设计</a>
+      <a href="../performance/index.html">性能</a>
+      <a href="../security/index.html">安全</a>
+      <a href="../testing/index.html">测试</a>
+      <a href="index.html">调试</a>
+      <a href="../guides/getting-started.html">快速入门</a>
+      <a href="../progress/roadmap.html">项目进展</a>
+      <a href="../guestbook.html">留言</a>
+      <span class="lang-sw"><a class="on" href="memory.html">中文</a><a href="../en/debugging/memory.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">架构设计</div>
+    <a href="../architecture/design.html">架构与模块设计</a>
+    <a href="../architecture/scheduler.html">调度器</a>
+    <a href="../architecture/memory.html">内存管理</a>
+    <a href="../architecture/filesystem.html">文件系统</a>
+    <a href="../architecture/ipc.html">进程间通信</a>
+    <a href="../architecture/boot.html">启动流程</a>
+    <a href="../architecture/interrupts.html">中断与时钟</a>
+    <a href="../architecture/structure.html">代码结构</a>
+    <a href="../architecture/riscv64.html">架构移植指南</a>
+    <a href="../architecture/kernel-lock.html">锁序不变量</a>
+    <div class="grp">调试</div>
+    <a href="index.html">调试指南</a>
+    <a href="tracepoints.html">tracepoint 框架</a>
+    <a href="perf.html">性能调试</a>
+    <a href="locks.html">锁调试</a>
+    <a class="on" href="memory.html">内存取证</a>
+    <a href="panic.html">panic 与符号化</a>
+    <div class="grp">性能</div>
+    <a href="../performance/index.html">性能测试</a>
+    <div class="grp">安全</div>
+    <a href="../security/index.html">安全与形式验证</a>
+    <div class="grp">测试</div>
+    <a href="../testing/index.html">测试总览</a>
+    <a href="../testing/ci-pipeline.html">CI 流水线</a>
+    <a href="../testing/ltp.html">LTP 兼容扫描</a>
+    <a href="../testing/ltp-full.html">LTP 全量用例</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT 审计</a>
+    <a href="../testing/stability.html">稳定性</a>
+    <a href="../testing/stress.html">压力</a>
+    <a href="../testing/gnome-retrospective.html">回溯报告</a>
+    <div class="grp">开发指南</div>
+    <a href="../guides/getting-started.html">快速入门</a>
+    <a href="../guides/development.html">参与开发</a>
+    <a href="../guides/configuration.html">内核配置</a>
+    <div class="grp">项目进展</div>
+    <a href="../progress/roadmap.html">路线图</a>
+    <a href="../progress/changelog.html">更新日志</a>
+    <a href="../progress/quickref.html">命令速查</a>
+    <div class="grp">互动</div>
+    <a href="../guestbook.html">留言板</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>内存取证</h1>
+    <div class="sub">泄漏、破坏、OOM 与用户态段错误的专用取证仪器 —— 每件仪器回答的问题、武装方式与判读方法 · 依据:kernel/src/dfx/、docs/guides/debugging.md</div>
+
+    <h2 id="ledger"><span class="anchor">§1</span>dfx=ledger:物理页总分类账</h2>
+    <ul>
+      <li><b>回答的问题</b>:"内存去哪了?" —— 全部受管页经单次描述符遍历、按优先序分类入桶(free_linked / free_orphan[≤LEAK] / reserved / page_tables[PT_LEDGER 精确位图] / anon / cow / mapped_file / lru_file / other_used),桶和回总到 zone 计数器,<b>任何差额以显式 mismatch 行打印</b>。</li>
+      <li><b>判读</b>:mismatch = 0 → 真空耗尽;mismatch &gt; 0 → 记账漂移(泄漏或分类遗漏)。fake-OOM 家族(记账漂移伪装耗尽)与真空耗尽的判定依据即此。</li>
+      <li><b>武装</b>:<code>dfx=ledger</code>;OOM 时刻自动随取证块输出;UART 魔数 "LEDGER!" 触发。</li>
+    </ul>
+
+    <h2 id="mmforensics"><span class="anchor">§2</span>dfx=mmforensics:页表与帧取证</h2>
+    <ul>
+      <li><b>触发点</b>:RAW-FREE watchpoint(Zone::free_pages)、活页表释放拒绝、PTLEDGER DOUBLE-FREE 拒绝、FUT-STALE-TREE 普查。</li>
+      <li><b>输出</b>:事件时刻的页描述符状态、PT 台账位、该帧的"化身历史"(取证环:PT_STAMP_RING —— 含盖章树的根、PT_FREE_RING、ZTRACE_ALLOC/ZTRACE_FREE、PTEI_RING 数据页安装)、per-CPU pageset 行,以及<b>对内核反向映射缺失的补偿</b>:有界扫描全部活任务的页表树,找出指向该 pfn 的链接。</li>
+      <li><b>代价</b>:fork/exit 热路径有计账开销 —— 仅排查期武装。</li>
+    </ul>
+
+    <h2 id="memwatch"><span class="anchor">§3</span>dfx=memwatch 与 allocwatch</h2>
+    <ul>
+      <li><b>memwatch</b>:按尺寸类的 alloc/free 计数 + 大对象(2048&lt;size≤4096)调用点直方图(前 4 个帧指针返回哈希);周期转储走 taskdump 原始 UART 路径 —— 泄漏定位首选。</li>
+      <li><b>allocwatch</b>:<b>跨 CPU 持锁者点名</b> —— 等待者不能自报(打印会分配,而它正卡在分配器内);scheduler_tick 跨 CPU 扫描全部戳记,报告持锁 &gt;1 s 者及其任务状态。设计动机:分配器冻结家族的"镜像误报"判例(da27be84)—— 本仪器曾用于<b>排除</b>指控而非定罪,双向可用。</li>
+    </ul>
+
+    <h2 id="oom"><span class="anchor">§4</span>OOM 取证块</h2>
+    <ul>
+      <li>OOM 触发时的自动输出:SP-7 VscanCensus(逐页跳过原因)、直接回收门状态(持有者 pid + RECLAIM_GATE_EXIT_RELEASES 计数)、ledger 桶和、oom_control 细节(chosen/chosen_points/totalpages)。</li>
+      <li><b>判读路径</b>:先 ledger mismatch → 若为记账漂移,PT_LEDGER 位图与 anon/cow 桶定位漂移源;若真耗尽,VscanCensus 的 rc2/rc3/rc4 行定位回收失效分支。</li>
+    </ul>
+
+    <h2 id="usegv"><span class="anchor">§5</span>用户态段错误取证:USEGV 家族</h2>
+    <ul>
+      <li><b>USEGV-L</b>:用户态 SIGSEGV 的结构化行(pid/rip/cr2)—— 内核侧无 panic 时用户态崩溃的第一读取点。</li>
+      <li><b>USEGV-FOR</b>:cr2 落点归因 —— 例:"cr2 INSIDE BINDER BUFFER of proc … — stale daemon mapping dropped at fork (DONTFORK)":cr2 位于某进程 binder 缓冲区内 + fork 时陈旧守护映射被丢弃的注记,直接点名缺陷族。</li>
+      <li>shmat1 类测试自身缺陷的定责即依赖该行(宿主基线交叉表 + cr2 落点)。</li>
+    </ul>
+
+    <h2 id="scribble"><span class="anchor">§6</span>scribble 家族:控制字涂写猎捕</h2>
+    <ul>
+      <li>对 thread.{fs_base,gs_base,sp,callee.ret_addr} 与停放的 pt_regs 控制字建立影子 canary;静息点与 tick 双验证 —— 野写命中即报。</li>
+      <li><b>scribblepark / scribblepid1 / scribblesweep</b>:命中即停靠,配 GDB watchpoint 反向定位写入者(pty 深嵌套栈溢出事故即由此定位:memcpy at sp 低于栈底)。</li>
+    </ul>
+
+    <h2 id="hung"><span class="anchor">§7</span>挂起与软死锁检测</h2>
+    <ul>
+      <li><b>hung_task</b>(khungtaskd):TASK_UNINTERRUPTIBLE 且上下文切换计数不变的任务;HUNG_TASK_TIMEOUT_SECS = 120,检查间隔 = 超时/2。</li>
+      <li><b>softlockup</b>:per-CPU 时间戳于 scheduler_tick 更新,阈值 10 s。</li>
+      <li><b>sysrq</b>(/proc/sysrq-trigger):已实现 c(故意 panic)/d(持锁展示)/i(kill-all 除 init)/t(taskdump)/s(sync);未实现项打印显式提示(SAK/RT-nice 等)。</li>
+    </ul>
+
+    <h2 id="offline"><span class="anchor">§8</span>离线镜像取证(不启动)</h2>
+    <pre><code>debugfs -R "cat /var/log/kmsg" &lt;拷贝盘.img&gt;   <span class="c"># 崩溃后抽内核日志</span>
+e2fsck -f &lt;拷贝盘.img&gt;                          <span class="c"># 镜像完整性</span></code></pre>
+    <ul>
+      <li>持久日志开启后 panic 日志幸存于 /var/log/kmsg(kernel/src/main.rs 单行开关);崩溃现场无活机时此为唯一日志源。</li>
+      <li>拷盘用 reflink(宿主 cp --reflink)避免改写原盘;所有启动一律 -snapshot + file.locking=off。</li>
+    </ul>
+
+    <h2 id="recipes"><span class="anchor">§9</span>判读速查</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>症状</th><th>仪器路径</th></tr></thead>
+      <tbody>
+        <tr><td>怀疑泄漏</td><td>dfx=memwatch 按调用点记账 → 分配器卡死者用 allocwatch 点名 → ledger 确认总量</td></tr>
+        <tr><td>OOM 报告可信吗</td><td>ledger mismatch 判真耗尽/记账漂移 → VscanCensus 定回收失效分支</td></tr>
+        <tr><td>双重分配/帧破坏</td><td>dfx=mmforensics:PT 台账 + 戳环给帧化身史 + 全任务反向扫描找持有者</td></tr>
+        <tr><td>野写</td><td>scribble canary 命中停靠 → GDB watchpoint 定写入者</td></tr>
+        <tr><td>用户态崩溃</td><td>USEGV-L 行定 pid/rip/cr2 → USEGV-FOR 归因 cr2 落点</td></tr>
+        <tr><td>堆破坏(brk 类)</td><td>TRIMQ 类隔离区仪器在专用狩猎线(lane 分支);主线用 mmforensics + scribble 组合</td></tr>
+        <tr><td>崩溃后无活机</td><td>debugfs 离线抽 /var/log/kmsg → e2fsck -f 验镜像</td></tr>
+      </tbody>
+    </table></div>
+
+    <div class="callout">代码:<code>kernel/src/dfx/</code>(ledger/mmforensics/memwatch/scribble/oops/hung_task/softlockup)。相关:<a href="panic.html">panic 与符号化</a>、<a href="../architecture/memory.html">内存管理</a>。政策:本页仪器中 trace 事件化部分(rux:mmforensics/rux:memwatch)见 <a href="tracepoints.html">tracepoint 框架</a>;其余为 dfx= 遗留面(冻结)。</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">返回首页</a></span>
+
+      <span class="foot-stats">本站访问 <span id="busuanzi_value_site_pv"></span> 次 · 访客 <span id="busuanzi_value_site_uv"></span> 人</span></div>
+  </div>
+</footer>
+
+<script src="../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>

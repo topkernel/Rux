@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Memory forensics · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">Home</a>
+      <a href="../architecture/design.html">Architecture</a>
+      <a href="../performance/index.html">Performance</a>
+      <a href="../security/index.html">Security</a>
+      <a href="../testing/index.html">Testing</a>
+      <a href="index.html">Debugging</a>
+      <a href="../guides/getting-started.html">Getting started</a>
+      <a href="../progress/roadmap.html">Progress</a>
+      <a href="../guestbook.html">Feedback</a>
+      <span class="lang-sw"><a class="on" href="../../debugging/memory.html">中文</a><a href="memory.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="../architecture/design.html">Design deep-dive</a>
+    <a href="../architecture/scheduler.html">Scheduler</a>
+    <a href="../architecture/memory.html">Memory management</a>
+    <a href="../architecture/filesystem.html">Filesystem</a>
+    <a href="../architecture/ipc.html">IPC</a>
+    <a href="../architecture/boot.html">Boot flow</a>
+    <a href="../architecture/interrupts.html">Interrupts &amp; timers</a>
+    <a href="../architecture/structure.html">Code layout</a>
+    <a href="../architecture/riscv64.html">Porting guide</a>
+    <a href="../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Debugging</div>
+    <a href="index.html">Debugging guide</a>
+    <a href="tracepoints.html">Tracepoints</a>
+    <a href="perf.html">Performance debugging</a>
+    <a href="locks.html">Lock debugging</a>
+    <a class="on" href="memory.html">Memory forensics</a>
+    <a href="panic.html">Panic &amp; symbols</a>
+    <div class="grp">Performance</div>
+    <a href="../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../security/index.html">Security &amp; verification</a>
+    <div class="grp">Testing</div>
+    <a href="../testing/index.html">Overview</a>
+    <a href="../testing/ci-pipeline.html">CI pipeline</a>
+    <a href="../testing/ltp.html">LTP scan</a>
+    <a href="../testing/ltp-full.html">LTP full cases</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT audit</a>
+    <a href="../testing/stability.html">Stability</a>
+    <a href="../testing/stress.html">Stress</a>
+    <a href="../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../guides/getting-started.html">Getting started</a>
+    <a href="../guides/development.html">Contributing</a>
+    <a href="../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../progress/roadmap.html">Roadmap</a>
+    <a href="../progress/changelog.html">Changelog</a>
+    <a href="../progress/quickref.html">Commands</a>
+    <div class="grp">Community</div>
+    <a href="../guestbook.html">Guestbook</a>
+  </aside>
+
+    <article class="doc-main">
+    <h1>Memory forensics</h1>
+    <div class="sub">Dedicated forensic instruments for leaks, corruption, OOM and user-space segfaults — the question each instrument answers, how to arm it and how to read it · Sources: kernel/src/dfx/, docs/guides/debugging.md</div>
+
+    <h2 id="ledger"><span class="anchor">§1</span>dfx=ledger: the physical-page master ledger</h2>
+    <ul>
+      <li><b>The question it answers</b>: "where did the RAM go?" — every managed page is classified into exactly one bucket via a single descriptor pass, in precedence order (free_linked / free_orphan[≤LEAK] / reserved / page_tables[the PT_LEDGER exact bitmap] / anon / cow / mapped_file / lru_file / other_used), the buckets are summed back against the zone counters, and <b>any gap prints as an explicit mismatch line</b>.</li>
+      <li><b>Reading it</b>: mismatch = 0 → true exhaustion; mismatch &gt; 0 → accounting drift (a leak or a classification gap). This is the tool that separated the fake-OOM family (accounting drift masquerading as exhaustion) from true exhaustion.</li>
+      <li><b>Arming</b>: <code>dfx=ledger</code>; it also emits automatically with the OOM forensic block; the UART magic "LEDGER!" triggers on demand.</li>
+    </ul>
+
+    <h2 id="mmforensics"><span class="anchor">§2</span>dfx=mmforensics: page-table and frame forensics</h2>
+    <ul>
+      <li><b>Trigger sites</b>: the RAW-FREE watchpoint (Zone::free_pages), live-page-table release refusal, PTLEDGER DOUBLE-FREE refusal, the FUT-STALE-TREE census.</li>
+      <li><b>Output</b>: the page-descriptor state at the event, the PT-ledger bit, the frame's "incarnation history" (the forensic rings: PT_STAMP_RING — including the stamping tree's ROOT —, PT_FREE_RING, ZTRACE_ALLOC/ZTRACE_FREE, PTEI_RING data-page installs), per-CPU pageset rows, and <b>compensation for the kernel's missing reverse map</b>: a bounded scan of every live task's page-table tree for links pointing at the pfn.</li>
+      <li><b>Cost</b>: accounting overhead on the fork/exit hot paths — arm during investigations only.</li>
+    </ul>
+
+    <h2 id="memwatch"><span class="anchor">§3</span>dfx=memwatch and allocwatch</h2>
+    <ul>
+      <li><b>memwatch</b>: per-size-class alloc/free counters + a call-site histogram for large objects (2048&lt;size≤4096, hashed from the first 4 frame-pointer returns); periodic dumps ride the taskdump raw-UART path — the first choice for leak localization.</li>
+      <li><b>allocwatch</b>: <b>cross-CPU holder naming</b> — a waiter cannot report itself (printing allocates, and it is stuck inside the allocator); scheduler_tick scans all stamps cross-CPU and reports anything held &gt;1 s with the holder's task state. Design note: the allocator-freeze family's "instrument mirage" verdict (da27be84) — this instrument once served to <b>exonerate</b> an accusation rather than convict; it works in both directions.</li>
+    </ul>
+
+    <h2 id="oom"><span class="anchor">§4</span>The OOM forensic block</h2>
+    <ul>
+      <li>Automatic output at OOM: the SP-7 VscanCensus (per-page skip reasons), the direct-reclaim gate state (holder pid + the RECLAIM_GATE_EXIT_RELEASES counter), the ledger bucket sums, and the oom_control details (chosen/chosen_points/totalpages).</li>
+      <li><b>Reading path</b>: ledger mismatch first → for drift, the PT_LEDGER bitmap and the anon/cow buckets locate the source; for true exhaustion, VscanCensus's rc2/rc3/rc4 rows locate the failing reclaim branch.</li>
+    </ul>
+
+    <h2 id="usegv"><span class="anchor">§5</span>User-space segfault forensics: the USEGV family</h2>
+    <ul>
+      <li><b>USEGV-L</b>: a structured line for user-space SIGSEGVs (pid/rip/cr2) — the first read when a user process crashes without a kernel panic.</li>
+      <li><b>USEGV-FOR</b>: attributing the cr2 landing — e.g. "cr2 INSIDE BINDER BUFFER of proc … — stale daemon mapping dropped at fork (DONTFORK)": the cr2 sits inside a process's binder buffer, annotated with the fork-time stale-daemon-mapping discard, naming the defect family directly.</li>
+      <li>Adjudicating test-self-defects like shmat1 depends on this line (the host-baseline cross-table plus the cr2 landing).</li>
+    </ul>
+
+    <h2 id="scribble"><span class="anchor">§6</span>The scribble family: control-word scribble hunting</h2>
+    <ul>
+      <li>Shadow canaries over thread.{fs_base,gs_base,sp,callee.ret_addr} and the parked pt_regs control words; verified at both quiesce points and ticks — a wild write reports on hit.</li>
+      <li><b>scribblepark / scribblepid1 / scribblesweep</b>: park on hit and pair with a GDB watchpoint to walk back to the writer (the pty deep-nesting stack-overflow incident was located this way: a memcpy at sp below the stack bottom).</li>
+    </ul>
+
+    <h2 id="hung"><span class="anchor">§7</span>Hang and soft-lockup detection</h2>
+    <ul>
+      <li><b>hung_task</b> (khungtaskd): tasks in TASK_UNINTERRUPTIBLE with an unchanged context-switch count; HUNG_TASK_TIMEOUT_SECS = 120, check interval = timeout/2.</li>
+      <li><b>softlockup</b>: per-CPU timestamps updated in scheduler_tick, threshold 10 s.</li>
+      <li><b>sysrq</b> (/proc/sysrq-trigger): implemented c (deliberate crash)/d (show held locks)/i (kill-all except init)/t (taskdump)/s (sync); unimplemented items print explicit notices (SAK/RT-nice etc.).</li>
+    </ul>
+
+    <h2 id="offline"><span class="anchor">§8</span>Offline image forensics (no boot)</h2>
+    <pre><code>debugfs -R "cat /var/log/kmsg" &lt;copied.img&gt;   <span class="c"># extract the kernel log after a crash</span>
+e2fsck -f &lt;copied.img&gt;                          <span class="c"># image integrity</span></code></pre>
+    <ul>
+      <li>With the persistent log enabled, panic logs survive in /var/log/kmsg (a one-line switch in kernel/src/main.rs); with no live machine after a crash, this is the only log source.</li>
+      <li>Copy images with reflink (host cp --reflink) to avoid mutating the original; all boots run -snapshot + file.locking=off.</li>
+    </ul>
+
+    <h2 id="recipes"><span class="anchor">§9</span>Reading quick-reference</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Symptom</th><th>Instrument path</th></tr></thead>
+      <tbody>
+        <tr><td>Suspected leak</td><td>dfx=memwatch per-site accounting → allocwatch to name a stuck holder → ledger to confirm totals</td></tr>
+        <tr><td>Is the OOM report trustworthy</td><td>ledger mismatch decides true exhaustion vs accounting drift → VscanCensus locates the failing reclaim branch</td></tr>
+        <tr><td>Double allocation/frame corruption</td><td>dfx=mmforensics: the PT ledger + stamp rings give the frame's incarnation history + the all-task reverse scan finds the holder</td></tr>
+        <tr><td>Wild write</td><td>scribble canary parks on hit → GDB watchpoint walks to the writer</td></tr>
+        <tr><td>User-space crash</td><td>the USEGV-L line names pid/rip/cr2 → USEGV-FOR attributes the cr2 landing</td></tr>
+        <tr><td>Heap corruption (brk class)</td><td>the TRIMQ-class isolation instruments live on their hunt lanes (branch-only); on main combine mmforensics + scribble</td></tr>
+        <tr><td>Crash with no live machine</td><td>debugfs extracts /var/log/kmsg offline → e2fsck -f validates the image</td></tr>
+      </tbody>
+    </table></div>
+
+    <div class="callout">Code: <code>kernel/src/dfx/</code> (ledger/mmforensics/memwatch/scribble/oops/hung_task/softlockup). Related: <a href="panic.html">panic &amp; symbols</a>, <a href="../architecture/memory.html">memory management</a>. Policy: the trace-event-migrated parts of this page (rux:mmforensics/rux:memwatch) are on <a href="tracepoints.html">tracepoints</a>; the rest is the frozen dfx= legacy surface.</div>
+  
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to home</a></span>
+
+      <span class="foot-stats">Site visits <span id="busuanzi_value_site_pv"></span> · Visitors <span id="busuanzi_value_site_uv"></span></span></div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>
