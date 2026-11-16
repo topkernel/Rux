@@ -235,6 +235,12 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         {
             crate::syscall::io::syscall_eio_line(sc_nr, syscall_get_arguments(regs));
         }
+        // launcher-errno lane: every failing syscall (EAGAIN excluded —
+        // the idle-park storm would drown the signal) feeds the
+        // per-(nr, errno) census. Two compares when syscost is off.
+        if rv < 0 && rv != -11 {
+            crate::dfx::syscost::note_errno(sc_nr, rv, syscall_get_arguments(regs)[0]);
+        }
     }
     crate::dfx::syscost::exit(sc_nr, sc_t0);
     // pa15 recv-family fd census (hilogd.server dual-drain evidence for

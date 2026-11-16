@@ -1144,6 +1144,88 @@ pub fn note_read_fail(fd: usize, ret: i64) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// launcher-errno lane: the per-(syscall, errno) census. The why-slow boot
+// error-stream diff convicted five divergences from kmsg ERROR rows, but
+// the launcher-leg freeze (8-17 s, foundation) produces ZERO kmsg rows —
+// the remaining divergence class is silent errno answers. This census
+// counts every syscall exit with a negative return (EAGAIN excluded: the
+// known idle-park storm would drown the signal), keyed by (nr, errno),
+// with first-seen boot-time, first comm and first a0 so a cell can be
+// attributed to a window and a caller. Printed at every SYSCOST dump.
+// ---------------------------------------------------------------------------
+
+struct ErrSlot {
+    nr: AtomicU64,
+    err: AtomicI64,
+    n: AtomicU64,
+    /// First-seen boot time, ms (only written on cell creation).
+    first_ms: AtomicU64,
+    /// First-seen comm (16 bytes, NUL-padded).
+    comm: [AtomicU8; 16],
+    /// First-seen a0 (fd or path pointer, depending on the syscall).
+    a0: AtomicU64,
+}
+
+const EMPTY_ERR: ErrSlot = ErrSlot {
+    nr: AtomicU64::new(0),
+    err: AtomicI64::new(0),
+    n: AtomicU64::new(0),
+    first_ms: AtomicU64::new(0),
+    comm: [const { AtomicU8::new(0) }; 16],
+    a0: AtomicU64::new(0),
+};
+
+static ERR_CENSUS: [ErrSlot; 96] = [const { EMPTY_ERR }; 96];
+
+/// Boot time in ms (the dump() clock, cheaper than a full time-of-day).
+fn boot_ms() -> u64 {
+    crate::drivers::timer::get_jiffies() as u64 * 1000
+        / crate::config::KERNEL_HZ as u64
+}
+
+/// Record one failing syscall (ret < 0, ret != -EAGAIN). Called from the
+/// syscall exit path; zero cost when syscost is off.
+pub fn note_errno(nr: usize, ret: i64, a0: u64) {
+    use core::sync::atomic::Ordering::Relaxed;
+    if !on() {
+        return;
+    }
+    // Match phase (cheap): count the existing (nr, err) cell.
+    for i in 0..ERR_CENSUS.len() {
+        if ERR_CENSUS[i].nr.load(Relaxed) != nr as u64 {
+            continue;
+        }
+        if ERR_CENSUS[i].err.load(Relaxed) != ret {
+            continue;
+        }
+        ERR_CENSUS[i].n.fetch_add(1, Relaxed);
+        return;
+    }
+    // Create phase: claim the first free cell (a racy double-claim only
+    // wastes a slot; the count stays right because the loser matches on
+    // the next call).
+    let comm: [u8; 16] = match crate::sched::current() {
+        // SAFETY: current task; comm is a fixed-size field.
+        Some(t) => unsafe { *(*t).comm() },
+        None => [0; 16],
+    };
+    for i in 0..ERR_CENSUS.len() {
+        if ERR_CENSUS[i].n.load(Relaxed) != 0 {
+            continue;
+        }
+        ERR_CENSUS[i].nr.store(nr as u64, Relaxed);
+        ERR_CENSUS[i].err.store(ret, Relaxed);
+        ERR_CENSUS[i].first_ms.store(boot_ms(), Relaxed);
+        for j in 0..16 {
+            ERR_CENSUS[i].comm[j].store(comm[j], Relaxed);
+        }
+        ERR_CENSUS[i].a0.store(a0, Relaxed);
+        ERR_CENSUS[i].n.store(1, Relaxed);
+        return;
+    }
+}
+
 /// pa9 positive-read census: call on every read() that returned data.
 /// See `RdDataSlot` for the design; zero cost when syscost is off.
 pub fn note_read_data(file: &crate::fs::File, n: usize, fd: usize) {
@@ -1624,6 +1706,52 @@ pub fn dump() {
             KMSG_N_SLEEP.load(Ordering::Relaxed),
             KMSG_FIRST_FLAGS.load(Ordering::Relaxed)
         );
+    }
+
+    // launcher-errno lane: the per-(nr, errno) census, sorted by count.
+    // First-seen boot-time attributes each cell to a boot phase; first
+    // comm + first a0 name the caller and its argument.
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        use alloc::vec::Vec;
+        let mut rows: Vec<(u64, i64, u64, u64, [u8; 16], u64)> = Vec::new();
+        for i in 0..ERR_CENSUS.len() {
+            let n = ERR_CENSUS[i].n.load(Relaxed);
+            if n == 0 {
+                continue;
+            }
+            let mut comm = [0u8; 16];
+            for j in 0..16 {
+                comm[j] = ERR_CENSUS[i].comm[j].load(Relaxed);
+            }
+            rows.push((
+                ERR_CENSUS[i].nr.load(Relaxed),
+                ERR_CENSUS[i].err.load(Relaxed),
+                n,
+                ERR_CENSUS[i].first_ms.load(Relaxed),
+                comm,
+                ERR_CENSUS[i].a0.load(Relaxed),
+            ));
+        }
+        rows.sort_by(|a, b| b.2.cmp(&a.2));
+        for (nr, err, n, first_ms, comm, a0) in rows {
+            let name = core::str::from_utf8(&comm)
+                .unwrap_or("?")
+                .split('\0')
+                .next()
+                .unwrap_or("?");
+            crate::pr_warn!(
+                "SYSCOST t={}s errno: nr={} err={} n={} first={}.{:03}s comm={} a0={:#x}",
+                secs,
+                nr,
+                err,
+                n,
+                first_ms / 1000,
+                first_ms % 1000,
+                name,
+                a0
+            );
+        }
     }
 
     // 38th (u2v wedge hunt): the syscall ring's newest 64 entries join the
