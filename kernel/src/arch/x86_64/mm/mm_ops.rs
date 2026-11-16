@@ -1836,17 +1836,17 @@ impl MmStruct {
         // snapshot / COW walk / VMA replay. One relaxed load when off.
         let fp = crate::dfx::forkprof::on();
         let fp_t_snap = if fp { crate::dfx::forkprof::now() } else { 0 };
-        let (cow_exempt, vma_snapshot): (Vec<(u64, u64)>, Vec<(PageVirtAddr, PageVirtAddr, VmaFlags, VmaType, i32, u64, usize, VmaOrigin)>) = {
+        let (cow_exempt, vma_snapshot, vma_ranges): (Vec<(u64, u64)>, Vec<(PageVirtAddr, PageVirtAddr, VmaFlags, VmaType, i32, u64, usize, VmaOrigin)>, Vec<(u64, u64)>) = {
             let parent_vma_guard = self.vma_read();
 
             // COW-exempt VMA regions (MAP_SHARED / device mappings). fork's COW
-            // walk historically write-protected EVERY user-writable PTE — in the
-            // PARENT too. A MAP_SHARED mapping then COW-faulted on the first
-            // post-fork store: the fault handler allocated a private copy and
-            // every subsequent store landed there, never in the shared backing
-            // (the fbterm framebuffer-freeze root cause on riscv64). Shared and
-            // device VMAs must be inherited as-is: bump the refcount, keep the
-            // write permission.
+            // walk historically write-protected EVERY user-writable PTE — in
+            // the PARENT too. A MAP_SHARED mapping then COW-faulted on the
+            // first post-fork store: the fault handler allocated a private
+            // copy and every subsequent store landed there, never in the
+            // shared backing (the fbterm framebuffer-freeze root cause on
+            // riscv64). Shared and device VMAs must be inherited as-is:
+            // bump the refcount, keep the write permission.
             let exempt: Vec<(u64, u64)> = parent_vma_guard
                 .iter()
                 .filter(|vma| {
@@ -1863,7 +1863,15 @@ impl MmStruct {
                     (vma.start(), vma.end(), vma.flags(), vma.vma_type(), vma.file_fd(), vma.file_size(), vma.offset(), vma.origin())
                 }).collect();
 
-            (exempt, snapshot)
+            // (sysmm-2x lane) Full VMA range list, same guard, same era:
+            // bounds the COW walk's leaf-table scans (see
+            // copy_page_table_cow). VMA iteration is sorted and disjoint.
+            let ranges: Vec<(u64, u64)> = parent_vma_guard
+                .iter()
+                .map(|vma| (vma.start().0 as u64, vma.end().0 as u64))
+                .collect();
+
+            (exempt, snapshot, ranges)
         };
         if fp {
             crate::dfx::forkprof::add(crate::dfx::forkprof::P_MM_SNAPSHOT, fp_t_snap);
@@ -1880,7 +1888,7 @@ impl MmStruct {
         // the function's own comment for the exclusion argument).
         let fp_t_cow = if fp { crate::dfx::forkprof::now() } else { 0 };
         let new_root_ppn = unsafe {
-            copy_page_table_cow(self, &cow_exempt).ok_or(MapError::OutOfMemory)?
+            copy_page_table_cow(self, &cow_exempt, &vma_ranges).ok_or(MapError::OutOfMemory)?
         };
         if fp {
             crate::dfx::forkprof::add(crate::dfx::forkprof::P_MM_COW, fp_t_cow);
@@ -2761,6 +2769,7 @@ pub(super) fn release_cache_mapping_pin(ppn: usize) {
 pub unsafe fn copy_page_table_cow(
     parent: &crate::mm::mm_struct::MmStruct,
     cow_exempt: &[(u64, u64)],
+    vma_ranges: &[(u64, u64)],
 ) -> Option<u64> {
     let parent_root_ppn = parent.root_ppn();
     // NOTE (launcher wall fix, session-3, updated for per-mm sections):
@@ -2936,7 +2945,47 @@ pub unsafe fn copy_page_table_cow(
                         let parent_pt = get_page_table_virt(ppn1 << PAGE_SHIFT);
                         let child_pt_ref = &mut *get_page_table_virt(child_pt_phys);
 
-                        for vpn1 in 0..512usize {
+                        // (sysmm-2x lane) VMA-RANGE-BOUNDED leaf scan —
+                        // same shape as free_user_page_tables: by the
+                        // mapping invariant only VMA-covered indices can
+                        // hold present PTEs. A fragmented parent (munmap
+                        // leaves emptied leaf tables behind) paid 512
+                        // streamed loads per table here — the mm_cow
+                        // 20 µs phase of the SMP-8 fork decomposition.
+                        // A table with no covering VMA still allocates
+                        // its child frame (the child links it, keeping
+                        // the tree shape) and keeps the full defensive
+                        // scan; >8 intersecting ranges likewise.
+                        let mut scan_windows: [(usize, usize); 8] = [(0, 0); 8];
+                        let mut n_windows = 0usize;
+                        {
+                            let wleaf_base = (vpn4 as u64) << 39
+                                | (vpn3 as u64) << 30
+                                | (vpn2 as u64) << 21;
+                            let wleaf_end = wleaf_base + (1u64 << 21);
+                            for &(rs, re) in vma_ranges {
+                                let s = rs.max(wleaf_base);
+                                let e = re.min(wleaf_end);
+                                if e <= s {
+                                    continue;
+                                }
+                                if n_windows == scan_windows.len() {
+                                    n_windows = 0; // too fragmented: full scan
+                                    break;
+                                }
+                                scan_windows[n_windows] = (
+                                    ((s - wleaf_base) >> 12) as usize,
+                                    ((e - wleaf_base) >> 12) as usize,
+                                );
+                                n_windows += 1;
+                            }
+                            if n_windows == 0 {
+                                scan_windows[0] = (0, 512);
+                                n_windows = 1;
+                            }
+                        }
+                        for &(win_lo, win_hi) in &scan_windows[..n_windows] {
+                        for vpn1 in win_lo..win_hi {
                             // Per-PTE atomicity vs demand/COW faults and
                             // mprotect/munmap: every access to this leaf
                             // table happens under the chunk's
@@ -3059,6 +3108,7 @@ pub unsafe fn copy_page_table_cow(
                         new_pte.ppn(),
                     );
                         }
+                        } // (sysmm-2x) end VMA-range-bounded leaf scan window
                     } // else (non-leaf) — end of leaf-table processing
                 } // end one-leaf-table chunk (PTE lock released)
 

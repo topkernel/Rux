@@ -911,6 +911,7 @@ pub fn pte_install_log(root_ppn: u64, va: u64, ppn: u64) {
 pub unsafe fn free_user_page_tables(
     pte: &crate::mm::mm_struct::PteLock,
     root_ppn: u64,
+    vma_ranges: &[(u64, u64)],
 ) {
     use crate::mm::{pfn_to_page, phys_to_pfn, phys_valid, free_pages};
     crate::dfx::memwatch::FUT_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -1144,7 +1145,46 @@ pub unsafe fn free_user_page_tables(
 
                 let table1 = get_page_table_virt(table1_phys);
 
-                for vpn1 in 0..512 {
+                // (sysmm-2x lane) VMA-RANGE-BOUNDED leaf scan: by the
+                // mapping invariant every mapped PTE lives inside some
+                // VMA, so only the PTE windows the caller's VMA snapshot
+                // covers can hold present entries. A fragmented mm (36
+                // leaf tables, 61 present PTEs after munmap-heavy
+                // phases) paid 512 streamed loads per table here — the
+                // whole 18 µs drop_ptfree phase of the SMP-8 fork-exit
+                // decomposition (forkprof=2, 2026-11-17). Windows are
+                // computed per table from the sorted, page-aligned VMA
+                // ranges; a table with NO covering VMA (or an empty
+                // range list, or >8 intersecting ranges) keeps the full
+                // defensive scan so orphan PTEs (invariant break) are
+                // still found and freed.
+                let mut scan_windows: [(usize, usize); 8] = [(0, 0); 8];
+                let mut n_windows = 0usize;
+                {
+                    let leaf_base = (vpn4 as u64) << 39 | (vpn3 as u64) << 30
+                        | (vpn2 as u64) << 21;
+                    let leaf_end = leaf_base + (1u64 << 21);
+                    for &(rs, re) in vma_ranges {
+                        let s = rs.max(leaf_base);
+                        let e = re.min(leaf_end);
+                        if e <= s {
+                            continue;
+                        }
+                        if n_windows == scan_windows.len() {
+                            n_windows = 0; // too fragmented: full scan
+                            break;
+                        }
+                        scan_windows[n_windows] =
+                            (((s - leaf_base) >> 12) as usize, ((e - leaf_base) >> 12) as usize);
+                        n_windows += 1;
+                    }
+                    if n_windows == 0 {
+                        scan_windows[0] = (0, 512);
+                        n_windows = 1;
+                    }
+                }
+                for &(win_lo, win_hi) in &scan_windows[..n_windows] {
+                for vpn1 in win_lo..win_hi {
                     let pte1 = (*table1).get(vpn1);
 
                     // Swap entry (P=0 leaf with the swap signature): the
@@ -1214,6 +1254,7 @@ pub unsafe fn free_user_page_tables(
                         }
                     }
                 }
+                } // (sysmm-2x) end VMA-range-bounded leaf scan
                 // FORENSIC: census the PT table before freeing it.
                 if get_alloc_stage() == AllocStage::Late && !PT_LEDGER.is_boot(ppn1) {
                     let live = PT_LEDGER.peek(ppn1) != 0;

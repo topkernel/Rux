@@ -314,6 +314,7 @@ pub(crate) fn do_execve_elf(
                 crate::arch::mm::mmu_init::free_user_page_tables(
                     &crate::mm::mm_struct::FRESH_TREE_PTE_LOCK,
                     self.0,
+                    &[],
                 );
             }
         }

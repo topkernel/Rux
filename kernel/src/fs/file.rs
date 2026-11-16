@@ -235,7 +235,27 @@ pub enum FileOpKind {
 /// NEW file after close(fd)+reopen (and made the legitimate re-ADD return
 /// EEXIST). A never-repeating generation keeps the identity stable for the
 /// description's lifetime without pinning the Arc.
-static FILE_ID_GENERATION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+///
+/// (sysmm-2x lane) The id is now PER-CPU: (cpu << 56) | local counter.
+/// A single global fetch_add made every File::new a cross-CPU
+/// cacheline RMW under the open/close storm (SMP-8: one line bounced
+/// across every vCPU opening files); the per-CPU prefix keeps global
+/// uniqueness (cpu < 64 ⇒ the top byte names the origin CPU) while the
+/// counter rides a per-CPU line. Uniqueness is all the registries
+/// (flock/ofd/lease/oasync) need — they compare for equality, never
+/// order. No irq bracket is needed (unlike CpuLocal::with): a racing
+/// fetch_add from an interrupt handler on the same CPU still yields a
+/// DISTINCT id, which is the whole contract.
+static FILE_ID_GENERATION_CPU: [core::sync::atomic::AtomicU64; 64] =
+    [const { core::sync::atomic::AtomicU64::new(1) }; 64];
+
+/// Allocate the next open-file-description id for THIS CPU.
+#[inline]
+fn next_file_id() -> u64 {
+    let cpu = (crate::arch::cpu_id() as usize) & 63;
+    let c = FILE_ID_GENERATION_CPU[cpu].fetch_add(1, Ordering::Relaxed);
+    ((cpu as u64) << 56) | (c & 0x00ff_ffff_ffff_ffff)
+}
 
 /// F4 route-4: one getdents64 listing cached per open file description.
 /// `file_getdents64` used to re-materialize the WHOLE directory on every
@@ -282,9 +302,10 @@ pub struct File {
     pub private_data: UnsafeCell<Option<*mut u8>>,
     /// close-on-exec flag (FD_CLOEXEC)
     pub cloexec: Spinlock<bool>,
-    /// R36-B1: unique open-file-description id (see FILE_ID_GENERATION).
-    /// Written once in File::new before the value is shared; readers only
-    /// need a plain u64 load (the Arc publication orders it).
+    /// R36-B1: unique open-file-description id (see
+    /// FILE_ID_GENERATION_CPU). Written once in File::new before the
+    /// value is shared; readers only need a plain u64 load (the Arc
+    /// publication orders it).
     pub file_id: u64,
     /// Serializes the whole read/write position sequence (get_pos →
     /// data op → set_pos) so concurrent readers/writers sharing this open
@@ -350,7 +371,7 @@ impl File {
             private_data: UnsafeCell::new(None),
             close_pending: core::sync::atomic::AtomicBool::new(false),
             cloexec: Spinlock::new(false),  // Default: don't set close-on-exec
-            file_id: FILE_ID_GENERATION.fetch_add(1, Ordering::Relaxed),
+            file_id: next_file_id(),
             io_lock: crate::sync::semaphore::Mutex::new(),
             f_owner: Spinlock::new(FileOwner::none()),
             f_signum: core::sync::atomic::AtomicI32::new(0),

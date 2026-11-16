@@ -125,6 +125,52 @@ ledger).
     kernels (same image); the table lands in this file when the run
     completes.
 
+## 6. pbench dual-kernel column (2026-11-17, sysmm-2x lane)
+
+Infrastructure: `test/pbench_boot.py --ref-kernel` (stages
+`test/pbench_ref_init.c` — mounts proc/sys/devtmpfs, wires the console,
+execs the same static musl probe — and boots the distro kernel on the
+packed rootfs). Rig: q35/KVM/`-cpu max`, smp8/2G, same probe binary
+and image shape both arms, Rux = main 9df618643 release.
+
+| Row | Rux | Reference | Ratio |
+|---|---|---|---|
+| p1_null | 0.050 µs | 0.050 µs | 1.00x |
+| p1_clock | 0.060 | 0.070 | **0.86x ahead** |
+| p2_ctxsw | 0.115 | 0.075 | 1.53x |
+| p3a_fault_anon | 0.010 | 0.260 | **0.04x ahead** |
+| p3b_fault_cow | 0.601 | 0.721 | **0.83x ahead** |
+| p3c_fault_file | 0.010 | 0.020 | **0.50x ahead** |
+| p4_fork_exit | 91.968 | 13.826 | **6.65x behind** |
+| p4_fork_exec | 114.409 | 26.580 | 4.30x behind |
+| p5a_pipe | 0.150 | 0.150 | 1.00x |
+| p5b_dgram_send | 0.160 | 0.210 | **0.76x ahead** |
+| p5b_dgram_recv_peek | 0.370 | 0.230 | 1.61x |
+| p5c/c2/c3 stream | 0.170 | 0.180-0.190 | ~0.9x ahead |
+| p5d_rt_read / rt_recv | 0.301 / 0.340 | 0.321 / 0.311 | 0.94x / 1.09x |
+| p5e_child_spin | 19.646 | 66.635 | **0.29x ahead** |
+| p6_stat | 0.491 | 0.220 | 2.23x |
+| p6_openclose | 0.942 | 0.371 | 2.54x |
+| p6_read_cached | 1.232 | 0.551 | 2.24x |
+| p6_append | 0.641 | 0.571 | 1.12x |
+
+Readings that update the queue:
+
+- The memory-fault family (p3a/p3b/p3c) is AHEAD — 25x, 1.2x, 2x
+  respectively. The historical "COW +58%" gap is retired: it was
+  anchored on a debug-profile kernel before the lazy-mm_cpumask
+  shootdown work landed.
+- The p4 fork/exec rows are the real MM gap (6.65x/4.30x at the
+  fragmented-parent shape; the lmbench lat_proc shape with a small
+  parent reads 0.80x AHEAD). Decomposition + first fix (VMA-bounded
+  walks) in `run/SYSMM-2X.md` (sysmm-2x lane); remaining levers:
+  munmap table freeing, per-table alloc cost, child wake-to-run
+  amplitude (bimodal 51-69 vs 90-107 µs — the wakeup-delivery family
+  of queue item 4).
+- p6 stat/openclose/read confirm the open-path queue (standing
+  lmbench rows); the sysmm-2x registry gates landed −11% on
+  lat_syscall open.
+
 ## 5. Artifacts
 
 - Battery driver + cmds: qa-suites worktree `run/bench-pair.sh`,

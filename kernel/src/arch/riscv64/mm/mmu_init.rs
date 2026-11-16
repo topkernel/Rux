@@ -1162,6 +1162,10 @@ pub(crate) unsafe fn release_user_leaf(
 pub unsafe fn free_user_page_tables(
     pte: &crate::mm::mm_struct::PteLock,
     root_ppn: u64,
+    // (sysmm-2x lane) VMA range snapshot bounding the leaf scans —
+    // implemented on the x86_64 twin first (platform priority); the
+    // riscv64 walk keeps its full scans and ignores the list.
+    _vma_ranges: &[(u64, u64)],
 ) {
     use crate::mm::{pfn_to_page, pfn_to_page_mut, phys_to_pfn, phys_valid, page_desc::PageFlag, free_pages};
     crate::dfx::memwatch::FUT_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);

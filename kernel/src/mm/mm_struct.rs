@@ -1373,12 +1373,22 @@ impl Drop for MmStruct {
             // Same treatment for the pinned-file table (get_vma_file
             // readers). The struct's own heap slot still follows the
             // grace-period wait below.
-            {
+            //
+            // (sysmm-2x lane) The VMA range list is snapshotted under the
+            // SAME write guard, before the tree is released: the teardown
+            // walk below uses it to bound its leaf-table scans (see
+            // free_user_page_tables).
+            let vma_ranges: alloc::vec::Vec<(u64, u64)> = {
                 let mut mgr = self.vma_write();
+                let ranges = mgr
+                    .iter()
+                    .map(|vma| (vma.start().0 as u64, vma.end().0 as u64))
+                    .collect();
                 // old tree's nodes are freed HERE, under the write lock
                 *mgr = VmaManager::new();
                 self.vma_files.write().clear();
-            }
+                ranges
+            };
             if fp {
                 crate::dfx::forkprof::add(crate::dfx::forkprof::P_DROP_VMAFREE, fp_t_vma);
             }
@@ -1458,7 +1468,7 @@ impl Drop for MmStruct {
                 // construction here (last-Arc + synchronize_rcu drain), so
                 // the teardown chunks never queue behind a live mm's
                 // sections.
-                crate::arch::mm::free_user_page_tables(self.pte_lock(), self.pgd);
+                crate::arch::mm::free_user_page_tables(self.pte_lock(), self.pgd, &vma_ranges);
             }
             if fp {
                 crate::dfx::forkprof::add(crate::dfx::forkprof::P_DROP_PTFREE, fp_t_pt);

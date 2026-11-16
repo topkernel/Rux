@@ -1176,6 +1176,21 @@ struct OAsyncEntry {
 
 static PIPE_OASYNC: crate::sync::spinlock::Spinlock<alloc::vec::Vec<OAsyncEntry>> =
     crate::sync::spinlock::Spinlock::new(alloc::vec::Vec::new());
+/// Live-entry mirror of PIPE_OASYNC (the RECORD_LOCK_COUNT pattern;
+/// sysmm-2x lane, 2026-11-17). File::drop's unregister reads this first
+/// and skips the lock + retain scan when 0 — O_ASYNC is off on default
+/// boots, so every close saves the pair. Soundness against a racing
+/// first registration: registration runs inside fcntl on a held File
+/// reference; File::drop runs after the last reference died, and the
+/// Arc refcount Release/Acquire chain orders the reader after the
+/// writer's length store.
+static OASYNC_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+#[inline]
+fn note_oasync_len(reg: &alloc::vec::Vec<OAsyncEntry>) {
+    OASYNC_COUNT.store(reg.len(), core::sync::atomic::Ordering::Release);
+}
 
 /// Refresh (or remove) this description's O_ASYNC registration after an
 /// fcntl touched f_owner/f_signum/O_ASYNC. No-op for non-pipe files.
@@ -1214,12 +1229,18 @@ pub fn oasync_register_pipe(file: &File, fd: i32) {
             owner_fd: fd,
         });
     }
+    note_oasync_len(&reg);
 }
 
 /// Drop a dying description's registration (File::drop).
 pub fn oasync_unregister_file(file_id: u64) {
+    // closegap: empty-table fast path — see OASYNC_COUNT.
+    if OASYNC_COUNT.load(core::sync::atomic::Ordering::Acquire) == 0 {
+        return;
+    }
     let mut reg = PIPE_OASYNC.lock();
     reg.retain(|e| e.file_id != file_id);
+    note_oasync_len(&reg);
 }
 
 /// Send the configured signal to an owner: process (1), process group
