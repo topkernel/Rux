@@ -54,6 +54,30 @@ python3 userspace/lmbench/make-report.py run/lmbench-rux.txt run/lmbench-linux.t
 
 <!--RESULTS-->
 
+## fork/exec phase anatomy (2026-11-17, forkprof=2, 61-69k samples, nohz_full=1)
+
+lat_proc fork 44.3 µs decomposed (per-fork kernel-side costs):
+
+- fork syscall: **9 µs total** — alloc 0, fdtable 0 (the single-lock
+  deep copy is already cheap at 84 occupied fds), mmfork 5 µs (COW
+  write-protect of ~84 PTEs at 4 µs), enqueue 0. Nothing left to cut
+  inside fork itself.
+- exit path: **15 µs total** — mmdrop 5 µs (Arc<MmStruct> final
+  release = mm teardown), drop_ptfree 4 µs (page-table free), plus
+  reparent/notify ≈ 0.
+- The remaining ~20 µs sits OUTSIDE both: two syscall entries
+  (~4-6 µs), schedule/pick on both sides, and the parent's wait4
+  (zombie reaping — release_task) which forkprof does not cover.
+
+Lever for the 2× target (17 µs): the exit teardown's synchronous
+mmdrop/ptfree — the reference frees page tables through
+tlb_finish_mmu batching and the mm through the delayed-put (rcu)
+path; both are already deferred shapes, ours are synchronous in the
+exiting task. Next round: measure the mmdrop/ptfree internals
+(buddy-page churn vs lock traffic) and port the delayed-put shape.
+fork/exec moved 54.6→40.3 (native-era) → 37.8-44.3 vs reference 33.9:
+the gap is 1.11-1.19x, the closest of the behind rows.
+
 ## Open-tail anatomy (2026-11-17, fsw pathcost, 20.7M opens, nohz_full=1)
 
 fsw=1 pathcost counters on the open/close storm (PC1 PRE bracket =
