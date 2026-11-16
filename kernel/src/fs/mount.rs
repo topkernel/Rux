@@ -397,6 +397,37 @@ pub fn do_mount(
             // hierarchy "name=systemd" is the only v1 consumer on this
             // rootfs, and it just needs the mount to succeed so the
             // cgroup.procs interface works (noble-desktop, 2026-11-13).
+            //
+            // cgroup v1 controller parity (launcher-errno lane, OH 6.6
+            // reference boot error stream): controller-bound v1 mounts
+            // FAIL with EINVAL on the reference — its kernel exposes
+            // the MEMORY controller only. OH init mounts /dev/cpuctl
+            // cpu, /dev/cpuset cpuset, /dev/pids pids and /dev/frz
+            // freezer (all EINVAL, logged and tolerated) plus
+            // /dev/memcg memory (succeeds). Our old behavior accepted
+            // every controller, so every follow-up chmod/chown/open row
+            // diverged (real cgroupfs nodes answering EPERM vs plain
+            // ENOENT on the reference's tmpfs dirs) — an ours-only
+            // error family. Mirror the reference: only the memory
+            // controller and generic mount tokens mount; any other
+            // controller token answers EINVAL.
+            if fs_type == "cgroup" {
+                if let Some(opts) = data {
+                    let disallowed = opts.split(',').any(|tok| {
+                        let tok = tok.trim();
+                        !tok.is_empty()
+                            && tok != "memory"
+                            && !tok.starts_with("name=")
+                            && !matches!(
+                                tok,
+                                "nodev" | "noexec" | "nosuid" | "rw" | "ro" | "remount"
+                            )
+                    });
+                    if disallowed {
+                        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+                    }
+                }
+            }
             crate::fs::cgroup::init_cgroupfs()
                 .map_err(|e| e as i32)?;
             crate::fs::cgroup::mount_cgroupfs(target)
