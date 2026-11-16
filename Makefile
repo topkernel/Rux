@@ -6,7 +6,13 @@
 
 # ---- Ubuntu native desktop (udesk) ----
 # Image and kernel artifacts
-UBUNTU_IMG ?= work/gnome-x86.img
+# 2026-11-16 (user directive): make ubuntu-run boots the FULL Ubuntu
+# 24.04 desktop image (debootstrap-noble + ubuntu-desktop, systemd 255)
+# from the image store — serial login root/rux. The runit-assembled GNOME
+# chain stays available as the override:
+#   UBUNTU_IMG=work/gnome-x86.img UBUNTU_INIT=/sbin/runit make ubuntu-run
+UBUNTU_IMG ?= /home/william/rux-images/ubuntu/ub2404.img
+UBUNTU_INIT ?= /sbin/init
 # Which x86_64 kernel profile `make ubuntu-run` builds and boots.
 # RELEASE by default — that is the shape the user boots, and the shape
 # the release perf gates measure. Override with UBUNTU_PROFILE=debug
@@ -118,7 +124,7 @@ ubuntu-image:
 # out (the 2026-11-16 dev-ttyS0.device timeout: an x86 bzImage built
 # before the uevent/netlink merge, booted from a post-merge tree).
 ubuntu-run: build-x86-$(UBUNTU_PROFILE) $(UBUNTU_IMG)
-	@echo "Starting Ubuntu GNOME desktop (x86_64, KVM, SDL window)..."
+	@echo "Starting full Ubuntu 24.04 (x86_64, KVM, SDL window; serial login root/rux)..."
 	@ROOTFS=$(UBUNTU_IMG) INIT=$(UBUNTU_INIT) NOBUILD=1 \
 	 PROFILE=$(UBUNTU_PROFILE) \
 	 KERNEL_ELF=$(CURDIR)/target/x86_64-unknown-none/$(UBUNTU_PROFILE)/rux \
