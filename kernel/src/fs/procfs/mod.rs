@@ -639,6 +639,15 @@ self.create_dynamic_file("cgroups", || {
         // Memory statistics (Linux layout).
         self.create_dynamic_file("vmstat", vmstat::generate);
         self.create_dynamic_file("buddyinfo", vmstat::generate_buddyinfo);
+        // /proc/slabinfo and /proc/vmallocinfo (launcher-errno lane):
+        // standard Linux root-owned debug files — OH init chmods/chowns
+        // both at boot and the chmod SUCCEEDS on the reference (the
+        // nodes exist there; ours was ENOENT, an ours-only error row).
+        // Content parity: the slabinfo v2.1 header with no caches (Rux
+        // has no SLAB allocator to report) and an empty vmallocinfo
+        // (no vmalloc regions are tracked).
+        self.create_dynamic_file("slabinfo", generate_slabinfo);
+        self.create_dynamic_file("vmallocinfo", generate_vmallocinfo);
         // Scheduler statistics (Linux layout).
         self.create_dynamic_file("schedstat", schedstat::generate);
         // Softirq statistics (Linux layout).
@@ -2898,6 +2907,23 @@ static PROCFS_NS_DIR_OPS: INodeOps = INodeOps {
 /// /proc/partitions — major minor #blocks name rows. Lists the root disk
 /// plus any bound loop devices (LTP tst_acquire_device's fallback probe
 /// and its "No free devices found" report read this).
+/// /proc/slabinfo (launcher-errno lane): the Linux v2.1 header with no
+/// cache rows — Rux's allocators are not SLAB and there is nothing
+/// per-cache to report. The node must exist: OH init chmods/chowns it
+/// at boot (succeeds on the reference).
+fn generate_slabinfo() -> alloc::vec::Vec<u8> {
+    alloc::vec::Vec::from(
+        &b"slabinfo - version: 2.1\n# name            <active_objs> <num_objs> <objsize> <objperslab> <pagesperslab> : tunables <limit> <batchcount> <sharedfactor> : slabdata <active_slabs> <num_slabs> <sharedavail>\n"[..],
+    )
+}
+
+/// /proc/vmallocinfo (launcher-errno lane): no vmalloc regions are
+/// tracked; the file exists (read returns EOF) so init's chmod/chown
+/// matches the reference.
+fn generate_vmallocinfo() -> alloc::vec::Vec<u8> {
+    alloc::vec::Vec::new()
+}
+
 fn partitions_generate() -> alloc::vec::Vec<u8> {
     let mut out = alloc::string::String::from("major minor  #blocks  name\n\n");
     if let Some(disk) = crate::drivers::virtio::get_pci_gen_disk() {

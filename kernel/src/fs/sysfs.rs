@@ -1570,6 +1570,51 @@ fn build_tree() -> Arc<KObject> {
         |_buf| 0,
     );
 
+    // /sys/power/resume and /sys/power/resume_offset (launcher-errno
+    // lane): the hibernation resume-device files. OH init chmods/chowns
+    // both at boot; the reference has them (chmod succeeds), ours was
+    // ENOENT. No resume device is configured: resume reads "0:0\n" and
+    // resume_offset reads "0\n" (Linux's unconfigured values); writes
+    // of 0 are accepted no-ops, anything else has nothing to resume
+    // from and fails ENODEV, the reference's answer in that case.
+    attr_rw(
+        &power,
+        "resume",
+        || b"0:0\n".to_vec(),
+        |buf| {
+            let s = core::str::from_utf8(buf).unwrap_or("").trim();
+            if s.is_empty() || s == "0:0" || s == "0" {
+                0
+            } else {
+                errno::Errno::NoSuchDevice.as_neg_i32()
+            }
+        },
+    );
+    attr_rw(
+        &power,
+        "resume_offset",
+        || b"0\n".to_vec(),
+        |buf| {
+            let s = core::str::from_utf8(buf).unwrap_or("").trim();
+            if s.is_empty() || s == "0" {
+                0
+            } else {
+                errno::Errno::InvalidArgument.as_neg_i32()
+            }
+        },
+    );
+
+    // /sys/hibernate/resume (launcher-errno lane): OH's hibernate
+    // control dir carries the same resume node; init chmods it. Same
+    // semantics as /sys/power/resume.
+    let hibernate = mk_dir(&root, "hibernate", KType::Power);
+    attr_rw(
+        &hibernate,
+        "resume",
+        || b"0:0\n".to_vec(),
+        |_buf| 0,
+    );
+
     // ---------------- /sys/dev + /sys/block ----------------
     // /sys/dev/{block,char} and /sys/block entries are created dynamically
     // by register_block_disk()/register_input_event(); only the tty char

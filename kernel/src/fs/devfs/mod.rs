@@ -847,6 +847,35 @@ pub fn init() {
             .insert(String::from(name), entry);
     }
 
+    // (launcher-errno lane) The standard misc devices OH init chmods at
+    // boot: /dev/fuse (misc 10:229, chmod target 0660), /dev/tun
+    // (misc 10:200), /dev/bbox (OH blackbox event driver) and
+    // /dev/sched_rtg_ctrl (OH scheduler RTG control, MISC_DYNAMIC on
+    // the reference). On the reference all four exist (ueventd creates
+    // them from the drivers' uevents; init's chmod/chown succeeds),
+    // ours was ENOENT — an ours-only error-row family. Null-semantics
+    // stubs (write swallowed, read EOF): the full semantics need the
+    // drivers, and no boot-path component on this image reads real
+    // data from them (the syscall errno census would show the opens).
+    for (name, minor) in [
+        ("fuse", 229u32),
+        ("tun", 200u32),
+        ("bbox", 242u32),
+        ("sched_rtg_ctrl", 243u32),
+    ] {
+        let dev = crate::fs::dev_t::DevNo::new(crate::fs::dev_t::MISC_MAJOR, minor);
+        let _ = registry::register_char_device(dev, &NULLDEV_OPS);
+        let entry = Arc::new(DevfsEntry::new_char_device_with_mode(
+            name,
+            dev,
+            0o666 | 0o020000, // S_IFCHR | rw-rw-rw-
+        ));
+        root_entry
+            .children
+            .lock_irqsave()
+            .insert(String::from(name), entry);
+    }
+
     // /dev/ptmx: every open allocates a new pty pair (fs/pty.rs ptmx_open).
     let ptmx_entry = Arc::new(DevfsEntry::new_char_device_with_mode(
         "ptmx",

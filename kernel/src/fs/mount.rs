@@ -469,6 +469,50 @@ pub fn do_mount(
             crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
             register_mount("securityfs", target, "securityfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
         }
+        // configfs (launcher-errno lane): OH's storage_daemon.cfg mounts
+        // configfs at /config and chowns /config/{hmdfs,sharefs} — on
+        // the reference the mount succeeds (a second mount answers
+        // EBUSY) and the two SUBSYSTEM dirs exist because the hmdfs /
+        // sharefs drivers register configfs subsystems. Rux has neither
+        // driver; the mount previously failed EINVAL, an ours-only
+        // error family (mount + both chowns + every later row). Mount
+        // a tmpfs instance tagged CONFIGFS_MAGIC, pre-populated with
+        // the two subsystem dirs, so the chown/chmod path matches.
+        // Divergence: userspace mkdir/rmdir inside the subsystem dirs
+        // behaves like tmpfs, not configfs (no subsystem item
+        // semantics) — no boot-path component on the OH image creates
+        // configfs items (audited oh-robot).
+        "configfs" => {
+            crate::fs::tmpfs::ensure_registered();
+            let mut root_inode = crate::fs::tmpfs::create_mount_instance(data);
+            crate::fs::tmpfs::tag_mount_instance_type(
+                &mut root_inode,
+                &crate::fs::tmpfs::CONFIGFS_INODE_OPS,
+            );
+            // Pre-create the hmdfs/sharefs subsystem dirs (the
+            // reference's driver-registered configfs groups) INSIDE the
+            // instance, before it is published by the mount.
+            if let Some(ops) = root_inode.ops {
+                if let Some(mkdir) = ops.mkdir {
+                    // SAFETY: root_inode is the freshly created instance
+                    // root; mkdir is the tmpfs mkdir twin.
+                    unsafe {
+                        let _ = mkdir(
+                            &root_inode,
+                            b"hmdfs",
+                            crate::fs::inode::InodeMode::new(0o755),
+                        );
+                        let _ = mkdir(
+                            &root_inode,
+                            b"sharefs",
+                            crate::fs::inode::InodeMode::new(0o755),
+                        );
+                    }
+                }
+            }
+            crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
+            register_mount("configfs", target, "configfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+        }
         "mqueue" => {
             crate::fs::tmpfs::ensure_registered();
             let mut root_inode = crate::fs::tmpfs::create_mount_instance(data);
