@@ -302,6 +302,10 @@ pub fn register_fork_root(_root_ppn: u64, _owner_pid: u32) {}
 pub unsafe fn free_user_page_tables(
     lock: &crate::mm::mm_struct::PteLock,
     root_ppn: u64,
+    // (sysmm-2x lane) VMA range snapshot bounding the leaf scans —
+    // implemented on the x86_64 twin first (platform priority); the
+    // aarch64 walk keeps its full scans and ignores the list.
+    _vma_ranges: &[(u64, u64)],
 ) {
     use crate::mm::phys_valid;
 
