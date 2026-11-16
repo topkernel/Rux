@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Performance debugging · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">Home</a>
+      <a href="../architecture/design.html">Architecture</a>
+      <a href="../performance/index.html">Performance</a>
+      <a href="../security/index.html">Security</a>
+      <a href="../testing/index.html">Testing</a>
+      <a href="index.html">Debugging</a>
+      <a href="../guides/getting-started.html">Getting started</a>
+      <a href="../progress/roadmap.html">Progress</a>
+      <a href="../guestbook.html">Feedback</a>
+      <span class="lang-sw"><a class="on" href="../../debugging/perf.html">中文</a><a href="perf.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="../architecture/design.html">Design deep-dive</a>
+    <a href="../architecture/scheduler.html">Scheduler</a>
+    <a href="../architecture/memory.html">Memory management</a>
+    <a href="../architecture/filesystem.html">Filesystem</a>
+    <a href="../architecture/ipc.html">IPC</a>
+    <a href="../architecture/boot.html">Boot flow</a>
+    <a href="../architecture/interrupts.html">Interrupts &amp; timers</a>
+    <a href="../architecture/structure.html">Code layout</a>
+    <a href="../architecture/riscv64.html">Porting guide</a>
+    <a href="../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Debugging</div>
+    <a href="index.html">Debugging guide</a>
+    <a href="tracepoints.html">Tracepoints</a>
+    <a class="on" href="perf.html">Performance debugging</a>
+    <a href="locks.html">Lock debugging</a>
+    <a href="memory.html">Memory forensics</a>
+    <a href="panic.html">Panic &amp; symbols</a>
+    <div class="grp">Performance</div>
+    <a href="../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../security/index.html">Security &amp; verification</a>
+    <div class="grp">Testing</div>
+    <a href="../testing/index.html">Overview</a>
+    <a href="../testing/ci-pipeline.html">CI pipeline</a>
+    <a href="../testing/ltp.html">LTP scan</a>
+    <a href="../testing/ltp-full.html">LTP full cases</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT audit</a>
+    <a href="../testing/stability.html">Stability</a>
+    <a href="../testing/stress.html">Stress</a>
+    <a href="../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../guides/getting-started.html">Getting started</a>
+    <a href="../guides/development.html">Contributing</a>
+    <a href="../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../progress/roadmap.html">Roadmap</a>
+    <a href="../progress/changelog.html">Changelog</a>
+    <a href="../progress/quickref.html">Commands</a>
+    <div class="grp">Community</div>
+    <a href="../guestbook.html">Guestbook</a>
+  </aside>
+
+    <article class="doc-main">
+    <h1>Performance debugging</h1>
+    <div class="sub">The perf_event_open syscall surface, the syscost boot census, the pbench microbenchmarks, the IF=0 probe and the performance gate — each tool's design, data shape and usage protocol · Sources: kernel/src/perf/, kernel/src/dfx/syscost.rs, test/pbench.c, docs/development/perf-gate-baseline.md</div>
+
+    <h2 id="perf-events"><span class="anchor">§1</span>perf_event_open (syscall 241)</h2>
+    <p>Rux implements the reference kernel's perf_event_open ABI (asm-generic number 241), software events:</p>
+    <ul>
+      <li><b>Event types</b>: CPU_CLOCK / TASK_CLOCK / PAGE_FAULTS / CONTEXT_SWITCHES; counting and sampling modes.</li>
+      <li><b>Sampling mode</b>: an mmap ring emits records with the field order ID/IDENTIFIER/IP/TID/TIME/ID/STREAM_ID/CPU/PERIOD/CALLCHAIN matching the reference; sideband records COMM/FORK/EXIT/MMAP2/LOST; the ioctl set; the <code>/proc/sys/kernel/perf_event_paranoid</code> gate (default 2).</li>
+      <li><b>Sampling granularity (a recorded divergence)</b>: software sampling rides the tick — a <code>sample_period</code> below one tick (10 ms at 100 Hz) coalesces to tick-rate samples; the reference's per-event hrtimer swevent is the follow-up. Sufficient for hotspot profiles (second-scale windows); insufficient for per-call precise profiling — the use boundary is stated as such.</li>
+      <li><b>How it was validated</b>: building the reference kernel's own profiler against this ABI exposed parity gaps no synthetic test had covered (inherit semantics, ring-fd O_RDWR, MISC cpumode byte order), then delivered the campaign's hotspot tables (80,961 → 244,516 samples, kernel 1-5 / user 2-16+ frame chains) — an ABI is validated by a real consumer.</li>
+    </ul>
+    <h3>Usage</h3>
+    <pre><code><span class="c"># inside the guest (perf_event_paranoid=2 default: same-process-group counting + own-user sampling)</span>
+<span class="c"># counting: perf_event_open(attr.disabled=1, type=PERF_TYPE_SOFTWARE,
+#   config=PERF_COUNT_SW_CPU_CLOCK) → ioctl ENABLE → read the mmap counter slot → ioctl DISABLE</span>
+<span class="c"># sampling: attr.sample_period=N + the mmap ring → read PERF_RECORD_SAMPLE(IP, CALLCHAIN)</span>
+cat /proc/sys/kernel/perf_event_paranoid</code></pre>
+
+    <h2 id="syscost"><span class="anchor">§2</span>syscost: the boot census collector</h2>
+    <ul>
+      <li><b>Arming</b>: the kernel cmdline <code>syscost=1</code>; zero cost when off (one cached atomic load per syscall exit; two relaxed adds in the tick hooks). It consumes no dfx= switch — the probe owns its own cmdline key.</li>
+      <li><b>What it measures</b>: per-native-syscall-number {count, wall cycles, max} (NR_SLOTS=512) + a slow-op ring of &gt;4 ms outliers with the caller comm (SLOW_RING=64 / SLOW_CYC=40000 ticks) + tick-mode per-CPU user/kernel-task/idle counters + a 256-slot kernel-text page histogram (RIP_SLOTS=256, symbolized offline against the built ELF's nm output); dumps every 60 s from the timer softirq (SYSCOST_DUMP_SECS=60).</li>
+      <li><b>The IF=0 EFLAGS-pair probe (v3)</b>: edge-triggered + self-healing; every hook reads the real IF flag and adjudicates the model against it — a modeled-open segment found with IF=1 is a leak, closed into HEAL; the HARDIRQ/SOFTIRQ/UART zones split separately; REST call sites attribute via #[track_caller] into a 96-slot table; segments carry raw TSC stamps. This is the official IF=0-share measurement (Tier 3), not a proxy.</li>
+      <li><b>Gate readings</b> (Tier 1, a quiet syscost boot): census TERM-DESCHED 8 (band 8±2) / WAKE-REFUSED 32 (band 32±4); tick ≥99.5/s; zero panics/OOM; syscall volume by profile class (debug 15.5M ±80%, release 50M ±60%); clock_gettime 3-4 µs; nanosleep ≤244 ms.</li>
+    </ul>
+
+    <h2 id="pbench"><span class="anchor">§3</span>pbench: the seven microbenchmark groups</h2>
+    <p><code>test/pbench.c</code>: one static musl x86_64 binary that <b>runs identically on Rux and the same-rig reference kernel</b> — every number is a same-binary pair. Runs as init (init=/test/pbench) for quiet probe boots. Timing: per-op rdtsc deltas calibrated against CLOCK_MONOTONIC_RAW; the output line is <code>PBENCH &lt;name&gt; n=&lt;N&gt; med=&lt;us&gt; p99=&lt;us&gt; min=&lt;us&gt; max=&lt;us&gt; avg=&lt;us&gt; wall=&lt;us&gt;</code>, terminated by <code>PBENCH DONE rc=0</code>; unsupported primitives SKIP themselves.</p>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Group</th><th>Measures</th><th>Protocol notes</th></tr></thead>
+      <tbody>
+        <tr><td>P1</td><td>p1_null (SYS_getuid loop N=1e6) / p1_clock</td><td>the empty-syscall and clock-read baselines</td></tr>
+        <tr><td>P2</td><td>p2_ctxsw</td><td>1-byte pipe ping-pong pinned to CPU0/CPU1, N=1e5, half roundtrip (one switch)</td></tr>
+        <tr><td>P3</td><td>p3a_fault_anon (64MB) / p3b_fault_cow (32MB) / p3c_fault_file (16MB)</td><td>the three fault classes</td></tr>
+        <tr><td>P4</td><td>p4_fork_exit / p4_fork_exec (N=1e3)</td><td>the exec target is a self re-exec</td></tr>
+        <tr><td>P5</td><td>p5a_pipe / p5b_dgram+recv_peek / p5c_stream_write / p5e-p5f flow-control discriminators</td><td>74 B (the hilogd protocol shape); p5a N=1e5, p5b N=2e4</td></tr>
+        <tr><td>P6</td><td>p6_stat/openclose/getdents/read_cached/write_fsync/append/mkdrmdir/unlink</td><td>a 1000-file × 4KB tree</td></tr>
+        <tr><td>P7</td><td>p7_sleep1ms</td><td>nanosleep 1 ms ×1e4, recording OVERSHOOT</td></tr>
+      </tbody>
+    </table></div>
+    <p>The gate anchor column (pb1, KVM debug class): p1_null 0.300 / p1_clock 0.371 / p2_ctxsw 1.242 / p3b_cow 8.075 / p6_write_fsync 8442.6 / p6_mkdrmdir 216.7 / p6_unlink 54.6 / p6_append 5.19 µs; the Tier-2 criterion is median ±20% or improved. The p2_ctxsw anchor is declared stale (the pre-nohz parent already drifted +60%; a REBANK is on record).</p>
+
+    <h2 id="gate"><span class="anchor">§4</span>The performance gate: three tiers and guarded domains</h2>
+    <p>Merge gating runs in three tiers (<code>docs/development/perf-gate-baseline.md</code> is the authoritative table; perf-gate.sh automates it):</p>
+    <ul>
+      <li><b>Tier 1 (all kernel changes)</b>: one quiet syscost boot (KVM q35 smp2/4G, syscost=1, 780 s) — census exact, tick rate, zero panics/OOM, volume band, per-op average bands.</li>
+      <li><b>Tier 2 (hot-path changes: mm/sched/fs/ipc/binder/timer/arch trap)</b>: one pbench boot added; P1-P7 medians ±20% or improved; the profile-class rule: cross-class comparison is meaningless (debug vs release-strong).</li>
+      <li><b>Tier 3 (allocator or IRQ-path changes)</b>: the IF=0 share (the official EFLAGS-pair measurement, 20.4 ±3pp).</li>
+    </ul>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Guarded domain</th><th>Key rows</th></tr></thead>
+      <tbody>
+        <tr><td>Allocation/reclaim</td><td>small_alloc global class-lock sections ≤25M/boot; REST share ≤10%; no reclaim slowpath emergence (drct=0 class)</td></tr>
+        <tr><td>Scheduling</td><td>GRQ average hold 1200–7320 ns; census 8±2/32±4; p2 ±20%; the p4 fork open regression on the watch row</td></tr>
+        <tr><td>Filesystem</td><td>stat/openclose/read_cached/append/mkdrmdir/unlink median bands; buffer hit rate ≥99.1%</td></tr>
+        <tr><td>Interrupts/IRQ</td><td>IF=0 20.4±3pp; max cli REST ≤10 ms; SOFTIRQ 3.1±2pp; no new IRQ-OFF print classes</td></tr>
+        <tr><td>IPC</td><td>the p5 band table: 18.3 / 23–41 / 24–27 / 25 / 41–46 µs</td></tr>
+        <tr><td>binder</td><td>the SLOW-TXN class: queue ≤10 ms everywhere; {1,64} exec-side 4.5-9 s keyed bands; FAIL at queue ≥50 ms</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout"><b>Comparability rules</b>: both sides of a comparison must use the same accelerator (KVM vs KVM); debug and release-strong never cross classes; TCG p2 readings are dominated by host load; baseline updates happen only via a merge that passed its own gate.</div>
+
+    <h2 id="fsw"><span class="anchor">§5</span>Specialized counters</h2>
+    <ul>
+      <li><b>fsw</b> (cmdline <code>fsw=1</code>): the fs sync-write-class census — an FSW1 row (br/rd/wr/sd/ev/sa/pb/ps/pc/ph/pb2/pm/lvl/es) + an FSW2 row (ri/wi/lk/ls/ni/ar/fr/j=jstart.jstop.jlazy.jcommit_fast.jrevoke/bl/biglock/w walks.hits.misses); dumped at :30 past each minute (avoiding the console-emit race with syscost). The fs gate reads "no new sync-write class outside the provisioning phase".</li>
+      <li><b>mmprof / PageCacheOps</b>: memory accounting cross-checks and the page-cache hit rate (a meminfo row), inputs to OOM forensics.</li>
+      <li><b>census / wakewatch</b>: the scheduling-stall census and wake-to-run latency, belonging to the scheduling domain (see <a href="../architecture/scheduler.html#instruments">scheduler §8</a>).</li>
+    </ul>
+
+    <h2 id="workflow"><span class="anchor">§6</span>The standard workflow</h2>
+    <ol>
+      <li><b>Detect</b>: a per-op average leaving its band in the Tier-1 syscost dump → locate the syscall number or census class;</li>
+      <li><b>Attribute</b>: pbench locates the group (P2 switch / P5 IPC / P6 fs) → the syscost RIP histogram or REST table names the segment → trace events (rux:schedtrace, lock:) capture the micro-sequence;</li>
+      <li><b>Fix and verify</b>: same-rig interleaved A/B (≥3, median) → perf-gate.sh three-tier verdict → the baseline table refresh rides the merge.</li>
+    </ol>
+    <p class="callout">Tool philosophy: every gated domain has a corresponding measurement in the tool set; if a change affects system performance and no existing tool can measure it, <b>adding the DFX tool for it is part of the change</b>, not an afterthought (the merge-gate policy). All new observability goes through tracepoints (see <a href="tracepoints.html">tracepoints</a>).</p>
+
+    <div class="callout">Code: <code>kernel/src/perf/mod.rs</code>, <code>kernel/src/dfx/syscost.rs</code>, <code>test/pbench.c</code>. Authoritative table: <code>docs/development/perf-gate-baseline.md</code> (three tiers + six guarded domains + all bands); automation: perf-gate.sh (worktree run/).</div>
+  
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to home</a></span>
+
+      <span class="foot-stats">Site visits <span id="busuanzi_value_site_pv"></span> · Visitors <span id="busuanzi_value_site_uv"></span></span></div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>

@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>性能调试 · Rux</title>
+<link rel="stylesheet" href="../css/style.css?v=18">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">首页</a>
+      <a href="../architecture/design.html">架构设计</a>
+      <a href="../performance/index.html">性能</a>
+      <a href="../security/index.html">安全</a>
+      <a href="../testing/index.html">测试</a>
+      <a href="index.html">调试</a>
+      <a href="../guides/getting-started.html">快速入门</a>
+      <a href="../progress/roadmap.html">项目进展</a>
+      <a href="../guestbook.html">留言</a>
+      <span class="lang-sw"><a class="on" href="perf.html">中文</a><a href="../en/debugging/perf.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">架构设计</div>
+    <a href="../architecture/design.html">架构与模块设计</a>
+    <a href="../architecture/scheduler.html">调度器</a>
+    <a href="../architecture/memory.html">内存管理</a>
+    <a href="../architecture/filesystem.html">文件系统</a>
+    <a href="../architecture/ipc.html">进程间通信</a>
+    <a href="../architecture/boot.html">启动流程</a>
+    <a href="../architecture/interrupts.html">中断与时钟</a>
+    <a href="../architecture/structure.html">代码结构</a>
+    <a href="../architecture/riscv64.html">架构移植指南</a>
+    <a href="../architecture/kernel-lock.html">锁序不变量</a>
+    <div class="grp">调试</div>
+    <a href="index.html">调试指南</a>
+    <a href="tracepoints.html">tracepoint 框架</a>
+    <a class="on" href="perf.html">性能调试</a>
+    <a href="locks.html">锁调试</a>
+    <a href="memory.html">内存取证</a>
+    <a href="panic.html">panic 与符号化</a>
+    <div class="grp">性能</div>
+    <a href="../performance/index.html">性能测试</a>
+    <div class="grp">安全</div>
+    <a href="../security/index.html">安全与形式验证</a>
+    <div class="grp">测试</div>
+    <a href="../testing/index.html">测试总览</a>
+    <a href="../testing/ci-pipeline.html">CI 流水线</a>
+    <a href="../testing/ltp.html">LTP 兼容扫描</a>
+    <a href="../testing/ltp-full.html">LTP 全量用例</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT 审计</a>
+    <a href="../testing/stability.html">稳定性</a>
+    <a href="../testing/stress.html">压力</a>
+    <a href="../testing/gnome-retrospective.html">回溯报告</a>
+    <div class="grp">开发指南</div>
+    <a href="../guides/getting-started.html">快速入门</a>
+    <a href="../guides/development.html">参与开发</a>
+    <a href="../guides/configuration.html">内核配置</a>
+    <div class="grp">项目进展</div>
+    <a href="../progress/roadmap.html">路线图</a>
+    <a href="../progress/changelog.html">更新日志</a>
+    <a href="../progress/quickref.html">命令速查</a>
+    <div class="grp">互动</div>
+    <a href="../guestbook.html">留言板</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>性能调试</h1>
+    <div class="sub">perf_event_open 系统调用面、syscost 启动普查、pbench 微基准、IF=0 探针与性能门禁 —— 每件工具的设计、数据形状与使用协议 · 依据:kernel/src/perf/、kernel/src/dfx/syscost.rs、test/pbench.c、docs/development/perf-gate-baseline.md</div>
+
+    <h2 id="perf-events"><span class="anchor">§1</span>perf_event_open(系统调用 241)</h2>
+    <p>Rux 实现参考内核的 perf_event_open ABI(asm-generic 编号 241),软件事件面:</p>
+    <ul>
+      <li><b>事件类型</b>:CPU_CLOCK / TASK_CLOCK / PAGE_FAULTS / CONTEXT_SWITCHES;计数与采样双模式。</li>
+      <li><b>采样模式</b>:mmap 环输出记录,字段序 ID/IDENTIFIER/IP/TID/TIME/ID/STREAM_ID/CPU/PERIOD/CALLCHAIN 与参考一致;sideband 记录 COMM/FORK/EXIT/MMAP2/LOST;ioctl 集;<code>/proc/sys/kernel/perf_event_paranoid</code> 门(默认 2)。</li>
+      <li><b>采样粒度(登记的分歧)</b>:软件采样骑 tick —— <code>sample_period</code> 低于一个 tick(100 Hz 下 10 ms)时聚合为 tick 率采样;参考实现的 per-event hrtimer swevent 为后续项。做热点概貌(秒级窗口)足够;做逐调用精确剖析不足 —— 用途边界如实。</li>
+      <li><b>验证方式</b>:以参考内核自身的 profiler 对本 ABI 构建,暴露合成测试未覆盖的对齐缺口(inherit 语义、环 fd O_RDWR、MISC cpumode 字节序),随后交付战役热点表(80,961 → 244,516 样本,内核 1-5 / 用户 2-16+ 帧链)—— ABI 验证以真实消费方为准。</li>
+    </ul>
+    <h3>用法</h3>
+    <pre><code><span class="c"># guest 内(perf_event_paranoid=2 默认:同进程组计数 + 本用户采样)</span>
+<span class="c"># 计数模式:perf_event_open(attr.disabled=1, type=PERF_TYPE_SOFTWARE,
+#   config=PERF_COUNT_SW_CPU_CLOCK) → ioctl ENABLE → 读 mmap 计数槽 → ioctl DISABLE</span>
+<span class="c"># 采样模式:attr.sample_period=N + mmap 环 → 读 PERF_RECORD_SAMPLE(IP, CALLCHAIN)</span>
+cat /proc/sys/kernel/perf_event_paranoid</code></pre>
+
+    <h2 id="syscost"><span class="anchor">§2</span>syscost:启动普查采集器</h2>
+    <ul>
+      <li><b>武装</b>:内核 cmdline <code>syscost=1</code>;关闭时零成本(每次系统调用退出一次缓存原子载入;tick 钩子两次 relaxed 加)。不占用 dfx= 开关表 —— 本探针持自有 cmdline 键。</li>
+      <li><b>计量内容</b>:每原生系统调用号 {次数, 墙钟周期, 最大值}(NR_SLOTS=512)+ 慢操作环(&gt;4 ms 异常值带调用方 comm,SLOW_RING=64 / SLOW_CYC=40000 tick)+ tick 模式 per-CPU user/kernel-task/idle 计数 + 256 槽内核文本页直方图(RIP_SLOTS=256,离线对照构建 ELF 的 nm 符号化);每 60 s 自定时器 softirq 转储(SYSCOST_DUMP_SECS=60)。</li>
+      <li><b>IF=0 EFLAGS 对探针(v3)</b>:边沿触发 + 自愈;每钩子读取真实 IF 标志并对模型裁决 —— 模型开启而实测 IF=1 判泄漏,闭合入 HEAL;HARDIRQ/SOFTIRQ/UART 区段分离;REST 调用点 #[track_caller] 归因 96 槽表;段带原始 TSC 戳。这是 IF=0 份额的官方测量(Tier-3),非代理。</li>
+      <li><b>门禁读数</b>(Tier-1,静默 syscost 启动):census TERM-DESCHED 8(带 8±2)/ WAKE-REFUSED 32(带 32±4);tick ≥99.5/s;零 panic/OOM;系统调用量按档位类带(debug 15.5M ±80%,release 50M ±60%);clock_gettime 3-4 µs;nanosleep ≤244 ms。</li>
+    </ul>
+
+    <h2 id="pbench"><span class="anchor">§3</span>pbench:七组微基准</h2>
+    <p><code>test/pbench.c</code>:单一静态 musl x86_64 二进制,<b>在 Rux 与同机参考内核上以同一二进制运行</b> —— 每个数字都是同二进制对。以 init 身份运行(init=/test/pbench)取静默探针启动。计时:逐操作 rdtsc 差值,以 CLOCK_MONOTONIC_RAW 校准;输出行 <code>PBENCH &lt;name&gt; n=&lt;N&gt; med=&lt;us&gt; p99=&lt;us&gt; min=&lt;us&gt; max=&lt;us&gt; avg=&lt;us&gt; wall=&lt;us&gt;</code>,终止行 <code>PBENCH DONE rc=0</code>;不支持的基元自动 SKIP。</p>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>组</th><th>量什么</th><th>协议要点</th></tr></thead>
+      <tbody>
+        <tr><td>P1</td><td>p1_null(SYS_getuid 循环 N=1e6)/ p1_clock</td><td>空系统调用与时钟读取基线</td></tr>
+        <tr><td>P2</td><td>p2_ctxsw</td><td>1 字节管道乒乓钉于 CPU0/CPU1,N=1e5,取半程(单次切换)</td></tr>
+        <tr><td>P3</td><td>p3a_fault_anon(64MB)/ p3b_fault_cow(32MB)/ p3c_fault_file(16MB)</td><td>缺页三态</td></tr>
+        <tr><td>P4</td><td>p4_fork_exit / p4_fork_exec(N=1e3)</td><td>exec 目标为自身重执行</td></tr>
+        <tr><td>P5</td><td>p5a_pipe / p5b_dgram+recv_peek / p5c_stream_write / p5e-p5f 流控判别</td><td>74 B(hilogd 协议形态);p5a N=1e5,p5b N=2e4</td></tr>
+        <tr><td>P6</td><td>p6_stat/openclose/getdents/read_cached/write_fsync/append/mkdrmdir/unlink</td><td>1000 文件 × 4KB 树</td></tr>
+        <tr><td>P7</td><td>p7_sleep1ms</td><td>nanosleep 1 ms ×1e4,记 OVERSHOOT</td></tr>
+      </tbody>
+    </table></div>
+    <p>门禁锚列(pb1,KVM debug 类):p1_null 0.300 / p1_clock 0.371 / p2_ctxsw 1.242 / p3b_cow 8.075 / p6_write_fsync 8442.6 / p6_mkdrmdir 216.7 / p6_unlink 54.6 / p6_append 5.19 µs;Tier-2 判据 = 中位 ±20% 或改善。p2_ctxsw 锚已声明过期(pre-nohz 父版已 +60% 漂移,REBANK 在案)。</p>
+
+    <h2 id="gate"><span class="anchor">§4</span>性能门禁:三层与守护域</h2>
+    <p>合入门禁按三层执行(<code>docs/development/perf-gate-baseline.md</code> 为权威表;<code>perf-gate.sh</code> 自动化):</p>
+    <ul>
+      <li><b>Tier 1(全部内核改动)</b>:一次静默 syscost 启动(KVM q35 smp2/4G,syscost=1,780 s)—— census 精确、tick 率、零 panic/OOM、调用量带、逐操作均值带。</li>
+      <li><b>Tier 2(触及热路径:mm/sched/fs/ipc/binder/timer/arch trap)</b>:加一次 pbench 启动,P1-P7 中位 ±20% 或改善;档位类规则:跨类比较无意义(debug 与 release-strong 不跨)。</li>
+      <li><b>Tier 3(分配器或 IRQ 路径改动)</b>:IF=0 份额(官方 EFLAGS 对测量,20.4 ±3pp)。</li>
+    </ul>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>守护域</th><th>关键行</th></tr></thead>
+      <tbody>
+        <tr><td>分配/回收</td><td>small_alloc 全局类锁区段 ≤25M/启动;REST 占机 ≤10%;回收慢路径 drct=0 类</td></tr>
+        <tr><td>调度</td><td>GRQ 平均持锁 1200–7320 ns;census 8±2/32±4;p2 ±20%;p4 fork 行开放回归挂账</td></tr>
+        <tr><td>文件系统</td><td>stat/openclose/read_cached/append/mkdrmdir/unlink 中位带;buffer 命中率 ≥99.1%</td></tr>
+        <tr><td>中断/IRQ</td><td>IF=0 20.4±3pp;max cli REST ≤10 ms;SOFTIRQ 3.1±2pp;无新 IRQ-OFF 打印类</td></tr>
+        <tr><td>IPC</td><td>p5a 18.3 / p5b 23–41 / p5c/f 24–27 / p5c3 25 / p5d 41–46 µs 带表</td></tr>
+        <tr><td>binder</td><td>SLOW-TXN 类:queue ≤10 ms 全域;{1,64} exec 侧 4.5-9 s 键带;FAIL 判据 queue ≥50 ms</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout"><b>可比性铁律</b>:对比两侧必须同加速器(KVM vs KVM);debug 与 release-strong 不跨类;TCG 下 p2 读数被宿主负载主导;基线更新仅经由自身过门的合并。</div>
+
+    <h2 id="fsw"><span class="anchor">§5</span>专项计数器</h2>
+    <ul>
+      <li><b>fsw</b>(cmdline <code>fsw=1</code>):fs 同步写类普查 —— FSW1 行(br/rd/wr/sd/ev/sa/pb/ps/pc/ph/pb2/pm/lvl/es)+ FSW2 行(ri/wi/lk/ls/ni/ar/fr/j=jstart.jstop.jlazy.jcommit_fast.jrevoke/bl/biglock/w walks.hits.misses);每分钟 :30 转储(避开 syscost 的控制台发送竞争)。fs 域门禁读"无新同步写类出于供给阶段之外"。</li>
+      <li><b>mmprof / PageCacheOps</b>:内存记账核对与页缓存命中率(meminfo 行),OOM 取证的输入。</li>
+      <li><b>census / wakewatch</b>:调度停滞普查与唤醒→运行延迟,归调度域(见<a href="../architecture/scheduler.html#instruments">调度器 §8</a>)。</li>
+    </ul>
+
+    <h2 id="workflow"><span class="anchor">§6</span>标准工作流</h2>
+    <ol>
+      <li><b>发现</b>:Tier-1 syscost 转储的逐操作均值出带 → 定位系统调用号或 census 类;</li>
+      <li><b>归因</b>:pbench 定位组(P2 切换 / P5 IPC / P6 fs)→ syscost RIP 直方图或 REST 表定段 → trace 事件(如 rux:schedtrace、lock:)取微观序列;</li>
+      <li><b>修复验证</b>:同 rig 交错 A/B(≥3 取中位)→ perf-gate.sh 三层判定 → 基线整表刷新随合并。</li>
+    </ol>
+    <p class="callout">工具哲学:每一项门禁域在工具集中有对应测量;若某改动影响系统性能而现有工具测不到,<b>为它新增 DFX 工具是改动的一部分</b>,不是事后项(合并门政策)。全部新观测走 tracepoint(见<a href="tracepoints.html">tracepoint 框架</a>)。</p>
+
+    <div class="callout">代码:<code>kernel/src/perf/mod.rs</code>、<code>kernel/src/dfx/syscost.rs</code>、<code>test/pbench.c</code>。权威表:<code>docs/development/perf-gate-baseline.md</code>(三层 + 六守护域 + 全带);自动化:perf-gate.sh(工作树 run/)。</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">返回首页</a></span>
+
+      <span class="foot-stats">本站访问 <span id="busuanzi_value_site_pv"></span> 次 · 访客 <span id="busuanzi_value_site_uv"></span> 人</span></div>
+  </div>
+</footer>
+
+<script src="../js/main.js?v=18"></script>
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+</body>
+</html>
