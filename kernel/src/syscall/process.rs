@@ -1347,7 +1347,10 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
     // KOBJECT_UEVENT netlink fd — the socket-activation shape (udevd
     // inherits pid1's bound monitor). One line per such exec, with each
     // fd's CLOEXEC state (LISTEN_FDS fds must pass with CLOEXEC CLEAR).
-    {
+    //
+    // RETIRED (probe-retire): unconditional (26 lines per ub2404 boot);
+    // behind the existing OH hunt-print master gate (dfx=ohhunt).
+    if crate::dfx::switches::oh_hunt_prints_on() {
         static UEEX_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if UEEX_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
@@ -5522,21 +5525,32 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
             alloc::format!("{}/", new_root)
         });
     if !under {
-        crate::pr_info!(
-            "pivot_root EINVAL(not-under): new='{}' put_old='{}'",
-            new_root,
-            put_old
-        );
+        // RETIRED (probe-retire): unbounded error trace; a genuine error
+        // path keeps ONE budgeted line (first 8).
+        static PIVOT_EINVAL_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if PIVOT_EINVAL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+            crate::pr_info!(
+                "pivot_root EINVAL(not-under): new='{}' put_old='{}'",
+                new_root,
+                put_old
+            );
+        }
         return -(errno::EINVAL as i64);
     }
 
     // new_root must be a mountpoint of the current mount namespace.
     if !crate::process::ns::ns_is_mountpoint(&new_root) {
-        crate::pr_info!(
-            "pivot_root EINVAL(not-mountpoint): new='{}' put_old='{}'",
-            new_root,
-            put_old
-        );
+        // RETIRED (probe-retire): unbounded error trace; budgeted (first 8).
+        static PIVOT_NMP_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if PIVOT_NMP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+            crate::pr_info!(
+                "pivot_root EINVAL(not-mountpoint): new='{}' put_old='{}'",
+                new_root,
+                put_old
+            );
+        }
         return -(errno::EINVAL as i64);
     }
 
@@ -5559,12 +5573,18 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
     // resolved dentry may live at a different GLOBAL path (a chroot prefix
     // like /usr can be in effect at pivot time) — every later prefixed
     // lookup walks the string against the global tree. Print both.
-    if let Some(rd) = root_dentry.as_ref() {
-        crate::pr_info!(
-            "pivot_root: arg='{}' resolved dentry global='{}'",
-            new_root,
-            rd.build_path()
-        );
+    //
+    // RETIRED (probe-retire): the hunt print was unconditional (22 lines
+    // per ub2404 boot); behind the existing OH hunt-print master gate
+    // (dfx=ohhunt).
+    if crate::dfx::switches::oh_hunt_prints_on() {
+        if let Some(rd) = root_dentry.as_ref() {
+            crate::pr_info!(
+                "pivot_root: arg='{}' resolved dentry global='{}'",
+                new_root,
+                rd.build_path()
+            );
+        }
     }
     if let Some(fs) = current.fs_arc() {
         fs.set_root_with_dentry(new_root.as_bytes(), root_dentry.clone());
@@ -5650,7 +5670,13 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
         *ns.root.lock() = root_dentry.or_else(crate::fs::vfs::get_vfs_root);
     }
 
-    crate::pr_info!("pivot_root: new root '{}' (old root at '{}')", new_root, put_old);
+    // RETIRED (probe-retire): the pivot_root success trace was
+    // unconditional (22 lines per ub2404 boot across the 11 pivots
+    // systemd performs); behind the existing OH hunt-print master gate
+    // (dfx=ohhunt).
+    if crate::dfx::switches::oh_hunt_prints_on() {
+        crate::pr_info!("pivot_root: new root '{}' (old root at '{}')", new_root, put_old);
+    }
     0
 }
 

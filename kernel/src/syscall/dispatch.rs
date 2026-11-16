@@ -931,7 +931,14 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // from some syscall, but not from any of the instrumented sleep paths.
     // Name every syscall that returns exactly -EFAULT so the culprit is
     // identifiable from the console. Rate-limited.
-    if result == -(errno::EFAULT as i64) {
+    //
+    // RETIRED (probe-retire): the trace was unconditional (37 lines per
+    // ub2404 boot). It now lives behind the existing OH hunt-print
+    // master gate (dfx=ohhunt); the switch is checked only on the
+    // EFAULT return path, so the hot path is untouched.
+    if result == -(errno::EFAULT as i64)
+        && crate::dfx::switches::oh_hunt_prints_on()
+    {
         static EFT_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if EFT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
@@ -951,7 +958,13 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // arm are EXCLUDED (they carry their own per-nr budgeted
     // attribution above) — keyctl's 57 joins/boot used to eat this
     // whole budget before the implemented-but-ENOSYS families printed.
-    if result == -(38i64) && !unknown_nr {
+    //
+    // RETIRED (probe-retire): unconditional (budget 200 lines/boot);
+    // behind the existing OH hunt-print master gate (dfx=ohhunt).
+    if result == -(38i64)
+        && !unknown_nr
+        && crate::dfx::switches::oh_hunt_prints_on()
+    {
         static ENOSYS_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if ENOSYS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {

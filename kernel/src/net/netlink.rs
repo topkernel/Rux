@@ -986,13 +986,23 @@ pub fn netlink_bind(
     // uevent hunt: attribute every KOBJECT_UEVENT bind (pid + group
     // mask) — the socket-activation shape has PID 1 binding on udevd's
     // behalf, which is easy to misread as "udevd subscribed".
-    if sock.protocol == NETLINK_KOBJECT_UEVENT {
-        crate::pr_info!(
-            "UEBIND pid={} groups={:#x} sock={:#x}",
-            crate::process::current_pid(),
-            groups,
-            alloc::sync::Arc::as_ptr(sock) as usize
-        );
+    //
+    // RETIRED (probe-retire): unconditional (19 lines per ub2404 boot);
+    // behind the existing OH hunt-print master gate (dfx=ohhunt) and
+    // budgeted.
+    if sock.protocol == NETLINK_KOBJECT_UEVENT
+        && crate::dfx::switches::oh_hunt_prints_on()
+    {
+        static UEBIND_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if UEBIND_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
+            crate::pr_info!(
+                "UEBIND pid={} groups={:#x} sock={:#x}",
+                crate::process::current_pid(),
+                groups,
+                alloc::sync::Arc::as_ptr(sock) as usize
+            );
+        }
     }
     // A KOBJECT_UEVENT listener subscribing to the kernel-event group:
     // push the synthesized device tree's "add" uevents into THIS socket
@@ -1175,7 +1185,10 @@ pub fn uevent_broadcast(payload: &[u8]) {
     // uevent hunt (serial-getty chain): fanout census per broadcast —
     // listener count, member count (group-1 subscribed), and the event
     // head. Budgeted.
-    {
+    //
+    // RETIRED (probe-retire): unconditional (26 lines per ub2404 boot);
+    // behind the existing OH hunt-print master gate (dfx=ohhunt).
+    if crate::dfx::switches::oh_hunt_prints_on() {
         static UEB_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if UEB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {

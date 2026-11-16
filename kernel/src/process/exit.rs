@@ -1564,7 +1564,13 @@ pub fn do_exit(exit_code: i32) -> ! {
         // ECONNREFUSED with the socket file left behind. `kill -0`-style
         // exits (normal, code>=0) are not printed: the fork/exec storm
         // would bury the signal deaths in noise.
-        if exit_code < 0 {
+        //
+        // RETIRED (probe-retire): the line was unconditional (18 lines
+        // per ub2404 boot — every service that died of a signal). It now
+        // lives behind the existing signal-family switch (dfx=sigtrace).
+        if exit_code < 0
+            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SigTrace)
+        {
             let comm_raw = (*current).comm();
             let comm_len = comm_raw.iter().position(|&b| b == 0).unwrap_or(comm_raw.len());
             // Sender forensics: SI_USER deaths (kill/tgkill) carry the

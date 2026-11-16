@@ -8115,9 +8115,15 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
         // EXITS in the window before the waiter parks; the census adopts
         // the frozen word only minutes later, so the latch must ride
         // the very first contention.
+        //
+        // RETIRED (probe-retire): the latch self-armed on EVERY boot
+        // (udisksd contention is ordinary on 24.04) and the exit.rs
+        // forensics then printed per thread exit. Behind the existing
+        // futex-hunt switch (dfx=futextrace), same as freeze_scan.
         if matches!(cmd, FUTEX_WAIT | FUTEX_WAIT_BITSET)
             && (val == 1 || val == 2)
             && RWFRZ_EXIT_WATCH_TGID.load(Relaxed) == 0
+            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FutexTrace)
         {
             if let Some(t) = crate::sched::current() {
                 // SAFETY: read-only tgid of the current task.
@@ -11757,6 +11763,18 @@ fn rwlock_frozen_shape(v: u32) -> bool {
 /// live tids, and fires a one-shot full-tgid park-stack dump.
 pub fn freeze_scan(now: u64, hz: u64) {
     if hz == 0 {
+        return;
+    }
+    // RETIRED (probe-retire): the whole scan is rwlock-freeze hunt
+    // instrumentation (word adoption, inflation curves, waiter decodes,
+    // park-stack dumps) and it SELF-ARMS on ordinary glib/udisksd mutex
+    // contention — every ub2404 boot printed ~150 RWFRZ lines in the
+    // settled phase. The entire body (adoption included — adopting a
+    // word also fills a RWFRZ_WATCH slot, arming the per-op tracer)
+    // now sits behind the existing futex-hunt switch (dfx=futextrace).
+    // The only functional action inside is watch-slot bookkeeping; the
+    // explicit rwfrzwatch= cmdline pre-arm above stays available.
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FutexTrace) {
         return;
     }
     // sc83: scanner liveness heartbeat — one line per minute. sc82 lost

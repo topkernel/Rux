@@ -477,7 +477,13 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
     // invisible on serial. Gate pid >= 300 (hdf_devmgr ~320, devhosts
     // ~404+, render_service ~443, bootanimation later); init/ueventd
     // stderr before that is kmsg-visible anyway.
-    if fd == 2 {
+    //
+    // RETIRED (probe-retire): the relay echoed 198 stderr lines of OTHER
+    // guests' services on an ordinary ub2404 boot — Linux never copies
+    // userspace stderr onto the kernel console. It now lives behind the
+    // existing OH hunt-print master gate (dfx=ohhunt); the write path
+    // itself is untouched.
+    if fd == 2 && crate::dfx::switches::oh_hunt_prints_on() {
         const STDERR_DUMP_N: usize = 200;
         static STDERR_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);

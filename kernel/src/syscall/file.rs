@@ -290,7 +290,10 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
 
     // OH bring-up: trace O_PATH opens (musl's fchmodat fallback opens
     // the target O_PATH then fstatat(fd,"",AT_EMPTY_PATH)s it).
-    {
+    // RETIRED (probe-retire): the trace was unconditional (19 lines per
+    // ub2404 boot) — it now lives behind the existing OH hunt-print
+    // master gate (dfx=ohhunt), budget unchanged.
+    if crate::dfx::switches::oh_hunt_prints_on() {
         const O_PATH_X: u32 = 0x200000;
         if (flags & O_PATH_X) != 0 {
             static OPATH_TRACE_N: core::sync::atomic::AtomicUsize =
@@ -309,6 +312,7 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
             }
         }
     }
+
 
     // OH bring-up: capped .so-open trace (SUCCESS too — a dlopen retry
     // loop is only visible when the loaded-each-round libs are shown).
@@ -662,107 +666,13 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
         }
     }
 
-    // OH bring-up: throttled ENOENT trace — the display HDF hosts retry
-    // missing files in tight loops and their hilog never reaches the
-    // console; the failing path list is the only visibility into what
-    // userspace still lacks. ld.so directory probes would burn the
-    // budget, so: /dev/ paths always print (device nodes are the
-    // bring-up signal), every other DISTINCT path prints once (the
-    // linker search list dedupes to one line per missing library).
-    if let Err(e) = &result {
-        if *e == -(errno::ENOENT as i32) {
-            static ENO_SEEN: crate::sync::spinlock::Spinlock<
-                Option<alloc::vec::Vec<alloc::string::String>>,
-            > = crate::sync::spinlock::Spinlock::new(None);
-            let mut print_it = false;
-            if full_path.starts_with("/dev/") {
-                static ENO_DEV_N: core::sync::atomic::AtomicUsize =
-                    core::sync::atomic::AtomicUsize::new(0);
-                print_it = ENO_DEV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32;
-            } else {
-                // ".so" misses get their own budget: the ld.so probe
-                // storm would otherwise starve the runtime-failure
-                // budget, but a lib missing from EVERY directory is the
-                // dlopen-failure signal (bootanimation retry loops).
-                // The BASE name dedupes the ~30 directory probes per
-                // missing lib to one line.
-                let is_lib_probe = full_path.ends_with(".so")
-                    || full_path.ends_with(".z.so")
-                    || full_path.ends_with(".so.1");
-if is_lib_probe {
-                    // Per-(basename,parent_dir) counter map: keeps the
-                    // dlopen directory probe storm deduplicated while
-                    // still surfacing WHERE the loader looked. The
-                    // (lib,dir) tuple is the unit — "still missing
-                    // libEGL.so in /system/lib64" is one line,
-                    // "/vendor/lib64" is another. Without the dir axis
-                    // the loader can hit /system/lib64 and miss, hit
-                    // /vendor/lib64 and miss, and we only see one
-                    // "still missing libEGL.so" that tells us nothing.
-                    static SO_COUNTS: crate::sync::spinlock::Spinlock<
-                        Option<alloc::vec::Vec<((alloc::string::String, alloc::string::String), u32)>>,
-                    > = crate::sync::spinlock::Spinlock::new(None);
-                    let base = alloc::string::String::from(
-                        full_path.rsplit('/').next().unwrap_or(""),
-                    );
-                    let parent = alloc::string::String::from(
-                        match full_path.rsplit_once('/') {
-                            Some((d, _)) if !d.is_empty() => d,
-                            _ => "/",
-                        },
-                    );
-                    let mut counts = SO_COUNTS.lock_irqsave();
-                    let list = counts.get_or_insert_with(alloc::vec::Vec::new);
-                    if list.len() < 420 {
-                        let key = (base.clone(), parent.clone());
-                        match list.iter_mut().find(|(k, _)| *k == key) {
-                            Some((_, c)) => {
-                                *c += 1;
-                                if *c % 64 == 0 {
-                                    crate::pr_info!(
-                                        "open ENOENT: still missing '{}' in '{}' x{} (pid {})",
-                                        base,
-                                        parent,
-                                        c,
-                                        unsafe { crate::process::current_pid() }
-                                    );
-                                }
-                            }
-                            None => {
-                                crate::pr_info!(
-                                    "open ENOENT: '{}' in '{}' (pid {})",
-                                    base,
-                                    parent,
-                                    unsafe { crate::process::current_pid() }
-                                );
-                                list.push((key, 1));
-                            }
-                        }
-                    }
-                } else {
-                    let mut seen = ENO_SEEN.lock_irqsave();
-                    let list = seen.get_or_insert_with(alloc::vec::Vec::new);
-                    if list.len() < 96 {
-                        if !list.iter().any(|p| p.as_str() == full_path) {
-                            list.push(alloc::string::String::from(full_path));
-                            crate::pr_info!(
-                                "open ENOENT: '{}' (pid {})",
-                                full_path,
-                                unsafe { crate::process::current_pid() }
-                            );
-                        }
-                    }
-                }
-            }
-            if print_it {
-                crate::pr_info!(
-                    "open ENOENT: '{}' (pid {})",
-                    full_path,
-                    unsafe { crate::process::current_pid() }
-                );
-            }
-        }
-    }
+    // RETIRED (probe-retire): the throttled ENOENT trace — "/dev/ paths
+    // always print, every other DISTINCT path prints once, plus a
+    // per-(lib,dir) budget for the ld.so probe storm". It printed 140
+    // lines per ub2404 boot ("open ENOENT: 'libgvfscommon.so' in ...",
+    // "open ENOENT: '/proc/xxx/...' (pid N)"). The syscall's own errno
+    // already names the failure, and the path-resolution diagnostics
+    // duplicated it on the console: dropped.
 
     match result {
         Ok(fd) => {
@@ -1555,10 +1465,13 @@ pub fn sys_mkdirat(args: SyscallArgs) -> i64 {
             // during StartUser(100), so every failed mkdir needs its
             // kernel-side errno and caller pid on serial. EEXIST stays
             // filtered (install streams would flood the budget).
+            // RETIRED (probe-retire): the budget was 300 lines per boot
+            // (17 on ub2404, but unbounded on a chatty guest). A genuine
+            // error path keeps ONE budgeted line: first 8.
             if e != -(17) {
                 static MKDIRFAIL_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
-                if MKDIRFAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 300 {
+                if MKDIRFAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
                     crate::pr_info!(
                         "mkdirfail '{}' mode {:#o}: {} (pid {})",
                         full_path,
@@ -1901,32 +1814,11 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
         // Linux truncates to bufsiz and returns the truncated length
         Ok(copy_len as i64)
     })();
-    // OH bring-up: throttled readlink-failure trace (HDF devhost probes
-    // its module directory through readlink; hilog never reaches the
-    // console). Distinct paths only, like the ENOENT open trace.
-    if let Err(e) = &rl_result {
-        static RL_SEEN: crate::sync::spinlock::Spinlock<
-            Option<alloc::vec::Vec<alloc::string::String>>,
-        > = crate::sync::spinlock::Spinlock::new(None);
-        let mut print_it = false;
-        {
-            let mut seen = RL_SEEN.lock_irqsave();
-            let list = seen.get_or_insert_with(alloc::vec::Vec::new);
-            if list.len() < 48 && !list.iter().any(|p| p.as_str() == full_path) {
-                list.push(alloc::string::String::from(full_path.as_str()));
-                print_it = true;
-            }
-        }
-        if print_it {
-            crate::pr_info!(
-                "readlink fail({}) '{}': not-a-symlink={} (pid {})",
-                e,
-                full_path,
-                *e == -(errno::EINVAL as i64),
-                unsafe { crate::process::current_pid() }
-            );
-        }
-    }
+    // RETIRED (probe-retire): the throttled readlink-failure trace
+    // ("readlink fail(-22) '/x': not-a-symlink=false (pid N)") printed 47
+    // lines per ub2404 boot. It is a path-resolution diagnostic: the
+    // syscall's own errno already names the failure — dropped, together
+    // with the ENOENT open trace above.
     match rl_result {
         Ok(v) => v,
         Err(e) => e,
@@ -2588,7 +2480,10 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
             // sits before the tap), hiding which move failed and why. Ring
             // every ENOENT-before-mount so the switch_root move map is
             // complete on serial.
-            if args[3] & 8192 != 0 {
+            // RETIRED (probe-retire): the tap was unconditional and
+            // unbounded; it now lives behind the existing OH hunt-print
+            // master gate (dfx=ohhunt).
+            if args[3] & 8192 != 0 && crate::dfx::switches::oh_hunt_prints_on() {
                 crate::pr_warn!(
                     "mnt-precheck-fail MS_MOVE '{}' -> '{}': {} (pid {})",
                     source,
@@ -2659,7 +2554,9 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
         // serial — the OH switch_root loop's successes are LOGV-silent
         // userspace-side, and this branch returns before the generic
         // mount tap, so the move map is otherwise invisible.
-        {
+        // RETIRED (probe-retire): 21 lines per ub2404 boot; behind the
+        // existing OH hunt-print master gate (dfx=ohhunt).
+        if crate::dfx::switches::oh_hunt_prints_on() {
             static MSMV_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if MSMV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
@@ -2727,7 +2624,10 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
         // Bring-up instrumentation (rate-limited, the mount-tap family):
         // remounts flip live mounts — the generator-protection RO walk
         // rides this path and aborts midway on any EINVAL row.
-        {
+        // RETIRED (probe-retire): 116 lines per ub2404 boot (systemd
+        // remounts / for ro, then every sandbox re-flag); behind the
+        // existing OH hunt-print master gate (dfx=ohhunt).
+        if crate::dfx::switches::oh_hunt_prints_on() {
             static RMNT_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if RMNT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
@@ -2776,12 +2676,18 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
             Err(e) => {
                 // Bring-up tap: a failed namespace remount is the current
                 // ub2404 blocker family — every Err must be visible.
-                crate::pr_warn!(
-                    "remount fail '{}' -> {} (pid {})",
-                    target,
-                    e,
-                    crate::process::current_pid()
-                );
+                // RETIRED (probe-retire): the tap was unbounded; a genuine
+                // error path keeps ONE budgeted line (first 8).
+                static RMNT_FAIL_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if RMNT_FAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+                    crate::pr_warn!(
+                        "remount fail '{}' -> {} (pid {})",
+                        target,
+                        e,
+                        crate::process::current_pid()
+                    );
+                }
                 return e as i64;
             }
         }
@@ -2828,13 +2734,20 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
             Err(e) => e,
         };
         if ret != 0 {
-            crate::pr_info!(
-                "bindmount '{}' -> '{}' flags {:#x}: {}",
-                source,
-                target,
-                args[3],
-                ret
-            );
+            // RETIRED (probe-retire): unbounded failure trace (9 lines per
+            // ub2404 boot); a genuine error path keeps ONE budgeted line
+            // (first 8).
+            static BINDFAIL_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if BINDFAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+                crate::pr_info!(
+                    "bindmount '{}' -> '{}' flags {:#x}: {}",
+                    source,
+                    target,
+                    args[3],
+                    ret
+                );
+            }
         }
         return ret as i64;
     }
@@ -2919,7 +2832,31 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
             // ub2404 bring-up: full-budget tap (debug builds) -- the
             // 24.04 boot runs hundreds of mounts; the old n<12 gate hid
             // the tmp.mount/dev-mqueue.mount unit mounts entirely.
-            if ret != 0 || n < 400 || always {
+            //
+            // RETIRED (probe-retire): the tap printed every mount (400
+            // budget) plus every failure — 49 lines per ub2404 boot, and
+            // hundreds on a desktop that mounts a lot. Split:
+            //   - FAILURES stay visible (a genuine error path) but keep
+            //     ONE budgeted line (first 16);
+            //   - SUCCESSES move behind the existing OH hunt-print
+            //     master gate (dfx=ohhunt), budget 128.
+            if ret != 0 {
+                static MNT_FAIL_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if MNT_FAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
+                    crate::pr_info!(
+                        "mount[{}] '{}' -> '{}' type '{}' flags {:#x}: {}",
+                        n,
+                        source,
+                        target,
+                        fs_type_str,
+                        args[3],
+                        ret
+                    );
+                }
+            } else if (n < 128 || always)
+                && crate::dfx::switches::oh_hunt_prints_on()
+            {
                 crate::pr_info!(
                     "mount[{}] '{}' -> '{}' type '{}' flags {:#x}: {}",
                     n,
@@ -3091,13 +3028,20 @@ pub fn sys_umount(args: SyscallArgs) -> i64 {
         // umount2(old_root, MNT_DETACH) fails EINVAL and wedges the boot
         // in a half-pivoted state — name every failed umount so the
         // topology gap is one glance.
-        crate::pr_info!(
-            "umountfail '{}' flags {:#x}: {} (pid {})",
-            target,
-            flags,
-            ret,
-            crate::process::current_pid()
-        );
+        // RETIRED (probe-retire): the trace was unbounded (55 lines per
+        // ub2404 boot — "/run/credentials/..." EINVAL rows); a genuine
+        // error path keeps ONE budgeted line (first 8).
+        static UMOUNTFAIL_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if UMOUNTFAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+            crate::pr_info!(
+                "umountfail '{}' flags {:#x}: {} (pid {})",
+                target,
+                flags,
+                ret,
+                crate::process::current_pid()
+            );
+        }
     }
     ret as i64
 }
@@ -4724,8 +4668,19 @@ pub fn sys_openat2(args: SyscallArgs) -> i64 {
         && !crate::fs::vfs::process_rooted()
         && cleaned.starts_with("/proc/")
     {
-        if cleaned.contains("cgroup") && crate::process::current_pid() == 1 {
-            crate::pr_warn!("NOBLEDBG openat2 shortcut path={}", cleaned);
+        if cleaned.contains("cgroup")
+            && crate::process::current_pid() == 1
+            && crate::dfx::switches::oh_hunt_prints_on()
+        {
+            // RETIRED (probe-retire): the 24.04 bring-up probe was
+            // unconditional (one line per pid-1 cgroup openat2); behind
+            // the existing OH hunt-print master gate (dfx=ohhunt) and
+            // budgeted.
+            static NOBLEDBG2_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if NOBLEDBG2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 64 {
+                crate::pr_warn!("NOBLEDBG openat2 shortcut path={}", cleaned);
+            }
         }
         if let Some(content) = crate::fs::procfs::read_file(&cleaned) {
             // Mount tables regenerate on rewind (seq_file semantics) —
@@ -7203,17 +7158,21 @@ pub fn sys_move_mount(args: SyscallArgs) -> i64 {
                 // Bring-up instrumentation (the mount-tap family): the
                 // new-API attaches are otherwise invisible on serial —
                 // systemd 255's namespace prep uses them exclusively.
-                static MOVE_OK_N: core::sync::atomic::AtomicUsize =
-                    core::sync::atomic::AtomicUsize::new(0);
-                if MOVE_OK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
-                    crate::pr_info!(
-                        "movemount[{}] '{}' -> '{}' flags {:#x} (pid {})",
-                        MOVE_OK_N.load(core::sync::atomic::Ordering::Relaxed),
-                        device,
-                        target,
-                        mnt.flags.lock().bits(),
-                        crate::process::current_pid()
-                    );
+                // RETIRED (probe-retire): unconditional; behind the
+                // existing OH hunt-print master gate (dfx=ohhunt).
+                if crate::dfx::switches::oh_hunt_prints_on() {
+                    static MOVE_OK_N: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    if MOVE_OK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
+                        crate::pr_info!(
+                            "movemount[{}] '{}' -> '{}' flags {:#x} (pid {})",
+                            MOVE_OK_N.load(core::sync::atomic::Ordering::Relaxed),
+                            device,
+                            target,
+                            mnt.flags.lock().bits(),
+                            crate::process::current_pid()
+                        );
+                    }
                 }
             }
             // open_tree(AT_RECURSIVE) clones: materialize inside the
@@ -7776,9 +7735,11 @@ pub fn sys_epoll_pwait2(args: SyscallArgs) -> i64 {
 pub fn sys_move_mount_tap(args: SyscallArgs) -> i64 {
     let r = sys_move_mount(args);
     if r != 0 {
+        // RETIRED (probe-retire): the failure budget was 160 lines/boot;
+        // a genuine error path keeps ONE budgeted line (first 8).
         static MM_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
-        if MM_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 160 {
+        if MM_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
             crate::pr_info!(
                 "movemount-fail[{}] from_fd={} to_fd={} -> {} (pid {})",
                 MM_N.load(core::sync::atomic::Ordering::Relaxed),
@@ -7795,9 +7756,12 @@ pub fn sys_move_mount_tap(args: SyscallArgs) -> i64 {
 pub fn sys_mount_setattr_tap(args: SyscallArgs) -> i64 {
     let r = sys_mount_setattr(args);
     if r != 0 {
+        // RETIRED (probe-retire): the failure budget was 160 lines/boot
+        // (9 on ub2404); a genuine error path keeps ONE budgeted line
+        // (first 8).
         static MS_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
-        if MS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 160 {
+        if MS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
             let mut pbuf = [0u8; PATH_MAX];
             let path = if args[1] != 0 {
                 read_user_path(args[1] as *const u8, &mut pbuf)
@@ -7958,18 +7922,23 @@ pub fn sys_mount_setattr(args: SyscallArgs) -> i64 {
     {
         // Bring-up instrumentation (rate-limited): flag flips on mounts
         // are the Protect*/namespace knob — needed them visible.
-        static MSA_N: core::sync::atomic::AtomicUsize =
-            core::sync::atomic::AtomicUsize::new(0);
-        if MSA_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
-            crate::pr_info!(
-                "mount_setattr[{}] set={:#x} clr={:#x}: flags {:#x} -> {:#x} (pid {})",
-                MSA_N.load(core::sync::atomic::Ordering::Relaxed),
-                attr_set,
-                attr_clr,
-                cur.bits(),
-                new_flags.bits(),
-                crate::process::current_pid()
-            );
+        // RETIRED (probe-retire): 71 lines per ub2404 boot (systemd
+        // resets the namespace flags on every mount); behind the existing
+        // OH hunt-print master gate (dfx=ohhunt).
+        if crate::dfx::switches::oh_hunt_prints_on() {
+            static MSA_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if MSA_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
+                crate::pr_info!(
+                    "mount_setattr[{}] set={:#x} clr={:#x}: flags {:#x} -> {:#x} (pid {})",
+                    MSA_N.load(core::sync::atomic::Ordering::Relaxed),
+                    attr_set,
+                    attr_clr,
+                    cur.bits(),
+                    new_flags.bits(),
+                    crate::process::current_pid()
+                );
+            }
         }
     }
     0

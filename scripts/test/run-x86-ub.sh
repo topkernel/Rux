@@ -28,7 +28,6 @@
 #   KERNEL_ELF / BZIMAGE
 #                       explicit kernel paths (override PROFILE)
 #   NOBUILD=1            skip the kernel build step
-#
 # The script prints the identity of the kernel it boots (path, size,
 # mtime) and warns when that binary is OLDER than the kernel sources —
 # a stale bzImage is indistinguishable from a fresh one at runtime, and
@@ -36,7 +35,12 @@
 # lane, 2026-11-16: an x86 bzImage built before the uevent/netlink merge
 # was booted with the post-merge tree checked out, and the
 # dev-ttyS0.device timeout was blamed on the tree).
-set -euo pipefail
+#   KERNEL_ELF=path      kernel ELF to boot (default: debug build)
+#   BZIMAGE=path         bzImage to boot (default: debug build)
+#                       Both default to the debug profile; point them at
+#                       target/x86_64-unknown-none/release/... to boot a
+#                       RELEASE kernel (the user-facing profile) without
+#                       touching this script.set -euo pipefail
 
 cd "$(dirname "$0")"
 WT="$PWD"
