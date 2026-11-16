@@ -1121,6 +1121,30 @@ impl FdTable {
     /// complete while any reader is between its load and this
     /// increment (that window holds no schedule point; the protocol
     /// is written up in fs/fdreap.rs).
+    /// __fdget's unshared fast path (the reference's files_lookup_fd_raw
+    /// + FDPUT: when the table is NOT CLONE_FILES-shared, no other
+    /// thread can close/dup concurrently, so the File is borrowed
+    /// WITHOUT a reference — one Acquire slot load, no irq bracket, no
+    /// rcu section, no refcount RMW. Callers must gate on
+    /// Arc::strong_count(&table) == 1 (the shared case falls back to
+    /// get_file, the reference's fget). Safe across blocking reads:
+    /// unshared means this thread is the table's only user, so the
+    /// slot's occupant cannot be retired while we hold the borrow.
+    pub fn get_file_borrow(&self, fd: usize) -> Option<&File> {
+        if fd >= MAX_FDS {
+            return None;
+        }
+        let p = self.slots[fd].0.load(Ordering::Acquire);
+        if p.is_null() {
+            return None;
+        }
+        // SAFETY: gated to unshared tables by the caller — the Arc in
+        // the slot stays alive (and the slot immutable) for the whole
+        // syscall; reconstruction is only needed to touch the refcount,
+        // which this path never does.
+        Some(unsafe { &*(p as *const File) })
+    }
+
     pub fn get_file(&self, fd: usize) -> Option<Arc<File>> {
         if fd >= MAX_FDS {
             return None;
@@ -1524,6 +1548,46 @@ pub fn gather_append_user(dst: &mut alloc::vec::Vec<u8>, src_user: usize, len: u
 pub unsafe fn get_file_fd(fd: usize) -> Option<Arc<File>> {
     use crate::sched;
     sched::get_current_fdtable()?.get_file(fd)
+}
+
+/// fdget's two outcomes (the reference's struct fd): a no-refcount
+/// borrow on an unshared table (FDPUT clear) or a full Arc reference
+/// (fget) when CLONE_FILES sharers exist.
+pub enum FastFd {
+    Borrowed(&'static File),
+    Owned(Arc<File>),
+}
+
+impl FastFd {
+    #[inline]
+    pub fn file(&self) -> &File {
+        match self {
+            FastFd::Borrowed(f) => f,
+            FastFd::Owned(a) => a,
+        }
+    }
+}
+
+/// The fdget fast path for read/write-style syscalls: unshared fdtable
+/// ⇒ borrow (one Acquire slot load, no irq/rcu bracket, no refcount
+/// RMW); shared ⇒ get_file (fget). Safe wrapper — the raw current-task
+/// deref lives here, not in forbid(unsafe) callers.
+pub fn get_file_fd_fast(fd: usize) -> Option<FastFd> {
+    let cur = crate::sched::current()?;
+    // SAFETY: current() yields a live task pointer.
+    unsafe {
+        if !(*cur).fdtable_unshared() {
+            return (*cur).try_fdtable().and_then(|t| t.get_file(fd)).map(FastFd::Owned);
+        }
+        // The unshared table outlives the syscall (owned by this task);
+        // extend the borrow to 'static through the raw pointer.
+        let tbl: &'static FdTable = (*cur).try_fdtable()?;
+        tbl.get_file_borrow(fd).map(|f| {
+            // SAFETY: the slot's Arc is owned by the unshared table and
+            // cannot be retired for the duration of this syscall.
+            unsafe { core::mem::transmute::<&File, &'static File>(f) }
+        }).map(FastFd::Borrowed)
+    }
 }
 
 /// Safe-typed fd lookup for the kernel capsule boundary: identical

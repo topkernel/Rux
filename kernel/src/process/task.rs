@@ -5743,6 +5743,35 @@ impl Task {
         self.fdtable.as_ref().map(|arc| arc.as_ref())
     }
 
+    /// True when this task's fdtable Arc has no other owner (no
+    /// CLONE_FILES sharers) — the gate for the reference's fdget
+    /// no-refcount fast path (files_lookup_fd_raw + FDPUT): unshared
+    /// means no other thread can close/dup concurrently, so a syscall
+    /// may borrow the File straight from the slot.
+    #[inline]
+    pub fn fdtable_unshared(&self) -> bool {
+        self.fdtable
+            .as_ref()
+            .map(|a| alloc::sync::Arc::strong_count(a) == 1)
+            .unwrap_or(false)
+    }
+
+    /// task_ppid(me) shape: the leader's parent Task pointer behind the
+    /// same plausibility screen ppid() uses (a non-leader thread's
+    /// parent field can be an unlinked snapshot naming freed memory).
+    #[inline]
+    pub fn parent_task_ptr(&self) -> *const Task {
+        match self.parent {
+            Some(parent_ptr) => {
+                if !Self::is_plausible_task_ptr(parent_ptr) {
+                    return core::ptr::null();
+                }
+                parent_ptr
+            }
+            None => core::ptr::null(),
+        }
+    }
+
     /// Get file descriptor table
     #[inline]
     pub fn fdtable(&self) -> &FdTable {

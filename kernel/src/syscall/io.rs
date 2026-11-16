@@ -120,8 +120,12 @@ fn sys_read_inner(args: SyscallArgs) -> i64 {
         return 0;
     }
 
-    match crate::fs::file::get_file_fd_safe(fd) {
-        Some(file) => read_file_core(fd, &file, buf, count),
+    // fdget fast path (the reference's files_lookup_fd_raw + FDPUT):
+    // an unshared fdtable borrows the File with no irq bracket, no rcu
+    // section and no refcount RMW — one Acquire slot load. Shared
+    // tables (CLONE_FILES threads) take the full get_file (fget).
+    match crate::fs::file::get_file_fd_fast(fd) {
+        Some(f) => read_file_core(fd, f.file(), buf, count),
         None => -errno::EBADF as i64,
     }
 }
@@ -135,7 +139,7 @@ fn sys_read_inner(args: SyscallArgs) -> i64 {
 ///
 /// The user window `buf..buf+count` must be access_ok-validated by the
 /// caller (same contract the sys_read path had at its lookup point).
-fn read_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf: usize, count: usize) -> i64 {
+fn read_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: usize) -> i64 {
     // One flags load + one ops load classify this fd for every gate
     // and fast path below: the mode/O_PATH checks and the O_DIRECT
     // check each re-loaded file.flags (Relaxed loads are not
@@ -559,10 +563,11 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
         }
     }
 
-    // get_file_fd_safe: fdtable read only; the Arc is dropped at function
-    // exit. User pointers validated above.
-    match crate::fs::file::get_file_fd_safe(fd) {
-        Some(file) => write_file_core(fd, &file, buf, count),
+    // fdget fast path (the read twin): unshared fdtable borrows the
+    // File with no irq/rcu bracket and no refcount RMW; shared tables
+    // take the full get_file (fget). User pointers validated above.
+    match crate::fs::file::get_file_fd_fast(fd) {
+        Some(f) => write_file_core(fd, f.file(), buf, count),
         None => -errno::EBADF as i64,
     }
 }
@@ -574,7 +579,7 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
 ///
 /// The user window `buf..buf+count` must be access_ok-validated by the
 /// caller.
-fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf: usize, count: usize) -> i64 {
+fn write_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: usize) -> i64 {
     // One flags load serves both gates (see read_file_core — the
     // Relaxed loads were not CSE-able).
     let flags = file.flags.load(core::sync::atomic::Ordering::Relaxed);
@@ -2849,7 +2854,7 @@ pub fn syscall_eio_line(nr: usize, args: [u64; 6]) {
 /// protocol — e.g. a hisysevent frame). Direct console with a reentrancy
 /// guard: this runs on the write error path, printk here could re-enter
 /// console write and print forever.
-fn eio_report(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, head: &[u8]) {
+fn eio_report(fd: usize, file: &crate::fs::file::File, head: &[u8]) {
     use crate::console::putchar_no_lock as putchar;
     static IN_EIO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
     static N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
