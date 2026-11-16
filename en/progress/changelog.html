@@ -68,6 +68,12 @@
     <h1>Changelog (highlights)</h1>
     <div class="sub">The full history: docs/progress/changelog.md and git log — this page records structural milestones only</div>
 
+    <h2 id="n1116"><span class="anchor">2026-11-16</span></h2>
+    <ul>
+      <li><b>The LTP audited round merged to main</b>: the official corrected count is <b>1122/1869</b> (x86_64+KVM; net +29 over the previous audited 1093 — 32 gains, 3 losses, with the losses accept03/ioperm01/iopl01 root-caused, fixed and merged in the same round); zero POISON/WEDGE/NOTRUN rows remain.</li>
+      <li><b>The tail-fix round merged to main (b3eb4b16e)</b>: the keyctl negative-case model, the mount-API negative families (fsconfig/fspick/mount_setattr/move_mount) and splice06 — 11 tests verified in isolation on the fixed kernel; the current expected count is <b>1133/1869</b> (60.6%).</li>
+    </ul>
+
     <h2 id="n1115"><span class="anchor">2026-11-15</span></h2>
     <ul>
       <li><b>The Geekbench 5 gb-opt round merged to main</b>: single-core best-of-runs <b>2440</b> (113% vs the Linux 4-CPU anchor), multi-core <b>7709</b> (110%) — the historical best; totals use the best-of-runs convention (user rule, recorded).</li>

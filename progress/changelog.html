@@ -68,6 +68,12 @@
     <h1>更新日志(精选)</h1>
     <div class="sub">逐条全史见仓库 docs/progress/changelog.md 与 git log · 本页只收录结构性节点</div>
 
+    <h2 id="n1116"><span class="anchor">2026-11-16</span></h2>
+    <ul>
+      <li><b>LTP 审计轮并入 main</b>:官方校正计数 <b>1122/1869</b>(x86_64+KVM,较上一审计口径 1093 净 +29 —— 32 项增益、3 项损失,损失项 accept03/ioperm01/iopl01 已定位修复并随本轮并入);POISON/WEDGE/NOTRUN 行清零。</li>
+      <li><b>尾修轮并入 main(b3eb4b16e)</b>:keyctl 负例模型、mount API 负例族(fsconfig/fspick/mount_setattr/move_mount)与 splice06 共 11 项在修复内核上隔离验证通过 —— 当前预期 <b>1133/1869</b>(60.6%)。</li>
+    </ul>
+
     <h2 id="n1115"><span class="anchor">2026-11-15</span></h2>
     <ul>
       <li><b>Geekbench 5 gb-opt 轮并入 main</b>:单核 best-of-runs <b>2440</b>(对 Linux 4-CPU 锚 113%)、多核 <b>7709</b>(110%)—— 历史最佳;总分口径 best-of-runs(用户规则,已记录)。</li>

@@ -81,7 +81,7 @@
       <div class="stat"><div class="v">345<em>+</em></div><div class="l">syscalls</div></div>
       <div class="stat"><div class="v">4200<em>+</em></div><div class="l">test cases</div></div>
       <div class="stat"><div class="v">3</div><div class="l">architectures</div></div>
-      <div class="stat"><div class="v">1093<em>/1869</em></div><div class="l">LTP passing</div></div>
+      <div class="stat"><div class="v">1133<em>/1869</em></div><div class="l">LTP passing</div></div>
       <div class="stat"><div class="v">19</div><div class="l">design divergences (registered)</div></div>
     </div>
   </div>
@@ -146,7 +146,7 @@
       <div class="card">
         <h3><span class="ico">📜</span>Compatibility as the constitution</h3>
         <p>POSIX and the Linux kernel ABI are the supreme constraints: LTP families pass family by family; distribution userspace runs unmodified.</p>
-        <div class="nums">345+ syscalls · LTP <b>1093/1869</b></div>
+        <div class="nums">345+ syscalls · LTP <b>1133/1869</b></div>
         <a class="more" href="architecture/design.html#divergences">Divergence register →</a>
       </div>
       <div class="card">
@@ -240,8 +240,8 @@
     <div class="card-grid grid-4">
       <div class="card">
         <h3><span class="ico">🧪</span>LTP compliance</h3>
-        <p>The full 1,869-case scan grew from 35 early passes to 1,093; every round is archived and new failures are isolated-rerun twice before being called regressions; the TIMEOUT class is adjudicated row by row under the P0 rule (1 kernel defect / 11 test defects / 1 lost-wake / 1 slow-progress). The r27 raw count was 1084; the audited official correction is 1093 (two real gains, cve-2017-17052 and shmat03, were partly masked by two order-dependent artifacts).</p>
-        <div class="nums">current <b>1093 / 1869</b> (r27 audited official)</div>
+        <p>The full 1,869-case scan grew from 35 early passes to 1,122 on the 2026-11-15 audited round (net +29 over the previous audited 1,093); every round is archived and suspect rows are isolated-rerun twice before being called regressions; the TIMEOUT class is adjudicated row by row under the P0 rule. After the tail-fix round (the keyctl negative-case model, the mount-API negative families, splice06) landed its 11 isolation-verified tests in main, the current expected count is 1,133.</p>
+        <div class="nums">current <b>1133 / 1869</b> (audited 1122 + 11 tail fixes)</div>
         <a class="more" href="testing/ltp.html">LTP scan →</a>
       </div>
       <div class="card">

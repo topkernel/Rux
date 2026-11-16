@@ -68,41 +68,42 @@
     <h1>LTP compliance scan</h1>
     <div class="sub">1,869 cases · two rigs · per-case verdicts in the full case list — reports: docs/test/ltp-report.md, ltp-tracking.md</div>
 
-    <p>A full scan of the 1,869-case LTP list (1,838 official binaries cross-compiled with musl, a 101% build rate). <b>Latest round r27 (x86_64 + KVM, 2026-11-05): raw PASS 1,084 (58.0%), audited official correction <b>1,093 (58.5%)</b></b> — two real gains, cve-2017-17052 and shmat03, were partly masked by two order-dependent artifacts; the corrected count is the official figure. Per-case verdicts: the <a href="ltp-full.html">full case list</a> (1,869 rows, searchable).</p>
+    <p>A full scan of the 1,869-case LTP list (1,838 official binaries cross-compiled with musl, a 101% build rate). <b>Latest audited round (2026-11-15/16, x86_64 + KVM): corrected official PASS <b>1,122 (60.0%)</b></b> — net +29 over the previous audited 1,093 (32 gains, 3 losses, with the losses root-caused, fixed and merged in the same round); every POISON/WEDGE/flake-suspect row was corrected under the two-pass isolated-rerun protocol, leaving zero POISON/WEDGE/NOTRUN rows; the tail-fix round (the keyctl negative-case model, the mount-API negative families, splice06) landed its 11 isolation-verified tests in main, so the current expected count is <b>1,133 (60.6%)</b>. Per-case verdicts: the <a href="ltp-full.html">full case list</a> (1,869 rows, the r27 archive, searchable).</p>
     <div class="tbl-wrap">
       <table>
-        <thead><tr><th>PASS</th><th>TCONF</th><th>FAIL</th><th>CRASH</th><th>EXECFAIL</th><th>TIMEOUT</th><th>WARN</th><th>WEDGE</th></tr></thead>
+        <thead><tr><th>PASS</th><th>TCONF</th><th>FAIL</th><th>CRASH</th><th>EXECFAIL</th><th>TIMEOUT</th><th>WARN</th></tr></thead>
         <tbody>
-          <tr><td class="num"><b>1084</b></td><td class="num">497</td><td class="num">228</td><td class="num">28</td><td class="num">17</td><td class="num">13</td><td class="num">1</td><td class="num">1</td></tr>
+          <tr><td class="num"><b>1122</b></td><td class="num">434</td><td class="num">250</td><td class="num">30</td><td class="num">17</td><td class="num">12</td><td class="num">4</td></tr>
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">TCONF is mostly unimplemented feature classes (hugemmap/fanotify/quotactl — not failures); FAIL/CRASH/TIMEOUT are the active fronts. r27 vs r26: +17 (19 flipped to PASS, 2 to FAIL then re-adjudicated). The table above is the raw r27 distribution; the audited official PASS = 1093.</p>
+    <p style="font-size:13px;color:var(--text-3)">TCONF is mostly unimplemented feature classes (hugemmap/fanotify/quotactl — not failures); FAIL/CRASH/TIMEOUT are the active fronts. The table above is the corrected distribution of the 2026-11-15 audited round (zero POISON/WEDGE/NOTRUN rows); the raw r27 distribution lives on the full-case archive page.</p>
 
     <h2 id="trend"><span class="anchor">§1</span>Trend (full scans)</h2>
     <div class="trend">
-      <div class="bar" style="height:3.2%"><span class="bv">35</span></div>
-      <div class="bar" style="height:47.9%"><span class="bv">524</span></div>
-      <div class="bar" style="height:60.3%"><span class="bv">659</span></div>
-      <div class="bar" style="height:73.3%"><span class="bv">801</span></div>
-      <div class="bar" style="height:86.5%"><span class="bv">945</span></div>
-      <div class="bar" style="height:92.0%"><span class="bv">1005</span></div>
-      <div class="bar" style="height:94.1%"><span class="bv">1028</span></div>
-      <div class="bar" style="height:92.4%"><span class="bv">1010</span></div>
-      <div class="bar" style="height:96.9%"><span class="bv">1059</span></div>
-      <div class="bar acc" style="height:100%"><span class="bv">1093</span></div>
+      <div class="bar" style="height:3.1%"><span class="bv">35</span></div>
+      <div class="bar" style="height:46.7%"><span class="bv">524</span></div>
+      <div class="bar" style="height:58.7%"><span class="bv">659</span></div>
+      <div class="bar" style="height:71.4%"><span class="bv">801</span></div>
+      <div class="bar" style="height:84.2%"><span class="bv">945</span></div>
+      <div class="bar" style="height:89.6%"><span class="bv">1005</span></div>
+      <div class="bar" style="height:91.6%"><span class="bv">1028</span></div>
+      <div class="bar" style="height:90.0%"><span class="bv">1010</span></div>
+      <div class="bar" style="height:94.4%"><span class="bv">1059</span></div>
+      <div class="bar" style="height:97.4%"><span class="bv">1093</span></div>
+      <div class="bar acc" style="height:100%"><span class="bv">1122</span></div>
     </div>
     <div class="trend-x">
-      <span>r1</span><span>r2</span><span>r3</span><span>r9</span><span>r14</span><span>r15</span><span>r20</span><span>r21</span><span>r23</span><span>r27</span>
+      <span>r1</span><span>r2</span><span>r3</span><span>r9</span><span>r14</span><span>r15</span><span>r20</span><span>r21</span><span>r23</span><span>r27</span><span>11-15</span>
     </div>
-    <p style="font-size:12.5px;color:var(--text-3)">r1–r10 (riscv64·TCG, previous host) → r14–r20 (same rig, closing at 1028) → r21 onward the x86_64+KVM standing rig (first round 1010 → r27 raw 1084 → audited official 1093). Mid-series dips were mostly host-load noise, recovered through isolated re-runs.</p>
+    <p style="font-size:12.5px;color:var(--text-3)">r1–r10 (riscv64·TCG, previous host) → r14–r20 (same rig, closing at 1028) → r21 onward the x86_64+KVM standing rig (first round 1010 → r27 audited 1093 → the 2026-11-15 audited round 1122; current expected 1133 after the +11 tail fixes). Mid-series dips were mostly host-load noise, recovered through isolated re-runs.</p>
 
     <h2 id="method"><span class="anchor">§2</span>Methodology</h2>
     <ul>
       <li><b>Flake isolation</b>: new full-scan failures are isolated-rerun twice before being called regressions — host load produces timeout/precision flakes (known: accept02, getrusage04, kill02, genfmod, rename/statfs families).</li>
       <li><b>NOT-OURS ledger</b>: the same musl LTP binaries run on the host Linux kernel; identical failures are recorded as test/environment issues rather than kernel gaps (decoded case by case in verdicts-r27.txt).</li>
       <li><b>WEDGE rescue</b>: 51 WEDGE/POISON rows from the raw r27 scan were rescued via isolation boots and spliced back; 6 stubborn rows re-ran one-case-per-boot; mmap1 stays WEDGE per the standing adjudication.</li>
-      <li>Every round's full results, deltas and verdicts are archived in the ltp-r27 lane's results/ directory; TIMEOUT-class cases get top-priority dedicated lanes.</li>
+      <li>Every round's full results, deltas and verdicts are archived in that round's lane results/ directory (r27 → ltp-r27; the 2026-11-15 audited round → ltp-scan2); TIMEOUT-class cases get top-priority dedicated lanes.</li>
     </ul>
 
     <h2 id="rigs"><span class="anchor">§3</span>Rigs</h2>
@@ -110,7 +111,7 @@
       <table>
         <thead><tr><th>Rig</th><th>Latest</th><th>Notes</th></tr></thead>
         <tbody>
-          <tr><td>x86_64 + KVM (standing rig)</td><td class="num">r27 audited official = 1093/1869 (raw 1084)</td><td>the standard test rig since 2026-11-01; first round r21 = 1010</td></tr>
+          <tr><td>x86_64 + KVM (standing rig)</td><td class="num">2026-11-15 audited = 1122/1869; current expected 1133/1869 after tail fixes</td><td>the standing test rig since 2026-11-01; first round r21 = 1010, r27 audited 1093</td></tr>
           <tr><td>riscv64 · TCG</td><td class="num">r20 = 1028/1869</td><td>closing round 2026-10-31; r14=945 → r15=1005 (do_exit fix)</td></tr>
         </tbody>
       </table>
