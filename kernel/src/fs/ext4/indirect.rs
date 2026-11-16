@@ -258,6 +258,11 @@ pub fn write_indirect_block(
         block_numbers[index] = block_num;
 
         (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+        // Family b (ext4-corrupt lane): journal registration — indirect
+        // blocks are metadata (see extent.rs write_node's note).
+        if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
+            let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
+        }
         let sync_res = bio::sync_dirty_buffer(bh);
         bio::brelse(bh);
         sync_res?;

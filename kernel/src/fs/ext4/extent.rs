@@ -1300,12 +1300,25 @@ unsafe fn write_node(
     data: &[u8],
     csum_seed: u32,
 ) -> Result<(), i32> {
+    // Family b (ext4-corrupt lane): register the node buffer with the
+    // current jbd2 handle so it persists at this operation's commit
+    // TOGETHER with the root (inode table), the allocation bitmaps and
+    // the group descriptors. The old deferred-only path left freshly
+    // written tree nodes dirty-in-cache until an out-of-band drain —
+    // while the bitmap registration made their BITS durable at every
+    // op's commit — so a hard kill left roots pointing at zeroed
+    // blocks (g1 cook: 18 inodes with bad-magic-0 nodes; e2fsck
+    // "invalid extent node"). Linux journals extent tree blocks the
+    // same way (they are metadata).
     if fs.metadata_csum && data.len() >= 4 {
         let mut sealed = alloc::vec::Vec::from(data);
         crate::fs::ext4::csum::extent_block_csum_set(csum_seed, &mut sealed);
         let bh = bio::bread(fs.device, blk).ok_or(errno::Errno::IOError.as_neg_i32())?;
         (*bh).b_data.copy_from_slice(&sealed);
         (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+        if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
+            let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
+        }
         let sync_res = bio::sync_dirty_buffer(bh);
         bio::brelse(bh);
         return sync_res;
@@ -1313,6 +1326,10 @@ unsafe fn write_node(
     let bh = bio::bread(fs.device, blk).ok_or(errno::Errno::IOError.as_neg_i32())?;
     (*bh).b_data.copy_from_slice(data);
     (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+    // Family b: journal registration (see the sealed branch above).
+    if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
+        let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
+    }
     let sync_res = bio::sync_dirty_buffer(bh);
     bio::brelse(bh);
     sync_res

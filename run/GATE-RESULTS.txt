@@ -1,0 +1,5 @@
+ext4-corrupt gate results (2026-11-17)
+x86_64 release-equivalent debug build: rc=0 (run/build-final.log)
+riscv64 build: rc=0 (run/gate-riscv-build.log)
+aarch64 build: rc=0 (run/gate-aarch64-build.log)
+riscv64 make test: ALL TESTS PASSED, 1330 PASS rows (run/gate-riscv-maketest2.log; full log kept untracked in worktree)

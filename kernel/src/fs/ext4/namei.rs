@@ -177,6 +177,11 @@ pub fn ext4_new_inode(
     mode: u16,
     _name: &[u8],
 ) -> Result<(u32, Ext4InodeOnDisk), i32> {
+    // Family a/b race closure (see free_inode's note): serialize the
+    // inode-bitmap RMW below against every other bitmap mutator
+    // (allocator.rs's InodeAllocator and namei's free_inode). Recursive
+    // per task — creators already holding EXT4_BIG_LOCK re-enter freely.
+    let _guard = super::EXT4_BIG_LOCK.lock();
     // Find suitable group
     let is_dir = (mode & S_IFMT) == S_IFDIR;
     let group = find_group_orlov(fs, dir, is_dir)?;
@@ -345,6 +350,31 @@ fn mark_inode_used(
     Ok(())
 }
 
+/// Update the group's used-DIRECTORIES count (bg_used_dirs_count, family
+/// a2 — see write_group_descriptor's publish note). Linux maintains this
+/// in ext4_alloc_inode (+1 for S_ISDIR) and ext4_free_inode (-1); e2fsck
+/// pass 5 recomputes it as the number of referenced directories per
+/// group and repairs drift, so every alloc/free of a directory inode
+/// must move it. The hi half stays 0 (ipg <= 65536 covers every real
+/// geometry).
+fn update_group_desc_used_dirs(fs: &Ext4FileSystem, group: u32, delta: i32) {
+    {
+        let mut group_descs = fs.group_descs.lock();
+        if group as usize >= group_descs.len() {
+            return;
+        }
+        let g = &mut group_descs[group as usize];
+        if delta >= 0 {
+            g.bg_used_dirs_count_lo = g.bg_used_dirs_count_lo.saturating_add(delta as u16);
+        } else {
+            g.bg_used_dirs_count_lo = g.bg_used_dirs_count_lo.saturating_sub((-delta) as u16);
+        }
+    }
+    // Durability-deferred like the other GD counters (order-unconstrained;
+    // a crash window here is the same e2fsck class as the free counts).
+    let _ = write_group_descriptor(fs, group);
+}
+
 /// Update group descriptor free inode count
 fn update_group_descriptor_inodes(fs: &Ext4FileSystem, group: u32, delta: i32) -> Result<(), i32> {
     {
@@ -417,6 +447,13 @@ fn update_superblock_free_inodes(fs: &Ext4FileSystem, delta: i32) -> Result<(), 
             super::csum::superblock_csum_set(&mut data[sb_start..sb_start + 1024]);
         }
         (*bh).set_state_bit(BufferState::BH_Dirty);
+        // Family b (ext4-corrupt lane): register with the current handle so
+        // the free-inode counter persists at this op's commit together with
+        // the inode bitmap / inode table it describes (see the allocator's
+        // write_block_bitmap note).
+        if let Some(handle) = get_current_handle() {
+            let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
+        }
         bio::brelse(bh);
     }
 
@@ -469,6 +506,18 @@ fn write_group_descriptor(fs: &Ext4FileSystem, group: u32) -> Result<(), i32> {
     if desc_size >= 0x2E + 2 {
         block_data[offset + 0x2E..offset + 0x30]
             .copy_from_slice(&gd.bg_free_inodes_count_hi.to_le_bytes());
+    }
+    // bg_used_dirs_count (family a2, ext4-corrupt lane): publish the
+    // directories count too — e2fsck pass 5 validates it against the
+    // dirs actually reachable from the root ("Group N directory count
+    // wrong (2, counted=1951)"); the kernel never maintained it, so
+    // every cooked image carried mkfs's initial value. Layout: lo at
+    // 0x10, hi at 0x30 (u16 each, desc_size >= 64 for the hi half).
+    block_data[offset + 0x10..offset + 0x12]
+        .copy_from_slice(&gd.bg_used_dirs_count_lo.to_le_bytes());
+    if desc_size >= 0x32 {
+        block_data[offset + 0x30..offset + 0x32]
+            .copy_from_slice(&gd.bg_used_dirs_count_hi.to_le_bytes());
     }
 
     // metadata_csum: this descriptor was just rewritten — re-seal its
@@ -966,10 +1015,18 @@ fn add_entry_to_block(
         return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
     }
 
-    // If the slack after the new entry can host another header, leave it
+    // If the slack after the new entry can host a MINIMAL record, leave it
     // as a free (inode-0) tail entry like ext4 does; otherwise fold the
-    // remainder into the new entry's rec_len.
-    let write_rec_len = if new_rec_len - required_len >= 8 {
+    // remainder into the new entry's rec_len. The minimum on-disk record
+    // is EXT2_DIR_REC_LEN(1) = 12 bytes — an 8-byte header-only leftover
+    // is rejected by e2fsck's parse ("directory corrupted", rec_len <
+    // 12) and by Linux's htree walk: every dirent slot, live or free,
+    // must be >= 12 bytes (ext4 never leaves 8-byte holes; the split in
+    // ext4_find_dest_de folds slack < 12 into the entry's rec_len).
+    // Cook evidence (c8/cook6, deterministic across cooks): dir block 0
+    // offsets 44/4076 read as "目录已损坏 Salvage?" — both were 8-byte
+    // inode-0 holes left by this split.
+    let write_rec_len = if new_rec_len - required_len >= 12 {
         required_len
     } else {
         new_rec_len
@@ -1306,6 +1363,10 @@ fn ext4_mkdir_no_journal(
 
     // Add entry to parent directory
     ext4_add_entry_locked(fs, dir_ino, name, new_ino, file_type::EXT4_FT_DIR)?;
+
+    // a2: the new directory is now REFERENCED — count it in its group
+    // (after add_entry so a failed publish does not over-count).
+    update_group_desc_used_dirs(fs, (new_ino - 1) / fs.inodes_per_group, 1);
 
     // Update parent link count. RE-READ the parent: ext4_add_entry above may
     // have grown the directory (new block, i_size/i_block updates written
@@ -1772,7 +1833,15 @@ pub(crate) fn ext4_reap_unlinked(
         // R107: erase the stale map (see erase_dead_inode_map) so no
         // later reader of this dead inode can re-free the blocks.
         erase_dead_inode_map(fs, ino, &mut inode)?;
-        free_inode(fs, ino)
+        let was_dir = inode.is_dir();
+        free_inode(fs, ino)?;
+        if was_dir {
+            // a2: a referenced directory left this group (deferred-delete
+            // path — the unlink that dropped its last link happened while
+            // the dirent was already gone, so it was counted).
+            update_group_desc_used_dirs(fs, (ino - 1) / fs.inodes_per_group, -1);
+        }
+        Ok(())
     })();
     // SAFETY: clear_current_handle resets the thread-local journal handle
     // to None; no other references to handle exist after this point.
@@ -2277,6 +2346,8 @@ fn ext4_rmdir_inner(
 
     // Free inode in bitmap
     free_inode(fs, target_ino)?;
+    // a2: a referenced directory left this group.
+    update_group_desc_used_dirs(fs, (target_ino - 1) / fs.inodes_per_group, -1);
     let p4 = crate::drivers::timer::monotonic_ns_since_boot();
 
     // Free data blocks
@@ -2360,6 +2431,20 @@ fn is_dir_empty(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) -> Result<bool, i3
 
 /// Free an inode in the bitmap
 pub(crate) fn free_inode(fs: &Ext4FileSystem, ino: u32) -> Result<(), i32> {
+    // Family a/b race closure (ext4-corrupt lane, g3 evidence): the
+    // inode-bitmap read-modify-write below ran WITHOUT EXT4_BIG_LOCK —
+    // the 5622f770e serialization only covered allocator.rs's mutators.
+    // The reap path (flush_pending_reaps) and rmdir/rename free through
+    // HERE, racing ext4_new_inode's own unlocked RMW on the same bitmap
+    // block: a lost bit-clear or lost bit-set handed one inode number
+    // to two owners (g3: dir inode 830 recycled under its children's
+    // ".." entries — e2fsck "<830>/<1067> .. wrong file type") or
+    // freed a still-referenced number (g3: dirent -> inode 2043 in the
+    // bitmap's unused range). The lock is recursive per task; callers
+    // already holding it (reap) re-enter harmlessly. It is taken AFTER
+    // the cache invalidations below — they need no bitmap lock, and
+    // holding the global lock across them lengthened the EXT4 big-lock
+    // hold to the stall-report class (g4: BIGLOCK-STALL held=260).
     // Drop every cache keyed by this inode BEFORE the number can be
     // reallocated (review EXT4-H8 + icache variant):
     // - page cache: a reader that cached pages of the dying file would
@@ -2385,6 +2470,10 @@ pub(crate) fn free_inode(fs: &Ext4FileSystem, ino: u32) -> Result<(), i32> {
     let inodes_per_group = fs.inodes_per_group;
     let group = (ino - 1) / inodes_per_group;
     let ino_in_group = (ino - 1) % inodes_per_group;
+
+    // (See the function-head note: the bitmap RMW itself runs under the
+    // big lock, the cache invalidations above do not.)
+    let _guard = super::EXT4_BIG_LOCK.lock();
 
     // Get group descriptor
     let bitmap_block = {
@@ -2771,6 +2860,8 @@ fn ext4_rename_inner(
             target_mut.i_dtime = 1;
             super::inode::write_inode_disk(fs, target_ino, &target_mut)?;
             free_inode(fs, target_ino)?;
+            // a2: the replaced directory left its group.
+            update_group_desc_used_dirs(fs, (target_ino - 1) / fs.inodes_per_group, -1);
             free_inode_blocks(fs, target_ino, &target_mut)?;
             // R107: erase the stale map (see erase_dead_inode_map).
             erase_dead_inode_map(fs, target_ino, &mut target_mut)?;

@@ -2795,6 +2795,10 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
     // is durable — a stale root pointing at freed tree blocks walks
     // garbage on the next boot).
     let mut r108_drop_meta: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+    // Family b sibling: set when the extent branch reconciled i_blocks
+    // (data + tree nodes); the post-branch blanket assignment must not
+    // clobber it back to data-only.
+    let mut ext4_blocks_reconciled = false;
 
     // SP-2 (stress-port r1, 2026-11-02): metadata-only setattr (chmod/
     // chown/utime/atime) must NOT write back the stale disk size. The
@@ -2940,6 +2944,17 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                             .blocks
                             .saturating_sub(freed_sectors)
                             .saturating_add_signed(meta_delta);
+                        // i_blocks keeps the extent-tree blocks (family b
+                        // sibling, ext4-corrupt lane): the blanket
+                        // `blocks = new_blocks * spb` assignment after the
+                        // branch used to clobber the reconciled value to
+                        // DATA-ONLY sectors, dropping every kept tree
+                        // node from i_blocks — e2fsck pass 1 recomputes
+                        // i_blocks from the walked tree and reported
+                        // "i_blocks N, should be N+16" for every
+                        // truncated deep-tree file (g2: inodes 456/465,
+                        // 2008 vs 2024 = exactly their 2 tree nodes).
+                        ext4_blocks_reconciled = true;
                     }
                 } else {
                     // Free indirect blocks beyond new size
@@ -3003,7 +3018,15 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                         ext4_inode.block[14] = 0;
                     }
                 }
-                ext4_inode.blocks = (new_blocks * (block_size / 512)) as u64;
+                // Indirect-mode files: the block count is exactly the data
+                // blocks (indirect metadata is not counted in i_blocks by
+                // this implementation's grow paths — see the note in
+                // file.rs allocate_indirect_block). Extent-mode files keep
+                // the reconciled value (data + surviving tree nodes) set
+                // in the extent branch above.
+                if !ext4_blocks_reconciled {
+                    ext4_inode.blocks = (new_blocks * (block_size / 512)) as u64;
+                }
 
                 // Partial last block: ZERO the tail of the kept block.
                 // POSIX truncate-extend semantics make [old, new) read as

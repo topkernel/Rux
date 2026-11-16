@@ -1,0 +1,138 @@
+e2fsck 1.47.2 (1-Jan-2025)
+第 1 遍：检查 inode、块，和大小
+Inode 268 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 271 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 273 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 351 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 421 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 448 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 464 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 464 的 i_blocks 为 2176，应为 2016。  修复？否
+
+Inode 466 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 471 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 471 的 i_blocks 为 2176，应为 2016。  修复？否
+
+Inode 472 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 480 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 480 的 i_blocks 为 4944，应为 4912。  修复？否
+
+Inode 484 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 484 的 i_blocks 为 4944，应为 4912。  修复？否
+
+Inode 514 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 518 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 523 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 532 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 573 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 577 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 593 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 844 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 848 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 853 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 861 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 1198 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 1293 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 1513 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 1531 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 2114 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 2185 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 2192 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 2194 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+Inode 2203，extent 的尾部超出了允许的值
+	（逻辑块 27，物理块 19121，长度 2）
+清除？否
+
+Inode 2203 的 extent 树（位于第 1 层）可以更窄。  优化？否
+
+第 2 遍：检查目录结构
+第 3 遍：检查目录连接性
+未被连接的目录 inode 1568（之前位于 /app/el2/100/database/com.ohos.devicemanagerui/???）
+连接到 /lost+found？否
+
+... (1568) 中的 ".." 为 /app/el2/100/database/com.ohos.devicemanagerui (1606)，应为 <NULL inode> (0)。
+修复？否
+
+未被连接的目录 inode 1570（之前位于 /app/el1/100/base/com.ohos.notificationdialog/???）
+连接到 /lost+found？否
+
+... (1570) 中的 ".." 为 /app/el1/100/base/com.ohos.notificationdialog (1611)，应为 <NULL inode> (0)。
+修复？否
+
+未被连接的目录 inode 1571（之前位于 /app/el2/100/base/com.ohos.pasteboarddialog/???）
+连接到 /lost+found？否
+
+... (1571) 中的 ".." 为 /app/el2/100/base/com.ohos.pasteboarddialog (1614)，应为 <NULL inode> (0)。
+修复？否
+
+第 4 遍：检查引用计数
+独立的零长度 inode 578。  清除？否
+
+独立的 inode 578。
+连接到 /lost+found？否
+
+Inode 664 的引用计数为 3，应为 2。  修复？否
+
+独立的零长度 inode 1221。  清除？否
+
+独立的 inode 1221。
+连接到 /lost+found？否
+
+独立的零长度 inode 1282。  清除？否
+
+独立的 inode 1282。
+连接到 /lost+found？否
+
+Inode 1428 的引用计数为 3，应为 5。  修复？否
+
+Inode 1568 的引用计数为 2，应为 1。  修复？否
+
+Inode 1570 的引用计数为 2，应为 1。  修复？否
+
+Inode 1571 的引用计数为 2，应为 1。  修复？否
+
+Inode 1606 的引用计数为 2，应为 3。  修复？否
+
+Inode 1611 的引用计数为 3，应为 4。  修复？否
+
+Inode 1614 的引用计数为 8，应为 9。  修复？否
+
+第 5 遍：检查组概要信息
+块位图的差异：  -(9874--9875) -(9883--9886) -(9895--9898) -(9903--9906) -(9911--9916) -9980 -(9983--9989) -(9992--9995) -(9998--10009) -12143 -14211 -14216 -14225 -(19121--19122) -(19327--19330)
+修复？否
+
+
+run/ud-h1.img: ********** 警告：文件系统上仍有错误 **********
+
+run/ud-h1.img: 2260/1048576 文件（3.5% 不连续），119432/4194304 块
