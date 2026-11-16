@@ -1378,6 +1378,10 @@ pub fn allocate_indirect_block(
                     }
 
                     (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                    // Family b: journal registration (metadata zeroing).
+                    if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
+                        let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
+                    }
                     let sync_res = bio::sync_dirty_buffer(bh);
                     bio::brelse(bh);
                     sync_res?;
@@ -1412,6 +1416,10 @@ pub fn allocate_indirect_block(
                     }
 
                     (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                    // Family b: journal registration (metadata zeroing).
+                    if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
+                        let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
+                    }
                     let sync_res = bio::sync_dirty_buffer(bh);
                     bio::brelse(bh);
                     sync_res?;
