@@ -103,7 +103,7 @@
     </div>
 
     <h2 id="pbench"><span class="anchor">§8</span>Tier 2:pbench P1–P7 全锚(SMP-8 标准,2026-11-08 重锚)</h2>
-    <div class="callout"><b>SMP-8 标准</b>(用户指令 2026-11-07):所有启动至少 8 CPU(Kernel.toml <code>smp.max_cpus = 8</code>;三架构驱动默认 <code>-smp 8</code>)。旧锚在 2–4 CPU 配置下测得,不能判定 8-CPU 跑分 —— 跨配置比较与 debug-vs-strong 同类无效。以下锚 = SMP-8 同 rig A/B 基线(base 166e4516 vs per-mm-break c127e4bc,KVM q35 4G)。</div>
+    <div class="callout"><b>SMP-8 标准</b>(用户指令 2026-11-07):所有启动至少 8 CPU(Kernel.toml <code>smp.max_cpus = 8</code>;三架构驱动默认 <code>-smp 8</code>)。旧锚在 2–4 CPU 配置下测得,不能判定 8-CPU 配置下的评分 —— 跨配置比较与 debug-vs-strong 同类无效。以下锚 = SMP-8 同 rig A/B 基线(base 166e4516 vs per-mm-break c127e4bc,KVM q35 4G)。</div>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>组</th><th>内容(test/pbench.c)</th><th class="num">锚(SMP-8 KVM,µs)</th></tr></thead>

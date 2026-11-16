@@ -140,7 +140,7 @@ e2fsck -f &lt;拷贝盘.img&gt;                          <span class="c"># 镜�
     <div class="tbl-wrap"><table>
       <thead><tr><th>症状</th><th>仪器路径</th></tr></thead>
       <tbody>
-        <tr><td>怀疑泄漏</td><td>dfx=memwatch 按调用点记账 → 分配器卡死者用 allocwatch 点名 → ledger 确认总量</td></tr>
+        <tr><td>怀疑泄漏</td><td>dfx=memwatch 按调用点记账 → 分配器内停滞的持有者由 allocwatch 点名 → ledger 确认总量</td></tr>
         <tr><td>OOM 报告可信吗</td><td>ledger mismatch 判真耗尽/记账漂移 → VscanCensus 定回收失效分支</td></tr>
         <tr><td>双重分配/帧破坏</td><td>dfx=mmforensics:PT 台账 + 戳环给帧化身史 + 全任务反向扫描找持有者</td></tr>
         <tr><td>野写</td><td>scribble canary 命中停靠 → GDB watchpoint 定写入者</td></tr>

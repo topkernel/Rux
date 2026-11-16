@@ -109,12 +109,12 @@
 
     <h2 id="n1110"><span class="anchor">2026-11-10</span></h2>
     <ul>
-      <li><b>make ci 一键 CI 流水线落地</b>(userspace/ci/):内核构建 → 套件编译(fio/rt-tests/futex/fsfuzz)→ guest 镜像 → Ubuntu 启动回归(脚本化串口 420 s,login/gnome 标记 + KERNPANIC 检出)与 OH 启动回归(双盘靴 600 s,SA 插入数 ≥20 判活)→ lmbench/Geekbench(资产自动获取已接,注入跑分与 CSV 解析 PENDING-RIG)→ LTP 全量 → 压力 32 类循环;daily-stress.sh 按同序每日循环,KERNPANIC 即 ALERT 停机。</li>
+      <li><b>make ci 一键 CI 流水线落地</b>(userspace/ci/):内核构建 → 套件编译(fio/rt-tests/futex/fsfuzz)→ guest 镜像 → Ubuntu 启动回归(脚本化串口 420 s,login/gnome 标记 + KERNPANIC 检出)与 OH 启动回归(双盘靴 600 s,SA 插入数 ≥20 判活)→ lmbench/Geekbench(资产自动获取已接,注入评测与 CSV 解析 PENDING-RIG)→ LTP 全量 → 压力 32 类循环;daily-stress.sh 按同序每日循环,KERNPANIC 即 ALERT 停机。</li>
     </ul>
 
     <h2 id="n1108"><span class="anchor">2026-11-08</span></h2>
     <ul>
-      <li><b>lmbench campaign 至第 14 轮</b>:10 项关闭 —— exec(78–82 vs 84.80 µs,~1.0×)与 fork(52.9–54.1 vs 51.61 µs,1.02–1.05×)进入持平带(fork 双稳态根因 = UART 打印风暴 + free 时 stale-rsp0 UAF,均已修);open 收窄至 1.61×、null 1.18×(2× 论证为物理不可达)。campaign 顺带修复 5 个正确性 bug。</li>
+      <li><b>lmbench campaign 至第 14 轮</b>:10 项关闭 —— exec(78–82 vs 84.80 µs,~1.0×)与 fork(52.9–54.1 vs 51.61 µs,1.02–1.05×)进入持平带(fork 双稳态根因 = UART 打印风暴 + free 时 stale-rsp0 UAF,均已修);open 收窄至 1.61×、null 1.18×(2× 论证为物理不可达)。campaign 随役修复 5 个正确性 bug。</li>
       <li><b>Tier-2 pbench 锚按 SMP-8 标准重锚</b>(用户指令:所有启动 ≥8 CPU):p2_ctxsw 0.756 µs(8 CPU 切换快 38%);COW 缺页 +58% 记为诚实缺口,下一主攻 = 跨 CPU shootdown。</li>
     </ul>
 

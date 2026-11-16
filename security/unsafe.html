@@ -109,7 +109,7 @@
       <thead><tr><th>目录</th><th class="num">unsafe 行</th><th class="num">unsafe 密度</th><th>说明</th></tr></thead>
       <tbody>
         <tr><td>全内核</td><td class="num">20,926 / 162,677 行(263 文件,2,494 个 unsafe 块)</td><td class="num"><b>12.9%</b></td><td>预算规则:该百分比只降不升,升须逐发布说明</td></tr>
-        <tr><td>fs</td><td class="num">5,352</td><td class="num">12.6%</td><td>ext4 + 页缓存是预算大头</td></tr>
+        <tr><td>fs</td><td class="num">5,352</td><td class="num">12.6%</td><td>ext4 与页缓存构成预算的主要部分</td></tr>
         <tr><td>syscall</td><td class="num">3,955</td><td class="num">15.8%</td><td>胶囊边界层</td></tr>
         <tr><td>process / drivers</td><td class="num">2,807 / 2,131</td><td class="num">24.6% / 15.7%</td><td>process 密度最高(trap/上下文汇编毗邻)</td></tr>
         <tr><td>sched</td><td class="num">—</td><td class="num">17.6%</td><td>GRQ/切换路径</td></tr>

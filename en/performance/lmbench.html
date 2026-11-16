@@ -141,7 +141,7 @@
     <ul>
       <li>The table above is the 2026-11-16 NOHZ-round full battery (12 latency + 8 bandwidth rows); the perf-2x rounds' newest bare-syscall values (null 0.0435 / read 0.101 / write 0.0811) are single-row re-measurements, not yet a full re-battery — the two datasets are labeled separately and never mixed.</li>
       <li>Historical standings: the 2026-11-15 gb-opt 29-row table, the 11-04 fair-KVM table (with the virtualization-tax analysis: pipe 4.85×/ctx 7.37×), and the r14 table are archived in <code>docs/test/lmbench-report.md</code>; the failed-row retry rule and the lat_fifo/bw_udp upstream-breakage drops are recorded there too.</li>
-      <li>Correctness defects the campaign dug out along the way (hidden by the performance gap): the free-path stale-rsp0 UAF (the fork bistability root cause), the call_rcu zero-grace callback firing, the wakeup-monitor staleness inversion, fdreap's per-tick 10 ms close stalls, and the mainline munmap missing-final-batch TLB flush (5b4a4bc7).</li>
+      <li>Correctness defects the campaign uncovered along the way (hidden by the performance gap): the free-path stale-rsp0 UAF (the fork bistability root cause), the call_rcu zero-grace callback firing, the wakeup-monitor staleness inversion, fdreap's per-tick 10 ms close stalls, and the mainline munmap missing-final-batch TLB flush (5b4a4bc7).</li>
     </ul>
 
     <h2 id="rerun"><span class="anchor">§5</span>Reproducing</h2>

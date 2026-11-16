@@ -109,7 +109,7 @@
     <h2 id="ext4"><span class="anchor">§3</span>ext4(12 文件,17,486 行)</h2>
     <h3>挂载特性门</h3>
     <ul>
-      <li><code>KNOWN_INCOMPAT = FILETYPE|RECOVER|EXTENTS|B64BIT|FLEX_BG|ENCRYPT</code> —— <b>ENCRYPT 是文件系统能力位,接受不拒</b>:拒绝它曾以 ENODEV 挡死 OH 原装 userdata 分区(/data 不可用,全服务 mkdir 风暴 err=2/5)。REJECTED 集 = COMPRESSION|JOURNAL_DEV|META_BG|MMP|EA_INODE|DIRDATA|CSUM_SEED|LARGEDIR|INLINE_DATA;未知 incompat 拒绝挂载;BIGALLOC 与 METADATA_CSUM 直接拒绝(附 sb 校验)。</li>
+      <li><code>KNOWN_INCOMPAT = FILETYPE|RECOVER|EXTENTS|B64BIT|FLEX_BG|ENCRYPT</code> —— <b>ENCRYPT 是文件系统能力位,接受不拒</b>:拒绝它曾以 ENODEV 阻断 OH 原装 userdata 分区(/data 不可用,全服务 mkdir 风暴 err=2/5)。REJECTED 集 = COMPRESSION|JOURNAL_DEV|META_BG|MMP|EA_INODE|DIRDATA|CSUM_SEED|LARGEDIR|INLINE_DATA;未知 incompat 拒绝挂载;BIGALLOC 与 METADATA_CSUM 直接拒绝(附 sb 校验)。</li>
       <li>ext3 为 ext4 驱动的别名(参考 ≥ 4.3 同形态);首个 ext4 挂载 = 根实例(执行日志重放),后续盘走独立实例;对活 ext4 的重复挂载以 EBUSY 拒绝 —— 避免对活日志重跑恢复。</li>
     </ul>
     <h3>读路径:缺失窗口批填充(D-12)</h3>

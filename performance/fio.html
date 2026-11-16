@@ -115,7 +115,7 @@
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">口径说明:fio 在此轮用于验证 I/O 引擎路径与数据完整性,非吞吐基准(无同机 Linux 对照;multi 组级 ~700 MiB/s 为页缓存吸收类的顺带读数)。I/O 吞吐性能由 §8 pbench P6(Rux 锚:write_fsync 8442.6 / mkdrmdir 216.7 / unlink 54.6 / append 5.19 µs)与 §2 lmbench 带宽行(bw_pipe 2.68×、bw_unix 1.88× 对 Linux)承担;fio 吞吐基准列入补测队列。附记:作业收尾后 numjobs 进程组回收阶段观测到 F-8(F-5 家族:停靠 forker + KOT-KILL 级联,调度交接问题,移交调度线);fio 自身结果不受影响(rc=0、数据正确)。netperf / iperf3 / sockperf 网络基准在 qa-suites 章程序列中,尚未开测。</p>
+    <p style="font-size:13px;color:var(--text-3)">口径说明:fio 在此轮用于验证 I/O 引擎路径与数据完整性,非吞吐基准(无同机 Linux 对照;multi 组级 ~700 MiB/s 为页缓存吸收类的伴随读数)。I/O 吞吐性能由 §8 pbench P6(Rux 锚:write_fsync 8442.6 / mkdrmdir 216.7 / unlink 54.6 / append 5.19 µs)与 §2 lmbench 带宽行(bw_pipe 2.68×、bw_unix 1.88× 对 Linux)承担;fio 吞吐基准列入补测队列。附记:作业收尾后 numjobs 进程组回收阶段观测到 F-8(F-5 家族:停靠 forker + KOT-KILL 级联,调度交接问题,移交调度线);fio 自身结果不受影响(rc=0、数据正确)。netperf / iperf3 / sockperf 网络基准在 qa-suites 章程序列中,尚未开测。</p>
 
     
     <h2 id="r5b"><span class="anchor">§2</span>第 5b 轮扩展类与吞吐读数(qa-suites,2026-11-05)</h2>

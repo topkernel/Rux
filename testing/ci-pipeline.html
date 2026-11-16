@@ -94,7 +94,7 @@
           <tr><td>3</td><td>guest 镜像</td><td>从资产库播种(缺则回退仓库原生 target 生成;镜像不可下载,只从常备镜像库 reflink 播种)</td><td><span class="chip ok"><span class="dot g"></span>已接</span></td></tr>
           <tr><td>4a</td><td>Ubuntu 启动回归</td><td>脚本化串口靴 420 s(KVM q35 4G/4CPU,-snapshot);login / gnome-shell / Ubuntu 标记判定通过,KERNPANIC 检出即 UBUNTU-REGRESS</td><td><span class="chip ok"><span class="dot g"></span>已接</span></td></tr>
           <tr><td>4b</td><td>OH 启动回归</td><td>双盘靴(system + userdata)600 s(KVM q35 2G/2CPU);"insert SA:" 插入数 ≥20 判活,KERNPANIC 检出即 OH-REGRESS</td><td><span class="chip ok"><span class="dot g"></span>已接</span></td></tr>
-          <tr><td>4c</td><td>lmbench / Geekbench</td><td>资产自动获取已接(lmbench 源码下载编译、Geekbench 6 tarball,入库后存在即跳过);注入跑分与 CSV 解析接入 rig 中</td><td><span class="chip warn">PENDING-RIG</span></td></tr>
+          <tr><td>4c</td><td>lmbench / Geekbench</td><td>资产自动获取已接(lmbench 源码下载编译、Geekbench 6 tarball,入库后存在即跳过);注入评测与 CSV 解析接入 rig 中</td><td><span class="chip warn">PENDING-RIG</span></td></tr>
           <tr><td>5</td><td>LTP 全量扫描</td><td>1,869 项全量,setsid 脱离启动,完成后结果落行(log run/ci-ltp.log)</td><td><span class="chip ok"><span class="dot g"></span>已接</span></td></tr>
           <tr><td>6</td><td>压力 32 类循环</td><td>3 槽 QEMU 循环(fio / futex / rt-tests / fsfuzz 类,finite pass 或每日循环直到 stop);裁决追加 rounds.log</td><td><span class="chip ok"><span class="dot g"></span>已接</span></td></tr>
         </tbody>

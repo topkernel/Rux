@@ -123,7 +123,7 @@
       </table>
     </div>
     <p style="font-size:13px;color:var(--text-3)">机制注:领先面集中在调度/唤醒与 IPC(跨 vCPU 唤醒 IPI 在虚拟化下开销显著,Rux 单全局队列不产生跨核重调度风暴)与内存带宽;系统调用延迟行 guest 自带入口、不发生 vmexit,两侧几乎无虚拟化附加成本,差距为真实内核差距。未出数行:lat_mmap/lat_pagefault/bw_mmap_rd(本轮电池未打印)与 net-server 族(lat_tcp/udp/connect、bw_tcp、lat_fs)——无诚实数字,不列表。历史 r14 表(2026-11-08 窗口)见 lmbench-report.md 存档。</p>
-    <div class="callout"><b>campaign 顺带挖出并修复的正确性 bug</b>(性能差距掩盖了它们):free 时的 stale-rsp0 UAF(fork 双稳态根因);call_rcu 零宽限期回调触发;唤醒监视器陈旧性判定反转;fdreap 每 tick 10 ms close 停滞;主线 munmap 末批 TLB flush 丢失(5b4a4bc7)。</div>
+    <div class="callout"><b>campaign 随役发现并修复的正确性 bug</b>(性能差距掩盖了它们):free 时的 stale-rsp0 UAF(fork 双稳态根因);call_rcu 零宽限期回调触发;唤醒监视器陈旧性判定反转;fdreap 每 tick 10 ms close 停滞;主线 munmap 末批 TLB flush 丢失(5b4a4bc7)。</div>
 
     
     <h2 id="campaign"><span class="anchor">§3</span>perf-2x 战役(裸系统调用 + fork/exec 2× 目标)</h2>
@@ -141,7 +141,7 @@
     <ul>
       <li>上表为 2026-11-16 NOHZ 轮全量电池(12 延迟行 + 8 带宽行);perf-2x 三轮的最新裸系统调用值(null 0.0435/read 0.101/write 0.0811)为单行重测,尚未全量重跑 —— 两组数据分别标注,不混排。</li>
       <li>历史口径:2026-11-15 gb-opt 29 行表、11-04 公平 KVM 表(含虚拟化税分析:pipe 4.85×/ctx 7.37×)与 r14 表均在 <code>docs/test/lmbench-report.md</code> 存档;失败行重试规则与 lat_fifo/bw_udp 上游缺陷弃用亦记录在案。</li>
-      <li>campaign 顺带修复的正确性缺陷(性能差距掩盖下):free 时 stale-rsp0 UAF(fork 双稳态根因)、call_rcu 零宽限期回调、唤醒监视器陈旧性判定反转、fdreap 每 tick 10 ms close 停滞、主线 munmap 末批 TLB flush 丢失(5b4a4bc7)。</li>
+      <li>campaign 随役修复的正确性缺陷(性能差距掩盖下):free 时 stale-rsp0 UAF(fork 双稳态根因)、call_rcu 零宽限期回调、唤醒监视器陈旧性判定反转、fdreap 每 tick 10 ms close 停滞、主线 munmap 末批 TLB flush 丢失(5b4a4bc7)。</li>
     </ul>
 
     <h2 id="rerun"><span class="anchor">§5</span>复现</h2>

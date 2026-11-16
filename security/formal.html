@@ -136,7 +136,7 @@
     <ul>
       <li><b>规模</b>:verify crate 1,164 个 #[test](102 文件),其中 109 个 proptest! 块(proptest 1.5,每测试默认 256 例,PROPTEST_CASES 可调);内核内另有 100 个 #[test](unit-test feature,QEMU 内 make test 执行)。</li>
       <li><b>覆盖面</b>:buddy 对齐/对合性、引用计数非负且无下溢释放、VMA 不重叠、Newton 法整平方根与水位线公式、Sv39 PTE/Satp 编码、RFC 1071 校验和 / RFC 6298 RTT / RFC 5681 拥塞控制、最长前缀匹配、ARP 缓存 LRU、路径规范化与根逃逸防护、Unix DAC 判定(含 CAP_DAC_OVERRIDE)、ext4 间接块/namei/超级块/分配器、OOM badness 评分(10 项:OOM_SCORE_ADJ_MIN 免疫、饱和规避、小 totalpages 无调整、对称性)、CFS 权重表单调性、deadline 带宽钳制、futex 键匹配、能力代数(De Morgan/子集/补)、cmdline 解析、JBD2 标签算术。</li>
-      <li><b>边界如实声明</b>:不覆盖裸指针/内联汇编/GlobalAlloc 实现、运行期并发与中断行为、需 QEMU 的系统集成 —— "verify 回答'算法是否正确',单元测试回答'实现是否正确'",集成面由 LTP/压力舰队承担。</li>
+      <li><b>边界如实声明</b>:不覆盖裸指针/内联汇编/GlobalAlloc 实现、运行期并发与中断行为、需 QEMU 的系统集成 —— "verify 回答'算法是否正确',单元测试回答'实现是否正确'",集成面由 LTP/压力并发集群承担。</li>
       <li><b>Miri</b>:对 verify crate 全量以 <code>-Zmiri-disable-isolation</code> 解释执行,检出任何 UB 即 fail(nightly,360 分钟预算)。</li>
     </ul>
 

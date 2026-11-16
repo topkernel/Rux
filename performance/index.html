@@ -98,7 +98,7 @@
         <div class="nums">逐项数据见 <a href="geekbench.html">Geekbench 页</a> · 机位注明:Linux 侧为宿主 4-CPU 钉核(taskset,拓扑对齐)</div>
       </div>
     </div>
-    <div class="callout"><b>差距结构:</b>领先面覆盖调度/唤醒(上下文切换、管道、信号量)、IPC 带宽(unix、pipe)与内存带宽;落后面集中在系统调用入口与路径解析(null/read/write/stat/open 1.2–2.5×)。历史 campaign 在旧参考窗口下曾把 fork/exec 记入持平带,2026-11-16 同 rig 参考列重测后回到 1.08–1.19× 带(参考内核切换族对测量窗口敏感,比值只在同会话内有意义)。campaign 顺带修复的 5 个正确性 bug 见 §2 表后清单。</div>
+    <div class="callout"><b>差距结构:</b>领先面覆盖调度/唤醒(上下文切换、管道、信号量)、IPC 带宽(unix、pipe)与内存带宽;落后面集中在系统调用入口与路径解析(null/read/write/stat/open 1.2–2.5×)。历史 campaign 在旧参考窗口下曾把 fork/exec 记入持平带,2026-11-16 同 rig 参考列重测后回到 1.08–1.19× 带(参考内核切换族对测量窗口敏感,比值只在同会话内有意义)。campaign 随役修复的 5 个正确性 bug 见 §2 表后清单。</div>
 
         <h2 id="suites"><span class="anchor">§2</span>套件地图(每套件一页)</h2>
     <div class="tbl-wrap">
@@ -170,7 +170,7 @@
           <tr><td>hook-call 税与 path_memo(campaign r5/r7)</td><td>1331 处 cli/sti 内联快门 + path_memo/lease 门(每 inode open_count 替代全局 BTreeMap 锁、读侧 seqlock 无锁化)</td><td>null −7% / read −5% / write −6% / ctxsw −6.1% / pipe −12%;open 累计 −15.2%、stat −4.6%,read 转为领先</td></tr>
           <tr><td>逐字 memo 哈希 + 仅能力 DAC 快径(campaign r10)</td><td>word-at-a-time 哈希;DAC 检查仅走能力位</td><td>open −5.2%、stat −10%;File-pool 假说被 PC3 相位解剖否定(fil=19/ins=24 ns)</td></tr>
           <tr><td>fd 表位图清扫(campaign r11)</td><td>fork 拷贝与 exit 释放改位图扫描;ptrace 被跟踪计数门</td><td>fork 拷贝 910→574 ns、exit 释放 4491→825 ns、premm 4635→757 ns;exit 体 17.9→7.3 µs;exec 三态锚定持平</td></tr>
-          <tr><td>fork 双稳态根因(campaign r12–14)</td><td>冻结取证链定位:UART 打印风暴(批量化)→ free 时 stale-rsp0 UAF(修复,六腿门禁)</td><td>挂起 3/6→1/6;fork 进入 1.02–1.05× 持平带;顺带修复 call_rcu 契约与唤醒监视器反转</td></tr>
+          <tr><td>fork 双稳态根因(campaign r12–14)</td><td>冻结取证链定位:UART 打印风暴(批量化)→ free 时 stale-rsp0 UAF(修复,六腿门禁)</td><td>挂起 3/6→1/6;fork 进入 1.02–1.05× 持平带;随役修复 call_rcu 契约与唤醒监视器反转</td></tr>
         </tbody>
       </table>
     </div>

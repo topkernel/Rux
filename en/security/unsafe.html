@@ -109,7 +109,7 @@
       <thead><tr><th>Directory</th><th class="num">unsafe lines</th><th class="num">unsafe density</th><th>Notes</th></tr></thead>
       <tbody>
         <tr><td>Whole kernel</td><td class="num">20,926 / 162,677 lines (263 files, 2,494 unsafe blocks)</td><td class="num"><b>12.9%</b></td><td>budget rule: the percentage only goes down, or an increase is justified per release</td></tr>
-        <tr><td>fs</td><td class="num">5,352</td><td class="num">12.6%</td><td>ext4 + page cache carry the budget</td></tr>
+        <tr><td>fs</td><td class="num">5,352</td><td class="num">12.6%</td><td>ext4 and the page cache form the bulk of the budget</td></tr>
         <tr><td>syscall</td><td class="num">3,955</td><td class="num">15.8%</td><td>the capsule boundary layer</td></tr>
         <tr><td>process / drivers</td><td class="num">2,807 / 2,131</td><td class="num">24.6% / 15.7%</td><td>process is the densest (trap/context-switch adjacency)</td></tr>
         <tr><td>sched</td><td class="num">—</td><td class="num">17.6%</td><td>the GRQ/switch paths</td></tr>
