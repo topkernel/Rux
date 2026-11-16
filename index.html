@@ -186,27 +186,27 @@
     <div class="card-grid grid-4">
       <div class="card">
         <h3><span class="ico">🧮</span>调度器</h3>
-        <p>单一全局运行队列(GRQ):在 2–4 vCPU 的目标场景下彻底消除负载迁移与任务窃取,唤醒路径直达。</p>
+        <p>单一全局运行队列(GRQ):面向 8 vCPU 以内的桌面/移动级核数,结构上消除负载迁移与任务窃取;实测等待唤醒抢占门终结逐记录抢占往返。</p>
         <div class="nums">持锁 <b>~2.8µs</b> · census 8/32 带内</div>
-        <a class="more" href="architecture/design.html#sched">设计详情 →</a>
+        <a class="more" href="architecture/scheduler.html">调度器深读 →</a>
       </div>
       <div class="card">
         <h3><span class="ico">🧠</span>内存管理</h3>
         <p>buddy 页分配器 + magazine 小对象分配、全局页缓存、每任务 VMA;munmap churn 竞态家族已全数关闭。</p>
         <div class="nums">小分配类锁 <b>19.7M</b>/次启动 · 门 ≤25M</div>
-        <a class="more" href="architecture/design.html#mm">设计详情 →</a>
+        <a class="more" href="architecture/memory.html">内存深读 →</a>
       </div>
       <div class="card">
         <h3><span class="ico">💾</span>文件系统</h3>
         <p>ext4(读写)+ 块层 bio 异步批量读 + buffer cache 命中率保障;pbench 文件路径中位数全部带内。</p>
         <div class="nums">buffer cache 命中率 <b>99.1%</b></div>
-        <a class="more" href="architecture/design.html#fs">设计详情 →</a>
+        <a class="more" href="architecture/filesystem.html">文件系统深读 →</a>
       </div>
       <div class="card">
         <h3><span class="ico">📡</span>IPC 与 binder</h3>
         <p>兼容 OpenHarmony 的完整 binder 实现、unix socket、pipe、SysV IPC;跨进程死锁家族已修复并回归。</p>
         <div class="nums">pipe 往返 <b>µs 级</b> · OH 全服务互通</div>
-        <a class="more" href="architecture/design.html#ipc">设计详情 →</a>
+        <a class="more" href="architecture/ipc.html">IPC 深读 →</a>
       </div>
       <div class="card">
         <h3><span class="ico">🌐</span>网络栈</h3>
@@ -222,15 +222,15 @@
       </div>
       <div class="card">
         <h3><span class="ico">🔍</span>可观测性</h3>
-        <p>统一 trace-event 框架 + tracefs(对齐 Linux 语义,61 事件/20 组),syscost 普查、kallsyms、PSI 压力统计(/proc/pressure)、任务转储、看门狗配套齐备。</p>
+        <p>统一 trace-event 框架 + tracefs(对齐参考语义,69 事件/17 组),syscost 普查与 IF=0 探针、pbench 微基准、kallsyms 编译期符号表、任务转储与看门狗;调试专栏含 tracepoint/性能/锁/内存取证/panic 五个深读页。</p>
         <div class="nums">新观测一律 <b>tracepoint</b> 化</div>
-        <a class="more" href="architecture/design.html#trace">设计详情 →</a>
+        <a class="more" href="debugging/tracepoints.html">tracepoint 深读 →</a>
       </div>
       <div class="card">
         <h3><span class="ico">🧭</span>架构移植层</h3>
         <p>启动协议(bzImage / 镜像头)、trap 入口、上下文切换、TLB 管理;90% 内核代码架构无关。</p>
         <div class="nums">x86_64 / riscv64 / aarch64</div>
-        <a class="more" href="architecture/design.html#archs">设计详情 →</a>
+        <a class="more" href="architecture/boot.html">启动流程深读 →</a>
       </div>
     </div>
   </div>
@@ -265,7 +265,7 @@
       </div>
       <div class="card">
         <h3><span class="ico">🔐</span>安全</h3>
-        <p>bug 分类学全史 34 例逐条归档(23 unsafe/汇编 + 11 safe 所有权类),指针表达式类缺陷为零;157 个 Kani harness 证明核心 unsafe 代码。</p>
+        <p>bug 分类学全史 34 例逐条归档(23 unsafe/汇编 + 11 safe 所有权类),指针表达式类缺陷为零;159 个 Kani harness 证明核心 unsafe 代码。</p>
         <div class="nums">unsafe 行 12.9% · 缺口直说</div>
         <a class="more" href="security/index.html">安全与形式验证 →</a>
       </div>

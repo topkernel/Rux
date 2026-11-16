@@ -117,6 +117,7 @@
       <li><b>All three desktop park-face mechanisms fixed</b>: SOFTIRQ_OFFSET migration (preempt bracket mismatch repair), the drain's yield defeated by a leaked preempt BASE (DRAIN-PC-HEAL), and the lost straggler wake (STRAGGLER-RESCUE) — 10 of 11 post-fix boots reach a shell (was 0–1 of 5).</li>
       <li><b>PSI</b> (/proc/pressure/{cpu,memory,io}) landed and registered as D-20 (tick-sampled stall accounting; always-on without scheduler hot-path cost).</li>
       <li>The tracepoint surface grew to <b>61 events / 20 groups</b> (the lock/tcp/sock/net families added).</li>
+      <li><em>Retrospective note (2026-11-17): the PSI (D-20) and lock/tcp/sock event families recorded above were lost in the 11-11 merge and are not in current main; PSI sits on the debug-alignment resume queue, and the D-20 number has been re-used by the writer-side writeback-watermark divergence.</em></li>
     </ul>
 
     <h2 id="n1106"><span class="anchor">2026-11-06</span></h2>

@@ -117,6 +117,7 @@
       <li><b>桌面冻结面三层机制全数修复</b>:SOFTIRQ_OFFSET 迁移(preempt 括号失配纠正)、泄漏 preempt BASE 导致的排空不让出(DRAIN-PC-HEAL)、丢失的 straggler 唤醒(STRAGGLER-RESCUE);修复后 11 次启动 10 次 shell 就绪(此前 0–1/5)。</li>
       <li><b>PSI</b>(/proc/pressure/{cpu,memory,io})落地,登记为 D-20(采样式停顿统计,常开不落在调度热路径)。</li>
       <li>tracepoint 事件面扩到 <b>61 事件 / 20 组</b>(新增 lock/tcp/sock/net 族)。</li>
+      <li><em>后续注记(2026-11-17):上两条所记 PSI(D-20)与 lock/tcp/sock 事件族在 11-11 合并中丢失,未在当前主线;PSI 在调试对齐恢复队列,D-20 编号已由写者侧回写水位分歧重新启用。</em></li>
     </ul>
 
     <h2 id="n1106"><span class="anchor">2026-11-06</span></h2>

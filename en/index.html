@@ -152,7 +152,7 @@
       <div class="card">
         <h3><span class="ico">🛡️</span>Rust safety, with a ledger</h3>
         <p>All-Rust kernel (no_std). All 34 memory-corruption defects in history are individually filed: 23 in audited <code>unsafe</code>/assembly, 11 in safe code (all ownership/lock-protocol classes safe Rust does not type-check today); pointer-expression classes (OOB, wild pointers, format strings) are zero in safe code.</p>
-        <div class="nums">unsafe lines 12.9% · Kani 157 proofs</div>
+        <div class="nums">unsafe lines 12.9% · Kani 159 proofs</div>
         <a class="more" href="security/index.html">Security section →</a>
       </div>
       <div class="card">
@@ -180,27 +180,27 @@
     <div class="card-grid grid-4">
       <div class="card">
         <h3><span class="ico">🧮</span>Scheduler</h3>
-        <p>A single global run queue (GRQ): for the 2–4 vCPU target it eliminates load balancing and task stealing entirely; wakeup paths go direct.</p>
+        <p>A single global run queue (GRQ): aimed at desktop/mobile core counts within 8 vCPUs, it eliminates load balancing and task stealing by construction; the measured-wait wakeup gate ends the per-record preempt round trip.</p>
         <div class="nums">hold <b>~2.8µs</b> · census 8/32 in band</div>
-        <a class="more" href="architecture/design.html#sched">Design →</a>
+        <a class="more" href="architecture/scheduler.html">Design →</a>
       </div>
       <div class="card">
         <h3><span class="ico">🧠</span>Memory management</h3>
         <p>Buddy allocator + magazine small-object allocation, global page cache, per-task VMAs; the munmap churn-race family fully closed.</p>
         <div class="nums">class-lock sections <b>19.7M</b>/boot · gate ≤25M</div>
-        <a class="more" href="architecture/design.html#mm">Design →</a>
+        <a class="more" href="architecture/memory.html">Design →</a>
       </div>
       <div class="card">
         <h3><span class="ico">💾</span>File systems</h3>
         <p>ext4 (rw) + async batched block reads + buffer-cache hit-rate protection; pbench filesystem medians all in band.</p>
         <div class="nums">buffer cache hit rate <b>99.1%</b></div>
-        <a class="more" href="architecture/design.html#fs">Design →</a>
+        <a class="more" href="architecture/filesystem.html">Design →</a>
       </div>
       <div class="card">
         <h3><span class="ico">📡</span>IPC &amp; binder</h3>
         <p>A complete OpenHarmony-compatible binder, unix sockets, pipes, SysV IPC; the cross-process deadlock family fixed and regressed.</p>
         <div class="nums">pipe round trip <b>µs class</b> · full OH service mesh</div>
-        <a class="more" href="architecture/design.html#ipc">Design →</a>
+        <a class="more" href="architecture/ipc.html">Design →</a>
       </div>
       <div class="card">
         <h3><span class="ico">🌐</span>Network stack</h3>
@@ -216,15 +216,15 @@
       </div>
       <div class="card">
         <h3><span class="ico">🔍</span>Observability</h3>
-        <p>A unified trace-event framework + tracefs (semantics aligned with Linux, 61 events / 20 groups), syscost census, kallsyms, PSI pressure accounting (/proc/pressure), task dumps, watchdog.</p>
+        <p>A unified trace-event framework + tracefs (semantics aligned with the reference, 69 events / 17 groups), the syscost census with the IF=0 probe, the pbench microbenchmarks, the compile-time kallsyms table, task dumps and the watchdog; the debugging section carries five deep-dive pages (tracepoints/perf/locks/memory forensics/panic).</p>
         <div class="nums">new observability is <b>tracepoint</b>-only</div>
-        <a class="more" href="architecture/design.html#trace">Design →</a>
+        <a class="more" href="debugging/tracepoints.html">Design →</a>
       </div>
       <div class="card">
         <h3><span class="ico">🧭</span>Arch port layer</h3>
         <p>Boot protocols (bzImage / image headers), trap entry, context switch, TLB management; ~90% of the kernel is arch-independent.</p>
         <div class="nums">x86_64 / riscv64 / aarch64</div>
-        <a class="more" href="architecture/design.html#archs">Design →</a>
+        <a class="more" href="architecture/boot.html">Design →</a>
       </div>
     </div>
   </div>
@@ -258,7 +258,7 @@
       </div>
       <div class="card">
         <h3><span class="ico">🔐</span>Security</h3>
-        <p>All 34 memory-corruption defects in history individually adjudicated (23 audited unsafe/asm + 11 safe ownership-class), zero pointer-expression defects in safe code; 157 Kani harnesses prove the core unsafe code for all inputs.</p>
+        <p>All 34 memory-corruption defects in history individually adjudicated (23 audited unsafe/asm + 11 safe ownership-class), zero pointer-expression defects in safe code; 159 Kani harnesses prove the core unsafe code for all inputs.</p>
         <div class="nums">unsafe lines 12.9% · gaps stated plainly</div>
         <a class="more" href="security/index.html">Security →</a>
       </div>
