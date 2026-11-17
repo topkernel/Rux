@@ -868,3 +868,53 @@ has nothing else to run.
   fast run never fired). fio --verify=md5 clean on every build;
   in-guest md5sums match host digests.
 - Artifacts: run/WRFSYNC.md (TSC decomposition, per-lever A/B).
+
+## R. Entity-embedded intrusive rb-tree CFS timeline (grq-10ns lane, 2026-11-17, evidence-backed)
+
+- **The global queue's timeline stopped being a data structure with a
+  heap behind it.** The CFS timeline was a `BTreeMap<VruntimeKey,
+  *mut Task>` — every enqueue and pick descended the tree under the
+  GRQ lock, and a B-tree split/merge could call the ALLOCATOR inside
+  the critical section. Replaced with an entity-embedded intrusive
+  red-black tree carrying a cached leftmost (the reference
+  `rb_root_cached` shape): the node lives inside
+  `SchedEntity::run_node`, mutations are pointer rewires, and the lock
+  holds ZERO allocations by construction (the BTreeMap import is
+  gone from fair.rs).
+- **The pick's rejection handling was the real tail.** The old pick
+  stashed refused candidates and re-did the walk (2×O(log n) per
+  refused candidate) and initialized a 768-byte stack array on every
+  pick inside the lock; the successor walk steps past refusals IN
+  PLACE. Timeline mutations per boot collapsed 19,785,398 → 145,524
+  (−99.3%, 2.0 → 0.013 per schedule) and the p2_ctxsw p99 bimodal
+  434–486 µs tail (a genuine stash-churn contention mode) is GONE
+  (4.00–4.11 µs stable).
+- **Measured (release, q35 KVM smp2, per schedule call, exact-probe
+  brackets):** pick segment 235 → 89–98 ns (−58%); exact GRQ hold
+  (acquire→release) 378 → 241–273 ns (−28%); timeline op 46–47 ns
+  measured, i.e. ~20–30 ns net of the probe's clock-read pair.
+  Debug class: pick 602–608 → 444–452 ns.
+- **The KVM tax is named, not hidden.** The lock-WAIT segment reads
+  70–84 ns: the hypervisor emulates cache coherence in the management
+  path, so cross-vCPU locked instructions cost several times more
+  than on bare metal — the reference kernel's per-rq lock pays the
+  same tax on this rig, so it is NOT a GRQ-specific cost. The site's
+  old "~102 ns GRQ critical section" figure was this lock-WAIT
+  segment mislabeled as the hold; the site's numbers now carry the
+  full decomposition (lock wait / acct 110–122 / deq 58–64 / pick
+  89–98 / ownership publish 68–77).
+- **Honest floor:** the whole critical section holds at 241–273 ns
+  because the remainder is D-1's own bookkeeping (class chain,
+  ownership publish, set_curr, slice math, min_vruntime rebase,
+  SWITCHING_OUT/slot/pick_gen stores, counter RMWs). A ≤10 ns
+  whole-section class is unreachable without changing D-1 (ruled
+  out); the tree-side component IS in the ~20–30 ns class and
+  allocation-free.
+- Gates: riscv64 make test 1333/1333 (5 new fair_timeline groups);
+  triple-arch builds rc=0; pbench P2 median +5.6% release (inside
+  ±20%) with p99 improved; census TERM 8 / REFUSED 32 in band; the
+  fairness soak passes (F1 vruntime spread 5.8–11.2%, F2 wake→RT
+  p99 ≈0.9–15 µs, F3 wait/run ≈3.0 on BOTH kernels = exact fair-share
+  arithmetic for 4 hogs/CPU).
+- Artifacts: run/GRQ-10NS.md (decomposition tables, poison-discipline
+  notes, the honest-floor statement).
