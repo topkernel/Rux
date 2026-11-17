@@ -327,11 +327,31 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
     // before arming — a slack of N ns delays the wake by at most N ns.
     // LTP's tst_timer_test reads PR_GET_TIMERSLACK and widens its
     // precision threshold accordingly.
-    let timer_slack_ns = crate::sched::current()
-        .and_then(|t| unsafe { (*t).signal.as_ref() })
-        .map(|s| s.timer_slack_ns.load(core::sync::atomic::Ordering::Relaxed))
-        .unwrap_or(50_000)
-        .max(1);
+    //
+    // timer-gap lane (RT exemption, the reference shape): hrtimer.c's
+    // hrtimer_nanosleep overrides the slack for RT tasks — `slack =
+    // current->timer_slack_ns; if (rt_task(current)) slack = 0;`. A
+    // SCHED_FIFO/RR sleeper must never have its deadline pushed by the
+    // coalescing range: this path is cyclictest's wake source (the
+    // ABSTIME leg converts to a residual relative duration whose phase
+    // is arbitrary, so the round-up added a uniform 0..slack_ns delay
+    // to EVERY interval). Slack 1 ns (the well-defined floor of the
+    // modulo below) = no coalescing.
+    let is_rt_task = crate::sched::current().is_some_and(|t| unsafe {
+        matches!(
+            (*t).policy(),
+            process::task::SchedPolicy::Fifo | process::task::SchedPolicy::Rr
+        )
+    });
+    let timer_slack_ns = if is_rt_task {
+        1
+    } else {
+        crate::sched::current()
+            .and_then(|t| unsafe { (*t).signal.as_ref() })
+            .map(|s| s.timer_slack_ns.load(core::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(50_000)
+            .max(1)
+    };
     // total_nanos is validated non-negative above; do the round-up in u64.
     let total_nanos = {
         let ns = total_nanos as u64;

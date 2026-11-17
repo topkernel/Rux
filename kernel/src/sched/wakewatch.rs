@@ -175,6 +175,37 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
     PICK_N.fetch_add(1, Ordering::Relaxed);
     let delta = now_ticks().saturating_sub(stamp);
     DELTA_SUM_TICKS.fetch_add(delta, Ordering::Relaxed);
+    // timer-gap lane (cyclictest tail attribution, cmdline cycdbg=1):
+    // the PICK-side half of the Max decomposition — a wake→pick delta
+    // over 100 us prints (budget 8/boot, direct console — GRQ held
+    // here). With CYC-FIRE-LATE (timer.rs), a cyclictest Max sample
+    // resolves to fire-late vs picked-late vs neither (arm/user side).
+    if delta * 1_000_000 > 100 * TIMER_CLOCK_FREQ_HZ
+        && crate::cmdline::get_param("cycdbg").as_deref() == Some("1")
+    {
+        static CYCP: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        if CYCP.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
+            use crate::dfx::taskdump::putc_brief as putchar;
+            fn ph(mut v: u64) {
+                for _ in 0..16 {
+                    let b = (v >> 60) as u8;
+                    putchar(if b < 10 { b'0' + b } else { b'a' + b - 10 });
+                    v <<= 4;
+                }
+            }
+            let us = delta * 1_000_000 / TIMER_CLOCK_FREQ_HZ;
+            // SAFETY: read-only pid of the picked task (GRQ held pins it).
+            let pid = unsafe { (*task).pid() as u64 };
+            for &b in b"\nCYC-PICK-LATE us=" { putchar(b); }
+            ph(us);
+            for &b in b" pid=0x" { putchar(b); }
+            ph(pid);
+            for &b in b" cpu=" { putchar(b); }
+            ph(cpu as u64);
+            putchar(b'\n');
+        }
+    }
     // s16 (WW5): sub-gate census before the print gate swallows the
     // distribution below 1000 ms.
     let ms = ticks_to_ms(delta);

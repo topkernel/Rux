@@ -90,6 +90,88 @@ impl RtRunQueue {
         self.rt_nr_running.load(Ordering::Acquire)
     }
 
+    /// timer-gap lane: raw bitmap word for wedge diagnostics (idx 0/1).
+    #[inline]
+    pub fn bitmap_word(&self, idx: usize) -> u64 {
+        self.bitmap[idx.min(1)].load(Ordering::Acquire)
+    }
+
+    /// timer-gap lane: is any task linked at a USER priority strictly
+    /// above `min_prio` whose affinity mask allows `mask`? Caller holds
+    /// the GRQ. Used by change_task_policy's self-weakening poke: a
+    /// running incumbent that just lowered itself must hand the cpu to
+    /// a now-higher queued task (the reference's check_preempt_curr at
+    /// __setscheduler). Walks bitmap words top-down; first allowed
+    /// match decides.
+    pub fn highest_linked_user_prio(&self, mask: u32, min_prio: u32) -> bool {
+        if mask == 0 {
+            return false;
+        }
+        for word_idx in 0..2usize {
+            let word = self.bitmap[word_idx].load(Ordering::Acquire);
+            let mut remaining = word;
+            while remaining != 0 {
+                let bit = remaining.trailing_zeros() as usize;
+                remaining &= remaining - 1;
+                let user_prio = 99 - (word_idx * 64 + bit);
+                if (user_prio as u32) <= min_prio {
+                    // Bitmap is ordered by (inverted) priority: once we
+                    // pass min_prio top-down, nothing above it remains.
+                    return false;
+                }
+                let head = &self.queue[word_idx * 64 + bit] as *const _ as *mut ListHead;
+                // SAFETY: head anchors linked tasks; bounded walk (8) —
+                // a corrupted ring cannot loop forever.
+                let mut pos = unsafe { (*head).next };
+                let mut n = 0;
+                while pos != head && n < 8 {
+                    n += 1;
+                    // SAFETY: pos is an embedded rt_run_list in a linked Task.
+                    let task = unsafe {
+                        let offset = core::mem::offset_of!(Task, rt_run_list);
+                        (pos as *mut u8).sub(offset) as *mut Task
+                    };
+                    if unsafe { (*task).cpus_allowed() } & mask != 0 {
+                        return true;
+                    }
+                    pos = unsafe { (*pos).next };
+                }
+            }
+        }
+        false
+    }
+
+    /// timer-gap lane: walk the user-priority list (0-99), `f` per task.
+    /// Caller holds the GRQ lock; read-only diagnostics. NOTE: queue[]
+    /// and the bitmap use the INVERTED index (bit 0 = priority 99), same
+    /// as enqueue/pick_next_cpu.
+    pub fn walk_prio(&self, prio: usize, f: &mut dyn FnMut(*mut Task)) {
+        if prio >= MAX_RT_PRIO {
+            return;
+        }
+        let inv = MAX_RT_PRIO - 1 - prio;
+        let word = self.bitmap[inv / 64].load(Ordering::Acquire);
+        if word & (1u64 << (inv % 64)) == 0 {
+            return;
+        }
+        let head = &self.queue[inv] as *const _ as *mut ListHead;
+        // SAFETY: head anchors linked tasks; walking next pointers under
+        // the GRQ lock is stable. Bounded at 8 entries to be safe against
+        // a corrupted ring.
+        let mut pos = unsafe { (*head).next };
+        let mut n = 0;
+        while pos != head && n < 8 {
+            n += 1;
+            // SAFETY: pos is an embedded rt_run_list in a linked Task.
+            let task = unsafe {
+                let offset = core::mem::offset_of!(Task, rt_run_list);
+                (pos as *mut u8).sub(offset) as *mut Task
+            };
+            f(task);
+            pos = unsafe { (*pos).next };
+        }
+    }
+
     /// Check if queue is empty
     #[inline]
     pub fn is_empty(&self) -> bool {
@@ -397,8 +479,16 @@ impl RtRunQueue {
 
     /// Pick the highest-priority RT task that is allowed to run on `cpu_id`.
     /// Scans from highest (0) to lowest (99) priority using the bitmap directly,
-    /// without collecting into a Vec.
-    pub fn pick_next_cpu(&mut self, cpu_id: usize, prev: *mut Task) -> Option<*mut Task> {
+    /// without collecting into a Vec. `skipped_owned_owner`: set to the
+    /// owning cpu when a task this cpu is ALLOWED to run was refused
+    /// solely for the in-flight switch-out ownership guard (timer-gap
+    /// lane: the self-migration handoff retry — see pick_next_task).
+    pub fn pick_next_cpu(
+        &mut self,
+        cpu_id: usize,
+        prev: *mut Task,
+        skipped_owned_owner: &mut usize,
+    ) -> Option<*mut Task> {
         // Iterate bitmap words
         for word_idx in 0..2 {
             let word = self.bitmap[word_idx].load(Ordering::Acquire);
@@ -465,6 +555,20 @@ impl RtRunQueue {
                         // read — see the fair-class twin.
                         let ownership_ok =
                             task == prev || (*task).ownership_pickable(cpu_id);
+                        // timer-gap lane: an AFFINITY-ALLOWED task refused
+                        // only for ownership is mid-switch-OUT on its
+                        // departing cpu (the sched_setaffinity
+                        // self-migration handoff) — the release store
+                        // lands within microseconds. Name the owner so
+                        // the caller can re-arm NEED_RESCHED and retry
+                        // instead of consuming the migration poke.
+                        if !ownership_ok && task != prev && (*task).cpu_allowed(cpu_id) {
+                            let claim =
+                                (*task).running_on_cpu.load(Ordering::Relaxed);
+                            if claim >= 0 {
+                                *skipped_owned_owner = claim as usize;
+                            }
+                        }
                         (*task).cpu_allowed(cpu_id)
                             && ownership_ok
                             && !crate::sched::cgroup::task_cgroup_throttled(task)
@@ -483,12 +587,17 @@ impl RtRunQueue {
                     // RT-2X item-7 hunt: a pinned-RT wake wedge shows the
                     // owning CPU spinning in its idle loop with runnable RT
                     // tasks — name the refusing guard live (cmdline
-                    // rt2xdbg=1, 48-line boot budget).
+                    // rt2xdbg=1, 48-line PER-CPU budget — timer-gap lane:
+                    // the single global budget let cpu1's affinity skips
+                    // eat every line, hiding cpu0's ownership skips).
                     if !allowed
                         && crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1")
                     {
-                        static SKP: AtomicU32 = AtomicU32::new(0);
-                        if SKP.fetch_add(1, Ordering::Relaxed) < 48 {
+                        static SKP: [AtomicU32; crate::config::MAX_CPUS] =
+                            [const { AtomicU32::new(0) }; crate::config::MAX_CPUS];
+                        if cpu_id < crate::config::MAX_CPUS
+                            && SKP[cpu_id].fetch_add(1, Ordering::Relaxed) < 48
+                        {
                             use crate::dfx::taskdump::putc_brief as putchar;
                             fn ph(mut v: u64) {
                                 for _ in 0..16 {
@@ -509,6 +618,8 @@ impl RtRunQueue {
                                     crate::sched::cgroup::task_cgroup_throttled(task) as u64;
                                 for &b in b"RT-PICK-SKIP pid=0x" { putchar(b); }
                                 ph(pid);
+                                for &b in b" jif=" { putchar(b); }
+                                ph(crate::drivers::timer::get_jiffies());
                                 for &b in b" cpu=" { putchar(b); }
                                 ph(cpu_id as u64);
                                 for &b in b" mask=0x" { putchar(b); }

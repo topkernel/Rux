@@ -1110,6 +1110,59 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
         // bounded by one tick (10 ms at HZ=100); anything past 20 ms
         // under load is part of the outlier family.
         let late_ticks = token.late_ticks;
+        // timer-gap lane (cyclictest tail attribution, cmdline cycdbg=1):
+        // ns-precision FIRE lateness for one-shot hres wakes — a new
+        // boot max over 100 us prints the interrupted context (the
+        // firing cpu's current task + preempt count), decomposing the
+        // cyclictest Max tail into "fire late" vs "picked late" (the
+        // wake→pick side prints from wakewatch, same gate). Budget
+        // 8/boot; IRQ-context direct console (putc_brief).
+        if late_ticks > 0
+            && matches!(action, Action::Wake { .. })
+            && crate::cmdline::get_param("cycdbg").as_deref() == Some("1")
+        {
+            const TNS_PER_TICK: u64 = 1_000_000_000 / crate::config::TIMER_CLOCK_FREQ_HZ as u64;
+            let late_us = late_ticks * TNS_PER_TICK / 1000;
+            static FL_MAX: AtomicU64 = AtomicU64::new(0);
+            static FL_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            let mut cur = FL_MAX.load(Ordering::Relaxed);
+            while late_us > cur {
+                match FL_MAX.compare_exchange_weak(cur, late_us, Ordering::Relaxed, Ordering::Relaxed) {
+                    Ok(_) => {
+                        if late_us > 100
+                            && FL_N.fetch_add(1, Ordering::Relaxed) < 12
+                        {
+                            use crate::dfx::taskdump::putc_brief as putchar;
+                            fn ph(mut v: u64) {
+                                for _ in 0..16 {
+                                    let b = (v >> 60) as u8;
+                                    putchar(if b < 10 { b'0' + b } else { b'a' + b - 10 });
+                                    v <<= 4;
+                                }
+                            }
+                            let (cpid, cpol, cpc) =
+                                crate::sched::current().map(|t| unsafe {
+                                    ((*t).pid() as u64, (*t).policy() as u64, (*t).preempt_count() as u64)
+                                }).unwrap_or((u64::MAX, 9, 0));
+                            for &b in b"\nCYC-FIRE-LATE us=" { putchar(b); }
+                            ph(late_us);
+                            for &b in b" pid=" { putchar(b); }
+                            ph(match action { Action::Wake { pid } => pid as u64, _ => 0 });
+                            for &b in b" int_ctx_pid=0x" { putchar(b); }
+                            ph(cpid);
+                            for &b in b" pol=" { putchar(b); }
+                            ph(cpol);
+                            for &b in b" pc=" { putchar(b); }
+                            ph(cpc);
+                            putchar(b'\n');
+                        }
+                        break;
+                    }
+                    Err(actual) => cur = actual,
+                }
+            }
+        }
         if late_ticks > 0 {
             WW_FIRE_N.fetch_add(1, Ordering::Relaxed);
             let late_ms = late_ticks * 1000 / crate::config::TIMER_CLOCK_FREQ_HZ;
