@@ -869,6 +869,33 @@ has nothing else to run.
   in-guest md5sums match host digests.
 - Artifacts: run/WRFSYNC.md (TSC decomposition, per-lever A/B).
 
+## R — RT kernel stack (real-time capability, 2026-11-17/18)
+
+The RT plan (docs/development/rt-kernel-plan.md) landed a staged real-time
+capability on Rux's own structures, NOT the PREEMPT_RT full-tree conversion
+(recorded divergence: Rux's measured critical sections are small — GRQ actual
+hold ~102 ns — and nesting is a compile fact via D-11 typed lock keys; we
+shrink and bound sections instead of making them sleep, and convert only the
+locks that need PI semantics).
+
+Measured evidence (same-image same-binary pair battery, docs/test/
+pair-battery-2026-11-17.md):
+- **R3** (D-14 measured-wait gate batch window 6 ms → 0.7 ms wakeup
+  granularity): khog futex wake→run median **28,135 → 150 µs (187×)**; the
+  D-14 ping-pong win preserved (p5b_dgram 43–48 µs flat, p1_null/p2 flat).
+- **R1** (irq-exit kernel preemption default): OH SA-storm release boot
+  600 s zero DEADLOCK prints (the documented re-land condition); cyclictest
+  OTHER max 29,061 → 2,285 µs (12.7×) on the first armed boot.
+- **R5** (forced per-IRQ threading, irqthread=1): 4/4 canary boots complete
+  with virtio completions on a SCHED_FIFO 50 kthread; khog med 157–208 µs
+  held — threading did not degrade the wake path.
+- **R6** (PI futex numeric chains): RT→RT max-priority propagation +
+  CFS→FIFO conversion + saved-config restore; pi_stress -g 2: 372k+370k
+  inversions completed (from "no data").
+
+The reference-column comparison (cyclictest FIFO avg 12 µs vs Rux 46 µs) is
+the open gap — the fire-late/hrtimer-re-arm attribution is queued (rt-r4).
+
 ## R. Entity-embedded intrusive rb-tree CFS timeline (grq-10ns lane, 2026-11-17, evidence-backed)
 
 - **The global queue's timeline stopped being a data structure with a
