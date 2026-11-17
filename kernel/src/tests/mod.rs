@@ -259,6 +259,7 @@ pub mod smp;
 pub mod smp_schedule;
 #[cfg(feature = "unit-test")]
 pub mod preemptive_scheduler;
+pub mod fair_timeline;
 
 // ===== Filesystem =====
 #[cfg(feature = "unit-test")]
@@ -570,6 +571,11 @@ pub fn run_all_tests() {
 
     test_group_start("preemptive_scheduler");
     preemptive_scheduler::test_preemptive_scheduler();
+
+    // grq-10ns: entity-embedded intrusive CFS timeline (sorted order,
+    // shuffled erase, leftmost cache, tie keys, pick/requeue cycles).
+    test_group_start("fair_timeline");
+    fair_timeline::test_fair_timeline();
 
     // ===== 7. Filesystem =====
     test_group_start("file_open");

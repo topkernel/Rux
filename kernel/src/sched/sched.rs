@@ -3425,6 +3425,10 @@ unsafe fn __schedule() {
     sched_cs_stamp(cpu_id, 2);
     let cc_t2 = crate::dfx::cctx::now();
     crate::dfx::cctx::add(&crate::dfx::cctx::SCH_LOCKWAIT_NS, cc_t1);
+    // grq-10ns: the EXACT GRQ critical section — one bracket from
+    // acquisition to the unlock below (the acct/deq/pick/pub phase rows
+    // remain, this row answers "how long is the lock held").
+    let cc_hold = crate::dfx::cctx::now();
 
     // Update runtime accounting for current task based on its scheduling class.
     // CFS: update vruntime; DL: consume runtime budget.
@@ -3658,6 +3662,8 @@ unsafe fn __schedule() {
     let flags = grq_guard.unlock_irqretain();
     sched_cs_stamp(cpu_id, 3);
     crate::dfx::cctx::add(&crate::dfx::cctx::SCH_PUB_NS, cc_t4);
+    // grq-10ns: close the exact GRQ-hold bracket (see the acquire site).
+    crate::dfx::cctx::add(&crate::dfx::cctx::SCH_HOLD_NS, cc_hold);
 
     if next == prev {
         // Same-task repick: no context switch happens, so the post-switch
@@ -3980,11 +3986,23 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
                 );
             } else {
                 mark_picked_on_cpu(task, task == prev);
-                grq.nr_running.fetch_update(
-                    core::sync::atomic::Ordering::SeqCst,
-                    core::sync::atomic::Ordering::SeqCst,
-                    |v| v.checked_sub(1),
-                );
+                // grq-10ns: single locked-RMW form (one xadd) instead of
+                // the fetch_update CAS loop — every writer of this
+                // counter holds the GRQ, so a wrap (old == 0) is
+                // restored with a plain store, keeping the checked-sub
+                // semantics with one bus op (see fair::nr_running_dec).
+                {
+                    let old = grq.nr_running.fetch_sub(
+                        1,
+                        core::sync::atomic::Ordering::SeqCst,
+                    );
+                    if old == 0 {
+                        grq.nr_running.store(
+                            0,
+                            core::sync::atomic::Ordering::SeqCst,
+                        );
+                    }
+                }
                 grq.cfs_rq.set_curr(task);
                 // R20-6: reset the execution clock at pick. Nothing else resets
                 // exec_start, so after a sleep it still holds the timestamp of

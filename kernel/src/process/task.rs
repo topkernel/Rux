@@ -1192,8 +1192,10 @@ pub struct Task {
 
     /// CFS scheduling entity
     ///
-    /// Contains vruntime, weight and other CFS scheduling info
-    sched_entity: crate::sched::fair::SchedEntity,
+    /// Contains vruntime, weight and other CFS scheduling info.
+    /// pub(crate) so fair.rs can compute the entity-embedded timeline
+    /// node's container-of offset (grq-10ns intrusive rbtree).
+    pub(crate) sched_entity: crate::sched::fair::SchedEntity,
 
     /// RT scheduling priority (0-99, lower value = higher priority)
     ///
