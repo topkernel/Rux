@@ -682,3 +682,37 @@ foreign QEMUs):
   share `Ext4Extent::length` / `is_unwritten`, so the divergent-decode
   family cannot re-emerge at a new call site — the accessor is the
   single place the on-disk discipline lives.
+
+## L. Incremental ext4 readdir via a typed fill op (getdents lane, 2026-11-17, evidence-backed)
+
+- **`INodeOps::readdir_fill` — the reference's filldir loop as a Rust
+  contract.** Linux's ext4_readdir walks directory blocks one at a
+  time and copies each dirent into the user buffer through filldir;
+  the Vec-returning `readdir` op shape (materialize the whole
+  directory, then filter by index) made every fresh-fd full-dir sweep
+  pay O(entries) heap work — 1000-entry sweep at 1374 µs vs the
+  reference's 72 µs. The new op is a typed contract instead of a
+  C-style callback: `fn(&Inode, pos: u64, buf: &mut [u8]) ->
+  Result<(bytes_filled, next_pos), i32>` with the record format,
+  every-byte-written (pad included), EOF/EINVAL and sleep rules
+  documented at the type (kernel/src/fs/inode.rs). The VFS branch is
+  8 lines; ext4 owns the walk.
+- **Byte-offset f_pos, d_off = resume point.** The file position
+  becomes the ext4 directory byte offset and each record's d_off
+  names the next entry's offset — telldir/seekdir round-trip through
+  plain lseek with no index translation (the old scheme was an index
+  into a synthesized Vec, meaningless across calls). "." and ".." are
+  emitted from the REAL on-disk entries (true inode numbers) instead
+  of being re-synthesized per materialization.
+- Measured (pbench dual-kernel rig, q35 KVM -cpu max smp8/2G,
+  1000-entry ext4 dir, 32 KiB buffer, n=1000 sweeps; interleaved
+  3 base + 3 head + 2 reference boots): 1374.3 -> 37.0 µs vs
+  reference 7.0.0-38-generic 72.2 µs — 19.0x behind -> 1.95x ahead.
+  Guard rows same boots: p6_stat 0.281/0.281, p6_openclose
+  0.681/0.691, p6_read_cached 0.982/0.992, p1_null 0.050/0.050.
+  Functional semantics probe (test/getdents_probe.c, 15 cases: dot
+  entries + ino truth, d_off monotonicity, restart determinism,
+  seekdir resume with zero loss/dup, mid-walk unlink, EOF, EINVAL on
+  1-byte buffer, 4096-entry dir, glibc DIR* walk): 15/15 PASS.
+  Artifacts: run/GETDENTS.md, run/pb-gdab-*.log, run/pb-gdref-*.log,
+  run/pb-gdprobe-h3.log.

@@ -527,6 +527,7 @@ pub static TRACEFS_INODE_OPS: INodeOps = INodeOps {
     readlink: None,
     get_file_ops: Some(tracefs_get_file_ops),
     readdir: Some(tracefs_readdir),
+    readdir_fill: None,
     readdir_cacheable: false,
     open: Some(tracefs_open),
     permission: None, // default DAC path

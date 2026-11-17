@@ -219,6 +219,35 @@ pub struct INodeOps {
     /// Returns a vector of VfsDirEntry on success, None if not a directory / error.
     pub readdir: Option<unsafe fn(&Inode) -> Option<alloc::vec::Vec<VfsDirEntry>>>,
 
+    /// Incremental directory read — the reference kernel's ext4_readdir
+    /// shape (getdents lane, 2026-11-17). Fills `buf` with packed
+    /// linux_dirent64 records (d_ino u64 / d_off u64 / d_reclen u16 /
+    /// d_type u8 / name / NUL / zero pad to 8) starting at directory
+    /// BYTE offset `pos`, and returns `(bytes_filled, next_pos)`.
+    ///
+    /// Contract:
+    /// - `next_pos` is the byte offset of the first entry NOT emitted
+    ///   (the resume point; getdents64 stores it as the file position,
+    ///   and each record's d_off names it — telldir/seekdir round-trip
+    ///   through lseek with no conversion).
+    /// - Zero bytes filled means EOF (pos at/after the directory size,
+    ///   or nothing emittable remains). Err(EINVAL) when the buffer is
+    ///   too small for even one entry but emittable entries remain.
+    /// - The op writes EVERY byte of [0..bytes_filled) — pad bytes
+    ///   included — so the syscall layer may copy exactly that prefix
+    ///   to userspace without a pre-zeroing pass.
+    /// - The op may sleep (block I/O); callers hold no spinlocks.
+    ///
+    /// A filesystem providing this op serves getdents64 WITHOUT
+    /// whole-directory materialization (no Vec<VfsDirEntry>, no
+    /// per-name heap allocation) and bypasses the per-open DirentCache
+    /// snapshot: each call reads only the directory blocks that cover
+    /// [pos, pos + buf.len()), exactly like the reference's
+    /// block-at-a-time filldir loop. `readdir` above stays as the
+    /// Vec-returning fallback for callers that want whole listings.
+    pub readdir_fill:
+        Option<unsafe fn(&Inode, pos: u64, buf: &mut [u8]) -> Result<(usize, u64), i32>>,
+
     /// F4 route-4 (getdents64 cache): whether this filesystem's
     /// directory listings may be cached across getdents64 calls on one
     /// open file description. True is ONLY safe for filesystems whose

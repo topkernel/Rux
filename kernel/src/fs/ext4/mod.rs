@@ -3246,6 +3246,11 @@ pub static EXT4_INODE_OPS: INodeOps = INodeOps {
     readlink: Some(ext4_readlink),
     get_file_ops: Some(ext4_get_file_ops),
     readdir: Some(ext4_readdir),
+    // Incremental getdents64 (getdents lane): when present, the VFS
+    // readdir path uses this op exclusively — no whole-dir Vec, no
+    // DirentCache snapshot. ext4_readdir above stays as the Vec-returning
+    // fallback for whole-listing callers.
+    readdir_fill: Some(ext4_readdir_fill),
     readdir_cacheable: true,
     open: None,
     permission: None,   // Default: allow all
@@ -3544,8 +3549,6 @@ unsafe fn ext4_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::F
 /// Ext4 readdir: list directory entries via inode.ops
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inode::VfsDirEntry>> {
-    use crate::fs::inode::file_type;
-
     let fs_ptr = get_ext4_fs_from_inode(inode).ok()?;
     let ext4_inode_ptr = inode.sb?;
     let ext4_inode = &*(ext4_inode_ptr as *const inode::Ext4Inode);
@@ -3554,16 +3557,7 @@ unsafe fn ext4_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inode
     let mut entries = alloc::vec::Vec::new();
     for entry in ext4_entries.iter() {
         let name_bytes = &entry.name[..entry.name_len as usize];
-        let dt = match entry.file_type {
-            1 => file_type::DT_REG,
-            2 => file_type::DT_DIR,
-            3 => file_type::DT_CHR,
-            4 => file_type::DT_BLK,
-            5 => file_type::DT_FIFO,
-            6 => file_type::DT_SOCK,
-            7 => file_type::DT_LNK,
-            _ => file_type::DT_UNKNOWN,
-        };
+        let dt = ext4_dirent_file_type(entry.file_type);
         // (launcher-errno lane) same heap-budget guard as list_dir: the
         // VfsDirEntry stage can also grow past the heap on huge dirs.
         if entries
@@ -3584,6 +3578,180 @@ unsafe fn ext4_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inode
         });
     }
     Some(entries)
+}
+
+/// Map an on-disk ext4 dirent file_type to the getdents DT_* value.
+fn ext4_dirent_file_type(ft: u8) -> u8 {
+    match ft {
+        1 => crate::fs::inode::file_type::DT_REG,
+        2 => crate::fs::inode::file_type::DT_DIR,
+        3 => crate::fs::inode::file_type::DT_CHR,
+        4 => crate::fs::inode::file_type::DT_BLK,
+        5 => crate::fs::inode::file_type::DT_FIFO,
+        6 => crate::fs::inode::file_type::DT_SOCK,
+        7 => crate::fs::inode::file_type::DT_LNK,
+        _ => crate::fs::inode::file_type::DT_UNKNOWN,
+    }
+}
+
+/// Ext4 incremental readdir — the reference kernel's ext4_readdir shape
+/// (getdents lane, 2026-11-17). Walks directory blocks ONE at a time
+/// starting at byte offset `pos` (the file position) and packs
+/// linux_dirent64 records straight into `buf`; returns
+/// `(bytes_filled, next_pos)`. No whole-directory materialization, no
+/// per-entry heap allocation, no 255-byte name copies — the old path's
+/// per-open full list_dir (Vec<Ext4DirEntry> + Vec<VfsDirEntry> + one
+/// Vec<u8> name per entry + dot synthesis Vec + snapshot Arc) made a
+/// fresh-fd full-dir sweep cost 19x the reference.
+///
+/// Compatibility notes (kept bit-compatible with the Vec path above):
+/// - "." and ".." are REAL on-disk entries in block 0 (both our mkdir
+///   and reference mkfs write them); they are emitted from disk with
+///   their true inode numbers instead of being synthesized.
+/// - inode==0 entries are skipped (deleted slots, metadata_csum tails,
+///   htree index fakes). name_len==0 and non-UTF-8 names are skipped —
+///   the same corrupt-image tolerance list_dir has carried since the
+///   OH userdata lanes (a bare advance, never a livelock).
+/// - d_off is the byte offset of the NEXT entry: telldir/seekdir
+///   round-trip through lseek with no index translation, and a
+///   mutation between calls leaves offsets stable (a deleted entry
+///   becomes an inode==0 slot that is stepped over).
+/// - Indexed (htree) directories: every entry physically lives in a
+///   leaf block, so the linear scan still visits each exactly once;
+///   internal dx blocks parse as garbage dirents whose rec_len breaks
+///   the block scan (block numbers < 8 fail rec_len>=8; their
+///   name_len byte is the block number's high byte, 0 for any image
+///   under 16M blocks) — the identical accidental-but-tolerated
+///   behavior the list_dir scanner has always had on dx dirs.
+// SAFETY: VFS callback contract; the Ext4Inode behind inode.sb outlives
+// the call (the open File pins the VFS Inode that owns it).
+unsafe fn ext4_readdir_fill(
+    inode: &Inode,
+    pos: u64,
+    buf: &mut [u8],
+) -> Result<(usize, u64), i32> {
+    let fs = get_ext4_fs_from_inode(inode)?;
+    let ext4_inode = &*(inode.sb.ok_or(errno::Errno::IOError.as_neg_i32())?
+        as *const inode::Ext4Inode);
+
+    let dir_size = ext4_inode.size;
+    if pos >= dir_size || buf.is_empty() {
+        return Ok((0, pos.max(dir_size)));
+    }
+    let block_size = fs.block_size as u64;
+
+    // Block list through the (ino, size)-keyed memo — same source
+    // list_dir uses, so the two readers can never disagree. The clone
+    // is one small Vec (<= nblocks u64) per call; the alternative
+    // (get_data_block per block) re-walks the extent tree per block.
+    let blocks = match fs.dir_blocks_cached(ext4_inode) {
+        Some(b) => b,
+        None => {
+            let b = ext4_inode.get_data_blocks(fs)?;
+            fs.dir_blocks_store(ext4_inode, b.clone());
+            b
+        }
+    };
+    crate::dfx::fsw::note_list_dir();
+
+    let mut filled = 0usize;
+    let mut cur = pos; // byte offset of the next candidate entry
+    let mut saw_unfittable = false;
+
+    'outer: while cur < dir_size {
+        let bidx = (cur / block_size) as usize;
+        let mut off = (cur % block_size) as usize;
+        if bidx >= blocks.len() {
+            break; // size says more, mapping says no: treat as EOF
+        }
+        let blk = blocks[bidx];
+        if blk == 0 {
+            // Sparse/holes: whole-block skip.
+            cur = (bidx as u64 + 1) * block_size;
+            continue;
+        }
+        let bh = match bio::bread(fs.device, blk) {
+            Some(bh) => bh,
+            None => return Err(errno::Errno::IOError.as_neg_i32()),
+        };
+        // SAFETY: bread returns a valid, pinned BufferHead whose b_data
+        // covers one full block; we only read it and brelse before any
+        // early exit below.
+        let data = unsafe { &(*bh).b_data };
+        while off + 8 <= block_size as usize {
+            let rec = &data[off..];
+            let entry_ino = u32::from_le_bytes([rec[0], rec[1], rec[2], rec[3]]);
+            let rec_len = u16::from_le_bytes([rec[4], rec[5]]) as usize;
+            let name_len = rec[6] as usize;
+            let file_type = rec[7];
+
+            // Corrupt tail: stop this block (ext4_rec_len validity is
+            // rec_len >= 8 and entry contained in the block; the
+            // >=12B folding rule from the ext4-corrupt lane means a
+            // well-formed final entry's rec_len reaches the block end).
+            if rec_len < 8 || off + rec_len > block_size as usize {
+                break;
+            }
+
+            // Skip deleted slots / csum tails / dx fakes; advance past.
+            if entry_ino == 0 || name_len == 0 || name_len + 8 > rec_len {
+                off += rec_len;
+                cur += rec_len as u64;
+                continue;
+            }
+            let name = &rec[8..8 + name_len];
+            // Corrupt/binary names: skip but ADVANCE (the historical
+            // OH-userdata tolerance; a bare continue livelocked).
+            if core::str::from_utf8(name).is_err() {
+                off += rec_len;
+                cur += rec_len as u64;
+                continue;
+            }
+
+            // Pack one linux_dirent64 (19B header + name + NUL, padded
+            // to 8 — the same record shape the VFS emit loop builds).
+            let reclen64 = (19 + name_len + 1 + 7) & !7;
+            if filled + reclen64 > buf.len() {
+                saw_unfittable = true;
+                // Release the pinned block BEFORE leaving the walk
+                // (break 'outer skips the brelse below the loop).
+                bio::brelse(bh);
+                break 'outer;
+            }
+            let dst = &mut buf[filled..filled + reclen64];
+            dst[0..8].copy_from_slice(&(entry_ino as u64).to_le_bytes());
+            // d_off = byte offset of the NEXT entry (resume point).
+            dst[8..16].copy_from_slice(&((off + rec_len) as u64 + bidx as u64 * block_size).to_le_bytes());
+            dst[16..18].copy_from_slice(&(reclen64 as u16).to_le_bytes());
+            dst[18] = ext4_dirent_file_type(file_type);
+            dst[19..19 + name_len].copy_from_slice(name);
+            dst[19 + name_len] = 0; // NUL
+            for b in &mut dst[20 + name_len..] {
+                *b = 0; // pad (never read by userland, zeroed for ABI)
+            }
+
+            filled += reclen64;
+            off += rec_len;
+            cur += rec_len as u64;
+        }
+        bio::brelse(bh);
+        if off + 8 > block_size as usize && cur % block_size != 0 {
+            // Block scan ended mid-block (corrupt tail): advance to the
+            // next block so the walk cannot wedge on the same offset.
+            cur = (bidx as u64 + 1) * block_size;
+        }
+    }
+
+    if filled == 0 && saw_unfittable {
+        // Reference behavior: a buffer too small for even ONE entry is
+        // EINVAL, not a silent Ok(0) (telldir loops would spin).
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+    if filled == 0 {
+        // Only skippable slots remained: consume to EOF and report it.
+        return Ok((0, dir_size));
+    }
+    Ok((filled, cur))
 }
 
 /// Create VFS inode from ext4 inode

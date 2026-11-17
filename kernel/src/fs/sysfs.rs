@@ -2377,6 +2377,7 @@ pub static SYSFS_INODE_OPS: INodeOps = INodeOps {
     readlink: Some(sysfs_readlink),
     get_file_ops: Some(sysfs_get_file_ops),
     readdir: Some(sysfs_readdir),
+    readdir_fill: None,
     readdir_cacheable: false,
     open: Some(sysfs_open),
     permission: None, // default DAC path
