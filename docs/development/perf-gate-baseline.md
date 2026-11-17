@@ -176,7 +176,7 @@ next main-class board (pa94 chain armed).
 | syscall volume | ~107.5M +-10% | 85-107M swing family (pa86 87.4M, pa88 96.6M, pa91 91.4M) — enforce only load-gated; the swing class is adjudicated, not a regression family | all three boots load1 9-15 |
 | clock_gettime avg | 3-4 us | 3 us (pa91 n=38.4M) | syscost |
 | nanosleep avg | 203 ms | 168-190 ms family (pa86 175, pa88 168, pa91 190) | +-20% of 203 stays the band |
-| GRQ avg hold | 5.1-6.1 us | 6.3-7.0 us family (pa86 7.0, pa88 6.5, pa91 6.3) — inside the 4080-7320 gate band; the 5.1-6.1 text was the pre-leg-48 class | syscost |
+| GRQ call-site IF=0 span avg | 5.1-6.1 us | 6.3-7.0 us family (pa86 7.0, pa88 6.5, pa91 6.3) — inside the 4080-7320 gate band; the 5.1-6.1 text was the pre-leg-48 class | syscost |
 | small_alloc REST share | 9.2% | 1.1-1.2% (pa86/pa88/pa91) | syscost |
 | get_file REST site | (not a row) | file.rs:1032: 94.5M calls / 31.2s / 330ns (was :941 132.3M / 50.8s / 383ns pre-leg-52) — NEW guarded row (fdtable) | syscost, leg-52 A+B |
 | p5b_dgram send/recv | 39-43 us loaded class | 4.3/3.8 us med-of-2 (pa91q; the class moved with lever A at the SAME load1 13-15 window) | strong, loaded |
@@ -205,7 +205,7 @@ note above). Two boots, each with its own recorded load window
 | syscall volume (t=720 s) | 107.5M | 97.5M | 92.4M | inside the adjudicated 85–107M swing family (pa86 87.4M … pa50main 107.5M); load-coupled, NOT a regression — pa113's window carried load1 ≤10.1 + 6 foreign QEMUs, and no quieter enforcement window existed on this host day |
 | clock_gettime avg | 3 µs (n=45.5M) | 3 µs (n=40.9M) | 3 µs (n=38.8M) | same class |
 | nanosleep avg | 203 ms (n=26.9k) | 198 ms (n=24.2k) | 188 ms (n=25.8k) | within ±20%, better direction |
-| GRQ avg hold (sched.rs REST site) | no instrument then | 3451 ns (n=24.3M) | 5367 ns (n=18.8M) | pa112's quiet-window read is BELOW the 4080 ns floor; the rerun-once boot (pa113, loadier window) reads back inside 4080–7320 ns. Reading is load-coupled: same kernel+lineage+instrument spans 3.4–5.4 µs across the two windows. In-band at standard enforcement windows; the 3.4 µs quiet floor is the improvement side, not a regression. Gate band unchanged pending a genuinely quiet (pa50main-class) window. |
+| GRQ call-site IF=0 span avg (sched.rs REST site) | no instrument then | 3451 ns (n=24.3M) | 5367 ns (n=18.8M) | pa112's quiet-window read is BELOW the 4080 ns floor; the rerun-once boot (pa113, loadier window) reads back inside 4080–7320 ns. Reading is load-coupled: same kernel+lineage+instrument spans 3.4–5.4 µs across the two windows. In-band at standard enforcement windows; the 3.4 µs quiet floor is the improvement side, not a regression. Gate band unchanged pending a genuinely quiet (pa50main-class) window. |
 | small_alloc REST share | 9.2% (old) / 1.1–1.2% family | 0.9% (14.6 s) | 1.1% (17.4 s) | in family, ≤10% band |
 | get_file REST site (file.rs:1032) | (pa91: 94.5M / 31.2 s / 330 ns) | 96.9M / 26.3 s / 271 ns | 92.4M / 26.2 s / 283 ns | improved vs pa91 (avg −15%, tot −16%) |
 
@@ -329,7 +329,7 @@ load window (run/116seed2-window.log, 116cook1/116cook2-window.log).
 | syscall volume (t=720 s) | 126.0M | 1.5M (parked) | 18.5M | 173.9M | **unenforceable on the seed vehicle** — the /data-less workload is bimodal (1.5M ↔ 174M on identical bytes). cook2's +38% over the tok anchor is depth, not cost: clock_gettime n +44% (77.8M vs 54.0M) at flat 3 µs avg. Anchor stays 126M ±10% for tok-class lineages |
 | clock_gettime avg | 3 µs (n=54.0M) | 3 µs (n=130k) | 3 µs (n=8.7M) | 3 µs (n=77.8M) | same class at every depth — cost row robust |
 | nanosleep avg | 158–203 ms (n=24–29k) | 927 ms (n=3.0k) | 529 ms (n=5.2k) | 666 ms (n=4.3k) | population artifact of the /data-less vehicle (n 3–5k, long-sleep dominated, max 295 s); NOT sleep cost — p7_sleep1ms reads 15.8 µs on the same kernel (see Tier-2). Enforce only on tok-class populations |
-| GRQ avg hold (sched.rs:2782) | 2786 ns (n=6.3M) | 3360 ns (n=3.0M) | 4416 ns (n=3.9M) | 2904 ns (n=6.0M) | in the 1200–7320 ns band on every boot; quietest window (cook2) reads lowest — the load-coupled class as documented |
+| GRQ call-site IF=0 span avg (sched.rs:2782) | 2786 ns (n=6.3M) | 3360 ns (n=3.0M) | 4416 ns (n=3.9M) | 2904 ns (n=6.0M) | in the 1200–7320 ns band on every boot; quietest window (cook2) reads lowest — the load-coupled class as documented |
 | small_alloc REST share | 0.4% | 0.1% (0.9 s) | 0.1% (1.3 s) | 0.7% (11.0 s) | ≤10% band, improvement side |
 | get_file REST site | file.rs:1110: 124.8M / 34.8 s / 278 ns | (shallow boot) | file.rs:1123: 17.7M / 6.0 s / 342 ns | file.rs:1123: 156.8M / 46.0 s / 293 ns | avg flat (293 vs 278 ns, +5%); n tracks boot depth (deeper boot → more get_file); the fdtable row is healthy |
 
@@ -664,7 +664,7 @@ run/pa115p2f-boot.log, run/pa115p2fk-boot.log.
 | syscall volume (t=720 s) | 92.4–97.5M (85–107M swing family) | 126.0M (+36% vs pa113) | **re-banked: 126M ±10% in a load-gated window.** Same-depth corroboration: pa115debt3 (same kernel, wedged later under load) paced 8.0M@60 s → 18.1M@120 s, the same ~10–11M/min regime debt1 ran from 24.8M@180 to 126.0M@720. Mechanism: 6394e8ee un-quantizes ms-class sleeps, userspace pacing loops run at true rate, the boot goes ~36% deeper in the same wall. Per-op avgs flat or better — throughput, not cost |
 | clock_gettime avg | 3 µs (n=38.8M) | 3 µs (n=54.0M) | same class, deeper n — the preempt-heal SKIP rows from the quiet rerun are now measured |
 | nanosleep avg | 188–198 ms | 158.4 ms (n=29.5k) | within the one-sided ≤244 ms band (improvement side); family note extends to 158 ms |
-| GRQ avg hold (sched.rs REST site) | 3451–5367 ns | 2786 ns (n=6.3M, tot 17.6 s; pa113 tot was 100.9 s at n=18.8M) | **floor re-banked: gate band 1200–7320 ns.** avg −48%, charged total −82% vs pa113. Single clean sample (the debt3 rerun wedged, see below); debt3's pre-wedge read 1215 ns is the same family |
+| GRQ call-site IF=0 span avg (sched.rs REST site) | 3451–5367 ns | 2786 ns (n=6.3M, tot 17.6 s; pa113 tot was 100.9 s at n=18.8M) | **floor re-banked: gate band 1200–7320 ns.** avg −48%, charged total −82% vs pa113. Single clean sample (the debt3 rerun wedged, see below); debt3's pre-wedge read 1215 ns is the same family |
 | small_alloc REST share | 0.9–1.1% | 0.4% (6.2 s); section count 6.0M vs 18.8M | improved, ≤10% band |
 | get_file REST site | file.rs:1032: 92.4M / 26.2 s / 283 ns | file.rs:1110: 124.8M / 34.8 s / 278 ns | avg flat, n +35% (deeper boot); the old 13.8 ms-avg file.rs:1077 outlier site left the top table |
 
