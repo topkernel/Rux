@@ -141,3 +141,25 @@ pub fn wall_secs() -> u64 {
         + crate::syscall::time::wall_epoch_offset_ns())
         / 1_000_000_000
 }
+
+/// Tick-cached wall second for ADVISORY stamps only (oc-rc read-path
+/// relatime gate): one relaxed load instead of a TSC read + divide per
+/// read(2). Refreshed from `wall_secs()` by the timer tick; stale by at
+/// most one tick. Never a substitute for `wall_secs()` where LTP
+/// brackets a stamp against CLOCK_REALTIME_COARSE (utime/utimensat keep
+/// the exact form). 0 before the first refresh — callers treat 0 as
+/// "not cached yet" and fall back.
+static CACHED_WALL_SECS: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Per-tick refresh (timer ISR, idempotent, multi-CPU safe).
+pub fn tick_refresh_cached_secs() {
+    let s = wall_secs() as u32;
+    CACHED_WALL_SECS.store(s, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Cached advisory wall second (0 = not yet refreshed).
+#[inline]
+pub fn cached_wall_secs() -> u32 {
+    CACHED_WALL_SECS.load(core::sync::atomic::Ordering::Relaxed)
+}

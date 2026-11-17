@@ -422,8 +422,8 @@ static RECORD_LOCK_TABLE: Spinlock<Vec<RecordLock>> = Spinlock::new(Vec::new());
 
 /// Live-entry mirror of RECORD_LOCK_TABLE, stored inside every critical
 /// section that mutates the table (closegap lane, 2026-11-02). The two
-/// per-CLOSE release paths (posix_release_on_close via
-/// displaced_close_decision, ofd_release_file via File::drop) read this
+/// per-CLOSE release paths (posix_release_on_close via fdreap::
+/// retire_complete, ofd_release_file via File::drop) read this
 /// first and skip the table lock + retain scan when it is 0 — the
 /// overwhelmingly common case (no process on the box holds record
 /// locks), and one irqsave lock pair + O(table) scan off every close

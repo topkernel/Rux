@@ -533,6 +533,10 @@ pub fn timer_interrupt_handler() -> u64 {
     // dispatch in the same IRQ.
     crate::timer::expire_hres_inline();
 
+    // Tick-cached wall second for advisory atime stamps (oc-rc read
+    // path) — idempotent relaxed store, once per tick per CPU.
+    crate::drivers::rtc::tick_refresh_cached_secs();
+
     // vDSO time page refresh (shared with the riscv64 twin)
     crate::mm::vdso::vdso_data_tick();
 

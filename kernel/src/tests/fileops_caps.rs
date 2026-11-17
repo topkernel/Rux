@@ -159,10 +159,16 @@ pub fn test_fileops_caps() {
     // fallback (a regular file is always readable/writable per the
     // reference behavior), pinned here so adding a poll slot to either
     // table is a deliberate act that fails this shape first.
+    // ext4 lost its close slot deliberately (oc-rc, 2026-11-17): the op
+    // existed only to free the boxed read-ahead state from
+    // private_data; the state is now embedded in File.ra and dies with
+    // the description itself — no per-close work remains for ext4 to
+    // do (the reference's ext4 file_operations carries no release
+    // either; generic_file_close does not exist).
     check(
         "ext4 file caps",
         &crate::fs::ext4::file::EXT4_FILE_OPS,
-        Expect { read: true, write: true, lseek: true, close: true, poll: false, read_at: true },
+        Expect { read: true, write: true, lseek: true, close: false, poll: false, read_at: true },
     );
     check(
         "tmpfs file caps",
