@@ -219,6 +219,27 @@ pub fn handle_ipi_vector(vector: u64, regs: &crate::arch::pt_regs::PtRegs) {
             // could deadlock on the runqueue lock the same way the
             // riscv64 twin documents; the trap-exit path reschedules.
             crate::sched::set_need_resched();
+            // RT-2X item-7 hunt: prove DELIVERY of the resched IPI to
+            // cpu0 (cmdline rt2xdbg=1, 200-line budget).
+            if crate::arch::cpu_id() as usize == 0
+                && crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1")
+            {
+                static RIP: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                if RIP.fetch_add(1, Ordering::Relaxed) < 200 {
+                    use crate::dfx::taskdump::putc_brief as putchar;
+                    for &b in b"RESCHED-IPI-RECV cpu=0 rip=0x" {
+                        putchar(b);
+                    }
+                    let mut v = regs.rip as u64;
+                    for _ in 0..16 {
+                        let n = (v >> 60) as u8;
+                        putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                        v <<= 4;
+                    }
+                    putchar(b'\n');
+                }
+            }
         }
         VECTOR_CALL_FUNCTION => csd_flush_queue(),
         VECTOR_TLB_FLUSH => {

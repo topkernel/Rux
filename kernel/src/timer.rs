@@ -885,19 +885,11 @@ pub fn timer_softirq_handler(_nr: usize) {
     }
 
     // Advance + collect under the lock; deliver AFTER releasing it
-    // (R12-3 — see the delivery block below).
-    // R34: the collection budget bounds the per-pass work; leftover
-    // due entries stay in their wheel list and drain on the next pass
-    // (same jiffy for hres re-runs — the precise compare re-runs —
-    // next jiffy otherwise). WEDGE/perf fix: the expired list used to
-    // be a heap `Vec::with_capacity(EXPIRY_BUDGET)` allocated on EVERY
-    // tick — a 2560-byte alloc/dealloc pair per jiffy in IRQ/softirq
-    // context. Under the LTP fs-storm wedges this churn dominated the
-    // buddy allocator (photographed by gdb at exactly this line) and
-    // was the sendmsg02 ALLOCTHROW (alloc-failure panic) site. The
-    // per-CPU static backing storage below needs no lock: the
-    // SOFTIRQ_IN_PROGRESS guard makes handler re-entry on the same CPU
-    // impossible.
+    // (R12-3 — see the delivery block below). The sweep body lives in
+    // `run_wheel_sweep` (RT-2X split) so the hardirq fast path
+    // `expire_hres_inline` runs the identical sequence at the top of
+    // the timer IRQ; the diagnostics above this point stay
+    // softirq-side only.
     static mut EXPIRED_BUF: [[FiredToken; wheel::EXPIRY_BUDGET];
         crate::config::MAX_CPUS] =
         [[FiredToken {
@@ -913,12 +905,80 @@ pub fn timer_softirq_handler(_nr: usize) {
     // guard prevents re-entry, so this CPU's row is exclusively ours.
     let buf_ptr: *mut [FiredToken; wheel::EXPIRY_BUDGET] =
         unsafe { (core::ptr::addr_of_mut!(EXPIRED_BUF) as *mut [FiredToken; wheel::EXPIRY_BUDGET]).add(cpu) };
+    run_wheel_sweep(current, now_time, hres_due, buf_ptr);
+    softirq_diagnostics(current);
+}
+
+/// RT-2X item 4 (pair-battery queue): hardirq-context fast expiry, the
+/// reference's hrtimer_interrupt shape. Called at the TOP of the timer
+/// IRQ (before the tick body) whenever a high-resolution deadline is
+/// due: the precise-sleep wake then happens before the per-tick
+/// accounting/scheduler_tick/scribble/softlockup body instead of after
+/// it — measured 30-70 us of body between the LAPIC fire and the wake
+/// on the debug kernel (run/RT-2X.md). Delivery context is the same
+/// no-sleep contract as the softirq sweep (R12-3: tokens delivered
+/// outside the TIMER_TABLE lock); all locks taken on this path are
+/// irqsave spinlocks already shared with the softirq caller.
+///
+/// Uses its OWN token buffer: a timer IRQ can land while the softirq
+/// deliver loop is mid-iteration over the per-CPU EXPIRED_BUF row (the
+/// sweep's TIMER_TABLE critical section is irqsave and thus
+/// un-interruptible, but the deliver phase is not) — sharing the row
+/// would corrupt the in-flight delivery. This path cannot nest with
+/// itself: the LAPIC one-shot never refires while its own vector is in
+/// service (re-arm happens at tick_nohz_irq_exit, after this handler).
+pub fn expire_hres_inline() -> bool {
+    let now_time = crate::drivers::timer::read_time();
+    if HRES_NEXT.load(Ordering::Acquire) > now_time {
+        return false;
+    }
+    // Wakewatch stamping parity with the softirq path (the stall
+    // watchdog reads these; the softirq dispatch later in the same IRQ
+    // re-stamps — a few ns of atomics, worth keeping the forensics
+    // unambiguous).
+    {
+        let cpu = crate::arch::cpu_id() as usize;
+        if cpu < crate::config::MAX_CPUS {
+            WW_HRES_LAST[cpu].store(now_time, Ordering::Release);
+            WW_HRES_N[cpu].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    static mut HRES_FAST_BUF: [FiredToken; wheel::EXPIRY_BUDGET] =
+        [FiredToken { id: 0, action: Action::None, late_ticks: 0 }; wheel::EXPIRY_BUDGET];
+    // SAFETY: single-CPU-use buffer owned by this call path (see the
+    // nesting note above); the wheel writes at most EXPIRY_BUDGET tokens.
+    let buf: *mut [FiredToken; wheel::EXPIRY_BUDGET] =
+        core::ptr::addr_of_mut!(HRES_FAST_BUF) as *mut [FiredToken; wheel::EXPIRY_BUDGET];
+    let current = timer::get_jiffies();
+    run_wheel_sweep(current, now_time, true, buf);
+    true
+}
+
+/// Advance + collect + deliver one wheel pass (the old tail of
+/// `timer_softirq_handler`, split for the RT-2X hardirq fast path).
+/// `buf` is the caller's dedicated expired-token storage: the softirq
+/// path passes the per-CPU EXPIRED_BUF row (re-entry impossible via the
+/// SOFTIRQ guard), the hardirq fast path passes its own single row (see
+/// `expire_hres_inline` — the two never alias: a timer IRQ landing in
+/// the softirq deliver loop overwrites only its own row, and the
+/// interrupted softirq iterates tokens it already copied out... it does
+/// NOT: it borrows the row. That is why the hardirq path carries a
+/// SEPARATE buffer).
+///
+/// R34: the collection budget bounds the per-pass work; leftover due
+/// entries stay in their wheel list and drain on the next pass.
+fn run_wheel_sweep(
+    current: u64,
+    now_time: u64,
+    hres_due: bool,
+    buf_ptr: *mut [FiredToken; wheel::EXPIRY_BUDGET],
+) {
+    // SAFETY: caller-owned row (per-CPU softirq row or the hardirq fast
+    // row); the wheel writes at most EXPIRY_BUDGET tokens.
     let expired_len = {
         let now = Now::new(current, now_time);
         let mut table = TIMER_TABLE.lock_irqsave();
         table.advance(now);
-        // SAFETY: per-CPU row, non-reentrant via SOFTIRQ guard; the
-        // wheel writes at most EXPIRY_BUDGET tokens.
         let row: &mut [FiredToken; wheel::EXPIRY_BUDGET] = unsafe { &mut *buf_ptr };
         table.collect(now, row)
     }; // TIMER_TABLE released here
@@ -941,10 +1001,15 @@ pub fn timer_softirq_handler(_nr: usize) {
     // in place with a fresh delivery queued for the NEXT expiry).
     // The SoftirqCtx token records the delivery-context contract.
     let ctx = SoftirqCtx::new();
-    // SAFETY: slice of this CPU's row, filled under the lock above.
+    // SAFETY: slice of the caller's row, filled under the lock above.
     let expired: &[FiredToken] = &unsafe { &*buf_ptr }[..expired_len];
     deliver_fired(expired, ctx);
+}
 
+/// The softirq-side 1 Hz-class diagnostics that used to trail the sweep
+/// inside `timer_softirq_handler` (RT-2X split: the hardirq fast path
+/// runs the sweep only, never these). `current` is the jiffy at dispatch.
+fn softirq_diagnostics(current: u64) {
     // DFX dfx=periodic: a task snapshot every PERIODIC_DUMP_SECS. Silent
     // hangs (form-B) trip no watchdog and swallow the UART magic (a wedged
     // shell stops draining the RX path) — a timed snapshot from the timer
@@ -952,7 +1017,7 @@ pub fn timer_softirq_handler(_nr: usize) {
     // sc115: the 500-jiffy (5 s) interval x ~500 tasks floods the
     // busy-poll UART (~87 us/byte charged to whoever is current); 3000
     // jiffies (30 s) still catches a hung launcher child's parked
-    // syscall — the children live ~10 s between LIFECYCLE_TIMEOUT and
+    // syscall — the children live ~10 s between LIFETIME_TIMEOUT and
     // the AMS restart, so every other dump sees one — without
     // distorting the boot it is diagnosing.
     if crate::trace::EVENT_TASKDUMP.armed()

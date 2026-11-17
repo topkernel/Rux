@@ -28,7 +28,7 @@
 //! also yields the TSC frequency for the timekeeping driver
 //! (`drivers::timer`).
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use crate::arch::cpu::{inb, outb, rdmsr, wrmsr};
 
@@ -192,9 +192,135 @@ const ICR_LEVEL_ASSERT: u32 = 1 << 14;
 
 /// Send a fixed-mode IPI with `vector` to the CPU whose LAPIC id is
 /// `dest`.  Physical destination mode.
+///
+/// RT-2X item 4: emits EXACTLY the reference's x2APIC ICR shape for a
+/// FIXED unicast — `((dest) << 32) | vector`, no trigger-mode bits
+/// (bit 14 is meaningless for FIXED edge delivery; the reference never
+/// sets it). When the hypervisor advertises KVM_FEATURE_PV_SEND_IPI
+/// the FIXED path takes the paravirt hypercall instead — the same
+/// `kvm_send_ipi_mask` replacement the reference kernel logs at boot
+/// ("kvm-guest: APIC: send_IPI_mask() replaced") — measured to be the
+/// reference's ~10x-cheaper IPI send+delivery leg on this AMD/KVM host
+/// (rtbench rt_wakesys / rt_preempt, run/RT-2X.md).
 pub fn send_ipi(dest: u32, vector: u8) {
-    let cmd = ICR_FIXED | (vector as u32) | ICR_LEVEL_ASSERT;
+    // RT-2X: the PV hypercall path is opt-in via `ipi=pv` — measured
+    // NOT faster than the raw ICR write on this host's KVM (both ride
+    // the same exit; rt_wakesys 15.0 vs 13.1 us, run/RT-2X.md), but the
+    // knob stays for hosts where PV delivery differs and for A/B.
+    // Memoized: one cmdline resolution ever, then a byte load per IPI.
+    match KVM_PV_IPI_ARMED.load(Ordering::Acquire) {
+        0 => {
+            let on = KVM_PV_IPI.load(Ordering::Acquire)
+                && crate::cmdline::get_param("ipi").as_deref() == Some("pv");
+            KVM_PV_IPI_ARMED.store(if on { 1 } else { 2 }, Ordering::Release);
+            if on && kvm_pv_send_ipi(dest, vector) {
+                return;
+            }
+        }
+        1 => {
+            if kvm_pv_send_ipi(dest, vector) {
+                return;
+            }
+        }
+        _ => {}
+    }
+    let cmd = vector as u32;
     send_icr(dest, cmd);
+}
+
+// ---------------------------------------------------------------------------
+// KVM paravirt IPI (KVM_FEATURE_PV_SEND_IPI, the reference's
+// kvm_send_ipi_mask — RT-2X item 4)
+// ---------------------------------------------------------------------------
+
+/// Hypercall number (uapi linux/kvm_para.h; stable since introduction —
+/// the host KVM interprets this, and 10 has been KVM_HC_SEND_IPI since
+/// the 4.16 merge).
+const KVM_HC_SEND_IPI: u64 = 10;
+/// CPUID leaf carrying KVM_FEATURE_* bits.
+const KVM_CPUID_FEATURES: u32 = 0x4000_0001;
+/// Bit 11: PV_SEND_IPI.
+const KVM_FEATURE_PV_SEND_IPI: u32 = 1 << 11;
+
+/// PV_SEND_IPI negotiated with the hypervisor (set once at init).
+static KVM_PV_IPI: AtomicBool = AtomicBool::new(false);
+/// Runtime USE of the PV path (0 = undecided, 1 = on, 2 = off) — the
+/// `ipi=pv` cmdline knob, memoized on first send (a per-IPI cmdline
+/// scan would cost more than the IPI).
+static KVM_PV_IPI_ARMED: AtomicU8 = AtomicU8::new(0);
+/// Use VMMCALL (SVM) vs VMCALL (VMX) — chosen by the physical CPU
+/// vendor at init (KVM intercepts the one its hardware defines).
+static KVM_HC_VMMCALL: AtomicBool = AtomicBool::new(false);
+
+/// Probe CPUID for the KVM signature + PV_SEND_IPI feature bit. Called
+/// once from `init()` (BSP context, before any IPI is needed).
+pub fn kvm_para_init() {
+    // Leaf 0x40000000: max leaf + hypervisor signature. KVM's is
+    // "KVMKVMKVM" in ebx/ecx/edx.
+    let (max_leaf, b, c, d) = crate::arch::x86_64::cpu::cpuid(0x4000_0000, 0);
+    if max_leaf < KVM_CPUID_FEATURES || b != 0x4b4d564b || c != 0x564b4d56 || d != 0x4d {
+        return; // not KVM (or ancient): keep the bare ICR path
+    }
+    // KVM_FEATURE_* bits live in EAX of the features leaf.
+    let (feat, _, _, _) = crate::arch::x86_64::cpu::cpuid(KVM_CPUID_FEATURES, 0);
+    if feat & KVM_FEATURE_PV_SEND_IPI == 0 {
+        return;
+    }
+    // Hypercall instruction: SVM guests must VMMCALL, VMX guests VMCALL.
+    // CPUID leaf 0 vendor is the EBX:EDX:ECX convention — measured on
+    // this rig: ebx="Auth"(0x68747541), edx="enti"(0x69746e65),
+    // ecx="cAMD"(0x444d4163).
+    let (_, vb, vc, vd) = crate::arch::x86_64::cpu::cpuid(0, 0);
+    let amd = vb == 0x6874_7541 && vd == 0x6974_6e65 && vc == 0x444d_4163;
+    KVM_HC_VMMCALL.store(amd, Ordering::Release);
+    KVM_PV_IPI.store(true, Ordering::Release);
+}
+
+/// One FIXED unicast through the PV hypercall. Returns false (caller
+/// falls back to the ICR write) when not negotiated or the hypervisor
+/// refuses. The register convention is the KVM pv hypercall ABI:
+/// rax=nr, rbx=a1, rcx=a2, rdx=a3, rsi=a4, return rax (0 on success,
+/// negative -KVM_E* on refusal).
+fn kvm_pv_send_ipi(dest: u32, vector: u8) -> bool {
+    if !KVM_PV_IPI.load(Ordering::Acquire) {
+        return false;
+    }
+    // SAFETY: pure register protocol with the hypervisor (no memory
+    // operands). The bitmap is a single-bit cluster with min=dest, so
+    // bitmap_low=1, bitmap_high=0 (arch/x86/kernel/kvm.c
+    // __send_ipi_mask, one-cpu cluster shape).
+    unsafe fn hc(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, vmmcall: bool) -> i64 {
+        let ret: i64;
+        // The KVM ABI passes arg1 in RBX, which LLVM reserves — shuttle
+        // it through any free GPR with an explicit push/mov/pop bracket
+        // (stack-neutral; that is why nostack is not claimed).
+        if vmmcall {
+            core::arch::asm!(
+                "push rbx",
+                "mov rbx, {b}",
+                "vmmcall",
+                "pop rbx",
+                b = in(reg) a1,
+                in("rax") nr, in("rcx") a2, in("rdx") a3, in("rsi") a4,
+                lateout("rax") ret,
+            );
+        } else {
+            core::arch::asm!(
+                "push rbx",
+                "mov rbx, {b}",
+                "vmcall",
+                "pop rbx",
+                b = in(reg) a1,
+                in("rax") nr, in("rcx") a2, in("rdx") a3, in("rsi") a4,
+                lateout("rax") ret,
+            );
+        }
+        ret
+    }
+    let vmmcall = KVM_HC_VMMCALL.load(Ordering::Acquire);
+    // SAFETY: register-only protocol, see hc.
+    let ret = unsafe { hc(KVM_HC_SEND_IPI, 1, 0, dest as u64, vector as u64, vmmcall) };
+    ret == 0
 }
 
 /// Send an INIT-deassert... not needed on anything modern; kept for the
@@ -1094,8 +1220,13 @@ pub fn this_lapic_id() -> u32 {
 /// 0xFF). A dead interface falls back to MMIO xAPIC, which works on
 /// every model seen so far.
 fn init_x2apic_or_mmio() -> bool {
-    // CPUID leaf 1, ECX bit 21 = x2APIC.
-    let has_x2 = crate::arch::cpu::cpuid(1, 0).2 & (1 << 21) != 0;
+    // CPUID leaf 1, ECX bit 21 = x2APIC. The cmdline override
+    // `apic=xapic` forces MMIO xAPIC mode even when x2APIC exists
+    // (RT-2X probe knob: hypervisor IPI-virtualization classes — AMD
+    // AVIC virtualizes xAPIC-window writes, x2APIC MSR writes always
+    // exit; see run/RT-2X.md).
+    let has_x2 = crate::arch::cpu::cpuid(1, 0).2 & (1 << 21) != 0
+        && crate::cmdline::get_param("apic").as_deref() != Some("xapic");
 
     // SAFETY: IA32_APIC_BASE programming of this CPU.
     unsafe {
@@ -1133,6 +1264,16 @@ fn init_x2apic_or_mmio() -> bool {
 pub fn init() {
     let x2 = init_x2apic_or_mmio();
     X2APIC.store(x2, Ordering::Release);
+    // RT-2X item 4: negotiate the KVM paravirt IPI before any FIXED
+    // IPI can be sent (secondary bring-up SIPIs are not FIXED and stay
+    // on the raw ICR path by construction — they predate READY anyway).
+    kvm_para_init();
+    if KVM_PV_IPI.load(Ordering::Acquire) {
+        crate::pr_info!(
+            "apic: KVM PV_SEND_IPI negotiated ({} hypercall)",
+            if KVM_HC_VMMCALL.load(Ordering::Acquire) { "vmmcall" } else { "vmcall" }
+        );
+    }
     READY.store(true, Ordering::Release);
 
     // Spurious vector + enable; TPR = 0 (accept everything).

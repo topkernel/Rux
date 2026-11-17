@@ -1511,6 +1511,44 @@ pub fn resched_cpu(cpu: usize) {
                     crate::arch::ipi::send_reschedule_ipi(cpu);
                 }
             }
+            // RT-2X item-7 hunt: name every poke decision for the wedge
+            // boot (cmdline rt2xdbg=1; cpu-0-targeted only, 200-line
+            // budget — self-pokes flood the log): target, sender,
+            // polling flag, and the target's current task (pid/policy).
+            if cpu == 0
+                && crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1")
+            {
+                static RSP: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                if RSP.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
+                    use crate::dfx::taskdump::putc_brief as putchar;
+                    fn ph(mut v: u64) {
+                        for _ in 0..16 {
+                            let n = (v >> 60) as u8;
+                            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                            v <<= 4;
+                        }
+                    }
+                    let cur = cpu_state(cpu).current;
+                    let (cpid, cpolicy) = if cur.is_null() {
+                        (0xDEADu64, 9u64)
+                    } else {
+                        ((*cur).pid() as u64, (*cur).policy() as u64)
+                    };
+                    let poll = POLLING_IDLE[cpu].load(core::sync::atomic::Ordering::Acquire);
+                    for &b in b"RESCHED-CPU tgt=" { putchar(b); }
+                    ph(cpu as u64);
+                    for &b in b" from=" { putchar(b); }
+                    ph(this_cpu as u64);
+                    for &b in b" cur=0x" { putchar(b); }
+                    ph(cpid);
+                    for &b in b" pol=" { putchar(b); }
+                    ph(cpolicy);
+                    for &b in b" polling=" { putchar(b); }
+                    ph(poll as u64);
+                    putchar(b'\n');
+                }
+            }
         }
     }
     crate::dfx::cctx::add(&crate::dfx::cctx::IPI_NS, cc_t);
@@ -3228,6 +3266,44 @@ unsafe fn __schedule() {
     if prev_pid == 0 {
         let nr = GlobalRunQueue::grq_nr_running();
         if nr == 0 {
+            // RT-2X item-7 hunt: the pinned-RT wedge shape — cpu0 idle
+            // forever with runnable RT tasks — convicts this branch when
+            // the counter desyncs from actual class linkage. Tripwire
+            // (cmdline rt2xdbg=1, 32-line budget): names the gap live.
+            if crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1") {
+                let grq = grq();
+                let rt_nr = grq.rt_rq.nr_running() as u64;
+                let rr_nr = grq.rt_rq.rr_nr_running.load(core::sync::atomic::Ordering::Relaxed) as u64;
+                let cfs_linked = {
+                    // count() requires the lock; approximate via the
+                    // timeline's own atomic size if exposed — otherwise
+                    // report -1 (the RT rows alone decide the wedge).
+                    u64::MAX
+                };
+                if rt_nr != 0 || rr_nr != 0 {
+                    static DSN: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    if DSN.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
+                        use crate::dfx::taskdump::putc_brief as putchar;
+                        fn ph(mut v: u64) {
+                            for _ in 0..16 {
+                                let n = (v >> 60) as u8;
+                                putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                                v <<= 4;
+                            }
+                        }
+                        for &b in b"NR-RUNNING-DESYNC cpu=" { putchar(b); }
+                        ph(crate::arch::cpu_id() as u64);
+                        for &b in b" nr=0 rt=" { putchar(b); }
+                        ph(rt_nr);
+                        for &b in b" rr=" { putchar(b); }
+                        ph(rr_nr);
+                        for &b in b" cfs=0x" { putchar(b); }
+                        ph(cfs_linked);
+                        putchar(b'\n');
+                    }
+                }
+            }
             return;
         }
     }
@@ -6856,6 +6932,45 @@ fn check_rt_preempt(task: *mut Task, cpus_allowed: u32) {
             }
             let running = cpu_state(cpu).current;
             if running.is_null() || running == cpu_state(cpu).idle {
+                // RT-2X item-7 hunt: an idle-SLOT cpu in the affinity is
+                // skipped here on the "nothing to preempt" assumption —
+                // but the pinned-RT wedge showed a cpu RUNNING a FIFO
+                // spinner while its slot named idle (syscost: 433 user
+                // ticks + 5724 idle-classified ticks on the same cpu).
+                // Name the skip decision live (cmdline rt2xdbg=1,
+                // 48-line budget): an idle-slot cpu whose idle BIT is
+                // clear is the wedge shape — claim_idle_cpu_for also
+                // refuses it, so NO dispatch path pokes it.
+                if task_prio > 85
+                    && crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1")
+                {
+                    static CSP: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    if CSP.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
+                        use crate::dfx::taskdump::putc_brief as putchar;
+                        fn ph(mut v: u64) {
+                            for _ in 0..16 {
+                                let n = (v >> 60) as u8;
+                                putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                                v <<= 4;
+                            }
+                        }
+                        let idle_bit = (grq()
+                            .idle_cpus
+                            .load(core::sync::atomic::Ordering::Acquire)
+                            >> cpu)
+                            & 1;
+                        for &b in b"CRP-SKIP-IDLE-SLOT cpu=" { putchar(b); }
+                        ph(cpu as u64);
+                        for &b in b" wakee=0x" { putchar(b); }
+                        ph((*task).pid() as u64);
+                        for &b in b" prio=" { putchar(b); }
+                        ph(task_prio as u64);
+                        for &b in b" idlebit=" { putchar(b); }
+                        ph(idle_bit as u64);
+                        putchar(b'\n');
+                    }
+                }
                 continue;
             }
             let r_policy = (*running).policy();

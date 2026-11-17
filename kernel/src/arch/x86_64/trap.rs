@@ -1757,8 +1757,28 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
         crate::perf::note_tick(regs.rip, crate::perf::MODE_IDLE, 0);
     }
 
-    // 1. Update jiffies
-    crate::drivers::timer::timer_interrupt_handler();
+    // 1. Update jiffies (+ RT-2X item 4: the driver entry also expires
+    // due high-resolution timers HERE, at the top of the IRQ — the
+    // reference's hrtimer_interrupt shape; see
+    // drivers/timer/x86_64.rs and timer::expire_hres_inline).
+    let jiffies_advanced = crate::drivers::timer::timer_interrupt_handler();
+
+    // RT-2X item 4, light exit: an hres-only fire (a precise deadline
+    // between grid ticks — jiffies did not move) carries no scheduler
+    // tick duty. The reference's tick_nohz machinery gives tickless
+    // CPUs exactly this shape: hrtimer fires deliver their wakeups and
+    // return, without running account_process_tick / scheduler_tick /
+    // watchdogs. Before this branch, EVERY LAPIC fire on a precise-
+    // sleep workload paid the full body below — the measured 30-70 us
+    // class between the deadline fire and the sleeper's wake
+    // (run/RT-2X.md, t_abs rows). The nohz re-arm still runs (this fire
+    // may have been the armed next-event); the softirq Hrtimer raise
+    // from the driver entry drains at irq_exit and hits its dedupe
+    // fast-out (the inline expiry already drained the wheel).
+    if jiffies_advanced == 0 {
+        crate::timer::nohz::tick_nohz_irq_exit();
+        return;
+    }
 
     // 1.1 Re-arm the LAPIC timer BEFORE anything below can switch tasks
     // (Tick re-arm moved to the END of this handler as

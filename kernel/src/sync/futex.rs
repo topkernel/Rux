@@ -8577,8 +8577,37 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
             }
             futex_wake_op(uaddr, flags, val as i32, _timeout as i32, uaddr2, val3)
         }
+        FUTEX_LOCK_PI | FUTEX_LOCK_PI2 | FUTEX_TRYLOCK_PI | FUTEX_UNLOCK_PI => {
+            // RT-2X item 7 (pair-battery queue): dispatch the PI ops to
+            // the long-implemented-but-never-wired futex_pi module (the
+            // pair battery's pi_stress row failed here with ENOSYS).
+            // Shared/private rides the FLAGS_PRIVATE bit like every
+            // other op. LOCK_PI/LOCK_PI2 treat the timeout as an
+            // ABSOLUTE CLOCK_MONOTONIC timespec (the module parks on an
+            // absolute-jiffy deadline); TRYLOCK/UNLOCK take none.
+            let shared = (flags & FLAGS_SHARED) != 0;
+            match cmd {
+                FUTEX_TRYLOCK_PI => crate::sync::futex_pi::futex_trylock_pi(uaddr, shared),
+                FUTEX_UNLOCK_PI => crate::sync::futex_pi::futex_unlock_pi(uaddr, shared),
+                _ => {
+                    let dl = match futex_parse_timeout_ns(_timeout, true, false) {
+                        Ok(Some(ns)) => {
+                            // ns (absolute, boot-anchored MONOTONIC) ->
+                            // absolute jiffies, rounded up so an
+                            // in-progress jiffy never under-times
+                            let hz = crate::config::KERNEL_HZ as u64;
+                            Some(ns.saturating_mul(hz).div_ceil(1_000_000_000))
+                        }
+                        Ok(None) => None,
+                        Err(e) => return -(e as i64),
+                    };
+                    crate::sync::futex_pi::futex_lock_pi(uaddr, dl, shared)
+                }
+            }
+        }
         _ => {
-            // PI-related operations not yet supported
+            // The remaining PI family (WAIT_REQUEUE_PI / CMP_REQUEUE_PI,
+            // the glibc PI-condvar path) is not yet implemented.
             -ENOSYS as i64
         }
     };
