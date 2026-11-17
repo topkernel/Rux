@@ -274,9 +274,29 @@ pub fn kill_other_threads(current: *mut Task) {
 /// taken there — documented as a known risk).
 pub fn wait_for_thread_group_death(current: *mut Task) {
     crate::arch::cpu::restore_irq(true);
+    // timer-gap lane (pi_stress -g 2 shutdown wedge): the wait must PARK,
+    // not spin. A RUNNING leader's schedule() requeues and re-picks it
+    // every pass — at FIFO priority above the SIGKILL'd members it
+    // starves the very threads it is waiting for (observed: leader
+    // pinned cpu0 looping here for 6983 jiffies while three
+    // ownership-free, SIGKILL-pending members never ran once; RT
+    // throttling rescued CFS but never the lower-RT members). Park
+    // INTERRUPTIBLE: the pick skips a sleeping leader, the members run
+    // their fatal-signal exits, and thread_group_leave's decrement-side
+    // wake (see task.rs) brings us back to re-check nr_threads.
     // SAFETY: current stays valid (it is the running task).
     while unsafe { (*current).nr_threads() } > 1 {
+        unsafe {
+            (*current).set_state(crate::process::task::TaskState::new(
+                crate::process::task::TaskState::INTERRUPTIBLE,
+            ));
+        }
         crate::sched::schedule();
+        unsafe {
+            (*current).set_state(crate::process::task::TaskState::new(
+                crate::process::task::TaskState::RUNNING,
+            ));
+        }
     }
 }
 
