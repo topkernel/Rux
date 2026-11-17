@@ -166,7 +166,7 @@
           <tr><td>Typed timer wheel (D-19)</td><td>clock-domain typing + scope guards</td><td>arm lock 924→697 ns; nanosleep 772.6→<b>662.7 ms</b>; p2_ctxsw 12.198 vs 15.400 µs</td></tr>
           <tr><td>dcache lockless reads (WalkClaim)</td><td>reader-bank publication + deferred retirement</td><td>stat 0.643→<b>0.423 µs</b>, open 1.128→0.889 µs</td></tr>
           <tr><td>small_alloc magazine</td><td>per-CPU magazine (depth 16) + bitmap routing</td><td>class-lock sections <b>25M→19.7M→6.0M</b>/boot; REST share 9.2%→0.1–1.2%</td></tr>
-          <tr><td>GRQ hold</td><td>0.7 ms granularity pins churn + slimmer pick path (segment-measured)</td><td>average hold <b>2786 ns</b> @126M syscalls (band 1200–7320)</td></tr>
+          <tr><td>GRQ hold</td><td>0.7 ms granularity pins churn + slimmer pick path (segment-measured)</td><td>switch critical section <b>~102 ns</b>; IF=0 span average 2786 ns @126M syscalls (band 1200–7320)</td></tr>
           <tr><td>unix bandwidth</td><td>unix staging eliminated</td><td>bw_unix 2.6→<b>42.9 GB/s</b></td></tr>
           <tr><td>Page-fault path (campaign r6)</td><td>backward-fault window + contiguous put_range + PCACHE_RO alias protocol + batched pin release + single TLB flush per munmap</td><td>lat_pagefault 0.468→<b>0.029–0.031 µs (16.1× total)</b>, now 2.26–2.45× ahead of Linux</td></tr>
           <tr><td>Hook-call tax &amp; path_memo (campaign r5/r7)</td><td>1,331 cli/sti outlined calls inlined + path_memo/lease gates (per-inode open_count replaced the global BTreeMap lock; reader-side seqlock lock-free)</td><td>null −7% / read −5% / write −6% / ctxsw −6.1% / pipe −12%; open −15.2% cumulative, stat −4.6%, read flipped ahead</td></tr>
