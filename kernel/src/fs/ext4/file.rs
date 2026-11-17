@@ -104,7 +104,7 @@ fn ext4_dio_read_batched(
 
     const MAX_BATCH: usize = 64;
     const MAX_BLOCKS_PER_WINDOW: u64 = 512;
-    const MAX_MERGE_BLOCKS: u64 = 64;
+    const MAX_MERGE_BLOCKS: u64 = 256;
     let sectors_per_block = (block_size / 512) as u64;
 
     let mut completions: [IoCompletion; MAX_BATCH] = [const { IoCompletion::new() }; MAX_BATCH];
@@ -258,6 +258,7 @@ fn ext4_dio_read_batched(
                     i = e;
                 }
 
+                let t0 = crate::drivers::timer::read_time();
                 // ---- Phase 2: one kick, then wait in order ----
                 // The PCI submit path publishes chains QUIETLY (every notify
                 // is an MMIO trap); nothing else on a quiet boot kicks the
@@ -265,6 +266,7 @@ fn ext4_dio_read_batched(
                 // at-device until the 10 s wait deadline (the VW-WEDGE
                 // unked=at_device family on real-data direct reads).
                 crate::drivers::virtio::pci_blk_kick_all();
+                let t1 = crate::drivers::timer::read_time();
 
                 let mut cut_at = usize::MAX;
                 // First pass: wait heads and individual chains, recording
@@ -358,6 +360,12 @@ fn ext4_dio_read_batched(
                     }
                     completions[j].reset();
                 }
+                let t2 = crate::drivers::timer::read_time();
+                crate::drivers::virtio::sg_diag_timing(
+                    t1.saturating_sub(t0),
+                    0,
+                    t2.saturating_sub(t1),
+                );
                 count = 0;
                 blocks_in_window = 0;
                 if cut_at != usize::MAX && cut_at < total_read {

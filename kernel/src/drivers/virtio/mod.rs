@@ -1983,6 +1983,34 @@ pub static SG_DIAG_SPAN_FALLBACK: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 pub static SG_DIAG_SEG_TOTAL: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
+pub static SG_DIAG_T_SUBMIT: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+pub static SG_DIAG_T_KICK: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+pub static SG_DIAG_T_WAIT: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+pub static SG_DIAG_T_N: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// TEMP timing bracket (TSC ticks): submit phase, kick, wait phase of one
+/// fused window. Printed rate-limited.
+pub fn sg_diag_timing(t_submit: u64, t_kick: u64, t_wait: u64) {
+    use core::sync::atomic::Ordering::AcqRel;
+    SG_DIAG_T_SUBMIT.fetch_add(t_submit, AcqRel);
+    SG_DIAG_T_KICK.fetch_add(t_kick, AcqRel);
+    SG_DIAG_T_WAIT.fetch_add(t_wait, AcqRel);
+    let n = SG_DIAG_T_N.fetch_add(1, AcqRel) + 1;
+    if n % 4096 == 1 {
+        let hz = crate::config::TIMER_CLOCK_FREQ_HZ;
+        crate::pr_info!(
+            "sg: window n={} submit={}us kick={}us wait={}us",
+            n,
+            SG_DIAG_T_SUBMIT.load(core::sync::atomic::Ordering::Acquire) * 1_000_000 / hz / n as u64,
+            SG_DIAG_T_KICK.load(core::sync::atomic::Ordering::Acquire) * 1_000_000 / hz / n as u64,
+            SG_DIAG_T_WAIT.load(core::sync::atomic::Ordering::Acquire) * 1_000_000 / hz / n as u64
+        );
+    }
+}
 
 pub fn sg_diag_note(fused: bool, n_segs: u64) {
     use core::sync::atomic::Ordering::AcqRel;
