@@ -22,12 +22,23 @@
 //! - The per-hash PI bucket lock (PI_BUCKET_HEADS) serializes every
 //!   user-word mutation and every state-chain edit, the same contract
 //!   the plain side implements with its hash buckets.
-//! - Priority inheritance is a nice-floor: while a PiState has
-//!   waiters, its owner runs at nice -20 (the strongest weight the
-//!   GRR scheduler offers) and its pre-boost nice is restored at
-//!   handoff/release. Chains (the owner itself blocked on another PI
-//!   lock) are walked for deadlock detection and every link boosts
-//!   transitively through the same pool scan.
+//! - Priority inheritance follows the reference rt_mutex_setprio
+//!   shape (RT-2X item 7): the boost is driven by the TOP waiter's
+//!   scheduling class. An RT (FIFO/RR) top waiter raises the owner's
+//!   rt_priority to max(owner, waiter) — or converts a CFS owner to
+//!   SCHED_FIFO at the waiter's priority — via the GRQ-locked
+//!   class/priority migration (change_task_policy, which re-links the
+//!   priority-array bucket). A CFS top waiter applies the old
+//!   nice-floor (owner's nice pulled down to the waiter's). The
+//!   owner's saved (policy, rt_priority, nice) is restored at
+//!   handoff/release; ownership handoff re-arms the boost on the
+//!   incoming owner while waiters remain. The nice-only floor this
+//!   module shipped first could NOT break an RT inversion (a FIFO
+//!   medium-prio spinner starves a FIFO low-prio lock holder forever
+//!   — pi_stress wedged exactly there: run/RT-2X.md). Chains (the
+//!   owner itself blocked on another PI lock) are walked for deadlock
+//!   detection and every link boosts transitively through the same
+//!   pool scan.
 //! - Lock ordering (INV-LOCK family): plain futex bucket -> PI bucket
 //!   -> pool slot. cmp_requeue_pi (in futex.rs) is the only operation
 //!   holding a plain bucket while taking PI locks, and it always takes
@@ -35,7 +46,7 @@
 //!   matching the plain side's C8 invariant.
 
 use crate::arch::cpu;
-use crate::process::task::{Task, TaskState};
+use crate::process::task::{SchedPolicy, Task, TaskState};
 use crate::sync::futex::{futex_hash, task_futex_mm_id, FutexKey};
 
 /// Set while any waiter is queued on the futex (reference bit 31).
@@ -46,10 +57,6 @@ pub const FUTEX_WAITERS: u32 = 0x8000_0000;
 pub const FUTEX_OWNER_DIED: u32 = 0x4000_0000;
 /// Everything below the two flag bits is the owner TID.
 const TID_MASK: u32 = !(FUTEX_WAITERS | FUTEX_OWNER_DIED);
-/// The nice floor applied to a PI-lock owner while waiters exist.
-const PI_BOOST_NICE: i32 = -20;
-/// Sentinel for "no saved nice" in PiState (nice is -20..=19).
-const NICE_NONE: i32 = 0x7fff;
 /// Cap on the deadlock-chain walk (the reference rt_mutex walk has the
 /// same depth guard; hitting it is treated as a cycle).
 const MAX_PI_CHAIN: usize = 16;
@@ -60,14 +67,42 @@ const MAX_PI_CHAIN: usize = 16;
 /// exit path; the handoff only marks `handed`).
 struct PiWaiter {
     task: *mut Task,
-    /// Nice snapshot at enqueue time — ordering key (lower wins, FIFO
-    /// among equals; the plain side uses the same rule).
+    /// Nice snapshot at enqueue time — the CFS ordering key (lower
+    /// wins, FIFO among equals; the plain side uses the same rule).
     nice: i32,
+    /// RT priority snapshot at enqueue time: Some(p) for SCHED_FIFO /
+    /// SCHED_RR waiters, None for CFS-class waiters. The RT-PI key
+    /// (RT-2X item 7): RT waiters order before every CFS waiter and
+    /// the top waiter's rt_priority is what an RT owner inherits.
+    rt_prio: Option<u32>,
     /// Ownership was transferred to this waiter (unlock_pi or the
     /// owner-died path): the user word already holds its TID; its park
     /// must end with success.
     handed: bool,
     next: Option<usize>,
+}
+
+/// The owner's pre-boost scheduling configuration, restored when the
+/// boost ends (reference: rt_mutex_setprio's saved prio/policy).
+#[derive(Clone, Copy)]
+struct SavedSched {
+    nice: i32,
+    policy: SchedPolicy,
+    rt_prio: u32,
+}
+
+/// Total order on waiters: RT waiters first (higher rt_priority wins),
+/// then CFS by nice ascending; equal keys keep arrival (FIFO) order.
+/// Returns (class, rank) — smaller wins.
+fn waiter_rank(idx: usize) -> (u8, u32) {
+    let w = PI_WAITER_POOL[idx].lock_irqsave();
+    match w.as_ref() {
+        Some(w) => match w.rt_prio {
+            Some(p) => (0, u32::MAX - p.min(99)),
+            None => (1, (w.nice + 20).clamp(0, 39) as u32),
+        },
+        None => (2, u32::MAX),
+    }
 }
 
 // SAFETY: PiWaiter slots are only accessed while the per-slot spinlock
@@ -81,10 +116,13 @@ unsafe impl Sync for PiWaiter {}
 struct PiState {
     key: FutexKey,
     owner_pid: u32,
-    /// Owner's nice before the first waiter boosted it (NICE_NONE when
-    /// no boost is applied).
-    owner_saved_nice: i32,
-    /// Priority-ordered waiter chain (lowest nice first, FIFO ties).
+    /// Owner's pre-boost (nice, policy, rt_priority) while a boost is
+    /// applied; None when the owner runs at its own configuration.
+    /// RT-2X item 7: an RT boost changes policy/rt_priority too, so the
+    /// saved triple replaces the old nice-only slot.
+    owner_saved: Option<SavedSched>,
+    /// Priority-ordered waiter chain (RT first by rt_priority desc,
+    /// then CFS by nice asc; FIFO among equals).
     waiters: Option<usize>,
 }
 
@@ -143,11 +181,23 @@ unsafe fn word_cas(uaddr: usize, expect: u32, new: u32) -> Option<u32> {
 // (one per CONTENDED pi futex) and PI operations are rare.
 // ---------------------------------------------------------------------------
 
-fn pi_waiter_alloc(task: *mut Task, nice: i32) -> Option<usize> {
+fn pi_waiter_alloc(task: *mut Task) -> Option<usize> {
+    // Snapshot the scheduling configuration under the pool scan — the
+    // waiter's class/priority cannot change while it is blocked, so the
+    // enqueue-time snapshot is stable for the chain's lifetime.
+    let (nice, rt_prio) = unsafe {
+        let policy = (*task).policy();
+        let rt = if matches!(policy, SchedPolicy::Fifo | SchedPolicy::Rr) {
+            Some((*task).rt_priority())
+        } else {
+            None
+        };
+        ((*task).nice(), rt)
+    };
     for i in 0..PI_WAITER_POOL_SIZE {
         let mut slot = PI_WAITER_POOL[i].lock_irqsave();
         if slot.is_none() {
-            *slot = Some(PiWaiter { task, nice, handed: false, next: None });
+            *slot = Some(PiWaiter { task, nice, rt_prio, handed: false, next: None });
             return Some(i);
         }
     }
@@ -188,7 +238,7 @@ fn pi_state_get_or_create(key: &FutexKey, owner_pid: u32) -> Option<usize> {
             *st = Some(PiState {
                 key: *key,
                 owner_pid,
-                owner_saved_nice: NICE_NONE,
+                owner_saved: None,
                 waiters: None,
             });
             return Some(i);
@@ -212,13 +262,11 @@ fn pi_state_maybe_free(si: usize) {
 // Waiter chain operations (caller holds the PI bucket lock)
 // ---------------------------------------------------------------------------
 
-/// Insert ordered by nice (ascending), FIFO among equals — the same
-/// discipline as the reference plist and our plain bucket chain.
+/// Insert ordered by `waiter_rank` (RT by rt_priority desc first, then
+/// CFS nice asc), FIFO among equals — the same discipline as the
+/// reference plist, extended with the RT class (RT-2X item 7).
 unsafe fn pi_queue_insert(si: usize, wi: usize) {
-    let nice = {
-        let w = PI_WAITER_POOL[wi].lock_irqsave();
-        w.as_ref().map(|w| w.nice).unwrap_or(0)
-    };
+    let rank = waiter_rank(wi);
     let mut st = PI_STATE_POOL[si].lock_irqsave();
     let s = match st.as_mut() {
         Some(s) => s,
@@ -228,11 +276,8 @@ unsafe fn pi_queue_insert(si: usize, wi: usize) {
         s.waiters = Some(wi);
         return;
     };
-    let head_nice = {
-        let w = PI_WAITER_POOL[head].lock_irqsave();
-        w.as_ref().map(|w| w.nice).unwrap_or(0)
-    };
-    if nice <= head_nice {
+    let head_rank = waiter_rank(head);
+    if rank <= head_rank {
         let mut w = PI_WAITER_POOL[wi].lock_irqsave();
         if let Some(ref mut x) = *w {
             x.next = Some(head);
@@ -248,11 +293,8 @@ unsafe fn pi_queue_insert(si: usize, wi: usize) {
             w.as_ref().and_then(|w| w.next)
         };
         let Some(n) = next else { break };
-        let n_nice = {
-            let w = PI_WAITER_POOL[n].lock_irqsave();
-            w.as_ref().map(|w| w.nice).unwrap_or(0)
-        };
-        if nice <= n_nice {
+        let n_rank = waiter_rank(n);
+        if rank <= n_rank {
             let mut w = PI_WAITER_POOL[wi].lock_irqsave();
             if let Some(ref mut x) = *w {
                 x.next = Some(n);
@@ -325,6 +367,7 @@ unsafe fn pi_queue_unlink(si: usize, wi: usize) -> bool {
 }
 
 /// Count the waiter chain of state `si`.
+#[allow(dead_code)]
 fn pi_state_waiter_count(si: usize) -> usize {
     let st = PI_STATE_POOL[si].lock_irqsave();
     let Some(ref s) = *st else { return 0 };
@@ -339,56 +382,163 @@ fn pi_state_waiter_count(si: usize) -> usize {
     n
 }
 
-/// Apply the nice-floor boost to the state's owner when the first
-/// waiter arrives (caller holds the PI bucket lock).
-unsafe fn pi_boost_owner_if_first(si: usize) {
-    if pi_state_waiter_count(si) > 1 {
-        return; // waiters existed before this one; boost already on
-    }
-    let (owner, saved) = {
-        let st = PI_STATE_POOL[si].lock_irqsave();
-        match st.as_ref() {
-            Some(s) => (s.owner_pid, s.owner_saved_nice),
-            None => return,
-        }
-    };
-    if saved != NICE_NONE {
+/// Restore `task` to a saved scheduling configuration (the boost-end
+/// half of the reference's rt_mutex_setprio). The GRQ-locked class
+/// migration handles both the RT->RT priority drop and the FIFO->CFS
+/// conversion; a pure nice change takes the renice path.
+unsafe fn pi_restore_saved(task: *mut Task, sv: &SavedSched) {
+    let cur_policy = (*task).policy();
+    if cur_policy != sv.policy {
+        crate::sched::sched::change_task_policy(task, sv.policy, sv.rt_prio);
+        // change_task_policy does not restore the nice (it only moves
+        // class/priority) — a boosted-then-converted owner returns to
+        // its CFS weight here.
+        crate::sched::sched::sched_renice_locked(task, sv.nice);
         return;
     }
-    let task = crate::sched::sched::find_task_by_pid(owner);
-    if !task.is_null() {
-        let nice = unsafe { (*task).nice() };
-        let mut st = PI_STATE_POOL[si].lock_irqsave();
-        if let Some(ref mut s) = *st {
-            s.owner_saved_nice = nice;
+    if matches!(sv.policy, SchedPolicy::Fifo | SchedPolicy::Rr) {
+        if (*task).rt_priority() != sv.rt_prio {
+            crate::sched::sched::change_task_policy(task, sv.policy, sv.rt_prio);
         }
-        drop(st);
-        crate::sched::sched::sched_renice_locked(task, PI_BOOST_NICE);
+        return;
+    }
+    if (*task).nice() != sv.nice {
+        crate::sched::sched::sched_renice_locked(task, sv.nice);
     }
 }
 
-/// Restore the owner's nice when the last waiter left (caller holds
-/// the PI bucket lock).
-unsafe fn pi_unboost_owner_if_last(si: usize) {
-    let (has_waiters, owner, saved) = {
+/// Re-evaluate the owner's boost against the current top waiter — the
+/// single evaluation point called after every chain edit (insert,
+/// unlink, ownership handoff; caller holds the PI bucket lock). This
+/// is the reference's rt_mutex_adjust_prio / rt_mutex_setprio shape:
+///
+///   top waiter RT(p)  -> owner (kept RT) raised to max(p, own), or a
+///                        CFS owner converted to SCHED_FIFO at p
+///   top waiter CFS(n) -> CFS owner's nice pulled down to min(n, own)
+///                        (an RT owner needs nothing — it already
+///                        outranks every CFS waiter)
+///   no waiters        -> restore the saved configuration
+///
+/// A changed top waiter first restores, then re-arms — an upgrade
+/// (higher RT waiter arrived) and a downgrade (the head left) both
+/// fall out of the same restore-then-apply sequence. The boost can
+/// only ever apply to the LIVE owner: ownership moves re-point
+/// `owner_pid` and route through here before returning (see
+/// futex_unlock_pi / the owner-died handoff).
+unsafe fn pi_adjust_owner_boost(si: usize) {
+    let (owner_pid, head, saved) = {
         let st = PI_STATE_POOL[si].lock_irqsave();
         match st.as_ref() {
-            Some(s) => (s.waiters.is_some(), s.owner_pid, s.owner_saved_nice),
-            None => (false, 0, NICE_NONE),
+            Some(s) => (s.owner_pid, s.waiters, s.owner_saved),
+            None => return,
         }
     };
-    if has_waiters || saved == NICE_NONE {
+    let task = crate::sched::sched::find_task_by_pid(owner_pid);
+    if task.is_null() {
+        // Owner gone (exited between edits): drop the saved slot; a
+        // dead task's configuration is moot.
+        if saved.is_some() {
+            let mut st = PI_STATE_POOL[si].lock_irqsave();
+            if let Some(ref mut s) = *st {
+                s.owner_saved = None;
+            }
+        }
         return;
     }
-    let mut st = PI_STATE_POOL[si].lock_irqsave();
-    if let Some(ref mut s) = *st {
-        s.owner_saved_nice = NICE_NONE;
+
+    // The desired boost, derived from the top waiter's class.
+    let desired = head.map(|wi| {
+        let w = PI_WAITER_POOL[wi].lock_irqsave();
+        w.as_ref().map(|w| (w.rt_prio, w.nice)).unwrap_or((None, 0))
+    });
+
+    // Does the owner's LIVE configuration already equal the desired
+    // boost? (Avoids restore+re-apply churn on every chain edit.)
+    let already = |desired: Option<(Option<u32>, i32)>| -> bool {
+        match desired {
+            None => saved.is_none(),
+            Some((Some(p), _)) => {
+                matches!((*task).policy(), SchedPolicy::Fifo | SchedPolicy::Rr)
+                    && (*task).rt_priority() >= p.min(99)
+            }
+            Some((None, n)) => {
+                !matches!((*task).policy(), SchedPolicy::Fifo | SchedPolicy::Rr)
+                    && (*task).nice() <= n
+            }
+        }
+    };
+    if already(desired) {
+        return;
     }
-    drop(st);
-    let task = crate::sched::sched::find_task_by_pid(owner);
-    if !task.is_null() {
-        crate::sched::sched::sched_renice_locked(task, saved);
+
+    // Restore the pre-boost configuration first (no-op when the saved
+    // slot is empty), then apply the new boost.
+    if let Some(sv) = saved {
+        pi_restore_saved(task, &sv);
+        let mut st = PI_STATE_POOL[si].lock_irqsave();
+        if let Some(ref mut s) = *st {
+            s.owner_saved = None;
+        }
     }
+    let Some((rt_prio, nice)) = desired else { return };
+
+    // Arm the saved slot from the owner's (now unboosted) live state.
+    {
+        let mut st = PI_STATE_POOL[si].lock_irqsave();
+        if let Some(ref mut s) = *st {
+            s.owner_saved = Some(SavedSched {
+                nice: (*task).nice(),
+                policy: (*task).policy(),
+                rt_prio: (*task).rt_priority(),
+            });
+        }
+    }
+    match rt_prio {
+        Some(p) => {
+            let p = p.min(99);
+            if matches!((*task).policy(), SchedPolicy::Fifo | SchedPolicy::Rr) {
+                if (*task).rt_priority() < p {
+                    // Same class, higher priority: the class migration
+                    // re-links the priority-array bucket (change_task_policy
+                    // keeps the policy when it matches).
+                    crate::sched::sched::change_task_policy(task, (*task).policy(), p);
+                }
+            } else {
+                // CFS owner under an RT waiter: convert to FIFO at the
+                // waiter's priority (the reference rt_mutex_setprio
+                // does exactly this via __setscheduler).
+                crate::sched::sched::change_task_policy(task, SchedPolicy::Fifo, p);
+            }
+        }
+        None => {
+            if !matches!((*task).policy(), SchedPolicy::Fifo | SchedPolicy::Rr)
+                && (*task).nice() > nice
+            {
+                crate::sched::sched::sched_renice_locked(task, nice);
+            }
+        }
+    }
+}
+
+/// Ownership-handoff boost routing: the outgoing owner's boost ends
+/// (its saved configuration is restored), the incoming owner's is
+/// armed from the remaining chain. Called after `owner_pid` was
+/// re-pointed (caller holds the PI bucket lock).
+unsafe fn pi_owner_handoff(si: usize, old_pid: u32) {
+    let saved = {
+        let mut st = PI_STATE_POOL[si].lock_irqsave();
+        match st.as_mut() {
+            Some(s) => s.owner_saved.take(),
+            None => return,
+        }
+    };
+    if let Some(sv) = saved {
+        let task = crate::sched::sched::find_task_by_pid(old_pid);
+        if !task.is_null() {
+            pi_restore_saved(task, &sv);
+        }
+    }
+    pi_adjust_owner_boost(si);
 }
 
 /// The state index `task` is blocked on, if any (deadlock-chain walk).
@@ -543,9 +693,7 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
             return -(EAGAIN as i64); // state pool exhausted; caller
                                      // retries (glibc re-issues LOCK_PI)
         };
-        let Some(wi) =
-            pi_waiter_alloc(current, unsafe { (*current).nice() })
-        else {
+        let Some(wi) = pi_waiter_alloc(current) else {
             pi_state_maybe_free(si);
             return -(EAGAIN as i64);
         };
@@ -558,13 +706,13 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
             }
 
             pi_queue_insert(si, wi);
-            pi_boost_owner_if_first(si);
+            pi_adjust_owner_boost(si);
             // Owner moved between validation and queue? Unlink/retry.
             let owner_now = word_read(uaddr).map(|v| v & TID_MASK);
             if owner_now != Some(tid) {
                 pi_queue_unlink(si, wi);
                 pi_waiter_free(wi);
-                pi_unboost_owner_if_last(si);
+                pi_adjust_owner_boost(si);
                 pi_state_maybe_free(si);
                 continue;
             }
@@ -591,15 +739,22 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
             return 0; // the user word already holds our TID
         }
         // Timed out / interrupted / spurious: leave the queue and end
-        // or restart the acquire accordingly.
+        // or restart the acquire accordingly. The bucket lock is
+        // RE-TAKEN for the unlink (RT-2X): the park dropped it, and an
+        // unlock_pi handoff racing this removal could otherwise mark
+        // `handed` on a freed (possibly reused) waiter slot and hand
+        // the word to a task that already left.
         let timed = deadline.is_some_and(|dl| {
             crate::drivers::timer::get_jiffies() >= dl
         });
-        unsafe {
-            pi_queue_unlink(si, wi);
-            pi_waiter_free(wi);
-            pi_unboost_owner_if_last(si);
-            pi_state_maybe_free(si);
+        {
+            let _bkt2 = pi_bucket_lock(&key);
+            unsafe {
+                pi_queue_unlink(si, wi);
+                pi_waiter_free(wi);
+                pi_adjust_owner_boost(si);
+                pi_state_maybe_free(si);
+            }
         }
         if timed {
             return -(ETIMEDOUT as i64);
@@ -738,8 +893,11 @@ pub fn futex_unlock_pi(uaddr: usize, shared: bool) -> i64 {
             x.handed = true;
         }
     }
-    // Ownership moved to the top waiter; it inherits the boost while
-    // any waiter remains, and our own boost ends.
+    // Ownership moved to the top waiter; the boost follows the lock:
+    // our own saved configuration is restored and the incoming owner
+    // is re-armed from the remaining chain (RT-2X item 7 — the old
+    // call left OUR boost on the state keyed to the NEW owner pid,
+    // leaking the boost and corrupting whoever restored it later).
     {
         let mut st = PI_STATE_POOL[si].lock_irqsave();
         if let Some(ref mut s) = *st {
@@ -747,7 +905,7 @@ pub fn futex_unlock_pi(uaddr: usize, shared: bool) -> i64 {
         }
     }
     unsafe {
-        pi_unboost_owner_if_last(si);
+        pi_owner_handoff(si, mytid);
     }
     let _ = Task::wake_up(wtask);
     pi_state_maybe_free(si);
@@ -775,7 +933,7 @@ pub unsafe fn pi_requeue_attach(
 ) -> Option<usize> {
     let _ = pi_bkt; // ordering documented; guard held by caller
     let si = pi_state_get_or_create(key2, owner_tid)?;
-    let wi = pi_waiter_alloc(task, (*task).nice())?;
+    let wi = pi_waiter_alloc(task)?;
     pi_queue_insert(si, wi);
     if handed_direct {
         let mut w = PI_WAITER_POOL[wi].lock_irqsave();
@@ -784,7 +942,7 @@ pub unsafe fn pi_requeue_attach(
         }
         let _ = Task::wake_up(task);
     } else {
-        pi_boost_owner_if_first(si);
+        pi_adjust_owner_boost(si);
     }
     Some(wi)
 }
@@ -795,7 +953,7 @@ pub unsafe fn pi_requeue_detach(key2: &FutexKey, wi: usize) {
     let _bkt = pi_bucket_lock(key2);
     if let Some(si) = pi_state_find(key2) {
         pi_queue_unlink(si, wi);
-        pi_unboost_owner_if_last(si);
+        pi_adjust_owner_boost(si);
         pi_state_maybe_free(si);
     }
     pi_waiter_free(wi);
@@ -838,7 +996,7 @@ pub fn futex_pi_exit_cleanup(task: *mut Task) {
         }
         pi_waiter_free(wi);
         unsafe {
-            pi_unboost_owner_if_last(si);
+            pi_adjust_owner_boost(si);
         }
         pi_state_maybe_free(si);
     }
@@ -886,8 +1044,18 @@ pub fn futex_pi_exit_cleanup(task: *mut Task) {
                         x.handed = true;
                     }
                 }
+                // Re-point the state's owner BEFORE the handoff routing
+                // so the incoming owner inherits the boost from the
+                // remaining chain (the old call left owner_pid naming
+                // the dead task).
+                {
+                    let mut st = PI_STATE_POOL[si].lock_irqsave();
+                    if let Some(ref mut s) = *st {
+                        s.owner_pid = wtid;
+                    }
+                }
                 let _ = Task::wake_up(wtask);
-                pi_unboost_owner_if_last(si);
+                pi_owner_handoff(si, dead_tid);
                 pi_state_maybe_free(si);
             },
             None => {
