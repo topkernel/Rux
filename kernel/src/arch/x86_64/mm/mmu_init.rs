@@ -216,7 +216,23 @@ pub unsafe fn alloc_page_table() -> Option<u64> {
             let phys_addr = if let Some(node) = crate::mm::pglist::first_online_node_mut() {
                 if let Some(zone) = node.zone_mut(ZoneType::ZoneNormal) {
                     if zone.is_initialized() {
-                        let mut pfn_opt = zone.alloc_pages(0);
+                        // (fork-frag lane) Per-CPU pageset fast path: a
+                        // fork's COW walk allocates one table per parent
+                        // leaf table (36 on the fragmented pbench shape)
+                        // and each used to pay a full zone-lock round
+                        // trip. The pcp row serves order-0 frames with no
+                        // zone lock (refill pays it once per PCP_BATCH) —
+                        // the exact fast path page_alloc::alloc_pages
+                        // gives data pages. Slowpath/reclaim semantics
+                        // unchanged: a pcp miss falls through to the
+                        // zone path below verbatim (the GFP slowpath
+                        // stays OUT of here — this call may run under the
+                        // mm PteLock, and swap-out reclaim of the same mm
+                        // would self-deadlock; see the shrink comment).
+                        let mut pfn_opt = crate::mm::pcp::alloc_order0(zone);
+                        if pfn_opt.is_none() {
+                            pfn_opt = zone.alloc_pages(0);
+                        }
                         if pfn_opt.is_none() {
                             // PT-alloc slowpath (fake-OOM family): the
                             // demand-fault path allocates its DATA page
@@ -423,6 +439,145 @@ unsafe fn free_page_table(phys_addr: u64) {
 
     // Use zone allocator to free
     crate::mm::page_alloc::free_pages(phys_addr as usize, 0);
+}
+
+// ============================================================================
+// Deferred page-table free (fork-frag lane, 2026-11-17) — the
+// tlb_remove_table shape, Rux edition
+// ============================================================================
+
+/// Why this exists: `unmap_pages`/`munmap` historically cleared leaf PTEs
+/// but NEVER freed emptied leaf tables — the fragmentation source behind
+/// the pbench p4 shape (36 linked leaf tables vs 61 present PTEs per
+/// fork; every fork allocated 36 child tables and every teardown walked
+/// all 36). Freeing a leaf table of a LIVE mm is the one table operation
+/// that needs more than the PTE lock:
+///
+/// 1. HARDWARE: a remote CPU that ever loaded this mm may hold a stale
+///    paging-structure-cache entry pointing at the table. The
+///    fire-and-forget `flush_tlb_others_mm` IPI does not prove the remote
+///    flush completed, so the frame must not reach the allocator until
+///    every target CPU's TLB_FLUSH_EPOCH advanced past a snapshot taken
+///    AFTER the PMD entry was cleared (any epoch advance implies a full
+///    non-global flush on that CPU — the remote handler flushes
+///    everything, not just one range).
+/// 2. KERNEL WALKERS: a lock-free PMD read (fork's COW walk, teardown)
+///    could have read the still-valid PMD entry and then dereference the
+///    freed table. Fixed by re-reading the PMD entry INSIDE the per-table
+///    PTE-lock chunk in both walkers (see copy_page_table_cow /
+///    free_user_page_tables) — a table that gets unlinked mid-walk turns
+///    into "entry invalid, skip", never a dangling dereference.
+///
+/// Protocol (munmap side): under the mm PTE lock — clear the table's
+/// PTEs, verify ALL 512 entries are zero, then
+/// `pt_free_emptied_table` (capacity check → PMD-entry clear → epoch
+/// snapshot → queue). After the lock: munmap's existing shootdown pair
+/// sends the IPIs that advance the target epochs. A later drain (munmap
+/// entry/exit, fork, exit_mm) frees every entry whose targets all
+/// advanced.
+///
+/// Overflow policy: the list is bounded. A munmap that empties more
+/// tables than there are free slots simply leaves the excess tables
+/// linked (yesterday's behavior — fragmentation, never corruption), and
+/// the next drain frees capacity for the following munmap.
+pub struct PtPendingFree {
+    /// Physical address of the unlinked leaf-table frame.
+    pub phys: u64,
+    /// Remote CPUs that must complete a flush before the free (bitmask).
+    pub targets: u64,
+    /// TLB_FLUSH_EPOCH snapshot per CPU, taken at commit (AFTER the PMD
+    /// entry was cleared).
+    pub snaps: [u64; crate::config::MAX_CPUS],
+}
+
+const PT_PENDING_CAP: usize = 96;
+
+static PT_PENDING: crate::sync::spinlock::Spinlock<[Option<PtPendingFree>; PT_PENDING_CAP]> =
+    crate::sync::spinlock::Spinlock::new([const { None }; PT_PENDING_CAP]);
+
+/// Unlink and defer-free ONE emptied leaf table. Runs under the caller's
+/// mm PTE lock (INV-LOCK-7), so the PMD entry cannot race a same-mm
+/// writer; lock order PTE → PT_PENDING is one-way (PT_PENDING is never
+/// held across a PTE lock). Steps, in the order the protocol needs:
+/// capacity check → PMD-entry clear → epoch snapshot → queue. Returns
+/// false when the list is full (the table stays linked — fragmentation,
+/// never corruption).
+///
+/// `tlb_mask` is the mm's tlb_cpu_mask (grow-only set of CPUs that ever
+/// loaded this root): exactly the CPUs whose hardware could hold stale
+/// paging-structure-cache entries for this tree, minus self (self
+/// flushes locally before the syscall returns).
+///
+/// SAFETY: `pmd_table` is the live PMD table of the caller's mm;
+/// `table_phys` is the leaf-table frame its `vpn2` entry names.
+pub unsafe fn pt_free_emptied_table(
+    pmd_table: *mut super::pagetable::PageTable,
+    vpn2: usize,
+    table_phys: u64,
+    tlb_mask: u64,
+) -> bool {
+    // Early/Fixmap stages have no per-mm table ownership semantics (the
+    // early pool is reused, boot tables are shared) — only Late-stage
+    // frames ever enter the deferred-free protocol.
+    if !alloc_stage_is_late() {
+        return false;
+    }
+    // Boot-shared tables (kernel-root subtree frames cloned into user
+    // mms) are never this mm's to free — keep them linked.
+    if PT_LEDGER.is_boot(table_phys >> PAGE_SHIFT) {
+        return false;
+    }
+    let targets = crate::arch::ipi::tlb_remote_targets(tlb_mask);
+    let mut list = PT_PENDING.lock();
+    let mut free_slot = None;
+    for (i, slot) in list.iter().enumerate() {
+        if slot.is_none() {
+            free_slot = Some(i);
+            break;
+        }
+    }
+    let Some(idx) = free_slot else { return false };
+    // 1. Unlink the table: hardware walks re-read the PMD entry from
+    //    memory and fault-allocate a fresh table; kernel walkers
+    //    re-read the entry under the PTE lock (fork/teardown re-read
+    //    fix) and skip.
+    (*pmd_table).set(vpn2, PageTableEntry::from_bits(0));
+    // 2. Snapshot epochs AFTER the clear (protocol above).
+    let snaps = crate::arch::ipi::tlb_epoch_snapshot();
+    list[idx] = Some(PtPendingFree {
+        phys: table_phys,
+        targets,
+        snaps,
+    });
+    true
+}
+
+/// Free every pending entry whose target CPUs have all completed a
+/// post-snapshot TLB flush. Bounded by PT_PENDING_CAP; called from
+/// munmap entry/exit, fork's mm phase, and exit_mm — the natural
+/// alloc/free churn points of page tables.
+pub fn pt_pending_drain() {
+    let mut list = PT_PENDING.lock();
+    for slot in list.iter_mut() {
+        let Some(e) = slot.as_ref() else { continue };
+        if !crate::arch::ipi::tlb_epochs_advanced(e.targets, &e.snaps) {
+            continue;
+        }
+        let phys = e.phys;
+        *slot = None; // take the slot before the free (the free path never
+        // re-enters this list; keeping the slot clear even if the checked
+        // free prints keeps the list walk-consistent).
+        // SAFETY: phys names a Late-stage alloc_page_table frame that was
+        // unlinked from its (live) mm under the mm PTE lock and waited out
+        // its target-CPU flush epochs; no tree references it.
+        unsafe { free_page_table_checked(phys, "munmap") };
+    }
+}
+
+/// Number of entries currently pending (DFX/observability).
+pub fn pt_pending_count() -> usize {
+    let list = PT_PENDING.lock();
+    list.iter().filter(|s| s.is_some()).count()
 }
 
 // FORENSIC: page-table frame ledger — every Late-stage alloc_page_table
@@ -1094,6 +1249,18 @@ pub unsafe fn free_user_page_tables(
                 // set — the whole-teardown CPU monopoly is gone.
                 {
                 let _pte_guard = pte.lock();
+
+                // (fork-frag lane) RE-READ the PMD entry under the chunk's
+                // lock — pte2 above was read without it, and munmap now
+                // unlinks emptied leaf tables on live mms (teardown and a
+                // racing same-mm munmap can overlap only through foreign
+                // last-Arc drop contexts; the re-read makes the walk
+                // structurally safe regardless — an unlinked table reads
+                // as "entry invalid", never a dangling frame).
+                let pte2 = (*table2).get(vpn2);
+                if !pte2.is_valid() {
+                    continue;
+                }
 
                 // 2MB leaf (PMD leaf with PS)
                 if pte2.is_leaf() {

@@ -1159,6 +1159,13 @@ pub(crate) unsafe fn release_user_leaf(
 /// `pte` is the PTE section for the teardown chunks (INV-LOCK-7; the
 /// dying mm's own PteLock, or FRESH_TREE_PTE_LOCK for unpublished trees).
 /// riscv64 is GLOBAL mode, so every handle maps to the same global epoch.
+// (fork-frag lane) x86_64-only deferred page-table-free protocol: munmap
+// on x86_64 unlinks and defer-frees emptied leaf tables behind a
+// TLB-flush epoch (see arch/x86_64/mm/mmu_init.rs). This arch's munmap
+// never frees tables, so the drain is a no-op twin kept so arch-generic
+// churn points (fork, exit) compile identically.
+pub fn pt_pending_drain() {}
+
 pub unsafe fn free_user_page_tables(
     pte: &crate::mm::mm_struct::PteLock,
     root_ppn: u64,

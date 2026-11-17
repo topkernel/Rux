@@ -303,13 +303,20 @@ unsafe fn expand_core_pattern(task: *mut Task, sig: i32) -> Vec<u8> {
 ///
 /// # Safety
 /// `root_ppn` is a valid page-table root PPN of the dumped mm.
-unsafe fn dump_read(root_ppn: u64, va: u64, out: &mut [u8]) {
+unsafe fn dump_read(mm: &crate::mm::mm_struct::MmStruct, va: u64, out: &mut [u8]) {
     use crate::arch::mm::mm_ops::PageTableWalker;
     use crate::arch::mm::{phys_to_virt, PhysAddr};
 
     for b in out.iter_mut() {
         *b = 0;
     }
+    // (fork-frag lane) walk under the mm PTE lock: x86_64 munmap can
+    // unlink+defer-free emptied leaf tables of live mms, and this walk
+    // dereferences PMD-resolved leaf tables — the lock serializes it
+    // against any same-mm munmap (a dying multithreaded process could
+    // still have a thread in munmap).
+    let _pte_guard = mm.pte_lock().lock();
+    let root_ppn = mm.root_ppn();
     // SAFETY: root_ppn belongs to the pinned mm; the walker bounds-checks
     // the root and every intermediate entry against machine memory.
     let (ppn, _) = match unsafe { PageTableWalker::walk(root_ppn, va) } {
@@ -550,15 +557,14 @@ pub unsafe fn do_coredump(task: *mut Task, sig: i32) -> bool {
         }
     }
 
-    let root_ppn = mm.root_ppn();
     let mut page_buf = [0u8; CHUNK];
     for (off, vaddr, filesz, _) in &planned {
         let mut written: u64 = 0;
         while written < *filesz {
             let va = vaddr + written;
             let chunk = core::cmp::min(CHUNK, (*filesz - written) as usize);
-            // SAFETY: root_ppn belongs to the pinned mm.
-            unsafe { dump_read(root_ppn, va, &mut page_buf[..chunk]) };
+            // SAFETY: mm is the pinned target mm.
+            unsafe { dump_read(&mm, va, &mut page_buf[..chunk]) };
             // SAFETY: write_at on the created file.
             let n = unsafe { file.write_at(off + written, page_buf.as_ptr(), chunk) };
             if n < 0 {

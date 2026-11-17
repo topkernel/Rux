@@ -299,6 +299,13 @@ pub fn register_fork_root(_root_ppn: u64, _owner_pid: u32) {}
 /// # Safety
 /// root_ppn must be an orphaned user root (no live MmStruct or CPU
 /// references it).
+// (fork-frag lane) x86_64-only deferred page-table-free protocol: munmap
+// on x86_64 unlinks and defer-frees emptied leaf tables behind a
+// TLB-flush epoch (see arch/x86_64/mm/mmu_init.rs). This arch's munmap
+// never frees tables, so the drain is a no-op twin kept so arch-generic
+// churn points (fork, exit) compile identically.
+pub fn pt_pending_drain() {}
+
 pub unsafe fn free_user_page_tables(
     lock: &crate::mm::mm_struct::PteLock,
     root_ppn: u64,

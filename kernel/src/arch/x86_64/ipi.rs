@@ -150,6 +150,61 @@ fn started_cpu_mask() -> u64 {
 }
 
 // ============================================================================
+// TLB-flush epoch (fork-frag lane, 2026-11-17)
+// ============================================================================
+
+/// Per-CPU count of COMPLETED TLB-flush IPIs (incremented at the END of
+/// the VECTOR_TLB_FLUSH handler, after the full non-global flush).
+///
+/// This is the ack side of the deferred page-table-free protocol
+/// (mmu_init::pt_pending_*): `flush_tlb_others_mm` is fire-and-forget,
+/// so "IPIs sent" does not mean "remote caches invalidated". A CPU whose
+/// epoch advanced past a recorded snapshot has, at some point after that
+/// snapshot, executed a full non-global flush on this address space's
+/// behalf — its stale paging-structure-cache entries for ANY mm are
+/// therefore gone. Combined with queueing the free only AFTER the PMD
+/// entry was cleared, an epoch advance proves no hardware walk on that
+/// CPU can still reach the freed leaf table.
+pub static TLB_FLUSH_EPOCH: [AtomicU64; MAX_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_CPUS];
+
+/// Snapshot of the current epoch of every CPU (taken before/while
+/// queueing a deferred table free).
+pub fn tlb_epoch_snapshot() -> [u64; MAX_CPUS] {
+    let mut snaps = [0u64; MAX_CPUS];
+    for cpu in 0..MAX_CPUS {
+        snaps[cpu] = TLB_FLUSH_EPOCH[cpu].load(Ordering::Acquire);
+    }
+    snaps
+}
+
+/// The remote-CPU set a deferred table free must wait on: every started
+/// CPU in `mask` except `self` (the queueing CPU flushes locally before
+/// the munmap syscall returns — see the protocol comment in
+/// mmu_init::unmap-emptied-table free path).
+pub fn tlb_remote_targets(mask: u64) -> u64 {
+    let me = crate::arch::cpu_id() as usize;
+    mask & started_cpu_mask() & !(1u64 << me)
+}
+
+/// True when every target CPU in `targets` has completed a full TLB
+/// flush after `snaps` was taken.
+pub fn tlb_epochs_advanced(targets: u64, snaps: &[u64; MAX_CPUS]) -> bool {
+    let mut t = targets;
+    while t != 0 {
+        let cpu = t.trailing_zeros() as usize;
+        t &= t - 1;
+        if cpu >= MAX_CPUS {
+            continue;
+        }
+        if TLB_FLUSH_EPOCH[cpu].load(Ordering::Acquire) <= snaps[cpu] {
+            return false;
+        }
+    }
+    true
+}
+
+// ============================================================================
 // Receive / dispatch (called from trap.rs with the IPI vector)
 // ============================================================================
 
@@ -187,6 +242,13 @@ pub fn handle_ipi_vector(vector: u64, regs: &crate::arch::pt_regs::PtRegs) {
             } else {
                 // SAFETY: reloading the current CR3 with PCID off.
                 unsafe { crate::arch::cpu::write_cr3(crate::arch::cpu::read_cr3()) };
+            }
+            // (fork-frag lane) Flush COMPLETED: publish the epoch advance
+            // that releases deferred page-table frees waiting on this CPU
+            // (see TLB_FLUSH_EPOCH above).
+            let cpu = crate::arch::cpu_id() as usize;
+            if cpu < MAX_CPUS {
+                TLB_FLUSH_EPOCH[cpu].fetch_add(1, Ordering::Release);
             }
         }
         VECTOR_STOP => loop {

@@ -1710,6 +1710,11 @@ pub fn do_exit(exit_code: i32) -> ! {
         let fp_t_mmdrop = if fp { crate::dfx::forkprof::now() } else { 0 };
         (*current).set_address_space(None);
         (*current).clear_active_mm();
+        // (fork-frag lane) exit is the other natural table-churn point:
+        // drain defer-freed leaf tables so the frames return before the
+        // next fork's child-table allocs look for them (no-op on arches
+        // without the protocol).
+        crate::arch::mm::pt_pending_drain();
         if fp {
             crate::dfx::forkprof::add(crate::dfx::forkprof::P_EX_MMDROP, fp_t_mmdrop);
             crate::dfx::forkprof::trace(crate::dfx::forkprof::T_MMDROP_DONE, dying_pid);

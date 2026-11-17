@@ -763,6 +763,12 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             let parent_addr_space = (*current_ptr).address_space();
             if let Some(parent_as) = parent_addr_space {
                 let fp_t_mm = if fp { crate::dfx::forkprof::now() } else { 0 };
+                // (fork-frag lane) drain defer-freed leaf tables before
+                // the COW walk — fork is the biggest page-table alloc
+                // churn point, so pending frames return to the allocator
+                // exactly where child tables are about to be allocated
+                // (no-op on arches without the protocol).
+                crate::arch::mm::pt_pending_drain();
                 match parent_as.fork() {
                     Ok(child_as) => {
                         #[cfg(feature = "dfx-futex-trace")]

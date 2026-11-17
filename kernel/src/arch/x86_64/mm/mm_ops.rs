@@ -734,6 +734,12 @@ impl MmStruct {
         let addr_us = addr.as_usize();
         let end_addr = addr_us + aligned_size;
 
+        // (fork-frag lane) drain previously defer-freed leaf tables whose
+        // target-CPU flush epochs have advanced — the free side of the
+        // emptied-table protocol. Entry of every munmap: the natural
+        // churn point, before any new work.
+        super::mmu_init::pt_pending_drain();
+
         // Per-piece cursor loop (89th session, the mallocng-corruption
         // root fix): each iteration removes at most MUNMAP_CHUNK_BYTES of
         // ONE VMA and zaps that piece's PTEs INSIDE the SAME vma_write()
@@ -827,7 +833,7 @@ impl MmStruct {
             // re-check is mapped-ness, not VMA coverage); exit teardown
             // reaps it. Lock order vma → pte, INV-LOCK-7.
             let _pte_guard = crate::arch::mm::mm_ops::pte_lock_for(self).lock();
-            if self.range_is_pte_empty(addr_us, aligned_size) {
+            if self.range_is_pte_empty(addr_us, aligned_size, true) {
                 let mut cur = addr_us;
                 while cur < end_addr {
                     let hit = vma_mgr
@@ -864,6 +870,9 @@ impl MmStruct {
                 if mp {
                     crate::dfx::mmprof::add(crate::dfx::mmprof::MU_BODY, mp_t0);
                 }
+                // (fork-frag) post-flush drain: single-CPU mms' pending
+                // entries (targets empty) free right here.
+                super::mmu_init::pt_pending_drain();
                 return Ok(());
             }
             drop(_pte_guard);
@@ -923,6 +932,7 @@ impl MmStruct {
                 PageVirtAddr::new(seg_start),
                 chunk_end - seg_start,
                 true,
+                true,
             )?;
 
             // Drop the guard BEFORE yielding: the write lock must never
@@ -947,6 +957,9 @@ impl MmStruct {
         crate::arch::ipi::flush_tlb_others_mm(self.tlb_cpu_mask(), addr_us as u64, end_addr as u64);
         crate::arch::mm::asid::flush_tlb_all();
 
+        // (fork-frag) post-flush drain — see the fast-path twin.
+        super::mmu_init::pt_pending_drain();
+
         if mp {
             crate::dfx::mmprof::add(crate::dfx::mmprof::MU_BODY, mp_t0);
         }
@@ -965,7 +978,7 @@ impl MmStruct {
         if start.as_usize().checked_add(aligned_size).is_none() {
             return Err(MapError::Invalid);
         }
-        self.unmap_pages(start, aligned_size, false)
+        self.unmap_pages(start, aligned_size, false, false)
     }
 
     /// Remove one VMA — or one [seg_start, piece_end) piece of it — from
@@ -1034,7 +1047,17 @@ impl MmStruct {
     /// once per 1 GB PUD region — sequential ranges pay ~1 leaf read per
     /// 2 MB instead of three upper reads per block (gb-opt lane: the
     /// per-block walk made the scan ~5 µs of a 10.8 µs 64 MB munmap).
-    fn range_is_pte_empty(&self, start: usize, size: usize) -> bool {
+    ///
+    /// (fork-frag lane) `unlink_emptied`: with it set (the munmap fast
+    /// path — the arena-teardown shape), a linked leaf table whose FULL
+    /// 512 entries are raw-zero is unlinked and defer-freed on the way
+    /// past. This is where "already zapped" fragmentation lives: the
+    /// range is PTE-empty but the tables stay linked otherwise, and
+    /// every later fork pays one child-table alloc per empty table. The
+    /// caller holds this mm's PTE section for the whole scan (see the
+    /// fast-path comment), so the unlink cannot race a same-mm fault;
+    /// cross-walker safety is pt_free_emptied_table's protocol.
+    fn range_is_pte_empty(&self, start: usize, size: usize, unlink_emptied: bool) -> bool {
         let mut addr = start;
         let end = addr.saturating_add(size);
 
@@ -1149,6 +1172,28 @@ impl MmStruct {
                 }
                 va += PAGE_SIZE_USIZE;
             }
+            // In-range entries are zero. For the unlink decision the
+            // WHOLE table must be zero (out-of-range PTEs of an
+            // edge-straddling table may hold live mappings).
+            if unlink_emptied {
+                let mut all_zero = true;
+                for i in 0..512usize {
+                    if unsafe { (*table1).get(i).bits() } != 0 {
+                        all_zero = false;
+                        break;
+                    }
+                }
+                if all_zero {
+                    unsafe {
+                        super::mmu_init::pt_free_emptied_table(
+                            table2,
+                            a.pmd_index() as usize,
+                            pte2.phys_addr(),
+                            self.tlb_cpu_mask(),
+                        );
+                    }
+                }
+            }
             addr = block_end;
         }
         true
@@ -1171,6 +1216,7 @@ impl MmStruct {
         start: PageVirtAddr,
         size: usize,
         defer_tlb_flush: bool,
+        free_emptied_tables: bool,
     ) -> Result<(), MapError> {
         // Serialize against fork's table walk and COW faults (this mm's
         // PTE section, INV-LOCK-7).
@@ -1442,6 +1488,40 @@ impl MmStruct {
                 // fault-around window teardown).
                 rss_delta += 1;
                 va += PAGE_SIZE_USIZE;
+            }
+
+            // (fork-frag lane) EMPTIED-TABLE FREE — the fragmentation
+            // source fix. munmap historically left emptied leaf tables
+            // linked (36 tables vs 61 present PTEs in the pbench p4
+            // parent); every later fork allocated a child frame per
+            // table and every teardown walked them all. When this pass
+            // just finished a table's LAST block, the table's PTEs are
+            // as final as this syscall makes them: scan the whole 512
+            // entries; all-zero (no mappings, no swap slots, no
+            // PROT_NONE markers, no kernel device-window leaves) means
+            // the frame is dead weight — unlink the PMD entry and
+            // defer-free the frame behind the TLB-flush epoch
+            // (mmu_init::pt_free_emptied_table owns the protocol).
+            // `free_emptied_tables` is set by munmap only — madvise
+            // (MADV_DONTNEED) zaps keep tables under live VMAs.
+            if free_emptied_tables && block_end == pmd_end {
+                let mut all_zero = true;
+                for i in 0..512usize {
+                    if unsafe { (*table1).get(i).bits() } != 0 {
+                        all_zero = false;
+                        break;
+                    }
+                }
+                if all_zero {
+                    unsafe {
+                        super::mmu_init::pt_free_emptied_table(
+                            table2,
+                            a.pmd_index() as usize,
+                            pte2.phys_addr(),
+                            self.tlb_cpu_mask(),
+                        );
+                    }
+                }
             }
             addr = block_end;
         }
@@ -2909,6 +2989,24 @@ pub unsafe fn copy_page_table_cow(
                     // ONE-LEAF-TABLE CHUNK under the PARENT mm's PTE
                     // section (INV-LOCK-7) — see the walk-head comment.
                     let _pte_guard = pte_lock_for(parent).lock();
+
+                    // (fork-frag lane) RE-READ the PMD entry under the
+                    // chunk's lock: munmap now UNLINKS emptied leaf
+                    // tables (pt_free_emptied_table) and the pte2 above
+                    // was read WITHOUT the lock — between that read and
+                    // this acquire, a concurrent munmap on the parent
+                    // (another thread of the mm) may have cleared the
+                    // entry and queued the frame for a deferred free.
+                    // The re-read turns that race into "entry invalid,
+                    // skip": this walk never dereferences an unlinked
+                    // table. Upper levels (PML4/PUD/PMD tables) are
+                    // never unlinked mid-life — only the PMD ENTRY is
+                    // cleared — so pte3/pte4 staleness stays the benign
+                    // add-only shape the walk always relied on.
+                    let pte2 = (*parent_pmd).get(vpn2);
+                    if !pte2.is_valid() {
+                        continue;
+                    }
 
                     // 2MB leaf: share (device/identity leaves, or user huge
                     // pages with a refcount bump). Foreign (boot-reserved,

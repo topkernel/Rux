@@ -117,10 +117,23 @@ pub fn ptrace_may_access(target_cred: &crate::process::task::Cred) -> bool {
 /// offsets in, so the answer is always the 4 KiB frame containing
 /// `va`.
 ///
+/// (fork-frag lane) The walk runs under the target mm's PTE lock
+/// (INV-LOCK-7): x86_64 munmap now UNLINKS and defer-frees emptied leaf
+/// tables of live mms, and this walker dereferences a PMD-resolved leaf
+/// table — without the lock a racing same-mm munmap could hand the walk
+/// a freed frame (garbage PPN past the bounds check = cross-process
+/// read). Under the lock the unlink and this walk serialize; the fault
+/// paths re-walk under the same lock, so nothing else changes.
+///
 /// # Safety
-/// `root_ppn` must be a valid page-table root PPN.
-unsafe fn translate(root_ppn: u64, va: u64) -> Option<(u64, u64)> {
+/// `mm` must be the pinned target mm whose root the walk uses.
+unsafe fn translate(
+    mm: &crate::mm::mm_struct::MmStruct,
+    va: u64,
+) -> Option<(u64, u64)> {
     use crate::arch::mm::mm_ops::PageTableWalker;
+    let root_ppn = mm.root_ppn();
+    let _pte_guard = mm.pte_lock().lock();
     // SAFETY: root_ppn belongs to the pinned target mm; the walker
     // bounds-checks the root and every intermediate entry against
     // machine memory.
@@ -146,9 +159,8 @@ pub fn read_target_word(task: *mut Task, addr: u64) -> Option<u64> {
     // SAFETY: task is pinned by the caller (sys_ptrace) for the call.
     unsafe {
         let mm = (*task).address_space_arc()?;
-        let root_ppn = mm.root_ppn();
 
-        if translate(root_ppn, page_fault_addr).is_none() {
+        if translate(&mm, page_fault_addr).is_none() {
             // Fault the page in through the target's mm (file-backed VMAs
             // are filled from their pinned File, anonymous ones zeroed).
             let r = crate::arch::mm::handle_mm_fault(
@@ -164,7 +176,7 @@ pub fn read_target_word(task: *mut Task, addr: u64) -> Option<u64> {
             }
         }
 
-        let (phys, page_len) = translate(root_ppn, addr)?;
+        let (phys, page_len) = translate(&mm, addr)?;
         let off = (addr & (page_len - 1)) as usize;
         if off + 8 > page_len as usize {
             return None;
@@ -198,9 +210,8 @@ pub fn write_target_word(task: *mut Task, addr: u64, value: u64) -> bool {
             Some(m) => m,
             None => return false,
         };
-        let root_ppn = mm.root_ppn();
 
-        if translate(root_ppn, page_fault_addr).is_none() {
+        if translate(&mm, page_fault_addr).is_none() {
             let r = crate::arch::mm::handle_mm_fault(
                 &mm,
                 crate::arch::mm::VirtAddr::new(page_fault_addr),
@@ -211,7 +222,7 @@ pub fn write_target_word(task: *mut Task, addr: u64, value: u64) -> bool {
             }
         }
 
-        let (phys, page_len) = match translate(root_ppn, addr) {
+        let (phys, page_len) = match translate(&mm, addr) {
             Some(v) => v,
             None => return false,
         };
@@ -264,8 +275,6 @@ pub fn process_vm_copy(
         Some(m) => m,
         None => return Err(14), // EFAULT: kernel-thread style target
     };
-    // SAFETY: root_ppn is the target mm's valid root PPN.
-    let root_ppn = mm.root_ppn();
 
     let mut done = 0usize;
     let mut r = remote;
@@ -289,7 +298,7 @@ pub fn process_vm_copy(
         }
         let page = r & !0xFFFu64;
         // SAFETY: translate only reads the target's page tables.
-        if unsafe { translate(root_ppn, page) }.is_none() {
+        if unsafe { translate(&mm, page) }.is_none() {
             let fl = if to_remote {
                 crate::arch::mm::FaultFlags::WRITE
             } else {
@@ -305,7 +314,7 @@ pub fn process_vm_copy(
             }
         }
         // SAFETY: translate only reads the target's page tables.
-        let (phys, page_len) = match unsafe { translate(root_ppn, r) } {
+        let (phys, page_len) = match unsafe { translate(&mm, r) } {
             Some(v) => v,
             None => break,
         };
