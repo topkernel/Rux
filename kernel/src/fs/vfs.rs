@@ -228,7 +228,19 @@ pub fn get_vfs_root() -> Option<Arc<Dentry>> {
 
 /// If `dentry` is a mount point, return the mounted filesystem's root dentry.
 /// Otherwise return `dentry` itself.
+///
+/// (stat-2x lane) Lock-free absence test FIRST: this runs at the START of
+/// every path walk (and the ".." hop), and the common case — not a mount
+/// point — paid the vfsmount spinlock pair + Option Arc clone on every
+/// lookup. The is_mountpoint mirror's protocol (set_mount stores flag
+/// first, descriptor second; clear_mount the reverse) makes a transient
+/// mismatch no worse than this slow path: the lock decides, and a race
+/// that still sees None simply stays on `dentry` exactly like a
+/// non-mountpoint.
 pub fn follow_mount(dentry: Arc<Dentry>) -> Arc<Dentry> {
+    if !dentry.has_mount() {
+        return dentry;
+    }
     let mount = dentry.get_mount();
     match mount {
         Some(mnt) => mnt.root.clone(),

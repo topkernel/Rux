@@ -884,25 +884,31 @@ fn note_lease_len(table: &Vec<LeaseEntry>) {
 /// Openers blocked in a lease break.
 static LEASE_WAIT: WaitQueueHead = WaitQueueHead::new();
 
-/// Live open-file-description counts per inode key: (total, write-open,
-/// breaking_total, breaking_writers) — the last two count openers BLOCKED
-/// in break_lease (so a lease holder cannot "downgrade" past a pending
-/// write breaker the way Linux's lease-break state machine prevents).
-/// Registered from File::set_inode, dropped from File::drop — this is
-/// our i_readcount/i_writecount analogue.
-type OpenCounts = (u32, u32, u32, u32);
-static INODE_OPENS: Spinlock<alloc::collections::BTreeMap<(u64, u64), OpenCounts>> =
-    Spinlock::new(alloc::collections::BTreeMap::new());
+/// Live open-file-description counts live ON the inode
+/// (Inode::open_total / open_write / open_breaking / open_breaking_write)
+/// — (stat-2x lane) the per-inode i_readcount/i_writecount shape. The
+/// former global `Spinlock<BTreeMap<key, (total, write, breaking,
+/// breaking_writers)>>` serialized EVERY open() and close() on one lock
+/// plus a tree walk; every reader (execve ETXTBSY, F_SETLEASE grant
+/// checks, break_lease pending-breaker accounting) arrives with the
+/// inode in hand, so per-inode atomics answer directly.
+///
+/// Snapshot note: the old table handed set_lease one consistent tuple
+/// under its lock; the per-inode atomics are individually atomic, not a
+/// consistent snapshot. Linux has the same property (per-inode
+/// atomic_t i_readcount/i_writecount, no global snapshot), so grant
+/// races here are reference-parity, not a regression.
 
 /// Register a new open file description on `inode` (File::set_inode).
 /// `write_access` is the description's access mode.
 pub fn inode_open_register(inode: &Inode, write_access: bool) {
-    let key = inode_lock_key(inode);
-    let mut m = INODE_OPENS.lock();
-    let e = m.entry(key).or_insert((0, 0, 0, 0));
-    e.0 = e.0.saturating_add(1);
+    inode
+        .open_total
+        .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
     if write_access {
-        e.1 = e.1.saturating_add(1);
+        inode
+            .open_write
+            .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
     }
 }
 
@@ -911,23 +917,19 @@ pub fn inode_open_register(inode: &Inode, write_access: bool) {
 pub fn inode_open_unregister(file: &File) {
     // SAFETY: inode is written once at open time; read-only access.
     let inode_opt = unsafe { &*file.inode.get() };
-    let key = match inode_opt.as_ref() {
-        Some(inode) => inode_lock_key(inode),
+    let inode = match inode_opt.as_ref() {
+        Some(inode) => inode,
         None => return,
     };
     // O_ACCMODE = 3; O_WRONLY(1) and O_RDWR(2) count as write access.
     let write_open = file.flags().bits() & 0o3 != 0;
-    {
-        let mut m = INODE_OPENS.lock();
-        if let Some(e) = m.get_mut(&key) {
-            e.0 = e.0.saturating_sub(1);
-            if write_open {
-                e.1 = e.1.saturating_sub(1);
-            }
-            if e.0 == 0 && e.2 == 0 {
-                m.remove(&key);
-            }
-        }
+    inode
+        .open_total
+        .fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
+    if write_open {
+        inode
+            .open_write
+            .fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
     }
     // Release the dying description's lease and wake lease breakers.
     // closegap: empty-table fast path — see LEASE_COUNT.
@@ -951,8 +953,7 @@ pub fn inode_open_unregister(file: &File) {
 /// a file some open description still writes would alias the text
 /// against a concurrent writer's bytes.
 pub fn inode_write_open_count(inode: &Inode) -> u32 {
-    let key = inode_lock_key(inode);
-    INODE_OPENS.lock().get(&key).map(|e| e.1).unwrap_or(0)
+    inode.open_write.load(core::sync::atomic::Ordering::Acquire)
 }
 
 /// Live exec text holds per inode key — the NEGATIVE half of the
@@ -1033,10 +1034,16 @@ pub fn set_lease(file: &File, lease_type: i16) -> Result<(), crate::errno::Errno
     };
 
     // Grant checks under both tables (open counts + leases).
+    // (stat-2x lane) open counts now load per-inode atomics — same
+    // individually-atomic property as the reference's i_readcount.
     {
-        let opens = INODE_OPENS.lock();
-        let (total, writers, breaking_total, breaking_writers) =
-            opens.get(&key).copied().unwrap_or((0, 0, 0, 0));
+        use core::sync::atomic::Ordering;
+        let (total, writers, breaking_total, breaking_writers) = (
+            inode.open_total.load(Ordering::Acquire),
+            inode.open_write.load(Ordering::Acquire),
+            inode.open_breaking.load(Ordering::Acquire),
+            inode.open_breaking_write.load(Ordering::Acquire),
+        );
         if !exclusive {
             // Read lease: nobody (not even ourselves) may hold the file
             // open for write — Linux's i_writecount gate — and a WRITE
@@ -1054,7 +1061,6 @@ pub fn set_lease(file: &File, lease_type: i16) -> Result<(), crate::errno::Errno
                 return Err(crate::errno::Errno::TryAgain);
             }
         }
-        drop(opens);
         let table = LEASE_TABLE.lock();
         // Another description's lease blocks a new lease of either kind
         // when it would conflict (read+read coexist).
@@ -1162,13 +1168,12 @@ pub fn break_lease(inode: &Inode, writer: bool) -> Result<(), crate::errno::Errn
         }
     }
     // Count this pending breaker so set_lease grant checks can refuse a
-    // lease that would strand it (see INODE_OPENS).
+    // lease that would strand it (the per-inode open_breaking counts).
     {
-        let mut m = INODE_OPENS.lock();
-        let e = m.entry(key).or_insert((0, 0, 0, 0));
-        e.2 = e.2.saturating_add(1);
+        use core::sync::atomic::Ordering;
+        inode.open_breaking.fetch_add(1, Ordering::AcqRel);
         if writer {
-            e.3 = e.3.saturating_add(1);
+            inode.open_breaking_write.fetch_add(1, Ordering::AcqRel);
         }
     }
     let break_secs = LEASE_BREAK_TIME.load(Ordering::Relaxed);
@@ -1208,15 +1213,10 @@ pub fn break_lease(inode: &Inode, writer: bool) -> Result<(), crate::errno::Errn
     crate::timer::del_timer(timer_id);
     // Uncount the pending breaker (every exit path lands here).
     {
-        let mut m = INODE_OPENS.lock();
-        if let Some(e) = m.get_mut(&key) {
-            e.2 = e.2.saturating_sub(1);
-            if writer {
-                e.3 = e.3.saturating_sub(1);
-            }
-            if e.0 == 0 && e.2 == 0 {
-                m.remove(&key);
-            }
+        use core::sync::atomic::Ordering;
+        inode.open_breaking.fetch_sub(1, Ordering::AcqRel);
+        if writer {
+            inode.open_breaking_write.fetch_sub(1, Ordering::AcqRel);
         }
     }
     ret

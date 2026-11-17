@@ -851,6 +851,11 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
     // pathcost: entry bracket (closed just before the lookup below).
     let pc_pre = crate::dfx::fsw::pc_now();
 
+    // (stat-2x lane) ONE chroot verdict for the whole syscall — the
+    // magic-link gate below and the fast-path gate near the lookup each
+    // re-probed it (sched::current + fs_struct read per call).
+    let not_rooted = !crate::fs::vfs::process_rooted();
+
     if statbuf.is_null() {
         return -(errno::EFAULT as i64);
     }
@@ -888,7 +893,7 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
     // O_PATH open; walking the synthetic symlink re-resolves a target
     // string that socket fds cannot express. (Non-chrooted tasks only,
     // like the other global /proc shortcuts.)
-    if !crate::fs::vfs::process_rooted() {
+    if not_rooted {
         if let Some(p) = probe_str {
                 // oh-svc wedge hunt (2026-10-31): init (pid 1) enters an
                 // infinite fstatat(fd=11, "#<n>") loop the instant
@@ -1042,9 +1047,7 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
     // need the root prefix, >127-byte paths were not captured).
     let full_path_owned: alloc::string::String;
     let full_path: &str = match probe_str {
-        Some(p)
-            if p.starts_with('/') && !crate::fs::vfs::process_rooted() =>
-        {
+        Some(p) if p.starts_with('/') && not_rooted => {
             p
         }
         _ => {

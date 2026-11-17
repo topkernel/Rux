@@ -438,6 +438,25 @@ pub struct Inode {
     /// (same lifetime caveat as `xattrs`).
     pub ioc_flags: AtomicU32,
 
+    // ==================== Open-description counts ====================
+    // (stat-2x lane) The i_readcount/i_writecount analogue, per inode.
+    // These replaced a GLOBAL Spinlock<BTreeMap<(u64,u64), OpenCounts>>
+    // that every open() and close() locked and walked (register: lock +
+    // tree entry; unregister: lock + get_mut + maybe remove) — the
+    // readers (execve's ETXTBSY gate, the F_SETLEASE grant checks,
+    // break_lease's pending-breaker counts) all arrive with the inode
+    // in hand, so per-inode atomics answer them directly. Reference
+    // parity: Linux keeps i_readcount/i_writecount as per-inode atomic_t
+    // for exactly this reason.
+    /// Live open file descriptions on this inode (total).
+    pub open_total: AtomicU32,
+    /// Of those, the ones opened for write access (O_WRONLY/O_RDWR).
+    pub open_write: AtomicU32,
+    /// Openers currently BLOCKED in break_lease (pending total).
+    pub open_breaking: AtomicU32,
+    /// Of those, blocked WRITE-mode breakers (see locks::break_lease).
+    pub open_breaking_write: AtomicU32,
+
     // ==================== Reference Counting ====================
 
     /// Reference count
@@ -520,6 +539,10 @@ impl Inode {
             data: Spinlock::new(None),
             xattrs: Spinlock::new(None),
             ioc_flags: AtomicU32::new(0),
+            open_total: AtomicU32::new(0),
+            open_write: AtomicU32::new(0),
+            open_breaking: AtomicU32::new(0),
+            open_breaking_write: AtomicU32::new(0),
             ref_count: AtomicU64::new(1),
         }
     }
@@ -544,6 +567,10 @@ impl Inode {
             data: Spinlock::new(None),
             xattrs: Spinlock::new(None),
             ioc_flags: AtomicU32::new(0),
+            open_total: AtomicU32::new(0),
+            open_write: AtomicU32::new(0),
+            open_breaking: AtomicU32::new(0),
+            open_breaking_write: AtomicU32::new(0),
             ref_count: AtomicU64::new(1),
         }
     }
