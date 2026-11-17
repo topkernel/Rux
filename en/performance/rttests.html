@@ -90,15 +90,15 @@
       <thead><tr><th>Item</th><th class="num">Rux</th><th class="num">Linux (same rig)</th><th>Notes</th></tr></thead>
       <tbody id="rt-rows">
         <tr><td class="mono">cyclictest SCHED_OTHER (missed/avg/max µs)</td><td class="num">avg 73 · max 2762 (release, single boot)</td><td class="num">avg 63 · max 1417 (full-suite column)</td><td>the max tail (2.7 ms class) suggests a long IRQ-off section / page fault interrupting the sleeper — attribution in progress</td></tr>
-        <tr><td class="mono">cyclictest SCHED_FIFO p98 (missed/avg/max µs)</td><td class="num">avg 69 · max 263 (release, single boot)</td><td class="num">avg 12 · max 887 (full-suite column)</td><td>avg 104→69 after the release-basis fix; the max columns are from different boots and not directly comparable — same-rig interleaved re-measurement in flight</td></tr>
+        <tr><td class="mono">cyclictest SCHED_FIFO p98 (missed/avg/max µs)</td><td class="num">avg 46 (after the RT timer-slack exemption) · max 263 (clean-window single boot)</td><td class="num">avg 12 · max 887 (full-suite column)</td><td>avg 104→69→46 (two steps: the release-build basis, then exempting RT tasks from timer slack); the max columns are from different boots and not directly comparable — same-rig interleaved re-measurement in flight</td></tr>
         <tr><td class="mono">rt_wakesys (wake-to-run, µs)</td><td class="num">3.3</td><td class="num">parity</td><td>after moving timer expiry to the top of the hardirq vector</td></tr>
-        <tr><td class="mono">hackbench socketpair -g 20 (s)</td><td class="num">1.536</td><td class="num">0.330</td><td>Linux 4.7×</td></tr>
-        <tr><td class="mono">hackbench pipe -p 20 -g 4 (s)</td><td class="num">0.163</td><td class="num">0.017</td><td>Linux 9.6×</td></tr>
-        <tr><td class="mono">hackbench thread -T 20 -g 4 (s)</td><td class="num">0.287</td><td class="num">0.042</td><td>Linux 6.8×</td></tr>
-        <tr><td class="mono">pi_stress -g 2 -D 20 (inversions completed)</td><td class="num">132,074 inversions (-g 1, 11 s)</td><td class="num">132,074 inversions (-g 1, 11 s)</td><td>PI futex now follows Linux's shape (rt_mutex_setprio); -g 2 still wedges on a pre-existing scheduler slot defect</td></tr>
+        <tr><td class="mono">hackbench socketpair -g 20 (s)</td><td class="num">0.258</td><td class="num">0.324</td><td>Rux ahead ~1.26×</td></tr>
+        <tr><td class="mono">hackbench pipe -p 20 -g 4 (s)</td><td class="num">0.018</td><td class="num">0.016</td><td>0.89× (near parity)</td></tr>
+        <tr><td class="mono">hackbench thread -T 20 -g 4 (s)</td><td class="num">0.039</td><td class="num">0.045</td><td>Rux ahead ~1.15×</td></tr>
+        <tr><td class="mono">pi_stress (inversions completed)</td><td class="num">-g 1: 82,483+88,571 · -g 2: 372,942+370,196 (two passes, clean exit)</td><td class="num">runs</td><td>PI futex follows Linux's shape (rt_mutex_setprio); the -g 2 wedge is fixed — it was four lost-dispatch bugs (self-migration poke consumed by a racing pick, a RUNNING task weakening itself without re-checking preemption, an idle-slot blind spot, exit_group spinning), not the retired "slot corruption" theory</td></tr>
       </tbody>
     </table></div>
-    <p style="font-size:13px;color:var(--text-3)">A row without numbers is a failure: hackbench inet ≥2 groups has no number on Rux (loopback non-blocking-connect stalls; on record with the networking work lane); pi_stress once failed initialization on Rux (the PI-mutex UAPI chain) — this table carries the newest two-sided readings, and failed items show as such in their rows.</p>
+    <p style="font-size:13px;color:var(--text-3)">A row without numbers is a failure: hackbench inet ≥2 groups has no number on Rux (loopback non-blocking-connect stalls; on record with the networking work lane). The old hackbench rows' 4.7–9.6× gap was a debug-build-era reading; the current numbers are release-build same-rig interleaved runs, with the 3-run medians being finalized — the row values refresh when they land. pi_stress runs on both sides. This table carries the newest two-sided readings.</p>
 
     <h2 id="rig"><span class="anchor">§2</span>Rig and method</h2>
     <ul>

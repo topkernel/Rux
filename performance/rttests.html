@@ -89,15 +89,15 @@
       <thead><tr><th>项</th><th class="num">Rux</th><th class="num">Linux(同机)</th><th>说明</th></tr></thead>
       <tbody id="rt-rows">
         <tr><td class="mono">cyclictest SCHED_OTHER(丢失/平均/最大 µs)</td><td class="num">平均 73 · 最大 2762(release 单次启动)</td><td class="num">平均 63 · 最大 1417(整轮测试列)</td><td>max 尾(2.7 ms 级)疑长关中断段/缺页打断,归因进行中</td></tr>
-        <tr><td class="mono">cyclictest SCHED_FIFO p98(丢失/平均/最大 µs)</td><td class="num">平均 69 · 最大 263(release 单次启动)</td><td class="num">平均 12 · 最大 887(整轮测试列)</td><td>release 后平均 104→69;max 与 Linux 列不同次启动不可直接比较,同机交替启动重新测量中</td></tr>
+        <tr><td class="mono">cyclictest SCHED_FIFO p98(丢失/平均/最大 µs)</td><td class="num">平均 46(RT 定时器余量豁免后) · 最大 263(干净窗口单次启动)</td><td class="num">平均 12 · 最大 887(整轮测试列)</td><td>平均 104→69→46(两步:换 release 构建口径、RT 任务豁免定时器余量);max 与 Linux 列不同次启动不可直接比较,同机交替启动重新测量中</td></tr>
         <tr><td class="mono">rt_wakesys(唤醒到运行,µs)</td><td class="num">3.3</td><td class="num">持平</td><td>定时器到期改在硬中断顶部派发后与 Linux 持平</td></tr>
-        <tr><td class="mono">hackbench socketpair -g 20(秒)</td><td class="num">1.536</td><td class="num">0.330</td><td>Linux 4.7×</td></tr>
-        <tr><td class="mono">hackbench pipe -p 20 -g 4(秒)</td><td class="num">0.163</td><td class="num">0.017</td><td>Linux 9.6×</td></tr>
-        <tr><td class="mono">hackbench thread -T 20 -g 4(秒)</td><td class="num">0.287</td><td class="num">0.042</td><td>Linux 6.8×</td></tr>
-        <tr><td class="mono">pi_stress -g 2 -D 20(完成反转数)</td><td class="num">132,074 反转(-g 1,11 s)</td><td class="num">132,074 反转(-g 1,11 s)</td><td>PI futex 已按 Linux 形态实现(rt_mutex_setprio);-g 2 仍卡在既有的调度槽损坏缺陷</td></tr>
+        <tr><td class="mono">hackbench socketpair -g 20(秒)</td><td class="num">0.258</td><td class="num">0.324</td><td>Rux 领先 ~1.26×</td></tr>
+        <tr><td class="mono">hackbench pipe -p 20 -g 4(秒)</td><td class="num">0.018</td><td class="num">0.016</td><td>0.89×(近平价)</td></tr>
+        <tr><td class="mono">hackbench thread -T 20 -g 4(秒)</td><td class="num">0.039</td><td class="num">0.045</td><td>Rux 领先 ~1.15×</td></tr>
+        <tr><td class="mono">pi_stress(完成反转数)</td><td class="num">-g 1:82,483+88,571 · -g 2:372,942+370,196(两轮完成,干净退出)</td><td class="num">可运行</td><td>PI futex 按 Linux 形态实现(rt_mutex_setprio);-g 2 的卡死已查明为四个丢派发缺陷并修复(自迁移 poke 被竞态吃掉/运行中自降权未复查抢占/空闲槽盲区/exit_group 自旋)——"槽损坏"旧判定作废</td></tr>
       </tbody>
     </table></div>
-    <p style="font-size:13px;color:var(--text-3)">无数据项即失败:hackbench inet ≥2 组在 Rux 无数字(回环非阻塞 connect 停滞,网络工作分支已记录在案);pi_stress 在 Rux 曾初始化失败(PI mutex UAPI 链)—— 本表以最新一轮双侧读数为准,失败项在行内如实显示。</p>
+    <p style="font-size:13px;color:var(--text-3)">无数据项即失败:hackbench inet ≥2 组在 Rux 无数字(回环非阻塞 connect 停滞,网络工作分支已记录在案)。hackbench 旧行的 4.7–9.6× 差距为 debug 构建时代的读数;现行数字为 release 构建同机交替测试,3 轮取中位数收尾中,收尾后行内数值随之刷新。pi_stress 两侧均可运行。本表以最新一轮双侧读数为准。</p>
 
     <h2 id="rig"><span class="anchor">§2</span>测试平台与方法</h2>
     <ul>
