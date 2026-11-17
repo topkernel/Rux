@@ -104,7 +104,7 @@
       <li><b>multiboot1 路径</b>:QEMU <code>-kernel</code> ELF,32 位保护模式进入(eax = 0x2BADB002,ebx = multiboot 信息指针);boot.S 保存指针、构建早期页表(低恒等 + 高半内核映射)、启用 long mode;multiboot blob 位于低内存 —— <b>早期即整体拷贝入内核 BSS</b>(内存映射、cmdline、引导器名),因 bootstrap 恒等映射在真实页表安装后即消亡。</li>
       <li><b>bzImage 路径</b>(Linux 引导协议头 + 16 位蹦床):16 位 → 保护模式(硬编码绝对远跳)→ 0x100000(32 位 boot stub)→ long mode → 内核;同镜像可在期望 Linux 引导协议的加载器下启动。</li>
       <li><b>bootstrap 恒等映射的生命周期</b>:bootstrap PML4 含低恒等窗(仅为 boot 栈服务);<code>mm::init()</code> 构建真实高半内核表并切换 CR3 后,<b>PML4[0] 于栈切换后立即 UNLINK</b>(drop_bootstrap_identity)—— 运行期不存在低恒等窗(D-17,§6)。</li>
-      <li><b>above-4G BAR</b>:宿主桥可将 virtio 64 位 BAR 置于任意 above-4G 地址 —— 两个静态别名窗 + 动态 ioremap 竞技场(K1-BAR);ECAM 于 q35 MMCONFIG 0xb0000000;IOAPIC/LAPIC 映射于 2GB bootstrap 覆盖之上(走表分配新 PMD,不降级 bootstrap 叶)。</li>
+      <li><b>above-4G BAR</b>:宿主桥可将 virtio 64 位 BAR 置于任意 above-4G 地址 —— 两个静态别名窗 + 动态 ioremap 竞技场(K1-BAR);ECAM 于 q35 MMCONFIG 0xb0000000;IOAPIC/LAPIC 映射于 2GB bootstrap 覆盖之上(页表遍历分配新 PMD,不降级 bootstrap 叶)。</li>
     </ul>
 
     <h2 id="aarch64"><span class="anchor">§4</span>aarch64:无固件 ELF + 内嵌 DTB</h2>

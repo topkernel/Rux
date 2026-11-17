@@ -137,7 +137,7 @@
         <tr><td>appspawn fork(服务孵化关键路径)</td><td class="num">130–272 ms</td><td class="num">85–90 ms</td></tr>
       </tbody>
     </table></div>
-    <p class="callout">已知代价(如实):落后于在跑任务的唤醒→运行延迟被 tick 量化至 ~10 ms(p2f 整轮测试双 hog 场景)—— 由 D-14 的亚 6 ms 窗口设计决定,消除路径见<a href="scheduler.html#tick">调度器 NOHZ</a>;binder 单事务最长 73 ms IF=0 为 watch 行。</p>
+    <p class="callout">已知代价(如实):唤醒发生于任务正在运行时,唤醒→运行延迟被 tick 量化至 ~10 ms(p2f 整轮测试双 hog 场景)—— 由 D-14 的亚 6 ms 窗口设计决定,消除路径见<a href="scheduler.html#tick">调度器 NOHZ</a>;binder 单事务最长 73 ms IF=0 为 watch 行。</p>
 
     <div class="callout">代码:<code>kernel/src/ipc/</code>(binder / access_token / sysv_shm / sysv_sem / sysv_msg / posix_mq / util)、<code>kernel/src/sync/futex_pi.rs</code>、<code>kernel/src/net/unix.rs</code>。对齐审计:docs/architecture/binder-parity-audit.md(缺口表 + 自创风险表,逐条要求引用参考函数行号)。守卫:LTP sem/msg/shm/pi 族 + OH 全服务集;性能门 IPC 域 p5 行带与 binder SLOW-TXN 类。</div>
   </article>

@@ -121,7 +121,7 @@
       <li><b>内核栈护栏</b>:栈底 canary(0xCAFE_F00D_DEAD_BEEF,volatile 写)+ 归还缓存前校验(R18-2 —— 被破坏值即任务越过栈底写入相邻堆页的直接证据,STACK-OVERFLOW 打印)+ FREED_STACKS 32 项环(故障 rsp 落于已释放栈时点名释放者)+ dfx 门控的 0xC3 自由涂绘;打包内核栈 slab(D-2)3445 活任务零 canary 命中。编译器栈保护为在册缺口(见 §6)。</li>
       <li><b>延迟释放隔离</b>:MmStruct/Task 进 16384 项墙钟环(1500 ms 排水)—— procfs 未记账借用者的 use-after-free 窗口结构性关闭。</li>
       <li><b>失败纪律</b>:Oops/panic 参考报告形状(CSR + 全 GPR + 32 帧回溯 + 符号化)、panic_on_oops sysctl、panic= 重启参数、pstore console。</li>
-      <li><b>可观测安全网</b>:统一 tracepoint(69 事件/17 组)、census/heal 自愈(MISS=0 入门禁)、自旋看门狗、kallsyms 符号化回溯 —— 缺陷的定位时间本身是安全性质的组成部分。</li>
+      <li><b>可观测安全网</b>:统一 tracepoint(69 事件/17 组)、调度事件普查/heal 自愈(MISS=0,已测量记录)、自旋看门狗、kallsyms 符号化回溯 —— 缺陷的定位时间本身是安全性质的组成部分。</li>
     </ul>
 
     <h2 id="gaps"><span class="anchor">§5</span>诚实缺口登记册</h2>
@@ -158,7 +158,7 @@
     <ul>
       <li><b>Ub 24.04 冻结案的内核无罪判定</b>:以逐事件取证链证明冻结前唯一一次 WAKE(val=1, ret=1) 已投递、WAIT/WAKE 路径无内核侧用户 futex 字写入 —— 内核在词句层面被排除,用户态锁定责任。安全性论证的可信度来自"内核也会被排除"的记录。</li>
       <li><b>SMAP 启用的二分演化</b>:STAC/CLAC 在 TCG 无条件 #UD(二分实证)→ pushfq 括号(~100+ 周期)→ SMAP-gated stac/clac(2 周期)—— 安全机制的成本曲线本身被测量驱动,不是一次性取舍。</li>
-      <li><b>D-19 类型化定时器轮</b>:六类历史缺陷类(混时钟域比较/periodic 误用/双重取消等)成为编译错,同一测试平台 A/B 同时给出性能改进(arm 锁 924→697 ns)—— 强化与性能同向的实例。</li>
+      <li><b>D-19 类型化定时器轮</b>:六类历史缺陷类(混时钟域比较/periodic 误用/双重取消等)成为编译错,同一测试平台 A/B 同时给出性能改进(定时器 arm 锁 924→697 ns)—— 强化与性能同向的实例。</li>
     </ul>
 
     <div class="callout">正本:docs/architecture/security-design.md(六层模型 + 度量表)、docs/development/security-posture.md(21 行 posture)、docs/architecture/safety-and-performance.md §5(缺口登记册)、docs/architecture/design-divergences.md(D-9/D-17/D-18)。相关:<a href="formal.html">形式验证</a>、<a href="taxonomy.html">缺陷分类学</a>、<a href="unsafe.html">分层 unsafe 台账</a>。</div>

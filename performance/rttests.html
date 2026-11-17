@@ -101,7 +101,7 @@
 
     <h2 id="rig"><span class="anchor">§2</span>测试平台与方法</h2>
     <ul>
-      <li><b>对照对</b>:与 fio 页同一对内核、同一镜像(reflink)、同一次注入的二进制(源码 tar 包入 git,musl 静态构建;含 numa shim 与 musl sched_* ENOSYS 桩覆写)。</li>
+      <li><b>对照组</b>:与 fio 页同一对内核、同一镜像(reflink)、同一次注入的二进制(源码 tar 包入 git,musl 静态构建;含 numa shim 与 musl sched_* ENOSYS 桩覆写)。</li>
       <li><b>协议</b>:每侧一次启动顺序执行全部项(qsrun cmds 协议);cyclictest 直出统计行,hackbench 直出耗时行。</li>
     </ul>
 

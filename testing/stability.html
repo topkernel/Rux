@@ -111,11 +111,11 @@
       <li><b>riscv64 启动参数矩阵 16/16</b>:smp{2,4,6,8} × mem{1,2,4,8}G 十六个格子全部干净启动到 shell、零 panic 零挂起(矩阵铺开前存在多个 panic/挂起格)。</li>
     </ul>
 
-    <h2 id="heal"><span class="anchor">§3</span>自愈观测(census + heal)</h2>
+    <h2 id="heal"><span class="anchor">§3</span>自愈观测(调度事件普查 + heal)</h2>
     <ul>
       <li>每任务逐字段 tick 观测 + 幻影 preempt-count 判定(200 连续 tick,合法括号是微秒级)+ 20 ms 饥饿界 + softirq 分派延迟门。</li>
       <li>实测:64.5k/52.1k 次 heal 共 605 ms,<b>model-vs-reality MISS=0</b>;IF=0 占机 25.7% → <b>20.4%</b>;最长关中断段 594–599 ms 一次性 → <b>6–9 ms</b>;WAKE-STRANDED <b>233 → 31</b>。</li>
-      <li>每次合格静默启动 的 census 精确一致(TERM-DESCHED 8、WAKE-REFUSED 32)—— 稳定性本身是带门禁的常设指标。</li>
+      <li>每次合格静默启动的调度事件普查读数精确一致(TERM-DESCHED 8、WAKE-REFUSED 32)—— 稳定性本身是带门禁的常设指标。</li>
     </ul>
 
     <h2 id="policy"><span class="anchor">§4</span>裁决纪律</h2>

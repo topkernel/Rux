@@ -96,17 +96,17 @@
     </table></div>
     <p style="font-size:13px;color:var(--text-3)">同一探针二进制、同一 128MB 工作集、同一 virtio-blk 后端;Rux 的差距集中在 msync/sync 相位(映射脏页回写路径)与 fsync(日志提交路径)—— 与<a href="fio.html">fio 页</a>的 fsync 行一致,为存储栈当前主要缺口。Rux sync 相位 0.487s 系其回写尚未在 msync 相位排尽,口径按探针原样呈现。</p>
 
-<h2 id="tier1"><span class="anchor">§2</span>Tier 1:静默启动普查带(合并门,当前带)</h2>
+<h2 id="tier1"><span class="anchor">§2</span>Tier 1:静默启动普查基准(合并门,当前允许范围)</h2>
 <div class="tbl-wrap">
       <table>
-        <thead><tr><th>指标</th><th>基线 / 带</th></tr></thead>
+        <thead><tr><th>指标</th><th>基线 / 允许范围</th></tr></thead>
         <tbody>
-          <tr><td>TERM-DESCHED 普查</td><td class="num">8 ± 2(连续 4 次以上启动精确读 8/32)</td></tr>
-          <tr><td>WAKE-REFUSED 普查</td><td class="num">32 ± 4</td></tr>
+          <tr><td>TERM-DESCHED 调度事件普查</td><td class="num">8 ± 2(连续 4 次以上启动精确读 8/32)</td></tr>
+          <tr><td>WAKE-REFUSED 调度事件普查</td><td class="num">32 ± 4</td></tr>
           <tr><td>WAKE-STRANDED</td><td class="num">5–31 有机类,无 1001ms 网格类</td></tr>
           <tr><td>每 CPU tick 率</td><td class="num">≥99.5/s 持续到窗末(当前 arc 读 104–124/s)</td></tr>
           <tr><td>panic / 新 OOM 类</td><td class="num">0</td></tr>
-          <tr><td>系统调用总量(780s)</td><td class="num">126.0M ± 10%(同谱系内执行)</td></tr>
+          <tr><td>系统调用总量(780s)</td><td class="num">1.26 亿 ± 10%(同谱系内执行)</td></tr>
           <tr><td>clock_gettime 均值</td><td class="num">3–4 µs(±20% 或更优)</td></tr>
           <tr><td>nanosleep 均值</td><td class="num">158–203 ms 族,≤244 ms 单边(p7_sleep1ms 探针同核 15.8 µs 证明睡眠成本未变)</td></tr>
           <tr><td>IF=0 占机</td><td class="num">20.4% ± 3pp(EFLAGS 对探针 if0 v3 官方测量)</td></tr>

@@ -101,7 +101,7 @@
         <div class="nums">逐项数据见 <a href="geekbench.html">Geekbench 页</a> · 测试平台注明:Linux 侧为宿主 4-CPU 钉核(taskset,拓扑对齐)</div>
       </div>
     </div>
-    <div class="callout"><b>差距结构:</b>领先面覆盖调度/唤醒(上下文切换、管道、信号量)、IPC 带宽(unix、pipe)与内存带宽;落后面集中在系统调用入口与路径解析(null/read/write/stat/open 1.2–2.5×)。历史 campaign 在旧参考窗口下曾把 fork/exec 记入持平带,2026-11-16 同 rig 参考列重测后回到 1.08–1.19× 带(参考内核切换族对测量窗口敏感,比值只在同会话内有意义)。campaign 随役修复的 5 个正确性 bug 见 §2 表后清单。</div>
+    <div class="callout"><b>差距结构:</b>领先面覆盖调度/唤醒(上下文切换、管道、信号量)、IPC 带宽(unix、pipe)与内存带宽;落后面集中在系统调用入口与路径解析(null/read/write/stat/open 1.2–2.5×)。历史 campaign 在旧参考窗口下曾把 fork/exec 记入持平区间,2026-11-16 同一测试平台参考列重测后回到 1.08–1.19× 区间(参考内核切换族对测量窗口敏感,比值只在同会话内有意义)。campaign 随役修复的 5 个正确性 bug 见 §2 表后清单。</div>
 
         <h2 id="suites"><span class="anchor">§2</span>套件地图(每套件一页)</h2>
     <div class="tbl-wrap">
@@ -130,7 +130,7 @@
       <table>
         <thead><tr><th>层级</th><th>适用</th><th>要求</th></tr></thead>
         <tbody>
-          <tr><td><b>Tier 1</b></td><td>所有内核改动</td><td>一次安静 syscost 启动:census 在基准范围内、tick ≥99.5/s、零新增 panic/OOM 类、系统调用量 ±10%、关键单次平均 ±20% 或更优</td></tr>
+          <tr><td><b>Tier 1</b></td><td>所有内核改动</td><td>一次安静 syscost 启动:调度事件普查(启动期调度事件的计数器)在基准范围内、tick ≥99.5/s、零新增 panic/OOM 类、系统调用量 ±10%、关键单次平均 ±20% 或更优</td></tr>
           <tr><td><b>Tier 2</b></td><td>热路径:mm/ sched/ fs/ ipc/ binder/ timer/ arch trap</td><td>加一次 pbench 启动:P1–P7 中位数 ±20% 内或更优</td></tr>
           <tr><td><b>Tier 3</b></td><td>分配器或 IRQ 路径</td><td>加 IF=0 中断关闭份额实测(EFLAGS 对探针 if0 v3,官方测量非代理)</td></tr>
         </tbody>
@@ -142,7 +142,7 @@
         <thead><tr><th>域</th><th>守护指标(现行带)</th></tr></thead>
         <tbody>
           <tr><td>内存分配 / 回收</td><td>small_alloc 全局类锁分段 ≤25M/次启动(实测 19.7M,最新板 6.0M)、REST 占比 ≤10%(现行 0.1–1.2%)、标准启动无回收慢路径浮现</td></tr>
-          <tr><td>调度</td><td>GRQ 锁内 241–273 ns(release,精确探针;树操作 ~20–30 ns + D-1 记账);锁等待 70–84 ns 为 KVM 跨 vCPU locked 指令税(参考 per-rq 锁同样交税)。门禁指标(调用点 IF=0 段均值,含获取等待)允许范围 1200–7320 ns(实测 2786 ns @ 样本数 630 万)、census TERM 8±2 / REFUSED 32±4、P2 ±20%、futex 唤醒→运行 quiet 7.5 µs ±20%</td></tr>
+          <tr><td>调度</td><td>GRQ 锁内 241–273 ns(release,精确探针;树操作 ~20–30 ns + D-1 记账);锁等待 70–84 ns 为 KVM 跨 vCPU locked 指令税(参考 per-rq 锁同样交税)。门禁指标(调用点 IF=0 段均值,含获取等待)允许范围 1200–7320 ns(实测 2786 ns @ 样本数 630 万)、调度事件普查 TERM 8±2 / REFUSED 32±4、P2 ±20%、futex 唤醒→运行 quiet 7.5 µs ±20%</td></tr>
           <tr><td>文件系统热路径</td><td>P6 行 ±20%(stat 71 / openclose 156 / append 77 / mkdrmdir 2760 / unlink 808 / write_fsync 14200 µs)、buffer cache 命中率 99.1% ≥ 基线、无新同步写类</td></tr>
           <tr><td>中断 / IRQ 路径</td><td>IF=0 份额 20.4%±3pp、最长关中断段 ≤10 ms(现行 6–9 ms)、SOFTIRQ 占比 3.1±2pp、无新 IRQ-OFF 打印类</td></tr>
           <tr><td>IPC</td><td>p5 族 ±20%(p5a 18.3 / p5b 23–41 / 流 24–27 µs)、unix writev/truesize 24 µs 类不回退</td></tr>
@@ -190,9 +190,9 @@
 
     <h2 id="tools"><span class="anchor">§7</span>debug 测量工具链</h2>
     <ul>
-      <li><b>syscost</b>:启动普查(系统调用量、census 计数、tick 率、每操作均值)—— Tier 1 的采集器。</li>
+      <li><b>syscost</b>:启动普查(系统调用量、调度事件普查计数、tick 率、每操作均值)—— Tier 1 的采集器。</li>
       <li><b>pbench</b>(test/pbench.c):P1–P7 七组微基准探针 —— Tier 2 的采集器。</li>
-      <li><b>census / wakewatch</b>:调度停滞普查(WAKE-STRANDED)与唤醒→运行延迟取证(1024 槽旁表 + pick-skip 原因旁表)。</li>
+      <li><b>调度事件普查 / wakewatch</b>:调度停滞普查(WAKE-STRANDED)与唤醒→运行延迟取证(1024 槽旁表 + pick-skip 原因旁表)。</li>
       <li><b>if0 v3</b>:EFLAGS 对探针,官方 IF=0 份额与关中断段测量(已上 main,不再用 tick-mode 代理)。</li>
       <li><b>fsw / mmprof 计数器</b>:fs 同步写类、内存记账核对(OOM forensics)。</li>
       <li><b>run/perf-gate.sh</b>:门禁自动化(anchor JSON + Tier 调度 + 带判定)。</li>

@@ -108,18 +108,18 @@
     <p><b>单一全局运行队列 GRQ(分歧 <a href="#d1">D-1</a>)。</b>一颗 <code>GlobalRunQueue</code> 服务所有 CPU,内含三个按调度类的子队列:DL(BTreeMap,EDF)、RT(位图 + 按优先级链表)、CFS(BTreeMap 按 vruntime);<code>nr_running</code> 原子计数、<code>idle_cpus</code> 位图,per-CPU 只留 current/idle/stop 指针。<b>没有 per-CPU 队列,没有负载均衡器</b> —— 空闲 CPU 经 IPI 唤醒后按需取任务。</p>
     <ul>
       <li><b>CFS(fair.rs)</b>:vruntime = 实际运行时间 ×(NICE_0_LOAD/权重);<code>cfs_min_granularity_ns = 0.7 ms</code>(亦是唤醒粒度)、延迟窗 6 ms、tick 100 Hz;pick 时把本 CPU 不能跑的条目抬出 timeline 再插回,<code>min_vruntime</code> 取完整树最左(防止抹掉睡眠者信用)。</li>
-      <li><b>实测等待唤醒抢占门(D-14)</b>:唤醒无空闲 CPU 时,仅当被唤醒者的实测等待 ≥ 6 ms 窗口才抢占在跑任务 —— 替代Linux 内核的 vruntime 信用比较(后者会被 Rux 的 vruntime 调整骗过)。</li>
+      <li><b>实测等待唤醒抢占门(D-14)</b>:唤醒无空闲 CPU 时,仅当被唤醒者的实测等待 ≥ 6 ms 窗口才抢占正在运行的任务 —— 替代 Linux 内核的 vruntime 信用比较(后者会被 Rux 的 vruntime 调整骗过)。</li>
       <li><b>wakewatch</b>:唤醒→运行延迟取证仪(1024 槽旁表 + pick-skip 原因旁表),是唤醒停滞(WAKE-STRANDED)问题归因的常备工具。</li>
       <li>GRQ 锁为类型化锁键保护(<a href="#d11">D-11</a>,嵌套关系是编译事实)。</li>
     </ul>
     <h3>关键数字</h3>
     <ul>
       <li>GRQ 锁内工作(精确探针,release,KVM q35 smp2):精确持锁 <b>241–273 ns</b>(改造前 378 ns);树操作本身 ~20–30 ns/次且锁内零分配,其余为 D-1 记账。<b>锁等待 70–84 ns 是 KVM 对跨 vCPU locked 指令的税</b>(参考的 per-rq 锁同样交税,不表示 GRQ 慢)。门禁基准范围跟踪的调用点 IF=0 段均值(关中断→恢复,<b>含锁获取等待</b>与临界区工作):2786 ns @ 样本数 630 万(允许范围 1200–7320 ns,负载耦合族 0.6–5.4 µs);对 1.26 亿次系统调用的大规模启动持平 → 体积耦合而非争用受限(≤4 vCPU 场景)。</li>
-      <li>启动 census 每次合格静默启动 精确一致:TERM-DESCHED <b>8</b>(允许范围 8±2)、WAKE-REFUSED <b>32</b>(允许范围 32±4)。</li>
+      <li>调度事件普查(启动期调度事件的计数器)在每次合格的静默启动中精确一致:TERM-DESCHED <b>8</b>(允许范围 8±2)、WAKE-REFUSED <b>32</b>(允许范围 32±4)。</li>
       <li>上下文切换三杠杆(FSGSBASE 393 ns/切换 + 惰性 FPU + PCID 门控)后:<code>lat_ctx -s64 2</code> <b>4.97→2.07 µs(−58%)</b>;lmbench 同机 <b>1.98 vs 6.71 µs(3.39×)</b>;缺页延迟 0.029–0.031 vs 0.0702 µs(2.26–2.45×,累计 16.1×)。</li>
       <li>D-14 生效后:74 字节 unix 流记录的"唤醒—抢占—切换"往返序列 ~275 µs → 对标 Linux ~2.5 µs;p5 IPC 族 <b>10–18×</b>。</li>
     </ul>
-    <p><b>兼容性:</b>纯内部策略,无 ABI 面。守卫 = 性能门调度域(hold 带、census、P2 ±20%)。</p>
+    <p><b>兼容性:</b>纯内部策略,无 ABI 面。守卫 = 性能门调度域(持锁范围、调度事件普查、P2 ±20%)。</p>
 
     <!-- ================= 内存 ================= -->
     <div class="mod-anchor" id="mm"></div>
@@ -213,7 +213,7 @@
       <li><b>统一 trace-event 框架(D-15)</b>:单声明表一行 = 组/名/id/print fmt/字段/typed 记录函数;tracefs(<code>/sys/kernel/tracing</code>)文件树与字节格式逐字节对齐 Linux(tracing_on/trace/trace_pipe/set_event/snapshot/events/*/enable…)。当前 <b>69 事件 / 17 组</b>(sched 9、rux 20、ext4 7、net/binder 各 5、input 4、kmem 4、raw_syscalls/irq/exceptions/block/jbd2 各 2、vmscan/timer/signal/printk/oom 各 1);完整清单与用法见 <a href="../debugging/tracepoints.html">tracepoint 框架</a>。</li>
       <li><b>门禁成本实测</b>:禁用点编译为一个 load+test+branch(release 反汇编逐点验证);启用后 <b>+13–19 ns/记录</b>;镜像价 +0.18%。</li>
       <li><b>kallsyms(D-3)</b>:编译期符号表入 .rodata(2.4MB 名 + 0.7MB 索引 @ ~22.6k 符号),零启动开销,/proc/kallsyms 标准行。</li>
-      <li><b>census + heal</b>:每任务逐字段 tick 观测 + 幻影 preempt 判定 + 20 ms 饥饿界;IF=0 占机 <b>25.7%→20.4%</b>,最长关中断段 594–599 ms 一次性 → <b>6–9 ms</b>,WAKE-STRANDED 233→31。</li>
+      <li><b>调度事件普查 + heal</b>:每任务逐字段 tick 观测 + 幻影 preempt 判定 + 20 ms 饥饿界;IF=0 占机 <b>25.7%→20.4%</b>,最长关中断段 594–599 ms 一次性 → <b>6–9 ms</b>,WAKE-STRANDED 233→31。</li>
       <li><b>dfx= 开关表冻结在 49 项</b>(遗留,已部分迁移为事件武装别名):新观测一律 tracepoint 化。</li>
     </ul>
 
@@ -252,7 +252,7 @@
           <tr><td><b>D-16</b></td><td><b>延迟释放定时器环</b>:16384 项 + 1500 ms 墙钟排水(覆盖 QSBR 看不见的未记账借用)。重审条件:借用 RcuHead 化即删环。</td></tr>
           <tr><td><b>D-17</b></td><td><b>内核侧设备地址别名区(arena)</b>:运行期无恒等 MMIO 窗,uaccess 无恒等洞(坏用户指针 fault 而非读物理内存)。守卫:PF-NOCTX/SMAP-VIOL 信标静默。</td></tr>
           <tr><td><b>D-18</b></td><td><b>SMAP 以 pushfq EFLAGS.AC 序列启用</b>:STAC/CLAC 在 TCG 无条件 #UD(配对实验确证);括号 ~55 ns,硬件与 TCG 双可启动。</td></tr>
-          <tr><td><b>D-19</b></td><td><b>类型化定时器轮</b>:时钟域不可混比,periodic 需 NonZeroU64,WakeArmed/WakeSpent 作用域守卫。六类历史 bug 成为编译错;同 rig A/B:arm 锁 924→697 ns、nanosleep 772.6→662.7 ms、p2_ctxsw 12.198 vs 15.400 µs。</td></tr>
+          <tr><td><b>D-19</b></td><td><b>类型化定时器轮</b>:时钟域不可混比,periodic 需 NonZeroU64,WakeArmed/WakeSpent 作用域守卫。六类历史 bug 成为编译错;同一测试平台 A/B:定时器 arm 锁 924→697 ns、nanosleep 772.6→662.7 ms、p2_ctxsw 12.198 vs 15.400 µs。</td></tr>
           <tr><td><b>D-20</b></td><td><b>写者侧脏页回写水位(空闲比例标记,无全局脏页记账)</b>:Normal zone 空闲页数低于受管页一半(zone_below_dirty_writeback_mark)时,缓冲写者自行冲刷本 inode 脏区间并执行系统级恢复(writeback_recover:先释放已净页,全表轮转收集脏 inode 逐个冲刷,直接淘汰已冲刷页)。与参考实现的差异:参考按 per-BDI 脏页阈值/balance_dirty_pages 的脏页比例节流,Rux 不维护 per-BDI 记账,以 zone 空闲比例作标记 —— <b>约束的是纪律而非常量</b>。消除延迟分配脏页气球楔死(24.3 万脏页涨至 RAM 规模、zone 排空);LTP fallocate05/06 三次全新启动 RC=0;riscv64 make test 1328/1328。代价:无 per-BDI 精度,多盘负载下水位粒度粗于参考。注:PSI(/proc/pressure)不在主线,登记于调试对齐恢复队列。</td></tr>
         </tbody>
       </table>
@@ -276,7 +276,7 @@
     <ul>
       <li><b>bug 分类学 v1</b>(全史 3,358 个去重提交逐条裁定):34 个内存破坏类缺陷中 <b>23 个位于显式 unsafe 块/架构汇编</b>,<b>11 个位于 safe 代码</b> —— 但全部是安全 Rust 当今不类型检查的所有权/引用计数/锁协议类;<b>零</b>指针表达式缺陷(越界/迭代器失效/野指针运算/格式串)出现在 safe 代码。34 例中 6 例在任何 boot 前被评审抓到。</li>
       <li><b>unsafe 表面已枚举且带合同</b>:unsafe 行占比 12.9%;47 个服务文件编译期 forbid(unsafe_code)、另 56 个已无 unsafe;SAFETY 注释覆盖 64%;159 个 Kani harness 对全输入证明核心 unsafe 代码。</li>
-      <li><b>性能每条配对安全句</b>:如切换路径携带类型化 per-CPU 存储 + 键控锁;lmbench/Geekbench 数字与 census 审判结构同表入账;代价侧(futex 唤醒在跑任务时 ~10ms tick 量化)如实记录。</li>
+      <li><b>性能每条配对安全句</b>:如切换路径携带类型化 per-CPU 存储 + 键控锁;lmbench/Geekbench 数字与调度事件普查的判定结果记入同一张表;代价侧(futex 唤醒正在运行的任务时 ~10ms tick 量化)如实记录。</li>
       <li><b>诚实缺口登记册 v1</b>:缺 KASLR(无 boot 熵源)、内核 text/rodata W^X 收紧、编译器栈保护、KASAN 式毒化广度、KCSAN 观察点、kallsyms 掩蔽 —— 逐条写明"补齐长什么样"。</li>
     </ul>
   </article>

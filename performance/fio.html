@@ -108,7 +108,7 @@
 
     <h2 id="rig"><span class="anchor">§3</span>测试平台与方法</h2>
     <ul>
-      <li><b>对照对</b>:Rux(main release)vs 参考内核(同镜像 guest 内核 7.0.0-38),同一 QEMU q35 + KVM(<code>-cpu host</code> SMP8/8G),同一 ext4 镜像(reflink 拷贝,snapshot 启动),同一静态二进制(源码 tar 包入 git,userspace/fio/build-x86.sh 构建);交替启动测试 3 轮取中位数。</li>
+      <li><b>对照组</b>:Rux(main release)vs 参考内核(同镜像 guest 内核 7.0.0-38),同一 QEMU q35 + KVM(<code>-cpu host</code> SMP8/8G),同一 ext4 镜像(reflink 拷贝,snapshot 启动),同一静态二进制(源码 tar 包入 git,userspace/fio/build-x86.sh 构建);交替启动测试 3 轮取中位数。</li>
       <li><b>协议</b>:每侧一次启动顺序执行全部作业(qsrun cmds 协议);fio terse 单行输出进串口采集,含 bw/IOPS/延迟字段。</li>
       <li><b>口径</b>:direct=1 行为真实设备路径;缓冲写行为页缓存吸收口径(两侧同);比值只在其会话内有意义。</li>
     </ul>

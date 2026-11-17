@@ -102,7 +102,7 @@ cat /proc/sys/kernel/perf_event_paranoid</code></pre>
       <li><b>武装</b>:内核 cmdline <code>syscost=1</code>;关闭时零成本(每次系统调用退出一次缓存原子载入;tick 钩子两次 relaxed 加)。不占用 dfx= 开关表 —— 本探针持自有 cmdline 键。</li>
       <li><b>计量内容</b>:每原生系统调用号 {次数, 墙钟周期, 最大值}(NR_SLOTS=512)+ 慢操作环(&gt;4 ms 异常值带调用方 comm,SLOW_RING=64 / SLOW_CYC=40000 tick)+ tick 模式 per-CPU user/kernel-task/idle 计数 + 256 槽内核文本页直方图(RIP_SLOTS=256,离线对照构建 ELF 的 nm 符号化);每 60 s 自定时器 softirq 转储(SYSCOST_DUMP_SECS=60)。</li>
       <li><b>IF=0 EFLAGS 对探针(v3)</b>:边沿触发 + 自愈;每钩子读取真实 IF 标志并对模型裁决 —— 模型开启而实测 IF=1 判泄漏,闭合入 HEAL;HARDIRQ/SOFTIRQ/UART 区段分离;REST 调用点 #[track_caller] 归因 96 槽表;段带原始 TSC 戳。这是 IF=0 份额的官方测量(Tier-3),非代理。</li>
-      <li><b>门禁读数</b>(Tier-1,静默 syscost 启动):census TERM-DESCHED 8(允许范围 8±2)/ WAKE-REFUSED 32(允许范围 32±4);tick ≥99.5/s;零 panic/OOM;系统调用量按档位类别范围(debug 1550 万 ±80%,release 5000 万 ±60%);clock_gettime 3-4 µs;nanosleep ≤244 ms。</li>
+      <li><b>门禁读数</b>(Tier-1,静默 syscost 启动):调度事件普查(启动期调度事件的计数器)TERM-DESCHED 8(允许范围 8±2)/ WAKE-REFUSED 32(允许范围 32±4);tick ≥99.5/s;零 panic/OOM;系统调用量按档位类别范围(debug 1550 万 ±80%,release 5000 万 ±60%);clock_gettime 3-4 µs;nanosleep ≤244 ms。</li>
     </ul>
 
     <h2 id="pbench"><span class="anchor">§3</span>pbench:七组微基准</h2>
@@ -124,7 +124,7 @@ cat /proc/sys/kernel/perf_event_paranoid</code></pre>
     <h2 id="gate"><span class="anchor">§4</span>性能门禁:三层与守护域</h2>
     <p>合入门禁按三层执行(<code>docs/development/perf-gate-baseline.md</code> 为权威表;<code>perf-gate.sh</code> 自动化):</p>
     <ul>
-      <li><b>Tier 1(全部内核改动)</b>:一次静默 syscost 启动(KVM q35 smp2/4G,syscost=1,780 s)—— census 精确、tick 率、零 panic/OOM、调用量范围、逐操作均值范围。</li>
+      <li><b>Tier 1(全部内核改动)</b>:一次静默 syscost 启动(KVM q35 smp2/4G,syscost=1,780 s)—— 调度事件普查精确、tick 率、零 panic/OOM、调用量范围、逐操作均值范围。</li>
       <li><b>Tier 2(触及热路径:mm/sched/fs/ipc/binder/timer/arch trap)</b>:加一次 pbench 启动,P1-P7 中位 ±20% 或改善;档位类规则:跨类比较无意义(debug 与 release-strong 不跨)。</li>
       <li><b>Tier 3(分配器或 IRQ 路径改动)</b>:IF=0 份额(官方 EFLAGS 对测量,20.4 ±3pp)。</li>
     </ul>
@@ -132,7 +132,7 @@ cat /proc/sys/kernel/perf_event_paranoid</code></pre>
       <thead><tr><th>守护域</th><th>关键行</th></tr></thead>
       <tbody>
         <tr><td>分配/回收</td><td>small_alloc 全局类锁区段每次启动 ≤2500 万;REST 占机 ≤10%;回收慢路径 drct=0 类</td></tr>
-        <tr><td>调度</td><td>GRQ 平均持锁 1200–7320 ns;census 8±2/32±4;p2 ±20%;p4 fork 行开放回归挂账</td></tr>
+        <tr><td>调度</td><td>GRQ 平均持锁 1200–7320 ns;调度事件普查 8±2/32±4;p2 ±20%;p4 fork 行列为开放回归项</td></tr>
         <tr><td>文件系统</td><td>stat/openclose/read_cached/append/mkdrmdir/unlink 中位带;buffer 命中率 ≥99.1%</td></tr>
         <tr><td>中断/IRQ</td><td>IF=0 20.4±3pp;max cli REST ≤10 ms;SOFTIRQ 3.1±2pp;无新 IRQ-OFF 打印类</td></tr>
         <tr><td>IPC</td><td>p5a 18.3 / p5b 23–41 / p5c/f 24–27 / p5c3 25 / p5d 41–46 µs 带表</td></tr>
@@ -145,12 +145,12 @@ cat /proc/sys/kernel/perf_event_paranoid</code></pre>
     <ul>
       <li><b>fsw</b>(cmdline <code>fsw=1</code>):fs 同步写类普查 —— FSW1 行(br/rd/wr/sd/ev/sa/pb/ps/pc/ph/pb2/pm/lvl/es)+ FSW2 行(ri/wi/lk/ls/ni/ar/fr/j=jstart.jstop.jlazy.jcommit_fast.jrevoke/bl/biglock/w walks.hits.misses);每分钟 :30 转储(避开 syscost 的控制台发送竞争)。fs 域门禁读"无新同步写类出于供给阶段之外"。</li>
       <li><b>mmprof / PageCacheOps</b>:内存记账核对与页缓存命中率(meminfo 行),OOM 取证的输入。</li>
-      <li><b>census / wakewatch</b>:调度停滞普查与唤醒→运行延迟,归调度域(见<a href="../architecture/scheduler.html#instruments">调度器 §8</a>)。</li>
+      <li><b>调度事件普查 / wakewatch</b>:调度停滞普查与唤醒→运行延迟,归调度域(见<a href="../architecture/scheduler.html#instruments">调度器 §8</a>)。</li>
     </ul>
 
     <h2 id="workflow"><span class="anchor">§6</span>标准工作流</h2>
     <ol>
-      <li><b>发现</b>:Tier-1 syscost 转储的逐操作均值出带 → 定位系统调用号或 census 类;</li>
+      <li><b>发现</b>:Tier-1 syscost 转储的逐操作均值出带 → 定位系统调用号或调度事件普查类别;</li>
       <li><b>归因</b>:pbench 定位组(P2 切换 / P5 IPC / P6 fs)→ syscost RIP 直方图或 REST 表定段 → trace 事件(如 rux:schedtrace、lock:)取微观序列;</li>
       <li><b>修复验证</b>:同一测试平台交替 A/B(≥3 轮取中位数)→ perf-gate.sh 三层判定 → 基线整表刷新随合并。</li>
     </ol>

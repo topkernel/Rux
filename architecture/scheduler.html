@@ -93,7 +93,7 @@
         <br><b>门禁指标另计</b>:门禁带跟踪的是调用点 IF=0 段均值(spin_lock_irqsave 关中断→恢复,<b>含锁获取等待</b>与临界区工作):<b>2786 ns</b>(n=6.3M,累计 17.6 s;KVM q35 smp2/4G,780 s 窗口,宿主负载 6.4–11.3),门禁带 <b>1200–7320 ns</b>。同一次启动内调度量增长约 2× 而该项保持持平 → <b>该成本是执行体积的函数,而非锁缓存线争用的函数</b>。</li>
       <li><b>Amdahl 裁定:该持锁不是并发瓶颈(2026-11-17,用户定向分析)</b>:S(N) = 1/(s+(1−s)/N)。以精确持锁 241–273 ns × 每次启动 630 万次取锁计,串行占比 s = <b>0.105%</b> —— 8 核下加速 7.94×(理想 8,并行效率 <b>99.3%</b>),Amdahl 天花板 ≈950 核;按最保守口径(调用点 IF=0 段均值 2786 ns,含锁等待)计 s = 1.13% —— 8 核效率 92.7%,天花板 ≈89 核。两个界都远高于 MAX_CPUS=8,<b>GRQ 持锁对并发的影响微乎其微</b>(经验佐证:4k 直接 I/O 在 numjobs 4→8 近线性扩展)。此后的持锁瘦身是切换<b>延迟</b>工作(每次 schedule 的路径长度),不是并发工作。</li>
       <li><b>churn 由配置常量界定</b>:<code>cfs_min_granularity_ns = 0.7 ms</code>(唤醒抢占粒度取同值)加 100 Hz tick —— 新入队任务在约 0.7 ms 的最小服务时间内不会被去调度,10 ms tick 界定重入队速率上限,唤醒风暴不具备扰动队列拓扑的通道。</li>
-      <li><b>持锁成本已分解至段级</b>:唤醒持锁 = 运行队列记账 / 摘除-插回 / pick / 统计四段,由 wakewatch 与 WW census 仪器逐段计量(§8)。</li>
+      <li><b>持锁成本已分解至段级</b>:唤醒持锁 = 运行队列记账 / 摘除-插回 / pick / 统计四段,由 wakewatch 与 WW 普查仪器逐段计量(§8)。</li>
       <li>架构调研记录(<code>docs/architecture/os-kernel-survey.md</code>):Barrelfish 式复制态消息内核与 flat combining 两方案均以"携带实测数据否决"的形式登记 —— 其动机问题(高核数缓存一致性流量)在本场景不存在。</li>
     </ul>
 
@@ -117,7 +117,7 @@
     <h2 id="cfs"><span class="anchor">§3</span>CFS 调度类(fair.rs)</h2>
     <ul>
       <li><b>vruntime</b> = delta_exec × NICE_0_LOAD / weight,实现为移位乘法 <code>delta × NICE_0_LOAD × inv_weight &gt;&gt; 32</code>(inv_weight = 2³²/weight);NICE_0_LOAD = 1024;SCHED_IDLE 策略实现为 fair 类内权重 3(非独立调度类)。</li>
-      <li><b>粒度常量</b>:<code>SCHED_MIN_GRANULARITY_NS = 0.7 ms</code>(同时作为唤醒抢占粒度 —— 被唤醒者须领先在跑者 0.7 ms 以上方触发抢占);<code>SCHED_LATENCY_NS = 6 ms</code> 延迟窗;tick 100 Hz。调度时间片 = min(粒度×nr_running, 6 ms) × 本任务权重 / 总权重,下限为最小粒度。</li>
+      <li><b>粒度常量</b>:<code>SCHED_MIN_GRANULARITY_NS = 0.7 ms</code>(同时作为唤醒抢占粒度 —— 被唤醒者须领先正在运行的任务 0.7 ms 以上方触发抢占);<code>SCHED_LATENCY_NS = 6 ms</code> 延迟窗;tick 100 Hz。调度时间片 = min(粒度×nr_running, 6 ms) × 本任务权重 / 总权重,下限为最小粒度。</li>
       <li><b>放置与睡眠信用</b>:min_vruntime 为单调下界;唤醒/首次入队的放置基点取 avg_vruntime(与参考 6.6 fair.c 同构的映射);睡眠任务入队时获得 <code>min_vruntime − 6 ms</code> 的信用下界(睡眠时长在 vruntime 中获得等值补偿,不被清零);lag 钳制至 max(2×时间片, tick) 的 fair 域内。</li>
       <li><b>pick 遍历与条目抬出</b>:leftmost 遍历拒绝本 CPU 当前不可运行的条目 —— 拒绝原因五类(所有权 / on_cpu / pick 声明被其他 CPU 持有 / 亲和性 / cgroup 节流 / healed 复位)—— 每个被拒条目临时移入 32 槽 stash,pick 完成后逆序插回。<b>min_vruntime 在全部插回之后、于完整 timeline 上更新</b>:条目抬出会使最左端点右移,先更新将永久抹除新任务与唤醒者的睡眠信用(该顺序经实测回归后修正)。</li>
       <li><b>entity_tick 守卫</b>:单 CPU 密集任务不再于每个 tick 被摘除/重插/重新拣选(对齐参考 entity_tick 的 nr_running&gt;1 条件)。</li>
@@ -137,7 +137,7 @@
       <li><b>无空闲 CPU、非 sync 唤醒</b>:通过<b>实测等待抢占判定</b>(D-14)—— 仅当被唤醒者的实测等待时长(sched_clock − 最近拣选时间戳)≥ 延迟窗(6 ms)时,才对忙 CPU 置位 need_resched;窗内刚运行过的任务交由时间片届期/交接机制处理。</li>
       <li><b>sync 唤醒且无空闲 CPU</b>:stacking —— 维持 wake_affine 的等价性质:持有全局队列时,同步唤醒绝不通知其他忙 CPU,唤醒者将接收者叠置于自身 CPU。</li>
     </ol>
-    <p><b>不采用 vruntime 信用比较作为判定条件的原因</b>:参考实现以"被唤醒者 vruntime 是否领先在跑者"决定抢占。Rux 的睡眠信用下界与唤醒放置调整会使乒乓唤醒对端<b>持续</b>落后数毫秒 vruntime(实测:重排钳制引起 +~10 ms 的 vruntime 跳变)—— 参考实现的判定条件在本设计的放置策略下于每次唤醒均成立,退化为逐记录的抢占-切换往返。实测等待判定仅在等待者真实等待达阈值时才中断在跑任务。</p>
+    <p><b>不采用 vruntime 信用比较作为判定条件的原因</b>:参考实现以"被唤醒者 vruntime 是否领先正在运行的任务"决定抢占。Rux 的睡眠信用下界与唤醒放置调整会使乒乓唤醒对端<b>持续</b>落后数毫秒 vruntime(实测:重排钳制引起 +~10 ms 的 vruntime 跳变)—— 参考实现的判定条件在本设计的放置策略下于每次唤醒均成立,退化为逐记录的抢占-切换往返。实测等待判定仅在等待者真实等待达阈值时才中断在跑任务。</p>
     <div class="tbl-wrap"><table>
       <thead><tr><th>D-14 效果(同一测试平台对比)</th><th>前</th><th>后</th></tr></thead>
       <tbody>
@@ -148,7 +148,7 @@
         <tr><td>p5a 管道往返(交接路径不经唤醒判定,按设计不变)</td><td class="num">19.673 µs</td><td class="num">18.306 µs(−6.9%)</td></tr>
       </tbody>
     </table></div>
-    <p><b>已知代价(已记录在案)</b>:亚 6 ms 乒乓接收者的唤醒延迟由时间片届期界定,而非即时抢占;exec_start 以最近拣选时间戳近似真实等待,存在轻微高估;落后于在跑任务的 futex 唤醒→运行延迟被 tick 量化至 ~10 ms(p2f 整轮测试:hog 场景 9.99/10.0 ms,该行为已知量化类的哨兵行)。</p>
+    <p><b>已知代价(已记录在案)</b>:亚 6 ms 乒乓接收者的唤醒延迟由时间片届期界定,而非即时抢占;exec_start 以最近拣选时间戳近似真实等待,存在轻微高估;任务正在运行时的 futex 唤醒→运行延迟被 tick 量化至 ~10 ms(p2f 整轮测试:hog 场景 9.99/10.0 ms,该行为已知量化类的哨兵行)。</p>
     <h3>IPI 成本与轮询空闲</h3>
     <ul>
       <li>resched IPI 发送端单独 <b>935–1139 ns</b>(cctx 探针);IPI + halt 退出每次交接约 2–5 µs 的 KVM exit 开销。</li>
@@ -161,7 +161,7 @@
       <li><b>tick</b>:per-CPU 定时器 100 Hz。<code>scheduler_tick()</code> 执行:softlockup 触摸、schedstat 记账、幻影位孤儿扫描、allocwatch、1 Hz CLAIM-SWEEP(持 GRQ 对整条 CFS timeline 执行陈旧拣选声明治愈)、PREEMPT-LEAK 逐任务抢占计数泄漏窗探测。</li>
       <li><b>内核抢占默认关闭</b>(经由显式 schedule() 调用点自愿让出);<code>kpreempt=1/0</code> 引导参数可武装 irq-exit 抢占钩子;A/B 对 hog 场景读数持平 —— 维持默认关闭。</li>
       <li><b>can_stop_tick 决策树</b>(对齐参考 core.c 顺序):存在 DL 任务则需要 tick;RR 任务数 &gt;1 需要;纯 FIFO 不需要;CFS 任务数 &gt;1(GRQ 计数加回各 CPU 非空闲 current)需要。</li>
-      <li><b>NOHZ(自适应 tick)</b>:按参考 tick-sched.c 逐函数映射实现(check_tick_dependency / tick_nohz_stop·restart_sched_tick / tick_nohz_irq_exit / nohz_full= 参数);tick_dep 位集含 POSIX_TIMER/PERF/SCHED/RCU 等;per-rq→GRQ 的结构性映射已登记(0→1 kick 保留为入队边沿的 resched IPI)。x86_64 已接线(LAPIC one-shot),其余架构待跟进。<code>nohz_full=1</code> 实测(nozh 合并记录):对抗负载下 lmbench lat_syscall,null 通过 11/12(main tip 0/10),p1_null 中位 0.050 vs 0.060 µs(−17%),两条 census 带精确保持。</li>
+      <li><b>NOHZ(自适应 tick)</b>:按参考 tick-sched.c 逐函数映射实现(check_tick_dependency / tick_nohz_stop·restart_sched_tick / tick_nohz_irq_exit / nohz_full= 参数);tick_dep 位集含 POSIX_TIMER/PERF/SCHED/RCU 等;per-rq→GRQ 的结构性映射已登记(0→1 kick 保留为入队边沿的 resched IPI)。x86_64 已接线(LAPIC one-shot),其余架构待跟进。<code>nohz_full=1</code> 实测(nozh 合并记录):对抗负载下 lmbench lat_syscall,null 通过 11/12(main tip 0/10),p1_null 中位 0.050 vs 0.060 µs(−17%),两条调度事件普查基准精确保持。</li>
       <li><b>依赖门控</b>:负载变化时的 tick 依赖重算由 NOHZ_FULL_RUNNING 门控 —— 无门控时 can-stop 判定中对 per-CPU current 的扫描将落入每次 GRQ 持锁的入队路径(p2_ctxsw 1.242→2.149 µs,+73%,门控后消除)。</li>
     </ul>
 
@@ -178,9 +178,9 @@
     <p>调度域观测自成体系,各仪器的用法见<a href="../debugging/index.html">调试指南</a>:</p>
     <ul>
       <li><b>wakewatch</b>:唤醒→运行延迟取证。1024 槽旁表(以 Task 指针哈希,不触碰任务结构布局),将"应运行未运行"判别为四类:WAKE-STRANDED(唤醒及时但未获拣选,输出受害任务、延迟时长、拣选 CPU)/ TIMER-LATE-FIRE(定时器超期触发)/ WAKE-REFUSED / 进程内丢失;WW5 分档计数 N250/N500/N750;搁浅阈值 1000 ms(因打印位于 IF=0 语境消耗 LIFECYCLE_TIMEOUT 预算而调高)。</li>
-      <li><b>census</b>:TERM-DESCHED 8±2(DEAD 任务终末去调度循环,打印预算 n&lt;8)、WAKE-REFUSED 32±4(W3 唤醒拒绝普查,预算 32)。两条 census 在每次合格静默启动上<b>精确一致</b>(8/32),作为调度域的形状签名纳入性能门。</li>
+      <li><b>调度事件普查</b>(启动期调度事件的计数器):TERM-DESCHED 8±2(DEAD 任务终末去调度循环,打印预算 n&lt;8)、WAKE-REFUSED 32±4(W3 唤醒拒绝普查,预算 32)。两条普查在每次合格静默启动上<b>精确一致</b>(8/32),作为调度域的形状签名纳入性能门。</li>
       <li><b>cctx 分段</b>:唤醒侧 WK_N/WK_SEL/WK_ENQ/WK_DISP/IPI_N/IPI_NS;切换侧 CW_FPUSAVE/CW_MM/CW_MSR/CW_ASM/CW_FPUREST;调度侧 SCH_PRE/LOCKWAIT/ACCT/DEQREQ/PICK/PUB —— 任何切换或唤醒回归均可定位至段。</li>
-      <li><b>门禁带</b>(调度域):GRQ 平均持锁 1200–7320 ns、census 8±2/32±4、p2_ctxsw ±20%、p5 行带;GRQ pick/放置的任何改动须通过 release-strong pbench 启动验证。</li>
+      <li><b>门禁带</b>(调度域):GRQ 平均持锁 1200–7320 ns、调度事件普查 8±2/32±4、p2_ctxsw ±20%、p5 行带;GRQ pick/放置的任何改动须通过 release-strong pbench 启动验证。</li>
     </ul>
 
     <h2 id="limits"><span class="anchor">§9</span>已知代价与未决项</h2>

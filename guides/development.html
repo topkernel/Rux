@@ -106,14 +106,14 @@
       <li><b>双架构构建</b>:<code>PLATFORM=x86_64 make build</code>,再 <code>rm build/.config && make build</code>,两者 rc=0。</li>
       <li><b>riscv64 回归启动</b>:最小根文件系统脚本化串口(cd/proc,rc=0,零 panic)。</li>
       <li><b>全套件</b>:riscv64 <code>make test</code> 全绿。</li>
-      <li><b>性能门</b>:用树内 debug 工具(syscost / census 探针 / pbench)对照 <code>docs/development/perf-gate-baseline.md</code> 基线。</li>
+      <li><b>性能门</b>:用树内 debug 工具(syscost、调度事件普查 —— 启动期调度事件的计数器、pbench)对照 <code>docs/development/perf-gate-baseline.md</code> 基线。</li>
     </ol>
     <h3>性能门分层</h3>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>层级</th><th>适用</th><th>额外要求</th></tr></thead>
         <tbody>
-          <tr><td><b>Tier 1</b></td><td>所有内核改动</td><td>一次安静 syscost 启动:census 计数在基准范围内(TERM-DESCHED 8±2、WAKE-REFUSED 32±4、无网格滞留)、tick ≥99.5/s、零新增 panic/OOM 类、系统调用量 ±10%、关键单次平均(read/write/clock_gettime/nanosleep)±20% 或更优</td></tr>
+          <tr><td><b>Tier 1</b></td><td>所有内核改动</td><td>一次安静 syscost 启动:调度事件普查计数在基准范围内(TERM-DESCHED 8±2、WAKE-REFUSED 32±4、无网格滞留)、tick ≥99.5/s、零新增 panic/OOM 类、系统调用量 ±10%、关键单次平均(read/write/clock_gettime/nanosleep)±20% 或更优</td></tr>
           <tr><td><b>Tier 2</b></td><td>热路径:mm/ sched/ fs/ ipc/ binder/ timer/ arch trap</td><td>加一次 pbench 启动:P1–P7 中位数全部在基线 ±20% 内或更优</td></tr>
           <tr><td><b>Tier 3</b></td><td>分配器或 IRQ 路径</td><td>再加 IF=0 中断关闭份额测量(EFLAGS 对探针)</td></tr>
         </tbody>
@@ -125,7 +125,7 @@
         <thead><tr><th>域</th><th>守护指标</th></tr></thead>
         <tbody>
           <tr><td>内存分配 / 回收</td><td>small_alloc 类锁分段每次启动 ≤ 约 2500 万、REST 占比 ≤10% 机器、无回收慢路径、zone 余量不变</td></tr>
-          <tr><td>调度</td><td>GRQ 锁内 241–273 ns(release,精确探针);锁等待 70–84 ns 为 KVM 跨 vCPU locked 指令税(非 GRQ 自身成本);门禁指标(调用点 IF=0 段均值,含获取等待)允许范围 1200–7320 ns(实测 2786 ns)、census 在基准范围内、唤醒→拾取与上下文切换成本在基准范围内</td></tr>
+          <tr><td>调度</td><td>GRQ 锁内 241–273 ns(release,精确探针);锁等待 70–84 ns 为 KVM 跨 vCPU locked 指令税(非 GRQ 自身成本);门禁指标(调用点 IF=0 段均值,含获取等待)允许范围 1200–7320 ns(实测 2786 ns)、调度事件普查在基准范围内、唤醒→拾取与上下文切换成本在基准范围内</td></tr>
           <tr><td>文件系统热路径</td><td>pbench fs 行(stat/mkdir+rmdir/unlink/write+fsync)在基准范围内、无新同步写类、buffer cache 命中率 ≥ 基线</td></tr>
           <tr><td>中断 / IRQ 路径</td><td>IF=0 份额在基准范围内(现行基准范围 20.4%±3pp)、关中断段 3–7 ms 类、无新 IRQ-OFF 打印类</td></tr>
           <tr><td>IPC</td><td>pipe / unix 往返中位在基准范围内、truesize/writev 路径不回退、连接风暴量级在基准范围内</td></tr>

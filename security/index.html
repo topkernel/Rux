@@ -128,7 +128,7 @@
       <thead><tr><th>性能结果(同一测试平台 A/B)</th><th>所携带的安全性质</th></tr></thead>
       <tbody>
         <tr><td>上下文切换 −58%(三项优化)</td><td>切换路径携带类型化 per-CPU 存储(D-7:guard 生命周期 = 关中断窗)+ 键控锁(D-11:嵌套序为编译事实)</td></tr>
-        <tr><td>GRQ 持锁 2786 ns @ 1.26 亿次系统调用</td><td>单一全局结构 = 取证可推理(D-1;OH 战役调度缺陷族实际在其上定位)+ census 每 boot 审判</td></tr>
+        <tr><td>GRQ 持锁 2786 ns @ 1.26 亿次系统调用</td><td>单一全局结构 = 取证可推理(D-1;OH 战役调度缺陷族实际在其上定位)+ 每次启动的调度事件普查判定</td></tr>
         <tr><td>定时器 nanosleep 772.6→662.7 ms(D-19)</td><td>六类历史缺陷类(混时钟域比较/periodic 误用/双重取消/陈旧 id 等)成为编译错</td></tr>
         <tr><td>stat 0.643→0.423 µs(WalkClaim 无锁读)</td><td>reader bank 发布 + 延迟退役,无悬垂引用窗;首落撞既有缺陷即回退、加固后重落地(历史留档)</td></tr>
         <tr><td>munmap 177→52 µs(叶表直走)</td><td>分块 TLB flush 竞态族随之闭合;OH 崩溃风暴 66 SEGVs/boot → 3/3 干净</td></tr>

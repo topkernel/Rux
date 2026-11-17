@@ -187,7 +187,7 @@
       <div class="card">
         <h3><span class="ico">🧮</span>调度器</h3>
         <p>单一全局运行队列(GRQ):面向 8 vCPU 以内的桌面/移动级核数,结构上消除负载迁移与任务窃取;实测等待唤醒抢占门终结逐记录抢占往返。</p>
-        <div class="nums">锁内 <b>0.24–0.27 µs</b> · census 8/32 在基准范围内</div>
+        <div class="nums">锁内 <b>0.24–0.27 µs</b> · 调度事件普查(启动期调度事件的计数器)8/32 在基准范围内</div>
         <a class="more" href="architecture/scheduler.html">调度器深读 →</a>
       </div>
       <div class="card">
@@ -253,7 +253,7 @@
       </div>
       <div class="card">
         <h3><span class="ico">🛡️</span>稳定性与压力</h3>
-        <p>内核套件三架构全绿、桌面会话 2100 秒门 ×3、census/heal 自愈 MISS=0;22.04 GNOME 桌面在 188+ 提交后的 main 上 5/5 次启动稳定性验证(shell 5 s、成帧 9.1 s,零 panic/OOM/SIGSEGV);stress-fleet 常驻 11 台 QEMU 并发测试集群(随机化测试/模糊测试/内存压力);riscv64 启动参数矩阵 smp{2,4,6,8} × mem{1,2,4,8}G 十六格全部干净启动(此前多个 panic/挂起格)。</p>
+        <p>内核套件三架构全绿、桌面会话 2100 秒门 ×3、调度事件普查/heal 自愈 MISS=0;22.04 GNOME 桌面在 188+ 提交后的 main 上 5/5 次启动稳定性验证(shell 5 s、成帧 9.1 s,零 panic/OOM/SIGSEGV);stress-fleet 常驻 11 台 QEMU 并发测试集群(随机化测试/模糊测试/内存压力);riscv64 启动参数矩阵 smp{2,4,6,8} × mem{1,2,4,8}G 十六格全部干净启动(此前多个 panic/挂起格)。</p>
         <div class="nums">make test <b>1328/1328</b> · 启动矩阵 <b>16/16</b> · GNOME <b>5/5</b></div>
         <a class="more" href="testing/stability.html">稳定性 →</a>
       </div>
