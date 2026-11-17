@@ -72,9 +72,10 @@ queue-model change. Two anchors for whoever revisits D-1 later:
   compare segment-wise against that decomposition (lock wait / acct /
   deq / pick / ownership publish) rather than any single aggregate.
 
-**Guard.** Perf-gate scheduling domain: GRQ average hold band (5.1–6.1 µs
-±20%), census in band (TERM 8±2 / REFUSED 32±4), pbench P2 context-switch
-median ±20% — any change touching `sched/` reports these.
+**Guard.** Perf-gate scheduling domain: GRQ call-site IF=0 span avg band
+(1200–7320 ns, includes acquisition wait), census in band (TERM 8±2 /
+REFUSED 32±4), pbench P2 context-switch median ±20% — any change
+touching `sched/` reports these.
 
 ---
 
