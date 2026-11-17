@@ -2083,7 +2083,142 @@ unsafe impl Sync for BinderTxn {}
 unsafe impl Send for BinderProc {}
 unsafe impl Sync for BinderProc {}
 
-fn world_lock() -> crate::sync::spinlock::SpinlockIrqGuard<'static, Option<World>> {
+/// RT-R4 (WORLD per-caller attribution): world_lock's sections all
+/// charge to ONE REST_SITES row (binder.rs:2092) — the 6–8 ms max could
+/// not be attributed to a caller. This wrapper records each section's
+/// span against the CALLER's Location (world_lock is #[track_caller]),
+/// and the syscost dump prints the top rows.
+struct WorldGuard<'a> {
+    inner: crate::sync::spinlock::SpinlockIrqGuard<'a, Option<World>>,
+    t0: u64,
+    loc: &'static core::panic::Location<'static>,
+}
+
+impl core::ops::Deref for WorldGuard<'_> {
+    type Target = Option<World>;
+    #[inline]
+    fn deref(&self) -> &Option<World> {
+        &self.inner
+    }
+}
+
+impl core::ops::DerefMut for WorldGuard<'_> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Option<World> {
+        &mut self.inner
+    }
+}
+
+impl Drop for WorldGuard<'_> {
+    fn drop(&mut self) {
+        // Span measured before the inner guard's unlock (Drop::drop runs
+        // before field drops). Raw TSC; converted at print time.
+        let span = crate::arch::cpu::read_counter().saturating_sub(self.t0);
+        let key = self.loc as *const _ as u64;
+        for i in 0..WORLD_SEC_N {
+            let cur = WORLD_SEC[i].loc.load(core::sync::atomic::Ordering::Relaxed);
+            if cur == key {
+                WORLD_SEC[i].n.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                let mut m = WORLD_SEC[i].max.load(core::sync::atomic::Ordering::Relaxed);
+                while span > m {
+                    match WORLD_SEC[i].max.compare_exchange_weak(
+                        m,
+                        span,
+                        core::sync::atomic::Ordering::Relaxed,
+                        core::sync::atomic::Ordering::Relaxed,
+                    ) {
+                        Ok(_) => break,
+                        Err(a) => m = a,
+                    }
+                }
+                return;
+            }
+            if cur == 0
+                && WORLD_SEC[i]
+                    .loc
+                    .compare_exchange_weak(
+                        0,
+                        key,
+                        core::sync::atomic::Ordering::Relaxed,
+                        core::sync::atomic::Ordering::Relaxed,
+                    )
+                    .is_ok()
+            {
+                WORLD_SEC[i].n.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                WORLD_SEC[i]
+                    .max
+                    .store(span, core::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+        }
+        // Table full: charge the overflow row.
+        WORLD_SEC_OF.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+const WORLD_SEC_N: usize = 24;
+
+struct WorldSecRow {
+    loc: core::sync::atomic::AtomicU64,
+    n: core::sync::atomic::AtomicU64,
+    max: core::sync::atomic::AtomicU64,
+}
+
+static WORLD_SEC: [WorldSecRow; WORLD_SEC_N] =
+    [const { WorldSecRow { loc: core::sync::atomic::AtomicU64::new(0), n: core::sync::atomic::AtomicU64::new(0), max: core::sync::atomic::AtomicU64::new(0) } }; WORLD_SEC_N];
+static WORLD_SEC_OF: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The per-caller WORLD section maxima, formatted for the syscost dump
+/// (top by max; empty string when no section ever ran).
+pub fn world_section_report() -> alloc::string::String {
+    use alloc::format;
+    let tsc_hz = crate::arch::cpu::get_counter_freq().max(1);
+    let usd = (tsc_hz / 1_000_000).max(1);
+    let mut rows: [(u64, u64, &'static core::panic::Location<'static>); 8] =
+        [(0, 0, core::panic::Location::caller()); 8];
+    for r in WORLD_SEC.iter() {
+        let key = r.loc.load(core::sync::atomic::Ordering::Relaxed);
+        if key == 0 {
+            continue;
+        }
+        let mx = r.max.load(core::sync::atomic::Ordering::Relaxed);
+        // SAFETY: keys are &'static Location refs stored at open time.
+        let l: &'static core::panic::Location<'static> =
+            unsafe { &*(key as *const core::panic::Location<'static>) };
+        for t in 0..rows.len() {
+            if mx > rows[t].0 {
+                let mut j = rows.len() - 1;
+                while j > t {
+                    rows[j] = rows[j - 1];
+                    j -= 1;
+                }
+                rows[t] = (mx, r.n.load(core::sync::atomic::Ordering::Relaxed), l);
+                break;
+            }
+        }
+    }
+    let mut s = alloc::string::String::new();
+    for (mx, n, l) in rows {
+        if mx == 0 {
+            continue;
+        }
+        s.push_str(&format!(
+            "\nSYSCOST world-sec {}:{} n={} max={}us",
+            l.file(),
+            l.line(),
+            n,
+            mx / usd
+        ));
+    }
+    let of = WORLD_SEC_OF.load(core::sync::atomic::Ordering::Relaxed);
+    if of != 0 {
+        s.push_str(&format!("\nSYSCOST world-sec of: n={}", of));
+    }
+    s
+}
+
+#[track_caller]
+fn world_lock() -> WorldGuard<'static> {
     // 105th WORLD-wait census (bindertrace): the acquire-wait time in
     // the nominal clock domain, bucketed like BRTT. Two relaxed loads
     // + one rdtsc per acquisition when armed; ~2 instructions when not.
@@ -2096,7 +2231,11 @@ fn world_lock() -> crate::sync::spinlock::SpinlockIrqGuard<'static, Option<World
     if g.is_none() {
         *g = Some(World { next_id: 1, procs: Vec::new(), mgr_node: [None, None, None] });
     }
-    g
+    WorldGuard {
+        inner: g,
+        t0: crate::arch::cpu::read_counter(),
+        loc: core::panic::Location::caller(),
+    }
 }
 
 /// sc160: non-blocking WORLD acquire for diagnostic readers that may be

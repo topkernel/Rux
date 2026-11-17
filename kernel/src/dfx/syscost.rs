@@ -1678,6 +1678,14 @@ pub fn dump() {
     // hilog-flood lane: OH log-fabric per-caller census (no-op unless
     // the hilogcensus=1 cmdline param is armed).
     crate::dfx::hilogcensus::dump();
+    // rt-r4: per-caller binder WORLD section maxima (all WORLD sections
+    // share one REST_SITES row — this splits the 6-8 ms class by caller).
+    {
+        let rep = crate::ipc::binder::world_section_report();
+        if !rep.is_empty() {
+            crate::pr_warn!("SYSCOST t={}s{}", secs, rep);
+        }
+    }
 
     // Tick modes: one line per dump.
     let mut line = alloc::string::String::from("SYSCOST t=");
