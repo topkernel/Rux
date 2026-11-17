@@ -371,6 +371,11 @@ pub struct FiredToken {
     /// Fire lateness in time ticks (hres one-shots only; 0 otherwise —
     /// wakewatch forensics, same contract as the old tuple element).
     pub late_ticks: u64,
+    /// The hres entry's precise deadline (0 for jiffy entries) — rt-r4
+    /// attribution: pairs the lateness with the arm that should have
+    /// covered it (TIMER_ARM_DEADLINE at delivery discriminates "armed
+    /// coarse" from "armed right, fired late").
+    pub deadline: u64,
 }
 
 /// Delivery-context capability: proves the caller is the timer softirq
@@ -1034,6 +1039,7 @@ impl TimerWheel {
                             id: slot.id,
                             action: slot.action,
                             late_ticks: 0,
+                            deadline: 0,
                         };
                         n += 1;
                     }
@@ -1041,10 +1047,15 @@ impl TimerWheel {
                         // One-shot: free the slot, move the action out.
                         let idx = cur as usize;
                         self.free(idx);
+                        let deadline = match slot.expiry {
+                            Expiry::Hres { precise, .. } => precise.abs(),
+                            Expiry::Jiffy(_) => 0,
+                        };
                         out[n] = FiredToken {
                             id: slot.id,
                             action: slot.action,
                             late_ticks,
+                            deadline,
                         };
                         n += 1;
                     }

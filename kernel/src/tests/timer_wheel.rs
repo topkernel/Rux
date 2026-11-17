@@ -108,6 +108,7 @@ fn tokens() -> [wheel::FiredToken; BUDGET] {
         id: 0,
         action: Action::None,
         late_ticks: 0,
+        deadline: 0,
     }; BUDGET]
 }
 

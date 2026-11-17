@@ -444,6 +444,12 @@ pub fn timer_arm_oneshot(deadline_nominal: u64) -> bool {
     if freq == 0 {
         return false; // calibration never ran: caller keeps periodic
     }
+    // Mode write then initial count: writing TMICT (re)starts the count.
+    // The divide register stays programmed (ignored in x2APIC; harmless
+    // in xAPIC — LAPIC_TIMER_FREQ was calibrated with it armed).
+    reg_write(XAPIC_TIMER_DIV, X2APIC_TIMER_DIV, TIMER_DIV_16 as u32);
+    let lvt = LOCAL_TIMER_VECTOR as u32; // mode bits [18:17] = 0: one-shot
+    reg_write(XAPIC_TIMER_LVT, X2APIC_TIMER_LVT, lvt);
     let now = crate::drivers::timer::read_time();
     let delta = deadline_nominal.saturating_sub(now).max(1);
     // counts = delta_seconds x freq, in u128 (delta up to a grid tick is
@@ -451,12 +457,6 @@ pub fn timer_arm_oneshot(deadline_nominal: u64) -> bool {
     let counts = ((delta as u128) * (freq as u128)
         / crate::config::TIMER_CLOCK_FREQ_HZ as u128) as u64;
     let counts = counts.clamp(1, u32::MAX as u64) as u32;
-    // Mode write then initial count: writing TMICT (re)starts the count.
-    // The divide register stays programmed (ignored in x2APIC; harmless
-    // in xAPIC — LAPIC_TIMER_FREQ was calibrated with it armed).
-    reg_write(XAPIC_TIMER_DIV, X2APIC_TIMER_DIV, TIMER_DIV_16 as u32);
-    let lvt = LOCAL_TIMER_VECTOR as u32; // mode bits [18:17] = 0: one-shot
-    reg_write(XAPIC_TIMER_LVT, X2APIC_TIMER_LVT, lvt);
     reg_write(XAPIC_TIMER_INIT, X2APIC_TIMER_INIT, counts);
     // SP-5 r5 arm trail: who programmed this CPU's timer last, with what.
     // r6: the recording (scalar fields + freeze ring) is unified in
@@ -553,7 +553,14 @@ pub fn timer_event_record(cpu: usize, op: u32, deadline: u64, counts: u32) {
     let seq = TIMER_ARM_SEQ[cpu].fetch_add(1, Ordering::Relaxed) + 1;
     let tb = crate::drivers::timer::read_time();
     TIMER_ARM_OP[cpu].store(op, Ordering::Relaxed);
-    TIMER_ARM_DEADLINE[cpu].store(deadline, Ordering::Relaxed);
+    // rt-r4: a SERVICE stamp (IRQ entry heartbeat) does not program the
+    // timer — writing its 0 deadline would erase the arm the CURRENT fire
+    // should be judged against (last_arm_deadline, the CYC-FIRE-LATE
+    // armdl discriminator). Only real programming ops refresh the scalar;
+    // the ring entry below still records the raw event.
+    if op != TIMER_OP_SERVICE {
+        TIMER_ARM_DEADLINE[cpu].store(deadline, Ordering::Relaxed);
+    }
     TIMER_ARM_COUNTS[cpu].store(counts, Ordering::Relaxed);
     TIMER_ARM_TB[cpu].store(tb, Ordering::Relaxed);
     let idx =
@@ -607,6 +614,17 @@ pub static TIMER_ARM_COUNTS: [AtomicU32; crate::config::MAX_CPUS] =
 /// Timebase value at the last programming event.
 pub static TIMER_ARM_TB: [AtomicU64; crate::config::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
+
+/// rt-r4 (cycdbg fire-late discriminator): the deadline this CPU's LAPIC
+/// was last armed at (0 = never armed). Read at a late fire to separate
+/// "one-shot armed at a LATER deadline" (kernel coarse arm) from "armed
+/// at the deadline, KVM delivered late" (host term).
+pub fn last_arm_deadline(cpu: usize) -> u64 {
+    if cpu >= crate::config::MAX_CPUS {
+        return 0;
+    }
+    TIMER_ARM_DEADLINE[cpu].load(Ordering::Relaxed)
+}
 
 /// Live LAPIC timer + delivery state of THIS CPU, for the frozen-tick trap.
 #[derive(Clone, Copy, Debug)]
@@ -831,9 +849,11 @@ fn calibrate() {
     crate::print_status(
         "timer",
         &alloc::format!(
-            "TSC {} MHz, LAPIC {} MHz ({} APIC)",
+            "TSC {} MHz (raw {} Hz), LAPIC {} MHz (raw {} Hz) ({} APIC)",
             tsc / 1_000_000,
+            tsc,
             lapic / 1_000_000,
+            lapic,
             if X2APIC.load(Ordering::Acquire) { "x2" } else { "MMIO" }
         ),
         tsc != 0 && lapic != 0,
