@@ -10,6 +10,7 @@
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::sync::spinlock::Spinlock;
+use crate::process::task::Task;
 use alloc::boxed::Box;
 
 use crate::config::PLIC_MAX_INTERRUPTS;
@@ -95,6 +96,12 @@ pub struct IrqDesc {
     pub depth: AtomicU32,
     /// Per-CPU interrupt counts for /proc/interrupts
     pub per_cpu_count: [AtomicU64; MAX_CPUS],
+    /// RT-plan R5 (forced threading): the IRQ runs its action chain in a
+    /// per-IRQ kernel thread instead of hardirq context. `pending` is
+    /// set by the hardirq and consumed by the thread; `thread_task`
+    /// carries the kthread pointer for wake_up_process.
+    pub pending: core::sync::atomic::AtomicBool,
+    pub thread_task: core::sync::atomic::AtomicUsize,
 }
 
 impl IrqDesc {
@@ -105,6 +112,8 @@ impl IrqDesc {
             action: Spinlock::new(None),
             depth: AtomicU32::new(0),
             per_cpu_count: [const { AtomicU64::new(0) }; MAX_CPUS],
+            pending: core::sync::atomic::AtomicBool::new(false),
+            thread_task: core::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
@@ -234,6 +243,14 @@ pub fn request_irq(
         None => {
             // First handler for this IRQ
             *action_guard = Some(new_action);
+            // RT-plan R5: forced threading spawns the per-IRQ thread at
+            // registration (unbound kthread_run — the R86 bind race is a
+            // kthread_run_on_cpu shape; unbound threads have no bind).
+            if force_threaded() {
+                drop(action_guard);
+                irq_thread_spawn(irq, name);
+                return Ok(());
+            }
         }
         Some(existing) => {
             // Shared IRQ: check compatibility
@@ -453,6 +470,22 @@ pub fn handle_fasteoi_irq(irq: u32) {
     // Increment statistics
     irq_inc_count(irq, cpu);
 
+    // RT-plan R5: forced threading — the top half only counts, EOI-less,
+    // sets pending and wakes the per-IRQ thread (which runs the chain
+    // then EOIs). The NMI and the timer vectors never reach this fn.
+    if force_threaded() {
+        let tp = desc.thread_task.load(Ordering::Acquire) as *const Task;
+        if !tp.is_null() {
+            desc.pending.store(true, Ordering::Release);
+            // SAFETY: set once at spawn, never cleared.
+            let t = unsafe { &*tp } as *const Task as *mut Task;
+            crate::sched::wake_up_process(t);
+            return;
+        }
+        // The thread has not spawned (registration raced the IRQ): run
+        // the chain inline this once.
+    }
+
     // Dispatch to action chain
     handle_irq_event(desc, irq);
 
@@ -464,6 +497,159 @@ pub fn handle_fasteoi_irq(irq: u32) {
         }
     }
 }
+
+// ==================== Forced threading (RT-plan R5) ====================
+
+/// `irqthread=1` forces every non-timer interrupt's action chain into a
+/// per-IRQ kernel thread (SCHED_FIFO 50): the hardirq top half only
+/// counts, sets pending and wakes the thread — NO EOI. The thread runs
+/// the chain, EOIs, and re-parks. Deferring the EOI keeps the in-service
+/// window open until the thread completes: an APIC edge re-fire while
+/// ISR holds the vector lands in IRR and delivers after EOI (not lost);
+/// a PLIC level re-assert re-pends and claims after complete (not lost).
+/// No mask/unmask needed, no refire storm.
+/// The verdict-cache discipline mirrors syscost::on(): never cache before
+/// cmdline::init (the first IRQ can fire pre-parse).
+static FORCE_THREADED: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(0);
+
+pub fn force_threaded() -> bool {
+    use core::sync::atomic::Ordering;
+    match FORCE_THREADED.load(Ordering::Relaxed) {
+        0 => {
+            match crate::cmdline::get_cmdline() {
+                None => return false,
+                Some(_) => {
+                    let v = if crate::cmdline::get_param("irqthread").as_deref()
+                        == Some("1")
+                    {
+                        2u8
+                    } else {
+                        1u8
+                    };
+                    FORCE_THREADED.store(v, Ordering::Relaxed);
+                    v == 2
+                }
+            }
+        }
+        2 => true,
+        _ => false,
+    }
+}
+
+use crate::process::task::TaskState;
+
+extern "C" fn irq_thread_fn(arg: *mut core::ffi::c_void) -> i32 {
+    let irq = (arg as usize) as u32;
+    let desc = match irq_to_desc(irq) {
+        Some(d) => d,
+        None => return 0,
+    };
+    loop {
+        if crate::process::kthread::kthread_should_stop() {
+            break;
+        }
+        // Consume pending, run the chain, EOI, re-park. The W3 lost-wake
+        // discipline: pending was set (Release) BEFORE wake_up_process,
+        // so the re-check below sees it even if the wake raced us.
+        if desc.pending.swap(false, Ordering::AcqRel) {
+            handle_irq_event(desc, irq);
+            let irq_data = desc.irq_data.lock_irqsave();
+            if let Some(ref chip) = irq_data.chip {
+                if let Some(eoi) = chip.irq_eoi {
+                    eoi(&irq_data);
+                }
+            }
+            drop(irq_data);
+            continue;
+        }
+        // Park: set INTERRUPTIBLE, re-check pending (the W3 re-check —
+        // the wake racing the park window is not lost), schedule.
+        // SAFETY: the kthread owns itself.
+        let tp = desc.thread_task.load(Ordering::Acquire) as *const Task;
+        if tp.is_null() {
+            return 0;
+        }
+        let t = unsafe { &*tp } as *const Task as *mut Task;
+        unsafe {
+            (*t).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+        }
+        if desc.pending.swap(false, Ordering::AcqRel) {
+            unsafe { (*t).set_state(TaskState::new(TaskState::RUNNING)) };
+            continue;
+        }
+        crate::sched::schedule();
+    }
+    0
+}
+
+/// Wake an IRQ's thread (called from its hardirq top half).
+fn irq_thread_wake(irq: u32) {
+    let desc = match irq_to_desc(irq) {
+        Some(d) => d,
+        None => return,
+    };
+    let ptr = desc.thread_task.load(Ordering::Acquire) as *const Task;
+    if ptr.is_null() {
+        return; // the thread has not spawned (or failed)
+    }
+    // SAFETY: the pointer was set once at spawn and never cleared.
+    let t = unsafe { &*ptr } as *const Task as *mut Task;
+    crate::sched::wake_up_process(t);
+}
+
+/// Spawn the per-IRQ thread (called from request_irq's first-action arm
+/// when forced threading is on; unbound kthread_run — no bind race).
+fn irq_thread_spawn(irq: u32, name: &'static str) {
+    let desc = match irq_to_desc(irq) {
+        Some(d) => d,
+        None => return,
+    };
+    if desc.thread_task.load(Ordering::Acquire) != 0 {
+        return;
+    }
+    // The name must be &'static str (kernel_thread holds it for the
+    // task's lifetime): build "irq/<n>" and leak the buffer (one tiny
+    // allocation per threaded IRQ, registration-time only).
+    let mut owned = alloc::vec::Vec::new();
+    owned.extend_from_slice(b"irq/");
+    let mut v = irq;
+    if v == 0 {
+        owned.push(b'0');
+    } else {
+        let mut digits = [0u8; 10];
+        let mut dn = 0;
+        while v > 0 {
+            digits[dn] = b'0' + (v % 10) as u8;
+            v /= 10;
+            dn += 1;
+        }
+        while dn > 0 {
+            dn -= 1;
+            owned.push(digits[dn]);
+        }
+    }
+    // SAFETY: "irq/" + decimal digits is valid UTF-8.
+    let tname: &'static str = unsafe {
+        core::str::from_utf8_unchecked(alloc::boxed::Box::leak(owned.into_boxed_slice()))
+    };
+    if let Some(t) = crate::process::kthread::kthread_run(
+        irq_thread_fn,
+        irq as *mut core::ffi::c_void,
+        tname,
+    ) {
+        crate::sched::sched::change_task_policy(
+            t,
+            crate::process::task::SchedPolicy::Fifo,
+            50,
+        );
+        desc.thread_task.store(
+            t as *const Task as usize,
+            core::sync::atomic::Ordering::Release,
+        );
+    }
+}
+
 
 // ==================== NMI ====================
 
