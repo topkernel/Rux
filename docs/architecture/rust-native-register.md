@@ -918,3 +918,71 @@ has nothing else to run.
   arithmetic for 4 hogs/CPU).
 - Artifacts: run/GRQ-10NS.md (decomposition tables, poison-discipline
   notes, the honest-floor statement).
+
+## S. Request merging + SG chains in the virtio-blk submit path (fio-merge-sg lane, 2026-11-18, evidence-backed)
+
+- **The reference's blk-merge endpoint, typed.** Linux fuses
+  queue-adjacent bios into one request carrying a scatter list
+  (block/blk-merge.c `bio_attempt_back_merge`; virtio_blk maps it with
+  `blk_rq_map_sg` into ONE descriptor chain — hdr + N data descs +
+  resp). Rux now has the same shape at three layers, and the merge
+  decision is a pure function of two integer compares
+  (`sector_i + len_i == sector_{i+1}` — the back-merge test) over a
+  recorded window: `WriteBatch` (bio) is a plug list whose flush()
+  groups device-adjacent spans and submits one
+  `blkdev_write_async_sg(disk, sector, &[DmaSeg], completion)` per
+  group; `DmaSeg { ptr, len }` is the bio-segment contract made a
+  `Copy` type — device-contiguous sectors, physically-discontiguous
+  memory allowed; the ext4 direct-read window records runs and fuses
+  at drain. Deferral to the drain is free by construction: chains
+  publish QUIETLY and the device only sees work at the kick, so the
+  plug list costs nothing the previous immediate submission did not.
+- **The admission budget as a published-lifecycle counter.** The
+  legacy in-flight guard assumes 3 descriptors per chain; an SG chain
+  holds N+2, so chains-only accounting under-counts exactly when
+  fusing is busiest. `VirtQueue::descs_held` is incremented at chain
+  PUBLISH (pending store / sync tombstone, under the BLK lock) and
+  released by the completion walker when it consumes the chain's
+  used-ring entry — the same lifecycle the pending-table window
+  reservation follows; burned (never-published) allocations never
+  touch it. The window-overlap check
+  (`chain_windows_overlap_len`) is length-aware and ring-wrap-safe.
+  An SG chain remains ONE chain to the walker (one head, one ordinal,
+  one pending, one used-ring entry matched by head id) — zero new
+  completion machinery in the historically bug-dense ordering family.
+- **Measured (q35 KVM smp8/8G, fio 3.36 psync depth 1, clean window
+  load ~0.8, kernel-vs-kernel interleaved ×3, run/FIO-MERGE-SG.md
+  §3.1):** 1 MiB sequential direct read 6857 → 8000 MiB/s (+17%),
+  clat 139 → 118-120 µs (−21 µs/op); request count per op 4 → 1
+  (diagnostic counters, since removed: "fused chains 1 (4 segs
+  total), span-fallbacks 0" — every window one chain, zero
+  fallbacks); 4k random read, 1 MiB write, 4k+fsync rows FLAT (±5%
+  noise) — no regression band. fio --verify=md5 direct+buffered ×15
+  total reps err=0, zero out-of-order/unmatched/misattribution
+  classes in every serial.
+- **Honest floor, named with numbers.** The fused window's whole wait
+  phase (kick→completion→wake→return) is 131-134 µs, and a 1×1 MiB
+  single-descriptor chain waits the same 131 µs as the 4-segment
+  chain — the chain shape is FREE; the floor is kick→IRQ delivery
+  (~60 µs class, fixed-CPU0 MSI steering — measured a conclusive dead
+  end on this QEMU by submit-2x §3-C), the 1 MiB snapshot-overlay
+  transfer, and the sleep/wake leg (~10-20 µs; D-21's adaptive
+  poll-budget follow-up). The remaining +38 µs copyout term is the
+  pinned-user-page DMA item (audit B2) whose plan builds on exactly
+  these multi-segment chains. The audit's 0.9×-parity estimate for
+  fusion alone was based on the 4 spans being 4 serialized
+  kick→IRQ round trips; they shared one kick all along, so fusion
+  buys the request-count term (+17%), not the delivery term.
+- **ABI note that closes an audit extension:** virtio-blk requests
+  address ONE contiguous sector range — the inode-table block cannot
+  ride a data span's chain (not sector-adjacent). The wrfsync
+  ride-along's shared kick window is the maximum batching the ABI
+  allows; fsync4k measured flat with fusion, as that predicts.
+- Gates: riscv64 make test green; triple-arch builds rc=0; pbench
+  Tier-2 rows in band (p2_ctxsw 1.38 vs 1.24-1.27 band = +9%, within
+  ±20%; p6_unlink 55.4 vs 54.6 flat; fs-row boards in
+  run/pbench-fs.log); non-SG devices (MMIO virtio, loop) keep the
+  byte-identical legacy submission shape (mode probed from the disk).
+- Artifacts: run/FIO-MERGE-SG.md (A/B/C tables, floor decomposition,
+  verification protocol), run/abc-*.txt, run/vfinal-*.log,
+  run/pbench-gate.log, run/pbench-fs.log.
