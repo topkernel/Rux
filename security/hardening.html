@@ -109,9 +109,9 @@
 
     <h2 id="user"><span class="anchor">§3</span>用户态特权面</h2>
     <ul>
-      <li><b>用户 W^X</b>:NX 映射、PT_GNU_STACK 语义、READ_IMPLIES_EXEC personality —— 三项曾缺失/被忽略,按参考语义修复(1de56837)。</li>
+      <li><b>用户 W^X</b>:NX 映射、PT_GNU_STACK 语义、READ_IMPLIES_EXEC personality —— 三项曾缺失/被忽略,按 Linux 语义修复(1de56837)。</li>
       <li><b>seccomp</b>:经典 BPF 子集解释器(LD|W|ABS/IMM、JMP|JEQ/JGT/JGE/JSET|K、RET|K;上限 4096 指令;越界载入与落尾 kill),门控位于两条 trap 路径的派发前;STRICT/FILTER 双模式;kill 动作队列 SIGKILL;fork 继承。PR_SET_NO_NEW_PRIVS 单向、跨 fork+exec 粘滞、门控非特权挂载(LTP prctl02 PASS)。登记的接受性分歧:单过滤器,无 TSYNC/TRACE/NOTIF。</li>
-      <li><b>能力模型</b>:41 个 CAP_* UAPI 常数(CAP_VALID_MASK = 2^41−1);审计后 23 个被咨询点 + 六个此前从未检查的能力经 4e75d849 接线(NET_RAW/NET_ADMIN/SYS_PACCT/SETFCAP/DAC_READ_SEARCH/PERFMON);执法门点 ~18(参考 ~120 —— 广度差距在缺口登记册)。</li>
+      <li><b>能力模型</b>:41 个 CAP_* UAPI 常数(CAP_VALID_MASK = 2^41−1);审计后 23 个被咨询点 + 六个此前从未检查的能力经 4e75d849 接线(NET_RAW/NET_ADMIN/SYS_PACCT/SETFCAP/DAC_READ_SEARCH/PERFMON);执法门点 ~18(Linux ~120 —— 广度差距在缺口登记册)。</li>
       <li><b>secure-exec 环境清洗(D-9)</b>:AT_SECURE 迁移时<b>内核</b>在安装 envp 前删除全部 LD_* —— 不依赖 libc 行为的纵深防御(静态链接自定义加载器同样受保护);登记代价:secure-exec 进程的 /proc/[pid]/environ 不列 LD_*。</li>
       <li><b>OOM 评分语义</b>:oom_badness 形态(resident 基线 + oom_score_adj),评分规则由 10 项属性测试钉住(免疫/饱和规避/对称性)。</li>
     </ul>
@@ -120,7 +120,7 @@
     <ul>
       <li><b>内核栈护栏</b>:栈底 canary(0xCAFE_F00D_DEAD_BEEF,volatile 写)+ 归还缓存前校验(R18-2 —— 被破坏值即任务越过栈底写入相邻堆页的直接证据,STACK-OVERFLOW 打印)+ FREED_STACKS 32 项环(故障 rsp 落于已释放栈时点名释放者)+ dfx 门控的 0xC3 自由涂绘;打包内核栈 slab(D-2)3445 活任务零 canary 命中。编译器栈保护为在册缺口(见 §6)。</li>
       <li><b>延迟释放隔离</b>:MmStruct/Task 进 16384 项墙钟环(1500 ms 排水)—— procfs 未记账借用者的 use-after-free 窗口结构性关闭。</li>
-      <li><b>失败纪律</b>:Oops/panic 参考报告形状(CSR + 全 GPR + 32 帧回溯 + 符号化)、panic_on_oops sysctl、panic= 重启参数、pstore console。</li>
+      <li><b>失败纪律</b>:Oops/panic 对齐 Linux 报告形状(CSR + 全 GPR + 32 帧回溯 + 符号化)、panic_on_oops sysctl、panic= 重启参数、pstore console。</li>
       <li><b>可观测安全网</b>:统一 tracepoint(69 事件/17 组)、调度事件普查/heal 自愈(MISS=0,已测量记录)、自旋看门狗、kallsyms 符号化回溯 —— 缺陷的定位时间本身是安全性质的组成部分。</li>
     </ul>
 
@@ -134,8 +134,8 @@
         <tr><td>算术溢出检查</td><td>release profile 关闭(开发开启)</td><td>一行配置 + 经合并门的实测启动/性能成本</td></tr>
         <tr><td>KASAN 式毒化</td><td>任务页涂绘 + 头部审计 + buddy 元数据影子(dfx 门控);small_alloc 无 redzone</td><td>构建旗标 redzone + small_alloc/slab 释放即毒化</td></tr>
         <tr><td>LSM 面</td><td>hook 存在;selinuxfs 为标签兼容挂载、构造性 permissive</td><td>策略解析 + AVC 判定</td></tr>
-        <tr><td>命名空间</td><td>PID/IPC 真实(1bde7490);net/user/mount 为桩</td><td>按参考语义逐个实现</td></tr>
-        <tr><td>能力执法广度</td><td>41 常数、~18 门点(参考 ~120)</td><td>按咨询面清单逐点接线</td></tr>
+        <tr><td>命名空间</td><td>PID/IPC 真实(1bde7490);net/user/mount 为桩</td><td>按 Linux 语义逐个实现</td></tr>
+        <tr><td>能力执法广度</td><td>41 常数、~18 门点(Linux ~120)</td><td>按咨询面清单逐点接线</td></tr>
       </tbody>
     </table></div>
     <h3>缺席</h3>
@@ -149,7 +149,7 @@
         <tr><td>模块签名</td><td>当前无运行期代码加载(注册面),议题暂空</td><td>真实加载器落地时随行签名校验</td></tr>
         <tr><td>KCSAN 类检查器</td><td>缺;残余 safe 竞态为协议级</td><td>watchpoint 检查器为立项级工程;loom/Kani 镜像覆盖原语子集</td></tr>
         <tr><td>kptr_restrict / kallsyms 掩蔽</td><td>/proc/kallsyms 对全部读者显示真地址</td><td>掩蔽旋钮 + 默认掩蔽</td></tr>
-        <tr><td>eBPF 类运行时缓解通道</td><td>缺</td><td>按参考语义立项</td></tr>
+        <tr><td>eBPF 类运行时缓解通道</td><td>缺</td><td>按 Linux 语义立项</td></tr>
       </tbody>
     </table></div>
     <p>posture 汇总(security-posture.md 21 行口径):<b>7 行已具备、3 行 quick、10 行立项级、1 行登记接受</b>。</p>

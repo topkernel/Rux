@@ -160,7 +160,7 @@
       <li>S-2 (a typed binder transaction FSM) is a registered placeholder — the only exit from the placeholder zone is delivering measured evidence.</li>
     </ul>
 
-    <div class="callout">Instrument selection vs the reference kernel: the reference has no Kani/loom/Miri counterpart, and SPIN corresponds to a compile-time subset of its lockdep — the difference here is that verification is moved to build/CI time rather than runtime sampling. Code: kernel/verify/ (34 harness files + spin/4 models + mutex_loom.rs); CI: .github/workflows/{kani,spin,loom,miri}.yml.</div>
+    <div class="callout">Instrument selection vs Linux: Linux has no Kani/loom/Miri counterpart, and SPIN corresponds to a compile-time subset of its lockdep — the difference here is that verification is moved to build/CI time rather than runtime sampling. Code: kernel/verify/ (34 harness files + spin/4 models + mutex_loom.rs); CI: .github/workflows/{kani,spin,loom,miri}.yml.</div>
   </article>
 </div>
 </main>

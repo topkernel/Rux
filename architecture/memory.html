@@ -83,14 +83,14 @@
     <div class="sub">kernel/src/mm/ · 地址空间、页表、buddy/slab 双层分配、页缓存与回写、回收、缺页路径与 TLB 管理 —— 机制、不变量与实测数据 · 依据:docs/architecture/memory.md、design-divergences.md(D-2/D-7/D-16/D-20)</div>
 
     <h2 id="layout"><span class="anchor">§1</span>地址空间布局与页表</h2>
-    <p>三种架构共用一套与参考实现常量级对齐的地址空间划分,页表层按各架构规范实现:</p>
+    <p>三种架构共用一套与 Linux 常量级对齐的地址空间划分,页表层按各架构规范实现:</p>
     <div class="tbl-wrap"><table>
       <thead><tr><th>项</th><th>riscv64(Sv39)</th><th>x86_64(4 级)</th><th>aarch64(4 级)</th></tr></thead>
       <tbody>
         <tr><td>用户空间</td><td class="num">256 GB(0x0–0x3FFF_FFFF_FFFF)</td><td class="num">128 TB(至 0x0000_7fff_ffff_f000)</td><td class="num">256 GB(TTBR0 L0 条目 0)</td></tr>
         <tr><td>直接映射 PAGE_OFFSET</td><td class="mono">0xFFFFFFD6_00000000</td><td class="mono">0xffff_8880_0000_0000</td><td class="mono">0xffff_c000_0000_0000</td></tr>
         <tr><td>内核链接地址</td><td class="mono">0xFFFFFFFF80000000</td><td class="mono">0xffff_ffff_8000_0000</td><td class="mono">0xffff_ffff_8008_0000</td></tr>
-        <tr><td>vmemmap / VMALLOC</td><td colspan="3">各架构独立常量区(VMALLOC 64GB 低于 PAGE_OFFSET,vmemmap 4GB 低于 VMALLOC;riscv64 与参考实现逐常量一致)</td></tr>
+        <tr><td>vmemmap / VMALLOC</td><td colspan="3">各架构独立常量区(VMALLOC 64GB 低于 PAGE_OFFSET,vmemmap 4GB 低于 VMALLOC;riscv64 与 Linux 逐常量一致)</td></tr>
       </tbody>
     </table></div>
     <ul>
@@ -121,8 +121,8 @@
     <h2 id="buddy"><span class="anchor">§4</span>zone / buddy / per-CPU pageset</h2>
     <ul>
       <li><b>zone 模型</b>:ZoneDma/ZoneDma32/ZoneNormal/ZoneMovable;riscv64 QEMU 配置仅 ZoneNormal。Zone 持 <code>free_area: [FreeArea; MAX_ORDER+1]</code>,MAX_ORDER = 10(最大 1024 页 = 4MB);buddy 拆分/合并遵循标准形态(buddy_pfn = pfn ^ (1&lt;&lt;order))。</li>
-      <li><b>水位线</b>:WMARK_MIN/LOW/HIGH;<code>setup_per_zone_wmarks</code> 按 <code>__setup_per_zone_wmarks()</code> 形态:min_free_kbytes = int_sqrt(managed_kb·16),钳制 [128, 262144](历史实现曾以 "/4" 使全部水位线低于参考值四倍,已修正);watermark_gap = max(wmark_min/4, managed·10/10000)。</li>
-      <li><b>PCP(per-CPU pageset)</b>:order-0 页帧由各 CPU 本地供给,<b>零 zone 锁</b>;zone 锁按 PCP_BATCH=16 成批支付。行结构 64 字节对齐。三条不变量已登记:INV-PCP-1(页帧三态生命周期:OnFreelist rc==0 / OnPcp rc==0 / in-use rc≥1,违例即泄漏加污染标记)、INV-PCP-2(zone free_pages 同时计入 buddy 与 pcp,参考语义)、INV-PCP-3(行仅由其所属 CPU 在关中断下触碰)。引入动机:PCP 之前的每次 order-0 分配/释放均为 zone 锁全程往返,且页描述符初始化循环位于锁内。</li>
+      <li><b>水位线</b>:WMARK_MIN/LOW/HIGH;<code>setup_per_zone_wmarks</code> 按 <code>__setup_per_zone_wmarks()</code> 形态:min_free_kbytes = int_sqrt(managed_kb·16),钳制 [128, 262144](历史实现曾以 "/4" 使全部水位线低于 Linux 对应值四倍,已修正);watermark_gap = max(wmark_min/4, managed·10/10000)。</li>
+      <li><b>PCP(per-CPU pageset)</b>:order-0 页帧由各 CPU 本地供给,<b>零 zone 锁</b>;zone 锁按 PCP_BATCH=16 成批支付。行结构 64 字节对齐。三条不变量已登记:INV-PCP-1(页帧三态生命周期:OnFreelist rc==0 / OnPcp rc==0 / in-use rc≥1,违例即泄漏加污染标记)、INV-PCP-2(zone free_pages 同时计入 buddy 与 pcp,与 Linux 语义一致)、INV-PCP-3(行仅由其所属 CPU 在关中断下触碰)。引入动机:PCP 之前的每次 order-0 分配/释放均为 zone 锁全程往返,且页描述符初始化循环位于锁内。</li>
       <li><b>迁移类型</b>:Unmovable/Movable/Reclaimable。</li>
     </ul>
 
@@ -148,7 +148,7 @@
       <li><b>组织</b>:4KB 页,键 (fs_id, inode_number, page_index) —— fs_id 因 u32 inode 截断曾引发跨文件系统碰撞(review 5.3)而引入。</li>
       <li><b>锁模型(两阶段演进)</b>:旧形态为单全局 BTreeMap 自旋锁 —— 冷启动期 4 CPU 逐页故障注入 100MB 库文件,全部请求串行化。现形态:<b>全局查找无锁</b> —— 固定容量开放寻址槽表(<code>PC_TABLE_CAP = 32768</code>,线性探测),读者认领所属 CPU 的 reader bank(SeqCst RMW),命中项以 Acquire 载入探测并取得强计数;跨 inode 故障注入零争用(per-inode 自旋锁);写者(wlock:插入/移除/淘汰/迭代)与 per-inode 锁仅允许单向嵌套;两把锁下均禁止分配(R-WRITESTORM-1)。整项移除采用停放-排水协议(tombstone 于 wlock 下,全部 reader bank 归零后释放)—— 假 miss 恒安全(miss 路径重读;insert 去重)。</li>
       <li><b>容量策略</b>:软上限 = 受管 RAM 的一半,下限 32MB(<code>MIN_CACHED_PAGES = 8192</code>)。固定 32MB 上限时期:OH 共享库加载期 ~580 任务逐页故障注入,每次故障为 miss+淘汰+盘回读+ext4 大锁往返,实测 ~1.5 s/页 —— 容量策略修正的依据。</li>
-      <li><b>回写与脏页水位(D-20)</b>:Normal zone 空闲页数低于其受管页数一半(<code>zone_below_dirty_writeback_mark</code>)时,缓冲写者自行冲刷本 inode 脏区间,随后执行系统级恢复(<code>PageCache::writeback_recover</code>:先释放已净页,全表轮转收集脏 inode,经批处理引擎逐 inode 冲刷,直接淘汰已冲刷页至上限 + 1/16 受管)。Rux 不维护 per-BDI 脏页记账,水位为 zone 空闲比例(参考实现为 dirty_background_threshold/balance_dirty_pages 的脏页比例)—— <b>约束的是纪律而非常量</b>。实测:消除延迟分配脏页气球楔死(24.3 万脏页增长至 RAM 规模、zone 排空、回收自身嵌套 io-lock 重入冲刷为最后产生者);LTP fallocate05/06 三次全新启动 RC=0 16/24 TPASS 零 TFAIL;riscv64 make test 1328/1328。</li>
+      <li><b>回写与脏页水位(D-20)</b>:Normal zone 空闲页数低于其受管页数一半(<code>zone_below_dirty_writeback_mark</code>)时,缓冲写者自行冲刷本 inode 脏区间,随后执行系统级恢复(<code>PageCache::writeback_recover</code>:先释放已净页,全表轮转收集脏 inode,经批处理引擎逐 inode 冲刷,直接淘汰已冲刷页至上限 + 1/16 受管)。Rux 不维护 per-BDI 脏页记账,水位为 zone 空闲比例(Linux 为 dirty_background_threshold/balance_dirty_pages 的脏页比例)—— <b>约束的是纪律而非常量</b>。实测:消除延迟分配脏页气球楔死(24.3 万脏页增长至 RAM 规模、zone 排空、回收自身嵌套 io-lock 重入冲刷为最后产生者);LTP fallocate05/06 三次全新启动 RC=0 16/24 TPASS 零 TFAIL;riscv64 make test 1328/1328。</li>
       <li><b>O_DIRECT 一致性</b>:绕过页缓存直接从块层供给;缓冲写后 O_DIRECT 读先冲刷对应脏页缓存区间(99ea87e3),diotest2/5 覆盖。</li>
       <li><b>可观测性</b>:/proc/meminfo 增加 PageCacheOps 计数行(hits/misses/evictions 比值)。</li>
     </ul>
@@ -172,7 +172,7 @@
     <h2 id="vma"><span class="anchor">§10</span>mmap / VMA 管理与 TLB</h2>
     <ul>
       <li><b>用户空间布局</b>(riscv64):null 页守卫 → ELF 段 → 堆(brk 自 512MB 向上,上限 TASK_SIZE/3)→ 守卫区 → mmap 区自 TASK_SIZE−64GB 向下 → 用户栈 TASK_SIZE−8MB 向下,上限 8MB。brk 权威为 per-mm(start_brk/brk 原子)—— 此前 per-TASK 的 brk 曾使线程收缩释放主线程活跃页(pango/FcInit SIGSEGV 家族)。VmaManager = BTreeMap&lt;start, Vma&gt; O(log n)。</li>
-      <li><b>per-mm PTE 锁 split 模式</b>:GlobalPteLock = RwSpinlock epoch(独占 = 旧全局单锁语义;共享 = per-mm 区段);不同 mm 的 PTE 写者并发执行;全部架构启用 split 模式。mm 另持 <code>mm_surgery: Rwsem</code>(整体系统调用级手术锁,参考 mmap_lock(write) 角色)闭合 mremap-move 与兄弟 munmap 竞态;vma_manager 为 Rwsem(睡眠等待,取代曾使慢读者独占 CPU 的纯自旋)。</li>
+      <li><b>per-mm PTE 锁 split 模式</b>:GlobalPteLock = RwSpinlock epoch(独占 = 旧全局单锁语义;共享 = per-mm 区段);不同 mm 的 PTE 写者并发执行;全部架构启用 split 模式。mm 另持 <code>mm_surgery: Rwsem</code>(整体系统调用级手术锁,即 Linux mmap_lock(write) 的角色)闭合 mremap-move 与兄弟 munmap 竞态;vma_manager 为 Rwsem(睡眠等待,取代曾使慢读者独占 CPU 的纯自旋)。</li>
       <li><b>叶表直走 unmap</b>:每页遍历零分配;上层链每 2MiB 块解析一次,叶 PTE 直接迭代(消除自加的每块 cond_resched,132µs/次 × n=213k)。mmap 平均 72 µs → 27–32 µs;munmap 主体 177–185 → 52 µs;&gt;16MiB mmap 中位 5.6 ms → 415–427 µs;vm-op 族 OH 负载下整机占比 15 s/CPU-min → 5 s/CPU-min。</li>
       <li><b>整 VMA munmap 快路径</b>(2026-11-15):范围不含页表状态时(glibc mmap/munmap churn),在 PTE 区段内权威空扫描("同 mm 故障无法在 pte_lock 持有期安装")后整 VMA 移除、跳过 zap。munmap 64MB 23.2 → 4.3 µs(61× → 5.3×);16MB 6.2 → 1.4 µs。故障入口遍历合并(缺页单次叶遍历):B 行 613.9 → 558–565 ns。mprotect 上提遍历经实测<b>撤回</b>(4/4 启动于 timer tick 内软死锁)—— 每页遍历容忍上层并发表更,上提不容忍,如实登记。</li>
       <li><b>TLB 冲刷与懒 mm_cpumask</b>:修复前每次 munmap/fork-COW/mprotect/COW 故障向全部 8 CPU 广播全 TLB 冲刷 IPI —— OH 纯净启动 /proc/interrupts 计数 t=200s 时 <b>4,031,356</b> 次冲刷 IPI(~20k/s,每次为 KVM 截获的 LAPIC 写加远端全冲刷)。per-mm cpu_mask(切入时于串行化 CR3 写前置位;切出时普通 CR3 写的全冲刷使清除合法;PCID 下只增不减)将其降至 <b>10,209 次 —— 减少 395×(−99.7%)</b>,冲刷语义不变(mask 仅决定谁可持有表项)。</li>
@@ -181,7 +181,7 @@
     <h2 id="defer"><span class="anchor">§11</span>延迟释放定时器环(D-16)</h2>
     <ul>
       <li><code>POOL_CAP = 16384</code> 项、<code>DEFER_MS = 1500</code> 墙钟排水;匹配登记尺寸的释放(MmStruct ArcInner 块、Task 页本体)在归还堆前先入环。</li>
-      <li><b>原理</b>:procfs 遍历者持有未记账的 &amp;MmStruct 借用;即便有 vma_write 遍历排除与 RCU 宽限等待,在系统调用中途被抢占的读者可在末次 Arc 释放后恢复并锁到垃圾 rwlock 字(#GP-in-btree-navigate 家族,OH log pid 554/exitwalk pid 314-315 实证)。与参考实现经 call_rcu 释放 mm_struct 同构,但基于墙钟 —— 本实现 RCU 将抢占点计为静息态,而系统调用中途的借用者不属于静息态,故墙钟覆盖为超集。</li>
+      <li><b>原理</b>:procfs 遍历者持有未记账的 &amp;MmStruct 借用;即便有 vma_write 遍历排除与 RCU 宽限等待,在系统调用中途被抢占的读者可在末次 Arc 释放后恢复并锁到垃圾 rwlock 字(#GP-in-btree-navigate 家族,OH log pid 554/exitwalk pid 314-315 实证)。与 Linux 经 call_rcu 释放 mm_struct 同构,但基于墙钟 —— 本实现 RCU 将抢占点计为静息态,而系统调用中途的借用者不属于静息态,故墙钟覆盖为超集。</li>
       <li>有界:固定环,溢出即立即释放;排水由分配路径机会性驱动(空闲系统不累积)。重审条件:未记账借用 RcuHead 化后整环可删。</li>
     </ul>
 
@@ -201,14 +201,14 @@
 
     <h2 id="proc"><span class="anchor">§14</span>/proc 观测面</h2>
     <ul>
-      <li>meminfo 与 vmstat 由 procfile! 宏派生(D-4):kv/pad/cols/kvtab 声明形式;vmstat 字节级一致快照、meminfo 与参考实现列精确对齐;/proc/[pid]/status 的 STATUS_FIELDS 以活渲染快照钉住。</li>
+      <li>meminfo 与 vmstat 由 procfile! 宏派生(D-4):kv/pad/cols/kvtab 声明形式;vmstat 字节级一致快照、meminfo 与 Linux 列精确对齐;/proc/[pid]/status 的 STATUS_FIELDS 以活渲染快照钉住。</li>
       <li>pagemap、vmstat 计数(note_fault 于缺页路径喂 pgfault/min_flt)、MemoryInfo 结构(mem_total/free/available/used、heap、slab_pages、pages_free/used/dirty/cow/anon)。</li>
       <li>zone 空闲计数含 PCP 缓存(INV-PCP-2)。</li>
     </ul>
 
     <h2 id="nums"><span class="anchor">§15</span>基准数字汇总</h2>
     <div class="tbl-wrap"><table>
-      <thead><tr><th>指标(rig 见 docs/test/)</th><th>Rux</th><th>同机参考</th><th>比值</th></tr></thead>
+      <thead><tr><th>指标(测试平台见 docs/test/)</th><th>Rux</th><th>同机 Linux</th><th>比值</th></tr></thead>
       <tbody>
         <tr><td>Geekbench 5.5.1 单核(9950X KVM q35 smp4 4G)</td><td class="num">2440</td><td class="num">2165</td><td class="num">113%</td></tr>
         <tr><td>Geekbench 5.5.1 多核</td><td class="num">7709</td><td class="num">7027</td><td class="num">110%</td></tr>

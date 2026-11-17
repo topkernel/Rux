@@ -160,7 +160,7 @@
       <li>S-2(类型化 binder 事务 FSM)为登记的占位项 —— 进占位区的唯一出口是交付实测证据。</li>
     </ul>
 
-    <div class="callout">装置选型原则(对照参考内核):参考内核无 Kani/loom/Miri 对应物,SPIN 对应其 lockdep 的编译期子集 —— Rux 的差异在验证前移到构建/CI 期而非运行期采样。代码:kernel/verify/(34 harness 文件 + spin/4 模型 + mutex_loom.rs);CI:.github/workflows/{kani,spin,loom,miri}.yml。</div>
+    <div class="callout">装置选型原则(对照 Linux):Linux 无 Kani/loom/Miri 对应物,SPIN 对应其 lockdep 的编译期子集 —— Rux 的差异在验证前移到构建/CI 期而非运行期采样。代码:kernel/verify/(34 harness 文件 + spin/4 模型 + mutex_loom.rs);CI:.github/workflows/{kani,spin,loom,miri}.yml。</div>
   </article>
 </div>
 </main>

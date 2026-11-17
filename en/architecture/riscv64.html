@@ -90,7 +90,7 @@
       <li><b>The big-lock protocol</b>: entry takes the kernel big lock with <code>amoswap.d.aq</code>, exit releases with <code>amoswap.d.rl</code>; before exit <code>sc.d</code> clears any LR/SC reservation (preventing cross-context leaks) + <code>fence iorw,iorw</code>.</li>
       <li>Hard-coded task offsets (flags 0x00 / preempt 0x04 / kernel_sp 0x08 / user_sp 0x10 / cpu 0x18 / state 0x20 / pid 0x24).</li>
     </ul>
-    <h3>Context switch (reference order)</h3>
+    <h3>Context switch (Linux order)</h3>
     <pre><code>fpu_save_for_switch   <span class="c"># save f0-f31+fcsr only if FS==DIRTY, set OFF</span>
 set_prev → switch_mm  <span class="c"># sfence.vma before and after satp (ASID=0, not embedded)</span>
 __switch_to           <span class="c"># ra/sp/s0-s11/SUM, tp=next</span>

@@ -91,7 +91,7 @@
     </ol>
     <p>Design points:</p>
     <ul>
-      <li><b>The print fmt is captured verbatim from the reference host's live files</b> — the text format and field offsets are byte-identical to the reference, so any host tool (event analyzers parsing the format files) works unmodified.</li>
+      <li><b>The print fmt is captured verbatim from the Linux host's live files</b> — the text format and field offsets are byte-identical to Linux's, so any host tool (event analyzers parsing the format files) works unmodified.</li>
       <li><b>One declaration = one edit</b>: the table row, the call signature and the file shapes are a single edit — the "format and data drift" defect class is structurally unrepresentable (the same derive pattern as procfile! D-4).</li>
       <li><b>An argument cap of 10 u64 slots</b> (TRACE_ARGS=10): a comm costs two slots; exceeding it is unrepresentable at compile time (the PackArg trait declares slot usage per type).</li>
       <li><b>Two-level gating</b>: recording requires both the event's own enable switch and the global tracing_on; the tracing_on check sits inside record, after argument marshalling.</li>
@@ -101,7 +101,7 @@
     <div class="tbl-wrap"><table>
       <thead><tr><th>Group</th><th>#</th><th>Events</th></tr></thead>
       <tbody>
-        <tr><td class="mono">rux</td><td class="num">20</td><td>The rux: own family (the reference has no counterparts): epoll_ctl_insert/epoll_ctl_remove/epoll_wait_scan/epoll_wait_exit/epoll_delivery, futex_miss, fuxstuck, hilog_census/hilog_kmsg/hilog_top, itimer_arm, memwatch, mmforensics, ohhunt, schedtrace, sigtrace, spinwatch/spinwatch_fd, sysring, taskdump, txnhang</td></tr>
+        <tr><td class="mono">rux</td><td class="num">20</td><td>The rux: own family (Linux has no counterparts): epoll_ctl_insert/epoll_ctl_remove/epoll_wait_scan/epoll_wait_exit/epoll_delivery, futex_miss, fuxstuck, hilog_census/hilog_kmsg/hilog_top, itimer_arm, memwatch, mmforensics, ohhunt, schedtrace, sigtrace, spinwatch/spinwatch_fd, sysring, taskdump, txnhang</td></tr>
         <tr><td class="mono">sched</td><td class="num">9</td><td>sched_switch/sched_waking/sched_wakeup/sched_wakeup_new/sched_migrate_task/sched_process_fork/sched_process_exit/sched_process_free/sched_process_wait</td></tr>
         <tr><td class="mono">ext4</td><td class="num">7</td><td>ext4_sync_file_enter/exit, ext4_ext_map_blocks_enter/exit, ext4_da_write_begin/end, ext4_free_blocks</td></tr>
         <tr><td class="mono">net / binder / input</td><td class="num">5+5+4</td><td>net: udp_deliver/udp_wake/lo_xmit/sock_wait/pkt_drop; binder: binder_transaction/binder_transaction_received/binder_transaction_alloc_buf/binder_transaction_buffer_release/binder_wait_for_work; input: input_event/evdev_read/evdev_open/evdev_wake</td></tr>
@@ -110,10 +110,10 @@
         <tr><td class="mono">vmscan / timer / signal / printk / oom</td><td class="num">1 each</td><td>mm_vmscan_lru_shrink_inactive, itimer_arm (counted under rux), signal_generate, printk:console, oom:mark_victim</td></tr>
       </tbody>
     </table></div>
-    <p class="callout">The rux: family is a registered divergence shape: the reference kernel has no epoll/input-specific events; it is an own-event family — semantically aligned with the reference event model (group/name/id/format), with content specific to this kernel.</p>
+    <p class="callout">The rux: family is a registered divergence shape: Linux has no epoll/input-specific events; it is an own-event family — semantically aligned with Linux's event model (group/name/id/format), with content specific to this kernel.</p>
 
     <h2 id="tracefs"><span class="anchor">§3</span>The tracefs tree and usage</h2>
-    <p>Once mounted, the file tree matches the reference file-for-file (standard names, standard modes, byte formats captured from the live host's /sys/kernel/tracing):</p>
+    <p>Once mounted, the file tree matches Linux file-for-file (standard names, standard modes, byte formats captured from the live host's /sys/kernel/tracing):</p>
     <pre><code>mount -t tracefs none /sys/kernel/tracing
 cd /sys/kernel/tracing
 ls
@@ -121,7 +121,7 @@ ls
 # available_events  set_event  buffer_size_kb  snapshot  options/
 # events/&lt;group&gt;/{enable,filter,&lt;event&gt;/{enable,filter,id,format}}</span>
 
-cat events/sched/sched_wakeup/format     <span class="c"># field list + print fmt (byte-exact vs the reference)</span>
+cat events/sched/sched_wakeup/format     <span class="c"># field list + print fmt (byte-exact vs Linux)</span>
 cat events/sched/sched_wakeup/id         <span class="c"># the event id</span></code></pre>
     <h3>A typical session</h3>
     <pre><code>echo 1 &gt; tracing_on                                <span class="c"># global master switch (the second gating level)</span>
@@ -175,12 +175,12 @@ echo 0 &gt; tracing_on                                 <span class="c"># stop re
 
     <h2 id="adding"><span class="anchor">§5</span>How to add an event</h2>
     <ol>
-      <li>Add one row to the <code>tracepoints!</code> table in <code>kernel/src/trace/mod.rs</code>: group/name/id/print fmt (captured verbatim from the reference's live files, or self-declared for the rux: family)/field list/call signature/renderer.</li>
+      <li>Add one row to the <code>tracepoints!</code> table in <code>kernel/src/trace/mod.rs</code>: group/name/id/print fmt (captured verbatim from Linux's live files, or self-declared for the rux: family)/field list/call signature/renderer.</li>
       <li>Call <code>trace_&lt;name&gt;(args...)</code> at the site — no hand-written armed checks, packing or rendering.</li>
-      <li>Guest-side verification: <code>cat events/&lt;group&gt;/&lt;name&gt;/format</code> must be byte-identical to the reference format (reference families), or self-consistent with the declaration (rux: family).</li>
+      <li>Guest-side verification: <code>cat events/&lt;group&gt;/&lt;name&gt;/format</code> must be byte-identical to the Linux format (Linux families), or self-consistent with the declaration (rux: family).</li>
       <li>Cost verification: confirm one-load call sites in the release disassembly; an on/off A/B microbenchmark for the enabled cost.</li>
     </ol>
-    <p class="callout">Policy basis: the observability policy (2026-11-02) — the old dfx= ad-hoc switch table is frozen at 49 entries and must not grow; any new observation point must enter this framework as a tracepoint. This is an interface decision aligned with the reference (the debugfs/tracefs ecosystem works directly), not an internal preference.</p>
+    <p class="callout">Policy basis: the observability policy (2026-11-02) — the old dfx= ad-hoc switch table is frozen at 49 entries and must not grow; any new observation point must enter this framework as a tracepoint. This is an interface decision aligned with Linux (the debugfs/tracefs ecosystem works directly), not an internal preference.</p>
 
     <div class="callout">Code: <code>kernel/src/trace/mod.rs</code> (the macro + declaration table), <code>kernel/src/trace/files.rs</code> (the tracefs tree). Related: <a href="perf.html">performance debugging</a> (syscost/pbench), <a href="locks.html">lock debugging</a> (lock: observation), <a href="index.html">the debugging guide</a> (the legacy switch table).</div>
   

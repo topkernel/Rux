@@ -109,9 +109,9 @@
 
     <h2 id="user"><span class="anchor">§3</span>The user-space privilege surface</h2>
     <ul>
-      <li><b>User W^X</b>: NX mappings, the PT_GNU_STACK semantics, the READ_IMPLIES_EXEC personality — all three were once missing or ignored, fixed to the reference semantics (1de56837).</li>
+      <li><b>User W^X</b>: NX mappings, the PT_GNU_STACK semantics, the READ_IMPLIES_EXEC personality — all three were once missing or ignored, fixed to Linux's semantics (1de56837).</li>
       <li><b>seccomp</b>: a classic-BPF subset interpreter (LD|W|ABS/IMM, JMP|JEQ/JGT/JGE/JSET|K, RET|K; a 4096-instruction cap; out-of-bounds loads and fall-off-end kill), gated from BOTH trap paths before dispatch; STRICT and FILTER modes; kill actions queue SIGKILL; fork inheritance. PR_SET_NO_NEW_PRIVS is one-way, sticky across fork+exec, and gates unprivileged seccomp attach (LTP prctl02 PASS). The registered accepted divergence: a single filter, no TSYNC/TRACE/NOTIF.</li>
-      <li><b>The capability model</b>: 41 CAP_* UAPI constants (CAP_VALID_MASK = 2^41−1); after audit, 23 consulted points + six previously-never-checked capabilities wired by 4e75d849 (NET_RAW/NET_ADMIN/SYS_PACCT/SETFCAP/DAC_READ_SEARCH/PERFMON); ~18 enforcement gate sites (the reference ~120 — the breadth gap is in the gaps register).</li>
+      <li><b>The capability model</b>: 41 CAP_* UAPI constants (CAP_VALID_MASK = 2^41−1); after audit, 23 consulted points + six previously-never-checked capabilities wired by 4e75d849 (NET_RAW/NET_ADMIN/SYS_PACCT/SETFCAP/DAC_READ_SEARCH/PERFMON); ~18 enforcement gate sites (Linux ~120 — the breadth gap is in the gaps register).</li>
       <li><b>Secure-exec environment scrubbing (D-9)</b>: on AT_SECURE transitions the <b>kernel</b> removes every LD_* variable from the envp it installs — defense in depth independent of libc behavior (static binaries with custom loaders are covered too); the registered cost: a secure-exec'd process's /proc/[pid]/environ does not list LD_*.</li>
       <li><b>OOM scoring semantics</b>: the oom_badness shape (a resident-pages baseline + oom_score_adj), pinned by 10 property tests (immunity, saturation avoidance, symmetry).</li>
     </ul>
@@ -120,7 +120,7 @@
     <ul>
       <li><b>Kernel-stack guards</b>: a bottom canary (0xCAFE_F00D_DEAD_BEEF, written volatile) verified before the stack returns to the cache (R18-2 — a smashed value is direct evidence the task ran past its stack into the adjacent heap page, printed as STACK-OVERFLOW) + the FREED_STACKS 32-entry ring (names the freer when a faulting rsp sits in a freed stack) + dfx-gated 0xC3 free-painting; the packed kernel-stack slab (D-2) ran 3,445 live tasks with zero canary hits. Compiler stack protection is a registered gap (§5).</li>
       <li><b>Deferred-free quarantine</b>: MmStruct/Task enter a 16,384-entry wall-clock ring (a 1,500 ms drain) — the use-after-free window for unaccounted procfs borrowers is structurally closed.</li>
-      <li><b>Failure discipline</b>: oops/panic in the reference report shape (CSRs + all GPRs + a 32-frame backtrace + symbolization), the panic_on_oops sysctl, the panic= reboot parameter, the pstore console.</li>
+      <li><b>Failure discipline</b>: oops/panic in Linux's report shape (CSRs + all GPRs + a 32-frame backtrace + symbolization), the panic_on_oops sysctl, the panic= reboot parameter, the pstore console.</li>
       <li><b>The observable safety net</b>: the unified tracepoints (69 events/17 groups), the census/heal self-repair (MISS=0, measured and recorded), the spinlock watchdog, kallsyms-symbolized backtraces — defect localization time is itself a security property.</li>
     </ul>
 
@@ -134,8 +134,8 @@
         <tr><td>arithmetic overflow checks</td><td>off in the release profile (on in dev)</td><td>one config line + the measured boot/perf cost through the merge gate</td></tr>
         <tr><td>KASAN-style poisoning</td><td>task-page paint + header audits + the buddy-metadata shadow (dfx-gated); no redzones on small_alloc</td><td>build-flag redzones and poison-on-free in small_alloc/slab</td></tr>
         <tr><td>the LSM surface</td><td>hooks exist; selinuxfs is a label-carrying compat mount, permissive by construction</td><td>policy parsing + AVC decisions</td></tr>
-        <tr><td>namespaces</td><td>PID/IPC real (1bde7490); net/user/mount are stubs</td><td>implement per the reference semantics one by one</td></tr>
-        <tr><td>capability enforcement breadth</td><td>41 constants, ~18 gate sites (the reference ~120)</td><td>wire per the consulted-surface list</td></tr>
+        <tr><td>namespaces</td><td>PID/IPC real (1bde7490); net/user/mount are stubs</td><td>implement per Linux semantics one by one</td></tr>
+        <tr><td>capability enforcement breadth</td><td>41 constants, ~18 gate sites (Linux ~120)</td><td>wire per the consulted-surface list</td></tr>
       </tbody>
     </table></div>
     <h3>Absent</h3>
@@ -149,7 +149,7 @@
         <tr><td>module signing</td><td>no runtime code loading today (a registration surface only), so the topic is dormant</td><td>signature verification ships with the real loader</td></tr>
         <tr><td>a KCSAN-class checker</td><td>absent; the residual safe races are protocol-level</td><td>a watchpoint checker is a project; the loom/Kani mirrors cover the primitive subset</td></tr>
         <tr><td>kptr_restrict / kallsyms masking</td><td>/proc/kallsyms shows real addresses to every reader</td><td>a masking knob + masked default</td></tr>
-        <tr><td>an eBPF-class runtime mitigation channel</td><td>absent</td><td>project per the reference semantics</td></tr>
+        <tr><td>an eBPF-class runtime mitigation channel</td><td>absent</td><td>project per Linux semantics</td></tr>
       </tbody>
     </table></div>
     <p>Posture summary (the security-posture.md 21-row basis): <b>7 rows present, 3 quick, 10 project-grade, 1 accepted</b>.</p>

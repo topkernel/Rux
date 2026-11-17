@@ -91,7 +91,7 @@
     </ol>
     <p>设计要点:</p>
     <ul>
-      <li><b>print fmt 从参考主机的活文件逐字捕获</b> —— 文本格式与字段偏移与参考实现逐字节一致,任何宿主工具(解析 format 文件的事件分析器)无需修改即可工作。</li>
+      <li><b>print fmt 从 Linux 主机的活文件逐字捕获</b> —— 文本格式与字段偏移与 Linux 逐字节一致,任何宿主工具(解析 format 文件的事件分析器)无需修改即可工作。</li>
       <li><b>一个声明 = 一次编辑</b>:表行、调用签名、文件形态是同一处修改 —— "格式与数据漂移"这类缺陷类在结构上不可表达(与 procfile! D-4 同一 derive 模式)。</li>
       <li><b>实参上限 10 个 u64 槽</b>(TRACE_ARGS=10):一个 comm 占两槽;超界在编译期不可表达(PackArg trait 逐类型声明占用槽数)。</li>
       <li><b>两级门控</b>:事件记录需事件自身 enable 与全局 tracing_on 同时开启;tracing_on 检查位于 record 内部、实参打包之后。</li>
@@ -101,7 +101,7 @@
     <div class="tbl-wrap"><table>
       <thead><tr><th>组</th><th>数</th><th>事件</th></tr></thead>
       <tbody>
-        <tr><td class="mono">rux</td><td class="num">20</td><td>rux 自有族(参考实现无对应事件):epoll_ctl_insert/epoll_ctl_remove/epoll_wait_scan/epoll_wait_exit/epoll_delivery、futex_miss、fuxstuck、hilog_census/hilog_kmsg/hilog_top、itimer_arm、memwatch、mmforensics、ohhunt、schedtrace、sigtrace、spinwatch/spinwatch_fd、sysring、taskdump、txnhang</td></tr>
+        <tr><td class="mono">rux</td><td class="num">20</td><td>rux 自有族(Linux 无对应事件):epoll_ctl_insert/epoll_ctl_remove/epoll_wait_scan/epoll_wait_exit/epoll_delivery、futex_miss、fuxstuck、hilog_census/hilog_kmsg/hilog_top、itimer_arm、memwatch、mmforensics、ohhunt、schedtrace、sigtrace、spinwatch/spinwatch_fd、sysring、taskdump、txnhang</td></tr>
         <tr><td class="mono">sched</td><td class="num">9</td><td>sched_switch/sched_waking/sched_wakeup/sched_wakeup_new/sched_migrate_task/sched_process_fork/sched_process_exit/sched_process_free/sched_process_wait</td></tr>
         <tr><td class="mono">ext4</td><td class="num">7</td><td>ext4_sync_file_enter/exit、ext4_ext_map_blocks_enter/exit、ext4_da_write_begin/end、ext4_free_blocks</td></tr>
         <tr><td class="mono">net / binder / input</td><td class="num">5+5+4</td><td>net: udp_deliver/udp_wake/lo_xmit/sock_wait/pkt_drop;binder: binder_transaction/binder_transaction_received/binder_transaction_alloc_buf/binder_transaction_buffer_release/binder_wait_for_work;input: input_event/evdev_read/evdev_open/evdev_wake</td></tr>
@@ -110,10 +110,10 @@
         <tr><td class="mono">vmscan / timer / signal / printk / oom</td><td class="num">各 1</td><td>mm_vmscan_lru_shrink_inactive、itimer_arm(计 rux)、signal_generate、printk:console、oom:mark_victim</td></tr>
       </tbody>
     </table></div>
-    <p class="callout">rux: 族为登记的设计分歧形态:参考内核无 epoll/input 专属事件,属自有事件族 —— 语义上对齐其事件模型(组/名/id/format),内容为本内核特有观测点。</p>
+    <p class="callout">rux: 族为登记的设计分歧形态:Linux 无 epoll/input 专属事件,属自有事件族 —— 语义上对齐其事件模型(组/名/id/format),内容为本内核特有观测点。</p>
 
     <h2 id="tracefs"><span class="anchor">§3</span>tracefs 文件树与使用</h2>
-    <p>挂载后文件树与参考实现逐文件对齐(标准名、标准 mode、字节格式自活主机 /sys/kernel/tracing 捕获):</p>
+    <p>挂载后文件树与 Linux 逐文件对齐(标准名、标准 mode、字节格式自活主机 /sys/kernel/tracing 捕获):</p>
     <pre><code>mount -t tracefs none /sys/kernel/tracing
 cd /sys/kernel/tracing
 ls
@@ -121,7 +121,7 @@ ls
 # available_events  set_event  buffer_size_kb  snapshot  options/
 # events/&lt;group&gt;/{enable,filter,&lt;event&gt;/{enable,filter,id,format}}</span>
 
-cat events/sched/sched_wakeup/format     <span class="c"># 字段表 + print fmt(逐字节对齐参考)</span>
+cat events/sched/sched_wakeup/format     <span class="c"># 字段表 + print fmt(逐字节对齐 Linux)</span>
 cat events/sched/sched_wakeup/id         <span class="c"># 事件 id</span></code></pre>
     <h3>典型会话</h3>
     <pre><code>echo 1 &gt; tracing_on                                <span class="c"># 全局总开关(两级门控的第二级)</span>
@@ -175,12 +175,12 @@ echo 0 &gt; tracing_on                                 <span class="c"># 停止�
 
     <h2 id="adding"><span class="anchor">§5</span>如何新增一个事件</h2>
     <ol>
-      <li>在 <code>kernel/src/trace/mod.rs</code> 的 <code>tracepoints!</code> 表加一行:组/名/id/print fmt(自参考活文件逐字捕获,或对 rux: 族自拟)/字段表/call 签名/render。</li>
+      <li>在 <code>kernel/src/trace/mod.rs</code> 的 <code>tracepoints!</code> 表加一行:组/名/id/print fmt(自 Linux 活文件逐字捕获,或对 rux: 族自拟)/字段表/call 签名/render。</li>
       <li>调用点写 <code>trace_&lt;name&gt;(实参...)</code> —— 无需手写 armed 检查、打包或渲染。</li>
-      <li>guest 侧验证:<code>cat events/&lt;group&gt;/&lt;name&gt;/format</code> 与参考 format 逐字节比对(参考族),或与声明自洽(rux: 族)。</li>
+      <li>guest 侧验证:<code>cat events/&lt;group&gt;/&lt;name&gt;/format</code> 与 Linux format 逐字节比对(Linux 族),或与声明自洽(rux: 族)。</li>
       <li>成本验证:release 反汇编确认调用点 one-load;开/关对照微基准给出启用代价。</li>
     </ol>
-    <p class="callout">政策依据:观测性政策(2026-11-02)—— 旧 dfx= 散装开关表冻结于 49 项不再增长;任何新观测点必须以 tracepoint 形态进入本框架。这是与参考实现对齐的接口决策(debugfs/tracefs 生态直接可用),而非内部偏好。</p>
+    <p class="callout">政策依据:观测性政策(2026-11-02)—— 旧 dfx= 散装开关表冻结于 49 项不再增长;任何新观测点必须以 tracepoint 形态进入本框架。这是与 Linux 对齐的接口决策(debugfs/tracefs 生态直接可用),而非内部偏好。</p>
 
     <div class="callout">代码:<code>kernel/src/trace/mod.rs</code>(宏 + 声明表)、<code>kernel/src/trace/files.rs</code>(tracefs 文件树)。相关:<a href="perf.html">性能调试</a>(syscost/pbench)、<a href="locks.html">锁调试</a>(lock: 观测)、<a href="index.html">调试指南</a>(遗留开关表)。</div>
   </article>

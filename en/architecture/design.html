@@ -83,7 +83,7 @@
     <div class="sub">Mechanisms, data structures and measured numbers per subsystem — numbers come from the repository docs; unmeasured items are marked as such</div>
 
     <h2 id="overview"><span class="anchor">§0</span>Overview</h2>
-    <p>Rux is one source tree serving three architectures (riscv64 / x86_64 / aarch64), ~90% arch-independent. Externally it matches the reference ABI across 345+ syscalls; internally it is a clean-room design — every internal decision that differs from the mainstream is registered in the <a href="#divergences">design-divergence register</a> with compatibility evidence.</p>
+    <p>Rux is one source tree serving three architectures (riscv64 / x86_64 / aarch64), ~90% arch-independent. Externally it matches the Linux ABI across 345+ syscalls; internally it is a clean-room design — every internal decision that differs from the mainstream is registered in the <a href="#divergences">design-divergence register</a> with compatibility evidence.</p>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>Subsystem</th><th class="num">Lines</th><th class="num">Share</th><th>Role</th></tr></thead>
@@ -107,13 +107,13 @@
     <p><b>A single global run queue — GRQ (divergence <a href="#d1">D-1</a>).</b> One <code>GlobalRunQueue</code> serves every CPU with three per-class subqueues: DL (BTreeMap, EDF), RT (bitmap + per-priority lists), CFS (BTreeMap by vruntime); atomic <code>nr_running</code>, an <code>idle_cpus</code> bitmap, and per-CPU current/idle/stop pointers only. <b>No per-CPU queues, no load balancer</b> — idle CPUs pull work on demand via IPI.</p>
     <ul>
       <li><b>CFS (fair.rs)</b>: vruntime = runtime ×(NICE_0_LOAD/weight); <code>cfs_min_granularity_ns = 0.7 ms</code> (also the wakeup granularity), a 6 ms latency window, 100 Hz ticks; pick lifts non-runnable entries out of the timeline and reinserts them; <code>min_vruntime</code> takes the whole tree's leftmost (never erasing a sleeper's credit).</li>
-      <li><b>The measured-wait wakeup preemption gate (D-14)</b>: a wakeup with no idle CPU pokes the busy CPU only when the wakee's measured wait ≥ 6 ms — replacing the reference's vruntime-credit comparison (which Rux's vruntime adjustments would fool every time).</li>
+      <li><b>The measured-wait wakeup preemption gate (D-14)</b>: a wakeup with no idle CPU pokes the busy CPU only when the wakee's measured wait ≥ 6 ms — replacing Linux's vruntime-credit comparison (which Rux's vruntime adjustments would fool every time).</li>
       <li><b>wakewatch</b>: a wake→run latency forensics instrument (1024-slot side table + a pick-skip reason table).</li>
       <li>The GRQ lock is protected by typed lock keys (<a href="#d11">D-11</a> — nesting is a compile-time fact).</li>
     </ul>
     <h3>Key numbers</h3>
     <ul>
-      <li>GRQ in-lock work (exact probe, release, KVM q35 smp2): exact hold <b>241–273 ns</b> (378 ns before the timeline rework); the tree work itself is ~20–30 ns per mutation with zero allocation under the lock, the rest is D-1 bookkeeping. <b>The 70–84 ns lock wait is the KVM tax on cross-vCPU locked instructions</b> (the reference's per-rq lock pays it too — it is not the GRQ being slow). The gate band tracks the call-site IF=0 span average (irqsave→restore, <b>including lock-acquisition wait</b> and critical-section work): 2786 ns @ n=6.3M (band 1200–7320 ns, load-coupled family 0.6–5.4 µs); flat across a 126.0M-syscall boot → size-coupled, not contention-bound (at ≤4 vCPUs).</li>
+      <li>GRQ in-lock work (exact probe, release, KVM q35 smp2): exact hold <b>241–273 ns</b> (378 ns before the timeline rework); the tree work itself is ~20–30 ns per mutation with zero allocation under the lock, the rest is D-1 bookkeeping. <b>The 70–84 ns lock wait is the KVM tax on cross-vCPU locked instructions</b> (Linux's per-rq lock pays it too — it is not the GRQ being slow). The gate band tracks the call-site IF=0 span average (irqsave→restore, <b>including lock-acquisition wait</b> and critical-section work): 2786 ns @ n=6.3M (band 1200–7320 ns, load-coupled family 0.6–5.4 µs); flat across a 126.0M-syscall boot → size-coupled, not contention-bound (at ≤4 vCPUs).</li>
       <li>Boot census reads exactly, on every qualified quiet boot: TERM-DESCHED <b>8</b> (band 8±2), WAKE-REFUSED <b>32</b> (band 32±4).</li>
       <li>Three context-switch levers (FSGSBASE 393 ns/switch + lazy FPU + CPUID-gated PCID): <code>lat_ctx -s64 2</code> <b>4.97→2.07 µs (−58%)</b>; same-rig lmbench <b>1.98 vs 6.71 µs (3.39×)</b>.</li>
       <li>With D-14: the 74-byte unix-stream wake/preempt/switch round trip ~275 µs → ~2.5 µs; the p5 IPC family <b>10–18×</b>.</li>
@@ -124,7 +124,7 @@
     <h2><span class="anchor">§2</span>Memory management (kernel/src/mm/) · <a href="memory.html">deep-dive →</a></h2>
     <p>Deep dive in the <a href="memory.html">memory page</a>; summary:</p>
     <ul>
-      <li><b>Three-stage boot</b>: memblock (dual-region table) → fixmap → zone/buddy; Sv39 layout constants match the reference (PAGE_OFFSET/VMALLOC/vmemmap/TASK_SIZE).</li>
+      <li><b>Three-stage boot</b>: memblock (dual-region table) → fixmap → zone/buddy; Sv39 layout constants match Linux (PAGE_OFFSET/VMALLOC/vmemmap/TASK_SIZE).</li>
       <li><b>vmemmap</b>: a 64-byte cache-line-aligned <code>Page</code> per physical page, pfn↔page O(1); buddy MAX_ORDER=10, order-0 through the per-CPU pageset (PCP) with zero zone locks.</li>
       <li><b>small_alloc (magazine)</b>: 8 power-of-two classes (8..1024B) + a per-CPU magazine (depth 16); class locks are taken only for batched refill/flush; one free bit per slab page, cleared before the page returns — a stale pointer lands on the buddy-side sentinel instead of corrupting silently.</li>
       <li><b>Packed kernel-stack slab (D-2, x86_64)</b>: 80KB slots in 256KB blocks + a side table; 85.3KB/stack vs 128KB, 99.9% slot packing, 3,445 live tasks (deepest recorded) with zero canary hits.</li>
@@ -150,12 +150,12 @@
       <li><b>jbd2 direct-write commit (D-8)</b>: commit writes transaction buffers straight to their final locations and advances the log tail/head with the commit — a completed commit leaves nothing to replay, and the 8–12 synchronous round trips per unlink/rmdir disappear; on-disk format and recovery (e2fsck) unchanged.</li>
       <li><b>bio/buffer cache</b>: buffer_head five states + LRU; write planning once re-scanned all pending quadratically (fixed with a 3-round cap + conservative linear fallback; 252 samples of one fsync wedging 1,092 s pinned it).</li>
       <li><b>The procfile! macro (D-4)</b>: /proc formatters derived from one field-declaration table, killing the format-drift defect class (vmstat/meminfo/status byte-identical to a live host).</li>
-      <li><b>pipe</b>: 64 KiB capacity, PIPE_BUF=4096 atomic writes (reference defaults). <b>io_uring</b>: the 5.1+ ABI (SQ/CQ ring mmap), operations executed synchronously in the enter context.</li>
+      <li><b>pipe</b>: 64 KiB capacity, PIPE_BUF=4096 atomic writes (Linux defaults). <b>io_uring</b>: the 5.1+ ABI (SQ/CQ ring mmap), operations executed synchronously in the enter context.</li>
     </ul>
     <h3>Key numbers</h3>
     <ul>
       <li>Metadata re-measurement (2026-11-01): stat 200.9→<b>71.1 µs</b>, openclose 512.9→<b>156.3 µs</b>, read_cached 546.8→<b>203.7 µs</b>, append 657.2→<b>77.4 µs</b>, mkdrmdir 22.8→<b>2.76 ms</b>, unlink 1,141→<b>808 µs</b>.</li>
-      <li>D-13 end to end: p6_mkdrmdir median 29,796→<b>2,107 µs</b>, p99 54→<b>16.4 ms</b> (vs 153 µs for the reference — the residue is shared syscall/lookup overhead, not fs).</li>
+      <li>D-13 end to end: p6_mkdrmdir median 29,796→<b>2,107 µs</b>, p99 54→<b>16.4 ms</b> (vs 153 µs for Linux — the residue is shared syscall/lookup overhead, not fs).</li>
       <li>buffer cache hit rate <b>99.1%</b> (gate ≥ baseline).</li>
     </ul>
     <p><b>Compatibility:</b> the jbd2 on-disk format is unchanged (image mounting/recovery identical); POSIX does not promise per-operation directory persistence (that is fsync(dirfd)); LTP change families green.</p>
@@ -163,25 +163,25 @@
     <div class="mod-anchor" id="ipc"></div>
     <h2><span class="anchor">§4</span>IPC (kernel/src/ipc/) · <a href="ipc.html">deep-dive →</a></h2>
     <ul>
-      <li><b>binder (14,144 lines, the largest single file; deep-dive on the <a href="ipc.html">IPC page</a>)</b>: the load-bearing implementation of the OpenHarmony service mesh. A misc device <code>/dev/binder</code>; mmap buffer silently truncated at 4 MiB (same as the reference); protocol version 8; the full BC_*/BR_* set, flat_binder_object cross-process translation, deferred TRANSACTION_COMPLETE for sync transactions. Lock model: one global spinlock, no user-memory copies and no sleeping under it.</li>
+      <li><b>binder (14,144 lines, the largest single file; deep-dive on the <a href="ipc.html">IPC page</a>)</b>: the load-bearing implementation of the OpenHarmony service mesh. A misc device <code>/dev/binder</code>; mmap buffer silently truncated at 4 MiB (same as Linux); protocol version 8; the full BC_*/BR_* set, flat_binder_object cross-process translation, deferred TRANSACTION_COMPLETE for sync transactions. Lock model: one global spinlock, no user-memory copies and no sleeping under it.</li>
       <li><b>The access_token registry</b>: <code>/dev/access_token_id</code> + BINDER_GET_SENDER_INFO — samgr's permission checks depend on it; its absence once caused the OH display blackout (the b98–b112 root cause).</li>
-      <li><b>SysV trio + POSIX MQ</b>: structs compile-time asserted against the reference layouts (ShmidDsUapi 112B, MqAttr 64B); SysV objects scoped per ipc_namespace.</li>
-      <li>The binder poll wake/availability fix converged four semantic divergences in one diff (the reference's three OR conditions in binder_has_work_ilocked).</li>
+      <li><b>SysV trio + POSIX MQ</b>: structs compile-time asserted against Linux's layouts (ShmidDsUapi 112B, MqAttr 64B); SysV objects scoped per ipc_namespace.</li>
+      <li>The binder poll wake/availability fix converged four semantic divergences in one diff (Linux's three OR conditions in binder_has_work_ilocked).</li>
     </ul>
     <h3>Key numbers</h3>
     <ul>
       <li>With /data mounted and the service mesh at ~<b>89k txns/s</b>, binder lock REST sections averaged 9.2 µs (single-transaction max 73 ms — a watch row; not reproduced on re-runs).</li>
       <li>pipe round trip p5a <b>18.3 µs</b>, unix dgram p5b <b>23–41 µs</b> (was 318.6 µs before D-14, −93%).</li>
     </ul>
-    <p><b>Compatibility:</b> the UAPI is byte-aligned with the reference binder header (_IOC encoding, packed layouts); LTP sem/msg/shm families + the full OH service set are the guards.</p>
+    <p><b>Compatibility:</b> the UAPI is byte-aligned with Linux's binder header (_IOC encoding, packed layouts); LTP sem/msg/shm families + the full OH service set are the guards.</p>
 
     <div class="mod-anchor" id="net"></div>
     <h2><span class="anchor">§5</span>Network (kernel/src/net/, 18 files)</h2>
     <ul>
       <li>Bottom-up: SkBuff → ethernet → arp → ipv4 → icmp/udp/tcp (+ipv6); a socket layer with SOCK_STREAM/DGRAM/RAW + unix + netlink.</li>
-      <li><b>TCP (4,841 lines)</b>: ISN from a four-tuple hash + jiffies; MSS 1460, window 65535, RTO 200 ms–120 s, DELACK 40 ms, zero-window persist probes at 5 s (reference initial values).</li>
+      <li><b>TCP (4,841 lines)</b>: ISN from a four-tuple hash + jiffies; MSS 1460, window 65535, RTO 200 ms–120 s, DELACK 40 ms, zero-window persist probes at 5 s (Linux initial values).</li>
       <li><b>AF_UNIX (3,707 lines)</b>: STREAM/SEQPACKET/DGRAM, the abstract namespace, SCM_RIGHTS fd passing, kernel-filled SCM_CREDENTIALS; peers are mutual Weaks (the fd is the only strong owner — "peer closed" = Weak::upgrade failure, no reference cycles); a single-lock send path with no AB-BA.</li>
-      <li>netlink set operations gate on NET_ADMIN, raw/packet on NET_RAW (errno precedence pinned from the reference source).</li>
+      <li>netlink set operations gate on NET_ADMIN, raw/packet on NET_RAW (errno precedence pinned from the Linux source).</li>
     </ul>
     <h3>Key numbers</h3>
     <ul>
@@ -244,17 +244,17 @@
           <tr><td><b>D-17</b></td><td><b>The kernel-side device alias arena</b>: no identity MMIO window at runtime, no uaccess identity hole (a bad user pointer faults instead of reading physical memory). Guards: PF-NOCTX/SMAP-VIOL beacons stay silent.</td></tr>
           <tr><td><b>D-18</b></td><td><b>SMAP via the pushfq EFLAGS.AC sequence</b>: STAC/CLAC unconditionally #UD under TCG (established by paired trials); ~55 ns per bracket, boots on hardware and TCG alike.</td></tr>
           <tr><td><b>D-19</b></td><td><b>The typed timer wheel</b>: clock domains cannot be mixed, periodic requires NonZeroU64, WakeArmed/WakeSpent scope guards. Six historical bug classes became compile errors; same-rig A/B: arm lock 924→697 ns, nanosleep 772.6→662.7 ms, p2_ctxsw 12.198 vs 15.400 µs.</td></tr>
-          <tr><td><b>D-20</b></td><td><b>The writer-side dirty-writeback watermark on a free-fraction mark (no global dirty accounting)</b>: once the Normal zone's free count falls below half its managed pages (zone_below_dirty_writeback_mark), the buffered writer flushes its own inode's dirty range and runs the system-wide recovery pass (writeback_recover: free already-clean pages first, collect dirty inodes via a full-table rotating walk and flush each, directly evict flushed pages). The difference from the reference: it throttles by per-BDI dirty thresholds / the balance_dirty_pages dirty fraction, while Rux keeps no per-BDI accounting and uses the zone free-fraction as the mark — <b>the discipline, not the constant, is the contract</b>. It eliminated the delayed-allocation dirty-balloon wedge (243k dirty pages growing to RAM scale, the zone draining to zero); LTP fallocate05/06 on three fresh boots RC=0; riscv64 make test 1328/1328. Cost: no per-BDI precision — with multi-device loads the watermark granularity is coarser than the reference. Note: PSI (/proc/pressure) is not in main; it is recorded on the debug-alignment resume queue.</td></tr>
+          <tr><td><b>D-20</b></td><td><b>The writer-side dirty-writeback watermark on a free-fraction mark (no global dirty accounting)</b>: once the Normal zone's free count falls below half its managed pages (zone_below_dirty_writeback_mark), the buffered writer flushes its own inode's dirty range and runs the system-wide recovery pass (writeback_recover: free already-clean pages first, collect dirty inodes via a full-table rotating walk and flush each, directly evict flushed pages). The difference from Linux: Linux throttles by per-BDI dirty thresholds / the balance_dirty_pages dirty fraction, while Rux keeps no per-BDI accounting and uses the zone free-fraction as the mark — <b>the discipline, not the constant, is the contract</b>. It eliminated the delayed-allocation dirty-balloon wedge (243k dirty pages growing to RAM scale, the zone draining to zero); LTP fallocate05/06 on three fresh boots RC=0; riscv64 make test 1328/1328. Cost: no per-BDI precision — with multi-device loads the watermark granularity is coarser than Linux's. Note: PSI (/proc/pressure) is not in main; it is recorded on the debug-alignment resume queue.</td></tr>
         </tbody>
       </table>
     </div>
 
     <h2 id="rust-native"><span class="anchor">§10</span>Rust-native engineering (register highlights)</h2>
-    <p>Thesis: externally reference-compatible, internally <b>not a C→Rust translation</b> — correctness and speed come from the type system, ownership, or internal architectures the reference does not have. Every entry carries numbers measured by this repository's instruments (entries without evidence are placeholders in the G bucket).</p>
+    <p>Thesis: externally Linux-compatible, internally <b>not a C→Rust translation</b> — correctness and speed come from the type system, ownership, or internal architectures Linux does not have. Every entry carries numbers measured by this repository's instruments (entries without evidence are placeholders in the G bucket).</p>
     <ul>
       <li><b>The type system turns bug classes into compile errors</b>: D-19's six misuse classes caught by rustc; the S-1 concurrency-primitive model check (loom interleavings + Kani proofs of INV-M1..M5) caught a real pid-0 recursion bug within its first 90 seconds; D-11 lock keys, D-7 CpuLocal, the WalkClaim lockless dcache (stat 0.643→0.423 µs).</li>
       <li><b>Safe-by-construction shapes are themselves optimizations</b>: D-1's single-structure forensics (how the OH campaign actually found the scheduling bug family); the leaf-table direct unmap (vm-op family 15→5 s/CPU-min); the negative-lookup memo (oracle 475k/963k/0).</li>
-      <li><b>Semantic divergences are found by diffing the reference tree and fixed by adopting its behavior</b> (root causes, not symptoms): execve ETXTBSY, SysV IPC per namespace, shared-futex keys resolved to the physical word, tmpfs MAP_SHARED coherence through the page cache, the binder poll triple-condition, O_DIRECT reads flushing the dirty page-cache range first, SYSRET TF|RF fallback, UTF-8 validation on every user-writable string.</li>
+      <li><b>Semantic divergences are found by diffing the Linux tree and fixed by adopting its behavior</b> (root causes, not symptoms): execve ETXTBSY, SysV IPC per namespace, shared-futex keys resolved to the physical word, tmpfs MAP_SHARED coherence through the page cache, the binder poll triple-condition, O_DIRECT reads flushing the dirty page-cache range first, SYSRET TF|RF fallback, UTF-8 validation on every user-writable string.</li>
       <li><b>Safety properties C kernels rent from tools</b>: constructive memory safety + SMAP/CR0.WP/no identity window/userspace W^X/seccomp/capabilities + a designed panic surface (every instance retired with a regression test).</li>
       <li><b>Redesigns that landed as performance (same-rig A/B)</b>: lmbench four-row leads (lat_ctx 3.4×, lat_pipe 2.6×, exec 1.39×, fstat 1.19×), switch −58%, p5 family −90~93%, the fs metadata family −65~−88%; Geekbench multi-core 7709 (4-CPU pinned, best-of-runs).</li>
       <li><b>Honest placeholders (bucket G)</b>: the typed-binder transaction FSM, an ext4/jbd2 host-side test slice, an internal completion-ring writeback base — no A/B numbers yet; the only way out is a measured row.</li>

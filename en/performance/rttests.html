@@ -85,7 +85,7 @@
     <div class="sub">Real-time latency and scheduling stress, compared on the same image, binaries and rig; a row without numbers is a failure · rig and method</div>
 
     <h2 id="data"><span class="anchor">§1</span>Data (same image, same binary, same rig)</h2>
-    <p style="font-size:13.5px">Both sides run <b>the same image, the same rt-tests v2.11 static binaries, the same parameters</b> — Rux (main release) vs the reference kernel (same-image guest kernel 7.0.0-38). cyclictest: a 30 s window, a 1000 µs interval, mlockall; hackbench: message-passing throughput (seconds, lower is better). The cyclictest rows currently carry Rux release single-boot measurements beside reference full-suite columns (different boots); the same-rig interleaved re-measurement is in flight.</p>
+    <p style="font-size:13.5px">Both sides run <b>the same image, the same rt-tests v2.11 static binaries, the same parameters</b> — Rux (main release) vs Linux (same-image guest kernel 7.0.0-38). cyclictest: a 30 s window, a 1000 µs interval, mlockall; hackbench: message-passing throughput (seconds, lower is better). The cyclictest rows currently carry Rux release single-boot measurements beside Linux full-suite columns (different boots); the same-rig interleaved re-measurement is in flight.</p>
     <div class="tbl-wrap"><table>
       <thead><tr><th>Item</th><th class="num">Rux</th><th class="num">Linux (same rig)</th><th>Notes</th></tr></thead>
       <tbody id="rt-rows">
@@ -95,7 +95,7 @@
         <tr><td class="mono">hackbench socketpair -g 20 (s)</td><td class="num">1.536</td><td class="num">0.330</td><td>Linux 4.7×</td></tr>
         <tr><td class="mono">hackbench pipe -p 20 -g 4 (s)</td><td class="num">0.163</td><td class="num">0.017</td><td>Linux 9.6×</td></tr>
         <tr><td class="mono">hackbench thread -T 20 -g 4 (s)</td><td class="num">0.287</td><td class="num">0.042</td><td>Linux 6.8×</td></tr>
-        <tr><td class="mono">pi_stress -g 2 -D 20 (inversions completed)</td><td class="num">132,074 inversions (-g 1, 11 s)</td><td class="num">132,074 inversions (-g 1, 11 s)</td><td>PI futex now follows the reference shape (rt_mutex_setprio); -g 2 still wedges on a pre-existing scheduler slot defect</td></tr>
+        <tr><td class="mono">pi_stress -g 2 -D 20 (inversions completed)</td><td class="num">132,074 inversions (-g 1, 11 s)</td><td class="num">132,074 inversions (-g 1, 11 s)</td><td>PI futex now follows Linux's shape (rt_mutex_setprio); -g 2 still wedges on a pre-existing scheduler slot defect</td></tr>
       </tbody>
     </table></div>
     <p style="font-size:13px;color:var(--text-3)">A row without numbers is a failure: hackbench inet ≥2 groups has no number on Rux (loopback non-blocking-connect stalls; on record with the net lane); pi_stress once failed initialization on Rux (the PI-mutex UAPI chain) — this table carries the newest two-sided readings, and failed items show as such in their rows.</p>
@@ -109,7 +109,7 @@
     <h2 id="infra"><span class="anchor">§3</span>Toolchain</h2>
     <ul>
       <li>The rt-tests v2.11 upstream source is committed; built by userspace/tests/rttests/build-x86.sh; schedprobe (injected every boot) verifies the raw sched_* syscall surface.</li>
-      <li>Extension: <code>test/qrtests/run-suite-x86.sh "60 cyclictest -D 30 -i 1000 -m"</code>; the histogram mode (-h to file) and a reference-kernel column are in the queue.</li>
+      <li>Extension: <code>test/qrtests/run-suite-x86.sh "60 cyclictest -D 30 -i 1000 -m"</code>; the histogram mode (-h to file) and a Linux column are in the queue.</li>
     </ul>
 
     <div class="callout">Canonical: the qa-suites worktree run/qa-suites-findings.md; raw serials run/bench-pair-1117/ (both sides).</div>

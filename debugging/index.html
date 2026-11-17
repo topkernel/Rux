@@ -97,13 +97,13 @@
     <h2 id="log"><span class="anchor">§2</span>内核日志</h2>
     <ul>
       <li><b>串口是首要日志</b>(<code>console=ttyS0</code>):启动期全部打印到 UART;调度器就绪后默认级别降为 emerg,<code>dmesg -n 7</code> 重开全量。</li>
-      <li><b>级别 0–7</b>与参考实现一致;宏 pr_emerg!/pr_err!/pr_warn!/pr_info!/pr_debug!(println! = pr_info! 别名);release 构建剔除 pr_debug。</li>
-      <li><b>kmsg 环形缓冲 1 MB</b>:读取途径 /proc/kmsg、syslog(2)、dmesg;<b>devkmsg 策略</b>(/proc/sys/kernel/printk_devkmsg:on|ratelimit|off)只决定控制台呈现多少 —— 环永远全量记录(rux 对参考 devkmsg 语义的对齐实现)。</li>
+      <li><b>级别 0–7</b>与 Linux 一致;宏 pr_emerg!/pr_err!/pr_warn!/pr_info!/pr_debug!(println! = pr_info! 别名);release 构建剔除 pr_debug。</li>
+      <li><b>kmsg 环形缓冲 1 MB</b>:读取途径 /proc/kmsg、syslog(2)、dmesg;<b>devkmsg 策略</b>(/proc/sys/kernel/printk_devkmsg:on|ratelimit|off)只决定控制台呈现多少 —— 环永远全量记录(rux 对 Linux devkmsg 语义的对齐实现)。</li>
       <li><b>持久日志</b>(默认关):panic 日志跨重启幸存于 /var/log/kmsg;崩溃后 debugfs 离线抽取(见 <a href="memory.html#offline">内存取证 §8</a>)。</li>
     </ul>
 
     <h2 id="trace"><span class="anchor">§3</span>trace 体系(摘要)</h2>
-    <p><b>新观测一律走统一 tracepoint</b>(观测性政策,2026-11-02)。当前 <b>69 事件 / 17 组</b>;tracefs 文件树与字节格式逐文件对齐参考实现;禁用站点 = 单次 load+test+branch,启用 +13–19 ns/记录,镜像 +0.18%。完整设计与用法见 <a href="tracepoints.html">tracepoint 框架</a>。</p>
+    <p><b>新观测一律走统一 tracepoint</b>(观测性政策,2026-11-02)。当前 <b>69 事件 / 17 组</b>;tracefs 文件树与字节格式逐文件对齐 Linux;禁用站点 = 单次 load+test+branch,启用 +13–19 ns/记录,镜像 +0.18%。完整设计与用法见 <a href="tracepoints.html">tracepoint 框架</a>。</p>
 
     <h2 id="switches"><span class="anchor">§4</span>dfx= 运行时开关(遗留诊断面,冻结于 49 项)</h2>
     <p>启动参数 <code>dfx=开关1,开关2</code>;权威表 = <code>kernel/src/dfx/switches.rs</code> 的 dfx_switch_table!(<b>49 项,冻结不再增长</b> —— 新观测走 tracepoint);debugfs 在 <code>/sys/kernel/debug/dfx/</code> 镜像同一张表;多数令牌已迁移为 rux: 事件的武装别名(映射见 <a href="tracepoints.html#dfx-alias">tracepoint 框架 §4</a>)。高频项:</p>

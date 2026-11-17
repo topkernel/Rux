@@ -108,7 +108,7 @@
     </ul>
 
     <h2 id="lockdep-lite"><span class="anchor">§5</span>lockdep-lite(运行期锁序记录:状态如实)</h2>
-    <p>参考内核 lockdep 的形态(锁类图 + 运行期环检测)在 Rux 的实现位置:<b>规划中,未进主线</b>。缺口表(<code>docs/development/dfx-align-plan.md</code>)登记 Locking | lockdep 类 | absent;P0(静态锁序注册表 + 启动期校验)与 P1(运行期获取记录 + 新边即时查环 + 双锁名/获取点 splat)在实现线分支上,过门禁前不并入。本页列出的三道防线是当前主线上的实际覆盖 —— 声明这一差距本身是可观测性诚实的一部分。</p>
+    <p>Linux lockdep 的形态(锁类图 + 运行期环检测)在 Rux 的实现位置:<b>规划中,未进主线</b>。缺口表(<code>docs/development/dfx-align-plan.md</code>)登记 Locking | lockdep 类 | absent;P0(静态锁序注册表 + 启动期校验)与 P1(运行期获取记录 + 新边即时查环 + 双锁名/获取点 splat)在实现线分支上,过门禁前不并入。本页列出的三道防线是当前主线上的实际覆盖 —— 声明这一差距本身是可观测性诚实的一部分。</p>
 
     <h2 id="hunt-wedge"><span class="anchor">§6</span>hunt-wedge:挂起自动捕获</h2>
     <pre><code>./scripts/test/hunt-wedge.sh [rounds]   <span class="c"># 默认 6 轮;捕获即停。退出码 0=抓到, 2=未复现</span></code></pre>

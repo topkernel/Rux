@@ -83,12 +83,12 @@
     <div class="sub">perf_event_open 系统调用面、syscost 启动普查、pbench 微基准、IF=0 探针与性能门禁 —— 每件工具的设计、数据形状与使用协议 · 依据:kernel/src/perf/、kernel/src/dfx/syscost.rs、test/pbench.c、docs/development/perf-gate-baseline.md</div>
 
     <h2 id="perf-events"><span class="anchor">§1</span>perf_event_open(系统调用 241)</h2>
-    <p>Rux 实现参考内核的 perf_event_open ABI(asm-generic 编号 241),软件事件面:</p>
+    <p>Rux 实现 Linux 的 perf_event_open ABI(asm-generic 编号 241),软件事件面:</p>
     <ul>
       <li><b>事件类型</b>:CPU_CLOCK / TASK_CLOCK / PAGE_FAULTS / CONTEXT_SWITCHES;计数与采样双模式。</li>
-      <li><b>采样模式</b>:mmap 环输出记录,字段序 ID/IDENTIFIER/IP/TID/TIME/ID/STREAM_ID/CPU/PERIOD/CALLCHAIN 与参考一致;sideband 记录 COMM/FORK/EXIT/MMAP2/LOST;ioctl 集;<code>/proc/sys/kernel/perf_event_paranoid</code> 门(默认 2)。</li>
-      <li><b>采样粒度(登记的分歧)</b>:软件采样骑 tick —— <code>sample_period</code> 低于一个 tick(100 Hz 下 10 ms)时聚合为 tick 率采样;参考实现的 per-event hrtimer swevent 为后续项。做热点概貌(秒级窗口)足够;做逐调用精确剖析不足 —— 用途边界如实。</li>
-      <li><b>验证方式</b>:以参考内核自身的 profiler 对本 ABI 构建,暴露合成测试未覆盖的对齐缺口(inherit 语义、环 fd O_RDWR、MISC cpumode 字节序),随后交付战役热点表(80,961 → 244,516 样本,内核 1-5 / 用户 2-16+ 帧链)—— ABI 验证以真实消费方为准。</li>
+      <li><b>采样模式</b>:mmap 环输出记录,字段序 ID/IDENTIFIER/IP/TID/TIME/ID/STREAM_ID/CPU/PERIOD/CALLCHAIN 与 Linux 一致;sideband 记录 COMM/FORK/EXIT/MMAP2/LOST;ioctl 集;<code>/proc/sys/kernel/perf_event_paranoid</code> 门(默认 2)。</li>
+      <li><b>采样粒度(登记的分歧)</b>:软件采样骑 tick —— <code>sample_period</code> 低于一个 tick(100 Hz 下 10 ms)时聚合为 tick 率采样;Linux 的 per-event hrtimer swevent 为后续项。做热点概貌(秒级窗口)足够;做逐调用精确剖析不足 —— 用途边界如实。</li>
+      <li><b>验证方式</b>:以 Linux 自身的 profiler 对本 ABI 构建,暴露合成测试未覆盖的对齐缺口(inherit 语义、环 fd O_RDWR、MISC cpumode 字节序),随后交付战役热点表(80,961 → 244,516 样本,内核 1-5 / 用户 2-16+ 帧链)—— ABI 验证以真实消费方为准。</li>
     </ul>
     <h3>用法</h3>
     <pre><code><span class="c"># guest 内(perf_event_paranoid=2 默认:同进程组计数 + 本用户采样)</span>
@@ -106,7 +106,7 @@ cat /proc/sys/kernel/perf_event_paranoid</code></pre>
     </ul>
 
     <h2 id="pbench"><span class="anchor">§3</span>pbench:七组微基准</h2>
-    <p><code>test/pbench.c</code>:单一静态 musl x86_64 二进制,<b>在 Rux 与同机参考内核上以同一二进制运行</b> —— 每个数字都是同二进制对。以 init 身份运行(init=/test/pbench)取静默探针启动。计时:逐操作 rdtsc 差值,以 CLOCK_MONOTONIC_RAW 校准;输出行 <code>PBENCH &lt;name&gt; n=&lt;N&gt; med=&lt;us&gt; p99=&lt;us&gt; min=&lt;us&gt; max=&lt;us&gt; avg=&lt;us&gt; wall=&lt;us&gt;</code>,终止行 <code>PBENCH DONE rc=0</code>;不支持的基元自动 SKIP。</p>
+    <p><code>test/pbench.c</code>:单一静态 musl x86_64 二进制,<b>在 Rux 与同机 Linux 上以同一二进制运行</b> —— 每个数字都是同二进制对。以 init 身份运行(init=/test/pbench)取静默探针启动。计时:逐操作 rdtsc 差值,以 CLOCK_MONOTONIC_RAW 校准;输出行 <code>PBENCH &lt;name&gt; n=&lt;N&gt; med=&lt;us&gt; p99=&lt;us&gt; min=&lt;us&gt; max=&lt;us&gt; avg=&lt;us&gt; wall=&lt;us&gt;</code>,终止行 <code>PBENCH DONE rc=0</code>;不支持的基元自动 SKIP。</p>
     <div class="tbl-wrap"><table>
       <thead><tr><th>组</th><th>量什么</th><th>协议要点</th></tr></thead>
       <tbody>

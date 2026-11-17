@@ -109,7 +109,7 @@
     <h2 id="softirq"><span class="anchor">§4</span>softirq 模型</h2>
     <ul>
       <li><b>10 类</b>:Hi/Timer/NetTx/NetRx/Block/IrqPoll/Tasklet/Sched/Hrtimer/Rcu;per-CPU pending 位图 + per-CPU/per-向量 raise 计数(供 /proc/softirqs)。</li>
-      <li><b>派发</b>:硬中断 raise;irq_exit 时 <code>__do_softirq()</code> 处理,溢出转 ksoftirqd。预算双界:<code>MAX_SOFTIRQ_RESTART = 10</code> 轮 + <code>2 ms</code> 墙钟(参考 MAX_SOFTIRQ_TIME 形态)—— 依据:无界 irq-exit 预算曾使 timer/IO 风暴将双 CPU 钉在 IRQ 上下文(93% si_busy),调度零拣选。</li>
+      <li><b>派发</b>:硬中断 raise;irq_exit 时 <code>__do_softirq()</code> 处理,溢出转 ksoftirqd。预算双界:<code>MAX_SOFTIRQ_RESTART = 10</code> 轮 + <code>2 ms</code> 墙钟(Linux MAX_SOFTIRQ_TIME 形态)—— 依据:无界 irq-exit 预算曾使 timer/IO 风暴将双 CPU 钉在 IRQ 上下文(93% si_busy),调度零拣选。</li>
       <li><b>ksoftirqd</b>:每 CPU 一个;排空循环内 need_resched 时 schedule()(幻影位公平性:否则反馈型积压使 kthread 经数千个 2 ms 窗独占其 CPU);睡眠前复查的丢失唤醒模式(run_ksoftirqd 形态)。</li>
       <li><b>窗口进度记录</b>:SOFTIRQ_WIN 紧凑打包 {open|handler bit|restart_count|pending} + SOFTIRQ_WIN_T0,跨 CPU 可读 —— 楔死窗口的外部取证;softirq 处理器投递簿记 SOFTIRQ_OFFSET,heal 落于窗口中段将楔死整机(VW-WEDGE 已确认为根因,29 个完成项丢失)。</li>
     </ul>
@@ -126,8 +126,8 @@
 
     <h2 id="nohz"><span class="anchor">§6</span>NOHZ / tick-sched</h2>
     <ul>
-      <li>照参考 tick-sched.c 逐函数映射(check_tick_dependency、tick_nohz_stop/restart_sched_tick、tick_nohz_irq_exit、nohz_full= 参数);per-CPU TickSched{inidle, tick_stopped, tick_dep_mask, next_tick};tick_dep 位集 POSIX_TIMER/PERF_EVENTS/SCHED/CLOCK_UNSTABLE/RCU/RCU_EXP。</li>
-      <li><b>结构性映射</b>(登记于 rust-native-register):per-rq → GRQ(SCHED 依赖由 can_stop_full_tick 即时评估;0→1 kick 保留为入队边沿 resched IPI);clockevent KTIME_MAX → timer_arm_oneshot(u64::MAX)(u32 计数钳制将 LAPIC 停于最大增量);tick_do_timer_cpu → boot CPU,睡眠上限 TIMEKEEPING_MAX_DEFERMENT(10 s);perf:dep 跟踪任意武装采样事件 —— Rux 软件采样骑 tick,登记为分歧(参考的 per-event hrtimer swevent 为后续项)。</li>
+      <li>照 Linux tick-sched.c 逐函数映射(check_tick_dependency、tick_nohz_stop/restart_sched_tick、tick_nohz_irq_exit、nohz_full= 参数);per-CPU TickSched{inidle, tick_stopped, tick_dep_mask, next_tick};tick_dep 位集 POSIX_TIMER/PERF_EVENTS/SCHED/CLOCK_UNSTABLE/RCU/RCU_EXP。</li>
+      <li><b>结构性映射</b>(登记于 rust-native-register):per-rq → GRQ(SCHED 依赖由 can_stop_full_tick 即时评估;0→1 kick 保留为入队边沿 resched IPI);clockevent KTIME_MAX → timer_arm_oneshot(u64::MAX)(u32 计数钳制将 LAPIC 停于最大增量);tick_do_timer_cpu → boot CPU,睡眠上限 TIMEKEEPING_MAX_DEFERMENT(10 s);perf:dep 跟踪任意武装采样事件 —— Rux 软件采样骑 tick,登记为分歧(Linux 的 per-event hrtimer swevent 为后续项)。</li>
       <li>x86_64 已接线;其余架构保持网格粘合 set_next_trigger。非 nohz_full CPU 保持逐字节网格路径。</li>
       <li><b>实测</b>(4+4 交错 lmbench lat_syscall,null,6 个对抗性外部 QEMU):main tip 0/10 通过;nohz_full=1 → <b>11/12(92%)</b>;p1_null 中位 0.050 vs 0.060 µs(−17%);两条调度事件普查(启动期调度事件计数器)基准精确保持;GRQ 平均持锁 699 ns(release 类跨类读数,不作 debug 带比较);pre-nohz 父版对照确认 p2 读数漂移属板间离散而非 nohz 变更。</li>
     </ul>

@@ -97,13 +97,13 @@
     <h2 id="log"><span class="anchor">§2</span>Kernel logging</h2>
     <ul>
       <li><b>The serial port is the primary log</b> (<code>console=ttyS0</code>): everything prints to the UART during boot; after the scheduler starts the default level drops to emerg, and <code>dmesg -n 7</code> reopens the full console output.</li>
-      <li><b>Levels 0–7</b> match the reference; the macros pr_emerg!/pr_err!/pr_warn!/pr_info!/pr_debug! (println! is a pr_info! alias); release builds compile out pr_debug.</li>
-      <li><b>The 1 MB kmsg ring</b>: read via /proc/kmsg, syslog(2), dmesg; <b>the devkmsg policy</b> (/proc/sys/kernel/printk_devkmsg: on|ratelimit|off) only decides how much the CONSOLE shows — the ring always records everything (our alignment with the reference's devkmsg semantics).</li>
+      <li><b>Levels 0–7</b> match Linux; the macros pr_emerg!/pr_err!/pr_warn!/pr_info!/pr_debug! (println! is a pr_info! alias); release builds compile out pr_debug.</li>
+      <li><b>The 1 MB kmsg ring</b>: read via /proc/kmsg, syslog(2), dmesg; <b>the devkmsg policy</b> (/proc/sys/kernel/printk_devkmsg: on|ratelimit|off) only decides how much the CONSOLE shows — the ring always records everything (our alignment with Linux's devkmsg semantics).</li>
       <li><b>Persistent log</b> (default off): panic logs survive a reboot in /var/log/kmsg; after a crash, extract offline with debugfs (see <a href="memory.html#offline">memory forensics §8</a>).</li>
     </ul>
 
     <h2 id="trace"><span class="anchor">§3</span>The trace system (summary)</h2>
-    <p><b>All new observability goes through the unified tracepoints</b> (the observability policy, 2026-11-02). Currently <b>69 events / 17 groups</b>; the tracefs tree matches the reference file-for-file and byte-for-byte; disabled sites are one load+test+branch, enabled +13–19 ns/record, the image +0.18%. Full design and usage on <a href="tracepoints.html">Tracepoints</a>.</p>
+    <p><b>All new observability goes through the unified tracepoints</b> (the observability policy, 2026-11-02). Currently <b>69 events / 17 groups</b>; the tracefs tree matches Linux file-for-file and byte-for-byte; disabled sites are one load+test+branch, enabled +13–19 ns/record, the image +0.18%. Full design and usage on <a href="tracepoints.html">Tracepoints</a>.</p>
 
     <h2 id="switches"><span class="anchor">§4</span>The dfx= runtime switches (the frozen legacy surface, 49 entries)</h2>
     <p>The boot parameter is <code>dfx=switch1,switch2</code>; the authoritative table is the dfx_switch_table! in <code>kernel/src/dfx/switches.rs</code> (<b>49 entries, frozen and not growing</b> — new observability goes to tracepoints); debugfs mirrors the same table at <code>/sys/kernel/debug/dfx/</code>; most tokens have migrated into arming aliases of rux: events (the mapping on <a href="tracepoints.html#dfx-alias">Tracepoints §4</a>). High-frequency items:</p>

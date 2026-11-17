@@ -85,7 +85,7 @@
     <h2 id="how"><span class="anchor">§1</span>How this project works</h2>
     <p>Rux is developed by multiple AI agents in parallel — one worktree per task — while humans set goals, review and hold merge authority. Two constitutional principles:</p>
     <ul>
-      <li><b>100% external compatibility</b>: full POSIX semantics + an ABI aligned with the reference (syscall numbers, ELF/auxv, futex, the ext4 on-disk format, the procfs layout). Any upstream software runs unmodified — the first constraint on every decision.</li>
+      <li><b>100% external compatibility</b>: full POSIX semantics + an ABI aligned with Linux (syscall numbers, ELF/auxv, futex, the ext4 on-disk format, the procfs layout). Any upstream software runs unmodified — the first constraint on every decision.</li>
       <li><b>Internal freedom, registered divergences</b>: an internal divergence survives only behind the triple gate — external compatibility intact, affected LTP families green, zero upstream breakage — and is registered in <code>docs/architecture/design-divergences.md</code> (D-numbered, 19 entries). Example: a single global run queue instead of per-CPU queues + balancing.</li>
     </ul>
     <div class="callout">The repository is <b>English-only</b>: commit messages, comments, docs and code. Reports use plain engineering language with concrete numbers.</div>
@@ -136,7 +136,7 @@
     <div class="callout"><b>Principle:</b> every subsystem that can affect performance must be under gate measurement — if no existing tool measures it, <b>add a debug observability tool for it</b> (gated off by default). Measurement is part of the change, not an afterthought. Baselines move only through merges that passed their own tier.</div>
 
     <h2 id="x86"><span class="anchor">§4</span>Platform priority: x86_64 + KVM first</h2>
-    <p>x86 + KVM is the fastest x86 virtualization on the host (near-native). Our own A/B: the reference probe <code>p1_null</code> 0.040 µs (KVM) vs 0.240 µs (TCG) — <b>6×</b>; IO/timer paths diverge more. Therefore:</p>
+    <p>x86 + KVM is the fastest x86 virtualization on the host (near-native). Our own A/B: the p1_null probe on Linux: 0.040 µs (KVM) vs 0.240 µs (TCG) — <b>6×</b>; IO/timer paths diverge more. Therefore:</p>
     <ul>
       <li>The primary dev/test/perf loop = x86_64 + KVM; all functional, performance, LTP and compatibility testing runs there first.</li>
       <li>riscv64 / aarch64 remain <b>three-architecture build + suite regression gates</b> (TCG boots — KVM cannot emulate them on an x86 host) with no perf/compat duty for now.</li>
@@ -165,14 +165,14 @@
     <h2 id="debug"><span class="anchor">§7</span>The debugging toolbox (full treatment in the <a href="../debugging/index.html">Debugging section</a>)</h2>
     <h3>Logs and panics</h3>
     <ul>
-      <li><b>The serial console is the primary log</b> (<code>console=ttyS0</code>). printk levels 0–7 match the reference; everything prints to UART during boot, dropping to emerg once the scheduler runs; userspace reopens with <code>dmesg -n 7</code>. All messages enter a 1 MB kmsg ring buffer, readable via <code>/proc/kmsg</code>, <code>syslog(2)</code>, <code>dmesg</code>.</li>
+      <li><b>The serial console is the primary log</b> (<code>console=ttyS0</code>). printk levels 0–7 match Linux; everything prints to UART during boot, dropping to emerg once the scheduler runs; userspace reopens with <code>dmesg -n 7</code>. All messages enter a 1 MB kmsg ring buffer, readable via <code>/proc/kmsg</code>, <code>syslog(2)</code>, <code>dmesg</code>.</li>
       <li><b>Kernel panic</b> output includes file:line, CSRs (sstatus/scause/stval/sepc), all 31 GPRs, and a Call trace of up to 32 frames along the fp chain. Symbolize with <code>riscv64-linux-gnu-addr2line -e &lt;kernel&gt; &lt;addr&gt;</code>.</li>
       <li><b>Offline forensics</b>: extract guest logs from a copied image with <code>debugfs</code> — no boot required.</li>
     </ul>
     <h3>Runtime switches</h3>
     <ul>
       <li><b>debug= boot flags</b> (legacy but functional): <code>debug=taskdump,watchdog</code> periodic task dumps + the spinlock-deadlock watchdog; <code>debug=memwatch</code> heap/page accounting for leak hunts. The authoritative table is <code>kernel/src/debug/switches.rs</code>.</li>
-      <li><b>The unified tracepoint framework (the new standard)</b>: a tracefs tree aligned exactly with the reference — <code>tracing_on</code>, <code>trace</code>, <code>trace_pipe</code>, <code>available_events</code>, <code>set_event</code>, <code>snapshot</code>, <code>events/&lt;group&gt;/&lt;event&gt;/enable</code>; two-level gating, an unarmed site pays one relaxed load.</li>
+      <li><b>The unified tracepoint framework (the new standard)</b>: a tracefs tree aligned exactly with Linux's — <code>tracing_on</code>, <code>trace</code>, <code>trace_pipe</code>, <code>available_events</code>, <code>set_event</code>, <code>snapshot</code>, <code>events/&lt;group&gt;/&lt;event&gt;/enable</code>; two-level gating, an unarmed site pays one relaxed load.</li>
       <li><b>hunt-wedge</b>: <code>./test/hunt-wedge.sh</code> captures deadlocks/hangs (a holder-annotated build + stress injection + on-site capture, paired with addr2line).</li>
       <li><b>GDB</b>: <code>make debug</code>.</li>
     </ul>

@@ -114,7 +114,7 @@
     </ul>
     <h3>关键数字</h3>
     <ul>
-      <li>GRQ 锁内工作(精确探针,release,KVM q35 smp2):精确持锁 <b>241–273 ns</b>(改造前 378 ns);树操作本身 ~20–30 ns/次且锁内零分配,其余为 D-1 记账。<b>锁等待 70–84 ns 是 KVM 对跨 vCPU locked 指令的税</b>(参考的 per-rq 锁同样交税,不表示 GRQ 慢)。门禁基准范围跟踪的调用点 IF=0 段均值(关中断→恢复,<b>含锁获取等待</b>与临界区工作):2786 ns @ 样本数 630 万(允许范围 1200–7320 ns,负载耦合族 0.6–5.4 µs);对 1.26 亿次系统调用的大规模启动持平 → 体积耦合而非争用受限(≤4 vCPU 场景)。</li>
+      <li>GRQ 锁内工作(精确探针,release,KVM q35 smp2):精确持锁 <b>241–273 ns</b>(改造前 378 ns);树操作本身 ~20–30 ns/次且锁内零分配,其余为 D-1 记账。<b>锁等待 70–84 ns 是 KVM 对跨 vCPU locked 指令的税</b>(Linux 的 per-rq 锁同样交税,不表示 GRQ 慢)。门禁基准范围跟踪的调用点 IF=0 段均值(关中断→恢复,<b>含锁获取等待</b>与临界区工作):2786 ns @ 样本数 630 万(允许范围 1200–7320 ns,负载耦合族 0.6–5.4 µs);对 1.26 亿次系统调用的大规模启动持平 → 体积耦合而非争用受限(≤4 vCPU 场景)。</li>
       <li>调度事件普查(启动期调度事件的计数器)在每次合格的静默启动中精确一致:TERM-DESCHED <b>8</b>(允许范围 8±2)、WAKE-REFUSED <b>32</b>(允许范围 32±4)。</li>
       <li>上下文切换三杠杆(FSGSBASE 393 ns/切换 + 惰性 FPU + PCID 门控)后:<code>lat_ctx -s64 2</code> <b>4.97→2.07 µs(−58%)</b>;lmbench 同机 <b>1.98 vs 6.71 µs(3.39×)</b>;缺页延迟 0.029–0.031 vs 0.0702 µs(2.26–2.45×,累计 16.1×)。</li>
       <li>D-14 生效后:74 字节 unix 流记录的"唤醒—抢占—切换"往返序列 ~275 µs → 对标 Linux ~2.5 µs;p5 IPC 族 <b>10–18×</b>。</li>
@@ -253,7 +253,7 @@
           <tr><td><b>D-17</b></td><td><b>内核侧设备地址别名区(arena)</b>:运行期无恒等 MMIO 窗,uaccess 无恒等洞(坏用户指针 fault 而非读物理内存)。守卫:PF-NOCTX/SMAP-VIOL 信标静默。</td></tr>
           <tr><td><b>D-18</b></td><td><b>SMAP 以 pushfq EFLAGS.AC 序列启用</b>:STAC/CLAC 在 TCG 无条件 #UD(配对实验确证);括号 ~55 ns,硬件与 TCG 双可启动。</td></tr>
           <tr><td><b>D-19</b></td><td><b>类型化定时器轮</b>:时钟域不可混比,periodic 需 NonZeroU64,WakeArmed/WakeSpent 作用域守卫。六类历史 bug 成为编译错;同一测试平台 A/B:定时器 arm 锁 924→697 ns、nanosleep 772.6→662.7 ms、p2_ctxsw 12.198 vs 15.400 µs。</td></tr>
-          <tr><td><b>D-20</b></td><td><b>写者侧脏页回写水位(空闲比例标记,无全局脏页记账)</b>:Normal zone 空闲页数低于受管页一半(zone_below_dirty_writeback_mark)时,缓冲写者自行冲刷本 inode 脏区间并执行系统级恢复(writeback_recover:先释放已净页,全表轮转收集脏 inode 逐个冲刷,直接淘汰已冲刷页)。与参考实现的差异:参考按 per-BDI 脏页阈值/balance_dirty_pages 的脏页比例节流,Rux 不维护 per-BDI 记账,以 zone 空闲比例作标记 —— <b>约束的是纪律而非常量</b>。消除延迟分配脏页气球楔死(24.3 万脏页涨至 RAM 规模、zone 排空);LTP fallocate05/06 三次全新启动 RC=0;riscv64 make test 1328/1328。代价:无 per-BDI 精度,多盘负载下水位粒度粗于参考。注:PSI(/proc/pressure)不在主线,登记于调试对齐恢复队列。</td></tr>
+          <tr><td><b>D-20</b></td><td><b>写者侧脏页回写水位(空闲比例标记,无全局脏页记账)</b>:Normal zone 空闲页数低于受管页一半(zone_below_dirty_writeback_mark)时,缓冲写者自行冲刷本 inode 脏区间并执行系统级恢复(writeback_recover:先释放已净页,全表轮转收集脏 inode 逐个冲刷,直接淘汰已冲刷页)。与 Linux 的差异:Linux 按 per-BDI 脏页阈值/balance_dirty_pages 的脏页比例节流,Rux 不维护 per-BDI 记账,以 zone 空闲比例作标记 —— <b>约束的是纪律而非常量</b>。消除延迟分配脏页气球楔死(24.3 万脏页涨至 RAM 规模、zone 排空);LTP fallocate05/06 三次全新启动 RC=0;riscv64 make test 1328/1328。代价:无 per-BDI 精度,多盘负载下水位粒度粗于 Linux。注:PSI(/proc/pressure)不在主线,登记于调试对齐恢复队列。</td></tr>
         </tbody>
       </table>
     </div>

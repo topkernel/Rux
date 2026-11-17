@@ -126,7 +126,7 @@ Level 2b the process tree    Level 2c  inode    Level 2d  dcache</code></pre>
     </ul>
 
     <h2 id="semantics"><span class="anchor">§5</span>Lock-semantics policy</h2>
-    <div class="callout"><b>Lock/synchronization-primitive semantics follow the reference kernel exactly; nothing is invented here.</b> "A non-sleeping caller holding the lock" is fixed at the call site (trylock/deferral), never by changing the lock's path. Fairness experiments (e.g. "spin 2 s then steal") were adjudicated and rejected — those branches never merge.</div>
+    <div class="callout"><b>Lock/synchronization-primitive semantics follow Linux exactly; nothing is invented here.</b> "A non-sleeping caller holding the lock" is fixed at the call site (trylock/deferral), never by changing the lock's path. Fairness experiments (e.g. "spin 2 s then steal") were adjudicated and rejected — those branches never merge.</div>
   </article>
 </div>
 </main>

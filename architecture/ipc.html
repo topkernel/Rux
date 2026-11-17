@@ -83,12 +83,12 @@
     <div class="sub">kernel/src/ipc/ + net/unix.rs · binder、PI futex、SysV/POSIX MQ、AF_UNIX —— 机制、锁模型与实测数据 · 语境:OpenHarmony 服务网格(~80 服务集合)在 /data 挂载后全量运行 · 依据:docs/architecture/binder-parity-audit.md、design-divergences.md(D-14)</div>
 
     <h2 id="binder"><span class="anchor">§1</span>binder(kernel/src/ipc/binder.rs,14,144 行)</h2>
-    <p>binder 是 OpenHarmony 服务网格的核心传输:全部系统服务注册(samgr)、服务调用与 hilog 数据面均经此通道。实现按参考 6.6 binder.c 的语义逐函数对齐,并有专项对齐审计(binder-parity-audit.md)约束后续变更:<b>每处改动必须引用其镜像的参考函数与行号</b>。</p>
+    <p>binder 是 OpenHarmony 服务网格的核心传输:全部系统服务注册(samgr)、服务调用与 hilog 数据面均经此通道。实现按 Linux 6.6 binder.c 的语义逐函数对齐,并有专项对齐审计(binder-parity-audit.md)约束后续变更:<b>每处改动必须引用其镜像的 Linux 函数与行号</b>。</p>
     <ul>
       <li><b>协议</b>:版本 8(BINDER_VERSION ioctl 返回);BC_* 全集(TRANSACTION/REPLY、FREE_BUFFER、INCREFS/ACQUIRE/RELEASE/DECREFS 及 DONE 对、REGISTER/ENTER/EXIT_LOOPER、DEAD_BINDER_DONE、TRANSACTION_SG/REPLY_SG);BR_* 全集(ERROR/TRANSACTION/REPLY/DEAD_REPLY/TRANSACTION_COMPLETE/NOOP/SPAWN_LOOPER/FAILED_REPLY 等)。</li>
       <li><b>flat_binder_object 跨进程翻译</b>:BINDER_TYPE_{WEAK_}BINDER/_HANDLE 的节点/引用握手(BR_INCREFS → BC_INCREFS_DONE)工作;BINDER_TYPE_FD/FDA/PTR 部分落地 —— FDA fd 生存期为开放项(发送即安装会在未投递事务上遗留幽灵 fd,审计已记录在案)。</li>
       <li><b>同步事务延迟 TRANSACTION_COMPLETE</b>:发送者的读保持睡眠直至 reply 将其携带出 —— 一次唤醒完成整个往返;replier 侧取非延迟形态。</li>
-      <li><b>mmap 缓冲</b>:静默截断至 4 MiB(与参考 binder_mmap 同行为);重复 mmap EBUSY 先于分配判定;VM_DONTFORK 语义经 sc157→sc159/160 反转 —— OH appspawn 子进程继承守护进程映射,DONTCOPY 已移除。</li>
+      <li><b>mmap 缓冲</b>:静默截断至 4 MiB(与 Linux binder_mmap 同行为);重复 mmap EBUSY 先于分配判定;VM_DONTFORK 语义经 sc157→sc159/160 反转 —— OH appspawn 子进程继承守护进程映射,DONTCOPY 已移除。</li>
       <li><b>锁模型</b>:单全局自旋锁守卫全部 binder 对象;<b>锁下不拷贝用户内存、不睡眠</b> —— BC 载荷在取锁前拷入,BR 载荷在锁内暂存内核 Vec、锁释放后拷出。</li>
       <li><b>thread_has_work 对齐</b>:looper_need_return 作为函数的一项合成条件(进程 todo、节点 async_todo、spawned/pending 计数);poll 唤醒扇出与可用性语义一次 diff 收敛四处分歧。</li>
       <li><b>失败回复路由</b>:BR_FAILED_REPLY/BR_DEAD_REPLY 语义 + 静默接收者清扫 sweep_silent_txns(进程 todo + 节点 async_todo,ONEWAY_SILENCE_J 窗)—— 对不履行 BC_FREE_BUFFER 义务的服务守住缓冲回收;TF_UPDATE_TXN(0x40)落地(对齐 binder.c:2734/2832-2845 的 supersede-on-park)。</li>
@@ -104,7 +104,7 @@
     <ul>
       <li>操作集:FUTEX_LOCK_PI / UNLOCK_PI / TRYLOCK_PI / LOCK_PI2 + WAIT_REQUEUE_PI / CMP_REQUEUE_PI;cmp-under-lock requeue 与 robust-exit 死亡标记齐全。</li>
       <li><b>实现形态:nice 下界(nice-floor)</b>:PiState 存在等待者时,其属主以 nice −20 运行;等待链逐链接行死锁检测,每一链接传递式提升;exit 路径带 owner-died 交接释放 PI 锁。</li>
-      <li>与参考 rt_mutex 的语义差异(内核侧数值提升 vs nice 折算)登记于实现注释;LTP pi 族 + OH FFRT 负载为守卫。</li>
+      <li>与 Linux rt_mutex 的语义差异(内核侧数值提升 vs nice 折算)登记于实现注释;LTP pi 族 + OH FFRT 负载为守卫。</li>
     </ul>
 
     <h2 id="sysv"><span class="anchor">§3</span>SysV 三件与 POSIX MQ</h2>
@@ -133,13 +133,13 @@
         <tr><td>p5b unix DGRAM send/recv(74 B,hilogd 协议形态)</td><td class="num">318.6 / 318.3 µs</td><td class="num">23.1 / 40.9 µs(带 23–41)</td></tr>
         <tr><td>p5c unix 流 write(74 B)</td><td class="num">276.5–277.6 µs</td><td class="num">24.9–26.8 µs(带 24–27)</td></tr>
         <tr><td>p5c3 双向流</td><td class="num">32.7 µs</td><td class="num">25.0 µs</td></tr>
-        <tr><td>lmbench lat_pipe(同机)</td><td class="num">13.30 µs(参考)</td><td class="num">5.11 µs(2.6×)</td></tr>
+        <tr><td>lmbench lat_pipe(同机)</td><td class="num">13.30 µs(Linux)</td><td class="num">5.11 µs(2.6×)</td></tr>
         <tr><td>appspawn fork(服务孵化关键路径)</td><td class="num">130–272 ms</td><td class="num">85–90 ms</td></tr>
       </tbody>
     </table></div>
     <p class="callout">已知代价(如实):唤醒发生于任务正在运行时,唤醒→运行延迟被 tick 量化至 ~10 ms(p2f 整轮测试双 hog 场景)—— 由 D-14 的亚 6 ms 窗口设计决定,消除路径见<a href="scheduler.html#tick">调度器 NOHZ</a>;binder 单事务最长 73 ms IF=0 为 watch 行。</p>
 
-    <div class="callout">代码:<code>kernel/src/ipc/</code>(binder / access_token / sysv_shm / sysv_sem / sysv_msg / posix_mq / util)、<code>kernel/src/sync/futex_pi.rs</code>、<code>kernel/src/net/unix.rs</code>。对齐审计:docs/architecture/binder-parity-audit.md(缺口表 + 自创风险表,逐条要求引用参考函数行号)。守卫:LTP sem/msg/shm/pi 族 + OH 全服务集;性能门 IPC 域 p5 行带与 binder SLOW-TXN 类。</div>
+    <div class="callout">代码:<code>kernel/src/ipc/</code>(binder / access_token / sysv_shm / sysv_sem / sysv_msg / posix_mq / util)、<code>kernel/src/sync/futex_pi.rs</code>、<code>kernel/src/net/unix.rs</code>。对齐审计:docs/architecture/binder-parity-audit.md(缺口表 + 自创风险表,逐条要求引用 Linux 函数行号)。守卫:LTP sem/msg/shm/pi 族 + OH 全服务集;性能门 IPC 域 p5 行带与 binder SLOW-TXN 类。</div>
   </article>
 </div>
 </main>

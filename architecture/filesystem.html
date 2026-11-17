@@ -86,7 +86,7 @@
     <ul>
       <li><b>Dentry 结构</b>(dentry.rs):名称/父项/子表(BTreeMap)/inode 在 Spinlock 下;外加原子镜像 —— ref_count、negative、is_mountpoint(AtomicBool:"一次 Relaxed 载入替代 vfsmount 自旋锁")、inode_ptr(AtomicPtr 无锁镜像)。</li>
       <li><b>挂载点回指针为 Weak</b>:挂载点 dentry 持有 vfsmount,vfsmount 反向强持有该 dentry —— 强回边将构成 Arc 环,故以 Weak 断环。</li>
-      <li><b>二级 dcache</b>:256 桶 FNV-1a 哈希表 + LRU 淘汰(DCACHE_SIZE=256);路径构建 build_path_rooted 对齐参考 prepend_path()(含 chroot 语义与 getcwd ENOENT),深度上限 256。</li>
+      <li><b>二级 dcache</b>:256 桶 FNV-1a 哈希表 + LRU 淘汰(DCACHE_SIZE=256);路径构建 build_path_rooted 对齐 Linux prepend_path()(含 chroot 语义与 getcwd ENOENT),深度上限 256。</li>
       <li><b>挂载命名空间</b>:全局 MOUNT_TABLE 仅承担启动簿记与 init-ns 播种;<b>权威视图为每命名空间的 MountNamespace</b>(sc98:私有命名空间挂载曾向全局表泵入死行 —— OH appspawn 子进程每次 spawn 约 50 个沙箱 bind)。MntFlags 位集含 MNT_READONLY/SHARED/SLAVE/UNBINDABLE/NOSYMFOLLOW;MS_* 翻译集中于 mount.rs;MOUNT_SEQ 全局挂接序保证 MS_REC 克隆先父后子。</li>
       <li><b>fd 表</b>:get_file 为 RCU 型读者 —— 单次裸槽载入 + 单次 RMW;get_file 每启动执行 1.3 亿次以上,retired 槽排水握手(FdTable lever-B 协议)是该协议首次成型处,后泛化至 dentry reader bank。</li>
     </ul>
@@ -110,7 +110,7 @@
     <h3>挂载特性门</h3>
     <ul>
       <li><code>KNOWN_INCOMPAT = FILETYPE|RECOVER|EXTENTS|B64BIT|FLEX_BG|ENCRYPT</code> —— <b>ENCRYPT 是文件系统能力位,接受不拒</b>:拒绝它曾以 ENODEV 阻断 OH 原装 userdata 分区(/data 不可用,全服务 mkdir 风暴 err=2/5)。REJECTED 集 = COMPRESSION|JOURNAL_DEV|META_BG|MMP|EA_INODE|DIRDATA|CSUM_SEED|LARGEDIR|INLINE_DATA;未知 incompat 拒绝挂载;BIGALLOC 与 METADATA_CSUM 直接拒绝(附 sb 校验)。</li>
-      <li>ext3 为 ext4 驱动的别名(参考 ≥ 4.3 同形态);首个 ext4 挂载 = 根实例(执行日志重放),后续盘走独立实例;对活 ext4 的重复挂载以 EBUSY 拒绝 —— 避免对活日志重跑恢复。</li>
+      <li>ext3 为 ext4 驱动的别名(Linux ≥ 4.3 同形态);首个 ext4 挂载 = 根实例(执行日志重放),后续盘走独立实例;对活 ext4 的重复挂载以 EBUSY 拒绝 —— 避免对活日志重跑恢复。</li>
     </ul>
     <h3>读路径:缺失窗口批填充(D-12)</h3>
     <ul>
@@ -129,12 +129,12 @@
     <ul>
       <li>commit 将事务 buffer <b>直写其最终落盘位置</b>,并在同一次 commit 中前推 log tail/head 越过日志区记录 —— 已完成的 commit <b>不留任何可重放物</b>(恢复自 s_start 起);revoke-cancel 机制(JBD2_FLAG_REVOKE_CANCEL)因此整段不需要。</li>
       <li>收益:每操作同步日志提交(描述符 + 拷贝 + revoke + commit + 超级块,8–12 次往返)消失,删除类操作与写同批化(p6_mkdrmdir 52–58 ms 强类中位 → 个位数 ms)。</li>
-      <li><b>磁盘格式未变</b>:日志镜像挂载/恢复 = e2fsck,与参考实现 write-back 挂载一致;校验层对 mke2fs 1.47.2 输出逐位验证(crc32c 于 0x3FC)。</li>
+      <li><b>磁盘格式未变</b>:日志镜像挂载/恢复 = e2fsck,与 Linux 的 write-back 挂载一致;校验层对 mke2fs 1.47.2 输出逐位验证(crc32c 于 0x3FC)。</li>
     </ul>
     <h3>崩溃窗一致性</h3>
     <ul>
       <li><b>map 先于 free 的持久化顺序</b>(R108):punch 的释放延迟至"重建后的映射已发布"之后 —— 对陈旧盘上映射执行释放是双重分配的毒窗;崩溃序与位图/GD/SB 延迟写及 revoke 记录协同。</li>
-      <li><b>e2fsck 互操作</b>:inode 创建盖章 i_extra_isize = 32(参考 s_want_extra_isize);R109 维护 bg_itable_unused(自组 inode 位图刷新,e2fsck 校验该字段);首个内核写镜像通过 e2fsck -n 零问题。</li>
+      <li><b>e2fsck 互操作</b>:inode 创建盖章 i_extra_isize = 32(Linux s_want_extra_isize);R109 维护 bg_itable_unused(自组 inode 位图刷新,e2fsck 校验该字段);首个内核写镜像通过 e2fsck -n 零问题。</li>
     </ul>
     <h3>fallocate</h3>
     <ul>
@@ -171,10 +171,10 @@
 
     <h2 id="misc"><span class="anchor">§7</span>pipe / io_uring / inotify / epoll</h2>
     <ul>
-      <li><b>pipe</b>:容量 64 KiB(PIPE_BUF_SIZE,经 review 5.2 自 16 KiB 提升),PIPE_BUF = 4096 原子写(对齐参考默认);容量+1 槽位分配缺陷修复(LTP pipe2_04:65536 字节满写曾返回 65535)。</li>
+      <li><b>pipe</b>:容量 64 KiB(PIPE_BUF_SIZE,经 review 5.2 自 16 KiB 提升),PIPE_BUF = 4096 原子写(对齐 Linux 默认);容量+1 槽位分配缺陷修复(LTP pipe2_04:65536 字节满写曾返回 65535)。</li>
       <li><b>io_uring</b>:Linux 5.1+ ABI;SQ/CQ 环 mmap(IORING_FEAT_SINGLE_MMAP);操作在 enter 上下文同步执行;操作集 NOP/FSYNC/CLOSE/READ/WRITE/FADVISE。</li>
       <li><b>inotify</b>:完整实现 —— 排队事件、watch 表、max_queued_events、fdinfo watches、init1/add_watch。</li>
-      <li><b>epoll</b>:兴趣集为 intrusive EpollEntry 链表(sentinel 头结点)—— 取代 Vec&lt;EpollEntry&gt; 在武装路径上的分配与扩容;唤醒注册表分片同为 intrusive EpollWakeNode 链;<b>武装路径零分配</b>。rux:epoll_* 事件族为登记的 rux: 自有族(参考实现无 epoll 事件)。</li>
+      <li><b>epoll</b>:兴趣集为 intrusive EpollEntry 链表(sentinel 头结点)—— 取代 Vec&lt;EpollEntry&gt; 在武装路径上的分配与扩容;唤醒注册表分片同为 intrusive EpollWakeNode 链;<b>武装路径零分配</b>。rux:epoll_* 事件族为登记的 rux: 自有族(Linux 无 epoll 事件)。</li>
     </ul>
 
     <h2 id="nums"><span class="anchor">§8</span>基准数字汇总</h2>
@@ -190,7 +190,7 @@
         <tr><td>buffer cache 命中率</td><td colspan="2" class="num">99.1%(门禁 ≥ 基线;pa29: bread 281 万 / 设备读 2.5 万)</td></tr>
       </tbody>
     </table></div>
-    <p class="callout">诚实差距登记:p6_mkdrmdir 对标同机参考 153 µs 仍差 ~14×——差距归因于共享的系统调用与路径查找固定开销,而非文件系统本体;写 fsync 14.2 ms 中位为当前门禁锚(串行 span 批化后再评)。</p>
+    <p class="callout">诚实差距登记:p6_mkdrmdir 对标同机 Linux 153 µs 仍差 ~14×——差距归因于共享的系统调用与路径查找固定开销,而非文件系统本体;写 fsync 14.2 ms 中位为当前门禁锚(串行 span 批化后再评)。</p>
 
     <div class="callout">代码:<code>kernel/src/fs/</code>(dentry / mount / file / fdreap / page_cache / bio / ext4/* / jbd2/* / procfs/* / pipe / inotify)与 <code>kernel/src/io_uring/</code>。分歧登记:D-4/D-6/D-8/D-12/D-13。仪器:fsw 计数器(fsw=1)、rux:epoll_* / ext4:* / jbd2:* trace 族(见 <a href="../debugging/tracepoints.html">tracepoint 框架</a>)。</div>
   </article>

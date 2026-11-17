@@ -107,7 +107,7 @@
     <h2 id="closed"><span class="anchor">§2</span>Root-caused classes (fleet wins)</h2>
     <ul>
       <li><b>The SIGILL family (kernel bug, fixed)</b>: read_counter() read the time CSR with the write-flavored form <code>csrrw a0, time, zero</code> — the whole instruction is illegal-instruction-prone; the mount hammer loop hit it within ~100 s on every build (toolchain zcb exonerated by paired trials). Fixed with the canonical read form <code>csrr</code>.</li>
-      <li><b>Seven user-length round-up overflows (fixed)</b>: fsfuzz r172 drove madvise length=−1 into <code>attempt to add with overflow</code> (syscall/memory.rs); all seven user-length round-ups (madvise/mprotect/msync/mremap/mincore/mlock/munlock) gained wrap checks (EINVAL, reference end-wrap semantics); post-fix the deterministic seed stream ran 150 s+ with zero panics (v4 died within 60 s).</li>
+      <li><b>Seven user-length round-up overflows (fixed)</b>: fsfuzz r172 drove madvise length=−1 into <code>attempt to add with overflow</code> (syscall/memory.rs); all seven user-length round-ups (madvise/mprotect/msync/mremap/mincore/mlock/munlock) gained wrap checks (EINVAL, Linux end-wrap semantics); post-fix the deterministic seed stream ran 150 s+ with zero panics (v4 died within 60 s).</li>
       <li><b>The zero-serve family (excluded)</b>: cluster LTP sweeps were round-for-round identical across the virtio/bio completion rewrite (1253/1254 TPASS both rounds) — the rewrite cost nothing on that surface.</li>
     </ul>
 

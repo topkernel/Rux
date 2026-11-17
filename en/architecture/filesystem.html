@@ -86,7 +86,7 @@
     <ul>
       <li><b>Dentry structure</b> (dentry.rs): name/parent/children (BTreeMap)/inode under a Spinlock, plus atomic mirrors — ref_count, negative, is_mountpoint (AtomicBool: "one Relaxed load instead of the vfsmount spinlock"), and inode_ptr (a lock-free AtomicPtr mirror).</li>
       <li><b>The mount-point back pointer is Weak</b>: the mount-point dentry holds the vfsmount, and the vfsmount strongly holds this dentry — a strong back edge would form an Arc cycle, so Weak breaks it.</li>
-      <li><b>Second-level dcache</b>: a 256-bucket FNV-1a hash table with LRU eviction (DCACHE_SIZE=256); path construction (build_path_rooted) mirrors the reference prepend_path() including chroot semantics and getcwd ENOENT, with a depth cap of 256.</li>
+      <li><b>Second-level dcache</b>: a 256-bucket FNV-1a hash table with LRU eviction (DCACHE_SIZE=256); path construction (build_path_rooted) mirrors Linux's prepend_path() including chroot semantics and getcwd ENOENT, with a depth cap of 256.</li>
       <li><b>Mount namespaces</b>: the global MOUNT_TABLE handles only boot-time bookkeeping and init-ns seeding; <b>the authoritative view is the per-namespace MountNamespace</b> (sc98: private-namespace mounts once pumped dead rows into the global table — OH appspawn children issue ~50 sandbox binds per spawn). The MntFlags bit set covers MNT_READONLY/SHARED/SLAVE/UNBINDABLE/NOSYMFOLLOW; MS_* translation is concentrated in mount.rs; the global MOUNT_SEQ attach sequence guarantees MS_REC clones attach parents before children.</li>
       <li><b>fd table</b>: get_file is an RCU-style reader — one raw slot load plus one RMW; get_file runs 130M+ times per boot, and the retired-slot drain handshake (the FdTable lever-B protocol) is where that protocol was first shaped, later generalized to the dentry reader banks.</li>
     </ul>
@@ -110,7 +110,7 @@
     <h3>Mount feature gates</h3>
     <ul>
       <li><code>KNOWN_INCOMPAT = FILETYPE|RECOVER|EXTENTS|B64BIT|FLEX_BG|ENCRYPT</code> — <b>ENCRYPT is a filesystem capability flag and is accepted, not refused</b>: refusing it once blocked the stock OH userdata partition with ENODEV (/data dead, the whole service mkdir storm failing err=2/5). The REJECTED set = COMPRESSION|JOURNAL_DEV|META_BG|MMP|EA_INODE|DIRDATA|CSUM_SEED|LARGEDIR|INLINE_DATA; unknown incompat features refuse the mount; BIGALLOC and METADATA_CSUM refuse outright (with sb checksum validation).</li>
-      <li>ext3 is the ext4 driver's alias (the reference ≥ 4.3 form); the first ext4 mount is THE root instance (journal replay) and additional disks take separate instances; re-mounting a live ext4 is refused with EBUSY — journal recovery must not re-run on a live journal.</li>
+      <li>ext3 is the ext4 driver's alias (the Linux ≥ 4.3 form); the first ext4 mount is THE root instance (journal replay) and additional disks take separate instances; re-mounting a live ext4 is refused with EBUSY — journal recovery must not re-run on a live journal.</li>
     </ul>
     <h3>Read path: miss-window batch fill (D-12)</h3>
     <ul>
@@ -129,12 +129,12 @@
     <ul>
       <li>commit syncs the transaction's buffers <b>through to their final on-disk locations</b> and advances the log tail/head past the transaction's journal-area records in the same commit — a completed commit <b>leaves nothing replayable</b> (recovery starts at s_start); the revoke-cancel machinery (JBD2_FLAG_REVOKE_CANCEL) is therefore unnecessary in full.</li>
       <li>Benefit: the per-op synchronous journal commit (descriptor + copies + revoke + commit + superblock, 8–12 round trips) disappears, and delete-class operations batch like writes (p6_mkdrmdir 52–58 ms strong-median class → single-digit ms).</li>
-      <li><b>The on-disk format is unchanged</b>: journal image mount/replay = e2fsck, matching the reference's write-back mount; the checksum layer is verified bit-for-bit against mke2fs 1.47.2 output (crc32c at 0x3FC).</li>
+      <li><b>The on-disk format is unchanged</b>: journal image mount/replay = e2fsck, matching Linux's write-back mount; the checksum layer is verified bit-for-bit against mke2fs 1.47.2 output (crc32c at 0x3FC).</li>
     </ul>
     <h3>Crash-window consistency</h3>
     <ul>
       <li><b>The map-before-free durability order</b> (R108): punch frees are deferred until "the rebuilt mapping is published" — freeing against the stale on-disk map is the double-allocation poison window; crash ordering rides the bitmap/GD/SB deferred writes plus revoke records.</li>
-      <li><b>e2fsck interop</b>: inode creation stamps i_extra_isize = 32 (the reference's s_want_extra_isize); R109 maintains bg_itable_unused (refreshed from the group's inode bitmap; e2fsck validates the field); the first kernel-written image passed e2fsck -n with no problems.</li>
+      <li><b>e2fsck interop</b>: inode creation stamps i_extra_isize = 32 (Linux's s_want_extra_isize); R109 maintains bg_itable_unused (refreshed from the group's inode bitmap; e2fsck validates the field); the first kernel-written image passed e2fsck -n with no problems.</li>
     </ul>
     <h3>fallocate</h3>
     <ul>
@@ -171,10 +171,10 @@
 
     <h2 id="misc"><span class="anchor">§7</span>pipe / io_uring / inotify / epoll</h2>
     <ul>
-      <li><b>pipe</b>: 64 KiB capacity (PIPE_BUF_SIZE, raised from 16 KiB per review 5.2), PIPE_BUF = 4096 atomic writes (matching the reference default); the capacity+1 slot-allocation defect is fixed (LTP pipe2_04: a full 65536-byte write once returned 65535).</li>
+      <li><b>pipe</b>: 64 KiB capacity (PIPE_BUF_SIZE, raised from 16 KiB per review 5.2), PIPE_BUF = 4096 atomic writes (matching the Linux default); the capacity+1 slot-allocation defect is fixed (LTP pipe2_04: a full 65536-byte write once returned 65535).</li>
       <li><b>io_uring</b>: the Linux 5.1+ ABI; SQ/CQ ring mmap (IORING_FEAT_SINGLE_MMAP); operations execute synchronously in the enter context; op set NOP/FSYNC/CLOSE/READ/WRITE/FADVISE.</li>
       <li><b>inotify</b>: fully implemented — queued events, watch table, max_queued_events, fdinfo watches, init1/add_watch.</li>
-      <li><b>epoll</b>: the interest set is an intrusive EpollEntry list (sentinel-headed) — replacing a Vec&lt;EpollEntry&gt; that allocated on the armed path (and on growth); the wake-registry shard is likewise an intrusive EpollWakeNode list; <b>zero allocation on the armed path</b>. The rux:epoll_* events are a registered rux: family of our own (the reference has no epoll events).</li>
+      <li><b>epoll</b>: the interest set is an intrusive EpollEntry list (sentinel-headed) — replacing a Vec&lt;EpollEntry&gt; that allocated on the armed path (and on growth); the wake-registry shard is likewise an intrusive EpollWakeNode list; <b>zero allocation on the armed path</b>. The rux:epoll_* events are a registered rux: family of our own (Linux has no epoll events).</li>
     </ul>
 
     <h2 id="nums"><span class="anchor">§8</span>Benchmark numbers</h2>
@@ -190,7 +190,7 @@
         <tr><td>buffer cache hit rate</td><td colspan="2" class="num">99.1% (gate ≥ baseline; pa29: bread 2.81M / device reads 25k)</td></tr>
       </tbody>
     </table></div>
-    <p class="callout">Honest gaps on record: p6_mkdrmdir remains ~14× from the same-rig reference's 153 µs — the gap is attributed to the shared syscall and path-lookup fixed costs, not the filesystem itself; the write_fsync 14.2 ms median is the current gate anchor (to be re-evaluated after span-writeback batching).</p>
+    <p class="callout">Honest gaps on record: p6_mkdrmdir remains ~14× from the same-rig Linux's 153 µs — the gap is attributed to the shared syscall and path-lookup fixed costs, not the filesystem itself; the write_fsync 14.2 ms median is the current gate anchor (to be re-evaluated after span-writeback batching).</p>
 
     <div class="callout">Code: <code>kernel/src/fs/</code> (dentry / mount / file / fdreap / page_cache / bio / ext4/* / jbd2/* / procfs/* / pipe / inotify) and <code>kernel/src/io_uring/</code>. Divergences: D-4/D-6/D-8/D-12/D-13. Instruments: the fsw counters (fsw=1), the rux:epoll_* / ext4:* / jbd2:* trace families (see <a href="../debugging/tracepoints.html">tracepoints</a>).</div>
   </article>

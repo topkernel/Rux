@@ -84,17 +84,17 @@
     <div class="sub">实时延迟与调度压力的性能对照(同机同镜像同二进制),无数据项即失败 · 测试平台与方法</div>
 
     <h2 id="data"><span class="anchor">§1</span>数据(同机同镜像同二进制对照)</h2>
-    <p style="font-size:13.5px">两侧使用<b>同一镜像、同一 rt-tests v2.11 静态二进制、同一参数</b>,Rux(main release)与参考内核(同镜像 guest 内核 7.0.0-38)对照。cyclictest:30 s 窗、1000 µs 间隔、mlockall;hackbench:消息传递吞吐(秒,越低越好)。cyclictest 行当前为 Rux release 单次启动实测与参考整轮测试列(不同次启动),同机交替启动重新测量进行中。</p>
+    <p style="font-size:13.5px">两侧使用<b>同一镜像、同一 rt-tests v2.11 静态二进制、同一参数</b>,Rux(main release)与 Linux(同镜像 guest 内核 7.0.0-38)对照。cyclictest:30 s 窗、1000 µs 间隔、mlockall;hackbench:消息传递吞吐(秒,越低越好)。cyclictest 行当前为 Rux release 单次启动实测与 Linux 整轮测试列(不同次启动),同机交替启动重新测量进行中。</p>
     <div class="tbl-wrap"><table>
       <thead><tr><th>项</th><th class="num">Rux</th><th class="num">Linux(同机)</th><th>说明</th></tr></thead>
       <tbody id="rt-rows">
         <tr><td class="mono">cyclictest SCHED_OTHER(丢失/平均/最大 µs)</td><td class="num">平均 73 · 最大 2762(release 单次启动)</td><td class="num">平均 63 · 最大 1417(整轮测试列)</td><td>max 尾(2.7 ms 级)疑长关中断段/缺页打断,归因进行中</td></tr>
-        <tr><td class="mono">cyclictest SCHED_FIFO p98(丢失/平均/最大 µs)</td><td class="num">平均 69 · 最大 263(release 单次启动)</td><td class="num">平均 12 · 最大 887(整轮测试列)</td><td>release 后平均 104→69;max 与参考列不同次启动不可直接比较,同机交替启动重新测量中</td></tr>
+        <tr><td class="mono">cyclictest SCHED_FIFO p98(丢失/平均/最大 µs)</td><td class="num">平均 69 · 最大 263(release 单次启动)</td><td class="num">平均 12 · 最大 887(整轮测试列)</td><td>release 后平均 104→69;max 与 Linux 列不同次启动不可直接比较,同机交替启动重新测量中</td></tr>
         <tr><td class="mono">rt_wakesys(唤醒到运行,µs)</td><td class="num">3.3</td><td class="num">持平</td><td>定时器到期改在硬中断顶部派发后与 Linux 持平</td></tr>
         <tr><td class="mono">hackbench socketpair -g 20(秒)</td><td class="num">1.536</td><td class="num">0.330</td><td>Linux 4.7×</td></tr>
         <tr><td class="mono">hackbench pipe -p 20 -g 4(秒)</td><td class="num">0.163</td><td class="num">0.017</td><td>Linux 9.6×</td></tr>
         <tr><td class="mono">hackbench thread -T 20 -g 4(秒)</td><td class="num">0.287</td><td class="num">0.042</td><td>Linux 6.8×</td></tr>
-        <tr><td class="mono">pi_stress -g 2 -D 20(完成反转数)</td><td class="num">132,074 反转(-g 1,11 s)</td><td class="num">132,074 反转(-g 1,11 s)</td><td>PI futex 已按参考形态实现(rt_mutex_setprio);-g 2 仍卡在既有的调度槽损坏缺陷</td></tr>
+        <tr><td class="mono">pi_stress -g 2 -D 20(完成反转数)</td><td class="num">132,074 反转(-g 1,11 s)</td><td class="num">132,074 反转(-g 1,11 s)</td><td>PI futex 已按 Linux 形态实现(rt_mutex_setprio);-g 2 仍卡在既有的调度槽损坏缺陷</td></tr>
       </tbody>
     </table></div>
     <p style="font-size:13px;color:var(--text-3)">无数据项即失败:hackbench inet ≥2 组在 Rux 无数字(回环非阻塞 connect 停滞,网络工作分支已记录在案);pi_stress 在 Rux 曾初始化失败(PI mutex UAPI 链)—— 本表以最新一轮双侧读数为准,失败项在行内如实显示。</p>
@@ -108,7 +108,7 @@
     <h2 id="infra"><span class="anchor">§3</span>工具链</h2>
     <ul>
       <li>rt-tests v2.11 原版源码入库;构建脚本 userspace/tests/rttests/build-x86.sh;schedprobe(随启动注入)验证原生 sched_* 系统调用面。</li>
-      <li>扩展:<code>test/qrtests/run-suite-x86.sh "60 cyclictest -D 30 -i 1000 -m"</code>;直方图模式(-h 落盘)与参考内核列扩展在补测队列。</li>
+      <li>扩展:<code>test/qrtests/run-suite-x86.sh "60 cyclictest -D 30 -i 1000 -m"</code>;直方图模式(-h 落盘)与 Linux 列扩展在补测队列。</li>
     </ul>
 
     <div class="callout">正本:qa-suites 工作树 run/qa-suites-findings.md;原始日志 run/bench-pair-1117/(两侧内核串口)。</div>

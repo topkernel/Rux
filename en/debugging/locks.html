@@ -108,7 +108,7 @@
     </ul>
 
     <h2 id="lockdep-lite"><span class="anchor">§5</span>lockdep-lite (runtime order recording: the honest status)</h2>
-    <p>The reference kernel's lockdep shape (a lock-class graph + runtime cycle detection) has this position in Rux: <b>planned, not in main</b>. The gap table (<code>docs/development/dfx-align-plan.md</code>) records Locking | lockdep-class | absent; P0 (a static lock-order registry + boot-time validation) and P1 (runtime acquire recording + cycle detection on new edges + two-lock-name/acquire-point splats) live on the implementation branch and will not merge before passing the gate. The three defense lines above are the actual coverage on main — stating this gap is itself part of observability honesty.</p>
+    <p>Linux's lockdep shape (a lock-class graph + runtime cycle detection) has this position in Rux: <b>planned, not in main</b>. The gap table (<code>docs/development/dfx-align-plan.md</code>) records Locking | lockdep-class | absent; P0 (a static lock-order registry + boot-time validation) and P1 (runtime acquire recording + cycle detection on new edges + two-lock-name/acquire-point splats) live on the implementation branch and will not merge before passing the gate. The three defense lines above are the actual coverage on main — stating this gap is itself part of observability honesty.</p>
 
     <h2 id="hunt-wedge"><span class="anchor">§6</span>hunt-wedge: automated hang capture</h2>
     <pre><code>./scripts/test/hunt-wedge.sh [rounds]   <span class="c"># 6 rounds default; stops on capture. exit 0=captured, 2=not reproduced</span></code></pre>

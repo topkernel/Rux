@@ -93,15 +93,15 @@
         <div class="nums">领先最高 4.6× · 落后最大 2.5× · 数据见 <a href="lmbench.html">lmbench 页</a></div>
       </div>
       <div class="card">
-        <h3><span class="ico">⚡</span>存储与实时路径对照:相位探针归因 + 参考形态改造</h3>
-        <p>存储 I/O 用<b>两侧同机对账</b>(共享 tracefs 时间线+相位括号+双方 perf)归因,再按参考内核实现形态改造:<b>fsync 路径重造</b>(未写盘区成批转换+邻接合并、每 inode 脏块笔记 O(dirty) 扫描、inode 表块搭同一刷写窗)——<b>0.30× 到领先 ~1.24×</b>;<b>同步等待先有界轮询后睡眠</b>(4k 随机写 0.97×、随机读写 0.96×、随机读 0.90×,平价范围);<b>直读物理连续段批量提交</b>(1M 顺序读 226× 落后到 0.62×);<b>缓冲写用户页直拷入帧</b>(0.94×,测试平台的物理下限:冷帧 RFO 两侧共付);<b>目录增量填充</b>(getdents <b>领先 1.95×</b>);<b>close 条件引用获取+readahead 状态内嵌</b>(openclose 1.59×、read_cached 1.66×,剩余主导=open 侧路径游走)。实时:<b>定时器到期改在硬中断顶部派发</b>(rt_wakesys 3.3 µs 持平)、<b>PI futex 参考形态</b>(pi_stress 132,074 反转)、cyclictest FIFO 平均 104→69 µs(最大 263,同机交替启动重新测量中)。</p>
+        <h3><span class="ico">⚡</span>存储与实时路径对照:相位探针归因 + 按 Linux 形态改造</h3>
+        <p>存储 I/O 用<b>两侧同机对账</b>(共享 tracefs 时间线+相位括号+双方 perf)归因,再按 Linux 实现形态改造:<b>fsync 路径重造</b>(未写盘区成批转换+邻接合并、每 inode 脏块笔记 O(dirty) 扫描、inode 表块搭同一刷写窗)——<b>0.30× 到领先 ~1.24×</b>;<b>同步等待先有界轮询后睡眠</b>(4k 随机写 0.97×、随机读写 0.96×、随机读 0.90×,平价范围);<b>直读物理连续段批量提交</b>(1M 顺序读 226× 落后到 0.62×);<b>缓冲写用户页直拷入帧</b>(0.94×,测试平台的物理下限:冷帧 RFO 两侧共付);<b>目录增量填充</b>(getdents <b>领先 1.95×</b>);<b>close 条件引用获取+readahead 状态内嵌</b>(openclose 1.59×、read_cached 1.66×,剩余主导=open 侧路径游走)。实时:<b>定时器到期改在硬中断顶部派发</b>(rt_wakesys 3.3 µs 持平)、<b>PI futex 按 Linux 形态</b>(pi_stress 132,074 反转)、cyclictest FIFO 平均 104→69 µs(最大 263,同机交替启动重新测量中)。</p>
         <div class="nums">逐项数据见 <a href="fio.html">fio 页</a> 与 <a href="rttests.html">rt-tests 页</a> · 方法与证据 docs/test/perf-campaign-2026-11-17.md</div>
         <h3><span class="ico">🏁</span>Geekbench 5:单核 2440 / 多核 7709(历史最佳)</h3>
         <p>单核总分 <b>2440 vs 2165(113%)</b>、多核总分 <b>7709 vs 7027(110%)</b>,best-of-runs 口径(gb-opt 轮,2026-11-15)。2026-11-04 完整捕获的逐项分布:多核 8 领先 / 5 持平 / 8 落后,单核 13 领先 / 3 持平 / 5 落后。</p>
         <div class="nums">逐项数据见 <a href="geekbench.html">Geekbench 页</a> · 测试平台注明:Linux 侧为宿主 4-CPU 钉核(taskset,拓扑对齐)</div>
       </div>
     </div>
-    <div class="callout"><b>差距结构:</b>领先面覆盖调度/唤醒(上下文切换、管道、信号量)、IPC 带宽(unix、pipe)与内存带宽;落后面集中在系统调用入口与路径解析(null/read/write/stat/open 1.2–2.5×)。历史 campaign 在旧参考窗口下曾把 fork/exec 记入持平区间,2026-11-16 同一测试平台参考列重测后回到 1.08–1.19× 区间(参考内核切换族对测量窗口敏感,比值只在同会话内有意义)。campaign 随役修复的 5 个正确性 bug 见 §2 表后清单。</div>
+    <div class="callout"><b>差距结构:</b>领先面覆盖调度/唤醒(上下文切换、管道、信号量)、IPC 带宽(unix、pipe)与内存带宽;落后面集中在系统调用入口与路径解析(null/read/write/stat/open 1.2–2.5×)。历史 campaign 在旧 Linux 侧窗口下曾把 fork/exec 记入持平区间,2026-11-16 同一测试平台 Linux 列重测后回到 1.08–1.19× 区间(Linux 切换族对测量窗口敏感,比值只在同会话内有意义)。campaign 随役修复的 5 个正确性 bug 见 §2 表后清单。</div>
 
         <h2 id="suites"><span class="anchor">§2</span>套件地图(每套件一页)</h2>
     <div class="tbl-wrap">
@@ -109,7 +109,7 @@
         <thead><tr><th>套件</th><th>类型</th><th>状态</th><th>页</th></tr></thead>
         <tbody>
           <tr><td>lmbench 3.0-a9</td><td>微基准(延迟 + 带宽,同机 Linux 对照)</td><td><span class="chip ok">2026-11-16 全量 standing + perf-2x 三轮</span></td><td><a href="lmbench.html">lmbench</a></td></tr>
-          <tr><td>Geekbench 5.5.1</td><td>综合套件(21 项逐负载,4-CPU 参考对照)</td><td><span class="chip ok">SC 2440 / MC 7709 best-of-runs,逐位复现确认</span></td><td><a href="geekbench.html">Geekbench 5</a></td></tr>
+          <tr><td>Geekbench 5.5.1</td><td>综合套件(21 项逐负载,4-CPU Linux 对照)</td><td><span class="chip ok">SC 2440 / MC 7709 best-of-runs,逐位复现确认</span></td><td><a href="geekbench.html">Geekbench 5</a></td></tr>
           <tr><td>fio 3.36</td><td>存储 I/O(引擎枚举 + 数据完整性 + 组级吞吐)</td><td><span class="chip ok">同机同镜像同二进制对照(吞吐/延迟/持久化路径)</span></td><td><a href="fio.html">fio</a></td></tr>
           <tr><td>rt-tests v2.11(cyclictest/hackbench/pi_stress)</td><td>实时延迟 + 调度压力</td><td><span class="chip ok">cyclictest/hackbench/pi_stress 同机对照(最新一轮)</span></td><td><a href="rttests.html">rt-tests</a></td></tr>
           <tr><td>内部微基准(pbench + Tier 带 + 刷盘墙 + cctx)</td><td>门禁采集器与历史 A/B</td><td><span class="chip ok">Tier 1 带 + 刷盘墙同机对照 + 切换解剖</span></td><td><a href="microbench.html">内部微基准</a></td></tr>
@@ -142,7 +142,7 @@
         <thead><tr><th>域</th><th>守护指标(现行带)</th></tr></thead>
         <tbody>
           <tr><td>内存分配 / 回收</td><td>small_alloc 全局类锁分段 ≤25M/次启动(实测 19.7M,最新板 6.0M)、REST 占比 ≤10%(现行 0.1–1.2%)、标准启动无回收慢路径浮现</td></tr>
-          <tr><td>调度</td><td>GRQ 锁内 241–273 ns(release,精确探针;树操作 ~20–30 ns + D-1 记账);锁等待 70–84 ns 为 KVM 跨 vCPU locked 指令税(参考 per-rq 锁同样交税)。门禁指标(调用点 IF=0 段均值,含获取等待)允许范围 1200–7320 ns(实测 2786 ns @ 样本数 630 万)、调度事件普查 TERM 8±2 / REFUSED 32±4、P2 ±20%、futex 唤醒→运行 quiet 7.5 µs ±20%</td></tr>
+          <tr><td>调度</td><td>GRQ 锁内 241–273 ns(release,精确探针;树操作 ~20–30 ns + D-1 记账);锁等待 70–84 ns 为 KVM 跨 vCPU locked 指令税(Linux 的 per-rq 锁同样交税)。门禁指标(调用点 IF=0 段均值,含获取等待)允许范围 1200–7320 ns(实测 2786 ns @ 样本数 630 万)、调度事件普查 TERM 8±2 / REFUSED 32±4、P2 ±20%、futex 唤醒→运行 quiet 7.5 µs ±20%</td></tr>
           <tr><td>文件系统热路径</td><td>P6 行 ±20%(stat 71 / openclose 156 / append 77 / mkdrmdir 2760 / unlink 808 / write_fsync 14200 µs)、buffer cache 命中率 99.1% ≥ 基线、无新同步写类</td></tr>
           <tr><td>中断 / IRQ 路径</td><td>IF=0 份额 20.4%±3pp、最长关中断段 ≤10 ms(现行 6–9 ms)、SOFTIRQ 占比 3.1±2pp、无新 IRQ-OFF 打印类</td></tr>
           <tr><td>IPC</td><td>p5 族 ±20%(p5a 18.3 / p5b 23–41 / 流 24–27 µs)、unix writev/truesize 24 µs 类不回退</td></tr>
