@@ -1861,6 +1861,7 @@ pub fn dump() {
     {
         let tsc_hz = crate::arch::cpu::get_counter_freq().max(1);
         let msd = tsc_hz / 1000;
+        let usd = (tsc_hz / 1_000_000).max(1);
         for c in 0..crate::config::MAX_CPUS {
             let v = [
                 IFZ.cum[c][0].load(Ordering::Relaxed),
@@ -1906,7 +1907,7 @@ pub fn dump() {
                 );
             }
             crate::pr_warn!(
-                "SYSCOST t={}s if0 cpu={}: tot={}ms rest={}ms hard={}ms soft={}ms uart={}ms nseg={}/{}/{}/{} max={}ms/{}ms/{}ms/{}ms heal={}n/{}ms miss={}n{}",
+                "SYSCOST t={}s if0 cpu={}: tot={}ms rest={}ms hard={}ms soft={}ms uart={}ms nseg={}/{}/{}/{} max={}us/{}us/{}us/{}us heal={}n/{}ms miss={}n{}",
                 secs,
                 c,
                 tot / msd,
@@ -1915,7 +1916,9 @@ pub fn dump() {
                 v[2] / msd,
                 v[3] / msd,
                 nseg[0], nseg[1], nseg[2], nseg[3],
-                mx[0] / msd, mx[1] / msd, mx[2] / msd, mx[3] / msd,
+                // rt-r4: per-zone maxima in µs (the ms grid rounded the
+                // 1 ms class to 0/1/2 — useless for the <1 ms gate).
+                mx[0] / usd, mx[1] / usd, mx[2] / usd, mx[3] / usd,
                 heal_n,
                 IFZ.heal_cyc[c].load(Ordering::Relaxed) / msd,
                 miss_n,
@@ -1970,7 +1973,7 @@ pub fn dump() {
                 (l.file(), l.line())
             };
             crate::pr_warn!(
-                "SYSCOST t={}s rest-site {:2}: {}:{} n={} tot={}ms avg={}ns max={}ms",
+                "SYSCOST t={}s rest-site {:2}: {}:{} n={} tot={}ms avg={}ns max={}us",
                 secs,
                 t + 1,
                 file,
@@ -1978,18 +1981,18 @@ pub fn dump() {
                 REST_SITES[i].n.load(Ordering::Relaxed),
                 top_cyc[t] / msd,
                 top_cyc[t] / n * 1000 / (tsc_hz / 1_000_000).max(1),
-                REST_SITES[i].max.load(Ordering::Relaxed) / msd
+                REST_SITES[i].max.load(Ordering::Relaxed) / usd
             );
         }
         if of_cyc != 0 || REST_OF.n.load(Ordering::Relaxed) != 0 {
             let n = REST_OF.n.load(Ordering::Relaxed).max(1);
             crate::pr_warn!(
-                "SYSCOST t={}s rest-site of: n={} tot={}ms avg={}ns max={}ms (table-full + missed-edge opens)",
+                "SYSCOST t={}s rest-site of: n={} tot={}ms avg={}ns max={}us (table-full + missed-edge opens)",
                 secs,
                 REST_OF.n.load(Ordering::Relaxed),
                 of_cyc / msd,
                 of_cyc / n * 1000 / (tsc_hz / 1_000_000).max(1),
-                REST_OF.max.load(Ordering::Relaxed) / msd
+                REST_OF.max.load(Ordering::Relaxed) / usd
             );
         }
     }

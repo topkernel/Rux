@@ -3602,112 +3602,137 @@ pub fn binder_on_tgid_exit(tgid: u32) {
     {
         let mut w = world_lock();
         let Some(world) = w.as_mut() else { return };
-        // Collect (owner, node) pairs registered by the dying tgid.
-        // SAFETY: all access below is under WORLD.
-        let mut victims: Vec<(Arc<BinderProc>, Arc<BinderNode>)> = Vec::new();
-        for p in world.procs.clone() {
-            // SAFETY: under WORLD.
-            for n in unsafe { pm(world, &p).im().nodes.clone() } {
-                if n.reg_tgid == tgid && n.reg_tgid != p.pid as u32 {
-                    victims.push((p.clone(), n));
+        // RT-R4 (binder.rs:2092 held the 8 ms REST max, pa-r4m1): the
+        // old shape cloned EVERY proc's ENTIRE node list up front, then
+        // PER VICTIM NODE re-drained the owner todo, re-cloned
+        // world.procs, and re-ran an O(nodes) retain — an irqsave
+        // section of O(procs×nodes + victims×(procs + nodes + todo))
+        // with a heap allocation per proc per exit. Restructured with
+        // identical WORLD-guard semantics: victims are grouped per
+        // OWNER proc as they are found (no whole-list clones), and each
+        // owner pays ONE todo pass and ONE retain for all its victims.
+        // SAFETY: all access below is under WORLD (the pm contract).
+        let procs = world.procs.clone(); // once: the Arc list, small
+        let mut total_victims = 0usize;
+        for p in &procs {
+            // Victims of THIS owner (by reference; clone only the arcs
+            // that match).
+            let mut owner_victims: Vec<Arc<BinderNode>> = Vec::new();
+            unsafe {
+                for n in pm(world, p).im().nodes.iter() {
+                    if n.reg_tgid == tgid && n.reg_tgid != p.pid as u32 {
+                        owner_victims.push(n.clone());
+                    }
                 }
             }
-        }
-        if victims.is_empty() {
-            return;
-        }
-        static EXIT_PROBE_N: core::sync::atomic::AtomicU32 =
-            core::sync::atomic::AtomicU32::new(0);
-        if EXIT_PROBE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
-            crate::pr_warn!(
-                "binder: tgid {} exit reaped {} child-registered nodes",
-                tgid,
-                victims.len()
-            );
-        }
-        // SAFETY: WORLD held for the rest of the block.
-        unsafe {
-            for (owner, node) in &victims {
-                // 1. Fail proc-todo transactions aimed at this node.
-                let queued: Vec<Work> = pm(world, owner).im().todo.drain(..).collect();
+            if owner_victims.is_empty() {
+                continue;
+            }
+            total_victims += owner_victims.len();
+            // 1. ONE pass over the owner todo for all of this owner's
+            //    victims (the old shape drained + requeued the whole
+            //    todo PER victim node — O(todo × victims) pushes).
+            unsafe {
+                let queued: Vec<Work> = pm(world, p).im().todo.drain(..).collect();
                 for wk in queued {
-                    let hit = match &wk {
+                    let victim_t = match &wk {
                         Work::Transaction(t)
                             if t
                                 .target_node
                                 .as_ref()
-                                .map(|n| Arc::ptr_eq(n, node))
-                                .unwrap_or(false) =>
+                                .is_some_and(|n| owner_victims.iter().any(|v| Arc::ptr_eq(v, n))) =>
                         {
-                            wakes.extend(dead_reply_to_sender(world, owner, t));
-                            true
+                            Some(t)
                         }
-                        _ => false,
+                        _ => None,
                     };
-                    if hit {
-                        finish_work(world, owner, wk);
+                    if let Some(t) = victim_t {
+                        wakes.extend(dead_reply_to_sender(world, p, t));
+                        finish_work(world, p, wk);
                     } else {
-                        pm(world, owner).im().todo.push_back(wk);
+                        pm(world, p).im().todo.push_back(wk);
                     }
                 }
-                // 2. Fail the node's parked async transactions.
-                let parked: Vec<Arc<BinderTxn>> = node.st().async_todo.drain(..).collect();
-                for t in parked {
-                    t.set_holds_async_slot(false);
-                    wakes.extend(dead_reply_to_sender(world, owner, &t));
-                    finish_work(world, owner, Work::Transaction(t));
-                }
-                // 3. Mark dead + queue DeadBinder for armed death
-                //    recipients across every holder proc.
-                node.dead.store(true, core::sync::atomic::Ordering::Release);
-                for q in world.procs.clone() {
-                    if Arc::ptr_eq(&q, owner) {
-                        continue;
+            }
+            // SAFETY: WORLD held for the rest of the block.
+            unsafe {
+                for node in &owner_victims {
+                    // 2. Fail the node's parked async transactions.
+                    let parked: Vec<Arc<BinderTxn>> = node.st().async_todo.drain(..).collect();
+                    for t in parked {
+                        t.set_holds_async_slot(false);
+                        wakes.extend(dead_reply_to_sender(world, p, &t));
+                        finish_work(world, p, Work::Transaction(t));
                     }
-                    let qim = pm(world, &q);
-                    for r in qim.im().refs.iter_mut() {
-                        if Arc::ptr_eq(&r.node, node) {
-                            if let Some(d) = r.death.as_mut() {
-                                if matches!(d.phase, DeathPhase::Armed) {
-                                    d.phase = DeathPhase::Queued;
-                                    // lb48: the child-node death notice
-                                    // (reg_tgid exit path) — same class as
-                                    // the proc-exit notice. lb51: lockless
-                                    // writer + budget (under WORLD).
-                                    // 110th: rides dfx=bindertrace.
-                                    static CNOTICE_N: core::sync::atomic::AtomicUsize =
-                                        core::sync::atomic::AtomicUsize::new(0);
-                                    if crate::trace::EVENT_BINDERTRACE.armed() && CNOTICE_N
-                                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
-                                        < 120
-                                    {
-                                        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
-                                        use core::fmt::Write as _;
-                                        let _ = writeln!(
-                                            w,
-                                            "binder: child-node death notice pid {} desc {} cookie {:#x} (owner {} reg_tgid {} exited)",
-                                            q.pid,
-                                            r.desc,
-                                            d.cookie,
-                                            owner.pid,
-                                            tgid
-                                        );
+                    // 3. Mark dead + queue DeadBinder for armed death
+                    //    recipients across every holder proc. RT-R4:
+                    //    iterate the ONE procs snapshot by reference
+                    //    (the old shape re-cloned the list per victim
+                    //    node).
+                    node.dead.store(true, core::sync::atomic::Ordering::Release);
+                    for q in &procs {
+                        if Arc::ptr_eq(q, p) {
+                            continue;
+                        }
+                        let qim = pm(world, q);
+                        for r in qim.im().refs.iter_mut() {
+                            if Arc::ptr_eq(&r.node, node) {
+                                if let Some(d) = r.death.as_mut() {
+                                    if matches!(d.phase, DeathPhase::Armed) {
+                                        d.phase = DeathPhase::Queued;
+                                        // lb48: the child-node death notice
+                                        // (reg_tgid exit path) — same class as
+                                        // the proc-exit notice. lb51: lockless
+                                        // writer + budget (under WORLD).
+                                        // 110th: rides dfx=bindertrace.
+                                        static CNOTICE_N: core::sync::atomic::AtomicUsize =
+                                            core::sync::atomic::AtomicUsize::new(0);
+                                        if crate::trace::EVENT_BINDERTRACE.armed() && CNOTICE_N
+                                            .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                                            < 120
+                                        {
+                                            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                                            use core::fmt::Write as _;
+                                            let _ = writeln!(
+                                                w,
+                                                "binder: child-node death notice pid {} desc {} cookie {:#x} (owner {} reg_tgid {} exited)",
+                                                q.pid,
+                                                r.desc,
+                                                d.cookie,
+                                                p.pid,
+                                                tgid
+                                            );
+                                        }
+                                        qim.im().todo.push_back(Work::DeadBinder {
+                                            desc: r.desc,
+                                            cookie: d.cookie,
+                                        });
+                                        wakes.push(q.clone());
                                     }
-                                    qim.im().todo.push_back(Work::DeadBinder {
-                                        desc: r.desc,
-                                        cookie: d.cookie,
-                                    });
-                                    wakes.push(q.clone());
                                 }
                             }
                         }
                     }
                 }
-                // 4. Drop the node from the owner's list.
-                pm(world, owner)
-                    .im()
-                    .nodes
-                    .retain(|n| !Arc::ptr_eq(n, node));
+                // 4. Drop ALL of this owner's victim nodes in ONE retain
+                //    (the old shape ran an O(nodes) retain per victim).
+                pm(world, p).im().nodes.retain(|n| {
+                    !owner_victims.iter().any(|v| Arc::ptr_eq(v, n))
+                });
+            }
+        }
+        // RT-R4: the count print moved OUT of the irqsave section (the
+        // old pr_warn ran under WORLD). Budget consumed only on
+        // victim-bearing calls (the original's early return shape).
+        if total_victims > 0 {
+            static EXIT_PROBE_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            if EXIT_PROBE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+                crate::pr_warn!(
+                    "binder: tgid {} exit reaped {} child-registered nodes",
+                    tgid,
+                    total_victims
+                );
             }
         }
     }
