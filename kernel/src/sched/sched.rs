@@ -1668,6 +1668,21 @@ pub fn resched_cpu(cpu: usize) {
 /// `Task::wake_up_impl`). The claim atomically clears the idle bit so two
 /// racing wakes cannot both dispatch to the same CPU.
 pub fn claim_idle_cpu_for(affinity: u32) -> Option<usize> {
+    // RT-R4 (R2 residual, pick side): prefer the LOCAL cpu when it is
+    // idle and allowed, before the rotating spread. The spread 50/50'd
+    // dispatches to the REMOTE idle cpu on an all-idle box — a resched
+    // IPI into a HALTED vCPU, the rt_pick_avg 19-21 us class (vs 3 us
+    // when no halt is crossed; smp2 interval sweep, run/RT-R4.md) —
+    // while the LOCAL cpu, often executing this very wake in its timer
+    // hardirq, would pick the task at its idle-loop schedule() with
+    // zero IPI and zero halt-exit (resched_cpu(self) only sets the
+    // NEED_RESCHED flag). Same shape as the reference's wake-affine
+    // this_cpu preference in select_task_rq. clear_idle is an atomic
+    // CAS, so racing wakes still cannot double-target a cpu.
+    let this = crate::arch::cpu_id() as usize;
+    if this < MAX_CPUS && affinity & (1u32 << this) != 0 && grq().clear_idle(this) {
+        return Some(this);
+    }
     grq().claim_idle_cpu(affinity)
 }
 
