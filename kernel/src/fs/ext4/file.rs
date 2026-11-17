@@ -1319,6 +1319,14 @@ pub fn ext4_file_write(
                                      core::cmp::max(current_blocks, first_touched))
         };
         r?;
+        // Delalloc reservations: every index below the freshly allocated
+        // frontier is a real block now (or a hole whose own materialize
+        // owns it) — release the pending-writeback reservations held for
+        // those indices (fio-delalloc; see DELALLOC_RESERVATIONS). This
+        // is the writeback twin of ext4_buffered_write's reserve: the
+        // da_write_begin reserve and the mballoc claim, one allocation
+        // apart.
+        da_release_below(fs, inode.ino, needed_blocks);
     }
 
     // BULK UNWRITTEN CONVERSION (wrfsync lane, 2026-11-17): convert the
@@ -2402,6 +2410,119 @@ fn settle_dirty_data_notes(fs_id: u64, ino: u64, still_dirty: &[u64]) {
     }
 }
 
+// =====================================================================
+// Delalloc block reservations (fio-delalloc lane, 2026-11-18) — the
+// reference kernel's ext4_da_reserve_space shape (fs/ext4/inode.c:
+// reserved-cluster accounting; a delayed-allocation write RESERVES space
+// at write time so ENOSPC lands at write(2), not at writeback).
+//
+// Buffered writes defer physical allocation to the writeback points (the
+// da shape, ext4_buffered_write); until then the blocks the dirty pages
+// will need are counted here, per (fs, ino) as a set of file block
+// indices (the DIRTY_DATA_BLOCKS side-table discipline: cheap inserts
+// under one short-held global lock, dedup by index). The write-time
+// ENOSPC gate then refuses an extending write when the filesystem's free
+// blocks are exhausted BY RESERVATIONS (free <= reserved), not only when
+// literally zero blocks remain — the precision the reference has and the
+// old est_free_blocks()==0 gate lacked: concurrent writers on a nearly
+// full fs used to race past the zero check and fail at flush time (the
+// unflushable dirty balloon the falloc-wedge lane documented).
+//
+// Reserve points: buffered writes extending past the inode's allocated
+// frontier (ceil of the cached on-disk inode size — allocation never
+// leads the size it serves). Release points: the writeback allocation
+// (ext4_file_write's allocate succeeds → every reserved index below the
+// allocated frontier is now a real block), truncate-down (indices at or
+// past the new size), inode deletion (all). Quota: no quota
+// infrastructure exists yet — the reference's dq_alloc_block hook is the
+// recorded follow-up.
+// =====================================================================
+type DelallocResMap =
+    alloc::collections::BTreeMap<(u64, u64), alloc::collections::BTreeSet<u64>>;
+static DELALLOC_RESERVATIONS: crate::sync::spinlock::Spinlock<DelallocResMap> =
+    crate::sync::spinlock::Spinlock::new(alloc::collections::BTreeMap::new());
+
+/// Reserve file blocks [first, first+n) for (fs, ino)'s pending
+/// delayed-allocation writeback. Fails -ENOSPC when the filesystem's free
+/// blocks (estimated — see est_free_blocks) cannot cover the reservations
+/// already held plus the NEW indices of this range (already-reserved
+/// indices are free — a second write over the same range owes nothing
+/// new). Call BEFORE any page is dirtied: a refusal must leave the file
+/// and the size watermark untouched. `free_est` is the caller's
+/// est_free_blocks() snapshot (the eager gate's — one estimate per write,
+/// never two group-descs walks).
+pub(crate) fn da_reserve_blocks(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    ino: u32,
+    first: u64,
+    n: u64,
+    free_est: u64,
+) -> Result<(), i32> {
+    if n == 0 {
+        return Ok(());
+    }
+    let free = free_est;
+    let end = first.saturating_add(n);
+    let key = (fs as *const _ as u64, ino as u64);
+    let mut m = DELALLOC_RESERVATIONS.lock();
+    let reserved_total: u64 = m.values().map(|s| s.len() as u64).sum();
+    let set = m.entry(key).or_default();
+    let mut new = 0u64;
+    for b in first..end {
+        if !set.contains(&b) {
+            new += 1;
+        }
+    }
+    if free <= reserved_total + new && free != 0 {
+        // Reservations (held + this ask) exhaust the estimated free
+        // space: refuse at write time — the reference's
+        // ext4_da_reserve_space ENOSPC. (free == 0 is the eager gate's
+        // case; already refused by the caller.)
+        if new > 0 {
+            return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+        }
+    }
+    for b in first..end {
+        set.insert(b);
+    }
+    Ok(())
+}
+
+/// Release every reservation of (fs, ino) below `upto` (exclusive) — the
+/// writeback allocated real blocks for those indices
+/// (allocate_blocks_for_file / allocate_blocks_unwritten_dio succeeded).
+pub(crate) fn da_release_below(fs: &crate::fs::ext4::Ext4FileSystem, ino: u32, upto: u64) {
+    let mut m = DELALLOC_RESERVATIONS.lock();
+    if let Some(set) = m.get_mut(&(fs as *const _ as u64, ino as u64)) {
+        let keep: alloc::collections::BTreeSet<u64> =
+            set.range(upto..).copied().collect();
+        *set = keep;
+        if set.is_empty() {
+            m.remove(&(fs as *const _ as u64, ino as u64));
+        }
+    }
+}
+
+/// Release every reservation of (fs, ino) at or past `from` — a
+/// truncate-down discards the tail's pending writeback obligations.
+pub(crate) fn da_release_from(fs: &crate::fs::ext4::Ext4FileSystem, ino: u32, from: u64) {
+    let mut m = DELALLOC_RESERVATIONS.lock();
+    if let Some(set) = m.get_mut(&(fs as *const _ as u64, ino as u64)) {
+        let keep: alloc::collections::BTreeSet<u64> =
+            set.range(..from).copied().collect();
+        *set = keep;
+        if set.is_empty() {
+            m.remove(&(fs as *const _ as u64, ino as u64));
+        }
+    }
+}
+
+/// Release all reservations of (fs, ino) — the inode is being deleted.
+pub(crate) fn da_release_all(fs: &crate::fs::ext4::Ext4FileSystem, ino: u32) {
+    let mut m = DELALLOC_RESERVATIONS.lock();
+    m.remove(&(fs as *const _ as u64, ino as u64));
+}
+
 fn ext4_sync_file_inner(
     fs: &crate::fs::ext4::Ext4FileSystem,
     inode: &crate::fs::ext4::inode::Ext4Inode,
@@ -3426,8 +3547,48 @@ unsafe fn ext4_buffered_write(
                 None => return errno::Errno::FileTooLarge.as_neg_i32() as isize,
             }
         };
-        if would_extend && fs.est_free_blocks() == 0 {
+        // ONE free estimate per write, shared by the eager zero-gate and
+        // the reservation below (two group-descs walks per 4 KiB write
+        // was measurable on the fsync4k row).
+        let free_est = if would_extend {
+            fs.est_free_blocks()
+        } else {
+            0 // non-extending: the eager gate does not apply
+        };
+        if would_extend && free_est == 0 {
             return errno::Errno::NoSpaceLeftOnDevice.as_neg_i32() as isize;
+        }
+
+        // Delalloc reservation (fio-delalloc lane, 2026-11-18): count the
+        // blocks this write's writeback will have to allocate — the
+        // written range's block indices AT OR PAST the inode's allocated
+        // frontier (ceil of the cached on-disk size; allocation never
+        // leads the size it serves) — against the fs's free space BEFORE
+        // any page is dirtied and BEFORE the size watermark is published
+        // below. A refusal is the write-time ENOSPC of the reference's
+        // ext4_da_reserve_space: reservations held by ANY writer reduce
+        // the space a new writer may promise, so concurrent writers on a
+        // nearly full fs fail at write() instead of racing past the zero
+        // check and failing at flush time (the unflushable dirty
+        // balloon). Overwrites below the frontier owe nothing (their
+        // blocks exist); a repeat write over an already-reserved range
+        // owes nothing new (set dedup). Quota check: the reference's
+        // dq_alloc_block hook has no infrastructure here yet — recorded
+        // follow-up.
+        let bs = fs.block_size as u64;
+        let base_size = sbi.get_size();
+        let frontier = base_size.div_ceil(bs);
+        let (first, last) = if offset == u64::MAX {
+            let cur = inode.size.load(Ordering::Acquire);
+            (cur / bs, (cur + srclen as u64).div_ceil(bs))
+        } else {
+            (offset / bs, (offset + srclen as u64).div_ceil(bs))
+        };
+        let first = first.max(frontier);
+        if last > first {
+            if let Err(e) = da_reserve_blocks(fs, inode.ino as u32, first, last - first, free_est) {
+                return e as isize;
+            }
         }
     }
 
