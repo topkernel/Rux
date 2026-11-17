@@ -243,3 +243,29 @@ the reference does and we skip.
    RCU-walk shape).
 6. perf-5.15 session compatibility (dummy:HG sideband, group_fd=0,
    second ring mmap) — our perf surface rejects record sessions.
+
+## 8. Round 3 notes (2026-11-18, in-flight lanes)
+
+- **hackbench battery-era gap adjudicated**: the 4.7–9.6× rows were
+  debug-build-era readings. Re-measured on main release, same-rig
+  interleaved (R3 lane, ×3 medians being finalized): socketpair -g 20
+  0.258 vs 0.324 s (ahead ~1.26×), pipe -p 20 -g 4 0.018 vs 0.016
+  (0.89×), thread -T 20 -g 4 0.039 vs 0.045 (ahead ~1.15×). The
+  cumulative effect of the round-1/2 merges is inside these numbers.
+- **cyclictest acceptance bar raised by the user**: SCHED_FIFO must
+  beat Linux by ≥50% on min AND avg AND max (same-rig interleaved).
+  Current: max 263 vs 887 µs (~70% better, different boots —
+  confirming); avg 46 vs 12 µs (the big gap; R1–R4 lanes own it); min
+  29 vs unmeasured. Recorded in docs/development/rt-kernel-plan.md.
+- **rt-r4 interim attribution** (lane branch, pre-merge): FIFO avg
+  decomposes into fire_avg (15–25 µs) + rt_pick_avg (19–21 µs) +
+  user/overhead; the halted-CPU re-arm hypothesis REFUTED (armdl=0 —
+  the LAPIC is armed exactly at the wheel deadline at sleep time).
+  Two fixes A/B'd on the lane branch: wake dispatch prefers the local
+  idle CPU (rt_pick 19–21→11–13 µs), LAPIC one-shot re-arm skips the
+  mode-register WRMSR pair (fire 15–25→10–16 µs); matched-interval
+  cyclictest avg i=500 55→42, i=2000 64→54, i=8000 76→53. The flat
+  ~10 µs fire term is shaped like the KVM halt-exit delivery class —
+  the two-sided segment table quantifies whether Linux pays it too.
+- **pi_stress**: -g 2 now completes 372,942+370,196 inversions, two
+  passes, clean exit (the timer-gap four lost-dispatch fixes).
