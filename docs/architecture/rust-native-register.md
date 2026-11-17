@@ -634,3 +634,51 @@ foreign QEMUs):
   1200-7320 ns band (improvement, rebank); small_alloc REST 0.0%.
 - Gates: riscv64 `make test` green (unit suite verdict green); aarch64
   builds clean; dual-arch x86_64 debug + release-opt build green.
+
+## K. Batched direct I/O with borrowed DMA (fio-2x lane, 2026-11-17, evidence-backed)
+
+- **Run-resolved, window-batched O_DIRECT with a borrowed DMA source**
+  (merge candidate 5606622b8 + 73f0ee509; ext4 file/extent, bio): the
+  direct reader resolves a request into physically-consecutive runs
+  with one extent-tree walk per run (`ext4_ext_get_run` — the maximal
+  (phys, len) pair, replacing 1-2 cached breads per 4 KiB), then DMAs
+  each run as ONE multi-block request straight into the syscall's
+  staging slice — no private kernel copy — keeping a window of up to
+  64 requests / 512 blocks in flight, waited once, one device kick
+  per window. The write side's fast arm is the Rust-native core:
+  `WriteBatch::submit_ref` lends the CALLER's buffer to the device as
+  the DMA source and the borrow checker enforces the discipline C
+  kernels hand-roll — the buffer cannot be mutated or dropped while
+  the device owns it, because the drain happens before return inside
+  the same lifetime. In C this is refcounted page pinning with a
+  use-after-unpin bug class; here the class has no representation.
+  Measured (fio 3.36 static, q35 KVM smp8/8G, same 4 GiB ext4 data
+  disk both arms, snapshot=on, 3 interleaved reps, medians; artifacts
+  run/ab-final3-*.txt, run/FIO-2X.md): 1M seq read direct 40.8 →
+  4711 MiB/s vs reference 9600 (226x-behind → 2.0x); 1M seq write
+  direct 93.9 → 1583 vs 4019 (57x → 2.5x); the 4k-random-direct
+  write storm (166 IOPS, 4 ms/op) was root-caused to the extent-decode
+  bug below and reads 10.9k IOPS after the fix. Remaining gap is
+  per-op completion latency, not batching (queue item 4, wakeup
+  delivery).
+- **Batched journal write-through with one drain per window**
+  (jbd2/bio, same merge): both jbd2 commit write-through loops and
+  the fsync data walk go through `bio::sync_dirty_blocks_batched`
+  (pin, submit 32-span windows, ONE device drain, clear BH_Dirty on
+  ack) instead of one serialized round trip per registered buffer,
+  and the fsync walk probes dirtiness with a no-pin lookup
+  (`block_dirty_cached`) instead of pinning every cached block of the
+  file (measured 59.3M breads in 15 s on the old walk; 2048 hash+LRU
+  pins per fsync of an 8 MiB file). 4k randwrite+fsync=1: 260.6 →
+  2727 IOPS vs reference 15.8k (7.7x → 5.8x behind; the residual is
+  per-fsync write-core cost, tracked in the lane record).
+- **The decode-bug class eliminated by ONE accessor**: ee_len==0x8000
+  is the on-disk encoding of a max WRITTEN extent (32768 blocks);
+  every decode site inlined its own mask, and several read bit 15 as
+  the unwritten marker — every >=128 MiB contiguous file read back as
+  ZEROS (silent, in-bounds, no memory corruption — a class-(b) logic
+  bug in safe code, caught by in-guest md5sum vs host digest, not by
+  the type system; honest note in the safety ledger). All sites now
+  share `Ext4Extent::length` / `is_unwritten`, so the divergent-decode
+  family cannot re-emerge at a new call site — the accessor is the
+  single place the on-disk discipline lives.

@@ -46,9 +46,27 @@ impl Ext4Extent {
         ((self.ee_start_hi as u64) << 32) | (self.ee_start_lo as u64)
     }
 
-    /// Get the length (number of blocks), masking the initialized flag (bit 15).
+    /// Get the length (number of blocks), masking the initialized flag
+    /// (bit 15). ext4 on-disk encoding (fio-2x lane, 2026-11-17): an
+    /// extent of EXACTLY 32768 blocks is stored as ee_len == 0x8000 —
+    /// the masked length reads 0. Any file with a >=128 MiB contiguous
+    /// run (dd/mkfs-created test images, big rootfs files) decoded as a
+    /// zero-length "unwritten" extent: reads zero-filled real data and
+    /// writes fell into the materialize/rebuild storm. 0x8000 exactly =
+    /// WRITTEN 32768; > 0x8000 = unwritten (len = ee_len - 0x8000).
     pub fn length(&self) -> u16 {
-        (self.ee_len as u32 & 0x7FFF) as u16
+        let l = self.ee_len & 0x7FFF;
+        if l == 0 {
+            0x8000
+        } else {
+            l
+        }
+    }
+
+    /// ext4 encoding discipline: unwritten means ee_len STRICTLY above
+    /// the 0x8000 max-written marker (see `length`).
+    pub fn is_unwritten(&self) -> bool {
+        self.ee_len > EXT4_EXT_UNWRITTEN
     }
 }
 
@@ -143,6 +161,153 @@ pub fn ext4_ext_get_block_ex(
     r
 }
 
+/// Maximal mapped run covering `logical_block` (pair-battery item 1,
+/// 2026-11-17): returns `(physical start block, run length in blocks,
+/// unwritten)`. The window `[logical_block, logical_block + len)` maps
+/// one-to-one onto `[phys, phys + len)` — a whole extent resolved with
+/// ONE tree walk, replacing the per-block `ext4_ext_get_block_ex` loop
+/// that paid 1-2 cached breads per 4 KiB block on depth>=1 files (512
+/// per 1 MiB direct read). Holes return `(0, tail_to_next_extent,
+/// false)`; unwritten extents return the run with `unwritten = true`
+/// (readers zero-fill, writers materialize per block).
+pub fn ext4_ext_get_run(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    ino: u32,
+    i_block: &[u32; 15],
+    logical_block: u64,
+) -> Result<(u64, u64, bool), i32> {
+    let header = get_extent_header(i_block);
+    if header.eh_magic != EXT4_EXT_MAGIC || header.eh_entries > header.eh_max {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+
+    // Root-node leaves only for depth 0; deep trees walk down.
+    if header.eh_depth != 0 {
+        // SAFETY: i_block is 60 bytes; index entries stay in-bounds
+        // (same slice construction as ext4_ext_get_block_ex_inner).
+        unsafe {
+            let idxs = core::slice::from_raw_parts(
+                (i_block.as_ptr() as *const u8).add(core::mem::size_of::<Ext4ExtentHeader>())
+                    as *const Ext4ExtentIdx,
+                core::cmp::min(header.eh_entries as usize, ROOT_NODE_CAP),
+            );
+            let mut child = 0u64;
+            for idx in idxs {
+                if logical_block >= idx.ei_block as u64 {
+                    child = idx.leaf_block();
+                } else {
+                    break;
+                }
+            }
+            if child == 0 {
+                return Ok((0, 0, false));
+            }
+            return find_run_in_external_extent(fs, child, logical_block, 0);
+        }
+    }
+
+    let max_entries = (60 - core::mem::size_of::<Ext4ExtentHeader>())
+        / core::mem::size_of::<Ext4Extent>();
+    if header.eh_entries as usize > max_entries {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+    // SAFETY: entries follow the 12-byte header inside the 60-byte
+    // i_block; eh_entries validated against max_entries above.
+    let entries = unsafe {
+        core::slice::from_raw_parts(
+            (i_block.as_ptr() as *const u8).add(core::mem::size_of::<Ext4ExtentHeader>())
+                as *const Ext4Extent,
+            header.eh_entries as usize,
+        )
+    };
+    Ok(run_from_entries(entries, logical_block))
+}
+
+/// Scan leaf `entries` for the extent covering `logical_block`; return
+/// the maximal run from that point. Holes report the distance to the
+/// next extent's start (length 0 means "nothing known ahead" — callers
+/// re-resolve per block there).
+#[inline]
+fn run_from_entries(entries: &[Ext4Extent], logical_block: u64) -> (u64, u64, bool) {
+    let mut next_start = u64::MAX;
+    for ext in entries {
+        let start = ext.ee_block as u64;
+        let end = start + ext.length() as u64;
+        if logical_block >= start && logical_block < end {
+            let offset = logical_block - start;
+            let unwritten = ext.is_unwritten();
+            let phys = if unwritten { 0 } else { ext.start_block() + offset };
+            let len = ext.length() as u64 - offset;
+            return (phys, len, unwritten);
+        }
+        if start > logical_block && start < next_start {
+            next_start = start;
+        }
+    }
+    (0, if next_start == u64::MAX { 0 } else { next_start - logical_block }, false)
+}
+
+/// Deep-tree run resolver: one walk per level, whole-extent verdict.
+///
+/// # Safety
+/// `block_num` must be a valid extent-tree block of this fs.
+unsafe fn find_run_in_external_extent(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    block_num: u64,
+    logical_block: u64,
+    depth: u32,
+) -> Result<(u64, u64, bool), i32> {
+    if depth > 5 {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+    // SAFETY: bio::bread returns a pinned BufferHead whose b_data is a
+    // block-sized slice; casts below stay within it, with eh_entries
+    // validated the same way as find_block_in_external_extent_ex.
+    unsafe {
+        let bh = bio::bread(fs.device, block_num)
+            .ok_or(errno::Errno::IOError.as_neg_i32())?;
+        let data = &(*bh).b_data;
+        let header = &*(data.as_ptr() as *const Ext4ExtentHeader);
+        if header.eh_magic != EXT4_EXT_MAGIC || header.eh_entries > header.eh_max {
+            bio::brelse(bh);
+            return Err(errno::Errno::IOError.as_neg_i32());
+        }
+        let max_slots = (fs.block_size as usize - core::mem::size_of::<Ext4ExtentHeader>())
+            / core::mem::size_of::<Ext4Extent>();
+        if header.eh_max as usize > max_slots {
+            bio::brelse(bh);
+            return Err(errno::Errno::IOError.as_neg_i32());
+        }
+        let result = if header.eh_depth == 0 {
+            let entries = core::slice::from_raw_parts(
+                data.as_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4Extent,
+                header.eh_entries as usize,
+            );
+            Ok(run_from_entries(entries, logical_block))
+        } else {
+            let indices = core::slice::from_raw_parts(
+                data.as_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4ExtentIdx,
+                header.eh_entries as usize,
+            );
+            let mut child_block = 0u64;
+            for idx in indices {
+                if logical_block >= idx.ei_block as u64 {
+                    child_block = idx.leaf_block();
+                } else {
+                    break;
+                }
+            }
+            if child_block == 0 {
+                Ok((0, 0, false))
+            } else {
+                find_run_in_external_extent(fs, child_block, logical_block, depth + 1)
+            }
+        };
+        bio::brelse(bh);
+        result
+    }
+}
+
 fn ext4_ext_get_block_ex_inner(
     fs: &crate::fs::ext4::Ext4FileSystem,
     i_block: &[u32; 15],
@@ -204,7 +369,7 @@ fn ext4_ext_get_block_ex_inner(
         let end = start + ext.length() as u64;
         if logical_block >= start && logical_block < end {
             let offset = logical_block - start;
-            let unwritten = ext.ee_len & EXT4_EXT_UNWRITTEN != 0;
+            let unwritten = ext.is_unwritten();
             return Ok((ext.start_block() + offset, unwritten));
         }
     }
@@ -255,7 +420,7 @@ fn materialize_block_inline(
             let start = ext.ee_block as u64;
             let end = start + ext.length() as u64;
             if logical_block >= start && logical_block < end {
-                if ext.ee_len & EXT4_EXT_UNWRITTEN == 0 {
+                if !ext.is_unwritten() {
                     // Already written — nothing to convert.
                     return Ok(Some(ext.start_block() + (logical_block - start)));
                 }
@@ -369,7 +534,7 @@ fn insert_written_inline(
             let e = &mut entries[i];
             let start = e.ee_block as u64;
             let end = start + e.length() as u64;
-            let e_unwritten = e.ee_len & EXT4_EXT_UNWRITTEN != 0;
+            let e_unwritten = e.is_unwritten();
             // u15 headroom (append_node's discipline, review EXT4-MERGE):
             // ee_len's bit 15 is the unwritten flag, so a written extent
             // can cover at most 0x7FFF blocks. `ee_len += len` without
@@ -1008,7 +1173,7 @@ fn find_block_in_external_extent_ex(
                 let end = start + ext.length() as u64;
                 if logical_block >= start && logical_block < end {
                     let offset = logical_block - start;
-                    let unwritten = ext.ee_len & EXT4_EXT_UNWRITTEN != 0;
+                    let unwritten = ext.is_unwritten();
                     hit = Ok((ext.start_block() + offset, unwritten));
                     break;
                 }
@@ -1092,7 +1257,7 @@ fn find_block_in_external_extent(
 
                 if logical_block >= start && logical_block < end {
                     let offset = logical_block - start;
-                    let unwritten = ext.ee_len & EXT4_EXT_UNWRITTEN != 0;
+                    let unwritten = ext.is_unwritten();
                     bio::brelse(bh);
                     // Ok(phys) loses the unwritten flag; callers that need
                     // it use find_block_external_ex below.
@@ -1170,7 +1335,7 @@ impl RawExtent {
             ee_block: e.ee_block,
             phys: e.start_block(),
             len: e.length(),
-            unwritten: e.ee_len & EXT4_EXT_UNWRITTEN != 0,
+            unwritten: e.is_unwritten(),
         }
     }
 
@@ -1870,7 +2035,7 @@ pub fn ext4_ext_materialize_block(
         let start = e.ee_block as u64;
         let end = start + e.length() as u64;
         if logical_block >= start && logical_block < end {
-            if e.ee_len & EXT4_EXT_UNWRITTEN == 0 {
+            if !e.is_unwritten() {
                 return Ok(Some(e.start_block() + (logical_block - start)));
             }
             hit = Some(i);

@@ -842,3 +842,28 @@ absents stated plainly. Each absent names what closing looks like.
   WB-WATERMARK rows on the fill show the mark un-tripping (free
   137k vs mark 121k, flushed 15.8k + shrunk 29.6k pages in one
   215-jiffy round). Full record: run/FALLOC-WEDGE.md.
+
+- Batched direct I/O + journal write-through (fio-2x lane,
+  5606622b8 + 73f0ee509, 2026-11-17): fio 3.36 static, q35 KVM
+  smp8/8G, same 4 GiB ext4 data disk both arms (snapshot=on, identical
+  bytes per boot), 3 interleaved reps, medians — 1M direct read
+  40.8 → 4711 MiB/s (ref 9600; 226x-behind → 2.0x), 1M direct write
+  93.9 → 1583 (ref 4019; 57x → 2.5x), 4k randwrite+fsync 260.6 →
+  2727 IOPS (ref 15.8k; 7.7x → 5.8x). The pbench p6_write_fsync gate
+  row improves vs same-window main base: 8783 vs 14891 µs (0.59x,
+  interleaved KVM debug boards, run/pbench-ab-mkdrmdir.log). Safety
+  pairing: the write fast arm's DMA borrows the caller's buffer
+  (`WriteBatch::submit_ref`) — the device-owned-buffer window is a
+  borrowck-enforced lifetime (drain before return), removing the
+  hand-rolled pin/unpin race class, not narrowing it. Honest note:
+  the same round found a class-(b) LOGIC bug in SAFE code — the
+  ee_len==0x8000 max-written extent decoded as length-0/unwritten at
+  every inline decode site, so >=128 MiB contiguous files silently
+  read back as ZEROS (in-bounds, no memory corruption; caught by
+  in-guest md5sum vs host digest, not by the type system — safe code
+  removed the C pointer classes, not logic bugs). Fixed by
+  centralizing the on-disk discipline in `Ext4Extent::length` /
+  `is_unwritten`, one accessor for all sites; every pre-fix
+  measurement on such files is void (the lane record lists which).
+  Artifacts: run/FIO-2X.md, run/ab-final3-*.txt,
+  run/md5-rand1g.log.
