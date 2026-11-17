@@ -3659,13 +3659,12 @@ impl Task {
             // needs the state-gate verdict and the enqueue outcome.
             // cpu0-pinned only (mask==1): the driver thread's 50 us
             // nanosleep polls otherwise eat the whole budget.
-            if crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1")
-                && matches!(
-                    (*task).policy(),
-                    crate::process::task::SchedPolicy::Fifo
-                        | crate::process::task::SchedPolicy::Rr
-                )
-                && (*task).cpus_allowed() == 1
+            if matches!(
+                (*task).policy(),
+                crate::process::task::SchedPolicy::Fifo
+                    | crate::process::task::SchedPolicy::Rr
+            ) && (*task).cpus_allowed() == 1
+                && crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1")
             {
                 static WUG: core::sync::atomic::AtomicU32 =
                     core::sync::atomic::AtomicU32::new(0);

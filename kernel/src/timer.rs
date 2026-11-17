@@ -1117,9 +1117,9 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
         // cyclictest Max tail into "fire late" vs "picked late" (the
         // wake→pick side prints from wakewatch, same gate). Budget
         // 8/boot; IRQ-context direct console (putc_brief).
-        if crate::cmdline::get_param("cycdbg").as_deref() == Some("1")
-            && late_ticks > 0
+        if late_ticks > 0
             && matches!(action, Action::Wake { .. })
+            && crate::cmdline::get_param("cycdbg").as_deref() == Some("1")
         {
             const TNS_PER_TICK: u64 = 1_000_000_000 / crate::config::TIMER_CLOCK_FREQ_HZ as u64;
             let late_us = late_ticks * TNS_PER_TICK / 1000;

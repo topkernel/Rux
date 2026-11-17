@@ -180,8 +180,8 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
     // over 100 us prints (budget 8/boot, direct console — GRQ held
     // here). With CYC-FIRE-LATE (timer.rs), a cyclictest Max sample
     // resolves to fire-late vs picked-late vs neither (arm/user side).
-    if crate::cmdline::get_param("cycdbg").as_deref() == Some("1")
-        && delta * 1_000_000 > 100 * TIMER_CLOCK_FREQ_HZ
+    if delta * 1_000_000 > 100 * TIMER_CLOCK_FREQ_HZ
+        && crate::cmdline::get_param("cycdbg").as_deref() == Some("1")
     {
         static CYCP: core::sync::atomic::AtomicU32 =
             core::sync::atomic::AtomicU32::new(0);
