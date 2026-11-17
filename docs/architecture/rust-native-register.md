@@ -815,3 +815,56 @@ has nothing else to run.
   landing CPU no longer matters for depth-1 waits anyway.
 - Artifacts: run/SUBMIT-2X.md, run/kk-*-{kk1,e1}.txt,
   run/ab-*-final.txt.
+
+## O. MSI-X completions walked inline in the hardirq vector (dio-conc lane, 2026-11-17, backfilled from run/DIO-CONC.md)
+
+- The per-op cost was interrupt DELIVERY, not locking: phase probes
+  put kick→INTx dispatch at 39.5 µs (QEMU completion + line assert +
+  delivery) and the shared INTx dispatcher ISR at 16.3 µs more — it
+  polled EVERY registered virtio function's ISR cap, each poll a
+  userspace MMIO round trip under KVM. MSI-X per-function vectors with
+  the completion walker inlined in the hardirq vector (the reference
+  vring IRQ shape) removed both terms: 4k randread direct 11.7–11.9k →
+  33.4k IOPS (0.27× → 0.77× of reference, which reads 43.7–44.3k).
+  Cross-check that convicts INTx as the mechanism: the REFERENCE
+  booted with pci=nomsi drops to 25.1k IOPS.
+- Same change carried whole-MiB staging + insert_dirty_batch for
+  buffered writes: 6000 → 8000 MiB/s (0.62× → 0.83×).
+- Artifacts: run/DIO-CONC.md (segment table + pci=nomsi cross-check).
+
+## P. Adaptive lock-free dentry child memo (stat-2x lane, 2026-11-17, backfilled from run/STAT-2X.md)
+
+- The 4-slot inline child memo thrashed to ~0% hit rate in real
+  directories — every lookup then paid the children lock + a BTreeMap
+  walk (~10 string compares) + a memo refill. Replaced with a
+  self-describing seqlock table sized next_pow2(2×children) clamped
+  [128, 2048], two lock-free tiers in front of the children lock
+  (inline memo → seqlock table → lock). p6_stat 0.491 → 0.281 µs
+  (2.23× behind → 1.28× vs reference 0.220), allocation threshold 12
+  children, memory 8 KB (small dirs) to 32 KB (large).
+- Companion levers same lane: has_mount() early-out in follow_mount;
+  per-inode open counters replacing the global INODE_OPENS table
+  (Linux parity — no global table walk per open).
+- Artifacts: run/STAT-2X.md (per-lever A/B, thrash experiment).
+
+## Q. ext4 fsync path rebuilt in reference shapes (wrfsync lane, 2026-11-17, backfilled from run/WRFSYNC.md)
+
+- Attribution first: the journal-commit theory was FALSIFIED (/data
+  mounts journal-less — zero commits ran). The real per-fsync cost
+  decomposed as per-4KiB unwritten-extent materialization (75 µs), an
+  O(file) dirty walk probing 2014 clean blocks (80 µs), and two
+  serialized ~30 µs device round trips. Four reference-shaped fixes:
+  ext4_ext_convert_unwritten-style BULK conversion with neighbor merge
+  (one tree edit per write span, node-local no-alloc prescan); the
+  tagged-page-tree analog — per-inode dirty-block notes so fsync
+  walks O(dirty); the inode-table block riding the same SpanFlusher
+  window (one drain per fsync, jbd2-style byte-snapshot settle guard
+  keeping BH_Dirty on raced shared blocks); binary-search extent
+  leaves (was O(entries) linear per resolve).
+- Measured: fsync4k 4653 → 20.1–22k IOPS vs reference 15.3–16.2k
+  (0.30× → ~1.24× AHEAD — the first storage row ahead); seqw1m_d
+  1583 → 4000 MiB/s (0.39× → 0.83×; root cause found: fio's
+  fallocated layout made the extent resolver return phys=0 so the DIO
+  fast run never fired). fio --verify=md5 clean on every build;
+  in-guest md5sums match host digests.
+- Artifacts: run/WRFSYNC.md (TSC decomposition, per-lever A/B).
