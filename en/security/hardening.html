@@ -121,7 +121,7 @@
       <li><b>Kernel-stack guards</b>: a bottom canary (0xCAFE_F00D_DEAD_BEEF, written volatile) verified before the stack returns to the cache (R18-2 — a smashed value is direct evidence the task ran past its stack into the adjacent heap page, printed as STACK-OVERFLOW) + the FREED_STACKS 32-entry ring (names the freer when a faulting rsp sits in a freed stack) + dfx-gated 0xC3 free-painting; the packed kernel-stack slab (D-2) ran 3,445 live tasks with zero canary hits. Compiler stack protection is a registered gap (§5).</li>
       <li><b>Deferred-free quarantine</b>: MmStruct/Task enter a 16,384-entry wall-clock ring (a 1,500 ms drain) — the use-after-free window for unaccounted procfs borrowers is structurally closed.</li>
       <li><b>Failure discipline</b>: oops/panic in the reference report shape (CSRs + all GPRs + a 32-frame backtrace + symbolization), the panic_on_oops sysctl, the panic= reboot parameter, the pstore console.</li>
-      <li><b>The observable safety net</b>: the unified tracepoints (69 events/17 groups), the census/heal self-repair (MISS=0 banked), the spinlock watchdog, kallsyms-symbolized backtraces — defect localization time is itself a security property.</li>
+      <li><b>The observable safety net</b>: the unified tracepoints (69 events/17 groups), the census/heal self-repair (MISS=0, measured and recorded), the spinlock watchdog, kallsyms-symbolized backtraces — defect localization time is itself a security property.</li>
     </ul>
 
     <h2 id="gaps"><span class="anchor">§5</span>The honest gaps register</h2>

@@ -84,12 +84,12 @@
     <div class="sub">实时延迟与调度压力的性能对照(同机同镜像同二进制),无数据项即失败 · 机位与方法</div>
 
     <h2 id="data"><span class="anchor">§1</span>数据(同机同镜像同二进制对照)</h2>
-    <p style="font-size:13.5px">两侧使用<b>同一镜像、同一 rt-tests v2.11 静态二进制、同一参数</b>,Rux(main release)与参考内核(同镜像 guest 内核 7.0.0-38)对照。cyclictest:30 s 窗、1000 µs 间隔、mlockall;hackbench:消息传递吞吐(秒,越低越好)。cyclictest 行当前为 Rux release 单次启动实测与参考整轮测试列(不同次启动),同机交错重银行进行中。</p>
+    <p style="font-size:13.5px">两侧使用<b>同一镜像、同一 rt-tests v2.11 静态二进制、同一参数</b>,Rux(main release)与参考内核(同镜像 guest 内核 7.0.0-38)对照。cyclictest:30 s 窗、1000 µs 间隔、mlockall;hackbench:消息传递吞吐(秒,越低越好)。cyclictest 行当前为 Rux release 单次启动实测与参考整轮测试列(不同次启动),同机交替启动重新测量进行中。</p>
     <div class="tbl-wrap"><table>
       <thead><tr><th>项</th><th class="num">Rux</th><th class="num">Linux(同机)</th><th>说明</th></tr></thead>
       <tbody id="rt-rows">
         <tr><td class="mono">cyclictest SCHED_OTHER(丢失/平均/最大 µs)</td><td class="num">平均 73 · 最大 2762(release 单次启动)</td><td class="num">平均 63 · 最大 1417(整轮测试列)</td><td>max 尾(2.7 ms 级)疑长关中断段/缺页打断,归因进行中</td></tr>
-        <tr><td class="mono">cyclictest SCHED_FIFO p98(丢失/平均/最大 µs)</td><td class="num">平均 69 · 最大 263(release 单次启动)</td><td class="num">平均 12 · 最大 887(整轮测试列)</td><td>release 后平均 104→69;max 与参考列不同次启动不可直接比较,同机交错重银行中</td></tr>
+        <tr><td class="mono">cyclictest SCHED_FIFO p98(丢失/平均/最大 µs)</td><td class="num">平均 69 · 最大 263(release 单次启动)</td><td class="num">平均 12 · 最大 887(整轮测试列)</td><td>release 后平均 104→69;max 与参考列不同次启动不可直接比较,同机交替启动重新测量中</td></tr>
         <tr><td class="mono">rt_wakesys(唤醒到运行,µs)</td><td class="num">3.3</td><td class="num">持平</td><td>定时器到期改在硬中断顶部派发后与 Linux 持平</td></tr>
         <tr><td class="mono">hackbench socketpair -g 20(秒)</td><td class="num">1.536</td><td class="num">0.330</td><td>Linux 4.7×</td></tr>
         <tr><td class="mono">hackbench pipe -p 20 -g 4(秒)</td><td class="num">0.163</td><td class="num">0.017</td><td>Linux 9.6×</td></tr>

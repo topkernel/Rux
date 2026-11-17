@@ -187,18 +187,18 @@
       <div class="card">
         <h3><span class="ico">🧮</span>调度器</h3>
         <p>单一全局运行队列(GRQ):面向 8 vCPU 以内的桌面/移动级核数,结构上消除负载迁移与任务窃取;实测等待唤醒抢占门终结逐记录抢占往返。</p>
-        <div class="nums">锁内 <b>0.24–0.27 µs</b> · census 8/32 带内</div>
+        <div class="nums">锁内 <b>0.24–0.27 µs</b> · census 8/32 在基准范围内</div>
         <a class="more" href="architecture/scheduler.html">调度器深读 →</a>
       </div>
       <div class="card">
         <h3><span class="ico">🧠</span>内存管理</h3>
         <p>buddy 页分配器 + magazine 小对象分配、全局页缓存、每任务 VMA;munmap churn 竞态家族已全数关闭。</p>
-        <div class="nums">小分配类锁 <b>19.7M</b>/次启动 · 门 ≤25M</div>
+        <div class="nums">小分配类锁每次启动 <b>1970 万</b> · 门 ≤2500 万</div>
         <a class="more" href="architecture/memory.html">内存深读 →</a>
       </div>
       <div class="card">
         <h3><span class="ico">💾</span>文件系统</h3>
-        <p>ext4(读写)+ 块层 bio 异步批量读 + buffer cache 命中率保障;pbench 文件路径中位数全部带内。</p>
+        <p>ext4(读写)+ 块层 bio 异步批量读 + buffer cache 命中率保障;pbench 文件路径中位数全部在基准范围内。</p>
         <div class="nums">buffer cache 命中率 <b>99.1%</b></div>
         <a class="more" href="architecture/filesystem.html">文件系统深读 →</a>
       </div>

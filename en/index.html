@@ -181,7 +181,7 @@
       <div class="card">
         <h3><span class="ico">🧮</span>Scheduler</h3>
         <p>A single global run queue (GRQ): aimed at desktop/mobile core counts within 8 vCPUs, it eliminates load balancing and task stealing by construction; the measured-wait wakeup gate ends the per-record preempt round trip.</p>
-        <div class="nums">in-lock <b>0.24–0.27 µs</b> · census 8/32 in band</div>
+        <div class="nums">in-lock <b>0.24–0.27 µs</b> · census 8/32 within the allowed band</div>
         <a class="more" href="architecture/scheduler.html">Design →</a>
       </div>
       <div class="card">
@@ -192,7 +192,7 @@
       </div>
       <div class="card">
         <h3><span class="ico">💾</span>File systems</h3>
-        <p>ext4 (rw) + async batched block reads + buffer-cache hit-rate protection; pbench filesystem medians all in band.</p>
+        <p>ext4 (rw) + async batched block reads + buffer-cache hit-rate protection; pbench filesystem medians all within the allowed band.</p>
         <div class="nums">buffer cache hit rate <b>99.1%</b></div>
         <a class="more" href="architecture/filesystem.html">Design →</a>
       </div>

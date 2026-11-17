@@ -102,7 +102,7 @@ cat /proc/sys/kernel/perf_event_paranoid</code></pre>
       <li><b>武装</b>:内核 cmdline <code>syscost=1</code>;关闭时零成本(每次系统调用退出一次缓存原子载入;tick 钩子两次 relaxed 加)。不占用 dfx= 开关表 —— 本探针持自有 cmdline 键。</li>
       <li><b>计量内容</b>:每原生系统调用号 {次数, 墙钟周期, 最大值}(NR_SLOTS=512)+ 慢操作环(&gt;4 ms 异常值带调用方 comm,SLOW_RING=64 / SLOW_CYC=40000 tick)+ tick 模式 per-CPU user/kernel-task/idle 计数 + 256 槽内核文本页直方图(RIP_SLOTS=256,离线对照构建 ELF 的 nm 符号化);每 60 s 自定时器 softirq 转储(SYSCOST_DUMP_SECS=60)。</li>
       <li><b>IF=0 EFLAGS 对探针(v3)</b>:边沿触发 + 自愈;每钩子读取真实 IF 标志并对模型裁决 —— 模型开启而实测 IF=1 判泄漏,闭合入 HEAL;HARDIRQ/SOFTIRQ/UART 区段分离;REST 调用点 #[track_caller] 归因 96 槽表;段带原始 TSC 戳。这是 IF=0 份额的官方测量(Tier-3),非代理。</li>
-      <li><b>门禁读数</b>(Tier-1,静默 syscost 启动):census TERM-DESCHED 8(带 8±2)/ WAKE-REFUSED 32(带 32±4);tick ≥99.5/s;零 panic/OOM;系统调用量按档位类带(debug 1550 万 ±80%,release 5000 万 ±60%);clock_gettime 3-4 µs;nanosleep ≤244 ms。</li>
+      <li><b>门禁读数</b>(Tier-1,静默 syscost 启动):census TERM-DESCHED 8(允许范围 8±2)/ WAKE-REFUSED 32(允许范围 32±4);tick ≥99.5/s;零 panic/OOM;系统调用量按档位类别范围(debug 1550 万 ±80%,release 5000 万 ±60%);clock_gettime 3-4 µs;nanosleep ≤244 ms。</li>
     </ul>
 
     <h2 id="pbench"><span class="anchor">§3</span>pbench:七组微基准</h2>
@@ -124,7 +124,7 @@ cat /proc/sys/kernel/perf_event_paranoid</code></pre>
     <h2 id="gate"><span class="anchor">§4</span>性能门禁:三层与守护域</h2>
     <p>合入门禁按三层执行(<code>docs/development/perf-gate-baseline.md</code> 为权威表;<code>perf-gate.sh</code> 自动化):</p>
     <ul>
-      <li><b>Tier 1(全部内核改动)</b>:一次静默 syscost 启动(KVM q35 smp2/4G,syscost=1,780 s)—— census 精确、tick 率、零 panic/OOM、调用量带、逐操作均值带。</li>
+      <li><b>Tier 1(全部内核改动)</b>:一次静默 syscost 启动(KVM q35 smp2/4G,syscost=1,780 s)—— census 精确、tick 率、零 panic/OOM、调用量范围、逐操作均值范围。</li>
       <li><b>Tier 2(触及热路径:mm/sched/fs/ipc/binder/timer/arch trap)</b>:加一次 pbench 启动,P1-P7 中位 ±20% 或改善;档位类规则:跨类比较无意义(debug 与 release-strong 不跨)。</li>
       <li><b>Tier 3(分配器或 IRQ 路径改动)</b>:IF=0 份额(官方 EFLAGS 对测量,20.4 ±3pp)。</li>
     </ul>

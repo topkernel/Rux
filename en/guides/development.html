@@ -113,7 +113,7 @@
       <table>
         <thead><tr><th>Tier</th><th>Applies to</th><th>Extra requirement</th></tr></thead>
         <tbody>
-          <tr><td><b>Tier 1</b></td><td>all kernel changes</td><td>one quiet syscost boot: census in band (TERM-DESCHED 8±2, WAKE-REFUSED 32±4, no grid strands), ticks ≥99.5/s, zero new panic/OOM classes, syscall volume ±10%, key per-op averages ±20% or better</td></tr>
+          <tr><td><b>Tier 1</b></td><td>all kernel changes</td><td>one quiet syscost boot: census within the allowed band (TERM-DESCHED 8±2, WAKE-REFUSED 32±4, no grid strands), ticks ≥99.5/s, zero new panic/OOM classes, syscall volume ±10%, key per-op averages ±20% or better</td></tr>
           <tr><td><b>Tier 2</b></td><td>hot paths: mm/ sched/ fs/ ipc/ binder/ timer/ arch trap</td><td>plus one pbench boot: P1–P7 medians within ±20% or better</td></tr>
           <tr><td><b>Tier 3</b></td><td>allocator or IRQ paths</td><td>plus an IF=0 measurement (the EFLAGS-pair probe)</td></tr>
         </tbody>
@@ -125,10 +125,10 @@
         <thead><tr><th>Domain</th><th>Guarded metrics</th></tr></thead>
         <tbody>
           <tr><td>Memory allocation / reclaim</td><td>small_alloc class-lock sections ≤ ~25M/boot, REST share ≤10%, no reclaim slow-path emergence, zone free floor unchanged</td></tr>
-          <tr><td>Scheduler</td><td>GRQ in-lock 241–273 ns (release, exact probe); the 70–84 ns lock wait is the KVM cross-vCPU locked-instruction tax (not the GRQ's own cost); gate metric (call-site IF=0 span average, incl. acquisition wait) band 1200–7320 ns (measured 2786 ns), census in band, wake→pick and context-switch cost in band</td></tr>
-          <tr><td>Filesystem hot paths</td><td>pbench fs rows (stat/mkdir+rmdir/unlink/write+fsync) in band, no new sync-write classes, buffer-cache hit rate ≥ baseline</td></tr>
-          <tr><td>Interrupts / IRQ paths</td><td>IF=0 share in band (currently 20.4%±3pp), closed cli segments 3–7 ms class, no new IRQ-OFF print classes</td></tr>
-          <tr><td>IPC</td><td>pipe / unix round-trip medians in band, truesize/writev path not regressed, connect-storm volumes in band</td></tr>
+          <tr><td>Scheduler</td><td>GRQ in-lock 241–273 ns (release, exact probe); the 70–84 ns lock wait is the KVM cross-vCPU locked-instruction tax (not the GRQ's own cost); gate metric (call-site IF=0 span average, incl. acquisition wait) band 1200–7320 ns (measured 2786 ns), census within the allowed band, wake→pick and context-switch cost within the allowed band</td></tr>
+          <tr><td>Filesystem hot paths</td><td>pbench fs rows (stat/mkdir+rmdir/unlink/write+fsync) within the allowed band, no new sync-write classes, buffer-cache hit rate ≥ baseline</td></tr>
+          <tr><td>Interrupts / IRQ paths</td><td>IF=0 share within the allowed band (currently 20.4%±3pp), closed cli segments 3–7 ms class, no new IRQ-OFF print classes</td></tr>
+          <tr><td>IPC</td><td>pipe / unix round-trip medians within the allowed band, truesize/writev path not regressed, connect-storm volumes within the allowed band</td></tr>
           <tr><td>binder</td><td>SLOW-TXN classes stable, transaction throughput not regressed on standard loads</td></tr>
         </tbody>
       </table>

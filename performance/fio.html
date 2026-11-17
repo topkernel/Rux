@@ -84,16 +84,16 @@
     <div class="sub">存储 I/O 性能对照(同机同镜像同二进制):吞吐与延迟,无数据引擎行即不可用 · 机位与方法</div>
 
     <h2 id="data"><span class="anchor">§1</span>数据(同机同镜像同二进制对照)</h2>
-    <p style="font-size:13.5px">两侧使用<b>同一 ext4 镜像、同一静态 fio 3.36 二进制、同一作业文件</b>,Rux(main release)与参考内核(同镜像 guest 内核 7.0.0-38)于同一机位(q35/KVM/<code>-cpu host</code>/SMP8/8G,virtio-blk;交替启动测试 3 轮取中位数)执行;direct=1 绕过页缓存。每行取最新实测值;同窗内核对内核比值随宿主负载窗两侧同浮动(±10% 级),比值只在同窗内有意义。无数字的引擎行即当前不可用。</p>
+    <p style="font-size:13.5px">两侧使用<b>同一 ext4 镜像、同一静态 fio 3.36 二进制、同一作业文件</b>,Rux(main release)与参考内核(同镜像 guest 内核 7.0.0-38)于同一机位(q35/KVM/<code>-cpu host</code>/SMP8/8G,virtio-blk;交替启动测试 3 轮取中位数)执行;direct=1 绕过页缓存。每行取最新实测值;同一测量窗口内内核对内核比值随宿主负载窗口两侧同浮动(±10% 级),比值只在同一测量窗口内有意义。无数字的引擎行即当前不可用。</p>
     <div class="tbl-wrap"><table>
       <thead><tr><th>作业</th><th class="num">Rux</th><th class="num">Linux(同机)</th><th class="num">比值(Rux/Linux)</th></tr></thead>
       <tbody id="fio-rows">
         <tr><td class="mono">4k 随机写 8M + fsync=1(持久化路径,15 s)</td><td class="num">20.1–22k IOPS</td><td class="num">15.3–16.2k IOPS(fsync 中位 ~57 µs)</td><td class="num"><b>Rux ~1.24× 领先</b></td></tr>
-        <tr><td class="mono">4k 随机读写 40M(direct,50/50)</td><td class="num">22.15k/22.15k IOPS</td><td class="num">22.0k/22.0k IOPS</td><td class="num">0.96×(平价带)</td></tr>
+        <tr><td class="mono">4k 随机读写 40M(direct,50/50)</td><td class="num">22.15k/22.15k IOPS</td><td class="num">22.0k/22.0k IOPS</td><td class="num">0.96×(平价范围)</td></tr>
         <tr><td class="mono">4k 随机写 40M(direct)</td><td class="num">36.75k IOPS</td><td class="num">~37.9k IOPS</td><td class="num">0.97×</td></tr>
         <tr><td class="mono">4k 随机读 40M(direct,20 s)</td><td class="num">37.0k IOPS(单作业)· 8 作业 0.91×</td><td class="num">~41k IOPS</td><td class="num">0.90×(单作业)</td></tr>
         <tr><td class="mono">1M 顺序写 48M(direct,已分配区域)</td><td class="num">4000 MiB/s</td><td class="num">5.2 GiB/s · clat ~188 µs</td><td class="num">0.83×</td></tr>
-        <tr><td class="mono">1M 顺序写 48M(direct,全新文件)</td><td class="num">同窗比值 0.33×</td><td class="num">188 µs/op(延迟分配使新写免分配)</td><td class="num">0.33×(延迟分配未实现)</td></tr>
+        <tr><td class="mono">1M 顺序写 48M(direct,全新文件)</td><td class="num">同一测量窗口比值 0.33×</td><td class="num">188 µs/op(延迟分配使新写免分配)</td><td class="num">0.33×(延迟分配未实现)</td></tr>
         <tr><td class="mono">1M 顺序读 48M(direct)</td><td class="num">~5000 MiB/s 级</td><td class="num">9.4 GiB/s · clat 90 µs</td><td class="num">0.62×</td></tr>
         <tr><td class="mono">1M 缓冲写 48M(页缓存口径,两侧同)</td><td class="num">9600 MiB/s</td><td class="num">9.4 GiB/s · clat 89.5 µs</td><td class="num">~0.94×(rig 地板:冷帧 RFO 两侧共付)</td></tr>
         <tr><td class="mono">128MB 刷盘墙探针(mmap 全同步回写,总墙钟)</td><td class="num">待 SMP8 下一次启动重新测量(fsync 路径已重造)</td><td class="num">1.223 s(旧口径)</td><td class="num">—</td></tr>
