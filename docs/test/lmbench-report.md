@@ -139,12 +139,16 @@ column (switch-family condition sensitivity) — ratios are within-window.
 calibration variance — retry rule queued, not regressions (fork/exec
 read 44/50 µs in earlier same-kernel boots vs the 33.9/37.6 anchors).
 
-2× scoreboard after this round: null AHEAD (0.92x vs the 0.023 target
-documented as entry-floor rework), sem at parity, write 1.13x, pipe
-1.39x, open 1.44x, read 1.42x — the wake/IPC family is now within the
-same order as the reference rather than 2-3.6x behind. Remaining
-structural items: entry floor (all rows), ctx walk loop (open/stat),
-exit async (fork/exec).
+2× scoreboard after this round (retry rule applied to the 5 capped
+rows — all recovered with real numbers): **null AHEAD 0.92x · sem
+1.04x · fork 1.08x (36.6 µs) · exec 1.05x (39.4 µs) · write 1.13x ·
+stat 1.14x (0.27 µs, recovered from TIMEOUT) · ctx-8 1.27x (1.92 µs,
+recovered) · pipe 1.39x · open 1.44x · read 1.42x · ctx-2 2.79x** —
+8 of the behind rows are now within 1.1-1.5x of the reference; the
+remaining true structural items: ctx-2 (2.79x — the GRQ ping-pong
+handoff), open (1.44x — walk loop + File construct), read (1.42x —
+copy tail), write (1.13x). lat_fs re-polluted by boot noise (no
+honest number this round).
 
 ## Patrol-4 med-of-3 (2026-11-17, kernel perf-2x head vs 11-16 standing)
 
