@@ -120,3 +120,25 @@ parallel whenever the REST table names a holder. R5–R6 are the structural
 completeness stages and can proceed independently once R2's delivery split
 is stable. The pair battery rig (same image, same binaries, both kernels) is
 the acceptance instrument throughout.
+
+## Status deltas (2026-11-17 night merges, main@286fe62a3+)
+
+The starting-point table above predates the evening merges; current state:
+- R2: PARTIALLY LANDED — rt-2x landed hardirq hres expiry; timer-gap
+  landed the RT slack exemption → cyclictest FIFO avg is now **46 µs**
+  (was 104; acceptance target ≤30 µs — the residual 16 µs needs
+  attribution: fire-late to 1066 µs tail says hrtimer re-arm
+  granularity while the CPU is halted is still in the path).
+- R3: the four lost-dispatch bugs (self-migration poke, RUNNING
+  self-weakening, idle-slot blind spot, exit_group park) are FIXED
+  (timer-gap merge) — pi_stress -g 2 clean. The unconditional-RT-wake
+  policy itself (D-14 gate bypass for RT classes) is STILL OPEN.
+- R6: pi_stress now RUNS (-g 1: 82k+88k; -g 2: 372k+370k inversions)
+  — the "no data" starting point is stale; what remains is the robust
+  registration chain + numeric priority propagation + the loom model
+  extension.
+- R1, R4, R5, R7: unchanged (open).
+- Known blocker for clean-window measurement: a release-profile
+  CLOCK_MONOTONIC poison under host load ≥6 (both kernels, suspect the
+  vDSO TSC-track path) — hunt queued; use debug-class windows or quiet
+  windows for interim numbers.
