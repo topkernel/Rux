@@ -228,6 +228,22 @@ impl GlobalRunQueue {
         }
     }
 
+    /// R3 (rt-r3 lane): claim with a PLACEMENT preference — try `prefer`'s
+    /// idle bit first (clear_idle only succeeds when the bit was set, so
+    /// this is the same atomic claim as the rotating path), then fall
+    /// back to the rotating scan. RT/DL timer wakes fire the hardirq on
+    /// the sleeper's own cpu: claiming the placement turns the dispatch
+    /// into a self-poke the idle loop consumes at the IRQ exit, instead
+    /// of steering to a rotated idle cpu that needs an IPI + halt-exit.
+    pub fn claim_idle_cpu_prefer(&self, affinity: u32, prefer: i32) -> Option<usize> {
+        if prefer >= 0 && (prefer as usize) < MAX_CPUS && (affinity & (1u32 << prefer)) != 0 {
+            if self.clear_idle(prefer as usize) {
+                return Some(prefer as usize);
+            }
+        }
+        self.claim_idle_cpu(affinity)
+    }
+
     /// Total load across all classes (for informational purposes).
     /// Expose total nr_running for diagnostic use.
     pub fn grq_nr_running() -> usize {
@@ -1666,9 +1682,16 @@ pub fn resched_cpu(cpu: usize) {
 /// Claim an idle CPU (within `affinity`) for a wake dispatch (perf-ipc):
 /// the wake path's public entry for idle steering (see
 /// `Task::wake_up_impl`). The claim atomically clears the idle bit so two
-/// racing wakes cannot both dispatch to the same CPU.
+/// racing wakes cannot dispatch to the same CPU.
 pub fn claim_idle_cpu_for(affinity: u32) -> Option<usize> {
     grq().claim_idle_cpu(affinity)
+}
+
+/// R3 (rt-r3 lane): placement-preferring idle claim — see
+/// `GlobalRunQueue::claim_idle_cpu_prefer`. `prefer` < 0 behaves exactly
+/// like `claim_idle_cpu_for`.
+pub fn claim_idle_cpu_for_prefer(affinity: u32, prefer: i32) -> Option<usize> {
+    grq().claim_idle_cpu_prefer(affinity, prefer)
 }
 
 /// Busy-CPU dispatch for a wake that found no idle CPU (perf-ipc): poke
@@ -1683,9 +1706,13 @@ pub fn preempt_check_wake(task: *mut Task) {
     // the check fns only read per-CPU current slots and task fields.
     unsafe {
         let allowed = (*task).cpus_allowed();
+        // R3 (rt-r3): the wake ladder steered ti_cpu to select_task_rq's
+        // placement BEFORE the enqueue, so ti_cpu names the rq the wakee
+        // was enqueued on — the reference's check_preempt_curr target.
+        let prefer = (*task).ti_cpu();
         match (*task).policy() {
-            SchedPolicy::Fifo | SchedPolicy::Rr => check_rt_preempt(task, allowed),
-            SchedPolicy::Deadline => check_dl_preempt(task, allowed),
+            SchedPolicy::Fifo | SchedPolicy::Rr => check_rt_preempt(task, allowed, prefer),
+            SchedPolicy::Deadline => check_dl_preempt(task, allowed, prefer),
             _ => {
                 // CFS: the vruntime-credit comparison is unusable as a
                 // wakeup gate in this tree — the sleeper-credit clamp
@@ -3571,10 +3598,12 @@ unsafe fn __schedule() {
                 Some(idle_cpu) => resched_cpu(idle_cpu),
                 None => match (*prev).policy() {
                     SchedPolicy::Fifo | SchedPolicy::Rr => {
-                        check_rt_preempt(prev, prev_mask)
+                        // No placement yet for a migrating prev (its old
+                        // cpu is excluded from the mask) — affinity scan.
+                        check_rt_preempt(prev, prev_mask, -1)
                     }
                     SchedPolicy::Deadline => {
-                        check_dl_preempt(prev, prev_mask)
+                        check_dl_preempt(prev, prev_mask, -1)
                     }
                     _ => check_cfs_preempt(prev, prev_mask),
                 },
@@ -4790,9 +4819,9 @@ pub fn enqueue_task(task: &'static mut Task) -> bool {
     if inserted {
         let policy = task.policy();
         if policy == SchedPolicy::Fifo || policy == SchedPolicy::Rr {
-            check_rt_preempt(task_ptr, cpus_allowed);
+            check_rt_preempt(task_ptr, cpus_allowed, task.ti_cpu());
         } else if policy == SchedPolicy::Deadline {
-            check_dl_preempt(task_ptr, cpus_allowed);
+            check_dl_preempt(task_ptr, cpus_allowed, task.ti_cpu());
         } else {
             // Normal / Batch / Idle
             check_cfs_preempt(task_ptr, cpus_allowed);
@@ -7214,108 +7243,159 @@ fn check_cfs_preempt(task: *mut Task, cpus_allowed: u32) {
     }
 }
 
+/// R3 (rt-r3 lane): one poke attempt for an RT wakee against `cpu`'s
+/// incumbent — `true` when the wakeup-preemption comparison poked (the
+/// caller stops scanning). Extracted from check_rt_preempt's loop body
+/// so the placement-first probe and the affinity scan share ONE decision
+/// path. No latency window: the RT wake compares priorities only, the
+/// reference's check_preempt_curr_rt shape.
+// SAFETY: task is a valid pointer from enqueue_task; cpu_state(cpu).current/idle
+// are valid pointers set during init; null checks before dereference.
+unsafe fn rt_try_poke_cpu(task: *mut Task, task_prio: u32, cpu: usize) -> bool {
+    let running = cpu_state(cpu).current;
+    if running.is_null() || running == cpu_state(cpu).idle {
+        // timer-gap fix (the RT-2X §3.3 double-refusal): an
+        // idle-SLOT cpu whose idle BIT is CLEAR is not provably
+        // empty — it is either mid pick→mark_idle transition or
+        // a lying slot (a pick that never reached its switch,
+        // or a heal writing idle while a real task runs;
+        // syscost pinned-RT capture: 433 user + 5724
+        // idle-classified ticks on the same cpu).
+        // claim_idle_cpu_for ALSO refuses it (bit clear), so
+        // skipping here left NO dispatch path willing to poke
+        // the cpu — the wedge. Poke instead: worst case the
+        // cpu's pick re-runs and re-picks its incumbent (one
+        // spurious IPI on a transient); best case it breaks a
+        // lying-slot wedge. A genuinely-idle cpu has its bit
+        // SET and stays on the claim path.
+        let idle_bit_set = grq()
+            .idle_cpus
+            .load(core::sync::atomic::Ordering::Acquire)
+            & (1u32 << cpu)
+            != 0;
+        if !running.is_null() && !idle_bit_set {
+            // RT-2X item-7 hunt print kept (rt2xdbg=1,
+            // 200-line budget): the poke decision, live.
+            if task_prio > 85 && crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1") {
+                static CSP: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                if CSP.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
+                    use crate::dfx::taskdump::putc_brief as putchar;
+                    fn ph(mut v: u64) {
+                        for _ in 0..16 {
+                            let n = (v >> 60) as u8;
+                            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                            v <<= 4;
+                        }
+                    }
+                    for &b in b"CRP-POKE-IDLE-SLOT cpu=" { putchar(b); }
+                    ph(cpu as u64);
+                    for &b in b" wakee=0x" { putchar(b); }
+                    ph((*task).pid() as u64);
+                    for &b in b" prio=" { putchar(b); }
+                    ph(task_prio as u64);
+                    putchar(b'\n');
+                }
+            }
+            resched_cpu(cpu);
+            return true;
+        }
+        return false;
+    }
+    let r_policy = (*running).policy();
+    if r_policy == SchedPolicy::Normal
+        || r_policy == SchedPolicy::Batch
+        || r_policy == SchedPolicy::Idle
+    {
+        resched_cpu(cpu);
+        return true;
+    }
+    if (r_policy == SchedPolicy::Fifo || r_policy == SchedPolicy::Rr)
+        && task_prio > (*running).rt_priority()
+    {
+        resched_cpu(cpu);
+        return true;
+    }
+    false
+}
+
 /// Check if a newly-enqueued RT task should preempt a running task on another CPU.
-fn check_rt_preempt(task: *mut Task, cpus_allowed: u32) {
+/// R3 (rt-r3 lane): `prefer` is the wakee's PLACEMENT cpu (its ti_cpu after
+/// select_task_rq/steer at the wake point; -1 when the caller has no
+/// placement). The reference runs check_preempt_curr on the rq the wakee was
+/// enqueued on — the poke targets the PLACEMENT, not "whatever eligible cpu
+/// the ascending scan hits first". Placement-first matters because the
+/// ascending scan's first winner is usually cpu0 — commonly the WAKER's own
+/// cpu, where the poke sits pending behind the waker's syscall (kernel
+/// preemption is off) while the placement cpu (often the cpu the timer
+/// hardirq fired on, for a timer wake: a SELF-poke with no IPI exit cost at
+/// all) could switch immediately. Falls through to the affinity scan when
+/// the placement loses the comparison, so no dispatch is lost vs the old
+/// shape.
+fn check_rt_preempt(task: *mut Task, cpus_allowed: u32, prefer: i32) {
     // SAFETY: task is a valid pointer from enqueue_task; cpu_state(cpu).current/idle
     // are valid pointers set during init; null checks before dereference.
     unsafe {
         let task_prio = (*task).rt_priority();
+        if prefer >= 0 && (prefer as usize) < MAX_CPUS && (cpus_allowed & (1u32 << prefer)) != 0
+        {
+            if rt_try_poke_cpu(task, task_prio, prefer as usize) {
+                return;
+            }
+        }
         for cpu in 0..MAX_CPUS {
             if (cpus_allowed & (1u32 << cpu)) == 0 {
                 continue;
             }
-            let running = cpu_state(cpu).current;
-            if running.is_null() || running == cpu_state(cpu).idle {
-                // timer-gap fix (the RT-2X §3.3 double-refusal): an
-                // idle-SLOT cpu whose idle BIT is CLEAR is not provably
-                // empty — it is either mid pick→mark_idle transition or
-                // a lying slot (a pick that never reached its switch,
-                // or a heal writing idle while a real task runs;
-                // syscost pinned-RT capture: 433 user + 5724
-                // idle-classified ticks on the same cpu).
-                // claim_idle_cpu_for ALSO refuses it (bit clear), so
-                // skipping here left NO dispatch path willing to poke
-                // the cpu — the wedge. Poke instead: worst case the
-                // cpu's pick re-runs and re-picks its incumbent (one
-                // spurious IPI on a transient); best case it breaks a
-                // lying-slot wedge. A genuinely-idle cpu has its bit
-                // SET and stays on the claim path.
-                let idle_bit_set = grq()
-                    .idle_cpus
-                    .load(core::sync::atomic::Ordering::Acquire)
-                    & (1u32 << cpu)
-                    != 0;
-                if !running.is_null() && !idle_bit_set {
-                    // RT-2X item-7 hunt print kept (rt2xdbg=1,
-                    // 200-line budget): the poke decision, live.
-                    if task_prio > 85
-                        && crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1")
-                    {
-                        static CSP: core::sync::atomic::AtomicU32 =
-                            core::sync::atomic::AtomicU32::new(0);
-                        if CSP.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
-                            use crate::dfx::taskdump::putc_brief as putchar;
-                            fn ph(mut v: u64) {
-                                for _ in 0..16 {
-                                    let n = (v >> 60) as u8;
-                                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                                    v <<= 4;
-                                }
-                            }
-                            for &b in b"CRP-POKE-IDLE-SLOT cpu=" { putchar(b); }
-                            ph(cpu as u64);
-                            for &b in b" wakee=0x" { putchar(b); }
-                            ph((*task).pid() as u64);
-                            for &b in b" prio=" { putchar(b); }
-                            ph(task_prio as u64);
-                            putchar(b'\n');
-                        }
-                    }
-                    resched_cpu(cpu);
-                    return;
-                }
-                continue;
-            }
-            let r_policy = (*running).policy();
-            if r_policy == SchedPolicy::Normal
-                || r_policy == SchedPolicy::Batch
-                || r_policy == SchedPolicy::Idle
-            {
-                resched_cpu(cpu);
-                return;
-            }
-            if (r_policy == SchedPolicy::Fifo || r_policy == SchedPolicy::Rr)
-                && task_prio > (*running).rt_priority()
-            {
-                resched_cpu(cpu);
+            if rt_try_poke_cpu(task, task_prio, cpu) {
                 return;
             }
         }
     }
 }
 
+/// R3 (rt-r3 lane): one poke attempt for a DL wakee against `cpu`'s
+/// incumbent — `true` when the comparison poked. Same extraction rationale
+/// as rt_try_poke_cpu (placement-first + scan share one decision path).
+// SAFETY: cpu_state(cpu).current/idle are valid pointers set during CPU
+// init; null checks before dereference.
+unsafe fn dl_try_poke_cpu(task_dl: u64, cpu: usize) -> bool {
+    let running = cpu_state(cpu).current;
+    if running.is_null() || running == cpu_state(cpu).idle {
+        return false;
+    }
+    let r_policy = (*running).policy();
+    if r_policy != SchedPolicy::Deadline {
+        resched_cpu(cpu);
+        return true;
+    }
+    let r_dl = (*running).dl_entity().deadline.load(core::sync::atomic::Ordering::Acquire);
+    if task_dl < r_dl {
+        resched_cpu(cpu);
+        return true;
+    }
+    false
+}
+
 /// Check if a newly-enqueued DL task should preempt a running task on another CPU.
-fn check_dl_preempt(task: *mut Task, cpus_allowed: u32) {
+/// R3 (rt-r3 lane): `prefer` = the wakee's placement cpu (see
+/// check_rt_preempt) — tried first, then the affinity scan.
+fn check_dl_preempt(task: *mut Task, cpus_allowed: u32, prefer: i32) {
     // SAFETY: task is a valid pointer from enqueue_task; per-CPU current/idle
     // pointers are valid when not null (set during CPU init).
     unsafe {
         let task_dl = (*task).dl_entity().deadline.load(core::sync::atomic::Ordering::Acquire);
+        if prefer >= 0 && (prefer as usize) < MAX_CPUS && (cpus_allowed & (1u32 << prefer)) != 0
+        {
+            if dl_try_poke_cpu(task_dl, prefer as usize) {
+                return;
+            }
+        }
         for cpu in 0..MAX_CPUS {
             if (cpus_allowed & (1u32 << cpu)) == 0 {
                 continue;
             }
-            let running = cpu_state(cpu).current;
-            if running.is_null() || running == cpu_state(cpu).idle {
-                continue;
-            }
-            let r_policy = (*running).policy();
-            if r_policy != SchedPolicy::Deadline {
-                resched_cpu(cpu);
-                return;
-            }
-            let r_dl = (*running).dl_entity().deadline.load(core::sync::atomic::Ordering::Acquire);
-            if task_dl < r_dl {
-                resched_cpu(cpu);
+            if dl_try_poke_cpu(task_dl, cpu) {
                 return;
             }
         }
@@ -7501,9 +7581,13 @@ pub fn change_task_policy(task: *mut Task, new_policy: crate::process::task::Sch
         // Cross-CPU preemption checks mirror enqueue_task.
         let policy = unsafe { (*task).policy() };
         if policy == SchedPolicy::Fifo || policy == SchedPolicy::Rr {
-            check_rt_preempt(task, unsafe { (*task).cpus_allowed() });
+            check_rt_preempt(task, unsafe { (*task).cpus_allowed() }, unsafe {
+                (*task).ti_cpu()
+            });
         } else if policy == SchedPolicy::Deadline {
-            check_dl_preempt(task, unsafe { (*task).cpus_allowed() });
+            check_dl_preempt(task, unsafe { (*task).cpus_allowed() }, unsafe {
+                (*task).ti_cpu()
+            });
         }
     }
 }

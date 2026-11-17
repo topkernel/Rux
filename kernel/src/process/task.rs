@@ -3942,7 +3942,21 @@ impl Task {
                     crate::sched::grq_idle_mask(),
                     core::sync::atomic::Ordering::Relaxed,
                 );
-                match crate::sched::claim_idle_cpu_for(allowed) {
+                // R3 (rt-r3 lane): RT/DL wakes steer the idle claim to the
+                // wakee's PLACEMENT cpu (the reference's select_task_rq_rt
+                // + check_preempt_curr both operate on the placement rq; a
+                // timer hardirq fires on the sleeper's own cpu, so the
+                // placement claim makes the dispatch a self-poke consumed
+                // at the IRQ exit instead of a rotated idle cpu that needs
+                // an IPI + halt-exit). Fair classes keep the rotating
+                // claim unchanged — the D-14 divergence stands for CFS.
+                let rt_prefer = match (*task).policy() {
+                    crate::process::task::SchedPolicy::Fifo
+                    | crate::process::task::SchedPolicy::Rr
+                    | crate::process::task::SchedPolicy::Deadline => (*task).ti_cpu(),
+                    _ => -1,
+                };
+                match crate::sched::claim_idle_cpu_for_prefer(allowed, rt_prefer) {
                     Some(idle_cpu) => {
                         crate::sched::WAKE_DISP.store(1, core::sync::atomic::Ordering::Relaxed);
                         crate::sched::resched_cpu(idle_cpu);
