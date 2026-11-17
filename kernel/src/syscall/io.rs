@@ -731,8 +731,14 @@ fn write_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: u
     // copy-in, one dispatch, identical error semantics to the loop's
     // first iteration (EFAULT before any side effect; a non-positive
     // write result propagates as-is).
+    // (Not taken for plain ext4 buffered writes — the user fast path
+    // below serves every size with ONE user→frame copy.)
     const SMALL_STAGE: usize = 256;
-    if count <= SMALL_STAGE {
+    if count <= SMALL_STAGE
+        && !ops.is_some_and(|o| {
+            core::ptr::eq(o as *const _, &crate::fs::ext4::file::EXT4_FILE_OPS as *const _)
+        })
+    {
         let mut sbuf = [0u8; SMALL_STAGE];
         let uncopied =
             crate::arch::uaccess_safe::copy_in(&mut sbuf[..count], buf);
@@ -744,6 +750,29 @@ fn write_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: u
             return result as i32 as i64;
         }
         return result as i64;
+    }
+    // ext4 buffered fast path (BUFW-2X, the write twin of the read fast
+    // path above): bytes go user→page-cache-frame in ONE copy inside the
+    // file layer — the generic chunked path below stages the whole
+    // request into a kernel buffer first (alloc + copy) and the page
+    // cache then copies staging→frame, the double copy the 1 MiB
+    // buffered-write row paid 114 µs/op against the reference's 89
+    // (DIO-CONC §8). Durability flags (O_SYNC/O_DSYNC/O_DIRECT) keep the
+    // generic staged shape. `buf` was access_ok-validated at sys_write
+    // entry / per-iovec in writev (same contract as the read twin).
+    if flags & (crate::fs::file::FileFlags::O_DIRECT
+        | crate::fs::file::FileFlags::O_SYNC
+        | crate::fs::file::FileFlags::O_DSYNC)
+        == 0
+        && ops.is_some_and(|o| {
+            core::ptr::eq(o as *const _, &crate::fs::ext4::file::EXT4_FILE_OPS as *const _)
+        })
+    {
+        return crate::fs::ext4::file::ext4_file_write_user_vfs(
+            file,
+            buf as *const u8,
+            count,
+        ) as i64;
     }
     // Chunked write (SYSA-C1): bounded staging buffer so a huge
     // count cannot OOM the kernel heap; a partial chunk write
@@ -2012,6 +2041,43 @@ pub fn sys_pwrite64(args: SyscallArgs) -> i64 {
 
     match crate::fs::file::get_file_fd_safe(fd) {
         Some(file) => {
+            // ext4 buffered fast path (BUFW-2X, the pwrite twin of
+            // write_file_core's): plain buffered pwrites on ext4 copy
+            // user→page-cache-frame directly — the generic loop below
+            // stages 64 KiB chunks (a 1 MiB buffered pwrite paid 16
+            // staging allocs + 16 copies + a second copy per page in the
+            // cache batch). `buf` was access_ok-validated above.
+            let pflags = file.flags.load(core::sync::atomic::Ordering::Relaxed);
+            if pflags & (crate::fs::file::FileFlags::O_DIRECT
+                | crate::fs::file::FileFlags::O_SYNC
+                | crate::fs::file::FileFlags::O_DSYNC)
+                == 0
+                && file
+                    .get_ops()
+                    .is_some_and(|o| {
+                        core::ptr::eq(
+                            o as *const _,
+                            &crate::fs::ext4::file::EXT4_FILE_OPS as *const _,
+                        )
+                    })
+            {
+                // f_mode + O_PATH gates: same EBADF pair as the staged
+                // path's File::write_at wrapper (LTP write03/04, open13).
+                if pflags & crate::fs::file::FileFlags::O_ACCMODE
+                    == crate::fs::file::FileFlags::O_RDONLY
+                {
+                    return -errno::EBADF as i64;
+                }
+                if pflags & crate::fs::file::FileFlags::O_PATH != 0 {
+                    return -errno::EBADF as i64;
+                }
+                return crate::fs::ext4::file::ext4_file_pwrite_user_vfs(
+                    &file,
+                    offset as u64,
+                    buf as *const u8,
+                    count,
+                ) as i64;
+            }
             // RACE fix (review批次1): use the position-invariant
             // write_at() — the old set_pos/restore dance corrupted the
             // shared fd position under concurrent I/O.
