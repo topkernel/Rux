@@ -99,6 +99,13 @@ pub struct VirtIOPCI {
     /// the I/O engine — queue, BLK lock, wait queue, pending table — is
     /// selected through this number). 0 until the probe assigns it.
     pub blk_slot: usize,
+    /// DIO-CONC: kernel-half VA of the MSI-X table (capability id 0x11),
+    /// 0 when the function has no MSI-X cap or its BAR could not be
+    /// mapped. Set at construction; `enable_msix_vector0` programs entry
+    /// 0 and switches completions onto the MSI vector.
+    pub msix_table_va: u64,
+    /// DIO-CONC: config-space offset of the MSI-X capability (0 = none).
+    pub msix_cap_off: u8,
 }
 
 impl VirtIOPCI {
@@ -263,6 +270,8 @@ impl VirtIOPCI {
             isr_cfg_offset: 0,
             base_addr: 0,
             blk_slot: 0,
+            msix_table_va: 0,
+            msix_cap_off: 0,
         };
 
         // ========== Scan VirtIO PCI capabilities ==========
@@ -342,6 +351,20 @@ impl VirtIOPCI {
         if device_bar != 0xFF && device_bar != common_bar && device_bar != notify_bar && device_bar != isr_bar {
             bars_to_assign.push(device_bar);
         }
+
+        // DIO-CONC: locate the standard MSI-X capability (id 0x11) and
+        // include its table BAR in the assignment set so the table is
+        // mapped/programmed alongside the virtio modern BARs. The cap is
+        // optional; without it the function stays on its arch's legacy
+        // interrupt path.
+        let msix_cap = temp_device.find_pci_capability(0x11);
+        let msix_table_bir = msix_cap.map(|cap| {
+            let bir = (pci_config.read_config_dword(cap + 4) & 0x7) as u8;
+            if !bars_to_assign.contains(&bir) {
+                bars_to_assign.push(bir);
+            }
+            bir
+        });
 
         // Store assigned BAR info
         let mut assigned_bars: alloc::collections::btree_map::BTreeMap<u8, PCIBAR> = alloc::collections::btree_map::BTreeMap::new();
@@ -515,6 +538,21 @@ impl VirtIOPCI {
             None => 0,
         };
 
+        // DIO-CONC: resolve the MSI-X table VA (BAR base + capability
+        // offset) when the cap was found and its BAR is memory-mapped.
+        let msix_table_va = match (msix_cap, msix_table_bir) {
+            (Some(cap), Some(bir)) => {
+                let table_off = pci_config.read_config_dword(cap + 4) & 0xFFFF_FFF8;
+                match assigned_bars.get(&bir) {
+                    Some(bar_obj) if bar_obj.bar_type == BARType::MemoryMapped => {
+                        bar_va(bar_obj.base_addr) + table_off as u64
+                    }
+                    _ => 0,
+                }
+            }
+            _ => 0,
+        };
+
         let dev = Self {
             pci_config,
             pci_slot,
@@ -531,6 +569,8 @@ impl VirtIOPCI {
             isr_cfg_offset: isr_offset,
             base_addr: common_cfg_bar + common_offset as u64,  // Use Common CFG as primary access address
             blk_slot: 0,
+            msix_table_va,
+            msix_cap_off: msix_cap.unwrap_or(0),
         };
 
         // x86_64: every constructed function goes on the shared INTx
@@ -854,6 +894,76 @@ impl VirtIOPCI {
         } else {
             None
         }
+    }
+
+    /// Find a STANDARD PCI capability (MSI-X = 0x11 etc.) by walking the
+    /// config-space capability list. Distinct from find_virtio_capability,
+    /// which matches vendor capabilities (id 0x09) by virtio cfg type.
+    fn find_pci_capability(&self, cap_id: u8) -> Option<u8> {
+        // SAFETY: config-space access through the mapped ECAM window;
+        // offsets bounded by the cap-list iteration guard.
+        unsafe {
+            let mut cap_ptr = self.pci_config.read_config_byte(PCI_CAPABILITY_LIST);
+            let mut iterations = 0;
+            while cap_ptr != 0 && iterations < 16 {
+                let id = self.pci_config.read_config_byte(cap_ptr);
+                if id == cap_id {
+                    return Some(cap_ptr);
+                }
+                cap_ptr = self.pci_config.read_config_byte(cap_ptr + 1);
+                iterations += 1;
+            }
+            None
+        }
+    }
+
+    /// Program MSI-X entry 0 with `vector`, enable MSI-X on the function,
+    /// and set INTx-disable (the device stops asserting its line; with
+    /// MSI-X the ISR capability stays silent).
+    ///
+    /// DIO-CONC, x86_64: replaces the per-completion chain
+    /// PIC-INTx -> shared dispatcher (ISR poll of EVERY registered
+    /// virtio function, each an MMIO trap to the hypervisor) ->
+    /// Block-softirq walker, with one posted MSI to MSIX_BLK_VECTOR that
+    /// the local APIC delivers in-kernel (no config-space round trip).
+    /// On q35/KVM that chain measured ~33 us of the ~83 us synchronous
+    /// 4 KiB direct-read (16.3 us ISR polls + 17.1 us softirq hop).
+    ///
+    /// Returns false (and leaves the legacy path in place) when the
+    /// function has no MSI-X capability or its table is unmapped.
+    #[cfg(feature = "x86_64")]
+    pub fn enable_msix_vector0(&self, vector: u8) -> bool {
+        use crate::drivers::virtio::MSIX_BLK_VECTOR;
+        let _ = vector; // single well-known vector for all blk functions
+        if self.msix_cap_off == 0 || self.msix_table_va == 0 {
+            return false;
+        }
+        let cap = self.msix_cap_off as u64;
+        // Entry layout: addr_lo @0, addr_hi @4, data @8, vector_control @12.
+        // Program masked first, then fill, then unmask (PCI spec 6.8.2.5:
+        // software must not touch an unmasked entry's fields).
+        let e = self.msix_table_va as usize;
+        unsafe {
+            let ctrl_ptr = e + 12;
+            core::ptr::write_volatile(ctrl_ptr as *mut u32, 1); // masked
+            // Delivery: fixed, edge-triggered, physical destination, the
+            // BSP (APIC ID 0). 0xFEE00000 base + dest<<12.
+            core::ptr::write_volatile((e) as *mut u32, 0xFEE0_0000);
+            core::ptr::write_volatile((e + 4) as *mut u32, 0);
+            core::ptr::write_volatile((e + 8) as *mut u32, MSIX_BLK_VECTOR as u32);
+            core::ptr::write_volatile(ctrl_ptr as *mut u32, 0); // unmask
+        }
+        // Message Control (cap+2): MSI-X Enable (bit 14) set, Function
+        // Mask (bit 15) clear. Bits 10:0 are the read-only table size-1.
+        let msg_ctrl = self.pci_config.read_config_word((cap + 2) as u8);
+        self.pci_config
+            .write_config_word((cap + 2) as u8, (msg_ctrl | 0x8000) & !0x4000);
+
+        // Command register: set INTx_DISABLE (bit 10); keep memory space
+        // (bit 1) and bus master (bit 2) as enable_bus_master left them.
+        let cmd = self.pci_config.read_config_word(0x04);
+        self.pci_config.write_config_word(0x04, cmd | 0x0400);
+        true
     }
 
     /// Set queue MSI-X vector

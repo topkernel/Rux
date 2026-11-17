@@ -330,6 +330,9 @@ TRAP_STUB 227
 TRAP_STUB 228
 TRAP_STUB 229
 
+/* ---- vector 129 (0x81): virtio-blk MSI-X completion (DIO-CONC) ---- */
+TRAP_STUB 129
+
 /* ============================================================================
  * Double fault (#DF, vector 8) — IST1
  *

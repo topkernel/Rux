@@ -755,9 +755,14 @@ fn write_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: u
     // bracket ONCE and lets the post-write plugged drain push the whole
     // range as one span (the 64 KiB cap paid 16 brackets + 16 drains
     // per 1 MiB direct write).
+    //
+    // Buffered ext4 exception (DIO-CONC, 2026-11-17): the same
+    // whole-MiB staging for plain buffered writes — the 64 KiB cap
+    // split a 1 MiB write into 16 ext4_buffered_write calls, each with
+    // its own staging alloc, size-CAS and per-page cache round trips
+    // (measured 154 µs/op vs the reference's 88 µs on the pair rig).
     const DIO_STAGE_MAX: usize = 1024 * 1024;
-    let stage_cap = if flags & crate::fs::file::FileFlags::O_DIRECT != 0
-        && ops.is_some_and(|o| core::ptr::eq(o as *const _, &crate::fs::ext4::file::EXT4_FILE_OPS as *const _))
+    let stage_cap = if ops.is_some_and(|o| core::ptr::eq(o as *const _, &crate::fs::ext4::file::EXT4_FILE_OPS as *const _))
     {
         DIO_STAGE_MAX
     } else {

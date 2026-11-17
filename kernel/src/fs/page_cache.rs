@@ -2398,6 +2398,43 @@ impl PageCache {
         block_size: usize,
         buf: &[u8],
     ) {
+        let _ = self.insert_batch_ext(fs_id, ino, first_index, block_size, buf, false);
+    }
+
+    /// Dirty-write twin of [`Self::insert_batch`] (DIO-CONC): installs the
+    /// run's frames BORN DIRTY and returns how many leading pages were
+    /// consumed (installed or overwritten). A page already cached when the
+    /// batch reaches it is OVERWRITTEN with this batch's bytes and turned
+    /// dirty — the read batch's skip-duplicate arm would silently drop the
+    /// writer's data — and an early stop (OOM / table full) reports the
+    /// consumed prefix so the caller falls back to its per-page path for
+    /// the tail. This is the buffered-write(2) fast path: one wlock pass
+    /// per 64 pages, order-0 batched allocations, unlocked memcpys (the
+    /// per-page insert_dirty loop cost ~0.6 µs/page on the pair rig).
+    pub fn insert_dirty_batch(
+        &self,
+        fs_id: u64,
+        ino: u64,
+        first_index: u64,
+        block_size: usize,
+        buf: &[u8],
+    ) -> usize {
+        self.insert_batch_ext(fs_id, ino, first_index, block_size, buf, true)
+    }
+
+    /// Shared body of the batch inserters. `mark_dirty` selects the write
+    /// semantics (born-dirty installs, duplicate OVERWRITE — see
+    /// insert_dirty_batch); the read shape keeps skip-duplicate.
+    /// Returns pages consumed from the front (read callers ignore it).
+    fn insert_batch_ext(
+        &self,
+        fs_id: u64,
+        ino: u64,
+        first_index: u64,
+        block_size: usize,
+        buf: &[u8],
+        mark_dirty: bool,
+    ) -> usize {
         // Early-return arms below (table-full, duplicate, revive-in-place)
         // free frames that the unlocked pre-stage ALREADY described as
         // cache pages (type/UpToDate/mapping/index — the perf-review
@@ -2426,24 +2463,39 @@ impl PageCache {
         }
 
         if block_size == 0 || buf.len() < block_size {
-            return;
+            return 0;
         }
         let npages = buf.len() / block_size;
         if npages <= 1 || block_size != PAGE_SIZE {
             // Single page, or a block size that does not fill a frame (the
             // packed contiguous copy below would pack blocks without their
             // per-page zero padding) — per-page inserts keep that layout.
+            let mut consumed = 0usize;
             for k in 0..npages {
                 let end = core::cmp::min((k + 1) * block_size, buf.len());
-                self.insert(
-                    fs_id,
-                    ino,
-                    first_index + k as u64,
-                    0,
-                    &buf[k * block_size..end],
-                );
+                if mark_dirty {
+                    if self.insert_dirty(fs_id, ino, first_index + k as u64, &buf[k * block_size..end]) {
+                        consumed += 1;
+                    } else {
+                        // Duplicate cached page the per-page write path
+                        // never got to pin-copy: still consumed for the
+                        // caller's accounting only when the bytes landed
+                        // — insert_dirty returns false on duplicates, so
+                        // stop here and let the per-page caller serve it.
+                        break;
+                    }
+                } else {
+                    self.insert(
+                        fs_id,
+                        ino,
+                        first_index + k as u64,
+                        0,
+                        &buf[k * block_size..end],
+                    );
+                    consumed += 1;
+                }
             }
-            return;
+            return consumed;
         }
         let key = cache_key(fs_id, ino);
 
@@ -2626,17 +2678,55 @@ impl PageCache {
                                     }
                                 }
                                 // Read-path batch: the revived frame now
-                                // matches disk — clean (atomic-op rule).
-                                dirty_account_transition(stale, false);
+                                // matches disk — clean; the dirty batch's
+                                // revive carries this batch's bytes, so it
+                                // transitions dirty (atomic-op rule either
+                                // way).
+                                dirty_account_transition(stale, mark_dirty);
                                 discard_prepared_frame(phys);
                                 continue;
                             } else {
-                                // Duplicate index: the frame was already filled
-                                // and described in the unlocked stage above —
-                                // release it exactly as the old in-lock order
-                                // did (no clobber, no leak). The pre-marked
-                                // cache identity is stripped first (see
-                                // discard_prepared_frame above).
+                                // Duplicate index. READ shape: the frame
+                                // was already filled and described in the
+                                // unlocked stage above — release it exactly
+                                // as the old in-lock order did (no clobber,
+                                // no leak). WRITE shape: the cached page
+                                // must RECEIVE this batch's bytes (the
+                                // per-page path's pin-and-copy outcome,
+                                // last-writer-wins) and turn dirty — the
+                                // skip arm would drop the write silently.
+                                if mark_dirty {
+                                    let src_off = (done + k) * block_size;
+                                    let copy_len = core::cmp::min(
+                                        PAGE_SIZE,
+                                        buf.len().saturating_sub(src_off),
+                                    );
+                                    let stale = g.get_mut(&page_index).expect("contains_key");
+                                    let dup_pfn = stale.pfn;
+                                    // SAFETY: dup_pfn is this entry's zone
+                                    // frame; the linear map covers
+                                    // PAGE_SIZE bytes and copy_len <= it.
+                                    unsafe {
+                                        let dst = phys_to_virt_ptr(pfn_to_phys(dup_pfn));
+                                        if copy_len > 0 {
+                                            core::ptr::copy_nonoverlapping(
+                                                buf.as_ptr().add(src_off),
+                                                dst,
+                                                copy_len,
+                                            );
+                                        }
+                                        if copy_len < PAGE_SIZE {
+                                            core::ptr::write_bytes(
+                                                dst.add(copy_len),
+                                                0,
+                                                PAGE_SIZE - copy_len,
+                                            );
+                                        }
+                                    }
+                                    dirty_account_transition(stale, true);
+                                }
+                                // The pre-marked cache identity is stripped
+                                // first (see discard_prepared_frame above).
                                 discard_prepared_frame(phys);
                                 continue;
                             }
@@ -2653,7 +2743,7 @@ impl PageCache {
                                 ref_count: AtomicU32::new(0),
                                 invalidated: false,
                                 released: core::sync::atomic::AtomicBool::new(false),
-                                dirty: core::sync::atomic::AtomicBool::new(false),
+                                dirty: core::sync::atomic::AtomicBool::new(mark_dirty),
                             },
                         );
                         appended += 1;
@@ -2661,12 +2751,16 @@ impl PageCache {
                     if lru_n > 0 {
                         lru::page_add_file_lru_young_batch(&lru_batch[..lru_n]);
                     }
+                    if mark_dirty && appended > 0 {
+                        DIRTY_PAGES.fetch_add(appended as usize, Ordering::Relaxed);
+                    }
                     self.total_pages.fetch_add(appended, Ordering::Relaxed);
                 }
             }
             self.flush_parked(&mut parked);
             done += got;
         }
+        done
     }
 
     /// Shrink the page cache by evicting up to `nr_to_scan` unreferenced pages.
