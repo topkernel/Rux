@@ -168,6 +168,29 @@ pub mod x86_track {
 
     use super::vdso_seq;
 
+    // ---- lane instrumentation (vdso-clock): fallback/skip counters ----
+    pub static TRACK_READ_NONE: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0);
+    pub static PEEK_NONE: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0);
+    pub static TICK_SKIP: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0);
+    #[inline]
+    fn bump(c: &core::sync::atomic::AtomicU64, tag: &str) {
+        let n = c.fetch_add(1, Ordering::Relaxed);
+        if n % 100 == 0 {
+            crate::pr_info!(
+                "vdc-instr {} n={}",
+                tag,
+                n + 1
+            );
+        }
+    }
+    /// Public bump for callers outside this module (vdso_data_tick).
+    pub fn bump_pub(c: &core::sync::atomic::AtomicU64, tag: &str) {
+        bump(c, tag)
+    }
+
     // ------------------------------------------------------------------
     // field accessors (the page static — plain volatile loads/stores;
     // coherence is the seq word's job)
@@ -329,10 +352,12 @@ pub mod x86_track {
                     continue;
                 }
                 if mult == 0 {
+                    bump(&PEEK_NONE, "peek-none-mult0");
                     return None; // not promoted
                 }
                 return Some((cl, base, mult));
             }
+            bump(&PEEK_NONE, "peek-none-retry");
             None
         }
     }
@@ -343,6 +368,16 @@ pub mod x86_track {
     /// syscall read and a vDSO read at the same instant agree bit for
     /// bit. None when not promoted / writer wedged (caller falls back;
     /// the TSC_LAST ratchet keeps that fallback monotonic).
+    ///
+    /// WRAP GUARD (vdso-clock hunt, 2026-11-18): a TSC that reads
+    /// behind the published cycle_last (vCPU TSC-offset smash — the
+    /// class the poisoned release boots hit) makes `raw - cl` wrap to
+    /// ~2^64, and `(wrapped * mult) >> 32` manufactures ~2^32 SECONDS
+    /// of time (exactly 2^32 × mult ≈ 4.3e16 nominal ticks). The
+    /// emitted vDSO code already routes unsigned-above-bound deltas to
+    /// the syscall fallback; the kernel twin must refuse them too —
+    /// retry, then report unreadable (the caller's ratchet freeze is
+    /// the safe degradation; the resync/rebase paths repair the anchor).
     pub fn tsc_track_now_nominal() -> Option<u64> {
         unsafe {
             for _ in 0..128 {
@@ -365,9 +400,14 @@ pub mod x86_track {
                 if s1 != s2 {
                     continue;
                 }
-                let delta = raw.wrapping_sub(cl);
+                if raw < cl {
+                    // Wrapped-delta refusal (see the doc above).
+                    continue;
+                }
+                let delta = raw - cl;
                 return Some(base.wrapping_add(tsc_delta_nominal(delta, mult)));
             }
+            bump(&TRACK_READ_NONE, "track-none");
             None
         }
     }
@@ -383,15 +423,24 @@ pub mod x86_track {
 pub fn vdso_data_tick() {
     unsafe {
         if x86_track::tsc_anchor_peek().is_none() {
+            x86_track::bump_pub(&x86_track::TICK_SKIP, "tick-skip-peek");
             return; // TSC timekeeper not promoted — keep the page as-is
         }
         if !x86_track::seq_try_begin() {
+            x86_track::bump_pub(&x86_track::TICK_SKIP, "tick-skip-writer");
             return; // another CPU is mid-refresh; next tick catches up
         }
         let cl = x86_track::rd(8);
         let base = x86_track::rd(16);
         let mult = x86_track::rd(40);
-        let raw = crate::arch::cpu::read_counter();
+        // Ordered TSC stamp (vdso-clock discipline): the reader side
+        // uses lfence;rdtsc so the stamp sits inside its seq window;
+        // the writer stamps with the SAME ordered read so the anchor it
+        // publishes is coherent with every reader's comparison (a bare
+        // rdtsc can execute speculatively early relative to the field
+        // loads — harmless today because raw >= cl is re-checked, but
+        // the ordered read keeps the writer/reader pair symmetric).
+        let raw = x86_track::read_tsc_ordered();
         // TSC must never read backward; if it ever does (vCPU TSC
         // smash), keep the old anchor — the emitted bound check sends
         // readers to the syscall and the resync report paths fire.
