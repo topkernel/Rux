@@ -108,6 +108,19 @@ pub struct VirtQueue {
     /// (stray kernel write into the heap-backed vring) previously made the
     /// device walk garbage heads and wedge permanently.
     avail_shadow: AtomicU16,
+    /// Descriptors currently held by LIVE published chains (the SG-chain
+    /// admission budget). The legacy in-flight guard in alloc_desc_chain
+    /// assumes 3 descriptors per chain; an SG chain of N data segments
+    /// holds N+2, so chains-only accounting under-estimates real ring
+    /// pressure exactly when fusing is busiest. Held is incremented at
+    /// chain PUBLISH time (async pending store / sync tombstone publish,
+    /// both under the BLK lock) and released by the completion walker when
+    /// it consumes the chain's used-ring entry — the same lifecycle the
+    /// pending-table window reservation follows. Burned allocations
+    /// (guard rejected / publish refused before submit_quiet) never touch
+    /// this counter. The MMIO legacy queue leaves it at 0 (its chains are
+    /// always 3-desc; its size-8 in-flight guard already caps it at 2).
+    descs_held: AtomicU16,
 }
 
 unsafe impl Send for VirtQueue {}
@@ -192,6 +205,7 @@ impl VirtQueue {
             next_desc: AtomicU16::new(0),
             leaked_chains: AtomicU16::new(0),
             avail_shadow: AtomicU16::new(0),
+            descs_held: AtomicU16::new(0),
         })
     }
 
@@ -1135,6 +1149,23 @@ impl VirtQueue {
     /// chain length restores the full ring for 1-desc (RX) and 2-desc
     /// (net TX) users; blk keeps the 3-desc accounting via alloc_desc().
     pub fn alloc_desc_chain(&mut self, _chain_len: u16) -> Option<u16> {
+        self.alloc_desc_run_checked(1)
+    }
+
+    /// Common admission + allocation core. Reserves `n` CONSECUTIVE
+    /// descriptor ids (one free-running fetch_add — callers build chains
+    /// that occupy exactly [base, base+n) mod queue_size) after both
+    /// admission guards pass:
+    ///
+    /// 1. the legacy chains-in-flight guard (unchanged semantics: caps the
+    ///    MMIO size-8 queue at 2 chains, keeps the PCI queue's coarse
+    ///    chain-count bound);
+    /// 2. the descriptors-held budget (`descs_held + n <= queue_size`) —
+    ///    accurate for SG chains whose length the legacy guard cannot see.
+    ///
+    /// The held budget counts only PUBLISHED chains, so a reservation here
+    /// that later fails to publish must not (and does not) touch it.
+    fn alloc_desc_run_checked(&mut self, n: u16) -> Option<u16> {
         let used_idx = self.get_used();
         let avail_idx = self.get_avail();
 
@@ -1176,9 +1207,57 @@ impl VirtQueue {
         if in_flight.saturating_mul(3).saturating_add(3) > self.queue_size {
             return None;
         }
+        // SG-aware budget (see `descs_held`): the legacy guard above
+        // assumes 3 descriptors per chain and under-counts whenever long
+        // chains dominate the ring. This is the accurate gate.
+        if n > 0 {
+            let held = self.descs_held.load(Ordering::Acquire);
+            if held.saturating_add(n) > self.queue_size {
+                return None;
+            }
+        }
 
-        let idx = self.next_desc.fetch_add(1, Ordering::AcqRel) % self.queue_size;
+        let idx = self.next_desc.fetch_add(n, Ordering::AcqRel) % self.queue_size;
         Some(idx)
+    }
+
+    /// Allocate `n` consecutive descriptors for one multi-segment chain
+    /// (header + n data descriptors + response is n+2 total; callers pass
+    /// the TOTAL). Returns the first (head) descriptor index; the chain
+    /// occupies [head, head+n) mod queue_size. Under the BLK lock, so the
+    /// free-running counter cannot interleave with another chain build.
+    pub fn alloc_desc_run(&mut self, n: u16) -> Option<u16> {
+        if n == 0 || n > self.queue_size {
+            return None;
+        }
+        self.alloc_desc_run_checked(n)
+    }
+
+    /// Mark `n` descriptors as held by a chain being PUBLISHED (pending
+    /// store or sync tombstone). Called under the BLK lock after
+    /// submit_quiet; pairs with the completion walker's release_descs.
+    pub fn hold_descs(&self, n: u16) {
+        self.descs_held.fetch_add(n, Ordering::AcqRel);
+    }
+
+    /// Release `n` descriptors whose chain's used-ring entry the walker
+    /// consumed. Saturating: a stale overcount must clamp to zero, never
+    /// wrap (the leaked_chains lesson applied symmetrically).
+    pub fn release_descs(&self, n: u16) {
+        let _ = self
+            .descs_held
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
+                if v >= n {
+                    Some(v - n)
+                } else {
+                    Some(0)
+                }
+            });
+    }
+
+    /// Snapshot of the held-descriptor count (diagnostics).
+    pub fn descs_held_snapshot(&self) -> u16 {
+        self.descs_held.load(Ordering::Acquire)
     }
 
     /// Reclaim descriptors that the device has finished processing.

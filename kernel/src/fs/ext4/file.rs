@@ -104,7 +104,7 @@ fn ext4_dio_read_batched(
 
     const MAX_BATCH: usize = 64;
     const MAX_BLOCKS_PER_WINDOW: u64 = 512;
-    const MAX_MERGE_BLOCKS: u64 = 64;
+    const MAX_MERGE_BLOCKS: u64 = 256;
     let sectors_per_block = (block_size / 512) as u64;
 
     let mut completions: [IoCompletion; MAX_BATCH] = [const { IoCompletion::new() }; MAX_BATCH];
@@ -112,11 +112,10 @@ fn ext4_dio_read_batched(
     let mut req_dst = [0usize; MAX_BATCH];
     let mut req_off = [0u64; MAX_BATCH];
     let mut req_len = [0usize; MAX_BATCH];
+    // Device-side start sector of each run (the fusion key).
+    let mut req_sector = [0u64; MAX_BATCH];
     let mut count = 0usize;
     let mut blocks_in_window: u64 = 0;
-    // Set once the async path proves usable; until then a submission
-    // failure falls back to the per-block body.
-    let mut async_ok = false;
 
     let mut total_read = 0usize;
     let mut current_offset = offset;
@@ -176,75 +175,195 @@ fn ext4_dio_read_batched(
         Some(len)
     }
 
-    // Drain the window: wait each request; a failed request is re-served
+    // Drain the window (FUSED, the blk-merge front/back-merge shape):
+    // runs were only RECORDED until now — the plug list. Phase 1 groups
+    // device-adjacent runs (sector-contiguous AND destination-contiguous,
+    // two integer compares — the reference's back-merge test) and submits
+    // ONE scatter-gather request per group (per-run chains as fallback);
+    // phase 2 kicks once and waits in order. A failed request is re-served
     // per-block synchronously (a second failure cuts the read short at
     // that request's start — POSIX short read).
     macro_rules! drain {
         () => {{
-            // The PCI submit path publishes chains QUIETLY (every notify
-            // is an MMIO trap); nothing else on a quiet boot kicks the
-            // device for us — without this kick the whole window sat
-            // at-device until the 10 s wait deadline (the VW-WEDGE
-            // unked=at_device family on real-data direct reads).
             if count > 0 {
+                const MAX_SEGS: usize =
+                    crate::drivers::virtio::MAX_SG_SEGS_PER_CHAIN;
+                // Per-run submission state: group_head[j] = Some(h) — run j
+                // rides the SG group headed at h; None + armed[j] — run j
+                // took its own chain; None + !armed[j] — never submitted
+                // (per-block re-serve below).
+                let mut group_head: [Option<usize>; MAX_BATCH] = [None; MAX_BATCH];
+                let mut armed = [false; MAX_BATCH];
+
+                // ---- Phase 1: group + submit quietly ----
+                let mut i = 0usize;
+                while i < count {
+                    let mut e = i + 1;
+                    while e < count
+                        && (e - i) < MAX_SEGS
+                        && req_sector[e - 1] + (req_len[e - 1] / 512) as u64
+                            == req_sector[e]
+                        && req_dst[e - 1] + req_len[e - 1] == req_dst[e]
+                    {
+                        e += 1;
+                    }
+                    let k = e - i;
+                    let mut segs: [crate::drivers::blkdev::DmaSeg; MAX_SEGS] =
+                        [crate::drivers::blkdev::DmaSeg {
+                            ptr: core::ptr::null_mut(),
+                            len: 0,
+                        }; MAX_SEGS];
+                    for (j, s) in segs.iter_mut().take(k).enumerate() {
+                        s.ptr = buf[req_dst[i + j]..].as_mut_ptr();
+                        s.len = req_len[i + j];
+                    }
+                    let submitted = crate::drivers::blkdev::blkdev_read_async_sg(
+                        fs.device,
+                        req_sector[i],
+                        &segs[..k],
+                        &completions[i],
+                    );
+                    match submitted {
+                        Ok(()) => {
+                            for r in i..e {
+                                group_head[r] = Some(i);
+                            }
+                        }
+                        Err(_) => {
+                            // No SG (or window lag): one chain per run —
+                            // the pre-fusion shape. A run whose own submit
+                            // also fails stays un-armed (re-served
+                            // per-block below — the standing fallback).
+                            for r in i..e {
+                                let dst = buf[req_dst[r]..req_dst[r] + req_len[r]]
+                                    .as_mut_ptr();
+                                let slice = unsafe {
+                                    core::slice::from_raw_parts_mut(dst, req_len[r])
+                                };
+                                if crate::drivers::blkdev::blkdev_read_async(
+                                    fs.device,
+                                    req_sector[r],
+                                    slice,
+                                    &completions[r],
+                                )
+                                .is_ok()
+                                {
+                                    armed[r] = true;
+                                }
+                            }
+                        }
+                    }
+                    i = e;
+                }
+
+                // ---- Phase 2: one kick, then wait in order ----
+                // The PCI submit path publishes chains QUIETLY (every notify
+                // is an MMIO trap); nothing else on a quiet boot kicks the
+                // device for us — without this kick the whole window sat
+                // at-device until the 10 s wait deadline (the VW-WEDGE
+                // unked=at_device family on real-data direct reads).
                 crate::drivers::virtio::pci_blk_kick_all();
-            }
-            let mut cut_at = usize::MAX;
-            for i in 0..count {
-                let rc = completions[i].wait();
-                let mut served = false;
-                if rc == 0 {
-                    // Zero-serve/attribution guard: the walker stamps the
-                    // DMA target pointer of the chain it completed.
-                    let token = completions[i].delivered_token();
-                    let dst = req_dst[i];
-                    let len = req_len[i];
-                    let expect = buf[dst..].as_ptr() as usize;
-                    if token == 0 || token == expect {
-                        served = true;
+
+                let mut cut_at = usize::MAX;
+                // First pass: wait heads and individual chains, recording
+                // per-run outcomes into st[].
+                let mut st = [0i32; MAX_BATCH];
+                let mut ok = [false; MAX_BATCH];
+                for j in 0..count {
+                    match group_head[j] {
+                        Some(h) if h == j => {
+                            let rc = completions[j].wait();
+                            if rc == 0 {
+                                // Zero-serve/attribution guard against the
+                                // GROUP's first segment pointer.
+                                let token = completions[j].delivered_token();
+                                let expect = buf[req_dst[j]..].as_ptr() as usize;
+                                if token == 0 || token == expect {
+                                    ok[j] = true;
+                                } else {
+                                    crate::pr_err!(
+                                        "ext4 dio: misattributed read completion (token {:x} != {:x})",
+                                        token, expect
+                                    );
+                                    st[j] = -5;
+                                }
+                            } else {
+                                st[j] = rc;
+                            }
+                        }
+                        Some(_) => {
+                            // Member run: its head (processed above — heads
+                            // precede members) already decided the group.
+                            let h = group_head[j].unwrap();
+                            ok[j] = ok[h];
+                            st[j] = st[h];
+                        }
+                        None => {
+                            if armed[j] {
+                                let rc = completions[j].wait();
+                                if rc == 0 {
+                                    let token = completions[j].delivered_token();
+                                    let expect = buf[req_dst[j]..].as_ptr() as usize;
+                                    if token == 0 || token == expect {
+                                        ok[j] = true;
+                                    } else {
+                                        crate::pr_err!(
+                                            "ext4 dio: misattributed read completion (token {:x} != {:x})",
+                                            token, expect
+                                        );
+                                        st[j] = -5;
+                                    }
+                                } else {
+                                    st[j] = rc;
+                                }
+                            } else {
+                                st[j] = -5;
+                            }
+                        }
+                    }
+                }
+                // Second pass: settle successes, per-block re-serve failures.
+                for j in 0..count {
+                    if ok[j] {
+                        let dst = req_dst[j];
+                        let len = req_len[j];
                         if dst + len > total_read {
                             total_read = dst + len;
                         }
                     } else {
-                        crate::pr_err!(
-                            "ext4 dio: misattributed read completion (token {:x} != {:x})",
-                            token, expect
-                        );
-                    }
-                }
-                if !served {
-                    // Per-block re-serve of the failed request's range.
-                    let mut off = req_off[i];
-                    let mut dst = req_dst[i];
-                    let mut left = req_len[i];
-                    while left > 0 {
-                        match serve_one_block(fs, inode, off, dst, buf, left, block_size) {
-                            Some(n) => {
-                                off += n as u64;
-                                dst += n;
-                                left -= n;
-                            }
-                            None => {
-                                cut_at = cut_at.min(dst);
-                                break;
+                        // Per-block re-serve of the failed request's range.
+                        let mut off = req_off[j];
+                        let mut dst = req_dst[j];
+                        let mut left = req_len[j];
+                        while left > 0 {
+                            match serve_one_block(fs, inode, off, dst, buf, left, block_size) {
+                                Some(n) => {
+                                    off += n as u64;
+                                    dst += n;
+                                    left -= n;
+                                }
+                                None => {
+                                    cut_at = cut_at.min(dst);
+                                    break;
+                                }
                             }
                         }
+                        if left == 0 && dst > total_read {
+                            total_read = dst;
+                        } else if left > 0 {
+                            cut_at = cut_at.min(dst);
+                        }
                     }
-                    if left == 0 && dst > total_read {
-                        total_read = dst;
-                    } else if left > 0 {
-                        cut_at = cut_at.min(dst);
-                    }
+                    completions[j].reset();
                 }
-                completions[i].reset();
+                count = 0;
+                blocks_in_window = 0;
+                if cut_at != usize::MAX && cut_at < total_read {
+                    total_read = cut_at;
+                }
+                buf_offset = total_read;
+                current_offset = offset + total_read as u64;
             }
-            count = 0;
-            blocks_in_window = 0;
-            if cut_at != usize::MAX && cut_at < total_read {
-                total_read = cut_at;
-            }
-            buf_offset = total_read;
-            current_offset = offset + total_read as u64;
         }};
     }
 
@@ -363,66 +482,25 @@ fn ext4_dio_read_batched(
         }
 
         let span_bytes = n as usize * block_size;
-        // SAFETY-free: buf[buf_offset..] is the caller's live staging
-        // slice; the completion drains before return.
-        let submitted = {
-            let dst = buf[buf_offset..buf_offset + span_bytes].as_mut_ptr();
-            let slice = unsafe {
-                core::slice::from_raw_parts_mut(dst, span_bytes)
-            };
-            crate::drivers::blkdev::blkdev_read_async(
-                fs.device,
-                run_phys * sectors_per_block,
-                slice,
-                &completions[count],
-            )
-        };
-        match submitted {
-            Ok(()) => {
-                async_ok = true;
-                crate::fs::ext4::extent::exthunt_rd_batch(
-                    inode.ino as u64,
-                    block_index,
-                    run_phys,
-                    n as u32,
-                );
-                req_dst[count] = buf_offset;
-                req_off[count] = current_offset;
-                req_len[count] = span_bytes;
-                count += 1;
-                blocks_in_window += n;
-                buf_offset += span_bytes;
-                current_offset += span_bytes as u64;
-            }
-            Err(_) => {
-                if !async_ok {
-                    // No async path at all: caller re-runs per-block body.
-                    return None;
-                }
-                drain!();
-                // Re-serve this run per-block after the window drain.
-                let mut off = current_offset;
-                let mut dst = buf_offset;
-                let mut left = span_bytes.min(to_read - buf_offset);
-                while left > 0 {
-                    match serve_one_block(fs, inode, off, dst, buf, left, block_size) {
-                        Some(nk) => {
-                            off += nk as u64;
-                            dst += nk;
-                            left -= nk;
-                        }
-                        None => {
-                            total_read = total_read.min(dst);
-                            buf_offset = total_read;
-                            return Some(total_read);
-                        }
-                    }
-                }
-                total_read = dst;
-                buf_offset = dst;
-                current_offset = off;
-            }
-        }
+        // RECORD the run only — the plug list. Submission (fused with any
+        // device-adjacent neighbors) happens at the window drain; the
+        // device sees no work before the drain's kick either way (chains
+        // publish quietly), so deferral costs nothing and lets the drain
+        // fuse this run with its predecessor when both are contiguous.
+        crate::fs::ext4::extent::exthunt_rd_batch(
+            inode.ino as u64,
+            block_index,
+            run_phys,
+            n as u32,
+        );
+        req_dst[count] = buf_offset;
+        req_off[count] = current_offset;
+        req_len[count] = span_bytes;
+        req_sector[count] = run_phys * sectors_per_block;
+        count += 1;
+        blocks_in_window += n;
+        buf_offset += span_bytes;
+        current_offset += span_bytes as u64;
     }
 
     drain!();

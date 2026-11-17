@@ -1974,6 +1974,11 @@ struct WriteSlot {
     /// Pre-armed completion; reset by flush() for reuse (the same
     /// discipline the direct-read batch's stack array follows).
     completion: crate::fs::io_completion::IoCompletion,
+    /// Device-side start sector of this span (512-byte units) — the
+    /// fusion key. Only meaningful on the deferred path.
+    sector: u64,
+    /// Target device of this span — groups never fuse across devices.
+    dev: *const blkdev::GenDisk,
 }
 
 impl WriteSlot {
@@ -1983,6 +1988,8 @@ impl WriteSlot {
             len: 0,
         },
         completion: crate::fs::io_completion::IoCompletion::new(),
+        sector: 0,
+        dev: core::ptr::null(),
     };
 }
 
@@ -2000,6 +2007,17 @@ impl WriteSlot {
 /// batch.flush();
 /// for i in 0..flushed { if batch.status(i) == 0 { /* clear BH_Dirty */ } }
 /// ```
+///
+/// FUSION (the blk-merge front/back-merge shape, 2026-11-18): when the
+/// device accepts SG requests, spans are NOT submitted at submit() time —
+/// they accumulate in the window (the plug list) and flush() fuses every
+/// run of device-adjacent spans (same device, sector_{i}+len_i ==
+/// sector_{i+1}) into ONE scatter-gather chain: one request header, one
+/// starting sector, N data descriptors, one completion — one device
+/// round trip per fused group instead of one per span. Nothing is lost
+/// by the deferral: chains are published QUIETLY and the device only
+/// sees work at the kick, which has always happened at drain. Devices
+/// without SG support keep the immediate per-span submission shape.
 pub struct WriteBatch {
     /// Inline slots; entries are slots[0..len].
     slots: [WriteSlot; MAX_WRITE_BATCH],
@@ -2009,6 +2027,12 @@ pub struct WriteBatch {
     /// order. Valid for i < results_n; reset by the next flush.
     results: [i32; MAX_WRITE_BATCH],
     results_n: usize,
+    /// Deferred (fusion) mode: decided by the FIRST submit from the
+    /// device's SG capability. False → immediate per-span submission
+    /// (the pre-fusion shape).
+    deferred: bool,
+    /// Mode decided (first submit happened).
+    mode_set: bool,
 }
 
 /// DMA source of a batch entry: the batch's private copy (submit) or the
@@ -2032,6 +2056,28 @@ impl WriteSource {
             WriteSource::Borrowed { ptr, .. } => *ptr,
         }
     }
+
+    #[inline]
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            WriteSource::Owned(b) => b,
+            WriteSource::Borrowed { ptr, len } => unsafe {
+                if *len == 0 {
+                    &[]
+                } else {
+                    core::slice::from_raw_parts(*ptr, *len)
+                }
+            },
+        }
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        match self {
+            WriteSource::Owned(b) => b.len(),
+            WriteSource::Borrowed { len, .. } => *len,
+        }
+    }
 }
 
 impl WriteBatch {
@@ -2041,6 +2087,8 @@ impl WriteBatch {
             len: 0,
             results: [0; MAX_WRITE_BATCH],
             results_n: 0,
+            deferred: false,
+            mode_set: false,
         }
     }
 
@@ -2061,11 +2109,31 @@ impl WriteBatch {
         }
     }
 
+    /// Decide the submission mode from the device's capability (first
+    /// submit). Returns false when the device has NEITHER SG NOR plain
+    /// async write (the caller's synchronous fallback owns the span).
+    fn mode_probe(&mut self, device: *const blkdev::GenDisk) -> bool {
+        if !self.mode_set {
+            // SAFETY: identity-field reads on a registered GenDisk.
+            let (has_sg, has_plain) = unsafe {
+                ((*device).has_async_write_sg(), (*device).async_write_fn.is_some())
+            };
+            if !has_sg && !has_plain {
+                return false;
+            }
+            self.deferred = has_sg;
+            self.mode_set = true;
+        }
+        true
+    }
+
     /// Submit one span without waiting. Returns false when the batch
-    /// window is full (flush, then retry) or the device rejected the
-    /// submission (no async write / retry-exhausted window lag: fall back
-    /// to a synchronous write for this span — correctness is unchanged,
-    /// only the batching is lost).
+    /// window is full (flush, then retry) or the device has no async
+    /// write at all (fall back to a synchronous write for this span —
+    /// correctness is unchanged, only the batching is lost).
+    ///
+    /// In deferred (fusion) mode the span is only RECORDED; the device
+    /// submission happens at flush() — see the struct's FUSION note.
     pub fn submit(
         &mut self,
         device: *const blkdev::GenDisk,
@@ -2075,9 +2143,19 @@ impl WriteBatch {
         if data.is_empty() || self.len >= MAX_WRITE_BATCH {
             return false;
         }
+        if !self.mode_probe(device) {
+            return false;
+        }
         // The private stable copy: the device DMAs FROM this block, so it
         // must not alias anything the kernel mutates before the drain.
         let owned: Box<[u8]> = alloc::vec::Vec::from(data).into_boxed_slice();
+        if self.deferred {
+            self.slots[self.len].data = WriteSource::Owned(owned);
+            self.slots[self.len].sector = sector;
+            self.slots[self.len].dev = device;
+            self.len += 1;
+            return true;
+        }
         // SAFETY: device is a registered GenDisk; `owned` and the slot's
         // inline completion stay valid (and unmodified) until the
         // completion fires — the write-batch contract.
@@ -2090,6 +2168,8 @@ impl WriteBatch {
         match rc {
             Ok(()) => {
                 self.slots[self.len].data = WriteSource::Owned(owned);
+                self.slots[self.len].sector = sector;
+                self.slots[self.len].dev = device;
                 self.len += 1;
                 true
             }
@@ -2119,6 +2199,19 @@ impl WriteBatch {
         if data.is_empty() || self.len >= MAX_WRITE_BATCH {
             return false;
         }
+        if !self.mode_probe(device) {
+            return false;
+        }
+        if self.deferred {
+            self.slots[self.len].data = WriteSource::Borrowed {
+                ptr: data.as_ptr(),
+                len: data.len(),
+            };
+            self.slots[self.len].sector = sector;
+            self.slots[self.len].dev = device;
+            self.len += 1;
+            return true;
+        }
         // SAFETY: device is a registered GenDisk; the caller's `data` and
         // the slot's inline completion stay valid (and the bytes
         // unmodified) until the drain — the submit_ref contract above.
@@ -2134,6 +2227,8 @@ impl WriteBatch {
                     ptr: data.as_ptr(),
                     len: data.len(),
                 };
+                self.slots[self.len].sector = sector;
+                self.slots[self.len].dev = device;
                 self.len += 1;
                 true
             }
@@ -2149,6 +2244,16 @@ impl WriteBatch {
         if self.len == 0 {
             return 0;
         }
+        if self.deferred {
+            self.flush_deferred()
+        } else {
+            self.flush_immediate()
+        }
+    }
+
+    /// Legacy flush: spans were already submitted (one chain each) at
+    /// submit time; kick once, wait each in order.
+    fn flush_immediate(&mut self) -> i32 {
         // One device kick for the whole quietly-submitted batch (the PCI
         // submit path publishes chains quietly; every notify is an MMIO
         // trap). The MMIO device notifies inline per chain — a no-op kick.
@@ -2162,84 +2267,269 @@ impl WriteBatch {
         // batch drains behind it.
         for i in 0..n {
             let status = self.slots[i].completion.wait();
-            let status = if status == 0 {
-                // Attribution guard (the read path's zero-serve analog):
-                // the walker stamps the completion with the DMA data
-                // pointer of the chain whose completion it delivered. A
-                // token mismatch means some OTHER chain's completion fired
-                // here — this span's write may not have landed, so its
-                // buffers must stay dirty (report EIO, loudly).
-                let token = self.slots[i].completion.delivered_token();
-                let expected = self.slots[i].data.as_ptr() as usize;
-                if token != 0 && token != expected {
-                    crate::pr_err!(
-                        "bio: misattributed write completion (token {:x} != buffer {:x}) — refusing to ack",
-                        token,
-                        expected
-                    );
-                    -5
-                } else {
-                    0
-                }
-            } else if status == crate::fs::io_completion::WAIT_TIMED_OUT {
-                match self.slots[i].data {
-                    WriteSource::Owned(_) => {
-                        // The chain may STILL be in flight: wait() already
-                        // tombstoned the device-side pending (abandon) and
-                        // drained deliveries, so the walker will never fire
-                        // this completion again. The DATA block is still
-                        // the device's DMA source and must be LEAKED,
-                        // never freed (the freed-kernel-DMA family).
-                        core::mem::forget(core::mem::replace(
-                            &mut self.slots[i].data,
-                            WriteSource::Borrowed {
-                                ptr: core::ptr::null(),
-                                len: 0,
-                            },
-                        ));
-                        status
-                    }
-                    WriteSource::Borrowed { ptr, len } => {
-                        // A borrowed source cannot be leaked — the caller
-                        // owns the buffer and reuses it after the drain,
-                        // and wait() already tombstoned the software
-                        // pending so no later delivery can be observed.
-                        // A 10 s virtio deadline on this span means the
-                        // machine is wedged far beyond it; report the
-                        // error (the span's owner keeps the range
-                        // unacknowledged) and hand the buffer back — the
-                        // same post-timeout discipline the read side's
-                        // bfree_multi already carries.
-                        crate::pr_err!(
-                            "bio: borrowed write span ({} bytes at {:p}) timed out — reporting EIO, buffer returned",
-                            len, ptr
-                        );
-                        status
-                    }
-                }
-            } else {
-                status
-            };
+            let status = self.wait_status_apply(i, status);
             self.results[i] = status;
             if status != 0 && first_error == 0 {
                 first_error = status;
             }
         }
-        // Retire the window: drop each live slot's data source (an Owned
-        // box's plain scope-end — safe on every completed path: the walker
-        // fired the completion, the delivery handshake drained inside
-        // wait(), and the chain's DMA is done, so the block is once again
-        // ordinary heap) and re-arm the completion for the next window
-        // (the direct-read batch's stack-array discipline).
+        self.retire_window(n);
+        first_error
+    }
+
+    /// Post-wait status adjudication for one slot: the zero-serve token
+    /// check on success, the leak/EIO split on timeout. Shared by both
+    /// flush modes (the deferred mode's group heads use the same rules
+    /// against the group's FIRST segment pointer).
+    fn wait_status_apply(&mut self, i: usize, status: i32) -> i32 {
+        if status == 0 {
+            // Attribution guard (the read path's zero-serve analog):
+            // the walker stamps the completion with the DMA data
+            // pointer of the chain whose completion it delivered. A
+            // token mismatch means some OTHER chain's completion fired
+            // here — this span's write may not have landed, so its
+            // buffers must stay dirty (report EIO, loudly).
+            let token = self.slots[i].completion.delivered_token();
+            let expected = self.slots[i].data.as_ptr() as usize;
+            if token != 0 && token != expected {
+                crate::pr_err!(
+                    "bio: misattributed write completion (token {:x} != buffer {:x}) — refusing to ack",
+                    token,
+                    expected
+                );
+                -5
+            } else {
+                0
+            }
+        } else if status == crate::fs::io_completion::WAIT_TIMED_OUT {
+            match self.slots[i].data {
+                WriteSource::Owned(_) => {
+                    // The chain may STILL be in flight: wait() already
+                    // tombstoned the device-side pending (abandon) and
+                    // drained deliveries, so the walker will never fire
+                    // this completion again. The DATA block is still
+                    // the device's DMA source and must be LEAKED,
+                    // never freed (the freed-kernel-DMA family).
+                    core::mem::forget(core::mem::replace(
+                        &mut self.slots[i].data,
+                        WriteSource::Borrowed {
+                            ptr: core::ptr::null(),
+                            len: 0,
+                        },
+                    ));
+                    status
+                }
+                WriteSource::Borrowed { ptr, len } => {
+                    // A borrowed source cannot be leaked — the caller
+                    // owns the buffer and reuses it after the drain,
+                    // and wait() already tombstoned the software
+                    // pending so no later delivery can be observed.
+                    // A 10 s virtio deadline on this span means the
+                    // machine is wedged far beyond it; report the
+                    // error (the span's owner keeps the range
+                    // unacknowledged) and hand the buffer back — the
+                    // same post-timeout discipline the read side's
+                    // bfree_multi already carries.
+                    crate::pr_err!(
+                        "bio: borrowed write span ({} bytes at {:p}) timed out — reporting EIO, buffer returned",
+                        len, ptr
+                    );
+                    status
+                }
+            }
+        } else {
+            status
+        }
+    }
+
+    /// Fused flush (deferred mode): build groups of device-adjacent
+    /// spans, submit one SG chain per group (per-span fallback chains on
+    /// SG failure), kick once, wait in order, propagate group status to
+    /// member slots.
+    fn flush_deferred(&mut self) -> i32 {
+        const MAX_SEGS: usize = crate::drivers::virtio::MAX_SG_SEGS_PER_CHAIN;
+        let n = self.len;
+        self.results_n = n;
+
+        // Per-slot submission state for this flush:
+        //  - group_head[i] = Some(h): slot i is a MEMBER of the SG group
+        //    headed at h (head included; h's completion carries the chain).
+        //  - None: the slot got its OWN chain (per-span fallback) — its
+        //    own completion is waited, or it never submitted (-5).
+        let mut group_head: [Option<usize>; MAX_WRITE_BATCH] = [None; MAX_WRITE_BATCH];
+        let mut span_armed: [bool; MAX_WRITE_BATCH] = [false; MAX_WRITE_BATCH];
+
+        // ---- Phase 1: group + submit (quiet) ----
+        let mut i = 0usize;
+        while i < n {
+            // Extend the group while the next span is device-adjacent
+            // (same device, sector-contiguous, whole-sector lengths) and
+            // the segment cap leaves room. Two integer compares per span
+            // — the reference's back-merge test.
+            let adj = |a: usize, b: usize| -> bool {
+                self.slots[a].dev == self.slots[b].dev
+                    && self.slots[a].sector + (self.slots[a].data.len() / 512) as u64
+                        == self.slots[b].sector
+                    && self.slots[a].data.len() % 512 == 0
+            };
+            let mut e = i + 1;
+            while e < n && (e - i) < MAX_SEGS && adj(e - 1, e) {
+                e += 1;
+            }
+
+            // Build the segment list from the group's slots.
+            let mut segs: [blkdev::DmaSeg; MAX_SEGS] = [blkdev::DmaSeg {
+                ptr: core::ptr::null_mut(),
+                len: 0,
+            }; MAX_SEGS];
+            let k = e - i;
+            for (j, s) in segs.iter_mut().take(k).enumerate() {
+                s.ptr = self.slots[i + j].data.as_ptr() as *mut u8;
+                s.len = self.slots[i + j].data.len();
+            }
+            let dev = self.slots[i].dev;
+            let sector0 = self.slots[i].sector;
+            // dev is a registered GenDisk (recorded at submit); every
+            // segment's buffer stays a stable DMA source until this
+            // flush's waits return — the write-batch contract.
+            let submitted =
+                blkdev::blkdev_write_async_sg(dev, sector0, &segs[..k], &self.slots[i].completion);
+            match submitted {
+                Ok(()) => {
+                    for si in i..e {
+                        group_head[si] = Some(i);
+                    }
+                }
+                Err(_) => {
+                    // SG submit refused (window lag, held budget, tiny
+                    // queue): per-span fallback — each span takes its own
+                    // 3-descriptor chain. A span that also fails to submit
+                    // reports EIO unwaited (its buffers stay dirty; the
+                    // standing durability points retry).
+                    for si in i..e {
+                        let d = self.slots[si].data.as_slice();
+                        // Same dev/sector contract as the SG arm.
+                        let rc = blkdev::blkdev_write_async(
+                            dev,
+                            self.slots[si].sector,
+                            d,
+                            &self.slots[si].completion,
+                        );
+                        if rc.is_ok() {
+                            span_armed[si] = true;
+                        } else {
+                            self.results[si] = -5;
+                        }
+                    }
+                }
+            }
+            i = e;
+        }
+
+        // ---- Phase 2: kick + wait ----
+        // One kick for the whole window (chains were published quietly).
+        crate::drivers::virtio::pci_blk_kick_all();
+
+        let mut first_error = 0i32;
+        // Group heads and fallback spans, in slot order — the device
+        // executes chains in submission order, so this wait order keeps
+        // the first waiter sleeping while the window drains behind it.
+        for si in 0..n {
+            match group_head[si] {
+                Some(h) if h == si => {
+                    // SG group head: wait the group's chain once.
+                    let status = self.slots[h].completion.wait();
+                    let status = self.wait_status_apply(h, status);
+                    // Propagate to every member slot. On timeout the
+                    // head's data source was already leaked/returned by
+                    // wait_status_apply; MEMBER sources are still the
+                    // device's DMA targets and need the same discipline.
+                    // Find the group's end (slots sharing this head).
+                    let mut e = si + 1;
+                    while e < n && group_head[e] == Some(h) {
+                        e += 1;
+                    }
+                    for m in si..e {
+                        let st = if status == 0 {
+                            0
+                        } else if status == crate::fs::io_completion::WAIT_TIMED_OUT {
+                            match self.slots[m].data {
+                                WriteSource::Owned(_) => {
+                                    // Same leak discipline as the head: the
+                                    // fused chain (still possibly in flight)
+                                    // DMAs from this block too.
+                                    core::mem::forget(core::mem::replace(
+                                        &mut self.slots[m].data,
+                                        WriteSource::Borrowed {
+                                            ptr: core::ptr::null(),
+                                            len: 0,
+                                        },
+                                    ));
+                                    status
+                                }
+                                WriteSource::Borrowed { ptr, len } => {
+                                    crate::pr_err!(
+                                        "bio: borrowed fused write span ({} bytes at {:p}) timed out — reporting EIO, buffer returned",
+                                        len, ptr
+                                    );
+                                    status
+                                }
+                            }
+                        } else {
+                            // Real device error: the chain COMPLETED (EIO
+                            // from the device) — DMA done, sources freed
+                            // normally at retire.
+                            status
+                        };
+                        self.results[m] = st;
+                    }
+                    if status != 0 && first_error == 0 {
+                        first_error = status;
+                    }
+                }
+                Some(_) => {
+                    // Group member: status was set by its head above.
+                    if self.results[si] != 0 && first_error == 0 {
+                        first_error = self.results[si];
+                    }
+                }
+                None => {
+                    if span_armed[si] {
+                        // Per-span fallback chain: the legacy wait.
+                        let status = self.slots[si].completion.wait();
+                        let status = self.wait_status_apply(si, status);
+                        self.results[si] = status;
+                    }
+                    // else: unsubmitted (-5 already recorded).
+                    if self.results[si] != 0 && first_error == 0 {
+                        first_error = self.results[si];
+                    }
+                }
+            }
+        }
+
+        self.retire_window(n);
+        first_error
+    }
+
+    /// Retire the window: drop each live slot's data source (an Owned
+    /// box's plain scope-end — safe on every completed path: the walker
+    /// fired the completion, the delivery handshake drained inside
+    /// wait(), and the chain's DMA is done, so the block is once again
+    /// ordinary heap; timed-out Owned boxes were already leaked above)
+    /// and re-arm the completion for the next window (the direct-read
+    /// batch's stack-array discipline).
+    fn retire_window(&mut self, n: usize) {
         for i in 0..n {
             self.slots[i].data = WriteSource::Borrowed {
                 ptr: core::ptr::null(),
                 len: 0,
             };
             self.slots[i].completion.reset();
+            self.slots[i].sector = 0;
+            self.slots[i].dev = core::ptr::null();
         }
         self.len = 0;
-        first_error
     }
 }
 
