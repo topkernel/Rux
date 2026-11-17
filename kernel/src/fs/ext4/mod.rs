@@ -545,6 +545,15 @@ impl Ext4FileSystem {
             return Err(errno::Errno::InvalidArgument.as_neg_i32());
         }
 
+        // Degenerate-geometry short-circuit (msync panic backstop twin
+        // of inode_table_block_of): an instance whose init() never ran
+        // has inodes_per_group == 0 and would panic on the divide
+        // below. EIO, not a panic — init() rejects such superblocks,
+        // so this never fires on a real filesystem.
+        if self.inodes_per_group == 0 {
+            return Err(errno::Errno::IOError.as_neg_i32());
+        }
+
         // Calculate block group and inode table index
         let group = (ino - 1) / self.inodes_per_group;
         let index = (ino - 1) % self.inodes_per_group;

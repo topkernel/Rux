@@ -4134,6 +4134,24 @@ pub fn ext4_flush_dirty_inode(
     first_index: u64,
     last_index: u64,
 ) -> usize {
+    // OPS-IDENTITY GATE (the msync panic, 2026-11-18): only
+    // EXT4_INODE_OPS inodes carry an Ext4FileSystem in private_data.
+    // Every other filesystem installs its OWN node pointer there
+    // (tmpfs a TmpfsNode Arc, memfd a MemfdState Box, devfs/sysfs/...
+    // their entries) — reinterpreting one of those as an
+    // Ext4FileSystem is type confusion whose garbage geometry reached
+    // inode_table_block_of's inodes_per_group divide and panicked the
+    // kernel (sys_msync flushed a tmpfs-backed MAP_SHARED file; rt-r1's
+    // LTP sched gate, inode.rs:679). The gate lives HERE — like
+    // persist_ioc_flags — so every caller (msync's two flush points,
+    // fsync, sync_file_range, the page-cache writeback engines) is
+    // covered once. Non-ext4 inodes have nothing in THIS machinery to
+    // flush (tmpfs pages are written back by tmpfs itself): 0 pages.
+    if !inode.ops.is_some_and(|o| {
+        core::ptr::eq(o as *const _, &crate::fs::ext4::EXT4_INODE_OPS as *const _)
+    }) {
+        return 0;
+    }
     let fs_ptr = match inode.private_data {
         Some(ptr) => ptr as *const crate::fs::ext4::Ext4FileSystem,
         None => return 0,
