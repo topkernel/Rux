@@ -231,6 +231,37 @@ pub fn retire_complete(file: Arc<File>) {
                     dn + 1
                 );
             }
+            // DEFER-CAP (perf-2x round 5): an unbounded defer queue under
+            // an RCU-starved window starves the benchmark task itself —
+            // the lmbench lat_syscall sampler anatomy: 27 ticks were ALL
+            // idle while lat_null was never scheduled. Past a small
+            // threshold, stop queueing and run the decisions INLINE with
+            // the existing bounded wait: this caller owns the closing
+            // task's context (sleepable), the bound keeps the stall
+            // finite, and the queue cannot grow ahead of the reaper.
+            if dn < 64 {
+                RETIRED_DEPTH.fetch_add(n, Ordering::Relaxed);
+                {
+                    let mut q = RETIRED.lock_irqsave();
+                    q.extend(batch);
+                }
+                TICKET.up();
+                return;
+            }
+            // Inline bounded wait: run the decisions here with the same
+            // bounded poll the queue path would have used.
+            RETIRED_DEPTH.fetch_sub(n, Ordering::Relaxed);
+            if crate::sync::rcu::synchronize_rcu_bounded_pollfirst(1500, "fdreap-close-inline") {
+                for f in &batch {
+                    FdTable::displaced_close_decision(f);
+                }
+                drop(batch);
+                PROCESSED_SEQ.fetch_add(n, Ordering::AcqRel);
+                TICKET.up();
+                return;
+            }
+            // Inline wait also failed (a true monopolist window): queue
+            // and let the reaper own it — the pre-cap path, unchanged.
             RETIRED_DEPTH.fetch_add(n, Ordering::Relaxed);
             {
                 let mut q = RETIRED.lock_irqsave();
