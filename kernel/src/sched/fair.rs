@@ -1554,10 +1554,14 @@ impl CfsRunQueue {
     /// grq_diag_counts() names the drift.
     #[track_caller]
     fn nr_running_dec(&self) {
-        if self.nr_running
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(1))
-            .is_err()
-        {
+        // grq-10ns: single locked-RMW form (fetch_sub = one xadd) instead
+        // of the fetch_update CAS loop. Every writer of this counter
+        // holds the GRQ lock, so a wrap (old == 0) can be restored with a
+        // plain store — no other decrement can interleave between the
+        // sub and the restore. Same checked-sub semantics, one bus op.
+        let old = self.nr_running.fetch_sub(1, Ordering::SeqCst);
+        if old == 0 {
+            self.nr_running.store(0, Ordering::SeqCst);
             // REGRESSION GUARD: the counter was already 0 when a
             // removal path decremented again. The one historical producer
             // was the 2b092c49 discarded-guard GRQ unlock (every critical
@@ -1750,10 +1754,12 @@ impl CfsRunQueue {
     /// one historical producer).
     #[track_caller]
     fn load_weight_sub(&self, weight: u64) {
-        if self.load_weight
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(weight))
-            .is_err()
-        {
+        // grq-10ns: single locked-RMW form (see nr_running_dec) — one
+        // xadd; a wrap (old < weight) is restored to `old` because every
+        // writer holds the GRQ.
+        let old = self.load_weight.fetch_sub(weight, Ordering::SeqCst);
+        if old < weight {
+            self.load_weight.store(old, Ordering::SeqCst);
             static LASTW: core::sync::atomic::AtomicU64 =
                 core::sync::atomic::AtomicU64::new(0);
             let now = crate::drivers::timer::get_jiffies();

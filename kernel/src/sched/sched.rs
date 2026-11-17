@@ -3757,11 +3757,23 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
                 );
             } else {
                 mark_picked_on_cpu(task, task == prev);
-                grq.nr_running.fetch_update(
-                    core::sync::atomic::Ordering::SeqCst,
-                    core::sync::atomic::Ordering::SeqCst,
-                    |v| v.checked_sub(1),
-                );
+                // grq-10ns: single locked-RMW form (one xadd) instead of
+                // the fetch_update CAS loop — every writer of this
+                // counter holds the GRQ, so a wrap (old == 0) is
+                // restored with a plain store, keeping the checked-sub
+                // semantics with one bus op (see fair::nr_running_dec).
+                {
+                    let old = grq.nr_running.fetch_sub(
+                        1,
+                        core::sync::atomic::Ordering::SeqCst,
+                    );
+                    if old == 0 {
+                        grq.nr_running.store(
+                            0,
+                            core::sync::atomic::Ordering::SeqCst,
+                        );
+                    }
+                }
                 grq.cfs_rq.set_curr(task);
                 // R20-6: reset the execution clock at pick. Nothing else resets
                 // exec_start, so after a sleep it still holds the timestamp of
