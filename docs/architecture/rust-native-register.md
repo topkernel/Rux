@@ -121,6 +121,26 @@ numbers this register cites).
 
 ## B. Designs where the safe-by-construction shape IS the optimization
 
+- **TLB-flush epoch ack for deferred page-table frees** (x86_64 ipi.rs
+  + mmu_init.rs, fork-frag lane 2026-11-17, commit 746678591): Rux's
+  shootdown IPI is fire-and-forget by design (zero per-page state, no
+  ack handshake), which left munmap no ordering proof to free an
+  emptied leaf table against. The protocol adds one per-CPU counter
+  incremented at the END of the flush handler — an epoch advance
+  proves that CPU completed a FULL non-global flush after a recorded
+  snapshot, and any advance counts (the handler flushes everything,
+  not a range) — so a freed table frame waits on exactly the CPUs
+  that ever loaded the mm, with zero added IPI traffic and zero
+  change to the shootdown fast path. The reference needs
+  smp_call_function wait states and RCU-batched tlb_remove_table for
+  the same proof; here the proof is two atomic loads per drain. The
+  dividend it unlocked: munmap frees emptied leaf tables (fragmented
+  parents carried 36 tables against 61 present PTEs), collapsing the
+  fork/teardown table churn — pbench SMP-8 KVM p4_fork_exit
+  68.6→39.0 µs and p4_fork_exec 77.2→44.3 µs vs reference
+  12.9/25.7 (5.31x→3.02x / 3.00x→1.72x), forkprof 36.0→7.0 leaf
+  tables per fork; clean small-parent shape flat (lmbench lat_proc
+  fork 46.3→45.2 µs interleaved med). Evidence: run/FORK-FRAG.md.
 - **D-1 Global run queue** (sched/, cross-ref D-1): one run queue
   serves all CPUs — no per-CPU run queues, no load balancer, no
   migration decisions; the pick path is a single queue with

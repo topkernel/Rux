@@ -2,6 +2,6 @@
 .balign 8
 .globl aarch64_virt_dtb
 aarch64_virt_dtb:
-.incbin "/home/william/rux-agents/dfx-migrate/kernel/src/arch/aarch64/virt.dtb"
+.incbin "/home/william/rux-agents/fork-frag/kernel/src/arch/aarch64/virt.dtb"
 .globl aarch64_virt_dtb_end
 aarch64_virt_dtb_end:

@@ -280,6 +280,33 @@ dead-proc `expect()` replaced by a bounded warning (619bf4b6); the
   handed off with the forkprof evidence in run/SYSMM-2X.md).
   p3b_fault_cow unchanged (0.601-0.611 both arms) — the walk change
   does not touch the fault path.
+- Emptied-leaf-table free in munmap behind a TLB-flush epoch + pcp
+  table allocs (fork-frag lane 2026-11-17, 746678591): the SOURCE of
+  the sysmm-2x fragmentation finding closed. munmap now unlinks a leaf
+  table whose full 512 entries are raw-zero and frees the frame only
+  after every CPU that ever loaded the mm completed a full TLB flush
+  taken AFTER the PMD clear (per-CPU TLB_FLUSH_EPOCH incremented at
+  the end of the shootdown IPI handler — the fire-and-forget flush
+  finally has an ack side; drains at munmap entry/exit, fork and
+  exit). The free never outruns the proof: a table frame reaches the
+  allocator only with every stale paging-structure-cache holder
+  flushed. Walker safety is by the same invariant the PTE lock always
+  owned: the fork COW walk and teardown re-read the PMD entry INSIDE
+  the per-table chunk (an unlinked table reads invalid, never a
+  dangling dereference); ptrace/coredump walks take the target mm's
+  PteLock (cold paths). Table allocations now use the per-CPU pageset
+  fast path (the data-page discipline; the GFP slowpath stays out of
+  the PteLock context). Measured (pbench SMP-8 KVM): p4_fork_exit
+  68.6→39.0 µs vs reference 12.9 (5.31x→3.02x), p4_fork_exec
+  77.2→44.3 vs 25.7 (3.00x→1.72x), quiet-host single boots; interleaved
+  3+3 at host load 6-8: 89.7→49.1 / 66.5→46.6. forkprof: 36.0→7.0
+  leaf tables per fork, mm_cow 22→5 µs, drop_ptfree 17→7 µs. Clean
+  small-parent shape NOT regressed (lmbench lat_proc fork 46.3→45.2
+  interleaved med); p3b_fault_cow 0.601→0.571-0.591. Lever C
+  (deferred last-Arc mm drop via mmdropd kthread) measured
+  NET-NEGATIVE (p4_fork_exec 44.3→76.0 µs — wake IPI + RCU-grace
+  poll per queued mm on busy CPUs) and was reverted; record in
+  run/FORK-FRAG.md. Full anatomy: run/FORK-FRAG.md.
 - Geekbench multicore class: parity-to-ahead of the reference on the
   same host (7139 vs 7027, 4-CPU pinned class) — pairing: it runs on
   the D-1 global run queue, the single structure the wake/pick census
@@ -397,6 +424,19 @@ absents stated plainly. Each absent names what closing looks like.
   corruption bugs (rows 24-25) are exactly the class a checked
   Refcount newtype catches. Closing: typed Refcount with
   decrement-must-hit-zero-to-free as the only free path.
+- Data-frame free vs shootdown completion (found by the fork-frag
+  lane 2026-11-17 while building the stricter table-free protocol):
+  unmap_pages frees DATA frames inside the PTE lock, BEFORE the
+  fire-and-forget flush_tlb_others_mm IPIs complete — a remote CPU of
+  a MULTI-THREADED mm holding a stale writable TLB entry can touch a
+  reused frame until its flush lands. Single-threaded mms are sound
+  (mask = self, local flush covers); the table-free protocol now
+  carries the proof the data path lacks (TLB_FLUSH_EPOCH acks). The
+  reference batches data frees behind completed shootdowns
+  (mmu_gather). Closing shape: route order-0 data frees from
+  same-mm shootdown paths through the epoch list (or wait-variant
+  shootdowns) for CLONE_VM mms; owner: mm lane, evidence
+  run/FORK-FRAG.md §gaps.
 - Arithmetic hardening in release builds: overflow-checks are off in
   the release profile (Cargo.toml), on in dev. Closing: one line plus
   a measured boot/perf cost through the merge gate.

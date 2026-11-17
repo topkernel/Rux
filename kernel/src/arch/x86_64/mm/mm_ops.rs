@@ -1174,15 +1174,24 @@ impl MmStruct {
             }
             // In-range entries are zero. For the unlink decision the
             // WHOLE table must be zero (out-of-range PTEs of an
-            // edge-straddling table may hold live mappings).
+            // edge-straddling table may hold live mappings). When this
+            // block covered the table ENTIRELY (the arena-teardown
+            // shape) the scan above already proved it — no second pass.
             if unlink_emptied {
-                let mut all_zero = true;
-                for i in 0..512usize {
-                    if unsafe { (*table1).get(i).bits() } != 0 {
-                        all_zero = false;
-                        break;
+                let block_covers_table =
+                    (addr & !(PMD_SIZE as usize - 1)) == addr && block_end == pmd_end;
+                let all_zero = if block_covers_table {
+                    true
+                } else {
+                    let mut z = true;
+                    for i in 0..512usize {
+                        if unsafe { (*table1).get(i).bits() } != 0 {
+                            z = false;
+                            break;
+                        }
                     }
-                }
+                    z
+                };
                 if all_zero {
                     unsafe {
                         super::mmu_init::pt_free_emptied_table(
