@@ -1283,10 +1283,41 @@ pub fn ext4_file_write(
     let current_blocks = (inode.get_size() + block_size - 1) / block_size;
     let sectors_per_block = (fs.block_size / 512) as u64;
 
+    // DIO UNWRITTEN ALLOCATION (fio-delalloc lane, 2026-11-18): an
+    // O_DIRECT write that grows the file allocates UNWRITTEN extents —
+    // metadata only (one bitmap run pass + extent append): NO per-block
+    // bread/zero/dirty populate of the fresh blocks, NO block-cache
+    // entries, NO dirty notes. The direct fast arm below then DMAs the
+    // caller's bytes straight over the unwritten run
+    // (ext4_ext_get_run_write resolves the real physical run) and the
+    // unwritten->written conversion runs at the write's COMPLETION, after
+    // the final device drain — the reference kernel's shape
+    // (iomap_dio_complete -> ext4_convert_unwritten_io_end_vec; bios over
+    // unwritten extents, state conversion at end_io). The old shape
+    // (written extents + per-block populate) breaded every fresh block
+    // (synchronous reads of garbage), left 256 dirty cache victims per
+    // 1 MiB for the write-return durability drain, and — because every
+    // target block became cache-resident — forced the data through the
+    // per-block buffer-cache body instead of the direct fast arm: the
+    // fresh-vs-overwrite 0.33x vs 0.83x split (hotspot-diff's +282 us/op
+    // fresh-allocation share). Gated on the same condition that arms the
+    // direct batch below (dio_fast && 4096-byte blocks && extent file):
+    // if the fast arm cannot run, the per-block body expects WRITTEN
+    // extents to splice into (materialize handles the unwritten edges).
+    let dio_unwritten = dio_fast && fs.block_size == 4096 && inode.has_extent();
     if needed_blocks > current_blocks {
         let first_touched = offset / block_size;
-        let r = allocate_blocks_for_file(fs, inode, needed_blocks,
-                                 core::cmp::max(current_blocks, first_touched));
+        let r = if dio_unwritten {
+            allocate_blocks_unwritten_dio(
+                fs,
+                inode,
+                needed_blocks,
+                core::cmp::max(current_blocks, first_touched),
+            )
+        } else {
+            allocate_blocks_for_file(fs, inode, needed_blocks,
+                                     core::cmp::max(current_blocks, first_touched))
+        };
         r?;
     }
 
@@ -1301,10 +1332,17 @@ pub fn ext4_file_write(
     // single-block entries whose every later lookup walked a deep leaf.
     // Partial head/tail blocks keep the per-block materialize below
     // (unwritten halves must not convert past the bytes actually being
-    // written). Runs after the growth allocation above: appended extents
-    // are already WRITTEN, so the conversion here only touches REMAINING
-    // unwritten overlap (old preallocations) — no double mapping.
-    if inode.has_extent() {
+    // written).
+    //
+    // fio-delalloc: the DIO path (dio_unwritten) SKIPS the conversion
+    // here and runs it at the write's END, after the data drain — the
+    // reference's end_io ordering (data on the device before the extent
+    // state flips; a crash between the two leaves unwritten = zeros, the
+    // strictly safer exposure). The non-DIO paths keep the top position:
+    // the per-block body below expects full blocks already WRITTEN (it
+    // would otherwise re-fragment the interior one materialize per
+    // block).
+    if inode.has_extent() && !dio_unwritten {
         let first_full = (offset + block_size - 1) / block_size;
         let last_full = (offset + to_write) / block_size; // exclusive
         if last_full > first_full {
@@ -1410,11 +1448,14 @@ pub fn ext4_file_write(
             if let Some(batch) = dio_batch.as_mut() {
                 let remaining_full = (to_write as usize - total_written) / block_size as usize;
                 if block_offset == 0 && remaining_full >= 1 {
-                    // ONE extent walk for the maximal run (same resolver
-                    // as the read side — per-block lookups paid 1-2
-                    // cached breads per 4 KiB on depth>=1 files).
+                    // ONE extent walk for the maximal run. WRITE-side
+                    // resolver (fio-delalloc): unwritten extents report
+                    // their REAL physical run so the direct arm targets
+                    // them (reads keep zero-filling unwritten via
+                    // ext4_ext_get_run) — per-block lookups paid 1-2
+                    // cached breads per 4 KiB on depth>=1 files.
                     let (mut first_phys, run_avail, _uw) = if inode.has_extent() {
-                        match crate::fs::ext4::extent::ext4_ext_get_run(
+                        match crate::fs::ext4::extent::ext4_ext_get_run_write(
                             fs,
                             inode.ino,
                             &inode.block,
@@ -1731,6 +1772,62 @@ pub fn ext4_file_write(
         }
     }
 
+    // END-OF-WRITE UNWRITTEN CONVERSION (fio-delalloc lane, 2026-11-18):
+    // the DIO path deferred the unwritten->written conversion here —
+    // AFTER the drain above device-acked every span, the reference
+    // kernel's end_io shape (iomap_dio_complete ->
+    // ext4_convert_unwritten_io_end_vec over the write's io_end vec: one
+    // bulk tree edit per write, off the data path). Data-before-metadata
+    // crash order: a crash between the data write and this edit leaves
+    // unwritten extents (readers/e2fsck see zeros — the strictly safer
+    // exposure vs converting first). Read-after-write correctness needs
+    // the conversion INSIDE the syscall (reads of unwritten zero-fill),
+    // exactly where the reference runs it. Covers the freshly allocated
+    // unwritten runs of this write AND any older fallocated unwritten
+    // overlap; partial head/tail blocks were materialized per-block by
+    // the body above. Range = the CONFIRMED full-block interior only (a
+    // short/failed write leaves its unwritten tail unconverted — zeros,
+    // which is what a never-completed write owes).
+    if dio_unwritten {
+        let first_full = (offset + block_size - 1) / block_size;
+        let confirmed_end = offset + total_written as u64;
+        let last_full = confirmed_end / block_size; // exclusive
+        if last_full > first_full {
+            let mut ext_meta: i64 = 0;
+            match crate::fs::ext4::extent::ext4_ext_convert_unwritten(
+                fs,
+                &mut inode.block,
+                first_full,
+                last_full - first_full,
+                &mut ext_meta,
+                crate::fs::ext4::csum::dir_csum_seed(
+                    fs.csum_seed,
+                    inode.ino,
+                    inode.generation,
+                ),
+            ) {
+                Ok(()) => {
+                    inode.blocks = apply_meta_delta(inode.blocks, ext_meta);
+                }
+                // A conversion failure after the data landed must not
+                // report the write short: the bytes are on the device and
+                // the syscall's contract is about DATA. The unconverted
+                // unwritten extents zero-fill for readers until the next
+                // conversion point (fsync/next write) — the honest
+                // degraded state, reported once.
+                Err(e) => {
+                    crate::pr_err!(
+                        "ext4: post-dio unwritten conversion failed (ino {} range {}+{}) — {}",
+                        inode.ino,
+                        first_full,
+                        last_full - first_full,
+                        e
+                    );
+                }
+            }
+        }
+    }
+
     // Update file size (partial-write safe: a mid-loop allocation failure
     // broke out with fewer bytes than requested — the size must reflect
     // only what landed).
@@ -1950,6 +2047,93 @@ fn allocate_blocks_with_extents(
         let csum_seed =
             crate::fs::ext4::csum::dir_csum_seed(fs.csum_seed, inode.ino, inode.generation);
         crate::fs::ext4::extent::ext4_ext_append(fs, &mut inode.block, &ext, &mut meta_sectors, csum_seed)?;
+        inode.blocks += sectors_per_block * run_len as u64;
+        logical_block += run_len as u64;
+    }
+    inode.blocks += meta_sectors;
+
+    Ok(())
+}
+
+/// Metadata-only UNWRITTEN allocation for a growing O_DIRECT write
+/// (fio-delalloc lane, 2026-11-18 — the reference kernel's DIO shape:
+/// ext4_map_blocks(PRE_IO) maps unwritten extents at submit time, the
+/// data bios target their physical blocks, and the unwritten->written
+/// conversion runs at the write's completion/end_io).
+///
+/// Identical run-based bitmap discipline to `allocate_blocks_with_extents`
+/// (one bitmap read/scan/mark/write per contiguous run, spiral goal-group
+/// search, multi-level extent append), but the fresh data blocks are
+/// NEVER breaded/zeroed/dirtied: reads of unwritten blocks zero-fill, so
+/// there is nothing to populate — allocation is bitmap + extent append,
+/// full stop. No block-cache entries and no dirty notes are created, so
+/// the write's direct fast arm sees a cold cache and DMAs the caller's
+/// bytes straight over the unwritten run; the conversion at the write's
+/// end (see ext4_file_write's END-OF-WRITE UNWRITTEN CONVERSION) flips
+/// the extent state after the data is device-acked.
+///
+/// ENOSPC: same contract as the written twin — failure leaves the runs
+/// already appended allocated-but-unwritten beyond the old EOF (readable
+/// as zeros, invisible past the never-extended size); no torn extents
+/// (each append is a complete run).
+fn allocate_blocks_unwritten_dio(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    inode: &mut crate::fs::ext4::inode::Ext4Inode,
+    needed_blocks: u64,
+    from_block: u64,
+) -> Result<(), i32> {
+    use crate::fs::ext4::extent::{Ext4ExtentHeader, EXT4_EXT_MAGIC};
+
+    let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
+    let block_size = fs.block_size as u64;
+    let current_blocks = (inode.get_size() + block_size - 1) / block_size;
+    let start_block = core::cmp::max(from_block, current_blocks).min(needed_blocks);
+    let sectors_per_block = (fs.block_size / 512) as u64;
+    let goal_group = (inode.ino / fs.inodes_per_group).min(fs.group_count - 1);
+    const MAX_EXTENT_LEN: u32 = 0x7FFF; // ee_len u16 with the unwritten bit reserved
+
+    let mut meta_sectors: u64 = 0;
+    let mut logical_block = start_block;
+    while logical_block < needed_blocks {
+        let want = core::cmp::min((needed_blocks - logical_block) as u32, MAX_EXTENT_LEN);
+        let Some((run_start, run_len)) = allocator.alloc_block_run(goal_group, want)? else {
+            return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+        };
+
+        // Valid (possibly empty) extent header on the root (same as the
+        // written twin).
+        {
+            // SAFETY: inode.block is 60 bytes; header at its start is
+            // in-bounds.
+            let header = unsafe { &mut *(inode.block.as_mut_ptr() as *mut Ext4ExtentHeader) };
+            if header.eh_magic != EXT4_EXT_MAGIC {
+                header.eh_magic = EXT4_EXT_MAGIC;
+                header.eh_entries = 0;
+                header.eh_max = 4;
+                header.eh_depth = 0;
+                header.eh_generation = 0;
+            }
+        }
+
+        // Append the run as an UNWRITTEN extent (merges with a trailing
+        // unwritten extent when contiguous — the state-aware merge in
+        // append_node refuses mixed states, exactly Linux's
+        // ext4_can_extents_be_merged).
+        let ext = crate::fs::ext4::extent::RawExtent {
+            ee_block: logical_block as u32,
+            phys: run_start,
+            len: run_len as u16,
+            unwritten: true,
+        };
+        let csum_seed =
+            crate::fs::ext4::csum::dir_csum_seed(fs.csum_seed, inode.ino, inode.generation);
+        crate::fs::ext4::extent::ext4_ext_append(
+            fs,
+            &mut inode.block,
+            &ext,
+            &mut meta_sectors,
+            csum_seed,
+        )?;
         inode.blocks += sectors_per_block * run_len as u64;
         logical_block += run_len as u64;
     }
