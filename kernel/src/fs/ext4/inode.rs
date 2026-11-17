@@ -385,6 +385,15 @@ pub fn read_inode(
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
 
+    // Degenerate-geometry short-circuit (msync panic backstop twin of
+    // inode_table_block_of): an instance whose init() never ran has
+    // inodes_per_group == 0 and would panic on the divide below. EIO,
+    // not a panic — init() rejects such superblocks, so this never
+    // fires on a real filesystem.
+    if fs.inodes_per_group == 0 {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+
     // Calculate block group and inode table index
     let group = (ino - 1) / fs.inodes_per_group;
     let index = (ino - 1) % fs.inodes_per_group;
@@ -398,6 +407,12 @@ pub fn read_inode(
         (gd.bg_inode_table_lo as u64) | ((gd.bg_inode_table_hi as u64) << 32)
     };
 
+    // Degenerate-geometry backstop (msync panic class): inode_size 0
+    // or > block_size — impossible on a validated mount (init bounds
+    // it to [128, block_size]) — would divide by zero below.
+    if fs.inode_size == 0 || fs.inode_size as u32 > fs.block_size {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
     let inodes_per_block = fs.block_size / (fs.inode_size as u32);
     let block_offset = index / inodes_per_block;
     let in_block_offset = ((index % inodes_per_block) * (fs.inode_size as u32)) as usize;
@@ -497,6 +512,15 @@ pub fn write_inode(
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
 
+    // Degenerate-geometry short-circuit (msync panic backstop twin of
+    // inode_table_block_of): an instance whose init() never ran has
+    // inodes_per_group == 0 and would panic on the divide below. EIO,
+    // not a panic — init() rejects such superblocks, so this never
+    // fires on a real filesystem.
+    if fs.inodes_per_group == 0 {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+
     // Calculate block group and inode table index
     let group = (ino - 1) / fs.inodes_per_group;
     let index = (ino - 1) % fs.inodes_per_group;
@@ -510,6 +534,12 @@ pub fn write_inode(
         (gd.bg_inode_table_lo as u64) | ((gd.bg_inode_table_hi as u64) << 32)
     };
 
+    // Degenerate-geometry backstop (msync panic class): inode_size 0
+    // or > block_size — impossible on a validated mount (init bounds
+    // it to [128, block_size]) — would divide by zero below.
+    if fs.inode_size == 0 || fs.inode_size as u32 > fs.block_size {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
     let inodes_per_block = fs.block_size / (fs.inode_size as u32);
     let block_offset = index / inodes_per_block;
     let in_block_offset = ((index % inodes_per_block) * (fs.inode_size as u32)) as usize;
@@ -676,6 +706,16 @@ pub fn inode_table_block_of(
     if ino == 0 || ino > fs.total_inodes {
         return None;
     }
+    // Degenerate-geometry short-circuit (the msync panic's backstop,
+    // 2026-11-18): a constructed-but-never-init() instance — or memory
+    // confused into one — carries inodes_per_group == 0 and would
+    // panic on the divide below (inode.rs:679, the rt-r1 LTP gate
+    // panic). A validated mount always has inodes_per_group != 0
+    // (init() rejects the superblock otherwise), so this never fires
+    // on a real filesystem.
+    if fs.inodes_per_group == 0 {
+        return None;
+    }
     let group = (ino - 1) / fs.inodes_per_group;
     let index = (ino - 1) % fs.inodes_per_group;
     let inode_table_start = {
@@ -686,7 +726,13 @@ pub fn inode_table_block_of(
         let gd = &group_descs[group as usize];
         (gd.bg_inode_table_lo as u64) | ((gd.bg_inode_table_hi as u64) << 32)
     };
+    // Same backstop for the slot arithmetic: init() bounds inode_size
+    // to [128, block_size], so inodes_per_block >= 1 on every mounted
+    // filesystem (read_inode's twin check, mod.rs).
     let inodes_per_block = fs.block_size / (fs.inode_size as u32);
+    if inodes_per_block == 0 {
+        return None;
+    }
     let block_offset = index / inodes_per_block;
     Some(inode_table_start + block_offset as u64)
 }
@@ -717,6 +763,15 @@ pub fn write_inode_disk(
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
 
+    // Degenerate-geometry short-circuit (msync panic backstop twin of
+    // inode_table_block_of): an instance whose init() never ran has
+    // inodes_per_group == 0 and would panic on the divide below. EIO,
+    // not a panic — init() rejects such superblocks, so this never
+    // fires on a real filesystem.
+    if fs.inodes_per_group == 0 {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+
     // Calculate block group and inode table index
     let group = (ino - 1) / fs.inodes_per_group;
     let index = (ino - 1) % fs.inodes_per_group;
@@ -730,6 +785,12 @@ pub fn write_inode_disk(
         (gd.bg_inode_table_lo as u64) | ((gd.bg_inode_table_hi as u64) << 32)
     };
 
+    // Degenerate-geometry backstop (msync panic class): inode_size 0
+    // or > block_size — impossible on a validated mount (init bounds
+    // it to [128, block_size]) — would divide by zero below.
+    if fs.inode_size == 0 || fs.inode_size as u32 > fs.block_size {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
     let inodes_per_block = fs.block_size / (fs.inode_size as u32);
     let block_offset = index / inodes_per_block;
     let in_block_offset = ((index % inodes_per_block) * (fs.inode_size as u32)) as usize;
