@@ -120,10 +120,17 @@ pub fn jbd2_journal_commit_transaction(
         // all buffers submit first and ONE drain device-acks the window.
         // The big lock matches SpanFlusher::drain's settle discipline
         // (task-recursive — callers already holding it re-enter freely).
+        // (_t: TEMPORARY dioprobe bracket, wrfsync lane)
+        #[allow(unused_variables)]
+        let _t = if crate::dfx::dioprobe::on() { crate::dfx::dioprobe::now() } else { 0 };
         let blocks: alloc::vec::Vec<u64> =
             dirty_buffers.iter().map(|(b, _)| *b).collect();
         let _ext4_guard = crate::fs::ext4::EXT4_BIG_LOCK.lock();
         let first_err = bio::sync_dirty_blocks_batched(device, &blocks, true);
+        if _t != 0 {
+            crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::FS_COMMIT_CYCLES, _t);
+            crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::FS_COMMIT_SYNC_CYCLES, _t);
+        }
         // Sequences advance; the log itself consumed no space (j_head,
         // j_tail, j_free unchanged).
         journal

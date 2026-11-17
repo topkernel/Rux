@@ -370,7 +370,15 @@ pub fn sys_pread64(args: SyscallArgs) -> i64 {
                 // engine preads — the 64 KiB cap serialized a 1 MiB read
                 // into 16 windows).
                 let stage_cap = pw_stage_cap(&file, count);
+                // TEMPORARY dioprobe (wrfsync lane): pread brackets
+                let probe = crate::dfx::dioprobe::on();
+                let pt0 = if probe { crate::dfx::dioprobe::now() } else { 0 };
+                let pa = if probe { crate::dfx::dioprobe::now() } else { 0 };
                 let mut kernel_buf = crate::fs::file::alloc_staging_buf(count.min(stage_cap));
+                if probe {
+                    crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::RD_ALLOC_CYCLES, pa);
+                    crate::dfx::dioprobe::bump(&crate::dfx::dioprobe::RD_N);
+                }
                 let mut total: usize = 0;
                 let mut err: i32 = 0;
                 let mut user_ptr = buf;
@@ -381,7 +389,11 @@ pub fn sys_pread64(args: SyscallArgs) -> i64 {
                     if chunk == 0 {
                         break;
                     }
+                    let pf = if probe { crate::dfx::dioprobe::now() } else { 0 };
                     let result = file.read_at_slice(cur_off, &mut kernel_buf[..chunk]);
+                    if probe {
+                        crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::RD_FILL_CYCLES, pf);
+                    }
                     if result <= 0 {
                         if result < 0 && total == 0 {
                             err = result as i32;
@@ -390,10 +402,14 @@ pub fn sys_pread64(args: SyscallArgs) -> i64 {
                     }
                     let n = result as usize;
                     // Within the validated [buf, buf+count) window.
+                    let pc = if probe { crate::dfx::dioprobe::now() } else { 0 };
                     let uncopied = crate::arch::uaccess_safe::copy_out(
                         user_ptr,
                         &kernel_buf[..n],
                     );
+                    if probe {
+                        crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::RD_COPYOUT_CYCLES, pc);
+                    }
                     if uncopied > 0 {
                         if total == 0 {
                             err = -errno::EFAULT as i32;
@@ -407,6 +423,9 @@ pub fn sys_pread64(args: SyscallArgs) -> i64 {
                     if n < chunk {
                         break;
                     }
+                }
+                if probe {
+                    crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::RD_CYCLES, pt0);
                 }
 
                 if total > 0 {
@@ -2022,7 +2041,15 @@ pub fn sys_pwrite64(args: SyscallArgs) -> i64 {
             // drain per direct pwrite (the 64 KiB cap paid 16 brackets
             // per 1 MiB).
             let stage_cap = pw_stage_cap(&file, count);
+            // TEMPORARY dioprobe (wrfsync lane): pwrite brackets
+            let probe = crate::dfx::dioprobe::on();
+            let pt0 = if probe { crate::dfx::dioprobe::now() } else { 0 };
+            let pa = if probe { crate::dfx::dioprobe::now() } else { 0 };
             let mut kernel_buf = crate::fs::file::alloc_staging_buf(count.min(stage_cap));
+            if probe {
+                crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::WR_ALLOC_CYCLES, pa);
+                crate::dfx::dioprobe::bump(&crate::dfx::dioprobe::WR_N);
+            }
             let mut total: usize = 0;
             let mut err: i32 = 0;
             let mut user_ptr = buf;
@@ -2033,17 +2060,25 @@ pub fn sys_pwrite64(args: SyscallArgs) -> i64 {
                 if chunk == 0 {
                     break;
                 }
+                let pc = if probe { crate::dfx::dioprobe::now() } else { 0 };
                 let uncopied = crate::arch::uaccess_safe::copy_in(
                     &mut kernel_buf[..chunk],
                     user_ptr,
                 );
+                if probe {
+                    crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::WR_COPYIN_CYCLES, pc);
+                }
                 if uncopied > 0 {
                     if total == 0 {
                         err = -errno::EFAULT as i32;
                     }
                     break;
                 }
+                let pw = if probe { crate::dfx::dioprobe::now() } else { 0 };
                 let result = file.write_at_slice(cur_off, &kernel_buf[..chunk]);
+                if probe {
+                    crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::WR_CORE_CYCLES, pw);
+                }
                 if result <= 0 {
                     if result < 0 && total == 0 {
                         err = result as i32;
@@ -2058,6 +2093,9 @@ pub fn sys_pwrite64(args: SyscallArgs) -> i64 {
                 if n < chunk {
                     break;
                 }
+            }
+            if probe {
+                crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::WR_CYCLES, pt0);
             }
 
             if total > 0 {
