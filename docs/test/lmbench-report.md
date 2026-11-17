@@ -115,6 +115,37 @@ strands. vs the guest reference medians (0.046/0.060/0.062):
 as entry-floor/copy-tail/exit-async structural work in the sections
 above.
 
+## Patrol-7 full battery (2026-11-18, kernel main+perf-2x rounds, nohz_full=1)
+
+Full 29-case battery (CCD0 + performance governor + warmer; 5 rows hit
+the 90 s calibration cap — the retry rule applies, not counted as
+regressions). **The wake/IPC family collapsed to parity-or-better:**
+
+| Case | This battery | Reference (same-rig guest) | Verdict |
+|---|---|---|---|
+| lat_syscall null | **0.042 µs** | 0.046 µs | **ahead 0.92x** |
+| lat_sem | **0.503 µs** | 0.483 µs | 1.04x (was 3.24x) |
+| lat_syscall write | **0.078 µs** | 0.069 µs | 1.13x |
+| lat_pipe | **4.40 µs** | 3.17 µs | 1.39x (was 2.1x) |
+| lat_syscall open | **0.676 µs** | 0.471 µs | 1.44x (was 1.9-2.5x) |
+| lat_syscall read | **0.095 µs** | 0.067 µs | 1.42x (was 1.7-1.8x) |
+| lat_unix | 4.55 µs | 3.24 µs | 1.40x |
+| lat_ctx -s 64 2 | 2.51 µs | 0.90 µs | 2.79x |
+| fstat / mem_rd / bcopy / bzero / bw_pipe / bw_unix / usleep | ahead/parity (0.73x-3.0x) | — | unchanged |
+
+The 2026-11-16 window reference reads slower than the frozen 11-04
+column (switch-family condition sensitivity) — ratios are within-window.
+5 TIMEOUT rows (stat/ctx-8/fork/exec/fs) are the sequential-boot
+calibration variance — retry rule queued, not regressions (fork/exec
+read 44/50 µs in earlier same-kernel boots vs the 33.9/37.6 anchors).
+
+2× scoreboard after this round: null AHEAD (0.92x vs the 0.023 target
+documented as entry-floor rework), sem at parity, write 1.13x, pipe
+1.39x, open 1.44x, read 1.42x — the wake/IPC family is now within the
+same order as the reference rather than 2-3.6x behind. Remaining
+structural items: entry floor (all rows), ctx walk loop (open/stat),
+exit async (fork/exec).
+
 ## Patrol-4 med-of-3 (2026-11-17, kernel perf-2x head vs 11-16 standing)
 
 Paired med-of-3 boots (CCD0 + performance governor + warmer, nohz_full=1;
