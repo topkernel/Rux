@@ -1155,9 +1155,12 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
                             // deadline and KVM delivered it late (host
                             // term); armdl≈late_us says it was armed AT
                             // the late instant (kernel coarse-arm term).
+                            #[cfg(feature = "x86_64")]
                             let arm_dl = crate::drivers::intc::apic::last_arm_deadline(
                                 crate::arch::cpu_id() as usize,
                             );
+                            #[cfg(not(feature = "x86_64"))]
+                            let arm_dl: u64 = 0;
                             for &b in b" armdl=" { putchar(b); }
                             if arm_dl >= token_deadline {
                                 ph((arm_dl - token_deadline) * TNS_PER_TICK / 1000);
