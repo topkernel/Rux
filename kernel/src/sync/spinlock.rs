@@ -289,6 +289,10 @@ impl RawSpinlock {
     /// contexts. This is the reference's preempt_schedule_irq contract
     /// (a preemptible kernel loop must honor need_resched), placed at
     /// the only point where the full guard set is checkable.
+    // RT-plan R1 completion note: this check's preempt_count()==0 term now
+    // also covers raw locks acquired by THIS thread (raw lock/unlock bump
+    // the count) — a nested holder stops yielding until it releases, the
+    // reference's raw_spin_lock semantic.
     fn spin_may_preempt() -> bool {
         crate::sched::need_resched()
             && crate::interrupt::preempt::preempt_count() == 0
@@ -348,6 +352,19 @@ impl RawSpinlock {
         // Diagnostics: record the holder AFTER the acquire (a spinner's
         // watchdog may read a stale 0 in the tiny window — acceptable).
         self.record_owner(caller_ra);
+        // RT-plan R1 completion (docs/development/rt-kernel-plan.md): the
+        // holder is non-preemptible for the critical section — the
+        // reference's raw_spin_lock semantics (CONFIG_PREEMPT). This makes
+        // INV-LOCK-1 ("preempt_disable must precede any spinlock acquire")
+        // automatic for every raw user, closing the sc70 family (the
+        // irq-exit kernel-preempt hook preempting inside a raw-lock section
+        // whose data is mid-mutation) that resurfaced as the intermittent
+        // early-boot freeze when the hook went default-ON over the new
+        // entity-embedded CFS timeline. The count is None-safe (early boot)
+        // and nests (hardirq/softirq/grq chains each add their own).
+        crate::interrupt::preempt::preempt_count_add(
+            crate::interrupt::preempt::PREEMPT_OFFSET,
+        );
     }
 
     /// Print deadlock warning via SBI (works even with interrupts disabled).
@@ -671,12 +688,23 @@ impl RawSpinlock {
         let ok = self.locked.compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire).is_ok();
         if ok {
             self.record_owner(caller_return_address());
+            // RT-plan R1 completion: symmetric with lock()/unlock().
+            crate::interrupt::preempt::preempt_count_add(
+                crate::interrupt::preempt::PREEMPT_OFFSET,
+            );
         }
         ok
     }
 
     #[inline]
     pub fn unlock(&self) {
+        // RT-plan R1 completion: pair of the acquire-side bump (see lock).
+        // Sub BEFORE the store: the glib-mutex ORDER FIX discipline (preempt
+        // sub precedes the unlock store) — the grq-10ns capture convicted
+        // the reverse order.
+        crate::interrupt::preempt::preempt_count_sub(
+            crate::interrupt::preempt::PREEMPT_OFFSET,
+        );
         self.clear_owner();
         self.locked.store(0, Ordering::Release);
     }
