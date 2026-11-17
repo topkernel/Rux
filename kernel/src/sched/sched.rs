@@ -11192,7 +11192,30 @@ pub fn cpu_idle_loop() -> ! {
             // near-idle handoffs (each saves the ~1 us IPI+halt-exit
             // exit latency); the window still closes well before a 250 Hz
             // tick. Pure-spin, no allocations.
-            const IDLE_POLL_WINDOW_NS: u64 = 120_000; // 120 us
+            //
+            // RT-R4 (idlepoll=us boot knob, the reference's idle=poll
+            // shape): under KVM every halt costs the fire and pick paths
+            // a halt-exit each (the WW6 flat terms: fire ~10 us, pick
+            // ~11-13 us at host load 4-6). An RT workload (cyclictest
+            // i=1000: ~950 us of idle per period) can spend that idle
+            // polling instead — the i=100 rows (no halt crossed) run the
+            // whole wake at the 3 us pick class. Default stays 120 us
+            // (standard boots keep halt power savings); the RT campaign
+            // boots pass idlepoll= to widen it. Parsed once, cached in a
+            // static (cmdline::get_param allocates — never on the idle
+            // path).
+            static IDLE_POLL_WINDOW_NS_CFG: core::sync::atomic::AtomicU64 =
+                core::sync::atomic::AtomicU64::new(u64::MAX);
+            let mut window =
+                IDLE_POLL_WINDOW_NS_CFG.load(core::sync::atomic::Ordering::Relaxed);
+            if window == u64::MAX {
+                window = crate::cmdline::get_param("idlepoll")
+                    .and_then(|v| v.trim().parse::<u64>().ok())
+                    .map(|us| us.saturating_mul(1_000))
+                    .unwrap_or(120_000);
+                IDLE_POLL_WINDOW_NS_CFG.store(window, core::sync::atomic::Ordering::Relaxed);
+            }
+            let IDLE_POLL_WINDOW_NS: u64 = window;
             while crate::drivers::timer::monotonic_ns_since_boot()
                 .saturating_sub(poll_t0)
                 < IDLE_POLL_WINDOW_NS
