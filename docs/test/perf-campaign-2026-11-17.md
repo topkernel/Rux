@@ -111,7 +111,14 @@ the 1M direct rows, and the descriptor-construction path.
   (mkdrmdir reads ~260 µs on both arms today; the 216.7 anchor is from
   2026-11-03). A per-row re-bank table belongs to the fs lane.
 
-## 5. Open items (the distance to 2×)
+## 5. Open items (the distance to 2×) — round 1 record
+
+> **Erratum (round 2):** item 1 below was WRONG. The two-sided
+> attribution (hotspot-diff) proved /data mounts journal-less — zero
+> jbd2 commits ran in the battery; the "1.9 ms vs 489 µs" pair does
+> not reproduce on current main (fsync medians: ours 224 µs, reference
+> 57 µs pre-wrfsync). The real fsync cost decomposition and the fix
+> that followed are in §7. Items 2–3 were addressed in round 2 (§7).
 
 1. **Journal-commit cost** — one commit ~1.9 ms vs the reference's
    489 µs; the D-8 direct-write commit does per-buffer sequential
@@ -139,3 +146,100 @@ the 1M direct rows, and the descriptor-construction path.
 - `~/rux-agents/rt-2x/run/RT-2X.md`
 
 Baseline table: `docs/test/pair-battery-2026-11-17.md`.
+
+## 7. Round 2 (same day, evening) — four more lanes + the two-sided audit
+
+Merged through `b92eb2c93` (oc-rc → bufw-2x → wrfsync → submit-2x).
+
+### 7.1 Board after round 2
+
+| Row | Round 1 | Round 2 | vs reference |
+|---|---|---|---|
+| 4k write+fsync (fsync4k) | 0.30× | 20.1–22k vs 15.3–16.2k IOPS | **~1.24× AHEAD** |
+| 4k randrw direct | 0.28× | 22.15k vs 22.0k /side | 0.96× (parity band) |
+| 4k randwrite direct | 0.68× | 36.75k | 0.97× |
+| 4k randread direct (j1 / j8) | 0.77× | 37.0k | 0.90× / 0.91× |
+| 1M seq write (allocated) | 0.39× | 4000 MiB/s | 0.83× |
+| 1M seq write (fresh file) | — | attribution isolated | 0.33× (delalloc missing) |
+| 1M seq read | 0.60× | ~5000 MiB/s class | 0.62× |
+| 1M buffered write | 0.83× | 9600 MiB/s | ~0.94× (rig floor) |
+| p6_openclose | 1.92× behind | 0.591 µs | 1.59× behind (open-side walk) |
+| p6_read_cached | 1.84× behind | 0.912 µs | 1.66× behind |
+
+### 7.2 What round 2 landed
+
+- **wrfsync** (`e026add2e`): attribution killed the journal theory —
+  the real per-fsync cost was per-4KiB unwritten-extent
+  materialization (75 µs), an O(file) dirty walk probing 2014 clean
+  blocks (80 µs), and two serialized device round trips. Fixes (all
+  reference shapes): `ext4_ext_convert_unwritten`-style bulk
+  conversion with neighbor merge; per-inode dirty-block notes → an
+  O(dirty) fsync walk (the tagged-page-tree analog); the inode-table
+  block rides the SpanFlusher window with a jbd2-style byte-snapshot
+  settle guard; binary-search extent leaves. Also fixed the seqw1m
+  root cause: fio's fallocated layout made the extent resolver return
+  phys=0 so the DIO fast run never fired.
+- **submit-2x** (`b92eb2c93`): the lever that moved the 4k family is
+  a bounded poll-before-sleep in `IoCompletion::wait` (14 µs budget;
+  at depth 1 the sleep machinery costs more than the device round
+  trip). Kernel-vs-kernel same-window: randrw +48%, randwrite +25%,
+  randread +16%. The bookkeeping levers (per-CPU io_buf pool,
+  pending-lock elision, inline-slot WriteBatch) measured within noise
+  — the round-1 "+9%" was a host-load artifact: the REFERENCE itself
+  swings ±10% across host-load windows; every material delta since is
+  same-window interleaved. MSI destination steering is a CONCLUSIVE
+  dead end under this QEMU/KVM+irqfd (any runtime MSI-X table write
+  kills completion delivery; both variants collapsed to 107 / 4
+  IOPS). Verify discipline caught two data-integrity near-misses
+  (interior-hole corruption on overwrite-skip, dangling inline
+  completions on batch move) — both fixed or reverted before merge.
+- **bufw-2x** (`e164de3b1`): `WriteSrc::User` direct user→frame copy
+  (the `copy_page_from_iter` shape), entry() single-traversal install.
+  The double-copy hypothesis was FALSIFIED by TSC probes: the staging
+  hop was a 13 µs warm copy; the 72 µs cold-frame RFO+TLB is paid
+  once in BOTH designs — **the row's rig floor is ~0.94×**, the 2×
+  target is physically unreachable on this rig via copy-based fill
+  (movnti measured 10× slower under KVM). Also FIXED a data-loss bug:
+  page-unaligned buffered writes silently dropped head partial-page
+  bytes (verify=md5 offset=4196 bs=8k: err=84 on main → err=0).
+- **oc-rc** (`d4d0cb43a`): conditional-refcount close (the
+  `fget_rcu`/fput split: decisions at last-reference drop, memory
+  freed by fdreapd after an async grace), readahead state embedded in
+  File. The "1 test failed" on first gate was a shape pin
+  (EXT4_FILE_OPS's .close slot was deliberately removed), not a
+  semantics regression.
+
+### 7.3 The two-sided audit (hotspot-diff)
+
+Method: both kernels on the same image and workload; a shared tracefs
+event timeline (8 events in the reference's exact format), dioprobe
+cycle brackets, perf cpu-clock on both arms; interleaved ×3, medians;
+instrument overhead measured (probe kernel idle −2.9%; instrumented
+totals match uninstrumented clat). Ranked where we are slower:
+
+1. 1M fresh write +375 µs/op — ~282 µs is fresh-allocation + metadata
+   writeback (ours 563→281 µs overwrite vs REF flat 188 µs: delayed
+   allocation makes REF's alloc free).
+2. fsync +167 µs median (pre-wrfsync; REF batches ~14 fsyncs per
+   async jbd2 commit — we sync per-op).
+3. 1M read +85 µs — span-pipeline +55.5 µs (4 serialized span round
+   trips vs REF 2 requests one kick) + copyout +34.5 µs (REF DMAs to
+   user pages).
+4. 4k randread +8 µs — entirely the kick→IRQ window (21 vs 13 µs);
+   our submit side is AHEAD (−1 µs).
+
+REF idles 91% during these rows — the gaps are wait-shape and
+copying, not CPU hotspots. No correctness-relevant work found that
+the reference does and we skip.
+
+### 7.4 Round-3 open items
+
+1. Delayed allocation + mballoc-shape preallocation (the 1M fresh
+   write row; biggest single term left).
+2. Pinned-user-page DMA for DIO (both 1M rows' copy terms).
+3. jbd2 async-commit fsync batching (journal mounts).
+4. Request merging / SG fusion (data+metadata one request).
+5. Open-side path walk (openclose/read_cached remaining term;
+   RCU-walk shape).
+6. perf-5.15 session compatibility (dummy:HG sideband, group_fd=0,
+   second ring mmap) — our perf surface rejects record sessions.
