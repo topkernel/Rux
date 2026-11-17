@@ -88,6 +88,33 @@ Open remains 0.86-0.87 µs (in band; 2× target 0.197 µs needs the
 path-walk loop 598 ns + TAIL 950 ns reductions — deep water, queued
 behind the sampling-tool fix).
 
+## Patrol-5/6 (2026-11-18, main=64fe7a080 — fdreap defer-cap resolved by the oc-rc rework)
+
+Round 5 (defer-cap: past 64 defers the closing caller runs the
+decisions inline with the bounded poll) was measured on its own
+kernel (37a18e841): null 0.0434-0.0436 (defer=0 gpb=0, 3/3) vs base
+0.0442-0.0582 with a defer=1 -> 200 GP-BOUND -> TIMEOUT episode;
+write 0.0816-0.0817 vs 0.0965 (**-15%**, base rep had a TIMEOUT);
+read parity 0.0994. While it measured, a parallel lane landed the
+oc-rc rework (d4d0cb43a): close(2) no longer waits out an RCU grace
+at all (the reference fput/fget_rcu + task_work shape, fdreapd async
+free) — openclose 0.681 -> 0.591 µs (1.92x -> 1.59x), read_cached
+1.002 -> 0.912 µs. The oc-rc shape achieves the defer-cap goal
+structurally (close never waits), so the merge took origin's fdreap
+and the defer-cap stands as a measured fallback experiment
+(37a18e841, branch perf-2x).
+
+Final main-kernel verification battery (main=64fe7a080 tree, med-of-2,
+nohz_full=1): **null 0.0454/0.0455, write 0.0808/0.0816, read
+0.0974/0.1000** — all at their best-ever values, zero defers, zero
+strands. vs the guest reference medians (0.046/0.060/0.062):
+**null 0.99x — at parity**, write 1.35x, read 1.62x.
+
+2× scoreboard vs Linux/2: null 0.0228 target (entry floor) · write
+0.030 · read 0.031 · open 0.198 · fork 17.0 · exec 18.8 — documented
+as entry-floor/copy-tail/exit-async structural work in the sections
+above.
+
 ## Patrol-4 med-of-3 (2026-11-17, kernel perf-2x head vs 11-16 standing)
 
 Paired med-of-3 boots (CCD0 + performance governor + warmer, nohz_full=1;
