@@ -194,7 +194,7 @@
 
     <h2 id="cpulocal"><span class="anchor">§13</span>Typed per-CPU storage CpuLocal&lt;T,N&gt; (D-7)</h2>
     <ul>
-      <li>Rows are 64-byte aligned; <code>with(f)</code> is the only access surface: IRQs off → cpu id read inside the window → the guard is !Send and Drop restores IRQ state; an out-of-range cpu id takes the None arm (callers fall back to locked bodies); same-slot re-entry is refused (in_use flag, counted and tainted).</li>
+      <li>Rows are 64-byte aligned; <code>with(f)</code> is the only access surface: IRQs off → cpu id read inside the window → the guard is !Send and Drop restores IRQ state; an out-of-range cpu id takes the None branch (callers fall back to locked bodies); same-slot re-entry is refused (in_use flag, counted and tainted).</li>
       <li><b>The landing incident</b> (recorded in D-7): the first version was a non-mut static without interior mutability, and rustc emitted the LLVM global as <code>constant</code> (.rodata) — debug builds booted, opt≥1 deleted every store and hoisted loads, the refill loop never terminated, and release boots died at the first c64 miss (ALLOCTHROW at t=3 s, 15.9M objects carved inside 2 lock sections, 99% of the heap); after a revert it re-landed with <code>rows: UnsafeCell&lt;...&gt;</code>. Verification: MAGAZINES resides in .bss and the opt≥1 disassembly contains the refill-loop stores.</li>
       <li>The incident's value: the interaction of the Rust type system with LLVM constant propagation is a compile-time risk class that does not exist in C — closed out with invariants and a disassembly verification procedure.</li>
     </ul>

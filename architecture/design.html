@@ -240,7 +240,7 @@
           <tr><td><b>D-4</b></td><td><b>procfile! 派生 /proc 格式化器</b>:一个声明表铸渲染器 + 形状测试,消除格式漂移类缺陷(vmstat/meminfo/status 逐字节对齐)。代价:~18 个手写文件残留。</td></tr>
           <tr><td><b>D-5</b></td><td><s>tracepoint! 声明宏</s> —— 已被 D-15 取代,保留历史。</td></tr>
           <tr><td><b>D-6</b></td><td><b>能力检查式 file-ops 声明</b>:重复安装 = 编译错,errno 单点映射(实际故障案例:epoll fd EBADF 空转 15.6 万次)。迁移全部完成。</td></tr>
-          <tr><td><b>D-7</b></td><td><b>类型化 per-CPU CpuLocal&lt;T,N&gt;</b>:仅可经 with(f) 访问,guard 生命周期 = 关中断窗,越界 id 走存活臂。守卫:改动须 release-strong pbench boot。</td></tr>
+          <tr><td><b>D-7</b></td><td><b>类型化 per-CPU CpuLocal&lt;T,N&gt;</b>:仅可经 with(f) 访问,guard 生命周期 = 关中断窗,越界 id 走存活分支。守卫:改动须 release-strong pbench boot。</td></tr>
           <tr><td><b>D-8</b></td><td><b>直写 jbd2 commit</b>(无重放窗/无 revoke-cancel):每 unlink/rmdir 的 8–12 次同步往返消失(p6_mkdrmdir 52–58 ms → 个位数 ms);磁盘格式未变,恢复 = e2fsck。</td></tr>
           <tr><td><b>D-9</b></td><td><b>secure-exec 的 LD_* 环境清洗</b>:AT_SECURE 下内核安装 envp 前删除全部 LD_*(libc 无关的纵深防御)。可见差异:/proc/&lt;pid&gt;/environ 不列 LD_*。</td></tr>
           <tr><td><b>D-10</b></td><td><b>Result 型内部错误 API</b>(Errno 枚举,负 errno 每调用链恰一次):file-locks/xattr/VFS inode-op 表已转。</td></tr>

@@ -148,7 +148,7 @@ echo 0 &gt; tracing_on                                 <span class="c"># 停止�
       <thead><tr><th>状态</th><th>成本</th><th>验证方式</th></tr></thead>
       <tbody>
         <tr><td>事件禁用</td><td class="num">单次 load + test + branch(调用点仅付实参求值)</td><td>release 反汇编逐站点验证(全部 39 个内核站点 one-load:movzbl+test+jcc)</td></tr>
-        <tr><td>事件启用</td><td class="num">+13–19 ns/记录(纯写循环);+28–35 ns(epoll ping-pong 语境)</td><td>on/off 双臂微基准</td></tr>
+        <tr><td>事件启用</td><td class="num">+13–19 ns/记录(纯写循环);+28–35 ns(epoll ping-pong 语境)</td><td>开/关对照微基准</td></tr>
         <tr><td>镜像代价</td><td class="num">+24,576 字节(+0.182%)</td><td>构建体积对比</td></tr>
         <tr><td>浸泡</td><td class="num">600 s 全武装零 panic</td><td>1.56M 环覆写验证</td></tr>
       </tbody>
@@ -178,7 +178,7 @@ echo 0 &gt; tracing_on                                 <span class="c"># 停止�
       <li>在 <code>kernel/src/trace/mod.rs</code> 的 <code>tracepoints!</code> 表加一行:组/名/id/print fmt(自参考活文件逐字捕获,或对 rux: 族自拟)/字段表/call 签名/render。</li>
       <li>调用点写 <code>trace_&lt;name&gt;(实参...)</code> —— 无需手写 armed 检查、打包或渲染。</li>
       <li>guest 侧验证:<code>cat events/&lt;group&gt;/&lt;name&gt;/format</code> 与参考 format 逐字节比对(参考族),或与声明自洽(rux: 族)。</li>
-      <li>成本验证:release 反汇编确认调用点 one-load;双臂微基准给启用代价。</li>
+      <li>成本验证:release 反汇编确认调用点 one-load;开/关对照微基准给出启用代价。</li>
     </ol>
     <p class="callout">政策依据:观测性政策(2026-11-02)—— 旧 dfx= 散装开关表冻结于 49 项不再增长;任何新观测点必须以 tracepoint 形态进入本框架。这是与参考实现对齐的接口决策(debugfs/tracefs 生态直接可用),而非内部偏好。</p>
 

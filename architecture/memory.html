@@ -194,7 +194,7 @@
 
     <h2 id="cpulocal"><span class="anchor">§13</span>类型化 per-CPU 存储 CpuLocal&lt;T,N&gt;(D-7)</h2>
     <ul>
-      <li>行结构 64 字节对齐;<code>with(f)</code> 为唯一访问面:关中断 → 窗内读 cpu id → guard 非 Send,Drop 恢复中断态;越界 cpu id 走 None 臂(调用方回退锁路径);同槽重入拒绝(in_use 标志,计数加污染)。</li>
+      <li>行结构 64 字节对齐;<code>with(f)</code> 为唯一访问面:关中断 → 窗内读 cpu id → guard 非 Send,Drop 恢复中断态;越界 cpu id 走 None 分支(调用方回退锁路径);同槽重入拒绝(in_use 标志,计数加污染)。</li>
       <li><b>落地事故</b>(登记于 D-7):首版为无内部可变性的非 mut 静态,rustc 将 LLVM 全局量发行为 <code>constant</code>(.rodata)—— debug 构建可启动,opt≥1 删除全部存储并外提载入,refill 循环永不终止,release 启动于首个 c64 miss 死亡(ALLOCTHROW t=3 s,2 次锁区段内切出 15.9M 对象,占堆 99%);回滚后以 <code>rows: UnsafeCell&lt;...&gt;</code> 重落地。验证方式:MAGAZINES 位于 .bss,opt≥1 反汇编含 refill 循环存储。</li>
       <li>该事故的价值:Rust 类型系统与 LLVM 常量传播的交互构成一类 C 语言不存在的编译期风险 —— 以不变量与反汇编验证流程闭环。</li>
     </ul>

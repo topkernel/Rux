@@ -148,7 +148,7 @@ echo 0 &gt; tracing_on                                 <span class="c"># stop re
       <thead><tr><th>State</th><th>Cost</th><th>Verification</th></tr></thead>
       <tbody>
         <tr><td>Event disabled</td><td class="num">One load + test + branch (the call site pays only argument evaluation)</td><td>Per-site release disassembly verification (all 39 kernel sites one-load: movzbl+test+jcc)</td></tr>
-        <tr><td>Event enabled</td><td class="num">+13–19 ns/record (pure-write loop); +28–35 ns (epoll ping-pong context)</td><td>On/off two-arm microbenchmarks</td></tr>
+        <tr><td>Event enabled</td><td class="num">+13–19 ns/record (pure-write loop); +28–35 ns (epoll ping-pong context)</td><td>On/off A/B microbenchmarks</td></tr>
         <tr><td>Image cost</td><td class="num">+24,576 bytes (+0.182%)</td><td>Build size comparison</td></tr>
         <tr><td>Soak</td><td class="num">600 s fully armed, zero panics</td><td>1.56M ring overwrites verified</td></tr>
       </tbody>
@@ -178,7 +178,7 @@ echo 0 &gt; tracing_on                                 <span class="c"># stop re
       <li>Add one row to the <code>tracepoints!</code> table in <code>kernel/src/trace/mod.rs</code>: group/name/id/print fmt (captured verbatim from the reference's live files, or self-declared for the rux: family)/field list/call signature/renderer.</li>
       <li>Call <code>trace_&lt;name&gt;(args...)</code> at the site — no hand-written armed checks, packing or rendering.</li>
       <li>Guest-side verification: <code>cat events/&lt;group&gt;/&lt;name&gt;/format</code> must be byte-identical to the reference format (reference families), or self-consistent with the declaration (rux: family).</li>
-      <li>Cost verification: confirm one-load call sites in the release disassembly; a two-arm microbenchmark for the enabled cost.</li>
+      <li>Cost verification: confirm one-load call sites in the release disassembly; an on/off A/B microbenchmark for the enabled cost.</li>
     </ol>
     <p class="callout">Policy basis: the observability policy (2026-11-02) — the old dfx= ad-hoc switch table is frozen at 49 entries and must not grow; any new observation point must enter this framework as a tracepoint. This is an interface decision aligned with the reference (the debugfs/tracefs ecosystem works directly), not an internal preference.</p>
 
