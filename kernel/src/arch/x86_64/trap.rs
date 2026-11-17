@@ -444,6 +444,7 @@ pub fn init() {
             static stub_227: u8;
             static stub_228: u8;
             static stub_229: u8;
+            static stub_129: u8;
         }
 
         let stubs: [*const u8; 48] = [
@@ -475,6 +476,8 @@ pub fn init() {
                 stubs[v]
             } else if v >= lv && v <= crate::arch::ipi::IPI_LAST as usize {
                 apic_stubs[v - lv]
+            } else if v == crate::drivers::virtio::MSIX_BLK_VECTOR as usize {
+                &raw const stub_129
             } else {
                 &raw const stub_spurious
             };
@@ -1280,6 +1283,23 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                     // tick_nohz_irq_exit: the kick (a dep 0->1 transition)
                     // re-evaluates the tick stop decision here.
                     crate::timer::nohz::tick_nohz_irq_exit();
+                }
+
+                // virtio-blk MSI-X completion vector (DIO-CONC, x86_64):
+                // the posted-MSI delivery replaces the PIC-INTx + ISR-read
+                // + Block-softirq chain. The walker runs inline here (hard
+                // irq context, bounded try-lock — it defers to the Block
+                // softirq itself when a task-context submitter holds the
+                // BLK lock), which is the reference kernel's shape: Linux
+                // vring completions also run in hardirq with the waiter
+                // woken directly. EOI first, same discipline as the timer
+                // and IPI arms: the wake below can switch tasks.
+                v if v == crate::drivers::virtio::MSIX_BLK_VECTOR as u64 => {
+                    crate::interrupt::preempt::irq_enter();
+                    crate::drivers::intc::apic::eoi();
+                    crate::drivers::virtio::msix_blk_isr();
+                    crate::interrupt::preempt::irq_exit();
+                    irq_exit_maybe_preempt_kernel(regs_ref);
                 }
 
                 vec::IRQ0 => {

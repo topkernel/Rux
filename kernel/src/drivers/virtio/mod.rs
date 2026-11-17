@@ -2641,6 +2641,30 @@ pub fn vw_blk_intx_bump() {
     VW_BLK_INTX.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
 }
 
+
+/// x86_64 IDT vector carrying virtio-blk MSI-X completions (DIO-CONC).
+/// Chosen in the free space between the PIC vectors (0x20-0x2F) and the
+/// LAPIC timer/IPI block (0xE0-0xE5); wired in trap.rs's IDT build and
+/// trap.S's stub, programmed into every virtio-blk function's MSI-X
+/// table entry 0 by the PCI probe.
+pub const MSIX_BLK_VECTOR: u8 = 0x81;
+
+/// MSI-X completion service for the virtio-blk disks (hard-IRQ context,
+/// vector MSIX_BLK_VECTOR). Runs the per-disk completion walker inline —
+/// the reference kernel completes vring requests in hardirq too. The
+/// walker's hardirq lock policy (DIO-CONC: in_irq() joins the bounded
+/// try-lock deferral) keeps the R12-3 discipline: a task-context
+/// submitter holding a BLK lock makes the walker defer to the Block
+/// softirq instead of spinning with IF=0.
+pub fn msix_blk_isr() {
+    for disk in 0..MAX_PCI_BLK_DISKS {
+        if PCI_BLK_READY[disk].load(core::sync::atomic::Ordering::Acquire) {
+            pci_process_async_completions_slot(disk);
+        }
+    }
+}
+
+
 /// One-line direct-console virtio ring snapshot (VW-SNAP): the same
 /// fields as the watchdog's VW-WEDGE, printed through putchar_no_lock —
 /// pr_err-based reports were silently dropped from the audit context on
@@ -2914,7 +2938,14 @@ pub fn pci_process_async_completions_slot(slot: usize) -> usize {
             // softirq the power to starve them for seconds. Process-context
             // callers (drain/rescue paths — the last-line consumers when
             // no interrupt will come) keep the blocking acquire.
-            let _guard = if crate::interrupt::preempt::in_softirq() {
+            // DIO-CONC: HARDIRQ joins the deferral class — the MSI-X
+            // completion service runs this walker inline in hardirq
+            // context, and spinning there with IF=0 on a task-context
+            // submitter's BLK lock is the same starvation shape the
+            // softirq rule exists to prevent.
+            let _guard = if crate::interrupt::preempt::in_softirq()
+                || crate::interrupt::preempt::in_irq()
+            {
                 match pci_blk_lock_defer(slot, 4096) {
                     Some(g) => g,
                     None => {

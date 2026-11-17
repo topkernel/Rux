@@ -185,7 +185,7 @@ fn ext4_dio_read_batched(
             // is an MMIO trap); nothing else on a quiet boot kicks the
             // device for us — without this kick the whole window sat
             // at-device until the 10 s wait deadline (the VW-WEDGE
-            // unkicked=at_device family on real-data direct reads).
+            // unked=at_device family on real-data direct reads).
             if count > 0 {
                 crate::drivers::virtio::pci_blk_kick_all();
             }
@@ -1201,22 +1201,12 @@ pub fn ext4_file_write(
     let current_blocks = (inode.get_size() + block_size - 1) / block_size;
     let sectors_per_block = (fs.block_size / 512) as u64;
 
-    // If new blocks are needed, allocate them — but ONLY from the first
-    // block this write touches. Pre-allocating [current_blocks,
-    // needed_blocks) for a sparse write (lseek past EOF + small write,
-    // Linux's O_LARGEFILE test writes 7 bytes at 4 GiB) materialized every
-    // hole block: on a disk smaller than the target offset that exhausts
-    // every free block zeroing data the writer never asked for, burns
-    // minutes of synchronous I/O under TCG (the r9 sweep's openat02 30s
-    // timeout + livelock), and leaves the filesystem full for every
-    // later test (294 TBROK mkdtemp failures). Holes in the skipped
-    // range stay holes; the per-block loop below allocates a missing
-    // block on first touch, and reads of holes zero-fill.
     if needed_blocks > current_blocks {
         let first_touched = offset / block_size;
         allocate_blocks_for_file(fs, inode, needed_blocks,
                                  core::cmp::max(current_blocks, first_touched))?;
     }
+
 
     // DIRECT FAST RUNS (pair-battery item 1, 2026-11-17): for O_DIRECT
     // writes, full-block spans whose physical blocks are consecutive and
@@ -1592,10 +1582,10 @@ pub fn ext4_file_write(
     }
 
     // Drain the direct fast runs (device-ack every span before the
-    // caller's buffer goes back to userspace). A failed span truncates
-    // the reported count to its start — bytes after it may or may not
-    // have landed, and POSIX allows the short count (the per-block
-    // path's partial-write discipline, span-granular).
+    // caller's buffer goes back to userspace). A failed span truncates the
+    // reported count to its start — bytes after it may or may not have
+    // landed, and POSIX allows the short count (the per-block path's
+    // partial-write discipline, span-granular).
     if let Some(mut batch) = dio_batch.take() {
         if batch.in_flight() > 0 {
             if dio_drain!(batch) {
@@ -2901,7 +2891,35 @@ unsafe fn ext4_buffered_write(
     let last_idx = (offset + buf.len() as u64 - 1) / ps;
     let mut copied: usize = 0;
 
-    for idx in first_idx..=last_idx {
+    // DIO-CONC: whole-run dirty batch. The maximal span of FULL pages
+    // ([first_full, last_full]) rides ONE page-cache batch — one wlock
+    // pass per 64 pages, batched order-0 allocations, memcpys outside
+    // every lock (the per-page insert_dirty loop cost ~0.6 µs/page, the
+    // 1 MiB buffered-write row's 0.62x). The batch's duplicate arm
+    // OVERWRITES an already-cached page and turns it dirty (the
+    // pin-and-copy outcome), so racing cached pages are served
+    // correctly; an early stop (OOM / table full) returns the consumed
+    // prefix and the per-page loop below serves the tail. Head/tail
+    // partial pages also stay with the per-page loop (read-modify-write
+    // semantics).
+    let first_full = first_idx + ((offset % ps) != 0) as u64;
+    let n_full = ((offset + buf.len() as u64) / ps).saturating_sub(first_full);
+    let mut batch_start_idx = first_idx;
+    if n_full > 0 {
+        let n_pages = n_full as usize;
+        let src_off = (first_full * ps - offset) as usize;
+        let consumed = cache.insert_dirty_batch(
+            fs_id,
+            ino,
+            first_full,
+            psu,
+            &buf[src_off..src_off + n_pages * psu],
+        );
+        copied += consumed * psu;
+        batch_start_idx = first_full + consumed as u64;
+    }
+
+    for idx in batch_start_idx..=last_idx {
         let page_off = if idx == first_idx {
             (offset % ps) as usize
         } else {

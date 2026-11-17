@@ -454,6 +454,37 @@ pub fn init_pci_block_devices() -> usize {
                             );
                         }
                         Some(virt_queue) => {
+                            // DIO-CONC (x86_64): MSI-X first — the queue's
+                            // msix_vector register must be written BEFORE
+                            // queue_enable (setup_queue), per virtio 1.0
+                            // 4.1.4.5. On success completions arrive as
+                            // posted MSIs on MSIX_BLK_VECTOR and the INTx
+                            // registration below is skipped (the shared
+                            // dispatcher's per-IRQ ISR poll of every
+                            // function was ~16 us per completion under
+                            // KVM — each poll is a hypervisor round trip).
+                            #[cfg(feature = "x86_64")]
+                            let msix_live = {
+                                let ok = virtio_dev.enable_msix_vector0(
+                                    crate::drivers::virtio::MSIX_BLK_VECTOR,
+                                );
+                                virtio_dev.set_queue_vector(0, 0);
+                                if ok {
+                                    crate::print_status(
+                                        "driver",
+                                        &alloc::format!(
+                                            "virtio-blk MSI-X vec {:#x} slot {}",
+                                            crate::drivers::virtio::MSIX_BLK_VECTOR,
+                                            device_count
+                                        ),
+                                        true,
+                                    );
+                                }
+                                ok
+                            };
+                            #[cfg(not(feature = "x86_64"))]
+                            let msix_live = false;
+
                             match virtio_dev.setup_queue(0, &virt_queue) {
                                 Ok(()) => {
                                     let slot = device_count;
@@ -470,7 +501,11 @@ pub fn init_pci_block_devices() -> usize {
                                     // Enable device interrupt (shared line:
                                     // several virtio-blk functions can
                                     // swizzle onto the same INTx IRQ).
-                                    virtio_dev.enable_device_interrupt();
+                                    // MSI-X disks skip INTx: their
+                                    // completions come as posted MSIs.
+                                    if !msix_live {
+                                        virtio_dev.enable_device_interrupt();
+                                    }
 
                                     // Set DRIVER_OK
                                     virtio_dev.set_status(
