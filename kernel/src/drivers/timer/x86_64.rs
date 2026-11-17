@@ -515,6 +515,10 @@ pub fn timer_interrupt_handler() {
         JIFFIES.fetch_add(1, Ordering::AcqRel);
     }
 
+    // Tick-cached wall second for advisory atime stamps (oc-rc read
+    // path) — idempotent relaxed store, once per tick per CPU.
+    crate::drivers::rtc::tick_refresh_cached_secs();
+
     // vDSO time page refresh (shared with the riscv64 twin)
     crate::mm::vdso::vdso_data_tick();
 

@@ -186,6 +186,7 @@ fn parse_proc_fd_dir_path(path: &str) -> Option<u64> {
 /// of the inner PRE/TAIL brackets) for the wall-vs-exec anatomy that
 /// attributes the syscost 85us-under-load open row. One relaxed load
 /// when off.
+
 pub fn sys_openat(args: SyscallArgs) -> i64 {
     let (w0, exec_armed) = crate::dfx::fsw::open_exec_stamp();
     let rc = sys_openat_impl(args);
@@ -705,7 +706,7 @@ pub fn sys_close(args: SyscallArgs) -> i64 {
         }
     }
 
-    use crate::fs::close_file_fd;
+    use crate::fs::close_file_fd_report;
     // Capture a Weak handle BEFORE the close so the purge below can tell
     // whether THIS close dropped the last fd-table reference to the open
     // file description. A strong Arc here would keep the description
@@ -714,17 +715,14 @@ pub fn sys_close(args: SyscallArgs) -> i64 {
     // rides along: the 79th's epoll purge keys removal on the DYING
     // DESCRIPTION, not the bare fd number (fork-shared epolls carry
     // foreign same-numbered interests that must survive).
-    let mut desc_file_id = 0u64;
-    let desc_weak = crate::sched::get_current_fdtable().and_then(|ft| {
-        ft.get_file(fd).map(|f| {
-            desc_file_id = f.file_id;
-            alloc::sync::Arc::downgrade(&f)
-        })
-    });
     // SAFETY: fd is a valid file descriptor owned by the current process.
+    // (oc-rc) ONE fd resolution per close(2): close_file_fd_report both
+    // removes the slot and returns the description identity the epoll
+    // check below needs — the old pre-lookup (get_file + Weak capture
+    // before the removal) was a whole second irq-bracketed RCU lookup.
     unsafe {
-        match close_file_fd(fd) {
-            Ok(()) => {
+        match close_file_fd_report(fd) {
+            Ok((desc_file_id, desc_weak)) => {
                 // Linux eventpoll removes interest entries when the LAST
                 // reference to the registered file description goes away
                 // (eventpoll_release — the epoll's own epi reference is
@@ -743,11 +741,7 @@ pub fn sys_close(args: SyscallArgs) -> i64 {
                 // server never accepting — the launcher chain's
                 // spawn-blocker. Gate the purge on this close being the
                 // description's last fd-table reference.
-                let others = desc_weak
-                    .as_ref()
-                    .map(alloc::sync::Weak::strong_count)
-                    .unwrap_or(1);
-                if others == 0 {
+                if desc_weak.strong_count() == 0 {
                     crate::syscall::misc::epoll_purge_closed_fd(fd, desc_file_id);
                 }
                 0

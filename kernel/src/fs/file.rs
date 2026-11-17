@@ -257,6 +257,81 @@ fn next_file_id() -> u64 {
     ((cpu as u64) << 56) | (c & 0x00ff_ffff_ffff_ffff)
 }
 
+/// Conditional strong-count acquisition on a published File — the
+/// reference's `get_file_rcu` / `atomic_long_inc_not_zero` shape
+/// (oc-rc close-path rework; replaces the unconditional increment that
+/// forced every close(2) to wait out an RCU grace period before
+/// dropping the removed Arc).
+///
+/// Returns None when the strong count has reached zero — the fd was
+/// closed concurrently; callers treat it exactly like an empty slot
+/// (EBADF), which is the reference fget race outcome.
+///
+/// SAFETY: `p` must have been published by a writer from an owned Arc
+/// (install/dup/fork displacement-free publication), and the ArcInner
+/// allocation must be pinned across this call (a slot reference or a
+/// fdreap-parked Weak) — the CAS itself must never act on freed memory.
+#[inline]
+unsafe fn file_arc_try_clone(p: *mut File) -> Option<Arc<File>> {
+    // std Arc layout on our 64-bit targets: ArcInner { strong:
+    // AtomicUsize, weak: AtomicUsize, value: T }, and into_raw/as_ptr
+    // point at `value` — the strong word sits two usize words back.
+    // The assumption is pinned at boot by verify_arc_inner_layout().
+    let strong = (p as *const core::sync::atomic::AtomicUsize).sub(2);
+    // SAFETY: caller pins the allocation (see doc); the atomic protocol
+    // below either wins a nonzero count or fails cleanly.
+    let mut cur = unsafe { (*strong).load(Ordering::Relaxed) };
+    loop {
+        if cur == 0 {
+            return None;
+        }
+        match unsafe {
+            (*strong).compare_exchange_weak(
+                cur,
+                cur + 1,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            )
+        } {
+            Ok(_) => return Some(unsafe { Arc::from_raw(p) }),
+            Err(c) => cur = c,
+        }
+    }
+}
+
+/// Boot-time pin of the ArcInner strong-word offset assumption used by
+/// `file_arc_try_clone` (called from fs::fdreap::init). If a future
+/// toolchain moved the refcount word, every lock-free fd lookup would
+/// CAS the wrong memory — fail loudly at boot instead.
+pub(crate) fn verify_arc_inner_layout() {
+    crate::pr_info!(
+        "fs: File={}B (open/close hot path size gate)",
+        core::mem::size_of::<File>()
+    );
+    let probe = Arc::new(File::new(FileFlags::new(0)));
+    // SAFETY: read-only probe of the live Arc the function constructed.
+    let strong = unsafe {
+        (Arc::as_ptr(&probe) as *const core::sync::atomic::AtomicUsize).sub(2)
+    };
+    // SAFETY: probe is a live Arc; the word read is the refcount itself
+    // under verification.
+    assert_eq!(
+        unsafe { (*strong).load(Ordering::Relaxed) },
+        1,
+        "ArcInner strong-word offset assumption broken"
+    );
+    let clone = Arc::clone(&probe);
+    assert_eq!(unsafe { (*strong).load(Ordering::Relaxed) }, 2);
+    drop(clone);
+    assert_eq!(unsafe { (*strong).load(Ordering::Relaxed) }, 1);
+    // Weak interplay: a downgrade must keep the ArcInner alive at
+    // strong-count zero (the fdreap parking depends on it).
+    let weak = Arc::downgrade(&probe);
+    drop(probe);
+    assert!(weak.upgrade().is_none(), "strong count must be zero");
+    drop(weak);
+}
+
 /// F4 route-4: one getdents64 listing cached per open file description.
 /// `file_getdents64` used to re-materialize the WHOLE directory on every
 /// call (ext4 list_dir: read every block + clone every entry; 27.6K full
@@ -329,6 +404,14 @@ pub struct File {
     /// Materialization (readdir) may sleep in block I/O and runs OUTSIDE
     /// this lock; only the slot swap is under it.
     pub dirent_cache: Spinlock<Option<alloc::sync::Arc<DirentCacheSnapshot>>>,
+    /// Embedded readahead state (the reference's struct file carries
+    /// file_ra_state inline — oc-rc: the Box-in-private_data form paid a
+    /// slab alloc + free per open-then-read cycle, which every
+    /// read-cached workload performs per sample). Lazily initialized in
+    /// place at the first read by the filesystem that owns the
+    /// description (ext4 today); mutated only under io_lock (the same
+    /// serialization the Box form had).
+    pub ra: UnsafeCell<Option<crate::fs::readahead::ReadAheadState>>,
 }
 
 /// fasync owner set via F_SETOWN/F_SETOWN_EX (kept on the open file
@@ -376,6 +459,7 @@ impl File {
             f_owner: Spinlock::new(FileOwner::none()),
             f_signum: core::sync::atomic::AtomicI32::new(0),
             dirent_cache: Spinlock::new(None),
+            ra: UnsafeCell::new(None),
         }
     }
 
@@ -837,18 +921,22 @@ impl File {
     }
 }
 
-// R31-B3 (v2 completion): the close op deferred by close_fd's close_pending
-// flag runs HERE, in the final dropper's context.  This is NOT the reverted
-// v1 behavior ("close on every Drop"): the flag is only set when close_fd
-// already removed every fd-table slot for this file while a clone was still
-// in flight (a syscall-local Arc or an io_uring pinned file), so ordinary
-// drops — failed opens, intermediate clones, table teardown that ran the op
-// itself — all see `false` and execute nothing.  Those in-flight clones are
-// only ever released in task context (syscall exit / register / ring close),
-// never in IRQ context, so ext4/jbd2 side effects of the deferred close stay
-// out of arbitrary contexts.  Without this hook the flag was set but never
-// consumed and the close op leaked (pipe EOF never delivered, epoll Box and
-// mem-file Box never freed).
+// R31-B3 (v2, oc-rc rework): the close op of a DISPLACED description
+// runs HERE, in the final dropper's context, gated by close_pending.
+// The flag is armed by every fd-table displacement (close(2), dup2
+// target eviction, exec cloexec, table teardown — fs::fdreap::
+// retire_complete) and consumed exactly once: there is exactly one
+// drop-to-zero of the strong count, so the op cannot run twice (the
+// old count==1-observation form needed a grace period to make the
+// observation quiescent; the refcount transition itself now decides).
+// Files that never occupied a slot (failed opens, kernel-internal
+// open_file_arc_nofd Files) keep close_pending == false and run no op.
+// The final dropper is the closer itself for the common single-fd
+// close — decisions complete before close(2) returns (r26) — or the
+// racing holder whose reference legitimately outlived the close
+// (reference fput-holder semantics); either way it is a task context
+// (syscall exit / register / ring close), never IRQ context, so
+// ext4/jbd2 side effects of the close stay out of arbitrary contexts.
 impl Drop for File {
     fn drop(&mut self) {
         // P0-5 flock(2): the open file description is dying — its flock
@@ -1127,21 +1215,23 @@ impl FdTable {
     /// RCU fast path (the reference fget shape; replaced the leg-52
     /// lever B per-CPU reader banks, whose SeqCst claim/release pair
     /// cost two extra locked RMWs per lookup on a path that runs 130M+
-    /// times per boot): NO entry lock, NO irq save — an Acquire slot
-    /// load (pairs the installer's Release store so the File's fields
-    /// are visible through the reconstructed Arc) plus a strong-count
-    /// increment, inside a read-side critical section.
+    /// times/boot): NO entry lock, NO bank claim — an Acquire slot load
+    /// (pairs the installer's Release store so the File's fields are
+    /// visible through the reconstructed Arc) plus a CONDITIONAL
+    /// strong-count acquisition (`file_arc_try_clone`), inside a
+    /// read-side critical section.
     ///
-    /// SAFETY of the increment: a slot's Arc is owned by the table
+    /// SAFETY of the acquisition: a slot's Arc is owned by the table
     /// while published; any writer that removes it (close / dup2
-    /// displacement) parks the Arc in the global retire queue
-    /// (fs::fdreap), which drops it only after a full RCU grace
-    /// period. A reader can therefore only load a pointer whose
-    /// reference is provably alive: either the slot still publishes it,
-    /// or the retire queue holds it — and a grace period cannot
-    /// complete while any reader is between its load and this
-    /// increment (that window holds no schedule point; the protocol
-    /// is written up in fs/fdreap.rs).
+    /// displacement) runs the close decisions at the refcount-driven
+    /// drop and parks a WEAK in the deferred-free queue (fs::fdreap),
+    /// which releases it only after a full RCU grace period. A reader
+    /// therefore either acquires a provably-live count (the slot or a
+    /// racing holder still holds a strong reference), or its CAS fails
+    /// on a zero count and the fd is reported closed — and the CAS
+    /// itself can never touch freed memory, because the parked Weak
+    /// pins the ArcInner until a grace period this reader's irqs-off
+    /// window cannot let pass (protocol written up in fs/fdreap.rs).
     /// __fdget's unshared fast path (the reference's files_lookup_fd_raw
     /// + FDPUT: when the table is NOT CLONE_FILES-shared, no other
     /// thread can close/dup concurrently, so the File is borrowed
@@ -1170,27 +1260,28 @@ impl FdTable {
         if fd >= MAX_FDS {
             return None;
         }
-        // The load→increment window must not admit ANY quiescent-state
-        // report of this CPU. preempt_count alone is not enough here:
-        // this kernel tolerates in-handler schedule() and IRQ-return
+        // The load→CAS window must not admit ANY quiescent-state report
+        // of this CPU. preempt_count alone is not enough here: this
+        // kernel tolerates in-handler schedule() and IRQ-return
         // reschedules that do not honor a nonzero preempt count (the
         // SCHED-IRQOFF family), and a context switch from inside the
         // window would report a QS, let the grace pass, and free the
-        // Arc under this increment. IRQs OFF across the window closes
+        // ArcInner under this CAS. IRQs OFF across the window closes
         // every report site (user-return, __schedule, idle) for its
         // duration; rcu_read_lock stays as the formal read-side marker.
         let irq = crate::arch::cpu::save_and_disable_irq();
         crate::sync::rcu::rcu_read_lock();
         // SAFETY: p was stored by a writer from an owned Arc
-        // (install/dup/fork); it stays alive through the slot or the
-        // retire queue (see the doc comment above), so the increment
-        // can never act on freed memory.
+        // (install/dup/fork). Acquisition is CONDITIONAL (the
+        // get_file_rcu shape): a CAS from a nonzero strong count. The
+        // ArcInner allocation cannot be freed under the CAS because a
+        // parked Weak (fs::fdreap) pins it until a grace period passes,
+        // and no grace period can pass while this irqs-off read-side
+        // window is open. A failed CAS means the fd was closed
+        // concurrently — the reference fget race outcome (EBADF).
         let p = self.slots[fd].0.load(Ordering::Acquire);
         let out = if !p.is_null() {
-            unsafe {
-                Arc::increment_strong_count(p);
-                Some(Arc::from_raw(p))
-            }
+            unsafe { file_arc_try_clone(p) }
         } else {
             None
         };
@@ -1242,19 +1333,22 @@ impl FdTable {
 
         // R13-4/R14-5 (lock-free slots update): the removal — slot null
         // store + metadata — runs under the entry lock exactly as before;
-        // the removed Arc is parked for a POST-GRACE close decision
-        // outside the lock. The grace period is where the count==1
-        // decision is sound: lock-free readers do not pass through the
-        // entry lock, so the old "decision under the lock" argument does
-        // not hold against them — a completed grace period is what proves
-        // no in-flight get_file clone can bump the count. The close op
-        // still never executes with IRQs off under the entry lock
-        // (R14-5). REFERENCE PARITY (r26): retire_complete waits for the
-        // decisions to COMPLETE before close(2) returns — the reference
-        // runs the final fput in task work at return-to-userspace, and
+        // the removed Arc's close decisions run at the refcount-driven
+        // drop OUTSIDE the lock (lock-free readers do not pass through
+        // the entry lock, so the old "decision under the lock" argument
+        // never held against them — under conditional reader acquisition
+        // the refcount transition itself is the decision, no grace
+        // observation needed). The close op still never executes with
+        // IRQs off under the entry lock (R14-5). REFERENCE PARITY (r26):
+        // retire_complete completes the decisions before close(2)
+        // returns on the common last-reference path — the reference runs
+        // the final fput in task work at return-to-userspace, and
         // userspace must never observe a closed fd whose side effects
         // (EPIPE on the pipe, lock release, IN_CLOSE_*) have not run
-        // (LTP pipe08/writev01/fcntl15/inotify01/execve03 family).
+        // (LTP pipe08/writev01/fcntl15/inotify01/execve03 family) —
+        // while close(2) itself never blocks on a grace period (the
+        // reference never does; the allocation's grace runs
+        // asynchronously in fdreapd).
         let removed: Option<Arc<File>> = {
             let mut entry = self.entry.lock_irqsave();
             // SAFETY: the swap atomically takes the slot's reference; the
@@ -1280,67 +1374,67 @@ impl FdTable {
             Some(unsafe { Arc::from_raw(p) })
         };
         if let Some(file) = removed {
-            // Park for the post-grace close decision and COMPLETE it
-            // before returning (the deferred-fput shape with reference
-            // task_work timing — see fs/fdreap.rs): the slot-null store
-            // precedes the park, the grace period proves no lock-free
-            // reader is mid-clone for the count==1 decision, and the
-            // decision runs before userspace resumes.
+            // Complete the close decisions and park the allocation for
+            // the post-grace free (the fput/task_work/call_rcu split —
+            // see fs/fdreap.rs): the slot-null store precedes the park,
+            // the last-reference drop runs the decisions HERE before
+            // userspace resumes, and the ArcInner's grace runs
+            // asynchronously.
             crate::fs::fdreap::retire_complete(file);
         }
         Ok(())
     }
 
-    /// Park a removed slot occupant for the post-grace close decision,
-    /// completed before returning (reference task_work timing). Writers
-    /// call this AFTER releasing the entry lock (R14-5: nothing here
-    /// may spin or run close ops under it).
-    fn park_and_drain(&self, file: Arc<File>) {
-        crate::fs::fdreap::retire_complete(file);
+    /// close_fd that reports the removed description's identity to the
+    /// syscall layer (oc-rc close-path cut): sys_close(2) previously did
+    /// its OWN get_file(fd) (a full irq-bracketed RCU lookup + Arc
+    /// acquire + Weak downgrade) before close_fd, only to learn the
+    /// file_id and a Weak for the epoll-release check — this variant
+    /// derives both from the Arc the removal already holds, so the
+    /// common close(2) runs exactly ONE fd resolution. The Weak is taken
+    /// BEFORE retire_complete drops the strong reference; its
+    /// strong_count() read afterwards has the same semantics the
+    /// sys_close-local Weak always had (0 = this close ended the
+    /// description; >0 = a racing holder legitimately outlives it).
+    pub fn close_fd_report(
+        &self,
+        fd: usize,
+    ) -> Result<(u64, alloc::sync::Weak<File>), ()> {
+        if fd >= MAX_FDS {
+            return Err(());
+        }
+        let removed: Option<Arc<File>> = {
+            let mut entry = self.entry.lock_irqsave();
+            // SAFETY: the swap atomically takes the slot's reference; the
+            // null return means the fd was not open.
+            let p = self.slots[fd].0.swap(core::ptr::null_mut(), Ordering::Release);
+            if p.is_null() {
+                return Err(());
+            }
+            entry.count -= 1;
+            if fd < entry.next_fd {
+                entry.next_fd = fd;
+            }
+            entry.open_bits[fd / 64] &= !(1u64 << (fd % 64));
+            Some(unsafe { Arc::from_raw(p) })
+        };
+        match removed {
+            Some(file) => {
+                let id = file.file_id;
+                let weak = Arc::downgrade(&file);
+                crate::fs::fdreap::retire_complete(file);
+                Ok((id, weak))
+            }
+            None => Err(()),
+        }
     }
 
-    /// The last-reference close discipline shared by the retire reaper
-    /// (close_fd, dup2 displacement, exec-cloexec) and the Drop path —
-    /// R13-4/R14-5/R10-2/R31-B3/P0-5 preserved verbatim in shape: POSIX
-    /// record-lock release first, then run the close op NOW when this is
-    /// the last reference, else arm close_pending for the final dropper.
-    /// Callers must hold quiescence for the count read: the fdreap
-    /// reaper runs this only after a grace period, Drop after the last
-    /// table reference is gone.
-    pub(crate) fn displaced_close_decision(file: &Arc<File>) {
-        // P0-5 POSIX record locks: closing ANY fd referring to the file
-        // releases ALL of the closing process's record locks on it —
-        // even when other fds (dup'd or separately opened) stay open.
-        // Runs before the close op, outside every lock.
-        crate::fs::locks::posix_release_for_file(file);
-        // R10-2 (PIPE2 EBADF root cause): release only on the LAST Arc
-        // reference — running the close op per EVENT let pipe_file_close
-        // STEAL private_data from the File that fd 1 still pointed at
-        // after `dup3(w,1); close(w)`. Post-grace this count is QUIESCENT
-        // (no in-flight clone can race it).
-        if Arc::strong_count(file) == 1 {
-            unsafe {
-                let file_ptr = Arc::as_ptr(file) as *mut File;
-                // Clear any close_pending left behind by an earlier close
-                // of a dup'd slot: count==2 back then meant "another fd
-                // still holds this file", not an in-flight clone, and we
-                // run the op right here — a stale flag would make the
-                // final Drop run the op a SECOND time (dup2 + close of
-                // both fds double-closed pipes/epoll).
-                (*file_ptr).close_pending.store(false, Ordering::Release);
-                let ops_ptr = (*file_ptr).ops.get();
-                if !ops_ptr.is_null() && !(*ops_ptr).is_none() {
-                    (*file_ptr).close();
-                }
-            }
-        } else {
-            // Someone else still holds a reference and the slot is gone:
-            // mark for the final dropper to run the op.
-            unsafe {
-                let file_ptr = Arc::as_ptr(file) as *mut File;
-                (*file_ptr).close_pending.store(true, Ordering::Release);
-            }
-        }
+    /// Park a removed slot occupant for the post-grace ALLOCATION free,
+    /// with the close decisions completed before returning (reference
+    /// task_work timing). Writers call this AFTER releasing the entry
+    /// lock (R14-5: nothing here may spin or run close ops under it).
+    fn park_and_drain(&self, file: Arc<File>) {
+        crate::fs::fdreap::retire_complete(file);
     }
 
     /// Duplicate file descriptor
@@ -1488,8 +1582,11 @@ impl Drop for FdTable {
         // but never applied here.
         //
         // Lock-free slots note: at drop no &self borrowers can exist, so
-        // no RCU reader can be mid-clone against THIS table — the close
-        // decisions run directly, without a grace wait.
+        // no RCU reader can be mid-CAS against THIS table. Each occupant
+        // still goes through retire_complete (the shared discipline:
+        // P0-5 record-lock release, close_pending arming, Weak park for
+        // the allocation's grace, then the drop), so a description ALSO
+        // referenced from outside this table keeps the same protocol.
         let mut to_close: alloc::vec::Vec<Arc<File>> = alloc::vec::Vec::new();
         {
             let mut entry = self.entry.lock_irqsave();
@@ -1503,13 +1600,13 @@ impl Drop for FdTable {
                 }
             }
         }
-        // Run the shared discipline (P0-5 record-lock release, R10-2/
-        // R31-B3 last-reference / close_pending) for every remaining
-        // occupant.
-        for file in &to_close {
-            Self::displaced_close_decision(file);
+        // Run the shared displacement discipline for every remaining
+        // occupant (consumes the Arcs; the last-reference File::drop may
+        // run close ops here — sleepable task context, outside the entry
+        // lock).
+        for file in to_close {
+            crate::fs::fdreap::retire_complete(file);
         }
-        // Boxes are deallocated automatically after this.
     }
 }
 
@@ -1633,6 +1730,20 @@ pub unsafe fn close_file_fd(fd: usize) -> Result<(), i32> {
     use crate::sched;
     match sched::get_current_fdtable() {
         Some(fdtable) => fdtable.close_fd(fd).map_err(|_| errno::Errno::BadFileNumber.as_neg_i32()),
+        None => Err(errno::Errno::BadFileNumber.as_neg_i32()),
+    }
+}
+
+/// close_file_fd that reports the removed description's identity
+/// (see FdTable::close_fd_report — the oc-rc single-resolution close).
+pub unsafe fn close_file_fd_report(
+    fd: usize,
+) -> Result<(u64, alloc::sync::Weak<File>), i32> {
+    use crate::sched;
+    match sched::get_current_fdtable() {
+        Some(fdtable) => fdtable
+            .close_fd_report(fd)
+            .map_err(|_| errno::Errno::BadFileNumber.as_neg_i32()),
         None => Err(errno::Errno::BadFileNumber.as_neg_i32()),
     }
 }

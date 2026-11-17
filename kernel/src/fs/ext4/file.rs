@@ -655,7 +655,13 @@ fn ext4_file_read_cached_dst(
         // the EFAULT path only, never on the benchmark's fast path.
         let probe = crate::dfx::filerd::on();
         let t_pin = if probe { crate::dfx::filerd::now() } else { 0 };
-        let run_len = cache.get_range_into(fs_id, ino, page_index, &mut run[..want]);
+        // oc-rc: claim the entry ONCE for the pin AND the unpin — the
+        // second bank-claim + probe + strong-count pair the old
+        // put_range re-paid per run was ~half the pin+unpin cost of a
+        // 1-page hit. The entry Arc keeps the pins' map alive across
+        // the copy window; the release paths below all hand it back.
+        let (run_len, entry) =
+            cache.get_range_with_entry(fs_id, ino, page_index, &mut run[..want]);
         if probe {
             crate::dfx::filerd::charge(&crate::dfx::filerd::PIN_CYCLES, t_pin);
         }
@@ -711,7 +717,12 @@ fn ext4_file_read_cached_dst(
                         Err(e) => {
                             // Immediate full user fault: EFAULT when nothing
                             // has been delivered yet, short read otherwise.
-                            cache.put_range(fs_id, ino, &run[..run_len]);
+                            cache.put_range_with_entry(
+                                fs_id,
+                                ino,
+                                entry.as_ref().unwrap(),
+                                &run[..run_len],
+                            );
                             return if total_read == 0 { Err(e) } else { Ok(total_read) };
                         }
                     };
@@ -720,7 +731,12 @@ fn ext4_file_read_cached_dst(
                     current_offset += copied as u64;
                     if copied < copy_len {
                         // Partial user fault: short read, stop.
-                        cache.put_range(fs_id, ino, &run[..run_len]);
+                        cache.put_range_with_entry(
+                            fs_id,
+                            ino,
+                            entry.as_ref().unwrap(),
+                            &run[..run_len],
+                        );
                         return Ok(total_read);
                     }
                     i += k;
@@ -730,7 +746,15 @@ fn ext4_file_read_cached_dst(
                 crate::dfx::filerd::charge(&crate::dfx::filerd::COPY_CYCLES, t_copy);
             }
             let t_unpin = if probe { crate::dfx::filerd::now() } else { 0 };
-            cache.put_range(fs_id, ino, &run[..run_len]);
+            // run_len > 0 implies get_range_with_entry pinned this run
+            // inside `entry` — the Option is always Some on this path
+            // (unwrap is the loud failure if that invariant breaks).
+            cache.put_range_with_entry(
+                fs_id,
+                ino,
+                entry.as_ref().unwrap(),
+                &run[..run_len],
+            );
             if probe {
                 crate::dfx::filerd::charge(&crate::dfx::filerd::UNPIN_CYCLES, t_unpin);
             }
@@ -2369,20 +2393,16 @@ pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {    // SAFETY: 
             match ext4_file_read_cached(fs, ext4_inode, offset, buf, ra_state) {
             Ok(read_bytes) => {
                 file.set_pos(offset + read_bytes as u64);
-                // atime: keep the CACHED inode in sync with the read (no
-                // disk write — same wall-clock seconds ext4_setattr would
-                // persist for mtime/ctime).
+                // atime: keep the CACHED inode in sync with the read,
+                // gated by the reference-default relatime rule
+                // (stamp_atime_relatime doc).
                 if read_bytes > 0 {
-                    let atime = crate::drivers::rtc::wall_secs() as u32;
                     // SAFETY: the cached Ext4Inode in inode.sb is a Box
                     // owned by this VFS inode; the big lock above
                     // serializes writers, and readers of atime tolerate
                     // torn u32 values (advisory field).
                     unsafe {
-                        core::ptr::write_volatile(
-                            &mut (*(inode.sb.unwrap() as *mut super::inode::Ext4Inode)).atime,
-                            atime,
-                        );
+                        stamp_atime_relatime(inode.sb.unwrap() as *mut super::inode::Ext4Inode);
                     }
                 }
                 read_bytes as isize
@@ -2437,14 +2457,12 @@ pub fn ext4_file_read_user_vfs(file: &File, dst: *mut u8, count: usize) -> isize
                 let t_ep = if probe { crate::dfx::filerd::now() } else { 0 };
                 file.set_pos(offset + read_bytes as u64);
                 if read_bytes > 0 {
-                    let atime = crate::drivers::rtc::wall_secs() as u32;
+                    // atime via the reference-default relatime gate
+                    // (stamp_atime_relatime doc).
                     // SAFETY: same as ext4_file_read_vfs (advisory field,
                     // big lock serializes writers).
                     unsafe {
-                        core::ptr::write_volatile(
-                            &mut (*(inode.sb.unwrap() as *mut super::inode::Ext4Inode)).atime,
-                            atime,
-                        );
+                        stamp_atime_relatime(inode.sb.unwrap() as *mut super::inode::Ext4Inode);
                     }
                     // inotify IN_ACCESS, same as the staged read path below
                     // (line ~1240): this fast path bypasses File::read, so
@@ -3950,40 +3968,58 @@ fn run_sync_spans(
     }
     close_span!();
 }
-/// Get or create ReadAheadState stored in file.private_data.
-unsafe fn get_or_create_ra_state<'a>(file: &File, block_size: u64) -> &'a mut ReadAheadState {
-    let ptr = file.private_data.get();
-    if let Some(state_ptr) = *ptr {
-        &mut *(state_ptr as *mut ReadAheadState)
-    } else {
-        let state = alloc::boxed::Box::new(ReadAheadState::new(block_size));
-        let state_ptr = alloc::boxed::Box::into_raw(state);
-        *ptr = Some(state_ptr as *mut u8);
-        &mut *state_ptr
-    }
-}
-
-/// Close callback — free ReadAheadState from file.private_data.
-fn ext4_file_close(file: &File) -> i32 {
-    // SAFETY: If state_ptr is Some, it was created by Box::into_raw in
-    // get_or_create_ra_state, so Box::from_raw is the correct way to free it.
-    // Setting *ptr to None prevents double-free on subsequent close calls.
-    unsafe {
-        let ptr = file.private_data.get();
-        if let Some(state_ptr) = *ptr {
-            let _ = alloc::boxed::Box::from_raw(state_ptr as *mut ReadAheadState);
-            *ptr = None;
+/// Get or create the description's ReadAheadState — embedded in File
+/// (file.ra, the reference's file_ra_state-in-struct-file shape; oc-rc:
+/// the Box-in-private_data form paid a slab alloc + free pair per
+/// open-then-read cycle). Initialized in place at first use; mutated
+/// only under io_lock, the same serialization the Box form had.
+/// Reference-default relatime atime gate (oc-rc): stamp the cached
+/// atime only when atime < mtime, atime < ctime, the last stamp is
+/// >= 24 h old, or atime was never set — the exact `relatime` rule a
+/// stock reference kernel mount applies. The unconditional per-read
+/// stamp this replaces paid a TSC read + divide + store on EVERY
+/// read(2); the gate costs three L1 loads and compares, and the
+/// candidate stamp comes from the tick-cached wall value (one relaxed
+/// load; 0 means "not refreshed yet" and falls back to the exact
+/// wall_secs()). Advisory field; readers tolerate torn u32. Disk
+/// persistence is unchanged (atime reaches the disk only through the
+/// same paths that persist mtime/ctime).
+///
+/// SAFETY: `ino` is the cached Ext4Inode box owned by the VFS inode;
+/// callers hold the io_lock/big-lock serialization the direct store had.
+unsafe fn stamp_atime_relatime(ino: *mut super::inode::Ext4Inode) {
+    // SAFETY: caller pins the Box; the time fields are u32s read-only
+    // here and written once below.
+    let i = unsafe { &mut *ino };
+    let now = {
+        let cached = crate::drivers::rtc::cached_wall_secs();
+        if cached != 0 {
+            cached
+        } else {
+            crate::drivers::rtc::wall_secs() as u32
         }
+    };
+    let stale = now.wrapping_sub(i.atime) >= 86_400;
+    if i.atime < i.mtime || i.atime < i.ctime || stale || i.atime == 0 {
+        // SAFETY: same advisory-field store the direct path performed.
+        unsafe { core::ptr::write_volatile(&mut i.atime, now) };
     }
-    0
 }
 
-/// Ext4 file operations structure
+unsafe fn get_or_create_ra_state<'a>(file: &File, block_size: u64) -> &'a mut ReadAheadState {
+    // SAFETY: file.ra is written only at File::new (None) and here
+    // under io_lock by the description's reader; readers of the state
+    // hold the same lock.
+    let opt = unsafe { &mut *file.ra.get() };
+    opt.get_or_insert_with(|| ReadAheadState::new(block_size))
+}
+
+/// Ext4 file operations structure (no close op since the readahead
+/// state moved into File::ra — freed with the description itself).
 pub static EXT4_FILE_OPS: FileOps = FileOps::builder()
     .read(ext4_file_read_vfs)
     .write(ext4_file_write_vfs)
     .lseek(reg_file_lseek)
-    .close(ext4_file_close)
     .read_at(ext4_file_read_at_vfs)
     .build();
 

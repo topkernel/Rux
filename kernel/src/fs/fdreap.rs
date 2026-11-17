@@ -1,79 +1,92 @@
-//! Post-grace reaping of fd-table slot occupants — the deferred-fput
-//! shape for the lock-free slot array.
+//! Post-grace reclamation of fd-table slot occupants — the deferred
+//! `file_free_rcu` shape for the lock-free slot array.
 //!
-//! `FdTable::get_file` is an RCU reader: one raw slot load + one
-//! strong-count increment inside a read-side critical section — no bank
-//! claim, no irq save (the retired bank protocol cost two extra locked
-//! RMWs per lookup, and get_file runs 130M+ times per boot). The window
-//! between a reader's slot load and its increment is closed by a GRACE
-//! PERIOD, not by reader counts: a writer that removes a slot
-//! (close/dup2/displacement) parks the removed occupant here, and this
-//! reaper runs the last-reference close decision and drops the parked
-//! references only after a full grace period.
+//! `FdTable::get_file` is an RCU reader: one raw slot load plus a
+//! CONDITIONAL strong-count acquisition (`file_arc_try_clone`, the
+//! `get_file_rcu` / `atomic_long_inc_not_zero` shape) inside a
+//! read-side critical section — no bank claim, no irq save beyond the
+//! reader window itself (get_file runs 130M+ times per boot). The
+//! window between a reader's slot load and its count CAS is closed by
+//! TWO mechanisms, neither of which waits in close(2):
 //!
-//! Why that is sound: a grace period requires every CPU to report a
-//! quiescent state (user-return, context switch, or idle) at/after its
-//! start. A reader between its load and its increment cannot hit any of
-//! those points — the window contains no schedule point, and
-//! `rcu_read_lock` holds preemption off across it — so no grace period
-//! that started after a slot-null store can complete while such a
-//! reader is open. The park (under the retire spinlock) and the
-//! semaphore handoff give the slot-null store → grace-start ordering.
+//! - The close DECISIONS (POSIX record-lock release, flock/OFD/lease
+//!   release, IN_CLOSE_* fsnotify, ops.close) are refcount-driven:
+//!   they run in `File::drop` at the LAST strong reference — in the
+//!   closer's own context on the common single-fd close, so userspace
+//!   still never observes a closed fd whose side effects have not run
+//!   (the r26 LTP pipe08/fcntl15/inotify family). A reader whose CAS
+//!   lands first keeps the description legitimately alive and the
+//!   decisions move to ITS final drop — reference behavior (Linux
+//!   fget-holder semantics).
+//! - The MEMORY (the ArcInner) is pinned by a Weak reference parked
+//!   here and freed only after a full grace period — the reference's
+//!   `call_rcu(file_free_rcu)` shape, run asynchronously by fdreapd.
+//!   A reader that loads a slot pointer and then pauses cannot touch
+//!   freed memory: its read-side critical section (irqs off, preempt
+//!   off) reports no quiescent state, so no grace period that started
+//!   after the park can complete while the reader is between its load
+//!   and its CAS — and by the time the grace passes, the count is
+//!   zero and the reader's CAS fails cleanly (the ArcInner is still
+//!   allocated because the parked Weak holds it).
 //!
-//! Timing note — REFERENCE PARITY (r26 fix): the reference kernel runs
-//! the final fput (`__fput`: record-lock release, fsnotify_close, pipe
-//! reader-count drop) in TASK WORK at the return-to-userspace boundary,
-//! so userspace never observes a closed fd whose side effects have not
-//! run: write-to-closed-pipe sees EPIPE immediately, a lock region is
-//! free right after close(2) returns, and an inotify read sees
-//! IN_CLOSE_WRITE/NOWRITE. The async-only reaper broke all of those
-//! (LTP pipe02/pipe08/write05/writev01, fcntl14/15/33, inotify01/02/05,
-//! execve03 — the r25-census regression family; producer 8d81c5da).
-//! `retire_complete` is therefore the form syscall-context displacement
-//! uses: park like before, then COMPLETE the close decisions for
-//! everything parked up to and including ours — draining the queue in
-//! the closer's own context when the reaper does not win the race —
-//! before returning. The reaper remains as the parallel processor (and
-//! the monopolist-timeout retry path).
+//! Why a reader can never RESURRECT a dying File: acquisition is a
+//! CAS from a nonzero count; once the closer's drop takes the count
+//! to zero, a racing CAS that read `1` fails on `0` and the reader
+//! treats the fd as closed (EBADF — exactly the reference's fget race
+//! outcome). The unconditional-increment protocol this replaces
+//! needed the closer to wait out a grace period BEFORE dropping
+//! (~250-330 ns charged to every close(2)); with conditional
+//! acquisition the same guarantee costs close(2) one Weak bump and
+//! one queue push.
+//!
+//! Timing note — REFERENCE PARITY (r26 fix, oc-rc reshuffle): the
+//! reference kernel runs the final fput (`__fput`: record-lock
+//! release, fsnotify_close, pipe reader-count drop) in TASK WORK at
+//! the return-to-userspace boundary — never blocking close(2) on a
+//! grace — and frees `struct file` via `call_rcu` asynchronously.
+//! This module now has the same split: decisions at last-reference
+//! drop (in the closer's context for the common case, i.e. before
+//! close(2) returns), memory after an asynchronous grace.
 
-use crate::fs::file::{FdTable, File};
+use crate::fs::file::File;
 use alloc::sync::Arc;
+use alloc::sync::Weak;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-/// Parked slot occupants awaiting a grace period. One global queue: the
-/// grace wait is table-independent, so batching every table's retires
-/// into one wait amortizes it. Parked Arcs keep their strong count
-/// alive, which is exactly the guarantee get_file's unconditional
-/// increment relies on (the count cannot reach zero while parked).
-static RETIRED: crate::sync::spinlock::Spinlock<Vec<Arc<File>>> =
+/// Parked Weaks awaiting a grace period. One global queue: the grace
+/// wait is table-independent, so batching every table's retires into
+/// one wait amortizes it. The Weak pins the ArcInner ALLOCATION only —
+/// the File value inside has already been dropped (File::drop ran the
+/// whole close decision chain when the strong count hit zero).
+static RETIRED: crate::sync::spinlock::Spinlock<Vec<Weak<File>>> =
     crate::sync::spinlock::Spinlock::new(Vec::new());
 
-/// Wake ticket for the reaper: every park ups once.
+/// Wake ticket for fdreapd. Parks up() only when a batch threshold is
+/// crossed (a wake per close(2) cost one wakeup + IPI each and dirtied
+/// the grace-period cachelines — the 2026-11-05 measurement of the old
+/// protocol's TICKET path); fdreapd's drain is pure memory
+/// reclamation, so batching costs nothing but a bounded, tiny queue
+/// depth.
 static TICKET: crate::sync::semaphore::Semaphore =
     crate::sync::semaphore::Semaphore::new(0);
 
-/// Reaper aliveness. While false (spawn failed, or a close before the
-/// late-boot init slot), parks take the inline bounded-grace fallback —
-/// slower close, same correctness; nothing may skip the grace.
+/// Reaper aliveness. While false (spawn failed), parks drain inline
+/// with a bounded forced grace in the closer — slower close, same
+/// correctness; nothing may skip the grace.
 static LIVE: AtomicBool = AtomicBool::new(false);
 
-/// DFX gauges: parked references currently awaiting grace, and grace
-/// waits that exceeded their budget (the monopolist-window family —
-/// see synchronize_rcu_bounded). A non-zero RETIRED_DEPTH on a standard
+/// Park threshold: kick fdreapd when this many Weaks are queued. Pure
+/// reclamation latency knob — no semantics.
+const WAKE_BATCH: usize = 16;
+
+/// DFX gauges: parked Weaks currently awaiting grace, and grace waits
+/// that exceeded their budget (the monopolist-window family — see
+/// synchronize_rcu_bounded). A non-zero RETIRED_DEPTH on a standard
 /// boot should drain to zero within a grace period; sustained growth
 /// names a stalled reaper or a monopolist CPU.
 pub static RETIRED_DEPTH: AtomicUsize = AtomicUsize::new(0);
 pub static GRACE_STALLS: AtomicUsize = AtomicUsize::new(0);
-
-/// Monotonic retire accounting. PUSHED_SEQ is the ordinal assigned to
-/// each park (1-indexed); PROCESSED_SEQ is the ordinal of the last file
-/// whose close decision COMPLETED. The queue is FIFO and every drain
-/// takes a whole prefix of it, so "PROCESSED_SEQ >= my ordinal" proves
-/// my file's close decision ran — regardless of whether the reaper or
-/// my own task drained the batch. retire_complete waits on exactly that.
-static PUSHED_SEQ: AtomicUsize = AtomicUsize::new(0);
-static PROCESSED_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 /// Grace budget per reaping cycle. Generous against ordinary load
 /// spikes; a monopolist window exceeds it and the batch is requeued.
@@ -91,161 +104,99 @@ const GP_BUDGET_MS: u64 = 2500;
 #[cfg(not(any(feature = "riscv64", feature = "aarch64")))]
 const GP_BUDGET_MS: u64 = 50;
 
-/// 51st session: failed-grace budgets a close(2) tolerates before
-/// deferring its completion batch to the reaper (the frozen-cpu
-/// monopolist escape hatch — see the stall arm in retire_complete).
-/// 16 x 50 ms = 800 ms worst case per close on x86 (4 s on the
-/// slower-TCG arch budgets), then close(2) returns; a healthy boot
-/// never reaches this (grace passes in the microsecond window).
+/// Park a removed slot occupant's allocation for post-grace reclamation
+/// and run its close side effects before returning — the reference
+/// task_work-parity form for syscall-context displacement (close(2),
+/// dup2(2)/dup3 displacement). Writers call this AFTER releasing their
+/// entry lock (R14-5: no close op under it).
 ///
-/// 52nd session (oh-crash): the ladder is REPLACED by one-attempt
-/// defer (reference parity: Linux's close never blocks on a grace —
-/// see the completion loop); this constant now bounds only the
-/// empty-batch yield rounds (ours inside the reaper's in-flight
-/// batch), where a couple of schedule() rounds is plenty.
-const FDREAP_MAX_STALLS: usize = 16;
-const FDREAP_YIELD_ROUNDS: usize = 2;
-
-/// Park a removed slot occupant and COMPLETE its close decision before
-/// returning — the reference task_work parity form for syscall-context
-/// displacement (close(2), dup2(2)/dup3 displacement). Writers call this
-/// AFTER releasing their entry lock (R14-5: no close op under it).
-///
-/// Linux runs the final fput in task work at the return-to-userspace
-/// boundary, so a userspace observer never sees a closed fd whose side
-/// effects have not run. This function restores that: the close
-/// decisions (record-lock release, ops.close — pipe reader drop,
-/// epoll purge — and the final Arc drop's IN_CLOSE_* fsnotify) complete
-/// in the closer's own context (or the racing reaper's, which this wait
-/// observes) before the syscall returns.
+/// Sequence (the fput + task_work + call_rcu split):
+/// 1. POSIX record locks: closing ANY fd referring to the file releases
+///    the closing process's locks on it — a close-EVENT property, not a
+///    last-reference property (the reference runs locks_remove_posix at
+///    filp_close). Runs now, refcount-independent.
+/// 2. Arm `close_pending`: the once-only close op runs in `File::drop`
+///    at the final strong reference — this context for the common
+///    single-fd close, the racing holder's release otherwise. Exactly
+///    one drop-to-zero exists, so the op runs exactly once (the old
+///    stale-flag hazard is structurally gone).
+/// 3. Park a Weak: pins the ArcInner across any in-flight conditional
+///    acquisition until fdreapd's grace passes.
+/// 4. Drop the strong reference. No grace is waited here — close(2)
+///    never blocks on RCU (reference parity).
 pub fn retire_complete(file: Arc<File>) {
-    if !LIVE.load(Ordering::Acquire) || crate::sched::current().is_none() {
-        // Reaper down (spawn failed / pre-init) or no task context:
-        // inline bounded grace for this one file here. close(2) latency
-        // only — never correctness.
-        if crate::sync::rcu::synchronize_rcu_forced(GP_BUDGET_MS, "fdreap-inline") {
-            FdTable::displaced_close_decision(&file);
-            return;
-        }
-        // Timed out (monopolist): fall through to the queue; when the
-        // reaper is up it retries, and if it never comes up the final
-        // table Drop re-runs the decision.
-    }
-    let my_ord = {
+    // 1) Close-event decisions (refcount-independent).
+    crate::fs::locks::posix_release_for_file(&file);
+    // 2) Arm the final-drop close op (R31-B3 discipline, single site).
+    file.close_pending.store(true, Ordering::Release);
+    // 3) Pin the allocation for the grace window.
+    let weak = Arc::downgrade(&file);
+    let mut wake = false;
+    {
         let mut q = RETIRED.lock_irqsave();
-        q.push(file);
-        PUSHED_SEQ.fetch_add(1, Ordering::AcqRel) + 1
-    };
-    RETIRED_DEPTH.fetch_add(1, Ordering::Relaxed);
-    // NOTE: no TICKET.up() on this happy path. The closer below drains
-    // the batch itself (one grace covers it), so an up here only wakes
-    // fdreapd to find an empty queue — one wakeup + IPI per close(2),
-    // and worse: a fdreapd that wins the take forces the CLOSER to wait
-    // on fdreapd's sleepy (1-jiffy poll) grace form, whose jiffy
-    // granularity turned a µs-scale report race into a full 10 ms
-    // close(2) stall once per tick (measured 2026-11-05: probe
-    // open+close median 1.07 µs, mean 2.45 µs; every stall in close(),
-    // tick-periodic, ending at a jiffy boundary; -smp 1 clean at
-    // mean 869 ns). With fdreapd asleep the secondary CPU stays halted
-    // — quiescent by construction — and the closer's polled grace
-    // completes in the microsecond window. fdreapd remains armed for
-    // the requeue path (grace-budget exhaustion), which still ups.
-    // Completion loop: wait until the close decisions for everything
-    // parked up to and including ours have run. Usually we win the race
-    // ourselves and drain the batch here (one grace covers the batch).
-    //
-    // 52nd session (oh-crash): the retry ladder is GONE — one polled
-    // attempt, one budget, then defer. The 51st's 16-budget escape
-    // hatch proved necessary but not sufficient: every close(2) still
-    // burned ~800ms while any CPU's quiescent report stalled
-    // (ohc10-ohc22: RCU-GP-BOUND site=fdreap-close is 100% of the
-    // grace-stall prints), and the take-all-requeue-all ladder
-    // multiplied that cost. The monopolist family behind the stalls is
-    // the fork-window allocator monopolies (stack_cache_alloc / buddy
-    // under churn — IRQ-off lock sections for hundreds of ms, sometimes
-    // terminal) plus preempt-count leaks; both are cross-lane fixes.
-    // What close(2) itself must do is reference parity: Linux's close
-    // NEVER blocks on an RCU grace — fput queues task_work at the
-    // return-to-userspace boundary and the file's release runs there,
-    // with call_rcu doing any after-the-fact reclamation asynchronously
-    // (fs/file_table.c fput / file_free_rcu). Keeping one fast
-    // synchronous window preserves our stricter-than-Linux "decisions
-    // done before the syscall returns" behavior on a healthy system
-    // (the polled grace completes in microseconds); on a stalled one we
-    // now pay one budget (~50ms worst case) and hand the batch to the
-    // reaper instead of stacking sixteen budgets per close.
-    let mut yields = 0usize;
-    while PROCESSED_SEQ.load(Ordering::Acquire) < my_ord {
-        let batch = {
-            let mut q = RETIRED.lock_irqsave();
-            core::mem::take(&mut *q)
-        };
-        if batch.is_empty() {
-            // Ours is inside the reaper's in-flight batch (between its
-            // take and its decisions). Yield a bounded number of
-            // rounds: the context switch both lets the reaper run and
-            // reports our CPU's quiescent state, which is what its
-            // grace wait needs to finish. After the bound, return —
-            // the reaper owns the batch that contains our file and
-            // completes it; blocking the closer on the reaper's
-            // progress rebuilds the monopolist convoy one level up.
-            yields += 1;
-            if yields >= FDREAP_YIELD_ROUNDS {
-                return;
-            }
-            crate::sched::schedule();
-            continue;
-        }
-        let n = batch.len();
-        RETIRED_DEPTH.fetch_sub(n, Ordering::Relaxed);
-        if crate::sync::rcu::synchronize_rcu_forced_polled(GP_BUDGET_MS, "fdreap-close") {
-            for f in &batch {
-                // Sleepable syscall context: record-lock release and
-                // ops.close may take mutexes, wake peers, or queue work
-                // (the same discipline close_fd ran before the retire
-                // reaper existed).
-                FdTable::displaced_close_decision(f);
-            }
-            // Drop the batch Arcs HERE, in the closer's context: the
-            // last-reference drops fire IN_CLOSE_* fsnotify, flock/OFD
-            // release and lease bookkeeping synchronously — the
-            // userspace-observable close semantics.
-            drop(batch);
-            PROCESSED_SEQ.fetch_add(n, Ordering::AcqRel);
-        } else {
-            // Grace did not pass (monopolist window): hand the batch to
-            // the reaper and RETURN. The reaper retries and completes
-            // the decisions whenever the grace finally passes (rolling
-            // monopolies drain between episodes); the closer stops
-            // stacking grace budgets behind a monopolized CPU.
-            // Correctness is unchanged: the batch is queued (never
-            // dropped), the reaper owns it, and the final table Drop
-            // re-runs any decision the reaper never reaches.
-            GRACE_STALLS.fetch_add(1, Ordering::Relaxed);
-            static DEFER_N: core::sync::atomic::AtomicUsize =
-                core::sync::atomic::AtomicUsize::new(0);
-            let dn = DEFER_N.fetch_add(1, Ordering::Relaxed);
-            if dn == 0 || dn % 8192 == 0 {
-                crate::pr_warn!(
-                    "fs: fdreap close deferred to reaper ({}x: stalled quiescent round — monopolist window)",
-                    dn + 1
-                );
-            }
-            RETIRED_DEPTH.fetch_add(n, Ordering::Relaxed);
-            {
-                let mut q = RETIRED.lock_irqsave();
-                q.extend(batch);
-            }
-            TICKET.up();
-            return;
+        q.push(weak);
+        RETIRED_DEPTH.fetch_add(1, Ordering::Relaxed);
+        if q.len() >= WAKE_BATCH {
+            wake = true;
         }
     }
+    // 4) Drop our strong reference: File::drop runs the decision chain
+    //    (flock/OFD release, open-count unregister, O_ASYNC unregister,
+    //    IN_CLOSE_* fsnotify, and the armed ops.close — sleepable ops
+    //    stay in this syscall context, the same discipline the old
+    //    displaced_close_decision had).
+    drop(file);
+    if wake {
+        TICKET.up();
+        return;
+    }
+    // Reaper down (spawn failed / pre-init): drain inline with a bounded
+    // forced grace — boot-time stdio closes only. Correctness unchanged:
+    // the batch is never dropped without a grace.
+    if !LIVE.load(Ordering::Acquire) && crate::sched::current().is_some() {
+        drain_with_grace();
+    }
+}
+
+/// Take the whole parked queue, wait one forced grace period, then let
+/// the Weaks go (freeing every ArcInner whose grace passed). Requeues
+/// on a budget miss. Shared by the closer's inline fallback and fdreapd.
+fn drain_with_grace() {
+    let batch = {
+        let mut q = RETIRED.lock_irqsave();
+        core::mem::take(&mut *q)
+    };
+    if batch.is_empty() {
+        return;
+    }
+    RETIRED_DEPTH.fetch_sub(batch.len(), Ordering::Relaxed);
+    if crate::sync::rcu::synchronize_rcu_forced(GP_BUDGET_MS, "fdreap-inline") {
+        // Drop the Weaks: each releases its ArcInner (the File value
+        // itself already died at strong-count zero).
+        drop(batch);
+        return;
+    }
+    // Grace did not pass (monopolist window): requeue. When fdreapd is
+    // up it retries (armed below); on the inline fallback path the next
+    // close retries. The batch is never freed without a grace.
+    GRACE_STALLS.fetch_add(1, Ordering::Relaxed);
+    RETIRED_DEPTH.fetch_add(batch.len(), Ordering::Relaxed);
+    {
+        let mut q = RETIRED.lock_irqsave();
+        q.extend(batch);
+    }
+    TICKET.up();
 }
 
 /// Spawn fdreapd. Late-boot slot (after secondaries online — its sleeps
 /// and wakeups need the scheduler and online CPUs), before the first
-/// userspace close.
+/// userspace close. The initial TICKET kick drains anything parked
+/// before the reaper existed.
 pub fn init() {
+    // Pin the ArcInner layout assumption file_arc_try_clone makes
+    // (fails loudly at boot if a toolchain change moves the refcount
+    // word the lock-free fd lookup CASes).
+    crate::fs::file::verify_arc_inner_layout();
     let ok = crate::process::kthread::kthread_run(
         fdreapd_fn,
         core::ptr::null_mut(),
@@ -255,13 +206,14 @@ pub fn init() {
     LIVE.store(ok, Ordering::Release);
     if ok {
         crate::pr_info!("fs: fdreapd retire reaper started");
+        TICKET.up();
     } else {
-        crate::pr_warn!("fs: fdreapd failed to start — closes fall back to inline grace waits");
+        crate::pr_warn!("fs: fdreapd failed to start — closes drain inline with a forced grace");
     }
 }
 
-/// fdreapd main loop: sleep until parked work exists, wait one grace
-/// period, then run the close decisions for the whole batch.
+/// fdreapd main loop: sleep until parked work exists, wait one forced
+/// grace period, then release the parked Weaks.
 extern "C" fn fdreapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
     loop {
         if crate::process::kthread::kthread_should_stop() {
@@ -270,51 +222,33 @@ extern "C" fn fdreapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         // INTERRUPTIBLE park (reference discipline for a perpetually-idle
         // daemon: Linux kthreads sleep on down_interruptible()/wait_event_
         // interruptible, so the hung-task detector never flags their idle
-        // wait). The plain down() parked UNINTERRUPTIBLE, and khungtaskd
-        // printed a full "INFO: task fdreapd blocked for more than 120
-        // seconds" + stack dump EVERY cycle, forever — ~1.3 KB of serial
-        // spam per 120 s that also raced the tty echo and corrupted long
-        // serial input lines (ub2404 shell work). A spurious wake is
-        // already handled below (empty batch → continue).
+        // wait). A spurious wake is handled below (empty batch → continue).
         let _ = TICKET.down_interruptible();
         let batch = {
             let mut q = RETIRED.lock_irqsave();
             core::mem::take(&mut *q)
         };
         if batch.is_empty() {
-            // Spurious wake (a force-wake out of UNINTERRUPTIBLE, R77
-            // family): nothing parked since our last take.
             continue;
         }
         RETIRED_DEPTH.fetch_sub(batch.len(), Ordering::Relaxed);
         // One grace period covers the whole batch: every park (and its
-        // slot-null store) precedes the semaphore handoff that got us
-        // here, which precedes this wait.
+        // slot-null store) precedes the ticket/wake that got us here,
+        // which precedes this wait.
         if !crate::sync::rcu::synchronize_rcu_forced_sleepy(GP_BUDGET_MS, "fdreap") {
-            // Grace did not pass: NO drop — requeue and re-arm the
+            // Grace did not pass: NO release — requeue and re-arm the
             // ticket. Each retry paces itself on the bounded wait.
             GRACE_STALLS.fetch_add(1, Ordering::Relaxed);
-            let n = batch.len();
+            RETIRED_DEPTH.fetch_add(batch.len(), Ordering::Relaxed);
             {
                 let mut q = RETIRED.lock_irqsave();
                 q.extend(batch);
             }
-            RETIRED_DEPTH.fetch_add(n, Ordering::Relaxed);
             TICKET.up();
             continue;
         }
-        let n = batch.len();
-        for file in &batch {
-            // Sleepable context: record-lock release and ops.close may
-            // take mutexes, wake peers, or queue work (the discipline
-            // close_fd ran at its drain point, moved here).
-            FdTable::displaced_close_decision(file);
-        }
-        // Drop the batch Arcs (final-reference IN_CLOSE_* fsnotify and
-        // lock/lease release run at the drops), then publish completion
-        // to any retire_complete waiter.
+        // Release the Weaks (each frees an ArcInner whose grace passed).
         drop(batch);
-        PROCESSED_SEQ.fetch_add(n, Ordering::AcqRel);
     }
     0
 }

@@ -350,6 +350,23 @@ dead-proc `expect()` replaced by a bounded warning (619bf4b6); the
   the vdso variants and both COARSE clocks. Artifacts: vdso-rearm lane
   run/VDSO-REARM.md, run/pa-vdsorearm-{a,b}-serial.log.
 
+- close(2) grace-wait elimination (oc-rc, 2026-11-17): the
+  unconditional-increment fd lookup made every close(2) wait out an
+  RCU grace period (~250-330 ns) before its close decisions; the
+  conditional-acquisition rework runs the decisions at the
+  last-strong-reference drop (closer's own context — the strict
+  userspace-observable timing is PRESERVED) and frees the ArcInner
+  after an asynchronous grace via a parked Weak (call_rcu shape).
+  p6_openclose 0.681 -> 0.591 µs, p6_read_cached 1.002 -> 0.912 µs
+  (pbench KVM smp8, med-of-3; reference 0.371/0.551). Safety
+  pairing: the once-only close op is decided by the refcount
+  transition itself (exactly one drop-to-zero — the stale-flag and
+  grace-observation hazard classes are structurally gone), the
+  reader's failed CAS is EBADF (the reference fget race outcome),
+  and the ArcInner layout the CAS depends on is boot-asserted, so a
+  toolchain change fails loudly instead of corrupting. riscv64 make
+  test 1328/1328. [run/OC-RC.md, lane worktree oc-rc]
+
 ## 4. Nothing traded away
 The compatibility checklist stands while both ledgers hold: 345+
 syscalls with reference-matched semantics; LTP 1,059/1,869 and
@@ -885,3 +902,9 @@ absents stated plainly. Each absent names what closing looks like.
   measurement showed it; the code path only triggers on small
   buffers) — the functional probe's 512-byte walks now cover it.
   Artifacts: run/GETDENTS.md, run/pb-gdab-*.log, run/pb-gdref-*.log.
+- oc-rc round (2026-11-17): §3 close(2) entry above; rust-native
+  register §M carries the design + same-rig numbers; the ext4
+  capability-matrix pin failed on the deliberately removed close slot
+  and was updated in the same change (the shape test working as
+  designed — the removal is documented at both the ops table and the
+  pin).

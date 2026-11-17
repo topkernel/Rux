@@ -716,3 +716,59 @@ foreign QEMUs):
   1-byte buffer, 4096-entry dir, glibc DIR* walk): 15/15 PASS.
   Artifacts: run/GETDENTS.md, run/pb-gdab-*.log, run/pb-gdref-*.log,
   run/pb-gdprobe-h3.log.
+
+## M. Close-path conditional refcount acquisition (oc-rc lane, 2026-11-17, evidence-backed)
+
+- **The unconditional-increment fd lookup forced every close(2) to
+  wait out an RCU grace period; conditional acquisition moved the
+  guarantee into the refcount transition itself.** The old protocol
+  (fs/fdreap.rs, pre-oc-rc): `get_file` cloned a slot's Arc with an
+  UNCONDITIONAL `increment_strong_count`, so a closer could only prove
+  "no in-flight reader will bump the count after my observation" by
+  parking the Arc and waiting a full grace period before the close
+  decision — ~250-330 ns charged to every close(2), plus a wakeup/IPI
+  path whenever the reaper raced the closer. The rework splits the
+  reference's fput shape into its two halves: (1) the close DECISIONS
+  (record locks, flock/OFD/lease, fsnotify, ops.close) run at the
+  last strong reference in `File::drop` — the closer's own context on
+  the common single-fd close, exactly one drop-to-zero so the op runs
+  exactly once, with no grace observation needed because a racing
+  reader's CAS from a nonzero count LEGITIMATELY KEEPS the
+  description alive (reference fget-holder semantics); (2) the
+  ArcInner MEMORY is pinned by a parked Weak and freed by fdreapd
+  after an asynchronous grace (the reference's call_rcu(file_free_rcu)
+  shape). The reader-side CAS (`file_arc_try_clone`) is the
+  reference's `get_file_rcu`/`atomic_long_inc_not_zero` shape, with
+  the std-Arc ArcInner strong-word offset pinned at boot
+  (`verify_arc_inner_layout` constructs, clones, downgrades and drops
+  a probe Arc and asserts every transition) — a toolchain move of the
+  refcount word fails loudly at boot instead of CASing wrong memory.
+- **The same round embedded the read-ahead state in File** (the
+  reference's `file_ra_state` inside `struct file`): the Box in
+  private_data paid a slab alloc + free pair per open-then-read cycle
+  and needed a per-fs close op to free; the field dies with the
+  description and ext4's close slot disappeared (capability matrix
+  updated deliberately, kernel/src/tests/fileops_caps.rs).
+- **Read path**: page-cache get/put now share ONE claimed entry
+  (put_range_with_entry) — the release-side bank-claim + probe +
+  strong-count round trip was ~half the pin+unpin cost of a 1-page
+  hit; per-page STAT_HITS RMW hoisted to one per call (same totals).
+  atime stamping gated by the reference-default relatime rule against
+  a tick-cached wall second (one relaxed load; LTP utime keeps the
+  exact wall_secs form).
+- Measured (pbench dual-kernel rig, q35 KVM -cpu max smp8/2G, n=10000,
+  med-of-3 interleaved boots vs same-rig baseline boots):
+  p6_openclose 0.681/0.691 -> 0.591 µs (3/3 boots 0.591; reference
+  0.371), p6_read_cached 1.002/1.012 -> 0.902/0.912/1.022 µs
+  (median 0.912; reference 0.551). Decomposition (rdtsc probe,
+  run/diag_oc.c): close side 0.220 -> 0.120-0.140 µs, warm read term
+  0.30 -> 0.24-0.25 µs, warm open+read+close 0.811 -> 0.75-0.77 µs.
+  Guard rows same boots: p6_stat 0.281 flat, p6_getdents 33.8-34.1
+  vs 34.5-35.0 baseline, p6_append 0.631-0.661 vs 0.621-0.631
+  (noise band), p1_null 0.050 flat. riscv64 make test 1328/1328.
+  Artifacts: run/OC-RC.md, run/pb-s8oc-base1.log, run/pb-ocrc3.log,
+  run/pb-ocrc-f*.log (lane worktree /home/william/rux-agents/oc-rc).
+- Honest floor statement: both rows remain 1.59-1.66x behind the
+  reference. The dominant remaining term is the OPEN-side path walk
+  (~0.24 µs of the 0.59; the p6_stat row shows the shared walk at
+  1.28x behind on its own) — stat-lane territory, not close-path.

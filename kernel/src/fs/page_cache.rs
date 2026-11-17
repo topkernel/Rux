@@ -428,7 +428,7 @@ const PC_PARK_BATCH: usize = 8;
 type PcParkBatch = [Option<Arc<InodePageCache>>; PC_PARK_BATCH];
 
 /// Per-inode page cache: the lock-free lookup unit.
-struct InodePageCache {
+pub(crate) struct InodePageCache {
     /// Identity for the slot-table probe compare (== cache_key). Written
     /// once at construction, never mutated — lock-free readers compare it
     /// inside their claim window.
@@ -1014,13 +1014,32 @@ impl PageCache {
         page_index: u64,
         out: &mut [(u64, *const u8)],
     ) -> usize {
+        self.get_range_with_entry(fs_id, ino, page_index, out)
+            .0
+    }
+
+    /// `get_range_into` that also hands the caller the CLAIMED entry the
+    /// pins live in (oc-rc read-path cut): a release through
+    /// `put_range_with_entry` then skips the second bank-claim + probe +
+    /// strong-count round trip `put_range` would pay — on the 1-page hit
+    /// that repeat lookup was ~half the pin+unpin pair's cost. The
+    /// returned Arc keeps the entry (and the pinned pages' map entries)
+    /// alive across the caller's copy window; `None` only when the whole
+    /// lookup missed (caller re-fills).
+    pub fn get_range_with_entry(
+        &self,
+        fs_id: u64,
+        ino: u64,
+        page_index: u64,
+        out: &mut [(u64, *const u8)],
+    ) -> (usize, Option<alloc::sync::Arc<InodePageCache>>) {
         let key = cache_key(fs_id, ino);
         if out.is_empty() {
-            return 0;
+            return (0, None);
         }
         let count = out.len();
         let Some(entry) = self.lookup_claimed(key) else {
-            return 0;
+            return (0, None);
         };
         let n = {
             let mut g = entry.lock.lock();
@@ -1033,7 +1052,6 @@ impl PageCache {
                 if page.invalidated {
                     break;
                 }
-                STAT_HITS.fetch_add(1, Ordering::Relaxed);
                 page.pin_locked();
                 let page_desc = pfn_to_page_mut(page.pfn);
                 if !page_desc.is_null() {
@@ -1048,8 +1066,12 @@ impl PageCache {
             }
             n
         };
-        drop(entry);
-        n
+        // oc-rc: one counter RMW per call instead of one per page — the
+        // per-page fetch_add on this shared line was pure cacheline
+        // ping on SMP for multi-page runs, and STAT_HITS semantics
+        // ("pages served from cache") are preserved exactly (n pages).
+        STAT_HITS.fetch_add(n as u64, Ordering::Relaxed);
+        (n, Some(entry))
     }
 
     /// Contiguous-run release fast path shared by `put_range` /
@@ -1182,7 +1204,61 @@ impl PageCache {
         drop(entry);
     }
 
-    /// Release a page reference (decrement ref_count).
+    /// `put_range` on an entry the caller already holds from
+    /// `get_range_with_entry` (oc-rc read-path cut): skips the second
+    /// bank-claim + probe + strong-count round trip. Passing the entry
+    /// is MORE precise than re-probing by key: the pins live in THIS
+    /// entry's map even if the slot was vacated and a new generation
+    /// re-inserted under the same key between the get and this put
+    /// (invalidate marks pinned pages `invalidated`; this same-entry
+    /// release path then frees the frame at the final unpin exactly as
+    /// the re-probed form would have for the old generation — and a
+    /// re-probe would have un-pinned the WRONG generation's page).
+    pub fn put_range_with_entry(
+        &self,
+        fs_id: u64,
+        ino: u64,
+        entry: &Arc<InodePageCache>,
+        pages: &[(u64, *const u8)],
+    ) {
+        if pages.is_empty() {
+            return;
+        }
+        let key = cache_key(fs_id, ino);
+        let emptied = {
+            let mut g = entry.lock.lock();
+            let idx = match Self::unpin_contiguous_locked(&mut g, pages, |p| p.0) {
+                Some(k) => k,
+                None => pages.len(),
+            };
+            for &(page_index, _) in &pages[idx..] {
+                if let Some(page) = g.get_mut(&page_index) {
+                    let decremented = page.unpin_locked();
+                    if decremented
+                        && page.count_locked() == 0
+                        && page.invalidated
+                        && page.take_released_locked()
+                    {
+                        let pfn = page.pfn;
+                        dirty_account_removed(page);
+                        g.remove(&page_index);
+                        let page_desc = pfn_to_page_mut(pfn);
+                        if !page_desc.is_null() {
+                            unsafe {
+                                lru::page_remove_lru(&*page_desc);
+                            }
+                        }
+                        release_page_frame(pfn);
+                        self.total_pages.fetch_sub(1, Ordering::Relaxed);
+                    }
+                }
+            }
+            g.is_empty()
+        };
+        if emptied {
+            self.remove_entry(key, entry);
+        }
+    }
     pub fn put(&self, fs_id: u64, ino: u64, page_index: u64) {
         let key = cache_key(fs_id, ino);
         let Some(entry) = self.lookup_claimed(key) else {
