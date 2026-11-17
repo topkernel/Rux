@@ -150,3 +150,15 @@ The starting-point table above predates the evening merges; current state:
   CLOCK_MONOTONIC poison under host load ≥6 (both kernels, suspect the
   vDSO TSC-track path) — hunt queued; use debug-class windows or quiet
   windows for interim numbers.
+
+## Acceptance bar (user directive, 2026-11-18)
+
+cyclictest SCHED_FIFO must beat Linux by ≥50% on ALL THREE statistics
+— min AND avg AND max (ours ≤ 0.5× Linux's), same-rig interleaved
+measurement, dual-column. Current standing: max 263 vs 887 µs
+(~70% better, different boots — confirm same-rig); avg 46 vs 12 µs
+(the big gap; R1–R4 are the levers); min 29 vs unmeasured (bank
+Linux's same-rig). If a shared KVM virtualization floor (the
+timer-fire exit/entry cost both kernels pay) blocks the avg target,
+the two-sided segment table decides it — same method as the GRQ
+KVM-tax verdict; present the decomposition, don't fake the number.
