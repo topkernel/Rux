@@ -137,7 +137,7 @@
       <li><b>无空闲 CPU、非 sync 唤醒</b>:通过<b>实测等待抢占判定</b>(D-14)—— 仅当被唤醒者的实测等待时长(sched_clock − 最近拣选时间戳)≥ 延迟窗(6 ms)时,才对忙 CPU 置位 need_resched;窗内刚运行过的任务交由时间片届期/交接机制处理。</li>
       <li><b>sync 唤醒且无空闲 CPU</b>:stacking —— 维持 wake_affine 的等价性质:持有全局队列时,同步唤醒绝不通知其他忙 CPU,唤醒者将接收者叠置于自身 CPU。</li>
     </ol>
-    <p><b>不采用 vruntime 信用比较作为判定条件的原因</b>:参考实现以"被唤醒者 vruntime 是否领先正在运行的任务"决定抢占。Rux 的睡眠信用下界与唤醒放置调整会使乒乓唤醒对端<b>持续</b>落后数毫秒 vruntime(实测:重排钳制引起 +~10 ms 的 vruntime 跳变)—— 参考实现的判定条件在本设计的放置策略下于每次唤醒均成立,退化为逐记录的抢占-切换往返。实测等待判定仅在等待者真实等待达阈值时才中断在跑任务。</p>
+    <p><b>不采用 vruntime 信用比较作为判定条件的原因</b>:参考实现以"被唤醒者 vruntime 是否领先正在运行的任务"决定抢占。Rux 的睡眠信用下界与唤醒放置调整会使乒乓唤醒对端<b>持续</b>落后数毫秒 vruntime(实测:重排钳制引起 +~10 ms 的 vruntime 跳变)—— 参考实现的判定条件在本设计的放置策略下于每次唤醒均成立,退化为逐记录的抢占-切换往返。实测等待判定仅在等待者真实等待达阈值时才中断正在运行的任务。</p>
     <div class="tbl-wrap"><table>
       <thead><tr><th>D-14 效果(同一测试平台对比)</th><th>前</th><th>后</th></tr></thead>
       <tbody>
@@ -191,7 +191,7 @@
       <li>内核抢占默认关闭:吞吐型工作负载下与参考实现的可选内核抢占默认不同;落后唤醒的 ~10 ms tick 量化与该选择同源 —— 消除量化依赖 NOHZ 全架构接线与 kpreempt 调优。</li>
     </ul>
 
-    <div class="callout">代码:<code>kernel/src/sched/</code>(sched.rs / fair.rs / rt.rs / deadline.rs / idle.rs / wakewatch.rs)。分歧登记:D-1/D-11/D-14。仪器:cctx(syscost 内)、wakewatch、census。门禁带:<code>docs/development/perf-gate-baseline.md</code> 调度域行。</div>
+    <div class="callout">代码:<code>kernel/src/sched/</code>(sched.rs / fair.rs / rt.rs / deadline.rs / idle.rs / wakewatch.rs)。分歧登记:D-1/D-11/D-14。仪器:cctx(syscost 内)、wakewatch、调度事件普查。门禁带:<code>docs/development/perf-gate-baseline.md</code> 调度域行。</div>
   </article>
 </div>
 </main>
