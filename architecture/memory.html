@@ -127,13 +127,13 @@
     </ul>
 
     <h2 id="smallalloc"><span class="anchor">§5</span>small_alloc:小对象分配器(magazine 缓存)</h2>
-    <p><b>起源</b>:OpenHarmony 首帧构成期持有约 21.3 万个净存活小对象(1B–1KB 类,CR3 遍历计量 23.2M alloc / 23.0M free),每个对象钉住整个 4KiB buddy 块 —— 852MB / 992MB 窗口,首帧构成即触发 ALLOCTHROUGH panic。小对象打包分配器由此引入。</p>
+    <p><b>起源</b>:OpenHarmony 首帧构成期持有约 21.3 万个净存活小对象(1B–1KB 类,CR3 遍历计量 2320 万次分配 / 2300 万次释放),每个对象钉住整个 4KiB buddy 块 —— 852MB / 992MB 窗口,首帧构成即触发 ALLOCTHROUGH panic。小对象打包分配器由此引入。</p>
     <ul>
       <li><b>类结构</b>:8 个 2 幂类(S = 8..1024,<code>SMALL_MAX = 1024</code>);slab 页为裸 order-0 buddy 块(绕过 GlobalAlloc,消除递归),对象按 S 对齐排布,页内 16 字节 PageHdr 含 magic/free_head/free_count/页链。</li>
       <li><b>1-bit 空闲路由</b>:每堆页一位(SLAB_PAGE_BITMAP,262144 页 = 1GiB 窗口 = 32KiB .bss);<b>空页归还 buddy 前先清位</b> —— 指向已回收页的陈旧指针落入 buddy 侧 tripwire(显式报错),而非静默破坏 slab 数据;is_slab_ptr 为无锁路由判定,object_span() 提供取证映射。</li>
-      <li><b>per-CPU magazine</b>(深度 16):引入动机为实测 —— 类锁占整机 12.6%(732M irqsave 区段/启动,均长 ~250 ns,IF=0 最大贡献者)。magazine 库为首个 D-7 CpuLocal 转换对象(<code>MAGAZINES: CpuLocal&lt;[Magazine; 8], MAX_CPUS&gt;</code>);快路径仅在<b>本地抢占关闭</b>下 pop/push,中断保持开启(中断上下文不触碰行,路由至类锁函数体);类锁按批(refill/flush ≈ MAG_DEPTH 个对象)摊销。</li>
+      <li><b>per-CPU magazine</b>(深度 16):引入动机为实测 —— 类锁占整机 12.6%(每次启动 7.32 亿次 irqsave 区段,均长 ~250 ns,IF=0 最大贡献者)。magazine 库为首个 D-7 CpuLocal 转换对象(<code>MAGAZINES: CpuLocal&lt;[Magazine; 8], MAX_CPUS&gt;</code>);快路径仅在<b>本地抢占关闭</b>下 pop/push,中断保持开启(中断上下文不触碰行,路由至类锁函数体);类锁按批(refill/flush ≈ MAG_DEPTH 个对象)摊销。</li>
       <li><b>正确性</b>:回收条件 free_count == objs_per_page 须持类锁 —— magazine 内条目使 free_count 短缺,故 magazine 驻留页被回收在构造上不可达;push 时筛查在关中断窗内重读页头(魔数/类匹配/槽位对齐),可疑指针路由至锁内 consume-and-taint 路径 —— <b>坏指针不可能驻留 magazine</b>。计数仅在锁内更新;magazine 驻留对存活估计的偏移上界为 MAX_CPUS×8×MAG_DEPTH。</li>
-      <li><b>实测</b>:全局类锁区段/启动 <b>19.7M</b>(门禁 ≤25M;最新板 6.0M),REST 占机比 <b>0.1–1.2%</b>(门禁 ≤10%),0.4% 档位区段计数 6.0M(此前 18.8M)。</li>
+      <li><b>实测</b>:每次启动全局类锁区段 <b>1970 万</b>(门禁 ≤2500 万;最新板 600 万),REST 占机比 <b>0.1–1.2%</b>(门禁 ≤10%),0.4% 档位区段计数 600 万(此前 1880 万)。</li>
     </ul>
 
     <h2 id="kstack"><span class="anchor">§6</span>打包内核栈 slab(D-2,x86_64)</h2>

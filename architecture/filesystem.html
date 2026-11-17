@@ -187,7 +187,7 @@
         <tr><td>append</td><td class="num">657.2 µs</td><td class="num">77.4 µs</td></tr>
         <tr><td>mkdir+rmdir</td><td class="num">22.8 ms</td><td class="num">2.76 ms</td></tr>
         <tr><td>unlink</td><td class="num">1,141 µs</td><td class="num">808 µs</td></tr>
-        <tr><td>buffer cache 命中率</td><td colspan="2" class="num">99.1%(门禁 ≥ 基线;pa29: bread 2.81M / 设备读 25k)</td></tr>
+        <tr><td>buffer cache 命中率</td><td colspan="2" class="num">99.1%(门禁 ≥ 基线;pa29: bread 281 万 / 设备读 2.5 万)</td></tr>
       </tbody>
     </table></div>
     <p class="callout">诚实差距登记:p6_mkdrmdir 对标同机参考 153 µs 仍差 ~14×——差距归因于共享的系统调用与路径查找固定开销,而非文件系统本体;写 fsync 14.2 ms 中位为当前门禁锚(串行 span 批化后再评)。</p>

@@ -102,7 +102,7 @@ cat /proc/sys/kernel/perf_event_paranoid</code></pre>
       <li><b>武装</b>:内核 cmdline <code>syscost=1</code>;关闭时零成本(每次系统调用退出一次缓存原子载入;tick 钩子两次 relaxed 加)。不占用 dfx= 开关表 —— 本探针持自有 cmdline 键。</li>
       <li><b>计量内容</b>:每原生系统调用号 {次数, 墙钟周期, 最大值}(NR_SLOTS=512)+ 慢操作环(&gt;4 ms 异常值带调用方 comm,SLOW_RING=64 / SLOW_CYC=40000 tick)+ tick 模式 per-CPU user/kernel-task/idle 计数 + 256 槽内核文本页直方图(RIP_SLOTS=256,离线对照构建 ELF 的 nm 符号化);每 60 s 自定时器 softirq 转储(SYSCOST_DUMP_SECS=60)。</li>
       <li><b>IF=0 EFLAGS 对探针(v3)</b>:边沿触发 + 自愈;每钩子读取真实 IF 标志并对模型裁决 —— 模型开启而实测 IF=1 判泄漏,闭合入 HEAL;HARDIRQ/SOFTIRQ/UART 区段分离;REST 调用点 #[track_caller] 归因 96 槽表;段带原始 TSC 戳。这是 IF=0 份额的官方测量(Tier-3),非代理。</li>
-      <li><b>门禁读数</b>(Tier-1,静默 syscost 启动):census TERM-DESCHED 8(带 8±2)/ WAKE-REFUSED 32(带 32±4);tick ≥99.5/s;零 panic/OOM;系统调用量按档位类带(debug 15.5M ±80%,release 50M ±60%);clock_gettime 3-4 µs;nanosleep ≤244 ms。</li>
+      <li><b>门禁读数</b>(Tier-1,静默 syscost 启动):census TERM-DESCHED 8(带 8±2)/ WAKE-REFUSED 32(带 32±4);tick ≥99.5/s;零 panic/OOM;系统调用量按档位类带(debug 1550 万 ±80%,release 5000 万 ±60%);clock_gettime 3-4 µs;nanosleep ≤244 ms。</li>
     </ul>
 
     <h2 id="pbench"><span class="anchor">§3</span>pbench:七组微基准</h2>
@@ -131,7 +131,7 @@ cat /proc/sys/kernel/perf_event_paranoid</code></pre>
     <div class="tbl-wrap"><table>
       <thead><tr><th>守护域</th><th>关键行</th></tr></thead>
       <tbody>
-        <tr><td>分配/回收</td><td>small_alloc 全局类锁区段 ≤25M/启动;REST 占机 ≤10%;回收慢路径 drct=0 类</td></tr>
+        <tr><td>分配/回收</td><td>small_alloc 全局类锁区段每次启动 ≤2500 万;REST 占机 ≤10%;回收慢路径 drct=0 类</td></tr>
         <tr><td>调度</td><td>GRQ 平均持锁 1200–7320 ns;census 8±2/32±4;p2 ±20%;p4 fork 行开放回归挂账</td></tr>
         <tr><td>文件系统</td><td>stat/openclose/read_cached/append/mkdrmdir/unlink 中位带;buffer 命中率 ≥99.1%</td></tr>
         <tr><td>中断/IRQ</td><td>IF=0 20.4±3pp;max cli REST ≤10 ms;SOFTIRQ 3.1±2pp;无新 IRQ-OFF 打印类</td></tr>

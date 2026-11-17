@@ -92,7 +92,7 @@
         <tr><td class="mono">4k random write 8M + fsync=1 (durability path, 15 s)</td><td class="num">20.1–22k IOPS</td><td class="num">15.3–16.2k IOPS (fsync median ~57 µs)</td><td class="num"><b>Rux ~1.24× ahead</b></td></tr>
         <tr><td class="mono">4k random rw 40M (direct, 50/50)</td><td class="num">22.15k/22.15k IOPS</td><td class="num">22.0k/22.0k IOPS</td><td class="num">0.96× (parity band)</td></tr>
         <tr><td class="mono">4k random write 40M (direct)</td><td class="num">36.75k IOPS</td><td class="num">~37.9k IOPS</td><td class="num">0.97×</td></tr>
-        <tr><td class="mono">4k random read 40M (direct, 20 s)</td><td class="num">37.0k IOPS (j1) · j8 0.91×</td><td class="num">~41k IOPS</td><td class="num">0.90× (j1)</td></tr>
+        <tr><td class="mono">4k random read 40M (direct, 20 s)</td><td class="num">37.0k IOPS (numjobs=1) · numjobs=8 0.91×</td><td class="num">~41k IOPS</td><td class="num">0.90× (numjobs=1)</td></tr>
         <tr><td class="mono">1M sequential write 48M (direct, allocated territory)</td><td class="num">4000 MiB/s</td><td class="num">5.2 GiB/s · clat ~188 µs</td><td class="num">0.83×</td></tr>
         <tr><td class="mono">1M sequential write 48M (direct, fresh file)</td><td class="num">same-window ratio 0.33×</td><td class="num">188 µs/op (delayed allocation makes fresh writes alloc-free)</td><td class="num">0.33× (delayed allocation not implemented)</td></tr>
         <tr><td class="mono">1M sequential read 48M (direct)</td><td class="num">~5000 MiB/s class</td><td class="num">9.4 GiB/s · clat 90 µs</td><td class="num">0.62×</td></tr>
