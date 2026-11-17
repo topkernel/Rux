@@ -2396,13 +2396,11 @@ impl WriteBatch {
                 blkdev::blkdev_write_async_sg(dev, sector0, &segs[..k], &self.slots[i].completion);
             match submitted {
                 Ok(()) => {
-                    crate::drivers::virtio::sg_diag_note(true, k as u64);
                     for si in i..e {
                         group_head[si] = Some(i);
                     }
                 }
                 Err(_) => {
-                    crate::drivers::virtio::sg_diag_note(false, k as u64);
                     // SG submit refused (window lag, held budget, tiny
                     // queue): per-span fallback — each span takes its own
                     // 3-descriptor chain. A span that also fails to submit

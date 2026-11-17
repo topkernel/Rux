@@ -225,13 +225,11 @@ fn ext4_dio_read_batched(
                     );
                     match submitted {
                         Ok(()) => {
-                            crate::drivers::virtio::sg_diag_note(true, k as u64);
                             for r in i..e {
                                 group_head[r] = Some(i);
                             }
                         }
                         Err(_) => {
-                            crate::drivers::virtio::sg_diag_note(false, k as u64);
                             // No SG (or window lag): one chain per run —
                             // the pre-fusion shape. A run whose own submit
                             // also fails stays un-armed (re-served
@@ -258,7 +256,6 @@ fn ext4_dio_read_batched(
                     i = e;
                 }
 
-                let t0 = crate::drivers::timer::read_time();
                 // ---- Phase 2: one kick, then wait in order ----
                 // The PCI submit path publishes chains QUIETLY (every notify
                 // is an MMIO trap); nothing else on a quiet boot kicks the
@@ -266,7 +263,6 @@ fn ext4_dio_read_batched(
                 // at-device until the 10 s wait deadline (the VW-WEDGE
                 // unked=at_device family on real-data direct reads).
                 crate::drivers::virtio::pci_blk_kick_all();
-                let t1 = crate::drivers::timer::read_time();
 
                 let mut cut_at = usize::MAX;
                 // First pass: wait heads and individual chains, recording
@@ -360,12 +356,6 @@ fn ext4_dio_read_batched(
                     }
                     completions[j].reset();
                 }
-                let t2 = crate::drivers::timer::read_time();
-                crate::drivers::virtio::sg_diag_timing(
-                    t1.saturating_sub(t0),
-                    0,
-                    t2.saturating_sub(t1),
-                );
                 count = 0;
                 blocks_in_window = 0;
                 if cut_at != usize::MAX && cut_at < total_read {
