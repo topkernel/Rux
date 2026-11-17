@@ -168,6 +168,41 @@ handoff), open (1.44x — walk loop + File construct), read (1.42x —
 copy tail), write (1.13x). lat_fs re-polluted by boot noise (no
 honest number this round).
 
+## Patrol-9: ctx-2 sampler blocked; 2x feasibility summary for the 4 behind rows (2026-11-18)
+
+The lat_ctx sampler could not catch a window: the whole lat_ctx run
+(-s 64 2 -N 8) completes in <3 s on the current kernel (calibration
+and measurement both — the pre-NOHZ grind is gone), so the sampler's
+post-sleep window always lands after exit. Three attempts (t=3/8/30 s)
+all CHILD-EXITED. Sampler follow-up: run the sample INSIDE lat_ctx's
+measurement (a forked sampler attached to the benchmp child) — queued.
+
+**2x feasibility per behind row (evidence-based, per the documentation
+requirement):**
+
+- **lat_ctx 2.51 µs vs 0.90 (2.79x; target 0.45)**: each roundtrip = 2
+  semops + 2 PROCESS switches (CR3) + a 64 KB working set (TLB refill
+  per switch). The reference's 0.90 µs/switch implies its ping-pong
+  stays on one CPU (no IPI) AND its CR3/TLB path is cheaper. Rux levers:
+  (a) the cctx-measured wake IPI (935-1139 ns send alone) must leave the
+  handoff — the polling-idle window already covers same-CPU pairs;
+  (b) PCID is off on this host (AMD) so every CR3 switch refills TLB —
+  the reference pays the same, but its switch body is smaller. Verdict:
+  2x needs the CR3/TLB path reworked (PCID or deferred refill) — a
+  structural mm project, NOT reachable by the current lever set.
+- **open 0.676 vs 0.471 (1.44x; target 0.198)**: walk loop 598 ns +
+  File::new/Arc/install ~400 ns + PRE 239 ns. 0.198 µs = the walk and
+  construct must both collapse — an entire-path resolve cache (the
+  reference's RCU-walk dcache covers multi-component hits lock-free).
+  Structural; queued after the sampler fix.
+- **read 0.095 vs 0.067 (1.42x; target 0.031)** / **write 0.078 vs
+  0.069 (1.13x; target 0.030)**: the remaining gap is the entry floor
+  (shared by all rows — null is at parity, so the floor is ~40 ns and
+  the reference's is ~25 ns) plus the 1-byte copy/dispatch tail.
+  Entry-floor rework (frame build + exit check chain merge) is the one
+  lever that moves all four rows at once — queued as the next
+  structural round.
+
 ## Patrol-4 med-of-3 (2026-11-17, kernel perf-2x head vs 11-16 standing)
 
 Paired med-of-3 boots (CCD0 + performance governor + warmer, nohz_full=1;
