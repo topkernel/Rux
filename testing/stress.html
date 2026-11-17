@@ -115,7 +115,7 @@
     <ul>
       <li><b>fsfuzz WATCHDOG 族</b>(perf 注册表 static+heap 锁对):r282 曾录零 DEADLOCK 打印(该类首次,45,858 行),r283 复现 118 次 —— 同族同 ra、静态锁地址随新二进制移动;修复未上 main 前按已知瞬态类记账,闭合等 c5640ccc 类落地。</li>
       <li><b>oom01 fake-OOM</b>(根因已锁定):直接回收路径已合入(page_alloc 深末轮,39a515a5),但 OOM 击杀来自 <b>kswapd 升级路径</b>(连续 16 次零回收 balance_pgdat → out_of_memory),该路径没有深排水。证据:OOM-FORENSIC 显示 in_direct_reclaim=1、zone 内 172 MB 干净页缓存一链之隔、全程零 OOM-DEEP-PASS 行;对照组 r35 无改善亦无回退。s17 设计(kswapd 升级点单次深排 + 成功重置失败计数)待 mm/perf 工作分支实现。</li>
-      <li><b>W3 停滞类</b>:oom01 SIGKILL 送达后串口静默 —— s17 形状,归 W3/OH 线所有。</li>
+      <li><b>W3 停滞类</b>:oom01 SIGKILL 送达后串口静默 —— s17 形状,归 W3/OH 工作分支所有。</li>
       <li><b>monkey-b / memstorm 实例状态</b>:monkey-b 实例 x86 轮全 WARN、零 critical 旗标,r7–r10 余量增长 141–178 MB 属判据内;memstorm r34 PREEMPT-UNDERFLOW=8(trio 族带 6–10),beat 86 对带 91–97,连续观察后再定性。</li>
     </ul>
 

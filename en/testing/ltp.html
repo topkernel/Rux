@@ -118,7 +118,7 @@
       <li><b>Flake isolation</b>: new full-scan failures are isolated-rerun twice before being called regressions — host load produces timeout/precision flakes (known: accept02, getrusage04, kill02, genfmod, rename/statfs families).</li>
       <li><b>NOT-OURS ledger</b>: the same musl LTP binaries run on the host Linux kernel; identical failures are recorded as test/environment issues rather than kernel gaps (decoded case by case in verdicts-r27.txt).</li>
       <li><b>WEDGE rescue</b>: 51 WEDGE/POISON rows from the raw r27 scan were rescued via isolation boots and spliced back; 6 stubborn rows re-ran one-case-per-boot; mmap1 stays WEDGE per the standing adjudication.</li>
-      <li>Every round's full results, deltas and verdicts are archived in that round's lane results/ directory (r27 → ltp-r27; the 2026-11-15 audited round → ltp-scan2; the 2026-11-16 confirmation scan → ltp-scan3); TIMEOUT-class cases get top-priority dedicated lanes.</li>
+      <li>Every round's full results, deltas and verdicts are archived in that round's work-lane results/ directory (r27 → ltp-r27; the 2026-11-15 audited round → ltp-scan2; the 2026-11-16 confirmation scan → ltp-scan3); TIMEOUT-class cases get top-priority dedicated lanes.</li>
     </ul>
 
     <h2 id="rigs"><span class="anchor">§3</span>Rigs</h2>

@@ -100,7 +100,7 @@
 
     <h2 id="ub"><span class="anchor">§2</span>用户/内核边界</h2>
     <ul>
-      <li><b>SMAP(x86_64,D-18 演进)</b>:CR4.SMAP 自 CPUID 判定位启用(曾有 G1 期 EDX/EBX 位错判缺陷,763e9f3c 修复 + 启动日志对活 CR4/CPUID 断言 + 每 boot smap_report);最初 pushfq/orq/popfq 序列(~100+ 周期/对)后演化为 SMAP-gated stac/clac —— CPUID SMAP 位蕴含 STAC/CLAC 存在,2 周期旗标写;<b>fixup 标签同时清 AC</b>(拷贝中途故障落于 AC 仍置位的状态);文档口径 ~55 ns/括号。SMAP-VIOL 信标全 suite 零命中。</li>
+      <li><b>SMAP(x86_64,D-18 演进)</b>:CR4.SMAP 自 CPUID 判定位启用(曾有 G1 期 EDX/EBX 位错判缺陷,763e9f3c 修复 + 启动日志对活 CR4/CPUID 断言 + 每次启动的 smap_report);最初 pushfq/orq/popfq 序列(~100+ 周期/对)后演化为 SMAP-gated stac/clac —— CPUID SMAP 位蕴含 STAC/CLAC 存在,2 周期旗标写;<b>fixup 标签同时清 AC</b>(拷贝中途故障落于 AC 仍置位的状态);文档口径 ~55 ns/括号。SMAP-VIOL 信标全 suite 零命中。</li>
       <li><b>SUM(riscv64)</b>:sstatus.SUM 恒 0 —— 内核仅经 uaccess 异常路径达用户内存;sret 返回 U 态时 SUM=0 为 ABI;任何 SUM=1 启动打印即回归。</li>
       <li><b>例外表 + fixup</b>:riscv64 .ex_table(insn, fixup);x86_64 可重启 rep-movsb;每个访问器 access_ok(addr,n);故障返回短读/EFAULT,不 panic(LTP x86-r2 N1 证据:37 个 EFAULT 族用例经 fixup 通过);~150 调用点。表完整性由脚本守卫(scripts/verify_exception_table.py:每项必须指向访存指令、fixup 必须指向可执行代码 —— 防标签错位类缺陷)。</li>
       <li><b>无恒等 MMIO 窗(D-17)</b>:设备地址经内核侧别名区,bootstrap 恒等映射启动后摘除 —— 坏用户指针故障,而非返回内核字节(x86_64 套件 1194/1194 含此前红的 EFAULT 行)。</li>

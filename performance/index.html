@@ -141,7 +141,7 @@
       <table>
         <thead><tr><th>域</th><th>守护指标(现行带)</th></tr></thead>
         <tbody>
-          <tr><td>内存分配 / 回收</td><td>small_alloc 全局类锁分段 ≤25M/次启动(实测 19.7M,最新板 6.0M)、REST 占比 ≤10%(现行 0.1–1.2%)、标准启动无回收慢路径浮现</td></tr>
+          <tr><td>内存分配 / 回收</td><td>small_alloc 全局类锁分段每次启动 ≤2500 万(实测 1970 万,最新板 600 万)、REST 占比 ≤10%(现行 0.1–1.2%)、标准启动无回收慢路径浮现</td></tr>
           <tr><td>调度</td><td>GRQ 锁内 241–273 ns(release,精确探针;树操作 ~20–30 ns + D-1 记账);锁等待 70–84 ns 为 KVM 跨 vCPU locked 指令税(Linux 的 per-rq 锁同样交税)。门禁指标(调用点 IF=0 段均值,含获取等待)允许范围 1200–7320 ns(实测 2786 ns @ 样本数 630 万)、调度事件普查 TERM 8±2 / REFUSED 32±4、P2 ±20%、futex 唤醒→运行 quiet 7.5 µs ±20%</td></tr>
           <tr><td>文件系统热路径</td><td>P6 行 ±20%(stat 71 / openclose 156 / append 77 / mkdrmdir 2760 / unlink 808 / write_fsync 14200 µs)、buffer cache 命中率 99.1% ≥ 基线、无新同步写类</td></tr>
           <tr><td>中断 / IRQ 路径</td><td>IF=0 份额 20.4%±3pp、最长关中断段 ≤10 ms(现行 6–9 ms)、SOFTIRQ 占比 3.1±2pp、无新 IRQ-OFF 打印类</td></tr>
@@ -166,7 +166,7 @@
           <tr><td>匿名回收(SP-7)</td><td>回收检查路径重构</td><td>检查率 <b>35%→82–89%</b>,swap 写 +75%</td></tr>
           <tr><td>类型化定时器轮(D-19)</td><td>时钟域类型化 + 作用域守卫</td><td>arm 锁 924→697 ns;nanosleep 772.6→<b>662.7 ms</b>;p2_ctxsw 12.198 vs 15.400 µs</td></tr>
           <tr><td>dcache 无锁读(WalkClaim)</td><td>reader bank 发布 + 延迟退役</td><td>stat 0.643→<b>0.423 µs</b>、open 1.128→0.889 µs</td></tr>
-          <tr><td>small_alloc magazine</td><td>per-CPU magazine(深度 16)+ 位图路由</td><td>类锁分段 <b>25M→19.7M→6.0M</b>/次启动;REST 占机 9.2%→0.1–1.2%</td></tr>
+          <tr><td>small_alloc magazine</td><td>per-CPU magazine(深度 16)+ 位图路由</td><td>类锁分段每次启动 <b>2500 万→1970 万→600 万</b>;REST 占机 9.2%→0.1–1.2%</td></tr>
           <tr><td>GRQ 持锁</td><td>0.7ms 粒度约束 churn + pick 路径精简(分段测量定位)</td><td>锁内 <b>241–273 ns</b>(改造前 378);锁等待 70–84 ns = KVM 跨 vCPU locked 指令税</td></tr>
           <tr><td>unix 带宽</td><td>unix 暂存消除</td><td>bw_unix 2.6→<b>42.9 GB/s</b></td></tr>
           <tr><td>缺页路径(campaign r6)</td><td>后错 fault 窗口 + 连续 put_range + PCACHE_RO 别名协议 + 批量 pin 释放 + munmap 单次 TLB flush</td><td>lat_pagefault 0.468→<b>0.029–0.031 µs(累计 16.1×)</b>,对 Linux 转为领先 2.26–2.45×</td></tr>

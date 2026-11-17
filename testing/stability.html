@@ -105,7 +105,7 @@
     <ul>
       <li>GNOME 全会话 <b>2100 秒门</b>(M1–M5 里程碑全过,零 panic)<b>三次独立启动</b>复现(2026-10-27)。</li>
       <li>桌面会话保持 <b>45 分钟零 panic</b>(GDM 端到端链路,2026-11-01);boot-to-login ~4.5 s(4 vCPU MTTCG)。</li>
-      <li><b>22.04 GNOME 桌面 5/5 稳定性验证</b>(2026-11-16,main @ 1553b75ac,上一战役后 188 个提交):战役全套成功判据(shell 就绪带 guest 真时间戳、截屏桌面成帧、指针 + Super 键像素差交互门)5/5 全绿 —— shell 5 s 就绪、桌面成帧 9.1 s、Super 键交互 5/5、零 panic/OOM/SIGSEGV;证据 gnome-regress 车道 run/GNOME-REGRESS.md。</li>
+      <li><b>22.04 GNOME 桌面 5/5 稳定性验证</b>(2026-11-16,main @ 1553b75ac,上一战役后 188 个提交):战役全套成功判据(shell 就绪带 guest 真时间戳、截屏桌面成帧、指针 + Super 键像素差交互门)5/5 全绿 —— shell 5 s 就绪、桌面成帧 9.1 s、Super 键交互 5/5、零 panic/OOM/SIGSEGV;证据 gnome-regress 工作分支 run/GNOME-REGRESS.md。</li>
       <li>GUI 验证器(<code>test/ubuntu-gui/verify.py</code>):每次启动 <b>23 项像素/串口检查</b>;键入式终端对话两次独立启动逐像素一致(convcheck)。</li>
       <li>OH 侧:bootanimation → SystemUI 锁屏 → 135+ 服务集,集群随机化测试持续走查(见压力子页)。</li>
       <li><b>riscv64 启动参数矩阵 16/16</b>:smp{2,4,6,8} × mem{1,2,4,8}G 十六个格子全部干净启动到 shell、零 panic 零挂起(矩阵铺开前存在多个 panic/挂起格)。</li>

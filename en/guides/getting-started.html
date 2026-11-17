@@ -190,7 +190,7 @@ cd /test/linux-ltp
     <h2 id="config"><span class="anchor">§7</span>Kernel configuration</h2>
     <pre><code>make config        <span class="c"># view (cat Kernel.toml)</span>
 make menuconfig    <span class="c"># TUI configuration (12 categories)</span></code></pre>
-    <p>Common <code>Kernel.toml</code> sections: <code>[memory]</code> (kernel_heap_size / physical_memory / page_size), <code>[smp]</code> (max_cpus), <code>[network]</code> (eth_mtu), <code>[printk]</code> (log_level), <code>[performance]</code> (opt_level / lto). Changes trigger a rebuild; the generated <code>kernel/src/config.rs</code> is <b>never hand-edited</b>. The repository's current <code>Kernel.toml</code> is authoritative (a few defaults move with lane needs, e.g. kernel heap size).</p>
+    <p>Common <code>Kernel.toml</code> sections: <code>[memory]</code> (kernel_heap_size / physical_memory / page_size), <code>[smp]</code> (max_cpus), <code>[network]</code> (eth_mtu), <code>[printk]</code> (log_level), <code>[performance]</code> (opt_level / lto). Changes trigger a rebuild; the generated <code>kernel/src/config.rs</code> is <b>never hand-edited</b>. The repository's current <code>Kernel.toml</code> is authoritative (a few defaults move with work-lane needs, e.g. kernel heap size).</p>
 
     <h2 id="trouble"><span class="anchor">§8</span>Troubleshooting</h2>
     <div class="tbl-wrap">

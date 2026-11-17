@@ -140,7 +140,7 @@ echo 0 &gt; tracing_on                                 <span class="c"># 停止�
     <h3>环与一致性</h3>
     <ul>
       <li>per-CPU 环,逐 CPU 序列号,读侧时间戳合并 —— 尾延迟 p99 1.403→0.741 µs(−47%,观测自身的成本有测量)。</li>
-      <li>600 s 全武装浸泡 1.56M 环覆写零 panic —— 环满覆写路径经过验证。</li>
+      <li>600 s 全武装浸泡 156 万次环覆写零 panic —— 环满覆写路径经过验证。</li>
     </ul>
 
     <h2 id="cost"><span class="anchor">§3b</span>成本模型</h2>
@@ -150,7 +150,7 @@ echo 0 &gt; tracing_on                                 <span class="c"># 停止�
         <tr><td>事件禁用</td><td class="num">单次 load + test + branch(调用点仅付实参求值)</td><td>release 反汇编逐站点验证(全部 39 个内核站点 one-load:movzbl+test+jcc)</td></tr>
         <tr><td>事件启用</td><td class="num">+13–19 ns/记录(纯写循环);+28–35 ns(epoll ping-pong 语境)</td><td>开/关对照微基准</td></tr>
         <tr><td>镜像代价</td><td class="num">+24,576 字节(+0.182%)</td><td>构建体积对比</td></tr>
-        <tr><td>浸泡</td><td class="num">600 s 全武装零 panic</td><td>1.56M 环覆写验证</td></tr>
+        <tr><td>浸泡</td><td class="num">600 s 全武装零 panic</td><td>156 万次环覆写验证</td></tr>
       </tbody>
     </table></div>
     <p class="callout">门禁口径:trace 站点的存在不改变门禁带 —— armed 关闭态在反汇编层面即不可达路径;调度事件普查与 pbench 锚均在未武装配置上计测。</p>

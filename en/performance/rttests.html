@@ -98,7 +98,7 @@
         <tr><td class="mono">pi_stress -g 2 -D 20 (inversions completed)</td><td class="num">132,074 inversions (-g 1, 11 s)</td><td class="num">132,074 inversions (-g 1, 11 s)</td><td>PI futex now follows Linux's shape (rt_mutex_setprio); -g 2 still wedges on a pre-existing scheduler slot defect</td></tr>
       </tbody>
     </table></div>
-    <p style="font-size:13px;color:var(--text-3)">A row without numbers is a failure: hackbench inet ≥2 groups has no number on Rux (loopback non-blocking-connect stalls; on record with the net lane); pi_stress once failed initialization on Rux (the PI-mutex UAPI chain) — this table carries the newest two-sided readings, and failed items show as such in their rows.</p>
+    <p style="font-size:13px;color:var(--text-3)">A row without numbers is a failure: hackbench inet ≥2 groups has no number on Rux (loopback non-blocking-connect stalls; on record with the networking work lane); pi_stress once failed initialization on Rux (the PI-mutex UAPI chain) — this table carries the newest two-sided readings, and failed items show as such in their rows.</p>
 
     <h2 id="rig"><span class="anchor">§2</span>Rig and method</h2>
     <ul>
