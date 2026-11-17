@@ -3674,7 +3674,7 @@ impl Task {
                     fn ph(mut v: u64) {
                         for _ in 0..16 {
                             let n = (v >> 60) as u8;
-                            putchar(if n < 10 { b'0' + n } else { b'a' + n + 10 });
+                            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
                             v <<= 4;
                         }
                     }

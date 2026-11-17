@@ -356,7 +356,7 @@ fn rt_wedge_dump_tick(cpu: usize) {
     fn ph(mut v: u64) {
         for _ in 0..16 {
             let n = (v >> 60) as u8;
-            putchar(if n < 10 { b'0' + n } else { b'a' + n + 10 });
+            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
             v <<= 4;
         }
     }
@@ -3538,7 +3538,7 @@ unsafe fn __schedule() {
                     let mut v = prev_pid as u64;
                     for _ in 0..8 {
                         let n = (v >> 28) as u8;
-                        putchar(if n < 10 { b'0' + n } else { b'a' + n + 10 });
+                        putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
                         v <<= 4;
                     }
                     putchar(b'\n');
@@ -3882,7 +3882,7 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
                 fn ph(mut v: u64) {
                     for _ in 0..16 {
                         let n = (v >> 60) as u8;
-                        putchar(if n < 10 { b'0' + n } else { b'a' + n + 10 });
+                        putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
                         v <<= 4;
                     }
                 }
@@ -3928,7 +3928,7 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
                     let mut v = skip_owner as u64;
                     for _ in 0..4 {
                         let n = (v >> 28) as u8;
-                        putchar(if n < 10 { b'0' + n } else { b'a' + n + 10 });
+                        putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
                         v <<= 4;
                     }
                     putchar(b'\n');
@@ -7221,7 +7221,7 @@ fn check_rt_preempt(task: *mut Task, cpus_allowed: u32) {
                             fn ph(mut v: u64) {
                                 for _ in 0..16 {
                                     let n = (v >> 60) as u8;
-                                    putchar(if n < 10 { b'0' + n } else { b'a' + n + 10 });
+                                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
                                     v <<= 4;
                                 }
                             }

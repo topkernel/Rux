@@ -6817,7 +6817,7 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
             fn ph(mut v: u64) {
                 for _ in 0..16 {
                     let n = (v >> 60) as u8;
-                    putchar(if n < 10 { b'0' + n } else { b'a' + n + 10 });
+                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
                     v <<= 4;
                 }
             }
@@ -7191,7 +7191,7 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
                     fn ph(mut v: u64) {
                         for _ in 0..16 {
                             let n = (v >> 60) as u8;
-                            putchar(if n < 10 { b'0' + n } else { b'a' + n + 10 });
+                            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
                             v <<= 4;
                         }
                     }
