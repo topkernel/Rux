@@ -1380,8 +1380,9 @@ fn read_block_once(
     // amplifier, and the b125 wedge hunt demands the BLK critical
     // section contain only ring RAM writes (see mod.rs forensics).
     let io_layout = alloc::alloc::Layout::from_size_align(64, 16).unwrap();
-    // SAFETY: Layout is non-zero-sized; null check follows immediately.
-    let io_buf: *mut u8 = unsafe { alloc::alloc::alloc(io_layout) };
+    // SUBMIT-2X: per-CPU io_buf pool — no global-allocator lock on the
+    // synchronous submit path either.
+    let io_buf: *mut u8 = crate::drivers::virtio::io_buf_alloc();
     if io_buf.is_null() {
         return Err("Failed to allocate header");
     }
@@ -1533,10 +1534,10 @@ fn read_block_once(
     let (used_ring_ptr, prev_expected) = match phase1 {
         Ok(v) => v,
         Err(e) => {
-            // SAFETY: io_buf was allocated above; every error above left
-            // no submitted chain referencing it. Freed outside the BLK
-            // lock's IRQ window.
-            unsafe { alloc::alloc::dealloc(io_buf, io_layout); }
+            // io_buf was allocated above; every error above left no
+            // submitted chain referencing it. Freed outside the BLK lock's
+            // IRQ window.
+            crate::drivers::virtio::io_buf_free(io_buf);
             return Err(e);
         }
     };
@@ -1602,11 +1603,10 @@ fn read_block_once(
     // SAFETY: resp_ptr was allocated above; device has completed the write.
     let status = unsafe { *resp_ptr };
 
-    // SAFETY: header_ptr is the base of the single combined R17-C block;
-    // resp lives inside it at +48.
-    unsafe {
-        alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-    }
+    // header_ptr is the base of the single combined R17-C block; resp
+    // lives inside it at +48. The device completed the chain, so the
+    // block is dead from its point of view — return it to the pool.
+    crate::drivers::virtio::io_buf_free(header_ptr as *mut u8);
 
     match status.status {
         crate::drivers::virtio::queue::status::VIRTIO_BLK_S_OK => Ok(buf.len()),
@@ -1662,8 +1662,9 @@ fn write_block_once(
     // R17-C combined header+resp block, allocated BEFORE the BLK lock
     // (same discipline as read_block_once — see the comment there).
     let io_layout = alloc::alloc::Layout::from_size_align(64, 16).unwrap();
-    // SAFETY: Layout is non-zero-sized; null check follows immediately.
-    let io_buf: *mut u8 = unsafe { alloc::alloc::alloc(io_layout) };
+    // SUBMIT-2X: per-CPU io_buf pool — no global-allocator lock on the
+    // synchronous submit path either.
+    let io_buf: *mut u8 = crate::drivers::virtio::io_buf_alloc();
     if io_buf.is_null() {
         return Err("Failed to allocate header");
     }
@@ -1796,10 +1797,10 @@ fn write_block_once(
     let (used_ring_ptr, prev_expected) = match phase1 {
         Ok(v) => v,
         Err(e) => {
-            // SAFETY: io_buf was allocated above; every error above left
-            // no submitted chain referencing it. Freed outside the BLK
-            // lock's IRQ window.
-            unsafe { alloc::alloc::dealloc(io_buf, io_layout); }
+            // io_buf was allocated above; every error above left no
+            // submitted chain referencing it. Freed outside the BLK lock's
+            // IRQ window.
+            crate::drivers::virtio::io_buf_free(io_buf);
             return Err(e);
         }
     };
@@ -1855,11 +1856,10 @@ fn write_block_once(
     // SAFETY: resp_ptr was allocated above; device has completed the write.
     let status = unsafe { *resp_ptr };
 
-    // SAFETY: header_ptr is the base of the single combined R17-C block;
-    // resp lives inside it at +48.
-    unsafe {
-        alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-    }
+    // header_ptr is the base of the single combined R17-C block; resp
+    // lives inside it at +48. The device completed the chain, so the
+    // block is dead from its point of view — return it to the pool.
+    crate::drivers::virtio::io_buf_free(header_ptr as *mut u8);
 
     match status.status {
         crate::drivers::virtio::queue::status::VIRTIO_BLK_S_OK => Ok(buf.len()),
@@ -1911,8 +1911,9 @@ fn flush_block_once(slot: usize) -> Result<usize, &'static str> {
     // Combined header+resp block (R17-C discipline, same as RW paths),
     // allocated BEFORE the BLK lock (see read_block_once).
     let io_layout = alloc::alloc::Layout::from_size_align(64, 16).unwrap();
-    // SAFETY: Layout is non-zero-sized; null check follows immediately.
-    let io_buf: *mut u8 = unsafe { alloc::alloc::alloc(io_layout) };
+    // SUBMIT-2X: per-CPU io_buf pool — no global-allocator lock on the
+    // synchronous submit path either.
+    let io_buf: *mut u8 = crate::drivers::virtio::io_buf_alloc();
     if io_buf.is_null() {
         return Err("Failed to allocate flush header");
     }
@@ -2014,10 +2015,10 @@ fn flush_block_once(slot: usize) -> Result<usize, &'static str> {
     let (used_ring_ptr, prev_expected) = match phase1 {
         Ok(v) => v,
         Err(e) => {
-            // SAFETY: io_buf was allocated above; every error above left
-            // no submitted chain referencing it. Freed outside the BLK
-            // lock's IRQ window.
-            unsafe { alloc::alloc::dealloc(io_buf, io_layout); }
+            // io_buf was allocated above; every error above left no
+            // submitted chain referencing it. Freed outside the BLK lock's
+            // IRQ window.
+            crate::drivers::virtio::io_buf_free(io_buf);
             return Err(e);
         }
     };
@@ -2065,10 +2066,9 @@ fn flush_block_once(slot: usize) -> Result<usize, &'static str> {
 
     // SAFETY: resp_ptr was allocated above; device has completed the flush.
     let status = unsafe { *resp_ptr };
-    // SAFETY: header_ptr is the base of the combined block; resp at +48.
-    unsafe {
-        alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-    }
+    // header_ptr is the base of the combined R17-C block; resp at +48.
+    // Device completed the chain — return the block to the pool.
+    crate::drivers::virtio::io_buf_free(header_ptr as *mut u8);
 
     match status.status {
         crate::drivers::virtio::queue::status::VIRTIO_BLK_S_OK => Ok(0),
