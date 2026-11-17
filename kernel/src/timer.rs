@@ -896,6 +896,7 @@ pub fn timer_softirq_handler(_nr: usize) {
             id: 0,
             action: Action::None,
             late_ticks: 0,
+            deadline: 0,
         }; wheel::EXPIRY_BUDGET]; crate::config::MAX_CPUS];
     let cpu = crate::arch::cpu_id() as usize;
     if cpu >= crate::config::MAX_CPUS {
@@ -944,7 +945,7 @@ pub fn expire_hres_inline() -> bool {
         }
     }
     static mut HRES_FAST_BUF: [FiredToken; wheel::EXPIRY_BUDGET] =
-        [FiredToken { id: 0, action: Action::None, late_ticks: 0 }; wheel::EXPIRY_BUDGET];
+        [FiredToken { id: 0, action: Action::None, late_ticks: 0, deadline: 0 }; wheel::EXPIRY_BUDGET];
     // SAFETY: single-CPU-use buffer owned by this call path (see the
     // nesting note above); the wheel writes at most EXPIRY_BUDGET tokens.
     let buf: *mut [FiredToken; wheel::EXPIRY_BUDGET] =
@@ -1123,6 +1124,7 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
         {
             const TNS_PER_TICK: u64 = 1_000_000_000 / crate::config::TIMER_CLOCK_FREQ_HZ as u64;
             let late_us = late_ticks * TNS_PER_TICK / 1000;
+            let token_deadline = token.deadline;
             static FL_MAX: AtomicU64 = AtomicU64::new(0);
             static FL_N: core::sync::atomic::AtomicU32 =
                 core::sync::atomic::AtomicU32::new(0);
@@ -1147,6 +1149,48 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
                                 }).unwrap_or((u64::MAX, 9, 0));
                             for &b in b"\nCYC-FIRE-LATE us=" { putchar(b); }
                             ph(late_us);
+                            // rt-r4 discriminator: this CPU's LAST LAPIC
+                            // arm deadline minus the wheel deadline —
+                            // armdl≈0 says the one-shot was armed AT the
+                            // deadline and KVM delivered it late (host
+                            // term); armdl≈late_us says it was armed AT
+                            // the late instant (kernel coarse-arm term).
+                            #[cfg(feature = "x86_64")]
+                            let arm_dl = crate::drivers::intc::apic::last_arm_deadline(
+                                crate::arch::cpu_id() as usize,
+                            );
+                            #[cfg(not(feature = "x86_64"))]
+                            let arm_dl: u64 = 0;
+                            for &b in b" armdl=" { putchar(b); }
+                            if arm_dl >= token_deadline {
+                                ph((arm_dl - token_deadline) * TNS_PER_TICK / 1000);
+                            } else {
+                                // armed EARLIER than the deadline (a prior
+                                // event's arm): print the wrapped distance
+                                // as a negative marker (huge hex).
+                                ph(u64::MAX);
+                            }
+                            // rt-r4 rate-bias discriminator: the HPET is
+                            // the truth source the TSC track was calibrated
+                            // against. hlate≈0 with us>0 says the fire was
+                            // PUNCTUAL in true time and the TSC-track
+                            // mapping runs fast (track bias); hlate≈us says
+                            // true lateness (LAPIC arm conversion or
+                            // delivery). One MMIO read, tail-print path
+                            // only (budget 12/boot).
+                            #[cfg(feature = "x86_64")]
+                            {
+                                let hlate = if crate::drivers::timer::hpet::ready() {
+                                    crate::drivers::timer::hpet::read_time_nominal()
+                                        .saturating_sub(token_deadline)
+                                        .saturating_mul(TNS_PER_TICK)
+                                        / 1000
+                                } else {
+                                    u64::MAX
+                                };
+                                for &b in b" hlate=" { putchar(b); }
+                                ph(hlate);
+                            }
                             for &b in b" pid=" { putchar(b); }
                             ph(match action { Action::Wake { pid } => pid as u64, _ => 0 });
                             for &b in b" int_ctx_pid=0x" { putchar(b); }
@@ -1165,6 +1209,25 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
         }
         if late_ticks > 0 {
             WW_FIRE_N.fetch_add(1, Ordering::Relaxed);
+            // rt-r4: sum + us-max for the AVG side (see WW_FIRE_SUM_TICKS).
+            // Plain add: wrapping needs ~584 years of summed lateness —
+            // saturation is unreachable; fetch_add is one RMW.
+            WW_FIRE_SUM_TICKS.fetch_add(late_ticks, Ordering::Relaxed);
+            // Divide-first tick→µs (overflow discipline; 10 ticks/µs).
+            let late_us_all = late_ticks
+                / (crate::config::TIMER_CLOCK_FREQ_HZ as u64 / 1_000_000).max(1);
+            let mut cur = WW_FIRE_MAX_US.load(Ordering::Relaxed);
+            while late_us_all > cur {
+                match WW_FIRE_MAX_US.compare_exchange_weak(
+                    cur,
+                    late_us_all,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(actual) => cur = actual,
+                }
+            }
             let late_ms = late_ticks * 1000 / crate::config::TIMER_CLOCK_FREQ_HZ;
             if late_ms >= 1 {
                 WW_FIRE_LATE_N.fetch_add(1, Ordering::Relaxed);
@@ -1300,6 +1363,15 @@ static WW_HRES_N: [AtomicU64; crate::config::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
 static WW_FIRE_N: AtomicU64 = AtomicU64::new(0);
 static WW_FIRE_LATE_MAX_MS: AtomicU64 = AtomicU64::new(0);
+/// rt-r4 (R2 residual attribution): fire-lateness SUM in time ticks over
+/// the same population as WW_FIRE_N (every hres fire with late_ticks>0 —
+/// effectively ALL hres wake fires: any fire past its deadline by one
+/// tick counts). avg = SUM/N is the AVG side of the CYC-FIRE-LATE tail
+/// bracket (46 us cyclictest avg decomposition).
+static WW_FIRE_SUM_TICKS: AtomicU64 = AtomicU64::new(0);
+/// rt-r4: cumulative max fire lateness in us (the existing MAX_MS is
+/// ms-granular — useless at the 10-1000 us class the residual lives in).
+static WW_FIRE_MAX_US: AtomicU64 = AtomicU64::new(0);
 static WW_FIRE_LATE_N: AtomicU64 = AtomicU64::new(0);
 static WW_PIDMISS_N: AtomicU64 = AtomicU64::new(0);
 static WW_LAST_HEARTBEAT: AtomicU64 = AtomicU64::new(0);
@@ -1463,6 +1535,29 @@ fn ww_heartbeat(now_time: u64) {
         mm_d[0],
         mm_d[1]
     );
+
+    // rt-r4 (R2 residual attribution): the AVG side of the CYC brackets —
+    // cumulative hres fire-lateness mean/max plus the RT-class wake→pick
+    // mean/max. With a cyclictest FIFO run, cyclictest_avg ≈ fire_avg +
+    // rt_pick_avg + switch/user overhead; the residual attribution names
+    // the top term from these two lines. Divide-first tick→µs (the WW
+    // overflow discipline: sums can grow unbounded across a long boot).
+    {
+        let ticks_per_us = (crate::config::TIMER_CLOCK_FREQ_HZ / 1_000_000).max(1);
+        let f_n = WW_FIRE_N.load(Ordering::Relaxed);
+        let f_sum_us = WW_FIRE_SUM_TICKS.load(Ordering::Relaxed) / ticks_per_us;
+        let f_avg = if f_n > 0 { f_sum_us / f_n } else { 0 };
+        let (rt_n, rt_avg, rt_max) = crate::sched::wakewatch::ww_rt_pick_stats();
+        crate::pr_info!(
+            "WW6: fire_n={} fire_avg={}us fire_max={}us rt_pick_n={} rt_pick_avg={}us rt_pick_max={}us",
+            f_n,
+            f_avg,
+            WW_FIRE_MAX_US.load(Ordering::Relaxed),
+            rt_n,
+            rt_avg,
+            rt_max
+        );
+    }
 
     crate::pr_info!(
         "WW: fires={} late_max={}ms pidmiss={} rearm={} wheel={}/{} hres_next={}ms\nWW2: si_runs={} si_busy={}ms ticks=[{},{}] vec=[{},{},{},{},{},{},{},{},{},{}]\nWW3: grq={} cfs={} idle={:#x} nr={} cpu0=(pid={} st={:#x} pc={}) cpu1=(pid={} st={:#x} pc={})",

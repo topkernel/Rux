@@ -2083,7 +2083,142 @@ unsafe impl Sync for BinderTxn {}
 unsafe impl Send for BinderProc {}
 unsafe impl Sync for BinderProc {}
 
-fn world_lock() -> crate::sync::spinlock::SpinlockIrqGuard<'static, Option<World>> {
+/// RT-R4 (WORLD per-caller attribution): world_lock's sections all
+/// charge to ONE REST_SITES row (binder.rs:2092) — the 6–8 ms max could
+/// not be attributed to a caller. This wrapper records each section's
+/// span against the CALLER's Location (world_lock is #[track_caller]),
+/// and the syscost dump prints the top rows.
+struct WorldGuard<'a> {
+    inner: crate::sync::spinlock::SpinlockIrqGuard<'a, Option<World>>,
+    t0: u64,
+    loc: &'static core::panic::Location<'static>,
+}
+
+impl core::ops::Deref for WorldGuard<'_> {
+    type Target = Option<World>;
+    #[inline]
+    fn deref(&self) -> &Option<World> {
+        &self.inner
+    }
+}
+
+impl core::ops::DerefMut for WorldGuard<'_> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Option<World> {
+        &mut self.inner
+    }
+}
+
+impl Drop for WorldGuard<'_> {
+    fn drop(&mut self) {
+        // Span measured before the inner guard's unlock (Drop::drop runs
+        // before field drops). Raw TSC; converted at print time.
+        let span = crate::arch::cpu::read_counter().saturating_sub(self.t0);
+        let key = self.loc as *const _ as u64;
+        for i in 0..WORLD_SEC_N {
+            let cur = WORLD_SEC[i].loc.load(core::sync::atomic::Ordering::Relaxed);
+            if cur == key {
+                WORLD_SEC[i].n.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                let mut m = WORLD_SEC[i].max.load(core::sync::atomic::Ordering::Relaxed);
+                while span > m {
+                    match WORLD_SEC[i].max.compare_exchange_weak(
+                        m,
+                        span,
+                        core::sync::atomic::Ordering::Relaxed,
+                        core::sync::atomic::Ordering::Relaxed,
+                    ) {
+                        Ok(_) => break,
+                        Err(a) => m = a,
+                    }
+                }
+                return;
+            }
+            if cur == 0
+                && WORLD_SEC[i]
+                    .loc
+                    .compare_exchange_weak(
+                        0,
+                        key,
+                        core::sync::atomic::Ordering::Relaxed,
+                        core::sync::atomic::Ordering::Relaxed,
+                    )
+                    .is_ok()
+            {
+                WORLD_SEC[i].n.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                WORLD_SEC[i]
+                    .max
+                    .store(span, core::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+        }
+        // Table full: charge the overflow row.
+        WORLD_SEC_OF.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+const WORLD_SEC_N: usize = 24;
+
+struct WorldSecRow {
+    loc: core::sync::atomic::AtomicU64,
+    n: core::sync::atomic::AtomicU64,
+    max: core::sync::atomic::AtomicU64,
+}
+
+static WORLD_SEC: [WorldSecRow; WORLD_SEC_N] =
+    [const { WorldSecRow { loc: core::sync::atomic::AtomicU64::new(0), n: core::sync::atomic::AtomicU64::new(0), max: core::sync::atomic::AtomicU64::new(0) } }; WORLD_SEC_N];
+static WORLD_SEC_OF: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The per-caller WORLD section maxima, formatted for the syscost dump
+/// (top by max; empty string when no section ever ran).
+pub fn world_section_report() -> alloc::string::String {
+    use alloc::format;
+    let tsc_hz = crate::arch::cpu::get_counter_freq().max(1);
+    let usd = (tsc_hz / 1_000_000).max(1);
+    let mut rows: [(u64, u64, &'static core::panic::Location<'static>); 8] =
+        [(0, 0, core::panic::Location::caller()); 8];
+    for r in WORLD_SEC.iter() {
+        let key = r.loc.load(core::sync::atomic::Ordering::Relaxed);
+        if key == 0 {
+            continue;
+        }
+        let mx = r.max.load(core::sync::atomic::Ordering::Relaxed);
+        // SAFETY: keys are &'static Location refs stored at open time.
+        let l: &'static core::panic::Location<'static> =
+            unsafe { &*(key as *const core::panic::Location<'static>) };
+        for t in 0..rows.len() {
+            if mx > rows[t].0 {
+                let mut j = rows.len() - 1;
+                while j > t {
+                    rows[j] = rows[j - 1];
+                    j -= 1;
+                }
+                rows[t] = (mx, r.n.load(core::sync::atomic::Ordering::Relaxed), l);
+                break;
+            }
+        }
+    }
+    let mut s = alloc::string::String::new();
+    for (mx, n, l) in rows {
+        if mx == 0 {
+            continue;
+        }
+        s.push_str(&format!(
+            "\nSYSCOST world-sec {}:{} n={} max={}us",
+            l.file(),
+            l.line(),
+            n,
+            mx / usd
+        ));
+    }
+    let of = WORLD_SEC_OF.load(core::sync::atomic::Ordering::Relaxed);
+    if of != 0 {
+        s.push_str(&format!("\nSYSCOST world-sec of: n={}", of));
+    }
+    s
+}
+
+#[track_caller]
+fn world_lock() -> WorldGuard<'static> {
     // 105th WORLD-wait census (bindertrace): the acquire-wait time in
     // the nominal clock domain, bucketed like BRTT. Two relaxed loads
     // + one rdtsc per acquisition when armed; ~2 instructions when not.
@@ -2096,7 +2231,11 @@ fn world_lock() -> crate::sync::spinlock::SpinlockIrqGuard<'static, Option<World
     if g.is_none() {
         *g = Some(World { next_id: 1, procs: Vec::new(), mgr_node: [None, None, None] });
     }
-    g
+    WorldGuard {
+        inner: g,
+        t0: crate::arch::cpu::read_counter(),
+        loc: core::panic::Location::caller(),
+    }
 }
 
 /// sc160: non-blocking WORLD acquire for diagnostic readers that may be
@@ -3602,112 +3741,137 @@ pub fn binder_on_tgid_exit(tgid: u32) {
     {
         let mut w = world_lock();
         let Some(world) = w.as_mut() else { return };
-        // Collect (owner, node) pairs registered by the dying tgid.
-        // SAFETY: all access below is under WORLD.
-        let mut victims: Vec<(Arc<BinderProc>, Arc<BinderNode>)> = Vec::new();
-        for p in world.procs.clone() {
-            // SAFETY: under WORLD.
-            for n in unsafe { pm(world, &p).im().nodes.clone() } {
-                if n.reg_tgid == tgid && n.reg_tgid != p.pid as u32 {
-                    victims.push((p.clone(), n));
+        // RT-R4 (binder.rs:2092 held the 8 ms REST max, pa-r4m1): the
+        // old shape cloned EVERY proc's ENTIRE node list up front, then
+        // PER VICTIM NODE re-drained the owner todo, re-cloned
+        // world.procs, and re-ran an O(nodes) retain — an irqsave
+        // section of O(procs×nodes + victims×(procs + nodes + todo))
+        // with a heap allocation per proc per exit. Restructured with
+        // identical WORLD-guard semantics: victims are grouped per
+        // OWNER proc as they are found (no whole-list clones), and each
+        // owner pays ONE todo pass and ONE retain for all its victims.
+        // SAFETY: all access below is under WORLD (the pm contract).
+        let procs = world.procs.clone(); // once: the Arc list, small
+        let mut total_victims = 0usize;
+        for p in &procs {
+            // Victims of THIS owner (by reference; clone only the arcs
+            // that match).
+            let mut owner_victims: Vec<Arc<BinderNode>> = Vec::new();
+            unsafe {
+                for n in pm(world, p).im().nodes.iter() {
+                    if n.reg_tgid == tgid && n.reg_tgid != p.pid as u32 {
+                        owner_victims.push(n.clone());
+                    }
                 }
             }
-        }
-        if victims.is_empty() {
-            return;
-        }
-        static EXIT_PROBE_N: core::sync::atomic::AtomicU32 =
-            core::sync::atomic::AtomicU32::new(0);
-        if EXIT_PROBE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
-            crate::pr_warn!(
-                "binder: tgid {} exit reaped {} child-registered nodes",
-                tgid,
-                victims.len()
-            );
-        }
-        // SAFETY: WORLD held for the rest of the block.
-        unsafe {
-            for (owner, node) in &victims {
-                // 1. Fail proc-todo transactions aimed at this node.
-                let queued: Vec<Work> = pm(world, owner).im().todo.drain(..).collect();
+            if owner_victims.is_empty() {
+                continue;
+            }
+            total_victims += owner_victims.len();
+            // 1. ONE pass over the owner todo for all of this owner's
+            //    victims (the old shape drained + requeued the whole
+            //    todo PER victim node — O(todo × victims) pushes).
+            unsafe {
+                let queued: Vec<Work> = pm(world, p).im().todo.drain(..).collect();
                 for wk in queued {
-                    let hit = match &wk {
+                    let victim_t = match &wk {
                         Work::Transaction(t)
                             if t
                                 .target_node
                                 .as_ref()
-                                .map(|n| Arc::ptr_eq(n, node))
-                                .unwrap_or(false) =>
+                                .is_some_and(|n| owner_victims.iter().any(|v| Arc::ptr_eq(v, n))) =>
                         {
-                            wakes.extend(dead_reply_to_sender(world, owner, t));
-                            true
+                            Some(t)
                         }
-                        _ => false,
+                        _ => None,
                     };
-                    if hit {
-                        finish_work(world, owner, wk);
+                    if let Some(t) = victim_t {
+                        wakes.extend(dead_reply_to_sender(world, p, t));
+                        finish_work(world, p, wk);
                     } else {
-                        pm(world, owner).im().todo.push_back(wk);
+                        pm(world, p).im().todo.push_back(wk);
                     }
                 }
-                // 2. Fail the node's parked async transactions.
-                let parked: Vec<Arc<BinderTxn>> = node.st().async_todo.drain(..).collect();
-                for t in parked {
-                    t.set_holds_async_slot(false);
-                    wakes.extend(dead_reply_to_sender(world, owner, &t));
-                    finish_work(world, owner, Work::Transaction(t));
-                }
-                // 3. Mark dead + queue DeadBinder for armed death
-                //    recipients across every holder proc.
-                node.dead.store(true, core::sync::atomic::Ordering::Release);
-                for q in world.procs.clone() {
-                    if Arc::ptr_eq(&q, owner) {
-                        continue;
+            }
+            // SAFETY: WORLD held for the rest of the block.
+            unsafe {
+                for node in &owner_victims {
+                    // 2. Fail the node's parked async transactions.
+                    let parked: Vec<Arc<BinderTxn>> = node.st().async_todo.drain(..).collect();
+                    for t in parked {
+                        t.set_holds_async_slot(false);
+                        wakes.extend(dead_reply_to_sender(world, p, &t));
+                        finish_work(world, p, Work::Transaction(t));
                     }
-                    let qim = pm(world, &q);
-                    for r in qim.im().refs.iter_mut() {
-                        if Arc::ptr_eq(&r.node, node) {
-                            if let Some(d) = r.death.as_mut() {
-                                if matches!(d.phase, DeathPhase::Armed) {
-                                    d.phase = DeathPhase::Queued;
-                                    // lb48: the child-node death notice
-                                    // (reg_tgid exit path) — same class as
-                                    // the proc-exit notice. lb51: lockless
-                                    // writer + budget (under WORLD).
-                                    // 110th: rides dfx=bindertrace.
-                                    static CNOTICE_N: core::sync::atomic::AtomicUsize =
-                                        core::sync::atomic::AtomicUsize::new(0);
-                                    if crate::trace::EVENT_BINDERTRACE.armed() && CNOTICE_N
-                                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
-                                        < 120
-                                    {
-                                        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
-                                        use core::fmt::Write as _;
-                                        let _ = writeln!(
-                                            w,
-                                            "binder: child-node death notice pid {} desc {} cookie {:#x} (owner {} reg_tgid {} exited)",
-                                            q.pid,
-                                            r.desc,
-                                            d.cookie,
-                                            owner.pid,
-                                            tgid
-                                        );
+                    // 3. Mark dead + queue DeadBinder for armed death
+                    //    recipients across every holder proc. RT-R4:
+                    //    iterate the ONE procs snapshot by reference
+                    //    (the old shape re-cloned the list per victim
+                    //    node).
+                    node.dead.store(true, core::sync::atomic::Ordering::Release);
+                    for q in &procs {
+                        if Arc::ptr_eq(q, p) {
+                            continue;
+                        }
+                        let qim = pm(world, q);
+                        for r in qim.im().refs.iter_mut() {
+                            if Arc::ptr_eq(&r.node, node) {
+                                if let Some(d) = r.death.as_mut() {
+                                    if matches!(d.phase, DeathPhase::Armed) {
+                                        d.phase = DeathPhase::Queued;
+                                        // lb48: the child-node death notice
+                                        // (reg_tgid exit path) — same class as
+                                        // the proc-exit notice. lb51: lockless
+                                        // writer + budget (under WORLD).
+                                        // 110th: rides dfx=bindertrace.
+                                        static CNOTICE_N: core::sync::atomic::AtomicUsize =
+                                            core::sync::atomic::AtomicUsize::new(0);
+                                        if crate::trace::EVENT_BINDERTRACE.armed() && CNOTICE_N
+                                            .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                                            < 120
+                                        {
+                                            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                                            use core::fmt::Write as _;
+                                            let _ = writeln!(
+                                                w,
+                                                "binder: child-node death notice pid {} desc {} cookie {:#x} (owner {} reg_tgid {} exited)",
+                                                q.pid,
+                                                r.desc,
+                                                d.cookie,
+                                                p.pid,
+                                                tgid
+                                            );
+                                        }
+                                        qim.im().todo.push_back(Work::DeadBinder {
+                                            desc: r.desc,
+                                            cookie: d.cookie,
+                                        });
+                                        wakes.push(q.clone());
                                     }
-                                    qim.im().todo.push_back(Work::DeadBinder {
-                                        desc: r.desc,
-                                        cookie: d.cookie,
-                                    });
-                                    wakes.push(q.clone());
                                 }
                             }
                         }
                     }
                 }
-                // 4. Drop the node from the owner's list.
-                pm(world, owner)
-                    .im()
-                    .nodes
-                    .retain(|n| !Arc::ptr_eq(n, node));
+                // 4. Drop ALL of this owner's victim nodes in ONE retain
+                //    (the old shape ran an O(nodes) retain per victim).
+                pm(world, p).im().nodes.retain(|n| {
+                    !owner_victims.iter().any(|v| Arc::ptr_eq(v, n))
+                });
+            }
+        }
+        // RT-R4: the count print moved OUT of the irqsave section (the
+        // old pr_warn ran under WORLD). Budget consumed only on
+        // victim-bearing calls (the original's early return shape).
+        if total_victims > 0 {
+            static EXIT_PROBE_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            if EXIT_PROBE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+                crate::pr_warn!(
+                    "binder: tgid {} exit reaped {} child-registered nodes",
+                    tgid,
+                    total_victims
+                );
             }
         }
     }
@@ -9942,6 +10106,32 @@ fn binder_transaction(
     let mut sg_total = sg_size;
     let txn_id;
 
+    // RT-R4 (binder.rs:10110 held the 9 ms WORLD max): the poison-32
+    // class-ID sampler used to copy_from_user INSIDE the irqsave WORLD
+    // section — a user read can take a page fault (demand paging, the
+    // exception-table walk) with IRQs off under the global binder lock;
+    // that was the multi-ms tail. The read only needs `tr`, so hoist it
+    // BEFORE the section; the (budget-gated) print stays where the
+    // lock-context values live.
+    let p32_sample: Option<i32> = if ams46_on() && tr.flags & _TF_STATUS_CODE != 0 && tr.data_size >= 4
+    {
+        let mut val: i32 = 0;
+        if unsafe {
+            crate::arch::uaccess::copy_from_user(
+                &mut val as *mut i32 as *mut u8,
+                tr.data_buffer as *const u8,
+                4,
+            )
+        } == 0
+        {
+            Some(val)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     {
         let mut w = world_lock();
         // SAFETY: all inner access in this block is under WORLD.
@@ -10119,15 +10309,12 @@ fn binder_transaction(
                     && tr.flags & _TF_STATUS_CODE != 0
                     && tr.data_size >= 4
                 {
-                    let mut val: i32 = 0;
-                    let ok = unsafe {
-                        crate::arch::uaccess::copy_from_user(
-                            &mut val as *mut i32 as *mut u8,
-                            tr.data_buffer as *const u8,
-                            4,
-                        )
-                    } == 0;
-                    if ok && val == 32 {
+                    // RT-R4: the 4-byte user read ran INSIDE this WORLD
+                    // irqsave section (the 9 ms max at binder.rs:10110) —
+                    // hoisted to p32_sample BEFORE the lock; only the
+                    // budget-gated print remains here.
+                    if let Some(val) = p32_sample {
+                        if val == 32 {
                         // HOTPATH-PRINT: binder poison-32 delivery hunt;
                         // budget-gated (P32_N) — oh-launcher lane. 24th
                         // session: 4000 -> 60. The poison-32 proxy-death
@@ -10150,6 +10337,7 @@ fn binder_transaction(
                                 ftid,
                                 t.code
                             );
+                        }
                         }
                     }
                 }

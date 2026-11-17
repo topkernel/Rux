@@ -86,6 +86,13 @@ static TABLE: [WwSlot; SLOTS] = {
 // ---- cumulative counters (read by the 1 Hz heartbeat) ----
 static WAKE_N: AtomicU64 = AtomicU64::new(0);
 static PICK_N: AtomicU64 = AtomicU64::new(0);
+// rt-r4 (R2 residual attribution): RT-class (FIFO/RR) wake→pick deltas —
+// the pick-side AVG of the CYC-PICK-LATE tail bracket, filtered to the
+// classes cyclictest runs under so background CFS chatter does not dilute
+// the mean. Unconditional relaxed atomics under the GRQ (ns-class).
+static RT_PICK_N: AtomicU64 = AtomicU64::new(0);
+static RT_PICK_SUM_TICKS: AtomicU64 = AtomicU64::new(0);
+static RT_PICK_MAX_US: AtomicU64 = AtomicU64::new(0);
 /// Sum of observed wake→pick deltas (ticks) over PICKED stamps.
 static DELTA_SUM_TICKS: AtomicU64 = AtomicU64::new(0);
 static STRAND_N: AtomicU64 = AtomicU64::new(0);
@@ -108,6 +115,16 @@ pub fn ww_subgate_counts() -> (u64, u64, u64) {
         STRAND_N500.load(Ordering::Relaxed),
         STRAND_N750.load(Ordering::Relaxed),
     )
+}
+
+/// rt-r4: (rt_pick_n, avg_us, max_us) for the RT-class wake→pick deltas
+/// (cumulative since boot) — the WW6 heartbeat line reads this.
+pub fn ww_rt_pick_stats() -> (u64, u64, u64) {
+    let n = RT_PICK_N.load(Ordering::Relaxed);
+    // ticks → µs (10 MHz: 10 ticks per µs); u64 holds ~584 years of sum.
+    let sum_us = RT_PICK_SUM_TICKS.load(Ordering::Relaxed) * 1_000_000 / TIMER_CLOCK_FREQ_HZ;
+    let avg = if n > 0 { sum_us / n } else { 0 };
+    (n, avg, RT_PICK_MAX_US.load(Ordering::Relaxed))
 }
 
 #[inline]
@@ -175,6 +192,27 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
     PICK_N.fetch_add(1, Ordering::Relaxed);
     let delta = now_ticks().saturating_sub(stamp);
     DELTA_SUM_TICKS.fetch_add(delta, Ordering::Relaxed);
+    // rt-r4: RT-class pick deltas (avg + µs max) — see RT_PICK_N.
+    if matches!(
+        unsafe { (*task).policy() },
+        crate::process::task::SchedPolicy::Fifo | crate::process::task::SchedPolicy::Rr
+    ) {
+        RT_PICK_N.fetch_add(1, Ordering::Relaxed);
+        RT_PICK_SUM_TICKS.fetch_add(delta, Ordering::Relaxed);
+        let us = delta * 1_000_000 / TIMER_CLOCK_FREQ_HZ;
+        let mut cur = RT_PICK_MAX_US.load(Ordering::Relaxed);
+        while us > cur {
+            match RT_PICK_MAX_US.compare_exchange_weak(
+                cur,
+                us,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => cur = actual,
+            }
+        }
+    }
     // timer-gap lane (cyclictest tail attribution, cmdline cycdbg=1):
     // the PICK-side half of the Max decomposition — a wake→pick delta
     // over 100 us prints (budget 8/boot, direct console — GRQ held
