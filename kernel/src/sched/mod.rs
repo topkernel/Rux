@@ -55,6 +55,7 @@ pub use sched::{
     resched_curr,
     resched_cpu,
     claim_idle_cpu_for,
+    claim_idle_cpu_for_prefer,
     preempt_check_wake,
     preempt_check_wake_sync,
     // 105th wake-dispatch census latches (bindertrace consumer).
