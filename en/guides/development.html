@@ -125,7 +125,7 @@
         <thead><tr><th>Domain</th><th>Guarded metrics</th></tr></thead>
         <tbody>
           <tr><td>Memory allocation / reclaim</td><td>small_alloc class-lock sections ≤ ~25M/boot, REST share ≤10%, no reclaim slow-path emergence, zone free floor unchanged</td></tr>
-          <tr><td>Scheduler</td><td>GRQ gate metric (call-site IF=0 span average, incl. acquisition wait) band 1200–7320 ns (measured 2786 ns; switch critical section ~102 ns), census in band, wake→pick and context-switch cost in band</td></tr>
+          <tr><td>Scheduler</td><td>GRQ in-lock 241–273 ns (release, exact probe); the 70–84 ns lock wait is the KVM cross-vCPU locked-instruction tax (not the GRQ's own cost); gate metric (call-site IF=0 span average, incl. acquisition wait) band 1200–7320 ns (measured 2786 ns), census in band, wake→pick and context-switch cost in band</td></tr>
           <tr><td>Filesystem hot paths</td><td>pbench fs rows (stat/mkdir+rmdir/unlink/write+fsync) in band, no new sync-write classes, buffer-cache hit rate ≥ baseline</td></tr>
           <tr><td>Interrupts / IRQ paths</td><td>IF=0 share in band (currently 20.4%±3pp), closed cli segments 3–7 ms class, no new IRQ-OFF print classes</td></tr>
           <tr><td>IPC</td><td>pipe / unix round-trip medians in band, truesize/writev path not regressed, connect-storm volumes in band</td></tr>

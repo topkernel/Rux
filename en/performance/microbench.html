@@ -120,7 +120,7 @@
 
     <h2 id="cctx"><span class="anchor">§3</span>The context-switch cost anatomy (cctx segments, a mechanism note)</h2>
     <ul>
-      <li>The x86_64 switch machinery ~620 ns (schedule 125 + the GRQ lock 102 + pick 96 + the mm switch 202–295 + FPU 34 + FS/GS 54 + GPRs ~22) — the reference kernel's native switch machinery ~910 ns; after the fdget borrow + getppid O(1), the pbench p2_ctxsw pipe ping-pong reads <b>0.090–0.105 µs</b>.</li>
+      <li>The x86_64 switch machinery ~620 ns (schedule 125 + <b>the GRQ lock wait 102</b> + pick 96 + the mm switch 202–295 + FPU 34 + FS/GS 54 + GPRs ~22) — the reference kernel's native switch machinery ~910 ns; the "GRQ lock wait" is the KVM tax on cross-vCPU locked instructions (the reference's per-rq lock pays it too — it does not mean the GRQ is slow), while the GRQ's in-lock work is counted separately: exact hold 241–273 ns (release; tree work ~20–30 ns + D-1 bookkeeping). After the fdget borrow + getppid O(1), the pbench p2_ctxsw pipe ping-pong reads <b>0.090–0.105 µs</b>.</li>
       <li>The wake-side segments (WK_SEL/WK_ENQ/WK_DISP/IPI_N/IPI_NS) and the GRQ-hold decomposition are on <a href="../architecture/scheduler.html#instruments">scheduler §8</a>; the NOHZ hostile-load A/B (0/10→11/12) on <a href="../architecture/interrupts.html#nohz">interrupts &amp; timers §6</a>.</li>
     </ul>
 
