@@ -230,6 +230,12 @@ fn retire_inode_arc(a: Arc<Inode>) {
     DENTRY_RET_INODE.lock_irqsave().push(a);
 }
 
+/// (stat-2x lane) Park a replaced big-memo table (a banked walk reader
+/// may still hold its base pointer mid-read); freed by the same
+/// reader-quiescent drain as retired dentries/inodes.
+static DENTRY_RET_MEMO: Spinlock<Vec<alloc::boxed::Box<BigMemoTable>>> =
+    Spinlock::new(Vec::new());
+
 /// Drop retired dentries/inodes once no reader can be mid-read.
 ///
 /// Quiescence: every bank reads 0 (each scan load Acquire — reading 0
@@ -252,7 +258,12 @@ pub fn dentry_drain_if_quiescent(parked: bool) {
         if d.is_empty() {
             let i = DENTRY_RET_INODE.lock_irqsave();
             if i.is_empty() {
-                return;
+                drop(i);
+                drop(d);
+                let m = DENTRY_RET_MEMO.lock_irqsave();
+                if m.is_empty() {
+                    return;
+                }
             }
         }
     }
@@ -286,11 +297,13 @@ pub fn dentry_drain_if_quiescent(parked: bool) {
         let _slow = DENTRY_SLOW_READ.lock_irqsave();
         let taken_d = core::mem::take(&mut *DENTRY_RET_DENTRY.lock_irqsave());
         let taken_i = core::mem::take(&mut *DENTRY_RET_INODE.lock_irqsave());
+        let taken_m = core::mem::take(&mut *DENTRY_RET_MEMO.lock_irqsave());
         // Drops run inside the slow-lock scope: any cascade (a dentry's
         // child map / inode slot releasing further Arcs) cannot race a
         // banked reader, which by the scan above cannot exist now.
         drop(taken_d);
         drop(taken_i);
+        drop(taken_m);
     }
 }
 
@@ -334,6 +347,47 @@ const CHILD_MEMO_NAME_MAX: usize = 24;
 const CHILD_MEMO_SLOTS: usize = 4;
 const CHILD_MEMO_MASK: usize = CHILD_MEMO_SLOTS - 1;
 
+/// (stat-2x lane) Secondary lock-free memo for LARGE directories.
+/// The inline 4-slot memo collapses to a ~1-in-N hit rate once a
+/// directory holds more than a handful of children (a 1000-entry tree
+/// cycling names: every final-component lookup missed and paid the
+/// children spinlock + BTreeMap walk — the dominant stat/open cost on
+/// the pbench tree shape; measured 0.491→0.291 µs med stat once the
+/// final component rides a memo). The table is sized ADAPTIVELY
+/// (next_pow2 of twice the live child count, clamped to
+/// [CHILD_MEMO_BIG_MIN_SLOTS, CHILD_MEMO_BIG_MAX_SLOTS]) so a
+/// direct-mapped slot count at or below the cycling name population
+/// cannot thrash; it is reallocated under the children lock whenever
+/// the directory outgrows it (a replaced table is parked in
+/// DENTRY_RET_MEMO and freed by the same reader-quiescent drain that
+/// frees retired dentries — a banked reader may still be mid-read of
+/// the old base). Same seqlock-slot + children_ver discipline as the
+/// inline memo — no new invalidation rules exist.
+/// Entry threshold: below this the inline memo serves fine.
+const CHILD_MEMO_BIG_MIN: usize = 12;
+/// Size clamps: 128 slots (8 KB) minimum, 2048 slots (128 KB) maximum
+/// per directory. Above the cap the hit rate degrades gracefully
+/// (direct-mapped conflict misses fall to the locked map lookup).
+const CHILD_MEMO_BIG_MIN_SLOTS: usize = 128;
+const CHILD_MEMO_BIG_MAX_SLOTS: usize = 2048;
+
+/// (stat-2x lane) The big-memo allocation: SELF-DESCRIBING so a
+/// lock-free reader that Acquire-loads the published base can size its
+/// slice without a second mirror that could race a concurrent grow
+/// (old base + new count would read past the old table). `nslots` is
+/// immutable after construction — the base pointer alone identifies a
+/// consistent (slots, len) pair.
+struct BigMemoTable {
+    nslots: usize,
+    slots: alloc::vec::Vec<ChildMemoSlot>,
+}
+
+// SAFETY: the table's slots are shared-memory seqlock cells exactly like
+// the inline `memo` array inside Sync Dentry; cross-thread access goes
+// through the seqlock/children-lock protocol.
+unsafe impl Send for BigMemoTable {}
+unsafe impl Sync for BigMemoTable {}
+
 /// Plain (non-atomic) slot payload — read/written through the enclosing
 /// slot's seqlock (the sync::seqlock UnsafeCell discipline).
 struct ChildMemoData {
@@ -357,6 +411,51 @@ struct ChildMemoSlot {
     /// Per-slot seqlock (writer: odd → fields → even).
     seq: AtomicU64,
     data: core::cell::UnsafeCell<ChildMemoData>,
+}
+
+impl ChildMemoSlot {
+    const fn empty() -> Self {
+        ChildMemoSlot {
+            seq: AtomicU64::new(0),
+            data: core::cell::UnsafeCell::new(ChildMemoData {
+                ver: 0,
+                hash: 0,
+                name: [0; CHILD_MEMO_NAME_MAX],
+                name_len: 0,
+                child: core::ptr::null(),
+            }),
+        }
+    }
+}
+
+/// Single-shot seqlock read of one memo slot against (ver, hash, name).
+/// None on a writer race or a miss — the caller falls to the next tier
+/// (inline → big → locked map), which is always authoritative.
+#[inline]
+fn memo_slot_read(
+    slot: &ChildMemoSlot,
+    ver: u64,
+    h: u64,
+    name: &[u8],
+) -> Option<*const Dentry> {
+    let s1 = slot.seq.load(Ordering::Acquire);
+    if s1 & 1 != 0 {
+        return None; // refill in flight
+    }
+    // SAFETY: seqlock-protected read (validated by the seq re-load
+    // below; the sync::seqlock UnsafeCell discipline).
+    let d = unsafe { &*slot.data.get() };
+    let hit = d.ver == ver
+        && d.hash == h
+        && !d.child.is_null()
+        && d.name_len as usize == name.len()
+        && d.name[..name.len()] == *name;
+    let p = d.child;
+    if slot.seq.load(Ordering::Acquire) == s1 && hit {
+        Some(p)
+    } else {
+        None
+    }
 }
 
 /// Directory entry
@@ -421,6 +520,18 @@ pub struct Dentry {
     children_ver: AtomicU64,
     /// (gap-fs lane) Lock-free child memo — see ChildMemoSlot.
     memo: [ChildMemoSlot; CHILD_MEMO_SLOTS],
+    /// (stat-2x lane) Secondary memo for large directories — ownership
+    /// slot. Swapped (None → Some → replaced on growth) only under the
+    /// children lock; lock-free readers go through the `big_memo_ptr`
+    /// mirror and the table's self-describing length. Replaced tables
+    /// are parked in DENTRY_RET_MEMO; the final table frees with the
+    /// Dentry.
+    big_memo: core::cell::UnsafeCell<Option<alloc::boxed::Box<BigMemoTable>>>,
+    /// (stat-2x lane) Published pointer of the secondary memo table
+    /// (null = not allocated). Release-stored under the children lock;
+    /// readers Acquire-load it under a walk claim and read the table's
+    /// immutable `nslots` for the slice length.
+    big_memo_ptr: AtomicPtr<BigMemoTable>,
     /// (gap-fs lane) Mirror of the `inode` slot's Arc pointer (null =
     /// None), published with Release by set_inode/clear_inode. Readers
     /// load it under a WalkClaim and may increment the strong count
@@ -451,18 +562,9 @@ impl Dentry {
             neg_gen: AtomicU64::new(0),
             neg_count: AtomicUsize::new(0),
             children_ver: AtomicU64::new(0),
-            memo: [const {
-                ChildMemoSlot {
-                    seq: AtomicU64::new(0),
-                    data: core::cell::UnsafeCell::new(ChildMemoData {
-                        ver: 0,
-                        hash: 0,
-                        name: [0; CHILD_MEMO_NAME_MAX],
-                        name_len: 0,
-                        child: core::ptr::null(),
-                    }),
-                }
-            }; CHILD_MEMO_SLOTS],
+            memo: [const { ChildMemoSlot::empty() }; CHILD_MEMO_SLOTS],
+            big_memo: core::cell::UnsafeCell::new(None),
+            big_memo_ptr: AtomicPtr::new(core::ptr::null_mut()),
             inode_ptr: AtomicPtr::new(core::ptr::null_mut()),
         }
     }
@@ -529,6 +631,9 @@ impl Dentry {
         d.negative.store(true, Ordering::Release);
         d.neg_gen.store(parent_gen, Ordering::Release);
         guard.insert(alloc::string::String::from(name), d);
+        // (stat-2x lane) negative children count toward the big-table
+        // threshold — their lookups should ride the tier-2 memo too.
+        self.big_memo_ensure_locked(&mut guard);
         self.neg_count.fetch_add(1, Ordering::AcqRel);
         // (gap-fs lane) map mutation — invalidate memo slots stamped
         // with the older version (a slot could otherwise keep serving a
@@ -753,52 +858,57 @@ impl Dentry {
     /// BTreeMap lookup, refilling the memo slot (serialized by the
     /// children lock) so the next walk of the same component rides the
     /// memo.
+    ///
+    /// (stat-2x lane) Two lock-free tiers before the lock: the inline
+    /// 4-slot memo (small directories), then the lazily allocated big
+    /// table (CHILD_MEMO_BIG_SLOTS seqlock slots for directories past
+    /// CHILD_MEMO_BIG_MIN children — the inline memo thrashes there and
+    /// every lookup used to pay the spinlock + BTreeMap walk).
     pub fn lookup_child_walk(
         &self,
         claim: &WalkClaim,
         name: &str,
     ) -> Option<*const Dentry> {
         if name.len() > CHILD_MEMO_NAME_MAX {
-            // Long names can't ride the inline memo. Locked lookup (the
+            // Long names can't ride the memo. Locked lookup (the
             // children lock serializes with every retire); the returned
             // Arc's map reference keeps the child alive under the claim
             // after our clone drops.
             let c = self.lookup_child(name)?;
             return Some(Arc::as_ptr(&c));
         }
-        let h = child_name_hash(name.as_bytes());
-        let slot = &self.memo[(h as usize) & CHILD_MEMO_MASK];
+        let bytes = name.as_bytes();
+        let h = child_name_hash(bytes);
         let ver = self.children_ver.load(Ordering::Relaxed);
-        let mut spins: u32 = 0;
-        loop {
-            let s1 = slot.seq.load(Ordering::Acquire);
-            if s1 & 1 == 0 {
-                // SAFETY: seqlock-protected read (validated by the seq
-                // re-load below; the sync::seqlock UnsafeCell discipline).
-                let d = unsafe { &*slot.data.get() };
-                let hit = d.ver == ver
-                    && d.hash == h
-                    && d.name_len as usize == name.len()
-                    && d.name[..name.len()] == *name.as_bytes();
-                let p = d.child;
-                if slot.seq.load(Ordering::Acquire) == s1 {
-                    if hit {
-                        debug_assert!(!p.is_null());
-                        return Some(p);
-                    }
-                    break; // clean miss → locked fallback + refill
-                }
+        // Tier 1: inline memo.
+        {
+            let slot = &self.memo[(h as usize) & CHILD_MEMO_MASK];
+            if let Some(p) = memo_slot_read(slot, ver, h, bytes) {
+                return Some(p);
             }
-            spins += 1;
-            if spins >= 128 {
-                break; // persistent seq mismatch → locked fallback
-            }
-            core::hint::spin_loop();
         }
+        // Tier 2: big memo (large directories).
+        let big = self.big_memo_ptr.load(Ordering::Acquire);
+        if !big.is_null() {
+            // SAFETY: published under the children lock with a Release
+            // store; the table stays alive through the ownership slot or
+            // the DENTRY_RET_MEMO park, and our walk claim blocks the
+            // drain that would free it. `nslots` is immutable after
+            // construction, so the base pointer alone yields a
+            // consistent (slots, len) pair even across a concurrent grow.
+            let table: &BigMemoTable = unsafe { &*big };
+            let n = table.nslots;
+            let slot = &table.slots[(h as usize) & (n - 1)];
+            if let Some(p) = memo_slot_read(slot, ver, h, bytes) {
+                return Some(p);
+            }
+        }
+        // Tier 3: locked map lookup + refill both tiers.
         let child = {
-            let guard = self.children.lock();
+            let mut guard = self.children.lock();
             let c = guard.get(name).cloned();
             if let Some(ref c) = c {
+                self.big_memo_ensure_locked(&mut guard);
                 self.refill_memo_locked(name, c);
             }
             c
@@ -824,7 +934,8 @@ impl Dentry {
     /// Refill a memo slot — called with the CHILDREN LOCK HELD (all
     /// refills and all `children_ver` bumps are serialized by it), so
     /// the plain-field writes race only readers, which the per-slot
-    /// seqlock guards.
+    /// seqlock guards. (stat-2x lane) Refills BOTH tiers: the inline
+    /// slot and, when the big table exists, its slot for this name.
     fn refill_memo_locked(&self, name: &str, child: &Arc<Dentry>) {
         if name.len() > CHILD_MEMO_NAME_MAX {
             return;
@@ -837,7 +948,7 @@ impl Dentry {
         {
             // SAFETY: children lock held — all refills serialize here.
             let cur = unsafe { &*slot.data.get() };
-            if cur.ver == ver && cur.hash == h {
+            if cur.ver == ver && cur.hash == h && !cur.child.is_null() {
                 return;
             }
         }
@@ -854,6 +965,96 @@ impl Dentry {
             d.child = Arc::as_ptr(child);
         }
         slot.seq.store((s | 1) + 1, Ordering::Release); // even — leave
+
+        // Tier-2 refill (same discipline; only when the table exists).
+        // The table base loaded here is the one the lock-free reader may
+        // have raced onto — both are kept alive (ownership slot / park).
+        let big = self.big_memo_ptr.load(Ordering::Relaxed);
+        if !big.is_null() {
+            // SAFETY: published table (children lock held here
+            // serializes this writer against every other refill);
+            // `nslots` immutable after construction.
+            let table: &BigMemoTable = unsafe { &*big };
+            let n = table.nslots;
+            let bslot = &table.slots[(h as usize) & (n - 1)];
+            // Same already-filled short-circuit as the inline slot.
+            {
+                // SAFETY: children lock held — all refills serialize.
+                let cur = unsafe { &*bslot.data.get() };
+                if cur.ver == ver && cur.hash == h && !cur.child.is_null() {
+                    return;
+                }
+            }
+            let s = bslot.seq.load(Ordering::Relaxed);
+            bslot.seq.store(s | 1, Ordering::Release); // odd — enter write
+            // SAFETY: children lock held; seqlock guards racing readers.
+            {
+                let d = unsafe { &mut *bslot.data.get() };
+                d.ver = ver;
+                d.hash = h;
+                d.name_len = name.len() as u8;
+                d.name[..name.len()].copy_from_slice(name.as_bytes());
+                d.child = Arc::as_ptr(child);
+            }
+            bslot.seq.store((s | 1) + 1, Ordering::Release); // even — leave
+        }
+    }
+
+    /// (stat-2x lane) Grow (or first-allocate) the secondary memo when
+    /// the children map has outgrown the inline memo's range AND the
+    /// current table. Called with the CHILDREN LOCK HELD (add_child,
+    /// memo_negative, and the locked lookup fallback). Sizing:
+    /// next_pow2(2 × live children), clamped — a direct-mapped table
+    /// with fewer slots than the live name population thrashes to a
+    /// ~0% hit rate (measured: 128 slots vs a cycling 1000-name tree).
+    /// A replaced table is parked for the reader-quiescent drain (a
+    /// banked reader may still hold the old base pointer mid-read).
+    fn big_memo_ensure_locked(
+        &self,
+        guard: &mut crate::sync::spinlock::SpinlockGuard<'_, BTreeMap<String, Arc<Dentry>>>,
+    ) {
+        if guard.len() < CHILD_MEMO_BIG_MIN {
+            return;
+        }
+        let want = (guard.len().saturating_mul(2))
+            .next_power_of_two()
+            .clamp(CHILD_MEMO_BIG_MIN_SLOTS, CHILD_MEMO_BIG_MAX_SLOTS);
+        let cur = self
+            .big_memo_ptr
+            .load(Ordering::Relaxed);
+        let cur_slots = if cur.is_null() {
+            0
+        } else {
+            // SAFETY: published table pointer (children lock held here,
+            // and the pointer only changes under this lock); nslots is
+            // immutable after construction.
+            unsafe { (*cur).nslots }
+        };
+        if want <= cur_slots {
+            return;
+        }
+        let slots: alloc::vec::Vec<ChildMemoSlot> = (0..want)
+            .map(|_| ChildMemoSlot::empty())
+            .collect();
+        let table = alloc::boxed::Box::new(BigMemoTable { nslots: want, slots });
+        // Swap ownership, then publish the base with Release: a reader
+        // that Acquire-loads this pointer sees the fully-initialized,
+        // self-consistent table.
+        // SAFETY: children lock held — this cell's only writers are
+        // here and the final Dentry drop (post-quiescence); lock-free
+        // readers never touch the ownership cell.
+        let old = unsafe { (*self.big_memo.get()).replace(table) };
+        let base = match unsafe { &*self.big_memo.get() } {
+            Some(b) => &**b as *const BigMemoTable as *mut BigMemoTable,
+            None => return,
+        };
+        self.big_memo_ptr.store(base, Ordering::Release);
+        if let Some(old) = old {
+            // The OLD base may still be loaded under banked walk claims:
+            // park it like a retired dentry; the quiescent drain frees it.
+            DENTRY_RET_MEMO.lock_irqsave().push(old);
+            dentry_drain_if_quiescent(true);
+        }
     }
 
     /// Add a child dentry. If a child with the same name exists, it is replaced.
@@ -884,7 +1085,13 @@ impl Dentry {
                 }
             }
         }
-        let old = self.children.lock().insert(name, child);
+        let old = {
+            let mut guard = self.children.lock();
+            // (stat-2x lane) grow the secondary memo when the directory
+            // crosses the big-table threshold (see big_memo_ensure_locked).
+            self.big_memo_ensure_locked(&mut guard);
+            guard.insert(name, child)
+        };
         // (gap-fs lane) Invalidate memo slots stamped with the old
         // version, then park a displaced child for a reader-quiescent
         // drain (a banked reader may still hold its raw pointer).
