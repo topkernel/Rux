@@ -158,7 +158,7 @@
     <ul>
       <li><b>Ub 24.04 冻结案的内核无罪判定</b>:以逐事件取证链证明冻结前唯一一次 WAKE(val=1, ret=1) 已投递、WAIT/WAKE 路径无内核侧用户 futex 字写入 —— 内核在词句层面被排除,用户态锁定责任。安全性论证的可信度来自"内核也会被排除"的记录。</li>
       <li><b>SMAP 启用的二分演化</b>:STAC/CLAC 在 TCG 无条件 #UD(二分实证)→ pushfq 括号(~100+ 周期)→ SMAP-gated stac/clac(2 周期)—— 安全机制的成本曲线本身被测量驱动,不是一次性取舍。</li>
-      <li><b>D-19 类型化定时器轮</b>:六类历史缺陷类(混时钟域比较/periodic 误用/双重取消等)成为编译错,同 rig A/B 同时给出性能改进(arm 锁 924→697 ns)—— 强化与性能同向的实例。</li>
+      <li><b>D-19 类型化定时器轮</b>:六类历史缺陷类(混时钟域比较/periodic 误用/双重取消等)成为编译错,同一测试平台 A/B 同时给出性能改进(arm 锁 924→697 ns)—— 强化与性能同向的实例。</li>
     </ul>
 
     <div class="callout">正本:docs/architecture/security-design.md(六层模型 + 度量表)、docs/development/security-posture.md(21 行 posture)、docs/architecture/safety-and-performance.md §5(缺口登记册)、docs/architecture/design-divergences.md(D-9/D-17/D-18)。相关:<a href="formal.html">形式验证</a>、<a href="taxonomy.html">缺陷分类学</a>、<a href="unsafe.html">分层 unsafe 台账</a>。</div>

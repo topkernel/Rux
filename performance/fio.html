@@ -81,10 +81,10 @@
   </aside>
   <article class="doc-main">
     <h1>fio 3.36</h1>
-    <div class="sub">存储 I/O 性能对照(同机同镜像同二进制):吞吐与延迟,无数据引擎行即不可用 · 机位与方法</div>
+    <div class="sub">存储 I/O 性能对照(同机同镜像同二进制):吞吐与延迟,无数据引擎行即不可用 · 测试平台与方法</div>
 
     <h2 id="data"><span class="anchor">§1</span>数据(同机同镜像同二进制对照)</h2>
-    <p style="font-size:13.5px">两侧使用<b>同一 ext4 镜像、同一静态 fio 3.36 二进制、同一作业文件</b>,Rux(main release)与参考内核(同镜像 guest 内核 7.0.0-38)于同一机位(q35/KVM/<code>-cpu host</code>/SMP8/8G,virtio-blk;交替启动测试 3 轮取中位数)执行;direct=1 绕过页缓存。每行取最新实测值;同一测量窗口内内核对内核比值随宿主负载窗口两侧同浮动(±10% 级),比值只在同一测量窗口内有意义。无数字的引擎行即当前不可用。</p>
+    <p style="font-size:13.5px">两侧使用<b>同一 ext4 镜像、同一静态 fio 3.36 二进制、同一作业文件</b>,Rux(main release)与参考内核(同镜像 guest 内核 7.0.0-38)于同一测试平台(q35/KVM/<code>-cpu host</code>/SMP8/8G,virtio-blk;交替启动测试 3 轮取中位数)执行;direct=1 绕过页缓存。每行取最新实测值;同一测量窗口内内核对内核比值随宿主负载窗口两侧同浮动(±10% 级),比值只在同一测量窗口内有意义。无数字的引擎行即当前不可用。</p>
     <div class="tbl-wrap"><table>
       <thead><tr><th>作业</th><th class="num">Rux</th><th class="num">Linux(同机)</th><th class="num">比值(Rux/Linux)</th></tr></thead>
       <tbody id="fio-rows">
@@ -95,7 +95,7 @@
         <tr><td class="mono">1M 顺序写 48M(direct,已分配区域)</td><td class="num">4000 MiB/s</td><td class="num">5.2 GiB/s · clat ~188 µs</td><td class="num">0.83×</td></tr>
         <tr><td class="mono">1M 顺序写 48M(direct,全新文件)</td><td class="num">同一测量窗口比值 0.33×</td><td class="num">188 µs/op(延迟分配使新写免分配)</td><td class="num">0.33×(延迟分配未实现)</td></tr>
         <tr><td class="mono">1M 顺序读 48M(direct)</td><td class="num">~5000 MiB/s 级</td><td class="num">9.4 GiB/s · clat 90 µs</td><td class="num">0.62×</td></tr>
-        <tr><td class="mono">1M 缓冲写 48M(页缓存口径,两侧同)</td><td class="num">9600 MiB/s</td><td class="num">9.4 GiB/s · clat 89.5 µs</td><td class="num">~0.94×(rig 地板:冷帧 RFO 两侧共付)</td></tr>
+        <tr><td class="mono">1M 缓冲写 48M(页缓存口径,两侧同)</td><td class="num">9600 MiB/s</td><td class="num">9.4 GiB/s · clat 89.5 µs</td><td class="num">~0.94×(测试平台的物理下限:冷帧 RFO 两侧共付)</td></tr>
         <tr><td class="mono">128MB 刷盘墙探针(mmap 全同步回写,总墙钟)</td><td class="num">待 SMP8 下一次启动重新测量(fsync 路径已重造)</td><td class="num">1.223 s(旧口径)</td><td class="num">—</td></tr>
         <tr><td class="mono">libaio(io_setup/io_submit)</td><td class="num">—</td><td class="num">有</td><td class="num">—</td></tr>
         <tr><td class="mono">io_uring(5.1 ABI enter 契约)</td><td class="num">—</td><td class="num">有</td><td class="num">—</td></tr>
@@ -106,7 +106,7 @@
     <h2 id="method"><span class="anchor">§2</span>优化方法</h2>
     <p style="font-size:13.5px">差距归因用<b>两侧同机对账</b>(两内核在同一镜像/负载下,用共享 tracefs 事件时间线 + 相位周期括号 + 双方 perf 把每 op 成本逐段对账:系统调用入口/块解析/提交+kick/设备/完成中断/唤醒/返回),再按参考内核的实现形态逐项改造:<b>直读路径按物理连续段批量提交</b>;<b>MSI-X + 完成处理内联硬中断向量</b>;<b>同步等待先有界轮询后睡眠</b>(完成对象是纯内核值,深度 1 时整套睡眠机械比设备往返还贵——参考内核同取舍仅 opt-in);<b>未写盘区成批转换+邻接合并</b>(每写跨度一次树编辑);<b>每 inode 脏块笔记 → O(dirty) fsync 扫描</b>(tagged page tree 类比)+ inode 表块搭同一刷写窗口;<b>缓冲写用户页直拷入页缓存帧</b>(copy_page_from_iter 形状);<b>目录读取增量填充</b>;<b>路径/描述符成本</b>(close 条件引用获取=fget_rcu 形状、readahead 状态内嵌 File);<b>地址空间回收释放空页表</b>。每项改造同机同镜像同二进制 A/B;负结果留档(MSI 目标重定向在本 QEMU/KVM+irqfd 下为死胡同)。方法与逐项证据见 <code>docs/test/perf-campaign-2026-11-17.md</code>。</p>
 
-    <h2 id="rig"><span class="anchor">§3</span>机位与方法</h2>
+    <h2 id="rig"><span class="anchor">§3</span>测试平台与方法</h2>
     <ul>
       <li><b>对照对</b>:Rux(main release)vs 参考内核(同镜像 guest 内核 7.0.0-38),同一 QEMU q35 + KVM(<code>-cpu host</code> SMP8/8G),同一 ext4 镜像(reflink 拷贝,snapshot 启动),同一静态二进制(源码 tar 包入 git,userspace/fio/build-x86.sh 构建);交替启动测试 3 轮取中位数。</li>
       <li><b>协议</b>:每侧一次启动顺序执行全部作业(qsrun cmds 协议);fio terse 单行输出进串口采集,含 bw/IOPS/延迟字段。</li>

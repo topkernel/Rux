@@ -130,7 +130,7 @@
         <tbody>
           <tr><td>unit-test-report.md</td><td>内核内 guest 套件(make test),逐架构</td><td class="mono">1328/1328 riscv64 · 1263/1263 x86_64 · 2026-11-16</td></tr>
           <tr><td>integration-test-report.md</td><td>多进程无人值守测试、探针、CI 冒烟门</td><td class="mono">2026-11-01</td></tr>
-          <tr><td>ltp-report.md / ltp-tracking.md</td><td>LTP 兼容性,双机位(riscv64 TCG / x86_64 KVM)</td><td class="mono">官方 scan3 1138/1869 → 当前预期 1139/1869 (x86+KVM) · 1028/1869 (riscv64)</td></tr>
+          <tr><td>ltp-report.md / ltp-tracking.md</td><td>LTP 兼容性,双测试平台(riscv64 TCG / x86_64 KVM)</td><td class="mono">官方 scan3 1138/1869 → 当前预期 1139/1869 (x86+KVM) · 1028/1869 (riscv64)</td></tr>
           <tr><td>lmbench-report.md</td><td>lmbench 逐用例:Rux vs Linux(同机同加速)</td><td class="mono">2026-11-04 基线 → 见性能栏目</td></tr>
           <tr><td>geekbench-report.md</td><td>Geekbench 5:全部 21 项工作负载对照</td><td class="mono">MC 7709/7027 · SC 2440/2165(best-of-runs)→ 见性能栏目</td></tr>
           <tr><td>stress-fleet.md</td><td>压测/稳定性/随机化/模糊测试集群设计 + 结果台账</td><td class="mono">常驻(11 QEMU)</td></tr>
@@ -152,7 +152,7 @@
 
     <h2 id="discipline"><span class="anchor">§4</span>方法与裁决纪律</h2>
     <ul>
-      <li><b>每个数字带 rig</b>:架构、加速器、内核 profile、宿主负载纪律 —— 没有 rig 的数字不算结果。</li>
+      <li><b>每个数字带测试平台</b>:架构、加速器、内核 profile、宿主负载纪律 —— 没有测试平台的数字不算结果。</li>
       <li><b>报告追加式</b>:新一轮追加小节或刷新常设表并注明日期,不静默改写历史。</li>
       <li><b>抖动隔离</b>:全量扫描新失败一律隔离复跑 2 次再定性为回归(已知抖动例:accept02、getrusage04、kill02、genfmod、rename/statfs 族)。</li>
       <li><b>NOT-OURS 台账</b>:同一 musl 版 LTP 二进制跑在宿主 Linux 内核上,判定一致的失败记为测试/环境问题而非内核缺口。</li>

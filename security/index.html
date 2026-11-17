@@ -125,7 +125,7 @@
 
     <h2 id="pairs"><span class="anchor">§5</span>安全 × 性能配对实证</h2>
     <div class="tbl-wrap"><table>
-      <thead><tr><th>性能结果(同 rig A/B)</th><th>所携带的安全性质</th></tr></thead>
+      <thead><tr><th>性能结果(同一测试平台 A/B)</th><th>所携带的安全性质</th></tr></thead>
       <tbody>
         <tr><td>上下文切换 −58%(三项优化)</td><td>切换路径携带类型化 per-CPU 存储(D-7:guard 生命周期 = 关中断窗)+ 键控锁(D-11:嵌套序为编译事实)</td></tr>
         <tr><td>GRQ 持锁 2786 ns @ 1.26 亿次系统调用</td><td>单一全局结构 = 取证可推理(D-1;OH 战役调度缺陷族实际在其上定位)+ census 每 boot 审判</td></tr>

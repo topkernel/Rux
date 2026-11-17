@@ -96,7 +96,7 @@
         <tr><td class="mono">1M sequential write 48M (direct, allocated territory)</td><td class="num">4000 MiB/s</td><td class="num">5.2 GiB/s · clat ~188 µs</td><td class="num">0.83×</td></tr>
         <tr><td class="mono">1M sequential write 48M (direct, fresh file)</td><td class="num">same-window ratio 0.33×</td><td class="num">188 µs/op (delayed allocation makes fresh writes alloc-free)</td><td class="num">0.33× (delayed allocation not implemented)</td></tr>
         <tr><td class="mono">1M sequential read 48M (direct)</td><td class="num">~5000 MiB/s class</td><td class="num">9.4 GiB/s · clat 90 µs</td><td class="num">0.62×</td></tr>
-        <tr><td class="mono">1M buffered write 48M (page-cache basis, both sides)</td><td class="num">9600 MiB/s</td><td class="num">9.4 GiB/s · clat 89.5 µs</td><td class="num">~0.94× (rig floor: the cold-frame RFO is paid by both)</td></tr>
+        <tr><td class="mono">1M buffered write 48M (page-cache basis, both sides)</td><td class="num">9600 MiB/s</td><td class="num">9.4 GiB/s · clat 89.5 µs</td><td class="num">~0.94× (the test platform's physical floor: the cold-frame RFO is paid by both)</td></tr>
         <tr><td class="mono">128MB flush-wall probe (mmap full-sync writeback, total wall clock)</td><td class="num">pending SMP8 re-measure (fsync path rebuilt)</td><td class="num">1.223 s (old basis)</td><td class="num">—</td></tr>
         <tr><td class="mono">libaio (io_setup/io_submit)</td><td class="num">—</td><td class="num">yes</td><td class="num">—</td></tr>
         <tr><td class="mono">io_uring (the 5.1 ABI enter contract)</td><td class="num">—</td><td class="num">yes</td><td class="num">—</td></tr>

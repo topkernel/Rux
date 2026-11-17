@@ -84,12 +84,12 @@
     <div class="sub">最新状态:同机 KVM 对照权威表(12 延迟行 + 8 带宽行,每行取当前 main 最新实测值) · 正本:docs/test/lmbench-report.md</div>
 
 <h2 id="data"><span class="anchor">§1</span>lmbench 数据(同机 KVM 对照,21 项)</h2>
-    <p style="font-size:13.5px">数据来源:lmbench-report.md「Standing(2026-11-16,内核 main=017bf556b)」—— 唯一权威表,以下即该节数据。方法:两侧同 rig(q35/KVM/-cpu host/smp2/2G,宿主 CCD0 钉核 + performance 治理器 + 保温线程);Rux 启动带 nohz_full=1,每用例独立启动、失败行重试;Linux 列 = OHOS 6.6.101 内核在<b>同一 guest 机位</b>执行同一静态二进制,各 2 rep 取中位。切换/唤醒族对参考窗口敏感,比值只在同会话内有意义。</p>
-    <p style="font-size:13px;color:var(--text-3)">口径:每行取当前 main 的最新实测值(2026-11-16 全量轮;null/read/write 三行为 11-17 单行重测)。Rux 列 = debug/strong 按原轮口径;Linux 列 = 宿主 7.0.0 内核在<b>同一 guest 机位</b>执行同一静态二进制。</p>
+    <p style="font-size:13.5px">数据来源:lmbench-report.md「Standing(2026-11-16,内核 main=017bf556b)」—— 唯一权威表,以下即该节数据。方法:两侧同一测试平台(q35/KVM/-cpu host/smp2/2G,宿主 CCD0 钉核 + performance 治理器 + 保温线程);Rux 启动带 nohz_full=1,每用例独立启动、失败行重试;Linux 列 = OHOS 6.6.101 内核在<b>同一 guest 测试平台</b>执行同一静态二进制,各 2 rep 取中位。切换/唤醒族对参考窗口敏感,比值只在同会话内有意义。</p>
+    <p style="font-size:13px;color:var(--text-3)">口径:每行取当前 main 的最新实测值(2026-11-16 全量轮;null/read/write 三行为 11-17 单行重测)。Rux 列 = debug/strong 按原轮口径;Linux 列 = 宿主 7.0.0 内核在<b>同一 guest 测试平台</b>执行同一静态二进制。</p>
     <h3>领先/持平组(14 项)</h3>
     <div class="tbl-wrap">
       <table>
-        <thead><tr><th>用例</th><th class="num">Rux</th><th class="num">Linux(同 rig guest)</th><th>结论</th></tr></thead>
+        <thead><tr><th>用例</th><th class="num">Rux</th><th class="num">Linux(同一测试平台 guest)</th><th>结论</th></tr></thead>
         <tbody>
           <tr><td class="mono">lat_pipe</td><td class="num">5.54–5.64 µs</td><td class="num">25.06–26.27 µs</td><td><span class="chip ok">领先 4.6×</span></td></tr>
           <tr><td class="mono">lat_ctx -s64 2</td><td class="num">2.86–3.25 µs</td><td class="num">12.84–12.97 µs</td><td><span class="chip ok">领先 4.0–4.5×</span></td></tr>
@@ -111,13 +111,13 @@
     <h3>落后组(7 项)</h3>
     <div class="tbl-wrap">
       <table>
-        <thead><tr><th>用例</th><th class="num">Rux</th><th class="num">Linux(同 rig guest)</th><th>结论</th><th>优化方向</th></tr></thead>
+        <thead><tr><th>用例</th><th class="num">Rux</th><th class="num">Linux(同一测试平台 guest)</th><th>结论</th><th>优化方向</th></tr></thead>
         <tbody>
           <tr><td class="mono">lat_syscall open</td><td class="num">0.86–0.87 µs(±1% 方差,fdreap 静默后 4/4 稳定)</td><td class="num">0.394–0.397 µs</td><td><span class="chip bad">落后 1.9–2.2×</span></td><td>路径走查 loop(598ns)+ File 构造/装配(950ns)</td></tr>
-          <tr><td class="mono">lat_syscall read</td><td class="num">0.0998 µs(3 次取中位数)</td><td class="num">0.060–0.062 µs</td><td><span class="chip bad">落后 1.61×</span>(累计 −6%)</td><td>拷贝尾+入口地板(同上)</td></tr>
+          <tr><td class="mono">lat_syscall read</td><td class="num">0.0998 µs(3 次取中位数)</td><td class="num">0.060–0.062 µs</td><td><span class="chip bad">落后 1.61×</span>(累计 −6%)</td><td>拷贝尾+入口路径下限(同上)</td></tr>
           <tr><td class="mono">lat_syscall stat</td><td class="num">0.32–0.45 µs</td><td class="num">0.239 µs</td><td><span class="chip bad">落后 1.4–1.9×</span>(不同次启动间方差 ±30%)</td><td>路径解析</td></tr>
-          <tr><td class="mono">lat_syscall write</td><td class="num">0.0832 µs(3 次取中位数)</td><td class="num">0.0597–0.0600 µs</td><td><span class="chip bad">落后 1.39×</span>(累计 −5%)</td><td>拷贝尾+入口地板(2× 需两者合并重构,已文档化)</td></tr>
-          <tr><td class="mono">lat_syscall null</td><td class="num">0.0448 µs(3 次取中位数)</td><td class="num">0.046 µs</td><td><span class="chip ok">反超 0.97×</span>(getppid O(1)+fdget+PT_REGS 三连后 −10%)</td><td>2× 目标 0.023µs 低于参考整调用成本=需入口地板重构(已文档化)</td></tr>
+          <tr><td class="mono">lat_syscall write</td><td class="num">0.0832 µs(3 次取中位数)</td><td class="num">0.0597–0.0600 µs</td><td><span class="chip bad">落后 1.39×</span>(累计 −5%)</td><td>拷贝尾+入口路径下限(2× 需两者合并重构,已文档化)</td></tr>
+          <tr><td class="mono">lat_syscall null</td><td class="num">0.0448 µs(3 次取中位数)</td><td class="num">0.046 µs</td><td><span class="chip ok">反超 0.97×</span>(getppid O(1)+fdget+PT_REGS 三连后 −10%)</td><td>2× 目标 0.023µs 低于参考整调用成本=需重构入口路径下限(已文档化)</td></tr>
           <tr><td class="mono">lat_proc fork</td><td class="num">37.8–40.3 µs</td><td class="num">33.9 µs</td><td><span class="chip bad">落后 1.11–1.19×</span></td><td>NOHZ 后已从超时族回归可测,继续收敛</td></tr>
           <tr><td class="mono">lat_proc exec</td><td class="num">40.6 µs</td><td class="num">37.6 µs</td><td><span class="chip bad">落后 1.08×</span></td><td>接近持平带</td></tr>
         </tbody>

@@ -80,7 +80,7 @@
 
   <article class="doc-main">
     <h1>LTP 兼容性全量扫描</h1>
-    <div class="sub">1,869 项 · 双机位 · 逐用例结论见全量用例子页 —— 仓库报告 docs/test/ltp-report.md 与 ltp-tracking.md</div>
+    <div class="sub">1,869 项 · 双测试平台 · 逐用例结论见全量用例子页 —— 仓库报告 docs/test/ltp-report.md 与 ltp-tracking.md</div>
 
     <p>对 1,869 项 LTP 测试清单(1,838 个官方二进制 musl 交叉编译,编译率 101%)做全量扫描。<b>最新官方确认轮(2026-11-16 scan3,main @ fecf6dd9f,x86_64 + KVM):官方校正 PASS <b>1,138(60.9%)</b></b> —— 较 2026-11-15 审计轮 1,122 净 +16(17 项预期增益全部兑现:审计轮随轮修复 3 项 + 尾修轮 11 项 + ltp-tail2 3 项;唯一真实损失 tgkill03),全部疑点行按隔离复跑协议校正,POISON/WEDGE/NOTRUN 保持清零;tgkill03 的 P0 修复(procfs pid-dentry 失效重验,878e3d9f9)已并入 main,当前预期 <b>1,139(60.9%)</b>。逐用例结论见 <a href="ltp-full.html">LTP 全量用例</a>(1,869 条,r27 归档,支持搜索)。</p>
     <div class="tbl-wrap">
@@ -111,7 +111,7 @@
     <div class="trend-x">
       <span>r1</span><span>r2</span><span>r3</span><span>r9</span><span>r14</span><span>r15</span><span>r20</span><span>r21</span><span>r23</span><span>r27</span><span>11-15</span><span>11-16</span>
     </div>
-    <p style="font-size:12.5px;color:var(--text-3)">r1–r10(riscv64·TCG,旧机)→ r14–r20(同机收官,r20=1028)→ r21 起 x86_64+KVM 标准机位(r21 首轮 1010 → r27 审计 1093 → 2026-11-15 审计轮 1122 → 2026-11-16 官方确认轮 1138;tgkill03 修复并入后当前预期 1139)。中间轮次回撤多为宿主负载噪声,经隔离复跑裁决回收。</p>
+    <p style="font-size:12.5px;color:var(--text-3)">r1–r10(riscv64·TCG,旧机)→ r14–r20(同机收官,r20=1028)→ r21 起 x86_64+KVM 标准测试平台(r21 首轮 1010 → r27 审计 1093 → 2026-11-15 审计轮 1122 → 2026-11-16 官方确认轮 1138;tgkill03 修复并入后当前预期 1139)。中间轮次回撤多为宿主负载噪声,经隔离复跑裁决回收。</p>
 
     <h2 id="method"><span class="anchor">§2</span>方法学</h2>
     <ul>
@@ -121,12 +121,12 @@
       <li>每轮全量结果、delta 与裁决归档于各轮车道 results/ 目录(r27 → ltp-r27;2026-11-15 审计轮 → ltp-scan2;2026-11-16 确认轮 → ltp-scan3);TIMEOUT 类按最高优先级专线处理。</li>
     </ul>
 
-    <h2 id="rigs"><span class="anchor">§3</span>机位</h2>
+    <h2 id="rigs"><span class="anchor">§3</span>测试平台</h2>
     <div class="tbl-wrap">
       <table>
-        <thead><tr><th>机位</th><th>最新</th><th>说明</th></tr></thead>
+        <thead><tr><th>测试平台</th><th>最新</th><th>说明</th></tr></thead>
         <tbody>
-          <tr><td>x86_64 + KVM(标准机位)</td><td class="num">2026-11-16 scan3 官方 = 1138/1869;tgkill03 修复后当前预期 1139/1869</td><td>2026-11-01 起为标准测试机位;r21 首轮 1010,r27 审计 1093,11-15 审计 1122</td></tr>
+          <tr><td>x86_64 + KVM(标准测试平台)</td><td class="num">2026-11-16 scan3 官方 = 1138/1869;tgkill03 修复后当前预期 1139/1869</td><td>2026-11-01 起为标准测试平台;r21 首轮 1010,r27 审计 1093,11-15 审计 1122</td></tr>
           <tr><td>riscv64 · TCG</td><td class="num">r20 = 1028/1869</td><td>2026-10-31 收官轮;r14=945 → r15=1005(do_exit 修复)</td></tr>
         </tbody>
       </table>

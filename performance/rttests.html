@@ -81,7 +81,7 @@
   </aside>
   <article class="doc-main">
     <h1>rt-tests(cyclictest / hackbench / pi_stress)</h1>
-    <div class="sub">实时延迟与调度压力的性能对照(同机同镜像同二进制),无数据项即失败 · 机位与方法</div>
+    <div class="sub">实时延迟与调度压力的性能对照(同机同镜像同二进制),无数据项即失败 · 测试平台与方法</div>
 
     <h2 id="data"><span class="anchor">§1</span>数据(同机同镜像同二进制对照)</h2>
     <p style="font-size:13.5px">两侧使用<b>同一镜像、同一 rt-tests v2.11 静态二进制、同一参数</b>,Rux(main release)与参考内核(同镜像 guest 内核 7.0.0-38)对照。cyclictest:30 s 窗、1000 µs 间隔、mlockall;hackbench:消息传递吞吐(秒,越低越好)。cyclictest 行当前为 Rux release 单次启动实测与参考整轮测试列(不同次启动),同机交替启动重新测量进行中。</p>
@@ -99,7 +99,7 @@
     </table></div>
     <p style="font-size:13px;color:var(--text-3)">无数据项即失败:hackbench inet ≥2 组在 Rux 无数字(回环非阻塞 connect 停滞,网络工作分支已记录在案);pi_stress 在 Rux 曾初始化失败(PI mutex UAPI 链)—— 本表以最新一轮双侧读数为准,失败项在行内如实显示。</p>
 
-    <h2 id="rig"><span class="anchor">§2</span>机位与方法</h2>
+    <h2 id="rig"><span class="anchor">§2</span>测试平台与方法</h2>
     <ul>
       <li><b>对照对</b>:与 fio 页同一对内核、同一镜像(reflink)、同一次注入的二进制(源码 tar 包入 git,musl 静态构建;含 numa shim 与 musl sched_* ENOSYS 桩覆写)。</li>
       <li><b>协议</b>:每侧一次启动顺序执行全部项(qsrun cmds 协议);cyclictest 直出统计行,hackbench 直出耗时行。</li>

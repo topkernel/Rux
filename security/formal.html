@@ -156,7 +156,7 @@
     <h2 id="pilots"><span class="anchor">§8</span>调研试点 → 已落地</h2>
     <ul>
       <li>S-1(并发原语模型检查试点,seL4 谱系):SleepMutex 提取 + loom/Kani 双装置已落 main(11c73f42/011a71c5/1d697ec2d/3b7b6f68);后续提取目标按事故密集度排队(D-7 magazine、D-11 GRQ claim、futex 桶嵌套)。</li>
-      <li>S-5(类型化定时器轮槽域试点):落地为 D-19,六类误用成为编译错(证据:同树六处 rustc 拒绝 + 同 rig A/B)。</li>
+      <li>S-5(类型化定时器轮槽域试点):落地为 D-19,六类误用成为编译错(证据:同树六处 rustc 拒绝 + 同一测试平台 A/B)。</li>
       <li>S-2(类型化 binder 事务 FSM)为登记的占位项 —— 进占位区的唯一出口是交付实测证据。</li>
     </ul>
 

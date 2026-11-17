@@ -152,7 +152,7 @@ cat /proc/sys/kernel/perf_event_paranoid</code></pre>
     <ol>
       <li><b>发现</b>:Tier-1 syscost 转储的逐操作均值出带 → 定位系统调用号或 census 类;</li>
       <li><b>归因</b>:pbench 定位组(P2 切换 / P5 IPC / P6 fs)→ syscost RIP 直方图或 REST 表定段 → trace 事件(如 rux:schedtrace、lock:)取微观序列;</li>
-      <li><b>修复验证</b>:同 rig 交错 A/B(≥3 取中位)→ perf-gate.sh 三层判定 → 基线整表刷新随合并。</li>
+      <li><b>修复验证</b>:同一测试平台交替 A/B(≥3 轮取中位数)→ perf-gate.sh 三层判定 → 基线整表刷新随合并。</li>
     </ol>
     <p class="callout">工具哲学:每一项门禁域在工具集中有对应测量;若某改动影响系统性能而现有工具测不到,<b>为它新增 DFX 工具是改动的一部分</b>,不是事后项(合并门政策)。全部新观测走 tracepoint(见<a href="tracepoints.html">tracepoint 框架</a>)。</p>
 

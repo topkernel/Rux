@@ -120,7 +120,7 @@
       <li><b>轮形态</b>:每级 64 桶,三级(粒度 1/64/4096 jiffy,总跨度 262144 jiffy ≈ HZ=100 下 43.7 min)加 FAR 深远景表(每 4096 jiffy ≈ 41 s 重扫);每趟工作量 O(到期项);纯 .bss 定长存储,单锁 TIMER_TABLE;<b>投递在锁外</b>(R12-3)。</li>
       <li><b>被类型系统消灭的六类历史缺陷</b>:时钟域混比(Deadline&lt;JiffyClock&gt;/&lt;HresClock&gt; 混比 = 编译错)、一次性动作泄漏(Action 枚举互斥:Wake/Signal/TimerFd)、periodic 误用(Option&lt;NonZeroU64&gt;)、静默 if/else-if 投递链、slot 生命周期误用(FiredToken 按值)、投递上下文越权(SoftirqCtx ZST 钉死 softirq-only 投递)。同树实测:六处误用全部被 rustc 拒绝(E0308/E0599/E0061/E0382)。</li>
       <li><b>调用方侧守卫</b>:WakeArmed 持有一个注册 id(非 Copy/Clone —— 双重取消不可表达);cancel(self) 消费为 WakeSpent 墓碑;Drop 对未消费守卫自动取消(池耗尽楔死类);hres 装载内嵌 hart 重编程(遗漏重编程的 hres 睡眠将等待下一个 10 ms 网格 tick)。</li>
-      <li><b>同 rig A/B</b>(s5-boot,OH 镜像,KVM q35 smp2/4G,syscost=1,780 s;A = 旧平面表内核,B = 类型化轮):定时器 arm 锁持锁 924→<b>697 ns</b>,pending 1288→868 ns,del 1291→862 ns(量级匹配 n 差 &lt;0.1%);nanosleep 均值 772.6→<b>662.7 ms</b>;pbench p2_ctxsw 12.198 vs 15.400 µs。代价:槽 56→64 B(池 66 KB .bss)。</li>
+      <li><b>同一测试平台 A/B</b>(s5-boot,OH 镜像,KVM q35 smp2/4G,syscost=1,780 s;A = 旧平面表内核,B = 类型化轮):定时器 arm 锁持锁 924→<b>697 ns</b>,pending 1288→868 ns,del 1291→862 ns(量级匹配 n 差 &lt;0.1%);nanosleep 均值 772.6→<b>662.7 ms</b>;pbench p2_ctxsw 12.198 vs 15.400 µs。代价:槽 56→64 B(池 66 KB .bss)。</li>
       <li>取代的旧形态:1024 槽平面数组 + 每趟 softirq 全量复查到期 + 运行期标志组合编码的定时器类。</li>
     </ul>
 
@@ -139,7 +139,7 @@
       <li><b>位等价设计</b>(x86_64,统一轨):read_time() 的 TSC 分支与 vDSO 函数从<b>同一组字、同一整数运算</b>计算同一值 —— nom(t) = base_mono_nom + ((tsc(t) − cycle_last) × mult) &gt;&gt; 32,整数可结合性使双轨位等价(LTP clock_gettime04 的要求);base_mono_nom 为标称域单调;seq 字兼任写者锁(cmpxchg even→odd),闭合多写者发布撕裂;数据页用户态只读 —— 正因内核信任其字。</li>
       <li><b>被否决的快路径(登记)</b>:per-CPU 修正发布携带 TSC_CPU_OFF 离散 —— tsleep2 −356 ms @t&lt;1s;syscall-vs-vdso 离散至 +1.2 ms;clock_gettime04 残余 −4582 ns。统一轨以位等价取代修正链。</li>
       <li><b>riscv64 教训</b>:seq 字必须经页指针读取 —— 曾有的独立 VDSO_SEQ 静态与页未别名化,读者在 base_tsc 与 base_mono_ns 两次载入间被去调度即配对过期 tsc 与新鲜 mono(vDSO 时钟领先系统调用时钟整个抢占间隙;LTP clock_gettime04 "Time travelled backwards −454618735 ns")。</li>
-      <li><b>实测</b>(同名同 rig A/B,tok-r4fix 载具,KVM q35 SMP2 4G,780 s):OH 启动 clock_gettime 系统调用 <b>8,259,773 → 0</b>(−29.4 CPU-s = 整机 −2.0%,总系统调用量 −26%),nanosleep 均值与 GRQ 锁点均值持平,双侧零 panic;LTP clock_gettime04 6/6 含 vdso 变体与双 COARSE 时钟。</li>
+      <li><b>实测</b>(同名同测试平台 A/B,tok-r4fix 载具,KVM q35 SMP2 4G,780 s):OH 启动 clock_gettime 系统调用 <b>8,259,773 → 0</b>(−29.4 CPU-s = 整机 −2.0%,总系统调用量 −26%),nanosleep 均值与 GRQ 锁点均值持平,双侧零 panic;LTP clock_gettime04 6/6 含 vdso 变体与双 COARSE 时钟。</li>
     </ul>
 
     <h2 id="ipi"><span class="anchor">§8</span>IPI 成本与 TLB 冲刷</h2>
