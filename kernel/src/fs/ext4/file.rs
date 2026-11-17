@@ -2418,15 +2418,23 @@ fn settle_dirty_data_notes(fs_id: u64, ino: u64, still_dirty: &[u64]) {
 //
 // Buffered writes defer physical allocation to the writeback points (the
 // da shape, ext4_buffered_write); until then the blocks the dirty pages
-// will need are counted here, per (fs, ino) as a set of file block
-// indices (the DIRTY_DATA_BLOCKS side-table discipline: cheap inserts
-// under one short-held global lock, dedup by index). The write-time
-// ENOSPC gate then refuses an extending write when the filesystem's free
-// blocks are exhausted BY RESERVATIONS (free <= reserved), not only when
-// literally zero blocks remain — the precision the reference has and the
-// old est_free_blocks()==0 gate lacked: concurrent writers on a nearly
-// full fs used to race past the zero check and fail at flush time (the
-// unflushable dirty balloon the falloc-wedge lane documented).
+// will need are counted here, per (fs, ino) as MERGED RUNS of file block
+// indices [start, start+len) (the extent shape itself; the
+// DIRTY_DATA_BLOCKS side-table discipline: one short-held global lock).
+// The write-time ENOSPC gate then refuses an extending write when the
+// filesystem's free blocks are exhausted BY RESERVATIONS (free <=
+// reserved), not only when literally zero blocks remain — the precision
+// the reference has and the old est_free_blocks()==0 gate lacked:
+// concurrent writers on a nearly full fs used to race past the zero
+// check and fail at flush time (the unflushable dirty balloon the
+// falloc-wedge lane documented).
+//
+// Representation history: the first cut stored per-block indices in a
+// BTreeSet — a sequential append walked a growing tree per 4 KiB write
+// (p6_append +0.8 µs/op vs main, +24% — marginal-out on the gate band)
+// and an earlier cut summed the whole map per write (O(files ever
+// written); p6_append 4.9 -> 27+ µs — caught by the gate boards). Merged
+// runs make the append case ONE tail-extend.
 //
 // Reserve points: buffered writes extending past the inode's allocated
 // frontier (ceil of the cached on-disk inode size — allocation never
@@ -2437,10 +2445,19 @@ fn settle_dirty_data_notes(fs_id: u64, ino: u64, still_dirty: &[u64]) {
 // infrastructure exists yet — the reference's dq_alloc_block hook is the
 // recorded follow-up.
 // =====================================================================
-type DelallocResMap =
-    alloc::collections::BTreeMap<(u64, u64), alloc::collections::BTreeSet<u64>>;
+type ResRuns = alloc::vec::Vec<(u64, u64)>; // sorted, merged [start, len)
+type DelallocResMap = alloc::collections::BTreeMap<(u64, u64), ResRuns>;
 static DELALLOC_RESERVATIONS: crate::sync::spinlock::Spinlock<DelallocResMap> =
     crate::sync::spinlock::Spinlock::new(alloc::collections::BTreeMap::new());
+/// Total reserved blocks across every (fs, ino) — the fs-wide claim the
+/// write-time gate checks against. Maintained INCREMENTALLY under the
+/// DELALLOC_RESERVATIONS lock (Relaxed atomics; every mutation holds the
+/// lock). The first cut summed `m.values().map(len)` per write: O(distinct
+/// inodes ever written) per buffered write — p6_append measured 4.9 -> 27+
+/// µs as the map filled (a probe pass that had already written thousands
+/// of files paid ~50 µs per 4 KiB append). The counter is exact, not an
+/// estimate: insert adds the NEW indices, releases subtract what they drop.
+static DELALLOC_TOTAL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Reserve file blocks [first, first+n) for (fs, ino)'s pending
 /// delayed-allocation writeback. Fails -ENOSPC when the filesystem's free
@@ -2451,6 +2468,10 @@ static DELALLOC_RESERVATIONS: crate::sync::spinlock::Spinlock<DelallocResMap> =
 /// and the size watermark untouched. `free_est` is the caller's
 /// est_free_blocks() snapshot (the eager gate's — one estimate per write,
 /// never two group-descs walks).
+///
+/// Run shape: the sequential-append common case is ONE tail-extend of the
+/// last run (no tree walk, one Vec store); a straddling write merges into
+/// its covering runs in place.
 pub(crate) fn da_reserve_blocks(
     fs: &crate::fs::ext4::Ext4FileSystem,
     ino: u32,
@@ -2465,15 +2486,39 @@ pub(crate) fn da_reserve_blocks(
     let end = first.saturating_add(n);
     let key = (fs as *const _ as u64, ino as u64);
     let mut m = DELALLOC_RESERVATIONS.lock();
-    let reserved_total: u64 = m.values().map(|s| s.len() as u64).sum();
-    let set = m.entry(key).or_default();
-    let mut new = 0u64;
-    for b in first..end {
-        if !set.contains(&b) {
-            new += 1;
+    let reserved_total = DELALLOC_TOTAL.load(core::sync::atomic::Ordering::Relaxed);
+    let runs = m.entry(key).or_default();
+    // Fast path: extend the last run when contiguous (sequential append).
+    if let Some(last) = runs.last_mut() {
+        if last.0 + last.1 == first {
+            // Fully new coverage (the run ends exactly at `first`).
+            if free != 0 && free <= reserved_total + n && n > 0 {
+                return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+            }
+            last.1 += n;
+            DELALLOC_TOTAL.store(reserved_total + n, core::sync::atomic::Ordering::Relaxed);
+            return Ok(());
         }
     }
-    if free <= reserved_total + new && free != 0 {
+    // General path: count the UNCOVERED portion of [first, end), then
+    // splice the range in, merging with every run it touches.
+    let mut covered: u64 = 0;
+    let mut lo = first;
+    for &(s, l) in runs.iter() {
+        let e = s + l;
+        if e <= first {
+            continue;
+        }
+        if s >= end {
+            break;
+        }
+        let ov_s = s.max(first);
+        let ov_e = e.min(end);
+        covered += ov_e.saturating_sub(ov_s);
+        lo = lo.min(s);
+    }
+    let new = n - covered.min(n);
+    if free != 0 && free <= reserved_total + new {
         // Reservations (held + this ask) exhaust the estimated free
         // space: refuse at write time — the reference's
         // ext4_da_reserve_space ENOSPC. (free == 0 is the eager gate's
@@ -2482,9 +2527,28 @@ pub(crate) fn da_reserve_blocks(
             return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
         }
     }
-    for b in first..end {
-        set.insert(b);
+    if new == 0 && covered == n {
+        return Ok(()); // entirely already reserved
     }
+    // Merge: drop the runs overlapped by [first, end), remember the
+    // union's bounds, insert one merged run at the right position.
+    let mut hi = end;
+    runs.retain(|&(s, l)| {
+        let e = s + l;
+        let keep = e <= first || s >= end;
+        if !keep {
+            lo = lo.min(s);
+            hi = hi.max(e);
+        }
+        keep
+    });
+    // Insert sorted by start.
+    let pos = runs.partition_point(|&(s, _)| s < lo);
+    runs.insert(pos, (lo, hi - lo));
+    // The merged run covers `new` blocks beyond what the dropped runs
+    // already held — the counter moves by exactly the newly covered
+    // blocks (math: (hi - lo) - merged_extra == new).
+    DELALLOC_TOTAL.store(reserved_total + new, core::sync::atomic::Ordering::Relaxed);
     Ok(())
 }
 
@@ -2492,13 +2556,34 @@ pub(crate) fn da_reserve_blocks(
 /// writeback allocated real blocks for those indices
 /// (allocate_blocks_for_file / allocate_blocks_unwritten_dio succeeded).
 pub(crate) fn da_release_below(fs: &crate::fs::ext4::Ext4FileSystem, ino: u32, upto: u64) {
+    let key = (fs as *const _ as u64, ino as u64);
     let mut m = DELALLOC_RESERVATIONS.lock();
-    if let Some(set) = m.get_mut(&(fs as *const _ as u64, ino as u64)) {
-        let keep: alloc::collections::BTreeSet<u64> =
-            set.range(upto..).copied().collect();
-        *set = keep;
-        if set.is_empty() {
-            m.remove(&(fs as *const _ as u64, ino as u64));
+    if let Some(runs) = m.get_mut(&key) {
+        let mut freed = 0u64;
+        runs.retain(|&(s, l)| {
+            let e = s + l;
+            if e <= upto {
+                freed += l;
+                false
+            } else if s < upto {
+                freed += upto - s;
+                true // straddler: head freed, tail clipped below
+            } else {
+                true
+            }
+        });
+        // Clip the straddler's head (retain cannot mutate elements).
+        for r in runs.iter_mut() {
+            if r.0 < upto && r.0 + r.1 > upto {
+                let cut = upto - r.0;
+                *r = (upto, r.1 - cut);
+            }
+        }
+        if runs.is_empty() {
+            m.remove(&key);
+        }
+        if freed > 0 {
+            DELALLOC_TOTAL.fetch_sub(freed, core::sync::atomic::Ordering::Relaxed);
         }
     }
 }
@@ -2506,21 +2591,44 @@ pub(crate) fn da_release_below(fs: &crate::fs::ext4::Ext4FileSystem, ino: u32, u
 /// Release every reservation of (fs, ino) at or past `from` — a
 /// truncate-down discards the tail's pending writeback obligations.
 pub(crate) fn da_release_from(fs: &crate::fs::ext4::Ext4FileSystem, ino: u32, from: u64) {
+    let key = (fs as *const _ as u64, ino as u64);
     let mut m = DELALLOC_RESERVATIONS.lock();
-    if let Some(set) = m.get_mut(&(fs as *const _ as u64, ino as u64)) {
-        let keep: alloc::collections::BTreeSet<u64> =
-            set.range(..from).copied().collect();
-        *set = keep;
-        if set.is_empty() {
-            m.remove(&(fs as *const _ as u64, ino as u64));
+    if let Some(runs) = m.get_mut(&key) {
+        let mut freed = 0u64;
+        runs.retain(|&(s, l)| {
+            if s >= from {
+                freed += l;
+                false
+            } else if s + l > from {
+                freed += s + l - from;
+                true // straddler clipped below
+            } else {
+                true
+            }
+        });
+        for r in runs.iter_mut() {
+            let e = r.0 + r.1;
+            if r.0 < from && e > from {
+                *r = (r.0, from - r.0);
+            }
+        }
+        if runs.is_empty() {
+            m.remove(&key);
+        }
+        if freed > 0 {
+            DELALLOC_TOTAL.fetch_sub(freed, core::sync::atomic::Ordering::Relaxed);
         }
     }
 }
 
 /// Release all reservations of (fs, ino) — the inode is being deleted.
 pub(crate) fn da_release_all(fs: &crate::fs::ext4::Ext4FileSystem, ino: u32) {
+    let key = (fs as *const _ as u64, ino as u64);
     let mut m = DELALLOC_RESERVATIONS.lock();
-    m.remove(&(fs as *const _ as u64, ino as u64));
+    if let Some(runs) = m.remove(&key) {
+        let held: u64 = runs.iter().map(|&(_, l)| l).sum();
+        DELALLOC_TOTAL.fetch_sub(held, core::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 fn ext4_sync_file_inner(
