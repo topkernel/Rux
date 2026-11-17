@@ -716,3 +716,46 @@ foreign QEMUs):
   1-byte buffer, 4096-entry dir, glibc DIR* walk): 15/15 PASS.
   Artifacts: run/GETDENTS.md, run/pb-gdab-*.log, run/pb-gdref-*.log,
   run/pb-gdprobe-h3.log.
+
+## M. Poll-before-sleep completions for synchronous I/O (submit-2x lane, 2026-11-17, evidence-backed)
+
+**What is Rust-native here:** the completion object is a plain kernel
+value (`IoCompletion`: three atomics + a wait-queue head), so EVERY
+synchronous wait can poll it directly before parking — no per-wait
+plumbing, no scheduler hooks, no special poll mode in each driver.
+`IoCompletion::wait()` polls its own `done` flag under a bounded
+pause-loop budget (1536 iterations ≈ 14 µs on the 3.7 GHz KVM rig)
+before arming the 10 s deadline timer and scheduling out. IRQs and
+preemption stay armed: the virtio-blk MSI-X hardirq interrupts the
+loop, the completion walker retires the chain, and the next polled
+load observes `done` — the wake, timer arm/disarm, schedule-out/in
+and wait-queue teardown are skipped entirely for completions that
+land inside the budget (the whole sleep path costs more than the
+device round trip itself under KVM). The reference kernel makes the
+same trade only in opt-in modes (io_uring HIPRI / nvme poll queues);
+here it is the default for every synchronous block-I/O wait, which
+is safe because the budget is bounded and the waiter, at depth 1,
+has nothing else to run.
+- Companion shape (same lane): the DIO write batch carries its
+  completions in inline slots re-armed per flush window (bio.rs
+  `WriteBatch`) — zero per-span heap traffic, mirroring the direct
+  read batch's stack array; and the virtio-blk 64-byte header+resp
+  blocks come from per-CPU free lists (`io_buf_alloc/io_buf_free`)
+  instead of the global allocator on every chain submit/complete.
+- Measured (same-window kernel-vs-kernel interleave, 4 boards
+  alternating, q35 KVM -cpu host 8G smp8, host load 10-15):
+  4k randrw direct 14.95k -> 22.15k IOPS/side (+48%, reference
+  parity: REF 22.0k same rig); 4k randwrite direct 29.5k -> 36.75k
+  (+25%); 4k randread direct 31.85k -> 37.0k (+16%); 1M seq read
+  direct +6%. fio --verify=md5 clean (4k buffered, 64k direct).
+  The A+B+D2 bookkeeping levers alone measured within noise
+  (+0.9..+2.6% same-window) — the poll is the lever that moved the
+  rows.
+- Negative result kept for the record: MSI destination steering
+  (rewriting the virtio-blk MSI-X entry to the submitting CPU,
+  rate-limited) collapsed rw4k to 107 IOPS under KVM/irqfd —
+  completion delivery breaks after a runtime table rewrite in this
+  QEMU; reverted, and with polling in place the completion IRQ's
+  landing CPU no longer matters for depth-1 waits anyway.
+- Artifacts: run/SUBMIT-2X.md, run/kk-*-{kk1,e1}.txt,
+  run/ab-*-final.txt.
