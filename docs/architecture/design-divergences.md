@@ -31,16 +31,30 @@ per-priority-class ordering (RT/CFS bands), with the idle path per-CPU.
   forensics stack (W3 census, TERM-DESCHED, WAKE-REFUSED probes) reasons
   over one structure, which is how the scheduler bug families of the OH
   campaign were actually found and fixed.
-- Measured hold cost is flat and small: GRQ average hold 5.1–6.1 µs across
-  loads (volume-coupled, not contention-bound at current scale).
+- Measured hold cost is flat and small: exact in-lock critical section
+  241–273 ns (release, post rb-tree rework; tree work ~20–30 ns of it,
+  zero allocation under the lock), volume-coupled not contention-bound
+  at current scale; the call-site IF=0 span average (includes
+  acquisition wait) is 2786 ns — see the Amdahl quantification below.
 
 **Compatibility evidence.** LTP sched-family tests green; 4-CPU SMP boots
 Ubuntu 22.04 to a desktop and OpenHarmony to its full ~80-service set with
 launcher execution in-sandbox.
 
-**Known cost.** A single queue is a contention ceiling at high CPU counts
-and cache-locality loss versus per-CPU queues. Acceptable at MAX_CPUS ≤ 4
-(current config); revisit if core counts grow.
+**Known cost — now QUANTIFIED (Amdahl, 2026-11-17, user-directed
+analysis).** A single queue is a contention ceiling at high CPU counts
+and cache-locality loss versus per-CPU queues. The ceiling is bounded
+by measurement: with the exact hold at 241–273 ns per acquisition
+(post rb-tree rework) and 6.3M acquisitions per boot, the serialized
+fraction is 0.105% — Amdahl at 8 CPUs gives 7.94× of ideal 8 (99.3%
+parallel efficiency; ceiling ≈950 cores). Under the most conservative
+reading (the call-site IF=0 span including lock-acquisition wait,
+2786 ns avg) the serial fraction is 1.13% — 92.7% efficiency at 8
+CPUs, ceiling ≈89 cores. Both bounds sit far above MAX_CPUS=8, so the
+GRQ lock hold is NOT a concurrency limiter at the platform's core
+counts (empirically: 4k direct I/O scales near-linearly at numjobs
+4→8). Further hold slimming is switch-LATENCY work (the schedule
+path's per-call cost), not concurrency work.
 
 **Status (user ruling, 2026-10-28): the GRQ stays.** Per-CPU queueing was
 re-evaluated and rejected as over-engineering at 4 cores with low
@@ -55,8 +69,8 @@ queue-model change. Two anchors for whoever revisits D-1 later:
 - The "small hold cost" claim above is decomposed by measurement (wake
   hold = runqueue accounting / dequeue-enqueue / pick / stats segments,
   from the wakewatch/WW census instruments); future D-1 work should
-  compare segment-wise against that decomposition rather than only the
-  5.1–6.1 µs aggregate.
+  compare segment-wise against that decomposition (lock wait / acct /
+  deq / pick / ownership publish) rather than any single aggregate.
 
 **Guard.** Perf-gate scheduling domain: GRQ average hold band (5.1–6.1 µs
 ±20%), census in band (TERM 8±2 / REFUSED 32±4), pbench P2 context-switch
