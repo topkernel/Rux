@@ -1709,7 +1709,26 @@ pub fn preempt_check_wake(task: *mut Task) {
                 let se = (*task).sched_entity();
                 let exec_start = se.exec_start.load(core::sync::atomic::Ordering::Acquire);
                 let waited = crate::sched::fair::sched_clock().saturating_sub(exec_start);
-                if exec_start != 0 && waited < crate::sched::fair::SCHED_LATENCY_NS {
+                // RT-plan R3 (docs/development/rt-kernel-plan.md): the D-14
+                // batch window was one full scheduling-latency window
+                // (6 ms), which quantized every fair wake that lost the
+                // idle-CPU race to the incumbent's slice end — the p2f
+                // khog canary read the full 10 ms tick with kpreempt=1
+                // armed (perf-gate-baseline.md: the canary row for the
+                // 977adb51 batch-peer gate + kpreempt re-land). The
+                // reference's own batching scale is the WAKEUP
+                // GRANULARITY, not the latency window: sub-granularity
+                // waits batch (the D-14 ping-pong win stays — a mid-batch
+                // producer's peer waits far below 0.7 ms), granularity-
+                // and-above waits preempt immediately. With the R1
+                // irq-exit hook armed (ABSENT now arms) the preempt lands
+                // at the incumbent's next irq-exit. Measured (p2fcanary,
+                // same-image same-binary A/B): khog futex wake->run
+                // median 28,135 -> 150 us (187x); quiet 43 -> 31 us;
+                // p1_null/p2_ctxsw/p5b_dgram flat.
+                if exec_start != 0
+                    && waited < crate::sched::fair::SCHED_MIN_GRANULARITY_NS
+                {
                     return;
                 }
                 check_cfs_preempt(task, allowed);
