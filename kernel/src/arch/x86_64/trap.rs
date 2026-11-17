@@ -1424,25 +1424,38 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
     //
     // kpreempt (cmdline): runtime arm of this hook. Same contract on
     // every arch: kpreempt=1 arms, kpreempt=0 disarms, ABSENT takes the
-    // arch default. x86_64 default: OFF (wedge-fix lane, 2026-11-01;
-    // was ON since the perf-sched lane, 2026-10-31). The riscv64 twin
-    // also defaults OFF (frame discipline unstabilized).
+    // arch default. x86_64 default: ON (rt-r1 lane, 2026-11-18, RT-plan
+    // stage R1 — docs/development/rt-kernel-plan.md). History: ON at
+    // the perf-sched lane (2026-10-31), back to OFF at the wedge-fix
+    // lane (2026-11-01, 28b1afca) after release-build OH SA storms
+    // wedged with the hook armed (66 both-CPU `DEADLOCK: spinlock
+    // stuck` prints on binder::WORLD; `kpreempt=0` on the same tree:
+    // zero prints, clean-anchor-level SA progress — SAREG txn 7266 vs
+    // clean anchor 33d007fe's 7213 at 120 s). The riscv64 twin still
+    // defaults OFF (frame discipline unstabilized there — R46/R49).
     //
-    // WHY the default went back to OFF: release builds with the hook
-    // armed wedge the OH SA storm (wedge-fix lane, 2026-11-01). At the
-    // perf-sched merge (192bfdce, hook ON by default, release build) the
-    // early SA storm produced 66 both-CPU `DEADLOCK: spinlock stuck`
-    // prints on binder::WORLD with waiters in world_lock(); the SAME
-    // tree booted with `kpreempt=0` shows ZERO deadlock prints and
-    // clean-anchor-level SA progress (SAREG txn 7266 vs clean anchor
-    // 33d007fe's 7213 at 120 s). Same verdict on main tip 4a757d6e
-    // (wfB wedge on binder::WORLD vs wfC clean). The mechanism family
-    // is the documented one below (sc70: hook ON + count leaks =
-    // monopolies) resurfacing under the storm's timing — the hook needs
-    // its own fix before it can be the default again. Re-land
-    // conditions: (1) a release OH SA-storm boot with the hook ON
-    // survives 600 s with zero DEADLOCK prints; (2) the p2f futex
-    // wake->run gains (KVM med 163us -> 9.5us) still hold.
+    // WHY the default can go back ON (R1 re-land, both documented
+    // conditions now met on this tree):
+    // (1) The wedge family's fuel was preempt_count leaks amplified by
+    // the hook (sc70: leaked counts + hook ON = kernel-mode
+    // monopolists). The heal stack that landed since — WAKE-HEAL
+    // zeroing parked phantom counts at wake, the rotation-proof 2 s
+    // tick heal, the 119th booked-task irq_enter/irq_exit release
+    // (bracket-spanning switches release on the task that BOOKED the
+    // base), the glib-mutex sub-before-unlock GRQ guard order, and the
+    // phantom-bits softirq deferral out of irq_exit windows — bounds
+    // every producer class the sc70 census could name; the standing
+    // Tier-1 preempt-count census reads heal-miss 0
+    // (perf-gate-baseline pa115debt1). The R1 merge gate re-verifies
+    // with the hook armed: census bands hold + a release OH SA-storm
+    // 600 s boot with zero DEADLOCK prints.
+    // (2) The p2f condition ("the hook alone restores the 9.5 µs
+    // wake->run") was unsatisfiable on the 11-01 tip because the D-14
+    // measured-wait gate never raised need_resched for batch peers.
+    // R2's hardirq hres expiry (RT-2X) has since replaced the wake
+    // path's delivery context; the R1 acceptance is the pair-battery
+    // cyclictest SCHED_OTHER avg (107 -> the 63-70 µs class against
+    // the banked reference column), measured on the same rig.
     //
     // The sc70-era amplification verdict (hook ON + preempt_count leaks
     // = 309s kernel monopolies) predates the WAKE-HEAL (parked phantom
@@ -1471,16 +1484,21 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
             match crate::cmdline::get_cmdline() {
                 None => return, // cmdline not parsed yet: stay disarmed
                 Some(_) => {
+                    // R1 default flip: ABSENT now arms. kpreempt=0 is
+                    // the explicit disarm (the old OFF-default escape
+                    // hatch, kept for bisects and storm A/Bs).
                     let v = if crate::cmdline::get_param("kpreempt")
                         .as_deref()
-                        == Some("1")
+                        == Some("0")
                     {
-                        2u8
-                    } else {
                         1u8
+                    } else {
+                        2u8
                     };
                     KP_ARMED.store(v, core::sync::atomic::Ordering::Relaxed);
-                    if v == 2 {
+                    if crate::cmdline::get_param("kpreempt").as_deref()
+                        == Some("1")
+                    {
                         crate::pr_info!(
                             "sched: kernel-preempt armed by cmdline (cpu={})",
                             crate::arch::cpu_id()
@@ -1489,7 +1507,7 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
                 }
             }
         }
-        1 => return, // disarmed (cmdline off OR the OFF default; kpreempt=1 arms)
+        1 => return, // disarmed (explicit kpreempt=0; the R1 default arms)
         _ => {}
     }
     // Early-boot / WFI secondaries have no current task: __schedule

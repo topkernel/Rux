@@ -547,7 +547,9 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
 /// Guards, all mirroring the x86_64 twin:
 /// - kpreempt=1 arms / kpreempt=0 disarms / absent = arch default OFF
 ///   on riscv64 (this twin is not yet stable — see the verdict-cache
-///   comment below; the x86_64 twin defaults ON with its battery).
+///   comment below; the x86_64 twin defaults ON since RT-plan R1,
+///   2026-11-18 — flip this twin only after the R53/R84/R85 asm frame
+///   families are stabilized, with its own battery + soak numbers).
 /// - user-origin frames are skipped: ret_from_exception's asm loop
 ///   owns user preemption.
 /// - preempt_count != 0 (spinlock/bh/RCU held) refuses the switch.

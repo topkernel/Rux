@@ -52,15 +52,23 @@ design-divergences.md when stage R6 lands.
 - Acceptance: cyclictest OTHER avg 107 → the 63–70 µs class; make test +
   LTP sched family green; Tier-1 census bands hold.
 
-### R2 — Timer delivery out of softirq (hrtimer-shaped)
-- Mechanism: add a hardirq delivery arm for wake-type timers — the D-19
-  Action::Wake class gets delivered in the timer hardirq (wake + set
-  need_resched), while clock-reading stays softirq-safe. The typed wheel
-  already separates these; this is a delivery-context split, not a redesign.
-- Surface: kernel/src/timer/wheel.rs (routing), oneshot.rs, arch timer irq
-  paths; NOHZ one-shot re-arm discipline stays.
-- Acceptance: cyclictest FIFO avg 104 → ≤30 µs; p7_sleep1ms overshoot
-  15.8 → ≤10 µs; nanosleep census unchanged.
+### R2 — RESCOPED 2026-11-17 after the RT-2X discovery
+- Discovery: the plan's premise was wrong for x86_64 — the RT-2X split
+  already delivers wake actions in hardirq context (expire_hres_inline runs
+  run_wheel_sweep, whose tail is deliver_fired; the softirq raise is gated
+  and dedupe fast-outs). R2 as originally written is a no-op there.
+- Measured after R1+R3: cyclictest FIFO avg 71 µs (min 32, max 2738, 6
+  >400 µs overflows clustering at host-QEMU interference windows); khog
+  futex wake→run median 150 µs vs main 28,135 µs (187×). The quiet-FIFO
+  avg gap to the reference (71 vs 12 µs) is NOT delivery context — the
+  remaining components: timer fire lateness (~16 µs, p7 overshoot class),
+  the wake ladder through idle exit, and distribution tails.
+- Revised R2 scope: (a) hres deadline arm precision (the LAPIC one-shot
+  deadline vs the actual fire time — p7 overshoot decomposition); (b) the
+  idle-exit wake ladder length (WFI exit → pick → resume); (c) cyclictest
+  -h histogram as the standing distribution instrument.
+- Acceptance: FIFO avg decomposition accounted (71 = fire lateness + ladder
+  + tail, each measured); then attack the largest component.
 
 ### R3 — RT wake preempts unconditionally
 - Mechanism: the D-14 measured-wait gate is a fair-class policy; for
