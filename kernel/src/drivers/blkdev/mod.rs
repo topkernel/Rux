@@ -39,6 +39,20 @@ pub struct Geo {
     pub start: u32,
 }
 
+/// One scatter-gather segment of a fused block request: a memory range
+/// (page-aligned or not — the driver maps it to phys) covering
+/// `len` whole 512-byte sectors of the request's CONTIGUOUS device range.
+/// The blk-merge.c bio-segment shape: physically-discontiguous memory,
+/// device-contiguous sectors.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DmaSeg {
+    /// Buffer (DMA target for reads, DMA source for writes)
+    pub ptr: *mut u8,
+    /// Length in bytes (multiple of the sector size)
+    pub len: usize,
+}
+
 pub struct GenDisk {
     /// Device name
     pub name: &'static str,
@@ -64,6 +78,14 @@ pub struct GenDisk {
     /// The DATA buffer is the DMA SOURCE: the caller must keep it valid and
     /// unmodified until the completion fires (the write-batch contract).
     pub async_write_fn: Option<unsafe fn(*const GenDisk, u64, &[u8], *mut core::ffi::c_void) -> i32>,
+    /// Async scatter-gather read (one fused request over N segments whose
+    /// combined length covers a contiguous sector range starting at
+    /// `sector`). None on devices without SG support — callers fall back
+    /// to per-segment `async_read_fn` submissions.
+    pub async_read_sg_fn: Option<unsafe fn(*const GenDisk, u64, &[DmaSeg], *mut core::ffi::c_void) -> i32>,
+    /// Async scatter-gather write — the fused form of `async_write_fn`;
+    /// every segment is a DMA source under the same stability contract.
+    pub async_write_sg_fn: Option<unsafe fn(*const GenDisk, u64, &[DmaSeg], *mut core::ffi::c_void) -> i32>,
 }
 
 unsafe impl Send for GenDisk {}
@@ -90,6 +112,8 @@ impl GenDisk {
             request_fn: None,
             async_read_fn: None,
             async_write_fn: None,
+            async_read_sg_fn: None,
+            async_write_sg_fn: None,
         }
     }
 
@@ -121,6 +145,26 @@ impl GenDisk {
     /// Set async write function (for async I/O submission without blocking)
     pub fn set_async_write_fn(&mut self, f: unsafe fn(*const GenDisk, u64, &[u8], *mut core::ffi::c_void) -> i32) {
         self.async_write_fn = Some(f);
+    }
+
+    /// Set async SG read function (fused multi-segment requests)
+    pub fn set_async_read_sg_fn(&mut self, f: unsafe fn(*const GenDisk, u64, &[DmaSeg], *mut core::ffi::c_void) -> i32) {
+        self.async_read_sg_fn = Some(f);
+    }
+
+    /// Set async SG write function (fused multi-segment requests)
+    pub fn set_async_write_sg_fn(&mut self, f: unsafe fn(*const GenDisk, u64, &[DmaSeg], *mut core::ffi::c_void) -> i32) {
+        self.async_write_sg_fn = Some(f);
+    }
+
+    /// True when the device accepts fused SG READ requests.
+    pub fn has_async_read_sg(&self) -> bool {
+        self.async_read_sg_fn.is_some()
+    }
+
+    /// True when the device accepts fused SG WRITE requests.
+    pub fn has_async_write_sg(&self) -> bool {
+        self.async_write_sg_fn.is_some()
     }
 }
 
@@ -350,6 +394,115 @@ pub fn blkdev_write_async(
             }
         } else {
             Err(-6)  // ENXIO — device doesn't support async writes
+        }
+    }
+}
+
+/// Submit a fused async scatter-gather READ: ONE device request covering
+/// the segments' combined sector range starting at `sector`. This is the
+/// merge endpoint the batch layers call after fusing device-adjacent
+/// spans — one block_rq_issue per merged request, exactly the reference's
+/// request shape.
+///
+/// The segments must cover one CONTIGUOUS device range (each seg is
+/// `len` bytes; the request is `sector..sector + total_len/512`). Each
+/// segment's buffer must remain a valid DMA target until the completion
+/// fires.
+///
+/// Returns Ok(()) if submitted, Err on failure (caller falls back to
+/// per-segment submissions — correctness is never lost, only the fusion).
+// SAFETY: disk is a valid GenDisk from register_disk; segments and
+// completion outlive the async operation.
+pub fn blkdev_read_async_sg(
+    disk: *const GenDisk,
+    sector: u64,
+    segs: &[DmaSeg],
+    completion: &crate::fs::io_completion::IoCompletion,
+) -> Result<(), i32> {
+    unsafe {
+        let gd = &*disk;
+        if let Some(async_fn) = gd.async_read_sg_fn {
+            let major = gd.major;
+            let minor = gd.first_minor;
+            let total: u64 = segs.iter().map(|s| (s.len / 512) as u64).sum();
+            let t0 = crate::drivers::timer::read_time();
+            if crate::trace::EVENT_BLOCK_RQ_ISSUE.armed() {
+                // SAFETY: current task's comm is read for the record only.
+                let comm = crate::sched::current().map(|cur| (*cur).comm());
+                if let Some(comm) = comm {
+                    crate::trace::trace_block_rq_issue(
+                        (major << 20) | minor,
+                        sector,
+                        total as u32,
+                        (total * 512) as u32,
+                        0,
+                        "R",
+                        comm,
+                    );
+                }
+            }
+            let ret = async_fn(disk, sector, segs, completion as *const _ as *mut _);
+            let elapsed_ns = crate::drivers::timer::read_time().saturating_sub(t0) * 100
+                / crate::config::TIMER_CLOCK_FREQ_HZ;
+            iostat::note_io(major, minor, false, total, elapsed_ns);
+            if ret < 0 {
+                Err(ret)
+            } else {
+                Ok(())
+            }
+        } else {
+            Err(-6) // ENXIO — no SG support; caller submits per segment
+        }
+    }
+}
+
+/// Submit a fused async scatter-gather WRITE — the merged form of
+/// [`blkdev_write_async`]. Every segment is a DMA SOURCE under the same
+/// stability contract (valid and unmodified until the completion fires).
+///
+/// Returns Ok(()) if submitted, Err on failure (caller falls back to
+/// per-segment submissions).
+// SAFETY: disk is a valid GenDisk from register_disk; segments stay
+// stable DMA sources and the completion outlives the operation.
+pub fn blkdev_write_async_sg(
+    disk: *const GenDisk,
+    sector: u64,
+    segs: &[DmaSeg],
+    completion: &crate::fs::io_completion::IoCompletion,
+) -> Result<(), i32> {
+    unsafe {
+        let gd = &*disk;
+        if let Some(async_fn) = gd.async_write_sg_fn {
+            let major = gd.major;
+            let minor = gd.first_minor;
+            let total: u64 = segs.iter().map(|s| (s.len / 512) as u64).sum();
+            let t0 = crate::drivers::timer::read_time();
+            if crate::trace::EVENT_BLOCK_RQ_ISSUE.armed() {
+                // SAFETY: current task's comm is read for the record only.
+                let comm = crate::sched::current().map(|cur| (*cur).comm());
+                if let Some(comm) = comm {
+                    crate::trace::trace_block_rq_issue(
+                        (major << 20) | minor,
+                        sector,
+                        total as u32,
+                        (total * 512) as u32,
+                        0,
+                        "W",
+                        comm,
+                    );
+                }
+            }
+            let ret = async_fn(disk, sector, segs, completion as *const _ as *mut _);
+            let elapsed_ns = crate::drivers::timer::read_time().saturating_sub(t0) * 100
+                / crate::config::TIMER_CLOCK_FREQ_HZ;
+            iostat::note_io(major, minor, true, total, elapsed_ns);
+            if ret < 0 {
+                Err(ret)
+            } else {
+                Ok(())
+            }
+        } else {
+            Err(-6) // ENXIO — no SG support; caller submits per segment
         }
     }
 }

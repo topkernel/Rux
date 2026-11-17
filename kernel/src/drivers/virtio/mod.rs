@@ -1001,6 +1001,7 @@ impl VirtIOBlkDevice {
             trace_dev: ((self.disk.major << 20) | self.disk.first_minor) as u32,
             trace_sector: sector,
             trace_nr_sector: (buf.len() / 512) as u32,
+            n_descs: 3,
         };
         VIRTIO_MMIO_PENDING.lock_irqsave()[slot] = Some(pending);
 
@@ -1174,6 +1175,7 @@ impl VirtIOBlkDevice {
             trace_dev: ((self.disk.major << 20) | self.disk.first_minor) as u32,
             trace_sector: sector,
             trace_nr_sector: (buf.len() / 512) as u32,
+            n_descs: 3,
         };
         VIRTIO_MMIO_PENDING.lock_irqsave()[slot] = Some(pending);
 
@@ -1771,6 +1773,12 @@ struct PendingIo {
     trace_dev: u32,
     trace_sector: u64,
     trace_nr_sector: u32,
+    /// Descriptors this chain occupies: [head_desc, head_desc+n_descs)
+    /// mod queue_size. 3 for the classic header/data/resp chain, N+2 for
+    /// an SG chain with N data segments. Drives the window-overlap check
+    /// (pci_pending_slot_reservable) and the descs_held budget release in
+    /// the completion walker.
+    n_descs: u16,
 }
 
 // SAFETY: PendingIo is stored in a Spinlock-protected table and only accessed
@@ -1838,6 +1846,7 @@ fn mmio_publish_sync_tombstone(ordinal: u16, head_desc: u16) {
         trace_dev: 0,
         trace_sector: 0,
         trace_nr_sector: 0,
+        n_descs: 3,
     });
 }
 
@@ -1960,6 +1969,39 @@ pub fn assert_no_virtio_lock(what: &str) {
 /// QEMU's virtio-blk-pci default queue size is 128 → 41 chains max.
 const MAX_PENDING_IO_PCI: usize = 64;
 
+/// Upper bound on data segments in one SG chain. Well under QEMU's
+/// seg_max (queue_size - 2; 254 on a 256-deep queue) and keeps a fused
+/// chain's descriptor footprint (N+2) modest so the descs_held budget
+/// rarely binds. Callers split larger groups.
+pub const MAX_SG_SEGS_PER_CHAIN: usize = 16;
+
+/// TEMP lane diagnostics (remove before merge): fused-chain and fallback
+/// volume counters, rate-limited one-line print.
+pub static SG_DIAG_FUSED: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+pub static SG_DIAG_SPAN_FALLBACK: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+pub static SG_DIAG_SEG_TOTAL: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+pub fn sg_diag_note(fused: bool, n_segs: u64) {
+    use core::sync::atomic::Ordering::AcqRel;
+    if fused {
+        let n = SG_DIAG_FUSED.fetch_add(1, AcqRel) + 1;
+        SG_DIAG_SEG_TOTAL.fetch_add(n_segs, AcqRel);
+        if n % 4096 == 1 {
+            crate::pr_info!(
+                "sg: fused chains {} ({} segs total), span-fallbacks {}",
+                n,
+                SG_DIAG_SEG_TOTAL.load(core::sync::atomic::Ordering::Acquire),
+                SG_DIAG_SPAN_FALLBACK.load(core::sync::atomic::Ordering::Acquire)
+            );
+        }
+    } else {
+        SG_DIAG_SPAN_FALLBACK.fetch_add(1, AcqRel);
+    }
+}
+
 /// Pending async I/O requests for the PCI VirtIO block device.
 ///
 /// ORDINAL-SLOT DISPATCH + DEVICE-TRUTHED MATCHING: every chain — async
@@ -2055,15 +2097,24 @@ pub fn pci_blk_kick_all() {
     }
 }
 
-/// True if the 3-descriptor windows of two chains (heads `a` and `b` on a
-/// queue of `q` descriptors) share any descriptor. Chains always occupy
-/// [head, head+1, head+2] consecutively (header/data/resp).
-fn chain_windows_overlap(a: u32, b: u32, q: u32) -> bool {
+/// True if the descriptor windows of two chains share any descriptor.
+/// Chain A occupies [a, a+la) and chain B [b, b+lb), both mod q. The
+/// classic chain is la=lb=3 (header/data/resp); an SG chain with N data
+/// segments holds N+2. Ring wrap-safe: distance is taken mod q in both
+/// directions.
+fn chain_windows_overlap_len(a: u32, la: u32, b: u32, lb: u32, q: u32) -> bool {
     if q == 0 {
         return false;
     }
     let d = (a as i64 - b as i64).rem_euclid(q as i64);
-    d < 3 || (q as i64 - d) < 3
+    d < la as i64 || (q as i64 - d) < lb as i64
+}
+
+/// True if the 3-descriptor windows of two chains (heads `a` and `b` on a
+/// queue of `q` descriptors) share any descriptor. Chains always occupy
+/// [head, head+1, head+2] consecutively (header/data/resp).
+fn chain_windows_overlap(a: u32, b: u32, q: u32) -> bool {
+    chain_windows_overlap_len(a, 3, b, 3, q)
 }
 
 /// Check that a chain CAN be published to the pending table: its ordinal
@@ -2095,6 +2146,19 @@ fn chain_windows_overlap(a: u32, b: u32, q: u32) -> bool {
 /// Caller must hold the PCI BLK lock (the walker collects under the same
 /// lock, so the reservation cannot race it).
 pub fn pci_pending_slot_reservable(disk: usize, queue_size: u32, ordinal: u16, head_desc: u16) -> bool {
+    pci_pending_slot_reservable_len(disk, queue_size, ordinal, head_desc, 3)
+}
+
+/// Length-aware reservation check (SG chains): the candidate occupies
+/// [head_desc, head_desc+n_descs) mod queue_size; every live entry's own
+/// window length is honored.
+pub fn pci_pending_slot_reservable_len(
+    disk: usize,
+    queue_size: u32,
+    ordinal: u16,
+    head_desc: u16,
+    n_descs: u16,
+) -> bool {
     if disk >= MAX_PCI_BLK_DISKS {
         return false;
     }
@@ -2109,8 +2173,15 @@ pub fn pci_pending_slot_reservable(disk: usize, queue_size: u32, ordinal: u16, h
     if table[slot].is_some() {
         return false;
     }
+    let n = if n_descs == 0 { 3 } else { n_descs } as u32;
     !table.iter().any(|e| match e {
-        Some(p) => chain_windows_overlap(p.head_desc, head_desc as u32, queue_size),
+        Some(p) => chain_windows_overlap_len(
+            p.head_desc,
+            p.n_descs.max(1) as u32,
+            head_desc as u32,
+            n,
+            queue_size,
+        ),
         None => false,
     })
 }
@@ -2161,7 +2232,13 @@ pub fn pci_publish_sync_chain(disk: usize, queue_size: u32, ordinal: u16, head_d
         trace_dev: 0,
         trace_sector: 0,
         trace_nr_sector: 0,
+        n_descs: 3,
     });
+    // Sync chains hold their 3 descriptors until the walker consumes this
+    // tombstone (pairs with the walker's release_descs).
+    if let Some(vq) = get_pci_device_queue_at(disk) {
+        vq.hold_descs(3);
+    }
 }
 
 /// Flag a synchronous chain's tombstone as timed out.
@@ -2260,6 +2337,7 @@ pub fn abandon_pending_completion(
                         trace_dev: 0,
                         trace_sector: 0,
                         trace_nr_sector: 0,
+                        n_descs: p.n_descs,
                     });
                     // io_buf intentionally leaked (see above).
                     abandoned += 1;
@@ -2311,6 +2389,7 @@ pub fn abandon_pending_completion(
                         trace_dev: 0,
                         trace_sector: 0,
                         trace_nr_sector: 0,
+                        n_descs: p.n_descs,
                     });
                     // header + resp intentionally leaked (same discipline).
                     abandoned += 1;
@@ -2340,11 +2419,9 @@ pub fn abandon_pending_completion(
 }
 
 /// Submit an async data chain (read or write per `is_write`) on the PCI
-/// VirtIO block device (no waiting). The direction parameterizes exactly
-/// three things: the request type (T_IN/T_OUT), the data descriptor's
-/// F_WRITE bit (set for reads — the device writes the buffer; clear for
-/// writes — the device READS the buffer), and the pending's is_write trace
-/// bit. Everything else is direction-neutral.
+/// VirtIO block device (no waiting). Single-segment form; see
+/// `pci_submit_data_async_sg` for the scatter-gather form and the shared
+/// design notes.
 ///
 /// SAFETY: `disk` must be the PCI virtio-blk GenDisk (major 8); `data_ptr`
 /// must remain valid and, for writes, UNMODIFIED until the completion
@@ -2357,6 +2434,50 @@ unsafe fn pci_submit_data_async(
     is_write: bool,
     completion: &crate::fs::io_completion::IoCompletion,
 ) -> Result<(), i32> {
+    // SAFETY: same contract, forwarded.
+    unsafe {
+        pci_submit_data_async_sg(
+            disk,
+            sector,
+            &[crate::drivers::blkdev::DmaSeg { ptr: data_ptr, len: data_len }],
+            is_write,
+            completion,
+        )
+    }
+}
+
+/// Submit an async SCATTER-GATHER data chain on the PCI VirtIO block
+/// device (no waiting) — the virtio-blk driver's `blk_rq_map_sg` shape:
+/// ONE request header (one starting sector), N data descriptors forming
+/// the request's scatter list, one response descriptor. The segments must
+/// cover ONE device-contiguous sector range [sector, sector + total/512);
+/// their MEMORY may be discontiguous (physically-separate buffers). This
+/// is the blk-merge.c front/back-merge endpoint: a 1 MiB read fused from
+/// four 256 KiB spans becomes one descriptor chain and one device round
+/// trip instead of four serialized ones.
+///
+/// The direction parameterizes exactly three things: the request type
+/// (T_IN/T_OUT), the data descriptors' F_WRITE bit (set for reads — the
+/// device writes the buffers; clear for writes — the device READS the
+/// buffers), and the pending's is_write trace bit. Everything else is
+/// direction-neutral.
+///
+/// Walker compatibility is unchanged: an SG chain is still ONE chain —
+/// one head descriptor, one submission ordinal, one pending-table entry,
+/// one used-ring entry matched by head id. `n_descs` (N+2) is carried in
+/// the pending so the window-overlap check and the descs_held budget see
+/// the chain's real footprint.
+///
+/// SAFETY: `disk` must be the PCI virtio-blk GenDisk (major 8); every
+/// segment's `ptr` must remain valid and, for writes, UNMODIFIED until
+/// the completion fires; `completion` must outlive the I/O.
+unsafe fn pci_submit_data_async_sg(
+    disk: *const crate::drivers::blkdev::GenDisk,
+    sector: u64,
+    segs: &[crate::drivers::blkdev::DmaSeg],
+    is_write: bool,
+    completion: &crate::fs::io_completion::IoCompletion,
+) -> Result<(), i32> {
     use queue::{VirtIOBlkReqHeader, VirtIOBlkResp};
 
     // Route to the disk's own slot: register_pci_gen_disk stashes the
@@ -2366,6 +2487,16 @@ unsafe fn pci_submit_data_async(
         || !PCI_BLK_READY[slot].load(core::sync::atomic::Ordering::Acquire)
     {
         return Err(-5); // EIO
+    }
+    if segs.is_empty() || segs.len() > MAX_SG_SEGS_PER_CHAIN {
+        return Err(-22); // EINVAL — caller must cap group size
+    }
+    let mut data_len_total: usize = 0;
+    for s in segs {
+        if s.len == 0 || s.len % 512 != 0 {
+            return Err(-22); // segments must be whole sectors
+        }
+        data_len_total = data_len_total.saturating_add(s.len);
     }
 
     // One 64-byte block carries header (offset 0) + response (offset 48) —
@@ -2399,9 +2530,6 @@ unsafe fn pci_submit_data_async(
 
     let header_phys = crate::arch::mm::virt_to_phys(
         crate::arch::mm::VirtAddr::new(header_ptr as u64),
-    ).0;
-    let data_phys = crate::arch::mm::virt_to_phys(
-        crate::arch::mm::VirtAddr::new(data_ptr as u64),
     ).0;
     let resp_phys = crate::arch::mm::virt_to_phys(
         crate::arch::mm::VirtAddr::new(resp_ptr as u64),
@@ -2441,20 +2569,29 @@ unsafe fn pci_submit_data_async(
                 }
             };
             let q = virt_queue.queue_size as u32;
+            let n_descs = (segs.len() + 2) as u16;
+            if q < n_descs as u32 {
+                // Queue too small for this chain (never on QEMU's 256-deep
+                // blk queues); caller falls back to per-span chains.
+                io_buf_free(io_buf);
+                return Err(-22);
+            }
 
-            let (header_desc_idx, data_desc_idx, resp_desc_idx) =
-                match (virt_queue.alloc_desc(), virt_queue.alloc_desc(), virt_queue.alloc_desc()) {
-                    (Some(h), Some(d), Some(r)) => (h, d, r),
-                    _ => {
-                        // In-flight guard exhausted. Draining completions
-                        // advances the used ring and lowers the guard, so
-                        // retry after the drain below; the burned
-                        // descriptor ids are harmless (free-running
-                        // counter, nothing submitted through them).
-                        lagging = true;
-                        (0, 0, 0)
-                    }
-                };
+            // The whole chain occupies [head, head+n_descs) — one
+            // free-running reservation (consecutive by construction under
+            // the BLK lock).
+            let header_desc_idx = match virt_queue.alloc_desc_run(n_descs) {
+                Some(h) => h,
+                None => {
+                    // In-flight/held guard exhausted. Draining completions
+                    // advances the used ring and lowers the guard, so
+                    // retry after the drain below; the burned descriptor
+                    // ids are harmless (free-running counter, nothing
+                    // submitted through them).
+                    lagging = true;
+                    0
+                }
+            };
 
             if !lagging {
                 // Ordinal slot BEFORE submit: every chain — async or
@@ -2462,20 +2599,31 @@ unsafe fn pci_submit_data_async(
                 // publishes at `ordinal % MAX_PENDING_IO_PCI`; the
                 // walker's positional fast path expects it there.
                 let prev_expected = get_expected_used_idx_at(slot);
-                if !pci_pending_slot_reservable(slot, q, prev_expected, header_desc_idx) {
+                if !pci_pending_slot_reservable_len(
+                    slot, q, prev_expected, header_desc_idx, n_descs,
+                ) {
                     // Walker lag: retry after drain below.
                     lagging = true;
                 } else {
                     virt_queue.set_desc(header_desc_idx, header_phys,
                         core::mem::size_of::<VirtIOBlkReqHeader>() as u32,
-                        VIRTQ_DESC_F_NEXT, data_desc_idx);
-                    // Direction: a WRITE's data descriptor has NO
-                    // VIRTQ_DESC_F_WRITE — the device READS the buffer
-                    // (it is the DMA source; the write-batch contract
-                    // keeps it stable until completion).
-                    virt_queue.set_desc(data_desc_idx, data_phys, data_len as u32,
-                        if is_write { VIRTQ_DESC_F_NEXT } else { VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT },
-                        resp_desc_idx);
+                        VIRTQ_DESC_F_NEXT, (header_desc_idx + 1) % virt_queue.queue_size);
+                    // Data descriptors: one per segment. Direction: a
+                    // WRITE's data descriptors have NO VIRTQ_DESC_F_WRITE —
+                    // the device READS the buffers (they are the DMA
+                    // source; the write-batch contract keeps them stable
+                    // until completion).
+                    for (i, seg) in segs.iter().enumerate() {
+                        let di = (header_desc_idx + 1 + i as u16) % virt_queue.queue_size;
+                        let next = (di + 1) % virt_queue.queue_size;
+                        let seg_phys = crate::arch::mm::virt_to_phys(
+                            crate::arch::mm::VirtAddr::new(seg.ptr as u64),
+                        ).0;
+                        virt_queue.set_desc(di, seg_phys, seg.len as u32,
+                            if is_write { VIRTQ_DESC_F_NEXT } else { VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT },
+                            next);
+                    }
+                    let resp_desc_idx = (header_desc_idx + 1 + segs.len() as u16) % virt_queue.queue_size;
                     virt_queue.set_desc(resp_desc_idx, resp_phys,
                         core::mem::size_of::<VirtIOBlkResp>() as u32,
                         VIRTQ_DESC_F_WRITE, 0);
@@ -2523,14 +2671,21 @@ unsafe fn pci_submit_data_async(
                         ordinal: prev_expected,
                         timed_out: false,
                         // Zero-serve guard: the walker stamps this into the
-                        // delivered completion; bread_wait verifies it.
-                        data_ptr: data_ptr as usize,
+                        // delivered completion; bread_wait verifies it. The
+                        // FIRST segment's pointer is the group's token (the
+                        // caller's expect-value is the fused range's first
+                        // buffer).
+                        data_ptr: segs[0].ptr as usize,
                         is_write,
                         // block:block_rq_complete geometry for the walker.
                         trace_dev: (((*disk).major << 20) | (*disk).first_minor) as u32,
                         trace_sector: sector,
-                        trace_nr_sector: (data_len / 512) as u32,
+                        trace_nr_sector: (data_len_total / 512) as u32,
+                        n_descs,
                     });
+                    // SG budget: the chain holds n_descs descriptors until
+                    // the walker consumes its used-ring entry.
+                    virt_queue.hold_descs(n_descs);
 
                     submitted = true;
                 }
@@ -2617,6 +2772,48 @@ unsafe fn pci_async_write_fn(
 ) -> i32 {
     let comp = &*(completion as *const crate::fs::io_completion::IoCompletion);
     match pci_submit_write_async(disk, sector, buf, comp) {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
+}
+
+/// Static wrapper matching GenDisk's `async_read_sg_fn` signature: one
+/// fused multi-segment READ chain covering the segments' contiguous
+/// sector range.
+///
+/// SAFETY: `disk` is the registered PCI virtio-blk GenDisk; every segment
+/// stays a valid DMA target until the completion fires; `completion`
+/// outlives the I/O.
+unsafe fn pci_async_read_sg_fn(
+    disk: *const crate::drivers::blkdev::GenDisk,
+    sector: u64,
+    segs: &[crate::drivers::blkdev::DmaSeg],
+    completion: *mut core::ffi::c_void,
+) -> i32 {
+    let comp = &*(completion as *const crate::fs::io_completion::IoCompletion);
+    // SAFETY: contract forwarded (see pci_submit_data_async_sg).
+    match unsafe { pci_submit_data_async_sg(disk, sector, segs, false, comp) } {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
+}
+
+/// Static wrapper matching GenDisk's `async_write_sg_fn` signature: one
+/// fused multi-segment WRITE chain; every segment is a DMA source that
+/// must stay valid and unmodified until the completion fires.
+///
+/// SAFETY: `disk` is the registered PCI virtio-blk GenDisk; segments stay
+/// stable DMA sources until the completion fires; `completion` outlives
+/// the I/O.
+unsafe fn pci_async_write_sg_fn(
+    disk: *const crate::drivers::blkdev::GenDisk,
+    sector: u64,
+    segs: &[crate::drivers::blkdev::DmaSeg],
+    completion: *mut core::ffi::c_void,
+) -> i32 {
+    let comp = &*(completion as *const crate::fs::io_completion::IoCompletion);
+    // SAFETY: contract forwarded (see pci_submit_data_async_sg).
+    match unsafe { pci_submit_data_async_sg(disk, sector, segs, true, comp) } {
         Ok(()) => 0,
         Err(e) => e,
     }
@@ -3152,6 +3349,14 @@ pub fn pci_process_async_completions_slot(slot: usize) -> usize {
                 }
                 match fired.as_ref() {
                     Some(p) => {
+                        // The chain's descriptor window and held-descriptor
+                        // budget are released HERE (the entry leaves the
+                        // table under this lock): sync tombstones and
+                        // timeout tombstones carry n_descs like every
+                        // other published chain.
+                        if let Some(vq) = get_pci_device_queue_at(slot) {
+                            vq.release_descs(p.n_descs);
+                        }
                         // Exact per-entry disorder measurement: the entry
                         // was submitted at ordinal p.ordinal but completed
                         // at used-ring index i.
@@ -3603,6 +3808,12 @@ pub fn register_pci_gen_disk(slot: usize) {
     // bio's WriteBatch falls back to serialized synchronous writes —
     // correct, but the fsync flush wall stays.
     disk.set_async_write_fn(pci_async_write_fn);
+    // Scatter-gather forms (the blk-merge front/back-merge endpoint):
+    // one fused chain per group of device-adjacent spans. Without them
+    // the batch layers fall back to one chain per span (the pre-fusion
+    // shape).
+    disk.set_async_read_sg_fn(pci_async_read_sg_fn);
+    disk.set_async_write_sg_fn(pci_async_write_sg_fn);
 
     // Register to block device manager
     let _ = crate::drivers::blkdev::register_disk(disk);
