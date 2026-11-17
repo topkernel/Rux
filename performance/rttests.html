@@ -84,12 +84,12 @@
     <div class="sub">实时延迟与调度压力的性能对照(同机同镜像同二进制),无数据项即失败 · 机位与方法</div>
 
     <h2 id="data"><span class="anchor">§1</span>数据(同机同镜像同二进制对照)</h2>
-    <p style="font-size:13.5px">两侧使用<b>同一镜像、同一 rt-tests v2.11 静态二进制、同一参数</b>,分别在 Rux(main debug)与 Linux(宿主 7.0.0 内核)于同一 guest 机位执行。cyclictest:30 s 窗、1000 µs 间隔、mlockall;hackbench:消息传递吞吐(秒,越低越好)。</p>
+    <p style="font-size:13.5px">两侧使用<b>同一镜像、同一 rt-tests v2.11 静态二进制、同一参数</b>,Rux(main release)与参考内核(同镜像 guest 内核 7.0.0-38)对照。cyclictest:30 s 窗、1000 µs 间隔、mlockall;hackbench:消息传递吞吐(秒,越低越好)。cyclictest 行当前为 Rux release 单靴实测与参考电池列(不同靴),同机交错重银行进行中。</p>
     <div class="tbl-wrap"><table>
       <thead><tr><th>项</th><th class="num">Rux</th><th class="num">Linux(同机)</th><th>说明</th></tr></thead>
       <tbody id="rt-rows">
-        <tr><td class="mono">cyclictest SCHED_OTHER(丢失/avg/max µs)</td><td class="num">59/30000 · avg 107 · max 29061(末窗毛刺)</td><td class="num">31/30000 · avg 63 · max 1417</td><td>实时路径延迟差距为主要缺口</td></tr>
-        <tr><td class="mono">cyclictest SCHED_FIFO p98(丢失/avg/max µs)</td><td class="num">56/30000 · avg 71 · max 27889(末窗毛刺)</td><td class="num">25/30000 · avg 12 · max 887</td><td>Linux RT 调度成熟度差距如实呈现</td></tr>
+        <tr><td class="mono">cyclictest SCHED_OTHER(丢失/avg/max µs)</td><td class="num">avg 73 · max 2762(release 单靴)</td><td class="num">avg 63 · max 1417(电池列)</td><td>max 尾(2.7 ms 级)疑长关中断段/缺页打断,归因进行中</td></tr>
+        <tr><td class="mono">cyclictest SCHED_FIFO p98(丢失/avg/max µs)</td><td class="num">avg 69 · max 263(release 单靴)</td><td class="num">avg 12 · max 887(电池列)</td><td>release 后 avg 104→69;max 与参考列不同靴不可直接比较,同机交错重银行中</td></tr>
         <tr><td class="mono">rt_wakesys(唤醒到运行,µs)</td><td class="num">3.3</td><td class="num">持平</td><td>定时器到期改在硬中断顶部派发后与 Linux 持平</td></tr>
         <tr><td class="mono">hackbench socketpair -g 20(秒)</td><td class="num">1.536</td><td class="num">0.330</td><td>Linux 4.7×</td></tr>
         <tr><td class="mono">hackbench pipe -p 20 -g 4(秒)</td><td class="num">0.163</td><td class="num">0.017</td><td>Linux 9.6×</td></tr>

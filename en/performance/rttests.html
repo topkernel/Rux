@@ -85,12 +85,12 @@
     <div class="sub">Real-time latency and scheduling stress, compared on the same image, binaries and rig; a row without numbers is a failure · rig and method</div>
 
     <h2 id="data"><span class="anchor">§1</span>Data (same image, same binary, same rig)</h2>
-    <p style="font-size:13.5px">Both sides run <b>the same image, the same rt-tests v2.11 static binaries, the same parameters</b> — Rux (main debug) and Linux (the host 7.0.0 kernel) in the same guest rig. cyclictest: a 30 s window, a 1000 µs interval, mlockall; hackbench: message-passing throughput (seconds, lower is better).</p>
+    <p style="font-size:13.5px">Both sides run <b>the same image, the same rt-tests v2.11 static binaries, the same parameters</b> — Rux (main release) vs the reference kernel (same-image guest kernel 7.0.0-38). cyclictest: a 30 s window, a 1000 µs interval, mlockall; hackbench: message-passing throughput (seconds, lower is better). The cyclictest rows currently carry Rux release single-boot measurements beside reference battery columns (different boots); the same-rig interleaved re-bank is in flight.</p>
     <div class="tbl-wrap"><table>
       <thead><tr><th>Item</th><th class="num">Rux</th><th class="num">Linux (same rig)</th><th>Notes</th></tr></thead>
       <tbody id="rt-rows">
-        <tr><td class="mono">cyclictest SCHED_OTHER (missed/avg/max µs)</td><td class="num">59/30000 · avg 107 · max 29061 (final-window spike)</td><td class="num">31/30000 · avg 63 · max 1417</td><td>the real-time latency gap is the main shortfall</td></tr>
-        <tr><td class="mono">cyclictest SCHED_FIFO p98 (missed/avg/max µs)</td><td class="num">56/30000 · avg 71 · max 27889 (final-window spike)</td><td class="num">25/30000 · avg 12 · max 887</td><td>the Linux RT-scheduling maturity gap, presented as measured</td></tr>
+        <tr><td class="mono">cyclictest SCHED_OTHER (missed/avg/max µs)</td><td class="num">avg 73 · max 2762 (release, single boot)</td><td class="num">avg 63 · max 1417 (battery column)</td><td>the max tail (2.7 ms class) suggests a long IRQ-off section / page fault interrupting the sleeper — attribution in progress</td></tr>
+        <tr><td class="mono">cyclictest SCHED_FIFO p98 (missed/avg/max µs)</td><td class="num">avg 69 · max 263 (release, single boot)</td><td class="num">avg 12 · max 887 (battery column)</td><td>avg 104→69 after the release-basis fix; the max columns are from different boots and not directly comparable — same-rig interleaved re-bank in flight</td></tr>
         <tr><td class="mono">rt_wakesys (wake-to-run, µs)</td><td class="num">3.3</td><td class="num">parity</td><td>after moving timer expiry to the top of the hardirq vector</td></tr>
         <tr><td class="mono">hackbench socketpair -g 20 (s)</td><td class="num">1.536</td><td class="num">0.330</td><td>Linux 4.7×</td></tr>
         <tr><td class="mono">hackbench pipe -p 20 -g 4 (s)</td><td class="num">0.163</td><td class="num">0.017</td><td>Linux 9.6×</td></tr>
