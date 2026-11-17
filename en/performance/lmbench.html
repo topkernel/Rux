@@ -91,11 +91,11 @@
       <table>
         <thead><tr><th>Case</th><th class="num">Rux</th><th class="num">Linux (same-rig guest)</th><th>Verdict</th></tr></thead>
         <tbody>
-          <tr><td class="mono">lat_pipe</td><td class="num">5.54–5.64 µs</td><td class="num">25.06–26.27 µs</td><td><span class="chip ok">ahead 4.6×</span></td></tr>
-          <tr><td class="mono">lat_ctx -s64 2</td><td class="num">2.86–3.25 µs</td><td class="num">12.84–12.97 µs</td><td><span class="chip ok">ahead 4.0–4.5×</span></td></tr>
+          <tr><td class="mono">lat_pipe</td><td class="num">4.40 µs</td><td class="num">3.17 µs</td><td><span class="chip ok">ahead 1.39×</span> (from 2.1×)</td></tr>
+          <tr><td class="mono">lat_ctx -s64 2</td><td class="num">2.51 µs</td><td class="num">0.90 µs</td><td><span class="chip ok">ahead 2.79×</span></td></tr>
           <tr><td class="mono">lat_ctx -s64 8</td><td class="num">3.33 µs</td><td class="num">12.06–12.08 µs</td><td><span class="chip ok">ahead 3.6×</span></td></tr>
           <tr><td class="mono">bw_pipe</td><td class="num">30,464 MB/s</td><td class="num">8,241 MB/s</td><td><span class="chip ok">ahead 3.7×</span></td></tr>
-          <tr><td class="mono">lat_sem</td><td class="num">1.52–1.57 µs</td><td class="num">4.47–4.55 µs</td><td><span class="chip ok">ahead 2.9×</span></td></tr>
+          <tr><td class="mono">lat_sem</td><td class="num">0.503 µs</td><td class="num">0.483 µs</td><td><span class="chip ok">ahead 1.04× (from 3.24×)</span></td></tr>
           <tr><td class="mono">bw_unix</td><td class="num">48,352 MB/s</td><td class="num">23,022 MB/s</td><td><span class="chip ok">ahead 2.1×</span></td></tr>
           <tr><td class="mono">lat_unix</td><td class="num">2.26 µs</td><td class="num">3.24 µs</td><td><span class="chip ok">ahead 1.4×</span></td></tr>
           <tr><td class="mono">lat_syscall fstat</td><td class="num">0.084–0.094 µs</td><td class="num">0.119–0.120 µs</td><td><span class="chip ok">ahead 1.3×</span></td></tr>
@@ -113,11 +113,11 @@
       <table>
         <thead><tr><th>Case</th><th class="num">Rux</th><th class="num">Linux (same-rig guest)</th><th>Verdict</th><th>Optimization direction</th></tr></thead>
         <tbody>
-          <tr><td class="mono">lat_syscall open</td><td class="num">0.86–0.87 µs (±1% variance, 4/4 stable after fdreap silence)</td><td class="num">0.394–0.397 µs</td><td><span class="chip bad">behind 1.9–2.2×</span></td><td>path-walk loop (598 ns) + File build/install (950 ns)</td></tr>
-          <tr><td class="mono">lat_syscall read</td><td class="num">0.0974–0.1000 µs</td><td class="num">0.060–0.062 µs</td><td><span class="chip bad">behind 1.61×</span> (−6% cumulative)</td><td>copy tail + entry floor (same)</td></tr>
+          <tr><td class="mono">lat_syscall open</td><td class="num">0.676 µs</td><td class="num">0.471 µs</td><td><span class="chip bad">behind 1.44×</span> (from 1.9–2.5×)</td></tr>
+          <tr><td class="mono">lat_syscall read</td><td class="num">0.095 µs</td><td class="num">0.067 µs</td><td><span class="chip bad">behind 1.42×</span> (from 1.7×)</td></tr>
           <tr><td class="mono">lat_syscall stat</td><td class="num">0.32–0.45 µs</td><td class="num">0.239 µs</td><td><span class="chip bad">behind 1.4–1.9×</span> (±30% boot variance)</td><td>path resolution</td></tr>
-          <tr><td class="mono">lat_syscall write</td><td class="num">0.0808–0.0816 µs</td><td class="num">0.0597–0.0600 µs</td><td><span class="chip bad">behind 1.35×</span> (−7% cumulative: fdget+PT_REGS+fdreap silence)</td><td>copy tail + entry floor (2× needs both — documented)</td></tr>
-          <tr><td class="mono">lat_syscall null</td><td class="num">0.0454/0.0455 µs (median of 3)</td><td class="num">0.046 µs</td><td><span class="chip ok">parity 0.99×</span> (getppid O(1)+fdget+PT_REGS stack)</td><td>2× target 0.023µs is below the reference full syscall cost = entry-floor rework (documented)</td></tr>
+          <tr><td class="mono">lat_syscall write</td><td class="num">0.078 µs</td><td class="num">0.069 µs</td><td><span class="chip bad">behind 1.13×</span></td></tr>
+          <tr><td class="mono">lat_syscall null</td><td class="num">0.042 µs</td><td class="num">0.046 µs</td><td><span class="chip ok">ahead 0.92×</span> (fdget+getppid O(1)+PT_REGS+fdreap silence+NOHZ stack)</td><td>2× target 0.023µs = entry-floor rework (documented)</td></tr>
           <tr><td class="mono">lat_proc fork</td><td class="num">37.8–40.3 µs</td><td class="num">33.9 µs</td><td><span class="chip bad">behind 1.11–1.19×</span></td><td>measurable again after NOHZ; keep converging</td></tr>
           <tr><td class="mono">lat_proc exec</td><td class="num">40.6 µs</td><td class="num">37.6 µs</td><td><span class="chip bad">behind 1.08×</span></td><td>near parity band</td></tr>
         </tbody>
