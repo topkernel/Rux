@@ -5158,15 +5158,17 @@ fn do_fsync(args: SyscallArgs, datasync: i32) -> i64 {
                         // first (collect/write/complete; no page-cache
                         // lock across I/O), then the normal data+journal
                         // sync persists what the flush wrote.
+                        #[allow(unused_variables)]
                         crate::fs::ext4::file::ext4_flush_dirty_inode(inode, 0, u64::MAX);
                         // SAFETY: both pointers were installed at file open
                         // time and live as long as the inode (Arc).
-                        match unsafe {
+                        let _r = match unsafe {
                             crate::fs::ext4::file::ext4_sync_file(&*fs_ptr, ext4_inode, datasync)
                         } {
                             Ok(()) => 0,
                             Err(e) => e as i64,
-                        }
+                        };
+                        _r
                     } else {
                         let _ = crate::fs::bio::sync_buffers();
                         // Persist the DISK's volatile cache too — draining

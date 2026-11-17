@@ -223,28 +223,63 @@ pub fn ext4_ext_get_run(
     Ok(run_from_entries(entries, logical_block))
 }
 
+/// Binary search a leaf `entries` slice (sorted by ee_block) for the
+/// entry covering `logical_block`. Returns the covering entry's index, or
+/// the INVERSE index (bit 31 set, values are small) of the first entry
+/// PAST `logical_block` (the hole-to-next-extent distance), or
+/// u32::MAX when nothing lies ahead. Replaces the linear scans that made
+/// every lookup of a fragmented tree O(entries) — the fsw br=25k-class
+/// CPU burn on depth>=1 files (wrfsync lane, 2026-11-17).
+#[inline]
+fn search_extent_entry(entries: &[Ext4Extent], logical_block: u64) -> u32 {
+    let mut lo = 0usize;
+    let mut hi = entries.len();
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if entries[mid].ee_block as u64 <= logical_block {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    // lo = first entry with ee_block > logical_block; lo-1 = candidate.
+    if lo > 0 {
+        let i = lo - 1;
+        let start = entries[i].ee_block as u64;
+        if logical_block < start + entries[i].length() as u64 {
+            return i as u32;
+        }
+    }
+    if lo < entries.len() {
+        0x8000_0000 | lo as u32 // hole: index of the next entry, marked
+    } else {
+        u32::MAX // hole: nothing ahead
+    }
+}
+
 /// Scan leaf `entries` for the extent covering `logical_block`; return
 /// the maximal run from that point. Holes report the distance to the
 /// next extent's start (length 0 means "nothing known ahead" — callers
 /// re-resolve per block there).
 #[inline]
 fn run_from_entries(entries: &[Ext4Extent], logical_block: u64) -> (u64, u64, bool) {
-    let mut next_start = u64::MAX;
-    for ext in entries {
+    let r = search_extent_entry(entries, logical_block);
+    if r != u32::MAX && r & 0x8000_0000 == 0 {
+        let ext = &entries[r as usize];
         let start = ext.ee_block as u64;
-        let end = start + ext.length() as u64;
-        if logical_block >= start && logical_block < end {
-            let offset = logical_block - start;
-            let unwritten = ext.is_unwritten();
-            let phys = if unwritten { 0 } else { ext.start_block() + offset };
-            let len = ext.length() as u64 - offset;
-            return (phys, len, unwritten);
-        }
-        if start > logical_block && start < next_start {
-            next_start = start;
-        }
+        let offset = logical_block - start;
+        let unwritten = ext.is_unwritten();
+        let phys = if unwritten { 0 } else { ext.start_block() + offset };
+        let len = ext.length() as u64 - offset;
+        return (phys, len, unwritten);
     }
-    (0, if next_start == u64::MAX { 0 } else { next_start - logical_block }, false)
+    if r == u32::MAX {
+        (0, 0, false)
+    } else {
+        let next = (r & 0x7FFF_FFFF) as usize;
+        let next_start = entries[next].ee_block as u64;
+        (0, next_start.saturating_sub(logical_block), false)
+    }
 }
 
 /// Deep-tree run resolver: one walk per level, whole-extent verdict.
@@ -1167,18 +1202,16 @@ fn find_block_in_external_extent_ex(
                 data.as_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4Extent,
                 header.eh_entries as usize,
             );
-            let mut hit = Ok((0u64, false));
-            for ext in entries {
-                let start = ext.ee_block as u64;
-                let end = start + ext.length() as u64;
-                if logical_block >= start && logical_block < end {
-                    let offset = logical_block - start;
-                    let unwritten = ext.is_unwritten();
-                    hit = Ok((ext.start_block() + offset, unwritten));
-                    break;
-                }
+            // Binary search (entries sorted by ee_block): O(log n) per
+            // lookup instead of the linear scan (wrfsync lane).
+            let r = search_extent_entry(entries, logical_block);
+            if r != u32::MAX && r & 0x8000_0000 == 0 {
+                let ext = &entries[r as usize];
+                let offset = logical_block - ext.ee_block as u64;
+                Ok((ext.start_block() + offset, ext.is_unwritten()))
+            } else {
+                Ok((0u64, false))
             }
-            hit
         } else {
             let indices = core::slice::from_raw_parts(
                 data.as_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4ExtentIdx,
@@ -1988,6 +2021,232 @@ fn find_covering_leaf_blk(
         depth -= 1;
     }
     Ok(child)
+}
+
+/// Push `e` onto `out`, merging with the previous entry when the two are
+/// logically+physically contiguous with the SAME unwritten state (the
+/// append_node merge rule; u15 headroom per EXT4-MERGE).
+#[inline]
+fn push_merge(out: &mut alloc::vec::Vec<RawExtent>, e: RawExtent) {
+    if let Some(l) = out.last_mut() {
+        if l.unwritten == e.unwritten
+            && l.end() == e.ee_block as u64
+            && l.phys + l.len as u64 == e.phys
+            && l.len as u64 + e.len as u64 <= 0x7FFE
+        {
+            l.len += e.len;
+            return;
+        }
+    }
+    out.push(e);
+}
+
+/// Splice a WRITTEN conversion of the logical range `[start, start+len)`
+/// through a flat sorted extent list, merging neighbors. Returns None when
+/// no unwritten extent overlapped the range (a no-op call). Takes an
+/// iterator so no-op calls (the per-write common case on already-written
+/// ranges) allocate nothing.
+fn splice_converted<I: Iterator<Item = RawExtent>>(
+    entries: I,
+    start: u64,
+    len: u64,
+) -> Option<alloc::vec::Vec<RawExtent>> {
+    let end = start.saturating_add(len);
+    let mut out: alloc::vec::Vec<RawExtent> = alloc::vec::Vec::new();
+    let mut changed = false;
+    for e in entries {
+        let e_end = e.end();
+        if !e.unwritten || e_end <= start || e.ee_block as u64 >= end {
+            push_merge(&mut out, e);
+            continue;
+        }
+        changed = true;
+        // Overlap [ov_s, ov_e) turns WRITTEN; unwritten prefix/suffix
+        // survive around it.
+        let ov_s = start.max(e.ee_block as u64);
+        let ov_e = end.min(e_end);
+        let e_start = e.ee_block as u64;
+        if ov_s > e_start {
+            push_merge(
+                &mut out,
+                RawExtent {
+                    ee_block: e.ee_block,
+                    phys: e.phys,
+                    len: (ov_s - e_start) as u16,
+                    unwritten: true,
+                },
+            );
+        }
+        push_merge(
+            &mut out,
+            RawExtent {
+                ee_block: ov_s as u32,
+                phys: e.phys + (ov_s - e_start),
+                len: (ov_e - ov_s) as u16,
+                unwritten: false,
+            },
+        );
+        if ov_e < e_end {
+            push_merge(
+                &mut out,
+                RawExtent {
+                    ee_block: ov_e as u32,
+                    phys: e.phys + (ov_e - e_start),
+                    len: (e_end - ov_e) as u16,
+                    unwritten: true,
+                },
+            );
+        }
+    }
+    if changed {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// Bulk unwritten->written conversion for a logical block range (the
+/// reference kernel's write shape: Linux submits the write's bios over
+/// unwritten extents directly and converts the extent STATE in bulk —
+/// ext4_ext_convert_unwritten — one tree edit per write, never per block).
+///
+/// The range's covered unwritten extents are spliced into (unwritten
+/// prefix, WRITTEN overlap, unwritten suffix) with neighbor merging in the
+/// covering node; the common single-extent case is a node-local edit
+/// (inline root: no tree I/O at all — the root lives in the inode; external
+/// leaf: one checksummed write_node). Ranges crossing node boundaries or
+/// overflowing a node's capacity fall back to gather/splice/rebuild. A
+/// no-op call (nothing unwritten overlapping) costs only the covering
+/// node's scan — no I/O, no edit.
+///
+/// Crash ordering note: the conversion happens BEFORE the data blocks are
+/// written, exactly like the per-block materialize path it replaces (a
+/// crash between the two exposes the preallocated block's stale bytes
+/// instead of zeros — the documented NJ write-back stance; e2fsck's
+/// unwritten-vs-bitmap pass covers it the same way it covers
+/// ext4_ext_materialize_block).
+///
+/// `meta_delta` accumulates the SIGNED 512-byte-sector delta of tree
+/// metadata (a rebuild may free more than it adds) — same contract as
+/// ext4_ext_materialize_block.
+pub fn ext4_ext_convert_unwritten(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    i_block: &mut [u32; 15],
+    start: u64,
+    len: u64,
+    meta_delta: &mut i64,
+    csum_seed: u32,
+) -> Result<(), i32> {
+    if len == 0 {
+        return Ok(());
+    }
+    let end = start.saturating_add(len);
+    let root = unsafe { core::slice::from_raw_parts(i_block.as_ptr() as *const u8, 60) };
+    let rh = node_header(root);
+    if rh.eh_magic != EXT4_EXT_MAGIC {
+        return Ok(());
+    }
+    if rh.eh_depth == 0 {
+        let n = rh.eh_entries as usize;
+        if n > ROOT_NODE_CAP {
+            return Err(errno::Errno::IOError.as_neg_i32());
+        }
+        // SAFETY: n bounded by ROOT_NODE_CAP (root 60-byte contract).
+        let entries: &[Ext4Extent] = unsafe { node_extents(root, n) };
+        let Some(spliced) =
+            splice_converted(entries.iter().map(|e| RawExtent::from_disk(e)), start, len)
+        else {
+            return Ok(());
+        };
+        if spliced.len() > ROOT_NODE_CAP {
+            // Root cannot hold the splice (fragmented legacy tree): full
+            // rebuild from the merged flat list.
+            let delta = ext4_ext_rebuild(fs, i_block, &spliced, csum_seed)?;
+            *meta_delta += delta;
+            return Ok(());
+        }
+        // Node-local root splice.
+        let mut node = root.to_vec();
+        let h = node_header_mut(&mut node);
+        h.eh_entries = spliced.len() as u16;
+        // SAFETY: spliced.len() <= ROOT_NODE_CAP fits the 60-byte root.
+        unsafe {
+            node_extents_mut(&mut node, ROOT_NODE_CAP)[..spliced.len()]
+                .copy_from_slice(&spliced.iter().map(|e| e.to_disk()).collect::<alloc::vec::Vec<_>>());
+            core::ptr::copy_nonoverlapping(node.as_ptr(), i_block.as_mut_ptr() as *mut u8, 60);
+        }
+        return Ok(());
+    }
+    // Depth >= 1: LEAF-LOCAL splices. The write's range usually covers a
+    // handful of leaves; each covering leaf is read once, spliced under
+    // its own capacity and written back with one checksum. The whole-tree
+    // gather/splice/rebuild runs only when a leaf overflows (fragmented
+    // legacy tree) — a per-write GATHER here was O(total-entries) on the
+    // random-overwrite fsync row (mid-run ~2k entries → 80 us per 4 KiB
+    // flushed page; the no-op path below is one cached leaf read + scan).
+    let mut lb = start;
+    let mut overflow = false;
+    while lb < end {
+        // SAFETY: i_block is the inode's extent root (60 bytes).
+        let leaf_blk = find_covering_leaf_blk(fs, i_block, lb)?;
+        if leaf_blk == 0 {
+            // Left of the first leaf's key — no coverage, no unwritten.
+            break;
+        }
+        // SAFETY: leaf_blk from the tree index walk.
+        let mut node = unsafe { read_node(fs, leaf_blk)? };
+        let cap = external_node_cap(fs);
+        let lh = node_header(&node);
+        let n = lh.eh_entries as usize;
+        if lh.eh_magic != EXT4_EXT_MAGIC || n > cap {
+            return Err(errno::Errno::IOError.as_neg_i32());
+        }
+        // SAFETY: n bounded by cap.
+        let entries: &[Ext4Extent] = unsafe { node_extents(&node, n) };
+        let leaf_end = entries
+            .last()
+            .map(|e| RawExtent::from_disk(e).end())
+            .unwrap_or(lb);
+        if leaf_end <= lb {
+            break; // degenerate/empty leaf
+        }
+        let range_end = end.min(leaf_end);
+        match splice_converted(entries.iter().map(|e| RawExtent::from_disk(e)), lb, range_end - lb) {
+            None => {
+                // No unwritten overlap in this leaf — advance.
+                lb = leaf_end;
+            }
+            Some(spliced) => {
+                if spliced.len() > cap {
+                    overflow = true;
+                    break;
+                }
+                let h = node_header_mut(&mut node);
+                h.eh_entries = spliced.len() as u16;
+                // SAFETY: spliced.len() <= cap fits the node buffer.
+                unsafe {
+                    let disk: alloc::vec::Vec<_> =
+                        spliced.iter().map(|e| e.to_disk()).collect();
+                    node_extents_mut(&mut node, cap)[..spliced.len()].copy_from_slice(&disk);
+                }
+                // SAFETY: leaf_blk from the tree walk.
+                unsafe { write_node(fs, leaf_blk, &node, csum_seed)? };
+                lb = leaf_end;
+            }
+        }
+    }
+    if overflow {
+        // A leaf cannot hold its splice: whole-tree rebuild from the
+        // merged flat list (this also collapses a fragmented legacy
+        // tree back toward the inline root).
+        let all = ext4_ext_gather(fs, i_block)?;
+        let Some(spliced) = splice_converted(all.into_iter(), start, len) else {
+            return Ok(());
+        };
+        let delta = ext4_ext_rebuild(fs, i_block, &spliced, csum_seed)?;
+        *meta_delta += delta;
+    }
+    Ok(())
 }
 
 /// Write-time conversion for unwritten extents (any tree depth): mark the
