@@ -189,11 +189,6 @@ fn ext4_dio_read_batched(
             if count > 0 {
                 crate::drivers::virtio::pci_blk_kick_all();
             }
-            // TEMPORARY dioprobe (wrfsync lane)
-            let _t = if crate::dfx::dioprobe::on() { crate::dfx::dioprobe::now() } else { 0 };
-            if count > 0 && crate::dfx::dioprobe::on() {
-                crate::dfx::dioprobe::bump(&crate::dfx::dioprobe::RD_DRAINS);
-            }
             let mut cut_at = usize::MAX;
             for i in 0..count {
                 let rc = completions[i].wait();
@@ -245,9 +240,6 @@ fn ext4_dio_read_batched(
             }
             count = 0;
             blocks_in_window = 0;
-            if _t != 0 {
-                crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::RD_WAIT_CYCLES, _t);
-            }
             if cut_at != usize::MAX && cut_at < total_read {
                 total_read = cut_at;
             }
@@ -284,9 +276,6 @@ fn ext4_dio_read_batched(
         // ONE extent walk resolves the maximal run (pair-battery item 1):
         // per-block get_data_block paid 1-2 cached breads per 4 KiB on
         // depth>=1 files (512 per 1 MiB read — the fsw br=25k signature).
-        // (_ew: TEMPORARY dioprobe bracket, wrfsync lane)
-        #[allow(unused_variables)]
-        let _ew = if crate::dfx::dioprobe::on() { crate::dfx::dioprobe::now() } else { 0 };
         let (run_phys, run_avail, run_unwritten) = match crate::fs::ext4::extent::ext4_ext_get_run(
             fs,
             inode.ino,
@@ -302,10 +291,6 @@ fn ext4_dio_read_batched(
                 return None;
             }
         };
-        if _ew != 0 {
-            crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::RD_EXTWALK_CYCLES, _ew);
-            crate::dfx::dioprobe::bump(&crate::dfx::dioprobe::RD_EXTWALKS);
-        }
 
         // Unwritten extent or hole: zero-serve the known stretch (the
         // resolver reports the distance to the next extent; 0 = unknown
@@ -380,9 +365,6 @@ fn ext4_dio_read_batched(
         let span_bytes = n as usize * block_size;
         // SAFETY-free: buf[buf_offset..] is the caller's live staging
         // slice; the completion drains before return.
-        // (_st: TEMPORARY dioprobe bracket, wrfsync lane)
-        #[allow(unused_variables)]
-        let _st = if crate::dfx::dioprobe::on() { crate::dfx::dioprobe::now() } else { 0 };
         let submitted = {
             let dst = buf[buf_offset..buf_offset + span_bytes].as_mut_ptr();
             let slice = unsafe {
@@ -395,10 +377,6 @@ fn ext4_dio_read_batched(
                 &completions[count],
             )
         };
-        if _st != 0 {
-            crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::RD_SUBMIT_CYCLES, _st);
-            crate::dfx::dioprobe::bump(&crate::dfx::dioprobe::RD_SUBMITS);
-        }
         match submitted {
             Ok(()) => {
                 async_ok = true;
@@ -1225,13 +1203,8 @@ pub fn ext4_file_write(
 
     if needed_blocks > current_blocks {
         let first_touched = offset / block_size;
-        // TEMPORARY dioprobe (wrfsync lane)
-        let _t = if crate::dfx::dioprobe::on() { crate::dfx::dioprobe::now() } else { 0 };
         let r = allocate_blocks_for_file(fs, inode, needed_blocks,
                                  core::cmp::max(current_blocks, first_touched));
-        if crate::dfx::dioprobe::on() {
-            crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::WR_ALLOCBLK_CYCLES, _t);
-        }
         r?;
     }
 
@@ -1351,13 +1324,6 @@ pub fn ext4_file_write(
 
         // Direct fast run: block-aligned, >= 1 full block left, extent
         // resolves, no block-cache entry inside the run.
-        // (_dp0/_dp1: TEMPORARY dioprobe brackets, wrfsync lane)
-        #[allow(unused_variables)]
-        let (_dp0, _dp_on) = if crate::dfx::dioprobe::on() {
-            (crate::dfx::dioprobe::now(), true)
-        } else {
-            (0, false)
-        };
         if !dio_dead {
             if let Some(batch) = dio_batch.as_mut() {
                 let remaining_full = (to_write as usize - total_written) / block_size as usize;
@@ -1378,25 +1344,6 @@ pub fn ext4_file_write(
                     } else {
                         (0, 0, false)
                     };
-                    // TEMPORARY dioprobe (wrfsync lane): gate attribution
-                    if _dp_on {
-                        if !inode.has_extent() {
-                            crate::dfx::dioprobe::bump(&crate::dfx::dioprobe::WR_GATE_NOEXTENT);
-                        } else if first_phys == 0 || run_avail == 0 {
-                            crate::dfx::dioprobe::bump(&crate::dfx::dioprobe::WR_GATE_EXTENT);
-                            static GATE_PRINTS: core::sync::atomic::AtomicUsize =
-                                core::sync::atomic::AtomicUsize::new(0);
-                            if GATE_PRINTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4 {
-                                use crate::fs::ext4::extent::get_extent_header;
-                                let h = get_extent_header(&inode.block);
-                                crate::pr_err!(
-                                    "WRGATE-DUMP ino={} blk={} magic={:x} entries={} max={} depth={} -> (phys={}, avail={})",
-                                    inode.ino, block_index, h.eh_magic, h.eh_entries, h.eh_max,
-                                    h.eh_depth, first_phys, run_avail
-                                );
-                            }
-                        }
-                    }
                     if first_phys != 0 && run_avail > 0 && remaining_full >= 1 {
                         let mut n: u64 = core::cmp::min(
                             core::cmp::min(run_avail, remaining_full as u64),
@@ -1416,48 +1363,28 @@ pub fn ext4_file_write(
                         // truth (possibly dirty) — the per-block body
                         // below serves it; no direct submission.
                         if n == 1 && bio::block_cached(fs.device, first_phys) {
-                            if _dp_on {
-                                crate::dfx::dioprobe::bump(&crate::dfx::dioprobe::WR_GATE_CACHED);
-                            }
                             n = 0;
                         }
                         let span_bytes = n as usize * block_size as usize;
-                        // TEMPORARY dioprobe (wrfsync lane)
-                        let _st = if _dp_on { crate::dfx::dioprobe::now() } else { 0 };
                         let mut submitted = batch.submit_ref(
                             fs.device,
                             first_phys * sectors_per_block,
                             &buf[buf_offset..buf_offset + span_bytes],
                         );
-                        if _dp_on {
-                            crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::WR_SUBMIT_CYCLES, _st);
-                            crate::dfx::dioprobe::bump(&crate::dfx::dioprobe::WR_SUBMITS);
-                        }
                         if !submitted {
-                            if _dp_on {
-                                crate::dfx::dioprobe::bump(&crate::dfx::dioprobe::WR_GATE_SUBMIT_NO);
-                            }
                             // Window full: drain, retry once. A failed
                             // drain kills the fast path for this call.
                             if dio_drain!(batch) {
                                 dio_dead = true;
                             } else {
-                                let _st2 = if _dp_on { crate::dfx::dioprobe::now() } else { 0 };
                                 submitted = batch.submit_ref(
                                     fs.device,
                                     first_phys * sectors_per_block,
                                     &buf[buf_offset..buf_offset + span_bytes],
                                 );
-                                if _dp_on {
-                                    crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::WR_SUBMIT_CYCLES, _st2);
-                                    crate::dfx::dioprobe::bump(&crate::dfx::dioprobe::WR_SUBMITS);
-                                }
                             }
                         }
                         if submitted && !dio_dead {
-                            if _dp_on {
-                                crate::dfx::dioprobe::bump(&crate::dfx::dioprobe::WR_GATE_HIT);
-                            }
                             dio_spans.push((buf_offset, span_bytes));
                             total_written += span_bytes;
                             buf_offset += span_bytes;
@@ -1468,21 +1395,9 @@ pub fn ext4_file_write(
                         // window drain failed): per-block body below
                         // handles this block (correctness unchanged).
                     }
-                } else if _dp_on && block_offset == 0
-                    && (to_write as usize - total_written) / block_size as usize >= 1
-                {
-                    crate::dfx::dioprobe::bump(&crate::dfx::dioprobe::WR_GATE_EXTENT);
                 }
-            } else if _dp_on {
-                crate::dfx::dioprobe::bump(&crate::dfx::dioprobe::WR_GATE_NOBATCH);
             }
-        } else if _dp_on {
-            crate::dfx::dioprobe::bump(&crate::dfx::dioprobe::WR_GATE_NOBATCH);
         }
-        if _dp_on {
-            crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::WR_FASTSUB_CYCLES, _dp0);
-        }
-
 
         // Get data block number (supports indirect blocks)
         let block_num = match inode.get_data_block(fs, block_index) {
@@ -1715,16 +1630,10 @@ pub fn ext4_file_write(
     // partial-write discipline, span-granular).
     if let Some(mut batch) = dio_batch.take() {
         if batch.in_flight() > 0 {
-            // TEMPORARY dioprobe (wrfsync lane)
-            let _t = if crate::dfx::dioprobe::on() { crate::dfx::dioprobe::now() } else { 0 };
-            crate::dfx::dioprobe::bump(&crate::dfx::dioprobe::WR_DRAINS);
             if dio_drain!(batch) {
                 crate::pr_err!(
                     "ext4: direct write span batch failure — truncating to confirmed bytes"
                 );
-            }
-            if crate::dfx::dioprobe::on() {
-                crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::WR_WAIT_CYCLES, _t);
             }
         }
     }
@@ -2258,9 +2167,6 @@ fn ext4_sync_file_inner(
     // the measured 691 us -> sub-200 us fsync class on the fio
     // write+fsync row. Indirect-mapped files keep the old per-block
     // walk (get_data_blocks handles the indirect chains).
-    // (_dw: TEMPORARY dioprobe bracket, wrfsync lane)
-    #[allow(unused_variables)]
-    let _dw = if crate::dfx::dioprobe::on() { crate::dfx::dioprobe::now() } else { 0 };
     // REGULAR FILES: dirty-NOTE-driven walk (O(dirty), the reference's
     // tagged-page-tree shape — see DIRTY_DATA_BLOCKS above). The old
     // extent walk probed every block of the file per fsync (2048 probes
@@ -2273,14 +2179,8 @@ fn ext4_sync_file_inner(
         let mut still_dirty: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
         let mut walk_err: Option<i32> = None;
         for blk in notes {
-            if _dw != 0 {
-                crate::dfx::dioprobe::bump(&crate::dfx::dioprobe::FS_WALK_PROBES);
-            }
             // SAFETY: fs.device is the fs's registered GenDisk (probe only).
             if unsafe { bio::block_dirty_cached(fs.device, blk) } {
-                if _dw != 0 {
-                    crate::dfx::dioprobe::bump(&crate::dfx::dioprobe::FS_WALK_DIRTY);
-                }
                 batch.push(blk);
             }
             if batch.len() >= 4096 {
@@ -2340,13 +2240,7 @@ fn ext4_sync_file_inner(
             // the 3.9M breads/s CPU burn (fsw br=59M on the battery row).
             // SAFETY: fs.device is the fs's registered GenDisk.
             for k in 0..n {
-                if _dw != 0 {
-                    crate::dfx::dioprobe::bump(&crate::dfx::dioprobe::FS_WALK_PROBES);
-                }
                 if unsafe { bio::block_dirty_cached(fs.device, phys + k) } {
-                    if _dw != 0 {
-                        crate::dfx::dioprobe::bump(&crate::dfx::dioprobe::FS_WALK_DIRTY);
-                    }
                     batch.push(phys + k);
                 }
             }
@@ -2396,9 +2290,6 @@ fn ext4_sync_file_inner(
         }
     }
 
-    if _dw != 0 {
-        crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::FS_WALK_CYCLES, _dw);
-    }
 
     // Sync the inode-table block: the inode's own durability point. The
     // write paths leave it in one of three states — already synced
@@ -2416,19 +2307,11 @@ fn ext4_sync_file_inner(
     if let Some(tbl_blk) = super::inode::inode_table_block_of(fs, inode.ino) {
         // SAFETY: fs.device is the fs's registered GenDisk (probe only).
         if unsafe { bio::block_dirty_cached(fs.device, tbl_blk) } {
-            // TEMPORARY dioprobe (wrfsync lane)
-            let _t = if _dw != 0 { crate::dfx::dioprobe::now() } else { 0 };
-            if _dw != 0 {
-                crate::dfx::dioprobe::bump(&crate::dfx::dioprobe::FS_ITB_N);
-            }
             let rc = bio::sync_dirty_blocks_batched(
                 fs.device,
                 core::slice::from_ref(&tbl_blk),
                 false,
             );
-            if _t != 0 {
-                crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::FS_ITB_CYCLES, _t);
-            }
             if rc != 0 {
                 return Err(rc);
             }
@@ -2447,12 +2330,7 @@ fn ext4_sync_file_inner(
         // the commit's write-through fast path persists the registered
         // inode-table blocks, making the fsynced state durable.
         handle.h_sync = true;
-        // TEMPORARY dioprobe (wrfsync lane)
-        let _t = if _dw != 0 { crate::dfx::dioprobe::now() } else { 0 };
         let res = super::journal::ext4_journal_stop(&mut handle);
-        if _t != 0 {
-            crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::FS_JSTOP_CYCLES, _t);
-        }
         let _ = journal; // Journal Arc retained for clarity
         res?;
     } else {
@@ -2906,8 +2784,6 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
             if durability & crate::fs::file::FileFlags::O_DIRECT != 0 && !fs.read_only {
                 let mut stage: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
                 let mut flusher = SpanFlusher::new();
-                // TEMPORARY dioprobe (wrfsync lane)
-                let _t = if crate::dfx::dioprobe::on() { crate::dfx::dioprobe::now() } else { 0 };
                 run_sync_spans(
                     fs,
                     inode,
@@ -2917,9 +2793,6 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
                     &mut flusher,
                 );
                 flusher.drain();
-                if crate::dfx::dioprobe::on() {
-                    crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::WR_RSS_CYCLES, _t);
-                }
             }
         }
         written
@@ -2958,15 +2831,7 @@ pub unsafe fn ext4_file_write_at_vfs(file: &File, offset: u64, buf: *const u8, c
             | crate::fs::file::FileFlags::O_DIRECT);
     unsafe {
         if durability == 0 && inode.mode.is_regular_file() && !(*fs_ptr).read_only {
-            // TEMPORARY dioprobe (wrfsync lane)
-            let _t = if crate::dfx::dioprobe::on() { crate::dfx::dioprobe::now() } else { 0 };
-            if _t != 0 {
-                crate::dfx::dioprobe::bump(&crate::dfx::dioprobe::BW_N);
-            }
             let r = ext4_buffered_write(&*fs_ptr, inode, offset, data);
-            if _t != 0 {
-                crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::BW_CYCLES, _t);
-            }
             r
         } else {
             let written = ext4_write_at_core(
@@ -2989,8 +2854,6 @@ pub unsafe fn ext4_file_write_at_vfs(file: &File, offset: u64, buf: *const u8, c
             {
                 let mut stage: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
                 let mut flusher = SpanFlusher::new();
-                // TEMPORARY dioprobe (wrfsync lane)
-                let _t = if crate::dfx::dioprobe::on() { crate::dfx::dioprobe::now() } else { 0 };
                 run_sync_spans(
                     &*fs_ptr,
                     inode,
@@ -3000,9 +2863,6 @@ pub unsafe fn ext4_file_write_at_vfs(file: &File, offset: u64, buf: *const u8, c
                     &mut flusher,
                 );
                 flusher.drain();
-                if crate::dfx::dioprobe::on() {
-                    crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::WR_RSS_CYCLES, _t);
-                }
             }
             written
         }
@@ -3571,9 +3431,6 @@ unsafe fn ext4_write_at_core(
     // same write-back stance the NJ create/mkdir path already documents
     // (journal.rs route-1 comment; recovery is e2fsck).
     let use_journal = fs.journal.is_some();
-    // TEMPORARY dioprobe (wrfsync lane): write-core sub-brackets
-    let _p_on = crate::dfx::dioprobe::on();
-    let _p_js = if _p_on { crate::dfx::dioprobe::now() } else { 0 };
     let mut journal_handle = match if use_journal || defer_unjournaled {
         super::journal::ext4_journal_start(fs, 4)
     } else {
@@ -3590,12 +3447,8 @@ unsafe fn ext4_write_at_core(
     if let Some(h) = journal_handle.as_mut() {
         super::namei::set_current_handle(h);
     }
-    if _p_on {
-        crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::FS_WAC_JS_CYCLES, _p_js);
-    }
 
     // Read ext4 inode from disk (write needs fresh on-disk data)
-    let _p_ri = if _p_on { crate::dfx::dioprobe::now() } else { 0 };
     let mut ext4_inode = match fs.read_inode(ext4_ino) {
         Ok(inode) => inode,
         Err(e) => {
@@ -3618,12 +3471,8 @@ unsafe fn ext4_write_at_core(
     } else {
         offset
     };
-    if _p_ri != 0 {
-        crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::FS_WAC_RI_CYCLES, _p_ri);
-    }
 
     // Call internal write function
-    let _p_fw = if _p_on { crate::dfx::dioprobe::now() } else { 0 };
     let result = match ext4_file_write(fs, &mut ext4_inode, offset, buf, dio_fast) {
         Err(e) => e as isize,
         Ok(written_bytes) => {
@@ -3648,11 +3497,7 @@ unsafe fn ext4_write_at_core(
                 refresh_cached_vfs_inode(&vi, &ext4_inode);
             }
             // Write back inode to disk (registers with journal if handle active)
-            let _p_wi = if _p_on { crate::dfx::dioprobe::now() } else { 0 };
             let wi_res = crate::fs::ext4::inode::write_inode(fs, ext4_ino, &ext4_inode);
-            if _p_on {
-                crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::FS_WAC_WI_CYCLES, _p_wi);
-            }
             match wi_res {
                 Ok(()) => {
                     // Session 25 write-through: update cached frames in the
@@ -3691,7 +3536,6 @@ unsafe fn ext4_write_at_core(
                         // page cache and fill from disk (the fast arm
                         // wrote it) or from cached-dirty blocks (the
                         // per-block arm's guard).
-                        let _p_pop = if _p_on { crate::dfx::dioprobe::now() } else { 0 };
                         if dio_fast {
                             page_cache::get_page_cache().writeback_update_range_multi(
                                 fs as *const crate::fs::ext4::Ext4FileSystem as u64,
@@ -3709,9 +3553,6 @@ unsafe fn ext4_write_at_core(
                                 skip_pfns,
                             );
                         }
-                        if _p_on {
-                            crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::FS_WAC_POP_CYCLES, _p_pop);
-                        }
                     }
                     written_bytes as isize
                 }
@@ -3722,22 +3563,10 @@ unsafe fn ext4_write_at_core(
 
     // Stop journal transaction
     if journal_handle.is_some() {
-        if _p_on {
-            crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::FS_WAC_FW_CYCLES, _p_fw);
-            let _p_js2 = crate::dfx::dioprobe::now();
-            super::namei::clear_current_handle();
-            if let Some(mut h) = journal_handle {
-                let _ = super::journal::ext4_journal_stop(&mut h);
-            }
-            crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::FS_WAC_JS_CYCLES, _p_js2);
-        } else {
-            super::namei::clear_current_handle();
-            if let Some(mut h) = journal_handle {
-                let _ = super::journal::ext4_journal_stop(&mut h);
-            }
+        super::namei::clear_current_handle();
+        if let Some(mut h) = journal_handle {
+            let _ = super::journal::ext4_journal_stop(&mut h);
         }
-    } else if _p_on {
-        crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::FS_WAC_FW_CYCLES, _p_fw);
     }
 
     result
@@ -3978,9 +3807,6 @@ fn flush_run(
 
     // SAFETY: same (fs, ino, inode) discipline as the fd write paths;
     // stage[..run_bytes] carries the pinned frames' bytes.
-    // (_t: TEMPORARY dioprobe bracket, wrfsync lane)
-    #[allow(unused_variables)]
-    let _t = if crate::dfx::dioprobe::on() { crate::dfx::dioprobe::now() } else { 0 };
     let written = unsafe {
         ext4_write_at_core(
             fs,
@@ -3993,21 +3819,12 @@ fn flush_run(
             false,
         )
     };
-    if _t != 0 {
-        crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::FS_WAC_CYCLES, _t);
-    }
     if written == run_bytes as isize {
         // Persist the run's data blocks now, in coalesced multi-block
         // requests (best-effort: a block left dirty by a fallback inside
         // is owned by the standing durability points — eviction, the
         // fsync data loop, sync(2)).
-        // (_t2: TEMPORARY dioprobe bracket, wrfsync lane)
-        #[allow(unused_variables)]
-        let _t2 = if _t != 0 { crate::dfx::dioprobe::now() } else { 0 };
         run_sync_spans(fs, inode, off0, run_bytes, stage, flusher);
-        if _t2 != 0 {
-            crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::FS_RSS_CYCLES, _t2);
-        }
         for k in 0..run_pages {
             done_out[k] = (run[k].0, run[k].1, true);
         }
@@ -4211,20 +4028,8 @@ impl SpanFlusher {
         // The settle runs under the big lock: same serialization vs
         // racing write cores as the span assembly itself (task-recursive
         // SleepMutex — re-entry under run_sync_spans' hold is legal).
-        // (_t/_t2: TEMPORARY dioprobe brackets, wrfsync lane)
-        #[allow(unused_variables)]
-        let (_t, _on) = if crate::dfx::dioprobe::on() {
-            (crate::dfx::dioprobe::now(), true)
-        } else {
-            (0, false)
-        };
         let _ext4_guard = crate::fs::ext4::EXT4_BIG_LOCK.lock();
         self.batch.flush();
-        if _on {
-            crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::FS_SPAN_DRAIN_CYCLES, _t);
-            crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::FS_WAIT_CYCLES, _t);
-            crate::dfx::dioprobe::bump(&crate::dfx::dioprobe::FS_DRAINS);
-        }
         let cache = crate::fs::bio::get_block_cache();
         for (i, bhs) in self.pending_bhs.drain(..).enumerate() {
             let snap = self.pending_snaps.get(i).map(|s| s.as_slice()).unwrap_or(&[]);

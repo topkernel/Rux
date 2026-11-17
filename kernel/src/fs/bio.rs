@@ -2238,14 +2238,7 @@ pub fn sync_dirty_blocks_batched(
         if batch.in_flight() == 0 {
             return;
         }
-        // TEMPORARY dioprobe (wrfsync lane)
-        #[allow(unused_variables)]
-        let _t = if crate::dfx::dioprobe::on() { crate::dfx::dioprobe::now() } else { 0 };
         let rc = batch.flush();
-        if _t != 0 {
-            crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::FS_WAIT_CYCLES, _t);
-            crate::dfx::dioprobe::bump(&crate::dfx::dioprobe::FS_DRAINS);
-        }
         if rc != 0 && *first_err == 0 {
             *first_err = rc;
         }
@@ -2300,16 +2293,9 @@ pub fn sync_dirty_blocks_batched(
         }
         // SAFETY: bh is pinned and its bytes are caller-stabilized; the
         // span drains before this function returns.
-        // (_st: TEMPORARY dioprobe bracket, wrfsync lane)
-        #[allow(unused_variables)]
-        let _st = if crate::dfx::dioprobe::on() { crate::dfx::dioprobe::now() } else { 0 };
         let submitted = unsafe {
             batch.submit_ref(device, blk * spb, &(*bh).b_data)
         };
-        if _st != 0 {
-            crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::FS_SUBMIT_CYCLES, _st);
-            crate::dfx::dioprobe::bump(&crate::dfx::dioprobe::FS_SUBMITS);
-        }
         if submitted {
             pinned.push(bh);
         } else {

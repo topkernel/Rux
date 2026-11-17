@@ -6379,7 +6379,6 @@ fn shutdown_cascade(cmd: u32) {
             if cmd == LINUX_REBOOT_CMD_HALT {
                 crate::println!("reboot: System halted");
             } else {
-                crate::dfx::dioprobe::dump(); // TEMPORARY wrfsync lane probe
                 crate::println!("reboot: Power down");
             }
             #[cfg(feature = "riscv64")]

@@ -5164,22 +5164,8 @@ fn do_fsync(args: SyscallArgs, datasync: i32) -> i64 {
                         // first (collect/write/complete; no page-cache
                         // lock across I/O), then the normal data+journal
                         // sync persists what the flush wrote.
-                        // TEMPORARY dioprobe (wrfsync lane): fsync brackets
                         #[allow(unused_variables)]
-                        let (_fs0, _fs_on) = if crate::dfx::dioprobe::on() {
-                            (crate::dfx::dioprobe::now(), true)
-                        } else {
-                            (0, false)
-                        };
-                        if _fs_on {
-                            crate::dfx::dioprobe::bump(&crate::dfx::dioprobe::FS_N);
-                        }
-                        #[allow(unused_variables)]
-                        let _fdi0 = if _fs_on { crate::dfx::dioprobe::now() } else { 0 };
                         crate::fs::ext4::file::ext4_flush_dirty_inode(inode, 0, u64::MAX);
-                        if _fs_on {
-                            crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::FS_FDI_CYCLES, _fdi0);
-                        }
                         // SAFETY: both pointers were installed at file open
                         // time and live as long as the inode (Arc).
                         let _r = match unsafe {
@@ -5188,9 +5174,6 @@ fn do_fsync(args: SyscallArgs, datasync: i32) -> i64 {
                             Ok(()) => 0,
                             Err(e) => e as i64,
                         };
-                        if _fs_on {
-                            crate::dfx::dioprobe::charge(&crate::dfx::dioprobe::FS_CYCLES, _fs0);
-                        }
                         _r
                     } else {
                         let _ = crate::fs::bio::sync_buffers();
