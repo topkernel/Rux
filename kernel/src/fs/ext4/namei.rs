@@ -2638,6 +2638,12 @@ pub(crate) fn free_inode_blocks(
 ) -> Result<(), i32> {
     let allocator = BlockAllocator::new(fs);
 
+    // Delalloc reservations (fio-delalloc lane): the inode is going away
+    // — its pending-writeback reservations are void. Free them BEFORE
+    // the block frees below return space to the fs, so a reservation
+    // held by a dying inode can never mask space from a live writer.
+    super::file::da_release_all(fs, ino);
+
     // Fast symlinks store the target STRING inside i_block — there are no
     // data blocks to free. Freeing the string bytes as block numbers
     // cleared arbitrary bitmap bits (or aborted with an error, leaking the

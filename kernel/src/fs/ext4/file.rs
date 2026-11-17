@@ -1361,11 +1361,50 @@ pub fn ext4_file_write(
     let current_blocks = (inode.get_size() + block_size - 1) / block_size;
     let sectors_per_block = (fs.block_size / 512) as u64;
 
+    // DIO UNWRITTEN ALLOCATION (fio-delalloc lane, 2026-11-18): an
+    // O_DIRECT write that grows the file allocates UNWRITTEN extents —
+    // metadata only (one bitmap run pass + extent append): NO per-block
+    // bread/zero/dirty populate of the fresh blocks, NO block-cache
+    // entries, NO dirty notes. The direct fast arm below then DMAs the
+    // caller's bytes straight over the unwritten run
+    // (ext4_ext_get_run_write resolves the real physical run) and the
+    // unwritten->written conversion runs at the write's COMPLETION, after
+    // the final device drain — the reference kernel's shape
+    // (iomap_dio_complete -> ext4_convert_unwritten_io_end_vec; bios over
+    // unwritten extents, state conversion at end_io). The old shape
+    // (written extents + per-block populate) breaded every fresh block
+    // (synchronous reads of garbage), left 256 dirty cache victims per
+    // 1 MiB for the write-return durability drain, and — because every
+    // target block became cache-resident — forced the data through the
+    // per-block buffer-cache body instead of the direct fast arm: the
+    // fresh-vs-overwrite 0.33x vs 0.83x split (hotspot-diff's +282 us/op
+    // fresh-allocation share). Gated on the same condition that arms the
+    // direct batch below (dio_fast && 4096-byte blocks && extent file):
+    // if the fast arm cannot run, the per-block body expects WRITTEN
+    // extents to splice into (materialize handles the unwritten edges).
+    let dio_unwritten = dio_fast && fs.block_size == 4096 && inode.has_extent();
     if needed_blocks > current_blocks {
         let first_touched = offset / block_size;
-        let r = allocate_blocks_for_file(fs, inode, needed_blocks,
-                                 core::cmp::max(current_blocks, first_touched));
+        let r = if dio_unwritten {
+            allocate_blocks_unwritten_dio(
+                fs,
+                inode,
+                needed_blocks,
+                core::cmp::max(current_blocks, first_touched),
+            )
+        } else {
+            allocate_blocks_for_file(fs, inode, needed_blocks,
+                                     core::cmp::max(current_blocks, first_touched))
+        };
         r?;
+        // Delalloc reservations: every index below the freshly allocated
+        // frontier is a real block now (or a hole whose own materialize
+        // owns it) — release the pending-writeback reservations held for
+        // those indices (fio-delalloc; see DELALLOC_RESERVATIONS). This
+        // is the writeback twin of ext4_buffered_write's reserve: the
+        // da_write_begin reserve and the mballoc claim, one allocation
+        // apart.
+        da_release_below(fs, inode.ino, needed_blocks);
     }
 
     // BULK UNWRITTEN CONVERSION (wrfsync lane, 2026-11-17): convert the
@@ -1379,10 +1418,17 @@ pub fn ext4_file_write(
     // single-block entries whose every later lookup walked a deep leaf.
     // Partial head/tail blocks keep the per-block materialize below
     // (unwritten halves must not convert past the bytes actually being
-    // written). Runs after the growth allocation above: appended extents
-    // are already WRITTEN, so the conversion here only touches REMAINING
-    // unwritten overlap (old preallocations) — no double mapping.
-    if inode.has_extent() {
+    // written).
+    //
+    // fio-delalloc: the DIO path (dio_unwritten) SKIPS the conversion
+    // here and runs it at the write's END, after the data drain — the
+    // reference's end_io ordering (data on the device before the extent
+    // state flips; a crash between the two leaves unwritten = zeros, the
+    // strictly safer exposure). The non-DIO paths keep the top position:
+    // the per-block body below expects full blocks already WRITTEN (it
+    // would otherwise re-fragment the interior one materialize per
+    // block).
+    if inode.has_extent() && !dio_unwritten {
         let first_full = (offset + block_size - 1) / block_size;
         let last_full = (offset + to_write) / block_size; // exclusive
         if last_full > first_full {
@@ -1488,11 +1534,14 @@ pub fn ext4_file_write(
             if let Some(batch) = dio_batch.as_mut() {
                 let remaining_full = (to_write as usize - total_written) / block_size as usize;
                 if block_offset == 0 && remaining_full >= 1 {
-                    // ONE extent walk for the maximal run (same resolver
-                    // as the read side — per-block lookups paid 1-2
-                    // cached breads per 4 KiB on depth>=1 files).
+                    // ONE extent walk for the maximal run. WRITE-side
+                    // resolver (fio-delalloc): unwritten extents report
+                    // their REAL physical run so the direct arm targets
+                    // them (reads keep zero-filling unwritten via
+                    // ext4_ext_get_run) — per-block lookups paid 1-2
+                    // cached breads per 4 KiB on depth>=1 files.
                     let (mut first_phys, run_avail, _uw) = if inode.has_extent() {
-                        match crate::fs::ext4::extent::ext4_ext_get_run(
+                        match crate::fs::ext4::extent::ext4_ext_get_run_write(
                             fs,
                             inode.ino,
                             &inode.block,
@@ -1809,6 +1858,62 @@ pub fn ext4_file_write(
         }
     }
 
+    // END-OF-WRITE UNWRITTEN CONVERSION (fio-delalloc lane, 2026-11-18):
+    // the DIO path deferred the unwritten->written conversion here —
+    // AFTER the drain above device-acked every span, the reference
+    // kernel's end_io shape (iomap_dio_complete ->
+    // ext4_convert_unwritten_io_end_vec over the write's io_end vec: one
+    // bulk tree edit per write, off the data path). Data-before-metadata
+    // crash order: a crash between the data write and this edit leaves
+    // unwritten extents (readers/e2fsck see zeros — the strictly safer
+    // exposure vs converting first). Read-after-write correctness needs
+    // the conversion INSIDE the syscall (reads of unwritten zero-fill),
+    // exactly where the reference runs it. Covers the freshly allocated
+    // unwritten runs of this write AND any older fallocated unwritten
+    // overlap; partial head/tail blocks were materialized per-block by
+    // the body above. Range = the CONFIRMED full-block interior only (a
+    // short/failed write leaves its unwritten tail unconverted — zeros,
+    // which is what a never-completed write owes).
+    if dio_unwritten {
+        let first_full = (offset + block_size - 1) / block_size;
+        let confirmed_end = offset + total_written as u64;
+        let last_full = confirmed_end / block_size; // exclusive
+        if last_full > first_full {
+            let mut ext_meta: i64 = 0;
+            match crate::fs::ext4::extent::ext4_ext_convert_unwritten(
+                fs,
+                &mut inode.block,
+                first_full,
+                last_full - first_full,
+                &mut ext_meta,
+                crate::fs::ext4::csum::dir_csum_seed(
+                    fs.csum_seed,
+                    inode.ino,
+                    inode.generation,
+                ),
+            ) {
+                Ok(()) => {
+                    inode.blocks = apply_meta_delta(inode.blocks, ext_meta);
+                }
+                // A conversion failure after the data landed must not
+                // report the write short: the bytes are on the device and
+                // the syscall's contract is about DATA. The unconverted
+                // unwritten extents zero-fill for readers until the next
+                // conversion point (fsync/next write) — the honest
+                // degraded state, reported once.
+                Err(e) => {
+                    crate::pr_err!(
+                        "ext4: post-dio unwritten conversion failed (ino {} range {}+{}) — {}",
+                        inode.ino,
+                        first_full,
+                        last_full - first_full,
+                        e
+                    );
+                }
+            }
+        }
+    }
+
     // Update file size (partial-write safe: a mid-loop allocation failure
     // broke out with fewer bytes than requested — the size must reflect
     // only what landed).
@@ -2028,6 +2133,93 @@ fn allocate_blocks_with_extents(
         let csum_seed =
             crate::fs::ext4::csum::dir_csum_seed(fs.csum_seed, inode.ino, inode.generation);
         crate::fs::ext4::extent::ext4_ext_append(fs, &mut inode.block, &ext, &mut meta_sectors, csum_seed)?;
+        inode.blocks += sectors_per_block * run_len as u64;
+        logical_block += run_len as u64;
+    }
+    inode.blocks += meta_sectors;
+
+    Ok(())
+}
+
+/// Metadata-only UNWRITTEN allocation for a growing O_DIRECT write
+/// (fio-delalloc lane, 2026-11-18 — the reference kernel's DIO shape:
+/// ext4_map_blocks(PRE_IO) maps unwritten extents at submit time, the
+/// data bios target their physical blocks, and the unwritten->written
+/// conversion runs at the write's completion/end_io).
+///
+/// Identical run-based bitmap discipline to `allocate_blocks_with_extents`
+/// (one bitmap read/scan/mark/write per contiguous run, spiral goal-group
+/// search, multi-level extent append), but the fresh data blocks are
+/// NEVER breaded/zeroed/dirtied: reads of unwritten blocks zero-fill, so
+/// there is nothing to populate — allocation is bitmap + extent append,
+/// full stop. No block-cache entries and no dirty notes are created, so
+/// the write's direct fast arm sees a cold cache and DMAs the caller's
+/// bytes straight over the unwritten run; the conversion at the write's
+/// end (see ext4_file_write's END-OF-WRITE UNWRITTEN CONVERSION) flips
+/// the extent state after the data is device-acked.
+///
+/// ENOSPC: same contract as the written twin — failure leaves the runs
+/// already appended allocated-but-unwritten beyond the old EOF (readable
+/// as zeros, invisible past the never-extended size); no torn extents
+/// (each append is a complete run).
+fn allocate_blocks_unwritten_dio(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    inode: &mut crate::fs::ext4::inode::Ext4Inode,
+    needed_blocks: u64,
+    from_block: u64,
+) -> Result<(), i32> {
+    use crate::fs::ext4::extent::{Ext4ExtentHeader, EXT4_EXT_MAGIC};
+
+    let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
+    let block_size = fs.block_size as u64;
+    let current_blocks = (inode.get_size() + block_size - 1) / block_size;
+    let start_block = core::cmp::max(from_block, current_blocks).min(needed_blocks);
+    let sectors_per_block = (fs.block_size / 512) as u64;
+    let goal_group = (inode.ino / fs.inodes_per_group).min(fs.group_count - 1);
+    const MAX_EXTENT_LEN: u32 = 0x7FFF; // ee_len u16 with the unwritten bit reserved
+
+    let mut meta_sectors: u64 = 0;
+    let mut logical_block = start_block;
+    while logical_block < needed_blocks {
+        let want = core::cmp::min((needed_blocks - logical_block) as u32, MAX_EXTENT_LEN);
+        let Some((run_start, run_len)) = allocator.alloc_block_run(goal_group, want)? else {
+            return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+        };
+
+        // Valid (possibly empty) extent header on the root (same as the
+        // written twin).
+        {
+            // SAFETY: inode.block is 60 bytes; header at its start is
+            // in-bounds.
+            let header = unsafe { &mut *(inode.block.as_mut_ptr() as *mut Ext4ExtentHeader) };
+            if header.eh_magic != EXT4_EXT_MAGIC {
+                header.eh_magic = EXT4_EXT_MAGIC;
+                header.eh_entries = 0;
+                header.eh_max = 4;
+                header.eh_depth = 0;
+                header.eh_generation = 0;
+            }
+        }
+
+        // Append the run as an UNWRITTEN extent (merges with a trailing
+        // unwritten extent when contiguous — the state-aware merge in
+        // append_node refuses mixed states, exactly Linux's
+        // ext4_can_extents_be_merged).
+        let ext = crate::fs::ext4::extent::RawExtent {
+            ee_block: logical_block as u32,
+            phys: run_start,
+            len: run_len as u16,
+            unwritten: true,
+        };
+        let csum_seed =
+            crate::fs::ext4::csum::dir_csum_seed(fs.csum_seed, inode.ino, inode.generation);
+        crate::fs::ext4::extent::ext4_ext_append(
+            fs,
+            &mut inode.block,
+            &ext,
+            &mut meta_sectors,
+            csum_seed,
+        )?;
         inode.blocks += sectors_per_block * run_len as u64;
         logical_block += run_len as u64;
     }
@@ -2293,6 +2485,227 @@ fn settle_dirty_data_notes(fs_id: u64, ino: u64, still_dirty: &[u64]) {
         if set.is_empty() {
             m.remove(&(fs_id, ino));
         }
+    }
+}
+
+// =====================================================================
+// Delalloc block reservations (fio-delalloc lane, 2026-11-18) — the
+// reference kernel's ext4_da_reserve_space shape (fs/ext4/inode.c:
+// reserved-cluster accounting; a delayed-allocation write RESERVES space
+// at write time so ENOSPC lands at write(2), not at writeback).
+//
+// Buffered writes defer physical allocation to the writeback points (the
+// da shape, ext4_buffered_write); until then the blocks the dirty pages
+// will need are counted here, per (fs, ino) as MERGED RUNS of file block
+// indices [start, start+len) (the extent shape itself; the
+// DIRTY_DATA_BLOCKS side-table discipline: one short-held global lock).
+// The write-time ENOSPC gate then refuses an extending write when the
+// filesystem's free blocks are exhausted BY RESERVATIONS (free <=
+// reserved), not only when literally zero blocks remain — the precision
+// the reference has and the old est_free_blocks()==0 gate lacked:
+// concurrent writers on a nearly full fs used to race past the zero
+// check and fail at flush time (the unflushable dirty balloon the
+// falloc-wedge lane documented).
+//
+// Representation history: the first cut stored per-block indices in a
+// BTreeSet — a sequential append walked a growing tree per 4 KiB write
+// (p6_append +0.8 µs/op vs main, +24% — marginal-out on the gate band)
+// and an earlier cut summed the whole map per write (O(files ever
+// written); p6_append 4.9 -> 27+ µs — caught by the gate boards). Merged
+// runs make the append case ONE tail-extend.
+//
+// Reserve points: buffered writes extending past the inode's allocated
+// frontier (ceil of the cached on-disk inode size — allocation never
+// leads the size it serves). Release points: the writeback allocation
+// (ext4_file_write's allocate succeeds → every reserved index below the
+// allocated frontier is now a real block), truncate-down (indices at or
+// past the new size), inode deletion (all). Quota: no quota
+// infrastructure exists yet — the reference's dq_alloc_block hook is the
+// recorded follow-up.
+// =====================================================================
+type ResRuns = alloc::vec::Vec<(u64, u64)>; // sorted, merged [start, len)
+type DelallocResMap = alloc::collections::BTreeMap<(u64, u64), ResRuns>;
+static DELALLOC_RESERVATIONS: crate::sync::spinlock::Spinlock<DelallocResMap> =
+    crate::sync::spinlock::Spinlock::new(alloc::collections::BTreeMap::new());
+/// Total reserved blocks across every (fs, ino) — the fs-wide claim the
+/// write-time gate checks against. Maintained INCREMENTALLY under the
+/// DELALLOC_RESERVATIONS lock (Relaxed atomics; every mutation holds the
+/// lock). The first cut summed `m.values().map(len)` per write: O(distinct
+/// inodes ever written) per buffered write — p6_append measured 4.9 -> 27+
+/// µs as the map filled (a probe pass that had already written thousands
+/// of files paid ~50 µs per 4 KiB append). The counter is exact, not an
+/// estimate: insert adds the NEW indices, releases subtract what they drop.
+static DELALLOC_TOTAL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Reserve file blocks [first, first+n) for (fs, ino)'s pending
+/// delayed-allocation writeback. Fails -ENOSPC when the filesystem's free
+/// blocks (estimated — see est_free_blocks) cannot cover the reservations
+/// already held plus the NEW indices of this range (already-reserved
+/// indices are free — a second write over the same range owes nothing
+/// new). Call BEFORE any page is dirtied: a refusal must leave the file
+/// and the size watermark untouched. `free_est` is the caller's
+/// est_free_blocks() snapshot (the eager gate's — one estimate per write,
+/// never two group-descs walks).
+///
+/// Run shape: the sequential-append common case is ONE tail-extend of the
+/// last run (no tree walk, one Vec store); a straddling write merges into
+/// its covering runs in place.
+pub(crate) fn da_reserve_blocks(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    ino: u32,
+    first: u64,
+    n: u64,
+    free_est: u64,
+) -> Result<(), i32> {
+    if n == 0 {
+        return Ok(());
+    }
+    let free = free_est;
+    let end = first.saturating_add(n);
+    let key = (fs as *const _ as u64, ino as u64);
+    let mut m = DELALLOC_RESERVATIONS.lock();
+    let reserved_total = DELALLOC_TOTAL.load(core::sync::atomic::Ordering::Relaxed);
+    let runs = m.entry(key).or_default();
+    // Fast path: extend the last run when contiguous (sequential append).
+    if let Some(last) = runs.last_mut() {
+        if last.0 + last.1 == first {
+            // Fully new coverage (the run ends exactly at `first`).
+            if free != 0 && free <= reserved_total + n && n > 0 {
+                return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+            }
+            last.1 += n;
+            DELALLOC_TOTAL.store(reserved_total + n, core::sync::atomic::Ordering::Relaxed);
+            return Ok(());
+        }
+    }
+    // General path: count the UNCOVERED portion of [first, end), then
+    // splice the range in, merging with every run it touches.
+    let mut covered: u64 = 0;
+    let mut lo = first;
+    for &(s, l) in runs.iter() {
+        let e = s + l;
+        if e <= first {
+            continue;
+        }
+        if s >= end {
+            break;
+        }
+        let ov_s = s.max(first);
+        let ov_e = e.min(end);
+        covered += ov_e.saturating_sub(ov_s);
+        lo = lo.min(s);
+    }
+    let new = n - covered.min(n);
+    if free != 0 && free <= reserved_total + new {
+        // Reservations (held + this ask) exhaust the estimated free
+        // space: refuse at write time — the reference's
+        // ext4_da_reserve_space ENOSPC. (free == 0 is the eager gate's
+        // case; already refused by the caller.)
+        if new > 0 {
+            return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+        }
+    }
+    if new == 0 && covered == n {
+        return Ok(()); // entirely already reserved
+    }
+    // Merge: drop the runs overlapped by [first, end), remember the
+    // union's bounds, insert one merged run at the right position.
+    let mut hi = end;
+    runs.retain(|&(s, l)| {
+        let e = s + l;
+        let keep = e <= first || s >= end;
+        if !keep {
+            lo = lo.min(s);
+            hi = hi.max(e);
+        }
+        keep
+    });
+    // Insert sorted by start.
+    let pos = runs.partition_point(|&(s, _)| s < lo);
+    runs.insert(pos, (lo, hi - lo));
+    // The merged run covers `new` blocks beyond what the dropped runs
+    // already held — the counter moves by exactly the newly covered
+    // blocks (math: (hi - lo) - merged_extra == new).
+    DELALLOC_TOTAL.store(reserved_total + new, core::sync::atomic::Ordering::Relaxed);
+    Ok(())
+}
+
+/// Release every reservation of (fs, ino) below `upto` (exclusive) — the
+/// writeback allocated real blocks for those indices
+/// (allocate_blocks_for_file / allocate_blocks_unwritten_dio succeeded).
+pub(crate) fn da_release_below(fs: &crate::fs::ext4::Ext4FileSystem, ino: u32, upto: u64) {
+    let key = (fs as *const _ as u64, ino as u64);
+    let mut m = DELALLOC_RESERVATIONS.lock();
+    if let Some(runs) = m.get_mut(&key) {
+        let mut freed = 0u64;
+        runs.retain(|&(s, l)| {
+            let e = s + l;
+            if e <= upto {
+                freed += l;
+                false
+            } else if s < upto {
+                freed += upto - s;
+                true // straddler: head freed, tail clipped below
+            } else {
+                true
+            }
+        });
+        // Clip the straddler's head (retain cannot mutate elements).
+        for r in runs.iter_mut() {
+            if r.0 < upto && r.0 + r.1 > upto {
+                let cut = upto - r.0;
+                *r = (upto, r.1 - cut);
+            }
+        }
+        if runs.is_empty() {
+            m.remove(&key);
+        }
+        if freed > 0 {
+            DELALLOC_TOTAL.fetch_sub(freed, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// Release every reservation of (fs, ino) at or past `from` — a
+/// truncate-down discards the tail's pending writeback obligations.
+pub(crate) fn da_release_from(fs: &crate::fs::ext4::Ext4FileSystem, ino: u32, from: u64) {
+    let key = (fs as *const _ as u64, ino as u64);
+    let mut m = DELALLOC_RESERVATIONS.lock();
+    if let Some(runs) = m.get_mut(&key) {
+        let mut freed = 0u64;
+        runs.retain(|&(s, l)| {
+            if s >= from {
+                freed += l;
+                false
+            } else if s + l > from {
+                freed += s + l - from;
+                true // straddler clipped below
+            } else {
+                true
+            }
+        });
+        for r in runs.iter_mut() {
+            let e = r.0 + r.1;
+            if r.0 < from && e > from {
+                *r = (r.0, from - r.0);
+            }
+        }
+        if runs.is_empty() {
+            m.remove(&key);
+        }
+        if freed > 0 {
+            DELALLOC_TOTAL.fetch_sub(freed, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// Release all reservations of (fs, ino) — the inode is being deleted.
+pub(crate) fn da_release_all(fs: &crate::fs::ext4::Ext4FileSystem, ino: u32) {
+    let key = (fs as *const _ as u64, ino as u64);
+    let mut m = DELALLOC_RESERVATIONS.lock();
+    if let Some(runs) = m.remove(&key) {
+        let held: u64 = runs.iter().map(|&(_, l)| l).sum();
+        DELALLOC_TOTAL.fetch_sub(held, core::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -3320,8 +3733,48 @@ unsafe fn ext4_buffered_write(
                 None => return errno::Errno::FileTooLarge.as_neg_i32() as isize,
             }
         };
-        if would_extend && fs.est_free_blocks() == 0 {
+        // ONE free estimate per write, shared by the eager zero-gate and
+        // the reservation below (two group-descs walks per 4 KiB write
+        // was measurable on the fsync4k row).
+        let free_est = if would_extend {
+            fs.est_free_blocks()
+        } else {
+            0 // non-extending: the eager gate does not apply
+        };
+        if would_extend && free_est == 0 {
             return errno::Errno::NoSpaceLeftOnDevice.as_neg_i32() as isize;
+        }
+
+        // Delalloc reservation (fio-delalloc lane, 2026-11-18): count the
+        // blocks this write's writeback will have to allocate — the
+        // written range's block indices AT OR PAST the inode's allocated
+        // frontier (ceil of the cached on-disk size; allocation never
+        // leads the size it serves) — against the fs's free space BEFORE
+        // any page is dirtied and BEFORE the size watermark is published
+        // below. A refusal is the write-time ENOSPC of the reference's
+        // ext4_da_reserve_space: reservations held by ANY writer reduce
+        // the space a new writer may promise, so concurrent writers on a
+        // nearly full fs fail at write() instead of racing past the zero
+        // check and failing at flush time (the unflushable dirty
+        // balloon). Overwrites below the frontier owe nothing (their
+        // blocks exist); a repeat write over an already-reserved range
+        // owes nothing new (set dedup). Quota check: the reference's
+        // dq_alloc_block hook has no infrastructure here yet — recorded
+        // follow-up.
+        let bs = fs.block_size as u64;
+        let base_size = sbi.get_size();
+        let frontier = base_size.div_ceil(bs);
+        let (first, last) = if offset == u64::MAX {
+            let cur = inode.size.load(Ordering::Acquire);
+            (cur / bs, (cur + srclen as u64).div_ceil(bs))
+        } else {
+            (offset / bs, (offset + srclen as u64).div_ceil(bs))
+        };
+        let first = first.max(frontier);
+        if last > first {
+            if let Err(e) = da_reserve_blocks(fs, inode.ino as u32, first, last - first, free_est) {
+                return e as isize;
+            }
         }
     }
 

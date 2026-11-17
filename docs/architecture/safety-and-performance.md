@@ -367,6 +367,37 @@ dead-proc `expect()` replaced by a bounded warning (619bf4b6); the
   toolchain change fails loudly instead of corrupting. riscv64 make
   test 1328/1328. [run/OC-RC.md, lane worktree oc-rc]
 
+- O_DIRECT fresh-write unwritten allocation + completion-time
+  conversion, and delalloc reservations (fio-delalloc, 2026-11-18):
+  the fresh 1 MiB direct write allocated written extents and
+  breaded/zeroed/dirtied every fresh block — synchronous garbage
+  reads, 256 dirty cache victims per op, and a cache-resident target
+  set that forced the data off the direct path. The reference shape
+  (unwritten extents at submit, bios over them, bulk state conversion
+  at completion — ext4_map_blocks(PRE_IO) + iomap_dio_complete ->
+  ext4_convert_unwritten_io_end_vec) took the fresh row from 3429 to
+  4000-4800 MiB/s, EQUAL to the overwrite row (fio KVM smp8 med-of-3,
+  same-window interleaved vs main). Safety pairing: conversion now
+  runs AFTER the data is device-acked — data-before-metadata ordering,
+  so the crash window between data and extent-state flip exposes
+  unwritten extents (readers see zeros) instead of preallocation
+  stale bytes (the strictly safer exposure; the old shape documented
+  the stale-bytes window as the NJ stance). The delalloc reservation
+  skeleton moves buffered-write ENOSPC to write(2)
+  (ext4_da_reserve_space shape): concurrent writers on a nearly full
+  fs can no longer race past the zero-free gate and strand
+  unflushable dirty pages — the dirty-balloon bug class the
+  falloc-wedge lane documented is refused at the reservation gate,
+  with the file consistent (probe battery T9: partial land, size ==
+  landed, read-back clean). Gate discipline caught the skeleton's own
+  representation costs: pbench boards measured p6_append 4.9 -> 27+
+  µs (O-files-ever-written total scan) and +24% (per-block BTreeSet)
+  before merged runs + an exact counter brought it to +10.9%
+  in-band — the boards gate what the functional battery cannot.
+  37/37 probe battery, fio verify=md5 clean (direct + buffered),
+  riscv make test 1333/1333. [lane worktree fio-delalloc
+  run/FIO-DELALLOC.md]
+
 ## 4. Nothing traded away
 The compatibility checklist stands while both ledgers hold: 345+
 syscalls with reference-matched semantics; LTP 1,059/1,869 and

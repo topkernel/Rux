@@ -176,6 +176,33 @@ pub fn ext4_ext_get_run(
     i_block: &[u32; 15],
     logical_block: u64,
 ) -> Result<(u64, u64, bool), i32> {
+    ext4_ext_get_run_impl(fs, ino, i_block, logical_block, false)
+}
+
+/// WRITE-side run resolver (fio-delalloc lane, 2026-11-18): identical walk
+/// to `ext4_ext_get_run`, but an UNWRITTENT covering extent reports its
+/// REAL physical run instead of phys 0 — the direct-write fast arm targets
+/// unwritten extents directly (the reference kernel's DIO submits bios
+/// over unwritten extents; the unwritten->written state conversion runs at
+/// the write's completion, `ext4_ext_convert_unwritten`). READ callers
+/// must keep using `ext4_ext_get_run` (unwritten reads zero-fill).
+pub fn ext4_ext_get_run_write(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    ino: u32,
+    i_block: &[u32; 15],
+    logical_block: u64,
+) -> Result<(u64, u64, bool), i32> {
+    ext4_ext_get_run_impl(fs, ino, i_block, logical_block, true)
+}
+
+fn ext4_ext_get_run_impl(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    ino: u32,
+    i_block: &[u32; 15],
+    logical_block: u64,
+    for_write: bool,
+) -> Result<(u64, u64, bool), i32> {
+    let _ = ino;
     let header = get_extent_header(i_block);
     if header.eh_magic != EXT4_EXT_MAGIC || header.eh_entries > header.eh_max {
         return Err(errno::Errno::IOError.as_neg_i32());
@@ -202,7 +229,7 @@ pub fn ext4_ext_get_run(
             if child == 0 {
                 return Ok((0, 0, false));
             }
-            return find_run_in_external_extent(fs, child, logical_block, 0);
+            return find_run_in_external_extent(fs, child, logical_block, 0, for_write);
         }
     }
 
@@ -220,7 +247,7 @@ pub fn ext4_ext_get_run(
             header.eh_entries as usize,
         )
     };
-    Ok(run_from_entries(entries, logical_block))
+    Ok(run_from_entries(entries, logical_block, for_write))
 }
 
 /// Binary search a leaf `entries` slice (sorted by ee_block) for the
@@ -262,14 +289,19 @@ fn search_extent_entry(entries: &[Ext4Extent], logical_block: u64) -> u32 {
 /// next extent's start (length 0 means "nothing known ahead" — callers
 /// re-resolve per block there).
 #[inline]
-fn run_from_entries(entries: &[Ext4Extent], logical_block: u64) -> (u64, u64, bool) {
+fn run_from_entries(entries: &[Ext4Extent], logical_block: u64, for_write: bool) -> (u64, u64, bool) {
     let r = search_extent_entry(entries, logical_block);
     if r != u32::MAX && r & 0x8000_0000 == 0 {
         let ext = &entries[r as usize];
         let start = ext.ee_block as u64;
         let offset = logical_block - start;
         let unwritten = ext.is_unwritten();
-        let phys = if unwritten { 0 } else { ext.start_block() + offset };
+        // READS of unwritten blocks zero-fill (callers treat phys 0 as a
+        // hole-shaped stretch); the WRITE-side resolver (`for_write`) needs
+        // the REAL physical run so a direct write can target unwritten
+        // extents — the reference kernel's DIO shape (bios over unwritten
+        // extents; state conversion at completion).
+        let phys = if unwritten && !for_write { 0 } else { ext.start_block() + offset };
         let len = ext.length() as u64 - offset;
         return (phys, len, unwritten);
     }
@@ -291,6 +323,7 @@ unsafe fn find_run_in_external_extent(
     block_num: u64,
     logical_block: u64,
     depth: u32,
+    for_write: bool,
 ) -> Result<(u64, u64, bool), i32> {
     if depth > 5 {
         return Err(errno::Errno::IOError.as_neg_i32());
@@ -318,7 +351,7 @@ unsafe fn find_run_in_external_extent(
                 data.as_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4Extent,
                 header.eh_entries as usize,
             );
-            Ok(run_from_entries(entries, logical_block))
+            Ok(run_from_entries(entries, logical_block, for_write))
         } else {
             let indices = core::slice::from_raw_parts(
                 data.as_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4ExtentIdx,
@@ -335,7 +368,7 @@ unsafe fn find_run_in_external_extent(
             if child_block == 0 {
                 Ok((0, 0, false))
             } else {
-                find_run_in_external_extent(fs, child_block, logical_block, depth + 1)
+                find_run_in_external_extent(fs, child_block, logical_block, depth + 1, for_write)
             }
         };
         bio::brelse(bh);

@@ -2886,6 +2886,11 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                 let new_blocks = (new_size + block_size - 1) / block_size;
                 let old_blocks = (ext4_inode.get_size() + block_size - 1) / block_size;
 
+                // Delalloc reservations (fio-delalloc): the cut tail's
+                // pending-writeback reservations are void — release every
+                // reserved index at or past the new EOF.
+                crate::fs::ext4::file::da_release_from(fs, ext4_inode.ino, new_blocks);
+
                 if ext4_inode.has_extent() {
                     use crate::fs::ext4::extent::{Ext4ExtentHeader, EXT4_EXT_MAGIC};
                     // Any-depth shrink via gather/classify/rebuild: extents
