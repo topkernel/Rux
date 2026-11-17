@@ -3316,6 +3316,10 @@ unsafe fn __schedule() {
     sched_cs_stamp(cpu_id, 2);
     let cc_t2 = crate::dfx::cctx::now();
     crate::dfx::cctx::add(&crate::dfx::cctx::SCH_LOCKWAIT_NS, cc_t1);
+    // grq-10ns: the EXACT GRQ critical section — one bracket from
+    // acquisition to the unlock below (the acct/deq/pick/pub phase rows
+    // remain, this row answers "how long is the lock held").
+    let cc_hold = crate::dfx::cctx::now();
 
     // Update runtime accounting for current task based on its scheduling class.
     // CFS: update vruntime; DL: consume runtime budget.
@@ -3496,6 +3500,8 @@ unsafe fn __schedule() {
     let flags = grq_guard.unlock_irqretain();
     sched_cs_stamp(cpu_id, 3);
     crate::dfx::cctx::add(&crate::dfx::cctx::SCH_PUB_NS, cc_t4);
+    // grq-10ns: close the exact GRQ-hold bracket (see the acquire site).
+    crate::dfx::cctx::add(&crate::dfx::cctx::SCH_HOLD_NS, cc_hold);
 
     if next == prev {
         // Same-task repick: no context switch happens, so the post-switch

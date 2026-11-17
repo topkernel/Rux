@@ -50,6 +50,20 @@ pub static SCH_PUB_NS: AtomicU64 = AtomicU64::new(0);
 /// Real context switches (next != prev) — the divisor for CW_* rows.
 pub static CTX_N: AtomicU64 = AtomicU64::new(0);
 
+// === grq-10ns: exact GRQ critical-section + CFS timeline anatomy ========
+/// __schedule's GRQ critical section: from lock acquired (past the
+/// lock_irqsave) to unlock_irqretain — the ACTUAL lock hold (acct +
+/// deq/req + pick + pub in one bracket, one clock-read pair).
+pub static SCH_HOLD_NS: AtomicU64 = AtomicU64::new(0);
+/// CFS timeline mutations (intrusive insert/erase in fair.rs —
+/// timeline_insert + timeline_remove of every kind: pick unlink, prev
+/// requeue, wake enqueue, sleeper dequeue).
+pub static FAIR_TL_N: AtomicU64 = AtomicU64::new(0);
+pub static FAIR_TL_NS: AtomicU64 = AtomicU64::new(0);
+/// CFS pick walks entered (pick_next_cpu) and candidates consulted.
+pub static FAIR_PICK_N: AtomicU64 = AtomicU64::new(0);
+pub static FAIR_WALK_N: AtomicU64 = AtomicU64::new(0);
+
 // === context_switch wrapper ===============================================
 pub static CW_N: AtomicU64 = AtomicU64::new(0);
 /// fpu_save_for_switch (fxsave/xsave into the outgoing task).
@@ -221,6 +235,20 @@ pub fn dump() {
         avg(&WK_DISP_NS, &WK_N),
         v(&IPI_N),
         avg(&IPI_NS, &IPI_N),
+    );
+    crate::pr_warn!(
+        // grq-10ns: GRQ hold + CFS timeline anatomy. hold = the exact
+        // critical section (lock acquired -> unlock, irq-retained); tl =
+        // the intrusive-timeline mutation cost; walks = candidates
+        // consulted per pick walk.
+        "CCTX6 t={}s grqhold n={} avg={} tl n={} avg={} picks={} walkavg={}",
+        secs,
+        v(&SCH_N),
+        avg(&SCH_HOLD_NS, &SCH_N),
+        v(&FAIR_TL_N),
+        avg(&FAIR_TL_NS, &FAIR_TL_N),
+        v(&FAIR_PICK_N),
+        avg(&FAIR_WALK_N, &FAIR_PICK_N),
     );
     crate::pr_warn!(
         "CCTX4 t={}s sem n={} pre={} try n={} avg={} blk n={} avg={}",
