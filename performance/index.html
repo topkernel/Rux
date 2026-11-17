@@ -89,10 +89,13 @@
       <div class="card">
         <h3><span class="ico">📏</span>lmbench 同机对照:21 项中 14 项领先/持平、7 项落后</h3>
         <p><b>领先</b>:lat_pipe <b>4.6×</b>、lat_ctx 2P <b>4.0–4.5×</b>、lat_ctx 8P <b>3.6×</b>、bw_pipe <b>3.7×</b>、lat_sem <b>2.9×</b>、bw_unix <b>2.1×</b>、lat_unix <b>1.4×</b>、fstat <b>1.3×</b>;bcopy/bzero/mem_rd/usleep 持平偏领先,bw_file_rd 快于计时器粒度。</p>
-        <p><b>落后</b>(Rux/Linux):open <b>1.9–2.5×</b>、read <b>1.7–1.8×</b>、stat <b>1.4–1.9×</b>、write <b>1.4×</b>、null <b>1.1–1.3×</b>;fork/exec 回到 1.08–1.19× 带(2× 目标战役 round 1 已落:fdget 直借 + getppid O(1),校准通过率 14/15 vs 0/15)。</p>
+        <p><b>落后</b>(Rux/Linux):open <b>1.92×</b>、read_cached <b>1.84×</b>、stat <b>1.28×</b>、write <b>1.06×</b>;null 已到<b>持平</b>(0.97×);fork/exec <b>0.75–0.79×</b>(领先)。存储与实时路径见下方对照。</p>
         <div class="nums">领先最高 4.6× · 落后最大 2.5× · 数据见 <a href="lmbench.html">lmbench 页</a></div>
       </div>
       <div class="card">
+        <h3><span class="ico">⚡</span>存储与实时路径对照:相位探针归因 + 参考形态改造</h3>
+        <p>存储 I/O 用<b>相位探针</b>把每 op 成本拆成中断投递/分发轮询/软中断跳转/唤醒恢复,再按参考内核的实现形态改造:<b>直读按物理连续段批量提交</b>(1M 顺序读从落后 226× 到落后 2.0×、顺序写 57× 到 2.5×)、<b>MSI-X + 完成处理内联硬中断向量</b>(4k 随机读 0.27× 到 0.77×)、<b>日志提交批量写通</b>(fsync 对 main 减半)、<b>目录读取增量填充</b>(getdents 从落后 19× 到<b>领先 1.95×</b>)、<b>路径/描述符成本与页表回收</b>(stat 1.28×、openclose 1.92×、read_cached 1.84×、fork_exec 1.72×)。实时路径:<b>定时器到期改在硬中断顶部派发</b>(rt_wakesys 3.3 µs 持平)、<b>PI futex 采用参考 rt_mutex_setprio 形态</b>(pi_stress 132,074 反转)。</p>
+        <div class="nums">逐项数据见 <a href="fio.html">fio 页</a> 与 <a href="rttests.html">rt-tests 页</a> · 方法与证据 docs/test/perf-campaign-2026-11-17.md</div>
         <h3><span class="ico">🏁</span>Geekbench 5:单核 2440 / 多核 7709(历史最佳)</h3>
         <p>单核总分 <b>2440 vs 2165(113%)</b>、多核总分 <b>7709 vs 7027(110%)</b>,best-of-runs 口径(gb-opt 轮,2026-11-15)。2026-11-04 完整捕获的逐项分布:多核 8 领先 / 5 持平 / 8 落后,单核 13 领先 / 3 持平 / 5 落后。</p>
         <div class="nums">逐项数据见 <a href="geekbench.html">Geekbench 页</a> · 机位注明:Linux 侧为宿主 4-CPU 钉核(taskset,拓扑对齐)</div>

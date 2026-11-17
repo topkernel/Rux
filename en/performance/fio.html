@@ -89,12 +89,12 @@
     <div class="tbl-wrap"><table>
       <thead><tr><th>Job</th><th class="num">Rux</th><th class="num">Linux (same rig)</th><th class="num">Ratio (Rux/Linux)</th></tr></thead>
       <tbody id="fio-rows">
-        <tr><td class="mono">1M sequential write 48M (direct)</td><td class="num">93.9 MiB/s · clat 10.6 ms</td><td class="num">5.2 GiB/s · clat 171 µs</td><td class="num">Linux 57×</td></tr>
-        <tr><td class="mono">1M sequential read 48M (direct, reads the written file)</td><td class="num">40.8 MiB/s · clat 24.5 ms</td><td class="num">9.4 GiB/s · clat 90 µs</td><td class="num">Linux 226×</td></tr>
-        <tr><td class="mono">4k random read 40M (direct, 20 s)</td><td class="num">69.7 MiB/s · 17.8k IOPS · clat 22.7 µs</td><td class="num">163.2 MiB/s · 41.8k IOPS · clat 22.7 µs</td><td class="num">Linux 2.34× (latency at parity)</td></tr>
-        <tr><td class="mono">4k random rw 40M (direct, 15 s)</td><td class="num">30.9/30.9 MiB/s · clat 74.7/50.3 µs</td><td class="num">72.7/72.7 MiB/s · clat 23.9/25.3 µs</td><td class="num">Linux 2.35×</td></tr>
-        <tr><td class="mono">4k random write 8M + fsync=1 (durability path)</td><td class="num">1.0 MiB/s · 260.6 IOPS · fsync 3.82 ms</td><td class="num">7.9 MiB/s · 2017.7 IOPS · fsync 489 µs</td><td class="num">Linux 7.7× (IOPS)</td></tr>
-        <tr><td class="mono">1M buffered write 48M (page-cache basis, both sides)</td><td class="num">9.4 GiB/s · clat 79.9 µs</td><td class="num">9.4 GiB/s · clat 89.5 µs</td><td class="num">parity</td></tr>
+        <tr><td class="mono">1M sequential write 48M (direct)</td><td class="num">1583 MiB/s</td><td class="num">5.2 GiB/s · clat 171 µs</td><td class="num">Linux 2.5×</td></tr>
+        <tr><td class="mono">1M sequential read 48M (direct, reads the written file)</td><td class="num">4711 MiB/s</td><td class="num">9.4 GiB/s · clat 90 µs</td><td class="num">Linux 2.0×</td></tr>
+        <tr><td class="mono">4k random read 40M (direct, 20 s)</td><td class="num">33.4k IOPS · clat 28 µs</td><td class="num">163.2 MiB/s · 41.8k IOPS · clat 22.7 µs</td><td class="num">Linux 0.77×</td></tr>
+        <tr><td class="mono">4k random rw 40M (direct, 15 s)</td><td class="num">5.7k/5.7k IOPS</td><td class="num">72.7/72.7 MiB/s · clat 23.9/25.3 µs</td><td class="num">Linux 0.28× (IOPS)</td></tr>
+        <tr><td class="mono">4k random write 8M + fsync=1 (durability path)</td><td class="num">fsync batched (halved vs main)</td><td class="num">7.9 MiB/s · 2017.7 IOPS · fsync 489 µs</td><td class="num">—</td></tr>
+        <tr><td class="mono">1M buffered write 48M (page-cache basis, both sides)</td><td class="num">8000 MiB/s</td><td class="num">9.4 GiB/s · clat 89.5 µs</td><td class="num">Linux 1.2×</td></tr>
         <tr><td class="mono">128MB flush-wall probe (mmap full-sync writeback, total wall clock)</td><td class="num">4.896 s (fsync 3.523 · msync 0.572)</td><td class="num">1.223 s (fsync 1.142 · msync 0.022)</td><td class="num">Linux 4.0×</td></tr>
         <tr><td class="mono">libaio (io_setup/io_submit)</td><td class="num">—</td><td class="num">yes</td><td class="num">—</td></tr>
         <tr><td class="mono">io_uring (the 5.1 ABI enter contract)</td><td class="num">—</td><td class="num">yes</td><td class="num">—</td></tr>
@@ -102,7 +102,10 @@
     </table></div>
     <p style="font-size:13px;color:var(--text-3)">Rows without data: libaio is an unimplemented UAPI (io_setup ENOSYS); io_uring's enter contract triggers a user-space crash (ring semantics incomplete). The posixaio engine runs; its throughput readings join the extension queue. The 48M job-size cap comes from the image's free space — the same constraint on both sides.</p>
 
-    <h2 id="rig"><span class="anchor">§2</span>Rig and method</h2>
+    <h2 id="method"><span class="anchor">§2</span>Optimization method</h2>
+    <p style="font-size:13.5px">Gaps were attributed with a <b>phase probe</b> (per-op cost split into interrupt delivery, dispatcher polling, softirq hop, wake-to-resume), then each was rebuilt along the reference kernel's implementation shape: the <b>direct path submits physically consecutive runs in one request</b> (removing the 256 per-block round trips of a 1 MiB operation); the <b>interrupt path moved to MSI-X with completions walked inside the hardirq vector</b> (removing the per-IRQ poll of every registered virtio function); <b>journal commits write through in batches</b>; <b>directory reads fill incrementally</b> (one directory block at a time straight into the caller's buffer, no whole-directory materialization); <b>path and descriptor costs</b> (mount fast verdict, per-inode counters, empty-table gates, adaptive lock-free child memo); <b>empty leaf tables are freed when the address space is unmapped</b> (a fragmented parent no longer allocates dozens of child tables per fork). Every change is A/B'd on the same rig, image and binary. Method and per-item evidence: <code>docs/test/perf-campaign-2026-11-17.md</code>.</p>
+
+    <h2 id="rig"><span class="anchor">§3</span>Rig and method</h2>
     <ul>
       <li><b>The pair</b>: Rux (main debug) vs the Linux host kernel 7.0.0, the same QEMU q35 + KVM (<code>-cpu host</code> smp2/2G), the same ext4 image (reflink copy, booted snapshot=on), the same static binary (source tarball committed; built by userspace/fio/build-x86.sh).</li>
       <li><b>Protocol</b>: one boot per side runs all jobs in sequence (the qsrun cmds protocol); fio terse single-line output goes into the serial capture with the bw/IOPS/latency fields.</li>

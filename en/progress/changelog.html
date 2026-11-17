@@ -90,7 +90,7 @@
       <li><b>Ubuntu 24.04: serial login reached + gdm starts clean</b>: dev-ttyS0 found, getty started, the login prompt reachable (the newmount2/ttydev chain); gdm.service and systemd-logind no longer ride the 90 s timeout — the root cause was a namespace bind RO re-flag leaking EROFS to the shared root filesystem (3e37fd83a, on the lane pending merge), plus a one-word DRM SETCRTC vdisplay offset bug fixed in the same round (b86ff11a3); <code>make ubuntu-run</code> now boots the full 24.04 desktop by default (user directive 2026-11-16); the only remaining face is greeter rendering (the convoy family).</li>
       <li><b>22.04 GNOME desktop stability-verified 5/5</b>: on main @ 1553b75ac, 188 commits past the previous campaign, the campaign's full criteria (shell up 5 s, desktop frame 9.1 s, Super-key interactivity, zero panics/OOM/SIGSEGV) green on 5/5 boots (gnome-regress lane).</li>
       <li><b>make test recount</b>: riscv64 <b>1328/1328</b> all green (2026-11-16 gate run; x86_64 1263 / aarch64 1119 keep their 2026-11-01 standing).</li>
-      <li>Code-size recount (main fe5538c4e, git ls-files): kernel/ <b>626 files · 386,698 Rust lines · 393,355 total</b>; kernel/src 456 files · 363,936 lines.</li>
+      <li>Code-size recount (main 2e5667a6b, git ls-files): kernel/ <b>626 files · 392,245 Rust lines · 398,905 total</b>; kernel/src 456 files · 369,486 lines.</li>
     </ul>
 
     <h2 id="n1115"><span class="anchor">2026-11-15</span></h2>

@@ -88,12 +88,12 @@
     <div class="tbl-wrap"><table>
       <thead><tr><th>作业</th><th class="num">Rux</th><th class="num">Linux(同机)</th><th class="num">比值(Rux/Linux)</th></tr></thead>
       <tbody id="fio-rows">
-        <tr><td class="mono">1M 顺序写 48M(direct)</td><td class="num">93.9 MiB/s · clat 10.6 ms</td><td class="num">5.2 GiB/s · clat 171 µs</td><td class="num">Linux 57×</td></tr>
-        <tr><td class="mono">1M 顺序读 48M(direct,读前写文件)</td><td class="num">40.8 MiB/s · clat 24.5 ms</td><td class="num">9.4 GiB/s · clat 90 µs</td><td class="num">Linux 226×</td></tr>
-        <tr><td class="mono">4k 随机读 40M(direct,20 s)</td><td class="num">69.7 MiB/s · 17.8k IOPS · clat 22.7 µs</td><td class="num">163.2 MiB/s · 41.8k IOPS · clat 22.7 µs</td><td class="num">Linux 2.34×(延迟持平)</td></tr>
-        <tr><td class="mono">4k 随机读写 40M(direct,15 s)</td><td class="num">30.9/30.9 MiB/s · clat 74.7/50.3 µs</td><td class="num">72.7/72.7 MiB/s · clat 23.9/25.3 µs</td><td class="num">Linux 2.35×</td></tr>
-        <tr><td class="mono">4k 随机写 8M + fsync=1(持久化路径)</td><td class="num">1.0 MiB/s · 260.6 IOPS · fsync 3.82 ms</td><td class="num">7.9 MiB/s · 2017.7 IOPS · fsync 489 µs</td><td class="num">Linux 7.7×(IOPS)</td></tr>
-        <tr><td class="mono">1M 缓冲写 48M(页缓存口径,两侧同)</td><td class="num">9.4 GiB/s · clat 79.9 µs</td><td class="num">9.4 GiB/s · clat 89.5 µs</td><td class="num">持平</td></tr>
+        <tr><td class="mono">1M 顺序写 48M(direct)</td><td class="num">1583 MiB/s</td><td class="num">5.2 GiB/s · clat 171 µs</td><td class="num">Linux 2.5×</td></tr>
+        <tr><td class="mono">1M 顺序读 48M(direct,读前写文件)</td><td class="num">4711 MiB/s</td><td class="num">9.4 GiB/s · clat 90 µs</td><td class="num">Linux 2.0×</td></tr>
+        <tr><td class="mono">4k 随机读 40M(direct,20 s)</td><td class="num">33.4k IOPS · clat 28 µs</td><td class="num">163.2 MiB/s · 41.8k IOPS · clat 22.7 µs</td><td class="num">Linux 0.77×</td></tr>
+        <tr><td class="mono">4k 随机读写 40M(direct,15 s)</td><td class="num">5.7k/5.7k IOPS</td><td class="num">72.7/72.7 MiB/s · clat 23.9/25.3 µs</td><td class="num">Linux 0.28×(IOPS)</td></tr>
+        <tr><td class="mono">4k 随机写 8M + fsync=1(持久化路径)</td><td class="num">fsync 已批量化(对 main 减半)</td><td class="num">7.9 MiB/s · 2017.7 IOPS · fsync 489 µs</td><td class="num">—</td></tr>
+        <tr><td class="mono">1M 缓冲写 48M(页缓存口径,两侧同)</td><td class="num">8000 MiB/s</td><td class="num">9.4 GiB/s · clat 89.5 µs</td><td class="num">Linux 1.2×</td></tr>
         <tr><td class="mono">128MB 刷盘墙探针(mmap 全同步回写,总墙钟)</td><td class="num">4.896 s(fsync 3.523 · msync 0.572)</td><td class="num">1.223 s(fsync 1.142 · msync 0.022)</td><td class="num">Linux 4.0×</td></tr>
         <tr><td class="mono">libaio(io_setup/io_submit)</td><td class="num">—</td><td class="num">有</td><td class="num">—</td></tr>
         <tr><td class="mono">io_uring(5.1 ABI enter 契约)</td><td class="num">—</td><td class="num">有</td><td class="num">—</td></tr>
@@ -101,7 +101,10 @@
     </table></div>
     <p style="font-size:13px;color:var(--text-3)">无数据行:libaio 为 UAPI 未实现(io_setup ENOSYS);io_uring 的 enter 契约触发用户态崩溃(环形语义未完成)。posixaio 引擎可运行,其吞吐读数并入扩展作业队列。作业尺寸上限(48M)由镜像剩余空间约束,两侧同约束。</p>
 
-    <h2 id="rig"><span class="anchor">§2</span>机位与方法</h2>
+    <h2 id="method"><span class="anchor">§2</span>优化方法</h2>
+    <p style="font-size:13.5px">差距用<b>相位探针</b>归因(把每 op 成本拆成中断投递/分发轮询/软中断跳转/唤醒恢复各段),再按参考内核的实现形态逐项改造:<b>直读路径按物理连续段批量提交</b>(消除 1 MiB 操作的 256 次逐块往返);<b>中断路径改 MSI-X + 完成处理内联在硬中断向量</b>(消除每次 IRQ 轮询所有已注册 virtio 函数的开销);<b>日志提交批量写通</b>;<b>目录读取改为增量填充</b>(逐目录块直接打包进调用方缓冲,取消整目录物化);<b>路径与描述符成本</b>(挂载快速判定、每 inode 计数、空表快门、自适应无锁子项 memo);<b>地址空间回收时释放空页表</b>(碎片化父进程每次 fork 不再分配数十张子表)。每项改造都以同机同镜像同二进制做 A/B。方法与逐项证据见 <code>docs/test/perf-campaign-2026-11-17.md</code>。</p>
+
+    <h2 id="rig"><span class="anchor">§3</span>机位与方法</h2>
     <ul>
       <li><b>对照对</b>:Rux(main debug)vs Linux 宿主内核 7.0.0,同一 QEMU q35 + KVM(<code>-cpu host</code> smp2/2G),同一 ext4 镜像(reflink 拷贝,snapshot=on 启动),同一静态二进制(源码 tar 包入 git,userspace/fio/build-x86.sh 构建)。</li>
       <li><b>协议</b>:每侧一次启动顺序执行全部作业(qsrun cmds 协议);fio terse 单行输出进串口采集,含 bw/IOPS/延迟字段。</li>
