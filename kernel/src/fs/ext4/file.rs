@@ -181,6 +181,14 @@ fn ext4_dio_read_batched(
     // that request's start — POSIX short read).
     macro_rules! drain {
         () => {{
+            // The PCI submit path publishes chains QUIETLY (every notify
+            // is an MMIO trap); nothing else on a quiet boot kicks the
+            // device for us — without this kick the whole window sat
+            // at-device until the 10 s wait deadline (the VW-WEDGE
+            // unkicked=at_device family on real-data direct reads).
+            if count > 0 {
+                crate::drivers::virtio::pci_blk_kick_all();
+            }
             let mut cut_at = usize::MAX;
             for i in 0..count {
                 let rc = completions[i].wait();
@@ -3341,13 +3349,38 @@ unsafe fn ext4_write_at_core(
                     // cache (p3c cold 14.1 us/page vs warm 0.94) instead
                     // of repopulating through the read machinery.
                     if written_bytes > 0 {
-                        page_cache::get_page_cache().writeback_populate_range_multi(
-                            fs as *const crate::fs::ext4::Ext4FileSystem as u64,
-                            ext4_ino as u64,
-                            offset,
-                            &buf[..written_bytes],
-                            skip_pfns,
-                        );
+                        // DIO fast arm (pair-battery item 1): UPDATE-only.
+                        // The direct spans' bytes are device-acked at this
+                        // point (ext4_file_write drained before returning)
+                        // and the fast arm leaves NO block-cache entry, so
+                        // inserting page-cache frames here would only add
+                        // DIRTY duplicates the writeback flusher later
+                        // rewrites through the full write core — a random
+                        // 4 KiB direct-write storm measured at 4 ms/op
+                        // (populate-insert -> periodic flush ->
+                        // sync_flushed_data's whole-file map walk).
+                        // Coherence: existing mapped frames are updated in
+                        // place (the update arm); fresh readers MISS the
+                        // page cache and fill from disk (the fast arm
+                        // wrote it) or from cached-dirty blocks (the
+                        // per-block arm's guard).
+                        if dio_fast {
+                            page_cache::get_page_cache().writeback_update_range_multi(
+                                fs as *const crate::fs::ext4::Ext4FileSystem as u64,
+                                ext4_ino as u64,
+                                offset,
+                                &buf[..written_bytes],
+                                skip_pfns,
+                            );
+                        } else {
+                            page_cache::get_page_cache().writeback_populate_range_multi(
+                                fs as *const crate::fs::ext4::Ext4FileSystem as u64,
+                                ext4_ino as u64,
+                                offset,
+                                &buf[..written_bytes],
+                                skip_pfns,
+                            );
+                        }
                     }
                     written_bytes as isize
                 }
