@@ -223,28 +223,63 @@ pub fn ext4_ext_get_run(
     Ok(run_from_entries(entries, logical_block))
 }
 
+/// Binary search a leaf `entries` slice (sorted by ee_block) for the
+/// entry covering `logical_block`. Returns the covering entry's index, or
+/// the INVERSE index (bit 31 set, values are small) of the first entry
+/// PAST `logical_block` (the hole-to-next-extent distance), or
+/// u32::MAX when nothing lies ahead. Replaces the linear scans that made
+/// every lookup of a fragmented tree O(entries) — the fsw br=25k-class
+/// CPU burn on depth>=1 files (wrfsync lane, 2026-11-17).
+#[inline]
+fn search_extent_entry(entries: &[Ext4Extent], logical_block: u64) -> u32 {
+    let mut lo = 0usize;
+    let mut hi = entries.len();
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if entries[mid].ee_block as u64 <= logical_block {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    // lo = first entry with ee_block > logical_block; lo-1 = candidate.
+    if lo > 0 {
+        let i = lo - 1;
+        let start = entries[i].ee_block as u64;
+        if logical_block < start + entries[i].length() as u64 {
+            return i as u32;
+        }
+    }
+    if lo < entries.len() {
+        0x8000_0000 | lo as u32 // hole: index of the next entry, marked
+    } else {
+        u32::MAX // hole: nothing ahead
+    }
+}
+
 /// Scan leaf `entries` for the extent covering `logical_block`; return
 /// the maximal run from that point. Holes report the distance to the
 /// next extent's start (length 0 means "nothing known ahead" — callers
 /// re-resolve per block there).
 #[inline]
 fn run_from_entries(entries: &[Ext4Extent], logical_block: u64) -> (u64, u64, bool) {
-    let mut next_start = u64::MAX;
-    for ext in entries {
+    let r = search_extent_entry(entries, logical_block);
+    if r != u32::MAX && r & 0x8000_0000 == 0 {
+        let ext = &entries[r as usize];
         let start = ext.ee_block as u64;
-        let end = start + ext.length() as u64;
-        if logical_block >= start && logical_block < end {
-            let offset = logical_block - start;
-            let unwritten = ext.is_unwritten();
-            let phys = if unwritten { 0 } else { ext.start_block() + offset };
-            let len = ext.length() as u64 - offset;
-            return (phys, len, unwritten);
-        }
-        if start > logical_block && start < next_start {
-            next_start = start;
-        }
+        let offset = logical_block - start;
+        let unwritten = ext.is_unwritten();
+        let phys = if unwritten { 0 } else { ext.start_block() + offset };
+        let len = ext.length() as u64 - offset;
+        return (phys, len, unwritten);
     }
-    (0, if next_start == u64::MAX { 0 } else { next_start - logical_block }, false)
+    if r == u32::MAX {
+        (0, 0, false)
+    } else {
+        let next = (r & 0x7FFF_FFFF) as usize;
+        let next_start = entries[next].ee_block as u64;
+        (0, next_start.saturating_sub(logical_block), false)
+    }
 }
 
 /// Deep-tree run resolver: one walk per level, whole-extent verdict.
@@ -1167,18 +1202,16 @@ fn find_block_in_external_extent_ex(
                 data.as_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4Extent,
                 header.eh_entries as usize,
             );
-            let mut hit = Ok((0u64, false));
-            for ext in entries {
-                let start = ext.ee_block as u64;
-                let end = start + ext.length() as u64;
-                if logical_block >= start && logical_block < end {
-                    let offset = logical_block - start;
-                    let unwritten = ext.is_unwritten();
-                    hit = Ok((ext.start_block() + offset, unwritten));
-                    break;
-                }
+            // Binary search (entries sorted by ee_block): O(log n) per
+            // lookup instead of the linear scan (wrfsync lane).
+            let r = search_extent_entry(entries, logical_block);
+            if r != u32::MAX && r & 0x8000_0000 == 0 {
+                let ext = &entries[r as usize];
+                let offset = logical_block - ext.ee_block as u64;
+                Ok((ext.start_block() + offset, ext.is_unwritten()))
+            } else {
+                Ok((0u64, false))
             }
-            hit
         } else {
             let indices = core::slice::from_raw_parts(
                 data.as_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4ExtentIdx,
