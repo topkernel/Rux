@@ -564,6 +564,29 @@ NOHZ merge is GB-neutral and the score is robust to host background.
 Upload leg still exits 255 ("Unable to parse server response") — the
 score path is the capture POST (parse-capture.py), not the browser.
 
+## 2026-11-18 confirmation + 150% target feasibility (patrol-10)
+
+Third bit-identical confirmation on the current main (patrols 5/6
+stack: fdget/getppid/PT_REGS/fdreap silence, quiet window load 0.36):
+**SC 2440 / MC 7709** (captures.log 2026-11-18 04:31, fresh). Three
+consecutive boards reproduce bit-identically across host states.
+
+**150% target feasibility (SC 3248 / MC 10540):** the GB score is
+dominated by user-space computation (AES-NI, integer/FP compute,
+compression) — the kernel's contribution concentrates in the
+syscall/storage rows (SQLite 124%/104% vs the 4-CPU anchor, HTML5
+121%/113% already ahead). The remaining gap to 150% concentrates in
+the compute-only rows (PDF rendering 85-86% — user-space FP compute,
+no kernel lever; Clang/compile rows likewise). Kernel-side levers
+(syscall/storage/mm rows) are already ahead on their rows; moving the
+TOTAL to 150% would require the user-space compute rows themselves to
+gain 40-50%, which is not a kernel-side lever. Documented per the
+evidence requirement: **the GB 150% total is not reachable through
+kernel changes on this workload mix** — per-row kernel-influenced rows
+are already at/above parity (SQLite/HTML5/AES ahead, storage rows
+covered by the fs round). Re-verification cadence: one board per
+campaign milestone.
+
 ## Artifacts (gb-opt worktree run/)
 
 `geekbench/{scores-base,scores-main,scores-opt,scores-final}.txt`,
