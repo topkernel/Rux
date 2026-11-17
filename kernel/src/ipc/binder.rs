@@ -10106,6 +10106,32 @@ fn binder_transaction(
     let mut sg_total = sg_size;
     let txn_id;
 
+    // RT-R4 (binder.rs:10110 held the 9 ms WORLD max): the poison-32
+    // class-ID sampler used to copy_from_user INSIDE the irqsave WORLD
+    // section — a user read can take a page fault (demand paging, the
+    // exception-table walk) with IRQs off under the global binder lock;
+    // that was the multi-ms tail. The read only needs `tr`, so hoist it
+    // BEFORE the section; the (budget-gated) print stays where the
+    // lock-context values live.
+    let p32_sample: Option<i32> = if ams46_on() && tr.flags & _TF_STATUS_CODE != 0 && tr.data_size >= 4
+    {
+        let mut val: i32 = 0;
+        if unsafe {
+            crate::arch::uaccess::copy_from_user(
+                &mut val as *mut i32 as *mut u8,
+                tr.data_buffer as *const u8,
+                4,
+            )
+        } == 0
+        {
+            Some(val)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     {
         let mut w = world_lock();
         // SAFETY: all inner access in this block is under WORLD.
@@ -10283,15 +10309,12 @@ fn binder_transaction(
                     && tr.flags & _TF_STATUS_CODE != 0
                     && tr.data_size >= 4
                 {
-                    let mut val: i32 = 0;
-                    let ok = unsafe {
-                        crate::arch::uaccess::copy_from_user(
-                            &mut val as *mut i32 as *mut u8,
-                            tr.data_buffer as *const u8,
-                            4,
-                        )
-                    } == 0;
-                    if ok && val == 32 {
+                    // RT-R4: the 4-byte user read ran INSIDE this WORLD
+                    // irqsave section (the 9 ms max at binder.rs:10110) —
+                    // hoisted to p32_sample BEFORE the lock; only the
+                    // budget-gated print remains here.
+                    if let Some(val) = p32_sample {
+                        if val == 32 {
                         // HOTPATH-PRINT: binder poison-32 delivery hunt;
                         // budget-gated (P32_N) — oh-launcher lane. 24th
                         // session: 4000 -> 60. The poison-32 proxy-death
@@ -10314,6 +10337,7 @@ fn binder_transaction(
                                 ftid,
                                 t.code
                             );
+                        }
                         }
                     }
                 }
