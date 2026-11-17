@@ -115,6 +115,24 @@ strands. vs the guest reference medians (0.046/0.060/0.062):
 as entry-floor/copy-tail/exit-async structural work in the sections
 above.
 
+## Patrol-8 verification (2026-11-18, stat-2x landed in tree)
+
+The parallel stat-2x lane (20ccf5d8b: has_mount early-out + per-inode
+open counters + adaptive lock-free child memo) verified on the syscall
+rows: stat 0.2703 µs (1.14x vs reference 0.236), open 0.6557 µs
+(1.39x), read 0.0952, write 0.0765 — all at their best values. The
+lane scoreboard holds: 11 ahead/parity, 4 behind (ctx-2 2.79x, open
+1.44x, read 1.42x, write 1.13x — all with documented levers).
+
+## Patrol-8 verification (2026-11-18, stat-2x landed in tree)
+
+The parallel stat-2x lane (20ccf5d8b: has_mount early-out + per-inode
+open counters + adaptive lock-free child memo) verified on the syscall
+rows: stat 0.2703 µs (1.14x vs reference 0.236), open 0.6557 µs
+(1.39x), read 0.0952, write 0.0765 — all at their best values. The
+lane scoreboard holds: 11 ahead/parity, 4 behind (ctx-2 2.79x, open
+1.44x, read 1.42x, write 1.13x — all with documented levers).
+
 ## Patrol-7 full battery (2026-11-18, kernel main+perf-2x rounds, nohz_full=1)
 
 Full 29-case battery (CCD0 + performance governor + warmer; 5 rows hit
