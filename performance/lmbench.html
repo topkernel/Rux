@@ -115,7 +115,7 @@
         <tbody>
           <tr><td class="mono">lat_syscall open</td><td class="num">0.676 µs</td><td class="num">0.471 µs</td><td><span class="chip bad">落后 1.44×</span>(自 1.9–2.5×)</td></tr>
           <tr><td class="mono">lat_syscall read</td><td class="num">0.095 µs</td><td class="num">0.067 µs</td><td><span class="chip bad">落后 1.42×</span>(自 1.7×)</td></tr>
-          <tr><td class="mono">lat_syscall stat</td><td class="num">0.27–0.32 µs</td><td class="num">0.236–0.239 µs</td><td><span class="chip bad">落后 1.14–1.36×</span></td></tr>
+          <tr><td class="mono">lat_syscall stat</td><td class="num">0.27 µs</td><td class="num">0.236–0.239 µs</td><td><span class="chip bad">落后 1.14×</span>(stat-2x 线:自适应子项 memo+has_mount 早退)</td></tr>
           <tr><td class="mono">lat_syscall write</td><td class="num">0.078 µs</td><td class="num">0.069 µs</td><td><span class="chip bad">落后 1.13×</span></td></tr>
           <tr><td class="mono">lat_syscall null</td><td class="num">0.042 µs</td><td class="num">0.046 µs</td><td><span class="chip ok">反超 0.92×</span>(fdget+getppid O(1)+PT_REGS+fdreap 静默+NOHZ 栈)</td><td>2× 目标 0.023µs=入口地板重构(已文档化)</td></tr>
           <tr><td class="mono">lat_proc fork</td><td class="num">36.6–40.3 µs</td><td class="num">33.9 µs</td><td><span class="chip ok">持平带 1.08–1.19×</span></td></tr>
