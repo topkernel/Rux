@@ -115,7 +115,7 @@ restore_fpu           <span class="c"># enable only if fs != OFF</span></code></
     </ul>
     <h3>x86_64 specifics</h3>
     <ul>
-      <li><b>SMAP (divergence D-18)</b>: CR4.SMAP enabled; usercopy uses <b>pushfq/orq/popfq AC brackets</b> instead of STAC/CLAC — which unconditionally #UD under QEMU TCG (convicted by paired trials); ~55 ns per bracket; SMAP-VIOL beacons silent across the suite.</li>
+      <li><b>SMAP (divergence D-18)</b>: CR4.SMAP enabled; usercopy uses <b>pushfq/orq/popfq AC brackets</b> instead of STAC/CLAC — which unconditionally #UD under QEMU TCG (established by paired trials); ~55 ns per bracket; SMAP-VIOL beacons silent across the suite.</li>
       <li><b>Syscall face</b>: MSR entry; SYSRET eligibility falls back to iret on TF|RF; a dirty EFLAGS.DF entering the kernel once reversed rep movsb (fixed); CR0.WP set from the earliest boot.</li>
       <li><b>Userspace W^X</b>: NX mappings, PT_GNU_STACK, READ_IMPLIES_EXEC.</li>
     </ul>

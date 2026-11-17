@@ -99,7 +99,7 @@
     <h2 id="memwatch"><span class="anchor">§3</span>dfx=memwatch 与 allocwatch</h2>
     <ul>
       <li><b>memwatch</b>:按尺寸类的 alloc/free 计数 + 大对象(2048&lt;size≤4096)调用点直方图(前 4 个帧指针返回哈希);周期转储走 taskdump 原始 UART 路径 —— 泄漏定位首选。</li>
-      <li><b>allocwatch</b>:<b>跨 CPU 持锁者点名</b> —— 等待者不能自报(打印会分配,而它正卡在分配器内);scheduler_tick 跨 CPU 扫描全部戳记,报告持锁 &gt;1 s 者及其任务状态。设计动机:分配器冻结家族的"镜像误报"判例(da27be84)—— 本仪器曾用于<b>排除</b>指控而非定罪,双向可用。</li>
+      <li><b>allocwatch</b>:<b>跨 CPU 持锁者点名</b> —— 等待者不能自报(打印会分配,而它正卡在分配器内);scheduler_tick 跨 CPU 扫描全部戳记,报告持锁 &gt;1 s 者及其任务状态。设计动机:分配器冻结家族的"镜像误报"判例(da27be84)—— 本仪器曾用于<b>排除</b>指控而非确认根因,双向可用。</li>
     </ul>
 
     <h2 id="oom"><span class="anchor">§4</span>OOM 取证块</h2>

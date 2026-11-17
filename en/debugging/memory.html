@@ -99,7 +99,7 @@
     <h2 id="memwatch"><span class="anchor">§3</span>dfx=memwatch and allocwatch</h2>
     <ul>
       <li><b>memwatch</b>: per-size-class alloc/free counters + a call-site histogram for large objects (2048&lt;size≤4096, hashed from the first 4 frame-pointer returns); periodic dumps ride the taskdump raw-UART path — the first choice for leak localization.</li>
-      <li><b>allocwatch</b>: <b>cross-CPU holder naming</b> — a waiter cannot report itself (printing allocates, and it is stuck inside the allocator); scheduler_tick scans all stamps cross-CPU and reports anything held &gt;1 s with the holder's task state. Design note: the allocator-freeze family's "instrument mirage" verdict (da27be84) — this instrument once served to <b>exonerate</b> an accusation rather than convict; it works in both directions.</li>
+      <li><b>allocwatch</b>: <b>cross-CPU holder naming</b> — a waiter cannot report itself (printing allocates, and it is stuck inside the allocator); scheduler_tick scans all stamps cross-CPU and reports anything held &gt;1 s with the holder's task state. Design note: the allocator-freeze family's "instrument mirage" verdict (da27be84) — this instrument once served to <b>clear</b> an accusation rather than to confirm it; it works in both directions.</li>
     </ul>
 
     <h2 id="oom"><span class="anchor">§4</span>The OOM forensic block</h2>

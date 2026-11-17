@@ -145,7 +145,7 @@ x86_64-linux-gnu-addr2line -e &lt;the unstripped ELF for the bzImage&gt; -f -C &
       <li>Classify: scause/cr2 names the exception class; the panic message + file:line give the first read;</li>
       <li>Locate: the whole Call trace's addresses through addr2line in one command → the function and line;</li>
       <li>Zoom: more scene needed → re-run with dfx=mmforensics / dfx=watchdog / REMOTE-BT;</li>
-      <li>Convict: deterministic reproduction (THREAD=single) + intersecting across boots.</li>
+      <li>Establish the root cause: deterministic reproduction (THREAD=single) + intersecting across boots.</li>
     </ol>
 
     <div class="callout">Code: <code>kernel/src/dfx/backtrace.rs</code> (the frame-pointer walk, force-frame-pointers=yes), <code>kernel/src/dfx/oops.rs</code>, <code>kernel/src/dfx/ksyms.rs</code> + build/gen-ksyms.py (the generator). Divergence: D-3. Related: <a href="memory.html">memory forensics</a> (scene deepening), <a href="locks.html">lock debugging</a> (the watchdog linkage).</div>

@@ -92,7 +92,7 @@ Level 2b the process tree    Level 2c  inode    Level 2d  dcache</code></pre>
     <ul>
       <li>Same-level branches (2a/2b/2c/2d) never nest; vertical acquisition only from lower to higher numbers.</li>
       <li><b>SleepMutexes sit outside the layers</b>: <code>VFS_MUTATION_LOCK → EXT4_BIG_LOCK</code> is the only legal sleeping-lock order (INV-LOCK-8).</li>
-      <li><b>virtio</b>: read this page and the in-source comments before touching any virtio path — net's one-way <code>{rx|tx}_queue → stats</code> order (INV-LOCK-6) was once convicted by an AB-BA of two CPUs spinning against each other.</li>
+      <li><b>virtio</b>: read this page and the in-source comments before touching any virtio path — net's one-way <code>{rx|tx}_queue → stats</code> order (INV-LOCK-6) was once proven by an AB-BA of two CPUs spinning against each other.</li>
     </ul>
 
     <h2 id="invs"><span class="anchor">§2</span>Named invariants (INV-LOCK-*)</h2>

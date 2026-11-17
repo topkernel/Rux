@@ -148,11 +148,11 @@
         <tr><td>p5a pipe roundtrip (handoffs bypass the wake gate, by design)</td><td class="num">19.673 µs</td><td class="num">18.306 µs (−6.9%)</td></tr>
       </tbody>
     </table></div>
-    <p><b>Known costs (on record)</b>: sub-6 ms ping-pong receivers wake at slice expiry rather than immediately; exec_start approximates true wait with the last pick stamp, slightly overestimating; a futex wake→run behind an incumbent is tick-quantized to ~10 ms (p2f battery: 9.99/10.0 ms in both hog regimes — the sentinel row of the known quantization class).</p>
+    <p><b>Known costs (on record)</b>: sub-6 ms ping-pong receivers wake at slice expiry rather than immediately; exec_start approximates true wait with the last pick stamp, slightly overestimating; a futex wake→run behind an incumbent is tick-quantized to ~10 ms (p2f suite run: 9.99/10.0 ms in both hog regimes — the sentinel row of the known quantization class).</p>
     <h3>IPI and polling idle</h3>
     <ul>
       <li>Resched IPI sender-side alone <b>935–1139 ns</b> (cctx probe); IPI + halt exit costs ~2–5 µs of KVM exit per handoff.</li>
-      <li><b>Polling idle window 120 µs</b>: wakes landing inside the pure-spin idle window skip the resched IPI (raised from 30 µs — battery2 measured 815/1915 wakes whose IPIs landed just past the window at a 995 ns mean; each elided IPI saves ~1 µs of handoff). Dekker SeqCst fence pairing with <code>resched_cpu</code> carries a documented lost-wake safety argument.</li>
+      <li><b>Polling idle window 120 µs</b>: wakes landing inside the pure-spin idle window skip the resched IPI (raised from 30 µs — suite run 2 measured 815/1915 wakes whose IPIs landed just past the window at a 995 ns mean; each elided IPI saves ~1 µs of handoff). Dekker SeqCst fence pairing with <code>resched_cpu</code> carries a documented lost-wake safety argument.</li>
       <li>Re-check need_resched between MARK_IDLE and WFI (R20-2): otherwise a task enqueued the instant before mark_idle sleeps a full 10 ms tick for nothing.</li>
     </ul>
 
@@ -161,7 +161,7 @@
       <li><b>Tick</b>: per-CPU timer at 100 Hz. <code>scheduler_tick()</code> does: softlockup touch, schedstat, phantom-bit orphan scan, allocwatch, a 1 Hz CLAIM-SWEEP (stale-claim heal over the whole CFS timeline under the GRQ), and the per-task PREEMPT-LEAK tripwire.</li>
       <li><b>Kernel preemption defaults off</b> (opt-in via explicit schedule() calls); the <code>kpreempt=1/0</code> boot param arms the irq-exit preemption hook; A/B reads flat for hog regimes — default stays off.</li>
       <li><b>can_stop_tick decision tree</b> (reference core.c order): any DL task needs the tick; &gt;1 RR task needs it; FIFO-only does not; &gt;1 CFS task (GRQ counter plus running non-idle currents added back) needs it.</li>
-      <li><b>NOHZ (adaptive tick)</b>: a function-for-function mirror of the reference tick-sched.c (check_tick_dependency / tick_nohz_stop·restart_sched_tick / tick_nohz_irq_exit / the nohz_full= parameter); tick_dep bits POSIX_TIMER/PERF/SCHED/RCU etc.; the per-rq→GRQ structural mapping is on record (the 0→1 kick kept as a resched IPI from the enqueue edge). Wired on x86_64 (LAPIC one-shot); other twins pending. <code>nohz_full=1</code> measured (merge record): under a hostile-load battery lmbench lat_syscall,null passes 11/12 (main tip 0/10), p1_null median 0.050 vs 0.060 µs (−17%), both census bands hold exactly.</li>
+      <li><b>NOHZ (adaptive tick)</b>: a function-for-function mirror of the reference tick-sched.c (check_tick_dependency / tick_nohz_stop·restart_sched_tick / tick_nohz_irq_exit / the nohz_full= parameter); tick_dep bits POSIX_TIMER/PERF/SCHED/RCU etc.; the per-rq→GRQ structural mapping is on record (the 0→1 kick kept as a resched IPI from the enqueue edge). Wired on x86_64 (LAPIC one-shot); other twins pending. <code>nohz_full=1</code> measured (merge record): under a hostile-load suite lmbench lat_syscall,null passes 11/12 (main tip 0/10), p1_null median 0.050 vs 0.060 µs (−17%), both census bands hold exactly.</li>
       <li><b>Dependency gate</b>: tick-dependency re-evaluation on load change is gated by NOHZ_FULL_RUNNING — ungated, the can-stop predicate's per-CPU current scan lands inside every GRQ-held enqueue (p2_ctxsw 1.242→2.149 µs, +73%, eliminated by the gate).</li>
     </ul>
 

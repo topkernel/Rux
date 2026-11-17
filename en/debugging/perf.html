@@ -119,7 +119,7 @@ cat /proc/sys/kernel/perf_event_paranoid</code></pre>
         <tr><td>P7</td><td>p7_sleep1ms</td><td>nanosleep 1 ms ×1e4, recording OVERSHOOT</td></tr>
       </tbody>
     </table></div>
-    <p>The gate anchor column (pb1, KVM debug class): p1_null 0.300 / p1_clock 0.371 / p2_ctxsw 1.242 / p3b_cow 8.075 / p6_write_fsync 8442.6 / p6_mkdrmdir 216.7 / p6_unlink 54.6 / p6_append 5.19 µs; the Tier-2 criterion is median ±20% or improved. The p2_ctxsw anchor is declared stale (the pre-nohz parent already drifted +60%; a REBANK is on record).</p>
+    <p>The gate anchor column (pb1, KVM debug class): p1_null 0.300 / p1_clock 0.371 / p2_ctxsw 1.242 / p3b_cow 8.075 / p6_write_fsync 8442.6 / p6_mkdrmdir 216.7 / p6_unlink 54.6 / p6_append 5.19 µs; the Tier-2 criterion is median ±20% or improved. The p2_ctxsw anchor is declared stale (the pre-nohz parent already drifted +60%; a re-measurement is on record).</p>
 
     <h2 id="gate"><span class="anchor">§4</span>The performance gate: three tiers and guarded domains</h2>
     <p>Merge gating runs in three tiers (<code>docs/development/perf-gate-baseline.md</code> is the authoritative table; perf-gate.sh automates it):</p>

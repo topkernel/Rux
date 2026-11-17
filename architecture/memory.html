@@ -122,7 +122,7 @@
     <ul>
       <li><b>zone 模型</b>:ZoneDma/ZoneDma32/ZoneNormal/ZoneMovable;riscv64 QEMU 配置仅 ZoneNormal。Zone 持 <code>free_area: [FreeArea; MAX_ORDER+1]</code>,MAX_ORDER = 10(最大 1024 页 = 4MB);buddy 拆分/合并遵循标准形态(buddy_pfn = pfn ^ (1&lt;&lt;order))。</li>
       <li><b>水位线</b>:WMARK_MIN/LOW/HIGH;<code>setup_per_zone_wmarks</code> 按 <code>__setup_per_zone_wmarks()</code> 形态:min_free_kbytes = int_sqrt(managed_kb·16),钳制 [128, 262144](历史实现曾以 "/4" 使全部水位线低于参考值四倍,已修正);watermark_gap = max(wmark_min/4, managed·10/10000)。</li>
-      <li><b>PCP(per-CPU pageset)</b>:order-0 页帧由各 CPU 本地供给,<b>零 zone 锁</b>;zone 锁按 PCP_BATCH=16 成批支付。行结构 64 字节对齐。三条不变量入册:INV-PCP-1(页帧三态生命周期:OnFreelist rc==0 / OnPcp rc==0 / in-use rc≥1,违例即泄漏加污染标记)、INV-PCP-2(zone free_pages 同时计入 buddy 与 pcp,参考语义)、INV-PCP-3(行仅由其所属 CPU 在关中断下触碰)。引入动机:PCP 之前的每次 order-0 分配/释放均为 zone 锁全程往返,且页描述符初始化循环位于锁内。</li>
+      <li><b>PCP(per-CPU pageset)</b>:order-0 页帧由各 CPU 本地供给,<b>零 zone 锁</b>;zone 锁按 PCP_BATCH=16 成批支付。行结构 64 字节对齐。三条不变量已登记:INV-PCP-1(页帧三态生命周期:OnFreelist rc==0 / OnPcp rc==0 / in-use rc≥1,违例即泄漏加污染标记)、INV-PCP-2(zone free_pages 同时计入 buddy 与 pcp,参考语义)、INV-PCP-3(行仅由其所属 CPU 在关中断下触碰)。引入动机:PCP 之前的每次 order-0 分配/释放均为 zone 锁全程往返,且页描述符初始化循环位于锁内。</li>
       <li><b>迁移类型</b>:Unmovable/Movable/Reclaimable。</li>
     </ul>
 

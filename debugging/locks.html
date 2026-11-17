@@ -89,7 +89,7 @@
     <ul>
       <li><b>机制</b>:锁序类携带零尺寸键类型(<code>GrqKey</code>、<code>FutexBucketKey</code>、<code>NetQueueKey</code>、<code>NetStatsKey</code>);一条允许的嵌套是显式的 <code>impl CanNestInside&lt;Outer&gt; for Inner</code>;持锁 guard 铸造零尺寸 NestProof,获取嵌套锁须消费 proof(<code>lock_nested</code>/<code>lock_irqsave_nested</code>)—— impl 不存在则不编译。<b>运行时成本为零</b>(键为 PhantomData;获取路径内联为原协议指令)。</li>
       <li><b>覆盖切片</b>:GRQ 本锁(RawSpinlock→KeyedRawSpinlock&lt;GrqKey&gt;);futex 哈希桶 + 唤醒链(桶内唤醒嵌套 GRQ 是日常路径,反向 = 全机死锁);futex WAITER_POOL 槽锁。</li>
-      <li><b>实战记录(2b092c49 撤回事件)</b>:首次 GRQ 键化因 API 形态缺陷失败 —— <code>KeyedRawSpinlock::lock()</code> 返回 guard,而既有的裸 <code>self.lock.lock();</code> 语句<b>丢弃</b>了它,Drop 在语句末释放锁:每个"持 GRQ"区段实际未排除(13 启动配对二分:6/6 x86 exitwalk 启动在 CFS timeline btree 遍历 panic,riscv64 R74 双重运行)。定罪 623c4736、根因 75dbf637;两键化 guard 类型此后 <code>#[must_use]</code>;协议封装层永不触碰返回 guard 的 lock(取 surface lock_claim/try_lock_claim/unlock)。该事故成为 guard 所有权纪律的实例教材。</li>
+      <li><b>实战记录(2b092c49 撤回事件)</b>:首次 GRQ 键化因 API 形态缺陷失败 —— <code>KeyedRawSpinlock::lock()</code> 返回 guard,而既有的裸 <code>self.lock.lock();</code> 语句<b>丢弃</b>了它,Drop 在语句末释放锁:每个"持 GRQ"区段实际未排除(13 次启动配对二分:6/6 x86 exitwalk 启动在 CFS timeline btree 遍历 panic,riscv64 R74 双重运行)。623c4736 确认问题、75dbf637 修复根因;两键化 guard 类型此后 <code>#[must_use]</code>;协议封装层永不触碰返回 guard 的 lock(取 surface lock_claim/try_lock_claim/unlock)。该事故成为 guard 所有权纪律的实例教材。</li>
     </ul>
 
     <h2 id="watchdog"><span class="anchor">§3</span>防线二:自旋看门狗(运行期)</h2>

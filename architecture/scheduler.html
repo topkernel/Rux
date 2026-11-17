@@ -148,11 +148,11 @@
         <tr><td>p5a 管道往返(交接路径不经唤醒判定,按设计不变)</td><td class="num">19.673 µs</td><td class="num">18.306 µs(−6.9%)</td></tr>
       </tbody>
     </table></div>
-    <p><b>已知代价(登记在案)</b>:亚 6 ms 乒乓接收者的唤醒延迟由时间片届期界定,而非即时抢占;exec_start 以最近拣选时间戳近似真实等待,存在轻微高估;落后于在跑任务的 futex 唤醒→运行延迟被 tick 量化至 ~10 ms(p2f 电池:hog 场景 9.99/10.0 ms,该行为已知量化类的哨兵行)。</p>
+    <p><b>已知代价(已记录在案)</b>:亚 6 ms 乒乓接收者的唤醒延迟由时间片届期界定,而非即时抢占;exec_start 以最近拣选时间戳近似真实等待,存在轻微高估;落后于在跑任务的 futex 唤醒→运行延迟被 tick 量化至 ~10 ms(p2f 整轮测试:hog 场景 9.99/10.0 ms,该行为已知量化类的哨兵行)。</p>
     <h3>IPI 成本与轮询空闲</h3>
     <ul>
       <li>resched IPI 发送端单独 <b>935–1139 ns</b>(cctx 探针);IPI + halt 退出每次交接约 2–5 µs 的 KVM exit 开销。</li>
-      <li><b>轮询空闲窗 120 µs</b>:落入纯自旋空闲窗内的唤醒跳过 resched IPI(窗口由 30 µs 提升 —— battery2 实测 815/1915 次唤醒的 IPI 落于窗外,均值 995 ns;每次省略的 IPI 约节省 1 µs 交接开销)。与 <code>resched_cpu</code> 以 Dekker SeqCst 栅栏配对,丢失唤醒安全性具备形式化论证。</li>
+      <li><b>轮询空闲窗 120 µs</b>:落入纯自旋空闲窗内的唤醒跳过 resched IPI(窗口由 30 µs 提升 —— 第二轮整轮测试实测 815/1915 次唤醒的 IPI 落于窗外,均值 995 ns;每次省略的 IPI 约节省 1 µs 交接开销)。与 <code>resched_cpu</code> 以 Dekker SeqCst 栅栏配对,丢失唤醒安全性具备形式化论证。</li>
       <li>MARK_IDLE 与 WFI 之间重查 need_resched(R20-2):否则在 mark_idle 前一刻入队的任务将空转等待一个完整 tick 周期(10 ms)。</li>
     </ul>
 

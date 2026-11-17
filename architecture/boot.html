@@ -95,7 +95,7 @@
     <ul>
       <li><b>引导链</b>:QEMU 载入 OpenSBI(fw_dynamic)于 M 态,移交 S 态内核于 <code>_start</code>(a0 = hartid,a1 = DTB 指针);boot.S:置栈、PC 相对清 BSS、构建蹦床页表(首 2MB 内核 VA→PA)再完整早期页表,启用 MMU 后跳 VA 进入 rust_main。</li>
       <li><b>SMP 拉起</b>:OpenSBI HSM 启动全部 hart;首个经 CAS 到达 init() 者为 boot hart,其余在 <code>SMP_INIT_DONE</code> 上 wfi 等待。</li>
-      <li><b>R87 次级核bring-up窗口(教训)</b>:次级核等待期曾以定时器已使能 + wfi 运行 —— BSP 尾段(fs 挂载、驱动、init 派生,随 -m 缩放)期间每个 tick 可经 irq_exit 抢占进入 __schedule(),而 PER_CPU[hart] 仍为全零槽位;零槽位引发 heal 链、hart 携 boot 栈执行入队任务、槽位争夺在上下文切换时簿记错误的 prev —— 混合上下文保存(一任务的寄存器写入另一任务的 thread 记录),爆点为"kill the idle task" KERNPANIC。修复 = 自旋等待 is_boot_complete(非 wfi —— QEMU 的 wfi 仅被已使能 pending 中断唤醒),PER_CPU[hart] 发布后才使能定时器/外部/软件中断;配套发现:boot.S 对每 hart 清零 sie 而 ipi::init 仅置 boot hart 的 SSIE —— 无 per-hart SSIE 时次级核全部 IPI 被屏蔽(resched/TLB/call-function 永久 pending;tick 量化 futex wake→run 9118 µs vs 同 hart 24 µs)。规则入册:<b>次级核在 per-CPU 状态完整初始化并进入 idle 循环前不得接收中断</b>(与参考内核同规则)。</li>
+      <li><b>R87 次级核bring-up窗口(教训)</b>:次级核等待期曾以定时器已使能 + wfi 运行 —— BSP 尾段(fs 挂载、驱动、init 派生,随 -m 缩放)期间每个 tick 可经 irq_exit 抢占进入 __schedule(),而 PER_CPU[hart] 仍为全零槽位;零槽位引发 heal 链、hart 携 boot 栈执行入队任务、槽位争夺在上下文切换时簿记错误的 prev —— 混合上下文保存(一任务的寄存器写入另一任务的 thread 记录),爆点为"kill the idle task" KERNPANIC。修复 = 自旋等待 is_boot_complete(非 wfi —— QEMU 的 wfi 仅被已使能 pending 中断唤醒),PER_CPU[hart] 发布后才使能定时器/外部/软件中断;配套发现:boot.S 对每 hart 清零 sie 而 ipi::init 仅置 boot hart 的 SSIE —— 无 per-hart SSIE 时次级核全部 IPI 被屏蔽(resched/TLB/call-function 永久 pending;tick 量化 futex wake→run 9118 µs vs 同 hart 24 µs)。规则已登记:<b>次级核在 per-CPU 状态完整初始化并进入 idle 循环前不得接收中断</b>(与参考内核同规则)。</li>
       <li><b>per-CPU 中断栈</b>:每 CPU 16KB、16 字节对齐;内核态陷阱用之(用户陷阱用任务内核栈)。</li>
     </ul>
 

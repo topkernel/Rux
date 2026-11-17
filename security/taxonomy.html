@@ -114,7 +114,7 @@
     <h3>safe 类(3 例 —— 全部是类型系统今天的盲区)</h3>
     <ul>
       <li><b>vmscan 引用计数 ≤0 仍释放</b>(zone 双重释放的使能者)(f4b67f66)→ 催化 checked Refcount newtype 提案(<a href="hardening.html">硬化缺口</a>在册)。</li>
-      <li><b>GRQ 键控锁 swap 丢弃返回 guard</b>:锁于语句末静默释放,全部临界区未互斥;13 启动配对二分定罪;此后键控 guard 全部 #[must_use] —— 同型 API 缺陷现为编译警告(2b092c49/623c4736/75dbf637)。</li>
+      <li><b>GRQ 键控锁 swap 丢弃返回 guard</b>:锁于语句末静默释放,全部临界区未互斥;13 次启动配对二分确认为根因;此后键控 guard 全部 #[must_use] —— 同型 API 缺陷现为编译警告(2b092c49/623c4736/75dbf637)。</li>
       <li><b>PCACHE_SHARED 定为 bit 10</b>:Sv39 中 bit 10 是 PPN[0],全部共享映射错位 4KiB 别名相邻帧(静默邻居页破坏);<b>快照评审在任何启动之前捕获</b>(6b49140b)。</li>
     </ul>
     <h3>评审捕获类(节选)</h3>
@@ -136,7 +136,7 @@
 
     <h2 id="negative"><span class="anchor">§6</span>负结果档案(带收据)</h2>
     <ul>
-      <li>仪器同样被定罪:PTGUARD/FREEGUARD 为误诊(e61f7a3a);首版 PT_LEDGER 哈希设计产生假 DOUBLE-FREE 报告加真实帧泄漏(626658991200);2b092c49 的"潜伏 GRQ 竞态"理论错误。<b>带收据的负结果保留在档案中</b> —— 判定纪律本身受审计。</li>
+      <li>仪器同样被查出误诊:PTGUARD/FREEGUARD 为误诊(e61f7a3a);首版 PT_LEDGER 哈希设计产生假 DOUBLE-FREE 报告加真实帧泄漏(626658991200);2b092c49 的"潜伏 GRQ 竞态"理论错误。<b>带收据的负结果保留在档案中</b> —— 判定纪律本身受审计。</li>
     </ul>
 
     <h2 id="verdict"><span class="anchor">§7</span>结论:这些数字支持什么</h2>

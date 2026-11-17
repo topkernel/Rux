@@ -119,7 +119,7 @@ cat /proc/sys/kernel/perf_event_paranoid</code></pre>
         <tr><td>P7</td><td>p7_sleep1ms</td><td>nanosleep 1 ms ×1e4,记 OVERSHOOT</td></tr>
       </tbody>
     </table></div>
-    <p>门禁锚列(pb1,KVM debug 类):p1_null 0.300 / p1_clock 0.371 / p2_ctxsw 1.242 / p3b_cow 8.075 / p6_write_fsync 8442.6 / p6_mkdrmdir 216.7 / p6_unlink 54.6 / p6_append 5.19 µs;Tier-2 判据 = 中位 ±20% 或改善。p2_ctxsw 锚已声明过期(pre-nohz 父版已 +60% 漂移,REBANK 在案)。</p>
+    <p>门禁锚列(pb1,KVM debug 类):p1_null 0.300 / p1_clock 0.371 / p2_ctxsw 1.242 / p3b_cow 8.075 / p6_write_fsync 8442.6 / p6_mkdrmdir 216.7 / p6_unlink 54.6 / p6_append 5.19 µs;Tier-2 判据 = 中位 ±20% 或改善。p2_ctxsw 锚已声明过期(pre-nohz 父版已 +60% 漂移,重新测量已记录在案)。</p>
 
     <h2 id="gate"><span class="anchor">§4</span>性能门禁:三层与守护域</h2>
     <p>合入门禁按三层执行(<code>docs/development/perf-gate-baseline.md</code> 为权威表;<code>perf-gate.sh</code> 自动化):</p>

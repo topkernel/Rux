@@ -137,7 +137,7 @@
         <tr><td>appspawn fork (the service-spawn critical path)</td><td class="num">130–272 ms</td><td class="num">85–90 ms</td></tr>
       </tbody>
     </table></div>
-    <p class="callout">Known costs (as recorded): a wake→run behind an incumbent is tick-quantized to ~10 ms (the p2f battery, both hog regimes) — a consequence of D-14's sub-6 ms window design; the removal path is on the <a href="scheduler.html#tick">scheduler NOHZ</a> section. The binder 73 ms single-transaction IF=0 max is a watch row.</p>
+    <p class="callout">Known costs (as recorded): a wake→run behind an incumbent is tick-quantized to ~10 ms (the p2f suite run, both hog regimes) — a consequence of D-14's sub-6 ms window design; the removal path is on the <a href="scheduler.html#tick">scheduler NOHZ</a> section. The binder 73 ms single-transaction IF=0 max is a watch row.</p>
 
     <div class="callout">Code: <code>kernel/src/ipc/</code> (binder / access_token / sysv_shm / sysv_sem / sysv_msg / posix_mq / util), <code>kernel/src/sync/futex_pi.rs</code>, <code>kernel/src/net/unix.rs</code>. Parity audit: docs/architecture/binder-parity-audit.md (a gap table and an invention-risk table, each entry required to cite the reference function and line). Guards: the LTP sem/msg/shm/pi families + the full OH service set; the perf gate's IPC-domain p5 bands and the binder SLOW-TXN class.</div>
   </article>

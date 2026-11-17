@@ -114,7 +114,7 @@
     <h3>Safe-class (3 examples — all in the type system's blind spots today)</h3>
     <ul>
       <li><b>vmscan freed at refcount ≤ 0</b> (the zone double-free enabler) (f4b67f66) → motivated the checked-Refcount-newtype proposal (a <a href="hardening.html">hardening gap</a> on record).</li>
-      <li><b>The GRQ keyed-lock swap discarded the returned guard</b>: the lock released silently at end-of-statement and every critical section ran unexcluded; convicted by a 13-boot paired bisection; keyed guards carry #[must_use] since — the same API-shape bug is now a compile warning (2b092c49/623c4736/75dbf637).</li>
+      <li><b>The GRQ keyed-lock swap discarded the returned guard</b>: the lock released silently at end-of-statement and every critical section ran unexcluded; established by a 13-boot paired bisection; keyed guards carry #[must_use] since — the same API-shape bug is now a compile warning (2b092c49/623c4736/75dbf637).</li>
       <li><b>PCACHE_SHARED defined as bit 10</b>: bit 10 is PPN[0] in Sv39, so every shared mapping aliased a frame 4 KiB off the cache page (silent neighbor-page corruption); <b>caught by snapshot review before any boot ran</b> (6b49140b).</li>
     </ul>
     <h3>Caught-in-review examples (selection)</h3>
@@ -136,7 +136,7 @@
 
     <h2 id="negative"><span class="anchor">§6</span>The negative-result archive (with receipts)</h2>
     <ul>
-      <li>Instruments get convicted too: PTGUARD/FREEGUARD were misdiagnoses (e61f7a3a); the first PT_LEDGER hash design produced false DOUBLE-FREE reports plus real frame leaks (626658991200); the 2b092c49 "latent GRQ race" theory was wrong. <b>Negative results with receipts stay in the record</b> — the adjudication discipline is itself audited.</li>
+      <li>Instruments were also found at fault: PTGUARD/FREEGUARD were misdiagnoses (e61f7a3a); the first PT_LEDGER hash design produced false DOUBLE-FREE reports plus real frame leaks (626658991200); the 2b092c49 "latent GRQ race" theory was wrong. <b>Negative results with receipts stay in the record</b> — the adjudication discipline is itself audited.</li>
     </ul>
 
     <h2 id="verdict"><span class="anchor">§7</span>The verdict: what these numbers support</h2>

@@ -123,12 +123,12 @@
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">机制注:领先面集中在调度/唤醒与 IPC(跨 vCPU 唤醒 IPI 在虚拟化下开销显著,Rux 单全局队列不产生跨核重调度风暴)与内存带宽;系统调用延迟行 guest 自带入口、不发生 vmexit,两侧几乎无虚拟化附加成本,差距为真实内核差距。未出数行:lat_mmap/lat_pagefault/bw_mmap_rd(本轮电池未打印)与 net-server 族(lat_tcp/udp/connect、bw_tcp、lat_fs)——无诚实数字,不列表。历史 r14 表(2026-11-08 窗口)见 lmbench-report.md 存档。</p>
+    <p style="font-size:13px;color:var(--text-3)">机制注:领先面集中在调度/唤醒与 IPC(跨 vCPU 唤醒 IPI 在虚拟化下开销显著,Rux 单全局队列不产生跨核重调度风暴)与内存带宽;系统调用延迟行 guest 自带入口、不发生 vmexit,两侧几乎无虚拟化附加成本,差距为真实内核差距。未出数行:lat_mmap/lat_pagefault/bw_mmap_rd(本轮整轮测试未打印)与 net-server 族(lat_tcp/udp/connect、bw_tcp、lat_fs)——无诚实数字,不列表。历史 r14 表(2026-11-08 窗口)见 lmbench-report.md 存档。</p>
     <div class="callout"><b>campaign 随役发现并修复的正确性 bug</b>(性能差距掩盖了它们):free 时的 stale-rsp0 UAF(fork 双稳态根因);call_rcu 零宽限期回调触发;唤醒监视器陈旧性判定反转;fdreap 每 tick 10 ms close 停滞;主线 munmap 末批 TLB flush 丢失(5b4a4bc7)。</div>
 
     
     <h2 id="rerun"><span class="anchor">§3</span>复现</h2>
-    <pre><code><span class="c"># 完整电池(每用例独立启动 + 重试规则)</span>
+    <pre><code><span class="c"># 完整整套测试(每用例独立启动 + 重试规则)</span>
 cd userspace/lmbench && ./extract-lmbench.sh && ./build-lmbench.sh && ./build-rootfs.sh work/lmbench-x86.img && ./run-rux.sh
 <span class="c"># 快速通道(10 个头条用例,~3 分钟,标注 INDICATIVE)</span>
 ./quick.sh [bzImage]</code></pre>

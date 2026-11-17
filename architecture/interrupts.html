@@ -101,7 +101,7 @@
     <h2 id="preempt"><span class="anchor">§3</span>抢占模型与中断关闭纪律</h2>
     <ul>
       <li><b>preempt_count 位布局</b>:PREEMPT [0:7]、SOFTIRQ [8:15]、HARDIRQ [16:19]、NMI [20:23]、PREEMPT_ACTIVE bit 26;计数位于 Task 结构;<code>preemptible()</code> = count==0。</li>
-      <li><b>irq_enter/exit 跨上下文切换</b>:HARDIRQ_OFFSET 由进行簿记的任务持有 —— tick 处理器可在括号内切换,故 per-CPU booked-task 栈于簿记任务上释放;拆分即"泄漏 0x10000 面"的产生器(第 119 次 epoll-pwait 定罪)。</li>
+      <li><b>irq_enter/exit 跨上下文切换</b>:HARDIRQ_OFFSET 由进行簿记的任务持有 —— tick 处理器可在括号内切换,故 per-CPU booked-task 栈于簿记任务上释放;拆分即"泄漏 0x10000 面"的产生器(第 119 次 epoll-pwait 上确认为根因)。</li>
       <li><b>内核抢占默认关闭</b>(显式 schedule() 自愿点);<code>kpreempt=</code> 引导参数武装 irq-exit 抢占钩子;A/B 对 hog 场景持平,维持默认。</li>
       <li><b>IF=0 纪律与官方测量</b>:EFLAGS 对探针(syscost v3)逐钩子读取真实 IF 标志并对模型裁决 —— 模型开启而实测 IF=1 的段判为泄漏,闭合入 HEAL 计数;HARDIRQ/SOFTIRQ/UART 三区段分离;REST 调用点经 #[track_caller] 归因至 96 槽表。官方份额:<b>IF=0 = 20.4 ±3pp</b>(pa115debt1;历史锚 pa27 = 25.7%,下降机制 = phantom-bits 将 softirq 派发移出 irq_exit 的 IF=0 窗、转入可调度的 ksoftirqd);REST 区最长闭合 cli 段 <b>6–9 ms</b>(带 ≤10 ms;曾经的 594–599 ms 一次性段已消除);hardirq 帧一次性 210 ms 为具名 watch 行(内联派发的饥饿上界)。</li>
     </ul>
@@ -111,7 +111,7 @@
       <li><b>10 类</b>:Hi/Timer/NetTx/NetRx/Block/IrqPoll/Tasklet/Sched/Hrtimer/Rcu;per-CPU pending 位图 + per-CPU/per-向量 raise 计数(供 /proc/softirqs)。</li>
       <li><b>派发</b>:硬中断 raise;irq_exit 时 <code>__do_softirq()</code> 处理,溢出转 ksoftirqd。预算双界:<code>MAX_SOFTIRQ_RESTART = 10</code> 轮 + <code>2 ms</code> 墙钟(参考 MAX_SOFTIRQ_TIME 形态)—— 依据:无界 irq-exit 预算曾使 timer/IO 风暴将双 CPU 钉在 IRQ 上下文(93% si_busy),调度零拣选。</li>
       <li><b>ksoftirqd</b>:每 CPU 一个;排空循环内 need_resched 时 schedule()(幻影位公平性:否则反馈型积压使 kthread 经数千个 2 ms 窗独占其 CPU);睡眠前复查的丢失唤醒模式(run_ksoftirqd 形态)。</li>
-      <li><b>窗口进度记录</b>:SOFTIRQ_WIN 紧凑打包 {open|handler bit|restart_count|pending} + SOFTIRQ_WIN_T0,跨 CPU 可读 —— 楔死窗口的外部取证;softirq 处理器投递簿记 SOFTIRQ_OFFSET,heal 落于窗口中段将楔死整机(VW-WEDGE 定罪,29 个完成项丢失)。</li>
+      <li><b>窗口进度记录</b>:SOFTIRQ_WIN 紧凑打包 {open|handler bit|restart_count|pending} + SOFTIRQ_WIN_T0,跨 CPU 可读 —— 楔死窗口的外部取证;softirq 处理器投递簿记 SOFTIRQ_OFFSET,heal 落于窗口中段将楔死整机(VW-WEDGE 已确认为根因,29 个完成项丢失)。</li>
     </ul>
 
     <h2 id="controllers"><span class="anchor">§5</span>定时器子系统与类型化定时器轮(D-19)</h2>

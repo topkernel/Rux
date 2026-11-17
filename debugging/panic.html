@@ -145,7 +145,7 @@ x86_64-linux-gnu-addr2line -e &lt;bzImage 对应 vmlinux&gt; -f -C &lt;addr&gt;
       <li>定类:scause/cr2 判异常类;panic 消息 + file:line 初判;</li>
       <li>定位:Call trace 全地址一次性 addr2line → 定位函数与行;</li>
       <li>取景:需要更多现场 → dfx=mmforensics / dfx=watchdog / REMOTE-BT 重跑;</li>
-      <li>定罪:确定性复现(THREAD=single)+ 多启动取交集。</li>
+      <li>确认为根因:确定性复现(THREAD=single)+ 多启动取交集。</li>
     </ol>
 
     <div class="callout">代码:<code>kernel/src/dfx/backtrace.rs</code>(帧指针行走,force-frame-pointers=yes)、<code>kernel/src/dfx/oops.rs</code>、<code>kernel/src/dfx/ksyms.rs</code> + build/gen-ksyms.py(生成器)。分歧:D-3。相关:<a href="memory.html">内存取证</a>(现场深化)、<a href="locks.html">锁调试</a>(看门狗联动)。</div>
