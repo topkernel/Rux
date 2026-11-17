@@ -896,3 +896,216 @@ must fall); PCACHE-RECLAIM census line (SR_*/EV_*/FL_* faces) on the
 OOM-FORENSIC block; pbench fs rows (stat/mkdir+rmdir/unlink/
 write+fsync medians) for the buffered-write path; the fallocate05/06
 pair as the standing regression probe.
+
+---
+
+## D-21: Default-on bounded poll-before-sleep for synchronous I/O waits
+
+**Design.** `IoCompletion::wait` (kernel/src/fs/io_completion.rs:188-212,
+submit-2x lane, d4769538e) polls its `done` flag for a bounded budget —
+1536 PAUSE iterations ≈ 14 µs on the 3.7 GHz KVM rig — with IRQs and
+preemption armed, BEFORE arming the 10 s deadline timer and scheduling
+out; the sleep path runs unchanged for completions slower than the
+budget. This is the DEFAULT for every synchronous block-I/O wait in the
+kernel. The reference kernel (7.0.0-38-generic, mainline shape) never
+polls before sleeping: polling exists only as an opt-in mode
+(`blk_mq_poll`/`blk_rq_poll`, block/blk-mq.c, behind REQ_HIPRI/
+REQ_POLLED from io_uring HIPRI or aio). The reference's closest
+historical relative, the v5.15 hybrid poll
+(`blk_mq_poll_hybrid`/`blk_mq_poll_hybrid_sleep`/`blk_mq_poll_nsecs`,
+block/blk-mq.c — since removed from mainline), was (a) opt-in per
+queue, (b) adaptive — budget = half the per-IO-size-bucket mean
+completion time, and (c) an hrtimer sleep, not a busy spin.
+
+**Advantage.** Under KVM the whole sleep machinery (timer arm/disarm,
+prepare_to_wait, schedule-out, cross-CPU IRQ wake, schedule-in, wait
+teardown) costs more than the device round trip itself (22-28 µs), so
+skipping it for in-budget completions is a direct win at depth 1:
+same-window kernel-vs-kernel interleaved A/B — 4k randrw direct
+14.95k→22.15k IOPS/side (+48%, reference parity on the same rig), 4k
+randwrite +25%, 4k randread +16%, 1M seq read +6%
+(/home/william/rux-agents/submit-2x/run/SUBMIT-2X.md §3-E, §4). Safe
+by construction here because the waiter at depth 1 has nothing else to
+run and the budget is bounded; the poll is also self-disarming on any
+device whose completions exceed it.
+
+**Compatibility evidence.** No guest-visible ABI change (an internal
+wait policy); fio --verify=md5 clean on 4k buffered and 64k direct;
+riscv64 make test 1330/1330; triple-arch builds rc=0; Tier-2 pbench fs
+rows in band (SUBMIT-2X.md §7). LTP unaffected (no interface change).
+
+**Known cost.** Burns up to the budget of CPU per synchronous op (a
+fixed spin where the adaptive v5.15 heuristic would spin less or
+sleep); under multi-job depth-1 load the aggregate spin is real (8
+jobs × 14 µs windows). The fixed budget sits where the adaptive
+mean/2 would land for THIS device (RT 22-28 µs → mean/2 ≈ 11-14 µs);
+on a slower device the fixed budget is strictly worse than the
+adaptive form. Follow-up hook: a per-completion mean/2 budget is the
+reference's improvement, adoptable without changing this entry's
+shape.
+
+**Guard.** pbench/fio 4k direct rows (the poll is the dominant term
+there); the perf-gate Tier-2 fs rows; syscost census IRQ-share bands
+(IF=0 share — the poll runs with IRQs armed, so no new IRQ-off class
+may appear).
+
+## D-22: Inline-hardirq virtio-blk completion walker on a single fixed MSI-X vector
+
+**Design.** The virtio-blk MSI-X completion path (dio-conc lane, f051ef80e)
+runs the pending-table completion walker INLINE in hardirq context —
+IDT vector 0x81 (kernel/src/arch/x86_64/trap.rs:1288-1297) — with a
+bounded try-lock that defers to the Block softirq when a task-context
+submitter holds the BLK lock (R12-3 discipline). The vector is
+programmed once at queue setup, fixed to physical CPU0
+(virtio_pci.rs:102-108). The reference driver does the split the other
+way: `virtblk_irq` (drivers/block/virtio_blk.c) only marks completion
+and calls `blk_mq_complete_request`, which runs the actual completion
+in SOFTIRQ context (local BLK_MQ_SOFTIRQ or an IPI to the submitting
+CPU), on per-vq MSI-X vectors that typically land on the submitting
+CPU.
+
+**Advantage.** Kills two measured per-op latencies on the 4k direct
+path: the INTx ISR-poll phase (16.3 µs — every registered virtio
+function's ISR cap polled per interrupt) and the softirq hop (17.1 µs)
+that the pre-MSI path paid: 4k randread direct 11.8k→34.1k IOPS,
+83→27.6 µs/op for this lever alone
+(/home/william/rux-agents/dio-conc/run/DIO-CONC.md §3-§5); with
+submit-2x's poll (D-21) the 4k rows sit at 0.90-0.97 of the reference.
+The inline walker is bounded (try-lock, defer on contention), so no
+IF=0 spinning on submitters.
+
+**Compatibility evidence.** No guest-visible ABI change. ~50 clean
+boots of the final kernel, no panics/MSI storms (DIO-CONC.md §6);
+fio --verify=md5 clean; riscv64 make test 1328/1328; INTx remains the
+fallback for caps-less devices and the net device; riscv64 PLIC and
+aarch64 GIC paths untouched.
+
+**Known cost.** Hardirq context is more brittle than softirq: any new
+lock taken by the walker must be irqsave-or-trylock (the defer class
+is the guard). The fixed CPU0 vector means the completing CPU is
+usually NOT the waiter's CPU at j8 (mitigated by D-21's polling: the
+polling CPU observes `done` via cache coherence). Runtime MSI-X table
+steering toward the submitting CPU is a CONCLUSIVE dead end on this
+QEMU/KVM (any runtime table write kills completion delivery —
+SUBMIT-2X.md §3-C; recorded to prevent blind retries).
+
+**Guard.** perf-gate Tier-3/IRQ domain (IF=0 share, max closed cli
+segments, SOFTIRQ dispatch share — the inline walker must not create
+a new IRQ-off class); 4k direct fio rows; the assert_no_virtio_lock
+debug invariant on completion paths.
+
+## D-23: Byte-snapshot settle guard for shared metadata blocks (jbd2 buffer-ownership, journal-less edition)
+
+**Design.** The wrfsync lane's SpanFlusher (kernel/src/fs/ext4/
+file.rs:4390-4450) submits the inode-table block (and any shared
+metadata block) in the SAME device window as the data spans — the
+jbd2 "prepare everything, one burst, one drain" shape without a
+journal. Because a NEIGHBOR inode's write can update the same table
+block between snapshot and settle, each in-flight span carries a
+byte-snapshot of the block it persisted, and BH_Dirty is cleared only
+if the buffer still matches the snapshot; a raced block stays dirty
+and is re-synced. The reference solves the same race with journal
+buffer ownership instead (fs/jbd2/transaction.c do_get_write_access:
+a buffer registered in a committing transaction blocks editors — no
+byte comparison exists in the reference). The guard is self-invented.
+
+**Advantage.** Removes the second serialized device round trip per
+fsync (~30 µs on the fio rig: the ITB sync was its own drain) while
+keeping the wrongly-cleared-BH_Dirty class — the double-allocation/
+csum corruption family — impossible by construction: a raced update
+leaves the block dirty rather than silently marking it clean.
+Measured: fsync4k 4653→20.1-22k IOPS vs reference 15.3-16.2k
+(0.30x→1.24x ahead)
+(/home/william/rux-agents/wrfsync/run/WRFSYNC.md §3).
+
+**Compatibility evidence.** fio --verify=md5 (buffered randwrite +
+fsync) clean; in-guest md5sum of 1G/2G test files match host digests;
+riscv64 make test ALL PASS; Tier-2 pbench rows in band or improved
+(WRFSYNC.md §5-§6). The fsync durability contract is unchanged (the
+settled block's persisted bytes are the ones the fsync owed).
+
+**Known cost.** One block-sized byte compare per raced settle (rare;
+the common case is no race) and a per-span snapshot field. The guard
+is journal-less-only by construction; on journal mounts the reference
+ownership discipline governs and the guard is bypassed.
+
+**Guard.** fio --verify=md5 with fsync; the ext4-corrupt lane's
+reference-boots-our-/data zero-errors check; fsw census counters for
+new sync-write classes (perf-gate fs domain).
+
+## D-24: Per-inode BTreeMap page cache with single-walk entry() install (xarray analogue)
+
+**Design.** The page cache (kernel/src/fs/page_cache.rs:477) keeps each
+inode's pages in a per-inode `Spinlock<BTreeMap<u64, CachedPage>>` —
+safe-Rust std BTreeMap, no unsafe, no lock-free radix tricks — with the
+batched install (`insert_batch_ext`, :2748) doing ONE map descent per
+page (the old shape was contains_key + contains_key + insert = three
+descents). Dirty/writeback state lives in a side-table
+(DIRTY_DATA_BLOCKS, ext4/file.rs:2175) rather than in-tree tags. The
+reference's structure is the xarray (lib/xarray.c) with XA_TAG_* bits
+in the per-address_space radix tree, single descent on insert, and
+tag-batched iteration (filemap_get_folios_tag, mm/filemap.c:2375).
+
+**Advantage.** Safe Rust end to end (the xarray is a lock-free
+structure the reference maintains with careful memory ordering and
+must audit for races); per-inode lock granularity without a shared
+tree; the bufw lane measured the single-walk install alone at
+lock-pass 94k→70k cycles/op on the 1 MiB buffered write
+(/home/william/rux-agents/bufw-2x/run/BUFW-2X.md §2-§3, §7: row
+0.83→~0.94 of reference, min-lat at parity).
+
+**Compatibility evidence.** No guest-visible ABI change (pure
+internal structure). fio --verify=md5 buffered 4k clean including the
+unaligned head-partial shapes the lane fixed; seq2g/rand1g guest
+digests match host truth; riscv64 make test 1330/1330; guard rows in
+band (BUFW-2X.md §6-§8).
+
+**Known cost.** O(log n) with allocation per node growth (xarray is
+allocation-amortized via internal entries); global side-table tags
+are an extra indirection vs in-tree tag bits; iteration is not
+batched the way xarray tag iteration is (the fsync walk compensates
+by being O(dirty-notes), D-23/§A3).
+
+**Guard.** pbench p6_read_cached/p6_append rows; the fs-domain
+perf-gate rows; fio verify suites; PCACHE-RECLAIM census faces.
+
+## D-25: Adaptive lock-free child memo over the authoritative dentry tree (dcache-lookup analogue)
+
+**Design.** Directory child lookup (kernel/src/fs/dentry.rs:380-389,
+529-534, stat-2x lane 78b17d528) keeps the authoritative
+`children: Spinlock<BTreeMap<String, Arc<Dentry>>>` and adds
+lock-free read tiers in front: an inline 4-slot memo, then a lazily
+allocated `BigMemoTable` — a direct-mapped table of seqlock slots,
+sized adaptively next_pow2(2 × live children) clamped [128, 2048],
+stamped with the existing `children_ver` discipline, retired through
+the reader-quiescent drain (DENTRY_RET_MEMO). The reference performs
+lock-free lookup directly over its AUTHORITATIVE persistent structure
+(the dcache: `__d_lookup_rcu` with `d_seq` seqcount, fs/dcache.c:1148)
+— there is no memo because the hash IS the lookup path, and dentries
+persist with LRU aging rather than being children-map entries.
+
+**Advantage.** Memory proportional to use: 8 KiB (small dirs, never
+allocated below 12 children) to 128 KiB (≥1025-entry dirs) per grown
+directory, vs a global hash sized for the whole namespace; no LRU
+aging problem (the authoritative map is the truth, the memo is
+disposable); adaptive sizing measured NECESSARY (a fixed 128-slot
+table vs a 1000-name tree gained nothing — direct-mapped thrash —
+while 2048 slots took stat 0.491→0.291 µs; the adaptive form picks
+2048 there and 128 small)
+(/home/william/rux-agents/stat-2x/run/STAT-2X.md §2-§3: stat
+2.23x→1.28x, openclose 2.43x→1.92x, read_cached 2.18x→1.84x of
+reference).
+
+**Compatibility evidence.** No guest-visible ABI change. riscv64 make
+test 1328/1328; riscv64 regression boot clean; pbench guard rows in
+band (STAT-2X.md §3, §5); no new invalidation rules (children_ver
+stamping predates the lane).
+
+**Known cost.** Two structures to keep coherent (memo + map) where
+the reference has one; a direct-mapped memo can thrash at sizing
+misfits (the clamp bounds this; growth reallocs under the children
+lock); lookup still falls to the locked BTreeMap on memo miss (the
+reference's rcu-walk never takes the dcache lock on hit).
+
+**Guard.** pbench p6_stat/p6_openclose rows; the fs-domain perf-gate
+band; LTP rename/unlink families (memo invalidation correctness).
