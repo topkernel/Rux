@@ -248,6 +248,13 @@ pub fn timer_interrupt_handler() {
         );
     }
 
+    // 2.4 RT-2X item 4 (pair-battery queue): expire due high-resolution
+    //     timers at the TOP of the IRQ — the reference's
+    //     hrtimer_interrupt shape (the x86_64 twin carries the measured
+    //     story; run/RT-2X.md). The raise below stays for timers armed
+    //     during this delivery.
+    crate::timer::expire_hres_inline();
+
     // 2.5 Raise Hrtimer softirq for software timer processing.
     //     sc184 (lane 2): gated until a timer has been armed or an hres
     //     deadline is due (see TIMER_EVER_ARMED in timer.rs).

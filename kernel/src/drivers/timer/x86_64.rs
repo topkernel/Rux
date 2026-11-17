@@ -469,9 +469,11 @@ pub fn pre_hpet_time() -> u64 {
 /// review批次7 discipline): with N CPUs each running a periodic LAPIC
 /// timer, per-IRQ increments ran jiffies N times fast.  Deriving
 /// `floor((now - base) / period)` makes the update idempotent and
-/// multi-CPU safe.
+/// multi-CPU safe.  Returns how many jiffies THIS call advanced (RT-2X:
+/// 0 marks an hres-only fire — a deadline between grid ticks — which
+/// the trap handler turns into the light no-tick-duty exit).
 #[inline]
-fn increment_jiffies_from_timebase() {
+fn increment_jiffies_from_timebase() -> u64 {
     let now = read_time();
     // Establish the grid origin on the first call.
     if JIFFIES_BASE.load(Ordering::Acquire) == 0 {
@@ -489,10 +491,14 @@ fn increment_jiffies_from_timebase() {
             Err(actual) => cur = actual,
         }
     }
+    nominal.saturating_sub(cur)
 }
 
-/// Clock interrupt handler (called from the x86_64 trap entry)
-pub fn timer_interrupt_handler() {
+/// Clock interrupt handler (called from the x86_64 trap entry).
+/// Returns the number of jiffies this fire advanced (RT-2X): 0 marks an
+/// hres-only fire (a precise deadline between grid ticks) — the trap
+/// handler takes the light exit with no scheduler-tick duty for those.
+pub fn timer_interrupt_handler() -> u64 {
     // Wakewatch: per-CPU timer-IRQ arrival count (storm detector — the
     // heartbeat prints the per-second delta) + last-arrival stamp, so a
     // TIMER-SOFTIRQ-STALL report can tell "this CPU's timer IRQs stopped
@@ -506,14 +512,26 @@ pub fn timer_interrupt_handler() {
             crate::timer::ww_note_tick_arrival(cpu);
         }
     }
-    if timebase_precise() {
+    let advanced = if timebase_precise() {
         // LAPIC-timer phase: idempotent, multi-CPU-safe jiffies.
-        increment_jiffies_from_timebase();
+        increment_jiffies_from_timebase()
     } else {
         // PIT phase: the free-running channel 0 makes every IRQ exactly
         // one tick (single-CPU boot fallback).
         JIFFIES.fetch_add(1, Ordering::AcqRel);
-    }
+        1
+    };
+
+    // RT-2X item 4 (pair-battery queue): expire due high-resolution
+    // timers HERE, at the top of the IRQ, before the tick body — the
+    // reference's hrtimer_interrupt shape. Precise sleeps then wake
+    // ahead of the per-tick accounting / scheduler_tick / scribble /
+    // softlockup work (measured 30-70 us of body on the debug kernel)
+    // instead of behind it; the irq-exit softirq dispatch below finds
+    // the wheel already drained (dedupe fast-out). The raise stays:
+    // timers armed DURING the delivery (re-arm actions) still get their
+    // dispatch in the same IRQ.
+    crate::timer::expire_hres_inline();
 
     // vDSO time page refresh (shared with the riscv64 twin)
     crate::mm::vdso::vdso_data_tick();
@@ -544,4 +562,5 @@ pub fn timer_interrupt_handler() {
             crate::interrupt::softirq::SoftirqIndex::Hrtimer as usize,
         );
     }
+    advanced
 }

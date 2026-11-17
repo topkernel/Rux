@@ -374,18 +374,21 @@ pub struct FiredToken {
 }
 
 /// Delivery-context capability: proves the caller is the timer softirq
-/// handler. Zero-sized; the constructor is visible only inside the
-/// timer module (`pub(super)`). Rux timer "callbacks" are data actions
-/// delivered in softirq context (must not sleep/block); this token is
-/// the type-level record of that contract. A future task-context
-/// delivery class would be a DIFFERENT token type — the two could not
-/// be confused.
+/// handler (or, since the RT-2X hardirq fast path, the hardirq timer
+/// entry `expire_hres_inline` — same no-sleep delivery contract, the
+/// reference's hrtimer-in-hardirq shape). Zero-sized; the constructor
+/// is visible only inside the timer module (`pub(super)`). Rux timer
+/// "callbacks" are data actions delivered in softirq context (must not
+/// sleep/block); this token is the type-level record of that contract.
+/// A future task-context delivery class would be a DIFFERENT token
+/// type — the two could not be confused.
 pub struct SoftirqCtx {
     _private: (),
 }
 
 impl SoftirqCtx {
-    /// Single construction site: `timer_softirq_handler`.
+    /// Construction site: `run_wheel_sweep` (timer.rs) — reached from
+    /// the softirq handler and the hardirq fast path.
     pub(super) fn new() -> Self {
         SoftirqCtx { _private: () }
     }
