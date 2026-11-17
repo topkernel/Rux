@@ -595,6 +595,64 @@ impl ReadDst {
     }
 }
 
+/// Source of a buffered write (BUFW-2X): a kernel slice (the FileOps path
+/// — the syscall layer's staging buffer) or USER memory (the write(2)
+/// fast path: bytes go user→page-cache-frame in ONE copy, the reference
+/// kernel's copy_page_from_iter shape — the staging buffer and its second
+/// copy are skipped).
+#[derive(Clone, Copy)]
+pub enum WriteSrc {
+    /// Kernel buffer pointer + length.
+    Kernel(*const u8, usize),
+    /// access_ok-validated user pointer + length.
+    User(*const u8, usize),
+}
+
+impl WriteSrc {
+    #[inline]
+    fn len(&self) -> usize {
+        match self {
+            WriteSrc::Kernel(_, n) | WriteSrc::User(_, n) => *n,
+        }
+    }
+
+    /// Clip the source to `n` bytes (RLIMIT_FSIZE truncation).
+    #[inline]
+    fn truncate(&self, n: usize) -> WriteSrc {
+        match *self {
+            WriteSrc::Kernel(p, _) => WriteSrc::Kernel(p, n),
+            WriteSrc::User(p, _) => WriteSrc::User(p, n),
+        }
+    }
+
+    /// Copy `n` bytes at source offset `off` straight into a page-cache
+    /// frame — the ONE user→frame copy on the fast path. Returns the
+    /// uncopied tail (0 = complete; >0 = user fault, and the frame holds
+    /// a valid prefix of the bytes at `dst` plus zero-fill beyond, per
+    /// the uaccess primitive's contract).
+    ///
+    /// # Safety
+    /// `dst` must be a valid writable kernel destination for `n` bytes
+    /// (a page-cache frame span). Never call this with a spinlock held:
+    /// the User arm's fault path can sleep (mapped-but-not-resident user
+    /// pages are demand-filled by the trap handler).
+    unsafe fn copy_to_frame(&self, off: usize, dst: *mut u8, n: usize) -> usize {
+        match self {
+            // SAFETY: caller guarantees the kernel source pointer and
+            // destination validity.
+            WriteSrc::Kernel(p, _) => {
+                unsafe { core::ptr::copy_nonoverlapping(p.add(off), dst, n) };
+                0
+            }
+            // SAFETY: exception-table copy from user memory — any
+            // address is sound to pass.
+            WriteSrc::User(p, _) => unsafe {
+                crate::arch::uaccess::copy_from_user(dst, p.add(off), n)
+            },
+        }
+    }
+}
+
 /// Read file data with page cache and batched async I/O.
 ///
 /// Uses `get_data_block(index)` for single-block resolution (instead of
@@ -2616,7 +2674,12 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
             && inode.mode.is_regular_file()
             && !fs.read_only
         {
-            ext4_buffered_write(fs, inode, offset, buf)
+            ext4_buffered_write(
+                fs,
+                inode,
+                offset,
+                WriteSrc::Kernel(buf.as_ptr(), buf.len()),
+            )
         } else {
             ext4_write_at_core(
                 fs,
@@ -2697,7 +2760,12 @@ pub unsafe fn ext4_file_write_at_vfs(file: &File, offset: u64, buf: *const u8, c
             | crate::fs::file::FileFlags::O_DIRECT);
     unsafe {
         if durability == 0 && inode.mode.is_regular_file() && !(*fs_ptr).read_only {
-            ext4_buffered_write(&*fs_ptr, inode, offset, data)
+            ext4_buffered_write(
+                &*fs_ptr,
+                inode,
+                offset,
+                WriteSrc::Kernel(data.as_ptr(), data.len()),
+            )
         } else {
             let written = ext4_write_at_core(
                 &*fs_ptr,
@@ -2731,6 +2799,191 @@ pub unsafe fn ext4_file_write_at_vfs(file: &File, offset: u64, buf: *const u8, c
             }
             written
         }
+    }
+}
+
+/// write(2) fast path for ext4 regular files, USER source (BUFW-2X): the
+/// bytes go user→page-cache-frame in ONE copy (the syscall layer's
+/// staging buffer and its second copy are skipped — the reference
+/// kernel's copy_page_from_iter shape). Mirrors ext4_file_write_vfs
+/// (io_lock/f_pos discipline, RLIMIT_FSIZE, routing, IN_MODIFY, set_pos);
+/// `src` must be access_ok-validated for `count` bytes (write_file_core
+/// contract). Durability flags route through a one-shot staging bounce
+/// (rare — the syscall layer only dispatches here for plain buffered
+/// writes; this is the safety net that keeps semantics identical).
+pub fn ext4_file_write_user_vfs(file: &File, src: *const u8, count: usize) -> isize {
+    if count == 0 {
+        return 0;
+    }
+    // SAFETY: same inode/fs lifetime guarantees as ext4_file_write_vfs.
+    unsafe {
+        let inode_opt = &*file.inode.get();
+        let inode = match inode_opt {
+            Some(i) => i,
+            None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
+        };
+        let fs_ptr = match inode.private_data {
+            Some(ptr) => ptr as *const crate::fs::ext4::Ext4FileSystem,
+            None => return errno::Errno::IOError.as_neg_i32() as isize,
+        };
+        let fs = &*fs_ptr;
+
+        // f_pos discipline (LTP fork07): serialize get_pos → write →
+        // set_pos against the same description's readers/writers, taken
+        // BEFORE the big lock (a slow waiter must not pin the machine-wide
+        // ext4 lock). Sleeping mutex — the user copies below may fault
+        // and sleep inside it (Linux holds i_rwsem across exactly this).
+        let _pos_guard = file.io_lock.guard();
+
+        let offset = if file.flags().bits() & crate::fs::file::FileFlags::O_APPEND != 0 {
+            u64::MAX
+        } else {
+            file.get_pos()
+        };
+
+        // RLIMIT_FSIZE (generic_write_checks twin — see
+        // ext4_file_write_vfs): at/after the soft limit EFBIG + SIGXFSZ;
+        // crossing it truncates silently to the boundary.
+        let mut wsrc = WriteSrc::User(src, count);
+        if let Some(task) = crate::sched::current() {
+            let (fsz_cur, _) = task.rlimit(crate::process::task::rlimit_res::FSIZE);
+            if fsz_cur != u64::MAX {
+                let start = if offset == u64::MAX {
+                    inode.size.load(core::sync::atomic::Ordering::Acquire)
+                } else {
+                    offset
+                };
+                if start >= fsz_cur {
+                    let _ = crate::signal::send_signal(
+                        task.pid() as u32,
+                        crate::signal::Signal::SIGXFSZ as i32,
+                    );
+                    return crate::errno::Errno::FileTooLarge.as_neg_i32() as isize;
+                }
+                let allowed = (fsz_cur - start) as usize;
+                if wsrc.len() > allowed {
+                    wsrc = wsrc.truncate(allowed);
+                }
+            }
+        }
+
+        let durability = file.flags().bits()
+            & (crate::fs::file::FileFlags::O_SYNC
+                | crate::fs::file::FileFlags::O_DSYNC
+                | crate::fs::file::FileFlags::O_DIRECT);
+        let written = if durability == 0 && inode.mode.is_regular_file() && !fs.read_only {
+            ext4_buffered_write(fs, inode, offset, wsrc)
+        } else {
+            // Safety net (the syscall layer does not dispatch durable
+            // writes here): stage the user bytes once and run the
+            // write-through core, exactly like the staged path would.
+            let mut staged = alloc::vec![0u8; wsrc.len()];
+            // SAFETY: staged is a valid kernel destination of wsrc.len().
+            let uncopied = wsrc.copy_to_frame(0, staged.as_mut_ptr(), staged.len());
+            if uncopied > 0 {
+                let landed = staged.len() - uncopied;
+                if landed == 0 {
+                    return errno::Errno::BadAddress.as_neg_i32() as isize;
+                }
+                staged.truncate(landed);
+            }
+            ext4_write_at_core(
+                fs,
+                inode.ino as u32,
+                Some(inode),
+                offset,
+                durability & (crate::fs::file::FileFlags::O_SYNC
+                    | crate::fs::file::FileFlags::O_DSYNC) == 0,
+                &staged,
+                &[0],
+                durability & crate::fs::file::FileFlags::O_DIRECT != 0,
+            )
+        };
+        if written > 0 {
+            let end = if offset == u64::MAX {
+                inode.size.load(core::sync::atomic::Ordering::Acquire)
+            } else {
+                offset + written as u64
+            };
+            file.set_pos(end);
+            // inotify IN_MODIFY: this fast path bypasses File::write,
+            // whose wrapper owns the notify on the staged path (same
+            // discipline as the read twin, LTP inotify01).
+            crate::fs::inotify::notify_file(
+                file,
+                crate::fs::inotify::inotify_events::IN_MODIFY,
+            );
+        }
+        written
+    }
+}
+
+/// pwrite(2) fast path for ext4 regular files, USER source (BUFW-2X): the
+/// write(2) twin at an explicit offset — ONE user→frame copy per page, no
+/// syscall-layer staging. Same routing and IN_MODIFY discipline as
+/// ext4_file_write_at_vfs (which the staged path uses); `src` must be
+/// access_ok-validated for `count` bytes. Durability flags bounce through
+/// a one-shot staging copy (the write-through core takes a kernel slice).
+pub fn ext4_file_pwrite_user_vfs(file: &File, offset: u64, src: *const u8, count: usize) -> isize {
+    if count == 0 {
+        return 0;
+    }
+    // SAFETY: same inode/fs lifetime guarantees as ext4_file_write_at_vfs.
+    unsafe {
+        let inode_opt = &*file.inode.get();
+        let inode = match inode_opt {
+            Some(i) => i,
+            None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
+        };
+        let fs_ptr = match inode.private_data {
+            Some(ptr) => ptr as *const crate::fs::ext4::Ext4FileSystem,
+            None => return errno::Errno::IOError.as_neg_i32() as isize,
+        };
+        let fs = &*fs_ptr;
+
+        let durability = file.flags().bits()
+            & (crate::fs::file::FileFlags::O_SYNC
+                | crate::fs::file::FileFlags::O_DSYNC
+                | crate::fs::file::FileFlags::O_DIRECT);
+        let written = if durability == 0 && inode.mode.is_regular_file() && !fs.read_only {
+            ext4_buffered_write(fs, inode, offset, WriteSrc::User(src, count))
+        } else {
+            // Safety net (the syscall layer does not dispatch durable
+            // pwrites here): stage once, run the write-through core —
+            // exactly the staged path's shape.
+            let mut staged = alloc::vec![0u8; count];
+            // SAFETY: staged is a valid kernel destination of count bytes.
+            let uncopied =
+                WriteSrc::User(src, count).copy_to_frame(0, staged.as_mut_ptr(), count);
+            if uncopied > 0 {
+                let landed = count - uncopied;
+                if landed == 0 {
+                    return errno::Errno::BadAddress.as_neg_i32() as isize;
+                }
+                staged.truncate(landed);
+            }
+            ext4_write_at_core(
+                fs,
+                inode.ino as u32,
+                Some(inode),
+                offset,
+                durability & (crate::fs::file::FileFlags::O_SYNC
+                    | crate::fs::file::FileFlags::O_DSYNC) == 0,
+                &staged,
+                &[0],
+                durability & crate::fs::file::FileFlags::O_DIRECT != 0,
+            )
+        };
+        if written > 0 {
+            // inotify IN_MODIFY: the staged path's File::write_at wrapper
+            // owns the notify; this fast path bypasses it (same discipline
+            // as the read twin, LTP inotify01).
+            crate::fs::inotify::notify_file(
+                file,
+                crate::fs::inotify::inotify_events::IN_MODIFY,
+            );
+        }
+        written
     }
 }
 
@@ -2792,11 +3045,12 @@ unsafe fn ext4_buffered_write(
     fs: &crate::fs::ext4::Ext4FileSystem,
     inode: &crate::fs::inode::Inode,
     offset: u64,
-    buf: &[u8],
+    src: WriteSrc,
 ) -> isize {
     use core::sync::atomic::Ordering;
 
-    if buf.is_empty() {
+    let srclen = src.len();
+    if srclen == 0 {
         return 0;
     }
     let sb_ptr = match inode.sb {
@@ -2826,7 +3080,7 @@ unsafe fn ext4_buffered_write(
         let would_extend = if offset == u64::MAX {
             true // O_APPEND always extends
         } else {
-            match offset.checked_add(buf.len() as u64) {
+            match offset.checked_add(srclen as u64) {
                 Some(end) => end > inode.size.load(Ordering::Acquire),
                 None => return errno::Errno::FileTooLarge.as_neg_i32() as isize,
             }
@@ -2838,14 +3092,14 @@ unsafe fn ext4_buffered_write(
 
     // 1) Resolve + reserve the range.
     let mut offset = offset;
-    let end = match offset.checked_add(buf.len() as u64) {
+    let end = match offset.checked_add(srclen as u64) {
         Some(e) if offset != u64::MAX => e,
         _ => {
             if offset == u64::MAX {
                 // O_APPEND: CAS-reserve [size, size+len).
                 loop {
                     let cur = inode.size.load(Ordering::Acquire);
-                    let new_end = match cur.checked_add(buf.len() as u64) {
+                    let new_end = match cur.checked_add(srclen as u64) {
                         Some(v) => v,
                         None => {
                             return errno::Errno::FileTooLarge.as_neg_i32() as isize
@@ -2864,7 +3118,7 @@ unsafe fn ext4_buffered_write(
                         Err(_) => continue,
                     }
                 }
-                offset + buf.len() as u64
+                offset + srclen as u64
             } else {
                 // Explicit offset beyond the representable range.
                 return errno::Errno::FileTooLarge.as_neg_i32() as isize;
@@ -2897,7 +3151,7 @@ unsafe fn ext4_buffered_write(
             super::dev_id(fs),
             ino,
             offset as i64,
-            buf.len() as u32,
+            srclen as u32,
         );
     }
 
@@ -2906,8 +3160,13 @@ unsafe fn ext4_buffered_write(
     let base_size = sbi.get_size();
 
     let first_idx = offset / ps;
-    let last_idx = (offset + buf.len() as u64 - 1) / ps;
+    let last_idx = (offset + srclen as u64 - 1) / ps;
     let mut copied: usize = 0;
+    // BUFW-2X: a user-page fault ends the write early (short-write /
+    // EFAULT semantics — see the User arms below). The staged path could
+    // not fault mid-write (its copy_in ran whole, up front), so this flag
+    // is only ever set for WriteSrc::User.
+    let mut user_fault = false;
 
     // DIO-CONC: whole-run dirty batch. The maximal span of FULL pages
     // ([first_full, last_full]) rides ONE page-cache batch — one wlock
@@ -2916,28 +3175,64 @@ unsafe fn ext4_buffered_write(
     // 1 MiB buffered-write row's 0.62x). The batch's duplicate arm
     // OVERWRITES an already-cached page and turns it dirty (the
     // pin-and-copy outcome), so racing cached pages are served
-    // correctly; an early stop (OOM / table full) returns the consumed
-    // prefix and the per-page loop below serves the tail. Head/tail
-    // partial pages also stay with the per-page loop (read-modify-write
-    // semantics).
+    // correctly; an early stop (OOM / table full / user fault) returns
+    // the consumed prefix and the per-page loop below serves the tail.
+    // Head/tail partial pages stay with the per-page loop
+    // (read-modify-write semantics).
+    //
+    // BUFW-2X: a USER source rides insert_dirty_batch_user — the frames
+    // are filled straight from user memory, ONE copy per page (the
+    // staging buffer and its second copy are gone), and a faulting page
+    // stops the batch at the previous page.
     let first_full = first_idx + ((offset % ps) != 0) as u64;
-    let n_full = ((offset + buf.len() as u64) / ps).saturating_sub(first_full);
+    let n_full = ((offset + srclen as u64) / ps).saturating_sub(first_full);
     let mut batch_start_idx = first_idx;
     if n_full > 0 {
         let n_pages = n_full as usize;
         let src_off = (first_full * ps - offset) as usize;
-        let consumed = cache.insert_dirty_batch(
-            fs_id,
-            ino,
-            first_full,
-            psu,
-            &buf[src_off..src_off + n_pages * psu],
-        );
-        copied += consumed * psu;
-        batch_start_idx = first_full + consumed as u64;
+        match src {
+            WriteSrc::Kernel(p, _) => {
+                // SAFETY: the caller's slice is valid for srclen bytes.
+                let buf = unsafe { core::slice::from_raw_parts(p, srclen) };
+                let consumed = cache.insert_dirty_batch(
+                    fs_id,
+                    ino,
+                    first_full,
+                    psu,
+                    &buf[src_off..src_off + n_pages * psu],
+                );
+                copied += consumed * psu;
+                batch_start_idx = first_full + consumed as u64;
+            }
+            WriteSrc::User(p, _) => {
+                let (consumed, fault) = cache.insert_dirty_batch_user(
+                    fs_id,
+                    ino,
+                    first_full,
+                    psu,
+                    p as usize + src_off,
+                    n_pages * psu,
+                );
+                copied += consumed * psu;
+                batch_start_idx = first_full + consumed as u64;
+                user_fault |= fault;
+            }
+        }
     }
 
-    for idx in batch_start_idx..=last_idx {
+    // The per-page loop covers EVERY page the batch did not fully serve:
+    // the head partial page (offset % ps != 0), the tail partial page,
+    // and any batch tail after an early stop. (BUFW-2X fix: the loop
+    // used to start at first_full+consumed, which SKIPPED the head
+    // partial page whenever the batch covered full pages — its bytes
+    // were silently dropped and the `copied < buf_start + want` fallback
+    // reset the accounting so the loss was invisible except to a
+    // read-back: fio --verify=md5 --offset=4196 --bs=8k failed err=84.)
+    for idx in first_idx..=last_idx {
+        // Batch-served pages: the batch installed (or overwrote) them.
+        if idx >= first_full && idx < batch_start_idx {
+            continue;
+        }
         let page_off = if idx == first_idx {
             (offset % ps) as usize
         } else {
@@ -2949,45 +3244,98 @@ unsafe fn ext4_buffered_write(
             (idx * ps - offset) as usize
         };
         let in_page_avail = psu - page_off;
-        let want = core::cmp::min(buf.len() - buf_start, in_page_avail);
-        let src = &buf[buf_start..buf_start + want];
+        let want = core::cmp::min(srclen - buf_start, in_page_avail);
         let file_off = idx * ps + page_off as u64;
         let full_page = page_off == 0 && want == psu;
 
         let mut filled_once = false;
         let mut rounds = 0u32;
+        // Set by every arm that landed this page's bytes (pin-and-copy,
+        // insert, revive). The write-through fallback below must fire on
+        // THIS page's failure — the old `copied < buf_start + want`
+        // accounting check cannot see a head-partial page's failure once
+        // the batch's later pages already pushed `copied` past it.
+        let mut served = false;
         loop {
             rounds += 1;
             // Pin-and-copy fast path (also the retry path after a lost
             // insert race: the winner's frame carries our bytes after
-            // this copy).
+            // this copy). BUFW-2X: the copy is the ONE user→frame copy
+            // for a User source; a mid-copy fault counts the landed
+            // prefix (the frame stays coherent with exactly what is
+            // counted — no torn bytes beyond the returned count) and
+            // ends the write.
             if let Some(frame) = cache.get(fs_id, ino, idx) {
                 // SAFETY: frame is a PAGE_SIZE pinned cache frame; the
                 // span [page_off, page_off+want) is inside it by
                 // construction (want <= PAGE_SIZE - page_off).
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        src.as_ptr(),
-                        frame.add(page_off) as *mut u8,
-                        want,
-                    );
+                let uncopied =
+                    unsafe { src.copy_to_frame(buf_start, frame.add(page_off) as *mut u8, want) };
+                if uncopied > 0 {
+                    let landed = want - uncopied;
+                    copied += landed;
+                    if landed > 0 {
+                        // The landed prefix IS in the frame; keep the
+                        // frame coherent with the counted bytes.
+                        cache.mark_dirty(fs_id, ino, idx);
+                        served = true;
+                    }
+                    cache.put(fs_id, ino, idx);
+                    user_fault = true;
+                    break;
                 }
                 cache.mark_dirty(fs_id, ino, idx);
                 cache.put(fs_id, ino, idx);
                 copied += want;
+                served = true;
                 break;
             }
             if full_page {
                 // Base content fully replaced: no read-modify-write.
-                if cache.insert_dirty(fs_id, ino, idx, src) {
-                    copied += want;
-                    break;
+                match src {
+                    WriteSrc::Kernel(p, _) => {
+                        // SAFETY: kernel source — slice the span.
+                        let s = unsafe { core::slice::from_raw_parts(p.add(buf_start), want) };
+                        if cache.insert_dirty(fs_id, ino, idx, s) {
+                            copied += want;
+                            served = true;
+                            break;
+                        }
+                        // Lost the insert race — loop back to
+                        // pin-and-copy.
+                        if rounds > 8 {
+                            break;
+                        }
+                        continue;
+                    }
+                    WriteSrc::User(p, _) => {
+                        match cache.insert_dirty_user(
+                            fs_id,
+                            ino,
+                            idx,
+                            p as usize + buf_start,
+                            want,
+                        ) {
+                            page_cache::DirtyUserOutcome::Installed => {
+                                copied += want;
+                                served = true;
+                                break;
+                            }
+                            page_cache::DirtyUserOutcome::Contention => {
+                                // Lost the insert race — loop back to
+                                // pin-and-copy.
+                                if rounds > 8 {
+                                    break;
+                                }
+                                continue;
+                            }
+                            page_cache::DirtyUserOutcome::Fault => {
+                                user_fault = true;
+                                break;
+                            }
+                        }
+                    }
                 }
-                // Lost the insert race — loop back to pin-and-copy.
-                if rounds > 8 {
-                    break;
-                }
-                continue;
             }
             // Partial page. If it may carry disk content, fill it once
             // through the read machinery (big lock + coherence rules),
@@ -3004,15 +3352,24 @@ unsafe fn ext4_buffered_write(
             if cache.insert_dirty(fs_id, ino, idx, &[]) {
                 if let Some(frame) = cache.get(fs_id, ino, idx) {
                     // SAFETY: as above.
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            src.as_ptr(),
-                            frame.add(page_off) as *mut u8,
-                            want,
-                        );
+                    let uncopied = unsafe {
+                        src.copy_to_frame(buf_start, frame.add(page_off) as *mut u8, want)
+                    };
+                    if uncopied > 0 {
+                        let landed = want - uncopied;
+                        copied += landed;
+                        if landed > 0 {
+                            cache.mark_dirty(fs_id, ino, idx);
+                            served = true;
+                        }
+                        cache.put(fs_id, ino, idx);
+                        user_fault = true;
+                        break;
                     }
+                    cache.mark_dirty(fs_id, ino, idx);
                     cache.put(fs_id, ino, idx);
                     copied += want;
+                    served = true;
                     break;
                 }
                 // Racing invalidation between insert and pin: fall
@@ -3023,16 +3380,45 @@ unsafe fn ext4_buffered_write(
             }
         }
 
-        if copied < buf_start + want {
+        if user_fault {
+            break;
+        }
+
+        if !served || copied < buf_start + want {
             // Bounded retries exhausted (stale-pinned orphan entry or
             // pathological insert racing): write this page's span through
             // the durable write-through core. Allocation + journal commit
             // happen there; the frames this write already dirtied for
             // other pages are unaffected (write-through updates frames in
             // place, writeback_populate_range).
+            //
+            // BUFW-2X: the write-through core takes a kernel slice; a
+            // USER source has none — bounce the page (≤ PAGE_SIZE)
+            // through a heap buffer scoped to this page's iteration.
+            // This arm is the pathological-race fallback; a faulting
+            // bounce is the same user fault the direct copies above
+            // would have hit.
+            let mut bounce;
+            let src_slice: &[u8] = match src {
+                WriteSrc::Kernel(p, _) => unsafe {
+                    core::slice::from_raw_parts(p.add(buf_start), want)
+                },
+                WriteSrc::User(..) => {
+                    bounce = alloc::vec![0u8; want];
+                    // SAFETY: bounce is a valid kernel destination.
+                    let uncopied =
+                        unsafe { src.copy_to_frame(buf_start, bounce.as_mut_ptr(), want) };
+                    if uncopied > 0 {
+                        copied += want - uncopied;
+                        user_fault = true;
+                        break;
+                    }
+                    &bounce
+                }
+            };
             // SAFETY: same (fs, ino, inode) discipline as write_vfs.
             let r = unsafe {
-                ext4_write_at_core(fs, inode.ino as u32, Some(inode), file_off, true, src, &[0], false)
+                ext4_write_at_core(fs, inode.ino as u32, Some(inode), file_off, true, src_slice, &[0], false)
             };
             if r < 0 {
                 if copied > 0 && crate::trace::EVENT_EXT4_DA_WRITE_END.armed() {
@@ -3044,7 +3430,7 @@ unsafe fn ext4_buffered_write(
                         super::dev_id(fs),
                         ino,
                         offset as i64,
-                        buf.len() as u32,
+                        srclen as u32,
                         copied as u32,
                     );
                 }
@@ -3054,8 +3440,59 @@ unsafe fn ext4_buffered_write(
         }
     }
 
+    // BUFW-2X fault epilogue. The staged path copies the whole request
+    // into kernel memory BEFORE any file state moves, so a faulting user
+    // buffer leaves the file untouched (or returns the fully-written
+    // prefix). The direct-copy path copies per page AFTER the size
+    // reservation, so on a fault the up-front publication must be pulled
+    // back to what actually landed — CAS only succeeds while our
+    // published_end is still the live watermark (a concurrent writer
+    // that advanced it wins, monotonicity preserved). copied==0 keeps
+    // the staged path's observable contract exactly: EFAULT, file
+    // untouched.
+    let mut pub_end = published_end;
+    if user_fault {
+        if copied == 0 {
+            // Roll the reservation back (best-effort CAS — a racing
+            // append may legitimately own a larger watermark now).
+            let _ = inode.size.compare_exchange(
+                published_end,
+                offset,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+            return errno::Errno::BadAddress.as_neg_i32() as isize;
+        }
+        let target = offset + copied as u64;
+        let _ = inode.size.compare_exchange(
+            published_end,
+            target,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        // A concurrent writer may hold a size between target and
+        // published_end — close it only down to target (monotonic CAS,
+        // never below the rollback target).
+        let mut cur = inode.size.load(Ordering::Acquire);
+        while target < cur && cur <= published_end {
+            match inode
+                .size
+                .compare_exchange(cur, target, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => break,
+                Err(c) => cur = c,
+            }
+        }
+        // Publish timestamps + the dirty-eof watermark with the
+        // ROLLED-BACK end (the common block below).
+        pub_end = target;
+    }
+
     // 2) Publish: data is in frames; lift the read bound + timestamps
     // under the big lock (atomic vs the write-through refresh paths).
+    // (BUFW-2X: pub_end is the rolled-back end after a user fault —
+    // timestamps and the dirty-eof watermark then cover exactly the
+    // copied prefix.)
     {
         let _g = crate::fs::ext4::EXT4_BIG_LOCK.lock();
         let now = crate::drivers::rtc::wall_secs() as u32;
@@ -3063,8 +3500,8 @@ unsafe fn ext4_buffered_write(
         // never freed while the inode lives; advisory field, volatile
         // store (same discipline as the atime update in the read path).
         unsafe {
-            if published_end > (*sb_ptr).size {
-                core::ptr::write_volatile(&mut (*sb_ptr).size, published_end);
+            if pub_end > (*sb_ptr).size {
+                core::ptr::write_volatile(&mut (*sb_ptr).size, pub_end);
             }
             core::ptr::write_volatile(&mut (*sb_ptr).mtime, now);
             core::ptr::write_volatile(&mut (*sb_ptr).ctime, now);
@@ -3074,16 +3511,18 @@ unsafe fn ext4_buffered_write(
         // re-instantiation can recover the byte-exact size. CAS-max inside
         // PageCache (a plain store could regress a concurrent append's
         // watermark).
-        cache.note_dirty_eof(fs_id, ino, published_end);
+        cache.note_dirty_eof(fs_id, ino, pub_end);
     }
 
-    // ext4:ext4_da_write_end — the full-copy success return.
+    // ext4:ext4_da_write_end — the full-copy success return (partial
+    // copied after a user fault: the reference fires write_end with the
+    // partial count too).
     if crate::trace::EVENT_EXT4_DA_WRITE_END.armed() {
         crate::trace::trace_ext4_da_write_end(
             super::dev_id(fs),
             ino,
             offset as i64,
-            buf.len() as u32,
+            srclen as u32,
             copied as u32,
         );
     }

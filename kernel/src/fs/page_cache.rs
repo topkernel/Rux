@@ -209,6 +209,43 @@ fn dirty_account_removed(page: &CachedPage) {
 pub fn dirty_pages() -> usize {
     DIRTY_PAGES.load(Ordering::Relaxed)
 }
+
+/// Fill source for the batch inserters: a kernel slice (read-ahead fills,
+/// staged writes) or USER memory (the buffered-write(2) fast path, BUFW-2X:
+/// bytes are copied straight into the fresh frames — ONE copy per page —
+/// and the syscall layer's staging buffer with its second copy is skipped).
+enum BatchFill<'a> {
+    Slice(&'a [u8]),
+    /// access_ok-validated user pointer + total length.
+    User { ptr: usize, len: usize },
+}
+
+impl<'a> BatchFill<'a> {
+    #[inline]
+    fn len(&self) -> usize {
+        match self {
+            BatchFill::Slice(b) => b.len(),
+            BatchFill::User { len, .. } => *len,
+        }
+    }
+}
+
+/// Outcome of [`PageCache::insert_dirty_user`] — the verdict the per-page
+/// buffered-write loop branches on. FAULT must be distinguishable from
+/// CONTENTION: a fault ENDS the write (short-write/EFAULT semantics), a
+/// contention just re-loops through pin-and-copy.
+pub enum DirtyUserOutcome {
+    /// Frame installed born-dirty (or a retired squatter revived with the
+    /// user page's bytes) — the caller counts the page as copied.
+    Installed,
+    /// Duplicate fresh entry / table full / OOM — the caller re-loops
+    /// through the pin-and-copy path, exactly like `insert_dirty`
+    /// returning false.
+    Contention,
+    /// The user copy faulted before any byte could be counted — the
+    /// write stops here.
+    Fault,
+}
 // evict_one skip faces (both the LRU walk and the fallback scan):
 /// Candidates skipped: cache pin (ref_count != 0).
 pub(crate) static EV_SKIP_PINNED: AtomicU64 = AtomicU64::new(0);
@@ -2210,6 +2247,178 @@ impl PageCache {
         self.insert_ext(fs_id, ino, page_index, 0, data, true)
     }
 
+    /// USER-memory twin of [`Self::insert_dirty`] (BUFW-2X): the frame is
+    /// filled by the ONE user→frame copy OUTSIDE every lock (a usercopy
+    /// under the per-inode spinlock would be unsound — its fault path can
+    /// sleep), then installed born-dirty through `insert_ext`'s verdict
+    /// discipline (duplicate / lazy-reap / revive-in-place, R8-3 and
+    /// FXW-SQUAT included). A faulting page is never installed: its
+    /// zero-filled tail would tear the page's base content beyond the
+    /// landed prefix — the frame is freed and FAULT is reported so the
+    /// caller ends the write with short-write/EFAULT semantics.
+    /// Mapped-but-not-resident user pages do NOT fault here (the uaccess
+    /// trap handler demand-fills them).
+    pub fn insert_dirty_user(
+        &self,
+        fs_id: u64,
+        ino: u64,
+        page_index: u64,
+        user_src: usize,
+        len: usize,
+    ) -> DirtyUserOutcome {
+        let key = cache_key(fs_id, ino);
+
+        // R-WRITESTORM-1: allocate + fill BEFORE any pcache lock (the
+        // alloc slowpath self-deadlock rule; see insert_ext).
+        let phys_addr = alloc_page(GfpFlags::GFP_KERNEL);
+        if phys_addr == 0 {
+            return DirtyUserOutcome::Contention;
+        }
+        let copy_len = core::cmp::min(len, PAGE_SIZE);
+        // SAFETY: the fresh zone frame is a valid PAGE_SIZE kernel
+        // destination; the user side is access_ok-checked and faults
+        // through the exception table inside the primitive — any address
+        // is sound to pass, and the uncopied tail of the frame is
+        // zero-filled by the primitive.
+        let uncopied = unsafe {
+            crate::arch::uaccess::copy_from_user(
+                phys_to_virt_ptr(phys_addr),
+                user_src as *const u8,
+                copy_len,
+            )
+        };
+        if uncopied > 0 {
+            // No byte of this page becomes visible; the frame was never
+            // stamped or published, so a plain free suffices.
+            free_page(phys_addr);
+            return DirtyUserOutcome::Fault;
+        }
+
+        STAT_MISSES.fetch_add(1, Ordering::Relaxed);
+
+        // First-touch Arc allocation outside wlock (same rule).
+        let mut fresh = Some(Arc::new(InodePageCache::new(key, fs_id, ino)));
+        let mut parked: PcParkBatch = [const { None }; PC_PARK_BATCH];
+
+        let verdict;
+        {
+            let w = self.wlock.lock();
+
+            // Eviction headroom (same progress-bounded shape as insert_ext).
+            while self.total_pages.load(Ordering::Relaxed) as usize >= max_cached_pages() {
+                if !self.evict_one_locked(&w, &mut parked) {
+                    break;
+                }
+            }
+
+            let Some(entry) = self.table_publish(&w, key, &mut fresh) else {
+                drop(w);
+                self.flush_parked(&mut parked);
+                free_page(phys_addr);
+                return DirtyUserOutcome::Contention;
+            };
+
+            // Dedup verdict + install in ONE per-inode hold; the in-lock
+            // data hop for the duplicate/revive arms is a frame→frame
+            // memcpy from the pre-filled fresh frame (never a usercopy).
+            let mut outcome = DirtyUserOutcome::Installed;
+            let mut fresh_unused = false;
+            {
+                let mut g = entry.lock.lock();
+
+                if g.contains_key(&page_index) {
+                    let reap = {
+                        let stale = g.get(&page_index).expect("contains_key");
+                        if !stale.invalidated {
+                            false
+                        } else {
+                            let pd = pfn_to_page_mut(stale.pfn);
+                            let mapped = !pd.is_null() && unsafe { (*pd).is_mapped() };
+                            stale.ref_count.load(Ordering::Acquire) == 0 && !mapped
+                        }
+                    };
+                    if reap {
+                        let stale = g.remove(&page_index).expect("contains_key");
+                        dirty_account_removed(&stale);
+                        let page_desc = pfn_to_page_mut(stale.pfn);
+                        if !page_desc.is_null() {
+                            unsafe {
+                                lru::page_remove_lru(&*page_desc);
+                            }
+                        }
+                        release_page_frame(stale.pfn);
+                        self.total_pages.fetch_sub(1, Ordering::Relaxed);
+                        // fall through: the fresh frame installs below
+                    } else if g.get(&page_index).expect("contains_key").invalidated {
+                        // REVIVE-IN-PLACE with the pre-filled frame's
+                        // bytes (insert_ext's twin; the data hop is
+                        // frame→frame, kernel memory only).
+                        let stale = g.get_mut(&page_index).expect("contains_key");
+                        stale.invalidated = false;
+                        let pfn = stale.pfn;
+                        // SAFETY: pfn is this entry's zone frame; phys is
+                        // this call's private pre-filled frame.
+                        unsafe {
+                            let dst = phys_to_virt_ptr(pfn_to_phys(pfn));
+                            let frame_src = phys_to_virt_ptr(phys_addr) as *const u8;
+                            if copy_len > 0 {
+                                core::ptr::copy_nonoverlapping(frame_src, dst, copy_len);
+                            }
+                            if copy_len < PAGE_SIZE {
+                                core::ptr::write_bytes(
+                                    dst.add(copy_len),
+                                    0,
+                                    PAGE_SIZE - copy_len,
+                                );
+                            }
+                        }
+                        dirty_account_transition(stale, true);
+                        fresh_unused = true; // data landed; frame freed below
+                    } else {
+                        // Duplicate fresh entry — the caller re-loops
+                        // through pin-and-copy (same contract as
+                        // insert_dirty returning false).
+                        outcome = DirtyUserOutcome::Contention;
+                        fresh_unused = true;
+                    }
+                }
+                if !fresh_unused {
+                    let pfn = phys_addr / PAGE_SIZE;
+                    let page_desc = pfn_to_page_mut(pfn);
+                    if !page_desc.is_null() {
+                        unsafe {
+                            (*page_desc).set_page_type(PageType::PageCache);
+                            (*page_desc).set_flag(PageFlag::UpToDate);
+                            (*page_desc).set_mapping(key as usize as *mut core::ffi::c_void);
+                            (*page_desc).set_index(page_index as usize);
+                        }
+                        lru::page_add_file_lru_young(unsafe { &*page_desc });
+                    }
+                    g.insert(
+                        page_index,
+                        CachedPage {
+                            pfn,
+                            ref_count: AtomicU32::new(0),
+                            invalidated: false,
+                            released: core::sync::atomic::AtomicBool::new(false),
+                            dirty: core::sync::atomic::AtomicBool::new(true),
+                        },
+                    );
+                    DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
+                    self.total_pages.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            drop(w);
+            self.flush_parked(&mut parked);
+            drop(entry);
+            if fresh_unused {
+                free_page(phys_addr);
+            }
+            verdict = outcome;
+        }
+        verdict
+    }
+
     fn insert_ext(
         &self,
         fs_id: u64,
@@ -2474,7 +2683,7 @@ impl PageCache {
         block_size: usize,
         buf: &[u8],
     ) {
-        let _ = self.insert_batch_ext(fs_id, ino, first_index, block_size, buf, false);
+        let _ = self.insert_batch_ext(fs_id, ino, first_index, block_size, BatchFill::Slice(buf), false);
     }
 
     /// Dirty-write twin of [`Self::insert_batch`] (DIO-CONC): installs the
@@ -2495,22 +2704,56 @@ impl PageCache {
         block_size: usize,
         buf: &[u8],
     ) -> usize {
-        self.insert_batch_ext(fs_id, ino, first_index, block_size, buf, true)
+        self.insert_batch_ext(fs_id, ino, first_index, block_size, BatchFill::Slice(buf), true)
+            .0
+    }
+
+    /// USER-memory twin of [`Self::insert_dirty_batch`] (BUFW-2X): the
+    /// batch's frames are filled straight from user memory — ONE copy
+    /// per page, user→frame, outside every lock (the reference kernel's
+    /// copy_page_from_iter shape; the syscall staging buffer and its
+    /// second copy are skipped). Returns (pages consumed from the front,
+    /// user-fault flag). A user page that FAULTS the copy stops the
+    /// batch at the previous page — the faulting page's bytes are never
+    /// installed (its partially-copied frame is discarded: a zero-padded
+    /// born-dirty install would tear the page's base content beyond the
+    /// landed prefix); the caller's per-page path then meets the same
+    /// fault head-on and applies the short-write/EFAULT semantics.
+    /// Mapped-but-not-resident user pages do NOT fault here — the
+    /// uaccess trap handler demand-fills them (exception-table copy).
+    pub fn insert_dirty_batch_user(
+        &self,
+        fs_id: u64,
+        ino: u64,
+        first_index: u64,
+        block_size: usize,
+        user_src: usize,
+        len: usize,
+    ) -> (usize, bool) {
+        self.insert_batch_ext(
+            fs_id,
+            ino,
+            first_index,
+            block_size,
+            BatchFill::User { ptr: user_src, len },
+            true,
+        )
     }
 
     /// Shared body of the batch inserters. `mark_dirty` selects the write
     /// semantics (born-dirty installs, duplicate OVERWRITE — see
     /// insert_dirty_batch); the read shape keeps skip-duplicate.
-    /// Returns pages consumed from the front (read callers ignore it).
+    /// Returns (pages consumed from the front, user-fault flag); read
+    /// callers ignore both.
     fn insert_batch_ext(
         &self,
         fs_id: u64,
         ino: u64,
         first_index: u64,
         block_size: usize,
-        buf: &[u8],
+        fill: BatchFill<'_>,
         mark_dirty: bool,
-    ) -> usize {
+    ) -> (usize, bool) {
         // Early-return arms below (table-full, duplicate, revive-in-place)
         // free frames that the unlocked pre-stage ALREADY described as
         // cache pages (type/UpToDate/mapping/index — the perf-review
@@ -2538,14 +2781,22 @@ impl PageCache {
             free_page(phys);
         }
 
-        if block_size == 0 || buf.len() < block_size {
-            return 0;
+        if block_size == 0 || fill.len() < block_size {
+            return (0, false);
         }
-        let npages = buf.len() / block_size;
+        let npages = fill.len() / block_size;
         if npages <= 1 || block_size != PAGE_SIZE {
+            if let BatchFill::User { .. } = fill {
+                // A user batch of a single page (or a sub-frame block
+                // size) saves nothing — report the whole span unconsumed
+                // so the caller's per-page path (with its fault
+                // semantics) serves it.
+                return (0, false);
+            }
             // Single page, or a block size that does not fill a frame (the
             // packed contiguous copy below would pack blocks without their
             // per-page zero padding) — per-page inserts keep that layout.
+            let BatchFill::Slice(buf) = fill else { unreachable!() };
             let mut consumed = 0usize;
             for k in 0..npages {
                 let end = core::cmp::min((k + 1) * block_size, buf.len());
@@ -2571,7 +2822,7 @@ impl PageCache {
                     consumed += 1;
                 }
             }
-            return consumed;
+            return (consumed, false);
         }
         let key = cache_key(fs_id, ino);
 
@@ -2586,7 +2837,9 @@ impl PageCache {
         // every insert batch wedged a CPU, SA .so loads never completed).
         // Chunked 64 frames at a time: each chunk allocates unlocked, then
         // one locked section does eviction headroom + inserts for the
-        // chunk.
+        // chunk. (A 256-chunk was measured neutral on the 1 MiB row — the
+        // cost is per-page free-list surgery, not per-chunk lock overhead
+        // — while quadrupling the zone-lock hold; keep the small holds.)
         const ALLOC_CHUNK: usize = 64;
         let mut phys_buf: [usize; ALLOC_CHUNK] = [0; ALLOC_CHUNK];
 
@@ -2610,17 +2863,64 @@ impl PageCache {
             // index turns out to be a duplicate at insert time pays one
             // wasted copy (the rare dedup path) and is freed exactly as
             // the old in-lock order did.
+            //
+            // BUFW-2X: the USER fill copies each page straight from user
+            // memory — the ONE user→frame copy, still outside every lock
+            // (a usercopy under a spinlock is unsound: its fault path can
+            // sleep). A mapped-but-not-resident user page does NOT stop
+            // the batch — the uaccess trap handler demand-fills it and
+            // the copy re-executes; only an unmapped page reports the
+            // uncopied tail, and that page must never become visible.
+            let mut faulted_at: Option<usize> = None;
             for k in 0..got {
                 let phys = phys_buf[k];
                 let pfn = phys / PAGE_SIZE;
                 let page_index = first_index + done as u64 + k as u64;
                 let src_off = (done + k) * block_size;
-                let copy_len = core::cmp::min(PAGE_SIZE, buf.len() - src_off);
-                // SAFETY: phys is a valid page frame from the zone
-                // allocator; the linear mapping covers all RAM.
-                unsafe {
-                    let dst = phys_to_virt_ptr(phys);
-                    core::ptr::copy_nonoverlapping(buf.as_ptr().add(src_off), dst, copy_len);
+                let copy_len = core::cmp::min(PAGE_SIZE, fill.len() - src_off);
+                match fill {
+                    BatchFill::Slice(buf) => {
+                        // SAFETY: phys is a valid page frame from the zone
+                        // allocator; the linear mapping covers all RAM.
+                        unsafe {
+                            let dst = phys_to_virt_ptr(phys);
+                            core::ptr::copy_nonoverlapping(
+                                buf.as_ptr().add(src_off),
+                                dst,
+                                copy_len,
+                            );
+                        }
+                    }
+                    BatchFill::User { ptr, .. } => {
+                        // SAFETY: dst is the fresh zone frame (a valid
+                        // PAGE_SIZE kernel destination); the user side is
+                        // access_ok-checked and faults through the
+                        // exception table inside the primitive — any
+                        // address is sound to pass, and the uncopied tail
+                        // of dst is zero-filled by the primitive.
+                        // (A movnti non-temporal variant measured 10x
+                        // WORSE under this KVM rig — see BUFW-2X.md — so
+                        // the regular rep movsb stays.)
+                        let uncopied = unsafe {
+                            crate::arch::uaccess::copy_from_user(
+                                phys_to_virt_ptr(phys),
+                                (ptr + src_off) as *const u8,
+                                copy_len,
+                            )
+                        };
+                        if uncopied > 0 {
+                            // FAULT: the page's bytes must not become
+                            // visible — a partially-copied frame installed
+                            // born-dirty would zero-overwrite the page's
+                            // base content beyond the landed prefix (a
+                            // torn frame). Discard this frame and the
+                            // chunk's not-yet-filled tail; the batch stops
+                            // at the previous page and the caller's
+                            // per-page path meets the fault head-on.
+                            faulted_at = Some(k);
+                            break;
+                        }
+                    }
                 }
                 let page_desc = pfn_to_page_mut(pfn);
                 if !page_desc.is_null() {
@@ -2633,6 +2933,21 @@ impl PageCache {
                         (*page_desc).set_index(page_index as usize);
                     }
                 }
+            }
+
+            // USER FAULT (BUFW-2X): install the successfully-filled prefix
+            // of this chunk, discard the faulted page and the unfilled
+            // tail, and stop the batch. The prefix's frames are private
+            // (not yet published), so nothing partial is ever visible.
+            let n_install = match faulted_at {
+                Some(k) => k,
+                None => got,
+            };
+            if n_install == 0 {
+                for j in 0..got {
+                    discard_prepared_frame(phys_buf[j]);
+                }
+                return (done, true);
             }
 
             // The first-touch Arc allocation stays outside wlock (same
@@ -2649,7 +2964,7 @@ impl PageCache {
                 // loop, the batch may proceed slightly over if everything
                 // is pinned or the park batch fills).
                 let mut evict_tries = 0u32;
-                while self.total_pages.load(Ordering::Relaxed) as usize + got > max_cached_pages() {
+                while self.total_pages.load(Ordering::Relaxed) as usize + n_install > max_cached_pages() {
                     if !self.evict_one_locked(&w, &mut parked) {
                         evict_tries += 1;
                         if evict_tries >= 32 {
@@ -2666,8 +2981,8 @@ impl PageCache {
                 let Some(entry) = self.table_publish(&w, key, &mut fresh) else {
                     // Table full: drop this chunk's frames, stop the batch.
                     drop(w);
-                    for &phys in &phys_buf[..got] {
-                        discard_prepared_frame(phys);
+                    for j in 0..got {
+                        discard_prepared_frame(phys_buf[j]);
                     }
                     self.flush_parked(&mut parked);
                     break;
@@ -2682,43 +2997,164 @@ impl PageCache {
                 let mut lru_n: usize = 0;
                 {
                     let mut g = entry.lock.lock();
-                    for k in 0..got {
+                    // BUFW-2X: ONE map traversal per page via entry() —
+                    // the old shape paid contains_key + a second
+                    // contains_key + insert (three descents of a 12k-entry
+                    // tree at the 48 MiB mark, ~400c/page under this lock;
+                    // the measured lock pass was 94-113k cycles per 1 MiB
+                    // op, the row's second-largest term after the copies).
+                    use alloc::collections::btree_map::Entry;
+                    for k in 0..n_install {
                         let phys = phys_buf[k];
                         let pfn = phys / PAGE_SIZE;
                         let page_index = first_index + done as u64 + k as u64;
+                        let src_off = (done + k) * block_size;
+                        let copy_len =
+                            core::cmp::min(PAGE_SIZE, fill.len().saturating_sub(src_off));
                         // Duplicate-key discipline of insert(): an existing
                         // fresh entry is left alone (no frame clobber/leak);
                         // an invalidated-but-pinned one (R8-3) is skipped
-                        // too. The frame was popped from the zone — release
-                        // it right away. LAZY REAP (FXW-SQUAT, see
-                        // insert_ext): a retired entry with no pin and no
-                        // live mapping is removed here so the batch's frame
-                        // installs instead of being dropped against a
-                        // squatter.
-                        if g.contains_key(&page_index) {
-                            let reap = {
-                                let stale = g.get(&page_index).expect("contains_key");
-                                if !stale.invalidated {
-                                    false
-                                } else {
-                                    let pd = pfn_to_page_mut(stale.pfn);
-                                    let mapped = !pd.is_null() && unsafe { (*pd).is_mapped() };
-                                    stale.ref_count.load(Ordering::Acquire) == 0 && !mapped
-                                }
-                            };
-                            if reap {
-                                let stale = g.remove(&page_index).expect("contains_key");
-                                dirty_account_removed(&stale);
-                                let pd = pfn_to_page_mut(stale.pfn);
-                                if !pd.is_null() {
+                        // too. LAZY REAP (FXW-SQUAT, see insert_ext): a
+                        // retired entry with no pin and no live mapping is
+                        // removed here so the batch's frame installs
+                        // instead of being dropped against a squatter.
+                        match g.entry(page_index) {
+                            Entry::Vacant(v) => {
+                                // Install the pre-filled fresh frame (born
+                                // dirty on the write shape).
+                                let page_desc = pfn_to_page_mut(pfn);
+                                if !page_desc.is_null() {
+                                    // SAFETY: pfn came from the zone
+                                    // allocator; descriptor valid.
                                     unsafe {
-                                        lru::page_remove_lru(&*pd);
+                                        (*page_desc).set_page_type(PageType::PageCache);
+                                        (*page_desc).set_flag(PageFlag::UpToDate);
+                                        (*page_desc).set_mapping(
+                                            key as usize as *mut core::ffi::c_void,
+                                        );
+                                        (*page_desc).set_index(page_index as usize);
                                     }
+                                    lru_batch[lru_n] = page_desc;
+                                    lru_n += 1;
                                 }
-                                release_page_frame(stale.pfn);
-                                self.total_pages.fetch_sub(1, Ordering::Relaxed);
-                                // fall through: install the batch frame below
-                            } else if g.get(&page_index).expect("contains_key").invalidated {
+                                v.insert(CachedPage {
+                                    pfn,
+                                    ref_count: AtomicU32::new(0),
+                                    invalidated: false,
+                                    released: core::sync::atomic::AtomicBool::new(false),
+                                    dirty: core::sync::atomic::AtomicBool::new(mark_dirty),
+                                });
+                                appended += 1;
+                            }
+                            Entry::Occupied(mut e) => {
+                                if !e.get().invalidated {
+                                    // Duplicate index. READ shape: the frame
+                                    // was already filled and described in the
+                                    // unlocked stage above — release it exactly
+                                    // as the old in-lock order did (no
+                                    // clobber, no leak). WRITE shape: the
+                                    // cached page must RECEIVE this batch's
+                                    // bytes (the per-page path's pin-and-copy
+                                    // outcome, last-writer-wins) and turn
+                                    // dirty — the skip arm would drop the
+                                    // write silently.
+                                    //
+                                    // BUFW-2X: the bytes ride the PRE-FILLED
+                                    // FRESH FRAME — the user fast path's one
+                                    // user→frame copy already landed them
+                                    // outside every lock, and a usercopy
+                                    // under this spinlock would be unsound
+                                    // (its fault path can sleep). The fresh
+                                    // frame holds exactly what the slice
+                                    // source would (the pre-stage filled it
+                                    // from the same offset), so the
+                                    // kernel-slice batch is byte-identical
+                                    // through this hop.
+                                    if mark_dirty {
+                                        let stale = e.get_mut();
+                                        let dup_pfn = stale.pfn;
+                                        // SAFETY: dup_pfn is this entry's
+                                        // zone frame; the linear map covers
+                                        // PAGE_SIZE bytes and copy_len <=
+                                        // it; phys is this batch's private
+                                        // pre-filled frame.
+                                        unsafe {
+                                            let dst = phys_to_virt_ptr(pfn_to_phys(dup_pfn));
+                                            let frame_src =
+                                                phys_to_virt_ptr(phys) as *const u8;
+                                            if copy_len > 0 {
+                                                core::ptr::copy_nonoverlapping(
+                                                    frame_src,
+                                                    dst,
+                                                    copy_len,
+                                                );
+                                            }
+                                            if copy_len < PAGE_SIZE {
+                                                core::ptr::write_bytes(
+                                                    dst.add(copy_len),
+                                                    0,
+                                                    PAGE_SIZE - copy_len,
+                                                );
+                                            }
+                                        }
+                                        dirty_account_transition(stale, true);
+                                    }
+                                    // The pre-marked cache identity is
+                                    // stripped first (see
+                                    // discard_prepared_frame above).
+                                    discard_prepared_frame(phys);
+                                    continue;
+                                }
+                                let reap = {
+                                    let stale = e.get();
+                                    let pd = pfn_to_page_mut(stale.pfn);
+                                    let mapped =
+                                        !pd.is_null() && unsafe { (*pd).is_mapped() };
+                                    stale.ref_count.load(Ordering::Acquire) == 0 && !mapped
+                                };
+                                if reap {
+                                    let stale = e.remove();
+                                    dirty_account_removed(&stale);
+                                    let pd = pfn_to_page_mut(stale.pfn);
+                                    if !pd.is_null() {
+                                        unsafe {
+                                            lru::page_remove_lru(&*pd);
+                                        }
+                                    }
+                                    release_page_frame(stale.pfn);
+                                    self.total_pages.fetch_sub(1, Ordering::Relaxed);
+                                    // Squatter gone: install the batch frame.
+                                    let page_desc = pfn_to_page_mut(pfn);
+                                    if !page_desc.is_null() {
+                                        // SAFETY: as the Vacant arm.
+                                        unsafe {
+                                            (*page_desc).set_page_type(PageType::PageCache);
+                                            (*page_desc).set_flag(PageFlag::UpToDate);
+                                            (*page_desc).set_mapping(
+                                                key as usize as *mut core::ffi::c_void,
+                                            );
+                                            (*page_desc).set_index(page_index as usize);
+                                        }
+                                        lru_batch[lru_n] = page_desc;
+                                        lru_n += 1;
+                                    }
+                                    g.insert(
+                                        page_index,
+                                        CachedPage {
+                                            pfn,
+                                            ref_count: AtomicU32::new(0),
+                                            invalidated: false,
+                                            released: core::sync::atomic::AtomicBool::new(
+                                                false,
+                                            ),
+                                            dirty: core::sync::atomic::AtomicBool::new(
+                                                mark_dirty,
+                                            ),
+                                        },
+                                    );
+                                    appended += 1;
+                                    continue;
+                                }
                                 // REVIVE-IN-PLACE (see insert_ext's twin):
                                 // a retired-but-live squatter (pinned or
                                 // still mapped) is revived WITH THIS
@@ -2727,20 +3163,21 @@ impl PageCache {
                                 // current data and every alias of the
                                 // frame stays coherent. The batch frame
                                 // is released exactly like a duplicate's.
-                                let src_off = (done + k) * block_size;
-                                let copy_len =
-                                    core::cmp::min(PAGE_SIZE, buf.len().saturating_sub(src_off));
-                                let stale = g.get_mut(&page_index).expect("contains_key");
+                                // (Bytes ride the pre-filled fresh frame —
+                                // see the duplicate arm above.)
+                                let stale = e.get_mut();
                                 stale.invalidated = false;
-                                let pfn = stale.pfn;
-                                // SAFETY: pfn is this entry's zone frame;
-                                // the linear map covers PAGE_SIZE bytes and
-                                // copy_len <= PAGE_SIZE.
+                                let revive_pfn = stale.pfn;
+                                // SAFETY: revive_pfn is this entry's zone
+                                // frame; the linear map covers PAGE_SIZE
+                                // bytes and copy_len <= PAGE_SIZE; phys is
+                                // this batch's private pre-filled frame.
                                 unsafe {
-                                    let dst = phys_to_virt_ptr(pfn_to_phys(pfn));
+                                    let dst = phys_to_virt_ptr(pfn_to_phys(revive_pfn));
+                                    let frame_src = phys_to_virt_ptr(phys) as *const u8;
                                     if copy_len > 0 {
                                         core::ptr::copy_nonoverlapping(
-                                            buf.as_ptr().add(src_off),
+                                            frame_src,
                                             dst,
                                             copy_len,
                                         );
@@ -2761,68 +3198,8 @@ impl PageCache {
                                 dirty_account_transition(stale, mark_dirty);
                                 discard_prepared_frame(phys);
                                 continue;
-                            } else {
-                                // Duplicate index. READ shape: the frame
-                                // was already filled and described in the
-                                // unlocked stage above — release it exactly
-                                // as the old in-lock order did (no clobber,
-                                // no leak). WRITE shape: the cached page
-                                // must RECEIVE this batch's bytes (the
-                                // per-page path's pin-and-copy outcome,
-                                // last-writer-wins) and turn dirty — the
-                                // skip arm would drop the write silently.
-                                if mark_dirty {
-                                    let src_off = (done + k) * block_size;
-                                    let copy_len = core::cmp::min(
-                                        PAGE_SIZE,
-                                        buf.len().saturating_sub(src_off),
-                                    );
-                                    let stale = g.get_mut(&page_index).expect("contains_key");
-                                    let dup_pfn = stale.pfn;
-                                    // SAFETY: dup_pfn is this entry's zone
-                                    // frame; the linear map covers
-                                    // PAGE_SIZE bytes and copy_len <= it.
-                                    unsafe {
-                                        let dst = phys_to_virt_ptr(pfn_to_phys(dup_pfn));
-                                        if copy_len > 0 {
-                                            core::ptr::copy_nonoverlapping(
-                                                buf.as_ptr().add(src_off),
-                                                dst,
-                                                copy_len,
-                                            );
-                                        }
-                                        if copy_len < PAGE_SIZE {
-                                            core::ptr::write_bytes(
-                                                dst.add(copy_len),
-                                                0,
-                                                PAGE_SIZE - copy_len,
-                                            );
-                                        }
-                                    }
-                                    dirty_account_transition(stale, true);
-                                }
-                                // The pre-marked cache identity is stripped
-                                // first (see discard_prepared_frame above).
-                                discard_prepared_frame(phys);
-                                continue;
                             }
                         }
-                        let page_desc = pfn_to_page_mut(pfn);
-                        if !page_desc.is_null() {
-                            lru_batch[lru_n] = page_desc;
-                            lru_n += 1;
-                        }
-                        g.insert(
-                            page_index,
-                            CachedPage {
-                                pfn,
-                                ref_count: AtomicU32::new(0),
-                                invalidated: false,
-                                released: core::sync::atomic::AtomicBool::new(false),
-                                dirty: core::sync::atomic::AtomicBool::new(mark_dirty),
-                            },
-                        );
-                        appended += 1;
                     }
                     if lru_n > 0 {
                         lru::page_add_file_lru_young_batch(&lru_batch[..lru_n]);
@@ -2834,9 +3211,18 @@ impl PageCache {
                 }
             }
             self.flush_parked(&mut parked);
-            done += got;
+            done += n_install;
+            if faulted_at.is_some() {
+                // USER FAULT: discard the faulted page and the unfilled
+                // tail (frames are private — nothing partial is visible),
+                // stop the batch with the installed prefix.
+                for j in n_install..got {
+                    discard_prepared_frame(phys_buf[j]);
+                }
+                return (done, true);
+            }
         }
-        done
+        (done, false)
     }
 
     /// Shrink the page cache by evicting up to `nr_to_scan` unreferenced pages.
