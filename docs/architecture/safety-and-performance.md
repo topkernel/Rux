@@ -867,3 +867,21 @@ absents stated plainly. Each absent names what closing looks like.
   measurement on such files is void (the lane record lists which).
   Artifacts: run/FIO-2X.md, run/ab-final3-*.txt,
   run/md5-rand1g.log.
+- getdents full-dir sweep (getdents lane, 2026-11-17; pbench
+  dual-kernel rig, q35 KVM smp8/2G, 1000-entry ext4 dir, 32 KiB
+  buffer, per-sample fresh-fd sweep to EOF, n=1000): 1374.3 ->
+  37.0 µs vs reference Linux 7.0.0-38 at 72.2 µs (19.0x behind ->
+  1.95x AHEAD; interleaved 3+3+2 boots, medians 1374.3/1378.4/1375.9
+  vs 37.21/37.23/36.80, ref 72.23/72.78). Safety pairing: the whole
+  getdents64 path for ext4 no longer materializes the directory at
+  all — the unbounded-allocation bug class (4 MiB whole-dir Vec
+  ALLOCTHROW panic at the le5 V0 boot, the heap-budget guards the
+  launcher-errno lane added) is structurally gone from the steady
+  path: ext4_readdir_fill packs linux_dirent64 records block-at-a-time
+  into the caller's buffer, holding only one pinned BufferHead at a
+  time (released on every exit path, including the buffer-full
+  break). Honest note: found and fixed a first-draft BufferHead
+  refcount leak on the buffer-full exit during lane self-review (no
+  measurement showed it; the code path only triggers on small
+  buffers) — the functional probe's 512-byte walks now cover it.
+  Artifacts: run/GETDENTS.md, run/pb-gdab-*.log, run/pb-gdref-*.log.

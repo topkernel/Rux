@@ -2461,6 +2461,7 @@ pub static DEVFS_INODE_OPS: INodeOps = INodeOps {
     readlink: Some(devfs_readlink),
     get_file_ops: Some(devfs_get_file_ops),
     readdir: Some(devfs_readdir),
+    readdir_fill: None,
     readdir_cacheable: false,
     open: Some(devfs_open),
     permission: None,

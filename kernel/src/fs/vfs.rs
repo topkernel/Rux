@@ -6961,6 +6961,24 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
             Some(ops) => ops,
             None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
         };
+
+        // Incremental filesystems (ext4 — the reference's ext4_readdir
+        // shape, getdents lane 2026-11-17) serve getdents64
+        // block-at-a-time from the file position, packing dirents
+        // straight into the caller's buffer: no whole-directory
+        // materialization, no per-open snapshot. The op's position is a
+        // directory byte offset and each record's d_off names the
+        // resume point, so telldir/seekdir and lseek(fd, 0) restart
+        // work unchanged.
+        if let Some(fill_fn) = ops.readdir_fill {
+            let pos = file.get_pos();
+            // May sleep in block I/O — no spinlock is held here (the fd
+            // table slot was released; the Arc keeps the File alive).
+            let (filled, next_pos) = unsafe { fill_fn(inode, pos, buf) }?;
+            file.set_pos(next_pos);
+            return Ok(filled);
+        }
+
         let readdir_fn = match ops.readdir {
             Some(f) => f,
             None => return Err(errno::Errno::NotADirectory.as_neg_i32()),
@@ -7460,6 +7478,7 @@ pub(crate) static PROCFS_DIR_OPS: INodeOps = INodeOps {
     readlink: None,
     get_file_ops: None,
     readdir: Some(procfs_dir_readdir),
+    readdir_fill: None,
     readdir_cacheable: false,
     open: None,
     permission: None,
