@@ -1233,6 +1233,98 @@ static mut VIRTIO_BLK: Option<VirtIOBlkDevice> = None;
 /// vendor/sys_prod/chip_prod/userdata as vda..vdf; two spare letters).
 pub const MAX_PCI_BLK_DISKS: usize = 8;
 
+// ============================================================================
+// SUBMIT-2X: pooled io_bufs (per-CPU 64-byte free lists)
+//
+// Every virtio-blk chain allocates one 64-byte header+resp block (the
+// R17-C combined allocation) at submit and frees it at completion. At
+// depth-1 4 KiB direct-I/O rates that is two global-allocator lock
+// round trips per I/O (alloc on the submitting CPU, dealloc on the
+// completion CPU) plus the allocator's size-class search — measured as
+// a named residual on the dio-conc open list ("64 B io_buf alloc/free
+// per request"). The pool below keeps one free list per CPU behind an
+// uncontended IRQ-save spinlock (the walker frees in hardirq on the
+// COMPLETION CPU, so plain per-CPU data is not enough); overflow
+// drains to the heap, underflow refills from it.
+//
+// Lifetime shape is unchanged from the heap free this replaces: a
+// buffer enters the pool only after its chain's used-ring entry was
+// consumed by the walker (device done DMA-ing the response byte) or
+// after a submit error path that built no chain. The timeout/abandon
+// path keeps its deliberate leak (R21-N2) by simply not returning the
+// buffer. Buffers parked in the pool carry the intrusive next pointer
+// in their first 8 bytes; alloc re-initializes the header before any
+// chain sees it.
+// ============================================================================
+
+/// Size/align of the pooled io_buf (the R17-C header+resp block).
+const IO_BUF_LAYOUT: alloc::alloc::Layout = unsafe {
+    // SAFETY: 64 with align 16 is a valid layout (const-stable unwrap on
+    // an infallible constructor).
+    alloc::alloc::Layout::from_size_align_unchecked(64, 16)
+};
+/// Per-CPU pool depth cap. Deep enough to ride out bursty windows
+/// (a 64-request read window submits 64 chains from one CPU) without
+// unbounded retention; excess frees go to the heap.
+const IO_BUF_POOL_CAP: usize = 256;
+
+struct IoBufFreelist {
+    /// Parked-buffer chain head, 0 = empty. Stored as usize (address);
+    /// the intrusive next pointer lives in the first 8 bytes of each
+    /// parked buffer.
+    head: usize,
+    count: usize,
+}
+
+static IO_BUF_POOLS: [Spinlock<IoBufFreelist>; crate::config::MAX_CPUS] =
+    [const {
+        Spinlock::new(IoBufFreelist {
+            head: 0,
+            count: 0,
+        })
+    }; crate::config::MAX_CPUS];
+
+/// Allocate one 64-byte io_buf: per-CPU pool first, heap on underflow.
+/// Returns null on heap OOM (callers already handle that shape).
+pub(crate) fn io_buf_alloc() -> *mut u8 {
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu < IO_BUF_POOLS.len() {
+        let mut pl = IO_BUF_POOLS[cpu].lock_irqsave();
+        if pl.head != 0 {
+            // SAFETY: parked buffers were allocated with IO_BUF_LAYOUT;
+            // the first 8 bytes hold the intrusive next pointer.
+            let p = pl.head as *mut u8;
+            pl.head = unsafe { *(p as *mut usize) };
+            pl.count -= 1;
+            return p;
+        }
+    }
+    // SAFETY: IO_BUF_LAYOUT is a non-zero-size valid layout.
+    unsafe { alloc::alloc::alloc(IO_BUF_LAYOUT) }
+}
+
+/// Return one 64-byte io_buf: per-CPU pool while under the cap, heap
+/// beyond it. `p` must have come from `io_buf_alloc` (or an identical
+/// 64/16 heap allocation) and must be dead from the device's point of
+/// view (see the lifetime note above).
+pub(crate) fn io_buf_free(p: *mut u8) {
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu < IO_BUF_POOLS.len() {
+        let mut pl = IO_BUF_POOLS[cpu].lock_irqsave();
+        if pl.count < IO_BUF_POOL_CAP {
+            // SAFETY: p is a live 64-byte, 16-aligned block; parking the
+            // next pointer in its first 8 bytes is safe because every
+            // consumer re-initializes the header before use.
+            unsafe { *(p as *mut usize) = pl.head };
+            pl.head = p as usize;
+            pl.count += 1;
+            return;
+        }
+    }
+    // SAFETY: p was allocated with IO_BUF_LAYOUT.
+    unsafe { alloc::alloc::dealloc(p, IO_BUF_LAYOUT) };
+}
+
 /// PCI virtio-blk devices (one per slot; slot 0 is the boot disk when the
 /// boot probe found PCI disks). Each slot owns its complete I/O engine:
 /// device, vring, BLK lock, sync wait queue, expected-used counter, pending
@@ -2007,7 +2099,13 @@ pub fn pci_pending_slot_reservable(disk: usize, queue_size: u32, ordinal: u16, h
         return false;
     }
     let slot = ordinal as usize % MAX_PENDING_IO_PCI;
-    let table = PCI_BLK_PENDING[disk].lock_irqsave();
+    // SUBMIT-2X: the caller holds the BLK lock, which serializes every
+    // pending-table access (submit publish, walker collect, sync
+    // tombstones, abandon under BLK) — the table's own irqsave lock was
+    // a redundant second acquisition inside that window (one of the 5
+    // per-submit acquisitions the dio-conc open list named).
+    // SAFETY: BLK lock held by the caller on this disk.
+    let table = unsafe { PCI_BLK_PENDING[disk].get_ref() };
     if table[slot].is_some() {
         return false;
     }
@@ -2037,7 +2135,10 @@ pub fn pci_publish_sync_chain(disk: usize, queue_size: u32, ordinal: u16, head_d
         return;
     }
     let slot = ordinal as usize % MAX_PENDING_IO_PCI;
-    let mut table = PCI_BLK_PENDING[disk].lock_irqsave();
+    // SUBMIT-2X: BLK lock held by the caller serializes the table —
+    // direct access, no second lock acquisition inside the window.
+    // SAFETY: BLK lock held by the caller on this disk.
+    let table = unsafe { PCI_BLK_PENDING[disk].get_mut_unchecked() };
     debug_assert!(
         table[slot].is_none()
             || !table.iter().any(|e| match e {
@@ -2076,7 +2177,9 @@ pub fn pci_flag_sync_tombstone_timed_out(disk: usize, ordinal: u16) {
         return;
     }
     let slot = ordinal as usize % MAX_PENDING_IO_PCI;
-    let mut table = PCI_BLK_PENDING[disk].lock_irqsave();
+    // SUBMIT-2X: caller holds the BLK lock (see pci_publish_sync_chain).
+    // SAFETY: BLK lock held by the caller on this disk.
+    let table = unsafe { PCI_BLK_PENDING[disk].get_mut_unchecked() };
     if let Some(p) = table[slot].as_mut() {
         if p.completion.is_null() {
             p.timed_out = true;
@@ -2131,8 +2234,14 @@ pub fn abandon_pending_completion(
 
     // PCI tables: tombstone (window stays reserved; nothing left to fire).
     // The completion may be in flight on ANY disk — sweep every slot.
+    // SUBMIT-2X: each disk's table is now serialized by that disk's BLK
+    // lock (the hot paths access it lock-free under BLK), so the sweep
+    // takes the BLK lock per disk, strictly sequentially (never two at
+    // once). Timeout context: no virtio lock is held on entry.
     for disk in 0..MAX_PCI_BLK_DISKS {
-        let mut table = PCI_BLK_PENDING[disk].lock_irqsave();
+        let _blk = pci_blk_lock(disk);
+        // SAFETY: BLK lock held on this disk; abandon only tombstones.
+        let table = unsafe { PCI_BLK_PENDING[disk].get_mut_unchecked() };
         for slot in table.iter_mut() {
             if let Some(p) = slot {
                 if p.completion == comp && !p.completion.is_null() {
@@ -2260,10 +2369,11 @@ unsafe fn pci_submit_data_async(
     }
 
     // One 64-byte block carries header (offset 0) + response (offset 48) —
-    // the same R17-C combined allocation the sync path uses.
+    // the same R17-C combined allocation the sync path uses. SUBMIT-2X:
+    // popped from the per-CPU io_buf pool (no global-allocator lock on
+    // the submit path).
     let io_layout = alloc::alloc::Layout::from_size_align(64, 16).unwrap();
-    // SAFETY: Layout is non-zero-sized; null check follows immediately.
-    let io_buf = unsafe { alloc::alloc::alloc(io_layout) };
+    let io_buf = io_buf_alloc();
     if io_buf.is_null() {
         return Err(-12); // ENOMEM
     }
@@ -2325,9 +2435,8 @@ unsafe fn pci_submit_data_async(
             let virt_queue = match get_pci_device_queue_mut_at(slot) {
                 Some(q) => q,
                 None => {
-                    // SAFETY: io_buf was allocated with io_layout and is
-                    // unreferenced; no chain was built for it.
-                    unsafe { alloc::alloc::dealloc(io_buf, io_layout); }
+                    // io_buf is unreferenced; no chain was built for it.
+                    io_buf_free(io_buf);
                     return Err(-5);
                 }
             };
@@ -2398,8 +2507,13 @@ unsafe fn pci_submit_data_async(
                     // held, so the completion walker (same lock) cannot
                     // observe the used-ring advance before this entry is
                     // visible — no matter how fast the device completes.
-                    PCI_BLK_PENDING[slot].lock_irqsave()
-                        [prev_expected as usize % MAX_PENDING_IO_PCI] = Some(PendingIo {
+                    // SUBMIT-2X: that same BLK lock serializes every
+                    // pending-table access, so the store itself needs no
+                    // second table lock (was one of the 5 per-submit
+                    // acquisitions).
+                    // SAFETY: BLK lock held (the _guard above).
+                    let table = unsafe { PCI_BLK_PENDING[slot].get_mut_unchecked() };
+                    table[prev_expected as usize % MAX_PENDING_IO_PCI] = Some(PendingIo {
                         completion: completion as *const _ as *mut _,
                         resp_ptr: resp_ptr as *mut u8,
                         resp_layout: io_layout,
@@ -2443,9 +2557,9 @@ unsafe fn pci_submit_data_async(
 
     // Still lagging after the retries — fail; the caller (bread_async)
     // falls back to a synchronous read, which is correct if slower.
-    // SAFETY: io_buf was allocated with io_layout and no chain was built
-    // from it (every attempt bailed before submit).
-    unsafe { alloc::alloc::dealloc(io_buf, io_layout); }
+    // No chain was ever built from io_buf (every attempt bailed before
+    // submit), so it is dead from the device's point of view.
+    io_buf_free(io_buf);
     Err(-5)
 }
 
@@ -2990,7 +3104,12 @@ pub fn pci_process_async_completions_slot(slot: usize) -> usize {
                 let ordinal_slot = i as usize % MAX_PENDING_IO_PCI;
                 let mut fired: Option<PendingIo> = None;
                 {
-                    let mut table = PCI_BLK_PENDING[slot].lock_irqsave();
+                    // SUBMIT-2X: the BLK lock held by this walker pass
+                    // serializes all pending-table access (submit publish
+                    // takes the same lock) — direct access, no second
+                    // table-lock acquisition per completed chain.
+                    // SAFETY: BLK lock held (the _guard above).
+                    let table = unsafe { PCI_BLK_PENDING[slot].get_mut_unchecked() };
                     let positional_match = match table[ordinal_slot].as_ref() {
                         Some(p) => p.head_desc == entry_id,
                         None => false,
@@ -3108,11 +3227,21 @@ pub fn pci_process_async_completions_slot(slot: usize) -> usize {
             }
             let status = unsafe { *(pending.resp_ptr as *mut u8) };
             let io_status = if status == 0 { 0 } else { -5i32 };
-            // SAFETY: the combined R17-C block: header at base, resp at
-            // +48, both inside the single 64-byte allocation
-            // (resp_layout == base).
-            unsafe {
-                alloc::alloc::dealloc(pending.header_ptr, pending.header_layout);
+            // The combined R17-C block: header at base, resp at +48, both
+            // inside the single 64-byte allocation. SUBMIT-2X: return it
+            // to the per-CPU pool (layout-checked; anything not the exact
+            // R17-C shape keeps the heap dealloc). The used-ring entry was
+            // consumed above, so the device is done DMA-ing into it.
+            if pending.header_layout.size() == IO_BUF_LAYOUT.size()
+                && pending.header_layout.align() == IO_BUF_LAYOUT.align()
+            {
+                io_buf_free(pending.header_ptr);
+            } else {
+                // SAFETY: dealloc with the layout the submitter allocated
+                // with (non-pool shape).
+                unsafe {
+                    alloc::alloc::dealloc(pending.header_ptr, pending.header_layout);
+                }
             }
             // block:block_rq_complete — the async chain's IRQ-side
             // completion, with the geometry stored at submit time

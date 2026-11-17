@@ -1960,11 +1960,30 @@ pub unsafe fn bfree_multi(bh: *mut BufferHead) {
 /// of the PCI submit path matches it.
 pub const MAX_WRITE_BATCH: usize = 32;
 
-struct WriteEntry {
-    /// The span's bytes (private copy, or the caller's stable buffer).
+/// One inline batch slot: DMA source plus its completion (SUBMIT-2X:
+/// the old shape Box-allocated the IoCompletion per span and pushed
+/// both the entry and the results Vec — three global-allocator round
+/// trips per 4 KiB direct write, ~half the write half's per-op delta
+/// vs the read side, which already drains a stack completion array.
+/// The inline slots cost a ~3 KiB zeroing construction, an order of
+/// magnitude cheaper, and never touch the heap in the steady state).
+struct WriteSlot {
+    /// Valid only while the slot is live (index < len): the span's DMA
+    /// source. Reset to the empty Borrowed shape by flush().
     data: WriteSource,
-    /// Completion signaled by the device's completion walker.
-    completion: Box<crate::fs::io_completion::IoCompletion>,
+    /// Pre-armed completion; reset by flush() for reuse (the same
+    /// discipline the direct-read batch's stack array follows).
+    completion: crate::fs::io_completion::IoCompletion,
+}
+
+impl WriteSlot {
+    const EMPTY: WriteSlot = WriteSlot {
+        data: WriteSource::Borrowed {
+            ptr: core::ptr::null(),
+            len: 0,
+        },
+        completion: crate::fs::io_completion::IoCompletion::new(),
+    };
 }
 
 /// A batch of asynchronously-submitted device writes (plugged writes).
@@ -1982,10 +2001,14 @@ struct WriteEntry {
 /// for i in 0..flushed { if batch.status(i) == 0 { /* clear BH_Dirty */ } }
 /// ```
 pub struct WriteBatch {
-    entries: alloc::vec::Vec<WriteEntry>,
-    /// Per-entry outcome of the LAST flush(), indexed by submission order.
-    /// Only meaningful after flush() returned; reset by the next submit.
-    results: alloc::vec::Vec<i32>,
+    /// Inline slots; entries are slots[0..len].
+    slots: [WriteSlot; MAX_WRITE_BATCH],
+    /// Live entry count.
+    len: usize,
+    /// Per-entry outcome of the LAST flush(), indexed by submission
+    /// order. Valid for i < results_n; reset by the next flush.
+    results: [i32; MAX_WRITE_BATCH],
+    results_n: usize,
 }
 
 /// DMA source of a batch entry: the batch's private copy (submit) or the
@@ -2014,14 +2037,16 @@ impl WriteSource {
 impl WriteBatch {
     pub fn new() -> Self {
         Self {
-            entries: alloc::vec::Vec::new(),
-            results: alloc::vec::Vec::new(),
+            slots: [const { WriteSlot::EMPTY }; MAX_WRITE_BATCH],
+            len: 0,
+            results: [0; MAX_WRITE_BATCH],
+            results_n: 0,
         }
     }
 
     /// Number of spans currently in flight (not yet drained).
     pub fn in_flight(&self) -> usize {
-        self.entries.len()
+        self.len
     }
 
     /// Outcome of entry `i` of the most recent flush (submission order).
@@ -2029,7 +2054,11 @@ impl WriteBatch {
     /// bytes may not have reached the device — treat like EIO and keep
     /// the span's buffers dirty).
     pub fn status(&self, i: usize) -> i32 {
-        self.results.get(i).copied().unwrap_or(-5)
+        if i < self.results_n {
+            self.results[i]
+        } else {
+            -5
+        }
     }
 
     /// Submit one span without waiting. Returns false when the batch
@@ -2043,29 +2072,31 @@ impl WriteBatch {
         sector: u64,
         data: &[u8],
     ) -> bool {
-        if data.is_empty() || self.entries.len() >= MAX_WRITE_BATCH {
+        if data.is_empty() || self.len >= MAX_WRITE_BATCH {
             return false;
         }
         // The private stable copy: the device DMAs FROM this block, so it
         // must not alias anything the kernel mutates before the drain.
         let owned: Box<[u8]> = alloc::vec::Vec::from(data).into_boxed_slice();
-        let completion = Box::new(crate::fs::io_completion::IoCompletion::new());
-        // SAFETY: device is a registered GenDisk; `owned` and `completion`
-        // are owned by this batch and stay valid (and unmodified) until
-        // the completion fires — the write-batch contract.
-        let rc = blkdev::blkdev_write_async(device, sector, &owned, &completion);
+        // SAFETY: device is a registered GenDisk; `owned` and the slot's
+        // inline completion stay valid (and unmodified) until the
+        // completion fires — the write-batch contract.
+        let rc = blkdev::blkdev_write_async(
+            device,
+            sector,
+            &owned,
+            &self.slots[self.len].completion,
+        );
         match rc {
             Ok(()) => {
-                self.entries.push(WriteEntry {
-                    data: WriteSource::Owned(owned),
-                    completion,
-                });
+                self.slots[self.len].data = WriteSource::Owned(owned);
+                self.len += 1;
                 true
             }
             Err(_) => {
                 // Submission failed before any chain was built (the PCI
-                // path deallocs its own io_buf on failure); both boxes
-                // drop here — nothing references them.
+                // path deallocs its own io_buf on failure); the private
+                // copy drops here — nothing references it.
                 false
             }
         }
@@ -2085,23 +2116,25 @@ impl WriteBatch {
         sector: u64,
         data: &[u8],
     ) -> bool {
-        if data.is_empty() || self.entries.len() >= MAX_WRITE_BATCH {
+        if data.is_empty() || self.len >= MAX_WRITE_BATCH {
             return false;
         }
-        let completion = Box::new(crate::fs::io_completion::IoCompletion::new());
         // SAFETY: device is a registered GenDisk; the caller's `data` and
-        // our `completion` stay valid (and the bytes unmodified) until the
-        // drain — the submit_ref contract above.
-        let rc = blkdev::blkdev_write_async(device, sector, data, &completion);
+        // the slot's inline completion stay valid (and the bytes
+        // unmodified) until the drain — the submit_ref contract above.
+        let rc = blkdev::blkdev_write_async(
+            device,
+            sector,
+            data,
+            &self.slots[self.len].completion,
+        );
         match rc {
             Ok(()) => {
-                self.entries.push(WriteEntry {
-                    data: WriteSource::Borrowed {
-                        ptr: data.as_ptr(),
-                        len: data.len(),
-                    },
-                    completion,
-                });
+                self.slots[self.len].data = WriteSource::Borrowed {
+                    ptr: data.as_ptr(),
+                    len: data.len(),
+                };
+                self.len += 1;
                 true
             }
             Err(_) => false,
@@ -2109,11 +2142,11 @@ impl WriteBatch {
     }
 
     /// Kick the device once and wait for every in-flight span. Fills
-    /// `status(i)` for i in 0..in_flight(), frees the completed entries,
-    /// and leaves the batch empty. Returns the first nonzero status (0
-    /// when every span device-acked).
+    /// `status(i)` for i in 0..in_flight(), releases the completed
+    /// entries, and leaves the batch empty. Returns the first nonzero
+    /// status (0 when every span device-acked).
     pub fn flush(&mut self) -> i32 {
-        if self.entries.is_empty() {
+        if self.len == 0 {
             return 0;
         }
         // One device kick for the whole quietly-submitted batch (the PCI
@@ -2121,16 +2154,14 @@ impl WriteBatch {
         // trap). The MMIO device notifies inline per chain — a no-op kick.
         crate::drivers::virtio::pci_blk_kick_all();
 
-        self.results.clear();
-        self.results.resize(self.entries.len(), 0);
+        let n = self.len;
+        self.results_n = n;
         let mut first_error = 0i32;
-        // Move the whole window out first: each box's death below is then
-        // plain scope-end, and `results` keeps SUBMISSION order (entries
-        // waited in order; the device completes them in submission order,
-        // so the first waiter sleeps while the batch drains behind it).
-        let entries = core::mem::take(&mut self.entries);
-        for (i, entry) in entries.into_iter().enumerate() {
-            let status = entry.completion.wait();
+        // SUBMISSION order: slots waited in order; the device completes
+        // them in submission order, so the first waiter sleeps while the
+        // batch drains behind it.
+        for i in 0..n {
+            let status = self.slots[i].completion.wait();
             let status = if status == 0 {
                 // Attribution guard (the read path's zero-serve analog):
                 // the walker stamps the completion with the DMA data
@@ -2138,27 +2169,34 @@ impl WriteBatch {
                 // token mismatch means some OTHER chain's completion fired
                 // here — this span's write may not have landed, so its
                 // buffers must stay dirty (report EIO, loudly).
-                let token = entry.completion.delivered_token();
-                if token != 0 && token != entry.data.as_ptr() as usize {
+                let token = self.slots[i].completion.delivered_token();
+                let expected = self.slots[i].data.as_ptr() as usize;
+                if token != 0 && token != expected {
                     crate::pr_err!(
                         "bio: misattributed write completion (token {:x} != buffer {:x}) — refusing to ack",
                         token,
-                        entry.data.as_ptr() as usize
+                        expected
                     );
                     -5
                 } else {
                     0
                 }
             } else if status == crate::fs::io_completion::WAIT_TIMED_OUT {
-                match entry.data {
+                match self.slots[i].data {
                     WriteSource::Owned(_) => {
                         // The chain may STILL be in flight: wait() already
-                        // tombstoned the device-side pending (abandon) and drained
-                        // deliveries, so the walker will never fire this
-                        // completion again — the completion box may die. The DATA
-                        // block is still the device's DMA source and must be
-                        // LEAKED, never freed (the freed-kernel-DMA family).
-                        core::mem::forget(entry.data);
+                        // tombstoned the device-side pending (abandon) and
+                        // drained deliveries, so the walker will never fire
+                        // this completion again. The DATA block is still
+                        // the device's DMA source and must be LEAKED,
+                        // never freed (the freed-kernel-DMA family).
+                        core::mem::forget(core::mem::replace(
+                            &mut self.slots[i].data,
+                            WriteSource::Borrowed {
+                                ptr: core::ptr::null(),
+                                len: 0,
+                            },
+                        ));
                         status
                     }
                     WriteSource::Borrowed { ptr, len } => {
@@ -2186,11 +2224,21 @@ impl WriteBatch {
             if status != 0 && first_error == 0 {
                 first_error = status;
             }
-            // entry.data and entry.completion drop here — safe on every
-            // completed path: the walker fired the completion (delivery
-            // handshake drained inside wait()) and the chain's DMA is
-            // done, so the data block is once again ordinary heap.
         }
+        // Retire the window: drop each live slot's data source (an Owned
+        // box's plain scope-end — safe on every completed path: the walker
+        // fired the completion, the delivery handshake drained inside
+        // wait(), and the chain's DMA is done, so the block is once again
+        // ordinary heap) and re-arm the completion for the next window
+        // (the direct-read batch's stack-array discipline).
+        for i in 0..n {
+            self.slots[i].data = WriteSource::Borrowed {
+                ptr: core::ptr::null(),
+                len: 0,
+            };
+            self.slots[i].completion.reset();
+        }
+        self.len = 0;
         first_error
     }
 }
@@ -2207,7 +2255,7 @@ impl Drop for WriteBatch {
     /// flush owner drains explicitly); a panic-unwind or an early return
     /// still lands here in task context, where sleeping is legal.
     fn drop(&mut self) {
-        if !self.entries.is_empty() {
+        if self.len != 0 {
             let _ = self.flush();
         }
     }

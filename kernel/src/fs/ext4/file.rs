@@ -1710,7 +1710,12 @@ pub fn ext4_file_write(
     // reported count to its start — bytes after it may or may not have
     // landed, and POSIX allows the short count (the per-block path's
     // partial-write discipline, span-granular).
-    if let Some(mut batch) = dio_batch.take() {
+    // SUBMIT-2X: borrow in place, NEVER move — the inline completion
+    // slots are part of the batch value; a take()/move with spans in
+    // flight would leave the device's pending table pointing at the
+    // old stack location (the Box-based batch was accidentally
+    // move-safe; the inline-slot one is not).
+    if let Some(batch) = dio_batch.as_mut() {
         if batch.in_flight() > 0 {
             if dio_drain!(batch) {
                 crate::pr_err!(

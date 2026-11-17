@@ -186,6 +186,30 @@ impl IoCompletion {
     /// Follows the standard BKL discipline: release BKL, schedule,
     /// re-acquire BKL.
     pub fn wait(&self) -> i32 {
+        // SUBMIT-2X (lever E): bounded poll-before-sleep. A synchronous
+        // depth-1 waiter has nothing else to run; the device completes
+        // under KVM in the ~10-25 us the sleep/wake machinery itself
+        // costs (schedule-out, IRQ wake on another CPU, schedule-in,
+        // wait-queue teardown). Polling the done flag for a bounded
+        // window first trades idle CPU for that whole path — the same
+        // trade the reference kernel's polled / HIPRI modes make, here
+        // applied to every sync I/O wait with a small fixed budget.
+        // Budget: 1536 pause iterations ~= 14 us on the 3.7 GHz KVM rig
+        // (each PAUSE ~35 cycles); completions slower than the budget
+        // fall through to the sleeping loop unchanged. Preemption and
+        // IRQs stay on: the completion IRQ itself interrupts the loop,
+        // retires the chain, and the next load observes done.
+        {
+            const POLL_BUDGET: u32 = 1536;
+            let mut i = 0u32;
+            while i < POLL_BUDGET {
+                if self.done.load(Ordering::Acquire) {
+                    return self.status.load(Ordering::Acquire);
+                }
+                core::hint::spin_loop();
+                i += 1;
+            }
+        }
         let mut deadline_timer = 0u64; // 0 = not armed (or arm failed)
         let mut deadline_armed = false;
         let mut poll_fallback = false; // timer budget exhausted: 1-jiffy re-arms
