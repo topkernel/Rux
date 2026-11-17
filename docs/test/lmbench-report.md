@@ -168,6 +168,23 @@ handoff), open (1.44x — walk loop + File construct), read (1.42x —
 copy tail), write (1.13x). lat_fs re-polluted by boot noise (no
 honest number this round).
 
+## Patrol-12 (2026-11-18): oc-rc openclose numbers banked; TIF wiring scoped
+
+- The parallel oc-rc rework's numbers are banked on the scoreboard:
+  **openclose 0.681 -> 0.591 µs (1.92x -> 1.59x), read_cached 1.002 ->
+  0.912 µs (1.84x -> 1.66x)** — close(2) no longer waits out an RCU
+  grace (fput/fget_rcu reference shape, fdreapd async free).
+- TIF wiring scoped: the ti_flags infrastructure exists on Task
+  (TIF_SIGPENDING/TIF_NEED_RESCHED constants, set/test_ti_flag) but has
+  ZERO producers/consumers wired. The entry-floor cut needs (a) every
+  signal-enqueue site to set the flag (a missed site = lost signal —
+  functional risk, so the audit must be exhaustive), (b) a GS-slot
+  ti_flags pointer maintained at context switch for the asm exit test.
+  This is one full round with the signal-family LTP battery as its
+  gate — queued as the entry-floor structural round.
+- Host is saturated with other lanes' suite boots (7 QEMUs) — no
+  measurement window this patrol.
+
 ## Patrol-9: ctx-2 sampler blocked; 2x feasibility summary for the 4 behind rows (2026-11-18)
 
 The lat_ctx sampler could not catch a window: the whole lat_ctx run
