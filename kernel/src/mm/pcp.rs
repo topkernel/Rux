@@ -191,6 +191,43 @@ pub fn alloc_order0(zone: &Zone) -> Option<usize> {
     Some(pfn)
 }
 
+/// Drain up to `n` frames from this CPU's pcp row in ONE irq-off window
+/// (BUFW-PARITY: the batch twin of alloc_order0 for the page-cache bulk
+/// insert path — a 1 MiB buffered write asks for 256 frames; serving the
+/// row's contents from the row avoids the zone round trip for every
+/// frame a recent free cached). Same state transitions and accounting as
+/// N calls to alloc_order0: INV-PCP-2 (each handed-out frame was counted
+/// free while cached -> free_pages_sub(k)) and to_in_use per frame.
+/// Returns how many were served; the caller falls to the zone bulk path
+/// for the remainder. No refill here — the single-frame path refills
+/// lazily.
+pub fn alloc_order0_batch(zone: &Zone, n: usize, out: &mut [usize]) -> usize {
+    if n == 0 || out.is_empty() {
+        return 0;
+    }
+    let want = n.min(out.len());
+    let k = with_row(|row| {
+        let avail = row.count.min(want);
+        for i in 0..avail {
+            out[i] = row.list[row.count - 1 - i];
+        }
+        row.count -= avail;
+        avail
+    })
+    .unwrap_or(0);
+    if k == 0 {
+        PCP_MISSES.fetch_add(1, Ordering::Relaxed);
+        return 0;
+    }
+    PCP_HITS.fetch_add(k, Ordering::Relaxed);
+    // INV-PCP-2: the k frames were counted free while cached.
+    zone.free_pages_sub(k);
+    for pfn in out.iter_mut().take(k) {
+        to_in_use(*pfn);
+    }
+    k
+}
+
 /// Free one order-0 frame into this CPU's pcp row.
 ///
 /// Returns true when the frame was cached (caller is done); false means
