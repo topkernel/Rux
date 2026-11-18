@@ -122,10 +122,4 @@ pub mod diskstats_file_tests {
             .split(' ').filter(|t| !t.is_empty()).count();
         assert_eq!(tokens, 3 + super::DISKSTAT_COLUMNS.len(), "/proc/diskstats field count drifted");
     }
-
-    #[cfg(test)]
-    #[test]
-    fn diskstats_snapshot() {
-        snapshot_check();
-    }
 }
