@@ -86,7 +86,7 @@
 <h2 id="data"><span class="anchor">§1</span>lmbench data (same-rig KVM, 21 cases)</h2>
     <p style="font-size:13.5px">Source: the "Standing (2026-11-16, kernel main=017bf556b)" section of lmbench-report.md — the single authoritative table; the data below is that section. Method: both sides in the same rig (q35/KVM/-cpu host/smp2/2G, host CCD0 pin + performance governor + warmer thread); Rux boots with nohz_full=1, one case per boot with the retry rule; the Linux column runs the OHOS 6.6.101 kernel in the <b>same guest rig</b> with the same static binaries, 2 reps, medians. The switch/wakeup family is sensitive to the Linux-side measurement window — ratios are only meaningful within one session.</p>
     <p style="font-size:13px;color:var(--text-3)">Basis: each row carries the latest measured value on current main (the 2026-11-16 full round; the null/read/write rows re-measured 11-17). The Rux column follows each round's own build class; the Linux column = the host 7.0.0 kernel booted in the <b>same guest rig</b> running the same static binaries.</p>
-    <h3>Ahead / parity (18 cases)</h3>
+    <h3>Ahead / parity (19 cases)</h3>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>Case</th><th class="num">Rux</th><th class="num">Linux (same rig)</th><th class="num">Ratio</th></tr></thead>
@@ -106,13 +106,14 @@
           <tr><td class="mono">lat_usleep 1000</td><td class="num">1030.8 µs</td><td class="num">1052.8 µs</td><td><span class="chip ok">parity (0.98×)</span></td></tr>
           <tr><td class="mono">bw_file_rd 1m io_only</td><td class="num">33,408–35,545 MB/s</td><td class="num">23,045 MB/s (ceiling)</td><td><span class="chip ok">ahead 1.45–1.54×</span></td></tr>
           <tr><td class="mono">lat_pagefault</td><td class="num">0.0253 µs</td><td class="num">0.072 µs (ceiling)</td><td><span class="chip ok">ahead 2.8×</span> (vs ceiling)</td></tr>
+          <tr><td class="mono">bw_mmap_rd 1m mmap_only</td><td class="num">79,954 MB/s</td><td class="num">77,100 MB/s (ceiling)</td><td><span class="chip ok">ahead 1.04×</span> (recovered after the image-runner fix)</td></tr>
           <tr><td class="mono">lat_syscall null</td><td class="num">0.042 µs</td><td class="num">0.046 µs</td><td><span class="chip ok">ahead 0.92×</span></td></tr>
           <tr><td class="mono">lat_proc fork</td><td class="num">36.6–40.3 µs</td><td class="num">33.9 µs</td><td><span class="chip ok">parity band 1.08–1.19×</span></td></tr>
           <tr><td class="mono">lat_proc exec</td><td class="num">39.4–40.6 µs</td><td class="num">37.6 µs</td><td><span class="chip ok">parity band 1.05–1.08×</span></td></tr>
         </tbody>
       </table>
     </div>
-    <h3>Behind (4 cases)</h3>
+    <h3>Behind (7 cases)</h3>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>Case</th><th class="num">Rux</th><th class="num">Linux (same rig)</th><th class="num">Ratio</th></tr></thead>
@@ -124,7 +125,11 @@
           
           
           
-        </tbody>
+        
+          <tr><td class="mono">lat_tcp 127.0.0.1</td><td class="num">10.35 µs</td><td class="num">4.89 µs (ceiling)</td><td><span class="chip bad">behind 2.12×</span></td></tr>
+          <tr><td class="mono">lat_udp 127.0.0.1</td><td class="num">9.00 µs</td><td class="num">4.147 µs (ceiling)</td><td><span class="chip bad">behind 2.17×</span></td></tr>
+          <tr><td class="mono">lat_fs -s 1k</td><td class="num">24.0k/20.6k files/s</td><td class="num">445k/455k (ceiling)</td><td><span class="chip bad">behind 19–22×</span> (largest true gap on the board: file create/delete hot path; bimodal load-coupled stall, open)</td></tr>
+          <tr><td class="mono">lat_connect / bw_tcp</td><td colspan="2">fd exhaustion (EMFILE) under the connect storm / transfer-storm timeout</td><td><span class="chip cyan">open kernel items</span> (reproducers archived)</td></tr></tbody>
       </table>
     </div>
     <p style="font-size:13px;color:var(--text-3)">Notes: the bw_file_rd and lat_pagefault rows carry values recovered after the image-runner fix (the earlier lows were not trustworthy); the lat_syscall null flip comes from the fdget borrow + getppid O(1) + PT_REGS + fdreap silence + the NOHZ stack. Mechanism note: the wins concentrate in scheduler/wakeup and IPC (cross-vCPU wakeup IPIs are expensive under virtualization; the single global run queue produces no cross-core reschedule storm) and memory bandwidth; syscall-latency rows run the guest's own entry (no vmexit), so the gaps there are real kernel differences. Rows without honest numbers: bw_mmap_rd and the net-server family (lat_tcp/udp/connect, bw_tcp, lat_fs) — not listed; lat_mmap 4.525 µs (1.12x vs ceiling, near-parity band).</p>
