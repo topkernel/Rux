@@ -66,6 +66,12 @@ jobs:
       - name: Mirror sync check
         run: python3 scripts/verify_sync_check.py
 
+      - name: Unsafe verification gate
+        # Every unsafe region must be accounted for in
+        # docs/development/unsafe-verification-artifacts.tsv; new unsafe
+        # without a ledger row fails the push.
+        run: python3 scripts/unsafe_gate.py --check
+
       - name: Proptest suite
         run: |
           cd kernel/verify
