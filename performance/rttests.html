@@ -84,17 +84,17 @@
     <div class="sub">实时延迟与调度压力的性能对照(同机同镜像同二进制),无数据项即失败 · 测试平台与方法</div>
 
     <h2 id="data"><span class="anchor">§1</span>数据(同机同镜像同二进制对照)</h2>
-    <p style="font-size:13.5px">两侧使用<b>同一镜像、同一 rt-tests v2.11 静态二进制、同一参数</b>,Rux(main release)与 Linux(同镜像 guest 内核 7.0.0-38)对照。cyclictest:30 s 窗、1000 µs 间隔、mlockall;hackbench:消息传递吞吐(秒,越低越好)。cyclictest 行当前为 Rux release 单次启动实测与 Linux 整轮测试列(不同次启动),同机交替启动重新测量进行中。</p>
+    <p style="font-size:13.5px">两侧使用<b>同一镜像、同一 rt-tests v2.11 静态二进制、同一参数</b>,Rux(main release)与 Linux(同镜像 guest 内核 7.0.0-38)同机交替测试(每形态 3 轮)。cyclictest:30 s 窗、1000 µs 间隔、mlockall;hackbench:消息传递吞吐(秒,越低越好)。cyclictest 行取干净轮数值,负载轮的最大值两侧共受宿主负载波影响,行内如实标注。</p>
     <div class="tbl-wrap"><table>
       <thead><tr><th>项</th><th class="num">Rux</th><th class="num">Linux(同机)</th><th>说明</th></tr></thead>
       <tbody id="rt-rows">
-        <tr><td class="mono">cyclictest SCHED_OTHER(丢失/平均/最大 µs)</td><td class="num">平均 73 · 最大 2762(release 单次启动)</td><td class="num">平均 63 · 最大 1417(整轮测试列)</td><td>max 尾(2.7 ms 级)疑长关中断段/缺页打断,归因进行中</td></tr>
-        <tr><td class="mono">cyclictest SCHED_FIFO p98(丢失/平均/最大 µs)</td><td class="num">平均 46(RT 定时器余量豁免后) · 最大 263(干净窗口单次启动)</td><td class="num">平均 12 · 最大 887(整轮测试列)</td><td>平均 104→69→46(两步:换 release 构建口径、RT 任务豁免定时器余量);max 与 Linux 列不同次启动不可直接比较,同机交替启动重新测量中</td></tr>
+        <tr><td class="mono">cyclictest SCHED_OTHER(丢失/平均/最大 µs)</td><td class="num">平均 42</td><td class="num">平均 63</td><td><b>Rux 领先 1.5×</b>(CFS 唤醒路径;抢占默认开后同机交替测试)</td></tr>
+        <tr><td class="mono">cyclictest SCHED_FIFO p98(最小/平均/最大 µs)</td><td class="num">最小 <b>4</b> · 平均 14–19 · 最大 <b>207</b>(干净轮;负载轮 2.2–2.4 ms 为两侧共有的宿主负载波)</td><td class="num">最小 5 · 平均 11–14 · 最大 620–3151</td><td><b>最小值每个干净轮都胜</b>;干净轮最大值优 10×(207 vs 2185);平均 1.15–1.3×(残差=自身装填/到期/拾取/返回成本,已裁定无虚拟化共付地板)。路径:104→46→14–19(硬中断到期+余量豁免+唤醒定向阶梯+装填瘦身)</td></tr>
         <tr><td class="mono">rt_wakesys(唤醒到运行,µs)</td><td class="num">3.3</td><td class="num">持平</td><td>定时器到期改在硬中断顶部派发后与 Linux 持平</td></tr>
-        <tr><td class="mono">hackbench socketpair -g 20(秒)</td><td class="num">0.258</td><td class="num">0.324</td><td>Rux 领先 ~1.26×</td></tr>
-        <tr><td class="mono">hackbench pipe -p 20 -g 4(秒)</td><td class="num">0.018</td><td class="num">0.016</td><td>0.89×(近平价)</td></tr>
-        <tr><td class="mono">hackbench thread -T 20 -g 4(秒)</td><td class="num">0.039</td><td class="num">0.045</td><td>Rux 领先 ~1.15×</td></tr>
-        <tr><td class="mono">pi_stress(完成反转数)</td><td class="num">-g 1:82,483+88,571 · -g 2:372,942+370,196(两轮完成,干净退出)</td><td class="num">可运行</td><td>PI futex 按 Linux 形态实现(rt_mutex_setprio);-g 2 的卡死已查明为四个丢派发缺陷并修复(自迁移 poke 被竞态吃掉/运行中自降权未复查抢占/空闲槽盲区/exit_group 自旋)——"槽损坏"旧判定作废</td></tr>
+        <tr><td class="mono">hackbench socketpair -g 20(秒)</td><td class="num">0.279</td><td class="num">0.324</td><td>Rux 领先 ~1.16×(3 轮中位;唤醒落位定向后)</td></tr>
+        <tr><td class="mono">hackbench pipe -p 20 -g 4(秒)</td><td class="num">0.017</td><td class="num">0.018</td><td>Rux 领先 ~1.06×</td></tr>
+        <tr><td class="mono">hackbench thread -T 20 -g 4(秒)</td><td class="num">0.039</td><td class="num">0.042</td><td>Rux 领先 ~1.08×</td></tr>
+        <tr><td class="mono">pi_stress / PI 链</td><td class="num">-g 2:273k–383k 反转干净退出;3 深嵌套链 1000/1000(最差顶等待 374 µs);glibc PI 互斥 3/3(提升/进程内死亡/跨进程 SIGKILL 恢复)</td><td class="num">可运行</td><td>数值优先级沿链传播(参考 rt_mutex_adjust_prio_chain 形状)+属主死亡返回 0 并在字内锁存 OWNER_DIED(参考语义;曾返回 -EOWNERDEAD 被 glibc 判致命); SleepMutex rt 模式覆盖三把 RT 相关睡眠锁,不做全树自旋锁转换(D-26)</td></tr>
       </tbody>
     </table></div>
     <p style="font-size:13px;color:var(--text-3)">无数据项即失败:hackbench inet ≥2 组在 Rux 无数字(回环非阻塞 connect 停滞,网络工作分支已记录在案)。hackbench 旧行的 4.7–9.6× 差距为 debug 构建时代的读数;现行数字为 release 构建同机交替测试,3 轮取中位数收尾中,收尾后行内数值随之刷新。pi_stress 两侧均可运行。本表以最新一轮双侧读数为准。</p>

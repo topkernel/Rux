@@ -93,8 +93,8 @@
         <tr><td class="mono">4k 随机写 40M(direct)</td><td class="num">36.75k IOPS</td><td class="num">~37.9k IOPS</td><td class="num">0.97×</td></tr>
         <tr><td class="mono">4k 随机读 40M(direct,20 s)</td><td class="num">37.0k IOPS(单作业)· 8 作业 0.91×</td><td class="num">~41k IOPS</td><td class="num">0.90×(单作业)</td></tr>
         <tr><td class="mono">1M 顺序写 48M(direct,已分配区域)</td><td class="num">4000 MiB/s</td><td class="num">5.2 GiB/s · clat ~188 µs</td><td class="num">0.83×</td></tr>
-        <tr><td class="mono">1M 顺序写 48M(direct,全新文件)</td><td class="num">同一测量窗口比值 0.33×</td><td class="num">188 µs/op(延迟分配使新写免分配)</td><td class="num">0.33×(延迟分配未实现)</td></tr>
-        <tr><td class="mono">1M 顺序读 48M(direct)</td><td class="num">~5000 MiB/s 级</td><td class="num">9.4 GiB/s · clat 90 µs</td><td class="num">0.62×</td></tr>
+        <tr><td class="mono">1M 顺序写 48M(direct,全新文件)</td><td class="num">4000–4800 MiB/s(中位 4000)</td><td class="num">5.2 GiB/s(两种场景同值)</td><td class="num">0.75–0.9×,<b>已追平覆写行</b>(未写盘区异步转换+延迟分配预留落地)</td></tr>
+        <tr><td class="mono">1M 顺序读 48M(direct)</td><td class="num">8000 MiB/s · 每 op 请求数 4→1</td><td class="num">9.4 GiB/s · clat 90 µs</td><td class="num">0.83×(请求合并+SG 链)</td></tr>
         <tr><td class="mono">1M 缓冲写 48M(页缓存口径,两侧同)</td><td class="num">9600 MiB/s</td><td class="num">9.4 GiB/s · clat 89.5 µs</td><td class="num">~0.94×(测试平台的物理下限:冷帧 RFO 两侧共付)</td></tr>
         <tr><td class="mono">128MB 刷盘墙探针(mmap 全同步回写,总墙钟)</td><td class="num">待 SMP8 下一次启动重新测量(fsync 路径已重造)</td><td class="num">1.223 s(旧口径)</td><td class="num">—</td></tr>
         <tr><td class="mono">libaio(io_setup/io_submit)</td><td class="num">—</td><td class="num">有</td><td class="num">—</td></tr>
