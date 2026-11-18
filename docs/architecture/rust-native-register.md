@@ -238,6 +238,23 @@ numbers this register cites).
     exhaustion-class stress runs complete their full budgets: 5.42M
     ops in the 100 s window, zero strike-only kills
     (stress-port/run/stress-runs/findings.md).
+  - GUP-pinned user-page DIO (gup-dio lane, 2026-11-18): the reference's
+    pin_user_pages / bio_iov_iter_get_pages shape — mm/gup.rs walks the
+    current task's page tables under the mm PTE lock (INV-LOCK-7) after
+    fault-in (FOLL_WRITE discipline for BOTH DMA directions), takes a
+    page refcount per frame (reclaim's refcount==1 gate keeps pinned
+    frames DMA-safe); the ext4 direct reader/writer build their SG
+    chains straight from the frames' direct-map aliases (physically
+    adjacent pages merged into one segment; chains sized by the
+    negotiated virtqueue seg_max, descriptor-budget waves), unpinnable
+    pages become typed holes served by the staged paths. Same-rig
+    kernel-vs-kernel (q35 KVM smp8/8G, 48 MiB psync 1M direct, clean
+    window): GUP 8000 MiB/s clat 109 µs vs the same tree's staging
+    path 6000 MiB/s / 145 µs — the full-request staging copy and the
+    copyout/copyin terms are gone (pin 10 µs/MiB); fio --verify=md5
+    direct 1M/64k/4k + unaligned-offset heads err=0; pbench Tier-2
+    rows in band or improved; riscv make test 1334 PASS.
+    Evidence: /home/william/rux-agents/gup-dio/run/GUP-DIO.md.
   - Also: execveat flags/AT_EMPTY_PATH/ELOOP semantics (5587c257),
     O_DIRECT read flushes the dirty page-cache range first (99ea87e3),
     poll rejects nfds above RLIMIT_NOFILE before allocating
