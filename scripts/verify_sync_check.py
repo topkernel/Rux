@@ -1524,6 +1524,19 @@ MAPPINGS = [
         "check_new": False,
     },
     {
+        "name": "arch/x86_uaccess_bounds",
+        "verify": "kernel/verify/src/arch/x86_64/mm/uaccess_test.rs",
+        "kernel": "kernel/src/arch/x86_64/uaccess.rs",
+        "type": None,
+        "compare": ["access_ok"],
+        "skip": [],
+        # the x86_64 twin references USER_END from its memory_layout import;
+        # the verify copy defines it as a module constant (no low floor
+        # check on this arch — address 0 is accepted by the gate by design)
+        "skip_diff": ["access_ok"],
+        "check_new": False,
+    },
+    {
         "name": "syscall/clamp_rw_count",
         "verify": "kernel/verify/src/arch/riscv64/mm/uaccess_test.rs",
         "kernel": "kernel/src/syscall/io.rs",
