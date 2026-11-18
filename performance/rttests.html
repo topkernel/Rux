@@ -86,18 +86,18 @@
     <h2 id="data"><span class="anchor">§1</span>数据(同机同镜像同二进制对照)</h2>
     <p style="font-size:13.5px">两侧使用<b>同一镜像、同一 rt-tests v2.11 静态二进制、同一参数</b>,Rux(main release)与 Linux(同镜像 guest 内核 7.0.0-38)同机交替测试(每形态 3 轮)。cyclictest:30 s 窗、1000 µs 间隔、mlockall;hackbench:消息传递吞吐(秒,越低越好)。cyclictest 行取干净轮数值,负载轮的最大值两侧共受宿主负载波影响,行内如实标注。</p>
     <div class="tbl-wrap"><table>
-      <thead><tr><th>项</th><th class="num">Rux</th><th class="num">Linux(同机)</th><th>说明</th></tr></thead>
+      <thead><tr><th>项</th><th class="num">Rux</th><th class="num">Linux(同机)</th><th class="num">比值</th></tr></thead>
       <tbody id="rt-rows">
-        <tr><td class="mono">cyclictest SCHED_OTHER(丢失/平均/最大 µs)</td><td class="num">平均 42</td><td class="num">平均 63</td><td><b>Rux 领先 1.5×</b>(CFS 唤醒路径;抢占默认开后同机交替测试)</td></tr>
-        <tr><td class="mono">cyclictest SCHED_FIFO p98(最小/平均/最大 µs)</td><td class="num">最小 <b>4</b> · 平均 14–19 · 最大 <b>207</b>(干净轮;负载轮 2.2–2.4 ms 为两侧共有的宿主负载波)</td><td class="num">最小 5 · 平均 11–14 · 最大 620–3151</td><td><b>最小值每个干净轮都胜</b>;干净轮最大值优 10×(207 vs 2185);平均 1.15–1.3×(残差=自身装填/到期/拾取/返回成本,已裁定无虚拟化共付地板)。路径:104→46→14–19(硬中断到期+余量豁免+唤醒定向阶梯+装填瘦身)</td></tr>
-        <tr><td class="mono">rt_wakesys(唤醒到运行,µs)</td><td class="num">3.3</td><td class="num">持平</td><td>定时器到期改在硬中断顶部派发后与 Linux 持平</td></tr>
-        <tr><td class="mono">hackbench socketpair -g 20(秒)</td><td class="num">0.279</td><td class="num">0.324</td><td>Rux 领先 ~1.16×(3 轮中位;唤醒落位定向后)</td></tr>
-        <tr><td class="mono">hackbench pipe -p 20 -g 4(秒)</td><td class="num">0.017</td><td class="num">0.018</td><td>Rux 领先 ~1.06×</td></tr>
-        <tr><td class="mono">hackbench thread -T 20 -g 4(秒)</td><td class="num">0.039</td><td class="num">0.042</td><td>Rux 领先 ~1.08×</td></tr>
-        <tr><td class="mono">pi_stress / PI 链</td><td class="num">-g 2:273k–383k 反转干净退出;3 深嵌套链 1000/1000(最差顶等待 374 µs);glibc PI 互斥 3/3(提升/进程内死亡/跨进程 SIGKILL 恢复)</td><td class="num">可运行</td><td>数值优先级沿链传播(参考 rt_mutex_adjust_prio_chain 形状)+属主死亡返回 0 并在字内锁存 OWNER_DIED(参考语义;曾返回 -EOWNERDEAD 被 glibc 判致命); SleepMutex rt 模式覆盖三把 RT 相关睡眠锁,不做全树自旋锁转换(D-26)</td></tr>
+        <tr><td class="mono">cyclictest SCHED_OTHER(丢失/平均/最大 µs)</td><td class="num">平均 42</td><td class="num">平均 63</td><td class="num"><b>Rux 领先 1.5×</b></td></tr>
+        <tr><td class="mono">cyclictest SCHED_FIFO p98(最小/平均/最大 µs)</td><td class="num">最小 <b>4</b> · 平均 14–19 · 最大 <b>207</b></td><td class="num">最小 5 · 平均 11–14 · 最大 620–3151</td><td class="num">最小每轮胜;平均 1.15–1.3×(落后)</td></tr>
+        <tr><td class="mono">rt_wakesys(唤醒到运行,µs)</td><td class="num">3.3</td><td class="num">持平</td><td class="num">持平</td></tr>
+        <tr><td class="mono">hackbench socketpair -g 20(秒)</td><td class="num">0.279</td><td class="num">0.324</td><td class="num">Rux 领先 ~1.16×</td></tr>
+        <tr><td class="mono">hackbench pipe -p 20 -g 4(秒)</td><td class="num">0.017</td><td class="num">0.018</td><td class="num">Rux 领先 ~1.06×</td></tr>
+        <tr><td class="mono">hackbench thread -T 20 -g 4(秒)</td><td class="num">0.039</td><td class="num">0.042</td><td class="num">Rux 领先 ~1.08×</td></tr>
+        <tr><td class="mono">pi_stress / PI 链</td><td class="num">-g 2:273k–383k 反转干净退出;3 深链 1000/1000;glibc PI 互斥 3/3</td><td class="num">可运行</td><td class="num">两侧可运行</td></tr>
       </tbody>
     </table></div>
-    <p style="font-size:13px;color:var(--text-3)">无数据项即失败:hackbench inet ≥2 组在 Rux 无数字(回环非阻塞 connect 停滞,网络工作分支已记录在案)。hackbench 旧行的 4.7–9.6× 差距为 debug 构建时代的读数;现行数字为 release 构建同机交替测试,3 轮取中位数收尾中,收尾后行内数值随之刷新。pi_stress 两侧均可运行。本表以最新一轮双侧读数为准。</p>
+    <p style="font-size:13px;color:var(--text-3)">注:SCHED_OTHER 行领先来自 CFS 唤醒路径(抢占默认开后同机交替测试)。FIFO 行为干净轮口径:最小值每个干净轮都胜,干净轮最大值优 10×(207 vs 2185);负载轮 2.2–2.4 ms 为两侧共有的宿主负载波;平均残差=自身装填/到期/拾取/返回成本(已裁定无虚拟化共付地板),路径 104→46→14–19(硬中断到期+余量豁免+唤醒定向阶梯+装填瘦身)。rt_wakesys 在定时器到期改到硬中断顶部派发后与 Linux 持平。hackbench 为 3 轮取中位数(唤醒落位定向后)。pi_stress:3 深嵌套链最差顶等待 374 µs,glibc PI 互斥三例=提升/进程内死亡/跨进程 SIGKILL 恢复;数值优先级沿链传播(rt_mutex_adjust_prio_chain 形状),属主死亡返回 0 并在字内锁存 OWNER_DIED(曾返回 -EOWNERDEAD 被 glibc 判致命);SleepMutex rt 模式覆盖三把 RT 相关睡眠锁,不做全树自旋锁转换(D-26)。无数据项即失败:hackbench inet ≥2 组在 Rux 无数字(回环非阻塞 connect 停滞,网络工作分支已记录在案)。hackbench 旧行的 4.7–9.6× 差距为 debug 构建时代的读数;现行数字为 release 构建同机交替测试,3 轮取中位数收尾中,收尾后行内数值随之刷新。本表以最新一轮双侧读数为准。</p>
 
     <h2 id="rig"><span class="anchor">§2</span>测试平台与方法</h2>
     <ul>
