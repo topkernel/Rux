@@ -260,10 +260,12 @@ pub fn request_irq(
     match action_guard.as_mut() {
         None => {
             // First handler for this IRQ
-            *action_guard = Some(new_action);
-            if force_threaded() && flags & IRQF_NO_THREAD == 0 {
+            if force_threaded()
+                && (flags & IRQF_NO_THREAD == 0 || force_thread_even_optouts())
+            {
                 spawn_thread = true;
             }
+            *action_guard = Some(new_action);
         }
         Some(existing) => {
             // Shared IRQ: check compatibility
@@ -530,6 +532,13 @@ pub fn handle_fasteoi_irq(irq: u32) {
 static FORCE_THREADED: core::sync::atomic::AtomicU8 =
     core::sync::atomic::AtomicU8::new(0);
 
+/// Forced-threading verdict. Cache values: 1 = off, 2 = on with the
+/// IRQF_NO_THREAD opt-outs honored (the landed shape — the virtio-blk
+/// completion queue opts out; measured 2026-11-18: threading it costs
+/// 28% of 4k randwrite direct throughput, 31.8 vs 44.3 MiB/s median,
+/// because every qd1 completion pays the thread wake on its critical
+/// path), 3 = on ignoring opt-outs (`irqthread=all`, the measurement
+/// arm). Same verdict-cache discipline as syscost::on().
 pub fn force_threaded() -> bool {
     use core::sync::atomic::Ordering;
     match FORCE_THREADED.load(Ordering::Relaxed) {
@@ -537,21 +546,26 @@ pub fn force_threaded() -> bool {
             match crate::cmdline::get_cmdline() {
                 None => return false,
                 Some(_) => {
-                    let v = if crate::cmdline::get_param("irqthread").as_deref()
-                        == Some("1")
-                    {
-                        2u8
-                    } else {
-                        1u8
+                    let v = match crate::cmdline::get_param("irqthread").as_deref() {
+                        Some("1") => 2u8,
+                        Some("all") => 3u8,
+                        _ => 1u8,
                     };
                     FORCE_THREADED.store(v, Ordering::Relaxed);
-                    v == 2
+                    v >= 2
                 }
             }
         }
-        2 => true,
+        v if v >= 2 => true,
         _ => false,
     }
+}
+
+/// `irqthread=all`: thread even the IRQF_NO_THREAD opt-outs (the
+/// measurement arm for the trade — NOT the shipping shape).
+pub fn force_thread_even_optouts() -> bool {
+    force_threaded();
+    FORCE_THREADED.load(core::sync::atomic::Ordering::Relaxed) == 3
 }
 
 use crate::process::task::TaskState;
@@ -689,7 +703,7 @@ pub fn irq_threads_boot_spawn() -> usize {
                 None => (false, false, ""),
             }
         };
-        if registered && !no_thread {
+        if registered && (!no_thread || force_thread_even_optouts()) {
             let before = desc.thread_task.load(Ordering::Acquire) != 0;
             irq_thread_spawn(i as u32, name);
             if !before && desc.thread_task.load(Ordering::Acquire) != 0 {

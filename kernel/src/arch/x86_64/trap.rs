@@ -825,8 +825,13 @@ static BLK_MSIX_THREAD_WANTED: core::sync::atomic::AtomicBool =
 
 /// Spawn (idempotent) the virtio-blk MSI-X completion thread. Called by
 /// the virtio PCI probe once vector 0x81 is programmed into the MSI-X
-/// table (the registration point for this pseudo-IRQ).
+/// table (the registration point for this pseudo-IRQ). The blk queue is
+/// an IRQF_NO_THREAD-class opt-out: only `irqthread=all` threads it
+/// (measured -28% 4k randwrite at the default shape; see run/RT-R5.md).
 pub fn spawn_blk_msix_irq_thread() {
+    if !crate::interrupt::irqdesc::force_thread_even_optouts() {
+        return;
+    }
     BLK_MSIX_THREAD_WANTED.store(true, core::sync::atomic::Ordering::Release);
     BLK_MSIX_IRQ_THREAD.spawn(
         "irq/129-blk",

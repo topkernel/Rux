@@ -826,7 +826,8 @@ impl VirtIOPCI {
         crate::interrupt::request_irq(
             irq,
             super::interrupt_handler_pci,
-            crate::interrupt::irqdesc::IRQF_SHARED,
+            crate::interrupt::irqdesc::IRQF_SHARED
+                | crate::interrupt::irqdesc::IRQF_NO_THREAD,
             "virtio-blk-pci",
             self.blk_slot,
         ).ok();
@@ -859,7 +860,8 @@ impl VirtIOPCI {
         crate::interrupt::request_irq(
             intid,
             super::interrupt_handler_pci,
-            crate::interrupt::irqdesc::IRQF_SHARED,
+            crate::interrupt::irqdesc::IRQF_SHARED
+                | crate::interrupt::irqdesc::IRQF_NO_THREAD,
             "virtio-blk-pci",
             self.blk_slot,
         ).ok();
@@ -965,15 +967,15 @@ impl VirtIOPCI {
         self.pci_config.write_config_word(0x04, cmd | 0x0400);
 
         // RT-plan R5: the completion vector's dispatch registration —
-        // under forced threading, spawn the per-vector service thread
-        // here (idempotent; the first blk function to program the vector
-        // wins). A completion posting before the thread is up is not
-        // lost: wake() no-ops and the inline fallback below runs the
-        // walker this once — same registration-race shape as the
-        // irqdesc action-chain threads.
-        if crate::interrupt::irqdesc::force_threaded() {
-            crate::arch::x86_64::trap::spawn_blk_msix_irq_thread();
-        }
+        // under `irqthread=all` (the measurement arm), spawn the
+        // per-vector service thread here (idempotent; the first blk
+        // function to program the vector wins). The default irqthread=1
+        // shape opts the block queue out (IRQF_NO_THREAD class): the
+        // vector's gate finds no thread and runs the walker inline.
+        // A completion posting before the thread is up is not lost:
+        // wake() no-ops and the inline fallback runs the walker this
+        // once — same registration-race shape as the irqdesc threads.
+        crate::arch::x86_64::trap::spawn_blk_msix_irq_thread();
         true
     }
 
