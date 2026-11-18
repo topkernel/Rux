@@ -86,7 +86,7 @@
 <h2 id="data"><span class="anchor">§1</span>Geekbench 5 data (5.5.1, 9950X, KVM q35 smp4/4G, strong kernel; per-workload tables 2026-11-04, totals updated through the gb-opt round 2026-11-15)</h2>
     <div class="tbl-wrap">
       <table>
-        <thead><tr><th></th><th class="num">Rux</th><th class="num">Linux (4-CPU pin)</th><th>Verdict</th></tr></thead>
+        <thead><tr><th>Item</th><th class="num">Rux</th><th class="num">Linux (4-CPU pin)</th><th class="num">Ratio</th></tr></thead>
         <tbody>
           <tr><td><b>Multi-core total</b></td><td class="num">7709</td><td class="num">7027</td><td><span class="chip ok">110%</span></td></tr>
           <tr><td><b>Single-core total</b></td><td class="num"><b>2440</b> (best-of-runs)</td><td class="num">2165</td><td><span class="chip ok">113%</span></td></tr>
@@ -98,29 +98,29 @@
     <h3>Single-core, per workload (all 21)</h3>
     <div class="tbl-wrap">
       <table>
-        <thead><tr><th>Class</th><th>Workload</th><th class="num">Rux</th><th class="num">Linux</th><th class="num">Rux/Linux</th></tr></thead>
+        <thead><tr><th>Item</th><th class="num">Rux</th><th class="num">Linux</th><th class="num">Ratio</th></tr></thead>
         <tbody>
-          <tr><td>AES-XTS</td><td>AES-XTS</td><td class="num"><b>8140</b> (re-run)</td><td class="num">7643</td><td class="num"><span class="chip ok">106%</span></td></tr>
-          <tr><td>Integer</td><td>Text Compression</td><td class="num">1446</td><td class="num">1536</td><td class="num">94%</td></tr>
-          <tr><td>Integer</td><td>Image Compression</td><td class="num">1901</td><td class="num">1813</td><td class="num"><span class="chip ok">105%</span></td></tr>
-          <tr><td>Integer</td><td>Navigation</td><td class="num">1416</td><td class="num">1753</td><td class="num"><span class="chip bad">81%</span></td></tr>
-          <tr><td>Integer</td><td>HTML5</td><td class="num">1991</td><td class="num">1651</td><td class="num"><span class="chip ok">121%</span></td></tr>
-          <tr><td>Integer</td><td>SQLite</td><td class="num">1833</td><td class="num">1480</td><td class="num"><span class="chip ok">124%</span></td></tr>
-          <tr><td>Integer</td><td>PDF Rendering</td><td class="num">1758</td><td class="num">2074</td><td class="num"><span class="chip bad">85%</span></td></tr>
-          <tr><td>Integer</td><td>Text Rendering</td><td class="num">1771</td><td class="num">1456</td><td class="num"><span class="chip ok">122%</span></td></tr>
-          <tr><td>Integer</td><td>Clang</td><td class="num">1891</td><td class="num">2161</td><td class="num"><span class="chip bad">88%</span></td></tr>
-          <tr><td>Integer</td><td>Camera</td><td class="num">2005</td><td class="num">1861</td><td class="num"><span class="chip ok">108%</span></td></tr>
-          <tr><td>Float</td><td>N-Body Physics</td><td class="num">2227</td><td class="num">1956</td><td class="num"><span class="chip ok">114%</span></td></tr>
-          <tr><td>Float</td><td>Rigid Body Physics</td><td class="num">1885</td><td class="num">1737</td><td class="num"><span class="chip ok">109%</span></td></tr>
-          <tr><td>Float</td><td>Gaussian Blur</td><td class="num">2136</td><td class="num">2149</td><td class="num">99%</td></tr>
-          <tr><td>Float</td><td>Face Detection</td><td class="num">2401</td><td class="num">2770</td><td class="num"><span class="chip bad">87%</span></td></tr>
-          <tr><td>Float</td><td>Horizon Detection</td><td class="num">1834</td><td class="num">1459</td><td class="num"><span class="chip ok">126%</span></td></tr>
-          <tr><td>Float</td><td>Image Inpainting</td><td class="num">4100</td><td class="num">4092</td><td class="num">100%</td></tr>
-          <tr><td>Float</td><td>HDR</td><td class="num">4563</td><td class="num">3614</td><td class="num"><span class="chip ok">126%</span></td></tr>
-          <tr><td>Float</td><td>Ray Tracing</td><td class="num">2725</td><td class="num">2042</td><td class="num"><span class="chip ok">133%</span></td></tr>
-          <tr><td>Float</td><td>Structure from Motion</td><td class="num">1806</td><td class="num">1661</td><td class="num"><span class="chip ok">109%</span></td></tr>
-          <tr><td>Float</td><td>Speech Recognition</td><td class="num">1712</td><td class="num">1741</td><td class="num">98%</td></tr>
-          <tr><td>Float</td><td>Machine Learning</td><td class="num">2511</td><td class="num">2028</td><td class="num"><span class="chip ok">124%</span></td></tr>
+          <tr><td>AES-XTS</td><td class="num"><b>8140</b> (re-run)</td><td class="num">7643</td><td class="num"><span class="chip ok">106%</span></td></tr>
+          <tr><td>Integer · Text Compression</td><td class="num">1446</td><td class="num">1536</td><td class="num">94%</td></tr>
+          <tr><td>Integer · Image Compression</td><td class="num">1901</td><td class="num">1813</td><td class="num"><span class="chip ok">105%</span></td></tr>
+          <tr><td>Integer · Navigation</td><td class="num">1416</td><td class="num">1753</td><td class="num"><span class="chip bad">81%</span></td></tr>
+          <tr><td>Integer · HTML5</td><td class="num">1991</td><td class="num">1651</td><td class="num"><span class="chip ok">121%</span></td></tr>
+          <tr><td>Integer · SQLite</td><td class="num">1833</td><td class="num">1480</td><td class="num"><span class="chip ok">124%</span></td></tr>
+          <tr><td>Integer · PDF Rendering</td><td class="num">1758</td><td class="num">2074</td><td class="num"><span class="chip bad">85%</span></td></tr>
+          <tr><td>Integer · Text Rendering</td><td class="num">1771</td><td class="num">1456</td><td class="num"><span class="chip ok">122%</span></td></tr>
+          <tr><td>Integer · Clang</td><td class="num">1891</td><td class="num">2161</td><td class="num"><span class="chip bad">88%</span></td></tr>
+          <tr><td>Integer · Camera</td><td class="num">2005</td><td class="num">1861</td><td class="num"><span class="chip ok">108%</span></td></tr>
+          <tr><td>Float · N-Body Physics</td><td class="num">2227</td><td class="num">1956</td><td class="num"><span class="chip ok">114%</span></td></tr>
+          <tr><td>Float · Rigid Body Physics</td><td class="num">1885</td><td class="num">1737</td><td class="num"><span class="chip ok">109%</span></td></tr>
+          <tr><td>Float · Gaussian Blur</td><td class="num">2136</td><td class="num">2149</td><td class="num">99%</td></tr>
+          <tr><td>Float · Face Detection</td><td class="num">2401</td><td class="num">2770</td><td class="num"><span class="chip bad">87%</span></td></tr>
+          <tr><td>Float · Horizon Detection</td><td class="num">1834</td><td class="num">1459</td><td class="num"><span class="chip ok">126%</span></td></tr>
+          <tr><td>Float · Image Inpainting</td><td class="num">4100</td><td class="num">4092</td><td class="num">100%</td></tr>
+          <tr><td>Float · HDR</td><td class="num">4563</td><td class="num">3614</td><td class="num"><span class="chip ok">126%</span></td></tr>
+          <tr><td>Float · Ray Tracing</td><td class="num">2725</td><td class="num">2042</td><td class="num"><span class="chip ok">133%</span></td></tr>
+          <tr><td>Float · Structure from Motion</td><td class="num">1806</td><td class="num">1661</td><td class="num"><span class="chip ok">109%</span></td></tr>
+          <tr><td>Float · Speech Recognition</td><td class="num">1712</td><td class="num">1741</td><td class="num">98%</td></tr>
+          <tr><td>Float · Machine Learning</td><td class="num">2511</td><td class="num">2028</td><td class="num"><span class="chip ok">124%</span></td></tr>
         </tbody>
       </table>
     </div>
@@ -129,29 +129,29 @@
     <h3>Multi-core, per workload (all 21)</h3>
     <div class="tbl-wrap">
       <table>
-        <thead><tr><th>Class</th><th>Workload</th><th class="num">Rux</th><th class="num">Linux</th><th class="num">Rux/Linux</th></tr></thead>
+        <thead><tr><th>Item</th><th class="num">Rux</th><th class="num">Linux</th><th class="num">Ratio</th></tr></thead>
         <tbody>
-          <tr><td>AES-XTS</td><td>AES-XTS</td><td class="num">9331</td><td class="num">8972</td><td class="num"><span class="chip ok">104%</span></td></tr>
-          <tr><td>Integer</td><td>Text Compression</td><td class="num">5787</td><td class="num">3851</td><td class="num"><span class="chip ok">150%</span></td></tr>
-          <tr><td>Integer</td><td>Image Compression</td><td class="num">7410</td><td class="num">7481</td><td class="num">99%</td></tr>
-          <tr><td>Integer</td><td>Navigation</td><td class="num">4187</td><td class="num">3546</td><td class="num"><span class="chip ok">118%</span></td></tr>
-          <tr><td>Integer</td><td>HTML5</td><td class="num">8087</td><td class="num">7151</td><td class="num"><span class="chip ok">113%</span></td></tr>
-          <tr><td>Integer</td><td>SQLite</td><td class="num">7069</td><td class="num">6829</td><td class="num"><span class="chip ok">104%</span></td></tr>
-          <tr><td>Integer</td><td>PDF Rendering</td><td class="num">6566</td><td class="num">7632</td><td class="num"><span class="chip bad">86%</span></td></tr>
-          <tr><td>Integer</td><td>Text Rendering</td><td class="num">5794</td><td class="num">5924</td><td class="num">98%</td></tr>
-          <tr><td>Integer</td><td>Clang</td><td class="num">7359</td><td class="num">7823</td><td class="num"><span class="chip bad">94%</span></td></tr>
-          <tr><td>Integer</td><td>Camera</td><td class="num">7191</td><td class="num">7477</td><td class="num"><span class="chip bad">96%</span></td></tr>
-          <tr><td>Float</td><td>N-Body Physics</td><td class="num">7174</td><td class="num">7501</td><td class="num"><span class="chip bad">96%</span></td></tr>
-          <tr><td>Float</td><td>Rigid Body Physics</td><td class="num">7463</td><td class="num">7589</td><td class="num">98%</td></tr>
-          <tr><td>Float</td><td>Gaussian Blur</td><td class="num">7682</td><td class="num">7694</td><td class="num">100%</td></tr>
-          <tr><td>Float</td><td>Face Detection</td><td class="num">9949</td><td class="num">10296</td><td class="num"><span class="chip bad">97%</span></td></tr>
-          <tr><td>Float</td><td>Horizon Detection</td><td class="num">7111</td><td class="num">7616</td><td class="num"><span class="chip bad">93%</span></td></tr>
-          <tr><td>Float</td><td>Image Inpainting</td><td class="num">14838</td><td class="num">12349</td><td class="num"><span class="chip ok">120%</span></td></tr>
-          <tr><td>Float</td><td>HDR</td><td class="num">17872</td><td class="num">18962</td><td class="num"><span class="chip bad">94%</span></td></tr>
-          <tr><td>Float</td><td>Ray Tracing</td><td class="num">13374</td><td class="num">11370</td><td class="num"><span class="chip ok">118%</span></td></tr>
-          <tr><td>Float</td><td>Structure from Motion</td><td class="num">7155</td><td class="num">7486</td><td class="num"><span class="chip bad">96%</span></td></tr>
-          <tr><td>Float</td><td>Speech Recognition</td><td class="num">5939</td><td class="num">4537</td><td class="num"><span class="chip ok">131%</span></td></tr>
-          <tr><td>Float</td><td>Machine Learning</td><td class="num">5641</td><td class="num">5635</td><td class="num">100%</td></tr>
+          <tr><td>AES-XTS</td><td class="num">9331</td><td class="num">8972</td><td class="num"><span class="chip ok">104%</span></td></tr>
+          <tr><td>Integer · Text Compression</td><td class="num">5787</td><td class="num">3851</td><td class="num"><span class="chip ok">150%</span></td></tr>
+          <tr><td>Integer · Image Compression</td><td class="num">7410</td><td class="num">7481</td><td class="num">99%</td></tr>
+          <tr><td>Integer · Navigation</td><td class="num">4187</td><td class="num">3546</td><td class="num"><span class="chip ok">118%</span></td></tr>
+          <tr><td>Integer · HTML5</td><td class="num">8087</td><td class="num">7151</td><td class="num"><span class="chip ok">113%</span></td></tr>
+          <tr><td>Integer · SQLite</td><td class="num">7069</td><td class="num">6829</td><td class="num"><span class="chip ok">104%</span></td></tr>
+          <tr><td>Integer · PDF Rendering</td><td class="num">6566</td><td class="num">7632</td><td class="num"><span class="chip bad">86%</span></td></tr>
+          <tr><td>Integer · Text Rendering</td><td class="num">5794</td><td class="num">5924</td><td class="num">98%</td></tr>
+          <tr><td>Integer · Clang</td><td class="num">7359</td><td class="num">7823</td><td class="num"><span class="chip bad">94%</span></td></tr>
+          <tr><td>Integer · Camera</td><td class="num">7191</td><td class="num">7477</td><td class="num"><span class="chip bad">96%</span></td></tr>
+          <tr><td>Float · N-Body Physics</td><td class="num">7174</td><td class="num">7501</td><td class="num"><span class="chip bad">96%</span></td></tr>
+          <tr><td>Float · Rigid Body Physics</td><td class="num">7463</td><td class="num">7589</td><td class="num">98%</td></tr>
+          <tr><td>Float · Gaussian Blur</td><td class="num">7682</td><td class="num">7694</td><td class="num">100%</td></tr>
+          <tr><td>Float · Face Detection</td><td class="num">9949</td><td class="num">10296</td><td class="num"><span class="chip bad">97%</span></td></tr>
+          <tr><td>Float · Horizon Detection</td><td class="num">7111</td><td class="num">7616</td><td class="num"><span class="chip bad">93%</span></td></tr>
+          <tr><td>Float · Image Inpainting</td><td class="num">14838</td><td class="num">12349</td><td class="num"><span class="chip ok">120%</span></td></tr>
+          <tr><td>Float · HDR</td><td class="num">17872</td><td class="num">18962</td><td class="num"><span class="chip bad">94%</span></td></tr>
+          <tr><td>Float · Ray Tracing</td><td class="num">13374</td><td class="num">11370</td><td class="num"><span class="chip ok">118%</span></td></tr>
+          <tr><td>Float · Structure from Motion</td><td class="num">7155</td><td class="num">7486</td><td class="num"><span class="chip bad">96%</span></td></tr>
+          <tr><td>Float · Speech Recognition</td><td class="num">5939</td><td class="num">4537</td><td class="num"><span class="chip ok">131%</span></td></tr>
+          <tr><td>Float · Machine Learning</td><td class="num">5641</td><td class="num">5635</td><td class="num">100%</td></tr>
         </tbody>
       </table>
     </div>

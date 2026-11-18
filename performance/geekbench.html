@@ -86,7 +86,7 @@
 <h2 id="data"><span class="anchor">§1</span>数据(总分 + 21 项逐负载;逐项表 = 最近一次完整逐项捕获)</h2>
     <div class="tbl-wrap">
       <table>
-        <thead><tr><th></th><th class="num">Rux</th><th class="num">Linux(4-CPU 钉核)</th><th>结论</th></tr></thead>
+        <thead><tr><th>项</th><th class="num">Rux</th><th class="num">Linux(4-CPU 钉核)</th><th class="num">比值</th></tr></thead>
         <tbody>
           <tr><td><b>多核总分</b></td><td class="num">7709</td><td class="num">7027</td><td><span class="chip ok">110%</span></td></tr>
           <tr><td><b>单核总分</b></td><td class="num"><b>2440</b>(best-of-runs)</td><td class="num">2165</td><td><span class="chip ok">113%</span></td></tr>
@@ -98,29 +98,29 @@
     <h3>单核逐项(21 项全)</h3>
     <div class="tbl-wrap">
       <table>
-        <thead><tr><th>类</th><th>工作负载</th><th class="num">Rux</th><th class="num">Linux</th><th class="num">Rux/Linux</th></tr></thead>
+        <thead><tr><th>项</th><th class="num">Rux</th><th class="num">Linux</th><th class="num">比值</th></tr></thead>
         <tbody>
-          <tr><td>AES-XTS</td><td>AES-XTS</td><td class="num"><b>8140</b>(复测)</td><td class="num">7643</td><td class="num"><span class="chip ok">106%</span></td></tr>
-          <tr><td>整数</td><td>文本压缩</td><td class="num">1446</td><td class="num">1536</td><td class="num">94%</td></tr>
-          <tr><td>整数</td><td>图像压缩</td><td class="num">1901</td><td class="num">1813</td><td class="num"><span class="chip ok">105%</span></td></tr>
-          <tr><td>整数</td><td>导航</td><td class="num">1416</td><td class="num">1753</td><td class="num"><span class="chip bad">81%</span></td></tr>
-          <tr><td>整数</td><td>HTML5</td><td class="num">1991</td><td class="num">1651</td><td class="num"><span class="chip ok">121%</span></td></tr>
-          <tr><td>整数</td><td>SQLite</td><td class="num">1833</td><td class="num">1480</td><td class="num"><span class="chip ok">124%</span></td></tr>
-          <tr><td>整数</td><td>PDF 渲染</td><td class="num">1758</td><td class="num">2074</td><td class="num"><span class="chip bad">85%</span></td></tr>
-          <tr><td>整数</td><td>文本渲染</td><td class="num">1771</td><td class="num">1456</td><td class="num"><span class="chip ok">122%</span></td></tr>
-          <tr><td>整数</td><td>Clang</td><td class="num">1891</td><td class="num">2161</td><td class="num"><span class="chip bad">88%</span></td></tr>
-          <tr><td>整数</td><td>相机</td><td class="num">2005</td><td class="num">1861</td><td class="num"><span class="chip ok">108%</span></td></tr>
-          <tr><td>浮点</td><td>N 体物理</td><td class="num">2227</td><td class="num">1956</td><td class="num"><span class="chip ok">114%</span></td></tr>
-          <tr><td>浮点</td><td>刚体物理</td><td class="num">1885</td><td class="num">1737</td><td class="num"><span class="chip ok">109%</span></td></tr>
-          <tr><td>浮点</td><td>高斯模糊</td><td class="num">2136</td><td class="num">2149</td><td class="num">99%</td></tr>
-          <tr><td>浮点</td><td>人脸检测</td><td class="num">2401</td><td class="num">2770</td><td class="num"><span class="chip bad">87%</span></td></tr>
-          <tr><td>浮点</td><td>地平线检测</td><td class="num">1834</td><td class="num">1459</td><td class="num"><span class="chip ok">126%</span></td></tr>
-          <tr><td>浮点</td><td>图像修补</td><td class="num">4100</td><td class="num">4092</td><td class="num">100%</td></tr>
-          <tr><td>浮点</td><td>HDR</td><td class="num">4563</td><td class="num">3614</td><td class="num"><span class="chip ok">126%</span></td></tr>
-          <tr><td>浮点</td><td>光线追踪</td><td class="num">2725</td><td class="num">2042</td><td class="num"><span class="chip ok">133%</span></td></tr>
-          <tr><td>浮点</td><td>运动恢复结构</td><td class="num">1806</td><td class="num">1661</td><td class="num"><span class="chip ok">109%</span></td></tr>
-          <tr><td>浮点</td><td>语音识别</td><td class="num">1712</td><td class="num">1741</td><td class="num">98%</td></tr>
-          <tr><td>浮点</td><td>机器学习</td><td class="num">2511</td><td class="num">2028</td><td class="num"><span class="chip ok">124%</span></td></tr>
+          <tr><td>AES-XTS</td><td class="num"><b>8140</b>(复测)</td><td class="num">7643</td><td class="num"><span class="chip ok">106%</span></td></tr>
+          <tr><td>整数 · 文本压缩</td><td class="num">1446</td><td class="num">1536</td><td class="num">94%</td></tr>
+          <tr><td>整数 · 图像压缩</td><td class="num">1901</td><td class="num">1813</td><td class="num"><span class="chip ok">105%</span></td></tr>
+          <tr><td>整数 · 导航</td><td class="num">1416</td><td class="num">1753</td><td class="num"><span class="chip bad">81%</span></td></tr>
+          <tr><td>整数 · HTML5</td><td class="num">1991</td><td class="num">1651</td><td class="num"><span class="chip ok">121%</span></td></tr>
+          <tr><td>整数 · SQLite</td><td class="num">1833</td><td class="num">1480</td><td class="num"><span class="chip ok">124%</span></td></tr>
+          <tr><td>整数 · PDF 渲染</td><td class="num">1758</td><td class="num">2074</td><td class="num"><span class="chip bad">85%</span></td></tr>
+          <tr><td>整数 · 文本渲染</td><td class="num">1771</td><td class="num">1456</td><td class="num"><span class="chip ok">122%</span></td></tr>
+          <tr><td>整数 · Clang</td><td class="num">1891</td><td class="num">2161</td><td class="num"><span class="chip bad">88%</span></td></tr>
+          <tr><td>整数 · 相机</td><td class="num">2005</td><td class="num">1861</td><td class="num"><span class="chip ok">108%</span></td></tr>
+          <tr><td>浮点 · N 体物理</td><td class="num">2227</td><td class="num">1956</td><td class="num"><span class="chip ok">114%</span></td></tr>
+          <tr><td>浮点 · 刚体物理</td><td class="num">1885</td><td class="num">1737</td><td class="num"><span class="chip ok">109%</span></td></tr>
+          <tr><td>浮点 · 高斯模糊</td><td class="num">2136</td><td class="num">2149</td><td class="num">99%</td></tr>
+          <tr><td>浮点 · 人脸检测</td><td class="num">2401</td><td class="num">2770</td><td class="num"><span class="chip bad">87%</span></td></tr>
+          <tr><td>浮点 · 地平线检测</td><td class="num">1834</td><td class="num">1459</td><td class="num"><span class="chip ok">126%</span></td></tr>
+          <tr><td>浮点 · 图像修补</td><td class="num">4100</td><td class="num">4092</td><td class="num">100%</td></tr>
+          <tr><td>浮点 · HDR</td><td class="num">4563</td><td class="num">3614</td><td class="num"><span class="chip ok">126%</span></td></tr>
+          <tr><td>浮点 · 光线追踪</td><td class="num">2725</td><td class="num">2042</td><td class="num"><span class="chip ok">133%</span></td></tr>
+          <tr><td>浮点 · 运动恢复结构</td><td class="num">1806</td><td class="num">1661</td><td class="num"><span class="chip ok">109%</span></td></tr>
+          <tr><td>浮点 · 语音识别</td><td class="num">1712</td><td class="num">1741</td><td class="num">98%</td></tr>
+          <tr><td>浮点 · 机器学习</td><td class="num">2511</td><td class="num">2028</td><td class="num"><span class="chip ok">124%</span></td></tr>
         </tbody>
       </table>
     </div>
@@ -130,29 +130,29 @@
     <h3>多核逐项(21 项全)</h3>
     <div class="tbl-wrap">
       <table>
-        <thead><tr><th>类</th><th>工作负载</th><th class="num">Rux</th><th class="num">Linux</th><th class="num">Rux/Linux</th></tr></thead>
+        <thead><tr><th>项</th><th class="num">Rux</th><th class="num">Linux</th><th class="num">比值</th></tr></thead>
         <tbody>
-          <tr><td>AES-XTS</td><td>AES-XTS</td><td class="num">9331</td><td class="num">8972</td><td class="num"><span class="chip ok">104%</span></td></tr>
-          <tr><td>整数</td><td>文本压缩</td><td class="num">5787</td><td class="num">3851</td><td class="num"><span class="chip ok">150%</span></td></tr>
-          <tr><td>整数</td><td>图像压缩</td><td class="num">7410</td><td class="num">7481</td><td class="num">99%</td></tr>
-          <tr><td>整数</td><td>导航</td><td class="num">4187</td><td class="num">3546</td><td class="num"><span class="chip ok">118%</span></td></tr>
-          <tr><td>整数</td><td>HTML5</td><td class="num">8087</td><td class="num">7151</td><td class="num"><span class="chip ok">113%</span></td></tr>
-          <tr><td>整数</td><td>SQLite</td><td class="num">7069</td><td class="num">6829</td><td class="num"><span class="chip ok">104%</span></td></tr>
-          <tr><td>整数</td><td>PDF 渲染</td><td class="num">6566</td><td class="num">7632</td><td class="num"><span class="chip bad">86%</span></td></tr>
-          <tr><td>整数</td><td>文本渲染</td><td class="num">5794</td><td class="num">5924</td><td class="num">98%</td></tr>
-          <tr><td>整数</td><td>Clang</td><td class="num">7359</td><td class="num">7823</td><td class="num"><span class="chip bad">94%</span></td></tr>
-          <tr><td>整数</td><td>相机</td><td class="num">7191</td><td class="num">7477</td><td class="num"><span class="chip bad">96%</span></td></tr>
-          <tr><td>浮点</td><td>N 体物理</td><td class="num">7174</td><td class="num">7501</td><td class="num"><span class="chip bad">96%</span></td></tr>
-          <tr><td>浮点</td><td>刚体物理</td><td class="num">7463</td><td class="num">7589</td><td class="num">98%</td></tr>
-          <tr><td>浮点</td><td>高斯模糊</td><td class="num">7682</td><td class="num">7694</td><td class="num">100%</td></tr>
-          <tr><td>浮点</td><td>人脸检测</td><td class="num">9949</td><td class="num">10296</td><td class="num"><span class="chip bad">97%</span></td></tr>
-          <tr><td>浮点</td><td>地平线检测</td><td class="num">7111</td><td class="num">7616</td><td class="num"><span class="chip bad">93%</span></td></tr>
-          <tr><td>浮点</td><td>图像修补</td><td class="num">14838</td><td class="num">12349</td><td class="num"><span class="chip ok">120%</span></td></tr>
-          <tr><td>浮点</td><td>HDR</td><td class="num">17872</td><td class="num">18962</td><td class="num"><span class="chip bad">94%</span></td></tr>
-          <tr><td>浮点</td><td>光线追踪</td><td class="num">13374</td><td class="num">11370</td><td class="num"><span class="chip ok">118%</span></td></tr>
-          <tr><td>浮点</td><td>运动恢复结构</td><td class="num">7155</td><td class="num">7486</td><td class="num"><span class="chip bad">96%</span></td></tr>
-          <tr><td>浮点</td><td>语音识别</td><td class="num">5939</td><td class="num">4537</td><td class="num"><span class="chip ok">131%</span></td></tr>
-          <tr><td>浮点</td><td>机器学习</td><td class="num">5641</td><td class="num">5635</td><td class="num">100%</td></tr>
+          <tr><td>AES-XTS</td><td class="num">9331</td><td class="num">8972</td><td class="num"><span class="chip ok">104%</span></td></tr>
+          <tr><td>整数 · 文本压缩</td><td class="num">5787</td><td class="num">3851</td><td class="num"><span class="chip ok">150%</span></td></tr>
+          <tr><td>整数 · 图像压缩</td><td class="num">7410</td><td class="num">7481</td><td class="num">99%</td></tr>
+          <tr><td>整数 · 导航</td><td class="num">4187</td><td class="num">3546</td><td class="num"><span class="chip ok">118%</span></td></tr>
+          <tr><td>整数 · HTML5</td><td class="num">8087</td><td class="num">7151</td><td class="num"><span class="chip ok">113%</span></td></tr>
+          <tr><td>整数 · SQLite</td><td class="num">7069</td><td class="num">6829</td><td class="num"><span class="chip ok">104%</span></td></tr>
+          <tr><td>整数 · PDF 渲染</td><td class="num">6566</td><td class="num">7632</td><td class="num"><span class="chip bad">86%</span></td></tr>
+          <tr><td>整数 · 文本渲染</td><td class="num">5794</td><td class="num">5924</td><td class="num">98%</td></tr>
+          <tr><td>整数 · Clang</td><td class="num">7359</td><td class="num">7823</td><td class="num"><span class="chip bad">94%</span></td></tr>
+          <tr><td>整数 · 相机</td><td class="num">7191</td><td class="num">7477</td><td class="num"><span class="chip bad">96%</span></td></tr>
+          <tr><td>浮点 · N 体物理</td><td class="num">7174</td><td class="num">7501</td><td class="num"><span class="chip bad">96%</span></td></tr>
+          <tr><td>浮点 · 刚体物理</td><td class="num">7463</td><td class="num">7589</td><td class="num">98%</td></tr>
+          <tr><td>浮点 · 高斯模糊</td><td class="num">7682</td><td class="num">7694</td><td class="num">100%</td></tr>
+          <tr><td>浮点 · 人脸检测</td><td class="num">9949</td><td class="num">10296</td><td class="num"><span class="chip bad">97%</span></td></tr>
+          <tr><td>浮点 · 地平线检测</td><td class="num">7111</td><td class="num">7616</td><td class="num"><span class="chip bad">93%</span></td></tr>
+          <tr><td>浮点 · 图像修补</td><td class="num">14838</td><td class="num">12349</td><td class="num"><span class="chip ok">120%</span></td></tr>
+          <tr><td>浮点 · HDR</td><td class="num">17872</td><td class="num">18962</td><td class="num"><span class="chip bad">94%</span></td></tr>
+          <tr><td>浮点 · 光线追踪</td><td class="num">13374</td><td class="num">11370</td><td class="num"><span class="chip ok">118%</span></td></tr>
+          <tr><td>浮点 · 运动恢复结构</td><td class="num">7155</td><td class="num">7486</td><td class="num"><span class="chip bad">96%</span></td></tr>
+          <tr><td>浮点 · 语音识别</td><td class="num">5939</td><td class="num">4537</td><td class="num"><span class="chip ok">131%</span></td></tr>
+          <tr><td>浮点 · 机器学习</td><td class="num">5641</td><td class="num">5635</td><td class="num">100%</td></tr>
         </tbody>
       </table>
     </div>
