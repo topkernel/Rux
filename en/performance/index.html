@@ -129,19 +129,20 @@
       <table>
         <thead><tr><th>Tier</th><th>Applies to</th><th>Requirement</th></tr></thead>
         <tbody>
-          <tr><td><b>Tier 1</b></td><td>All kernel changes</td><td>One quiet syscost boot: census within the allowed band, ticks ≥99.5/s, zero new panic/OOM classes, syscall volume ±10%, key per-op averages ±20% or better</td></tr>
+          <tr><td><b>Tier 1</b></td><td>All kernel changes</td><td>One quiet syscost boot: census in band, ticks ≥99.5/s, zero new panic/OOM classes, syscall volume ±10%, per-op averages ±20% or better</td></tr>
           <tr><td><b>Tier 2</b></td><td>Hot paths: mm/ sched/ fs/ ipc/ binder/ timer/ arch trap</td><td>Plus one pbench boot: P1–P7 medians within ±20% or better</td></tr>
           <tr><td><b>Tier 3</b></td><td>Allocator or IRQ paths</td><td>Plus an IF=0 measurement (EFLAGS-pair probe if0 v3, official — no proxy)</td></tr>
         </tbody>
       </table>
     </div>
+    <p style="font-size:13px;color:var(--text-3)">Notes: census = boot-time scheduling-event counters; per-op averages = read/write/clock_gettime/nanosleep; the current Tier 1 bands are itemized on the <a href="microbench.html">internal-microbenchmarks page</a>.</p>
     <h3>Six guarded domains</h3>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>Domain</th><th>Guarded metric (current band)</th></tr></thead>
         <tbody>
           <tr><td>Memory allocation / reclaim</td><td>small_alloc global class-lock sections ≤25M/boot (measured 19.7M, latest board 6.0M), REST share ≤10% (now 0.1–1.2%), no reclaim slow-path emergence on standard boots</td></tr>
-          <tr><td>Scheduler</td><td>GRQ in-lock 241–273 ns (release, exact probe; tree work ~20–30 ns + D-1 bookkeeping); the 70–84 ns lock wait is the KVM cross-vCPU locked-instruction tax (Linux's per-rq lock pays it too). Gate metric (call-site IF=0 span average, incl. acquisition wait) band 1200–7320 ns (measured 2786 ns @ n=6.3M), census TERM 8±2 / REFUSED 32±4, P2 ±20%, futex wake→run quiet 7.5 µs ±20%</td></tr>
+          <tr><td>Scheduler</td><td>GRQ in-lock 241–273 ns (release probe), IF=0 span avg 1200–7320 ns (measured 2786), census TERM 8±2 / REFUSED 32±4, P2 ±20%, futex wake→run 7.5 µs ±20%</td></tr>
           <tr><td>Filesystem hot paths</td><td>P6 rows ±20% (stat 71 / openclose 156 / append 77 / mkdrmdir 2760 / unlink 808 / write_fsync 14200 µs), buffer-cache hit rate 99.1% ≥ baseline, no new sync-write classes</td></tr>
           <tr><td>Interrupts / IRQ paths</td><td>IF=0 share 20.4%±3pp, longest closed cli segment ≤10 ms (now 6–9 ms), SOFTIRQ share 3.1±2pp, no new IRQ-OFF print classes</td></tr>
           <tr><td>IPC</td><td>p5 family ±20% (p5a 18.3 / p5b 23–41 / stream 24–27 µs), unix writev/truesize 24 µs class not regressed</td></tr>
@@ -149,6 +150,7 @@
         </tbody>
       </table>
     </div>
+    <p style="font-size:13px;color:var(--text-3)">Notes: the scheduler domain's in-lock figure is the exact-probe basis (tree work ~20–30 ns + D-1 bookkeeping); the 70–84 ns lock wait is the KVM cross-vCPU locked-instruction tax (Linux's per-rq lock pays it too); the IF=0 span average is the call-site basis including acquisition wait (n=6.3M); futex wake→run is the quiet-load basis.</p>
     <div class="callout"><b>Principle:</b> every subsystem that can affect performance must be under gate measurement — if no existing tool measures it, add a debug observability tool (gated off by default). Measurement is part of the change, not an afterthought.</div>
 
     <h2 id="campaigns"><span class="anchor">§5</span>Landed performance work (same-rig A/B measured)</h2>
@@ -160,7 +162,7 @@
           <tr><td>Context switch</td><td>FSGSBASE (393 ns/switch) + lazy FPU (xsaveopt moved into #NM) + CPUID-gated PCID</td><td>lat_ctx 4.97→<b>2.07 µs (−58%)</b></td></tr>
           <tr><td>Measured-wait wakeup preemption gate (D-14)</td><td>Poke a busy CPU only when the wakee's measured wait ≥6 ms, replacing vruntime-credit comparison</td><td>74-byte unix-stream wake/preempt/switch round trip ~275→~2.5 µs; p5 family <b>10–18×</b></td></tr>
           <tr><td>fs metadata re-anchor</td><td>D-8 direct-write jbd2 + D-12 read-window batch fill + D-13 batched publication / discard-on-free</td><td>stat −65% / openclose −70% / append −88% / mkdrmdir −88%; p6_mkdrmdir median 29,796→<b>2,107 µs</b></td></tr>
-          <tr><td>Filesystem flush (fs-flush + virtio-async)</td><td>run-batched flush + batched async span writes (CHUNK=64, absent-durable skip); the fsx revive-in-place fix</td><td>128 MB mtest06 shape (x86_64 KVM): fsync <b>11.55→6.18→3.04 s</b> (~3.8× cumulative vs pre-campaign), msync <b>13.95→3.31 s</b> (4.2×), sync <b>11.30→3.31 s</b>; mmap2 TIMEOUT→PASS, fsx -N10000 PASS, pbench fs within the allowed band</td></tr>
+          <tr><td>Filesystem flush (fs-flush + virtio-async)</td><td>run-batched flush + batched async span writes (CHUNK=64, absent-durable skip); the fsx revive-in-place fix</td><td>fsync <b>11.55→6.18→3.04 s</b>, msync <b>13.95→3.31 s</b> (4.2×), sync <b>11.30→3.31 s</b></td></tr>
           <tr><td>vm-op family</td><td>leaf-table direct unmap (allocation-free per-page walker)</td><td>mmap 72→27–32 µs, munmap 177→52 µs; OH workload <b>15→5 s/CPU-min</b></td></tr>
           <tr><td>Anon reclaim (SP-7)</td><td>reclaim check-path rework</td><td>check rate <b>35%→82–89%</b>, swap writes +75%</td></tr>
           <tr><td>Typed timer wheel (D-19)</td><td>clock-domain typing + scope guards</td><td>arm lock 924→697 ns; nanosleep 772.6→<b>662.7 ms</b>; p2_ctxsw 12.198 vs 15.400 µs</td></tr>
@@ -169,13 +171,14 @@
           <tr><td>GRQ hold</td><td>0.7 ms granularity pins churn + slimmer pick path (segment-measured)</td><td>in-lock <b>241–273 ns</b> (378 before); lock wait 70–84 ns = the KVM cross-vCPU locked-instruction tax</td></tr>
           <tr><td>unix bandwidth</td><td>unix staging eliminated</td><td>bw_unix 2.6→<b>42.9 GB/s</b></td></tr>
           <tr><td>Page-fault path (campaign r6)</td><td>backward-fault window + contiguous put_range + PCACHE_RO alias protocol + batched pin release + single TLB flush per munmap</td><td>lat_pagefault 0.468→<b>0.029–0.031 µs (16.1× total)</b>, now 2.26–2.45× ahead of Linux</td></tr>
-          <tr><td>Hook-call tax &amp; path_memo (campaign r5/r7)</td><td>1,331 cli/sti outlined calls inlined + path_memo/lease gates (per-inode open_count replaced the global BTreeMap lock; reader-side seqlock lock-free)</td><td>null −7% / read −5% / write −6% / ctxsw −6.1% / pipe −12%; open −15.2% cumulative, stat −4.6%, read flipped ahead</td></tr>
-          <tr><td>Word-at-a-time memo hash + capability-only DAC fast path (r10)</td><td>word-at-a-time hashing; DAC checks take the capability bit only</td><td>open −5.2%, stat −10%; the File-pool hypothesis refuted by PC3 phase anatomy (fil=19/ins=24 ns)</td></tr>
+          <tr><td>Hook-call tax &amp; path_memo (campaign r5/r7)</td><td>1,331 cli/sti outlined calls inlined + path_memo/lease gates</td><td>null −7% / read −5% / write −6% / ctxsw −6.1% / pipe −12%; open −15.2% cumulative, stat −4.6%, read flipped ahead</td></tr>
+          <tr><td>Word-at-a-time memo hash + capability-only DAC fast path (r10)</td><td>word-at-a-time hashing; DAC checks take the capability bit only</td><td>open −5.2%, stat −10%</td></tr>
           <tr><td>fd-table bitmap sweeps (r11)</td><td>fork copy and exit drop as bitmap scans; a ptrace tracee-count gate</td><td>fork copy 910→574 ns, exit drop 4491→825 ns, premm 4635→757 ns; exit body 17.9→7.3 µs; exec three-state anchored at parity</td></tr>
-          <tr><td>Fork bistability root cause (r12–14)</td><td>freeze-forensics chain: a UART print storm (batched) → a stale-rsp0-at-free UAF (fixed, six-leg gated)</td><td>hangs 3/6→1/6; fork into the 1.02–1.05× parity band; the call_rcu contract and a wake-monitor inversion fixed alongside</td></tr>
+          <tr><td>Fork bistability root cause (r12–14)</td><td>freeze-forensics chain: a batched UART print storm → the stale-rsp0-at-free UAF fixed</td><td>hangs 3/6→1/6; fork into the 1.02–1.05× parity band; the call_rcu contract and a wake-monitor inversion fixed alongside</td></tr>
         </tbody>
       </table>
     </div>
+    <p style="font-size:13px;color:var(--text-3)">Notes: the flush-row figures are the 128 MB mtest06 shape (x86_64 KVM), fsync ~3.8× cumulative vs pre-campaign; mmap2 TIMEOUT→PASS, fsx -N10000 PASS, pbench fs within the allowed band. The path_memo/lease gates = per-inode open_count replacing the global BTreeMap lock, reader-side seqlock lock-free. The File-pool hypothesis was refuted by PC3 phase anatomy (fil=19/ins=24 ns). The stale-rsp0 UAF fix is six-leg gated.</p>
 
     <h2 id="queue"><span class="anchor">§6</span>Optimization queue (open gaps, priority order)</h2>
     <ul>
