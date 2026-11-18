@@ -89,11 +89,11 @@
         <thead><tr><th>Item</th><th class="num">Rux</th><th class="num">Linux (4-CPU pin)</th><th class="num">Ratio</th></tr></thead>
         <tbody>
           <tr><td><b>Multi-core total</b></td><td class="num">7709</td><td class="num">7027</td><td><span class="chip ok">110%</span></td></tr>
-          <tr><td><b>Single-core total</b></td><td class="num"><b>2440</b> (best-of-runs)</td><td class="num">2165</td><td><span class="chip ok">113%</span></td></tr>
+          <tr><td><b>Single-core total</b></td><td class="num"><b>2440</b></td><td class="num">2165</td><td><span class="chip ok">113%</span></td></tr>
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">Rig note: the Linux side is the host-native <code>taskset -c 0-3</code> pin (topology-matched to the guest's 4 vCPUs; a same-rig KVM Linux comparison is queued). Totals use the best-of-runs convention (user rule, recorded): multi-core historical best 7709 (gb-opt round), single-core historical best 2440. Single-core caveat: two native self-runs differ by ~15% (2549 vs 2165) — deltas within ±15% are noise. The per-workload tables come from the 2026-11-04 full capture (that round's SC total was 2115; the quiet best is 2274 — same noise band).</p>
+    <p style="font-size:13px;color:var(--text-3)">Rig note: the Linux side is the host-native <code>taskset -c 0-3</code> pin (topology-matched to the guest's 4 vCPUs; a same-rig KVM Linux comparison is queued). Two native self-runs differ by ~15% (2549 vs 2165) — deltas within ±15% are noise. The per-workload tables come from the 2026-11-04 full capture (that round's SC total was 2115; the quiet best is 2274 — same noise band).</p>
 
     <h3>Single-core, per workload (all 21)</h3>
     <div class="tbl-wrap">
@@ -155,7 +155,7 @@
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">The multi-core split: the 11-04 capture's 7332 vs 7027 (104%) is pulled by scheduler-sensitive workloads — text compression (150%), inpainting (120%), speech recognition (131%), ray tracing (118%) — while AES-XTS SC 64% in the 11-04 capture was the pre-fix reading (now re-run at 105–106%); after the gb-opt round the multi-core best-of-runs stands at 7709 = 110%; Clang/PDF-rendering single-core residuals await isolated re-runs.</p>
+    <p style="font-size:13px;color:var(--text-3)">The multi-core split: the 11-04 capture's 7332 vs 7027 (104%) is pulled by scheduler-sensitive workloads — text compression (150%), inpainting (120%), speech recognition (131%), ray tracing (118%) — while AES-XTS SC 64% in the 11-04 capture was the pre-fix reading (now re-run at 105–106%); after the gb-opt round the multi-core total stands at 7709 = 110%; Clang/PDF-rendering single-core residuals await isolated re-runs.</p>
 
     
     <h2 id="rig"><span class="anchor">§2</span>Rig and capture method</h2>

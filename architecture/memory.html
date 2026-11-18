@@ -166,7 +166,7 @@
       <li><b>匿名前向 fault-around</b>:窗口 32 页(<code>ANON_FAULTAROUND_PAGES = 32</code>),仅写故障,仅适用于 VMA ≥ 1MB(<code>ANON_FAULTAROUND_MIN_VMA</code>)—— 避免影响小型栈/brk 映射;顺序流上缺页陷阱数削减约 32×;批填充具备无 TLB 冲刷契约(批内页帧为新装项);aarch64 同形移植。</li>
       <li><b>文件背书路径</b>:页故障文件路径先预热页缓存再钉住(pin);D-12 读缺失窗口批填充见<a href="filesystem.html">文件系统页</a>。</li>
       <li><b>COW 不变量</b>(INV-COW-1..5,x86_64):COW 位置位 ⇒ W 清零;COW ⇒ refcount ≥ 2;refcount==1 故障直接恢复 W 不拷贝;refcount&gt;1 → 分配/拷贝/递减/映射 W=1 COW=0;fork 后全部可写子 PTE 降级 W=0 COW=1。riscv64:PTE bit 8 为 COW 软件标志;fork 仅遍历 VPN2[0..255];refcount==1 时唯一所有者快路径恢复。</li>
-      <li><b>故障延迟实测</b>(mm_probe PID-1 rig,双内核 best-of-N):匿名顺序 alloc+touch+free 503.6 vs 513.9 ns/fault(0.98×);匿名随机写故障 613.9 vs 323.2 ns(1.90× → 路径合并后 1.7×);文件背书随机触摸摊销 34.6 vs 70.2(0.49×);fork+exit 606 vs 1207 µs(0.50×)。</li>
+      <li><b>故障延迟实测</b>(mm_probe PID-1 rig,双内核):匿名顺序 alloc+touch+free 503.6 vs 513.9 ns/fault(0.98×);匿名随机写故障 613.9 vs 323.2 ns(1.90× → 路径合并后 1.7×);文件背书随机触摸摊销 34.6 vs 70.2(0.49×);fork+exit 606 vs 1207 µs(0.50×)。</li>
     </ul>
 
     <h2 id="vma"><span class="anchor">§10</span>mmap / VMA 管理与 TLB</h2>

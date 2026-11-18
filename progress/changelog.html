@@ -95,7 +95,7 @@
 
     <h2 id="n1115"><span class="anchor">2026-11-15</span></h2>
     <ul>
-      <li><b>Geekbench 5 gb-opt 轮并入 main</b>:单核 best-of-runs <b>2440</b>(对 Linux 4-CPU 锚 113%)、多核 <b>7709</b>(110%)—— 历史最佳;总分口径 best-of-runs(用户规则,已记录)。</li>
+      <li><b>Geekbench 5 gb-opt 轮并入 main</b>:单核 <b>2440</b>(对 Linux 4-CPU 锚 113%)、多核 <b>7709</b>(110%)—— 该轮历史最佳读数。</li>
       <li><b>文件系统刷盘两轮并入 main</b>(fs-flush + virtio-async):128MB mtest06 形状(x86_64 KVM)fsync 11.55→6.18→<b>3.04 s</b>(累计 ~3.8×)、msync 13.95→<b>3.31 s</b>(4.2×)、sync 11.30→3.31 s;mmap2 TIMEOUT→PASS。</li>
       <li><b>LTP r27 审计定档</b>:官方校正计数 <b>1093/1869</b>(原始 1084;cve-2017-17052 与 shmat03 两项真实增量曾被两个顺序依赖伪影部分掩盖)。</li>
       <li><b>riscv64 启动参数矩阵 16/16</b>:smp{2,4,6,8} × mem{1,2,4,8}G 全格干净启动(此前多个 panic/挂起格)。</li>

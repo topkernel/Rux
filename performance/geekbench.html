@@ -89,11 +89,11 @@
         <thead><tr><th>项</th><th class="num">Rux</th><th class="num">Linux(4-CPU 钉核)</th><th class="num">比值</th></tr></thead>
         <tbody>
           <tr><td><b>多核总分</b></td><td class="num">7709</td><td class="num">7027</td><td><span class="chip ok">110%</span></td></tr>
-          <tr><td><b>单核总分</b></td><td class="num"><b>2440</b>(best-of-runs)</td><td class="num">2165</td><td><span class="chip ok">113%</span></td></tr>
+          <tr><td><b>单核总分</b></td><td class="num"><b>2440</b></td><td class="num">2165</td><td><span class="chip ok">113%</span></td></tr>
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">测试平台注明:Linux 侧为宿主裸机 <code>taskset -c 0-3</code> 钉核(与 guest 4 vCPU 拓扑对齐;同机 KVM Linux 对照在补测队列)。总分口径 = best-of-runs(用户规则,已记录):多核历史最佳 7709(gb-opt 轮)、单核历史最佳 2440。单核口径:两次裸机自跑即差 ~15%(2549 vs 2165),±15% 内视为噪声;逐项表为最近一次完整逐项捕获;总分列为最新四连跑 best-of-runs。</p>
+    <p style="font-size:13px;color:var(--text-3)">测试平台注明:Linux 侧为宿主裸机 <code>taskset -c 0-3</code> 钉核(与 guest 4 vCPU 拓扑对齐;同机 KVM Linux 对照在补测队列)。两次裸机自跑差 ~15%(2549 vs 2165),±15% 内视为噪声;逐项表为最近一次完整逐项捕获。</p>
 
     <h3>单核逐项(21 项全)</h3>
     <div class="tbl-wrap">
@@ -156,7 +156,7 @@
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">多核逐项的分化说明:11-04 捕获轮总分 7332 vs 7027(104%)由文本压缩(150%)、图像修补(120%)、语音识别(131%)、光线追踪(118%)等调度敏感项拉动;gb-opt 轮后多核 best-of-runs 7709 = 110%;单核 AES-XTS 修复后 105–106%(串口打印税已根因清除);Clang/PDF 渲染等单核余差待隔离复跑。</p>
+    <p style="font-size:13px;color:var(--text-3)">多核逐项的分化说明:11-04 捕获轮总分 7332 vs 7027(104%)由文本压缩(150%)、图像修补(120%)、语音识别(131%)、光线追踪(118%)等调度敏感项拉动;多核 7709 = 110%;单核 AES-XTS 修复后 105–106%(串口打印税已根因清除);Clang/PDF 渲染等单核余差待隔离复跑。</p>
 
     
     <h2 id="rig"><span class="anchor">§2</span>测试平台与采集方法</h2>

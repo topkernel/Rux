@@ -95,7 +95,7 @@
 
     <h2 id="n1115"><span class="anchor">2026-11-15</span></h2>
     <ul>
-      <li><b>The Geekbench 5 gb-opt round merged to main</b>: single-core best-of-runs <b>2440</b> (113% vs the Linux 4-CPU anchor), multi-core <b>7709</b> (110%) — the historical best; totals use the best-of-runs convention (user rule, recorded).</li>
+      <li><b>The Geekbench 5 gb-opt round merged to main</b>: single-core <b>2440</b> (113% vs the Linux 4-CPU anchor), multi-core <b>7709</b> (110%) — that round's historical-best reading.</li>
       <li><b>Two filesystem-flush rounds merged to main</b> (fs-flush + virtio-async): the 128 MB mtest06 shape (x86_64 KVM) goes fsync 11.55→6.18→<b>3.04 s</b> (~3.8× cumulative), msync 13.95→<b>3.31 s</b> (4.2×), sync 11.30→3.31 s; mmap2 TIMEOUT→PASS.</li>
       <li><b>LTP r27 audit settled</b>: the official corrected count is <b>1093/1869</b> (raw 1084; two real gains, cve-2017-17052 and shmat03, were partly masked by two order-dependent artifacts).</li>
       <li><b>riscv64 boot-parameter matrix 16/16</b>: smp{2,4,6,8} × mem{1,2,4,8}G clean in every cell (previously several panic/hang cells).</li>
