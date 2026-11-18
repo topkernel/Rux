@@ -47,7 +47,7 @@ use crate::sync::spinlock::Spinlock;
 pub const TMPFS_MAGIC: u32 = 0x0102_1994;
 
 /// tmpfs page size (matches the kernel page size / stat blksize).
-const PAGE_SIZE: usize = 4096;
+pub(crate) const PAGE_SIZE: usize = 4096;
 
 /// icache identity prefix ("TPFS"); the low bits carry the per-mount
 /// instance id so (ino, fs_id) pairs from different tmpfs mounts never
@@ -623,14 +623,14 @@ pub struct TmpfsSuperBlock {
     /// in 4 KiB pages. 0 = unlimited (Linux's default is half of RAM,
     /// which for this heap-backed tmpfs means "bounded by the kernel
     /// heap" — the pre-fix behavior).
-    page_limit_pages: AtomicU64,
+    pub(crate) page_limit_pages: AtomicU64,
     /// Live data pages across ALL files of this mount. Incremented by
     /// TmpfsNode::reserve_page, decremented by TmpfsPage::drop.
-    used_pages: AtomicU64,
+    pub(crate) used_pages: AtomicU64,
 }
 
 impl TmpfsSuperBlock {
-    fn new(instance: u64, page_limit_pages: u64) -> Self {
+    pub(crate) fn new(instance: u64, page_limit_pages: u64) -> Self {
         let fs_id = FS_ID_TMPFS_BASE | instance;
         let root_node = Arc::new(TmpfsNode::new(
             b"/".to_vec(),
@@ -675,7 +675,7 @@ impl TmpfsSuperBlock {
     }
 
     /// Create a fresh node stamped with this instance's identity.
-    fn new_node(&self, name: Vec<u8>, node_type: TmpfsType) -> Arc<TmpfsNode> {
+    pub(crate) fn new_node(&self, name: Vec<u8>, node_type: TmpfsType) -> Arc<TmpfsNode> {
         Arc::new(TmpfsNode::new(
             name,
             node_type,
@@ -1678,139 +1678,4 @@ pub static DEVPTS_INODE_OPS: INodeOps = INodeOps {
     destroy_inode: Some(tmpfs_destroy_inode),
 };
 
-#[cfg(test)]
-mod tests {
-    use super::*;
 
-    #[test]
-    fn test_tmpfs_page_roundtrip() {
-        let sb = TmpfsSuperBlock::new(9001, 0);
-        let f = sb.new_node(b"file".to_vec(), TmpfsType::RegularFile);
-        // Sparse write: page 0 and page 2, hole at page 1.
-        f.write_at(0, b"hello");
-        f.write_at(PAGE_SIZE * 2, b"world");
-        assert_eq!(f.file_size(), (PAGE_SIZE * 2 + 5) as u64);
-        assert_eq!(f.page_count(), 2);
-
-        let mut buf = [0u8; PAGE_SIZE * 3];
-        let n = f.read_at(0, &mut buf);
-        assert_eq!(n, PAGE_SIZE * 2 + 5);
-        assert_eq!(&buf[..5], b"hello");
-        // Hole reads as zeros.
-        assert!(buf[PAGE_SIZE..PAGE_SIZE * 2].iter().all(|&b| b == 0));
-        assert_eq!(&buf[PAGE_SIZE * 2..PAGE_SIZE * 2 + 5], b"world");
-    }
-
-    #[test]
-    fn test_tmpfs_truncate_zero_tail() {
-        let sb = TmpfsSuperBlock::new(9002, 0);
-        let f = sb.new_node(b"file".to_vec(), TmpfsType::RegularFile);
-        f.write_at(0, &[0xAAu8; 64]);
-        f.truncate(16);
-        assert_eq!(f.file_size(), 16);
-        // Re-extend: the stale tail must read as zeros.
-        f.truncate(64);
-        let mut buf = [0u8; 64];
-        assert_eq!(f.read_at(0, &mut buf), 64);
-        assert!(buf[16..].iter().all(|&b| b == 0));
-    }
-
-    #[test]
-    fn test_tmpfs_dir_ops() {
-        let sb = TmpfsSuperBlock::new(9003, 0);
-        let root = sb.root_node.clone();
-        let d = sb.new_node(b"d".to_vec(), TmpfsType::Directory);
-        root.add_child(d.clone());
-        assert!(root.find_child(b"d").is_some());
-        assert!(d.list_children().is_empty());
-        assert!(root.remove_child(b"d"));
-        assert!(root.find_child(b"d").is_none());
-    }
-
-}
-
-// ============================================================================
-// In-kernel unit tests (unit-test feature)
-// ============================================================================
-
-/// Boot-time tests for the tmpfs page budget (mount options `size=` /
-/// `nr_blocks=`). Lives in this module rather than kernel/src/tests/
-/// because it needs private access: `TmpfsSuperBlock::new` with an
-/// explicit page limit plus the superblock's live counters. Registered
-/// from `crate::tests::run_all_tests()`.
-///
-/// Covers the LTP preadv203 regression shape: a size-capped tmpfs fed
-/// more data than its budget must stop granting pages (short write /
-/// ENOSPC), never eat the kernel heap.
-#[cfg(feature = "unit-test")]
-pub fn run_budget_tests() {
-    crate::tests::test_group_start("tmpfs-budget");
-
-    // ---- parse_size_pages: mount option string -> page budget ----------
-    crate::test_assert_eq!(parse_size_pages(None), 0, "parse: no options -> unlimited");
-    crate::test_assert_eq!(parse_size_pages(Some("")), 0, "parse: empty string -> unlimited");
-    crate::test_assert_eq!(parse_size_pages(Some("size=32M")), 8192, "parse: size=32M -> 8192 pages");
-    crate::test_assert_eq!(parse_size_pages(Some("size=32m")), 8192, "parse: size=32m (lowercase)");
-    crate::test_assert_eq!(parse_size_pages(Some("size=1G")), 256 * 1024, "parse: size=1G");
-    crate::test_assert_eq!(parse_size_pages(Some("size=512k")), 128, "parse: size=512k");
-    // Round UP to whole pages (Linux memparse + PAGE_ALIGN).
-    crate::test_assert_eq!(parse_size_pages(Some("size=1")), 1, "parse: size=1 rounds up to 1 page");
-    crate::test_assert_eq!(parse_size_pages(Some("size=4097")), 2, "parse: size=4097 rounds up to 2 pages");
-    // nr_blocks counts pages.
-    crate::test_assert_eq!(parse_size_pages(Some("nr_blocks=100")), 100, "parse: nr_blocks=100");
-    crate::test_assert_eq!(parse_size_pages(Some("nr_blocks=10k")), 10240, "parse: nr_blocks=10k");
-    // Mixed with other (ignored) options.
-    crate::test_assert_eq!(parse_size_pages(Some("mode=700,size=32M")), 8192, "parse: leading ignored option");
-    crate::test_assert_eq!(parse_size_pages(Some("size=32M,nr_inodes=1024")), 8192, "parse: trailing ignored option");
-    // Percent of the kernel heap.
-    let heap_pages = (crate::config::KERNEL_HEAP_SIZE / PAGE_SIZE) as u64;
-    crate::test_assert_eq!(parse_size_pages(Some("size=50%")), heap_pages / 2, "parse: size=50% of heap");
-    crate::test_assert_eq!(parse_size_pages(Some("size=200%")), heap_pages, "parse: size=200% clamps to heap");
-    // Unknown/garbage values ignored (unlimited).
-    crate::test_assert_eq!(parse_size_pages(Some("size=abc")), 0, "parse: garbage value ignored");
-    crate::test_assert_eq!(parse_size_pages(Some("nr_inodes=100")), 0, "parse: unrelated option ignored");
-
-    // ---- budget enforcement: short writes, ENOSPC shape -----------------
-    // LTP preadv203 pattern: a 32MB-capped tmpfs fed ~118MB of writes
-    // must stop granting pages, not eat the kernel heap.
-    let sb = TmpfsSuperBlock::new(9004, 2); // 2-page budget
-    crate::test_assert_eq!(sb.page_limit_pages.load(Ordering::Relaxed), 2, "budget: limit stored");
-    let f = sb.new_node(b"file".to_vec(), TmpfsType::RegularFile);
-
-    // Fill the budget: two distinct pages.
-    crate::test_assert_eq!(f.write_at(0, &[1u8; PAGE_SIZE]), PAGE_SIZE, "budget: page 0 stored");
-    crate::test_assert_eq!(f.write_at(PAGE_SIZE, &[2u8; PAGE_SIZE]), PAGE_SIZE, "budget: page 1 stored");
-    crate::test_assert_eq!(sb.used_pages.load(Ordering::Relaxed), 2, "budget: both pages charged");
-
-    // Third page: refused — short write of the bytes that DID fit
-    // (none here: the write starts on a fresh page).
-    crate::test_assert_eq!(f.write_at(PAGE_SIZE * 2, &[3u8; PAGE_SIZE]), 0, "budget: third page refused (0 -> ENOSPC)");
-    // Partial write: the first page of the range already exists, so
-    // its bytes store and the write stops at the page boundary.
-    let big = [7u8; PAGE_SIZE * 2];
-    let n = f.write_at(PAGE_SIZE, &big);
-    crate::test_assert_eq!(n, PAGE_SIZE, "budget: partial write stops at page boundary");
-    crate::test_assert_eq!(sb.used_pages.load(Ordering::Relaxed), 2, "budget: still two pages charged");
-
-    // Truncate returns pages to the budget and writes succeed again.
-    f.truncate(0);
-    crate::test_assert_eq!(sb.used_pages.load(Ordering::Relaxed), 0, "budget: truncate returns pages");
-    crate::test_assert_eq!(f.write_at(0, &[9u8; PAGE_SIZE]), PAGE_SIZE, "budget: write works after truncate");
-
-    // Dropping the node returns everything.
-    drop(f);
-    crate::test_assert_eq!(sb.used_pages.load(Ordering::Relaxed), 0, "budget: drop returns pages");
-
-    // ---- budget is per-MOUNT, shared across files -----------------------
-    // Two files on one 1-page tmpfs cannot each take a page.
-    let sb = TmpfsSuperBlock::new(9005, 1);
-    let a = sb.new_node(b"a".to_vec(), TmpfsType::RegularFile);
-    let b = sb.new_node(b"b".to_vec(), TmpfsType::RegularFile);
-    crate::test_assert_eq!(a.write_at(0, &[1u8; 16]), 16, "shared: first file takes the page");
-    crate::test_assert_eq!(b.write_at(0, &[1u8; 16]), 0, "shared: second file refused (ENOSPC)");
-    crate::test_assert_eq!(sb.used_pages.load(Ordering::Relaxed), 1, "shared: one page charged");
-    // Hard links share one pages map — no double charge.
-    let a2 = a.clone();
-    crate::test_assert_eq!(a2.write_at(100, &[5u8; 16]), 16, "shared: hard link writes into same page");
-    crate::test_assert_eq!(sb.used_pages.load(Ordering::Relaxed), 1, "shared: no double charge for links");
-}

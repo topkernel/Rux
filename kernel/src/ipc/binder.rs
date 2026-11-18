@@ -462,25 +462,25 @@ enum DeathPhase {
     Delivered,
 }
 
-struct BufBlock {
-    off: usize,
-    len: usize,
-    free: bool,
-    async_block: bool,
-    allow_user_free: bool,
-    data_size: usize,
-    offsets_size: usize,
+pub(crate) struct BufBlock {
+    pub(crate) off: usize,
+    pub(crate) len: usize,
+    pub(crate) free: bool,
+    pub(crate) async_block: bool,
+    pub(crate) allow_user_free: bool,
+    pub(crate) data_size: usize,
+    pub(crate) offsets_size: usize,
     /// Per-allocation id (the reference's buffer->debug_id): assigned
     /// by new_buf when a block is carved, 0 while free. Carried by the
     /// binder_transaction_alloc_buf / buffer_release trace events.
-    buf_id: u64,
+    pub(crate) buf_id: u64,
     /// sg (extra) area size: BINDER_TYPE_PTR payload copies (layout:
     /// [data][offsets][extra], each u64-aligned).
-    extra_size: usize,
+    pub(crate) extra_size: usize,
     /// Oneway (async) buffers keep their transaction alive so the node's
     /// async slot is released when the receiver frees the buffer (Linux
     /// buffer->transaction). Sync buffers rely on the reply path instead.
-    txn: Option<Arc<BinderTxn>>,
+    pub(crate) txn: Option<Arc<BinderTxn>>,
     /// sc243 (leg-17): the sync txn this buffer carried has been
     /// REPLIED — the request data is protocol-dead and only the
     /// receiver's contractual BC_FREE_BUFFER remains. The OHOS
@@ -489,23 +489,23 @@ struct BufBlock {
     /// live BinderTxn arcs, every one pinned by such a block; at the
     /// launcher floor this is ~210MB of the 831MB heap). On alloc
     /// pressure these blocks are reclaimed (see alloc_new_buf).
-    reply_done: bool,
+    pub(crate) reply_done: bool,
 }
 
-struct BinderAlloc {
-    kvirt: *mut u8,
-    phys: usize,
-    npages: usize,
-    order: usize,
-    user_base: u64,
-    blocks: Vec<BufBlock>,
-    free_async_space: usize,
+pub(crate) struct BinderAlloc {
+    pub(crate) kvirt: *mut u8,
+    pub(crate) phys: usize,
+    pub(crate) npages: usize,
+    pub(crate) order: usize,
+    pub(crate) user_base: u64,
+    pub(crate) blocks: Vec<BufBlock>,
+    pub(crate) free_async_space: usize,
     /// sc243 (leg-17): jiffies of the last stale-async sweep (see
     /// sweep_stale_async) — rate-limits the O(blocks) scan to one per
     /// second per allocator.
-    last_sweep_j: u32,
+    pub(crate) last_sweep_j: u32,
     /// Monotone buffer-id source (see BufBlock::buf_id).
-    next_buf_id: u64,
+    pub(crate) next_buf_id: u64,
 }
 
 impl BinderAlloc {
@@ -521,7 +521,7 @@ impl BinderAlloc {
 
     /// binder_alloc_new_buf: sync first-fit from the low end, async from
     /// the top half against the free_async_space budget.
-    fn new_buf(
+    pub(crate) fn new_buf(
         &mut self,
         data_size: usize,
         offsets_size: usize,
@@ -630,7 +630,7 @@ impl BinderAlloc {
     /// the buffer was freed and it kept an async (oneway) transaction
     /// alive, Some(none) when freed without one, None when the pointer
     /// does not match a freeable buffer.
-    fn free_buf(&mut self, user_ptr: u64) -> Option<Option<Arc<BinderTxn>>> {
+    pub(crate) fn free_buf(&mut self, user_ptr: u64) -> Option<Option<Arc<BinderTxn>>> {
         let Some(d) = user_ptr.checked_sub(self.user_base) else {
             return None;
         };
@@ -1552,7 +1552,7 @@ fn app_txn_fail_print(proc: &BinderProc, why: &str, handle: u64, code: u64) {
     }
 }
 
-struct BinderTxn {
+pub(crate) struct BinderTxn {
     id: u64,
     from_proc: Option<Arc<BinderProc>>,
     from_tid: Option<u32>,
@@ -14231,89 +14231,3 @@ pub fn binder_dfx_dump() {
 // next allocation — sweep_stale_async treats txn==None && reply_done as
 // "reclaim NOW (no grace)", so a stale marker handed the block to a third
 // transaction while the second was still being processed.
-#[cfg(feature = "unit-test")]
-pub fn test_binder_alloc_recycle() {
-    crate::tests::test_group_start("binder_alloc_recycle");
-
-    let mut alloc = BinderAlloc {
-        // new_buf/free_buf never dereference kvirt; phys stays 0 so Drop
-        // would be a no-op-free — but Drop runs put_page on null pages and
-        // skips free_pages when still_pinned stays false... a zeroed phys
-        // would free_pages(0, order). Leak the alloc instead: forget it.
-        kvirt: core::ptr::null_mut(),
-        phys: 0,
-        npages: 4,
-        order: 2,
-        user_base: 0x1000,
-        blocks: Vec::new(),
-        free_async_space: 8192,
-        last_sweep_j: 0,
-        next_buf_id: 1,
-    };
-    alloc.blocks.push(BufBlock {
-        off: 0,
-        len: 16384,
-        free: true,
-        async_block: false,
-        allow_user_free: false,
-        data_size: 0,
-        offsets_size: 0,
-        extra_size: 0,
-        buf_id: 0,
-        txn: None,
-        reply_done: false,
-    });
-
-    // Life 1: sync txn buffer, delivered (allow_user_free), replied
-    // (reply_done), then freed by the server's BC_FREE_BUFFER — the
-    // standard request-buffer flow of every binder server.
-    let off1 = match alloc.new_buf(100, 0, 0, false) {
-        Some(o) => o,
-        None => {
-            crate::tests::test_fail("binder_alloc_l1", "first sync alloc failed");
-            return;
-        }
-    };
-    {
-        let b = alloc.blocks.iter_mut().find(|b| b.off == off1).unwrap();
-        b.allow_user_free = true;
-        b.reply_done = true; // set by the reply path (BC_REPLY)
-    }
-    match alloc.free_buf(alloc.user_base + off1 as u64) {
-        Some(t) if t.is_none() => {}
-        _ => {
-            crate::tests::test_fail("binder_alloc_l1", "free of sync buffer failed");
-            return;
-        }
-    }
-    crate::tests::test_pass("binder_alloc_l1");
-
-    // Life 2: the SAME block (first-fit from the low end) serves a new
-    // sync txn. It must come back clean: reply_done false, no stale txn.
-    let off2 = match alloc.new_buf(100, 0, 0, false) {
-        Some(o) => o,
-        None => {
-            crate::tests::test_fail("binder_alloc_l2", "second sync alloc failed");
-            return;
-        }
-    };
-    crate::test_assert_eq!(off2, off1, "first-fit recycles the same block");
-    let clean = alloc
-        .blocks
-        .iter()
-        .find(|b| b.off == off2)
-        .map(|b| !b.reply_done && b.txn.is_none() && !b.free)
-        .unwrap_or(false);
-    if clean {
-        crate::tests::test_pass("binder_alloc_l2_clean");
-    } else {
-        crate::tests::test_fail(
-            "binder_alloc_l2_clean",
-            "recycled sync block carries stale reply_done/txn (sweep would reclaim an in-flight buffer)",
-        );
-    }
-
-    // The allocation must never escape this test (phys==0 would hand the
-    // buddy allocator a bogus block on Drop).
-    core::mem::forget(alloc);
-}

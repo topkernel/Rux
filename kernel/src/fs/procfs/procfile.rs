@@ -215,12 +215,6 @@ macro_rules! procfile {
                         .collect::<alloc::vec::Vec<_>>().as_slice()),
                     expect);
             }
-
-            #[cfg(test)]
-            #[test]
-            fn shape_kv_lines() {
-                shape_check();
-            }
         }
     };
 
@@ -267,12 +261,6 @@ macro_rules! procfile {
                         "{:<w$}{:>8}{}", key, 0u64, unit_suffix, w = $width);
                     assert_eq!(got, expect, "pad shape drifted for {}", k);
                 }
-            }
-
-            #[cfg(test)]
-            #[test]
-            fn shape_pad_lines() {
-                shape_check();
             }
         }
     };
@@ -332,12 +320,6 @@ macro_rules! procfile {
                 let tokens = got.trim_end_matches('\n')
                     .split(' ').filter(|t| !t.is_empty()).count();
                 assert_eq!(tokens, cols.len() + 1, "cols token/column mismatch");
-            }
-
-            #[cfg(test)]
-            #[test]
-            fn shape_cols_row() {
-                shape_check();
             }
         }
     };

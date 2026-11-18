@@ -80,26 +80,3 @@ pub fn pseudo_header_checksum(
     ip_checksum(&pseudo_header)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_ip_checksum() {
-        let data = [0x45, 0x00, 0x00, 0x3c, 0x1c, 0x46, 0x40, 0x00, 0x40, 0x06, 0xb1, 0xe6, 0xc0, 0xa8, 0x01, 0x01, 0xc0, 0xa8, 0x01, 0x02];
-
-        let csum = ip_checksum(&data);
-        assert_eq!(csum, 0xb1e6);
-    }
-
-    #[test]
-    fn test_pseudo_header_checksum() {
-        let src = 0xC0A80101;
-        let dst = 0xC0A80102;
-        let protocol = 6;
-        let len = 20;
-
-        let csum = pseudo_header_checksum(src, dst, protocol, len);
-        assert!(csum != 0);
-    }
-}

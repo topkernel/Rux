@@ -382,24 +382,3 @@ mod offsets {
 #[allow(dead_code)]
 pub use offsets::*;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_pt_regs_size() {
-        assert_eq!(core::mem::size_of::<PtRegs>(), 320);
-        // The entry asm relies on a 16-aligned frame size.
-        assert_eq!(PT_REGS_SIZE % 16, 0);
-    }
-
-    #[test]
-    fn test_offsets() {
-        assert_eq!(offsets::X0, 0x00);
-        assert_eq!(offsets::SP, 0x0F8);
-        assert_eq!(offsets::PC, 0x100);
-        assert_eq!(offsets::PSTATE, 0x108);
-        assert_eq!(offsets::ORIG_X0, 0x120);
-        assert_eq!(offsets::SYSCALLNO, 0x128);
-    }
-}

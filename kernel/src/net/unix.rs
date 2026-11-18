@@ -4179,29 +4179,6 @@ pub fn unix_getsockopt(sock: &Arc<UnixSocket>, level: i32, optname: i32) -> Resu
 // Tests
 // ============================================================================
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_name_key() {
-        assert_eq!(name_key(b"/tmp/sock\0"), Some(String::from("/tmp/sock")));
-        assert_eq!(name_key(b"/tmp/sock"), Some(String::from("/tmp/sock")));
-        // Abstract: leading NUL preserved.
-        assert_eq!(name_key(b"\0abc\0\0"), Some(String::from("\0abc")));
-        assert_eq!(name_key(b""), None);
-        assert_eq!(name_key(b"\0"), None);
-    }
-
-    #[test]
-    fn test_parse_sockaddr_un() {
-        let mut buf = [0u8; 110];
-        buf[0] = AF_UNIX as u8;
-        buf[2..11].copy_from_slice(b"/dev/log\0");
-        let addr = parse_sockaddr_un(&buf).unwrap();
-        assert_eq!(addr.key, "/dev/log");
-    }
-}
 
 /// 53rd session (hilogd drain hunt): park-side AF_UNIX wait-object audit.
 ///

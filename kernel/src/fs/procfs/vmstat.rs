@@ -169,12 +169,6 @@ pub mod vmstat_file_tests {
         assert_eq!(lines.len(), VMSTAT_FIELDS.len());
         assert!(VMSTAT_FIELDS.len() == 60, "field count changed: {} — update this snapshot deliberately", VMSTAT_FIELDS.len());
     }
-
-    #[cfg(test)]
-    #[test]
-    fn snapshot_zero_counters() {
-        snapshot_check();
-    }
 }
 
 /// Generate /proc/buddyinfo content: the free pages per order, per

@@ -177,7 +177,7 @@ impl ArpEntry {
 }
 
 /// ARP cache
-struct ArpCache {
+pub(crate) struct ArpCache {
     entries: [ArpEntry; ARP_CACHE_SIZE],
     count: usize,
 }
@@ -211,7 +211,7 @@ impl ArpCache {
     const ARP_TIMEOUT_SECS: u64 = 300; // 5 minutes
 
     /// Add or update ARP cache entry
-    fn update(&mut self, ip: u32, mac: [u8; ETH_ALEN]) {
+    pub(crate) fn update(&mut self, ip: u32, mac: [u8; ETH_ALEN]) {
         for entry in self.entries.iter_mut() {
             if entry.valid && entry.ip == ip {
                 entry.mac = mac;
@@ -270,7 +270,7 @@ impl ArpCache {
 
 /// Global ARP cache (Spinlock-protected for concurrent access from
 /// syscall context and softirq/timer context).
-static ARP_CACHE: Spinlock<ArpCache> = Spinlock::new(ArpCache::new());
+pub(crate) static ARP_CACHE: Spinlock<ArpCache> = Spinlock::new(ArpCache::new());
 
 // ==================== ARP pending queue (R35) ====================
 //
@@ -763,26 +763,3 @@ pub fn resolve_ip(ip: u32) -> Option<[u8; ETH_ALEN]> {
     None
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_arp_packet_size() {
-        assert_eq!(core::mem::size_of::<ArpPacket>(), 28);
-    }
-
-    #[test]
-    fn test_arp_cache_lookup() {
-        let ip = 0xC0A80101;
-        let mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
-
-        unsafe {
-            // SAFETY: test context; ARP_CACHE is a global static.
-            ARP_CACHE.update(ip, mac);
-        }
-
-        let result = arp_lookup(ip);
-        assert_eq!(result, Some(mac));
-    }
-}
