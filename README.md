@@ -42,7 +42,7 @@ Two proofs, one kernel:
 Inside, the design is a clean-room Rust architecture, not a translation. Where
 an internal structure deliberately diverges from the mainstream, it is
 registered with compatibility evidence in the
-[design-divergence register](docs/architecture/design-divergences.md) — 27
+[design-divergence register](docs/architecture/design-divergences.md) — 28
 entries, each gated by LTP families and unmodified-software proofs.
 
 ## Performance: measured against Linux on the same machine
