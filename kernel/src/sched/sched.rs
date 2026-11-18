@@ -897,6 +897,37 @@ static RQ_INITIALIZED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [const { cor
 static SWITCHING_OUT: [core::sync::atomic::AtomicU64; MAX_CPUS] =
     [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
 
+// grq-hold-slim Cut 2 (class-chain short-circuit): one word answers
+// "which scheduling classes are non-empty" for the GRQ-held pick chain,
+// so a single-class boot (the standard shape: CFS only) never walks
+// DL -> RT -> CFS with a load per class. The bits are maintained ONLY
+// at empty <-> nonempty transitions of each class's own nr_running
+// counter (every mutation of those counters holds the GRQ, and the pick
+// chain reads the mask under the GRQ, so the mask is exactly as
+// consistent as the is_empty() loads it replaces — it is DERIVED from
+// the same counters at the same serialization point). Relaxed ordering
+// suffices: the GRQ lock provides the happens-before, no other
+// inter-word ordering is consumed.
+pub const CLASS_DL_BIT: u32 = 1;
+pub const CLASS_RT_BIT: u32 = 2;
+pub const CLASS_CFS_BIT: u32 = 4;
+pub static CLASS_NONEMPTY: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Set a class's nonempty bit (GRQ-held; call on the 0 -> nonempty
+/// transition of that class's counter).
+#[inline]
+pub fn class_nonempty_set(bit: u32) {
+    CLASS_NONEMPTY.fetch_or(bit, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Clear a class's nonempty bit (GRQ-held; call on the -> empty
+/// transition of that class's counter).
+#[inline]
+pub fn class_nonempty_clear(bit: u32) {
+    CLASS_NONEMPTY.fetch_and(!bit, core::sync::atomic::Ordering::Relaxed);
+}
+
 /// glib-mutex lane (2026-11-14): jiffies at the moment SWITCHING_OUT[c]
 /// was LAST SET (stored together with the marker, under the GRQ). The
 /// WAKE-HEAL's stale-marker adjudication uses MARKER AGE from this
@@ -3508,6 +3539,50 @@ unsafe fn __schedule() {
         }
     }
 
+    // grq-hold-slim Cut 1 (bookkeeping out of the lock): charge prev's
+    // own CFS entity BEFORE the GRQ acquire. This is exactly the
+    // non-slot-owner arm of the old in-lock charge (R20-6's "everyone
+    // else charges its own prev directly"): it touches ONLY prev's
+    // per-entity atomics. prev is unlinked here (picked tasks leave the
+    // timeline at their pick; a still-RUNNING prev is re-linked later
+    // in this same section, a sleeping prev is dequeued there), so no
+    // timeline reader can observe a mid-charge vruntime. A concurrent
+    // waker on another CPU CAN re-link a sleeping prev mid-charge, but
+    // (add_vruntime RMW | set_vruntime placement store) serialize
+    // atomically and each order is a defensible outcome — the waker's
+    // placement behavior is unchanged from the old in-lock charge
+    // (a waker that won the same window there also skipped the lag
+    // capture, which only the sleep-dequeue path takes).
+    //
+    // IRQ bracket: update_exec_runtime is NOT atomic (load ->
+    // fetch_add -> store of exec_start). The only other chargers of
+    // prev's entity run on THIS CPU (scheduler_tick / yield_cpu, both
+    // under the GRQ); schedule() is entered with IF=1 on every
+    // non-IRQ-exit path, so without the bracket a timer tick landing
+    // inside that window double-charges the accumulated delta (the
+    // tick adds E->now_tick, we add E->now). The cli/sti pair runs
+    // OUTSIDE the measured GRQ hold — it costs the pre-segment, not
+    // the critical section. The slot-owner arm (update_curr — the
+    // GRQ-shared min_vruntime/avg-vruntime base) stays under the lock:
+    // after this pre-lock charge stored exec_start, update_curr's
+    // delta is precisely the acquire-wait residue, so the owner's
+    // charge remains complete and min_vruntime still refreshes
+    // in-lock exactly as before.
+    let prev_policy_pre = (*prev).policy();
+    if prev_policy_pre == SchedPolicy::Normal
+        || prev_policy_pre == SchedPolicy::Batch
+        || prev_policy_pre == SchedPolicy::Idle
+    {
+        let irq_state = crate::arch::cpu::save_and_disable_irq();
+        let now = crate::sched::fair::sched_clock();
+        let se = (*prev).sched_entity();
+        let delta = se.update_exec_runtime(now);
+        if delta > 0 {
+            se.update_vruntime(delta);
+        }
+        crate::arch::cpu::restore_irq(irq_state);
+    }
+
     // Lock the global RQ
     let cc_t1 = crate::dfx::cctx::now();
     crate::dfx::cctx::add(&crate::dfx::cctx::SCH_PRE_NS, cc_t0);
@@ -3523,26 +3598,43 @@ unsafe fn __schedule() {
 
     // Update runtime accounting for current task based on its scheduling class.
     // CFS: update vruntime; DL: consume runtime budget.
+    // grq-hold-slim Cut 1: prev's OWN charge ran PRE-LOCK (see the
+    // block above the acquire) for owner and non-owner alike — the
+    // entity's runtime/vruntime are per-task atomics, and the tick and
+    // yield paths still charge through update_curr under this same GRQ.
+    // What remains in-lock for CFS is only the GRQ-SHARED state:
+    // min_vruntime, refreshed here when no later step of this hold
+    // refreshes it (the voluntary-sleep path unlinks nothing — prev was
+    // unlinked at its pick — so neither the dequeue nor the requeue
+    // arm's update_min_vruntime runs; the requeue path's enqueue_inner
+    // and the dequeue path both refresh it themselves). The dropped
+    // residue charge is the acquire-wait only (sub-us, vs ms-scale
+    // slices); sum_exec_runtime/vruntime remain exact to within that
+    // bound, and avg_vruntime() folds curr's live vruntime at read
+    // time, so the pre-lock charge is fully visible to placement.
+    //
+    // This early read of prev_running (pre-nanosleep-rescue) serves
+    // ONLY the min_vruntime condition: the nanosleep-loss park gate
+    // below re-reads state under this same hold and may flip a timed
+    // sleeper back to RUNNING — in that rescued case the requeue's
+    // enqueue_inner refreshes min_vruntime itself, so acting on the
+    // pre-rescue value here is at most a redundant refresh, never a
+    // missed one.
+    let prev_running = (*prev).state() == TaskState::new(TaskState::RUNNING);
     let prev_policy = (*prev).policy();
     if prev_policy == SchedPolicy::Normal
         || prev_policy == SchedPolicy::Batch
         || prev_policy == SchedPolicy::Idle
     {
-        let now = crate::sched::fair::sched_clock();
-        // R20-6: cfs_rq.curr is a SINGLE global slot while several CPUs can
-        // run CFS tasks concurrently — the old unconditional update_curr()
-        // charged the slot's task once per running CPU (double charge) and
-        // never charged the other running tasks at all (frozen vruntime →
-        // permanent leftmost hog). Only the slot owner charges through
-        // update_curr; everyone else charges its own prev directly.
-        if grq_guard.cfs_rq.get_curr() == prev {
-            grq_guard.cfs_rq.update_curr(now);
-        } else {
-            let se = (*prev).sched_entity();
-            let delta = se.update_exec_runtime(now);
-            if delta > 0 {
-                se.update_vruntime(delta);
-            }
+        // R20-6: cfs_rq.curr is a SINGLE global slot while several CPUs
+        // can run CFS tasks concurrently — the old unconditional
+        // update_curr() charged the slot's task once per running CPU
+        // (double charge) and never charged the other running tasks at
+        // all (frozen vruntime → permanent leftmost hog). Only the slot
+        // owner touches GRQ-shared CFS state here; everyone else's
+        // charge was purely per-entity (pre-lock).
+        if grq_guard.cfs_rq.get_curr() == prev && !prev_running {
+            grq_guard.cfs_rq.update_min_vruntime();
         }
     } else if prev_policy == SchedPolicy::Deadline {
         // Update DL runtime accounting; on exhaustion THROTTLE prev so the
@@ -3797,6 +3889,39 @@ unsafe fn __schedule() {
     // grq-10ns: close the exact GRQ-hold bracket (see the acquire site).
     crate::dfx::cctx::add(&crate::dfx::cctx::SCH_HOLD_NS, cc_hold);
 
+    // grq-hold-slim Cut 1: the picked task's own entity bookkeeping,
+    // relocated from pick_next_task's CFS arm (out of the GRQ hold).
+    // Runs with IRQs off, before the switch / repick return — see the
+    // comment at the pick arm for why nothing can observe these fields
+    // earlier. slice math reads the GRQ counters WITHOUT the lock:
+    // another CPU's enqueue in this window only perturbs the slice by
+    // one in-flight task's weight, the same advisory noise the tick's
+    // own slice recomputation already tolerates (sched_slice is not a
+    // GRQ invariant — it is a per-activation advisory value).
+    if !next.is_null() && next_pid != 0 {
+        let np = (*next).policy();
+        if np == SchedPolicy::Normal || np == SchedPolicy::Batch || np == SchedPolicy::Idle {
+            let se = (*next).sched_entity();
+            // R20-6: reset the execution clock at pick. Nothing else
+            // resets exec_start, so after a sleep it still holds the
+            // timestamp of the task's PREVIOUS run — the first
+            // update_curr/direct charge after wakeup billed the entire
+            // sleep duration into vruntime.
+            se.set_exec_start(crate::sched::fair::sched_clock());
+            // Batch 8: start a fresh activation window — scheduler_tick
+            // judges preemption on sum_exec_runtime -
+            // prev_sum_exec_runtime (current run length) vs the slice
+            // (Linux check_preempt_tick).
+            se.prev_sum_exec_runtime.store(
+                se.sum_exec_runtime.load(core::sync::atomic::Ordering::Acquire),
+                core::sync::atomic::Ordering::Release,
+            );
+            let slice_ns = grq().cfs_rq.sched_slice(se);
+            let slice_ms = crate::sched::fair::sched_slice_to_ms(slice_ns);
+            (*next).set_time_slice(slice_ms.max(1) as u32);
+        }
+    }
+
     if next == prev {
         // Same-task repick: no context switch happens, so the post-switch
         // notify processing below would be skipped. A pending deferred
@@ -3949,8 +4074,18 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
     //     return pcpu.stop;
     // }
 
+    // grq-hold-slim Cut 2: the class-chain short-circuit. ONE relaxed
+    // load replaces the per-class is_empty() loads (plus the old RT
+    // double read: is_empty was evaluated twice, once per if) — a
+    // single-class boot never touches the DL/RT arms at all. The mask
+    // is derived from each class's own nr_running counter at its
+    // empty/nonempty transitions, every one of which holds this same
+    // GRQ (see CLASS_NONEMPTY above), so under this lock it is exactly
+    // as fresh as the is_empty() loads it replaces.
+    let class_mask = CLASS_NONEMPTY.load(core::sync::atomic::Ordering::Relaxed);
+
     // 2. Deadline — pick earliest-deadline task that can run on this CPU
-    if !grq.dl_rq.is_empty() {
+    if class_mask & CLASS_DL_BIT != 0 {
         if let Some(task) = grq.dl_rq.pick_next_cpu(cpu_id, prev) {
             // PID-0 GATE (b64-b66 fatal chain): PIDs below RESERVED_PIDS
             // are never allocated, so a class-queue entry reading pid 0
@@ -4011,7 +4146,12 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
     // tasks wait. Name the skip live (rt2xdbg=1, cpu-0-targeted, 32-line
     // budget): the accounting triple (used/period_start/now jiffies)
     // decides between "throttle never lifts" and "lifts but re-arms".
-    if !grq.rt_rq.is_empty() && rt_throttled(cpu_id) {
+    // grq-hold-slim Cut 2: the class bit gates the whole arm (mask
+    // load above); rt_throttled is now evaluated ONCE per RT-nonempty
+    // pick instead of twice.
+    if class_mask & CLASS_RT_BIT != 0 {
+        let rt_is_throttled = rt_throttled(cpu_id);
+        if rt_is_throttled {
         if cpu_id == 0 && crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1") {
             static TRS: core::sync::atomic::AtomicU32 =
                 core::sync::atomic::AtomicU32::new(0);
@@ -4038,7 +4178,7 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
             }
         }
     }
-    if !grq.rt_rq.is_empty() && !rt_throttled(cpu_id) {
+        if !rt_is_throttled {
         // timer-gap lane (self-migration handoff retry): the walk names
         // an affinity-allowed task it refused only because its owner is
         // mid-switch-OUT. Re-arm NEED_RESCHED when that owner's switch
@@ -4094,10 +4234,11 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
                 return task;
             }
         }
+        }
     }
 
     // 4. CFS — pick min-vruntime task that can run on this CPU
-    if !grq.cfs_rq.is_empty() {
+    if class_mask & CLASS_CFS_BIT != 0 {
         if let Some(task) = grq.cfs_rq.pick_next_cpu(cpu_id, prev) {
             // PID-0 GATE — see the Deadline block above. This is the exact
             // site of the b64-b66 fatal: the CFS walk returned a
@@ -4136,22 +4277,18 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
                     }
                 }
                 grq.cfs_rq.set_curr(task);
-                // R20-6: reset the execution clock at pick. Nothing else resets
-                // exec_start, so after a sleep it still holds the timestamp of
-                // the task's PREVIOUS run — the first update_curr/direct charge
-                // after wakeup billed the entire sleep duration into vruntime.
-                let se = (*task).sched_entity();
-                se.set_exec_start(crate::sched::fair::sched_clock());
-                // Batch 8: start a fresh activation window — scheduler_tick
-                // judges preemption on sum_exec_runtime - prev_sum_exec_runtime
-                // (current run length) vs the slice (Linux check_preempt_tick).
-                se.prev_sum_exec_runtime.store(
-                    se.sum_exec_runtime.load(core::sync::atomic::Ordering::Acquire),
-                    core::sync::atomic::Ordering::Release,
-                );
-                let slice_ns = grq.cfs_rq.sched_slice(se);
-                let slice_ms = crate::sched::fair::sched_slice_to_ms(slice_ns);
-                (*task).set_time_slice(slice_ms.max(1) as u32);
+                // grq-hold-slim Cut 1: the picked task's OWN entity
+                // bookkeeping (exec_start reset, activation-window
+                // stamp, slice math, time_slice publish) moved OUT of
+                // the GRQ hold — it runs in __schedule right after the
+                // unlock, still with IRQs off and before the context
+                // switch / repick return. Nothing can read those fields
+                // before the picked task actually runs: it was
+                // unpickable to other CPUs before this pick, the slot
+                // publish names it only as ours, and its own CPU's
+                // tick/stat readers run post-switch. The R20-6 exec
+                // clock reset and the Batch-8 activation window are
+                // unchanged, just relocated.
                 return task;
             }
         }
