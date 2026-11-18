@@ -142,7 +142,7 @@
         <thead><tr><th>Domain</th><th>Guarded metric (current band)</th></tr></thead>
         <tbody>
           <tr><td>Memory allocation / reclaim</td><td>small_alloc global class-lock sections ≤25M/boot (measured 19.7M, latest board 6.0M), REST share ≤10% (now 0.1–1.2%), no reclaim slow-path emergence on standard boots</td></tr>
-          <tr><td>Scheduler</td><td>GRQ critical section ≈60 ns (production) / 75–80 ns (minimal bracket; the old reading carried probe cost), IF=0 span avg 1200–7320 ns (measured 2786), census TERM 8±2 / REFUSED 32±4, P2 ±20%, futex wake→run 7.5 µs ±20%</td></tr>
+          <tr><td>Scheduler</td><td>GRQ critical section ≈60 ns (production) / 75–80 ns (minimal bracket), IF=0 span avg 2786 ns, census TERM 8±2 / REFUSED 32±4, P2 ±20%, futex wake→run 7.5 µs ±20%</td></tr>
           <tr><td>Filesystem hot paths</td><td>P6 rows ±20% (stat 71 / openclose 156 / append 77 / mkdrmdir 2760 / unlink 808 / write_fsync 14200 µs), buffer-cache hit rate 99.1% ≥ baseline, no new sync-write classes</td></tr>
           <tr><td>Interrupts / IRQ paths</td><td>IF=0 share 20.4%±3pp, longest closed cli segment ≤10 ms (now 6–9 ms), SOFTIRQ share 3.1±2pp, no new IRQ-OFF print classes</td></tr>
           <tr><td>IPC</td><td>p5 family ±20% (p5a 18.3 / p5b 23–41 / stream 24–27 µs), unix writev/truesize 24 µs class not regressed</td></tr>
@@ -168,7 +168,7 @@
           <tr><td>Typed timer wheel (D-19)</td><td>clock-domain typing + scope guards</td><td>arm lock 924→697 ns; nanosleep 772.6→<b>662.7 ms</b>; p2_ctxsw 12.198 vs 15.400 µs</td></tr>
           <tr><td>dcache lockless reads (WalkClaim)</td><td>reader-bank publication + deferred retirement</td><td>stat 0.643→<b>0.423 µs</b>, open 1.128→0.889 µs</td></tr>
           <tr><td>small_alloc magazine</td><td>per-CPU magazine (depth 16) + bitmap routing</td><td>class-lock sections <b>25M→19.7M→6.0M</b>/boot; REST share 9.2%→0.1–1.2%</td></tr>
-          <tr><td>GRQ hold</td><td>0.7 ms granularity pins churn + slimmer pick path (segment-measured)</td><td>critical section <b>≈60 ns</b> (production) / 75–80 ns (minimal bracket); the old 241–273 reading carried ≈190 ns of probe cost; the 70–84 ns lock-wait segment = the KVM cross-vCPU locked-instruction tax</td></tr>
+          <tr><td>GRQ hold</td><td>0.7 ms granularity pins churn + slimmer pick path (segment-measured)</td><td>critical section <b>≈60 ns</b> (production) / 75–80 ns (minimal bracket); the 70–84 ns lock-wait segment = the KVM cross-vCPU locked-instruction tax</td></tr>
           <tr><td>unix bandwidth</td><td>unix staging eliminated</td><td>bw_unix 2.6→<b>42.9 GB/s</b></td></tr>
           <tr><td>Page-fault path (campaign r6)</td><td>backward-fault window + contiguous put_range + PCACHE_RO alias protocol + batched pin release + single TLB flush per munmap</td><td>lat_pagefault 0.468→<b>0.029–0.031 µs (16.1× total)</b>, now 2.26–2.45× ahead of Linux</td></tr>
           <tr><td>Hook-call tax &amp; path_memo (campaign r5/r7)</td><td>1,331 cli/sti outlined calls inlined + path_memo/lease gates</td><td>null −7% / read −5% / write −6% / ctxsw −6.1% / pipe −12%; open −15.2% cumulative, stat −4.6%, read flipped ahead</td></tr>
