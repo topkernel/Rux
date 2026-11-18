@@ -269,3 +269,34 @@ the reference does and we skip.
   the two-sided segment table quantifies whether Linux pays it too.
 - **pi_stress**: -g 2 now completes 372,942+370,196 inversions, two
   passes, clean exit (the timer-gap four lost-dispatch fixes).
+
+## 9. Round 4 (2026-11-18 midday — the RT campaign's measurement day)
+
+- **vdso-clock merged**: the release CLOCK_MONOTONIC poison decoded to
+  three structural defects in x86_64 unified-track timekeeping
+  (ratcheted-down TSC_LAST race; HPET fallback ±50µs off the vDSO
+  track; the kernel track read missing the wrap guard its vDSO twin
+  has). Post-fix: zero poison across all confirmation passes.
+- **rt-r4-p0 merged**: the merged-tree "deadlock regression" was
+  adjudicated ENVIRONMENT-COUPLED (8 boots × 5 kernels × 3 load
+  shapes, zero tripwires incl. merged at matched load; the storm was
+  1-2 host-descheduled locks re-warned). Real finds: rt-r3's rewiring
+  had silently bypassed the local-idle claim (fixed: ONE wake ladder
+  placement → local-when-idle → rotating); LOCKOWNER=1 forensics knob
+  (holder forensics were compiled out of every standard build);
+  quiet REST re-rank: every named site ≤842µs, the 6–9ms band GONE.
+- **Combined-tree three-stat finals** (interleaved ×3): FIFO min 4µs
+  won EVERY clean pass (Linux 5); avg 14–19 vs 11–14 (1.15–1.3×); the
+  cleanest max 207µs vs Linux's 2185 (10× better). OTHER avg 42 vs 63
+  (ahead 1.5×). hackbench 3-run medians: all three forms ahead.
+- **rt-r6 merged**: numeric PI chains (reference adjust_prio_chain
+  shape), SleepMutex rt mode (D-26: no full-tree conversion), glibc
+  PI UAPI closed (owner-death 0+OWNER_DIED latch). 3-deep chains
+  1000/1000; pi_glibc 3/3.
+- **ext4-msync-panic merged** (P0): sys_msync type confusion — tmpfs/
+  memfd private_data reinterpreted as ext4 geometry; ops-identity
+  gate + degenerate-geometry backstops.
+- In flight: nanosleep-loss (root convicted to the mid-park-protocol
+  wake-consumption window; partial reference-shaped hardening landed),
+  gup-dio (B2 pinned user pages), rt-r5 (threaded IRQs),
+  grq-hold-slim (latency cut).
