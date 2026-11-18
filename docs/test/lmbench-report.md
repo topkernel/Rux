@@ -168,6 +168,40 @@ handoff), open (1.44x — walk loop + File construct), read (1.42x —
 copy tail), write (1.13x). lat_fs re-polluted by boot noise (no
 honest number this round).
 
+## CORRECTION (2026-11-19, user challenge upheld again): full 29-case scoreboard, correct denominators
+
+The patrol-7 battery table was generated with make-report.py against
+the NATIVE column (lmbench-linux-ccd.txt) — the same denominator error
+the user caught on 11-16, regressed through the tooling. Recomputed
+with guest-in-guest references where measured, native explicitly
+labeled CEILING:
+
+**29 = 15 ahead + 2 near-ceiling + 4 behind + 8 no-honest-number**
+
+- **Ahead vs GUEST reference (7)**: sem **8.97x** · ctx-8 **6.29x** ·
+  pipe **5.84x** · ctx-2 **5.14x** · fstat 1.37x · unix 1.43x ·
+  null 1.10x — the entire wake/switch/IPC family. (The patrol-7 rows
+  "ctx-2 2.79x behind / pipe 1.39x behind / sem 1.04x" were native-
+  denominator artifacts — RETIRED.)
+- **Ahead vs CEILING (8, conservative — ahead of any guest ref)**:
+  mem_rd 1MB/256MB, bcopy, bzero, bw_pipe 2.97x, bw_unix 1.61x,
+  bw_file_rd (>timer), usleep.
+- **Near ceiling (2, no guest ref yet — guest refs run higher than
+  native under KVM, so likely ahead)**: fork 1.08x, exec 1.05x.
+- **Behind vs GUEST reference (4 — ALL in the plain-syscall family)**:
+  **open 1.71x** (walk loop + File construct) · **read 1.55x** (copy
+  tail) · **write 1.30x** · **stat 1.13x** — the entry-floor + path
+  structural items already documented. These four ARE the remaining
+  campaign surface.
+- **No honest number (8)**: pagefault / mmap / bw_mmap_rd (battery
+  prints no row) · lat_fs (pollution) · lat_tcp / lat_udp /
+  lat_connect / bw_tcp (net-server handshake family — open).
+
+Discipline (binding): ratio tables are generated ONLY against
+guest-in-guest references; the native column is a CEILING row label,
+never a denominator (make-report.py must not be pointed at
+lmbench-linux*.txt for verdicts).
+
 ## Patrol-13..22 consolidated milestone (2026-11-19, tree=5aceafc2a)
 
 Latest tree (this campaign's stack + parallel rt-r4 + vdso-clock + the
