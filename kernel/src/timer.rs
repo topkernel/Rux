@@ -396,6 +396,7 @@ fn non_zero_interval(interval_jiffies: u64) -> Option<core::num::NonZeroU64> {
 /// # Returns
 /// `true` if timer was found and removed.
 pub fn del_timer(id: u64) -> bool {
+    del_note(id);
     // R37: single lock — the old TIMERS→ACTIONS nesting (the lock-order
     // comment used to live here) is gone: entry and action are one slot.
     let mut table = TIMER_TABLE.lock_irqsave();
@@ -415,6 +416,37 @@ pub fn del_timer(id: u64) -> bool {
 }
 
 /// Check if a timer is currently active.
+// nanosleep-loss conviction: del_timer ring (id + caller line).
+pub static DEL_IX: AtomicUsize = AtomicUsize::new(0);
+pub static DEL_ID: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
+pub static DEL_RA: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
+pub static DEL_JIF: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
+
+#[track_caller]
+fn del_note(id: u64) {
+    let slot = DEL_IX.fetch_add(1, Ordering::Relaxed) % 64;
+    DEL_ID[slot].store(id, Ordering::Relaxed);
+    DEL_RA[slot].store(
+        core::panic::Location::caller().line() as u64,
+        Ordering::Relaxed,
+    );
+    DEL_JIF[slot].store(crate::drivers::timer::get_jiffies(), Ordering::Relaxed);
+}
+
+/// Was `id` deleted (and from which source line, how long ago)?
+pub fn del_lookup(id: u64) -> Option<(u64, u64)> {
+    for k in 0..64 {
+        if DEL_ID[k].load(Ordering::Relaxed) == id {
+            return Some((
+                DEL_RA[k].load(Ordering::Relaxed),
+                crate::drivers::timer::get_jiffies()
+                    .saturating_sub(DEL_JIF[k].load(Ordering::Relaxed)),
+            ));
+        }
+    }
+    None
+}
+
 pub fn timer_pending(id: u64) -> bool {
     let table = TIMER_TABLE.lock_irqsave();
     table.contains(id)
@@ -1657,7 +1689,10 @@ fn ww_heartbeat(now_time: u64) {
         }
         static PTBUDGET: core::sync::atomic::AtomicU64 =
             core::sync::atomic::AtomicU64::new(0);
-        if PTBUDGET.fetch_add(1, Ordering::Relaxed) < 60 {
+        // nanosleep-loss: CPU-0 only — the direct-console census writes
+        // garble when both CPUs print concurrently.
+        if crate::arch::cpu_id() as usize == 0
+            && PTBUDGET.fetch_add(1, Ordering::Relaxed) < 60 {
             putchar(b'\n');
             crate::process::pid_hash::pid_hash_for_each_task_try(|task| unsafe {
                 let pid = (*task).pid();

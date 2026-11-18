@@ -218,6 +218,98 @@ pub fn kill_other_threads(current: *mut Task) {
                     victims.push((*m).pid());
                 }
             }
+            // nanosleep-loss conviction (wwcensus-gated): every member's
+            // terminal anatomy at exit-group time — last pick phase,
+            // ownership qword, linkage, timed-sleep shadow, pending
+            // signals, and the saved kernel resume address (names the
+            // park site).
+            if crate::trace::EVENT_WWCENSUS.armed() && m != current {
+                use crate::dfx::taskdump::putc_brief as putchar;
+                fn pd(mut v: u64) {
+                    use crate::dfx::taskdump::putc_brief as p;
+                    let mut buf = [0u8; 20];
+                    let mut n = 0;
+                    if v == 0 { p(b'0'); return; }
+                    while v > 0 && n < buf.len() {
+                        buf[n] = b'0' + (v % 10) as u8; v /= 10; n += 1;
+                    }
+                    for k in (0..n).rev() { p(buf[k]); }
+                }
+                static XG_N: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                if XG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
+                    let q = core::ptr::read_volatile(
+                        core::ptr::addr_of!((*m).ti_on_cpu) as *const u64,
+                    );
+                    let (ph, ph_ago) =
+                        crate::sched::sched::pick_trace_peek(m).unwrap_or((0, 0));
+                    let tid = (*m)
+                        .timed_sleep_timer_id
+                        .load(core::sync::atomic::Ordering::Relaxed);
+                    let kind = (*m)
+                        .timed_sleep_kind
+                        .load(core::sync::atomic::Ordering::Relaxed);
+                    let tdl = (*m)
+                        .timed_sleep_deadline
+                        .load(core::sync::atomic::Ordering::Relaxed);
+                    let nowt = crate::drivers::timer::read_time();
+                    let linked = match (*m).policy() {
+                        crate::process::task::SchedPolicy::Fifo
+                        | crate::process::task::SchedPolicy::Rr => false,
+                        _ => (*m).sched_entity().timeline_key().is_some(),
+                    };
+                    #[cfg(feature = "x86_64")]
+                    let ra = (*m).thread.callee.ret_addr as u64;
+                    #[cfg(not(feature = "x86_64"))]
+                    let ra = (*m).thread.ra as u64;
+                    for &b in b"\nXGM pid=" { putchar(b); }
+                    pd((*m).pid() as u64);
+                    for &b in b" ph=" { putchar(b); }
+                    pd(ph as u64);
+                    for &b in b"/" { putchar(b); }
+                    pd(ph_ago);
+                    for &b in b" q=0x" { putchar(b); }
+                    pd(q);
+                    for &b in b" pk=" { putchar(b); }
+                    pd((*m).pick_state() as u64);
+                    for &b in b" lnk=" { putchar(b); }
+                    pd(linked as u64);
+                    for &b in b" st=0x" { putchar(b); }
+                    pd((*m).state().bits() as u64);
+                    for &b in b" ts=" { putchar(b); }
+                    pd(kind as u64);
+                    for &b in b"/tid=" { putchar(b); }
+                    pd(tid);
+                    for &b in b"/dl-" { putchar(b); }
+                    if tdl > nowt {
+                        pd((tdl - nowt) / 10000);
+                    } else {
+                        putchar(b'-');
+                        pd((nowt - tdl) / 10000);
+                    }
+                    for &b in b"ms pend=0x" { putchar(b); }
+                    pd((*m).pending.get_all());
+                    for &b in b" ra=0x" { putchar(b); }
+                    pd(ra);
+                    if tid != 0 {
+                        for &b in b" del=" { putchar(b); }
+                        match crate::timer::del_lookup(tid) {
+                            Some((line, ago)) => {
+                                for &b in b"L" { putchar(b); }
+                                pd(line);
+                                for &b in b"/" { putchar(b); }
+                                pd(ago);
+                            }
+                            None => {
+                                for &b in b"none" { putchar(b); }
+                            }
+                        }
+                        for &b in b" tp=" { putchar(b); }
+                        pd(crate::timer::timer_pending(tid) as u64);
+                    }
+                    putchar(b'\n');
+                }
+            }
         });
     }
         // gdm bring-up r9-r11: a silent mass SIGKILL took out the whole
