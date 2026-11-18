@@ -2162,6 +2162,34 @@ impl CfsRunQueue {
         se.timeline_key().is_some()
     }
 
+    /// r-strand face (a) heal (lat_fs conviction, 2026-11-19): counter/
+    /// timeline desync — the GRQ counter reads 0 while the timeline
+    /// still holds entries, so every idle CPU WFI-halts on
+    /// nr_running==0 and never attempts the pick (the R20-2 recheck is
+    /// counter-gated): the stranded entry starves with all CPUs idle.
+    /// Recount the timeline and resync the counter + class bit when
+    /// they disagree. GRQ-HELD by the caller; 1 Hz cadence (the phantom
+    /// sweep) keeps the walk cost out of the hot path. Returns
+    /// (was, now) for the heal report, or None when paired.
+    pub fn resync_nr_running_from_timeline(&mut self) -> Option<(u64, u64)> {
+        let truth = self.timeline_head_diag(&mut []) as u64;
+        let was = self.nr_running.load(Ordering::Acquire);
+        if truth == was {
+            return None;
+        }
+        self.nr_running.store(truth, Ordering::Release);
+        if truth > 0 {
+            crate::sched::sched::class_nonempty_set(
+                crate::sched::sched::CLASS_CFS_BIT,
+            );
+        } else {
+            crate::sched::sched::class_nonempty_clear(
+                crate::sched::sched::CLASS_CFS_BIT,
+            );
+        }
+        Some((was, truth))
+    }
+
     /// nanosleep-loss lane (hunt instrument): bounded in-order walk of
     /// the timeline filling `rows` with (pid, vruntime, on_cpu, claim)
     /// in PICK ORDER (leftmost first) — the traversal the pick uses, so

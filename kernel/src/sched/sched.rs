@@ -11433,6 +11433,28 @@ pub fn relink_unlinked_running_phantoms() -> u32 {
     let mut report_pc = 0i32;
     {
         let mut g = grq().lock_irqsave();
+        // r-strand face (a) (lat_fs conviction, 2026-11-19): the same
+        // sweep family as the unlinked-RUNNING phantom below, for the
+        // LINKED victim: a counter/timeline desync (counter reads 0
+        // while the tree holds the task) WFI-halts every idle CPU on
+        // the nr_running==0 fast path and the linked task is never
+        // picked. Resync from the tree truth; the stranded task is
+        // then picked on the next idle pass. (The diag walk caps at
+        // 999; a capped count still reads >0, which is all the idle
+        // gate needs — an over-count is benign, the under-count was
+        // the killer.)
+        if let Some((was, now)) = g.cfs_rq.resync_nr_running_from_timeline() {
+            static CR_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            if CR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
+                crate::pr_warn!(
+                    "STRAND-COUNTER-RESYNC cfs was={} now={}",
+                    was,
+                    now
+                );
+            }
+            healed += 1;
+        }
         for i in 0..n {
             let task = cand[i];
             if task.is_null() {
