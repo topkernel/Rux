@@ -95,13 +95,13 @@
         <tr><td class="mono">1M 顺序写 48M(direct,已分配区域)</td><td class="num">4000 MiB/s</td><td class="num">5.2 GiB/s · clat ~188 µs</td><td class="num">0.83×</td></tr>
         <tr><td class="mono">1M 顺序写 48M(direct,全新文件)</td><td class="num">4000–4800 MiB/s(中位 4000)</td><td class="num">5.2 GiB/s(两种场景同值)</td><td class="num">0.75–0.9×(<b>已追平覆写</b>)</td></tr>
         <tr><td class="mono">1M 顺序读 48M(direct)</td><td class="num">8000 MiB/s · 每 op 请求数 4→1</td><td class="num">9.4 GiB/s · clat 90 µs</td><td class="num">0.83×(合并+SG 链)</td></tr>
-        <tr><td class="mono">1M 缓冲写 48M(页缓存口径,两侧同)</td><td class="num">9600 MiB/s</td><td class="num">9.4 GiB/s · clat 89.5 µs</td><td class="num">~0.94×(物理下限)</td></tr>
+        <tr><td class="mono">1M 缓冲写 48M(页缓存口径,两侧同)</td><td class="num">9600 MiB/s</td><td class="num">9.4 GiB/s · clat 89.5 µs</td><td class="num">~0.94×(2× 不可达,~6% 自身项待收)</td></tr>
         <tr><td class="mono">128MB 刷盘墙探针(mmap 全同步回写,总墙钟)</td><td class="num">待重测</td><td class="num">1.223 s(旧口径)</td><td class="num">—</td></tr>
         <tr><td class="mono">libaio(io_setup/io_submit)</td><td class="num">—</td><td class="num">有</td><td class="num">—</td></tr>
         <tr><td class="mono">io_uring(5.1 ABI enter 契约)</td><td class="num">—</td><td class="num">有</td><td class="num">—</td></tr>
       </tbody>
     </table></div>
-    <p style="font-size:13px;color:var(--text-3)">注:全新文件顺序写行已追平覆写行,机制为未写盘区异步转换+延迟分配预留落地。缓冲写行的 ~0.94× 是测试平台的物理下限:冷帧 RFO 两侧共付。顺序读行的差距由请求合并+SG 链收窄。刷盘墙探针待 SMP8 下一次启动重新测量(fsync 路径已重造)。4k 随机读行的 0.90× 为单作业口径,8 作业时 0.91×。无数据行:libaio 为 UAPI 未实现(io_setup ENOSYS);io_uring 的 enter 契约触发用户态崩溃(环形语义未完成)。posixaio 引擎可运行,其吞吐读数并入扩展作业队列。作业尺寸上限(48M)由镜像剩余空间约束,两侧同约束。</p>
+    <p style="font-size:13px;color:var(--text-3)">注:全新文件顺序写行已追平覆写行,机制为未写盘区异步转换+延迟分配预留落地。缓冲写行:冷帧 RFO 两侧共付证明 2× 目标不可达,但剩余 ~6% 差距是自身项(区域化分配快速路径 ~13µs/op、批量锁争用尾,已定名待做)——持平与领先仍为该行目标。顺序读行的差距由请求合并+SG 链收窄。刷盘墙探针待 SMP8 下一次启动重新测量(fsync 路径已重造)。4k 随机读行的 0.90× 为单作业口径,8 作业时 0.91×。无数据行:libaio 为 UAPI 未实现(io_setup ENOSYS);io_uring 的 enter 契约触发用户态崩溃(环形语义未完成)。posixaio 引擎可运行,其吞吐读数并入扩展作业队列。作业尺寸上限(48M)由镜像剩余空间约束,两侧同约束。</p>
 
     <h2 id="method"><span class="anchor">§2</span>优化方法</h2>
     <p style="font-size:13.5px">差距归因用<b>两侧同机对账</b>(两内核在同一镜像/负载下,用共享 tracefs 事件时间线 + 相位周期括号 + 双方 perf 把每 op 成本逐段对账:系统调用入口/块解析/提交+kick/设备/完成中断/唤醒/返回),再按 Linux 的实现形态逐项改造:<b>直读路径按物理连续段批量提交</b>;<b>MSI-X + 完成处理内联硬中断向量</b>;<b>同步等待先有界轮询后睡眠</b>(完成对象是纯内核值,深度 1 时整套睡眠机械比设备往返还贵——Linux 同取舍,仅 opt-in);<b>未写盘区成批转换+邻接合并</b>(每写跨度一次树编辑);<b>每 inode 脏块笔记 → O(dirty) fsync 扫描</b>(tagged page tree 类比)+ inode 表块搭同一刷写窗口;<b>缓冲写用户页直拷入页缓存帧</b>(copy_page_from_iter 形状);<b>目录读取增量填充</b>;<b>路径/描述符成本</b>(close 条件引用获取=fget_rcu 形状、readahead 状态内嵌 File);<b>地址空间回收释放空页表</b>。每项改造同机同镜像同二进制 A/B;负结果留档(MSI 目标重定向在本 QEMU/KVM+irqfd 下为死胡同)。方法与逐项证据见 <code>docs/test/perf-campaign-2026-11-17.md</code>。</p>
