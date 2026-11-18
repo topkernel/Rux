@@ -676,7 +676,7 @@ fn loop_status_of(idx: usize) -> LoopStatus {
 
 /// LOOP_CHANGE_FD: swap the backing file of a BOUND loop.
 fn loop_change_fd(idx: usize, fd: usize) -> Result<(), i32> {
-    let file = unsafe { crate::fs::file::get_file_fd(fd) }
+    let file = crate::fs::file::get_file_fd(fd)
         .ok_or_else(|| crate::errno::Errno::BadFileNumber.as_neg_i32())?;
     let size = file_size_bytes(&file)? as u64;
     // SAFETY: static array access bounded by N_LOOPS (checked by caller).
@@ -787,7 +787,7 @@ pub fn loop_file_ioctl(
             if !is_loop {
                 return Some(-25i64);
             }
-            let backing = unsafe { crate::fs::file::get_file_fd(arg) };
+            let backing = crate::fs::file::get_file_fd(arg);
             match backing {
                 Some(f) => {
                     let path = fd_backing_path(&f);
@@ -818,7 +818,7 @@ pub fn loop_file_ioctl(
             let fd = u32::from_le_bytes(cfg[0..4].try_into().unwrap()) as usize;
             let offset = u64::from_le_bytes(cfg[8 + 24..8 + 32].try_into().unwrap());
             let sizelimit = u64::from_le_bytes(cfg[8 + 32..8 + 40].try_into().unwrap());
-            let backing = match unsafe { crate::fs::file::get_file_fd(fd) } {
+            let backing = match crate::fs::file::get_file_fd(fd) {
                 Some(f) => f,
                 None => return Some(-9i64),
             };

@@ -186,7 +186,7 @@ unsafe fn audit(now: u64) {
                 && tk.pid() != u32::MAX
             {
                 let owned = (0..crate::config::MAX_CPUS)
-                    .any(|c| crate::sched::sched::cpu_state(c).current == task);
+                    .any(|c| crate::sched::sched::cpu_state(c).current as usize == task as *const _ as usize);
                 if !owned {
                     notes.push(Note {
                         pid: tk.pid(),

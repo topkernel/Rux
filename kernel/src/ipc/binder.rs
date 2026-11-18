@@ -1527,7 +1527,7 @@ fn app_txn_fail_print(proc: &BinderProc, why: &str, handle: u64, code: u64) {
         return;
     }
     let comm = crate::sched::current()
-        .map(|t| unsafe { (*t).comm() })
+        .map(|t| t.comm())
         .map(|c| core::str::from_utf8(c).unwrap_or(""))
         .unwrap_or("")
         .trim_end_matches('\0');
@@ -4656,11 +4656,14 @@ pub fn sleep_snapshot() {
     let ufw_gen = UFW_GEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed) & 0xff;
     use core::fmt::Write as _;
     crate::sched::for_each_task(|task| {
-        // SAFETY: callback runs under the pid-hash bucket lock (same
-        // contract as hung_task's check_tasks); reads are confined to
-        // the task's own fields and its mapped kernel stack.
+        // Callback runs under the pid-hash bucket lock (same contract
+        // as hung_task's check_tasks); reads are confined to the task's
+        // own fields and its mapped kernel stack. oh67_poll_decode
+        // still takes the raw pointer identity.
+        let task_raw = task as *const crate::process::task::Task
+            as *mut crate::process::task::Task;
         unsafe {
-            let tk = &*task;
+            let tk = task;
             if tk.pid() == 0 {
                 return;
             }
@@ -4732,7 +4735,7 @@ pub fn sleep_snapshot() {
                     core::sync::atomic::AtomicU32::new(0);
                 if SNAP_PFD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4 {
                     let t =
-                        crate::sync::futex::oh67_poll_decode(task, a0, a1, a2);
+                        crate::sync::futex::oh67_poll_decode(task_raw, a0, a1, a2);
                     if !t.is_empty() {
                         let _ = writeln!(outf, "SNAPPFD tid {} ({}){}", tk.pid(), name, t);
                     }
@@ -11409,7 +11412,7 @@ fn binder_transaction(
                         txn.id,
                         proc.pid,
                         crate::sched::current()
-                            .map(|t| unsafe { (*t).comm() })
+                            .map(|t| t.comm())
                             .map(|c| {
                                 alloc::string::String::from(
                                     core::str::from_utf8(&c[..])
@@ -11434,7 +11437,7 @@ fn binder_transaction(
                 // 1:1 with the SLRD read line (offline delivery audit).
                 let t_id = txn.id;
                 let comm = crate::sched::current()
-                    .map(|t| unsafe { (*t).comm() })
+                    .map(|t| t.comm())
                     .map(|c| core::str::from_utf8(c).unwrap_or(""))
                     .unwrap_or("")
                     .trim_end_matches('\0');
@@ -11530,7 +11533,7 @@ fn binder_transaction(
             // of the two subscribe-time notifies ever fired).
             if SACB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4000 {
                 let comm = crate::sched::current()
-                    .map(|t| unsafe { (*t).comm() })
+                    .map(|t| t.comm())
                     .map(|c| core::str::from_utf8(c).unwrap_or(""))
                     .unwrap_or("")
                     .trim_end_matches('\0');
@@ -11589,7 +11592,7 @@ fn binder_transaction(
             core::sync::atomic::AtomicUsize::new(0);
         if INST_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 800 {
             let comm = crate::sched::current()
-                .map(|t| unsafe { (*t).comm() })
+                .map(|t| t.comm())
                 .map(|c| core::str::from_utf8(c).unwrap_or(""))
                 .unwrap_or("")
                 .trim_end_matches('\0');
@@ -11669,7 +11672,7 @@ fn binder_transaction(
                 ams46_txns_push(txn.id);
                 if AMS46_ENQ_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
                     let comm = crate::sched::current()
-                        .map(|t| unsafe { (*t).comm() })
+                        .map(|t| t.comm())
                         .map(|c| core::str::from_utf8(c).unwrap_or(""))
                         .unwrap_or("")
                         .trim_end_matches('\0');
@@ -11716,7 +11719,7 @@ fn binder_transaction(
                 if proc.pid == tp || proc.pid == sp || target.pid == tp || target.pid == sp {
                     if AMS46_RIP_N.fetch_add(1, Relaxed) < 640 {
                         let rcomm = crate::sched::current()
-                            .map(|t| unsafe { (*t).comm() })
+                            .map(|t| t.comm())
                             .map(|c| core::str::from_utf8(c).unwrap_or(""))
                             .unwrap_or("")
                             .trim_end_matches('\0');
@@ -11874,7 +11877,7 @@ fn binder_transaction(
 
         if !reply {
             let comm_now = crate::sched::current()
-                .map(|t| unsafe { (*t).comm() })
+                .map(|t| t.comm())
                 .map(|c| core::str::from_utf8(c).unwrap_or(""))
                 .unwrap_or("")
                 .trim_end_matches('\0');
@@ -12015,7 +12018,7 @@ fn binder_transaction(
             }
             if SACMP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 300 {
                 let comm2 = crate::sched::current()
-                    .map(|t| unsafe { (*t).comm() })
+                    .map(|t| t.comm())
                     .map(|c| core::str::from_utf8(c).unwrap_or(""))
                     .unwrap_or("")
                     .trim_end_matches('\0');
@@ -12407,7 +12410,7 @@ fn binder_transaction(
                     if crate::trace::EVENT_BINDERTRACE.armed()
                     {
                         let comm = crate::sched::current()
-                            .map(|t| unsafe { (*t).comm() })
+                            .map(|t| t.comm())
                             .map(|c| core::str::from_utf8(c).unwrap_or(""))
                             .unwrap_or("")
                             .trim_end_matches('\0');
@@ -12577,7 +12580,7 @@ fn binder_transaction(
                 if crate::trace::EVENT_BINDERTRACE.armed()
                 {
                     let comm = crate::sched::current()
-                        .map(|t| unsafe { (*t).comm() })
+                        .map(|t| t.comm())
                         .map(|c| core::str::from_utf8(c).unwrap_or(""))
                         .unwrap_or("")
                         .trim_end_matches('\0');
@@ -13686,7 +13689,7 @@ fn binder_thread_read(
                             // lost past it is foundation userspace.
                             if ams46_on() && ams46_txns_contains(t.id) {
                                 let name = crate::sched::current()
-                                    .map(|ct| unsafe { (*ct).comm() })
+                                    .map(|ct| ct.comm())
                                     .map(|c| core::str::from_utf8(c).unwrap_or(""))
                                     .unwrap_or("")
                                     .trim_end_matches('\0');

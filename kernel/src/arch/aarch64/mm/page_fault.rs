@@ -531,7 +531,7 @@ pub fn handle_mm_fault(
                     let file = vm_file.clone().or_else(|| {
                         if vma_file_fd >= 0 {
                             // SAFETY: fd-table lookup.
-                            unsafe { crate::fs::get_file_fd(vma_file_fd as usize) }
+                            crate::fs::get_file_fd(vma_file_fd as usize)
                         } else {
                             None
                         }

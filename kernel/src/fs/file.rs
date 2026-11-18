@@ -1663,7 +1663,7 @@ pub fn gather_append_user(dst: &mut alloc::vec::Vec<u8>, src_user: usize, len: u
     true
 }
 
-pub unsafe fn get_file_fd(fd: usize) -> Option<Arc<File>> {
+pub fn get_file_fd(fd: usize) -> Option<Arc<File>> {
     use crate::sched;
     sched::get_current_fdtable()?.get_file(fd)
 }
@@ -1726,7 +1726,7 @@ pub unsafe fn get_file_fd_install(file: Arc<File>) -> Option<usize> {
     sched::get_current_fdtable()?.install_lowest_fd(file)
 }
 
-pub unsafe fn close_file_fd(fd: usize) -> Result<(), i32> {
+pub fn close_file_fd(fd: usize) -> Result<(), i32> {
     use crate::sched;
     match sched::get_current_fdtable() {
         Some(fdtable) => fdtable.close_fd(fd).map_err(|_| errno::Errno::BadFileNumber.as_neg_i32()),
@@ -1736,7 +1736,7 @@ pub unsafe fn close_file_fd(fd: usize) -> Result<(), i32> {
 
 /// close_file_fd that reports the removed description's identity
 /// (see FdTable::close_fd_report — the oc-rc single-resolution close).
-pub unsafe fn close_file_fd_report(
+pub fn close_file_fd_report(
     fd: usize,
 ) -> Result<(u64, alloc::sync::Weak<File>), i32> {
     use crate::sched;
@@ -1752,11 +1752,11 @@ pub unsafe fn close_file_fd_report(
 // Kernel thread standard input/output
 // ============================================================================
 
-pub unsafe fn get_stdin() -> Option<Arc<File>> {
+pub fn get_stdin() -> Option<Arc<File>> {
     get_file_fd(0)
 }
 
-pub unsafe fn get_stdout() -> Option<Arc<File>> {
+pub fn get_stdout() -> Option<Arc<File>> {
     get_file_fd(1)
 }
 

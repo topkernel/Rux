@@ -480,7 +480,7 @@ pub unsafe fn do_coredump(task: *mut Task, sig: i32) -> bool {
     // Take our own Arc reference and immediately free the fd slot so the
     // dying task's fd table is not perturbed.
     // SAFETY: fd was just installed in the current task's fdtable.
-    let file = unsafe { crate::fs::get_file_fd(fd) };
+    let file = crate::fs::get_file_fd(fd);
     if let Some(fdt) = unsafe { (*task).try_fdtable() } {
         let _ = fdt.close_fd(fd);
     }

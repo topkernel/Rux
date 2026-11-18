@@ -517,7 +517,7 @@ pub fn inotify_add_watch(fd: usize, path: &str, mask: u32) -> Result<i32, i32> {
     if mask & (IN_ALL_EVENTS | IN_ATTRIB) == 0 {
         return Err(-crate::errno::constants::EINVAL);
     }
-    let file = unsafe { crate::fs::file::get_file_fd(fd) }
+    let file = crate::fs::file::get_file_fd(fd)
         .ok_or(-crate::errno::constants::EBADF)?;
     let instance = instance_of(&file).ok_or(-crate::errno::constants::EINVAL)?;
 
@@ -589,7 +589,7 @@ pub fn inotify_add_watch(fd: usize, path: &str, mask: u32) -> Result<i32, i32> {
 /// inotify_rm_watch: remove a watch by wd. Queues IN_IGNORED (Linux
 /// always delivers it on watch removal).
 pub fn inotify_rm_watch(fd: usize, wd: i32) -> Result<(), i32> {
-    let file = unsafe { crate::fs::file::get_file_fd(fd) }
+    let file = crate::fs::file::get_file_fd(fd)
         .ok_or(-crate::errno::constants::EBADF)?;
     let instance = instance_of(&file).ok_or(-crate::errno::constants::EINVAL)?;
 

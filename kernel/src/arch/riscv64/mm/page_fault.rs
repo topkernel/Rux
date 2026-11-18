@@ -674,7 +674,7 @@ pub fn handle_mm_fault(
             // VMA's start and pin a foreign file's cache page.
             let file = vm_file.clone().or_else(|| {
                 if vma_file_fd >= 0 {
-                    unsafe { crate::fs::get_file_fd(vma_file_fd as usize) }
+                    crate::fs::get_file_fd(vma_file_fd as usize)
                 } else {
                     None
                 }
@@ -803,7 +803,7 @@ pub fn handle_mm_fault(
                         // produced zero pages (Ubuntu ld.so).
                         let file = vm_file
                             .clone()
-                            .or_else(|| unsafe { crate::fs::get_file_fd(vma_file_fd as usize) });
+                            .or_else(|| crate::fs::get_file_fd(vma_file_fd as usize));
                         if let Some(file) = file {
                             let bytes_to_read = core::cmp::min(
                                 PAGE_SIZE_USIZE,

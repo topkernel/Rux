@@ -1755,11 +1755,11 @@ pub fn do_exit(exit_code: i32) -> ! {
                 }
                 // SAFETY: task is alive for the duration of the hash walk
                 // (same discipline as send_signal_to_pgid's in-walk use).
-                (*t).set_tracer_pid(0);
-                (*t).set_ptrace_options(0);
-                (*t).clear_single_step();
-                if (*t).state().contains(TaskState::STOPPED) {
-                    crate::signal::signal_wake_up(t);
+                t.set_tracer_pid(0);
+                t.set_ptrace_options(0);
+                t.clear_single_step();
+                if t.state().contains(TaskState::STOPPED) {
+                    crate::signal::signal_wake_up(t as *const Task as *mut Task);
                 }
             });
         }
@@ -2728,14 +2728,15 @@ pub fn wait4_park_audit() {
     let mut nwait = 0usize;
     let mut observed = [false; WL_RING];
     crate::sched::for_each_task_try(|t| {
-        if t.is_null() || nwait == 2 {
+        if nwait == 2 {
             return;
         }
-        // SAFETY: diagnostic reads of a task pinned by the try-walk.
-        let (sleeping, pid) = unsafe { ((*t).state().is_sleeping(), (*t).pid()) };
+        // Diagnostic reads of a task pinned by the try-walk (typed).
+        let (sleeping, pid) = (t.state().is_sleeping(), t.pid());
         if !sleeping || pid == 0 {
             return;
         }
+        let t = t as *const Task as *mut Task;
         let (nr, _a0) = unsafe { wl_entry_syscall(t) };
         if !WAIT_SYS.contains(&nr) {
             return;
@@ -2802,11 +2803,10 @@ pub fn wait4_park_audit() {
     let mut st_bits = [0u32; 2];
     let mut nr_arg = [0u64; 2];
     crate::sched::for_each_task_try(|t| {
-        if t.is_null() {
-            return;
-        }
-        // SAFETY: reads under the tree lock (release_task's tree detach
-        // also holds it), each task pinned by the try-walk.
+        // Reads under the tree lock (release_task's tree detach also
+        // holds it), each task pinned by the try-walk. wl_entry_syscall
+        // still takes the raw pointer.
+        let t = t as *const Task as *mut Task;
         unsafe {
             for w in 0..nwait {
                 if (*t).pid() == waiters[w].0 {
@@ -3117,10 +3117,10 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                         return;
                     }
                     found_tracee = true;
-                    if (*t).state() == TaskState::new(TaskState::STOPPED)
-                        && !(*t).stop_reported.load(core::sync::atomic::Ordering::Acquire)
+                    if t.state() == TaskState::new(TaskState::STOPPED)
+                        && !t.stop_reported.load(core::sync::atomic::Ordering::Acquire)
                     {
-                        tracee_stop = Some(t);
+                        tracee_stop = Some(t as *const Task as *mut Task);
                     }
                 });
                 if let Some(t) = tracee_stop {

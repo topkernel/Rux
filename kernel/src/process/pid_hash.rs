@@ -209,15 +209,20 @@ pub fn pid_hash_lookup(pid: u32) -> *mut Task {
 /// Takes per-bucket locks sequentially. Used by the OOM killer.
 pub fn pid_hash_for_each_task<F>(mut f: F)
 where
-    F: FnMut(*mut Task),
+    F: FnMut(&Task),
 {
     for i in 0..PID_HASH_BUCKETS {
         let flags = lock_bucket(i);
-        // SAFETY: We hold the bucket lock so no concurrent insert/remove can modify the chain.
+        // SAFETY: We hold the bucket lock so no concurrent insert/remove
+        // can modify the chain; every chained node is a live, fully
+        // constructed Task (insert happens after construction), so a
+        // shared reference for the callback's duration is sound. The
+        // callback must not yield the CPU (the bucket lock is
+        /// irq-save spin) nor retain the reference past its return.
         unsafe {
             let mut curr = BUCKET_HEAD[i].load(Ordering::Acquire);
             while !curr.is_null() {
-                f(curr);
+                f(&*curr);
                 curr = (*curr).pid_hash_next;
             }
         }
@@ -232,7 +237,7 @@ where
 /// report that the dump is incomplete.
 pub fn pid_hash_for_each_task_try<F>(mut f: F) -> usize
 where
-    F: FnMut(*mut Task),
+    F: FnMut(&Task),
 {
     let mut skipped = 0;
     for i in 0..PID_HASH_BUCKETS {
@@ -242,11 +247,12 @@ where
         };
         // SAFETY: We hold the bucket lock so no concurrent insert/remove can
         // modify the chain; tasks unlinked by a stalled holder are simply
-        // missed by this snapshot.
+        // missed by this snapshot; nodes are live, fully constructed
+        // Tasks (same contract as pid_hash_for_each_task).
         unsafe {
             let mut curr = BUCKET_HEAD[i].load(Ordering::Acquire);
             while !curr.is_null() {
-                f(curr);
+                f(&*curr);
                 curr = (*curr).pid_hash_next;
             }
         }

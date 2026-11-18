@@ -11,6 +11,7 @@
 //! - `wait`: Wait queues
 
 pub mod task;
+pub mod task_ref;
 pub mod fork;
 pub mod pid;
 pub mod pid_hash;
