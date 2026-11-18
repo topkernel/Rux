@@ -89,7 +89,7 @@
     <h3>Ahead / parity (18 cases)</h3>
     <div class="tbl-wrap">
       <table>
-        <thead><tr><th>Case</th><th class="num">Rux</th><th class="num">Linux (same-rig guest)</th><th>Verdict</th></tr></thead>
+        <thead><tr><th>Case</th><th class="num">Rux</th><th class="num">Linux (same rig)</th><th class="num">Ratio</th></tr></thead>
         <tbody>
           <tr><td class="mono">lat_pipe</td><td class="num">4.40 µs</td><td class="num">25.06–26.27 µs</td><td><span class="chip ok">ahead 5.84×</span></td></tr>
           <tr><td class="mono">lat_ctx -s64 2</td><td class="num">2.51 µs</td><td class="num">12.84–12.97 µs</td><td><span class="chip ok">ahead 5.14×</span></td></tr>
@@ -104,9 +104,9 @@
           <tr><td class="mono">lat_mem_rd 1MB</td><td class="num">2.20–2.25 ns/load</td><td class="num">2.375 ns/load</td><td><span class="chip ok">ahead 0.95×</span></td></tr>
           <tr><td class="mono">lat_mem_rd 256MB</td><td class="num">6.49–6.65 ns/load</td><td class="num">6.691 ns/load</td><td><span class="chip ok">parity-plus (0.97×)</span></td></tr>
           <tr><td class="mono">lat_usleep 1000</td><td class="num">1030.8 µs</td><td class="num">1052.8 µs</td><td><span class="chip ok">parity (0.98×)</span></td></tr>
-          <tr><td class="mono">bw_file_rd 1m io_only</td><td class="num">33,408–35,545 MB/s</td><td class="num">23,045 MB/s (ceiling)</td><td><span class="chip ok">ahead 1.45–1.54×</span> (recovered after the image-runner fix)</td></tr>
-          <tr><td class="mono">lat_pagefault</td><td class="num">0.0253 µs</td><td class="num">0.072 µs (ceiling)</td><td><span class="chip ok">ahead 2.8×</span> (vs ceiling; recovered after the image-runner fix)</td></tr>
-          <tr><td class="mono">lat_syscall null</td><td class="num">0.042 µs</td><td class="num">0.046 µs</td><td><span class="chip ok">ahead 0.92×</span> (fdget+getppid O(1)+PT_REGS+fdreap silence+NOHZ stack)</td></tr>
+          <tr><td class="mono">bw_file_rd 1m io_only</td><td class="num">33,408–35,545 MB/s</td><td class="num">23,045 MB/s (ceiling)</td><td><span class="chip ok">ahead 1.45–1.54×</span></td></tr>
+          <tr><td class="mono">lat_pagefault</td><td class="num">0.0253 µs</td><td class="num">0.072 µs (ceiling)</td><td><span class="chip ok">ahead 2.8×</span> (vs ceiling)</td></tr>
+          <tr><td class="mono">lat_syscall null</td><td class="num">0.042 µs</td><td class="num">0.046 µs</td><td><span class="chip ok">ahead 0.92×</span></td></tr>
           <tr><td class="mono">lat_proc fork</td><td class="num">36.6–40.3 µs</td><td class="num">33.9 µs</td><td><span class="chip ok">parity band 1.08–1.19×</span></td></tr>
           <tr><td class="mono">lat_proc exec</td><td class="num">39.4–40.6 µs</td><td class="num">37.6 µs</td><td><span class="chip ok">parity band 1.05–1.08×</span></td></tr>
         </tbody>
@@ -115,7 +115,7 @@
     <h3>Behind (4 cases)</h3>
     <div class="tbl-wrap">
       <table>
-        <thead><tr><th>Case</th><th class="num">Rux</th><th class="num">Linux (same-rig guest)</th><th>Verdict</th><th>Optimization direction</th></tr></thead>
+        <thead><tr><th>Case</th><th class="num">Rux</th><th class="num">Linux (same rig)</th><th class="num">Ratio</th></tr></thead>
         <tbody>
           <tr><td class="mono">lat_syscall open</td><td class="num">0.676 µs</td><td class="num">0.394–0.397 µs</td><td><span class="chip bad">behind 1.71×</span></td></tr>
           <tr><td class="mono">lat_syscall read</td><td class="num">0.095 µs</td><td class="num">0.060–0.062 µs</td><td><span class="chip bad">behind 1.55×</span></td></tr>
@@ -127,7 +127,7 @@
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">Mechanism note: the wins concentrate in scheduler/wakeup and IPC (cross-vCPU wakeup IPIs are expensive under virtualization; the single global run queue produces no cross-core reschedule storm) and memory bandwidth; syscall-latency rows run the guest's own entry (no vmexit), so the gaps there are real kernel differences. Rows without honest numbers: bw_mmap_rd and the net-server family (lat_tcp/udp/connect, bw_tcp, lat_fs) — not listed; lat_mmap 4.525 µs (1.12x vs ceiling, near-parity band).</p>
+    <p style="font-size:13px;color:var(--text-3)">Notes: the bw_file_rd and lat_pagefault rows carry values recovered after the image-runner fix (the earlier lows were not trustworthy); the lat_syscall null flip comes from the fdget borrow + getppid O(1) + PT_REGS + fdreap silence + the NOHZ stack. Mechanism note: the wins concentrate in scheduler/wakeup and IPC (cross-vCPU wakeup IPIs are expensive under virtualization; the single global run queue produces no cross-core reschedule storm) and memory bandwidth; syscall-latency rows run the guest's own entry (no vmexit), so the gaps there are real kernel differences. Rows without honest numbers: bw_mmap_rd and the net-server family (lat_tcp/udp/connect, bw_tcp, lat_fs) — not listed; lat_mmap 4.525 µs (1.12x vs ceiling, near-parity band).</p>
     <div class="callout"><b>Correctness bugs the campaign found and fixed</b> (the performance gaps were hiding them): a stale-rsp0-at-free UAF (the fork bistability root cause); a call_rcu zero-grace callback firing; a wake-monitor staleness inversion; the fdreap per-tick 10 ms close stall; the mainline munmap final-TLB-flush loss (5b4a4bc7).</div>
     <div class="callout"><b>Why the large leads: design trade-offs, not missing safety features.</b>Code-level argument, item by item:
 <br><b>(1) Source of the wake/switch family gap (sem 8.97x / ctx-8 6.29x / ctx-2 5.14x / pipe 5.84x)</b> — the reference's per-CPU runqueues under KVM make every ping-pong roundtrip pay cross-core resched IPIs (vmexit + halt-exit, 2-5 µs each; the IPI send side alone measured 935-1139 ns). Rux's single global run queue (register D-1) plus the 120 µs polling idle window turns µs-scale handoffs into same-core, ZERO-IPI transfers (<code>sched/sched.rs</code> idle window, closegap lane measurements). This is queue topology winning under virtualization's cost structure.
