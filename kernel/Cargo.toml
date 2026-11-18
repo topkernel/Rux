@@ -9,6 +9,10 @@ license.workspace = true
 log = { workspace = true }
 bitflags = { workspace = true }
 linked_list_allocator = "0.10"
+# LLVM profiling runtime for no_std (vendored, Apache-2.0/MIT): only built
+# with the cov-dump feature; provides capture_coverage() so a
+# -C instrument-coverage kernel can serialize a .profraw at test end.
+minicov = { path = "vendor/minicov", optional = true, default-features = false, features = ["alloc"] }
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 sbi-rt = { version = "0.0.2", features = ["legacy"] }
@@ -25,6 +29,10 @@ aarch64 = []
 x86_64 = []
 riscv64 = []
 unit-test = []  # Enable unit tests (only used during testing)
+# Coverage dump: builds in the minicov profile runtime and the
+# end-of-suite .profraw writer. Only meaningful together with
+# RUSTFLAGS="-C instrument-coverage -Zno-profiler-runtime" (make coverage).
+cov-dump = ["dep:minicov"]
 # DFX: spinlock holder tracking (two atomic stores per lock/unlock pair).
 # Zero-cost when off; enabled when hunting lock deadlocks
 # (see test/hunt-wedge.sh and docs/guides/debugging.md).
