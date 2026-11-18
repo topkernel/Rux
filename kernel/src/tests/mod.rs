@@ -184,6 +184,8 @@ macro_rules! test_assert_eq {
 #[cfg(feature = "unit-test")]
 pub mod binder;
 #[cfg(feature = "unit-test")]
+pub mod perf;
+#[cfg(feature = "unit-test")]
 pub mod dev_t;
 #[cfg(feature = "unit-test")]
 pub mod checksum;
@@ -487,11 +489,9 @@ pub fn run_all_tests() {
     test_group_start("signal");
     signal::test_signal();
 
-    // perf events: ABI record encoding + ring arithmetic + freq floor.
-    test_group_start("perf-records");
-    crate::perf::tests::test_record_encoding();
-    crate::perf::tests::test_ring_wrap();
-    crate::perf::tests::test_freq_floor();
+    // perf events: ABI record encoding + ring arithmetic + freq floor
+    // (moved from the in-module perf::tests block into tests/perf.rs).
+    perf::test_perf();
 
     // ===== 3. Memory management =====
     test_group_start("heap_allocator");
