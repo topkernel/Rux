@@ -201,6 +201,29 @@ fn read_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: us
         }
         return n;
     }
+    // GUP O_DIRECT fast path (GUP-DIO): large direct reads on ext4 pin
+    // the user pages and DMA straight into them — the staging alloc +
+    // copyout pair (the +34.5 µs/op term on the 1 MiB direct-read row)
+    // is gone. None = not applicable (small, unaligned, no SG) — the
+    // staged loop below is untouched.
+    if flags & crate::fs::file::FileFlags::O_DIRECT != 0
+        && count >= crate::fs::ext4::file::GUP_DIO_READ_MIN
+        && buf % 512 == 0
+        && ops.is_some_and(|o| {
+            core::ptr::eq(o as *const _, &crate::fs::ext4::file::EXT4_FILE_OPS as *const _)
+        })
+    {
+        if let Some(n) = crate::fs::ext4::file::ext4_file_read_dio_user_vfs(
+            file,
+            buf as *mut u8,
+            count,
+        ) {
+            if n > 0 {
+                crate::dfx::syscost::note_read_data(&file, n as usize, fd);
+            }
+            return n as i64;
+        }
+    }
     // Small-count stack staging (perf-r3): a 1-byte read (lat_syscall
     // read; every poller's probe read) paid a slab alloc + free pair
     // per call in the chunk loop below — the largest removable cost
@@ -358,6 +381,37 @@ pub fn sys_pread64(args: SyscallArgs) -> i64 {
 
     match crate::fs::file::get_file_fd_safe(fd) {
         Some(file) => {
+                // GUP O_DIRECT fast path (GUP-DIO): the pread twin —
+                // fio's psync engine exercises exactly this entry.
+                // None = staged path below, untouched.
+                {
+                    let pflags =
+                        file.flags.load(core::sync::atomic::Ordering::Relaxed);
+                    if pflags & crate::fs::file::FileFlags::O_DIRECT != 0
+                        && pflags & crate::fs::file::FileFlags::O_ACCMODE
+                            != crate::fs::file::FileFlags::O_WRONLY
+                        && pflags & crate::fs::file::FileFlags::O_PATH == 0
+                        && count >= crate::fs::ext4::file::GUP_DIO_READ_MIN
+                        && buf % 512 == 0
+                        && file.get_ops().is_some_and(|o| {
+                            core::ptr::eq(
+                                o as *const _,
+                                &crate::fs::ext4::file::EXT4_FILE_OPS as *const _,
+                            )
+                        })
+                    {
+                        if let Some(n) =
+                            crate::fs::ext4::file::ext4_file_pread_dio_user_vfs(
+                                &file,
+                                offset as u64,
+                                buf as *mut u8,
+                                count,
+                            )
+                        {
+                            return n as i64;
+                        }
+                    }
+                }
                 // RACE fix (review批次1): pread must not touch the shared fd
                 // position — the old get_pos/set_pos/restore dance corrupted
                 // concurrent reads on other threads sharing the fd. Use the
@@ -773,6 +827,30 @@ fn write_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: u
             buf as *const u8,
             count,
         ) as i64;
+    }
+    // GUP O_DIRECT fast path (GUP-DIO): plain O_DIRECT writes on ext4
+    // pin the user pages and DMA from the frames — no staging copy (the
+    // ~56 µs/op copyin term on the 1 MiB direct-write row). O_SYNC /
+    // O_DSYNC combinations keep the staged write-through shape. None =
+    // not applicable (small, unaligned, pin hole, no SG) — the staged
+    // loop below is untouched.
+    if flags & crate::fs::file::FileFlags::O_DIRECT != 0
+        && flags & (crate::fs::file::FileFlags::O_SYNC
+            | crate::fs::file::FileFlags::O_DSYNC)
+            == 0
+        && count >= crate::fs::ext4::file::GUP_DIO_WRITE_MIN
+        && buf % 512 == 0
+        && ops.is_some_and(|o| {
+            core::ptr::eq(o as *const _, &crate::fs::ext4::file::EXT4_FILE_OPS as *const _)
+        })
+    {
+        if let Some(n) = crate::fs::ext4::file::ext4_file_write_dio_user_vfs(
+            file,
+            buf as *const u8,
+            count,
+        ) {
+            return n as i64;
+        }
     }
     // Chunked write (SYSA-C1): bounded staging buffer so a huge
     // count cannot OOM the kernel heap; a partial chunk write
@@ -2077,6 +2155,38 @@ pub fn sys_pwrite64(args: SyscallArgs) -> i64 {
                     buf as *const u8,
                     count,
                 ) as i64;
+            }
+            // GUP O_DIRECT fast path (GUP-DIO): the pwrite twin — fio's
+            // psync engine pwrites. Plain O_DIRECT only; None = staged.
+            {
+                let pflags = file.flags.load(core::sync::atomic::Ordering::Relaxed);
+                if pflags & crate::fs::file::FileFlags::O_DIRECT != 0
+                    && pflags & (crate::fs::file::FileFlags::O_SYNC
+                        | crate::fs::file::FileFlags::O_DSYNC)
+                        == 0
+                    && pflags & crate::fs::file::FileFlags::O_ACCMODE
+                        != crate::fs::file::FileFlags::O_RDONLY
+                    && pflags & crate::fs::file::FileFlags::O_PATH == 0
+                    && count >= crate::fs::ext4::file::GUP_DIO_WRITE_MIN
+                    && buf % 512 == 0
+                    && file.get_ops().is_some_and(|o| {
+                        core::ptr::eq(
+                            o as *const _,
+                            &crate::fs::ext4::file::EXT4_FILE_OPS as *const _,
+                        )
+                    })
+                {
+                    if let Some(n) =
+                        crate::fs::ext4::file::ext4_file_pwrite_dio_user_vfs(
+                            &file,
+                            offset as u64,
+                            buf as *const u8,
+                            count,
+                        )
+                    {
+                        return n as i64;
+                    }
+                }
             }
             // RACE fix (review批次1): use the position-invariant
             // write_at() — the old set_pos/restore dance corrupted the

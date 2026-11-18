@@ -1594,6 +1594,77 @@ impl PageCache {
         self.writeback_update_range_impl(fs_id, ino, file_off, data, skip_pfns, false);
     }
 
+    /// GUP-DIO twin of `writeback_update_range_multi`: the written
+    /// bytes live in PINNED user frames (request offset 0 = the pin's
+    /// first byte), not a staging slice. Same walk, same skip discipline;
+    /// the copy reads the frames' direct-map aliases (the caller
+    /// guarantees the pin covers the whole written range). Only
+    /// existing entries are updated — the DIO fast arm leaves no cache
+    /// residents to populate.
+    pub fn writeback_update_range_pinned(
+        &self,
+        fs_id: u64,
+        ino: u64,
+        file_off: u64,
+        pins: &crate::mm::gup::PinnedUserPages,
+        written: usize,
+        skip_pfns: &[u64],
+    ) {
+        if written == 0 {
+            return;
+        }
+        let key = cache_key(fs_id, ino);
+        let first_index = file_off / PAGE_SIZE as u64;
+        let last_index = (file_off + written as u64 - 1) / PAGE_SIZE as u64;
+        let Some(entry) = self.lookup_claimed(key) else {
+            return;
+        };
+        {
+            let g = entry.lock.lock();
+            for idx in first_index..=last_index {
+                let Some(page) = g.get(&idx) else {
+                    continue;
+                };
+                if page.invalidated {
+                    continue; // stale-pinned: same policy as the impl twin
+                }
+                if page.pfn as u64 != 0 && skip_pfns.contains(&(page.pfn as u64)) {
+                    continue;
+                }
+                let page_off = (idx * PAGE_SIZE as u64).max(file_off);
+                let page_end = ((idx + 1) * PAGE_SIZE as u64).min(file_off + written as u64);
+                if page_off >= page_end {
+                    continue;
+                }
+                let src_skip = (page_off - file_off) as usize;
+                let n = (page_end - page_off) as usize;
+                let page_in_frame = (page_off % PAGE_SIZE as u64) as usize;
+                let dst = phys_to_virt_ptr(pfn_to_phys(page.pfn));
+                // Copy the pin's [src_skip, src_skip+n) into the entry's
+                // frame. The user frames are PINNED — no fault possible;
+                // the write entry guarantees a full pin, so the pieces
+                // cover every byte (the cursor asserts it).
+                let mut done = 0usize;
+                pins.for_each_piece(src_skip, n, |src, l| {
+                    // SAFETY: dst is the linear map of the entry's frame
+                    // (PAGE_SIZE writable bytes); page_in_frame + done + l
+                    // <= PAGE_SIZE by construction.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            src as *const u8,
+                            dst.add(page_in_frame + done),
+                            l,
+                        );
+                    };
+                    done += l;
+                    true
+                });
+                debug_assert_eq!(done, n, "gup writeback crossed a pin hole");
+            }
+        }
+        drop(entry);
+    }
+
     /// Authoritative-repopulation twin of `writeback_update_range` (tmpfs
     /// truncate coherence): identical body except STALE-BUT-MAPPED frames
     /// are updated too. An invalidated entry whose frame still backs a

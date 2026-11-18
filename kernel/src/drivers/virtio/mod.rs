@@ -2462,8 +2462,17 @@ unsafe fn pci_submit_data_async_sg(
     {
         return Err(-5); // EIO
     }
-    if segs.is_empty() || segs.len() > MAX_SG_SEGS_PER_CHAIN {
+    if segs.is_empty() {
         return Err(-22); // EINVAL — caller must cap group size
+    }
+    {
+        // Chain footprint vs the negotiated ring depth (header + data
+        // + response). MAX_SG_SEGS_PER_CHAIN is the fusion lanes'
+        // conservative default, not the device limit.
+        let (seg_max, _) = pci_blk_sg_limits(slot);
+        if segs.len() > seg_max {
+            return Err(-22); // caller must split
+        }
     }
     let mut data_len_total: usize = 0;
     for s in segs {
@@ -3649,10 +3658,34 @@ pub fn set_pci_device_queue(slot: usize, queue: queue::VirtQueue) {
     // SAFETY: Called once during device init before any I/O; stores
     // the configured VirtQueue into the slot's array cell.
     unsafe {
+        PCI_BLK_QSIZE[slot].store(queue.queue_size, core::sync::atomic::Ordering::Release);
         PCI_BLK_QUEUES[slot] = Some(queue);
         // Initialize expected used.idx to 0 (new queue starts at 0)
         PCI_BLK_EXPECTED_USED_IDX[slot].store(0, core::sync::atomic::Ordering::Release);
     }
+}
+
+/// Per-slot negotiated virtqueue depth (GUP-DIO: the SG arms size their
+/// chains/waves from it). 0 = slot not configured.
+static PCI_BLK_QSIZE: [core::sync::atomic::AtomicU16; MAX_PCI_BLK_DISKS] =
+    [const { core::sync::atomic::AtomicU16::new(0) }; MAX_PCI_BLK_DISKS];
+
+/// SG chain limits of `slot`'s virtqueue: (max data segments per chain,
+/// descriptor budget for concurrent chains). Conservative fallback
+/// (16 / 100) when the slot is unconfigured.
+pub fn pci_blk_sg_limits(slot: usize) -> (usize, usize) {
+    let q = PCI_BLK_QSIZE
+        .get(slot)
+        .map(|q| q.load(core::sync::atomic::Ordering::Acquire) as usize)
+        .unwrap_or(0);
+    if q < 16 {
+        return (16, 100);
+    }
+    // seg_max = queue_size - 2 (header + response). The descriptor
+    // budget keeps a small margin for other in-flight chains (sync
+    // reads, journal traffic) that share the ring; alloc_desc_run's own
+    // desc budget (q) is the hard bound.
+    (q - 2, q - 8)
 }
 
 /// Get a slot's VirtQueue (mutable reference).
