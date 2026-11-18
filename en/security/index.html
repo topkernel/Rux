@@ -91,7 +91,7 @@
     <div class="tbl-wrap"><table>
       <thead><tr><th>Sub-page</th><th>Question answered</th><th>Headline</th></tr></thead>
       <tbody>
-        <tr><td><a href="unsafe.html">Layered unsafe ledger</a></td><td>How large is the memory-safety TCB, where is it, what process constrains it?</td><td class="num">12.9% unsafe lines (263 files / 2,494 blocks); the Framework/Service layering, 47 forbid files, a monotone-down budget</td></tr>
+        <tr><td><a href="unsafe.html">Layered unsafe ledger</a></td><td>How large is the memory-safety TCB, where is it, what process constrains it?</td><td class="num">10.6% unsafe lines (372 files / 5,420 blocks; 44,337 of 417,023 lines); the Framework/Service layering, 47 forbid files, a monotone-down budget</td></tr>
         <tr><td><a href="taxonomy.html">Defect taxonomy</a></td><td>What have the historical defects actually looked like, and where did they live?</td><td class="num">all-history 33 defects adjudicated: 23 unsafe/asm + 10 safe ownership-class; pointer-expression classes <b>0</b>; 6 caught by review pre-boot</td></tr>
         <tr><td><a href="formal.html">Formal verification</a></td><td>What machine verification exists beyond human review?</td><td class="num">Kani 159 harnesses · SPIN 4 models · loom 8 scenarios · Miri · 1,164 host tests; the mirror-sync discipline pins proof validity</td></tr>
         <tr><td><a href="hardening.html">Hardening &amp; gaps</a></td><td>Which runtime defenses exist? What is missing and what does closing it look like?</td><td class="num">the six-layer model 5/6 present; the 21-row posture = 7 present/3 quick/10 project/1 accepted; every gap with its closure shape</td></tr>
@@ -100,7 +100,7 @@
 
     <h2 id="composite"><span class="anchor">§3</span>The composite argument: why these numbers amount to "safe enough"</h2>
     <ol>
-      <li><b>Class elimination (compile time)</b>: the expression-level defect classes dominating C-kernel CVE history (overruns/iterator invalidation/wild pointer arithmetic/format strings) are unrepresentable in safe code — the taxonomy's <b>0</b> is that claim's empirical face; the unsafe surface is 12.9% and audited block by block.</li>
+      <li><b>Class elimination (compile time)</b>: the expression-level defect classes dominating C-kernel CVE history (overruns/iterator invalidation/wild pointer arithmetic/format strings) are unrepresentable in safe code — the taxonomy's <b>0</b> is that claim's empirical face; the unsafe surface is 10.6% and audited block by block.</li>
       <li><b>The residual class has dedicated countermeasures</b>: the 10 safe-class defects are all ownership/refcount/lock-protocol/stack-depth decisions — precisely the targets of model checking and symbolic execution: loom's interleaving enumeration (caught a real lock-protocol defect in its first 90 seconds), Kani proving invariant tables for all inputs, proptests pinning scoring/encoding/algebra rules.</li>
       <li><b>Proof validity is process-guaranteed</b>: the mirror-sync discipline makes kernel-vs-mirror drift fail the build directly — a proof cannot silently stop covering its code; the CI layering (light per-push + heavy nightly) ensures the instruments actually run.</li>
       <li><b>The defect surface is designed</b>: panic paths contained instance by instance (a dozen-plus regression receipts); instrument misjudgments and negative results archived with receipts — the adjudication discipline is itself audited.</li>
@@ -113,7 +113,7 @@
       <tbody>
         <tr><td>Memory-corruption defects (all history, adjudicated)</td><td class="num">33 (23 unsafe-class / 10 safe ownership-class)</td><td><a href="taxonomy.html">taxonomy §2</a></td></tr>
         <tr><td>Pointer-expression defects (safe code)</td><td class="num">0</td><td><a href="taxonomy.html">taxonomy §2</a></td></tr>
-        <tr><td>unsafe line share / unsafe blocks</td><td class="num">12.9% (20,926/162,677 lines) / 2,494 blocks</td><td><a href="unsafe.html">ledger §3</a></td></tr>
+        <tr><td>unsafe line share / unsafe blocks</td><td class="num">10.6% (44,337/417,023 lines) / 5,420 blocks</td><td><a href="unsafe.html">ledger §3</a></td></tr>
         <tr><td>Compile-time forbid(unsafe_code) files</td><td class="num">47 (+56 files already unsafe-free)</td><td><a href="unsafe.html">ledger §4</a></td></tr>
         <tr><td>Kani harnesses (all-input proofs)</td><td class="num">159 (34 files) / ~150 invariant families</td><td><a href="formal.html">formal §2</a></td></tr>
         <tr><td>SPIN models / loom scenarios</td><td class="num">4 models all PASS / 8 scenarios (3 planted must-catch)</td><td><a href="formal.html">formal §3-4</a></td></tr>
