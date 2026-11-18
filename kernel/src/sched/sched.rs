@@ -986,9 +986,27 @@ pub fn pick_owner_live(task: *mut Task) -> bool {
     if task.is_null() {
         return false;
     }
+    // r-strand (lat_fs conviction, 2026-11-19): an idle-marked cpu runs
+    // only its idle task — its slot cannot legitimately name a real
+    // task. The idle-loop entry heal rewrites the slot BEFORE
+    // mark_idle, so a name surviving on an idle-marked cpu is the
+    // STALE-slot face: the strand capture (PICK-SKIP-ALL why=1
+    // oncpu=1 claim=1 slot=2 swout=0) held a linked task refused by
+    // every pick for the whole window while the naming cpu sat
+    // halted-idle. Discount idle-marked names so the why=1
+    // stale-mark heal (stale_mark_confirm + release_pick_ownership)
+    // can fire; SWITCHING_OUT stays authoritative — a cpu switching
+    // TO idle keeps its mark until the release store lands.
+    let idle_mask = grq().idle_cpus.load(core::sync::atomic::Ordering::Acquire);
     (0..MAX_CPUS).any(|c| {
+        let sw = SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire) == task as u64;
+        if sw {
+            return true;
+        }
+        if c < 32 && idle_mask & (1u32 << c) != 0 {
+            return false;
+        }
         cpu_state(c).current == task
-            || SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire) == task as u64
     })
 }
 
