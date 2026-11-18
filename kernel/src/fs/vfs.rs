@@ -1184,8 +1184,10 @@ fn collect_subtree_mounts(
         // cost is about to be visible in every VFS_STATE waiter.
         if visited.len() == 4096 {
             crate::pr_warn!(
-                "vfs: MS_REC clone walk crossed {} mounts (registry pollution or subtree escape)",
-                visited.len()
+                "vfs: MS_REC clone walk crossed {} mounts (registry pollution or subtree escape); registry mounts={} chain_index={}",
+                visited.len(),
+                state.mounts.len(),
+                state.mount_chain_index.len()
             );
         }
     }
