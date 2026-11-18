@@ -1070,6 +1070,17 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
         }
 
         if vector == SYSCALL_VECTOR {
+            // rcu_user_exit shape (context tracking): a syscall ENTRY
+            // from user mode proves the CPU just spent the whole
+            // user-mode stretch outside any RCU read-side critical
+            // section — report it as a quiescent state. This is the
+            // user-busy CPU's report source the exit-tail report alone
+            // misses when a peer's storm pins the console mid-write
+            // (the bw_file_rd livelock: PID 1 blocked in write(1)
+            // never returns to user, so the EXIT report never fires;
+            // its next syscall ENTRY still does). One gated store,
+            // same fast-path shape as the exit report.
+            crate::sync::rcu::rcu_note_context_switch();
             handle_syscall(regs_ref);
         } else {
             match vector {

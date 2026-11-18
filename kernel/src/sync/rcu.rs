@@ -386,7 +386,14 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
             static SGP_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             let n = SGP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            if n < 200 {
+            // Print budget 4 (was 200): each report is a long IF=0
+            // polled-UART line; under the close storm the reports
+            // themselves pinned the console while the peer CPU's PID 1
+            // sat blocked in write(1) — manufacturing the very "stuck
+            // CPU" they were diagnosing (the bw_file_rd livelock
+            // anatomy, 2026-11-19). Four lines name the class; the
+            // rest stay silent.
+            if n < 4 {
                 // rwlock-livelock: the old print showed only qs[0..4] —
                 // on the SMP8 ub2404 rig the non-quiescent CPU was
                 // invisible (qs0-3 all == gen while the round failed),
@@ -699,7 +706,7 @@ fn announce_and_wait(gen: u32, max_ms: u64, site: &'static str) -> bool {
             static GPB_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             let n = GPB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            if n < 200 {
+            if n < 4 {
                 crate::pr_warn!(
                     "RCU-GP-BOUND site={} waited>{}ms: cpu{} reports no quiescent state (monopolist window)",
                     site,
