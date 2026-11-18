@@ -186,6 +186,8 @@ pub mod binder;
 #[cfg(feature = "unit-test")]
 pub mod perf;
 #[cfg(feature = "unit-test")]
+pub mod tmpfs;
+#[cfg(feature = "unit-test")]
 pub mod dev_t;
 #[cfg(feature = "unit-test")]
 pub mod checksum;
@@ -461,9 +463,11 @@ pub fn run_all_tests() {
     crate::fs::procfs::cpuinfo::cpuinfo_file_tests::shape_check();
     crate::fs::procfs::cpuinfo::cpuinfo_file_tests::order_check();
 
-    // tmpfs page-budget tests (mount option size=). Implemented in
-    // fs::tmpfs itself (needs private TmpfsSuperBlock access).
-    crate::fs::tmpfs::run_budget_tests();
+    // tmpfs group (kernel/src/tests/tmpfs.rs): page store, truncate
+    // tails, dir ops, and the mount-option page budget. Formerly an
+    // in-module unit-test fn plus a dead #[cfg(test)] block in
+    // fs/tmpfs.rs — all tmpfs unit tests live under kernel/src/tests/.
+    tmpfs::test_tmpfs();
 
     test_group_start("vma_flags");
     vma_flags::test_vma_flags();
