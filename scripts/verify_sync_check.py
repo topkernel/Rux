@@ -1520,6 +1520,16 @@ MAPPINGS = [
         # copy defines USER_START/USER_END as module constants instead, and
         # strncpy_from_user references the same path for its user_end read
         "transforms": [(r'super::mm::user_addr::USER_END', 'USER_END')],
+        # The verify mirrors' user-memory model splits the user pointer's
+        # two roles: the mirrored text reads the pointer's VALUE through
+        # model_addr_of(p) (the MODEL_BASE-space address the kernel-side
+        # text derives from `p as usize`), while the pointer itself
+        # carries real allocation provenance for Miri. The v_transform
+        # canonicalizes the hook back to `X as usize` for comparison, so
+        # the compared text stays kernel-faithful.
+        "v_transforms": [
+            (r'model_addr_of\((from|str|to)\)', r'\1 as usize'),
+        ],
         "skip_diff": ["access_ok"],
         "check_new": False,
     },
