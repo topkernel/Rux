@@ -126,7 +126,7 @@
         <thead><tr><th>Domain</th><th>Guarded metrics</th></tr></thead>
         <tbody>
           <tr><td>Memory allocation / reclaim</td><td>small_alloc class-lock sections ≤ ~25M/boot, REST share ≤10%, no reclaim slow-path emergence, zone free floor unchanged</td></tr>
-          <tr><td>Scheduler</td><td>GRQ critical section ≈60 ns (production) / 75–80 ns (minimal bracket; the old reading carried probe cost), IF=0 span avg 1200–7320 ns (measured 2786), census / wake→pick / context-switch cost in band</td></tr>
+          <tr><td>Scheduler</td><td>GRQ critical section ≈60 ns (production) / 75–80 ns (minimal bracket), IF=0 span avg 2786 ns (measured 2786), census / wake→pick / context-switch cost in band</td></tr>
           <tr><td>Filesystem hot paths</td><td>pbench fs rows (stat/mkdir+rmdir/unlink/write+fsync) within the allowed band, no new sync-write classes, buffer-cache hit rate ≥ baseline</td></tr>
           <tr><td>Interrupts / IRQ paths</td><td>IF=0 share within the allowed band (currently 20.4%±3pp), closed cli segments 3–7 ms class, no new IRQ-OFF print classes</td></tr>
           <tr><td>IPC</td><td>pipe / unix round-trip medians within the allowed band, truesize/writev path not regressed, connect-storm volumes within the allowed band</td></tr>

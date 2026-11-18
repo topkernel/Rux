@@ -132,7 +132,7 @@ cat /proc/sys/kernel/perf_event_paranoid</code></pre>
       <thead><tr><th>Guarded domain</th><th>Key rows</th></tr></thead>
       <tbody>
         <tr><td>Allocation/reclaim</td><td>small_alloc global class-lock sections ≤25M/boot; REST share ≤10%; no reclaim slowpath emergence (drct=0 class)</td></tr>
-        <tr><td>Scheduling</td><td>GRQ average hold 1200–7320 ns; census 8±2/32±4; p2 ±20%; the p4 fork open regression on the watch row</td></tr>
+        <tr><td>Scheduling</td><td>GRQ average hold 2786 ns; census 8±2/32±4; p2 ±20%; the p4 fork open regression on the watch row</td></tr>
         <tr><td>Filesystem</td><td>stat/openclose/read_cached/append/mkdrmdir/unlink median bands; buffer hit rate ≥99.1%</td></tr>
         <tr><td>Interrupts/IRQ</td><td>IF=0 20.4±3pp; max cli REST ≤10 ms; SOFTIRQ 3.1±2pp; no new IRQ-OFF print classes</td></tr>
         <tr><td>IPC</td><td>the p5 band table: 18.3 / 23–41 / 24–27 / 25 / 41–46 µs</td></tr>

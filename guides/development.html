@@ -126,7 +126,7 @@
         <thead><tr><th>域</th><th>守护指标</th></tr></thead>
         <tbody>
           <tr><td>内存分配 / 回收</td><td>small_alloc 类锁分段每次启动 ≤ 约 2500 万、REST 占比 ≤10% 机器、无回收慢路径、zone 余量不变</td></tr>
-          <tr><td>调度</td><td>GRQ 临界区 ≈60 ns(生产)/75–80 ns(最小括号,旧 241–273 读数含探针成本)、IF=0 段均值 1200–7320 ns(实测 2786)、普查/唤醒→拾取/上下文切换在基准范围内</td></tr>
+          <tr><td>调度</td><td>GRQ 临界区 ≈60 ns(生产)/75–80 ns(最小括号)、IF=0 段均值 2786 ns、普查/唤醒→拾取/上下文切换在基准范围内</td></tr>
           <tr><td>文件系统热路径</td><td>pbench fs 行(stat/mkdir+rmdir/unlink/write+fsync)在基准范围内、无新同步写类、buffer cache 命中率 ≥ 基线</td></tr>
           <tr><td>中断 / IRQ 路径</td><td>IF=0 份额在基准范围内(现行基准范围 20.4%±3pp)、关中断段 3–7 ms 类、无新 IRQ-OFF 打印类</td></tr>
           <tr><td>IPC</td><td>pipe / unix 往返中位在基准范围内、truesize/writev 路径不回退、连接风暴量级在基准范围内</td></tr>

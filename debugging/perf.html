@@ -132,7 +132,7 @@ cat /proc/sys/kernel/perf_event_paranoid</code></pre>
       <thead><tr><th>守护域</th><th>关键行</th></tr></thead>
       <tbody>
         <tr><td>分配/回收</td><td>small_alloc 全局类锁区段每次启动 ≤2500 万;REST 占机 ≤10%;回收慢路径 drct=0 类</td></tr>
-        <tr><td>调度</td><td>GRQ 平均持锁 1200–7320 ns;调度事件普查 8±2/32±4;p2 ±20%;p4 fork 行列为开放回归项</td></tr>
+        <tr><td>调度</td><td>GRQ 平均持锁 2786 ns;调度事件普查 8±2/32±4;p2 ±20%;p4 fork 行列为开放回归项</td></tr>
         <tr><td>文件系统</td><td>stat/openclose/read_cached/append/mkdrmdir/unlink 中位带;buffer 命中率 ≥99.1%</td></tr>
         <tr><td>中断/IRQ</td><td>IF=0 20.4±3pp;max cli REST ≤10 ms;SOFTIRQ 3.1±2pp;无新 IRQ-OFF 打印类</td></tr>
         <tr><td>IPC</td><td>p5a 18.3 / p5b 23–41 / p5c/f 24–27 / p5c3 25 / p5d 41–46 µs 带表</td></tr>
