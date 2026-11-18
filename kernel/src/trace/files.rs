@@ -133,6 +133,46 @@ pub fn register() {
         Some(|buf: &[u8]| bool_write(buf, |on| trace::set_tracing_on(on))),
     );
 
+    // --- the event pid filter ---------------------------------------
+    // set_event_pid (the reference's file of the same name): a list of
+    // pids; when non-empty, only those tasks' events are recorded.
+    // Write: comma/space/newline-separated pids; an empty/whitespace
+    // write CLEARS the filter (the reference's semantics for clearing).
+    // Divergence (documented at trace::event_pid_passes): a listed pid
+    // matches the task's tid OR tgid, so writing one service tgid
+    // captures its whole process tree.
+    tracefs::create_file(
+        &format!("{}/set_event_pid", TRACING_DIR),
+        0o644,
+        || {
+            let mut out = alloc::vec::Vec::new();
+            for pid in trace::event_pids() {
+                out.extend_from_slice(alloc::format!("{}\n", pid).as_bytes());
+            }
+            out
+        },
+        Some(|buf: &[u8]| {
+            let text = core::str::from_utf8(buf).unwrap_or("");
+            let mut pids = alloc::vec::Vec::new();
+            for tok in text.split(|c: char| c == ',' || c.is_whitespace()) {
+                if tok.is_empty() {
+                    continue;
+                }
+                match tok.parse::<u32>() {
+                    Ok(pid) if pid != 0 => {
+                        if pids.len() >= 16 {
+                            return -22; // EINVAL: table full (16 slots)
+                        }
+                        pids.push(pid);
+                    }
+                    _ => return -22, // EINVAL: unparsable token
+                }
+            }
+            trace::set_event_pids(&pids);
+            0
+        }),
+    );
+
     // --- the collected records ---------------------------------------
     tracefs::create_file(
         &format!("{}/trace", TRACING_DIR),
@@ -146,11 +186,13 @@ pub fn register() {
     );
 
     // --- the consuming reader ----------------------------------------
-    tracefs::create_file(
+    // Streaming shape: every read() on a held fd drains the rings —
+    // the snapshot-once shape returned EOF forever and userspace
+    // stream consumers saw nothing.
+    tracefs::create_stream_file(
         &format!("{}/trace_pipe", TRACING_DIR),
         0o440,
         || trace::render_pipe().into_bytes(),
-        None::<fn(&[u8]) -> i32>,
     );
 
     // --- the tracers --------------------------------------------------
@@ -448,11 +490,10 @@ pub fn register() {
                 0
             }),
         );
-        tracefs::create_file(
+        tracefs::create_stream_file(
             &format!("{}/trace_pipe", cpu_dir),
             0o440,
             move || trace::render_pipe_cpu(cpu).into_bytes(),
-            None::<fn(&[u8]) -> i32>,
         );
         tracefs::create_file(
             &format!("{}/stats", cpu_dir),

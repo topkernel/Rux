@@ -2700,8 +2700,7 @@ unsafe fn procfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::ino
     // For procfs root (ino == 1), also list all active PID directories.
     if inode.ino == 1 {
         use crate::process::pid_hash;
-        let (pids, count, _truncated) = pid_hash::pid_hash_collect_all();
-        for i in 0..count {
+        for pid in pid_hash::pid_hash_collect_all() {
             // Linux-exact /proc root listing: pid 0 (the per-CPU idle
             // tasks / swapper) NEVER appears — Linux keeps idle tasks out
             // of the PID allocator, so no dirent is generated for them.
@@ -2711,12 +2710,12 @@ unsafe fn procfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::ino
             // boot, regardless of the online CPU count. /proc/0 LOOKUP
             // already refused them (pid::is_valid_pid); readdir now
             // matches that.
-            if pids[i] == 0 {
+            if pid == 0 {
                 continue;
             }
             entries.push(crate::fs::inode::VfsDirEntry {
-                ino: pids[i] as u64,
-                name: alloc::format!("{}", pids[i]).into_bytes(),
+                ino: pid as u64,
+                name: alloc::format!("{}", pid).into_bytes(),
                 file_type: file_type::DT_DIR,
             });
         }

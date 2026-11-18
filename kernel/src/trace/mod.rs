@@ -54,7 +54,7 @@
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 /// The tracefs files (the filesystem side of the tracing subsystem).
 pub mod files;
@@ -2789,6 +2789,69 @@ pub fn set_tracing_on(on: bool) {
 }
 
 // ============================================================================
+// The event pid filter (tracefs `set_event_pid`)
+// ============================================================================
+
+/// Capacity of the `set_event_pid` set (the reference grows a list
+/// dynamically; a fixed 16-slot table keeps the record path lock-free —
+/// every slot is an independent atomic word).
+const EVENT_PID_SLOTS: usize = 16;
+
+static EVENT_PIDS: [AtomicU32; EVENT_PID_SLOTS] =
+    [const { AtomicU32::new(0) }; EVENT_PID_SLOTS];
+static EVENT_PID_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Replace the `set_event_pid` set (the tracefs file write). Pids are
+/// stored first, then the count with release — readers that load the
+/// count with acquire see a coherent table. Entries beyond the parsed
+/// list are zeroed so a shrinking write cannot leave stale matches.
+pub fn set_event_pids(pids: &[u32]) {
+    for (slot, pid) in EVENT_PIDS.iter().zip(pids.iter()) {
+        slot.store(*pid, Ordering::Relaxed);
+    }
+    for slot in EVENT_PIDS.iter().skip(pids.len()) {
+        slot.store(0, Ordering::Relaxed);
+    }
+    EVENT_PID_COUNT.store(pids.len().min(EVENT_PID_SLOTS), Ordering::Release);
+}
+
+/// The current `set_event_pid` set, in write order (the tracefs read).
+pub fn event_pids() -> alloc::vec::Vec<u32> {
+    let n = EVENT_PID_COUNT.load(Ordering::Acquire).min(EVENT_PID_SLOTS);
+    let mut out = alloc::vec::Vec::with_capacity(n);
+    for slot in EVENT_PIDS.iter().take(n) {
+        out.push(slot.load(Ordering::Relaxed));
+    }
+    out
+}
+
+/// Does the CURRENT task pass the `set_event_pid` filter? Matches the
+/// task's tid OR its process tgid: the reference filters on the task
+/// pid alone, but the OH hunts write one service tgid expecting the
+/// whole process tree (every OS_IPC/OS_FFRT worker shares the tgid) —
+/// matching both keeps single-threaded tools identical while making a
+/// tgid capture complete. The check is a bounded scan over ≤16 relaxed
+/// loads and only runs when a filter is armed (count > 0).
+#[inline]
+fn event_pid_passes() -> bool {
+    let n = EVENT_PID_COUNT.load(Ordering::Acquire);
+    if n == 0 {
+        return true; // no filter armed — everything passes
+    }
+    let (tid, tgid) = match crate::sched::current() {
+        Some(cur) => unsafe { ((*cur).pid() as u32, (*cur).tgid() as u32) },
+        None => return false, // no task context (early IRQ) — filtered
+    };
+    for slot in EVENT_PIDS.iter().take(n) {
+        let pid = slot.load(Ordering::Relaxed);
+        if pid != 0 && (pid == tid || pid == tgid) {
+            return true;
+        }
+    }
+    false
+}
+
+// ============================================================================
 // The trace options (tracefs `options/` — one boolean file per option)
 // ============================================================================
 
@@ -3061,6 +3124,11 @@ fn render_flags() -> [u8; 5] {
 /// ring_buffer_lock_reserve behaves the same).
 pub fn record(event: &TraceEvent, args: [u64; TRACE_ARGS]) -> bool {
     if !event.armed() || !TRACING_ON.load(Ordering::Relaxed) {
+        return false;
+    }
+    // set_event_pid: one acquire load when a filter is armed; a single
+    // relaxed zero-load when not (the common case).
+    if !event_pid_passes() {
         return false;
     }
     let cpu = crate::arch::cpu_id() as usize;

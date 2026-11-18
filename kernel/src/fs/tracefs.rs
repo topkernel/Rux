@@ -90,6 +90,7 @@ pub fn create_dir(path: &str) -> bool {
             children: Spinlock::new(BTreeMap::new()),
             show: None,
             store: None,
+            streaming: false,
         });
         let mut children = current.children.lock();
         children.insert(String::from(component), node.clone());
@@ -110,6 +111,23 @@ where
     F: Fn() -> Vec<u8> + Send + Sync + 'static,
     S: Fn(&[u8]) -> i32 + Send + Sync + 'static,
 {
+    create_file_inner(
+        path,
+        mode,
+        Some(Box::new(show)),
+        store.map(|s| Box::new(s) as Box<dyn Fn(&[u8]) -> i32 + Send + Sync>),
+        false,
+    )
+}
+
+/// The shared body of [`create_file`] and [`create_stream_file`].
+fn create_file_inner(
+    path: &str,
+    mode: u32,
+    show: Option<Box<dyn Fn() -> Vec<u8> + Send + Sync>>,
+    store: Option<Box<dyn Fn(&[u8]) -> i32 + Send + Sync>>,
+    streaming: bool,
+) -> bool {
     let root = match tracefs_root() {
         Some(r) => r,
         None => return false,
@@ -140,6 +158,7 @@ where
             children: Spinlock::new(BTreeMap::new()),
             show: None,
             store: None,
+            streaming: false,
         });
         let mut children = current.children.lock();
         children.insert(String::from(component), node.clone());
@@ -152,12 +171,29 @@ where
         is_dir: false,
         mode,
         children: Spinlock::new(BTreeMap::new()),
-        show: Some(Box::new(show)),
-        store: store.map(|s| Box::new(s) as Box<dyn Fn(&[u8]) -> i32 + Send + Sync>),
+        show,
+        store,
+        streaming,
     });
     let mut children = current.children.lock();
     children.insert(String::from(file_name), node);
     true
+}
+
+/// Create a STREAMING file: the reference tracefs `trace_pipe` shape.
+/// Every `read()` on a held fd drains whatever the generator yields NOW
+/// (consuming the rings), instead of serving the open-time snapshot —
+/// a snapshot made a held fd return EOF forever, so userspace stream
+/// readers (trace_pipe consumers) saw nothing after the first empty
+/// read. Re-open semantics are unchanged (the generator also runs on
+/// open). Empty drain reads return 0; reference blocking semantics are
+/// approximated — consumers polling with O_NONBLOCK treat 0 as
+/// "nothing new" (EAGAIN-equivalent).
+pub fn create_stream_file<F>(path: &str, mode: u32, show: F) -> bool
+where
+    F: Fn() -> Vec<u8> + Send + Sync + 'static,
+{
+    create_file_inner(path, mode, Some(Box::new(show)), None, true)
 }
 
 // ============================================================================
@@ -219,6 +255,7 @@ pub fn init_tracefs() -> Result<(), i32> {
         children: Spinlock::new(BTreeMap::new()),
         show: None,
         store: None,
+        streaming: false,
     });
 
     let sb = Box::new(TraceFsSuperBlock {
@@ -475,6 +512,8 @@ unsafe fn tracefs_readdir(inode: &Inode) -> Option<Vec<VfsDirEntry>> {
 
 /// tracefs open: snapshot the file content into file-private storage
 /// (the generator runs here, so every open sees the live value).
+/// STREAMING nodes (trace_pipe) skip the snapshot — their reads drain
+/// fresh content per call instead.
 /// SAFETY: VFS callback contract.
 unsafe fn tracefs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
     if !inode.mode.is_regular_file() {
@@ -484,11 +523,22 @@ unsafe fn tracefs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
         Some(e) => e,
         None => return 0,
     };
+    if entry.node.streaming {
+        let live = Box::new(TraceFsFileContent {
+            data: Vec::new(),
+            streaming: true,
+        });
+        file.set_private_data(Box::into_raw(live) as *mut u8);
+        return 0;
+    }
     let content = match entry.node.show.as_ref() {
         Some(show) => show(),
         None => Vec::new(),
     };
-    let snapshot = Box::new(TraceFsFileContent { data: content });
+    let snapshot = Box::new(TraceFsFileContent {
+        data: content,
+        streaming: false,
+    });
     file.set_private_data(Box::into_raw(snapshot) as *mut u8);
     0
 }
@@ -545,9 +595,16 @@ pub static TRACEFS_INODE_OPS: INodeOps = INodeOps {
 pub struct TraceFsFileContent {
     /// generated content
     pub data: Vec<u8>,
+    /// streaming node (trace_pipe): refilled by the read path
+    pub streaming: bool,
 }
 
 /// read: serve from the open-time snapshot at the file position.
+/// STREAMING nodes: when the previous batch is fully consumed, run the
+/// node's generator (the drain) and serve the fresh batch — the
+/// reference trace_pipe's consuming-reader shape; an empty drain
+/// returns 0 ("nothing new now"), which poll loops treat as
+/// EAGAIN-equivalent.
 fn tracefs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     // SAFETY: private_data was installed by tracefs_open under this File.
     let ptr = match unsafe { *file.private_data.get() } {
@@ -555,7 +612,21 @@ fn tracefs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
     // SAFETY: pointer provenance is Box::into_raw in tracefs_open.
-    let content = unsafe { &*(ptr as *const TraceFsFileContent) };
+    let content = unsafe { &mut *(ptr as *mut TraceFsFileContent) };
+    let offset = file.get_pos() as usize;
+    if content.streaming && offset >= content.data.len() {
+        // Refill: drain the generator into the live batch. The inode
+        // lookup mirrors tracefs_file_write; a missing entry leaves the
+        // batch empty (reads report 0).
+        let inode = unsafe { (*file.inode.get()).clone() };
+        let fresh = inode
+            .as_ref()
+            .and_then(|i| unsafe { entry_of(i) })
+            .and_then(|e| e.node.show.as_ref().map(|show| show()))
+            .unwrap_or_default();
+        content.data = fresh;
+        file.set_pos(0);
+    }
     let offset = file.get_pos() as usize;
     let available = content.data.len().saturating_sub(offset);
     let to_read = buf.len().min(available);
