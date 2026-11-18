@@ -574,6 +574,29 @@ impl Socket {
                                     crate::net::tcp::TcpState::TCP_ESTABLISHED => {
                                         Some(true)
                                     }
+                                    // Established-then-closing states: the
+                                    // handshake COMPLETED and the peer has
+                                    // since closed (e.g. a server that
+                                    // accept()s and close()s immediately —
+                                    // the lat_connect pattern). connect()
+                                    // must report SUCCESS per the reference:
+                                    // the connection lived; the peer's FIN
+                                    // is a subsequent event (read() = 0).
+                                    // The old shape treated CLOSE_WAIT as
+                                    // failure and FABRICATED ETIMEDOUT when
+                                    // pending_error was 0 — a working
+                                    // connection reported as timeout (the
+                                    // fdprobe hunt: connect() ETIMEDOUT
+                                    // while a retry on the same socket
+                                    // returned 0).
+                                    crate::net::tcp::TcpState::TCP_CLOSE_WAIT
+                                    | crate::net::tcp::TcpState::TCP_FIN_WAIT1
+                                    | crate::net::tcp::TcpState::TCP_FIN_WAIT2
+                                    | crate::net::tcp::TcpState::TCP_CLOSING
+                                    | crate::net::tcp::TcpState::TCP_LAST_ACK
+                                    | crate::net::tcp::TcpState::TCP_TIME_WAIT => {
+                                        Some(true)
+                                    }
                                     crate::net::tcp::TcpState::TCP_SYN_SENT
                                     | crate::net::tcp::TcpState::TCP_SYN_RECV => None,
                                     _ => Some(false),
