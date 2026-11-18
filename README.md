@@ -73,7 +73,7 @@ boards, with method and a per-row attribution of every remaining gap:
 | Pipe · context-switch · semaphore latency | **5.8× · 5.1–6.3× · 9.0× faster** |
 | Real-time wake latency, cyclictest clean runs | **min and max win every clean pass; max 10× better** |
 | hackbench, all three forms | **1.06–1.16× faster** |
-| Geekbench 5 | **single-core 113% · multi-core 110%** |
+| Geekbench 5 | **single-core 110% · multi-core 105%** |
 | 4 KiB random I/O · 1 MiB direct streams | parity band, 0.83–0.97× — each row carries a measured decomposition of the gap |
 
 The rows that trail are not excused; they are *accounted* — every remaining
