@@ -136,6 +136,17 @@ def normalize(text):
     # Remove crate::pr_warn!(...) calls (kernel-only logging)
     text = re.sub(r'\s*crate::pr_warn!.*?;\s*\n?', '\n', text, flags=re.DOTALL)
 
+    # Remove crate::dfx::... statement calls (kernel-only forensics probes,
+    # e.g. mmforensics::note_ref). Single statements ending at the first
+    # ';'. The trailing [ \t]*\n? eats exactly the statement's own newline
+    # so the next line keeps its indentation.
+    text = re.sub(r'[ \t]*crate::dfx::[^;]*;[ \t]*\n?', '', text)
+
+    # Remove preempt_count_add/sub balance pairs (kernel-only preemption
+    # gating around spinlock critical sections; the verification models
+    # treat preemption as an explicit environment hook instead).
+    text = re.sub(r'[ \t]*crate::interrupt::preempt::preempt_count_(?:add|sub)\([^;]*\);[ \t]*\n?', '', text)
+
     # Remove #[inline], #[inline(never)], #[inline(always)]
     text = re.sub(r'#\[inline[^\]]*\]\s*\n?', '', text)
 
@@ -401,12 +412,15 @@ MAPPINGS = [
         "type": None,  # free functions
         "compare": [
             "heap_size_to_order", "size_to_order", "get_buddy_idx",
-            "page_idx_to_addr", "addr_to_page_idx",
+            "page_idx_to_addr",
         ],
         "skip_diff": [
             "heap_size_to_order", "size_to_order", "get_buddy_idx",
-            "page_idx_to_addr", "addr_to_page_idx",
-        ],  # verify uses pub const/const, kernel uses different visibility
+            "page_idx_to_addr",
+        ],
+        # addr_to_page_idx was removed from the kernel (replaced by the
+        # bounds-checked method addr_to_page_idx_checked); verify uses
+        # pub const/const, kernel uses different visibility
     },
     # ---- Phase 2 mappings ----
     {
@@ -1116,9 +1130,12 @@ MAPPINGS = [
         "verify": "kernel/verify/src/ipc/ipc_id_test.rs",
         "kernel": "kernel/src/ipc/util.rs",
         "type": None,  # free functions
-        "compare": ["ipc_build_id", "ipc_id_to_index", "ipc_id_seq", "ipc_update_mode", "owner_bits", "group_bits", "other_bits"],
+        # ipc_update_mode / owner_bits / group_bits / other_bits were
+        # removed from the kernel's ipc/util.rs (mode bits now handled
+        # inline); drop them from the mirror contract.
+        "compare": ["ipc_build_id", "ipc_id_to_index", "ipc_id_seq"],
         "skip": [],
-        "skip_diff": ["ipc_build_id", "ipc_id_to_index", "ipc_id_seq", "ipc_update_mode", "owner_bits", "group_bits", "other_bits"],
+        "skip_diff": ["ipc_build_id", "ipc_id_to_index", "ipc_id_seq"],
         # verify copies standalone fns with simplified signatures; kernel uses private methods
         "check_new": False,
     },
@@ -1145,9 +1162,11 @@ MAPPINGS = [
         "verify": "kernel/verify/src/drivers/pci_offset_test.rs",
         "kernel": "kernel/src/drivers/pci/mod.rs",
         "type": None,  # constants + free functions
-        "compare": ["is_io_bar", "is_memory_bar", "is_64bit_memory_bar"],
+        # is_io_bar / is_memory_bar / is_64bit_memory_bar were removed
+        # from the kernel's PCI code; nothing left to compare.
+        "compare": [],
         "skip": [],
-        "skip_diff": ["is_io_bar", "is_memory_bar", "is_64bit_memory_bar"],
+        "skip_diff": [],
         # verify copies as standalone fns; kernel has in impl block
         "check_new": False,
     },
@@ -1156,9 +1175,12 @@ MAPPINGS = [
         "verify": "kernel/verify/src/net/tcp_state_test.rs",
         "kernel": "kernel/src/net/tcp.rs",
         "type": None,  # enum constants + free functions
-        "compare": ["tcp_dof", "tcp_header_len", "tcp_syn", "tcp_ack", "tcp_fin", "tcp_rst", "tcp_psh"],
+        # tcp_dof / tcp_header_len / tcp_syn / tcp_ack / tcp_fin /
+        # tcp_rst / tcp_psh helpers were removed from the kernel's
+        # tcp.rs (header flag access is inline now); nothing to compare.
+        "compare": [],
         "skip": [],
-        "skip_diff": ["tcp_dof", "tcp_header_len", "tcp_syn", "tcp_ack", "tcp_fin", "tcp_rst", "tcp_psh"],
+        "skip_diff": [],
         # verify copies as standalone fns; kernel methods are on TcpHdr impl
         "check_new": False,
     },
