@@ -47,7 +47,8 @@ impl Ext4FileSystem {
 
         // Get journal start block from inode's first data block
         // For simple journals, the journal data starts at i_block[0]
-        let journal_start_block = if (journal_inode.i_flags & 0x80000) != 0 {
+        let journal_extent_based = (journal_inode.i_flags & 0x80000) != 0;
+        let journal_start_block = if journal_extent_based {
             // Extents-based journal inode — read first extent
             use crate::fs::ext4::extent::ext4_ext_get_block;
             match ext4_ext_get_block(self, &journal_inode.i_block, 0) {
@@ -173,6 +174,46 @@ impl Ext4FileSystem {
 
         // Free space = total log area minus used
         journal.j_free.store(j_last - log_head, core::sync::atomic::Ordering::SeqCst);
+
+        // JOURNAL BLOCK MAP (ext4-persist P0 fix): e2fsprogs lays the
+        // journal inode out as MULTIPLE extents with physical holes
+        // between them (the 96M battery image: logical 0-9 -> 19-28,
+        // 10-24 -> 30-44, 25-1023 -> 1582-2580; physical 29 is the
+        // inode BITMAP and 45..1581 the inode TABLES). The old
+        // `j_blk_offset + logical` arithmetic assumed one contiguous
+        // range and wrote journal DATA blocks onto live metadata:
+        // dir-block journal copies over the inode bitmap (reserved
+        // inodes handed out to mkdir), journal copies over the inode
+        // table — catastrophic on-disk corruption within seconds of
+        // any revoke-carrying commit (rmdir churn) under load. Capture
+        // the true logical->physical map here, BEFORE recovery runs
+        // (replay reads through the same map). Holes inside the journal
+        // length stay 0: Journal::jmap returns 0 and commits into them
+        // abort instead of corrupting. Legacy direct-block journals
+        // keep the empty map (jmap's contiguous fallback — exact for
+        // the Rux-made images).
+        if journal_extent_based {
+            use crate::fs::ext4::extent::ext4_ext_get_block;
+            let mut map = alloc::vec::Vec::with_capacity(j_maxlen as usize);
+            let mut holes = 0u32;
+            for logical in 0..j_maxlen as u64 {
+                match ext4_ext_get_block(self, &journal_inode.i_block, logical) {
+                    Ok(b) if b != 0 => map.push(b),
+                    _ => {
+                        map.push(0);
+                        holes += 1;
+                    }
+                }
+            }
+            if holes != 0 {
+                crate::pr_warn!(
+                    "ext4: journal inode has {}/{} unmapped logical blocks (multi-extent layout); writes into them abort",
+                    holes,
+                    j_maxlen
+                );
+            }
+            *journal.j_block_map.lock() = map;
+        }
 
         let journal_arc = Arc::new(journal);
         // Seed for CSUM_V2/V3 block/tag checksums (reference journal.c:

@@ -789,6 +789,16 @@ pub struct Journal {
     pub j_fc_replay_callback: Option<fn(&Journal, *mut BufferHead, i32, i32, Tid) -> i32>,
     /// Bmap function
     pub j_bmap: Option<fn(&Journal, *mut u64) -> i32>,
+    /// Journal logical->physical block map, captured once at load from
+    /// the journal inode's extents (ext4-persist P0 fix). e2fsprogs
+    /// journals are MULTI-EXTENT with holes between extents (96M image:
+    /// logical 0-9 -> 19-28, 10-24 -> 30-44, 25-1023 -> 1582-2580;
+    /// physical 29 is the inode bitmap, 45.. are the inode tables) —
+    /// the old `j_blk_offset + logical` arithmetic wrote journal DATA
+    /// blocks onto live metadata. Empty map = the legacy contiguous
+    /// layout (Rux-made direct-block journals): jmap falls back to the
+    /// arithmetic, which is exact for them.
+    pub j_block_map: Spinlock<alloc::vec::Vec<u64>>,
 }
 
 impl Journal {
@@ -853,6 +863,7 @@ impl Journal {
             j_fc_cleanup_callback: None,
             j_fc_replay_callback: None,
             j_bmap: None,
+            j_block_map: Spinlock::new(alloc::vec::Vec::new()),
         }
     }
 
@@ -899,6 +910,28 @@ impl Journal {
     /// the superblock are crc32c-protected when either feature is set).
     pub fn has_csum_v2or3(&self) -> bool {
         self.has_csum_v2() || self.has_csum_v3()
+    }
+
+    /// Resolve a journal-LOGICAL block number (offset from the journal's
+    /// first block: 0 is the journal superblock, j_first..j_last the log
+    /// area) to its PHYSICAL device block through the extent map
+    /// captured at journal load. Empty map = the legacy contiguous
+    /// layout (Rux-made direct-block journals), where the arithmetic
+    /// fallback is exact. Returns 0 when the logical block is unmapped
+    /// (a hole between the journal inode's extents): callers MUST treat
+    /// 0 as a journal-structure error — falling back to arithmetic
+    /// here is the P0 corruption class (journal data blocks landing on
+    /// the inode bitmap / inode tables; ext4-persist lane, 2026-11-19).
+    pub fn jmap(&self, logical: u64) -> u64 {
+        let map = self.j_block_map.lock();
+        if map.is_empty() {
+            return self.j_blk_offset + logical;
+        }
+        if logical < map.len() as u64 {
+            map[logical as usize]
+        } else {
+            0
+        }
     }
 
     /// The checksum seed for CSUM_V2/V3 block/tag checksums.
