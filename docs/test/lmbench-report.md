@@ -168,6 +168,53 @@ handoff), open (1.44x — walk loop + File construct), read (1.42x —
 copy tail), write (1.13x). lat_fs re-polluted by boot noise (no
 honest number this round).
 
+## Patrol round (2026-11-19 02:xx): two strand heals landed (c736ec7d9, f315e95df); remaining hang face = alloc/IO-completion convoy
+
+The patrol's lever on the convicted family: two surgical heals on the
+strand mechanisms, both following existing in-tree heal patterns,
+gated (riscv 1334/1334, triple-arch rc=0, pushed):
+
+1. pick_owner_live discounts idle-marked cpus' slot names — an
+idle-marked cpu runs only its idle task, so a slot name surviving on
+one is the provably stale-slot face (the convicted capture: why=1
+oncpu=1 claim=1 slot=2 while the naming cpu sat halted-idle); the
+why=1 stale-mark heal can now fire instead of refusing forever.
+2. The 1 Hz phantom sweep recounts the timeline and resyncs the GRQ
+counter + class bit on desync — face (a): counter 0 while the tree
+holds the task WFI-halts every idle CPU on the nr_running==0 gate and
+the linked task starves with all CPUs idle.
+
+Verification boot on the release-opt heal kernel: the previously
+deterministic 1k-round hang COMPLETED (row 19046/17006 at full speed)
+with zero false-positive heal fires — but the battery still stalled
+after the 1k row, so the boot's residual hang is a third face, now
+evidence-armed:
+
+- The stall mechanism is a **hardirq-bracket convoy**: a timer-softirq
+  dispatch (the 1 Hz heartbeat's futex holder decode) wedged INSIDE
+  the IRQ bracket on cpu1 for 200+ jiffies (PREEMPT-LEAK pc=0x10000
+  rip=oh68_holder_decode_tgid); while booked, that cpu's irq-exit
+  cannot dispatch softirqs — TIMER-SOFTIRQ-STALL grows, the 10 s
+  IoCompletion deadline escapes never fire, sleepers strand.
+- The convoy partner: the decoder allocates diagnostic Strings in
+  softirq context — the allocation spins on the buddy lock; the
+  earlier frozen-cpu dump showed the lock's other side
+  (shutdown_cascade -> dealloc_untracked spinning at a constant rip
+  while cpu0 sat in PageCache::insert_ext). The write-task spin face
+  (preempt=2) matches the bio.rs bucket lock (preempt_disable only)
+  — the sync_all walk discipline is the next audit target.
+- Note: the PREEMPT-LEAK pc=0x10000 lines ON IDLE TASKS are the probe
+  measuring its own tick bracket (the probe samples inside the
+  hardirq) — not leaks; the instrument self-measurement is now known.
+
+Next-round levers (priority order): (1) audit the buffer-cache
+sync_all / bucket-lock preempt discipline behind the preempt=2 write
+spin; (2) instrument the ABBA (buddy-lock holder vs completion
+delivery) — one rate-capped print naming the holder's wait site when
+the buddy lock age exceeds 1 s (the allocwatch pattern); (3) move the
+heartbeat's allocation out of softirq context (pre-sized buffers).
+lat_fs + bw_tcp rows stay open pending this.
+
 ## lat_fs stall family CONVICTED (2026-11-19 night, strand anatomy captured)
 
 The phase-decomposition probe (latfsinit, per-round -s runs + 2 s wall
