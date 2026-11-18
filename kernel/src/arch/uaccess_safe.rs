@@ -101,6 +101,45 @@ pub fn futex_cmpxchg_u32(uaddr: usize, expected: u32, new: u32) -> Option<u32> {
     unsafe { uaccess::futex_cmpxchg_u32_user(uaddr as *mut u32, expected, new) }
 }
 
+/// Copy one `T` in from user memory at `src_user` into `dst`.
+///
+/// Returns the number of bytes NOT copied (0 = complete success). On
+/// failure the uncopied tail of `dst` is zero-filled by the primitive.
+///
+/// Contract (same as the arch `copy_from_user` the call sites used to
+/// wrap): `T: Copy` and `T` carries no bit-pattern validity constraint
+/// beyond its bytes (plain integer/struct UAPI types — not `bool`/
+/// `char`/enums with niches); `dst` must point at an initialized `T`.
+#[inline]
+pub fn copy_in_t<T: Copy>(dst: &mut T, src_user: usize) -> usize {
+    // SAFETY: the kernel side is a live `&mut T` (caller-initialized);
+    // the user side is access_ok-checked and faults through the
+    // exception table, so any src_user value is sound to pass.
+    unsafe {
+        uaccess::copy_from_user(
+            dst as *mut T as *mut u8,
+            src_user as *const u8,
+            core::mem::size_of::<T>(),
+        )
+    }
+}
+
+/// Copy one `T` out from kernel memory to user address `dst_user`.
+///
+/// Returns the number of bytes NOT copied (0 = complete success).
+#[inline]
+pub fn copy_out_t<T: Copy>(dst_user: usize, src: &T) -> usize {
+    // SAFETY: the kernel side is a shared `&T` (size_of::<T>() readable
+    // bytes by the type system); the user side fault-safes inside.
+    unsafe {
+        uaccess::copy_to_user(
+            dst_user as *mut u8,
+            src as *const T as *const u8,
+            core::mem::size_of::<T>(),
+        )
+    }
+}
+
 /// Typed handle to one `Copy` value living in user memory.
 ///
 /// Constructing this is infallible and validates nothing; every
