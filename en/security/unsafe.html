@@ -108,7 +108,7 @@
     <div class="tbl-wrap"><table>
       <thead><tr><th>Directory</th><th class="num">unsafe lines</th><th class="num">unsafe density</th><th>Notes</th></tr></thead>
       <tbody>
-        <tr><td>Whole kernel</td><td class="num">20,926 / 162,677 lines (263 files, 2,494 unsafe blocks)</td><td class="num"><b>12.9%</b></td><td>budget rule: the percentage only goes down, or an increase is justified per release</td></tr>
+        <tr><td>Whole kernel</td><td class="num">20,926 / 417,023 lines (263 files, 5,420 unsafe blocks)</td><td class="num"><b>10.6%</b></td><td>budget rule: the percentage only goes down, or an increase is justified per release</td></tr>
         <tr><td>fs</td><td class="num">5,352</td><td class="num">12.6%</td><td>ext4 and the page cache form the bulk of the budget</td></tr>
         <tr><td>syscall</td><td class="num">3,955</td><td class="num">15.8%</td><td>the capsule boundary layer</td></tr>
         <tr><td>process / drivers</td><td class="num">2,807 / 2,131</td><td class="num">24.6% / 15.7%</td><td>process is the densest (trap/context-switch adjacency)</td></tr>
@@ -117,7 +117,7 @@
         <tr><td>sync</td><td class="num">—</td><td class="num"><b>2.8%</b></td><td>the shape's living instance: one small unsafe core per primitive, a safe API above it</td></tr>
       </tbody>
     </table></div>
-    <p>External reference point: Asterinas (USENIX ATC'25, a same-class Rust kernel) reports a memory-safety TCB of ~14% under the same kind of measurement — this kernel sits on the same axis at 12.9%.</p>
+    <p>External reference point: Asterinas (USENIX ATC'25, a same-class Rust kernel) reports a memory-safety TCB of ~14% under the same kind of measurement — this kernel sits on the same axis at 10.6%.</p>
     <h3>Token basis (scripts/gen_tcb_ledger.py; the rule table mirrors kernel-layers.md)</h3>
     <div class="tbl-wrap"><table>
       <thead><tr><th>Bucket</th><th class="num">unsafe tokens</th><th>Notes</th></tr></thead>
@@ -143,7 +143,7 @@
       <li><b>Class elimination (compile time)</b>, against C-kernel CVE history: buffer overruns (bounds-checked slices), Arc-owned use-after-free/double-free, data races on typed shared state (Send/Sync), iterator invalidation (borrowck), format-string injection (typed formatting) — the dominant classes are <b>unrepresentable in safe code</b>; the taxonomy's zero pointer-expression defects is the empirical face of the same argument (see <a href="taxonomy.html">taxonomy</a>).</li>
       <li><b>The density argument</b>: sync at 2.8% unsafe density is the layering's living sample — unsafe area scales with primitive complexity, not API surface.</li>
       <li><b>The pairing argument</b>: every Framework primitive carries (a) a Kani harness, (b) a proptest, and (c) — as the Framework shrinks — a Verus function spec (the registered next step, page-flag/refcount algebra first); RustBelt is cited as the trust anchor, not a build dependency.</li>
-      <li><b>The budget argument</b>: the monotone-down rule on 12.9% + every newly added unsafe requiring a commit-body explanation of "why safe code was not possible" — TCB growth is constrained by process, not convention.</li>
+      <li><b>The budget argument</b>: the monotone-down rule on 10.6% + every newly added unsafe requiring a commit-body explanation of "why safe code was not possible" — TCB growth is constrained by process, not convention.</li>
     </ul>
 
     <div class="callout">Reproduce: python3 scripts/gen_tcb_ledger.py --markdown (the layered token basis); python3 scripts/tcb_ledger.py (the line basis). Canonical: docs/architecture/kernel-layers.md (the rules + forbid campaign), docs/development/tcb-ledger.md (the generated ledger). Related: <a href="formal.html">formal verification</a> (Kani proving unsafe), <a href="taxonomy.html">defect taxonomy</a> (the residency evidence).</div>

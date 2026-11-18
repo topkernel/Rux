@@ -141,7 +141,7 @@
 
     <h2 id="verdict"><span class="anchor">§7</span>The verdict: what these numbers support</h2>
     <ul>
-      <li><b>The class-elimination argument holds</b>: zero expression-level defects is consistent with safe code's structural immunity; 23 of 33 defects reside in explicitly audited unsafe — self-consistent with the layered model where the unsafe surface IS the TCB (12.9% of area, the <a href="unsafe.html">ledger</a>).</li>
+      <li><b>The class-elimination argument holds</b>: zero expression-level defects is consistent with safe code's structural immunity; 23 of 33 defects reside in explicitly audited unsafe — self-consistent with the layered model where the unsafe surface IS the TCB (10.6% of area, the <a href="unsafe.html">ledger</a>).</li>
       <li><b>The residual class is named and addressed</b>: the 10 safe-class defects are all ownership/refcount/lock-protocol/stack-depth decisions — precisely the targets of model checking and property testing (loom lock protocols, Kani INV-M tables, proptest refcounts); the hardening register lists checked Refcount and stack-depth analysis as closure items.</li>
       <li><b>The defense lines work</b>: 6/33 caught by review before any boot; panic surfaces contained instance by instance; instrument misjudgments archived.</li>
       <li><b>A statement without hedging</b>: 33 defects over 3,358 commits ≈ 1% of all commits carried a memory-corruption defect, each with a fix and regression evidence — this is the empirical baseline for "safe enough", not an assertion.</li>
