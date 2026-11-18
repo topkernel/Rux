@@ -117,7 +117,7 @@
         </tbody>
       </table>
     </div>
-<h2 id="method"><span class="anchor">§3</span>方法与 rig</h2>
+<h2 id="method"><span class="anchor">§3</span>方法与 test platform</h2>
     <ul>
       <li><b>同机同加速</b>:两侧同一宿主、同一 QEMU q35 + KVM(<code>-accel kvm -cpu host</code>)、同一 Ubuntu rootfs 形状、同一静态基准二进制;每启动一个用例(串口与长基准并发打印,单用例单次启动是唯一干净采集),runner 为 PID 1,35 秒 in-guest 预算(特殊用例单独注明)。</li>
       <li><b>类内可比铁律</b>:debug 与 release-strong 不可跨类比(strong 在下限类指标低 10–30×);TCG 与 KVM 不可跨类比。</li>

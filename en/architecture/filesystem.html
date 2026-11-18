@@ -190,7 +190,7 @@
         <tr><td>buffer cache hit rate</td><td colspan="2" class="num">99.1% (gate ≥ baseline; pa29: bread 2.81M / device reads 25k)</td></tr>
       </tbody>
     </table></div>
-    <p class="callout">Honest gaps on record: p6_mkdrmdir remains ~14× from the same-rig Linux's 153 µs — the gap is attributed to the shared syscall and path-lookup fixed costs, not the filesystem itself; the write_fsync 14.2 ms median is the current gate anchor (to be re-evaluated after span-writeback batching).</p>
+    <p class="callout">Honest gaps on record: p6_mkdrmdir remains ~14× from the same-test platform Linux's 153 µs — the gap is attributed to the shared syscall and path-lookup fixed costs, not the filesystem itself; the write_fsync 14.2 ms median is the current gate anchor (to be re-evaluated after span-writeback batching).</p>
 
     <div class="callout">Code: <code>kernel/src/fs/</code> (dentry / mount / file / fdreap / page_cache / bio / ext4/* / jbd2/* / procfs/* / pipe / inotify) and <code>kernel/src/io_uring/</code>. Divergences: D-4/D-6/D-8/D-12/D-13. Instruments: the fsw counters (fsw=1), the rux:epoll_* / ext4:* / jbd2:* trace families (see <a href="../debugging/tracepoints.html">tracepoints</a>).</div>
   </article>

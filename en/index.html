@@ -126,7 +126,7 @@
       <table>
         <thead><tr><th>Architecture</th><th>QEMU machine</th><th>Accel</th><th>Userspace</th><th>Status</th></tr></thead>
         <tbody>
-          <tr><td><b>x86_64</b></td><td class="mono">q35</td><td>KVM (primary)</td><td>Ubuntu 22.04 + 24.04 (glibc)</td><td><span class="chip ok"><span class="dot g"></span>22.04 GNOME desktop 5/5 · 24.04 graphical targets + serial login · main LTP/perf rig</span></td></tr>
+          <tr><td><b>x86_64</b></td><td class="mono">q35</td><td>KVM (primary)</td><td>Ubuntu 22.04 + 24.04 (glibc)</td><td><span class="chip ok"><span class="dot g"></span>22.04 GNOME desktop 5/5 · 24.04 graphical targets + serial login · main LTP/perf test platform</span></td></tr>
           <tr><td><b>riscv64</b></td><td class="mono">virt</td><td>TCG (MTTCG)</td><td>Ubuntu 22.04 / musl minimal rootfs</td><td><span class="chip ok"><span class="dot g"></span>Desktop + kernel suite 1328/1328</span></td></tr>
           <tr><td><b>aarch64</b></td><td class="mono">virt (gic-version=3)</td><td>TCG</td><td>Interactive shell</td><td><span class="chip cyan"><span class="dot o"></span>shell / signals / kernel suite green</span></td></tr>
         </tbody>
@@ -235,7 +235,7 @@
     <div class="sec-head">
       <span class="kicker">Quality · sections</span>
       <h2>The numbers</h2>
-      <p>Four standalone sections: Testing (LTP / stability / stress), Performance (gates + benchmark panel + optimization ledger), Security (taxonomy + formal verification + gap register) — every number carries its rig and date.</p>
+      <p>Four standalone sections: Testing (LTP / stability / stress), Performance (gates + benchmark panel + optimization ledger), Security (taxonomy + formal verification + gap register) — every number carries its test platform and date.</p>
     </div>
     <div class="card-grid grid-4">
       <div class="card">
@@ -252,7 +252,7 @@
       </div>
       <div class="card">
         <h3><span class="ico">📊</span>Performance</h3>
-        <p>Three gate tiers + six guarded domains. Same-rig vs Linux (2026-11-16 standing; the Linux column is a guest kernel in the same rig): lmbench 14 of 21 paired cases ahead or at parity (pipe 4.6×, context switch 4.0–4.5×, semaphore 2.9×), 7 behind (the plain-syscall band 1.2–2.5×, open worst at 1.9–2.5×); Geekbench 5 SC 2440 / MC 7709 (vs the Linux 4-CPU anchor 113% / 110%); filesystem flush 128 MB (x86_64 KVM): fsync 11.55→3.04 s, msync 13.95→3.31 s, sync 11.30→3.31 s.</p>
+        <p>Three gate tiers + six guarded domains. Same-test platform vs Linux (2026-11-16 standing; the Linux column is a guest kernel in the same test platform): lmbench 14 of 21 paired cases ahead or at parity (pipe 4.6×, context switch 4.0–4.5×, semaphore 2.9×), 7 behind (the plain-syscall band 1.2–2.5×, open worst at 1.9–2.5×); Geekbench 5 SC 2440 / MC 7709 (vs the Linux 4-CPU anchor 113% / 110%); filesystem flush 128 MB (x86_64 KVM): fsync 11.55→3.04 s, msync 13.95→3.31 s, sync 11.30→3.31 s.</p>
         <div class="nums">14 of 21 paired cases · full ledger</div>
         <a class="more" href="performance/index.html">Performance →</a>
       </div>

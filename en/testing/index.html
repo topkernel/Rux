@@ -131,7 +131,7 @@
           <tr><td>unit-test-report.md</td><td>In-kernel guest suite (make test), per architecture</td><td class="mono">1328/1328 riscv64 · 1263/1263 x86_64 · 2026-11-16</td></tr>
           <tr><td>integration-test-report.md</td><td>Multi-process unattended testing, probes, CI smoke gate</td><td class="mono">2026-11-01</td></tr>
           <tr><td>ltp-report.md / ltp-tracking.md</td><td>LTP compatibility, both rigs (riscv64 TCG / x86_64 KVM)</td><td class="mono">official scan3 1138/1869 → expected 1139/1869 (x86+KVM) · 1028/1869 (riscv64)</td></tr>
-          <tr><td>lmbench-report.md</td><td>lmbench per-case: Rux vs Linux (same rig)</td><td class="mono">2026-11-06 campaign table → Performance section</td></tr>
+          <tr><td>lmbench-report.md</td><td>lmbench per-case: Rux vs Linux (same test platform)</td><td class="mono">2026-11-06 campaign table → Performance section</td></tr>
           <tr><td>geekbench-report.md</td><td>Geekbench 5: all 21 workloads vs Linux</td><td class="mono">MC 7709/7027 · SC 2440/2165</td></tr>
           <tr><td>stress-fleet.md</td><td>Stress/stability/randomized/fuzz cluster design + results</td><td class="mono">standing (11 QEMUs)</td></tr>
           <tr><td>formal-verification-report.md</td><td>Kani / proptest / SPIN / Miri standing</td><td class="mono">157 harnesses · 1104 proptests</td></tr>
@@ -152,7 +152,7 @@
 
     <h2 id="discipline"><span class="anchor">§4</span>Method and adjudication discipline</h2>
     <ul>
-      <li><b>Every number carries its rig</b>: architecture, accelerator, kernel profile, host-load discipline — a number without a rig is not a result.</li>
+      <li><b>Every number carries its test platform</b>: architecture, accelerator, kernel profile, host-load discipline — a number without a test platform is not a result.</li>
       <li><b>Append-only reports</b>: a new run appends a section or refreshes the standing table with its date; history is never silently rewritten.</li>
       <li><b>Flake isolation</b>: new full-scan failures are isolated-rerun twice before being called regressions (known flake families: accept02, getrusage04, kill02, genfmod, rename/statfs).</li>
       <li><b>NOT-OURS ledger</b>: the same musl LTP binaries run on the host Linux kernel; failures that reproduce there are recorded as test/environment issues, not kernel gaps.</li>

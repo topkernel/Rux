@@ -86,37 +86,37 @@
     <p>Every comparison against Linux on this page is <b>same-host, same-accelerator</b>: the same host (9950X), the same QEMU q35 + KVM (<code>-accel kvm -cpu host</code>), the same image shape, the same static benchmark binaries. No native columns.</p>
     <div class="card-grid grid-2">
       <div class="card">
-        <h3><span class="ico">📏</span>lmbench same-rig: 14 of 21 cases ahead or at parity, 7 behind</h3>
+        <h3><span class="ico">📏</span>lmbench same-test platform: 14 of 21 cases ahead or at parity, 7 behind</h3>
         <p><b>Ahead</b>: lat_pipe <b>4.6×</b>, lat_ctx 2P <b>4.0–4.5×</b>, lat_ctx 8P <b>3.6×</b>, bw_pipe <b>3.7×</b>, lat_sem <b>2.9×</b>, bw_unix <b>2.1×</b>, lat_unix <b>1.4×</b>, fstat <b>1.3×</b>; bcopy/bzero/mem_rd/usleep at or above parity, bw_file_rd faster than the timer granularity.</p>
         <p><b>Behind</b> (Rux/Linux): open <b>1.92×</b>, read_cached <b>1.84×</b>, stat <b>1.28×</b>, write <b>1.06×</b>; null now at <b>parity</b> (0.97×); fork/exec <b>0.75–0.79×</b> (ahead). Storage and real-time rows below.</p>
         <div class="nums">best lead 4.6× · worst lag 2.5× · data on the <a href="lmbench.html">lmbench page</a></div>
       </div>
       <div class="card">
         <h3><span class="ico">⚡</span>Storage and real-time rows: phase-probe attribution, rebuilds along Linux's shapes</h3>
-        <p>Storage I/O is attributed by a <b>two-sided same-rig accounting</b> (shared tracefs timeline + phase brackets + perf on both sides), then rebuilt along Linux's shapes: <b>the fsync path rebuilt</b> (bulk unwritten-extent conversion with neighbor merge, per-inode dirty-block notes with an O(dirty) walk, the inode-table block riding the same flush window) — <b>0.30× to ~1.24× AHEAD</b>; <b>synchronous waits poll briefly before sleeping</b> (4k randwrite 0.97×, randrw 0.96×, randread 0.90× — the parity band); <b>the direct path submits physically consecutive runs in one request</b> (1M sequential read 226× behind → 0.62×); <b>buffered writes copy user pages straight into frames</b> (0.94×, the test platform's physical floor: the cold-frame RFO is paid by both sides); <b>directory reads fill incrementally</b> (getdents <b>1.95× ahead</b>); <b>conditional-refcount close + readahead state embedded in File</b> (openclose 1.59×, read_cached 1.66× — the remaining term is the open-side path walk). Real-time: <b>timer expiry at the top of the hardirq vector</b> (rt_wakesys 3.3 µs, parity), <b>PI futex in Linux's shape</b> (pi_stress 132,074 inversions), cyclictest FIFO avg 104→69 µs (max 263; same-rig interleaved re-measurement in flight).</p>
+        <p>Storage I/O is attributed by a <b>two-sided same-test platform accounting</b> (shared tracefs timeline + phase brackets + perf on both sides), then rebuilt along Linux's shapes: <b>the fsync path rebuilt</b> (bulk unwritten-extent conversion with neighbor merge, per-inode dirty-block notes with an O(dirty) walk, the inode-table block riding the same flush window) — <b>0.30× to ~1.24× AHEAD</b>; <b>synchronous waits poll briefly before sleeping</b> (4k randwrite 0.97×, randrw 0.96×, randread 0.90× — the parity band); <b>the direct path submits physically consecutive runs in one request</b> (1M sequential read 226× behind → 0.62×); <b>buffered writes copy user pages straight into frames</b> (0.94×, the test platform's physical floor: the cold-frame RFO is paid by both sides); <b>directory reads fill incrementally</b> (getdents <b>1.95× ahead</b>); <b>conditional-refcount close + readahead state embedded in File</b> (openclose 1.59×, read_cached 1.66× — the remaining term is the open-side path walk). Real-time: <b>timer expiry at the top of the hardirq vector</b> (rt_wakesys 3.3 µs, parity), <b>PI futex in Linux's shape</b> (pi_stress 132,074 inversions), cyclictest FIFO avg 104→69 µs (max 263; same-test platform interleaved re-measurement in flight).</p>
         <div class="nums">Per-item rows: <a href="fio.html">fio</a> and <a href="rttests.html">rt-tests</a> · method and evidence: docs/test/perf-campaign-2026-11-17.md</div>
         <h3><span class="ico">🏁</span>Geekbench 5: single-core 2440 / multi-core 7709 (historical best)</h3>
         <p>Single-core total <b>2440 vs 2165 (113%)</b>, multi-core total <b>7709 vs 7027 (110%)</b>. Per-workload split from the 2026-11-04 full capture: multi-core 8 ahead / 5 parity / 8 behind; single-core 13 ahead / 3 parity / 5 behind.</p>
-        <div class="nums">per-workload on the <a href="geekbench.html">Geekbench page</a> · rig note: Linux side is the host 4-CPU pin (taskset, topology-matched)</div>
+        <div class="nums">per-workload on the <a href="geekbench.html">Geekbench page</a> · test platform note: Linux side is the host 4-CPU pin (taskset, topology-matched)</div>
       </div>
     </div>
-    <div class="callout"><b>Gap structure:</b> the leads cover scheduler/wakeup (context switch, pipe, semaphore), IPC bandwidth (unix, pipe) and memory bandwidth; the remaining gaps concentrate in syscall entry and path resolution (null/read/write/stat/open at 1.2–2.5×). Under the older Linux-side window the historic campaign had scored fork/exec at parity; the 2026-11-16 same-rig re-measure puts them in the 1.08–1.19× band (the Linux switch family is measurement-window-sensitive — ratios are only meaningful within one session). The 5 correctness bugs the campaign found and fixed are listed after the §2 tables.</div>
+    <div class="callout"><b>Gap structure:</b> the leads cover scheduler/wakeup (context switch, pipe, semaphore), IPC bandwidth (unix, pipe) and memory bandwidth; the remaining gaps concentrate in syscall entry and path resolution (null/read/write/stat/open at 1.2–2.5×). Under the older Linux-side window the historic campaign had scored fork/exec at parity; the 2026-11-16 same-test platform re-measure puts them in the 1.08–1.19× band (the Linux switch family is measurement-window-sensitive — ratios are only meaningful within one session). The 5 correctness bugs the campaign found and fixed are listed after the §2 tables.</div>
 
         <h2 id="suites"><span class="anchor">§2</span>The suite map (one page per suite)</h2>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>Suite</th><th>Type</th><th>Status</th><th>Page</th></tr></thead>
         <tbody>
-          <tr><td>lmbench 3.0-a9</td><td>microbenchmarks (latency + bandwidth vs same-rig Linux)</td><td><span class="chip ok">the 2026-11-16 full standing + three perf-2x rounds</span></td><td><a href="lmbench.html">lmbench</a></td></tr>
+          <tr><td>lmbench 3.0-a9</td><td>microbenchmarks (latency + bandwidth vs same-test platform Linux)</td><td><span class="chip ok">the 2026-11-16 full standing + three perf-2x rounds</span></td><td><a href="lmbench.html">lmbench</a></td></tr>
           <tr><td>Geekbench 5.5.1</td><td>the composite suite (21 workloads vs 4-CPU Linux)</td><td><span class="chip ok">SC 2440 / MC 7709, bit-identical reproduction confirmed</span></td><td><a href="geekbench.html">Geekbench 5</a></td></tr>
-          <tr><td>fio 3.36</td><td>storage I/O (engine enumeration + data integrity + group throughput)</td><td><span class="chip ok">same-image same-binary same-rig comparison (throughput/latency/durability path)</span></td><td><a href="fio.html">fio</a></td></tr>
-          <tr><td>rt-tests v2.11 (cyclictest/hackbench/pi_stress)</td><td>real-time latency + scheduling stress</td><td><span class="chip ok">cyclictest/hackbench/pi_stress same-rig comparison (the newest round)</span></td><td><a href="rttests.html">rt-tests</a></td></tr>
-          <tr><td>internal microbenchmarks (pbench + the Tier bands + the flush wall + cctx)</td><td>gate collectors and historical A/Bs</td><td><span class="chip ok">Tier 1 bands + the flush-wall same-rig comparison + the switch anatomy</span></td><td><a href="microbench.html">Internal microbenchmarks</a></td></tr>
+          <tr><td>fio 3.36</td><td>storage I/O (engine enumeration + data integrity + group throughput)</td><td><span class="chip ok">same-image same-binary same-test platform comparison (throughput/latency/durability path)</span></td><td><a href="fio.html">fio</a></td></tr>
+          <tr><td>rt-tests v2.11 (cyclictest/hackbench/pi_stress)</td><td>real-time latency + scheduling stress</td><td><span class="chip ok">cyclictest/hackbench/pi_stress same-test platform comparison (the newest round)</span></td><td><a href="rttests.html">rt-tests</a></td></tr>
+          <tr><td>internal microbenchmarks (pbench + the Tier bands + the flush wall + cctx)</td><td>gate collectors and historical A/Bs</td><td><span class="chip ok">Tier 1 bands + the flush-wall same-test platform comparison + the switch anatomy</span></td><td><a href="microbench.html">Internal microbenchmarks</a></td></tr>
           <tr><td>planned (no data, nothing listed)</td><td>netperf/iperf3, bonnie++/postmark/dbench, UnixBench, a kselftest subset, Trinity/syzkaller corpora</td><td><span class="chip cyan">the qa-suites onboarding sequence</span></td><td>—</td></tr>
         </tbody>
       </table>
     </div>
-<h2 id="method"><span class="anchor">§3</span>Method and rig</h2>
+<h2 id="method"><span class="anchor">§3</span>Method and test platform</h2>
     <ul>
       <li><b>Same host, same accelerator</b>: both sides on the same host, the same QEMU q35 + KVM (<code>-accel kvm -cpu host</code>), the same Ubuntu rootfs shape, the same static benchmark binaries; one case per boot (the serial console interleaves with long sweeps, so a single-case boot is the only clean collection), PID 1 runner, 35 s in-guest budget (exceptions noted per case).</li>
       <li><b>Comparable-class rule</b>: debug vs release-strong never cross-compared (strong reads 10–30× lower on the floor families); TCG vs KVM never cross-compared.</li>
@@ -153,8 +153,8 @@
     <p style="font-size:13px;color:var(--text-3)">Notes: the scheduler domain's in-lock figure is the exact-probe basis (tree work ~20–30 ns + D-1 bookkeeping); the 70–84 ns lock wait is the KVM cross-vCPU locked-instruction tax (Linux's per-rq lock pays it too); the IF=0 span average is the call-site basis including acquisition wait (n=6.3M); futex wake→run is the quiet-load basis.</p>
     <div class="callout"><b>Principle:</b> every subsystem that can affect performance must be under gate measurement — if no existing tool measures it, add a debug observability tool (gated off by default). Measurement is part of the change, not an afterthought.</div>
 
-    <h2 id="campaigns"><span class="anchor">§5</span>Landed performance work (same-rig A/B measured)</h2>
-    <p>Each item below was attributed with a same-rig A/B; gains and costs are recorded in the same table (see docs/architecture/rust-native-register.md):</p>
+    <h2 id="campaigns"><span class="anchor">§5</span>Landed performance work (same-test platform A/B measured)</h2>
+    <p>Each item below was attributed with a same-test platform A/B; gains and costs are recorded in the same table (see docs/architecture/rust-native-register.md):</p>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>Item</th><th>Mechanism</th><th>Measured result</th></tr></thead>
@@ -187,7 +187,7 @@
       <li><b>lat_syscall null 1.18× / write 1.14×</b>: entry floor; null's 2× is proven physically unreachable (the shared syscall RTT floor) — converge to parity; write is 6 ns from parity.</li>
       <li><b>Geekbench single-core residuals</b>: Text Compression 94% / Navigation 81% / PDF 85% / Clang 88% / Face 87% await isolated re-runs (AES-XTS root-caused and fixed, 105–106%; single-core 2440 = 113%).</li>
       <li><b>Network family</b>: bw_tcp TIMEOUT / lat_connect 14–16 ms — a scheduler stale-claim refuses the accept server/worker wakes (WAKE-HEAL-SKIP ×39); TCP throughput needs that fix first.</li>
-      <li><b>Backfill queue</b>: a fio throughput benchmark (same-rig Linux baseline, direct=1); the Geekbench same-rig KVM comparison; page-cache hit-rate absolutes, PCP watermarks, binder throughput.</li>
+      <li><b>Backfill queue</b>: a fio throughput benchmark (same-test platform Linux baseline, direct=1); the Geekbench same-test platform KVM comparison; page-cache hit-rate absolutes, PCP watermarks, binder throughput.</li>
     </ul>
 
     <h2 id="tools"><span class="anchor">§7</span>debug measurement toolchain</h2>

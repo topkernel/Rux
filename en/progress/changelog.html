@@ -109,7 +109,7 @@
 
     <h2 id="n1110"><span class="anchor">2026-11-10</span></h2>
     <ul>
-      <li><b>make ci — the one-key CI pipeline landed</b> (userspace/ci/): kernel build → suite builds (fio/rt-tests/futex/fsfuzz) → guest image → the Ubuntu boot regression (scripted serial, 420 s, login/gnome markers + KERNPANIC detection) and the OH boot regression (dual-disk 600 s, SA-insert count ≥20 liveness) → lmbench/Geekbench (asset auto-fetch wired; injection runs and CSV parsing PENDING-RIG) → full LTP → the 32-class stress loop; daily-stress.sh drives the same order daily, a KERNPANIC alerts and halts.</li>
+      <li><b>make ci — the one-key CI pipeline landed</b> (userspace/ci/): kernel build → suite builds (fio/rt-tests/futex/fsfuzz) → guest image → the Ubuntu boot regression (scripted serial, 420 s, login/gnome markers + KERNPANIC detection) and the OH boot regression (dual-disk 600 s, SA-insert count ≥20 liveness) → lmbench/Geekbench (asset auto-fetch wired; injection runs and CSV parsing PENDING) → full LTP → the 32-class stress loop; daily-stress.sh drives the same order daily, a KERNPANIC alerts and halts.</li>
     </ul>
 
     <h2 id="n1108"><span class="anchor">2026-11-08</span></h2>
@@ -149,7 +149,7 @@
 
     <h2 id="n1101"><span class="anchor">2026-11-01</span></h2>
     <ul>
-      <li><b>The GDM greeter achieved</b> (x86_64+KVM, ~4.5 s boot-to-login, 45 minutes zero panic); x86_64+KVM becomes the standing test rig; the fs metadata family re-anchors (−65%~−88%); kernel suite 1267/1267 (riscv64), 1263/1263 (x86_64).</li>
+      <li><b>The GDM greeter achieved</b> (x86_64+KVM, ~4.5 s boot-to-login, 45 minutes zero panic); x86_64+KVM becomes the standing test platform; the fs metadata family re-anchors (−65%~−88%); kernel suite 1267/1267 (riscv64), 1263/1263 (x86_64).</li>
       <li>IF=0 re-anchored at 20.4%±3pp (the mechanism: softirqs leave the IF=0 window to ksoftirqd).</li>
     </ul>
 

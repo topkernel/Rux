@@ -166,7 +166,7 @@
       <li><b>Anonymous forward fault-around</b>: a 32-page window (<code>ANON_FAULTAROUND_PAGES = 32</code>), write faults only, restricted to VMAs ≥ 1 MB (<code>ANON_FAULTAROUND_MIN_VMA</code>) — small stack/brk mappings are unaffected; on sequential streams the trap count drops ~32×; batch fills carry a no-TLB-flush contract (batch frames are freshly installed); aarch64 ports the same shape.</li>
       <li><b>File-backed path</b>: the page-fault file path warms the page cache and then pins; D-12's read-miss window batch fill lives on the <a href="filesystem.html">filesystem page</a>.</li>
       <li><b>COW invariants</b> (INV-COW-1..5, x86_64): COW set ⇒ W clear; COW ⇒ refcount ≥ 2; a refcount==1 fault restores W without copying; refcount&gt;1 → allocate/copy/decrement/map with W=1 COW=0; after fork every writable child PTE is downgraded W=0 COW=1. riscv64: PTE bit 8 is the COW software flag; fork walks only VPN2[0..255]; a refcount==1 sole owner takes the fast restore.</li>
-      <li><b>Fault latency measurements</b> (mm_probe PID-1 rig, both kernels): anon sequential alloc+touch+free 503.6 vs 513.9 ns/fault (0.98×); anon random-order write fault 613.9 vs 323.2 ns (1.90× → 1.7× after walk consolidation); file-backed random touch amortized 34.6 vs 70.2 (0.49×); fork+exit 606 vs 1207 µs (0.50×).</li>
+      <li><b>Fault latency measurements</b> (mm_probe PID-1 test platform, both kernels): anon sequential alloc+touch+free 503.6 vs 513.9 ns/fault (0.98×); anon random-order write fault 613.9 vs 323.2 ns (1.90× → 1.7× after walk consolidation); file-backed random touch amortized 34.6 vs 70.2 (0.49×); fork+exit 606 vs 1207 µs (0.50×).</li>
     </ul>
 
     <h2 id="vma"><span class="anchor">§10</span>mmap / VMA management and TLB</h2>
@@ -208,7 +208,7 @@
 
     <h2 id="nums"><span class="anchor">§15</span>Benchmark numbers</h2>
     <div class="tbl-wrap"><table>
-      <thead><tr><th>Metric (rigs in docs/test/)</th><th>Rux</th><th>Same-rig Linux</th><th>Ratio</th></tr></thead>
+      <thead><tr><th>Metric (rigs in docs/test/)</th><th>Rux</th><th>Same-test platform Linux</th><th>Ratio</th></tr></thead>
       <tbody>
         <tr><td>Geekbench 5.5.1 single-core (9950X KVM q35 smp4 4G)</td><td class="num">2440</td><td class="num">2165</td><td class="num">113%</td></tr>
         <tr><td>Geekbench 5.5.1 multi-core</td><td class="num">7709</td><td class="num">7027</td><td class="num">110%</td></tr>

@@ -81,15 +81,15 @@
   </aside>
   <article class="doc-main">
     <h1>lmbench 3.0-a9</h1>
-    <div class="sub">Latest state: the authoritative same-rig KVM table (12 latency + 8 bandwidth rows, each row the newest measured value on current main) · Canonical: docs/test/lmbench-report.md</div>
+    <div class="sub">Latest state: the authoritative same-test platform KVM table (12 latency + 8 bandwidth rows, each row the newest measured value on current main) · Canonical: docs/test/lmbench-report.md</div>
 
-<h2 id="data"><span class="anchor">§1</span>lmbench data (same-rig KVM, 21 cases)</h2>
-    <p style="font-size:13.5px">Source: the "Standing (2026-11-16, kernel main=017bf556b)" section of lmbench-report.md — the single authoritative table; the data below is that section. Method: both sides in the same rig (q35/KVM/-cpu host/smp2/2G, host CCD0 pin + performance governor + warmer thread); Rux boots with nohz_full=1, one case per boot with the retry rule; the Linux column runs the OHOS 6.6.101 kernel in the <b>same guest rig</b> with the same static binaries, 2 reps, medians. The switch/wakeup family is sensitive to the Linux-side measurement window — ratios are only meaningful within one session.</p>
-    <p style="font-size:13px;color:var(--text-3)">Basis: each row carries the latest measured value on current main (the 2026-11-16 full round; the null/read/write rows re-measured 11-17). The Rux column follows each round's own build class; the Linux column = the host 7.0.0 kernel booted in the <b>same guest rig</b> running the same static binaries.</p>
+<h2 id="data"><span class="anchor">§1</span>lmbench data (same-test platform KVM, 21 cases)</h2>
+    <p style="font-size:13.5px">Source: the "Standing (2026-11-16, kernel main=017bf556b)" section of lmbench-report.md — the single authoritative table; the data below is that section. Method: both sides in the same test platform (q35/KVM/-cpu host/smp2/2G, host CCD0 pin + performance governor + warmer thread); Rux boots with nohz_full=1, one case per boot with the retry rule; the Linux column runs the OHOS 6.6.101 kernel in the <b>same guest test platform</b> with the same static binaries, 2 reps, medians. The switch/wakeup family is sensitive to the Linux-side measurement window — ratios are only meaningful within one session.</p>
+    <p style="font-size:13px;color:var(--text-3)">Basis: each row carries the latest measured value on current main (the 2026-11-16 full round; the null/read/write rows re-measured 11-17). The Rux column follows each round's own build class; the Linux column = the host 7.0.0 kernel booted in the <b>same guest test platform</b> running the same static binaries.</p>
     <h3>Ahead / parity (19 cases)</h3>
     <div class="tbl-wrap">
       <table>
-        <thead><tr><th>Case</th><th class="num">Rux</th><th class="num">Linux (same rig)</th><th class="num">Ratio</th></tr></thead>
+        <thead><tr><th>Case</th><th class="num">Rux</th><th class="num">Linux (same test platform)</th><th class="num">Ratio</th></tr></thead>
         <tbody>
           <tr><td class="mono">lat_pipe</td><td class="num">4.40 µs</td><td class="num">25.06–26.27 µs</td><td><span class="chip ok">ahead 5.84×</span></td></tr>
           <tr><td class="mono">lat_ctx -s64 2</td><td class="num">2.51 µs</td><td class="num">12.84–12.97 µs</td><td><span class="chip ok">ahead 5.14×</span></td></tr>
@@ -116,7 +116,7 @@
     <h3>Behind (7 cases)</h3>
     <div class="tbl-wrap">
       <table>
-        <thead><tr><th>Case</th><th class="num">Rux</th><th class="num">Linux (same rig)</th><th class="num">Ratio</th></tr></thead>
+        <thead><tr><th>Case</th><th class="num">Rux</th><th class="num">Linux (same test platform)</th><th class="num">Ratio</th></tr></thead>
         <tbody>
           <tr><td class="mono">lat_syscall open</td><td class="num">0.676 µs</td><td class="num">0.394–0.397 µs</td><td><span class="chip bad">behind 1.71×</span></td></tr>
           <tr><td class="mono">lat_syscall read</td><td class="num">0.095 µs</td><td class="num">0.060–0.062 µs</td><td><span class="chip bad">behind 1.55×</span></td></tr>
@@ -141,7 +141,7 @@
 <br><b>(3) User-memory access safety matches the reference shape</b>: every uaccess (scalars included) goes through exception-table fixups (<code>arch/x86_64/uaccess.rs</code>) — bad pointers return EFAULT, never crash. x86 SMAP is currently not armed (honestly recorded, sec-r1), but its performance contribution to these cases is ~2 two-cycle instructions per copy (~1 ns) — 0.005% of the pipe gap's 20 µs scale — not the source of the lead; the semantics are preserved by the active exception-table path.
 <br><b>(4) fork/exec copy-on-write and teardown safety present</b>: fork's mmfork phase carries the full PTE write-protection (COW, per the forkprof decomposition); page-table freeing goes through an RCU grace period; fd lifetimes go through the retire queue (<code>fs/fdreap.rs</code>).
 <br><b>(5) The bug taxonomy corroborates</b>: every memory-corruption-class historical bug lived in audited unsafe code, zero in safe code (docs/architecture/safety-and-performance.md §2).
-The full lead list with measured evidence: docs/architecture/rust-native-register.md (D-numbers and same-rig A/B figures).</div>
+The full lead list with measured evidence: docs/architecture/rust-native-register.md (D-numbers and same-test platform A/B figures).</div>
 
 
     

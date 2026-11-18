@@ -125,14 +125,14 @@
 
     <h2 id="pairs"><span class="anchor">§5</span>Security × performance pairing evidence</h2>
     <div class="tbl-wrap"><table>
-      <thead><tr><th>Performance result (same-rig A/B)</th><th>The security property it carries</th></tr></thead>
+      <thead><tr><th>Performance result (same-test platform A/B)</th><th>The security property it carries</th></tr></thead>
       <tbody>
         <tr><td>Context switch −58% (three optimizations)</td><td>the switch path carries typed per-CPU storage (D-7: guard lifetime = the IRQ-off window) + keyed locks (D-11: nesting order a compile fact)</td></tr>
         <tr><td>GRQ hold 2786 ns @ 126M syscalls</td><td>a single global structure = forensicability (D-1; the OH campaign's scheduler defect families were actually located on it) + a per-boot census verdict</td></tr>
         <tr><td>timer nanosleep 772.6→662.7 ms (D-19)</td><td>six historical defect classes (mixed clock domains / periodic misuse / double cancels / stale ids) became compile errors</td></tr>
         <tr><td>stat 0.643→0.423 µs (the WalkClaim lockless read)</td><td>reader-bank publication + deferred retirement, no dangling-reference window; the first landing reverted on an existing defect and re-landed hardened (history on record)</td></tr>
         <tr><td>munmap 177→52 µs (the leaf-table direct walk)</td><td>the chunked TLB-flush race family closed with it; the OH crash storm 66 SEGVs/boot → 3/3 clean</td></tr>
-        <tr><td>lmbench same-rig 10 cases ahead (fault/pipe/switch/semaphore family) + Geekbench multi-core 110%</td><td>all of it runs on the D-1/D-7/D-11 structures — the fast path IS the safe path</td></tr>
+        <tr><td>lmbench same-test platform 10 cases ahead (fault/pipe/switch/semaphore family) + Geekbench multi-core 110%</td><td>all of it runs on the D-1/D-7/D-11 structures — the fast path IS the safe path</td></tr>
       </tbody>
     </table></div>
 

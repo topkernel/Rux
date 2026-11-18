@@ -159,7 +159,7 @@
     <p style="font-size:13px;color:var(--text-3)">多核逐项的分化说明:11-04 捕获轮总分 7332 vs 7027(104%)由文本压缩(150%)、图像修补(120%)、语音识别(131%)、光线追踪(118%)等调度敏感项拉动;多核 7709 = 110%;单核 AES-XTS 修复后 105–106%(串口打印税已根因清除);Clang/PDF 渲染等单核余差待隔离复跑。</p>
 
     
-    <h2 id="rig"><span class="anchor">§2</span>测试平台与采集方法</h2>
+    <h2 id="platform"><span class="anchor">§2</span>测试平台与采集方法</h2>
     <ul>
       <li><b>测试平台</b>:9950X 宿主,q35 KVM <code>-cpu host -smp 4 -m 4G</code>,strong 构建(build-release-opt);一次启动跑完整轮,外层预算 2700 s、in-guest 900 s。</li>
       <li><b>分数采集</b>:本地 TLS 捕获服务(自签 CA 经 debugfs 注入 guest /etc/hosts,将 browser.geekbench.com 钉至 10.0.2.2;:443 捕获服务接 HTTPS 上传 POST,parse-capture.py 解析)—— 分数不经外网,过程可重放。</li>

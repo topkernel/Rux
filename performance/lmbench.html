@@ -143,7 +143,7 @@
 <br><b>③ 用户内存访问安全与 Linux 同构</b>:全部 uaccess(含标量)走异常表修复路径(<code>arch/x86_64/uaccess.rs</code>),错误指针返回 EFAULT 而非崩溃。x86 SMAP 目前未武装(sec-r1 诚实记录),但其对这批用例的性能贡献 ≈ 每次拷贝 2 条 2 周期指令(~1ns),对 pipe 20µs 量级差距占比 0.005%——不构成领先来源,语义由异常表路径保持。
 <br><b>④ fork/exec 的写时复制与释放安全在场</b>:fork 的 mmfork 相位含全部 PTE 写保护(COW,forkprof 分解);页表释放经 RCU 宽限期;fd 生命周期经退休队列(<code>fs/fdreap.rs</code>)。
 <br><b>⑤ bug 分类学佐证</b>:记忆破坏类历史 bug 全部位于审计 unsafe 代码,safe 代码为零(docs/architecture/safety-and-performance.md §2)。
-领先项清单与实测证据:docs/architecture/rust-native-register.md(带 D-编号与同 rig A/B 数字)。</div>
+领先项清单与实测证据:docs/architecture/rust-native-register.md(带 D-编号与同 test platform A/B 数字)。</div>
     <h2     id="rerun"><span class="anchor">§3</span>复现</h2>
     <pre><code><span class="c"># 完整整套测试(每用例独立启动 + 重试规则)</span>
 cd userspace/lmbench && ./extract-lmbench.sh && ./build-lmbench.sh && ./build-rootfs.sh work/lmbench-x86.img && ./run-rux.sh

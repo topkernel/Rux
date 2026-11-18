@@ -115,7 +115,7 @@
     <ul>
       <li>GRQ critical section (post measurement-correction): <b>production ≈60 ns, minimal-bracket measured 75–80 ns</b>. Tree work ~20–30 ns per mutation, zero allocation under the lock. <b>The 70–84 ns lock wait is the KVM tax on cross-vCPU locked instructions</b> (Linux's per-rq lock pays it too — it is not the GRQ being slow). The gate band tracks the call-site IF=0 span average (irqsave→restore, <b>including lock-acquisition wait</b> and critical-section work): 2786 ns @ n=6.3M; flat across a 126.0M-syscall boot → size-coupled, not contention-bound (at ≤4 vCPUs).</li>
       <li>Boot census reads exactly, on every qualified quiet boot: TERM-DESCHED <b>8</b> (band 8±2), WAKE-REFUSED <b>32</b> (band 32±4).</li>
-      <li>Three context-switch levers (FSGSBASE 393 ns/switch + lazy FPU + CPUID-gated PCID): <code>lat_ctx -s64 2</code> <b>4.97→2.07 µs (−58%)</b>; same-rig lmbench <b>1.98 vs 6.71 µs (3.39×)</b>.</li>
+      <li>Three context-switch levers (FSGSBASE 393 ns/switch + lazy FPU + CPUID-gated PCID): <code>lat_ctx -s64 2</code> <b>4.97→2.07 µs (−58%)</b>; same-test platform lmbench <b>1.98 vs 6.71 µs (3.39×)</b>.</li>
       <li>With D-14: the 74-byte unix-stream wake/preempt/switch round trip ~275 µs → ~2.5 µs; the p5 IPC family <b>10–18×</b>.</li>
     </ul>
     <p><b>Compatibility:</b> pure internal policy, no ABI surface. Guarded by the performance gate's scheduler domain (hold band, census, P2 ±20%).</p>
@@ -185,7 +185,7 @@
     </ul>
     <h3>Key numbers</h3>
     <ul>
-      <li>Same-rig lmbench: lat_pipe <b>3.74 vs 13.30 µs (3.56×)</b>.</li>
+      <li>Same-test platform lmbench: lat_pipe <b>3.74 vs 13.30 µs (3.56×)</b>.</li>
       <li>unix stream p5c <b>24.9–26.8 µs</b> (was 276.5 µs, −90%).</li>
       <li>TCP throughput/congestion benchmarks: not yet measured (stated plainly; covered by the LTP socket family + nettest).</li>
     </ul>
@@ -243,7 +243,7 @@
           <tr><td><b>D-16</b></td><td><b>The deferred-free timer ring</b>: 16,384 slots + a 1500 ms wall-clock drain (covering QSBR-invisible unaccounted borrows). Revisit condition: once borrows become RcuHead, delete the ring.</td></tr>
           <tr><td><b>D-17</b></td><td><b>The kernel-side device alias arena</b>: no identity MMIO window at runtime, no uaccess identity hole (a bad user pointer faults instead of reading physical memory). Guards: PF-NOCTX/SMAP-VIOL beacons stay silent.</td></tr>
           <tr><td><b>D-18</b></td><td><b>SMAP via the pushfq EFLAGS.AC sequence</b>: STAC/CLAC unconditionally #UD under TCG (established by paired trials); ~55 ns per bracket, boots on hardware and TCG alike.</td></tr>
-          <tr><td><b>D-19</b></td><td><b>The typed timer wheel</b>: clock domains cannot be mixed, periodic requires NonZeroU64, WakeArmed/WakeSpent scope guards. Six historical bug classes became compile errors; same-rig A/B: arm lock 924→697 ns, nanosleep 772.6→662.7 ms, p2_ctxsw 12.198 vs 15.400 µs.</td></tr>
+          <tr><td><b>D-19</b></td><td><b>The typed timer wheel</b>: clock domains cannot be mixed, periodic requires NonZeroU64, WakeArmed/WakeSpent scope guards. Six historical bug classes became compile errors; same-test platform A/B: arm lock 924→697 ns, nanosleep 772.6→662.7 ms, p2_ctxsw 12.198 vs 15.400 µs.</td></tr>
           <tr><td><b>D-20</b></td><td><b>The writer-side dirty-writeback watermark on a free-fraction mark (no global dirty accounting)</b>: once the Normal zone's free count falls below half its managed pages (zone_below_dirty_writeback_mark), the buffered writer flushes its own inode's dirty range and runs the system-wide recovery pass (writeback_recover: free already-clean pages first, collect dirty inodes via a full-table rotating walk and flush each, directly evict flushed pages). The difference from Linux: Linux throttles by per-BDI dirty thresholds / the balance_dirty_pages dirty fraction, while Rux keeps no per-BDI accounting and uses the zone free-fraction as the mark — <b>the discipline, not the constant, is the contract</b>. It eliminated the delayed-allocation dirty-balloon wedge (243k dirty pages growing to RAM scale, the zone draining to zero); LTP fallocate05/06 on three fresh boots RC=0; riscv64 make test 1328/1328. Cost: no per-BDI precision — with multi-device loads the watermark granularity is coarser than Linux's. Note: PSI (/proc/pressure) is not in main; it is recorded on the debug-alignment resume queue.</td></tr>
         </tbody>
       </table>
@@ -256,7 +256,7 @@
       <li><b>Safe-by-construction shapes are themselves optimizations</b>: D-1's single-structure forensics (how the OH campaign actually found the scheduling bug family); the leaf-table direct unmap (vm-op family 15→5 s/CPU-min); the negative-lookup memo (oracle 475k/963k/0).</li>
       <li><b>Semantic divergences are found by diffing the Linux tree and fixed by adopting its behavior</b> (root causes, not symptoms): execve ETXTBSY, SysV IPC per namespace, shared-futex keys resolved to the physical word, tmpfs MAP_SHARED coherence through the page cache, the binder poll triple-condition, O_DIRECT reads flushing the dirty page-cache range first, SYSRET TF|RF fallback, UTF-8 validation on every user-writable string.</li>
       <li><b>Safety properties C kernels rent from tools</b>: constructive memory safety + SMAP/CR0.WP/no identity window/userspace W^X/seccomp/capabilities + a designed panic surface (every instance retired with a regression test).</li>
-      <li><b>Redesigns that landed as performance (same-rig A/B)</b>: lmbench four-row leads (lat_ctx 3.4×, lat_pipe 2.6×, exec 1.39×, fstat 1.19×), switch −58%, p5 family −90~93%, the fs metadata family −65~−88%; Geekbench multi-core 7709 (4-CPU pinned).</li>
+      <li><b>Redesigns that landed as performance (same-test platform A/B)</b>: lmbench four-row leads (lat_ctx 3.4×, lat_pipe 2.6×, exec 1.39×, fstat 1.19×), switch −58%, p5 family −90~93%, the fs metadata family −65~−88%; Geekbench multi-core 7709 (4-CPU pinned).</li>
       <li><b>Honest placeholders (bucket G)</b>: the typed-binder transaction FSM, an ext4/jbd2 host-side test slice, an internal completion-ring writeback base — no A/B numbers yet; the only way out is a measured row.</li>
     </ul>
 

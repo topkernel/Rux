@@ -106,7 +106,7 @@ cat /proc/sys/kernel/perf_event_paranoid</code></pre>
     </ul>
 
     <h2 id="pbench"><span class="anchor">§3</span>pbench: the seven microbenchmark groups</h2>
-    <p><code>test/pbench.c</code>: one static musl x86_64 binary that <b>runs identically on Rux and the same-rig Linux</b> — every number is a same-binary pair. Runs as init (init=/test/pbench) for quiet probe boots. Timing: per-op rdtsc deltas calibrated against CLOCK_MONOTONIC_RAW; the output line is <code>PBENCH &lt;name&gt; n=&lt;N&gt; med=&lt;us&gt; p99=&lt;us&gt; min=&lt;us&gt; max=&lt;us&gt; avg=&lt;us&gt; wall=&lt;us&gt;</code>, terminated by <code>PBENCH DONE rc=0</code>; unsupported primitives SKIP themselves.</p>
+    <p><code>test/pbench.c</code>: one static musl x86_64 binary that <b>runs identically on Rux and the same-test platform Linux</b> — every number is a same-binary pair. Runs as init (init=/test/pbench) for quiet probe boots. Timing: per-op rdtsc deltas calibrated against CLOCK_MONOTONIC_RAW; the output line is <code>PBENCH &lt;name&gt; n=&lt;N&gt; med=&lt;us&gt; p99=&lt;us&gt; min=&lt;us&gt; max=&lt;us&gt; avg=&lt;us&gt; wall=&lt;us&gt;</code>, terminated by <code>PBENCH DONE rc=0</code>; unsupported primitives SKIP themselves.</p>
     <div class="tbl-wrap"><table>
       <thead><tr><th>Group</th><th>Measures</th><th>Protocol notes</th></tr></thead>
       <tbody>
@@ -152,7 +152,7 @@ cat /proc/sys/kernel/perf_event_paranoid</code></pre>
     <ol>
       <li><b>Detect</b>: a per-op average leaving its band in the Tier-1 syscost dump → locate the syscall number or census class;</li>
       <li><b>Attribute</b>: pbench locates the group (P2 switch / P5 IPC / P6 fs) → the syscost RIP histogram or REST table names the segment → trace events (rux:schedtrace, lock:) capture the micro-sequence;</li>
-      <li><b>Fix and verify</b>: same-rig interleaved A/B (≥3, median) → perf-gate.sh three-tier verdict → the baseline table refresh rides the merge.</li>
+      <li><b>Fix and verify</b>: same-test platform interleaved A/B (≥3, median) → perf-gate.sh three-tier verdict → the baseline table refresh rides the merge.</li>
     </ol>
     <p class="callout">Tool philosophy: every gated domain has a corresponding measurement in the tool set; if a change affects system performance and no existing tool can measure it, <b>adding the DFX tool for it is part of the change</b>, not an afterthought (the merge-gate policy). All new observability goes through tracepoints (see <a href="tracepoints.html">tracepoints</a>).</p>
 
