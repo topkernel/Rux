@@ -590,7 +590,7 @@ impl SlabAllocator {
     }
 
     /// Find appropriate cache index
-    fn find_cache_index(size: usize) -> Option<usize> {
+    pub(crate) fn find_cache_index(size: usize) -> Option<usize> {
         if size == 0 || size > MAX_OBJECT_SIZE {
             return None;
         }
@@ -790,19 +790,3 @@ pub struct SlabStats {
     pub total_pages: usize,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_find_cache_index() {
-        assert_eq!(SlabAllocator::find_cache_index(1), Some(0));
-        assert_eq!(SlabAllocator::find_cache_index(8), Some(0));
-        assert_eq!(SlabAllocator::find_cache_index(9), Some(1));
-        assert_eq!(SlabAllocator::find_cache_index(16), Some(1));
-        assert_eq!(SlabAllocator::find_cache_index(100), Some(6));
-        assert_eq!(SlabAllocator::find_cache_index(4096), Some(9));
-        assert_eq!(SlabAllocator::find_cache_index(4097), None);
-        assert_eq!(SlabAllocator::find_cache_index(0), None);
-    }
-}

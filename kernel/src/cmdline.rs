@@ -22,8 +22,8 @@ use alloc::vec;
 
 /// Global command line argument storage
 /// Uses AtomicPtr and length storage to ensure memory visibility in multi-core environment
-static CMDLINE_PTR: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
-static CMDLINE_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub(crate) static CMDLINE_PTR: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
+pub(crate) static CMDLINE_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// Maximum command line argument length - from config
 const MAX_CMDLINE_LEN: usize = crate::config::MAX_CMDLINE_LEN;
@@ -959,45 +959,3 @@ pub fn get_console_devices() -> Vec<String> {
     devices
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn set_test_cmdline(cmdline: &'static str) {
-        let ptr = cmdline.as_ptr() as *mut u8;
-        let len = cmdline.len();
-        CMDLINE_PTR.store(ptr, Ordering::SeqCst);
-        CMDLINE_LEN.store(len, Ordering::SeqCst);
-    }
-
-    #[test]
-    fn test_parse_root() {
-        // Need to initialize before test
-        set_test_cmdline("root=/dev/vda rw console=ttyS0");
-        assert_eq!(get_root_device(), "/dev/vda");
-        assert!(!is_root_readonly());
-    }
-
-    #[test]
-    fn test_parse_init() {
-        set_test_cmdline("init=/sbin/init root=/dev/ram0");
-        assert_eq!(get_init_program(), "/sbin/init");
-    }
-
-    #[test]
-    fn test_has_param() {
-        set_test_cmdline("debug quiet root=/dev/ram0");
-        assert!(has_param("debug"));
-        assert!(has_param("quiet"));
-        assert!(!has_param("ro"));
-    }
-
-    #[test]
-    fn test_get_all_params() {
-        set_test_cmdline("root=/dev/vda init=/hello_world debug");
-        let params = get_all_params();
-        assert_eq!(params.len(), 2);
-        assert_eq!(params[0], (String::from("root"), String::from("/dev/vda")));
-        assert_eq!(params[1], (String::from("init"), String::from("/hello_world")));
-    }
-}

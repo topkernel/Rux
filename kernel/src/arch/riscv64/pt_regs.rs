@@ -437,22 +437,3 @@ mod offsets {
 #[allow(dead_code)]
 pub use offsets::*;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_pt_regs_size() {
-        assert_eq!(core::mem::size_of::<PtRegs>(), 288);
-    }
-
-    #[test]
-    fn test_offsets() {
-        assert_eq!(offsets::EPC, 0x00);
-        assert_eq!(offsets::RA, 0x08);
-        assert_eq!(offsets::SP, 0x10);
-        assert_eq!(offsets::A0, 0x50);
-        assert_eq!(offsets::STATUS, 0x100);
-        assert_eq!(offsets::ORIG_A0, 0x118);
-    }
-}

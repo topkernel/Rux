@@ -184,6 +184,10 @@ macro_rules! test_assert_eq {
 #[cfg(feature = "unit-test")]
 pub mod binder;
 #[cfg(feature = "unit-test")]
+pub mod fs_pins;
+#[cfg(feature = "unit-test")]
+pub mod mm_sched_pins;
+#[cfg(feature = "unit-test")]
 pub mod net_hdrs;
 #[cfg(feature = "unit-test")]
 pub mod net_pins;
@@ -640,6 +644,12 @@ pub fn run_all_tests() {
 
     test_group_start("ipc_sysv");
     ipc_sysv::test_ipc_sysv();
+
+    // FS + MM/sched pins (kernel/src/tests/{fs_pins,mm_sched_pins}.rs):
+    // stat/superblock/vt/rootfs/ext4 csum+indirect, slab classes, VMA,
+    // page flags/refcount/mapcount, fair weights, cmdline parsers.
+    fs_pins::test_fs_pins();
+    mm_sched_pins::test_mm_sched_pins();
 
     // Network pins (kernel/src/tests/net_pins.rs): skb core, header
     // sizes, UDP/TCP state machines, checksums, ARP, routes, IPv6,

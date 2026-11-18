@@ -934,57 +934,6 @@ pub enum VmaError {
 unsafe impl Send for VmaManager {}
 unsafe impl Sync for VmaManager {}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_vma_creation() {
-        let start = VirtAddr::new(0x1000);
-        let end = VirtAddr::new(0x2000);
-        let flags = VmaFlags::from_bits(VmaFlags::READ | VmaFlags::WRITE);
-
-        let vma = Vma::new(start, end, flags);
-        assert_eq!(vma.start(), start);
-        assert_eq!(vma.end(), end);
-        assert_eq!(vma.size(), 0x1000);
-        assert_eq!(vma.page_count(), 1);
-    }
-
-    #[test]
-    fn test_vma_contains() {
-        let start = VirtAddr::new(0x1000);
-        let end = VirtAddr::new(0x3000);
-        let vma = Vma::new(start, end, VmaFlags::new());
-
-        assert!(vma.contains(VirtAddr::new(0x1000)));
-        assert!(vma.contains(VirtAddr::new(0x2000)));
-        assert!(!vma.contains(VirtAddr::new(0x3000)));
-        assert!(!vma.contains(VirtAddr::new(0xfff)));
-    }
-
-    #[test]
-    fn test_vma_origin_stamp_and_split() {
-        // Creator stamp + fork modifier survive splits and set_creator
-        // clears a previous creator while keeping the fork bit.
-        let mut vma = Vma::new(VirtAddr::new(0x1000), VirtAddr::new(0x4000), VmaFlags::new());
-        assert_eq!(vma.origin().creator_name(), "unknown");
-        vma.set_origin(VmaOrigin::from_bits(VmaOrigin::MMAP));
-        let (head, tail) = vma.split(VirtAddr::new(0x2000)).unwrap();
-        assert_eq!(head.origin().creator_name(), "mmap");
-        assert_eq!(tail.origin().creator_name(), "mmap");
-        let mut o = tail.origin();
-        o.mark_forked();
-        assert!(o.is_forked());
-        assert_eq!(o.creator_name(), "mmap");
-        let mut o2 = VmaOrigin::from_bits(VmaOrigin::MPROTECT | VmaOrigin::FORKED);
-        assert_eq!(o2.creator_name(), "mprotect");
-        assert!(o2.is_forked());
-        o2.set_creator(VmaOrigin::MMAP);
-        assert_eq!(o2.creator_name(), "mmap");
-        assert!(o2.is_forked());
-    }
-}
 
 // ============================================================================
 // Address Space Platform-Specific Parameter Interface

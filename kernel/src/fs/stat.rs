@@ -398,36 +398,3 @@ impl Default for Statx {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_stat_creation() {
-        let stat = Stat::new();
-        assert_eq!(stat.st_dev, 0);
-        assert_eq!(stat.st_ino, 0);
-        assert_eq!(stat.st_size, 0);
-    }
-
-    #[test]
-    fn test_file_type() {
-        let mut stat = Stat::new();
-
-        stat.set_regular_file();
-        assert!(stat.is_regular_file());
-        assert!(!stat.is_directory());
-
-        stat.set_directory();
-        assert!(stat.is_directory());
-        assert!(!stat.is_regular_file());
-    }
-
-    #[test]
-    fn test_permissions() {
-        let mut stat = Stat::new();
-        stat.set_mode(0o644);
-
-        assert_eq!(stat.get_mode(), 0o644);
-    }
-}
