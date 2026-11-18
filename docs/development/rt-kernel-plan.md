@@ -141,10 +141,17 @@ The starting-point table above predates the evening merges; current state:
   self-weakening, idle-slot blind spot, exit_group park) are FIXED
   (timer-gap merge) — pi_stress -g 2 clean. The unconditional-RT-wake
   policy itself (D-14 gate bypass for RT classes) is STILL OPEN.
-- R6: pi_stress now RUNS (-g 1: 82k+88k; -g 2: 372k+370k inversions)
-  — the "no data" starting point is stale; what remains is the robust
-  registration chain + numeric priority propagation + the loom model
-  extension.
+- R6: LANDED (rt-r6 lane, 2026-11-18): numeric priority propagation
+  along the chain (adjust_prio_chain walk re-implemented pool-native,
+  D-27), rt semantics on the sleepable locks RT tasks block on
+  (D-26), the glibc robust+PI UAPI chain CLOSED (LOCK_PI returns 0
+  with OWNER_DIED in the word — the reference contract; the old
+  -EOWNERDEAD return aborted glibc), owner-side cycle detection
+  fixed, INV-C1..C5 chain model added. pi_chain 3-deep 1000/1000;
+  pi_glibc 3/3; pi_stress -g 2 273k-383k sustained; LTP futex family
+  green; INV-M1..M6 still pass. Residual: multi-lock-PI-owner
+  chain-restore (never wrong-low), sticky downgrade boost (both
+  documented, run/RT-R6.md §5).
 - R1, R4, R5, R7: unchanged (open).
 - Known blocker for clean-window measurement: a release-profile
   CLOCK_MONOTONIC poison under host load ≥6 (both kernels, suspect the

@@ -889,9 +889,26 @@ pair-battery-2026-11-17.md):
 - **R5** (forced per-IRQ threading, irqthread=1): 4/4 canary boots complete
   with virtio completions on a SCHED_FIFO 50 kthread; khog med 157–208 µs
   held — threading did not degrade the wake path.
-- **R6** (PI futex numeric chains): RT→RT max-priority propagation +
-  CFS→FIFO conversion + saved-config restore; pi_stress -g 2: 372k+370k
-  inversions completed (from "no data").
+- **R6 LANDED** (rt_mutex real PI chains, rt-r6 lane 2026-11-18): the
+  boost now propagates NUMERICALLY along the chain —
+  rt_mutex_adjust_prio_chain's walk re-implemented as a pool-re-scan
+  walk holding one bucket at a time (D-27) with LIVE top-waiter
+  evaluation — plus rt semantics on the sleepable locks RT tasks can
+  block on (D-26: VFS-MUTATION/EXT4-BIGLOCK/loop-io via
+  SleepMutex::new_rt, kernel-keyed PI states in the same chain
+  engine), the glibc PTHREAD_PRIO_INHERIT robust UAPI chain closed
+  (LOCK_PI returns 0 with FUTEX_OWNER_DIED latched in the word — the
+  reference contract; glibc's fatal-error switch rejects
+  -EOWNERDEAD), and the owner-side cycle-detection fix
+  (rt_mutex_owner(lock) == top_task shape). Evidence: pi_chain
+  3-deep CFS→FIFO-90 conversion through 3 lock edges 1000/1000
+  rounds (300/300 post-rebase, worst top-waiter wait 374 µs);
+  pi_glibc robust PI (in-process pthread_exit + cross-process SIGKILL
+  death → EOWNERDEAD → pthread_mutex_consistent recovery) 3/3;
+  pi_stress -g 2 sustained 273k-383k across runs; pi_min 0/1/2
+  200/200 each; LTP futex family TPASS; INV-C1..C5 chain-invariant
+  model (kernel/verify pi_model) + INV-M1..M6 still green (1137
+  host tests); riscv make test ALL PASS, triple-arch rc=0.
 
 The reference-column comparison (cyclictest FIFO avg 12 µs vs Rux 46 µs) is
 the open gap — the fire-late/hrtimer-re-arm attribution is queued (rt-r4).

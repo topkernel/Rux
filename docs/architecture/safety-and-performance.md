@@ -939,3 +939,30 @@ absents stated plainly. Each absent names what closing looks like.
   and was updated in the same change (the shape test working as
   designed — the removal is documented at both the ops table and the
   pin).
+- rt-r6 round (2026-11-18): R6 PI chains. Safety properties landed
+  with measured evidence: (1) the PI chain walk holds AT MOST ONE PI
+  bucket lock at a time (D-27) — the reference's pi_lock/wait_lock
+  lock-order hazard class is structurally absent; verified by
+  pi_chain 1000-round chain-walk stress with zero wedges and the
+  INV-C3 bounded-walk model proof. (2) The glibc robust-PI death
+  contract (LOCK_PI returns 0 with FUTEX_OWNER_DIED in the word)
+  eliminates glibc's futex-fatal abort on owner death — pi_glibc's
+  in-process pthread_exit and cross-process SIGKILL scenarios both
+  recover via pthread_mutex_consistent (3/3). (3) The cycle-detection
+  fix (owner-side walk) turns a silent graph deadlock (X owns A, Y
+  blocked on A, X blocks on B owned by Y — previously queued
+  silently) into EDEADLK at block time; caught by the INV model's
+  cycle scenario before any boot. (4) Kernel-keyed PI states carry a
+  key_is_kernel guard on every user-word access — a kernel rt-mutex
+  key's uaddr is a kernel static; writing through it would be kernel
+  memory corruption (compile-time-impossible class eliminated by the
+  runtime guard, exercised by the rt-mode conversions surviving the
+  full battery). Bug-class taxonomy: the EOWNERDEAD contract bug and
+  the cycle blindness lived in SAFE code (no unsafe introduced); the
+  walk's unsafe surface is the same raw-pointer discipline as the
+  existing engine (queued-waiter task pointers under the bucket, the
+  documented contract). Honest gaps: multi-lock PI owners can
+  chain-restore to an intermediate boosted config (never wrong-low,
+  §5 candidate: per-task effective-priority tree in the reference's
+  shape); the sticky-boost downgrade divergence (D-26 note). Artifacts:
+  run/RT-R6.md (§3-§5), run/c*.log, run/g*.log.

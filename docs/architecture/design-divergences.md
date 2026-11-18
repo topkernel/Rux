@@ -1152,3 +1152,80 @@ reference's rcu-walk never takes the dcache lock on hit).
 
 **Guard.** pbench p6_stat/p6_openclose rows; the fs-domain perf-gate
 band; LTP rename/unlink families (memo invalidation correctness).
+
+## D-26: No full-tree spinlock→rt_mutex conversion — bounded sections + typed keys, rt semantics only where RT tasks block
+
+**Design.** PREEMPT_RT converts the kernel's spinlock tree to
+rt_mutexes (sleepable, PI-chained). Rux keeps every spinlock a
+spinlock — the measured critical sections are small (GRQ hold ~102
+ns, D-1) and nesting is a compile fact (D-11 typed lock keys) — and
+gives ONLY the sleepable locks an RT task can actually block on the
+rt_mutex semantics (R6, kernel/src/sync/mutex.rs `SleepMutex::new_rt`
++ kernel/src/sync/futex_pi.rs kernel-keyed states): VFS-MUTATION,
+EXT4-BIGLOCK, loop-io. Even there the PI chain arms ONLY for
+SCHED_FIFO/RR waiters (kernel rt_waiter_enter's policy gate): CFS
+contention keeps the R84 FIFO handoff byte-for-byte (the sync-checked
+state machine is unchanged), and there is no nice-floor churn on the
+fs big locks — the reference's rt_mutex boosts CFS waiters by
+effective nice; we deliberately do not (throughput-shaped CFS
+convoying on fs locks is served by the fairness gate, and the renice
+storm under load would be pure cost).
+
+**Advantage.** Zero spinlock conversion risk (no new sleeping
+contexts in IRQ-adjacent paths), zero overhead on all-CFS loads (one
+`rt` branch + an advisory count read per release), while a FIFO task
+parking on the ext4 big lock boosts the CFS owner and — via the
+shared chain engine — propagates through to user PI futexes the owner
+holds (the reference achieves the uniform chain via
+task->pi_blocked_on; Rux via the same pool scan for kernel-keyed
+states). Measured: pi_chain/pi_glibc/pi_stress batteries green
+(run/RT-R6.md §4); pbench fs rows in band on the loaded window
+(quiet-window rerun at merge).
+
+**Compatibility evidence.** External ABI unchanged (kernel-internal
+locks). riscv64 make test ALL PASS (rebased tree); LTP futex family
+TPASS; the R84 state machine verified byte-identical
+(scripts/verify_sync_check.py, sync/mutex_model clean).
+
+**Known cost.** An RT waiter queued behind CFS waiters jumps the
+queue only when it is the highest-RT queued entry (wake_up_one_hiprio
+pick); the R85 anti-starve insurance still bounds any residual gate
+pathology. A CFS-priority inversion on these locks is NOT resolved by
+PI (by design — bounded by the fairness machinery, not inherited).
+
+**Guard.** pi_stress -g 2 inversion class; pi_chain rounds; the
+fs-domain pbench rows (p6_*) + sched domain p2_ctxsw band.
+
+## D-27: PI chain walk re-scans the pools per step, one bucket at a time
+
+**Design.** The reference's rt_mutex_adjust_prio_chain carries waiter
+pointers across lock drops and detects the world changing via the
+next_lock comparison, under the pi_lock/wait_lock lock-order dance
+(with trylock retry loops). Rux's `pi_chain_walk`
+(kernel/src/sync/futex_pi.rs) takes AT MOST ONE PI bucket lock at a
+time (never nested — opposite-direction walks cannot deadlock by
+construction) and re-derives every step from freshly read state
+(`pi_blocked_state_of` pool scan = the task->pi_blocked_on
+equivalent), so a chain that moved between steps is followed from
+wherever it actually is now instead of aborted; the boost input is
+the top waiter's LIVE task configuration rather than a snapshot
+(snapshots only order the queue and are refreshed at walk steps —
+the reference's requeue).
+
+**Advantage.** No lock-order protocol to maintain (the reference's
+step list is a documented hazard); no stale-branch aborts; the walk
+is idempotent and self-correcting. Measured: 3-deep chains arm in
+every round (pi_chain 1000/1000 pre-rebase, 300/300 after), no
+starvation (worst top-waiter wait 374 µs), pool census leak-free.
+
+**Compatibility evidence.** External ABI unchanged. LTP futex family
+green; INV-C1..C5 model invariants hold across the randomized op soup
+(kernel/verify pi_model).
+
+**Known cost.** O(pool) scan per walk step (128 states × slot locks)
+on a rare slow path — fine for PI op rates (pi_stress ~18k
+inversions/s); the reference's per-task pointers are O(1) but need
+the pi_lock protocol.
+
+**Guard.** pi_chain rounds + boost_ok counter; pi_stress -g 2
+sustained inversions; INV-C1/INV-C3 model checks.
