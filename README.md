@@ -70,7 +70,7 @@ boards, with method and a per-row attribution of every remaining gap:
 | ext4 durability — 4 KiB write+fsync | **1.24× faster** |
 | 1 MiB buffered write | **1.19–1.25× faster** — 11.7 GiB/s at 78 µs/op |
 | Directory scan — getdents, 1000 entries | **1.95× faster** |
-| Pipe · context-switch · semaphore latency | **4.6× · 4.0–4.5× · 2.9× faster** |
+| Pipe · context-switch · semaphore latency | **5.8× · 5.1–6.3× · 9.0× faster** |
 | Real-time wake latency, cyclictest clean runs | **min and max win every clean pass; max 10× better** |
 | hackbench, all three forms | **1.06–1.16× faster** |
 | Geekbench 5 | **single-core 113% · multi-core 110%** |
