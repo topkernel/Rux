@@ -952,9 +952,29 @@ const SWITCHING_OUT_STALE_JIF: u64 = 50;
 /// R63: whether `task` is the prev of a context switch in flight on any
 /// CPU. Called with the GRQ lock held (same discipline as the R49
 /// current-slot scan).
+///
+/// r-strand (lat_fs conviction, 2026-11-19): only a YOUNG mark is an
+/// in-flight switch. The mark's window is the __schedule frame —
+/// microseconds — while the birth stamp (SWITCHING_OUT_JIF, set under
+/// the same GRQ hold as the mark) bounds it; the 50-jiffy stale bar is
+/// five-plus orders of margin. A mark aging past the bar means its
+/// retire was lost (the captured face: a worker switched out mid-creat
+/// with the retire skipped — RUNNING+unlinked+stale-marked, reached by
+/// no pick and no heal, machine idle around it). Aging marks read as
+/// NOT in flight so the phantom sweep relinks the task and the pick's
+/// stale-mark heal can fire instead of every scanner deferring to a
+/// switch that finished ages ago.
 pub fn task_is_mid_switch_out(task: *mut Task) -> bool {
+    let now = crate::drivers::timer::get_jiffies();
     (0..MAX_CPUS).any(|c| {
-        SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire) == task as u64
+        if SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire) != task as u64 {
+            return false;
+        }
+        let born = SWITCHING_OUT_JIF[c].load(core::sync::atomic::Ordering::Acquire);
+        born != 0
+            && now
+                .wrapping_sub(born)
+                < SWITCHING_OUT_STALE_JIF
     })
 }
 
@@ -998,8 +1018,18 @@ pub fn pick_owner_live(task: *mut Task) -> bool {
     // can fire; SWITCHING_OUT stays authoritative — a cpu switching
     // TO idle keeps its mark until the release store lands.
     let idle_mask = grq().idle_cpus.load(core::sync::atomic::Ordering::Acquire);
+    let now = crate::drivers::timer::get_jiffies();
     (0..MAX_CPUS).any(|c| {
-        let sw = SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire) == task as u64;
+        // Same aging discipline as task_is_mid_switch_out: only a YOUNG
+        // switch-out mark names a live owner; an aged mark is the
+        // lost-retire face and must let the stale-mark heal fire.
+        let sw = {
+            let m = SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire)
+                == task as u64;
+            let born = SWITCHING_OUT_JIF[c].load(core::sync::atomic::Ordering::Acquire);
+            m && born != 0
+                && now.wrapping_sub(born) < SWITCHING_OUT_STALE_JIF
+        };
         if sw {
             return true;
         }
