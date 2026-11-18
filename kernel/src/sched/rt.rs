@@ -184,11 +184,19 @@ impl RtRunQueue {
     /// forever and the idle fast path dies (the P08 comment's underflow
     /// hazard, now structural).
     fn rt_nr_dec(&self) {
-        let _ = self.rt_nr_running.fetch_update(
+        // grq-hold-slim Cut 2: on the 1 -> 0 transition clear the RT
+        // class bit (GRQ-held; see CLASS_NONEMPTY in sched.rs).
+        if let Ok(old) = self.rt_nr_running.fetch_update(
             Ordering::AcqRel,
             Ordering::Acquire,
             |v| v.checked_sub(1),
-        );
+        ) {
+            if old == 1 {
+                crate::sched::sched::class_nonempty_clear(
+                    crate::sched::sched::CLASS_RT_BIT,
+                );
+            }
+        }
     }
 
     /// rr_nr_running twin of rt_nr_dec.
@@ -266,7 +274,14 @@ impl RtRunQueue {
             self.bitmap[word_idx].fetch_or(1u64 << bit_idx, Ordering::AcqRel);
 
             // Update counters
-            self.rt_nr_running.fetch_add(1, Ordering::AcqRel);
+            // grq-hold-slim Cut 2: on the 0 -> nonempty transition set
+            // the RT class bit (GRQ-held).
+            let rt_old = self.rt_nr_running.fetch_add(1, Ordering::AcqRel);
+            if rt_old == 0 {
+                crate::sched::sched::class_nonempty_set(
+                    crate::sched::sched::CLASS_RT_BIT,
+                );
+            }
 
             if t.policy() == SchedPolicy::Rr {
                 self.rr_nr_running.fetch_add(1, Ordering::AcqRel);
