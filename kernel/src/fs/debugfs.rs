@@ -72,6 +72,12 @@ pub struct DebugFsNode {
     pub show: Option<Box<dyn Fn() -> Vec<u8> + Send + Sync>>,
     /// write handler — returns 0 or a negative errno
     pub store: Option<Box<dyn Fn(&[u8]) -> i32 + Send + Sync>>,
+    /// streaming node (tracefs trace_pipe shape): every read drains
+    /// fresh records via `show` instead of serving an open-time
+    /// snapshot — the reference trace_pipe's consuming-reader
+    /// semantics (snapshot-once made a held fd return EOF forever,
+    /// so userspace stream readers saw nothing).
+    pub streaming: bool,
 }
 
 // SAFETY: every mutable field sits behind a Spinlock; the closures are
@@ -125,6 +131,7 @@ pub fn create_dir(path: &str) -> bool {
             children: Spinlock::new(BTreeMap::new()),
             show: None,
             store: None,
+            streaming: false,
         });
         let mut children = current.children.lock();
         children.insert(String::from(component), node.clone());
@@ -175,6 +182,7 @@ where
             children: Spinlock::new(BTreeMap::new()),
             show: None,
             store: None,
+            streaming: false,
         });
         let mut children = current.children.lock();
         children.insert(String::from(component), node.clone());
@@ -189,6 +197,7 @@ where
         children: Spinlock::new(BTreeMap::new()),
         show: Some(Box::new(show)),
         store: store.map(|s| Box::new(s) as Box<dyn Fn(&[u8]) -> i32 + Send + Sync>),
+        streaming: false,
     });
     let mut children = current.children.lock();
     children.insert(String::from(file_name), node);
@@ -257,6 +266,7 @@ pub fn init_debugfs() -> Result<(), i32> {
         children: Spinlock::new(BTreeMap::new()),
         show: None,
         store: None,
+        streaming: false,
     });
 
     let sb = Box::new(DebugFsSuperBlock {

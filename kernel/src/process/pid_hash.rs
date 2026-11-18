@@ -255,37 +255,35 @@ where
     skipped
 }
 
-/// Collect PIDs currently in the hash table.
+/// Collect EVERY task pid currently in the hash table.
 ///
-/// Returns a fixed-size array of PIDs, the count, and whether truncation occurred.
-/// If more than 64 processes exist, remaining PIDs are silently dropped and
-/// `truncated` is set to true.
-/// Used by procfs to list /proc/[pid] directories.
-pub fn pid_hash_collect_all() -> ([u32; 64], usize, bool) {
-    let mut pids = [0u32; 64];
-    let mut count = 0;
-    let mut truncated = false;
+/// History: this returned a fixed `[u32; 64]` snapshot — a
+/// no-allocation shortcut that silently TRUNCATED the task list at 64
+/// entries. /proc root readdir is built on it, so on task-dense
+/// systems (the OH image: hundreds of live tasks by 14s) every pid
+/// past the 64-slot window was invisible to userspace: `ps`, `ls
+/// /proc` and every process-finder missed services wholesale (the mmi
+/// syscall-diff probe polled /proc for 300s and never saw
+/// `multimodalinput`, although the kernel's own watchdog walked the
+/// same hash and found the task). The reference kernel has no such
+/// cap — procfs lists the whole pid table. The walk now collects into
+/// a Vec (the same shape as the /proc/[pid]/task branch: raw pushes
+/// under the per-bucket locks, formatting after the walk).
+pub fn pid_hash_collect_all() -> alloc::vec::Vec<u32> {
+    let mut pids = alloc::vec::Vec::new();
 
     for i in 0..PID_HASH_BUCKETS {
-        if count >= 64 {
-            truncated = true;
-            break;
-        }
         let flags = lock_bucket(i);
         // SAFETY: We hold the bucket lock so the chain cannot be modified concurrently.
         unsafe {
             let mut curr = BUCKET_HEAD[i].load(Ordering::Acquire);
-            while !curr.is_null() && count < 64 {
-                pids[count] = (*curr).pid();
-                count += 1;
+            while !curr.is_null() {
+                pids.push((*curr).pid());
                 curr = (*curr).pid_hash_next;
-            }
-            if !curr.is_null() {
-                truncated = true;
             }
         }
         unlock_bucket(i, flags);
     }
 
-    (pids, count, truncated)
+    pids
 }
