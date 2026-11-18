@@ -30,7 +30,7 @@
 //! are registered via `add_timer_with_action()` and looked up by
 //! timer ID during expiry.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering, AtomicUsize, AtomicU8, AtomicU32};
 use crate::sync::spinlock::Spinlock;
 use crate::drivers::timer;
 
@@ -396,6 +396,7 @@ fn non_zero_interval(interval_jiffies: u64) -> Option<core::num::NonZeroU64> {
 /// # Returns
 /// `true` if timer was found and removed.
 pub fn del_timer(id: u64) -> bool {
+    del_note(id);
     // R37: single lock — the old TIMERS→ACTIONS nesting (the lock-order
     // comment used to live here) is gone: entry and action are one slot.
     let mut table = TIMER_TABLE.lock_irqsave();
@@ -415,6 +416,50 @@ pub fn del_timer(id: u64) -> bool {
 }
 
 /// Check if a timer is currently active.
+// nanosleep-loss conviction: del_timer ring (id + caller line).
+pub static DEL_IX: AtomicUsize = AtomicUsize::new(0);
+pub static DEL_ID: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
+pub static DEL_RA: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
+pub static DEL_JIF: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
+
+#[track_caller]
+fn del_note(id: u64) {
+    let slot = DEL_IX.fetch_add(1, Ordering::Relaxed) % 64;
+    DEL_ID[slot].store(id, Ordering::Relaxed);
+    DEL_RA[slot].store(
+        core::panic::Location::caller().line() as u64,
+        Ordering::Relaxed,
+    );
+    DEL_JIF[slot].store(crate::drivers::timer::get_jiffies(), Ordering::Relaxed);
+    // direct-mapped id table (survives the ring's roll): 16K slots,
+    // key = id itself — the wheel's ids are monotonic and sparse, so a
+    // slot's id word validates the entry.
+    let d = id as usize & 0x3FFF;
+    DELDM_ID[d].store(id, Ordering::Relaxed);
+    DELDM_RA[d].store(
+        core::panic::Location::caller().line() as u64,
+        Ordering::Relaxed,
+    );
+    DELDM_JIF[d].store(crate::drivers::timer::get_jiffies(), Ordering::Relaxed);
+}
+pub static DELDM_ID: [AtomicU64; 16384] = [const { AtomicU64::new(0) }; 16384];
+pub static DELDM_RA: [AtomicU64; 16384] = [const { AtomicU64::new(0) }; 16384];
+pub static DELDM_JIF: [AtomicU64; 16384] = [const { AtomicU64::new(0) }; 16384];
+
+/// Was `id` deleted (and from which source line, how long ago)?
+pub fn del_lookup(id: u64) -> Option<(u64, u64)> {
+    for k in 0..64 {
+        if DEL_ID[k].load(Ordering::Relaxed) == id {
+            return Some((
+                DEL_RA[k].load(Ordering::Relaxed),
+                crate::drivers::timer::get_jiffies()
+                    .saturating_sub(DEL_JIF[k].load(Ordering::Relaxed)),
+            ));
+        }
+    }
+    None
+}
+
 pub fn timer_pending(id: u64) -> bool {
     let table = TIMER_TABLE.lock_irqsave();
     table.contains(id)
@@ -944,12 +989,31 @@ pub fn expire_hres_inline() -> bool {
             WW_HRES_N[cpu].fetch_add(1, Ordering::Relaxed);
         }
     }
-    static mut HRES_FAST_BUF: [FiredToken; wheel::EXPIRY_BUDGET] =
-        [FiredToken { id: 0, action: Action::None, late_ticks: 0, deadline: 0 }; wheel::EXPIRY_BUDGET];
-    // SAFETY: single-CPU-use buffer owned by this call path (see the
-    // nesting note above); the wheel writes at most EXPIRY_BUDGET tokens.
-    let buf: *mut [FiredToken; wheel::EXPIRY_BUDGET] =
-        core::ptr::addr_of_mut!(HRES_FAST_BUF) as *mut [FiredToken; wheel::EXPIRY_BUDGET];
+    // nanosleep-loss fix (lost-wake, the pichek class): the hardirq
+    // fast path's token buffer is PER-CPU. The single shared row raced
+    // across CPUs — CPU A's expire_hres_inline had collected its tokens
+    // into the row and released TIMER_TABLE; CPU B's LAPIC one-shot then
+    // fired its own hardirq expiry, whose collect OVERWROTE the shared
+    // row before A's deliver_fired read it. The collected one-shot
+    // entries were already freed from the wheel (the sleeper's entry
+    // reads spent ever after) yet their wakes were never delivered —
+    // the sleeper parks on with no waker left anywhere: three of four
+    // pichek threads frozen permanently, every interval 100us..20ms,
+    // the OH-campaign "wake TRUE, task unlinked" signature. Per-CPU
+    // rows close it (the reference runs hrtimer expiry on per-CPU
+    // bases; a shared expiry buffer is unrepresentable there).
+    static mut HRES_FAST_BUF: [[FiredToken; wheel::EXPIRY_BUDGET];
+        crate::config::MAX_CPUS] =
+        [[FiredToken { id: 0, action: Action::None, late_ticks: 0, deadline: 0 }; wheel::EXPIRY_BUDGET];
+            crate::config::MAX_CPUS];
+    let cpu = crate::arch::cpu_id() as usize;
+    // SAFETY: per-CPU row owned by THIS cpu's hardirq path (same shape
+    // as the softirq EXPIRED_BUF row above); the wheel writes at most
+    // EXPIRY_BUDGET tokens.
+    let buf: *mut [FiredToken; wheel::EXPIRY_BUDGET] = unsafe {
+        (core::ptr::addr_of_mut!(HRES_FAST_BUF) as *mut [FiredToken; wheel::EXPIRY_BUDGET])
+            .add(cpu % crate::config::MAX_CPUS)
+    };
     let current = timer::get_jiffies();
     run_wheel_sweep(current, now_time, true, buf);
     true
@@ -1262,6 +1326,32 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
                 let task = crate::process::pid_hash::pid_hash_lookup_pinned(pid);
                 if !task.is_null() {
                     let ok = crate::sched::wake_up_process(task);
+                    // nanosleep-loss conviction: fire-side direct map —
+                    // every FIRED wake id + jiffies.
+                    {
+                        let d = token.id as usize & 0x3FFF;
+                        FWHOW_ID[d].store(token.id, Ordering::Relaxed);
+                        FWHOW_JIF[d].store(
+                            crate::drivers::timer::get_jiffies(),
+                            Ordering::Relaxed,
+                        );
+                        FWHOW_OK[d].store(ok as u8, Ordering::Relaxed);
+                    }
+                    // nanosleep-loss hunt: the wake's outcome + the
+                    // target's post-wake linkage state.
+                    if !task.is_null() {
+                        // SAFETY: pinned task, diagnostic reads.
+                        let (onrq, key, stb) = unsafe {
+                            (
+                                (*task).sched_entity().on_rq.load(Ordering::Relaxed),
+                                (*task).sched_entity().timeline_key().is_some(),
+                                (*task).state().bits(),
+                            )
+                        };
+                        fw_record(pid, ok, onrq, key, stb);
+                    } else {
+                        fw_record(pid, ok, false, false, 0xFFFF);
+                    }
                     // r41v17 ticktrap: a delivered timer wake that did not
                     // stick — the fire happened, the entry left the wheel,
                     // and the target did not end up woken. If the target
@@ -1378,6 +1468,105 @@ static WW_LAST_HEARTBEAT: AtomicU64 = AtomicU64::new(0);
 /// Wakewatch: nanosleep belt-and-braces re-arms (one-shot token
 /// consumed before deadline — the early-fire family).
 static WW_REARM_N: AtomicU64 = AtomicU64::new(0);
+
+// nanosleep-loss hunt: deliver_fired per-wake outcome ring (module
+// statics so the heartbeat census can read them).
+pub static FW_IX: AtomicUsize = AtomicUsize::new(0);
+pub static FW_PID: [AtomicU32; 64] = [const { AtomicU32::new(0) }; 64];
+pub static FW_OK: [AtomicU8; 64] = [const { AtomicU8::new(0) }; 64];
+pub static FW_ONRQ: [AtomicU8; 64] = [const { AtomicU8::new(0) }; 64];
+pub static FW_KEY: [AtomicU8; 64] = [const { AtomicU8::new(0) }; 64];
+pub static FW_ST: [AtomicU32; 64] = [const { AtomicU32::new(0) }; 64];
+
+// nanosleep-loss conviction: fire-side direct map (id-keyed).
+pub static FWHOW_ID: [AtomicU64; 16384] = [const { AtomicU64::new(0) }; 16384];
+pub static FWHOW_JIF: [AtomicU64; 16384] = [const { AtomicU64::new(0) }; 16384];
+pub static FWHOW_OK: [AtomicU8; 16384] = [const { AtomicU8::new(0) }; 16384];
+
+// nanosleep-loss hunt: per-pid LAST-fire record (module level).
+pub static FWT_PID: [AtomicU32; 32] = [const { AtomicU32::new(0) }; 32];
+pub static FWT_OK: [AtomicU8; 32] = [const { AtomicU8::new(0) }; 32];
+pub static FWT_ONRQ: [AtomicU8; 32] = [const { AtomicU8::new(0) }; 32];
+pub static FWT_KEY: [AtomicU8; 32] = [const { AtomicU8::new(0) }; 32];
+pub static FWT_ST: [AtomicU32; 32] = [const { AtomicU32::new(0) }; 32];
+pub static FWT_JIF: [AtomicU64; 32] = [const { AtomicU64::new(0) }; 32];
+
+#[inline]
+fn fw_record(pid: u32, ok: bool, on_rq: bool, key: bool, st: u32) {
+    let slot = FW_IX.fetch_add(1, Ordering::Relaxed) % 64;
+    FW_PID[slot].store(pid, Ordering::Relaxed);
+    FW_OK[slot].store(ok as u8, Ordering::Relaxed);
+    FW_ONRQ[slot].store(on_rq as u8, Ordering::Relaxed);
+    FW_KEY[slot].store(key as u8, Ordering::Relaxed);
+    FW_ST[slot].store(st, Ordering::Relaxed);
+    // per-pid LAST-fire side table (survives the ring's roll)
+    let jif = crate::drivers::timer::get_jiffies();
+    for k in 0..32 {
+        if FWT_PID[k].load(Ordering::Relaxed) == pid
+            && FWT_PID[k]
+                .compare_exchange(pid, pid, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            FWT_OK[k].store(ok as u8, Ordering::Relaxed);
+            FWT_ONRQ[k].store(on_rq as u8, Ordering::Relaxed);
+            FWT_KEY[k].store(key as u8, Ordering::Relaxed);
+            FWT_ST[k].store(st, Ordering::Relaxed);
+            FWT_JIF[k].store(jif, Ordering::Relaxed);
+            return;
+        }
+    }
+    for k in 0..32 {
+        if FWT_PID[k]
+            .compare_exchange(0, pid, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            FWT_OK[k].store(ok as u8, Ordering::Relaxed);
+            FWT_ONRQ[k].store(on_rq as u8, Ordering::Relaxed);
+            FWT_KEY[k].store(key as u8, Ordering::Relaxed);
+            FWT_ST[k].store(st, Ordering::Relaxed);
+            FWT_JIF[k].store(jif, Ordering::Relaxed);
+            return;
+        }
+    }
+}
+
+// nanosleep-loss conviction: timed-sleep loop-iteration counter (side
+// table keyed by task pointer; no Task layout change). One relaxed add
+// per nanosleep_impl loop pass; read by the heartbeat census.
+pub static NSL_TASK: [AtomicUsize; 16] = [const { AtomicUsize::new(0) }; 16];
+pub static NSL_ITER: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
+
+#[inline]
+pub fn nsleep_iter_bump() {
+    let Some(t) = crate::sched::current() else { return };
+    let key = t as *mut crate::process::Task as usize;
+    for k in 0..16 {
+        if NSL_TASK[k].load(Ordering::Relaxed) == key {
+            NSL_ITER[k].fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    }
+    for k in 0..16 {
+        if NSL_TASK[k]
+            .compare_exchange(0, key, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            NSL_ITER[k].fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    }
+}
+
+/// Reader: the task's timed-sleep loop-iteration count (0 = unseen).
+pub fn nsleep_iter_of(task: *mut crate::process::Task) -> u64 {
+    let key = task as usize;
+    for k in 0..16 {
+        if NSL_TASK[k].load(Ordering::Relaxed) == key {
+            return NSL_ITER[k].load(Ordering::Relaxed);
+        }
+    }
+    0
+}
 
 /// Wakewatch: count a nanosleep early-token-consumption re-arm.
 pub fn ww_note_rearm() {
@@ -1503,6 +1692,125 @@ fn ww_heartbeat(now_time: u64) {
 
     let sched = crate::sched::sched::ww_sched_snapshot();
 
+    // nanosleep-loss hunt: arm/fire accounting — NEXT_TIMER_ID-1 is the
+    // total arms ever; fires + live entries + cancels must cover it. A
+    // gap = entries vanishing unfired.
+    {
+        use crate::dfx::taskdump::putc_brief as putchar;
+        fn pdec9(mut v: u64) {
+            use crate::dfx::taskdump::putc_brief as p;
+            let mut buf = [0u8; 20];
+            let mut n = 0;
+            if v == 0 { p(b'0'); return; }
+            while v > 0 && n < buf.len() { buf[n] = b'0' + (v % 10) as u8; v /= 10; n += 1; }
+            for k in (0..n).rev() { p(buf[k]); }
+        }
+        for &b in b"NSLPARK rescued=" { putchar(b); }
+        pdec9(crate::sched::sched::NSLPARK_RESCUED.load(Ordering::Relaxed));
+        putchar(b'\n');
+        for &b in b"ARMS id=" { putchar(b); }
+        pdec9(NEXT_TIMER_ID.load(Ordering::Relaxed).saturating_sub(1));
+        for &b in b" fires=" { putchar(b); }
+        pdec9(WW_FIRE_N.load(Ordering::Relaxed));
+        for &b in b" live=" { putchar(b); }
+        {
+            let table = TIMER_TABLE.lock_irqsave();
+            pdec9(table.len() as u64);
+        }
+        putchar(b'\n');
+    }
+    // nanosleep-loss lane (hunt): per-task pick-phase census — every
+    // heartbeat, one line per task: pid, last pick-phase (1 walk-unlink,
+    // 2 mark_picked, 3 slot-published, 4 repick-return, 5 wrapper-enter,
+    // 6 affirm-ok, 7 affirm-fail, 8 early-abort, 9 asm-abort), phase age
+    // (jiffies), ownership qword, pk, linked, state. A frozen task names
+    // its terminal phase directly.
+    {
+        use crate::dfx::taskdump::putc_brief as putchar;
+        fn pdec(mut v: u64) {
+            use crate::dfx::taskdump::putc_brief as p;
+            let mut buf = [0u8; 20];
+            let mut n = 0;
+            if v == 0 { p(b'0'); return; }
+            while v > 0 && n < buf.len() { buf[n] = b'0' + (v % 10) as u8; v /= 10; n += 1; }
+            for k in (0..n).rev() { p(buf[k]); }
+        }
+        static PTBUDGET: core::sync::atomic::AtomicU64 =
+            core::sync::atomic::AtomicU64::new(0);
+        // nanosleep-loss: CPU-0 only — the direct-console census writes
+        // garble when both CPUs print concurrently.
+        if crate::arch::cpu_id() as usize == 0
+            && PTBUDGET.fetch_add(1, Ordering::Relaxed) < 60 {
+            putchar(b'\n');
+            crate::process::pid_hash::pid_hash_for_each_task_try(|task| unsafe {
+                let pid = (*task).pid();
+                if pid == 0 || pid == crate::sched::sched::TASK_POISON { return; }
+                let q = core::ptr::read_volatile(
+                    core::ptr::addr_of!((*task).ti_on_cpu) as *const u64);
+                let st = (*task).state().bits();
+                let linked = match (*task).policy() {
+                    crate::process::task::SchedPolicy::Fifo
+                    | crate::process::task::SchedPolicy::Rr => false,
+                    _ => (*task).sched_entity().timeline_key().is_some(),
+                };
+                let (ptc, ptj) =
+                    match crate::sched::sched::pick_trace_peek(task) {
+                        Some(x) => x,
+                        None => (0, 0),
+                    };
+                for &b in b"PTC pid=" { putchar(b); }
+                pdec(pid as u64);
+                for &b in b" ph=" { putchar(b); }
+                pdec(ptc as u64);
+                for &b in b" ago=" { putchar(b); }
+                pdec(ptj);
+                for &b in b" q=0x" { putchar(b); }
+                pdec(q);
+                for &b in b" pk=" { putchar(b); }
+                pdec((*task).pick_state() as u64);
+                for &b in b" lnk=" { putchar(b); }
+                pdec(linked as u64);
+                let tid = (*task).timed_sleep_timer_id.load(Ordering::Relaxed);
+                let tdl = (*task).timed_sleep_deadline.load(Ordering::Relaxed);
+                let tpend = crate::timer::timer_pending(tid);
+                for &b in b" tid=" { putchar(b); }
+                pdec(tid);
+                for &b in b" tp=" { putchar(b); }
+                pdec(tpend as u64);
+                for &b in b" tdl-now=" { putchar(b); }
+                let nowt = crate::drivers::timer::read_time();
+                if tdl > nowt {
+                    pdec((tdl - nowt) * 1000 / crate::config::TIMER_CLOCK_FREQ_HZ as u64);
+                } else {
+                    putchar(b'-');
+                    pdec((nowt - tdl) * 1000 / crate::config::TIMER_CLOCK_FREQ_HZ as u64);
+                }
+                for &b in b" st=0x" { putchar(b); }
+                pdec(st as u64);
+                for &b in b" itr=" { putchar(b); }
+                pdec(crate::timer::nsleep_iter_of(task));
+                // last fire-record for this pid (per-pid table)
+                for k in 0..32 {
+                    if FWT_PID[k].load(Ordering::Relaxed) == pid {
+                        for &b in b" fwj=" { putchar(b); }
+                        pdec(crate::drivers::timer::get_jiffies().saturating_sub(
+                            FWT_JIF[k].load(Ordering::Relaxed)));
+                        for &b in b" fw=(ok:" { putchar(b); }
+                        pdec(FWT_OK[k].load(Ordering::Relaxed) as u64);
+                        for &b in b",onrq:" { putchar(b); }
+                        pdec(FWT_ONRQ[k].load(Ordering::Relaxed) as u64);
+                        for &b in b",key:" { putchar(b); }
+                        pdec(FWT_KEY[k].load(Ordering::Relaxed) as u64);
+                        for &b in b",st:0x" { putchar(b); }
+                        pdec(FWT_ST[k].load(Ordering::Relaxed) as u64);
+                        putchar(b')');
+                        break;
+                    }
+                }
+                putchar(b'\n');
+            });
+        }
+    }
     // s16 (WW5, A2 census): pick-walk and heal deltas plus cumulative
     // sub-gate strand counts — the counter-based adjudication of the
     // msg-region strand family (see fair.rs WW_* counters). OWN pr_info:

@@ -420,6 +420,7 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
     // jiffies / pending signal and we exit the loop instead of sleeping.
     // Mirrors sys_rt_sigtimedwait's established pattern.
     loop {
+        crate::timer::nsleep_iter_bump();
         // Precise wake condition: the time CSR has reached the deadline.
         let now = timer::read_time();
 
@@ -512,6 +513,47 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
                 // SAFETY: current is the running task's pointer (see above).
                 unsafe {
                     crate::sched::dequeue_task(&*current);
+                }
+                continue;
+            }
+
+            // nanosleep-loss fix (reference shape): NEVER park with a
+            // spent waker. The reference's hrtimer_nanosleep gates its
+            // schedule on the sleeper's own liveness flag —
+            //     set_current_state(TASK_INTERRUPTIBLE);
+            //     if (likely(t.task)) ret = schedule();
+            // where t.task goes NULL the moment the hrtimer callback ran
+            // (or was cancelled): a sleeper whose one-shot already fired
+            // NEVER sleeps — it loops back, re-checks the deadline, and
+            // re-arms through hrtimer_sleeper_start_expires.
+            //
+            // The bug this closes (pichek class, 2+ threads, any interval
+            // 100us..20ms, SMP1/SMP2): the one-shot can be consumed by a
+            // wake that arrives while the sleeper is in its RUNNING phase
+            // (between the rearm_if_spent refresh above and the park
+            // below). That wake finds the task not-yet-INTERRUPTIBLE or
+            // mid-protocol, is refused as the benign redundant class (the
+            // R33 protocol's own design), and the ONLY waker is gone; the
+            // sleeper then parks waker-less and never runs again — the
+            // exact OH-campaign "wake TRUE, task unlinked, never runs
+            // again" signature. The R33 state-first re-check and the
+            // rearm_if_spent belt-and-braces close the windows BEFORE
+            // set_state; this gate closes the LAST one, between the
+            // re-check and schedule()'s park. pending() is the live
+            // wheel query (the WakeGuard's own liveness flag, the twin
+            // of the reference's t.task).
+            //
+            // The re-check below already restored nothing on this path,
+            // so the state is still INTERRUPTIBLE here: restore RUNNING
+            // before looping (the park is skipped, the next iteration's
+            // rearm_if_spent refreshes the spent guard; its refresh and
+            // the loop's deadline check terminate the sleep normally).
+            if !wake.as_ref().is_some_and(|w| w.pending()) {
+                // SAFETY: current is the running task's pointer (see above).
+                unsafe {
+                    (*current).set_state(process::task::TaskState::new(
+                        process::task::TaskState::RUNNING
+                    ));
                 }
                 continue;
             }
