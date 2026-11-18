@@ -103,7 +103,7 @@ impl LoopDev {
             sizelimit: AtomicU64::new(0),
             flags: AtomicU64::new(0),
             name: Spinlock::new([0; 64]),
-            io_lock: crate::sync::mutex::SleepMutex::new("loop-io", false),
+            io_lock: crate::sync::mutex::SleepMutex::new_rt("loop-io", false),
             io_owner_pid: AtomicU32::new(0),
             disk: None,
         }

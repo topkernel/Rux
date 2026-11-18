@@ -101,7 +101,7 @@ pub const NAME_MAX: usize = 255;
 /// on GRQ in scheduler_tick). All users are syscall-context directory
 /// mutators, so sleeping is legal everywhere this lock is taken.
 pub static VFS_MUTATION_LOCK: crate::sync::SleepMutex =
-    crate::sync::SleepMutex::new("VFS-MUTATION", false);
+    crate::sync::SleepMutex::new_rt("VFS-MUTATION", false);
 
 
 impl VfsPath {
