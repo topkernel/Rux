@@ -42,7 +42,13 @@ SECTIONS
 
 	. = ALIGN(8);
 	__ex_table_start = .;
-	.ex_table : AT(ADDR(.ex_table) - VA_OFFSET) { *(.ex_table) }
+	/* KEEP: nothing references .ex_table from a kept section (the fault
+	 * path reads it via the __ex_table_start/end script symbols, which do
+	 * not root a section for --gc-sections). The normal link kept it
+	 * incidentally; instrumented (-C instrument-coverage) links changed
+	 * section reachability and gc dropped the whole table — every user
+	 * fault then panicked instead of being contained. */
+	.ex_table : AT(ADDR(.ex_table) - VA_OFFSET) { KEEP(*(.ex_table)) }
 	__ex_table_end = .;
 
 	. = ALIGN(4096);

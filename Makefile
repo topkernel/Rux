@@ -172,7 +172,15 @@ verify:
 	@echo ""
 	@echo "=== All verify steps passed ==="
 
-# Run Miri UB detection on verify crate
+# Whole-kernel coverage report over the in-kernel test suite: boots an
+# instrumented kernel (COV=1 make test), extracts the profile from the
+# rootfs, and prints a per-subsystem table including 0% files.
+# scripts/coverage-report.sh --record refreshes
+# docs/development/coverage-latest.txt.
+coverage:
+	@bash scripts/coverage-report.sh
+
+# Miri UB detection on verify crate
 miri:
 	@echo "=== Step 1/2: Sync check ==="
 	@python3 scripts/verify_sync_check.py

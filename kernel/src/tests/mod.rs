@@ -765,6 +765,18 @@ pub fn print_test_summary() {
     } else {
         test_println!("\u{1b}[32m*** ALL TESTS PASSED ***\u{1b}[0m");
     }
+
+    // Whole-kernel coverage dump (cov-dump feature, see kernel/src/cov.rs):
+    // the .profraw is emitted as hex between [cov-begin]/[cov-end] marker
+    // lines on this console stream; the host-side report extracts it from
+    // the boot log. Runs once, after all test work.
+    #[cfg(feature = "cov-dump")]
+    {
+        match crate::cov::dump_to_console() {
+            Ok(n) => test_println!("[cov] profile emitted ({} bytes)", n),
+            Err(e) => test_println!("[cov] profile dump failed: errno {}", e),
+        }
+    }
 }
 
 /// Get failed test count
