@@ -113,19 +113,20 @@
       <table>
         <thead><tr><th>层级</th><th>适用</th><th>额外要求</th></tr></thead>
         <tbody>
-          <tr><td><b>Tier 1</b></td><td>所有内核改动</td><td>一次安静 syscost 启动:调度事件普查计数在基准范围内(TERM-DESCHED 8±2、WAKE-REFUSED 32±4、无网格滞留)、tick ≥99.5/s、零新增 panic/OOM 类、系统调用量 ±10%、关键单次平均(read/write/clock_gettime/nanosleep)±20% 或更优</td></tr>
+          <tr><td><b>Tier 1</b></td><td>所有内核改动</td><td>syscost 安静启动:普查带内、tick ≥99.5/s、零新增 panic/OOM、系统调用量 ±10%、单次平均 ±20% 或更优</td></tr>
           <tr><td><b>Tier 2</b></td><td>热路径:mm/ sched/ fs/ ipc/ binder/ timer/ arch trap</td><td>加一次 pbench 启动:P1–P7 中位数全部在基线 ±20% 内或更优</td></tr>
           <tr><td><b>Tier 3</b></td><td>分配器或 IRQ 路径</td><td>再加 IF=0 中断关闭份额测量(EFLAGS 对探针)</td></tr>
         </tbody>
       </table>
     </div>
+    <p style="font-size:13px;color:var(--text-3)">注:普查带 = TERM-DESCHED 8±2、WAKE-REFUSED 32±4、无网格滞留;单次平均 = read/write/clock_gettime/nanosleep。现行允许带逐项见性能栏目「内部微基准」页。</p>
     <h3>六大看护域(改动碰到任何一项,必须显式报告该域检查结果)</h3>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>域</th><th>守护指标</th></tr></thead>
         <tbody>
           <tr><td>内存分配 / 回收</td><td>small_alloc 类锁分段每次启动 ≤ 约 2500 万、REST 占比 ≤10% 机器、无回收慢路径、zone 余量不变</td></tr>
-          <tr><td>调度</td><td>GRQ 锁内 241–273 ns(release,精确探针);锁等待 70–84 ns 为 KVM 跨 vCPU locked 指令税(非 GRQ 自身成本);门禁指标(调用点 IF=0 段均值,含获取等待)允许范围 1200–7320 ns(实测 2786 ns)、调度事件普查在基准范围内、唤醒→拾取与上下文切换成本在基准范围内</td></tr>
+          <tr><td>调度</td><td>GRQ 锁内 241–273 ns(release 探针)、IF=0 段均值 1200–7320 ns(实测 2786)、普查/唤醒→拾取/上下文切换在基准范围内</td></tr>
           <tr><td>文件系统热路径</td><td>pbench fs 行(stat/mkdir+rmdir/unlink/write+fsync)在基准范围内、无新同步写类、buffer cache 命中率 ≥ 基线</td></tr>
           <tr><td>中断 / IRQ 路径</td><td>IF=0 份额在基准范围内(现行基准范围 20.4%±3pp)、关中断段 3–7 ms 类、无新 IRQ-OFF 打印类</td></tr>
           <tr><td>IPC</td><td>pipe / unix 往返中位在基准范围内、truesize/writev 路径不回退、连接风暴量级在基准范围内</td></tr>
@@ -133,6 +134,7 @@
         </tbody>
       </table>
     </div>
+    <p style="font-size:13px;color:var(--text-3)">注:调度域锁内为精确探针口径;锁等待 70–84 ns 为 KVM 跨 vCPU locked 指令税(非 GRQ 自身成本);IF=0 段均值为调用点口径、含获取等待。</p>
     <div class="callout"><b>总原则:</b>任何可能影响性能的子系统都必须处于门禁测量范围之内 —— 如果现有工具测不了它,<b>应为其新增 debug 观测工具</b>(默认关闭)。测量是变更的组成部分,而非事后补充。基线只能由通过了自身层级的合并来更新。</div>
 
     <h2 id="x86"><span class="anchor">§4</span>平台优先级:x86_64 + KVM 先行</h2>
