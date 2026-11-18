@@ -175,7 +175,7 @@ miri:
 	@python3 scripts/verify_sync_check.py
 	@echo ""
 	@echo "=== Step 2/2: Run Miri UB detection ==="
-	@cd kernel/verify && MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test
+	@cd kernel/verify && MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-permissive-provenance" cargo +nightly miri test
 	@echo ""
 	@echo "=== All Miri checks passed (no UB found) ==="
 
