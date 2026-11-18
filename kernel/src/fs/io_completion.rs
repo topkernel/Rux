@@ -268,6 +268,10 @@ impl IoCompletion {
 
             // Use prepare_to_wait to atomically set INTERRUPTIBLE and
             // add to queue, preventing lost-wakeup race.
+            // might_sleep parity: a softirq-context caller parking here
+            // is the count-migration leak's producer class (schedule()
+            // now refuses the switch and names it).
+            crate::interrupt::preempt::might_sleep_check("IoCompletion::wait");
             self.wait_queue.prepare_to_wait(current, false, true);
 
             // Recheck after setting state (waker may have fired)

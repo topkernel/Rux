@@ -141,6 +141,39 @@ pub fn in_task() -> bool {
     !in_interrupt()
 }
 
+/// The reference's might_sleep() discipline: a task about to sleep must
+/// be in task context. Sleeping primitives (SleepMutex::lock's slowpath,
+/// IoCompletion::wait, futex waits) call this at their sleeping point —
+/// a hit names the SOFTIRQ-context sleeping call that the count-
+/// migration leak (Session-6: +SOFTIRQ_OFFSET stranded on the
+/// interrupted task when a handler parks) needs to stop producing.
+/// The reference BUGs here; the hunting-phase equivalent is a
+/// rate-capped splat naming the site, and schedule()'s own
+/// __schedule_bug-parity check refuses the switch (see schedule()).
+pub fn might_sleep_check(site: &'static str) {
+    if !in_interrupt() {
+        return;
+    }
+    static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let now = crate::drivers::timer::get_jiffies();
+    let last = LAST.load(core::sync::atomic::Ordering::Acquire);
+    if now.wrapping_sub(last) < 200
+        || LAST
+            .compare_exchange(last, now, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire)
+            .is_err()
+    {
+        return;
+    }
+    crate::pr_err!(
+        "MIGHT-SLEEP-ATOMIC site={} pid={} pc={:#x} in_softirq={} in_irq={}",
+        site,
+        crate::sched::get_current_pid(),
+        preempt_count(),
+        in_softirq(),
+        in_irq(),
+    );
+}
+
 /// Check if preemption is allowed
 #[inline]
 pub fn preemptible() -> bool {

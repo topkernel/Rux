@@ -2934,6 +2934,37 @@ pub fn preempt_check_wake_sync(task: *mut Task) {
 #[inline(never)]
 #[track_caller]
 pub fn schedule() {
+    // __schedule_bug parity (the reference's kernel/sched/core.c
+    // discipline): schedule() from interrupt context is forbidden — in
+    // the reference it splats __schedule_bug(prev) and every sleeping
+    // primitive BUGs first via might_sleep(), so the invariant
+    // "SOFTIRQ/HARDIRQ_OFFSET exists only inside its own bracket and a
+    // switch can never carry it to another task" holds structurally.
+    // This tree lacked the check: a softirq-context sleeper's schedule
+    // proceeded silently, the bracket's add/sub pair straddled two
+    // task contexts, and the migrated +SOFTIRQ_OFFSET stranded on a
+    // worker forever (the lat_fs strand family, 2026-11-19 conviction:
+    // PREEMPT-HEAL-REFUSED pc=0x2 with 377 fresh observations). The
+    // switch is REFUSED here (the count cannot migrate); the sleeping
+    // primitive's wait fails/spins and the offender is named.
+    if crate::interrupt::preempt::in_interrupt() {
+        static ATOMIC_N: core::sync::atomic::AtomicU64 =
+            core::sync::atomic::AtomicU64::new(0);
+        let n = ATOMIC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 24 {
+            let loc = core::panic::Location::caller();
+            crate::pr_err!(
+                "SCHEDULE-ATOMIC (reference __schedule_bug parity) caller={}:{} pid={} pc={:#x} in_softirq={} in_irq={}",
+                loc.file(),
+                loc.line(),
+                crate::process::current_pid(),
+                crate::interrupt::preempt::preempt_count(),
+                crate::interrupt::preempt::in_softirq(),
+                crate::interrupt::preempt::in_irq(),
+            );
+        }
+        return;
+    }
     // SP-5 r5 frozen-tick trap: schedule() entered with IF=0. The tail's
     // per-caller restore_irq(flags) then returns with IF STILL 0, and the
     // caller keeps running with IRQs off until some other sti — the
@@ -8253,8 +8284,17 @@ pub fn scheduler_tick() {
                 cur
             };
             if !cur.is_null() {
-                let pc =
-                    unsafe { (*cur).preempt_count() };
+                // The probe samples from inside the tick hardirq, so the
+                // sampled count legitimately carries THIS tick's own
+                // HARDIRQ_OFFSET for whatever task is current — counting
+                // it made every idle-cpu sample "hold nonzero pc" forever
+                // (the PREEMPT-LEAK pc=0x10000 spam on idle tasks,
+                // 2026-11-19: the reporter was measuring its own bracket).
+                // Subtract exactly the tick's one level before any
+                // adjudication; a task's own leaked hardirq level still
+                // shows as a residue (and h_extra reads >= 1 level).
+                let pc = unsafe { (*cur).preempt_count() }
+                    .saturating_sub(crate::interrupt::preempt::HARDIRQ_OFFSET);
                 // Per-field consecutive-PRESENT run counters (phantom-bits
                 // r2/3, stress-port r3 2026-11-02): a field's phantomness
                 // is proven only by ITS OWN observations — a field seen
@@ -8293,7 +8333,7 @@ pub fn scheduler_tick() {
                 // 200 real observations before any heal.
                 {
                     let h_extra_now = (pc & crate::interrupt::preempt::HARDIRQ_MASK)
-                        >= 2 * crate::interrupt::preempt::HARDIRQ_OFFSET;
+                        >= crate::interrupt::preempt::HARDIRQ_OFFSET;
                     unsafe {
                         (*cur).ti_pc_present_runs_tick(
                             pc & crate::interrupt::preempt::PREEMPT_MASK != 0,
