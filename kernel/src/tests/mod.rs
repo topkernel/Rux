@@ -182,6 +182,8 @@ macro_rules! test_assert_eq {
 
 // ===== Pure logic tests =====
 #[cfg(feature = "unit-test")]
+pub mod binder;
+#[cfg(feature = "unit-test")]
 pub mod dev_t;
 #[cfg(feature = "unit-test")]
 pub mod checksum;
@@ -624,10 +626,10 @@ pub fn run_all_tests() {
     test_group_start("ipc_sysv");
     ipc_sysv::test_ipc_sysv();
 
-    // R40: semop blocking contract (block-until-post, EAGAIN only with
-    // IPC_NOWAIT) — runs AFTER the pure-logic ipc_sysv rows; it spawns
-    // helper kthreads and sleeps the boot task.
-    crate::ipc::binder::test_binder_alloc_recycle();
+    // Binder group (kernel/src/tests/binder.rs): alloc recycle, event
+    // name table, device contexts. Formerly an in-module test inside
+    // ipc/binder.rs — all binder unit tests live under kernel/src/tests/.
+    binder::test_binder();
 
     test_group_start("sysv_sem_block");
     sysv_sem_block::test_sysv_sem_block();
