@@ -162,8 +162,19 @@ main() {
     local INIT="${2:-$DEFAULT_INIT}"
 
     if [ "$MODE" = "test" ]; then
-        # Test mode: use unit-test feature, force recompile
-        ensure_kernel "${PLATFORM},unit-test" true
+        # Test mode: use unit-test feature, force recompile. COV=1 adds the
+        # cov-dump feature and the coverage RUSTFLAGS so the suite boots an
+        # instrumented kernel and writes /coverage.profraw to the (writable,
+        # scratch) rootfs; scripts/coverage-report.sh extracts and reports it.
+        if [ "${COV:-0}" = "1" ]; then
+            export RUSTFLAGS="${RUSTFLAGS:-} -C instrument-coverage -Zno-profiler-runtime"
+            # minicov's C runtime must match the kernel's RISC-V FP ABI
+            # (clang's triple default disagrees with rustc's lp64d objects).
+            export CFLAGS="${CFLAGS:-} -march=rv64gc -mabi=lp64d"
+            ensure_kernel "${PLATFORM},unit-test,cov-dump" true
+        else
+            ensure_kernel "${PLATFORM},unit-test" true
+        fi
         # Bounded run + self-cleanup (test-infra fix, 2026-10-28): the
         # kernel prints its suite verdict and halts, but nothing wires
         # QEMU to exit on halt, so the process spins forever and every
