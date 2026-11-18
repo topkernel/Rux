@@ -3133,7 +3133,10 @@ impl CfsRunQueue {
                             {
                                 static WHY1_N: core::sync::atomic::AtomicU32 =
                                     core::sync::atomic::AtomicU32::new(0);
+                                let stale_task = crate::sched::sched::pick_trace_peek(task)
+                                    .is_some_and(|(_, ago)| ago > 30);
                                 if crate::trace::EVENT_SCHEDTRACE.armed()
+                                    && stale_task
                                     && crate::drivers::timer::get_jiffies() > 300
                                     && WHY1_N.fetch_add(
                                         1,

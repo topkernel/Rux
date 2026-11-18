@@ -30,7 +30,7 @@
 //! are registered via `add_timer_with_action()` and looked up by
 //! timer ID during expiry.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering, AtomicUsize, AtomicU8, AtomicU32};
 use crate::sync::spinlock::Spinlock;
 use crate::drivers::timer;
 
@@ -1262,6 +1262,21 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
                 let task = crate::process::pid_hash::pid_hash_lookup_pinned(pid);
                 if !task.is_null() {
                     let ok = crate::sched::wake_up_process(task);
+                    // nanosleep-loss hunt: the wake's outcome + the
+                    // target's post-wake linkage state.
+                    if !task.is_null() {
+                        // SAFETY: pinned task, diagnostic reads.
+                        let (onrq, key, stb) = unsafe {
+                            (
+                                (*task).sched_entity().on_rq.load(Ordering::Relaxed),
+                                (*task).sched_entity().timeline_key().is_some(),
+                                (*task).state().bits(),
+                            )
+                        };
+                        fw_record(pid, ok, onrq, key, stb);
+                    } else {
+                        fw_record(pid, ok, false, false, 0xFFFF);
+                    }
                     // r41v17 ticktrap: a delivered timer wake that did not
                     // stick — the fire happened, the entry left the wheel,
                     // and the target did not end up woken. If the target
@@ -1378,6 +1393,62 @@ static WW_LAST_HEARTBEAT: AtomicU64 = AtomicU64::new(0);
 /// Wakewatch: nanosleep belt-and-braces re-arms (one-shot token
 /// consumed before deadline — the early-fire family).
 static WW_REARM_N: AtomicU64 = AtomicU64::new(0);
+
+// nanosleep-loss hunt: deliver_fired per-wake outcome ring (module
+// statics so the heartbeat census can read them).
+pub static FW_IX: AtomicUsize = AtomicUsize::new(0);
+pub static FW_PID: [AtomicU32; 64] = [const { AtomicU32::new(0) }; 64];
+pub static FW_OK: [AtomicU8; 64] = [const { AtomicU8::new(0) }; 64];
+pub static FW_ONRQ: [AtomicU8; 64] = [const { AtomicU8::new(0) }; 64];
+pub static FW_KEY: [AtomicU8; 64] = [const { AtomicU8::new(0) }; 64];
+pub static FW_ST: [AtomicU32; 64] = [const { AtomicU32::new(0) }; 64];
+
+// nanosleep-loss hunt: per-pid LAST-fire record (module level).
+pub static FWT_PID: [AtomicU32; 32] = [const { AtomicU32::new(0) }; 32];
+pub static FWT_OK: [AtomicU8; 32] = [const { AtomicU8::new(0) }; 32];
+pub static FWT_ONRQ: [AtomicU8; 32] = [const { AtomicU8::new(0) }; 32];
+pub static FWT_KEY: [AtomicU8; 32] = [const { AtomicU8::new(0) }; 32];
+pub static FWT_ST: [AtomicU32; 32] = [const { AtomicU32::new(0) }; 32];
+pub static FWT_JIF: [AtomicU64; 32] = [const { AtomicU64::new(0) }; 32];
+
+#[inline]
+fn fw_record(pid: u32, ok: bool, on_rq: bool, key: bool, st: u32) {
+    let slot = FW_IX.fetch_add(1, Ordering::Relaxed) % 64;
+    FW_PID[slot].store(pid, Ordering::Relaxed);
+    FW_OK[slot].store(ok as u8, Ordering::Relaxed);
+    FW_ONRQ[slot].store(on_rq as u8, Ordering::Relaxed);
+    FW_KEY[slot].store(key as u8, Ordering::Relaxed);
+    FW_ST[slot].store(st, Ordering::Relaxed);
+    // per-pid LAST-fire side table (survives the ring's roll)
+    let jif = crate::drivers::timer::get_jiffies();
+    for k in 0..32 {
+        if FWT_PID[k].load(Ordering::Relaxed) == pid
+            && FWT_PID[k]
+                .compare_exchange(pid, pid, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            FWT_OK[k].store(ok as u8, Ordering::Relaxed);
+            FWT_ONRQ[k].store(on_rq as u8, Ordering::Relaxed);
+            FWT_KEY[k].store(key as u8, Ordering::Relaxed);
+            FWT_ST[k].store(st, Ordering::Relaxed);
+            FWT_JIF[k].store(jif, Ordering::Relaxed);
+            return;
+        }
+    }
+    for k in 0..32 {
+        if FWT_PID[k]
+            .compare_exchange(0, pid, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            FWT_OK[k].store(ok as u8, Ordering::Relaxed);
+            FWT_ONRQ[k].store(on_rq as u8, Ordering::Relaxed);
+            FWT_KEY[k].store(key as u8, Ordering::Relaxed);
+            FWT_ST[k].store(st, Ordering::Relaxed);
+            FWT_JIF[k].store(jif, Ordering::Relaxed);
+            return;
+        }
+    }
+}
 
 /// Wakewatch: count a nanosleep early-token-consumption re-arm.
 pub fn ww_note_rearm() {
@@ -1503,6 +1574,30 @@ fn ww_heartbeat(now_time: u64) {
 
     let sched = crate::sched::sched::ww_sched_snapshot();
 
+    // nanosleep-loss hunt: arm/fire accounting — NEXT_TIMER_ID-1 is the
+    // total arms ever; fires + live entries + cancels must cover it. A
+    // gap = entries vanishing unfired.
+    {
+        use crate::dfx::taskdump::putc_brief as putchar;
+        fn pdec9(mut v: u64) {
+            use crate::dfx::taskdump::putc_brief as p;
+            let mut buf = [0u8; 20];
+            let mut n = 0;
+            if v == 0 { p(b'0'); return; }
+            while v > 0 && n < buf.len() { buf[n] = b'0' + (v % 10) as u8; v /= 10; n += 1; }
+            for k in (0..n).rev() { p(buf[k]); }
+        }
+        for &b in b"ARMS id=" { putchar(b); }
+        pdec9(NEXT_TIMER_ID.load(Ordering::Relaxed).saturating_sub(1));
+        for &b in b" fires=" { putchar(b); }
+        pdec9(WW_FIRE_N.load(Ordering::Relaxed));
+        for &b in b" live=" { putchar(b); }
+        {
+            let table = TIMER_TABLE.lock_irqsave();
+            pdec9(table.len() as u64);
+        }
+        putchar(b'\n');
+    }
     // nanosleep-loss lane (hunt): per-task pick-phase census — every
     // heartbeat, one line per task: pid, last pick-phase (1 walk-unlink,
     // 2 mark_picked, 3 slot-published, 4 repick-return, 5 wrapper-enter,
@@ -1551,8 +1646,41 @@ fn ww_heartbeat(now_time: u64) {
                 pdec((*task).pick_state() as u64);
                 for &b in b" lnk=" { putchar(b); }
                 pdec(linked as u64);
+                let tid = (*task).timed_sleep_timer_id.load(Ordering::Relaxed);
+                let tdl = (*task).timed_sleep_deadline.load(Ordering::Relaxed);
+                let tpend = crate::timer::timer_pending(tid);
+                for &b in b" tid=" { putchar(b); }
+                pdec(tid);
+                for &b in b" tp=" { putchar(b); }
+                pdec(tpend as u64);
+                for &b in b" tdl-now=" { putchar(b); }
+                let nowt = crate::drivers::timer::read_time();
+                if tdl > nowt {
+                    pdec((tdl - nowt) * 1000 / crate::config::TIMER_CLOCK_FREQ_HZ as u64);
+                } else {
+                    putchar(b'-');
+                    pdec((nowt - tdl) * 1000 / crate::config::TIMER_CLOCK_FREQ_HZ as u64);
+                }
                 for &b in b" st=0x" { putchar(b); }
                 pdec(st as u64);
+                // last fire-record for this pid (per-pid table)
+                for k in 0..32 {
+                    if FWT_PID[k].load(Ordering::Relaxed) == pid {
+                        for &b in b" fwj=" { putchar(b); }
+                        pdec(crate::drivers::timer::get_jiffies().saturating_sub(
+                            FWT_JIF[k].load(Ordering::Relaxed)));
+                        for &b in b" fw=(ok:" { putchar(b); }
+                        pdec(FWT_OK[k].load(Ordering::Relaxed) as u64);
+                        for &b in b",onrq:" { putchar(b); }
+                        pdec(FWT_ONRQ[k].load(Ordering::Relaxed) as u64);
+                        for &b in b",key:" { putchar(b); }
+                        pdec(FWT_KEY[k].load(Ordering::Relaxed) as u64);
+                        for &b in b",st:0x" { putchar(b); }
+                        pdec(FWT_ST[k].load(Ordering::Relaxed) as u64);
+                        putchar(b')');
+                        break;
+                    }
+                }
                 putchar(b'\n');
             });
         }
