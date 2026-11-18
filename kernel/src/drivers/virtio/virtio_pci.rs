@@ -963,6 +963,17 @@ impl VirtIOPCI {
         // (bit 1) and bus master (bit 2) as enable_bus_master left them.
         let cmd = self.pci_config.read_config_word(0x04);
         self.pci_config.write_config_word(0x04, cmd | 0x0400);
+
+        // RT-plan R5: the completion vector's dispatch registration —
+        // under forced threading, spawn the per-vector service thread
+        // here (idempotent; the first blk function to program the vector
+        // wins). A completion posting before the thread is up is not
+        // lost: wake() no-ops and the inline fallback below runs the
+        // walker this once — same registration-race shape as the
+        // irqdesc action-chain threads.
+        if crate::interrupt::irqdesc::force_threaded() {
+            crate::arch::x86_64::trap::spawn_blk_msix_irq_thread();
+        }
         true
     }
 

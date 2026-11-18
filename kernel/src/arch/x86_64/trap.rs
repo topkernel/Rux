@@ -610,9 +610,16 @@ fn pic_claim() -> Option<u8> {
     }
 }
 
+/// Serializes PIC mask-register RMWs. Leaf lock (never held across any
+/// other acquire). Needed since RT-plan R5: per-line IRQ threads unmask
+/// from task context (any CPU) while hardirq top halves mask on the BSP
+/// — the old "IF-off or single-owner" contract no longer holds.
+static PIC_MASK_LOCK: Spinlock<()> = Spinlock::new(());
+
 /// Unmask one PIC line (0..15).
 pub fn unmask_irq_line(line: u8) {
-    // SAFETY: RMW of the mask register; IF-off or single-owner callers.
+    let _pl = PIC_MASK_LOCK.lock_irqsave();
+    // SAFETY: RMW of the mask register, serialized by PIC_MASK_LOCK.
     unsafe {
         if line < 8 {
             let m = inb(PIC1_DATA) & !(1 << line);
@@ -626,7 +633,8 @@ pub fn unmask_irq_line(line: u8) {
 
 /// Mask one PIC line (0..15).
 pub fn mask_irq_line(line: u8) {
-    // SAFETY: RMW of the mask register.
+    let _pl = PIC_MASK_LOCK.lock_irqsave();
+    // SAFETY: RMW of the mask register, serialized by PIC_MASK_LOCK.
     unsafe {
         if line < 8 {
             let m = inb(PIC1_DATA) | (1 << line);
@@ -675,6 +683,13 @@ pub fn request_irq_line_named(line: u8, name: &'static str, handler: fn()) -> bo
         return false;
     }
     *IRQ_LINE_NAMES[line as usize].lock_irqsave() = name;
+    // RT-plan R5: forced threading spawns the per-line service thread at
+    // registration (the ksoftirqd lifecycle shape; unbound kthread, no
+    // R86 bind race). The line still unmasks — threading changes the
+    // dispatch context, not the registration contract.
+    if crate::interrupt::irqdesc::force_threaded() {
+        spawn_intx_irq_thread(line, name);
+    }
     unmask_irq_line(line);
     true
 }
@@ -701,6 +716,148 @@ pub fn free_irq_line(line: u8) {
         IRQ_LINE_HANDLERS[line as usize].store(0, Ordering::Release);
         *IRQ_LINE_NAMES[line as usize].lock_irqsave() = "";
     }
+}
+
+// ============================================================================
+// Threaded IRQ services (RT-plan R5, forced threading on x86_64)
+//
+// The reference's threadirqs shape for the x86_64 paths that predate the
+// irq-domain action layer: the virtio-blk MSI-X completion vector and the
+// PIC INTx lines. The hardirq top half only suppresses re-fire and wakes
+// a per-IRQ SCHED_FIFO 50 kthread; the action runs preemptibly in the
+// thread. The timer/clock vectors and IPIs never use this — they stay
+// raw hardirq (wake-type timer expiry is the RT latency path).
+// ============================================================================
+
+use crate::interrupt::irqthread::ThreadedIrq;
+
+/// Invoke a line's action inline with the irq_handler_entry/exit
+/// tracepoints — the reference brackets every action where it executes
+/// (kernel/irq/handle.c). The x86 line handlers are void, so the exit's
+/// ret is "handled" — the handler ran. Both trace calls marshal only
+/// behind armed() (one relaxed load when off; the name lookup too).
+fn run_line_action(line: u8, h: u64) {
+    if crate::trace::EVENT_IRQ_HANDLER_ENTRY.armed() {
+        let name = irq_line_name(line);
+        let name16 = if name.is_empty() {
+            crate::trace::str_to_comm16(LINE_NAME_FALLBACK[line as usize])
+        } else {
+            crate::trace::str_to_comm16(name)
+        };
+        crate::trace::trace_irq_handler_entry(line as i32, &name16);
+    }
+    // SAFETY: nonzero values were stored from fn pointers by
+    // request_irq_line_named.
+    let f: fn() = unsafe { core::mem::transmute(h) };
+    f();
+    if crate::trace::EVENT_IRQ_HANDLER_EXIT.armed() {
+        crate::trace::trace_irq_handler_exit(line as i32, 1);
+    }
+}
+
+/// The per-PIC-line service threads ("irq/<line>-<name>").
+static INTX_IRQ_THREADS: [ThreadedIrq; 16] = [const { ThreadedIrq::new() }; 16];
+
+/// The virtio-blk MSI-X completion thread ("irq/129-blk", vector 0x81).
+static BLK_MSIX_IRQ_THREAD: ThreadedIrq = ThreadedIrq::new();
+
+/// Per-line INTx service thread body: run the line's handler (the ISR
+/// read inside dispatches/ACKs the asserting virtio functions; the UART
+/// handler drains the RX FIFO), then unmask. Unmask order matters: the
+/// handler's device-side ACK drops the level assertion first, so the
+/// unmask cannot release a storm (the reference's threaded level-IRQ
+/// completion shape: thread runs action, then chip re-arms).
+extern "C" fn intx_irq_thread_fn(arg: *mut core::ffi::c_void) -> i32 {
+    let line = (arg as usize) as u8;
+    INTX_IRQ_THREADS[line as usize].thread_loop(|| {
+        let h = IRQ_LINE_HANDLERS[line as usize].load(core::sync::atomic::Ordering::Acquire);
+        if h != 0 {
+            run_line_action(line, h);
+        }
+        unmask_irq_line(line);
+    })
+}
+
+/// MSI-X completion thread body: the per-disk walker that used to run
+/// inline in the hardirq gate. No EOI/unmask here — MSI is edge
+/// delivered, the top half EOIs first (a completion arriving while the
+/// thread runs delivers a fresh vector and re-pends, coalesced by the
+/// pending flag; the walker drains the whole used ring anyway).
+extern "C" fn blk_msix_irq_thread_fn(_arg: *mut core::ffi::c_void) -> i32 {
+    BLK_MSIX_IRQ_THREAD.thread_loop(crate::drivers::virtio::msix_blk_isr)
+}
+
+/// Spawn (idempotent) the per-line thread at registration time. The
+/// name must be &'static (kernel_thread holds it for the task lifetime):
+/// "irq/<line>-<name>" is built and leaked, one tiny allocation per
+/// threaded line, registration-time only. Returns whether a thread was
+/// (already) spawned.
+fn spawn_intx_irq_thread(line: u8, name: &'static str) -> bool {
+    if INTX_IRQ_THREADS[line as usize].spawned() {
+        return true; // skip the name leak on the idempotent path
+    }
+    let mut owned = alloc::vec::Vec::new();
+    owned.extend_from_slice(b"irq/");
+    owned.push(b'0' + (line / 10) as u8);
+    owned.push(b'0' + (line % 10) as u8);
+    owned.push(b'-');
+    owned.extend_from_slice(if name.is_empty() {
+        LINE_NAME_FALLBACK[line as usize].as_bytes()
+    } else {
+        name.as_bytes()
+    });
+    // SAFETY: "irq/" + digits + '-' + a registered &'static name is
+    // valid UTF-8.
+    let tname: &'static str = unsafe {
+        core::str::from_utf8_unchecked(alloc::boxed::Box::leak(owned.into_boxed_slice()))
+    };
+    INTX_IRQ_THREADS[line as usize].spawn(
+        tname,
+        intx_irq_thread_fn,
+        line as usize as *mut core::ffi::c_void,
+    )
+}
+
+/// The MSI-X vector was programmed (probe-time marker for the deferred
+/// boot pass — the spawn itself may have no-op'd pre-scheduler).
+static BLK_MSIX_THREAD_WANTED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Spawn (idempotent) the virtio-blk MSI-X completion thread. Called by
+/// the virtio PCI probe once vector 0x81 is programmed into the MSI-X
+/// table (the registration point for this pseudo-IRQ).
+pub fn spawn_blk_msix_irq_thread() {
+    BLK_MSIX_THREAD_WANTED.store(true, core::sync::atomic::Ordering::Release);
+    BLK_MSIX_IRQ_THREAD.spawn(
+        "irq/129-blk",
+        blk_msix_irq_thread_fn,
+        core::ptr::null_mut(),
+    );
+}
+
+/// Deferred per-IRQ thread pass (post-sched::init; the ksoftirqd
+/// precedent): registrations that ran before the scheduler existed left
+/// their lines on the inline fallback — spawn their threads now.
+/// Returns how many threads spawned (boot-log visibility).
+pub fn irq_threads_boot_init() -> usize {
+    let mut n = 0usize;
+    for line in 0..16u8 {
+        if IRQ_LINE_HANDLERS[line as usize].load(core::sync::atomic::Ordering::Acquire) != 0 {
+            if spawn_intx_irq_thread(line, irq_line_name(line)) {
+                n += 1;
+            }
+        }
+    }
+    if BLK_MSIX_THREAD_WANTED.load(core::sync::atomic::Ordering::Acquire) {
+        if BLK_MSIX_IRQ_THREAD.spawn(
+            "irq/129-blk",
+            blk_msix_irq_thread_fn,
+            core::ptr::null_mut(),
+        ) {
+            n += 1;
+        }
+    }
+    n
 }
 
 // ============================================================================
@@ -1298,17 +1455,29 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
 
                 // virtio-blk MSI-X completion vector (DIO-CONC, x86_64):
                 // the posted-MSI delivery replaces the PIC-INTx + ISR-read
-                // + Block-softirq chain. The walker runs inline here (hard
-                // irq context, bounded try-lock — it defers to the Block
-                // softirq itself when a task-context submitter holds the
-                // BLK lock), which is the reference kernel's shape: Linux
-                // vring completions also run in hardirq with the waiter
-                // woken directly. EOI first, same discipline as the timer
-                // and IPI arms: the wake below can switch tasks.
+                // + Block-softirq chain. EOI first, same discipline as the
+                // timer and IPI arms: the wake below can switch tasks.
+                //
+                // RT-plan R5: under forced threading (irqthread=1) the
+                // walker no longer runs inline — the top half only wakes
+                // the per-vector SCHED_FIFO 50 kthread ("irq/129-blk"),
+                // which runs msix_blk_isr preemptibly (the reference's
+                // threadirqs shape; mainline keeps the inline hardirq
+                // walker, which is what the else-branch preserves). MSI
+                // is edge-delivered: a completion arriving while the
+                // thread runs posts a fresh vector and re-pends; the
+                // pending flag coalesces and the walker drains the whole
+                // used ring, so nothing is lost.
                 v if v == crate::drivers::virtio::MSIX_BLK_VECTOR as u64 => {
                     crate::interrupt::preempt::irq_enter();
                     crate::drivers::intc::apic::eoi();
-                    crate::drivers::virtio::msix_blk_isr();
+                    if !crate::interrupt::irqdesc::force_threaded()
+                        || !BLK_MSIX_IRQ_THREAD.wake()
+                    {
+                        // Unthreaded, or the spawn race (vector live
+                        // before the thread): run the walker inline.
+                        crate::drivers::virtio::msix_blk_isr();
+                    }
                     crate::interrupt::preempt::irq_exit();
                     irq_exit_maybe_preempt_kernel(regs_ref);
                 }
@@ -1891,31 +2060,32 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
 fn handle_external_interrupt(vector: u64) {
     // The timer line never reaches here (vector 32 has its own gate and
     // EOI-first handler), so every claimed line is a device line.
+    // RT-plan R5: under forced threading the top half only MASKS the
+    // claimed line (the reference's mask_ack shape — suppression without
+    // an open in-service window) and defers handler + unmask to the
+    // per-line SCHED_FIFO 50 thread; the EOIs still happen here so the
+    // LAPIC class never blocks and other lines keep delivering.
+    let threaded = crate::interrupt::irqdesc::force_threaded();
     let mut claimed = 0;
     while let Some(line) = pic_claim() {
         let h = IRQ_LINE_HANDLERS[line as usize].load(core::sync::atomic::Ordering::Acquire);
         if h != 0 {
-            // The irq:irq_handler_entry/exit tracepoints, bracketing the
-            // line handler the way the reference brackets every action
-            // (kernel/irq/handle.c). The x86 line handlers are void, so
-            // the exit's ret is "handled" — the handler ran. Both calls
-            // marshal only behind armed() (one relaxed load when off;
-            // the name lookup too).
-            if crate::trace::EVENT_IRQ_HANDLER_ENTRY.armed() {
-                let name = irq_line_name(line);
-                let name16 = if name.is_empty() {
-                    crate::trace::str_to_comm16(LINE_NAME_FALLBACK[line as usize])
-                } else {
-                    crate::trace::str_to_comm16(name)
-                };
-                crate::trace::trace_irq_handler_entry(line as i32, &name16);
-            }
-            // SAFETY: nonzero values were stored from fn pointers by
-            // request_irq_line.
-            let f: fn() = unsafe { core::mem::transmute(h) };
-            f();
-            if crate::trace::EVENT_IRQ_HANDLER_EXIT.armed() {
-                crate::trace::trace_irq_handler_exit(line as i32, 1);
+            if threaded {
+                // Suppress re-fire while the thread is pending, then
+                // defer. The thread runs the action (with the
+                // irq_handler_entry/exit tracepoints — the reference
+                // brackets the action where it executes, which for a
+                // threaded IRQ is the thread) and unmasks on completion.
+                mask_irq_line(line);
+                if !INTX_IRQ_THREADS[line as usize].wake() {
+                    // Defensive: registration raced (cannot happen via
+                    // request_irq_line_named's spawn-before-unmask
+                    // ordering) — run inline this once and re-arm.
+                    run_line_action(line, h);
+                    unmask_irq_line(line);
+                }
+            } else {
+                run_line_action(line, h);
             }
         } else {
             // Once per line per boot: on the OH q35 boot, spurious PIC
