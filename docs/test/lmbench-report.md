@@ -168,6 +168,19 @@ handoff), open (1.44x — walk loop + File construct), read (1.42x —
 copy tail), write (1.13x). lat_fs re-polluted by boot noise (no
 honest number this round).
 
+## bw_tcp adjudicated (2026-11-21): functional, bimodal slow mode
+
+Parameter-grid bisect (-N x -W, six cells): ALL complete; the same
+args (-N 3 -W 1) measured 150 s in one boot and 5.2 s in another —
+high-variance bimodal, same family as the lat_fs load-coupled stall.
+The TCP data path itself is millisecond-class (hand-rolled probe: 4MB
+send ~1 ms / receive ~3 ms; ENOUGH env has no effect — the calibration
+hypothesis was refuted). The runner-path boots (budget=140) hit the
+slow mode 2/2 — the startup phase lands in the slow mode with high
+probability under the runner. Status: functional, honest number pending
+the stall-family fix; wire evidence and the six-cell grid archived
+(bis-a1..a5, bwbench*, bwt* probes).
+
 ## lat_connect root cause FIXED (2026-11-20, main=6957aa1f0): the fabricated ETIMEDOUT
 
 The connect() blocking wait treated every non-ESTABLISHED,
