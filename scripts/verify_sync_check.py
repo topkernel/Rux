@@ -1514,10 +1514,12 @@ MAPPINGS = [
         "verify": "kernel/verify/src/arch/riscv64/mm/uaccess_test.rs",
         "kernel": "kernel/src/arch/riscv64/uaccess.rs",
         "type": None,
-        "compare": ["access_ok"],
+        "compare": ["access_ok", "get_user", "put_user", "strnlen_user", "strncpy_from_user"],
         "skip": [],
         # kernel body opens with `use super::mm::user_addr::...`; the verify
-        # copy defines USER_START/USER_END as module constants instead
+        # copy defines USER_START/USER_END as module constants instead, and
+        # strncpy_from_user references the same path for its user_end read
+        "transforms": [(r'super::mm::user_addr::USER_END', 'USER_END')],
         "skip_diff": ["access_ok"],
         "check_new": False,
     },

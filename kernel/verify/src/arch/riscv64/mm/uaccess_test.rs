@@ -194,3 +194,433 @@ proptest! {
         }
     }
 }
+
+// ============================================================================
+// Copied logic (kernel/src/arch/riscv64/uaccess.rs) — the typed and
+// string accessors. Bodies are text-faithful; the extable-backed leaf
+// primitives (__copy_from_user / copy_from_user / copy_to_user) are
+// replaced by the model below so the loop/gate logic runs on the host.
+// ============================================================================
+
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+
+/// Sparse user memory + a fault window: the host stand-in for the
+/// exception-table copy primitives. Addresses are absolute integers (the
+/// mirror fns take raw pointers whose integer value keys the model).
+pub struct UserMemModel {
+    pub mem: BTreeMap<usize, u8>,
+    /// First faulting address: accesses at addr >= fault_at stop there
+    /// (the extable fixup copies up to the fault, then bails). None =
+    /// no fault anywhere.
+    pub fault_at: Option<usize>,
+}
+
+thread_local! {
+    static MODEL: RefCell<UserMemModel> = RefCell::new(UserMemModel {
+        mem: BTreeMap::new(),
+        fault_at: None,
+    });
+}
+
+pub fn model_setup(mem: BTreeMap<usize, u8>, fault_at: Option<usize>) {
+    MODEL.with(|m| {
+        *m.borrow_mut() = UserMemModel { mem, fault_at };
+    });
+}
+
+/// How many bytes at `addr` are readable/writable given the fault window:
+/// the extable copy proceeds byte by byte until the faulting address, so
+/// the readable extent is clamp(fault_at - addr, 0, n).
+fn model_readable(addr: usize, n: usize) -> usize {
+    MODEL.with(|m| match m.borrow().fault_at {
+        Some(f) => f.saturating_sub(addr).min(n),
+        None => n,
+    })
+}
+
+fn model_read(addr: usize, out: &mut [u8]) -> usize {
+    let readable = model_readable(addr, out.len());
+    MODEL.with(|m| {
+        let m = m.borrow();
+        for (i, b) in out.iter_mut().enumerate().take(readable) {
+            *b = *m.mem.get(&(addr + i)).unwrap_or(&0);
+        }
+    });
+    out.len() - readable
+}
+
+fn model_write(addr: usize, src: &[u8]) -> usize {
+    let writable = model_readable(addr, src.len());
+    MODEL.with(|m| {
+        let mut m = m.borrow_mut();
+        for (i, &b) in src.iter().enumerate().take(writable) {
+            m.mem.insert(addr + i, b);
+        }
+    });
+    src.len() - writable
+}
+
+// --- leaf model shims (kernel: extable asm leaves; never compared) ---
+
+unsafe fn copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize {
+    model_read(from as usize, core::slice::from_raw_parts_mut(to, n))
+}
+
+unsafe fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
+    model_write(to as usize, core::slice::from_raw_parts(from, n))
+}
+
+unsafe fn __copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize {
+    copy_from_user(to, from, n)
+}
+
+// --- text-faithful mirror of kernel/src/arch/riscv64/uaccess.rs ---
+
+/// Mirror of kernel get_user (riscv64/uaccess.rs).
+#[inline]
+pub unsafe fn get_user<T: Copy>(from: *const T) -> Option<T> {
+    let size = core::mem::size_of::<T>();
+
+    if !access_ok(from as usize, size) {
+        return None;
+    }
+
+    let mut value: core::mem::MaybeUninit<T> = core::mem::MaybeUninit::uninit();
+
+    let uncopied = copy_from_user(
+        value.as_mut_ptr() as *mut u8,
+        from as *const u8,
+        size,
+    );
+
+    if uncopied == 0 {
+        Some(value.assume_init())
+    } else {
+        None
+    }
+}
+
+/// Mirror of kernel put_user (riscv64/uaccess.rs).
+#[inline]
+pub unsafe fn put_user<T: Copy>(to: *mut T, value: T) -> bool {
+    let size = core::mem::size_of::<T>();
+
+    if !access_ok(to as usize, size) {
+        return false;
+    }
+
+    let uncopied = copy_to_user(
+        to as *mut u8,
+        &value as *const T as *const u8,
+        size,
+    );
+
+    uncopied == 0
+}
+
+/// Mirror of kernel strnlen_user (riscv64/uaccess.rs).
+pub unsafe fn strnlen_user(str: *const u8, maxlen: usize) -> usize {
+    if maxlen == 0 {
+        return 0;
+    }
+
+    if !access_ok(str as usize, 1) {
+        return 0;
+    }
+
+    let mut len = 0;
+    while len < maxlen {
+        match get_user(str.add(len) as *const u8) {
+            Some(0) => return len + 1, // Include null terminator
+            Some(_) => len += 1,
+            None => return 0,
+        }
+    }
+
+    0 // String too long
+}
+
+/// Mirror of kernel strncpy_from_user (riscv64/uaccess.rs). The
+/// `super::mm::user_addr::USER_END` path is canonicalized to this file's
+/// USER_END constant by the sync-checker transform.
+pub fn strncpy_from_user<'a>(from: *const u8, max_len: usize, buf: &'a mut [u8]) -> Result<&'a [u8], i64> {
+    // EFAULT = 14
+    const EFAULT: i64 = 14;
+
+    if from.is_null() {
+        return Err(-EFAULT);
+    }
+
+    // Verify the pointer itself is in user space.
+    if !access_ok(from as usize, 1) {
+        return Err(-EFAULT);
+    }
+
+    // Compute max readable bytes as distance from pointer to
+    // USER_END. This avoids the old bug where access_ok(from, max_len)
+    // failed when from was near the end of user space.
+    let addr = from as usize;
+    let user_end = USER_END;
+    let max = if addr < user_end {
+        user_end - addr
+    } else {
+        return Err(-EFAULT);
+    };
+    let limit = core::cmp::min(max_len, buf.len());
+    let limit = core::cmp::min(limit, max);
+
+    const CHUNK: usize = 64;
+    let mut done: usize = 0;
+    while done < limit {
+        let want = core::cmp::min(CHUNK, limit - done);
+        // SAFETY: buf is `limit` bytes; done+want stays inside it. The
+        // raw exception-table copy handles user faults: it returns the
+        // bytes NOT copied of this chunk.
+        let uncopied = unsafe {
+            __copy_from_user(buf.as_mut_ptr().add(done), from.add(done), want)
+        };
+        let got = want - uncopied;
+        if uncopied > 0 {
+            // SAFETY: zero the never-written tail so the NUL scan below
+            // cannot see stale kernel bytes.
+            unsafe {
+                core::ptr::write_bytes(buf.as_mut_ptr().add(done + got), 0, uncopied)
+            };
+        }
+        if let Some(rel) = buf[done..done + got].iter().position(|&b| b == 0) {
+            return Ok(&buf[..done + rel]);
+        }
+        if uncopied > 0 {
+            // Faulted with no NUL in the readable window so far.
+            return Err(-EFAULT);
+        }
+        done += want;
+    }
+    // No NUL within `limit` bytes: same shape the old loop returned.
+    Ok(&buf[..limit])
+}
+
+// ============================================================================
+// Model-driven properties for the accessors above
+// ============================================================================
+
+/// Backing window for model addresses (any integer keys the model; this
+/// window keeps generated addresses realistic and away from USER_END).
+const MODEL_BASE: usize = 0x1000_0000;
+const MODEL_SPAN: usize = 8192;
+
+/// Chunk size of the mirrored strncpy_from_user loop (the fn-local const
+/// of the same value is part of the synced kernel text and not addressable
+/// from the tests; this is the model-side twin).
+const STRN_CHUNK: usize = 64;
+
+fn model_addr() -> impl proptest::strategy::Strategy<Value = usize> {
+    prop_oneof![
+        6 => MODEL_BASE..MODEL_BASE + MODEL_SPAN,
+        1 => Just(MODEL_BASE + MODEL_SPAN),
+        1 => Just(USER_END.saturating_sub(4)), // near the user ceiling
+        1 => Just(USER_END + 64),              // beyond user space
+        1 => Just(0usize),
+    ]
+}
+
+/// get_user returns Some iff the gate passes AND the model can supply the
+/// whole value; the returned value round-trips the model bytes.
+proptest! {
+    #[test]
+    fn get_user_gate_and_roundtrip(
+        addr in model_addr(),
+        val in any::<u64>(),
+        fault_kind in 0u8..4,
+    ) {
+        let size = core::mem::size_of::<u64>();
+        let mem: BTreeMap<usize, u8> = val.to_ne_bytes()
+            .iter().enumerate().map(|(i, b)| (addr + i, *b)).collect();
+        // 0 = no fault; 1 = fault at first byte; 2..3 = fault mid-value
+        let fault_at = match fault_kind {
+            0 => None,
+            1 => Some(addr),
+            k => Some(addr + (k as usize - 1)),
+        };
+        model_setup(mem, fault_at);
+
+        let got = unsafe { get_user::<u64>(addr as *const u64) };
+        let fully_readable = match fault_at {
+            None => true,
+            Some(f) => addr + size <= f,
+        };
+        let expect_some = access_ok(addr, size) && fully_readable;
+        prop_assert_eq!(got.is_some(), expect_some);
+        if let Some(v) = got {
+            prop_assert_eq!(v, val);
+        }
+    }
+}
+
+/// put_user returns true iff the gate passes AND no fault; on success the
+/// model holds the value's native-endian bytes.
+proptest! {
+    #[test]
+    fn put_user_gate_and_write(
+        addr in model_addr(),
+        val in any::<u32>(),
+        fault_kind in 0u8..4,
+    ) {
+        let size = core::mem::size_of::<u32>();
+        let fault_at = match fault_kind {
+            0 => None,
+            1 => Some(addr),
+            k => Some(addr + (k as usize - 1)),
+        };
+        model_setup(BTreeMap::new(), fault_at);
+
+        let ok = unsafe { put_user::<u32>(addr as *mut u32, val) };
+        let fully_writable = match fault_at {
+            None => true,
+            Some(f) => addr + size <= f,
+        };
+        let expect_ok = access_ok(addr, size) && fully_writable;
+        prop_assert_eq!(ok, expect_ok);
+        if ok {
+            // read the stored bytes out of the model first: the
+            // prop_assert macros must run outside thread-local closures
+            let stored: Vec<u8> = MODEL.with(|m| {
+                let m = m.borrow();
+                (0..size).map(|i| *m.mem.get(&(addr + i)).unwrap_or(&0)).collect()
+            });
+            let bytes = val.to_ne_bytes();
+            for (i, b) in stored.iter().enumerate() {
+                prop_assert_eq!(*b, bytes[i], "model byte {} after put_user", i);
+            }
+        }
+    }
+}
+
+/// strnlen_user: result is 0 or (NUL index + 1) within maxlen; never
+/// exceeds maxlen; reports 0 on fault before the terminator.
+proptest! {
+    #[test]
+    fn strnlen_bounded_scan(
+        nul_at in 0usize..200usize,
+        maxlen in 1usize..256usize,
+        fault_kind in 0u8..4, // 0 none / 1 at the NUL / 2 before the NUL / 3 after
+    ) {
+        let addr = MODEL_BASE;
+        let mut mem = BTreeMap::new();
+        for i in 0..nul_at {
+            mem.insert(addr + i, b'a');
+        }
+        mem.insert(addr + nul_at, 0u8);
+        let fault_at = match fault_kind {
+            0 => None,
+            1 => Some(addr + nul_at),
+            2 if nul_at >= 2 => Some(addr + nul_at / 2),
+            _ => Some(addr + nul_at + 7),
+        };
+        model_setup(mem, fault_at);
+
+        let got = unsafe { strnlen_user(addr as *const u8, maxlen) };
+        // the NUL is readable iff no fault covers it
+        let nul_readable = match fault_at {
+            None => true,
+            Some(f) => f > addr + nul_at,
+        };
+        if !nul_readable {
+            prop_assert_eq!(got, 0, "fault before the terminator must report 0");
+        } else if nul_at < maxlen {
+            prop_assert_eq!(got, nul_at + 1);
+        } else {
+            // no NUL within maxlen: too-long string reports 0
+            prop_assert_eq!(got, 0);
+        }
+        prop_assert!(got <= maxlen);
+    }
+}
+
+/// strncpy_from_user: exact user bytes before the terminator, NUL pinned
+/// at the return length, and — the info-leak pin — a faulted tail is
+/// ZEROED: the 0xA5 sentinel may never survive beyond the readable
+/// extent. This pins the chunk loop's zero-fill discipline.
+proptest! {
+    #[test]
+    fn strncpy_no_stale_tail(
+        nul_at in 0usize..150usize,
+        max_len in 1usize..256usize,
+        fault_after_nul in 0usize..200usize,
+    ) {
+        const BUF_LEN: usize = 256;
+        let addr = MODEL_BASE;
+        let mut mem = BTreeMap::new();
+        for i in 0..nul_at {
+            mem.insert(addr + i, b'a');
+        }
+        mem.insert(addr + nul_at, 0u8);
+        // fault strictly AFTER the terminator: the scan must still find
+        // the NUL (kernel comment: "the scan either finds the NUL first")
+        let fault_at = Some(addr + nul_at + 1 + fault_after_nul);
+        model_setup(mem, fault_at);
+
+        let mut buf = [0xA5u8; BUF_LEN];
+        // map to a length first: the returned slice borrows `buf`, and the
+        // assertions below need buf free of that borrow
+        let result = strncpy_from_user(addr as *const u8, max_len, &mut buf)
+            .map(|s| s.len());
+
+        // limit mirrors the kernel computation
+        let limit = max_len.min(BUF_LEN);
+        // readable extent in buf coordinates (fault is strictly after the NUL)
+        let fault_off = fault_at.unwrap() - addr;
+        match result {
+            Ok(ret_len) => {
+                if ret_len < limit {
+                    // NUL-terminated shape: the terminator is at nul_at
+                    prop_assert_eq!(ret_len, nul_at, "return stops at the NUL");
+                    prop_assert_eq!(buf[ret_len], 0u8);
+                }
+                // exact user bytes before the terminator
+                for i in 0..ret_len {
+                    prop_assert_eq!(buf[i], b'a', "prefix byte {}", i);
+                }
+                // faulted tail within the LAST EXECUTED chunk must be
+                // zero, not the 0xA5 sentinel (stale-kernel-byte
+                // disclosure pin). The kernel zero-fills only the faulted
+                // chunk's tail; chunks the loop never reached keep their
+                // caller-provided contents, so the check range stops at
+                // the executed-chunk end.
+                let chunk_of_ret = ret_len / STRN_CHUNK * STRN_CHUNK;
+                let executed_end =
+                    chunk_of_ret + STRN_CHUNK.min(limit.saturating_sub(chunk_of_ret));
+                for i in (ret_len + 1)..limit.min(executed_end) {
+                    if i >= fault_off {
+                        prop_assert_eq!(buf[i], 0u8, "stale byte at {} in executed chunk", i);
+                    }
+                }
+            }
+            Err(e) => {
+                prop_assert_eq!(e, -14i64);
+                // Err only when no NUL lies within the readable limit
+                prop_assert!(nul_at >= limit, "NUL before the limit must succeed");
+                prop_assert!(fault_off < limit, "fault beyond the limit never fails");
+            }
+        }
+    }
+}
+
+/// Boundary pins carried over from the 20-byte-name regression: a short
+/// name costs exactly one chunk and the returned slice excludes the NUL.
+#[test]
+fn strncpy_short_name_single_chunk() {
+    let addr = MODEL_BASE;
+    let mut mem = BTreeMap::new();
+    let name = b"/etc/passwd";
+    for (i, &b) in name.iter().enumerate() {
+        mem.insert(addr + i, b);
+    }
+    mem.insert(addr + name.len(), 0u8);
+    model_setup(mem, None);
+
+    let mut buf = [0u8; 128];
+    let got = strncpy_from_user(addr as *const u8, 4096, &mut buf).unwrap();
+    assert_eq!(got, name);
+}
