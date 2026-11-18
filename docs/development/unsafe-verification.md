@@ -19,17 +19,17 @@ census id is accounted for here.
 
 ## Totals
 
-- unsafe regions: **6397**
+- unsafe regions: **6399**
 - with artifact (non-GAP): **0** (0.0%)
-- GAP: **6397**
-- by kind: block=5520, unsafe-extern=31, unsafe-fn=697, unsafe-impl=149
-- by category (regions carry 0..n tags): ptr-ops=1714, volatile=365, asm=275, addr-arith=144, raw-construct=126, no-preempt=44, ffi=40, layout-meta=22, static-mut=5, transmute=4
+- GAP: **6399**
+- by kind: block=5522, unsafe-extern=31, unsafe-fn=697, unsafe-impl=149
+- by category (regions carry 0..n tags): ptr-ops=1712, volatile=365, asm=275, addr-arith=144, raw-construct=126, no-preempt=44, ffi=40, layout-meta=22, static-mut=5, transmute=4
 
 ## Per-subsystem
 
 | subsystem | regions | non-GAP | GAP |
 |-----------|---------|---------|-----|
-| fs | 1195 | 0 | 1195 |
+| fs | 1199 | 0 | 1199 |
 | arch | 964 | 0 | 964 |
 | syscall | 893 | 0 | 893 |
 | drivers | 549 | 0 | 549 |
@@ -38,10 +38,10 @@ census id is accounted for here.
 | sched | 371 | 0 | 371 |
 | process | 359 | 0 | 359 |
 | mm | 263 | 0 | 263 |
-| net | 258 | 0 | 258 |
+| net | 255 | 0 | 255 |
 | dfx | 227 | 0 | 227 |
-| <top> | 184 | 0 | 184 |
-| tests | 101 | 0 | 101 |
+| <top> | 182 | 0 | 182 |
+| tests | 104 | 0 | 104 |
 | interrupt | 52 | 0 | 52 |
 | io_uring | 49 | 0 | 49 |
 | perf | 46 | 0 | 46 |
@@ -1173,18 +1173,18 @@ census id is accounted for here.
 |------|----|------|------------|----------|----|
 | 152 | get | block | - | GAP | `8a8c2de10cd5` |
 | 317 | generate_status | block | - | GAP | `6fa59b9d419a` |
-| 540 | read_target_user_mm | block | - | GAP | `f338dd9788f5` |
-| 548 | read_target_user_mm | block | raw-construct | GAP | `31fa1f208d1c` |
-| 680 | generate_stat | block | - | GAP | `d8ae9c37d2a4` |
-| 901 | generate_smaps | block | - | GAP | `e109b02d9c04` |
-| 1058 | generate_maps | block | - | GAP | `7c9e13e1a5b7` |
-| 1077 | generate_maps | block | - | GAP | `e17ea91014ea` |
-| 1082 | generate_maps | block | - | GAP | `ca286648b3f9` |
-| 1184 | get_fd_path | block | - | GAP | `0438ef134284` |
-| 1193 | get_fd_path | block | - | GAP | `8e2701636db7` |
-| 1263 | generate_oom_score | block | - | GAP | `2d6a9e321111` |
-| 1276 | generate_oom_score | block | - | GAP | `d0749306ada3` |
-| 1298 | generate_oom_score_adj | block | - | GAP | `f0ba3a648105` |
+| 482 | read_target_user_mm | block | - | GAP | `abf91f562a91` |
+| 490 | read_target_user_mm | block | raw-construct | GAP | `1466a9f124b9` |
+| 622 | generate_stat | block | - | GAP | `0668fe6ff2ba` |
+| 843 | generate_smaps | block | - | GAP | `33b0f0f2d5ee` |
+| 1000 | generate_maps | block | - | GAP | `e13f4fecaf9a` |
+| 1019 | generate_maps | block | - | GAP | `b12752ea05b2` |
+| 1024 | generate_maps | block | - | GAP | `4cbf4f7708cd` |
+| 1126 | get_fd_path | block | - | GAP | `72bab4fd534d` |
+| 1135 | get_fd_path | block | - | GAP | `62227fbd92bb` |
+| 1205 | generate_oom_score | block | - | GAP | `5c7fffd7cd65` |
+| 1218 | generate_oom_score | block | - | GAP | `f027141d9d39` |
+| 1240 | generate_oom_score_adj | block | - | GAP | `40c994cd15d1` |
 
 ### kernel/src/fs/procfs/self_proc.rs (1)
 
@@ -1212,7 +1212,7 @@ census id is accounted for here.
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
 | 48 | nr_free_pages | block | - | GAP | `e62c9fc06356` |
-| 185 | generate_buddyinfo | block | - | GAP | `eaaeedd0c474` |
+| 179 | generate_buddyinfo | block | - | GAP | `b2cfb70a29d3` |
 
 ### kernel/src/fs/pty.rs (11)
 
@@ -1230,40 +1230,44 @@ census id is accounted for here.
 | 932 | pty_ioctl | block | - | GAP | `30ff0466c722` |
 | 933 | pty_ioctl | block | ptr-ops | GAP | `bcad485c4814` |
 
-### kernel/src/fs/rootfs.rs (30)
+### kernel/src/fs/rootfs.rs (34)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
 | 72 | <module> | unsafe-impl | - | GAP | `4e75d887470b` |
-| 75 | <module> | unsafe-impl | - | GAP | `38e70cdc9bfc` |
-| 180 | rootfs_count_links | block | - | GAP | `7f1d6d797afd` |
-| 279 | <module> | unsafe-impl | - | GAP | `817e358f22a8` |
-| 282 | <module> | unsafe-impl | - | GAP | `7b77e0e03a61` |
-| 309 | name | block | - | GAP | `b81a540786c2` |
-| 367 | set_name | block | - | GAP | `056ff0a8695b` |
-| 1202 | <module> | unsafe-extern | ptr-ops,ffi | GAP | `2c7e6459f52d` |
-| 1247 | init_rootfs | block | - | GAP | `a9bd351d48bb` |
-| 1253 | init_rootfs | block | - | GAP | `8b27faae9597` |
-| 1269 | get_root_node | block | - | GAP | `59d705ccbdee` |
-| 1284 | create_root_inode | block | - | GAP | `da561b3056bf` |
-| 1304 | <module> | unsafe-fn | ptr-ops | GAP | `0b1adbfc1362` |
-| 1322 | <module> | unsafe-fn | ptr-ops | GAP | `d794e447c43d` |
-| 1362 | <module> | unsafe-fn | ptr-ops | GAP | `4ea76a08b8d0` |
-| 1395 | <module> | unsafe-fn | ptr-ops | GAP | `d39b05b0aac2` |
-| 1432 | <module> | unsafe-fn | ptr-ops | GAP | `5f50990c502d` |
-| 1471 | <module> | unsafe-fn | ptr-ops | GAP | `a9c3261daf4c` |
-| 1508 | <module> | unsafe-fn | ptr-ops | GAP | `ca536561978f` |
-| 1559 | <module> | unsafe-fn | ptr-ops | GAP | `8aaeb141e42a` |
-| 1615 | <module> | unsafe-fn | ptr-ops | GAP | `d0e6ca30064c` |
-| 1639 | <module> | unsafe-fn | ptr-ops | GAP | `47d64542cead` |
-| 1684 | <module> | unsafe-fn | ptr-ops | GAP | `42ef5ed8f7e2` |
-| 1720 | rootfs_file_read | block | ptr-ops | GAP | `439aa5478f79` |
-| 1748 | rootfs_file_write | block | ptr-ops | GAP | `c5c8ce222b9b` |
-| 1774 | rootfs_file_lseek | block | ptr-ops | GAP | `65c85000fb14` |
-| 1813 | <module> | unsafe-fn | - | GAP | `0c15eaf163c7` |
-| 1825 | <module> | unsafe-fn | ptr-ops | GAP | `5b1249b948c8` |
-| 1856 | <module> | unsafe-fn | ptr-ops | GAP | `075c19348ef5` |
-| 1893 | <module> | unsafe-fn | ptr-ops | GAP | `8a27e9b95fe4` |
+| 75 | <module> | unsafe-impl | - | GAP | `cf205e01e29d` |
+| 192 | rootfs_count_links | block | - | GAP | `d84996fb9330` |
+| 302 | <module> | unsafe-impl | - | GAP | `c7b3d61cd49e` |
+| 305 | <module> | unsafe-impl | - | GAP | `3d9c662ecb68` |
+| 333 | name | block | - | GAP | `1b82997b924f` |
+| 396 | set_name | block | - | GAP | `daf6ad4d8dc1` |
+| 1239 | <module> | unsafe-extern | ptr-ops,ffi | GAP | `f8e20f3c7860` |
+| 1284 | init_rootfs | block | - | GAP | `aa267ad798ce` |
+| 1290 | init_rootfs | block | - | GAP | `3d8f186893e3` |
+| 1306 | get_root_node | block | - | GAP | `b7faa5e19a40` |
+| 1321 | create_root_inode | block | - | GAP | `822185ad2712` |
+| 1341 | <module> | unsafe-fn | ptr-ops | GAP | `68c680acc0d1` |
+| 1359 | <module> | unsafe-fn | ptr-ops | GAP | `21164b4f711a` |
+| 1399 | <module> | unsafe-fn | ptr-ops | GAP | `3e6dce83e1f2` |
+| 1428 | rootfs_unlink | block | - | GAP | `8d596d474012` |
+| 1443 | <module> | unsafe-fn | ptr-ops | GAP | `14a87ca37d49` |
+| 1476 | rootfs_rmdir | block | - | GAP | `7a6df13ba4f3` |
+| 1491 | <module> | unsafe-fn | ptr-ops | GAP | `a86377e4c781` |
+| 1530 | <module> | unsafe-fn | ptr-ops | GAP | `66fcaaab238c` |
+| 1567 | <module> | unsafe-fn | ptr-ops | GAP | `57f1f0a8c2f5` |
+| 1615 | rootfs_link | block | - | GAP | `ed55ff28acec` |
+| 1628 | <module> | unsafe-fn | ptr-ops | GAP | `5767457cc8f3` |
+| 1682 | rootfs_rename | block | - | GAP | `392a6ca1aa31` |
+| 1693 | <module> | unsafe-fn | ptr-ops | GAP | `58ff450e094d` |
+| 1717 | <module> | unsafe-fn | ptr-ops | GAP | `af8d16fc194e` |
+| 1762 | <module> | unsafe-fn | ptr-ops | GAP | `fb437aa1a903` |
+| 1798 | rootfs_file_read | block | ptr-ops | GAP | `48d177b677cd` |
+| 1826 | rootfs_file_write | block | ptr-ops | GAP | `8fe8ab9e8700` |
+| 1852 | rootfs_file_lseek | block | ptr-ops | GAP | `d7d91c40f9d3` |
+| 1891 | <module> | unsafe-fn | - | GAP | `0efa7dfce46b` |
+| 1903 | <module> | unsafe-fn | ptr-ops | GAP | `49c4a0ddfd88` |
+| 1934 | <module> | unsafe-fn | ptr-ops | GAP | `eb6de46a0186` |
+| 1971 | <module> | unsafe-fn | ptr-ops | GAP | `9e73f8aba8c3` |
 
 ### kernel/src/fs/selinuxfs.rs (9)
 
@@ -6516,7 +6520,7 @@ census id is accounted for here.
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
 | 934 | <module> | unsafe-impl | - | GAP | `1e2f541ded8a` |
-| 935 | <module> | unsafe-impl | - | GAP | `fb5a84945d29` |
+| 935 | <module> | unsafe-impl | - | GAP | `6c3162a3450b` |
 
 ### kernel/src/mm/vmemmap.rs (6)
 
@@ -6565,7 +6569,7 @@ census id is accounted for here.
 
 ## net
 
-### kernel/src/net/arp.rs (5)
+### kernel/src/net/arp.rs (4)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
@@ -6573,9 +6577,8 @@ census id is accounted for here.
 | 520 | arp_build_request | block | ptr-ops | GAP | `55364b12c94e` |
 | 558 | arp_build_reply | block | ptr-ops | GAP | `a2452841925b` |
 | 587 | arp_rcv | block | raw-construct | GAP | `8ec76ccbbb8b` |
-| 780 | test_arp_cache_lookup | block | - | GAP | `412886f837fa` |
 
-### kernel/src/net/buffer.rs (13)
+### kernel/src/net/buffer.rs (12)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
@@ -6591,7 +6594,6 @@ census id is accounted for here.
 | 327 | skb_reserve | block | - | GAP | `be59769b2eac` |
 | 348 | skb_put_data | block | ptr-ops | GAP | `b0f9cd79a320` |
 | 435 | skb_copy_bits | block | ptr-ops | GAP | `63c3d307f81d` |
-| 494 | test_skb_push | block | ptr-ops | GAP | `1c7becfff00a` |
 
 ### kernel/src/net/ethernet.rs (6)
 
@@ -6646,7 +6648,7 @@ census id is accounted for here.
 | 461 | ip_rcv | block | raw-construct | GAP | `69598f32f402` |
 | 486 | ip_dispatch | block | - | GAP | `d4530d9ea667` |
 
-### kernel/src/net/ipv4/route.rs (6)
+### kernel/src/net/ipv4/route.rs (5)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
@@ -6655,7 +6657,6 @@ census id is accounted for here.
 | 241 | route_remove | block | - | GAP | `a0a93d496c52` |
 | 248 | route_clear | block | - | GAP | `9b8c387afc2b` |
 | 255 | route_dump | block | - | GAP | `b709a3bcc5f7` |
-| 308 | test_route_lookup | block | - | GAP | `1fec63e5f3b0` |
 
 ### kernel/src/net/ipv6/icmpv6.rs (3)
 
@@ -6901,7 +6902,7 @@ census id is accounted for here.
 | 3980 | unix_socket_from_fd | block | - | GAP | `cf59f59c24fa` |
 | 3999 | unix_file_of_file | block | - | GAP | `c9d801a393f9` |
 | 4007 | unix_file_of_file | block | - | GAP | `1f5bef6c6352` |
-| 4234 | unix_park_audit | block | ptr-ops | GAP | `5b875894a12b` |
+| 4211 | unix_park_audit | block | ptr-ops | GAP | `ca036b74e485` |
 
 ## dfx
 
@@ -7335,6 +7336,12 @@ census id is accounted for here.
 | 1192 | pl011_irq_handler | block | volatile,ptr-ops | GAP | `339088942459` |
 | 1219 | init_irq | block | volatile,ptr-ops | GAP | `4addb2858a45` |
 
+### kernel/src/cov.rs (1)
+
+| line | fn | kind | categories | artifact | id |
+|------|----|------|------------|----------|----|
+| 48 | capture_profile | block | - | GAP | `46923f678bed` |
+
 ### kernel/src/init.rs (7)
 
 | line | fn | kind | categories | artifact | id |
@@ -7354,7 +7361,7 @@ census id is accounted for here.
 | 102 | load | block | raw-construct,ptr-ops | GAP | `f7211708faa1` |
 | 116 | load | block | - | GAP | `e2d422e51b3f` |
 
-### kernel/src/list.rs (10)
+### kernel/src/list.rs (7)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
@@ -7365,29 +7372,26 @@ census id is accounted for here.
 | 149 | <module> | unsafe-fn | - | GAP | `0b2f34b26a3c` |
 | 187 | <module> | unsafe-fn | - | GAP | `237336f34049` |
 | 211 | offset | block | - | GAP | `a60c8658c944` |
-| 237 | test_list_add | block | ptr-ops | GAP | `2f2f0608b684` |
-| 252 | test_list_add_tail | block | ptr-ops | GAP | `5247d1b7efc0` |
-| 271 | test_list_del | block | - | GAP | `3cc514f15f23` |
 
 ### kernel/src/main.rs (15)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 217 | alloc_error_handler | block | volatile,ptr-ops | GAP | `d1b5fcd0d94d` |
-| 281 | format_hex | block | raw-construct | GAP | `a9ac0923c28f` |
-| 309 | rust_main_tail | block | - | GAP | `0e2bbf2281fa` |
-| 312 | rust_main_tail | block | - | GAP | `e1a464c9c37b` |
-| 458 | rust_main_tail | block | - | GAP | `de295f86f2ea` |
-| 465 | rust_main_tail | block | - | GAP | `a698aff218e3` |
-| 1394 | x86_boot_memory_regions | block | - | GAP | `f2c31540c2f9` |
-| 1403 | x86_boot_memory_regions | block | - | GAP | `86fb9ffc8bdc` |
-| 1514 | rust_main | block | - | GAP | `35eeac632d1b` |
-| 1535 | rust_main | block | - | GAP | `ae7e10c1b4ca` |
-| 1541 | rust_main | block | - | GAP | `a8ca681ab97f` |
-| 1567 | rust_main | block | - | GAP | `367ff2406f90` |
-| 1584 | rust_main | block | volatile,ptr-ops | GAP | `912711b725d9` |
-| 1587 | rust_main | block | volatile,ptr-ops | GAP | `f6df53d9edec` |
-| 1769 | rust_main | block | asm | GAP | `027c10ecb2f3` |
+| 219 | alloc_error_handler | block | volatile,ptr-ops | GAP | `2aed3cfbfdb6` |
+| 283 | format_hex | block | raw-construct | GAP | `8dd30b83fb8e` |
+| 311 | rust_main_tail | block | - | GAP | `4f865f079a23` |
+| 314 | rust_main_tail | block | - | GAP | `89df8b5609fa` |
+| 460 | rust_main_tail | block | - | GAP | `703e2c0fc0d1` |
+| 467 | rust_main_tail | block | - | GAP | `9b4fdcc1bdba` |
+| 1396 | x86_boot_memory_regions | block | - | GAP | `761eb41c997c` |
+| 1405 | x86_boot_memory_regions | block | - | GAP | `139685671038` |
+| 1516 | rust_main | block | - | GAP | `18d5ad9ab11d` |
+| 1537 | rust_main | block | - | GAP | `847dc9395010` |
+| 1543 | rust_main | block | - | GAP | `9be8fd483031` |
+| 1569 | rust_main | block | - | GAP | `11bc1e8f7bdf` |
+| 1586 | rust_main | block | volatile,ptr-ops | GAP | `15ac169cbf83` |
+| 1589 | rust_main | block | volatile,ptr-ops | GAP | `80e18e3bf7af` |
+| 1771 | rust_main | block | asm | GAP | `4885c56da0d5` |
 
 ### kernel/src/printk.rs (14)
 
@@ -7556,7 +7560,7 @@ census id is accounted for here.
 |------|----|------|------------|----------|----|
 | 70 | test_ipc_perm_uapi_layout | block | - | GAP | `8adc9aafa627` |
 
-### kernel/src/tests/listhead.rs (6)
+### kernel/src/tests/listhead.rs (7)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
@@ -7566,6 +7570,7 @@ census id is accounted for here.
 | 60 | test_listhead | block | - | GAP | `edd5b61f65c6` |
 | 64 | test_listhead | block | ptr-ops | GAP | `9ecdb927f997` |
 | 76 | test_listhead | block | - | GAP | `be4a237f78de` |
+| 92 | test_listhead | block | - | GAP | `5e2a0aa9bf53` |
 
 ### kernel/src/tests/loop_flags.rs (6)
 
@@ -7593,7 +7598,14 @@ census id is accounted for here.
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
-| 380 | setup_boot_task_fdtable | block | - | GAP | `99834696d7f4` |
+| 398 | setup_boot_task_fdtable | block | - | GAP | `41cc9ed2d4b7` |
+
+### kernel/src/tests/net_pins.rs (2)
+
+| line | fn | kind | categories | artifact | id |
+|------|----|------|------------|----------|----|
+| 59 | test_net_pins | block | ptr-ops | GAP | `2bf1d1271dec` |
+| 166 | test_net_pins | block | - | GAP | `0a4e76b160d1` |
 
 ### kernel/src/tests/network.rs (1)
 

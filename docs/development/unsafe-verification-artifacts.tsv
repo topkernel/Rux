@@ -1024,6 +1024,7 @@ e47fe2430c21	kernel/src/console.rs	uart_data_ready	1000	asm	GAP
 17aeb40b6cec	kernel/src/console.rs	pl011_rx_pending	1178	volatile,ptr-ops	GAP
 339088942459	kernel/src/console.rs	pl011_irq_handler	1192	volatile,ptr-ops	GAP
 4addb2858a45	kernel/src/console.rs	init_irq	1219	volatile,ptr-ops	GAP
+46923f678bed	kernel/src/cov.rs	capture_profile	48		GAP
 2cc40e28d4fe	kernel/src/dfx/allocwatch.rs	tick_check	328	ptr-ops,no-preempt	GAP
 e51766f92575	kernel/src/dfx/allocwatch.rs	tick_check	437	volatile	GAP
 15168fd46e7d	kernel/src/dfx/backtrace.rs	current_frame_pointer	106	asm	GAP
@@ -2722,18 +2723,18 @@ cad929924034	kernel/src/fs/procfs/mod.rs	<module>	2816		GAP
 f370644492d8	kernel/src/fs/procfs/mod.rs	partitions_generate	2933		GAP
 8a8c2de10cd5	kernel/src/fs/procfs/pid.rs	get	152		GAP
 6fa59b9d419a	kernel/src/fs/procfs/pid.rs	generate_status	317		GAP
-f338dd9788f5	kernel/src/fs/procfs/pid.rs	read_target_user_mm	540		GAP
-31fa1f208d1c	kernel/src/fs/procfs/pid.rs	read_target_user_mm	548	raw-construct	GAP
-d8ae9c37d2a4	kernel/src/fs/procfs/pid.rs	generate_stat	680		GAP
-e109b02d9c04	kernel/src/fs/procfs/pid.rs	generate_smaps	901		GAP
-7c9e13e1a5b7	kernel/src/fs/procfs/pid.rs	generate_maps	1058		GAP
-e17ea91014ea	kernel/src/fs/procfs/pid.rs	generate_maps	1077		GAP
-ca286648b3f9	kernel/src/fs/procfs/pid.rs	generate_maps	1082		GAP
-0438ef134284	kernel/src/fs/procfs/pid.rs	get_fd_path	1184		GAP
-8e2701636db7	kernel/src/fs/procfs/pid.rs	get_fd_path	1193		GAP
-2d6a9e321111	kernel/src/fs/procfs/pid.rs	generate_oom_score	1263		GAP
-d0749306ada3	kernel/src/fs/procfs/pid.rs	generate_oom_score	1276		GAP
-f0ba3a648105	kernel/src/fs/procfs/pid.rs	generate_oom_score_adj	1298		GAP
+abf91f562a91	kernel/src/fs/procfs/pid.rs	read_target_user_mm	482		GAP
+1466a9f124b9	kernel/src/fs/procfs/pid.rs	read_target_user_mm	490	raw-construct	GAP
+0668fe6ff2ba	kernel/src/fs/procfs/pid.rs	generate_stat	622		GAP
+33b0f0f2d5ee	kernel/src/fs/procfs/pid.rs	generate_smaps	843		GAP
+e13f4fecaf9a	kernel/src/fs/procfs/pid.rs	generate_maps	1000		GAP
+b12752ea05b2	kernel/src/fs/procfs/pid.rs	generate_maps	1019		GAP
+4cbf4f7708cd	kernel/src/fs/procfs/pid.rs	generate_maps	1024		GAP
+72bab4fd534d	kernel/src/fs/procfs/pid.rs	get_fd_path	1126		GAP
+62227fbd92bb	kernel/src/fs/procfs/pid.rs	get_fd_path	1135		GAP
+5c7fffd7cd65	kernel/src/fs/procfs/pid.rs	generate_oom_score	1205		GAP
+f027141d9d39	kernel/src/fs/procfs/pid.rs	generate_oom_score	1218		GAP
+40c994cd15d1	kernel/src/fs/procfs/pid.rs	generate_oom_score_adj	1240		GAP
 88faa275147e	kernel/src/fs/procfs/self_proc.rs	get_thread_self_link	36		GAP
 c39593be6931	kernel/src/fs/procfs/stat.rs	procs_blocked	163		GAP
 9e5606448548	kernel/src/fs/procfs/sysrq.rs	signal_all_except_init	132		GAP
@@ -2741,7 +2742,7 @@ c39593be6931	kernel/src/fs/procfs/stat.rs	procs_blocked	163		GAP
 4df81cd464bf	kernel/src/fs/procfs/sysrq.rs	print_task_stack_words	201	volatile	GAP
 c40846865843	kernel/src/fs/procfs/sysrq.rs	dump_blocked_tasks	220		GAP
 e62c9fc06356	kernel/src/fs/procfs/vmstat.rs	nr_free_pages	48		GAP
-eaaeedd0c474	kernel/src/fs/procfs/vmstat.rs	generate_buddyinfo	185		GAP
+b2cfb70a29d3	kernel/src/fs/procfs/vmstat.rs	generate_buddyinfo	179		GAP
 1d93085e4660	kernel/src/fs/pty.rs	pty_output	207	ptr-ops	GAP
 a226634569dd	kernel/src/fs/pty.rs	pair_of	362	ptr-ops	GAP
 cd03fc4b2cfe	kernel/src/fs/pty.rs	pair_of	366		GAP
@@ -2754,35 +2755,39 @@ e98377ff85ca	kernel/src/fs/pty.rs	pty_ioctl	840	ptr-ops	GAP
 30ff0466c722	kernel/src/fs/pty.rs	pty_ioctl	932		GAP
 bcad485c4814	kernel/src/fs/pty.rs	pty_ioctl	933	ptr-ops	GAP
 4e75d887470b	kernel/src/fs/rootfs.rs	<module>	72		GAP
-38e70cdc9bfc	kernel/src/fs/rootfs.rs	<module>	75		GAP
-7f1d6d797afd	kernel/src/fs/rootfs.rs	rootfs_count_links	180		GAP
-817e358f22a8	kernel/src/fs/rootfs.rs	<module>	279		GAP
-7b77e0e03a61	kernel/src/fs/rootfs.rs	<module>	282		GAP
-b81a540786c2	kernel/src/fs/rootfs.rs	name	309		GAP
-056ff0a8695b	kernel/src/fs/rootfs.rs	set_name	367		GAP
-2c7e6459f52d	kernel/src/fs/rootfs.rs	<module>	1202	ptr-ops,ffi	GAP
-a9bd351d48bb	kernel/src/fs/rootfs.rs	init_rootfs	1247		GAP
-8b27faae9597	kernel/src/fs/rootfs.rs	init_rootfs	1253		GAP
-59d705ccbdee	kernel/src/fs/rootfs.rs	get_root_node	1269		GAP
-da561b3056bf	kernel/src/fs/rootfs.rs	create_root_inode	1284		GAP
-0b1adbfc1362	kernel/src/fs/rootfs.rs	<module>	1304	ptr-ops	GAP
-d794e447c43d	kernel/src/fs/rootfs.rs	<module>	1322	ptr-ops	GAP
-4ea76a08b8d0	kernel/src/fs/rootfs.rs	<module>	1362	ptr-ops	GAP
-d39b05b0aac2	kernel/src/fs/rootfs.rs	<module>	1395	ptr-ops	GAP
-5f50990c502d	kernel/src/fs/rootfs.rs	<module>	1432	ptr-ops	GAP
-a9c3261daf4c	kernel/src/fs/rootfs.rs	<module>	1471	ptr-ops	GAP
-ca536561978f	kernel/src/fs/rootfs.rs	<module>	1508	ptr-ops	GAP
-8aaeb141e42a	kernel/src/fs/rootfs.rs	<module>	1559	ptr-ops	GAP
-d0e6ca30064c	kernel/src/fs/rootfs.rs	<module>	1615	ptr-ops	GAP
-47d64542cead	kernel/src/fs/rootfs.rs	<module>	1639	ptr-ops	GAP
-42ef5ed8f7e2	kernel/src/fs/rootfs.rs	<module>	1684	ptr-ops	GAP
-439aa5478f79	kernel/src/fs/rootfs.rs	rootfs_file_read	1720	ptr-ops	GAP
-c5c8ce222b9b	kernel/src/fs/rootfs.rs	rootfs_file_write	1748	ptr-ops	GAP
-65c85000fb14	kernel/src/fs/rootfs.rs	rootfs_file_lseek	1774	ptr-ops	GAP
-0c15eaf163c7	kernel/src/fs/rootfs.rs	<module>	1813		GAP
-5b1249b948c8	kernel/src/fs/rootfs.rs	<module>	1825	ptr-ops	GAP
-075c19348ef5	kernel/src/fs/rootfs.rs	<module>	1856	ptr-ops	GAP
-8a27e9b95fe4	kernel/src/fs/rootfs.rs	<module>	1893	ptr-ops	GAP
+cf205e01e29d	kernel/src/fs/rootfs.rs	<module>	75		GAP
+d84996fb9330	kernel/src/fs/rootfs.rs	rootfs_count_links	192		GAP
+c7b3d61cd49e	kernel/src/fs/rootfs.rs	<module>	302		GAP
+3d9c662ecb68	kernel/src/fs/rootfs.rs	<module>	305		GAP
+1b82997b924f	kernel/src/fs/rootfs.rs	name	333		GAP
+daf6ad4d8dc1	kernel/src/fs/rootfs.rs	set_name	396		GAP
+f8e20f3c7860	kernel/src/fs/rootfs.rs	<module>	1239	ptr-ops,ffi	GAP
+aa267ad798ce	kernel/src/fs/rootfs.rs	init_rootfs	1284		GAP
+3d8f186893e3	kernel/src/fs/rootfs.rs	init_rootfs	1290		GAP
+b7faa5e19a40	kernel/src/fs/rootfs.rs	get_root_node	1306		GAP
+822185ad2712	kernel/src/fs/rootfs.rs	create_root_inode	1321		GAP
+68c680acc0d1	kernel/src/fs/rootfs.rs	<module>	1341	ptr-ops	GAP
+21164b4f711a	kernel/src/fs/rootfs.rs	<module>	1359	ptr-ops	GAP
+3e6dce83e1f2	kernel/src/fs/rootfs.rs	<module>	1399	ptr-ops	GAP
+8d596d474012	kernel/src/fs/rootfs.rs	rootfs_unlink	1428		GAP
+14a87ca37d49	kernel/src/fs/rootfs.rs	<module>	1443	ptr-ops	GAP
+7a6df13ba4f3	kernel/src/fs/rootfs.rs	rootfs_rmdir	1476		GAP
+a86377e4c781	kernel/src/fs/rootfs.rs	<module>	1491	ptr-ops	GAP
+66fcaaab238c	kernel/src/fs/rootfs.rs	<module>	1530	ptr-ops	GAP
+57f1f0a8c2f5	kernel/src/fs/rootfs.rs	<module>	1567	ptr-ops	GAP
+ed55ff28acec	kernel/src/fs/rootfs.rs	rootfs_link	1615		GAP
+5767457cc8f3	kernel/src/fs/rootfs.rs	<module>	1628	ptr-ops	GAP
+392a6ca1aa31	kernel/src/fs/rootfs.rs	rootfs_rename	1682		GAP
+58ff450e094d	kernel/src/fs/rootfs.rs	<module>	1693	ptr-ops	GAP
+af8d16fc194e	kernel/src/fs/rootfs.rs	<module>	1717	ptr-ops	GAP
+fb437aa1a903	kernel/src/fs/rootfs.rs	<module>	1762	ptr-ops	GAP
+48d177b677cd	kernel/src/fs/rootfs.rs	rootfs_file_read	1798	ptr-ops	GAP
+8fe8ab9e8700	kernel/src/fs/rootfs.rs	rootfs_file_write	1826	ptr-ops	GAP
+d7d91c40f9d3	kernel/src/fs/rootfs.rs	rootfs_file_lseek	1852	ptr-ops	GAP
+0efa7dfce46b	kernel/src/fs/rootfs.rs	<module>	1891		GAP
+49c4a0ddfd88	kernel/src/fs/rootfs.rs	<module>	1903	ptr-ops	GAP
+eb6de46a0186	kernel/src/fs/rootfs.rs	<module>	1934	ptr-ops	GAP
+9e73f8aba8c3	kernel/src/fs/rootfs.rs	<module>	1971	ptr-ops	GAP
 1e2616325f68	kernel/src/fs/selinuxfs.rs	<module>	136		GAP
 e94e1aa565be	kernel/src/fs/selinuxfs.rs	<module>	171		GAP
 0034dad192ca	kernel/src/fs/selinuxfs.rs	<module>	181		GAP
@@ -3519,24 +3524,21 @@ e0e263294fdf	kernel/src/list.rs	<module>	101	ptr-ops	GAP
 0b2f34b26a3c	kernel/src/list.rs	<module>	149		GAP
 237336f34049	kernel/src/list.rs	<module>	187		GAP
 a60c8658c944	kernel/src/list.rs	offset	211		GAP
-2f2f0608b684	kernel/src/list.rs	test_list_add	237	ptr-ops	GAP
-5247d1b7efc0	kernel/src/list.rs	test_list_add_tail	252	ptr-ops	GAP
-3cc514f15f23	kernel/src/list.rs	test_list_del	271		GAP
-d1b5fcd0d94d	kernel/src/main.rs	alloc_error_handler	217	volatile,ptr-ops	GAP
-a9ac0923c28f	kernel/src/main.rs	format_hex	281	raw-construct	GAP
-0e2bbf2281fa	kernel/src/main.rs	rust_main_tail	309		GAP
-e1a464c9c37b	kernel/src/main.rs	rust_main_tail	312		GAP
-de295f86f2ea	kernel/src/main.rs	rust_main_tail	458		GAP
-a698aff218e3	kernel/src/main.rs	rust_main_tail	465		GAP
-f2c31540c2f9	kernel/src/main.rs	x86_boot_memory_regions	1394		GAP
-86fb9ffc8bdc	kernel/src/main.rs	x86_boot_memory_regions	1403		GAP
-35eeac632d1b	kernel/src/main.rs	rust_main	1514		GAP
-ae7e10c1b4ca	kernel/src/main.rs	rust_main	1535		GAP
-a8ca681ab97f	kernel/src/main.rs	rust_main	1541		GAP
-367ff2406f90	kernel/src/main.rs	rust_main	1567		GAP
-912711b725d9	kernel/src/main.rs	rust_main	1584	volatile,ptr-ops	GAP
-f6df53d9edec	kernel/src/main.rs	rust_main	1587	volatile,ptr-ops	GAP
-027c10ecb2f3	kernel/src/main.rs	rust_main	1769	asm	GAP
+2aed3cfbfdb6	kernel/src/main.rs	alloc_error_handler	219	volatile,ptr-ops	GAP
+8dd30b83fb8e	kernel/src/main.rs	format_hex	283	raw-construct	GAP
+4f865f079a23	kernel/src/main.rs	rust_main_tail	311		GAP
+89df8b5609fa	kernel/src/main.rs	rust_main_tail	314		GAP
+703e2c0fc0d1	kernel/src/main.rs	rust_main_tail	460		GAP
+9b4fdcc1bdba	kernel/src/main.rs	rust_main_tail	467		GAP
+761eb41c997c	kernel/src/main.rs	x86_boot_memory_regions	1396		GAP
+139685671038	kernel/src/main.rs	x86_boot_memory_regions	1405		GAP
+18d5ad9ab11d	kernel/src/main.rs	rust_main	1516		GAP
+847dc9395010	kernel/src/main.rs	rust_main	1537		GAP
+9be8fd483031	kernel/src/main.rs	rust_main	1543		GAP
+11bc1e8f7bdf	kernel/src/main.rs	rust_main	1569		GAP
+15ac169cbf83	kernel/src/main.rs	rust_main	1586	volatile,ptr-ops	GAP
+80e18e3bf7af	kernel/src/main.rs	rust_main	1589	volatile,ptr-ops	GAP
+4885c56da0d5	kernel/src/main.rs	rust_main	1771	asm	GAP
 e3852ddce358	kernel/src/mm/buddy_allocator.rs	<module>	171		GAP
 0b4f426290a1	kernel/src/mm/buddy_allocator.rs	<module>	172		GAP
 8251aca7f194	kernel/src/mm/buddy_allocator.rs	get	185		GAP
@@ -3769,7 +3771,7 @@ c1c5a89cc382	kernel/src/mm/vdso.rs	tsc_track_now_nominal	380		GAP
 6d749ad66d2e	kernel/src/mm/vdso.rs	vdso_data_tick	422		GAP
 458af135d39b	kernel/src/mm/vdso.rs	vdso_init	1463		GAP
 1e2f541ded8a	kernel/src/mm/vma.rs	<module>	934		GAP
-fb5a84945d29	kernel/src/mm/vma.rs	<module>	935		GAP
+6c3162a3450b	kernel/src/mm/vma.rs	<module>	935		GAP
 db59c000beec	kernel/src/mm/vmemmap.rs	pfn_to_vmemmap	56		GAP
 d52d87a663a3	kernel/src/mm/vmemmap.rs	vmemmap_to_pfn	68		GAP
 15ddfbd0c3ea	kernel/src/mm/vmemmap.rs	init_vmemmap	165	ptr-ops	GAP
@@ -3808,7 +3810,6 @@ b4bc10a3f4ca	kernel/src/module/mod.rs	sys_finit_module_impl	404		GAP
 55364b12c94e	kernel/src/net/arp.rs	arp_build_request	520	ptr-ops	GAP
 a2452841925b	kernel/src/net/arp.rs	arp_build_reply	558	ptr-ops	GAP
 8ec76ccbbb8b	kernel/src/net/arp.rs	arp_rcv	587	raw-construct	GAP
-412886f837fa	kernel/src/net/arp.rs	test_arp_cache_lookup	780		GAP
 37c890d31f65	kernel/src/net/buffer.rs	<module>	127		GAP
 798c10d031c1	kernel/src/net/buffer.rs	<module>	128		GAP
 b4b1e46d7e15	kernel/src/net/buffer.rs	alloc	175		GAP
@@ -3821,7 +3822,6 @@ b4b1e46d7e15	kernel/src/net/buffer.rs	alloc	175		GAP
 be59769b2eac	kernel/src/net/buffer.rs	skb_reserve	327		GAP
 b0f9cd79a320	kernel/src/net/buffer.rs	skb_put_data	348	ptr-ops	GAP
 63c3d307f81d	kernel/src/net/buffer.rs	skb_copy_bits	435	ptr-ops	GAP
-1c7becfff00a	kernel/src/net/buffer.rs	test_skb_push	494	ptr-ops	GAP
 f79188b79973	kernel/src/net/ethernet.rs	from_bytes	54	ptr-ops	GAP
 7642889fcde6	kernel/src/net/ethernet.rs	eth_push_header	108	ptr-ops	GAP
 c5a5e731cb18	kernel/src/net/ethernet.rs	eth_pull_header	130	raw-construct	GAP
@@ -3860,7 +3860,6 @@ d5bcc5061d37	kernel/src/net/ipv4/route.rs	route_lookup	192		GAP
 a0a93d496c52	kernel/src/net/ipv4/route.rs	route_remove	241		GAP
 9b8c387afc2b	kernel/src/net/ipv4/route.rs	route_clear	248		GAP
 b709a3bcc5f7	kernel/src/net/ipv4/route.rs	route_dump	255		GAP
-1fec63e5f3b0	kernel/src/net/ipv4/route.rs	test_route_lookup	308		GAP
 1994dfe8e769	kernel/src/net/ipv6/icmpv6.rs	icmpv6_send	84	raw-construct,ptr-ops	GAP
 def363ba1d1a	kernel/src/net/ipv6/icmpv6.rs	icmpv6_rcv	105	raw-construct	GAP
 2987db6f3e93	kernel/src/net/ipv6/icmpv6.rs	icmpv6_rcv	107	ptr-ops	GAP
@@ -4061,7 +4060,7 @@ d0e83370cbe3	kernel/src/net/unix.rs	unix_socket_from_fd	3972		GAP
 cf59f59c24fa	kernel/src/net/unix.rs	unix_socket_from_fd	3980		GAP
 c9d801a393f9	kernel/src/net/unix.rs	unix_file_of_file	3999		GAP
 1f5bef6c6352	kernel/src/net/unix.rs	unix_file_of_file	4007		GAP
-5b875894a12b	kernel/src/net/unix.rs	unix_park_audit	4234	ptr-ops	GAP
+ca036b74e485	kernel/src/net/unix.rs	unix_park_audit	4211	ptr-ops	GAP
 0f9cdcd34ce9	kernel/src/perf/mod.rs	refresh_wanted_bits	313	ptr-ops	GAP
 dee99e10f5de	kernel/src/perf/mod.rs	ring_covers	430	ptr-ops	GAP
 81e360c51a13	kernel/src/perf/mod.rs	register	481		GAP
@@ -6307,6 +6306,7 @@ dbe8c85101d2	kernel/src/tests/listhead.rs	test_listhead	48	ptr-ops	GAP
 edd5b61f65c6	kernel/src/tests/listhead.rs	test_listhead	60		GAP
 9ecdb927f997	kernel/src/tests/listhead.rs	test_listhead	64	ptr-ops	GAP
 be4a237f78de	kernel/src/tests/listhead.rs	test_listhead	76		GAP
+5e2a0aa9bf53	kernel/src/tests/listhead.rs	test_listhead	92		GAP
 ff74a9fb3a7d	kernel/src/tests/loop_flags.rs	test_loop_flags	79		GAP
 6d60018cbdc7	kernel/src/tests/loop_flags.rs	test_loop_flags	81		GAP
 31ad16172637	kernel/src/tests/loop_flags.rs	test_loop_flags	91		GAP
@@ -6319,7 +6319,9 @@ c20584d48b87	kernel/src/tests/mkdir_unlink.rs	test_rmdir	95		GAP
 98693563d5c8	kernel/src/tests/mkdir_unlink.rs	test_rmdir	97		GAP
 8971a83c7789	kernel/src/tests/mkdir_unlink.rs	test_unlink	163		GAP
 faa3b2f6a714	kernel/src/tests/mkdir_unlink.rs	test_unlink	165		GAP
-99834696d7f4	kernel/src/tests/mod.rs	setup_boot_task_fdtable	380		GAP
+41cc9ed2d4b7	kernel/src/tests/mod.rs	setup_boot_task_fdtable	398		GAP
+2bf1d1271dec	kernel/src/tests/net_pins.rs	test_net_pins	59	ptr-ops	GAP
+0a4e76b160d1	kernel/src/tests/net_pins.rs	test_net_pins	166		GAP
 cfce9e7aeebe	kernel/src/tests/network.rs	test_skb_push_pull	111	ptr-ops	GAP
 c8d4e2992db1	kernel/src/tests/pipe2.rs	pipe_of	14		GAP
 5197725c92ab	kernel/src/tests/pipe2.rs	pipe_of	16	ptr-ops	GAP
