@@ -168,6 +168,21 @@ handoff), open (1.44x — walk loop + File construct), read (1.42x —
 copy tail), write (1.13x). lat_fs re-polluted by boot noise (no
 honest number this round).
 
+## Patrol-13..22 consolidated milestone (2026-11-19, tree=5aceafc2a)
+
+Latest tree (this campaign's stack + parallel rt-r4 + vdso-clock + the
+CFS intrusive-red-black timeline) measured at host load 6.7-7.7 — a
+HOSTILE window, med-of-3, nohz_full=1: null 0.0561 · read 0.1350 ·
+write 0.1085 · stat 0.3419 · open 0.6989 med (2/3 calibration caps,
+retry recovered). Against the 11-16 quiet-window reference medians
+(0.046/0.062/0.060/0.239/0.395): ratios 1.22x/2.18x/1.81x/1.43x/1.77x
+— the load-coupled face (the same kernel read 0.0430/0.0971/0.0823 at
+load 2-3 in patrol-11's quiet window). No regression conclusion at
+this load; the quiet-window milestone board remains the citation
+(patrol-7 battery + patrol-11 confirmation). Campaign scoreboard
+unchanged: 11 ahead/parity (quiet-window), 4 behind with documented
+structural levers.
+
 ## Patrol-12 (2026-11-18): oc-rc openclose numbers banked; TIF wiring scoped
 
 - The parallel oc-rc rework's numbers are banked on the scoreboard:
