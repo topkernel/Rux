@@ -44,6 +44,33 @@
 //!   holding a plain bucket while taking PI locks, and it always takes
 //!   them in that order. Task::wake_up runs under the PI bucket lock,
 //!   matching the plain side's C8 invariant.
+//! - CHAIN PROPAGATION (R6, reference rt_mutex_adjust_prio_chain):
+//!   the boost/deboost of an owner must travel up the blocked-on
+//!   chain — A holds C, B holds D and blocks on C, T blocks on D:
+//!   boosting T boosts B (single edge), and B's NEW priority must
+//!   re-rank B's waiter entry on C and boost A in turn. The walk
+//!   (`pi_chain_walk`) mirrors the reference's step loop: one lock at
+//!   a time, requeue the blocked owner's waiter entry with its live
+//!   priority, re-evaluate the edge, follow to the next owner. Two
+//!   Rux-native structural differences, both recorded in
+//!   docs/architecture/design-divergences.md: (1) the waiter's boost
+//!   input is evaluated LIVE from the task (the reference snapshots
+//!   waiter->tree.prio and requeues inside the walk — our pool scan
+//!   makes every edge derivation from current state anyway); (2) the
+//!   walk holds at most ONE PI bucket at a time (never nested), so
+//!   bucket-order deadlocks are impossible by construction where the
+//!   reference needs the pi_lock/wait_lock trylock dance.
+//! - KERNEL RT-MUTEXES (R6): SleepMutex instances constructed with
+//!   `SleepMutex::new_rt` register PI states in the SAME pools with a
+//!   FLAGS_KERNEL_RT key (uaddr = the mutex address, mm = 0). Their
+//!   RT-class waiters join the priority chain, so a FIFO task blocked
+//!   on the ext4 big lock boosts the lock's CFS owner, and if that
+//!   owner is itself blocked on a user PI futex the boost keeps
+//!   walking — one chain engine for both worlds, the reference's
+//!   shared task->pi_blocked_on shape. Kernel keys never touch a user
+//!   word: every word_read/word_cas on a PI state is guarded by
+//!   `key_is_kernel` (the key's uaddr is a kernel static — writing it
+//!   would corrupt kernel memory).
 
 use crate::arch::cpu;
 use crate::process::task::{SchedPolicy, Task, TaskState};
@@ -57,9 +84,50 @@ pub const FUTEX_WAITERS: u32 = 0x8000_0000;
 pub const FUTEX_OWNER_DIED: u32 = 0x4000_0000;
 /// Everything below the two flag bits is the owner TID.
 const TID_MASK: u32 = !(FUTEX_WAITERS | FUTEX_OWNER_DIED);
+/// Key flag marking a KERNEL rt-mutex PI state (SleepMutex::new_rt):
+/// uaddr is the mutex's kernel address, mm is 0, and no user word is
+/// ever read or written through such a key.
+pub const FLAGS_KERNEL_RT: u32 = 0x0040;
 /// Cap on the deadlock-chain walk (the reference rt_mutex walk has the
 /// same depth guard; hitting it is treated as a cycle).
 const MAX_PI_CHAIN: usize = 16;
+
+/// True when `key` names a kernel rt-mutex (see FLAGS_KERNEL_RT) —
+/// every user-word access on a PI state must be skipped for these.
+fn key_is_kernel(key: &FutexKey) -> bool {
+    key.flags & FLAGS_KERNEL_RT != 0
+}
+
+/// Kernel rt-mutex key for a SleepMutex static (R6).
+fn kernel_key(mutex: usize) -> FutexKey {
+    FutexKey {
+        uaddr: mutex,
+        mm: 0,
+        flags: FLAGS_KERNEL_RT,
+        phys: 0,
+        object: false,
+    }
+}
+
+/// Live scheduling configuration of `task` as a waiter boost input:
+/// Some(rt_prio) for FIFO/RR, None for CFS-class (keyed by nice).
+/// SAFETY: caller guarantees `task` is a valid Task (queued waiter or
+/// pid-resolved owner). Reads are plain field loads; a task blocked in
+/// a PI park changes these only via PI boosts, so a torn (policy, prio)
+/// pair is a transient a later walk re-evaluates (priority is a
+/// scheduling hint, not a memory-safety datum).
+unsafe fn task_live_rank(task: *mut Task) -> Option<(Option<u32>, i32)> {
+    if task.is_null() {
+        return None;
+    }
+    let policy = (*task).policy();
+    let rt = if matches!(policy, SchedPolicy::Fifo | SchedPolicy::Rr) {
+        Some((*task).rt_priority())
+    } else {
+        None
+    };
+    Some((rt, (*task).nice()))
+}
 
 /// One task queued on a PI futex. Allocated by the enqueue site (the
 /// blocker itself for LOCK_PI, or cmp_requeue_pi for a requeued
@@ -446,10 +514,20 @@ unsafe fn pi_adjust_owner_boost(si: usize) {
         return;
     }
 
-    // The desired boost, derived from the top waiter's class.
-    let desired = head.map(|wi| {
-        let w = PI_WAITER_POOL[wi].lock_irqsave();
-        w.as_ref().map(|w| (w.rt_prio, w.nice)).unwrap_or((None, 0))
+    // The desired boost, derived from the top waiter's LIVE class and
+    // priority (R6: a chained waiter — one that owns another PI lock —
+    // is itself boosted while parked, so the enqueue-time snapshot in
+    // its PiWaiter is stale by design; the reference reads the top
+    // waiter task's current prio through rt_mutex_setprio the same
+    // way). The snapshot fields stay authoritative for QUEUE ORDER
+    // within the state (refreshed by pi_waiter_refresh_rank during
+    // chain walks — the reference's requeue step).
+    let desired = head.and_then(|wi| {
+        let wtask = {
+            let w = PI_WAITER_POOL[wi].lock_irqsave();
+            w.as_ref().map(|w| w.task).unwrap_or(core::ptr::null_mut())
+        };
+        unsafe { task_live_rank(wtask) }
     });
 
     // Does the owner's LIVE configuration already equal the desired
@@ -541,6 +619,117 @@ unsafe fn pi_owner_handoff(si: usize, old_pid: u32) {
     pi_adjust_owner_boost(si);
 }
 
+/// Snapshot of state `si`'s key (Copy read under the slot lock; a
+/// state's key is immutable while it exists). None when the slot is
+/// empty (state freed).
+fn pi_state_key(si: usize) -> Option<FutexKey> {
+    let st = PI_STATE_POOL[si].lock_irqsave();
+    st.as_ref().map(|s| s.key)
+}
+
+/// Snapshot of state `si`'s owner pid (0 when absent).
+fn pi_state_owner(si: usize) -> u32 {
+    let st = PI_STATE_POOL[si].lock_irqsave();
+    st.as_ref().map(|s| s.owner_pid).unwrap_or(0)
+}
+
+/// Re-snapshot `task`'s waiter entry in state `si` from its LIVE
+/// scheduling configuration and re-insert it at its new rank — the
+/// reference chain-walk's requeue step ([7] rt_mutex_adjust_prio_chain:
+/// dequeue, waiter_update_prio, enqueue). Caller holds si's PI bucket
+/// lock. No-op when the task has no entry (it left the queue between
+/// the pool scan and this critical section — the walk's fresh re-scan
+/// makes that benign).
+unsafe fn pi_waiter_refresh_rank(si: usize, task: *mut Task) {
+    // Find the entry (pi_queue_unlink needs the index).
+    let mut cur = {
+        let st = PI_STATE_POOL[si].lock_irqsave();
+        st.as_ref().and_then(|s| s.waiters)
+    };
+    let mut found = None;
+    while let Some(wi) = cur {
+        let (t, n) = {
+            let w = PI_WAITER_POOL[wi].lock_irqsave();
+            match w.as_ref() {
+                Some(w) => (w.task, w.next),
+                None => (core::ptr::null_mut(), None),
+            }
+        };
+        if t == task {
+            found = Some(wi);
+            break;
+        }
+        cur = n;
+    }
+    let Some(wi) = found else { return };
+    let Some((rt_prio, nice)) = task_live_rank(task) else { return };
+    if !pi_queue_unlink(si, wi) {
+        return;
+    }
+    {
+        let mut w = PI_WAITER_POOL[wi].lock_irqsave();
+        if let Some(ref mut x) = *w {
+            x.rt_prio = rt_prio;
+            x.nice = nice;
+        }
+    }
+    pi_queue_insert(si, wi);
+}
+
+/// The R6 chain walk — reference rt_mutex_adjust_prio_chain, adapted to
+/// the pool structure. `owner` is the task whose edge was JUST adjusted
+/// by the caller (it queued a waiter on / removed a waiter from a state
+/// owned by `owner`, or handed ownership to it): if `owner` is itself
+/// blocked on another PI state, its live (possibly new) priority must
+/// re-rank its waiter entry there and re-evaluate THAT edge, and so on
+/// up the chain.
+///
+/// Step shape (reference numbers in brackets):
+///   [2]  waiter = the state `owner` is blocked on (pool scan — our
+///        task->pi_blocked_on equivalent)
+///   [7]  requeue that waiter entry at its live priority
+///   [10] follow to the state's owner; adjust its boost [11]
+///   [12] if that owner is blocked in turn, continue
+///
+/// ONE bucket lock held at a time (never nested) — opposite-direction
+/// walks cannot deadlock, and each step derives from freshly read
+/// state, so a chain that moved between steps is followed correctly
+/// from wherever it actually is now (the reference's next_lock-change
+/// abort exists because its walk carries waiter pointers across steps;
+/// our re-scan needs no such guard). Bounded by MAX_PI_CHAIN like the
+/// reference's max_lock_depth.
+unsafe fn pi_chain_walk(owner: *mut Task) {
+    if owner.is_null() {
+        return;
+    }
+    let mut cur = owner;
+    for _ in 0..MAX_PI_CHAIN {
+        // [2] What is cur blocked on? (Fresh scan every step.)
+        let Some(si) = pi_blocked_state_of(cur) else { return };
+        let Some(key) = pi_state_key(si) else { return };
+        let _bkt = pi_bucket_lock(&key);
+        // [7] re-rank cur's waiter entry with its live configuration.
+        pi_waiter_refresh_rank(si, cur);
+        // [10]/[11] re-evaluate the edge's owner boost.
+        pi_adjust_owner_boost(si);
+        let next_pid = pi_state_owner(si);
+        drop(_bkt);
+        if next_pid == 0 {
+            return;
+        }
+        let next = crate::sched::sched::find_task_by_pid(next_pid);
+        if next.is_null() || (*next).state().is_dead() {
+            return;
+        }
+        cur = next;
+    }
+    // Depth cap hit: treat like the reference's max_lock_depth — the
+    // queue-time pi_chain_hits screen reports true cycles as EDEADLK;
+    // a walk this long without one is a pathological but acyclic
+    // chain, and the boost state it leaves behind is re-evaluated by
+    // the next edit on any of its edges.
+}
+
 /// The state index `task` is blocked on, if any (deadlock-chain walk).
 fn pi_blocked_state_of(task: *mut Task) -> Option<usize> {
     for si in 0..PI_STATE_POOL_SIZE {
@@ -564,29 +753,41 @@ fn pi_blocked_state_of(task: *mut Task) -> Option<usize> {
     None
 }
 
-/// Deadlock detection: follow task -> blocked-on state -> owner ->
-/// blocked-on state ... and see whether we revisit `target_si`.
+/// Deadlock detection for queueing `start` on `target_si`: the new
+/// edge start->target_si closes a cycle iff following the chain
+/// target_si.owner -> (that owner's blocked-on state) -> (that state's
+/// owner) ... reaches `start` (the reference's check at chain-walk step
+/// [6]: rt_mutex_owner(lock) == top_task). The PRE-R6 walk started
+/// from `start`'s own blocked-on edges — which are EMPTY for a task in
+/// the middle of acquiring — and missed owner-side cycles (X owns A,
+/// Y blocks on A, X blocks on B owned by Y: legal-looking edges, dead
+/// graph; found by the R6 model's cycle scenario).
 unsafe fn pi_chain_hits(start: *mut Task, target_si: usize) -> bool {
-    let mut cur_task = start;
-    for _ in 0..MAX_PI_CHAIN {
-        let Some(si) = pi_blocked_state_of(cur_task) else {
-            return false;
-        };
-        if si == target_si {
-            return true;
+    let mut cur_pid = {
+        let st = PI_STATE_POOL[target_si].lock_irqsave();
+        match st.as_ref() {
+            Some(s) => s.owner_pid,
+            None => return false,
         }
-        let owner = {
+    };
+    for _ in 0..MAX_PI_CHAIN {
+        if cur_pid == 0 {
+            return false;
+        }
+        let cur = crate::sched::sched::find_task_by_pid(cur_pid);
+        if cur.is_null() {
+            return false;
+        }
+        if cur == start as *mut Task {
+            return true; // the new edge loops back to the acquirer
+        }
+        let Some(si) = pi_blocked_state_of(cur) else {
+            return false; // chain ends at a running owner
+        };
+        cur_pid = {
             let st = PI_STATE_POOL[si].lock_irqsave();
             st.as_ref().map(|s| s.owner_pid).unwrap_or(0)
         };
-        if owner == 0 {
-            return false;
-        }
-        let next = crate::sched::sched::find_task_by_pid(owner);
-        if next.is_null() {
-            return false;
-        }
-        cur_task = next;
     }
     true
 }
@@ -599,10 +800,62 @@ fn my_task() -> Option<*mut Task> {
     crate::sched::current().map(|t| t as *mut Task)
 }
 
+/// Post-handoff user-word fixup (the reference's fixup_owner shape):
+/// after a handoff marked us `handed`, the word must end holding
+/// `mytid`, PRESERVING a latched FUTEX_OWNER_DIED so glibc's robust
+/// recovery sees the dead owner. Returns the syscall result: 0 for a
+/// normal handoff, -EOWNERDEAD when the death flag is (or must be)
+/// set, -EAGAIN when the word moved to a foreign owner (userspace
+/// broke the kernel-writer contract; glibc re-issues LOCK_PI).
+/// Caller holds the PI bucket lock.
+unsafe fn handed_fixup(uaddr: usize, mytid: u32) -> i64 {
+    use crate::syscall::errno::{EAGAIN, EFAULT, EOWNERDEAD};
+    unsafe fn death_take(uaddr: usize, uval: u32, mytid: u32) -> i64 {
+        use crate::syscall::errno::{EAGAIN, EFAULT};
+        // Reference contract (kernel/futex/pi.c has NO EOWNERDEAD
+        // return): LOCK_PI returns 0 while the word carries
+        // FUTEX_OWNER_DIED beside the new owner TID — glibc's robust
+        // path reads the flag from the WORD (__futex_lock_pi64's
+        // fatal-error switch does not accept -EOWNERDEAD) and reports
+        // EOWNERDEAD to the application itself.
+        let newv = mytid | FUTEX_OWNER_DIED | (uval & FUTEX_WAITERS);
+        match word_cas(uaddr, uval, newv) {
+            Some(v) if v == uval => 0,
+            Some(_) => -(EAGAIN as i64),
+            None => -(EFAULT as i64),
+        }
+    }
+    let Some(uval) = word_read(uaddr) else {
+        return -(EFAULT as i64);
+    };
+    let tid = uval & TID_MASK;
+    if tid == mytid {
+        // The handoff (or a prior fixup) already installed us. Return
+        // 0 either way: a latched OWNER_DIED stays IN THE WORD for
+        // glibc's robust recovery to see (reference contract).
+        return 0;
+    }
+    if uval & FUTEX_OWNER_DIED != 0 {
+        // Death-marked with the TID cleared (robust walk or the exit
+        // path): install ourselves as the recovery owner.
+        return death_take(uaddr, uval, mytid);
+    }
+    if tid == 0 {
+        // Free word: the dying owner's CAS lost and nobody else queued.
+        // We hold the handoff, the previous owner is gone — take it
+        // with the death flag so robust users recover.
+        return death_take(uaddr, uval, mytid);
+    }
+    -(EAGAIN as i64)
+}
+
 /// FUTEX_LOCK_PI: acquire the PI futex at `uaddr`, blocking under an
 /// ABSOLUTE jiffies deadline (the timeout is absolute, like
-/// FUTEX_WAIT_BITSET). Returns 0 acquired (word holds our TID),
-/// -EOWNERDEAD when we inherited a dead owner's lock, -EDEADLK on
+/// FUTEX_WAIT_BITSET). Returns 0 acquired (word holds our TID — with
+/// FUTEX_OWNER_DIED PRESERVED IN THE WORD when we inherited a dead
+/// owner's lock; the reference kernel never returns -EOWNERDEAD here,
+/// and modern glibc's __futex_lock_pi64 treats that errno as fatal —
+/// robust recovery reads the flag from the word), -EDEADLK on
 /// self/cycle, -ETIMEDOUT / -EINTR as usual.
 pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
     use crate::syscall::errno::{
@@ -627,11 +880,11 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
             let newv = mytid | (uval & FUTEX_OWNER_DIED);
             match unsafe { word_cas(uaddr, uval, newv) } {
                 Some(v) if v == uval => {
-                    return if uval & FUTEX_OWNER_DIED != 0 {
-                        -(EOWNERDEAD as i64)
-                    } else {
-                        0
-                    };
+                    // Preserve the latched OWNER_DIED IN THE WORD and
+                    // return 0 — glibc's robust recovery reads the
+                    // flag from the word (the reference returns no
+                    // EOWNERDEAD here either).
+                    return 0;
                 }
                 Some(_) => continue, // raced; re-read
                 None => return -(EFAULT as i64),
@@ -654,7 +907,9 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
         if !owner_live {
             let newv = mytid | FUTEX_OWNER_DIED | FUTEX_WAITERS;
             match unsafe { word_cas(uaddr, uval, newv) } {
-                Some(v) if v == uval => return -(EOWNERDEAD as i64),
+                // 0 with the death flag IN THE WORD (glibc contract —
+                // see handed_fixup).
+                Some(v) if v == uval => return 0,
                 Some(_) => continue,
                 None => return -(EFAULT as i64),
             }
@@ -698,6 +953,11 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
             return -(EAGAIN as i64);
         };
 
+        // Dominated-assignment: every path that falls through the
+        // unsafe block below has assigned walk_from (EDEADLK returns,
+        // the owner-moved retry continues, the committed path assigns).
+        #[allow(unused_assignments)]
+        let mut walk_from: *mut Task = core::ptr::null_mut();
         unsafe {
             if pi_chain_hits(current, si) {
                 pi_waiter_free(wi);
@@ -716,15 +976,30 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
                 pi_state_maybe_free(si);
                 continue;
             }
-        }
+            // We are committed to park on this state: resolve the owner
+            // for the post-publication chain walk (R6) while the state
+            // is pinned under the bucket.
+            walk_from = crate::sched::sched::find_task_by_pid(tid);
 
-        // Park. C8 ordering: waiter state + INTERRUPTIBLE published
-        // under the bucket lock, then drop, then schedule.
-        unsafe {
+            // Park. C8 ordering: waiter state + INTERRUPTIBLE published
+            // under the bucket lock, then drop, then schedule.
             (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
         }
         drop(_bkt);
         cpu::restore_irq(true);
+        // R6 chain walk — the reference runs adjust_prio_chain from
+        // task_blocks_on_rt_mutex BEFORE the blocker sleeps: our arrival
+        // may have boosted the owner, and if that owner is itself
+        // parked on another PI lock the boost must re-rank it there and
+        // keep walking up. We are still executing (sleep state
+        // published, not yet scheduled away), so the walk runs in our
+        // own context exactly like the reference's. One bucket at a
+        // time; a concurrent unlock that hands to us (handed=true)
+        // finds our sleep state already published, so the wake pairs
+        // with the schedule() below.
+        unsafe {
+            pi_chain_walk(walk_from);
+        }
         let wake = deadline.map(|dl| {
             crate::timer::WakeArmed::arm_jiffy(
                 dl,
@@ -735,8 +1010,19 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
         drop(wake);
 
         if pi_waiter_handed(wi) {
+            // Ownership was transferred to us. Fix up the user word and
+            // report the death contract (R6): a normal unlock_pi
+            // handoff already wrote our TID (0); a death handoff (exit
+            // cleanup / the robust walk) leaves FUTEX_OWNER_DIED
+            // latched — install our TID beside it and return
+            // EOWNERDEAD (the reference's fixup_owner; glibc's robust
+            // recovery keys on exactly this pair).
+            let ret = {
+                let _bkt2 = pi_bucket_lock(&key);
+                unsafe { handed_fixup(uaddr, mytid) }
+            };
             pi_waiter_free(wi);
-            return 0; // the user word already holds our TID
+            return ret;
         }
         // Timed out / interrupted / spurious: leave the queue and end
         // or restart the acquire accordingly. The bucket lock is
@@ -748,13 +1034,24 @@ pub fn futex_lock_pi(uaddr: usize, deadline: Option<u64>, shared: bool) -> i64 {
             crate::drivers::timer::get_jiffies() >= dl
         });
         {
-            let _bkt2 = pi_bucket_lock(&key);
-            unsafe {
-                pi_queue_unlink(si, wi);
-                pi_waiter_free(wi);
-                pi_adjust_owner_boost(si);
-                pi_state_maybe_free(si);
+            let mut walk_from: *mut Task = core::ptr::null_mut();
+            {
+                let _bkt2 = pi_bucket_lock(&key);
+                unsafe {
+                    pi_queue_unlink(si, wi);
+                    pi_waiter_free(wi);
+                    pi_adjust_owner_boost(si);
+                    // Our departure may DEBOOST the owner (we were its
+                    // top waiter): if that owner is itself parked on
+                    // another PI lock, its stale-high rank there must
+                    // relax too — resolve it while the state exists.
+                    walk_from = crate::sched::sched::find_task_by_pid(pi_state_owner(si));
+                    pi_state_maybe_free(si);
+                }
             }
+            // R6 deboost propagation (reference remove_waiter ->
+            // adjust_prio_chain).
+            unsafe { pi_chain_walk(walk_from) };
         }
         if timed {
             return -(ETIMEDOUT as i64);
@@ -784,13 +1081,9 @@ pub fn futex_trylock_pi(uaddr: usize, shared: bool) -> i64 {
         if tid == 0 {
             let newv = mytid | (uval & FUTEX_OWNER_DIED);
             match unsafe { word_cas(uaddr, uval, newv) } {
-                Some(v) if v == uval => {
-                    return if uval & FUTEX_OWNER_DIED != 0 {
-                        -(EOWNERDEAD as i64)
-                    } else {
-                        0
-                    };
-                }
+                // Death flag preserved in the word; ret 0 (glibc
+                // contract — see handed_fixup).
+                Some(v) if v == uval => return 0,
                 Some(_) => continue,
                 None => return -(EFAULT as i64),
             }
@@ -960,13 +1253,122 @@ pub unsafe fn pi_requeue_detach(key2: &FutexKey, wi: usize) {
 }
 
 // ---------------------------------------------------------------------------
+// Kernel rt-mutex hooks (SleepMutex::new_rt — R6)
+// ---------------------------------------------------------------------------
+
+/// Park-side PI registration for an RT-class waiter on a kernel
+/// rt-mutex (a SleepMutex in rt mode). Creates (or reuses) the
+/// kernel-keyed PiState owned by `owner_pid`, queues the waiter, arms
+/// the owner's boost from the (live) top waiter, and propagates up the
+/// owner's own blocked-on chain — a FIFO task parking on the ext4 big
+/// lock boosts the lock's CFS owner immediately, and if that owner is
+/// itself blocked on a user PI futex the walk keeps going.
+///
+/// Returns the (state, waiter) indices for the matching rt_waiter_leave.
+/// None for CFS-class tasks (kernel rt-mutexes boost only for RT
+/// waiters — the recorded divergence: no nice-floor churn on the fs big
+/// locks, CFS contention keeps the R84 FIFO discipline unchanged) or on
+/// pool exhaustion (PI degrades to none; the park itself proceeds).
+pub fn rt_waiter_enter(
+    mutex: usize,
+    owner_pid: u32,
+    task: *mut Task,
+) -> Option<(usize, usize)> {
+    unsafe {
+        let policy = (*task).policy();
+        if !matches!(policy, SchedPolicy::Fifo | SchedPolicy::Rr) {
+            return None;
+        }
+        let key = kernel_key(mutex);
+        let walk_from;
+        let out = {
+            let _bkt = pi_bucket_lock(&key);
+            let si = pi_state_get_or_create(&key, owner_pid)?;
+            let wi = match pi_waiter_alloc(task) {
+                Some(wi) => wi,
+                None => {
+                    pi_state_maybe_free(si);
+                    return None;
+                }
+            };
+            pi_queue_insert(si, wi);
+            pi_adjust_owner_boost(si);
+            walk_from =
+                crate::sched::sched::find_task_by_pid(pi_state_owner(si));
+            Some((si, wi))
+        };
+        // Upward propagation (reference task_blocks_on_rt_mutex's
+        // adjust_prio_chain) — OUTSIDE the bucket: the walk takes one
+        // bucket at a time.
+        pi_chain_walk(walk_from);
+        out
+    }
+}
+
+/// Leave-side: remove the parked waiter (it acquired the lock) and
+/// re-evaluate the owner's boost, walking up when the departure
+/// deboosts the owner (reference remove_waiter).
+pub fn rt_waiter_leave(mutex: usize, si: usize, wi: usize) {
+    let key = kernel_key(mutex);
+    let mut walk_from: *mut Task = core::ptr::null_mut();
+    {
+        let _bkt = pi_bucket_lock(&key);
+        unsafe {
+            pi_queue_unlink(si, wi);
+            pi_waiter_free(wi);
+            pi_adjust_owner_boost(si);
+            walk_from =
+                crate::sched::sched::find_task_by_pid(pi_state_owner(si));
+        }
+        pi_state_maybe_free(si);
+    }
+    unsafe { pi_chain_walk(walk_from) };
+}
+
+/// Release-side boost routing (reference mark_wakeup_next_waiter): the
+/// outgoing owner's boost ends (its saved configuration restored), the
+/// incoming owner (`new_owner_pid` — the task the release's hi-prio
+/// wake just picked) inherits from the remaining waiters. A no-op when
+/// no kernel state exists (no RT waiter ever queued, or the last one
+/// left and freed it).
+pub fn rt_release_handoff(mutex: usize, new_owner_pid: u32) {
+    let key = kernel_key(mutex);
+    let _bkt = pi_bucket_lock(&key);
+    if let Some(si) = pi_state_find(&key) {
+        let old = pi_state_owner(si);
+        unsafe {
+            // Re-point BEFORE the handoff routing (same order as
+            // futex_unlock_pi): the incoming owner inherits the boost
+            // from the remaining chain.
+            {
+                let mut st = PI_STATE_POOL[si].lock_irqsave();
+                if let Some(ref mut s) = *st {
+                    s.owner_pid = new_owner_pid;
+                }
+            }
+            pi_owner_handoff(si, old);
+        }
+        pi_state_maybe_free(si);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Exit cleanup (owner-died protocol)
 // ---------------------------------------------------------------------------
 
 /// Release every PI futex `task` holds and dequeue every PI queue it
 /// waits in. Called beside futex_cleanup in do_exit. A dying owner
 /// hands the lock to its top waiter with FUTEX_OWNER_DIED latched
-/// (robust-mutex contract); the waiter's park ends OWNING the lock.
+/// (robust-mutex contract); the waiter's park ends OWNING the lock and
+/// its post-park fixup (handed_fixup) installs its TID beside the
+/// death flag, returning EOWNERDEAD — the reference's split is
+/// handle_futex_death (word mark, no PI wake) + exit_pi_state_list
+/// (wake the rt_mutex's top waiter); our combined path does both under
+/// the one PI bucket lock, accepting BOTH word shapes (pre- and
+/// post-robust-walk — exit_robust_list runs earlier in do_exit and
+/// has already cleared the dead TID when it registered the mutex).
+/// KERNEL rt-mutex states (FLAGS_KERNEL_RT) share the waiter-side and
+/// boost routing but never touch a user word.
 pub fn futex_pi_exit_cleanup(task: *mut Task) {
     // 1. Waiter side: leave every PI queue (no wake).
     while let Some(si) = pi_blocked_state_of(task) {
@@ -991,14 +1393,18 @@ pub fn futex_pi_exit_cleanup(task: *mut Task) {
             }
         }
         let Some(wi) = found else { break };
+        let mut walk_from: *mut Task = core::ptr::null_mut();
         unsafe {
             pi_queue_unlink(si, wi);
-        }
-        pi_waiter_free(wi);
-        unsafe {
+            pi_waiter_free(wi);
             pi_adjust_owner_boost(si);
+            walk_from =
+                crate::sched::sched::find_task_by_pid(pi_state_owner(si));
         }
         pi_state_maybe_free(si);
+        // R6: the dying waiter's removal DEBOOSTS the owner — propagate
+        // up its chain (reference remove_waiter walk).
+        unsafe { pi_chain_walk(walk_from) };
     }
 
     // 2. Owner side: died holding PI locks — hand each to its top
@@ -1013,6 +1419,7 @@ pub fn futex_pi_exit_cleanup(task: *mut Task) {
             }
         };
         let Some(key) = owner_key else { continue };
+        let kernel = key_is_kernel(&key);
         let _bkt = pi_bucket_lock(&key);
         let top = {
             let st = PI_STATE_POOL[si].lock_irqsave();
@@ -1034,8 +1441,23 @@ pub fn futex_pi_exit_cleanup(task: *mut Task) {
                 let newv = wtid
                     | FUTEX_OWNER_DIED
                     | if more { FUTEX_WAITERS } else { 0 };
-                let _ = word_cas(key.uaddr, dead_tid | FUTEX_WAITERS, newv);
-                // Even if the CAS lost (userspace moved the word), the
+                if !kernel {
+                    // Accept both word shapes: the raw contended word
+                    // (dead_tid | WAITERS) AND the post-robust-walk
+                    // shape (TID cleared, OWNER_DIED latched —
+                    // exit_robust_list ran earlier in do_exit). A word
+                    // already naming the incoming waiter or a foreign
+                    // owner is left alone (userspace moved it; the
+                    // handoff below still ends the park).
+                    let _ = word_cas(key.uaddr, dead_tid | FUTEX_WAITERS, newv);
+                    let _ = word_cas(
+                        key.uaddr,
+                        FUTEX_OWNER_DIED | FUTEX_WAITERS,
+                        newv,
+                    );
+                    let _ = word_cas(key.uaddr, FUTEX_OWNER_DIED, newv);
+                }
+                // Even if the CASs lost (userspace moved the word), the
                 // waiter must not sleep forever: hand unconditionally.
                 pi_queue_unlink(si, wi);
                 {
@@ -1057,6 +1479,10 @@ pub fn futex_pi_exit_cleanup(task: *mut Task) {
                 let _ = Task::wake_up(wtask);
                 pi_owner_handoff(si, dead_tid);
                 pi_state_maybe_free(si);
+                // No chain walk from here: the dead owner's edges are
+                // torn down by this very section, and the incoming
+                // owner is being WOKEN (it is not parked anywhere) —
+                // whichever lock it parks on next runs its own walk.
             },
             None => {
                 // Dying owner with a state but no waiters: the word

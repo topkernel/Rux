@@ -21,3 +21,12 @@ pub mod mutex_model;
 pub mod mutex_model_test;
 #[cfg(all(feature = "loom", loom))]
 pub mod mutex_loom;
+
+// R6: PI chain engine model — the boost-propagation layer of
+// kernel/src/sync/futex_pi.rs with the chain invariant table
+// (INV-C1..C5). Same extraction philosophy as mutex_model: pools and
+// bucket locks are environment; the transitions and invariants are
+// the pinned logic.
+pub mod pi_model;
+#[cfg(test)]
+mod pi_model_test;

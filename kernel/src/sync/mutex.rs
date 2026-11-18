@@ -107,11 +107,17 @@ struct SleepMutexState {
     /// (every counted waiter is mid-loop between finish_wait and its
     /// next prepare_to_wait) the wake is dropped and the lock sits FREE
     /// behind a nonzero `waiters` with nobody left to wake it. Each such
-    /// drop bumps this epoch: a waiter whose registration snapshot of
-    /// the epoch predates the bump may take the free lock at its
+    /// drop bumps this epoch: a waiter whose registration snapshot of the
+    /// epoch predates the bump may take the free lock at its
     /// re-check, so an orphaned handoff is recovered by the FIRST
     /// mid-loop waiter to re-register.
     handoff_epoch: u64,
+    /// R6 (rt mode only): RT-class waiters currently parked with a PI
+    /// entry registered (advisory trigger for the hi-priority handoff
+    /// wake and the boost routing — the PI state's own waiter list is
+    /// the authoritative set; drift here can only ever fall back to
+    /// the plain FIFO wake, never corrupt state).
+    rt_waiters: u32,
 }
 
 /// Outcome of one optimistic_probe round (see optimistic_probe).
@@ -140,6 +146,13 @@ pub struct SleepMutex {
     /// True only for the ext4 big lock so its counters stay comparable
     /// across the perf gate; other instances do not pollute them.
     fsw_notes: bool,
+    /// R6 rt-mutex mode: RT-class waiters join the kernel PI chain
+    /// (owner boost + hi-priority handoff) through the shared PI
+    /// engine (kernel-keyed states in sync/futex_pi.rs). All-CFS
+    /// contention is byte-for-byte the R84/R85 behavior — the mode
+    /// only adds the boost and changes WHICH waiter a release wakes
+    /// when an RT-class waiter is queued.
+    rt: bool,
 }
 
 impl SleepMutex {
@@ -167,11 +180,26 @@ impl SleepMutex {
                 acquired_at: 0,
                 waiters: 0,
                 handoff_epoch: 0,
+                rt_waiters: 0,
             }),
             wait: WaitQueueHead::new(),
             name,
             fsw_notes,
+            rt: false,
         }
+    }
+
+    /// R6: rt-mutex mode constructor — the locks that need PI
+    /// semantics (the plan's "convert ONLY the locks that need PI"):
+    /// RT-class waiters boost the owner through the shared PI engine
+    /// and releases hand off to the highest-priority waiter (reference
+    /// rt_mutex mark_wakeup_next_waiter). See the module doc for the
+    /// divergence record: NO nice-floor boosts and NO spinlock-tree
+    /// conversion — only FIFO waiters of RT class arm the chain.
+    pub const fn new_rt(name: &'static str, fsw_notes: bool) -> Self {
+        let mut s = Self::new(name, fsw_notes);
+        s.rt = true;
+        s
     }
 
     /// Try to take the lock / recurse into it, UNGATED: a free lock goes
@@ -432,6 +460,10 @@ impl SleepMutex {
         let mut woken_retry = false;
         let mut first_park = 0u64;
         let mut timer_id = 0u64;
+        // R6 rt mode: our PI waiter entry (kernel-keyed state index +
+        // waiter index) once the first park commits; cleared by
+        // rt_leave on every acquire exit below.
+        let mut pi_q: Option<(usize, usize)> = None;
 
         loop {
             if woken_retry {
@@ -441,11 +473,17 @@ impl SleepMutex {
                 // contender (our count stays).
                 if let Some(g) = self.try_acquire_wake_token(pid) {
                     counted = false;
+                    if self.rt {
+                        self.rt_leave(&mut pi_q);
+                    }
                     return g;
                 }
                 woken_retry = false;
             }
             if let Some(g) = self.try_acquire_or_recurse_fair(pid) {
+                if self.rt {
+                    self.rt_leave(&mut pi_q);
+                }
                 return g;
             }
             // R83b (R74 producer hunt): every capture so far had the
@@ -546,7 +584,32 @@ impl SleepMutex {
                     if timer_id != 0 && crate::timer::timer_pending(timer_id) {
                         crate::timer::del_timer(timer_id);
                     }
+                    if self.rt {
+                        self.rt_leave(&mut pi_q);
+                    }
                     return SleepMutexGuard { lock: self };
+                }
+            }
+            // R6 rt mode: register the PI waiter once, when the first
+            // park is committed (the registration re-check above said
+            // the lock is not ours). RT-class waiters only — CFS
+            // contention never touches the PI engine (the divergence
+            // record: kernel rt-mutexes boost for FIFO/RR waiters, no
+            // nice-floor churn on the fs big locks). Pool exhaustion
+            // degrades to an un-boosted park (rt_waiter_enter's None).
+            if self.rt && pi_q.is_none() {
+                let owner_pid = {
+                    let st = self.state.lock();
+                    st.owner
+                };
+                if let Some((si, wi)) = crate::sync::futex_pi::rt_waiter_enter(
+                    self as *const _ as usize,
+                    owner_pid,
+                    cur as *mut crate::process::task::Task,
+                ) {
+                    pi_q = Some((si, wi));
+                    let mut st = self.state.lock();
+                    st.rt_waiters += 1;
                 }
             }
             // Sleep until release() wakes us (UNINTERRUPTIBLE: sections
@@ -652,12 +715,54 @@ impl SleepMutex {
         }
     }
 
+    /// R6 rt mode: leave the kernel PI queue (the attempt acquired the
+    /// lock) and re-evaluate the boost chain upward (deboost of the
+    /// previous owner's boost from OUR departure).
+    fn rt_leave(&'static self, pi_q: &mut Option<(usize, usize)>) {
+        if let Some((si, wi)) = pi_q.take() {
+            crate::sync::futex_pi::rt_waiter_leave(
+                self as *const _ as usize,
+                si,
+                wi,
+            );
+            let mut st = self.state.lock();
+            st.rt_waiters = st.rt_waiters.saturating_sub(1);
+        }
+    }
+
     /// RAII alias, mirroring the older `Mutex::guard()` spelling.
     pub fn guard(&'static self) -> SleepMutexGuard {
         self.lock()
     }
 
     fn release(&'static self) {
+        // R6 rt mode (BEFORE the state section so the extracted state
+        // machine below stays byte-identical to the verified model):
+        // with RT-class waiters queued the handoff picks the
+        // HIGHEST-priority one (reference mark_wakeup_next_waiter) and
+        // routes the boost to it — the boost we held ends, the incoming
+        // owner inherits from the remaining chain. No RT waiter queued
+        // (or the wake was refused): fall through to the plain R84
+        // FIFO-head wake, unchanged.
+        if self.rt {
+            let rtq = {
+                let st = self.state.lock();
+                st.rt_waiters
+            };
+            if rtq > 0 {
+                if let Some(wtask) = self.wait.wake_up_one_hiprio() {
+                    let wpid = unsafe {
+                        (*(wtask as *mut crate::process::task::Task)).pid()
+                            as u32
+                    };
+                    crate::sync::futex_pi::rt_release_handoff(
+                        self as *const _ as usize,
+                        wpid,
+                    );
+                    return;
+                }
+            }
+        }
         {
             let mut st = self.state.lock();
             if st.depth > 0 {
@@ -728,6 +833,28 @@ impl SleepMutex {
             }
         };
         if was_held {
+            // R6 rt mode: same hi-priority handoff + boost routing as
+            // release() — a dying owner's boost ends with it, the next
+            // (strongest) waiter takes over.
+            if self.rt {
+                let rtq = {
+                    let st = self.state.lock();
+                    st.rt_waiters
+                };
+                if rtq > 0 {
+                    if let Some(wtask) = self.wait.wake_up_one_hiprio() {
+                        let wpid = unsafe {
+                            (*(wtask as *mut crate::process::task::Task))
+                                .pid() as u32
+                        };
+                        crate::sync::futex_pi::rt_release_handoff(
+                            self as *const _ as usize,
+                            wpid,
+                        );
+                        return;
+                    }
+                }
+            }
             let woke = self.wait.wake_up_one();
             if woke == 0 {
                 // R85: same dropped-handoff recovery as release().

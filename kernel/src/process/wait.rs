@@ -541,6 +541,74 @@ impl WaitQueueHead {
         self.wake_up(WakeUpHint::Normal, 1)
     }
 
+    /// Wake the highest-priority SCHED_FIFO/RR entry (R6 rt-mutex
+    /// handoff): scans the queue for un-woken RT-class entries and
+    /// wakes the one with the highest rt_priority (FIFO among equals —
+    /// list order). Returns None when NO RT-class entry is queued (or
+    /// the wake was refused): the CALLER then runs its plain
+    /// wake-one — no internal fallback, so exactly one handoff wake
+    /// ever happens per release. Returns the woken task so the caller
+    /// can route the priority-inheritance handoff to it.
+    ///
+    /// Same wake-under-lock contract as wake_up (R12-1): the woken
+    /// entry cannot pass finish_wait while we hold the list lock, so
+    /// its task pointer is live. Same R127 staleness screen.
+    pub fn wake_up_one_hiprio(&self) -> Option<*mut Task> {
+        if self.waiters.load(Ordering::Acquire) == 0 {
+            return None;
+        }
+        let mut list = self.list.lock_irqsave();
+        // Pick: RT-class entries only; highest rt_priority wins, list
+        // order breaks ties (FIFO). One pass, no allocation.
+        let mut best: Option<(usize, u32)> = None; // (index, rt_prio)
+        for (i, entry) in list.iter().enumerate() {
+            if entry.is_woken() {
+                continue;
+            }
+            let t = entry.task();
+            if t.is_null() {
+                continue;
+            }
+            // SAFETY: read at compile-time Task offsets inside the
+            // kernel linear map (same contract as wake_up's screen).
+            let cur_pid = unsafe {
+                core::ptr::read_volatile(
+                    (t as *const u8)
+                        .add(crate::process::task::task_offsets::TASK_PID)
+                        as *const u32,
+                )
+            };
+            if cur_pid != entry.registered_pid() {
+                continue; // R127 stale incarnation
+            }
+            let (is_rt, rt_prio) = unsafe {
+                use crate::process::task::SchedPolicy;
+                let p = (*t).policy();
+                (
+                    matches!(p, SchedPolicy::Fifo | SchedPolicy::Rr),
+                    (*t).rt_priority(),
+                )
+            };
+            if !is_rt {
+                continue;
+            }
+            if best.map_or(true, |(_, bp)| rt_prio > bp) {
+                best = Some((i, rt_prio));
+            }
+        }
+        let (i, _) = best?;
+        let entry_task = list[i].task();
+        list[i].set_woken();
+        let woke = crate::sched::wake_up_process(entry_task);
+        if !woke {
+            // W1 token discipline: a refused wake must not consume the
+            // entry's one-shot flag.
+            list[i].clear_woken();
+            return None;
+        }
+        Some(entry_task)
+    }
+
     /// Wake-drop probe snapshot (input:evdev_wake hunt): entries as
     /// (pid, state bits, woken flag, task ptr) so the push_event probe
     /// can key pre/post wake verdicts per entry AND read scheduler

@@ -3243,7 +3243,7 @@ unsafe fn ext4_destroy_inode(inode: &mut crate::fs::inode::Inode) {
 /// releases. do_exit() force-drops via release_if_owner (R73) since
 /// RAII never runs through do_exit.
 pub static EXT4_BIG_LOCK: crate::sync::SleepMutex =
-    crate::sync::SleepMutex::new("EXT4-BIGLOCK", true);
+    crate::sync::SleepMutex::new_rt("EXT4-BIGLOCK", true);
 
 /// Ext4 inode operations table
 /// Ext4 now supports write operations through namei module
