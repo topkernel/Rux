@@ -168,6 +168,41 @@ handoff), open (1.44x — walk loop + File construct), read (1.42x —
 copy tail), write (1.13x). lat_fs re-polluted by boot noise (no
 honest number this round).
 
+## No-number rows adjudicated (2026-11-19): rig staleness, NOT a kernel bug + one real item promoted
+
+The user challenged the no-number rows ("之前都是有数据的"). Verdict:
+
+- **lat_pagefault / lat_mmap / (bw_file_rd's ">timer") — RIG STALENESS.**
+  The battery image's lmbench_run predated the ENTIRE scratch logic
+  (zero occurrences of lat_pagefault//tmp/lmbench.file in the binary's
+  strings) — it never created the 16 MiB /tmp/lmbench.file. pagefault/
+  mmap's CHK macro (`perror("x"); exit(1)`) explains the mystery
+  "x: No such file or directory" fast-exit; bw_file_rd's ">timer" was
+  reading a NONEXISTENT file (instant, zero bytes) — the ">timer ahead"
+  row is RETIRED as an artifact. The r14-era numbers came from the
+  perf-gap-hunt lane's image, which had the newer runner. No kernel
+  regression existed. Fixed: current runner injected into the permanent
+  store image and the worktree copy (verified).
+- **Recovered real numbers (fixed runner, nohz_full=1, CCD pin):**
+  **lat_pagefault 0.0253 µs** (vs the native ceiling 0.072 → ahead of
+  the ceiling 2.8x — ahead of any guest ref); **lat_mmap 4.525 µs**
+  (vs ceiling 4.047 → 1.12x near-ceiling band).
+- **bw_file_rd — REAL kernel item promoted:** with a real scratch it
+  now runs the open/read/close storm and re-exposes the RCU grace
+  starvation (RCU-GP-BOUND flood at site=fdreap — the reaper-side
+  synchronize; user-busy CPUs have no QS reporting source). This was
+  demoted to "observation" at patrol-3 (serial-print secondary); the
+  battery-blocking reproducer PROMOTES the context-tracking QS item
+  (user enter/exit QS reporting, the reference's shape) back to a
+  real lane item.
+- Corrected 29-case scoreboard: **16 ahead** (7 vs guest: sem 8.97x /
+  ctx8 6.29x / pipe 5.84x / ctx2 5.14x / unix 1.43x / fstat 1.37x /
+  null 1.10x; 9 vs ceiling: pagefault 2.8x, mem_rd x2, bcopy, bzero,
+  bw_pipe 2.97x, bw_unix 1.61x, usleep) + **3 near-ceiling** (fork
+  1.08x / exec 1.05x / mmap 1.12x) + **4 behind vs guest** (open
+  1.71x / read 1.55x / write 1.30x / stat 1.13x) + **6 no-number**
+  (bw_file_rd=RCU storm, bw_mmap_rd, lat_fs, net x4).
+
 ## CORRECTION (2026-11-19, user challenge upheld again): full 29-case scoreboard, correct denominators
 
 The patrol-7 battery table was generated with make-report.py against
