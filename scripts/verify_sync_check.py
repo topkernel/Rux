@@ -1514,10 +1514,35 @@ MAPPINGS = [
         "verify": "kernel/verify/src/arch/riscv64/mm/uaccess_test.rs",
         "kernel": "kernel/src/arch/riscv64/uaccess.rs",
         "type": None,
-        "compare": ["access_ok"],
+        "compare": ["access_ok", "get_user", "put_user", "strnlen_user", "strncpy_from_user"],
         "skip": [],
         # kernel body opens with `use super::mm::user_addr::...`; the verify
-        # copy defines USER_START/USER_END as module constants instead
+        # copy defines USER_START/USER_END as module constants instead, and
+        # strncpy_from_user references the same path for its user_end read
+        "transforms": [(r'super::mm::user_addr::USER_END', 'USER_END')],
+        # The verify mirrors' user-memory model splits the user pointer's
+        # two roles: the mirrored text reads the pointer's VALUE through
+        # model_addr_of(p) (the MODEL_BASE-space address the kernel-side
+        # text derives from `p as usize`), while the pointer itself
+        # carries real allocation provenance for Miri. The v_transform
+        # canonicalizes the hook back to `X as usize` for comparison, so
+        # the compared text stays kernel-faithful.
+        "v_transforms": [
+            (r'model_addr_of\((from|str|to)\)', r'\1 as usize'),
+        ],
+        "skip_diff": ["access_ok"],
+        "check_new": False,
+    },
+    {
+        "name": "arch/x86_uaccess_bounds",
+        "verify": "kernel/verify/src/arch/x86_64/mm/uaccess_test.rs",
+        "kernel": "kernel/src/arch/x86_64/uaccess.rs",
+        "type": None,
+        "compare": ["access_ok"],
+        "skip": [],
+        # the x86_64 twin references USER_END from its memory_layout import;
+        # the verify copy defines it as a module constant (no low floor
+        # check on this arch — address 0 is accepted by the gate by design)
         "skip_diff": ["access_ok"],
         "check_new": False,
     },

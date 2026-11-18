@@ -6,3 +6,4 @@
 
 pub mod pt_regs_test;
 pub mod riscv64;
+pub mod x86_64;

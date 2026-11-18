@@ -61,6 +61,9 @@ pub mod memory_layout_kani;
 #[cfg(kani)]
 #[path = "arch/riscv64/mm/asid_kani.rs"]
 pub mod asid_kani;
+#[cfg(kani)]
+#[path = "arch/riscv64/mm/uaccess_kani.rs"]
+pub mod uaccess_kani;
 
 #[cfg(kani)]
 #[path = "process/exit_status_kani.rs"]
