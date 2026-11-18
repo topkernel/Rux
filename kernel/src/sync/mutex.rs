@@ -736,14 +736,35 @@ impl SleepMutex {
     }
 
     fn release(&'static self) {
-        // R6 rt mode (BEFORE the state section so the extracted state
-        // machine below stays byte-identical to the verified model):
-        // with RT-class waiters queued the handoff picks the
-        // HIGHEST-priority one (reference mark_wakeup_next_waiter) and
-        // routes the boost to it — the boost we held ends, the incoming
-        // owner inherits from the remaining chain. No RT waiter queued
-        // (or the wake was refused): fall through to the plain R84
-        // FIFO-head wake, unchanged.
+        // Drop our nesting level FIRST, in every mode (the same order
+        // release_if_owner uses): the woken waiter spends a HANDOFF
+        // token through try_acquire_wake_token, which can only take a
+        // lock the state machine has already freed (!locked). The rt-r6
+        // landing ran the rt handoff BEFORE this section and returned
+        // early on success — the mutex stayed locked with owner = the
+        // departed releaser, the woken waiter's token spend failed
+        // forever, and the OH boot wedged deterministically behind the
+        // stuck lock (VFS-MUTATION-STALL holder growing, init blocked
+        // >120 s inside its provisioning mutation; oh-launch bisect
+        // 017bf556b..e9a0c1749, guilty commit 0b12e6e18).
+        {
+            let mut st = self.state.lock();
+            if st.depth > 0 {
+                st.depth -= 1;
+                if st.depth == 0 {
+                    st.locked = false;
+                    st.owner = 0;
+                }
+            }
+        }
+        // R6 rt mode: with RT-class waiters queued the handoff picks
+        // the HIGHEST-priority one (reference mark_wakeup_next_waiter)
+        // and routes the boost to it — the boost we held ends, the
+        // incoming owner inherits from the remaining chain. The lock is
+        // already free per the section above; the woken waiter takes it
+        // through the same token discipline as the FIFO handoff below.
+        // No RT waiter queued (or the wake was refused): fall through
+        // to the plain R84 FIFO-head wake, unchanged.
         if self.rt {
             let rtq = {
                 let st = self.state.lock();
@@ -760,16 +781,6 @@ impl SleepMutex {
                         wpid,
                     );
                     return;
-                }
-            }
-        }
-        {
-            let mut st = self.state.lock();
-            if st.depth > 0 {
-                st.depth -= 1;
-                if st.depth == 0 {
-                    st.locked = false;
-                    st.owner = 0;
                 }
             }
         }
