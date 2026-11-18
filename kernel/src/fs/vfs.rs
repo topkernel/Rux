@@ -942,13 +942,23 @@ pub fn vfs_umount_object(mnt: &Arc<VfsMountInternal>) {
         if let Some(top) = cur.as_ref() {
             if !Arc::ptr_eq(top, mnt) {
                 // Shadowed by a newer mount at the same mountpoint: detach
-                // from the registry only. sc181: the chain-index entry
-                // STAYS — the mount's mountpoint back-ref is still set, so
-                // the old scan's climb (and thus the DFS) still reaches
-                // mounts inside this mount's tree.
+                // from the registry AND the chain index. The old code kept
+                // the index row on purpose (the DFS still reached this
+                // mount's subtree), but that left STALE rows behind after
+                // the mount left the registry: every MS_REC clone walk
+                // (collect_subtree_mounts iterates the INDEX, not the
+                // registry) then cloned these dead mounts into each new
+                // namespace — a compounding multiplier (ub2404: registry
+                // grew to 4258 mounts in minutes; each polluted clone
+                // attached stale subtrees over live paths, and later
+                // executors found /var/lib gone — the accounts-daemon
+                // STATE_DIRECTORY ENOENT that blocks the gdm greeter).
+                // A dying mount's subtree is unmounted by its own
+                // namespace Drop iterations (iter().rev() ordering).
                 drop(cur);
                 let mut state = VFS_STATE.lock();
                 state.mounts.retain(|m| !Arc::ptr_eq(m, mnt));
+                mount_index_remove(&mut state, mnt, &mp);
                 return;
             }
             *cur = None;
@@ -1189,6 +1199,17 @@ fn collect_subtree_mounts(
                 state.mounts.len(),
                 state.mount_chain_index.len()
             );
+            // Identity sample: the 8 most-recently-attached registry rows'
+            // mountpoint paths — who is filling the registry.
+            let n = state.mounts.len();
+            for m in state.mounts.iter().skip(n.saturating_sub(8)) {
+                let mp = m
+                    .root
+                    .get_mountpoint_back()
+                    .and_then(|d| d.build_path_rooted(None))
+                    .unwrap_or_else(|| alloc::string::String::from("(no-mp)"));
+                crate::pr_warn!("vfs: registry row mp={} seq={}", mp, m.seq);
+            }
         }
     }
     drop(state);
