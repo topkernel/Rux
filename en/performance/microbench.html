@@ -91,30 +91,31 @@
         <tr><td class="mono">buffered write 128MB (s)</td><td class="num">0.210</td><td class="num">0.029</td><td class="num">Linux 7.2×</td></tr>
         <tr><td class="mono">fsync (s)</td><td class="num">3.523</td><td class="num">1.142</td><td class="num">Linux 3.1×</td></tr>
         <tr><td class="mono">memset + msync(MS_SYNC) (s)</td><td class="num">0.087 + 0.572</td><td class="num">0.028 + 0.022</td><td class="num">Linux 13.9× (msync)</td></tr>
-        <tr><td class="mono">sync (s)</td><td class="num">0.487</td><td class="num">0.001</td><td class="num">Linux 487× (Rux's dirty pages were not exhausted at msync — the probe basis is shown as measured)</td></tr>
+        <tr><td class="mono">sync (s)</td><td class="num">0.487</td><td class="num">0.001</td><td class="num">Linux 487× (basis caveat)</td></tr>
         <tr><td class="mono">total wall clock (s)</td><td class="num">4.896</td><td class="num">1.223</td><td class="num">Linux 4.0×</td></tr>
       </tbody>
     </table></div>
-    <p style="font-size:13px;color:var(--text-3)">The same probe binary, the same 128MB working set, the same virtio-blk backend; the Rux gap concentrates in the msync/sync phases (the mapped-dirty-page writeback path) and fsync (the journal-commit path) — consistent with the fsync row on the <a href="fio.html">fio page</a>, the storage stack's current main shortfall.</p>
+    <p style="font-size:13px;color:var(--text-3)">The same probe binary, the same 128MB working set, the same virtio-blk backend; the Rux gap concentrates in the msync/sync phases (the mapped-dirty-page writeback path) and fsync (the journal-commit path) — consistent with the fsync row on the <a href="fio.html">fio page</a>, the storage stack's current main shortfall. The sync-phase 487× is a basis difference: Rux's writeback was not exhausted at msync — the probe basis is shown as measured.</p>
 
 <h2 id="tier1"><span class="anchor">§2</span>Tier 1: the quiet-boot census bands (the merge gate, current bands)</h2>
 <div class="tbl-wrap">
       <table>
         <thead><tr><th>Metric</th><th>Baseline / band</th></tr></thead>
         <tbody>
-          <tr><td>TERM-DESCHED census</td><td class="num">8 ± 2 (4+ consecutive boots read exactly 8/32)</td></tr>
+          <tr><td>TERM-DESCHED census</td><td class="num">8 ± 2</td></tr>
           <tr><td>WAKE-REFUSED census</td><td class="num">32 ± 4</td></tr>
           <tr><td>WAKE-STRANDED</td><td class="num">5–31 organic, no 1001 ms grid class</td></tr>
-          <tr><td>Per-CPU tick rate</td><td class="num">≥99.5/s sustained to window end (current arc reads 104–124/s)</td></tr>
+          <tr><td>Per-CPU tick rate</td><td class="num">≥99.5/s to window end</td></tr>
           <tr><td>panics / new OOM classes</td><td class="num">0</td></tr>
-          <tr><td>Syscall volume (780 s)</td><td class="num">126.0M ± 10% (same lineage class)</td></tr>
+          <tr><td>Syscall volume (780 s)</td><td class="num">126.0M ± 10%</td></tr>
           <tr><td>clock_gettime avg</td><td class="num">3–4 µs (±20% or better)</td></tr>
-          <tr><td>nanosleep avg</td><td class="num">158–203 ms family, ≤244 ms one-sided (p7_sleep1ms probe 15.8 µs on the same core)</td></tr>
-          <tr><td>IF=0 share</td><td class="num">20.4% ± 3pp (EFLAGS-pair probe if0 v3, official)</td></tr>
-          <tr><td>Longest closed cli segment</td><td class="num">≤10 ms (now 6–9 ms; the one-shot 594–599 ms class is gone)</td></tr>
+          <tr><td>nanosleep avg</td><td class="num">158–203 ms family, ≤244 ms one-sided</td></tr>
+          <tr><td>IF=0 share</td><td class="num">20.4% ± 3pp</td></tr>
+          <tr><td>Longest closed cli segment</td><td class="num">≤10 ms</td></tr>
         </tbody>
       </table>
     </div>
+    <p style="font-size:13px;color:var(--text-3)">Notes: TERM-DESCHED read exactly 8/32 across 4+ consecutive boots; the current arc reads 104–124/s ticks; the syscall volume is the same-lineage basis; the p7_sleep1ms probe reads 15.8 µs on the same core (the sleep cost is unchanged); the IF=0 share is the official EFLAGS-pair probe if0 v3; the longest cli segment now runs 6–9 ms (the one-shot 594–599 ms class is gone).</p>
 
     
 
