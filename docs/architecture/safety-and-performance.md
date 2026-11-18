@@ -527,6 +527,21 @@ absents stated plainly. Each absent names what closing looks like.
 - kptr_restrict / kallsyms masking: /proc/kallsyms shows real
   addresses to every reader (posture quick row).
 
+### 5.x e2fsck pre-existing findings (adjudicated 2026-11-18, fio-delalloc lane)
+
+Byte-identical e2fsck findings on clean-poweroff AND hard-kill images
+of main vs the lane branch — pre-existing, not introduced by any
+current change; all auto-fixable, no structural corruption observed:
+- extent-node checksum mismatch (metadata_csum family);
+- stale BLOCK_UNINIT in group descriptors;
+- block/inode free-count drift.
+Open: root-cause each (candidate surfaces: the metadata_csum
+compute-on-write path, the group-descriptor init/update path, and
+delalloc-vs-free-count accounting), then this register entry closes
+with per-finding root cause + fix. Severity: low (fsck -a heals; no
+observed data loss in any verify=md5 battery), but the family is
+registered per the data-corruption doctrine.
+
 ## 6. Process (how this grows)
 - Every merged round that lands a safety property, a perf number, or a
   bug-class elimination appends its evidence here (AGENTS.md rule,
