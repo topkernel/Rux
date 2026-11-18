@@ -103,6 +103,15 @@ static TSC_FROM_HPET: AtomicU64 = AtomicU64::new(0);
 /// and why the base must never move backward outside the rebase path.
 static TSC_LAST: AtomicU64 = AtomicU64::new(0);
 
+/// Lane instrumentation (vdso-clock): times read_time() fell off the TSC
+/// track to the HPET fallback while the track was active.
+static HPET_FALLBACK: AtomicU64 = AtomicU64::new(0);
+
+/// Consecutive track-read failures in read_time() (reset on success;
+/// ≥ TRACK_FAIL_ESCAPE trips the HPET escape hatch).
+static TRACK_FAIL: AtomicU64 = AtomicU64::new(0);
+const TRACK_FAIL_ESCAPE: u64 = 10;
+
 /// jiffies — global tick counter (advanced from the timer IRQ)
 static JIFFIES: AtomicU64 = AtomicU64::new(0);
 /// timebase value at the first LAPIC-tick jiffies update (grid origin).
@@ -174,6 +183,27 @@ pub fn monotonic_ns_since_boot() -> u64 {
 /// same instant are bit-identical (LTP clock_gettime04's strict
 /// adjacent-pair requirement). HPET-derived (one MMIO read per call)
 /// only in the pre-promotion window; jiffies-derived before either.
+///
+/// VISIBLE-CLOCK DISCIPLINE (vdso-clock hunt, 2026-11-18): the syscall
+/// clock and the vDSO track are ONE clock. Two structural violations of
+/// that were the release-profile CLOCK_MONOTONIC poison:
+///  1. the TSC_LAST ratchet was a load-then-conditional-store — two
+///     racing readers could ratchet it DOWN, after which the visible
+///     syscall clock stepped backward by the skew between their reads
+///     (measured 25 µs; served to cyclictest as (uint64)(-25µs) ≈
+///     1.8e19, which its double average prints as Avg≈1e15 with a
+///     NEGATIVE Max). Now an atomic fetch_max: it never decreases.
+///  2. when the track read failed (128 seq retries exhausted — a
+///     reader descheduled mid-retry under a publication storm), the
+///     fallback returned a RAW HPET value tens of µs off the track the
+///     vDSO was serving: clock_nanosleep armed deadlines on one clock
+///     while glibc read `now` from the other — the mixed-track skew is
+///     the negative-latency class. Now the failure path FREEZES at the
+///     ratchet (the track is forward-only; the freeze lasts only until
+///     the next successful read, typically well under a tick) and only
+///     a PERSISTENT failure (page wedged ≥ TRACK_FAIL_ESCAPE consecutive
+///     reads) escapes to the HPET through the same forward-only
+///     ratchet, loudly.
 #[inline]
 pub fn read_time() -> u64 {
     if TSC_ACTIVE.load(Ordering::Acquire) != 0 {
@@ -183,18 +213,35 @@ pub fn read_time() -> u64 {
             // Monotonic ratchet (TSC_LAST doc): never engages on a
             // healthy unified track; freezes the clock through the
             // rebase pull-back instead of stepping back.
-            let last = TSC_LAST.load(Ordering::Relaxed);
-            if v > last {
-                TSC_LAST.store(v, Ordering::Relaxed);
-            } else if v < last {
-                v = last;
+            TRACK_FAIL.store(0, Ordering::Relaxed);
+            let prev = TSC_LAST.fetch_max(v, Ordering::Relaxed);
+            if v < prev {
+                v = prev;
             }
             return v;
         }
-        // Page unreadable (writer wedged — should be impossible: the
-        // writer runs IRQ-off for a handful of stores): fall through to
-        // the HPET/jiffies branches; the ratchet keeps the visible
-        // clock monotonic across the excursion.
+        // Track busy/invalid: freeze the visible clock at the ratchet
+        // rather than mixing in a second clocksource (see the doc
+        // above). The freeze is bounded by the writer's section (µs)
+        // and the track only moves forward, so nothing strands.
+        let n = TRACK_FAIL.fetch_add(1, Ordering::Relaxed);
+        let last = TSC_LAST.load(Ordering::Relaxed);
+        if n < TRACK_FAIL_ESCAPE && last != 0 {
+            return last;
+        }
+        if n == TRACK_FAIL_ESCAPE {
+            crate::pr_warn!(
+                "tsc-clock: track unreadable {} reads — escaping to HPET (anchor wedged or TSC smashed; last={})",
+                n,
+                last
+            );
+        }
+        let hpet = crate::drivers::timer::hpet::read_time_nominal();
+        let prev = TSC_LAST.fetch_max(hpet, Ordering::Relaxed);
+        if hpet < prev {
+            return prev;
+        }
+        return hpet;
     }
     if crate::drivers::timer::hpet::ready() {
         crate::drivers::timer::hpet::read_time_nominal()
