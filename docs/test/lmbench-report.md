@@ -168,6 +168,32 @@ handoff), open (1.44x — walk loop + File construct), read (1.42x —
 copy tail), write (1.13x). lat_fs re-polluted by boot noise (no
 honest number this round).
 
+## Context-tracking QS round (2026-11-19, main=64f790cc2): bw_file_rd recovered
+
+Landed (64f790cc2): (1) the syscall-ENTRY QS report — rcu_user_exit
+semantics: entering the kernel from user proves the whole user-mode
+stretch was RCU-quiescent; one gated store on the syscall path. This
+is the user-busy CPU's report source for the console-blocked shape
+(PID 1 wedged in write(1) never fires the EXIT report; its next
+ENTRY does). (2) GP-BOUND print budget 200 -> 4 (the reports
+themselves pinned the console and manufactured the stuck-CPU they
+diagnosed).
+
+- **bw_file_rd recovered with the fixed-image runner: 33408-35545
+  MB/s = 1.45-1.54x AHEAD of the native ceiling (23045)** — the row
+  returns to the board in the ahead set.
+- The storm itself did not reproduce in this window (two A/B rounds,
+  including one under deliberate host load — both kernels clean). The
+  hardening stands on the reference shape; the storm evidence stays
+  archived (condition-specific).
+- Gates: triple-arch green, riscv suite green, LTP spot 40/40
+  same-class (execveat01's rc=2 refuted by 2/2 isolated PASS — the
+  documented stderr-suppression artifact).
+- Corrected scoreboard: **17 ahead** (16 + bw_file_rd) / 3
+  near-ceiling / 4 behind (open 1.71 / read 1.55 / write 1.30 /
+  stat 1.13) / **5 no-number** (bw_mmap_rd, lat_fs, net x4 → net x3
+  + fs).
+
 ## No-number rows adjudicated (2026-11-19): rig staleness, NOT a kernel bug + one real item promoted
 
 The user challenged the no-number rows ("之前都是有数据的"). Verdict:
