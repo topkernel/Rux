@@ -746,7 +746,7 @@ pub fn epoll_interest_snapshot() {
     if !crate::trace::EVENT_SOCKSNAP.armed() {
         return;
     }
-    crate::trace::trace_socksnap(0, unsafe { crate::process::current_pid() }, 0, 0);
+    crate::trace::trace_socksnap(0, crate::process::current_pid(), 0, 0);
     // (epoll ptr, owner pid, wait count, [(fd, events, file_id, last_reported, reports); ..])
     // — collected under the registry + entries locks, printed after release.
     let mut out: alloc::vec::Vec<(

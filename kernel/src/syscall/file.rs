@@ -221,10 +221,7 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
     if not_rooted
         && !pathname_ptr.is_null()
         && crate::arch::uaccess::access_ok(pathname_ptr as usize, probe.len())
-        && unsafe {
-            crate::arch::uaccess::copy_from_user(
-                probe.as_mut_ptr(), pathname_ptr, probe.len())
-        } == 0
+        && crate::arch::uaccess_safe::copy_in(&mut probe, pathname_ptr as usize) == 0
     {
         // nul_found gate: never walk a probe-TRUNCATED prefix of a
         // longer path (falls back to resolve_user_path instead).
@@ -275,7 +272,7 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
                                     dirfd,
                                     name,
                                     -(e as i64),
-                                    unsafe { crate::process::current_pid() }
+                                    crate::process::current_pid()
                                 );
                             }
                         }
@@ -299,7 +296,7 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
         if (flags & O_PATH_X) != 0 {
             static OPATH_TRACE_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
-            let pid = unsafe { crate::process::current_pid() };
+            let pid = crate::process::current_pid();
             let n = if pid >= 300 {
                 OPATH_TRACE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
             } else {
@@ -331,7 +328,7 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
             [const { core::sync::atomic::AtomicU32::new(0) }; 8];
         static SO_SLOT_N: [core::sync::atomic::AtomicU32; 8] =
             [const { core::sync::atomic::AtomicU32::new(0) }; 8];
-        let pid = unsafe { crate::process::current_pid() } as u32;
+        let pid = crate::process::current_pid() as u32;
         let slot = (pid % 8) as usize;
         let slot_pid = SO_SLOT_PID[slot].load(core::sync::atomic::Ordering::Relaxed);
         if slot_pid != pid && pid >= 418 {
@@ -383,7 +380,7 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
             .collect();
         if parts.len() == 3 && parts[0] == "proc" && parts[2] == "exe" && (flags & O_CREAT) == 0 {
             let pid = if parts[1] == "self" {
-                (unsafe { crate::process::current_pid() }) as u64
+                (crate::process::current_pid()) as u64
             } else {
                 match parts[1].parse::<u64>() {
                     Ok(p) => p,
@@ -460,7 +457,7 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
                 .collect();
             if parts.len() == 3 && parts[0] == "proc" && parts[2] == "environ" {
                 let pid = if parts[1] == "self" {
-                    (unsafe { crate::process::current_pid() }) as u64
+                    (crate::process::current_pid()) as u64
                 } else {
                     match parts[1].parse::<u64>() {
                         Ok(p) => p,
@@ -572,7 +569,7 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
                     flags,
                     root_str,
                     detail,
-                    unsafe { crate::process::current_pid() }
+                    crate::process::current_pid()
                 );
             }
             if let Err(e) = &result {
@@ -587,7 +584,7 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
                         flags,
                         -e,
                         root_str,
-                        unsafe { crate::process::current_pid() }
+                        crate::process::current_pid()
                     );
                 }
             }
@@ -613,7 +610,7 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
                     full_path,
                     flags,
                     -e,
-                    unsafe { crate::process::current_pid() }
+                    crate::process::current_pid()
                 );
             }
         } else if (flags & O_DIRECTORY) != 0 {
@@ -631,7 +628,7 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
                     n,
                     full_path,
                     flags,
-                    unsafe { crate::process::current_pid() }
+                    crate::process::current_pid()
                 );
             }
         }
@@ -662,7 +659,7 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
                 flags,
                 creating,
                 rc,
-                unsafe { crate::process::current_pid() }
+                crate::process::current_pid()
             );
         }
     }
@@ -720,7 +717,7 @@ pub fn sys_close(args: SyscallArgs) -> i64 {
     // removes the slot and returns the description identity the epoll
     // check below needs — the old pre-lookup (get_file + Weak capture
     // before the removal) was a whole second irq-bracketed RCU lookup.
-    unsafe {
+    {
         match close_file_fd_report(fd) {
             Ok((desc_file_id, desc_weak)) => {
                 // Linux eventpoll removes interest entries when the LAST
@@ -816,7 +813,7 @@ fn proc_fd_magic(path: &str) -> Option<(u32, u32)> {
         return None;
     }
     let pid: u32 = if pid_s == "self" {
-        unsafe { crate::process::current_pid() }
+        crate::process::current_pid()
     } else if !pid_s.is_empty() && pid_s.bytes().all(|b| b.is_ascii_digit()) {
         pid_s.parse().ok()?
     } else {
@@ -869,10 +866,7 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
     let mut probe_str: Option<&str> = None;
     if !pathname_ptr.is_null()
         && crate::arch::uaccess::access_ok(pathname_ptr as usize, probe.len())
-        && unsafe {
-            crate::arch::uaccess::copy_from_user(
-                probe.as_mut_ptr(), pathname_ptr, probe.len())
-        } == 0
+        && crate::arch::uaccess_safe::copy_in(&mut probe, pathname_ptr as usize) == 0
     {
         if let Some(len) = probe.iter().position(|&b| b == 0) {
             if let Ok(p) = core::str::from_utf8(&probe[..len]) {
@@ -952,13 +946,10 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
                         let mut stk = alloc::string::String::new();
                         for i in 0..16u64 {
                             let mut w = [0u8; 8];
-                            if unsafe {
-                                crate::arch::uaccess::copy_from_user(
-                                    w.as_mut_ptr(),
-                                    (ursp + i * 8) as *const u8,
-                                    8,
-                                )
-                            } == 0
+                            if crate::arch::uaccess_safe::copy_in(
+                                &mut w,
+                                (ursp + i * 8) as usize,
+                            ) == 0
                             {
                                 stk.push_str(&alloc::format!(" {:02x}",
                                     u64::from_le_bytes(w)));
@@ -1023,7 +1014,7 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
                     crate::pr_info!(
                         "fstatat empty-path err: dirfd={} flags={:#x} ret={} pid={}",
                         dirfd, flags, e,
-                        unsafe { crate::process::current_pid() }
+                        crate::process::current_pid()
                     );
                 }
                 return e as i64;
@@ -1056,7 +1047,7 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
                     {
                         static FSTATAT_ERR_TRACE_N: core::sync::atomic::AtomicUsize =
                             core::sync::atomic::AtomicUsize::new(0);
-                        let pid = unsafe { crate::process::current_pid() };
+                        let pid = crate::process::current_pid();
                         let n = if pid >= 300 {
                             FSTATAT_ERR_TRACE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
                         } else {
@@ -1237,7 +1228,7 @@ pub fn sys_getdents64(args: SyscallArgs) -> i64 {
                                 p,
                                 b,
                                 txt,
-                                unsafe { crate::process::current_pid() }
+                                crate::process::current_pid()
                             );
                         }
                         Err(e) => crate::pr_warn!(
@@ -1245,7 +1236,7 @@ pub fn sys_getdents64(args: SyscallArgs) -> i64 {
                             n,
                             p,
                             -e,
-                            unsafe { crate::process::current_pid() }
+                            crate::process::current_pid()
                         ),
                     }
                 }
@@ -1255,12 +1246,10 @@ pub fn sys_getdents64(args: SyscallArgs) -> i64 {
 
     match result {
         Ok(bytes_read) => {
-            // SAFETY: dirp validated with access_ok(count); bytes_read <= count.
-            let uncopied = unsafe {
-                crate::arch::uaccess::copy_to_user(
-                    dirp, buffer.as_ptr(), bytes_read,
-                )
-            };
+            // dirp validated with access_ok(count); bytes_read <= count.
+            let uncopied = crate::arch::uaccess_safe::UserSlice::new(
+                dirp as usize, bytes_read)
+                .copy_out(&buffer[..bytes_read]);
             if uncopied != 0 {
                 return -(errno::EFAULT as i64);
             }
@@ -1365,8 +1354,9 @@ pub fn sys_getdents(args: SyscallArgs) -> i64 {
     if dst == 0 {
         return 0; // end of directory (or nothing repacked)
     }
-    // SAFETY: dirp validated with access_ok(count) above; dst <= count.
-    let uncopied = unsafe { crate::arch::uaccess::copy_to_user(dirp, out.as_ptr(), dst) };
+    // dirp validated with access_ok(count) above; dst <= count.
+    let uncopied = crate::arch::uaccess_safe::UserSlice::new(dirp as usize, dst)
+        .copy_out(&out[..dst]);
     if uncopied != 0 {
         return -(errno::EFAULT as i64);
     }
@@ -1391,7 +1381,7 @@ fn datatap_log(op: &str, path: &str, detail: &str, rc: i64) {
         path,
         detail,
         rc,
-        unsafe { crate::process::current_pid() }
+        crate::process::current_pid()
     );
 }
 
@@ -1445,7 +1435,7 @@ pub fn sys_mkdirat(args: SyscallArgs) -> i64 {
             full_path,
             mode,
             rc,
-            unsafe { crate::process::current_pid() }
+            crate::process::current_pid()
         );
         return rc;
     }
@@ -1474,7 +1464,7 @@ pub fn sys_mkdirat(args: SyscallArgs) -> i64 {
                         full_path,
                         mode,
                         e,
-                        unsafe { crate::process::current_pid() }
+                        crate::process::current_pid()
                     );
                 }
             }
@@ -1663,16 +1653,10 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
     // must run before it (LTP readlinkat01's fd-direct case).
     {
         let mut pbuf = [0u8; 1];
-        // SAFETY: copy_from_user probes with the exception table in play;
-        // an unreadable pointer falls through to the normal path.
-        let empty = unsafe {
-            crate::arch::uaccess::copy_from_user(
-                pbuf.as_mut_ptr(),
-                pathname_ptr as *const u8,
-                1,
-            ) == 0
-                && pbuf[0] == 0
-        };
+        // Typed exception-table probe; an unreadable pointer falls
+        // through to the normal path.
+        let empty = crate::arch::uaccess_safe::copy_in(&mut pbuf, pathname_ptr as usize) == 0
+            && pbuf[0] == 0;
         if empty && dirfd >= 0 {
             let file = crate::sched::get_current_fdtable()
                 .and_then(|ft| ft.get_file(dirfd as usize));
@@ -1702,12 +1686,11 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
                 };
                 if let Some((tb, n)) = target {
                     let copy_len = n.min(bufsize);
-                    // SAFETY: buf validated with access_ok(bufsize);
-                    // exception-table copy.
-                    unsafe {
-                        if crate::arch::uaccess::copy_to_user(buf, tb.as_ptr(), copy_len) != 0 {
-                            return -(errno::EFAULT as i64);
-                        }
+                    // buf validated with access_ok(bufsize).
+                    if crate::arch::uaccess_safe::UserSlice::new(buf as usize, copy_len)
+                        .copy_out(&tb[..copy_len]) != 0
+                    {
+                        return -(errno::EFAULT as i64);
                     }
                     return copy_len as i64;
                 }
@@ -1728,18 +1711,16 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
     // shortcut, non-chrooted tasks only).
     if !crate::fs::vfs::process_rooted() && pathname == "/proc/self/exe" {
         if let Some(current) = crate::sched::current() {
-            // SAFETY: current is the running task's Task pointer from sched::current().
-            let exe_path = unsafe { (*current).get_exe_path() };
+            let exe_path = current.get_exe_path();
 
             // Linux readlink NEVER fails with ENAMETOOLONG — it truncates
             // the target to bufsiz and returns the truncated length (the
             // buffer is not NUL-terminated).
             let copy_len = exe_path.len().min(bufsize);
-            // SAFETY: buf validated with access_ok(bufsize); exception-table copy.
-            unsafe {
-                if crate::arch::uaccess::copy_to_user(buf, exe_path.as_ptr(), copy_len) != 0 {
-                    return -(errno::EFAULT as i64);
-                }
+            if crate::arch::uaccess_safe::UserSlice::new(buf as usize, copy_len)
+                .copy_out(&exe_path[..copy_len]) != 0
+            {
+                return -(errno::EFAULT as i64);
             }
 
             return copy_len as i64;
@@ -1754,11 +1735,10 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
         if let Some(target) = handle_proc_fd_readlink(&full_path) {
             // Same truncation semantics as above (Linux policy, not ENAMETOOLONG).
             let copy_len = target.len().min(bufsize);
-            // SAFETY: buf validated with access_ok(bufsize); exception-table copy.
-            unsafe {
-                if crate::arch::uaccess::copy_to_user(buf, target.as_ptr(), copy_len) != 0 {
-                    return -(errno::EFAULT as i64);
-                }
+            if crate::arch::uaccess_safe::UserSlice::new(buf as usize, copy_len)
+                .copy_out(&target[..copy_len]) != 0
+            {
+                return -(errno::EFAULT as i64);
             }
             return copy_len as i64;
         }
@@ -1773,11 +1753,10 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
         if let Some(target) = handle_proc_ns_readlink(&ns_full_path) {
             // Linux truncates to bufsiz and returns the truncated length.
             let copy_len = target.len().min(bufsize);
-            // SAFETY: buf validated with access_ok(bufsize); exception-table copy.
-            unsafe {
-                if crate::arch::uaccess::copy_to_user(buf, target.as_ptr(), copy_len) != 0 {
-                    return -(errno::EFAULT as i64);
-                }
+            if crate::arch::uaccess_safe::UserSlice::new(buf as usize, copy_len)
+                .copy_out(&target[..copy_len]) != 0
+            {
+                return -(errno::EFAULT as i64);
             }
             return copy_len as i64;
         }
@@ -1802,11 +1781,11 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
             return Err(-(errno::ENAMETOOLONG as i64));
         }
         let copy_len = n.min(bufsize);
-        // SAFETY: buf validated with access_ok(bufsize); exception-table copy.
-        unsafe {
-            if crate::arch::uaccess::copy_to_user(buf, target_buf.as_ptr(), copy_len) != 0 {
-                return Err(-(errno::EFAULT as i64));
-            }
+        // buf validated with access_ok(bufsize).
+        if crate::arch::uaccess_safe::UserSlice::new(buf as usize, copy_len)
+            .copy_out(&target_buf[..copy_len]) != 0
+        {
+            return Err(-(errno::EFAULT as i64));
         }
         // Linux truncates to bufsiz and returns the truncated length
         Ok(copy_len as i64)
@@ -1831,7 +1810,7 @@ fn resolve_proc_readlink_path(dirfd: i32, pathname: &str) -> alloc::string::Stri
         let mut path = alloc::string::String::from(pathname);
         if path.contains("/self/") {
             // SAFETY: current_pid() reads the current task's pid from scheduler.
-            let pid = unsafe { crate::process::current_pid() };
+            let pid = crate::process::current_pid();
             path = path.replace("/self/", &alloc::format!("/{}/", pid));
         }
         return path;
@@ -1848,8 +1827,7 @@ fn resolve_proc_readlink_path(dirfd: i32, pathname: &str) -> alloc::string::Stri
     // cwd on an absolute path).
     if !pathname.starts_with('/') && dirfd == AT_FDCWD {
         if let Some(current) = crate::sched::current() {
-            // SAFETY: current is the running task's Task pointer from sched::current().
-            let cwd = unsafe { (*current).get_cwd() };
+            let cwd = current.get_cwd();
             let cwd_str = core::str::from_utf8(&cwd).unwrap_or("?");
             let mut full = if cwd_str.ends_with('/') {
                 alloc::format!("{}{}", cwd_str, pathname)
@@ -1858,7 +1836,7 @@ fn resolve_proc_readlink_path(dirfd: i32, pathname: &str) -> alloc::string::Stri
             };
             if full.contains("/self/") {
                 // SAFETY: current_pid() reads the current task's pid from scheduler.
-                let pid = unsafe { crate::process::current_pid() };
+                let pid = crate::process::current_pid();
                 full = full.replace("/self/", &alloc::format!("/{}/", pid));
             }
             return full;
@@ -2015,7 +1993,7 @@ pub fn sys_fchdir(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
 
     // SAFETY: fd is a valid file descriptor; get_file_fd returns valid File or None.
-    let file = unsafe { crate::fs::get_file_fd(fd) }
+    let file = crate::fs::get_file_fd(fd)
         .ok_or(-(errno::EBADF as i64));
     let file = match file {
         Ok(f) => f,
@@ -2316,7 +2294,7 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
                 core::sync::atomic::AtomicUsize::new(0);
             if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
                 let comm = crate::sched::current()
-                    .map(|t| unsafe { (*t).comm() })
+                    .map(|t| t.comm())
                     .map(|c| core::str::from_utf8(c).unwrap_or(""))
                     .unwrap_or("")
                     .trim_end_matches('\0');
@@ -3272,7 +3250,7 @@ pub fn sys_futimesat(args: SyscallArgs) -> i64 {
         }
         // SAFETY: dirfd is a caller-supplied fd; get_file_fd returns None for
         // invalid fds.
-        let file = match unsafe { crate::fs::get_file_fd(dirfd as usize) } {
+        let file = match crate::fs::get_file_fd(dirfd as usize) {
             Some(f) => f,
             None => return -(errno::EBADF as i64),
         };
@@ -3605,15 +3583,12 @@ pub fn sys_fchmodat(args: SyscallArgs) -> i64 {
         let mut probe = [0u8; 64];
         if !pathname_ptr.is_null()
             && crate::arch::uaccess::access_ok(pathname_ptr as usize, probe.len())
-            && unsafe {
-                crate::arch::uaccess::copy_from_user(
-                    probe.as_mut_ptr(), pathname_ptr, probe.len())
-            } == 0
+            && crate::arch::uaccess_safe::copy_in(&mut probe, pathname_ptr as usize) == 0
         {
             let len = probe.iter().position(|&b| b == 0).unwrap_or(probe.len());
             if let Ok(p) = core::str::from_utf8(&probe[..len]) {
                 if let Some((_, fd)) = proc_fd_magic(p) {
-                    return match unsafe { crate::fs::get_file_fd(fd as usize) } {
+                    return match crate::fs::get_file_fd(fd as usize) {
                         Some(file) => fchmod_file_core(&file, mode & 0o7777),
                         None => -(errno::EBADF as i64),
                     };
@@ -3664,15 +3639,12 @@ pub fn sys_fchownat(args: SyscallArgs) -> i64 {
         let mut probe = [0u8; 64];
         if !pathname_ptr.is_null()
             && crate::arch::uaccess::access_ok(pathname_ptr as usize, probe.len())
-            && unsafe {
-                crate::arch::uaccess::copy_from_user(
-                    probe.as_mut_ptr(), pathname_ptr, probe.len())
-            } == 0
+            && crate::arch::uaccess_safe::copy_in(&mut probe, pathname_ptr as usize) == 0
         {
             let len = probe.iter().position(|&b| b == 0).unwrap_or(probe.len());
             if let Ok(p) = core::str::from_utf8(&probe[..len]) {
                 if let Some((_, fd)) = proc_fd_magic(p) {
-                    return match unsafe { crate::fs::get_file_fd(fd as usize) } {
+                    return match crate::fs::get_file_fd(fd as usize) {
                         Some(file) => fchown_file_core(&file, uid, gid),
                         None => -(errno::EBADF as i64),
                     };
@@ -3703,7 +3675,7 @@ pub fn sys_fchownat(args: SyscallArgs) -> i64 {
             if dirfd < 0 {
                 return -(errno::EBADF as i64);
             }
-            return match unsafe { crate::fs::get_file_fd(dirfd as usize) } {
+            return match crate::fs::get_file_fd(dirfd as usize) {
                 Some(file) => fchown_file_core(&file, uid, gid),
                 None => -(errno::EBADF as i64),
             };
@@ -4284,7 +4256,7 @@ pub fn sys_statx(args: SyscallArgs) -> i64 {
         // The fd's own path (the mount the open file sits on).
         // SAFETY: fd validated by file_stat above; get_file_fd returns a
         // live Arc<File> or None.
-        if let Some(f) = unsafe { crate::fs::get_file_fd(dirfd as usize) } {
+        if let Some(f) = crate::fs::get_file_fd(dirfd as usize) {
             if let Some(d) = unsafe { (*f.dentry.get()).clone() } {
                 mnt_id_path = Some(d.build_path());
             }
@@ -4558,7 +4530,7 @@ pub fn sys_openat2(args: SyscallArgs) -> i64 {
             None => return -(errno::ESRCH as i64),
         }
     } else {
-        match unsafe { crate::fs::get_file_fd(dirfd as usize) } {
+        match crate::fs::get_file_fd(dirfd as usize) {
             Some(f) => f.path(),
             None => return -(errno::EBADF as i64),
         }
@@ -4845,7 +4817,7 @@ fn mkfifo_at(path: &str, perm: u32) -> i64 {
     match crate::fs::file_open(path, 0o100 | 0o200 | 0o1000 | 0o2, perm) {
         Ok(fd) => {
             // SAFETY: fd is a valid open descriptor from file_open above.
-            let file = match unsafe { crate::fs::get_file_fd(fd) } {
+            let file = match crate::fs::get_file_fd(fd) {
                 Some(f) => f,
                 None => {
                     return -(errno::EIO as i64);
@@ -4959,7 +4931,7 @@ pub fn sys_fchmod(args: SyscallArgs) -> i64 {
     let mode = mode & 0o7777;
 
     // SAFETY: fd is a valid file descriptor; get_file_fd returns valid File or None.
-    match unsafe { crate::fs::get_file_fd(fd as usize) } {
+    match crate::fs::get_file_fd(fd as usize) {
         Some(file) => {
             // O_PATH descriptors permit no metadata changes through the
             // FD-BASED syscall (LTP open13 asserts plain fchmod on O_PATH
@@ -5084,7 +5056,7 @@ pub fn sys_fsync(args: SyscallArgs) -> i64 {
 fn do_fsync(args: SyscallArgs, datasync: i32) -> i64 {
     let fd = args[0] as i32;
     // SAFETY: fd is a valid non-negative i32; get_file_fd returns None for invalid fds.
-    match unsafe { crate::fs::get_file_fd(fd as usize) } {
+    match crate::fs::get_file_fd(fd as usize) {
         Some(file) => {
             // Linux: fsync on pipes, sockets, and FIFOs is EINVAL (no
             // fsync method), regardless of the file having an inode
@@ -5235,7 +5207,7 @@ fn xattr_inode_by_path(path: &str, follow: bool) -> Result<alloc::sync::Arc<crat
 
 fn xattr_inode_by_fd(fd: u64) -> Result<alloc::sync::Arc<crate::fs::inode::Inode>, i32> {
     // SAFETY: fd comes from the syscall args; get_file_fd validates it.
-    let file = unsafe { crate::fs::get_file_fd(fd as usize) }
+    let file = crate::fs::get_file_fd(fd as usize)
         .ok_or(-(errno::EBADF as i32))?;
     // O_PATH descriptors permit no xattr operations either — Linux rejects
     // them with EBADF before touching the inode (LTP open13).
@@ -5775,7 +5747,7 @@ pub fn sys_fchown(args: SyscallArgs) -> i64 {
     let gid = args[2] as u32;
 
     // SAFETY: fd is a valid non-negative i32; get_file_fd returns None for invalid fds.
-    match unsafe { crate::fs::get_file_fd(fd as usize) } {
+    match crate::fs::get_file_fd(fd as usize) {
         Some(file) => {
             // O_PATH descriptors permit no metadata changes through the
             // FD-BASED syscall (LTP open13 asserts plain fchown on O_PATH
@@ -5903,7 +5875,7 @@ pub fn sys_sync_file_range(args: SyscallArgs) -> i64 {
 
     // fd must exist and be open for writing (EBADF otherwise).
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
-    let file = match unsafe { crate::fs::get_file_fd(fd as usize) } {
+    let file = match crate::fs::get_file_fd(fd as usize) {
         Some(f) => f,
         None => return -(errno::EBADF as i64),
     };
@@ -6818,7 +6790,7 @@ pub fn sys_open_tree(args: SyscallArgs) -> i64 {
 
     // Resolve the tree dentry.
     let dentry = if path.is_empty() {
-        match unsafe { crate::fs::get_file_fd(dfd as usize) } {
+        match crate::fs::get_file_fd(dfd as usize) {
             Some(f) => {
                 if let Some(mfd) = fapi::mountfd_of(&f) {
                     Some(mfd.mnt.root.clone())
@@ -6973,7 +6945,7 @@ pub fn sys_move_mount(args: SyscallArgs) -> i64 {
             if flags & fapi::MOVE_MOUNT_F_EMPTY_PATH == 0 {
                 return -(errno::ENOENT as i64);
             }
-            match unsafe { crate::fs::get_file_fd(from_dfd as usize) } {
+            match crate::fs::get_file_fd(from_dfd as usize) {
                 Some(f) => {
                     if let Some(mfd) = fapi::mountfd_of(&f) {
                         let was = mfd.attached;
@@ -7001,7 +6973,7 @@ pub fn sys_move_mount(args: SyscallArgs) -> i64 {
             // inode in this model), so spell the base from the mount
             // root first (LTP move_mount02 invalid-from-path).
             let mountfd_base: Option<alloc::string::String> = (|| {
-                let f = unsafe { crate::fs::get_file_fd(from_dfd as usize) }?;
+                let f = crate::fs::get_file_fd(from_dfd as usize)?;
                 let mfd = fapi::mountfd_of(&f)?;
                 let base = mfd.mnt.root.get_mountpoint_back().map(|mp| mp.build_path())
                     .unwrap_or_else(|| mfd.mnt.root.build_path());
@@ -7066,7 +7038,7 @@ pub fn sys_move_mount(args: SyscallArgs) -> i64 {
         if flags & fapi::MOVE_MOUNT_T_EMPTY_PATH == 0 {
             return -(errno::ENOENT as i64);
         }
-        match unsafe { crate::fs::get_file_fd(to_dfd as usize) } {
+        match crate::fs::get_file_fd(to_dfd as usize) {
             Some(f) => {
                 if let Some(mfd) = fapi::mountfd_of(&f) {
                     // A mount fd as target: attach onto ITS mountpoint
@@ -7303,7 +7275,7 @@ pub fn sys_fsconfig(args: SyscallArgs) -> i64 {
     }
 
     let fd = fd_i as usize;
-    let file = match unsafe { crate::fs::get_file_fd(fd) } {
+    let file = match crate::fs::get_file_fd(fd) {
         Some(f) => f,
         None => return -(errno::EBADF as i64),
     };
@@ -7445,7 +7417,7 @@ pub fn sys_fsconfig(args: SyscallArgs) -> i64 {
                 return -(errno::EINVAL as i64);
             }
             // aux carries the descriptor: EBADF when it names none.
-            if unsafe { crate::fs::get_file_fd(args[4] as usize) }.is_none() {
+            if crate::fs::get_file_fd(args[4] as usize).is_none() {
                 return -(errno::EBADF as i64);
             }
             fc.params.push((key, None));
@@ -7502,7 +7474,7 @@ pub fn sys_fsmount(args: SyscallArgs) -> i64 {
     if args[1] & !fapi::FSMOUNT_CLOEXEC != 0 {
         return -(errno::EINVAL as i64);
     }
-    let file = match unsafe { crate::fs::get_file_fd(args[0] as usize) } {
+    let file = match crate::fs::get_file_fd(args[0] as usize) {
         Some(f) => f,
         None => return -(errno::EBADF as i64),
     };
@@ -7574,7 +7546,7 @@ pub fn sys_fspick(args: SyscallArgs) -> i64 {
         if flags & FSPICK_EMPTY_PATH == 0 {
             return -(errno::ENOENT as i64);
         }
-        match unsafe { crate::fs::get_file_fd(dfd as usize) } {
+        match crate::fs::get_file_fd(dfd as usize) {
             Some(f) => {
                 // SAFETY: dentry written once at open time; read-only.
                 match unsafe { (*f.dentry.get()).clone() } {
@@ -7720,24 +7692,23 @@ pub fn sys_epoll_pwait2(args: SyscallArgs) -> i64 {
         if !crate::arch::uaccess::access_ok(sigmask_ptr as usize, 8) {
             return -(errno::EFAULT as i64);
         }
-        let new_mask = match unsafe { crate::arch::uaccess::get_user(sigmask_ptr) } {
-            Some(v) => v,
-            None => return -(errno::EFAULT as i64),
+        let Some(new_mask) = crate::arch::uaccess_safe::UserPtr::<u64>::new(
+            sigmask_ptr as usize)
+            .read()
+        else {
+            return -(errno::EFAULT as i64);
         };
         let new_mask = new_mask & !((1u64 << 8) | (1u64 << 18));
-        if let Some(c) = crate::sched::current() {
-            let current = c as *const _ as *mut crate::process::task::Task;
-            // SAFETY: current is the running task; sigmask is a plain u64.
-            saved_mask_cell.set(unsafe { (*current).sigmask });
-            unsafe { (*current).sigmask = new_mask; }
+        if let Some(current) = crate::sched::current() {
+            // sigmask is a plain u64 on the running task.
+            saved_mask_cell.set(current.sigmask);
+            current.sigmask = new_mask;
         }
     }
     let ret = crate::syscall::misc::sys_epoll_wait([args[0], args[1], args[2], timeout_ms as u64, 0, 0]);
     if mask_applied {
-        if let Some(c) = crate::sched::current() {
-            let current = c as *const _ as *mut crate::process::task::Task;
-            // SAFETY: same running task as above.
-            unsafe { (*current).sigmask = saved_mask_cell.get(); }
+        if let Some(current) = crate::sched::current() {
+            current.sigmask = saved_mask_cell.get();
         }
     }
     ret
@@ -7877,7 +7848,7 @@ pub fn sys_mount_setattr(args: SyscallArgs) -> i64 {
         if flags & AT_EMPTY_PATH == 0 {
             return -(errno::ENOENT as i64);
         }
-        match unsafe { crate::fs::get_file_fd(dfd as usize) } {
+        match crate::fs::get_file_fd(dfd as usize) {
             Some(f) => {
                 if let Some(mfd) = fapi::mountfd_of(&f) {
                     mfd.mnt.clone()

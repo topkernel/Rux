@@ -276,12 +276,9 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         let cur = crate::sched::current();
         if let Some(cur) = cur {
             use core::sync::atomic::Ordering::Relaxed;
-            // SAFETY: cur is the running task.
-            unsafe {
-                (*cur).last_syscall_nr.store(syscall_no as u32, Relaxed);
-                (*cur).last_syscall_a0.store(args[0], Relaxed);
-                (*cur).last_syscall_a1.store(args[1], Relaxed);
-            }
+            cur.last_syscall_nr.store(syscall_no as u32, Relaxed);
+            cur.last_syscall_a0.store(args[0], Relaxed);
+            cur.last_syscall_a1.store(args[1], Relaxed);
         }
     }
 
@@ -469,12 +466,9 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], u64::MAX);
         if let Some(cur) = crate::sched::current() {
             use core::sync::atomic::Ordering::Relaxed;
-            // SAFETY: cur is the running task.
-            unsafe {
-                (*cur).last_syscall_nr.store(syscall_no as u32, Relaxed);
-                (*cur).last_syscall_a0.store(args[0], Relaxed);
-                (*cur).last_syscall_a1.store(args[1], Relaxed);
-            }
+            cur.last_syscall_nr.store(syscall_no as u32, Relaxed);
+            cur.last_syscall_a0.store(args[0], Relaxed);
+            cur.last_syscall_a1.store(args[1], Relaxed);
         }
     }
 
@@ -919,7 +913,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
                     Some(t) => {
                         // SAFETY: sched::current() returns the running task;
                         // comm_str is the lossy NUL-aware decoder.
-                        unsafe { (*t).comm_str() }
+                        t.comm_str()
                     }
                     None => alloc::borrow::Cow::Borrowed("?"),
                 };
@@ -1013,11 +1007,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // integer compare on the exec numbers only.
     if syscall_no == 59 || syscall_no == 322 {
         if let Some(cur) = crate::sched::current() {
-            unsafe {
-                (*cur)
-                    .did_exec
-                    .store(true, core::sync::atomic::Ordering::Relaxed)
-            };
+            cur.did_exec.store(true, core::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -1094,9 +1084,9 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // the clock_gettime retry loop masking the real pre-park sequence.
     if let Some(cur) = crate::sched::current() {
         use core::sync::atomic::Ordering::Relaxed;
-        let idx = unsafe { (*cur).last_calls_cur.fetch_add(1, Relaxed) }
+        let idx = cur.last_calls_cur.fetch_add(1, Relaxed)
             % crate::process::task::LAST_CALLS_LEN;
-        unsafe { (*cur).last_calls[idx].store((syscall_no as u32) & 0xffff, Relaxed) };
+        cur.last_calls[idx].store((syscall_no as u32) & 0xffff, Relaxed);
     }
 
     // sc138 (Session Q): FILTERED init ring — skips the parked child's
@@ -1127,20 +1117,16 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         if !skip {
             if let Some(cur) = crate::sched::current() {
                 use core::sync::atomic::Ordering::Relaxed;
-                let n = unsafe { (*cur).init_calls_cur.fetch_add(1, Relaxed) };
+                let n = cur.init_calls_cur.fetch_add(1, Relaxed);
                 let idx = n % crate::process::task::INIT_CALLS_LEN;
-                unsafe {
-                    (*cur).init_calls[idx].store((syscall_no as u32) & 0xffff, Relaxed);
-                    (*cur).init_a0[idx].store(args[0], Relaxed);
-                }
+                cur.init_calls[idx].store((syscall_no as u32) & 0xffff, Relaxed);
+                cur.init_a0[idx].store(args[0], Relaxed);
                 // sc143: latch the birth window once (first 64 filtered
                 // calls of this task's life) — the deep ring's tail gets
                 // churned by retry loops, the birth window cannot.
                 if n < crate::process::task::BIRTH_CALLS_LEN as usize {
-                    unsafe {
-                        (*cur).birth_calls[n].store((syscall_no as u32) & 0xffff, Relaxed);
-                        (*cur).birth_a0[n].store(args[0], Relaxed);
-                    }
+                    cur.birth_calls[n].store((syscall_no as u32) & 0xffff, Relaxed);
+                    cur.birth_a0[n].store(args[0], Relaxed);
                 }
             }
         }
@@ -1155,10 +1141,10 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     if result < 0 && result > -4096 {
         if let Some(cur) = crate::sched::current() {
             let packed = ((-(result) as u32) << 16) | ((syscall_no as u32) & 0xffff);
-            let idx = unsafe { (*cur).last_fails_cur.fetch_add(1, core::sync::atomic::Ordering::Relaxed) } % 8;
-            unsafe { (*cur).last_fails[idx].store(packed, core::sync::atomic::Ordering::Relaxed) };
-            unsafe { (*cur).last_fails_a0[idx].store(args[0], core::sync::atomic::Ordering::Relaxed) };
-            unsafe { (*cur).last_fails_a1[idx].store(args[1], core::sync::atomic::Ordering::Relaxed) };
+            let idx = cur.last_fails_cur.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % 8;
+            cur.last_fails[idx].store(packed, core::sync::atomic::Ordering::Relaxed);
+            cur.last_fails_a0[idx].store(args[0], core::sync::atomic::Ordering::Relaxed);
+            cur.last_fails_a1[idx].store(args[1], core::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -1174,7 +1160,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // park time has no xpm/dec fd, so the loop polls an open service fd.
     if syscall_no == 29 {
         let comm = crate::sched::current()
-            .map(|t| unsafe { (*t).comm() })
+            .map(|t| t.comm())
             .map(|c| core::str::from_utf8(c).unwrap_or(""))
             .unwrap_or("")
             .trim_end_matches('\0');
@@ -1208,7 +1194,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // result, budget 700).
     if syscall_no == 66 && args[0] == 3 {
         let comm = crate::sched::current()
-            .map(|t| unsafe { (*t).comm() })
+            .map(|t| t.comm())
             .map(|c| core::str::from_utf8(c).unwrap_or(""))
             .unwrap_or("")
             .trim_end_matches('\0');
@@ -1258,21 +1244,16 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
                         alloc::vec::Vec::new();
                     for vi in 0..3u64 {
                         let vp = base + vi * 16;
-                        let iobase =
-                            unsafe { crate::arch::uaccess::get_user(vp as *const u64) };
-                        let iolen =
-                            unsafe { crate::arch::uaccess::get_user((vp + 8) as *const u64) };
+                        let vp_h = crate::arch::uaccess_safe::UserSlice::new(vp as usize, 16);
+                        let iobase = vp_h.read_at::<u64>(0);
+                        let iolen = vp_h.read_at::<u64>(8);
                         if let (Some(b), Some(l)) = (iobase, iolen) {
                             if l > 0 && l < 0x10000 {
                                 let n = (l as usize).min(110);
                                 let mut buf = [0u8; 110];
-                                let ok = unsafe {
-                                    crate::arch::uaccess::copy_from_user(
-                                        buf.as_mut_ptr(),
-                                        b as *const u8,
-                                        n,
-                                    ) == 0
-                                };
+                                let ok = crate::arch::uaccess_safe::UserSlice::new(
+                                    b as usize, n)
+                                    .copy_in(&mut buf[..n]) == 0;
                                 if ok {
                                     let text: alloc::string::String = buf[..n]
                                         .iter()
@@ -1335,7 +1316,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     if syscall_no == 203 {
         let cur_task = crate::sched::current();
         let comm = cur_task
-            .map(|t| unsafe { (*t).comm() })
+            .map(|t| t.comm())
             .map(|c| core::str::from_utf8(c).unwrap_or(""))
             .unwrap_or("")
             .trim_end_matches('\0');
@@ -1370,13 +1351,8 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
                         // sc141: RAW copy — strncpy_from_user stops at the
                         // first NUL, so an abstract sockaddr printed as
                         // "all zeros" when its real name started later.
-                        let raw_ok = unsafe {
-                            crate::arch::uaccess::copy_from_user(
-                                sa.as_mut_ptr(),
-                                args[1] as *const u8,
-                                sa.len(),
-                            ) == 0
-                        };
+                        let raw_ok = crate::arch::uaccess_safe::copy_in(
+                            &mut sa, args[1] as usize) == 0;
                         if raw_ok {
                             let fam = u16::from_ne_bytes([sa[0], sa[1]]);
                             if fam == 1 {
@@ -1434,7 +1410,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // five args, scoped to the app family, budget 40.
     if syscall_no == 167 && result == -22 {
         let comm = crate::sched::current()
-            .map(|t| unsafe { (*t).comm() })
+            .map(|t| t.comm())
             .map(|c| core::str::from_utf8(c).unwrap_or(""))
             .unwrap_or("")
             .trim_end_matches('\0');
@@ -1514,7 +1490,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         && (syscall_no as u64 == 2 || syscall_no as u64 == 56 || syscall_no as u64 == 257)
     {
         let comm_ok = crate::sched::current()
-            .map(|t| unsafe { (*t).comm() })
+            .map(|t| t.comm())
             .map(|c| {
                 let s = core::str::from_utf8(&c[..]).unwrap_or("").trim_end_matches('\0');
                 s.contains("launcher")
@@ -1537,7 +1513,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
                 } else { "-" };
                 // Root context: a pivoted child resolves against its jail.
                 let root = crate::sched::current()
-                    .and_then(|t| unsafe { (*t).fs_arc() })
+                    .and_then(|t| t.fs_arc())
                     .map(|fs| fs.get_root())
                     .unwrap_or_default();
                 let root_str = core::str::from_utf8(&root).unwrap_or("?");

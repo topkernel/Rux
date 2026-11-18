@@ -64,7 +64,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
         if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
             let st = crate::mm::buddy_allocator::buddy_stats();
             let comm = crate::sched::current()
-                .map(|t| unsafe { (*t).comm() })
+                .map(|t| t.comm())
                 .map(|c| core::str::from_utf8(c).unwrap_or(""))
                 .unwrap_or("")
                 .trim_end_matches('\0');
@@ -138,7 +138,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
         && flags & 0x00010000 == 0 /* !CLONE_THREAD */
     {
         let comm = crate::sched::current()
-            .map(|t| unsafe { (*t).comm() })
+            .map(|t| t.comm())
             .map(|c| core::str::from_utf8(c).unwrap_or(""))
             .unwrap_or("")
             .trim_end_matches('\0');
@@ -217,7 +217,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
     // from "success then instant death" (worker fault/exit).
     {
         let comm = crate::sched::current()
-            .map(|t| unsafe { (*t).comm() })
+            .map(|t| t.comm())
             .map(|c| core::str::from_utf8(c).unwrap_or(""))
             .unwrap_or("")
             .trim_end_matches('\0');
@@ -478,7 +478,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                 core::sync::atomic::AtomicUsize::new(0);
             if N2.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
                 let comm = crate::sched::current()
-                    .map(|t| unsafe { (*t).comm() })
+                    .map(|t| t.comm())
                     .map(|c| core::str::from_utf8(c).unwrap_or(""))
                     .unwrap_or("")
                     .trim_end_matches('\0');
@@ -564,12 +564,12 @@ fn read_exec_file(path: &str) -> Option<alloc::vec::Vec<u8>> {
     // came back ENOENT even though the exec pre-flight path_lookup
     // succeeded. Open through the VFS (any mount) and read in chunks.
     if let Ok(fd) = crate::fs::vfs::file_open(path, 0 /* O_RDONLY */, 0) {
-        let file = unsafe { crate::fs::file::get_file_fd(fd) };
+        let file = crate::fs::file::get_file_fd(fd);
         if let Some(file) = file {
             let mut data = alloc::vec::Vec::new();
             let mut chunk = [0u8; 16384];
             loop {
-                let n = unsafe { file.read(chunk.as_mut_ptr(), chunk.len()) };
+                let n = file.read_slice(&mut chunk);
                 if n <= 0 {
                     break;
                 }
@@ -578,14 +578,13 @@ fn read_exec_file(path: &str) -> Option<alloc::vec::Vec<u8>> {
                     break;
                 }
             }
-            // SAFETY: fd came from file_open on the current task's table.
-            let _ = unsafe { crate::fs::file::close_file_fd(fd) };
+            // fd came from file_open on the current task's table.
+            let _ = crate::fs::file::close_file_fd(fd);
             if !data.is_empty() {
                 return Some(data);
             }
         } else {
-            // SAFETY: fd came from file_open on the current task's table.
-            let _ = unsafe { crate::fs::file::close_file_fd(fd) };
+            let _ = crate::fs::file::close_file_fd(fd);
         }
     }
     if crate::fs::ext4::is_mounted() {
@@ -686,8 +685,7 @@ fn read_file_via(
     let mut data = alloc::vec::Vec::with_capacity(cap);
     let mut chunk = [0u8; 16384];
     loop {
-        // SAFETY: file is a live Arc<File>; chunk is a valid kernel buffer.
-        let n = unsafe { file.read(chunk.as_mut_ptr(), chunk.len()) };
+        let n = file.read_slice(&mut chunk);
         if n <= 0 {
             break;
         }
@@ -732,8 +730,12 @@ fn copy_argv_from_user(argv_ptr: *const *const u8) -> Result<alloc::vec::Vec<all
             // Hit the entry cap with no NULL terminator seen.
             return Err(-(errno::E2BIG as i64));
         }
-        // Read one pointer from the user argv array via get_user (handles SUM + exception table).
-        let arg_ptr = match unsafe { crate::arch::uaccess::get_user(argv_ptr.add(i)) } {
+        // Typed exception-table read of one pointer from the user argv array.
+        let arg_ptr = match crate::arch::uaccess_safe::UserPtr::<*const u8>::new(
+            argv_ptr as usize + i * core::mem::size_of::<*const u8>(),
+        )
+        .read()
+        {
             Some(p) => p,
             None => break, // fault or end of array
         };
@@ -771,8 +773,12 @@ fn copy_envp_from_user(envp_ptr: *const *const u8) -> Result<alloc::vec::Vec<all
         if i == MAX_ARG_STRINGS - 1 {
             return Err(-(errno::E2BIG as i64));
         }
-        // Read one pointer from the user envp array via get_user (handles SUM + exception table).
-        let env_str_ptr = match unsafe { crate::arch::uaccess::get_user(envp_ptr.add(i)) } {
+        // Typed exception-table read of one pointer from the user envp array.
+        let env_str_ptr = match crate::arch::uaccess_safe::UserPtr::<*const u8>::new(
+            envp_ptr as usize + i * core::mem::size_of::<*const u8>(),
+        )
+        .read()
+        {
             Some(p) => p,
             None => break,
         };
@@ -858,8 +864,8 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
     };
     if xt_on {
         let comm = crate::sched::current()
-            .map(|c| unsafe {
-                let raw = (*c).comm();
+            .map(|c| {
+                let raw = c.comm();
                 let len = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
                 core::str::from_utf8(&raw[..len]).unwrap_or("?")
             })
@@ -875,8 +881,7 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
         alloc::borrow::Cow::Borrowed(pathname)
     } else {
         if let Some(current) = crate::sched::current() {
-            // SAFETY: current is guaranteed non-null from sched::current() above.
-            let cwd = unsafe { (*current).get_cwd() };
+            let cwd = current.get_cwd();
             if let Ok(cwd_str) = core::str::from_utf8(&cwd) {
                 let mut path = String::with_capacity(cwd_str.len() + pathname.len() + 1);
                 path.push_str(cwd_str);
@@ -1415,7 +1420,7 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
                 pathname_str,
                 rc,
                 root_str,
-                unsafe { crate::process::current_pid() }
+                crate::process::current_pid()
             );
         }
     } else if rc < 0 {
@@ -1433,7 +1438,7 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
         let n = EXEC_FAIL2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         if n < 48 {
             let comm = crate::sched::current()
-                .map(|t| unsafe { (*t).comm() })
+                .map(|t| t.comm())
                 .map(|c| core::str::from_utf8(c).unwrap_or(""))
                 .unwrap_or("")
                 .trim_end_matches('\0');
@@ -1443,7 +1448,7 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
                 pathname_str,
                 rc,
                 comm,
-                unsafe { crate::process::current_pid() }
+                crate::process::current_pid()
             );
         }
     }
@@ -1499,7 +1504,7 @@ pub fn sys_exit_group(args: SyscallArgs) -> i64 {
             // Ring recorded only under dfx=sysring (perf lane 2026-11).
             if crate::trace::EVENT_SYSRING.armed() {
                 use core::sync::atomic::Ordering::Relaxed;
-                let pid = unsafe { crate::process::current_pid() } as u32;
+                let pid = crate::process::current_pid() as u32;
                 let mut picks: [(u32, u64, u64, u64); 12] = [(0, 0, 0, 0); 12];
                 let mut n = 0usize;
                 for e in crate::syscall::dispatch::SYSCALL_RING.iter() {
@@ -1538,7 +1543,7 @@ pub fn sys_exit_group(args: SyscallArgs) -> i64 {
             } else {
                 crate::pr_warn!(
                     "childexit pid={} root='{}' status={:#x} (syscall ring off; boot with dfx=sysring)",
-                    unsafe { crate::process::current_pid() },
+                    crate::process::current_pid(),
                     root_str,
                     args[0] as u32
                 );
@@ -1650,7 +1655,7 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
                         0
                     } else {
                         // SAFETY: access_ok-validated in the prologue.
-                        unsafe { crate::arch::uaccess::get_user(wstatus as *const i32) }
+                        crate::arch::uaccess_safe::UserPtr::<i32>::new(wstatus as usize).read()
                             .unwrap_or(0)
                     };
                     crate::dfx::reaper::on_reap_wait4(
@@ -1731,11 +1736,11 @@ fn reaper_note_waitid(idtype: i32, id: i32, options: i32, infop: *mut u8, via_pi
     }
     // SAFETY: infop points at a validated 128-byte user buffer that
     // do_waitid just filled; each read is an exception-table uaccess.
-    let si_code = unsafe { crate::arch::uaccess::get_user(infop.add(8) as *const i32) }
+    let si_code = crate::arch::uaccess_safe::UserPtr::<i32>::new(infop as usize + 8).read()
         .unwrap_or(0);
-    let si_pid = unsafe { crate::arch::uaccess::get_user(infop.add(16) as *const u32) }
+    let si_pid = crate::arch::uaccess_safe::UserPtr::<u32>::new(infop as usize + 16).read()
         .unwrap_or(0);
-    let si_status = unsafe { crate::arch::uaccess::get_user(infop.add(24) as *const i32) }
+    let si_status = crate::arch::uaccess_safe::UserPtr::<i32>::new(infop as usize + 24).read()
         .unwrap_or(0);
     crate::dfx::reaper::on_reap_waitid(
         crate::process::current_pid(),
@@ -1896,13 +1901,11 @@ pub fn sys_waitid(args: SyscallArgs) -> i64 {
 /// namespace (ns-local pid).
 pub fn sys_getpid(_args: SyscallArgs) -> i64 {
     if let Some(current) = crate::sched::current() {
-        // SAFETY: current is guaranteed valid and non-null by
-        // sched::current(); group_leader_ptr() heals NULL. The LEADER's
-        // ns-local pid is the process's pid in the caller's namespace.
-        unsafe {
-            let leader = (*current).group_leader_ptr();
-            (*leader).ns_pid_local() as i64
-        }
+        // group_leader_ptr() heals NULL. The LEADER's ns-local pid is
+        // the process's pid in the caller's namespace (typed current;
+        // the leader pointer stays raw).
+        let leader = current.group_leader_ptr();
+        unsafe { (*leader).ns_pid_local() as i64 }
     } else {
         0
     }
@@ -1916,7 +1919,7 @@ pub fn sys_getpid(_args: SyscallArgs) -> i64 {
 pub fn sys_gettid(_args: SyscallArgs) -> i64 {
     if let Some(current) = crate::sched::current() {
         // SAFETY: current is guaranteed valid and non-null by sched::current().
-        unsafe { (*current).ns_pid_local() as i64 }
+        current.ns_pid_local() as i64
     } else {
         0
     }
@@ -1984,12 +1987,12 @@ pub fn sys_kill(args: SyscallArgs) -> i64 {
         // accepted the signal but at least one denied it.
         let my_tgid = match crate::sched::current() {
             // SAFETY: task pointer from sched::current() is valid when Some.
-            Some(t) => unsafe { (*t).tgid() },
+            Some(t) => t.tgid(),
             None => return -(errno::ESRCH as i64),
         };
         let group_filter: Option<u32> = if pid == 0 {
             // SAFETY: same current task as above.
-            Some(unsafe { (*crate::sched::current().unwrap()).pgid() })
+            crate::sched::current().map(|t| t.pgid())
         } else if pid == -1 {
             None
         } else if pid == i32::MIN {
@@ -2016,14 +2019,14 @@ pub fn sys_kill(args: SyscallArgs) -> i64 {
         // ancestor-namespace tasks killed the LTP runner itself (pidns10
         // expected ESRCH from an empty namespace; pidns17's parent died
         // by the container's own SIGUSR1 broadcast).
-        let caller_ns = crate::sched::current().and_then(|t| unsafe { (*t).ns_pid.clone() });
+        let caller_ns = crate::sched::current().and_then(|t| t.ns_pid.clone());
         // pid_hash_for_each_task covers sleeping tasks too (unlike the
         // per-CPU for_each_task which only sees running/idle tasks) — and
         // every THREAD is its own hash entry, so each live member of a
         // multithreaded group receives its own copy.
-        crate::process::pid_hash::pid_hash_for_each_task(|task| unsafe {
+        crate::process::pid_hash::pid_hash_for_each_task(|task| {
             if let Some(ref ns) = caller_ns {
-                let same_ns = (*task)
+                let same_ns = task
                     .ns_pid
                     .as_ref()
                     .map(|a| alloc::sync::Arc::ptr_eq(a, ns))
@@ -2032,22 +2035,22 @@ pub fn sys_kill(args: SyscallArgs) -> i64 {
                     return;
                 }
             }
-            let tp = (*task).pid();
+            let tp = task.pid();
             if tp == 1 {
                 return; // kill(-1) skips init
             }
             // Only kill(-1) excludes the caller's own thread group.
-            if skip_self_group && (*task).tgid() == my_tgid {
+            if skip_self_group && task.tgid() == my_tgid {
                 return;
             }
             if let Some(g) = group_filter {
-                if (*task).pgid() != g {
+                if task.pgid() != g {
                     return;
                 }
             }
             found.set(true);
             if sig > 0 {
-                if crate::security::can_send_signal((*task).cred()) {
+                if crate::security::can_send_signal(task.cred()) {
                     let _ = crate::signal::send_signal_from_user(tp, sig);
                 } else {
                     denied.set(true);
@@ -7111,7 +7114,7 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
     // is unlikely, the budget here is small and separate).
     {
         let comm = crate::sched::current()
-            .map(|t| unsafe { (*t).comm() })
+            .map(|t| t.comm())
             .map(|c| core::str::from_utf8(c).unwrap_or(""))
             .unwrap_or("")
             .trim_end_matches('\0');
