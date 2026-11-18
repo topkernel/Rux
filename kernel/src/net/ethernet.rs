@@ -591,34 +591,3 @@ pub fn ethernet_poll() {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_eth_hdr_size() {
-        assert_eq!(core::mem::size_of::<EthHdr>(), 14);
-    }
-
-    #[test]
-    fn test_eth_broadcast() {
-        let addr: [u8; 6] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
-        assert!(eth_is_broadcast_addr(&addr));
-        assert!(eth_is_multicast_addr(&addr));
-    }
-
-    #[test]
-    fn test_eth_multicast() {
-        let addr: [u8; 6] = [0x01, 0x00, 0x5E, 0x00, 0x00, 0x01];
-        assert!(eth_is_multicast_addr(&addr));
-        assert!(!eth_is_broadcast_addr(&addr));
-    }
-
-    #[test]
-    fn test_eth_unicast() {
-        let addr: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
-        assert!(!eth_is_multicast_addr(&addr));
-        assert!(!eth_is_broadcast_addr(&addr));
-        assert!(eth_is_valid_unicast_addr(&addr));
-    }
-}

@@ -503,24 +503,6 @@ pub fn ip_dispatch(skb: &mut SkBuff, ip_hdr: &IpHdr, src_ip: u32, dest_ip: u32) 
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_iphdr_size() {
-        assert_eq!(core::mem::size_of::<IpHdr>(), 20);
-    }
-
-    #[test]
-    fn test_iphdr_version_ihl() {
-        let mut hdr = IpHdr::default();
-        hdr.version_ihl = 0x45;
-
-        assert_eq!(hdr.version_ihl >> 4, 4);
-        assert_eq!(hdr.version_ihl & 0x0F, 5);
-    }
-}
 
 /// Convenience wrapper: source = device address.
 pub fn ipv4_send(skb: SkBuff, dest_ip: u32, protocol: u8) -> Result<(), ()> {

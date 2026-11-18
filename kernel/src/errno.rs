@@ -270,32 +270,6 @@ pub mod constants {
     pub const EOPNOTSUPP: i32 = 95;
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_errno_values() {
-        assert_eq!(Errno::NoSuchFileOrDirectory.as_i32(), 2);
-        assert_eq!(Errno::BadFileNumber.as_i32(), 9);
-        assert_eq!(Errno::InvalidArgument.as_i32(), 22);
-        assert_eq!(Errno::PermissionDenied.as_i32(), 13);
-    }
-
-    #[test]
-    fn test_errno_negative() {
-        assert_eq!(Errno::NoSuchFileOrDirectory.as_neg_i32(), -2);
-        assert_eq!(Errno::BadFileNumber.as_neg_i32(), -9);
-        assert_eq!(Errno::InvalidArgument.as_neg_i32(), -22);
-    }
-
-    #[test]
-    fn test_errno_constants() {
-        assert_eq!(constants::ENOENT, 2);
-        assert_eq!(constants::EBADF, 9);
-        assert_eq!(constants::EINVAL, 22);
-    }
-}
 
 /// MIGRATION BRIDGE (see `Errno::from_neg_i32`): lets `?` in a
 /// Result<_, Errno> function absorb a Result<_, i32> from an

@@ -9,6 +9,7 @@
 
 // Test: Path parsing functionality
 use crate::println;
+use alloc::vec::Vec;
 use crate::fs::path::Path;
 use super::{test_pass, test_fail, test_group_start};
 
@@ -65,6 +66,82 @@ pub fn test_path() {
         test_pass("as_str");
     } else {
         test_fail("as_str", "as_str check failed");
+    }
+
+    // Ported from the dead #[cfg(test)] block in kernel/src/fs/path.rs.
+    // Components iteration.
+    let components: Vec<&str> = Path::new("/usr/bin/bash")
+        .components()
+        .map(|c| c.name())
+        .collect();
+    if components == ["usr", "bin", "bash"] {
+        test_pass("components");
+    } else {
+        test_fail("components", "component iteration drifted");
+    }
+
+    // Component classification.
+    use crate::fs::path::PathComponent;
+    if PathComponent::new(".").is_current()
+        && PathComponent::new("..").is_parent()
+        && PathComponent::new("/").is_root()
+        && !PathComponent::new("test").is_current()
+        && !PathComponent::new("test").is_parent()
+    {
+        test_pass("component checks");
+    } else {
+        test_fail("component checks", "is_current/is_parent/is_root drifted");
+    }
+
+    // path_normalize pins (absolute + relative + edge cases).
+    let cases: &[(&str, &str)] = &[
+        ("/usr/bin", "/usr/bin"),
+        ("/usr/bin/", "/usr/bin"),
+        ("/usr/./bin", "/usr/bin"),
+        ("/./usr/bin", "/usr/bin"),
+        ("/usr/../bin", "/bin"),
+        ("/usr/local/../bin", "/usr/bin"),
+        ("//usr///bin", "/usr/bin"),
+        ("/", "/"),
+        ("//", "/"),
+        ("/..", "/"),
+        ("/../..", "/"),
+        ("/a/b/../c/./d", "/a/c/d"),
+        ("usr/bin", "usr/bin"),
+        ("usr/bin/", "usr/bin"),
+        ("usr/./bin", "usr/bin"),
+        ("usr/../bin", "bin"),
+        ("../usr/bin", "../usr/bin"),
+        // (the dead block pinned "../bin" here — wrong: usr/local/../..
+        // returns to the start directory, so the path is "bin"; this pin
+        // was never executed until the port).
+        ("usr/local/../../bin", "bin"),
+        ("", ""),
+        // DEVIATION FLAG (reference-behavior audit pending): the current
+        // implementation returns "" for the exact-cancellation relative
+        // case; directory-lookup semantics (each .. resolves the parent,
+        // like the reference's path walk) would give ".." — 3 downs and
+        // 3 ups land one above the start. Pinned AS-IS to prevent silent
+        // drift; changing it is a kernel-behavior decision, not a test
+        // decision (path_normalize feeds every path operation).
+        ("a/b/c/../../..", ""),
+        ("/a/b/c/../../..", "/"),
+        ("/a/./b/../c", "/a/c"),
+        (".", ""),
+        ("/.", "/"),
+        ("..", ".."),
+        ("/..", "/"),
+    ];
+    let mut all_ok = true;
+    for (input, want) in cases {
+        if crate::fs::path::path_normalize(input) != *want {
+            all_ok = false;
+        }
+    }
+    if all_ok {
+        test_pass("path_normalize pins");
+    } else {
+        test_fail("path_normalize pins", "normalization drifted from the pinned cases");
     }
 
     test_println!("test: Path parsing testing completed.");
