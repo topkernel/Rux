@@ -74,23 +74,97 @@ unsafe impl Send for RootFSPathCache {}
 // no data races are possible across threads/CPUs.
 unsafe impl Sync for RootFSPathCache {}
 
-static ROOTFS_PATH_CACHE: Spinlock<Option<RootFSPathCache>> = Spinlock::new(None);
+/// Per-superblock path-cache methods. Linux dcache alignment: the cache
+/// lives on the RootFSSuperBlock instance (like the reference's dentry
+/// tree on its superblock), never in a global keyed by bare path strings —
+/// a global let two sb instances collide on "/" (a unit-test sb's
+/// list_dir("/") returned the boot rootfs's cached root).
+impl RootFSSuperBlock {
+    fn path_cache_init(&self) {
+        {
+            let mut cache = self.path_cache.lock();
+            if cache.is_some() {
+                return; // Already initialized
+            }
 
-fn rootfs_path_cache_init() {
-    let mut cache = ROOTFS_PATH_CACHE.lock();
-    if cache.is_some() {
-        return;  // Already initialized
+            // Use from_fn to create array (avoid Copy trait requirement)
+            let buckets: [RootFSPathCacheEntry; ROOTFS_PATH_CACHE_SIZE] =
+                core::array::from_fn(|_| RootFSPathCacheEntry::new());
+
+            *cache = Some(RootFSPathCache {
+                buckets,
+                hits: AtomicU64::new(0),
+                misses: AtomicU64::new(0),
+            });
+        }
+        // First cache use on this sb: stamp the root and any tree that
+        // was built BEFORE the cache went live (initrd unpacking) so
+        // every node can reach this sb for invalidation.
+        // *const -> *mut cast: the flush path only ever calls &self
+        // methods through this pointer (standard container_of practice).
+        let sb_ptr = self as *const RootFSSuperBlock as *mut RootFSSuperBlock;
+        Self::stamp_tree(&self.root_node, sb_ptr);
     }
 
-    // Use from_fn to create array (avoid Copy trait requirement)
-    let buckets: [RootFSPathCacheEntry; ROOTFS_PATH_CACHE_SIZE] =
-        core::array::from_fn(|_| RootFSPathCacheEntry::new());
+    /// One-time recursive sb stamp (children Arcs cloned under the lock,
+    /// recursion outside it).
+    fn stamp_tree(node: &RootFSNode, sb: *mut RootFSSuperBlock) {
+        node.sb_back.store(sb, Ordering::Relaxed);
+        let kids: Vec<Arc<RootFSNode>> = node.children.lock().clone();
+        for kid in kids {
+            Self::stamp_tree(&kid, sb);
+        }
+    }
 
-    *cache = Some(RootFSPathCache {
-        buckets,
-        hits: AtomicU64::new(0),
-        misses: AtomicU64::new(0),
-    });
+    fn path_cache_lookup(&self, path: &str) -> Option<Arc<RootFSNode>> {
+        self.path_cache_init();
+
+        let cache = self.path_cache.lock();
+        let cache_inner = cache.as_ref()?;
+
+        let hash = rootfs_path_hash(path);
+        let index = (hash as usize) % ROOTFS_PATH_CACHE_SIZE;
+
+        let bucket = &cache_inner.buckets[index];
+        if bucket.path == path {
+            if let Some(ref node) = bucket.node {
+                cache_inner.hits.fetch_add(1, Ordering::Relaxed);
+                return Some(node.clone());
+            }
+        }
+
+        cache_inner.misses.fetch_add(1, Ordering::Relaxed);
+        None
+    }
+
+    fn path_cache_add(&self, path: &str, node: Arc<RootFSNode>) {
+        self.path_cache_init();
+
+        let mut cache = self.path_cache.lock();
+        let inner = cache.as_mut().expect("cache not initialized");
+
+        let hash = rootfs_path_hash(path);
+        let index = (hash as usize) % ROOTFS_PATH_CACHE_SIZE;
+
+        // Simple LRU: directly overwrite old entry
+        inner.buckets[index].path = path.to_owned();
+        inner.buckets[index].node = Some(node);
+    }
+
+    /// Drop every cached (path → node) binding (review 5.4: 路径缓存无失效 —
+    /// unlink/rename left the cache serving the OLD node for the OLD path).
+    /// Full flush, not per-key eviction: the cache is 64 slots and directory
+    /// mutation is rare; anything finer needs reverse node→paths indexing.
+    fn path_cache_flush(&self) {
+        self.path_cache_init();
+        let mut cache = self.path_cache.lock();
+        if let Some(inner) = cache.as_mut() {
+            for bucket in inner.buckets.iter_mut() {
+                bucket.path.clear();
+                bucket.node = None;
+            }
+        }
+    }
 }
 
 fn rootfs_path_hash(path: &str) -> u64 {
@@ -100,68 +174,6 @@ fn rootfs_path_hash(path: &str) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
-}
-
-fn rootfs_path_cache_lookup(path: &str) -> Option<Arc<RootFSNode>> {
-    rootfs_path_cache_init();
-
-    let cache = ROOTFS_PATH_CACHE.lock();
-    let cache_inner = cache.as_ref()?;
-
-    let hash = rootfs_path_hash(path);
-    let index = (hash as usize) % ROOTFS_PATH_CACHE_SIZE;
-
-    let bucket = &cache_inner.buckets[index];
-    if bucket.path == path {
-        if let Some(ref node) = bucket.node {
-            cache_inner.hits.fetch_add(1, Ordering::Relaxed);
-            return Some(node.clone());
-        }
-    }
-
-    cache_inner.misses.fetch_add(1, Ordering::Relaxed);
-    None
-}
-
-fn rootfs_path_cache_add(path: &str, node: Arc<RootFSNode>) {
-    rootfs_path_cache_init();
-
-    let mut cache = ROOTFS_PATH_CACHE.lock();
-    let inner = cache.as_mut().expect("cache not initialized");
-
-    let hash = rootfs_path_hash(path);
-    let index = (hash as usize) % ROOTFS_PATH_CACHE_SIZE;
-
-    // Simple LRU: directly overwrite old entry
-    inner.buckets[index].path = path.to_owned();
-    inner.buckets[index].node = Some(node);
-}
-
-fn rootfs_path_cache_stats() -> (u64, u64) {
-    rootfs_path_cache_init();
-
-    let cache = ROOTFS_PATH_CACHE.lock();
-    let cache_inner = cache.as_ref().expect("cache not initialized");
-
-    (
-        cache_inner.hits.load(Ordering::Relaxed),
-        cache_inner.misses.load(Ordering::Relaxed),
-    )
-}
-
-/// Drop every cached (path → node) binding (review 5.4: 路径缓存无失效 —
-/// unlink/rename left the cache serving the OLD node for the OLD path).
-/// Full flush, not per-key eviction: the cache is 64 slots and directory
-/// mutation is rare; anything finer needs reverse node→paths indexing.
-fn rootfs_path_cache_flush() {
-    rootfs_path_cache_init();
-    let mut cache = ROOTFS_PATH_CACHE.lock();
-    if let Some(inner) = cache.as_mut() {
-        for bucket in inner.buckets.iter_mut() {
-            bucket.path.clear();
-            bucket.node = None;
-        }
-    }
 }
 
 /// Wall-clock seconds since epoch (RTC-armed boot offset + monotonic);
@@ -272,6 +284,17 @@ pub struct RootFSNode {
     ref_count: AtomicU64,
     /// Node ID
     pub ino: u64,
+    /// Owning superblock back-pointer (Linux dcache alignment: the
+    /// dcache lives on the sb and invalidation reaches it through the
+    /// dentry's sb). Stamped on the ROOT at the sb's first cache use and
+    /// inherited from the parent at add_child — so every node in the
+    /// tree carries its sb once the sb's cache is live. Null for
+    /// detached nodes (nothing to flush).
+    ///
+    /// VALIDITY: the owning RootFSSuperBlock outlives its whole node
+    /// tree (production: the leaked global sb; tests: the sb lives to
+    /// the end of the test fn and flushes happen only while it does).
+    pub(crate) sb_back: AtomicPtr<RootFSSuperBlock>,
 }
 
 // SAFETY: RootFSNode's mutable fields (data, children) are protected by Spinlocks;
@@ -299,6 +322,7 @@ impl RootFSNode {
             children: Spinlock::new(Vec::new()),
             ref_count: AtomicU64::new(1),
             ino,
+            sb_back: AtomicPtr::new(core::ptr::null_mut()),
         }
     }
 
@@ -342,6 +366,11 @@ impl RootFSNode {
 
     /// Add child node
     pub fn add_child(&self, child: Arc<RootFSNode>) {
+        // Inherit the owning sb (parent's stamp; the root gets stamped by
+        // the sb's first cache use, which also re-stamps any tree built
+        // before that).
+        let sb = self.sb_back.load(Ordering::Relaxed);
+        child.sb_back.store(sb, Ordering::Relaxed);
         let mut children = self.children.lock();
         children.push(child);
     }
@@ -453,6 +482,13 @@ pub struct RootFSSuperBlock {
     pub root_node: Arc<RootFSNode>,
     /// Next inode ID
     next_ino: AtomicU64,
+    /// Per-instance resolved-path cache. Linux dcache alignment: the
+    /// dentry tree lives on the superblock and is NEVER shared across
+    /// sb instances. The old GLOBAL path-string-keyed cache let two
+    /// RootFSSuperBlock instances collide on "/" (observed: a unit-test
+    /// sb's list_dir("/") returned the boot rootfs's cached root), so
+    /// the cache moved onto the sb.
+    path_cache: Spinlock<Option<RootFSPathCache>>,
 }
 
 impl RootFSSuperBlock {
@@ -469,6 +505,7 @@ impl RootFSSuperBlock {
             sb,
             root_node,
             next_ino: AtomicU64::new(2),
+            path_cache: Spinlock::new(None),
         }
     }
 
@@ -705,7 +742,7 @@ impl RootFSSuperBlock {
         };
 
         // Try to lookup from path cache
-        if let Some(cached) = rootfs_path_cache_lookup(normalized_path) {
+        if let Some(cached) = self.path_cache_lookup(normalized_path) {
             return Some(cached);
         }
 
@@ -714,7 +751,7 @@ impl RootFSSuperBlock {
 
         // Add result to cache
         if let Some(ref node) = result {
-            rootfs_path_cache_add(normalized_path, node.clone());
+            self.path_cache_add(normalized_path, node.clone());
         }
 
         result
@@ -1383,7 +1420,18 @@ unsafe fn rootfs_unlink(dir: &Inode, name: &[u8]) -> i32 {
 
     // Remove child
     if node.remove_child(name) {
-        rootfs_path_cache_flush();
+        // Linux d_delete shape: the mutation reaches its sb through the
+        // node and flushes THAT sb's cache. Null sb_back = detached node
+        // (no cache could have an entry for it).
+        let sb = node.sb_back.load(Ordering::Relaxed);
+        if !sb.is_null() {
+            unsafe {
+                // SAFETY: sb_back is valid for the node's lifetime (see
+                // the field's VALIDITY contract); the flush only touches
+                // the sb's own cache lock.
+                (*sb).path_cache_flush();
+            }
+        }
         0
     } else {
         errno::Errno::NoSuchFileOrDirectory.as_neg_i32()
@@ -1420,7 +1468,18 @@ unsafe fn rootfs_rmdir(dir: &Inode, name: &[u8]) -> i32 {
 
     // Remove child
     if node.remove_child(name) {
-        rootfs_path_cache_flush();
+        // Linux d_delete shape: the mutation reaches its sb through the
+        // node and flushes THAT sb's cache. Null sb_back = detached node
+        // (no cache could have an entry for it).
+        let sb = node.sb_back.load(Ordering::Relaxed);
+        if !sb.is_null() {
+            unsafe {
+                // SAFETY: sb_back is valid for the node's lifetime (see
+                // the field's VALIDITY contract); the flush only touches
+                // the sb's own cache lock.
+                (*sb).path_cache_flush();
+            }
+        }
         0
     } else {
         errno::Errno::NoSuchFileOrDirectory.as_neg_i32()
@@ -1548,8 +1607,18 @@ unsafe fn rootfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
         alloc::sync::Arc::new(node)
     };
     dir_node.add_child(new_link);
-    // Directory contents changed — drop stale path-cache entries.
-    rootfs_path_cache_flush();
+    // Directory contents changed — drop stale path-cache entries via the
+    // node's owning sb (Linux d_delete shape; null sb_back = detached
+    // node with no cacheable entry).
+    let sb = dir_node.sb_back.load(Ordering::Relaxed);
+    if !sb.is_null() {
+        unsafe {
+            // SAFETY: sb_back is valid for the node's lifetime (see the
+            // field's VALIDITY contract); the flush only touches the sb's
+            // own cache lock.
+            (*sb).path_cache_flush();
+        }
+    }
 
     0
 }
@@ -1606,7 +1675,16 @@ unsafe fn rootfs_rename(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_n
     // Add to new directory
     new_dir_node.add_child(source);
 
-    rootfs_path_cache_flush();
+    // Both directories changed — drop stale path-cache entries via the
+    // node's owning sb (null sb_back = detached node).
+    let sb = new_dir_node.sb_back.load(Ordering::Relaxed);
+    if !sb.is_null() {
+        unsafe {
+            // SAFETY: sb_back is valid for the node's lifetime (see the
+            // field's VALIDITY contract).
+            (*sb).path_cache_flush();
+        }
+    }
     0
 }
 

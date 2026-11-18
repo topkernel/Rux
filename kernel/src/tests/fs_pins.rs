@@ -143,12 +143,13 @@ fn test_rootfs_pins() {
     let sb = RootFSSuperBlock::new();
     crate::test_assert!(sb.create_file("/file1.txt", b"data1".to_vec()).is_ok(), "create file1");
     crate::test_assert!(sb.create_file("/file2.txt", b"data2".to_vec()).is_ok(), "create file2");
-    // list_dir("/") would hit the GLOBAL rootfs path cache (an earlier
-    // boot-time lookup of "/" poisons the cache across test sb instances —
-    // the guest run returned a foreign node with 9 children, which is why
-    // the dead block's "2 files" pin never matched). Use the sb's own
-    // root node directly: fresh root, exactly the two created files.
-    let children = sb.get_root().unwrap().list_children();
+    // list_dir("/") exercises the per-sb path cache. The old GLOBAL
+    // cache let this fresh test sb collide with the boot rootfs's cached
+    // "/" (the guest run returned a foreign node with 9 children — the
+    // dead block's "2 files" pin never matched for that reason). The
+    // cache is per-superblock now (Linux dcache alignment), so a fresh
+    // sb lists exactly its own two created files.
+    let children = sb.list_dir("/").unwrap();
     let names: Vec<&[u8]> = children.iter().map(|c| c.name()).collect();
     crate::test_assert_eq!(children.len(), 2, "fresh root lists exactly the created files");
     crate::test_assert!(names.contains(&&b"file1.txt"[..]), "file1 listed");
