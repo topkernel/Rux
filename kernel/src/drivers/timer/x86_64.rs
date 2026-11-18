@@ -112,6 +112,12 @@ static HPET_FALLBACK: AtomicU64 = AtomicU64::new(0);
 static TRACK_FAIL: AtomicU64 = AtomicU64::new(0);
 const TRACK_FAIL_ESCAPE: u64 = 10;
 
+/// Jiffies stamp of the last escape WARNING print (rate limiter: first
+/// episode prints immediately, then at most one line per 60 s — an
+/// SMP8 boot under a persistent reader-failure storm logged 200+ lines
+/// otherwise, burying the serial console for every other consumer).
+static ESCAPE_PRINT_JIFFIES: AtomicU64 = AtomicU64::new(0);
+
 /// jiffies — global tick counter (advanced from the timer IRQ)
 static JIFFIES: AtomicU64 = AtomicU64::new(0);
 /// timebase value at the first LAPIC-tick jiffies update (grid origin).
@@ -229,12 +235,26 @@ pub fn read_time() -> u64 {
         if n < TRACK_FAIL_ESCAPE && last != 0 {
             return last;
         }
+        // Rate-limited anomaly report: the escape itself repeats (each
+        // fresh 10-fail streak re-escapes), but the print does not —
+        // an SMP8 24.04 boot logged 200+ lines interleaved with every
+        // other console consumer. First episode prints at once; then at
+        // most one line per 60 s while the condition persists.
         if n == TRACK_FAIL_ESCAPE {
-            crate::pr_warn!(
-                "tsc-clock: track unreadable {} reads — escaping to HPET (anchor wedged or TSC smashed; last={})",
-                n,
-                last
-            );
+            let now_j = get_jiffies();
+            let prev_j = ESCAPE_PRINT_JIFFIES.load(Ordering::Relaxed);
+            if prev_j == 0 || now_j.saturating_sub(prev_j) >= HZ as u64 * 60 {
+                if ESCAPE_PRINT_JIFFIES
+                    .compare_exchange(prev_j, now_j, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    crate::pr_warn!(
+                        "tsc-clock: track unreadable {} reads — escaping to HPET (anchor wedged or TSC smashed; last={})",
+                        n,
+                        last
+                    );
+                }
+            }
         }
         let hpet = crate::drivers::timer::hpet::read_time_nominal();
         let prev = TSC_LAST.fetch_max(hpet, Ordering::Relaxed);
