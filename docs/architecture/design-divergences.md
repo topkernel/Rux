@@ -1229,3 +1229,35 @@ the pi_lock protocol.
 
 **Guard.** pi_chain rounds + boost_ok counter; pi_stress -g 2
 sustained inversions; INV-C1/INV-C3 model checks.
+
+## D-28: set_event_pid matches tid OR tgid (whole-tree capture by one service tgid)
+
+**Interface.** tracefs `set_event_pid` (write: pid list; read: the
+list; empty write clears).
+
+**Reference shape.** Linux filters on the task pid alone (`comm` !=
+`tgid` threads are separate tasks; a written pid matches exactly that
+task). Capturing a whole multi-threaded service requires listing every
+tid and refreshing as threads spawn.
+
+**Rux divergence.** A listed pid matches the task's tid OR its process
+tgid: writing one service tgid captures its whole process tree for the
+life of the filter — the shape every OH hunt needs (mmi/foundation
+syscall-stream diffs, the mouse endgame). Single-threaded tools (write
+the pid you want) are behaviorally identical to the reference; the
+divergence only ADDS matches (a listed tgid also matches its threads).
+
+**Why kept.** The OH campaign's two-sided syscall-diff method needs a
+stable whole-tree filter captured at spawn time (thread tids are not
+known yet and churn); the reference's tid-only semantics force a
+userspace refresher thread racing the spawn. Internal design freedom,
+external trace text unchanged.
+
+**Evidence.** mmi arm (ruxmm5): one tgid written, 16 threads' events
+captured, 20109 lines/100s, readback `[457`; reference arm the same
+image/protocol (mode L = explicit tid list + refresh) 21910 lines —
+the diff method works both sides. Record path cost: one acquire load
+when a filter is armed, one relaxed zero-load + branch when not
+(behind the existing armed() gate) — off in default boots.
+
+**Guard.** trace-unit tests + the mm-diff rig (run/mm-diff.py).
