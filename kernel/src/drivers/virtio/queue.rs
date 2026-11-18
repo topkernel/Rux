@@ -126,6 +126,22 @@ pub struct VirtQueue {
 unsafe impl Send for VirtQueue {}
 unsafe impl Sync for VirtQueue {}
 
+/// r-strand instrument (lat_fs conviction round, 2026-11-19): the sync
+/// wait loop's phase counts, printed by the periodic dump. A stranded
+/// waiter shows SLEWED (schedule returned many times but RESP stayed
+/// pending = wake reached us yet our byte never landed) vs NEVER
+/// (schedule never returned = the wake never reached the task; the
+/// strand is scheduler-side).
+pub static VW_WAIT_ENTER: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+pub static VW_WAIT_SCHED: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+pub static VW_WAIT_RESP: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+pub static VW_WAIT_TIMEOUT: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+
 impl VirtQueue {
     /// Create new VirtQueue (using contiguous memory layout)
     ///
@@ -738,6 +754,7 @@ impl VirtQueue {
                     continue;
                 }
 
+                VW_WAIT_ENTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 // Normal path: get current task and sleep on wait queue.
                 // The idle task has SchedPolicy::Idle which enqueue_task() ignores,
                 // so sleeping would be a permanent deadlock.
@@ -820,6 +837,7 @@ impl VirtQueue {
                 // fired between the fast check above and prepare_to_wait is
                 // caught here instead of sleeping on a queue nobody will wake.
                 if unsafe { resp_done(resp_status) } {
+                    VW_WAIT_RESP.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     wait_queue.finish_wait(current);
                     // R36-B2 compensation (IoCompletion::wait discipline): a
                     // racing fire may have enqueued us between prepare and
@@ -859,7 +877,8 @@ impl VirtQueue {
                     // prev_used sentinel: caller runs its late-drain and
                     // retry (R21-N2 — never free a buffer the device may
                     // still DMA into).
-                    break 'wait_done prev_used;
+                    VW_WAIT_TIMEOUT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+break 'wait_done prev_used;
                 }
 
                 if poll_fallback {
@@ -875,6 +894,7 @@ impl VirtQueue {
                         // wait loop.
                         crate::arch::cpu::restore_irq(true);
                         crate::sched::schedule();
+                        VW_WAIT_SCHED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                         crate::timer::del_timer(id);
                     } else {
                         // Timer table STILL exhausted: never schedule()
@@ -911,6 +931,7 @@ impl VirtQueue {
                     };
                     crate::arch::cpu::restore_irq(true);
                     crate::sched::schedule();
+                    VW_WAIT_SCHED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     if rid != 0 {
                         crate::timer::del_timer(rid);
                     }

@@ -855,6 +855,17 @@ fn put_hex(v: u64) {
 /// Raw UART, allocation-free, safe from softirq context.
 pub fn dump_mem() {
     taskdump_raw_line(b"\nMEM heap ");
+        // r-strand instrument (lat_fs conviction round): the sync-wait
+        // phase counts on this proven raw path (pr_warn in the timer
+        // softirq was dropped by printk on loaded boots).
+        taskdump_raw_line(b"\nVWWAIT enter=");
+        taskdump_dec(crate::drivers::virtio::queue::VW_WAIT_ENTER.load(core::sync::atomic::Ordering::Relaxed));
+        taskdump_raw_line(b" sched=");
+        taskdump_dec(crate::drivers::virtio::queue::VW_WAIT_SCHED.load(core::sync::atomic::Ordering::Relaxed));
+        taskdump_raw_line(b" resp=");
+        taskdump_dec(crate::drivers::virtio::queue::VW_WAIT_RESP.load(core::sync::atomic::Ordering::Relaxed));
+        taskdump_raw_line(b" timeout=");
+        taskdump_dec(crate::drivers::virtio::queue::VW_WAIT_TIMEOUT.load(core::sync::atomic::Ordering::Relaxed));
     let st = crate::mm::buddy_allocator::buddy_stats();
     put_dec((st.used_bytes / 1024) as u64);
     taskdump_raw_line(b"K/");

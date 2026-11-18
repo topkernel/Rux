@@ -437,6 +437,17 @@ const fn bt_user_window() -> (u64, u64) {
     (0x1000, 0x0000_4000_0000_0000)
 }
 
+pub fn vw_wait_counters_line() -> alloc::string::String {
+    use core::sync::atomic::Ordering::Relaxed;
+    alloc::format!(
+        "VWWAIT enter={} sched={} resp={} timeout={}",
+        crate::drivers::virtio::queue::VW_WAIT_ENTER.load(Relaxed),
+        crate::drivers::virtio::queue::VW_WAIT_SCHED.load(Relaxed),
+        crate::drivers::virtio::queue::VW_WAIT_RESP.load(Relaxed),
+        crate::drivers::virtio::queue::VW_WAIT_TIMEOUT.load(Relaxed),
+    )
+}
+
 pub fn dump_all_tasks(reason: &str) {
     puts("\n=== DFX TASK DUMP (");
     puts(reason);

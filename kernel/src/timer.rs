@@ -1119,6 +1119,14 @@ fn softirq_diagnostics(current: u64) {
         // (echo consumer of the same event).
         crate::trace::trace_taskdump(1, current);
         crate::dfx::taskdump::dump_all_tasks("periodic");
+        {
+            // R34 direct-console discipline (this runs in the timer
+            // softirq; a printk here has been observed dropped).
+            use crate::dfx::taskdump::putc_brief as putchar;
+            for &b in b"\nVWWAIT ".iter() { putchar(b); }
+            let line = crate::dfx::taskdump::vw_wait_counters_line();
+            for &b in line.as_bytes() { putchar(b); }
+        }
     }
 
     // lmbench-fix lane: sweep the unlinked-RUNNING phantom (the
