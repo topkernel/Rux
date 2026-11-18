@@ -11541,6 +11541,56 @@ pub fn relink_unlinked_running_phantoms() -> u32 {
                 if task_is_mid_switch_out(task) {
                     continue;
                 }
+                // r-strand: the relink must ALSO retire an aged
+                // switch-out mark and clear the task's stale ownership
+                // qword — otherwise the next pick refuses it (oncpu=1
+                // claim=X with no live owner) and the strand just
+                // re-forms. The captured face: worker switched out
+                // mid-creat, mark unretired, qword stale, machine idle
+                // around it. (task_is_mid_switch_out above now reads
+                // aged marks as NOT in flight, so we get here.)
+                {
+                    let now = crate::drivers::timer::get_jiffies();
+                    for c in 0..MAX_CPUS {
+                        if SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire)
+                            == task as u64
+                        {
+                            let born = SWITCHING_OUT_JIF[c]
+                                .load(core::sync::atomic::Ordering::Acquire);
+                            if born == 0
+                                || now.wrapping_sub(born) >= SWITCHING_OUT_STALE_JIF
+                            {
+                                SWITCHING_OUT[c]
+                                    .store(0, core::sync::atomic::Ordering::Release);
+                                SWITCHING_OUT_JIF[c]
+                                    .store(0, core::sync::atomic::Ordering::Release);
+                                static SR_N: core::sync::atomic::AtomicU32 =
+                                    core::sync::atomic::AtomicU32::new(0);
+                                if SR_N
+                                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                                    < 24
+                                {
+                                    crate::pr_warn!(
+                                        "SWOUT-STALE-RETIRED cpu={} pid={}",
+                                        c,
+                                        tk.pid()
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    // The qword: clear when it names an owner this
+                    // sweep just proved absent (the `owned` scan ran
+                    // under the same GRQ hold).
+                    let q = core::ptr::read_volatile(
+                        core::ptr::addr_of!((*task).ti_on_cpu) as *const u64,
+                    );
+                    let q_oncpu = (q & 0xFF) != 0;
+                    let q_claim = (q >> 32) as i32;
+                    if q_oncpu || q_claim != -1 {
+                        (*task).release_pick_ownership();
+                    }
+                }
                 let mut owned = false;
                 for c in 0..MAX_CPUS {
                     if cpu_state(c).current == task {
@@ -11557,6 +11607,51 @@ pub fn relink_unlinked_running_phantoms() -> u32 {
                     _ => g.cfs_rq.is_linked(task),
                 };
                 if linked {
+                    // r-strand ID scan (lat_fs conviction round): a
+                    // LINKED, RUNNING task whose last pick-trace is
+                    // stale (or absent) is the seed-shape face —
+                    // name it so the next reproducer boot identifies
+                    // which mechanism strands it (stale qword /
+                    // counter desync / never-picked-at-all). The two
+                    // heals above fix their own faces; this keeps
+                    // ANY residual shape visible at 1 Hz. Rate-capped.
+                    static SID_N: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    if SID_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
+                        let (ago, traced) = match crate::sched::sched::pick_trace_peek(task) {
+                            Some((_, a)) => (a, true),
+                            None => (u64::MAX, false),
+                        };
+                        if ago > 200 {
+                            let q = core::ptr::read_volatile(
+                                core::ptr::addr_of!((*task).ti_on_cpu) as *const u64,
+                            );
+                            let cb = tk.comm();
+                            let cl = cb.iter().position(|&b| b == 0).unwrap_or(16);
+                            let comm =
+                                core::str::from_utf8(&cb[..cl]).unwrap_or("?");
+                            if traced {
+                                crate::pr_warn!(
+                                    "STRAND-ID pid={} comm={} st={:#x} qword={:#x} pk={} linked=true ago={}",
+                                    tk.pid(),
+                                    comm,
+                                    st.bits(),
+                                    q,
+                                    tk.pick_state(),
+                                    ago,
+                                );
+                            } else {
+                                crate::pr_warn!(
+                                    "STRAND-ID pid={} comm={} st={:#x} qword={:#x} pk={} linked=true trace=none",
+                                    tk.pid(),
+                                    comm,
+                                    st.bits(),
+                                    q,
+                                    tk.pick_state(),
+                                );
+                            }
+                        }
+                    }
                     continue;
                 }
                 // Same insert pair as wake_up_enqueue_opt: plain insert,
