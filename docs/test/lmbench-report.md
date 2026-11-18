@@ -168,6 +168,31 @@ handoff), open (1.44x — walk loop + File construct), read (1.42x —
 copy tail), write (1.13x). lat_fs re-polluted by boot noise (no
 honest number this round).
 
+## lat_connect root cause FIXED (2026-11-20, main=6957aa1f0): the fabricated ETIMEDOUT
+
+The connect() blocking wait treated every non-ESTABLISHED,
+non-handshaking state as failure and FABRICATED ETIMEDOUT when
+pending_error was 0. For an accept-and-close server (the lat_connect
+pattern), the client slot legitimately reaches CLOSE_WAIT while
+connect() still waits — the handshake COMPLETED and the peer has since
+closed; the reference reports SUCCESS there (read() returning 0 is the
+subsequent event).
+
+- Discriminator (fdprobe): connect #3-5 returned ETIMEDOUT while a
+  retry on the SAME socket returned 0; instrumented handle_synack_recv
+  showed the full handshake completing; the wire showed the server
+  FINning the live connection.
+- Fix: CLOSE_WAIT/FIN_WAIT1/2/CLOSING/LAST_ACK/TIME_WAIT resolve the
+  wait as success.
+- Verified: 2000/2000 sequential connects complete (was 3-4);
+  lat_connect runs to DONE (its remaining exit is the benchmark's own
+  parallel-fd policy, no kernel hang); net LTP spot 12/12 rc=0
+  (connect01/accept01/accept02/listen/bind/recv/send/socket/close/
+  poll); triple-arch + riscv suite green.
+- lat_connect/lat_tcp family now: functional kernel bug closed; the
+  performance rows stand as measured (tcp 2.12x / udp 2.17x vs
+  ceiling).
+
 ## No-number rows CLOSED (2026-11-19/20, user directive round): every row adjudicated
 
 Concentrated pass over the remaining no-number rows (isolated boots,
