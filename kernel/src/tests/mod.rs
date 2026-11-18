@@ -184,6 +184,10 @@ macro_rules! test_assert_eq {
 #[cfg(feature = "unit-test")]
 pub mod binder;
 #[cfg(feature = "unit-test")]
+pub mod net_pins;
+#[cfg(feature = "unit-test")]
+pub mod procfs;
+#[cfg(feature = "unit-test")]
 pub mod perf;
 #[cfg(feature = "unit-test")]
 pub mod tmpfs;
@@ -456,12 +460,10 @@ pub fn run_all_tests() {
     crate::fs::procfs::diskstats::diskstats_file_tests::snapshot_check();
     // D-4 kvtab slice (refactor lane): /proc/[pid]/status — key order,
     // tab shape and value formats pinned against a live render.
-    crate::fs::procfs::pid::status_file_tests::shape_check();
-    crate::fs::procfs::pid::status_file_tests::order_check();
-    // D-4 kvtab_pad slice (refactor lane): /proc/cpuinfo per-block key
-    // order + `key<tabs>: value` shape (per-arch, compiled per-arch).
-    crate::fs::procfs::cpuinfo::cpuinfo_file_tests::shape_check();
-    crate::fs::procfs::cpuinfo::cpuinfo_file_tests::order_check();
+    // procfs renderer pins (kernel/src/tests/procfs.rs): /proc/cpuinfo
+    // per-arch key table + /proc/[pid]/status shape and order. Formerly
+    // in-module cpuinfo_file_tests/status_file_tests blocks.
+    procfs::test_procfs();
 
     // tmpfs group (kernel/src/tests/tmpfs.rs): page store, truncate
     // tails, dir ops, and the mount-option page budget. Formerly an
@@ -630,6 +632,11 @@ pub fn run_all_tests() {
     test_group_start("ipc_sysv");
     ipc_sysv::test_ipc_sysv();
 
+    // Network pins (kernel/src/tests/net_pins.rs): skb core, header
+    // sizes, UDP/TCP state machines, checksums, ARP, routes, IPv6,
+    // loopback. LAST — it plants ARP/route table entries.
+    net_pins::test_net_pins();
+
     // Binder group (kernel/src/tests/binder.rs): alloc recycle, event
     // name table, device contexts. Formerly an in-module test inside
     // ipc/binder.rs — all binder unit tests live under kernel/src/tests/.
@@ -646,6 +653,9 @@ pub fn run_all_tests() {
     mem_cow::test_cow();
 
     // ===== 10. Network =====
+    test_group_start("net_hdrs");
+    net_hdrs::test_net_hdrs();
+
     test_group_start("tcp_handshake");
     tcp_handshake::test_tcp_handshake();
 
