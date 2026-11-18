@@ -120,7 +120,7 @@
 
     <h2 id="cctx"><span class="anchor">§3</span>上下文切换成本解剖(cctx 分段,机制注)</h2>
     <ul>
-      <li>x86_64 切换机器 ~620 ns(schedule 125 + <b>GRQ 锁等待 102</b> + pick 96 + mm 切换 202–295 + FPU 34 + FS/GS 54 + GPR ~22)—— Linux 原生切换机器 ~910 ns;其中"GRQ 锁等待"是 KVM 对跨 vCPU locked 指令的税(Linux 的 per-rq 锁同样交税,不代表 GRQ 本身慢);GRQ 锁内工作另计:精确持锁 241–273 ns(release;树操作 ~20–30 ns + D-1 记账)。fdget 直借 + getppid O(1) 后 pbench p2_ctxsw <b>0.090–0.105 µs</b>。</li>
+      <li>x86_64 切换机器 ~620 ns(schedule 125 + <b>GRQ 锁等待 102</b> + pick 96 + mm 切换 202–295 + FPU 34 + FS/GS 54 + GPR ~22)—— Linux 原生切换机器 ~910 ns;其中"GRQ 锁等待"是 KVM 对跨 vCPU locked 指令的税(Linux 的 per-rq 锁同样交税,不代表 GRQ 本身慢);GRQ 临界区另计:生产 ≈60 ns、最小括号 75–80 ns(树操作 ~20–30 ns + 记账;旧 241–273 读数含探针 ≈190 ns)。fdget 直借 + getppid O(1) 后 pbench p2_ctxsw <b>0.090–0.105 µs</b>。</li>
       <li>唤醒侧分段(WK_SEL/WK_ENQ/WK_DISP/IPI_N/IPI_NS)与 GRQ 持锁分解见<a href="../architecture/scheduler.html#instruments">调度器 §8</a>;NOHZ 对抗负载 A/B(0/10→11/12)见<a href="../architecture/interrupts.html#nohz">中断与时钟 §6</a>。</li>
     </ul>
 

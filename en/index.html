@@ -163,7 +163,7 @@
       <div class="card">
         <h3><span class="ico">⚡</span>Performance is a gate</h3>
         <p>Every merge is reviewed for both function and performance: three gate tiers + six guarded domains (memory/scheduler/fs/IRQ/IPC/binder) — no merge without measurement.</p>
-        <div class="nums">GRQ in-lock <b>0.24–0.27 µs</b> · lock wait 0.07–0.08 µs (KVM tax)</div>
+        <div class="nums">GRQ critical section <b>~0.06–0.08 µs</b> (production ~60 ns; the old 0.24–0.27 µs reading carried ~190 ns of probe self-cost)</div>
         <a class="more" href="performance/index.html">Performance section →</a>
       </div>
     </div>
@@ -181,7 +181,7 @@
       <div class="card">
         <h3><span class="ico">🧮</span>Scheduler</h3>
         <p>A single global run queue (GRQ): aimed at desktop/mobile core counts within 8 vCPUs, it eliminates load balancing and task stealing by construction; the measured-wait wakeup gate ends the per-record preempt round trip.</p>
-        <div class="nums">in-lock <b>0.24–0.27 µs</b> · census 8/32 within the allowed band</div>
+        <div class="nums">critical section <b>~0.06–0.08 µs</b> · census 8/32 within the allowed band</div>
         <a class="more" href="architecture/scheduler.html">Design →</a>
       </div>
       <div class="card">

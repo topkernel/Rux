@@ -168,7 +168,7 @@
       <div class="card">
         <h3><span class="ico">⚡</span>性能即门禁</h3>
         <p>每次合并同时审查功能与性能:三层门禁 + 六大看护域(内存/调度/文件系统/中断/IPC/binder),无测量数据不予合并。</p>
-        <div class="nums">GRQ 锁内 <b>0.24–0.27 µs</b> · 锁等待 0.07–0.08 µs(KVM 税)</div>
+        <div class="nums">GRQ 临界区 <b>~0.06–0.08 µs</b>(生产 ~60 ns;旧 0.24–0.27 µs 读数含探针自身 ~190 ns)</div>
         <a class="more" href="performance/index.html">性能栏目 →</a>
       </div>
     </div>
@@ -187,7 +187,7 @@
       <div class="card">
         <h3><span class="ico">🧮</span>调度器</h3>
         <p>单一全局运行队列(GRQ):面向 8 vCPU 以内的桌面/移动级核数,结构上消除负载迁移与任务窃取;实测等待唤醒抢占门终结逐记录抢占往返。</p>
-        <div class="nums">锁内 <b>0.24–0.27 µs</b> · 调度事件普查(启动期调度事件的计数器)8/32 在基准范围内</div>
+        <div class="nums">临界区 <b>~0.06–0.08 µs</b> · 调度事件普查(启动期调度事件的计数器)8/32 在基准范围内</div>
         <a class="more" href="architecture/scheduler.html">调度器深读 →</a>
       </div>
       <div class="card">
