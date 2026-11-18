@@ -4287,11 +4287,16 @@ pub fn enable_device_interrupt(base_addr: u64) {
         true,
     );
 
-    // Register handler via IRQ framework (unmasks automatically)
+    // Register handler via IRQ framework (unmasks automatically).
+    // RT-plan R5: IRQF_NO_THREAD — the block completion queue opts out
+    // of forced threading (every qd1 completion would pay the thread
+    // wake on its critical path; the x86_64 MSI-X twin carries the
+    // measured -28% 4k randwrite trade, run/RT-R5.md). `irqthread=all`
+    // overrides opt-outs for measurement.
     crate::interrupt::request_irq(
         irq,
         interrupt_handler,
-        0,
+        crate::interrupt::irqdesc::IRQF_NO_THREAD,
         "virtio-blk",
         base_addr as usize,
     ).ok();

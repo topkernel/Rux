@@ -1012,6 +1012,15 @@ pub fn rust_main_tail() -> ! {
             print_status("softirq", "ksoftirqd per-CPU threads", true);
         }
 
+        // RT-plan R5: activate forced per-IRQ threading. IRQ
+        // registrations run long before sched::init (the serial line,
+        // the virtio probes), so their per-IRQ threads deferred to here;
+        // until this point the dispatchers' inline fallbacks ran every
+        // action in hardirq. No-op unless irqthread=1.
+        {
+            interrupt::irqthread::boot_init();
+        }
+
         // Start the hung-task detector kthread here (late boot — after
         // secondaries are online, same context as ksoftirqd; the early
         // dfx::init() slot runs BEFORE start_secondaries so its wake_up

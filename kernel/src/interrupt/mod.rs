@@ -14,9 +14,11 @@
 //! - ksoftirqd: per-CPU kernel thread for softirq overflow
 //! - request_irq/free_irq: handler registration API
 //! - request_nmi/free_nmi: NMI handler registration API
+//! - irqthread: per-IRQ threaded service primitive (RT-plan R5)
 
 pub mod irqdesc;
 pub mod irqchip;
+pub mod irqthread;
 pub mod domain;
 pub mod preempt;
 pub mod softirq;

@@ -38,6 +38,12 @@ pub enum IrqReturn {
 /// Allow sharing this IRQ line with other devices
 pub const IRQF_SHARED: u32 = 0x00000001;
 
+/// Keep this IRQ's action chain in hardirq context even under forced
+/// threading (RT-plan R5; the reference's IRQF_NO_THREAD). Checked on
+/// the FIRST registration for the line — threading is per-line, so a
+/// NO_THREAD action forces the whole chain inline.
+pub const IRQF_NO_THREAD: u32 = 0x00000002;
+
 // ==================== IrqData ====================
 
 /// Per-interrupt hardware state.
@@ -239,18 +245,27 @@ pub fn request_irq(
         next: None,
     });
 
+    // RT-plan R5: forced threading spawns the per-IRQ thread at
+    // registration (unbound kthread_run — the R86 bind race is a
+    // kthread_run_on_cpu shape; unbound threads have no bind).
+    // IRQF_NO_THREAD opts the line out (the reference's escape hatch for
+    // latency-critical hardirq actions). The spawn happens AFTER the
+    // action lock drops (kthread_run allocates and enqueues); the flow
+    // then continues to the chip unmask — a threaded registration still
+    // needs its line ENABLED in hardware, only the dispatch context
+    // differs (the first cut's early return skipped the unmask and left
+    // the PLIC line masked: no delivery at all).
+    let mut spawn_thread = false;
+
     match action_guard.as_mut() {
         None => {
             // First handler for this IRQ
-            *action_guard = Some(new_action);
-            // RT-plan R5: forced threading spawns the per-IRQ thread at
-            // registration (unbound kthread_run — the R86 bind race is a
-            // kthread_run_on_cpu shape; unbound threads have no bind).
-            if force_threaded() {
-                drop(action_guard);
-                irq_thread_spawn(irq, name);
-                return Ok(());
+            if force_threaded()
+                && (flags & IRQF_NO_THREAD == 0 || force_thread_even_optouts())
+            {
+                spawn_thread = true;
             }
+            *action_guard = Some(new_action);
         }
         Some(existing) => {
             // Shared IRQ: check compatibility
@@ -274,6 +289,10 @@ pub fn request_irq(
     }
 
     drop(action_guard);
+
+    if spawn_thread {
+        irq_thread_spawn(irq, name);
+    }
 
     // Unmask the IRQ in hardware (irq_data lock is also taken in
     // handle_fasteoi_irq during interrupt dispatch).
@@ -513,6 +532,13 @@ pub fn handle_fasteoi_irq(irq: u32) {
 static FORCE_THREADED: core::sync::atomic::AtomicU8 =
     core::sync::atomic::AtomicU8::new(0);
 
+/// Forced-threading verdict. Cache values: 1 = off, 2 = on with the
+/// IRQF_NO_THREAD opt-outs honored (the landed shape — the virtio-blk
+/// completion queue opts out; measured 2026-11-18: threading it costs
+/// 28% of 4k randwrite direct throughput, 31.8 vs 44.3 MiB/s median,
+/// because every qd1 completion pays the thread wake on its critical
+/// path), 3 = on ignoring opt-outs (`irqthread=all`, the measurement
+/// arm). Same verdict-cache discipline as syscost::on().
 pub fn force_threaded() -> bool {
     use core::sync::atomic::Ordering;
     match FORCE_THREADED.load(Ordering::Relaxed) {
@@ -520,21 +546,26 @@ pub fn force_threaded() -> bool {
             match crate::cmdline::get_cmdline() {
                 None => return false,
                 Some(_) => {
-                    let v = if crate::cmdline::get_param("irqthread").as_deref()
-                        == Some("1")
-                    {
-                        2u8
-                    } else {
-                        1u8
+                    let v = match crate::cmdline::get_param("irqthread").as_deref() {
+                        Some("1") => 2u8,
+                        Some("all") => 3u8,
+                        _ => 1u8,
                     };
                     FORCE_THREADED.store(v, Ordering::Relaxed);
-                    v == 2
+                    v >= 2
                 }
             }
         }
-        2 => true,
+        v if v >= 2 => true,
         _ => false,
     }
+}
+
+/// `irqthread=all`: thread even the IRQF_NO_THREAD opt-outs (the
+/// measurement arm for the trade — NOT the shipping shape).
+pub fn force_thread_even_optouts() -> bool {
+    force_threaded();
+    FORCE_THREADED.load(core::sync::atomic::Ordering::Relaxed) == 3
 }
 
 use crate::process::task::TaskState;
@@ -600,12 +631,17 @@ fn irq_thread_wake(irq: u32) {
 
 /// Spawn the per-IRQ thread (called from request_irq's first-action arm
 /// when forced threading is on; unbound kthread_run — no bind race).
+/// Before the scheduler is up this no-ops (the handle_fasteoi_irq inline
+/// fallback covers the window); `irq_threads_boot_spawn` retries.
 fn irq_thread_spawn(irq: u32, name: &'static str) {
     let desc = match irq_to_desc(irq) {
         Some(d) => d,
         None => return,
     };
     if desc.thread_task.load(Ordering::Acquire) != 0 {
+        return;
+    }
+    if !crate::interrupt::irqthread::spawns_allowed() {
         return;
     }
     // The name must be &'static str (kernel_thread holds it for the
@@ -650,6 +686,33 @@ fn irq_thread_spawn(irq: u32, name: &'static str) {
     }
 }
 
+
+/// Deferred per-IRQ thread pass (post-sched::init): request_irq calls
+/// that ran before the scheduler existed (the UART registration) left
+/// their chains on the handle_fasteoi_irq inline fallback — spawn their
+/// threads now. Skips lines whose first action opted out
+/// (IRQF_NO_THREAD). Returns how many threads spawned.
+pub fn irq_threads_boot_spawn() -> usize {
+    let mut n = 0usize;
+    for i in 0..NR_IRQS {
+        let desc = &IRQ_DESC_ARRAY[i];
+        let (registered, no_thread, name) = {
+            let guard = desc.action.lock_irqsave();
+            match guard.as_ref() {
+                Some(a) => (true, a.flags & IRQF_NO_THREAD != 0, a.name),
+                None => (false, false, ""),
+            }
+        };
+        if registered && (!no_thread || force_thread_even_optouts()) {
+            let before = desc.thread_task.load(Ordering::Acquire) != 0;
+            irq_thread_spawn(i as u32, name);
+            if !before && desc.thread_task.load(Ordering::Acquire) != 0 {
+                n += 1;
+            }
+        }
+    }
+    n
+}
 
 // ==================== NMI ====================
 
