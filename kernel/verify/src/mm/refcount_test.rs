@@ -40,7 +40,8 @@ impl Page {
     /// Increment reference count
     #[inline]
     pub fn get_page(&self) -> i32 {
-        self._refcount.fetch_add(1, Ordering::AcqRel) + 1
+        let r = self._refcount.fetch_add(1, Ordering::AcqRel) + 1;
+        r
     }
 
     /// Decrement reference count with underflow protection.

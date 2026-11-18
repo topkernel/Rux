@@ -146,8 +146,11 @@ fn add_entry_to_block(
 
     // If the slack after the new entry can host another header, leave it
     // as a free (inode-0) tail entry like ext4 does; otherwise fold the
-    // remainder into the new entry's rec_len.
-    let write_rec_len = if new_rec_len - required_len >= 8 {
+    // remainder into the new entry's rec_len. The 12-byte minimum follows
+    // the kernel (0160a8f0c): slack < 12 folds into the entry, because an
+    // 8-byte inode-0 hole reads as a corruption marker in cooked ext4
+    // images.
+    let write_rec_len = if new_rec_len - required_len >= 12 {
         required_len
     } else {
         new_rec_len

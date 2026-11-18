@@ -51,7 +51,6 @@ pub fn jbd2_journal_commit_transaction(
         return Ok(());
     }
 
-    let blk_offset = journal.j_blk_offset;
     let block_size = journal.j_blocksize as usize;
     let tid = commit_transaction.t_tid;
 
@@ -274,7 +273,18 @@ pub fn jbd2_journal_commit_transaction(
                 }
             };
 
-            let data_abs_block = blk_offset + current_journal_block;
+            // ext4-persist P0 fix: journal blocks resolve through the
+            // extent map (Journal::jmap), never the contiguous
+            // arithmetic — e2fsprogs journals are multi-extent with
+            // holes, and offset+logical wrote journal data onto the
+            // inode bitmap / inode tables. 0 = unmapped hole: abort.
+            let data_abs_block = journal.jmap(current_journal_block);
+            if data_abs_block == 0 {
+                bio::brelse(src_bh);
+                journal.abort(EIO);
+                *commit_transaction.t_state.lock() = TransactionState::Finished;
+                return Err(EIO);
+            }
             // SAFETY: bio::bread returns a valid BufferHead or None (handled).
             let data_bh = unsafe {
                 match bio::bread(device, data_abs_block) {
@@ -321,7 +331,12 @@ pub fn jbd2_journal_commit_transaction(
         }
 
         // --- Build and write the descriptor block at desc_log_block ---
-        let abs_block = blk_offset + desc_log_block;
+        let abs_block = journal.jmap(desc_log_block);
+        if abs_block == 0 {
+            journal.abort(EIO);
+            *commit_transaction.t_state.lock() = TransactionState::Finished;
+            return Err(EIO);
+        }
         // SAFETY: bio::bread returns a valid BufferHead or None (handled).
         let bh = unsafe {
             match bio::bread(device, abs_block) {
@@ -448,7 +463,12 @@ pub fn jbd2_journal_commit_transaction(
         *state = TransactionState::Commit;
     }
 
-    let commit_abs_block = blk_offset + current_journal_block;
+    let commit_abs_block = journal.jmap(current_journal_block);
+    if commit_abs_block == 0 {
+        journal.abort(EIO);
+        *commit_transaction.t_state.lock() = TransactionState::Finished;
+        return Err(EIO);
+    }
     // SAFETY: bio::bread returns a valid BufferHead or None (handled by ?).
     let commit_bh = unsafe {
         match bio::bread(device, commit_abs_block) {
@@ -520,8 +540,8 @@ pub fn jbd2_journal_commit_transaction(
     journal.j_commit_sequence.store(tid, core::sync::atomic::Ordering::SeqCst);
     journal.j_tail_sequence.store(tid, core::sync::atomic::Ordering::SeqCst);
 
-    // Write journal superblock
-    write_journal_superblock(journal, device, blk_offset, current_journal_block, tid + 1)?;
+    // Write journal superblock (logical block 0, resolved through jmap)
+    write_journal_superblock(journal, device, journal.jmap(0), current_journal_block, tid + 1)?;
 
     *commit_transaction.t_state.lock() = TransactionState::Finished;
     Ok(())
@@ -581,17 +601,19 @@ fn block_tag_csum(journal: &Journal, sequence: Tid, data: &[u8]) -> u32 {
 }
 
 
-/// Write journal superblock with updated s_start and s_sequence
+/// Write journal superblock with updated s_start and s_sequence.
+/// `sb_block` is the PHYSICAL block of the journal superblock (journal
+/// logical 0, resolved by the caller through Journal::jmap).
 fn write_journal_superblock(
     journal: &Journal,
     device: *const crate::drivers::blkdev::GenDisk,
-    blk_offset: u64,
+    sb_block: u64,
     new_start: u64,
     new_sequence: u32,
 ) -> Result<(), i32> {
     // SAFETY: bio::bread returns a valid BufferHead or None (handled).
     let bh = unsafe {
-        match bio::bread(device, blk_offset) {
+        match bio::bread(device, sb_block) {
             Some(b) => b,
             None => return Err(EIO),
         }

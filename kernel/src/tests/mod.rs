@@ -182,6 +182,24 @@ macro_rules! test_assert_eq {
 
 // ===== Pure logic tests =====
 #[cfg(feature = "unit-test")]
+pub mod binder;
+#[cfg(feature = "unit-test")]
+pub mod fs_pins;
+#[cfg(feature = "unit-test")]
+pub mod mm_sched_pins;
+#[cfg(feature = "unit-test")]
+pub mod net_hdrs;
+#[cfg(feature = "unit-test")]
+pub mod net_pins;
+#[cfg(feature = "unit-test")]
+pub mod procfs;
+#[cfg(all(feature = "unit-test", feature = "x86_64"))]
+pub mod pt_regs;
+#[cfg(feature = "unit-test")]
+pub mod perf;
+#[cfg(feature = "unit-test")]
+pub mod tmpfs;
+#[cfg(feature = "unit-test")]
 pub mod dev_t;
 #[cfg(feature = "unit-test")]
 pub mod checksum;
@@ -450,16 +468,16 @@ pub fn run_all_tests() {
     crate::fs::procfs::diskstats::diskstats_file_tests::snapshot_check();
     // D-4 kvtab slice (refactor lane): /proc/[pid]/status — key order,
     // tab shape and value formats pinned against a live render.
-    crate::fs::procfs::pid::status_file_tests::shape_check();
-    crate::fs::procfs::pid::status_file_tests::order_check();
-    // D-4 kvtab_pad slice (refactor lane): /proc/cpuinfo per-block key
-    // order + `key<tabs>: value` shape (per-arch, compiled per-arch).
-    crate::fs::procfs::cpuinfo::cpuinfo_file_tests::shape_check();
-    crate::fs::procfs::cpuinfo::cpuinfo_file_tests::order_check();
+    // procfs renderer pins (kernel/src/tests/procfs.rs): /proc/cpuinfo
+    // per-arch key table + /proc/[pid]/status shape and order. Formerly
+    // in-module cpuinfo_file_tests/status_file_tests blocks.
+    procfs::test_procfs();
 
-    // tmpfs page-budget tests (mount option size=). Implemented in
-    // fs::tmpfs itself (needs private TmpfsSuperBlock access).
-    crate::fs::tmpfs::run_budget_tests();
+    // tmpfs group (kernel/src/tests/tmpfs.rs): page store, truncate
+    // tails, dir ops, and the mount-option page budget. Formerly an
+    // in-module unit-test fn plus a dead #[cfg(test)] block in
+    // fs/tmpfs.rs — all tmpfs unit tests live under kernel/src/tests/.
+    tmpfs::test_tmpfs();
 
     test_group_start("vma_flags");
     vma_flags::test_vma_flags();
@@ -485,11 +503,9 @@ pub fn run_all_tests() {
     test_group_start("signal");
     signal::test_signal();
 
-    // perf events: ABI record encoding + ring arithmetic + freq floor.
-    test_group_start("perf-records");
-    crate::perf::tests::test_record_encoding();
-    crate::perf::tests::test_ring_wrap();
-    crate::perf::tests::test_freq_floor();
+    // perf events: ABI record encoding + ring arithmetic + freq floor
+    // (moved from the in-module perf::tests block into tests/perf.rs).
+    perf::test_perf();
 
     // ===== 3. Memory management =====
     test_group_start("heap_allocator");
@@ -527,6 +543,11 @@ pub fn run_all_tests() {
     mount_flags::test_mount_flags();
 
     // ===== 4. Process management =====
+    // x86_64 ABI pins (kernel/src/tests/pt_regs.rs) — run only on
+    // x86_64 kernels (make test PLATFORM=x86_64).
+    #[cfg(feature = "x86_64")]
+    pt_regs::test_pt_regs();
+
     test_group_start("scheduler");
     scheduler::test_scheduler();
 
@@ -624,10 +645,21 @@ pub fn run_all_tests() {
     test_group_start("ipc_sysv");
     ipc_sysv::test_ipc_sysv();
 
-    // R40: semop blocking contract (block-until-post, EAGAIN only with
-    // IPC_NOWAIT) — runs AFTER the pure-logic ipc_sysv rows; it spawns
-    // helper kthreads and sleeps the boot task.
-    crate::ipc::binder::test_binder_alloc_recycle();
+    // FS + MM/sched pins (kernel/src/tests/{fs_pins,mm_sched_pins}.rs):
+    // stat/superblock/vt/rootfs/ext4 csum+indirect, slab classes, VMA,
+    // page flags/refcount/mapcount, fair weights, cmdline parsers.
+    fs_pins::test_fs_pins();
+    mm_sched_pins::test_mm_sched_pins();
+
+    // Network pins (kernel/src/tests/net_pins.rs): skb core, header
+    // sizes, UDP/TCP state machines, checksums, ARP, routes, IPv6,
+    // loopback. LAST — it plants ARP/route table entries.
+    net_pins::test_net_pins();
+
+    // Binder group (kernel/src/tests/binder.rs): alloc recycle, event
+    // name table, device contexts. Formerly an in-module test inside
+    // ipc/binder.rs — all binder unit tests live under kernel/src/tests/.
+    binder::test_binder();
 
     test_group_start("sysv_sem_block");
     sysv_sem_block::test_sysv_sem_block();
@@ -640,6 +672,9 @@ pub fn run_all_tests() {
     mem_cow::test_cow();
 
     // ===== 10. Network =====
+    test_group_start("net_hdrs");
+    net_hdrs::test_net_hdrs();
+
     test_group_start("tcp_handshake");
     tcp_handshake::test_tcp_handshake();
 
@@ -764,6 +799,18 @@ pub fn print_test_summary() {
         test_println!("\u{1b}[31m!!! TESTS FAILED !!!\u{1b}[0m");
     } else {
         test_println!("\u{1b}[32m*** ALL TESTS PASSED ***\u{1b}[0m");
+    }
+
+    // Whole-kernel coverage dump (cov-dump feature, see kernel/src/cov.rs):
+    // the .profraw is emitted as hex between [cov-begin]/[cov-end] marker
+    // lines on this console stream; the host-side report extracts it from
+    // the boot log. Runs once, after all test work.
+    #[cfg(feature = "cov-dump")]
+    {
+        match crate::cov::dump_to_console() {
+            Ok(n) => test_println!("[cov] profile emitted ({} bytes)", n),
+            Err(e) => test_println!("[cov] profile dump failed: errno {}", e),
+        }
     }
 }
 

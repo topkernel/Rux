@@ -974,6 +974,32 @@ pub fn timer_softirq_handler(_nr: usize) {
 /// itself: the LAPIC one-shot never refires while its own vector is in
 /// service (re-arm happens at tick_nohz_irq_exit, after this handler).
 pub fn expire_hres_inline() -> bool {
+    // r-strand instrument (lat_fs conviction round, 2026-11-19): probe
+    // the stuck-softirq-window face from OUTSIDE the guard. A window
+    // open >1 s means one handler never returned — this cpu's
+    // irq-exit skips dispatch (IN_PROGRESS guard), the wheel stops
+    // processing, and every timed wait strands; the softirq-side
+    // watchdog sits behind the same guard and cannot report it. The
+    // tick lands here every interval; TICK_ENTRY_RIP names where the
+    // handler sits (each tick interrupts it in the same loop).
+    {
+        let cpu = crate::arch::cpu_id() as usize;
+        if let Some((vec, age)) = crate::interrupt::softirq::stuck_window(cpu) {
+            static STUCK_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            if STUCK_N.fetch_add(1, Ordering::Relaxed) < 8 {
+                crate::pr_err!(
+                    "SOFTIRQ-STUCK-WINDOW cpu={} vec={} age={}ms rip={:#x} cs={:#x} pid={}",
+                    cpu,
+                    vec,
+                    age * 1000 / crate::config::TIMER_CLOCK_FREQ_HZ,
+                    crate::interrupt::preempt::TICK_ENTRY_RIP[cpu].load(Ordering::Relaxed),
+                    crate::interrupt::preempt::TICK_ENTRY_CS[cpu].load(Ordering::Relaxed),
+                    crate::interrupt::preempt::TICK_ENTRY_PID[cpu].load(Ordering::Relaxed),
+                );
+            }
+        }
+    }
     let now_time = crate::drivers::timer::read_time();
     if HRES_NEXT.load(Ordering::Acquire) > now_time {
         return false;

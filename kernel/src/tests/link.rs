@@ -27,6 +27,11 @@ pub fn test_link() {
 }
 
 fn test_basic_link() {
+    // Prior boots may have left these behind (the test rootfs boots
+    // read-write and persists) — a leftover target makes link(2)
+    // EEXIST and poisons every later boot (the 2026-11-18 incident).
+    let _ = crate::fs::vfs::file_unlink("/test_link_hardlink.txt");
+    let _ = crate::fs::vfs::file_unlink("/test_link_original.txt");
     // Create original file
     let oldpath = "/test_link_original.txt";
 

@@ -298,6 +298,7 @@ pub fn synchronize_rcu_bounded_pollfirst(max_ms: u64, site: &'static str) -> boo
     // Poll phase: ~100 µs of pause-hinted checks (see forced_polled).
     for _ in 0..50_000 {
         if all_online_cpus_reported(gen) {
+            shared_grace_done();
             RCU_WAITERS.fetch_sub(1, Ordering::AcqRel);
             return true;
         }
@@ -314,8 +315,49 @@ pub fn synchronize_rcu_bounded_pollfirst(max_ms: u64, site: &'static str) -> boo
 /// began — which is exactly the guarantee an RCU read-side window
 /// (preempt-off load→increment, no schedule point inside) needs.
 pub fn synchronize_rcu_forced(max_ms: u64, site: &'static str) -> bool {
-    let gen = RCU_GEN.fetch_add(1, Ordering::AcqRel) + 1;
+    let gen = shared_grace_target();
     announce_and_wait(gen, max_ms, site)
+}
+
+/// Shared-grace acquisition (the reference's synchronize_rcu shape):
+/// concurrent waiters share ONE in-flight grace period. The FIRST
+/// waiter opens the period (RCU_GEN.fetch_add); everyone else latches
+/// the same target while it is in flight. Safety for a late joiner:
+/// its target is always >= the gen it observed at entry + 1 — the
+/// reference's wait_rcu_gp(gp_seq + 1) form — so a quiescent report
+/// older than its read-side window can never satisfy its wait.
+///
+/// Why this exists: the per-waiter fetch_add let a close-storm's
+/// waiters push the completion target past every CPU's freshest report
+/// (measured: qs trailing the target by 1-3 generations in the
+/// RCU-GP-BOUND dumps) — each waiter timed out, deferred, and became
+/// another waiter: the lat_fs / bw_tcp bimodal stall family.
+static GP_IN_FLIGHT: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+fn shared_grace_target() -> u32 {
+    if GP_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        // First waiter: open a new period.
+        RCU_GEN.fetch_add(1, Ordering::AcqRel) + 1
+    } else {
+        // A period is in flight — latch its target. The read-side
+        // window this waiter needs closed STARTED before this load, and
+        // the in-flight period opened at or after the previous period's
+        // completion — a CPU report satisfying this target was taken
+        // after this period began, which is after our window opened
+        // (the same guarantee the per-waiter fetch_add gave).
+        RCU_GEN.load(Ordering::Acquire)
+    }
+}
+
+/// Complete the in-flight period (called by the waiter that observed
+/// all CPUs reported) so the next shared_grace_target opens a fresh
+/// one.
+fn shared_grace_done() {
+    GP_IN_FLIGHT.store(false, Ordering::Release);
 }
 
 /// Forced grace period with SLEEPING polls — the fd-table reaper's form.
@@ -332,7 +374,7 @@ pub fn synchronize_rcu_forced(max_ms: u64, site: &'static str) -> bool {
 /// syscall-exiting CPUs report continuously while a waiter is armed)
 /// still completes without sleeping at all.
 pub fn synchronize_rcu_forced_sleepy(max_ms: u64, site: &'static str) -> bool {
-    let gen = RCU_GEN.fetch_add(1, Ordering::AcqRel) + 1;
+    let gen = shared_grace_target();
     RCU_WAITERS.fetch_add(1, Ordering::AcqRel);
     rcu_note_context_switch();
     wait_qs_sleepy(gen, max_ms, site)
@@ -349,7 +391,7 @@ pub fn synchronize_rcu_forced_sleepy(max_ms: u64, site: &'static str) -> bool {
 /// typical µs-scale report window FIRST, and only falls back to the
 /// sleeping poll for a genuinely monopolist CPU.
 pub fn synchronize_rcu_forced_polled(max_ms: u64, site: &'static str) -> bool {
-    let gen = RCU_GEN.fetch_add(1, Ordering::AcqRel) + 1;
+    let gen = shared_grace_target();
     RCU_WAITERS.fetch_add(1, Ordering::AcqRel);
     rcu_note_context_switch();
     // Poll phase: ~100 µs of pause-hinted checks covers a peer's
@@ -377,11 +419,13 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
 
     loop {
         if all_online_cpus_reported(gen) {
+            shared_grace_done();
             RCU_WAITERS.fetch_sub(1, Ordering::AcqRel);
             GP_CONSEC_FAIL.store(0, Ordering::Relaxed);
             return true;
         }
         if crate::drivers::timer::get_jiffies() >= deadline {
+            shared_grace_done();
             RCU_WAITERS.fetch_sub(1, Ordering::AcqRel);
             static SGP_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);

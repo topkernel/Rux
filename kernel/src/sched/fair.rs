@@ -1606,8 +1606,21 @@ impl CfsRunQueue {
         // plain store — no other decrement can interleave between the
         // sub and the restore. Same checked-sub semantics, one bus op.
         let old = self.nr_running.fetch_sub(1, Ordering::SeqCst);
+        if old == 1 {
+            // grq-hold-slim Cut 2: CFS emptied — clear the class
+            // nonempty bit (GRQ-held; see CLASS_NONEMPTY in sched.rs).
+            crate::sched::sched::class_nonempty_clear(
+                crate::sched::sched::CLASS_CFS_BIT,
+            );
+        }
         if old == 0 {
             self.nr_running.store(0, Ordering::SeqCst);
+            // Cut 2 consistency: the counter reads 0 again after the
+            // restore — keep the class bit identical to what is_empty()
+            // would now report.
+            crate::sched::sched::class_nonempty_clear(
+                crate::sched::sched::CLASS_CFS_BIT,
+            );
             // REGRESSION GUARD: the counter was already 0 when a
             // removal path decremented again. The one historical producer
             // was the 2b092c49 discarded-guard GRQ unlock (every critical
@@ -1888,7 +1901,7 @@ impl CfsRunQueue {
     /// let min_vruntime run arbitrarily far ahead of the running task — a
     /// sleeper woken later than one latency window was clamped up to
     /// min_vruntime, erasing its entire sleep compensation.
-    fn update_min_vruntime(&mut self) {
+    pub(crate) fn update_min_vruntime(&mut self) {
         // SAFETY: self.curr is either null or set by set_curr() to a valid
         // Task pointer; only its sched_entity vruntime is read.
         let curr_v = if self.curr.is_null() {
@@ -2036,7 +2049,14 @@ impl CfsRunQueue {
             se.set_on_rq(true);
 
             // Update task count and total weight
-            self.nr_running.fetch_add(1, Ordering::AcqRel);
+            // grq-hold-slim Cut 2: on the 0 -> nonempty transition set
+            // the class bit (GRQ-held; see CLASS_NONEMPTY in sched.rs).
+            let nr_old = self.nr_running.fetch_add(1, Ordering::AcqRel);
+            if nr_old == 0 {
+                crate::sched::sched::class_nonempty_set(
+                    crate::sched::sched::CLASS_CFS_BIT,
+                );
+            }
             self.load_weight.fetch_add(se.load.weight, Ordering::AcqRel);
 
             // Update minimum vruntime
@@ -2140,6 +2160,34 @@ impl CfsRunQueue {
         // the timeline discipline covers its sched_entity access.
         let se = unsafe { (*task).sched_entity() };
         se.timeline_key().is_some()
+    }
+
+    /// r-strand face (a) heal (lat_fs conviction, 2026-11-19): counter/
+    /// timeline desync — the GRQ counter reads 0 while the timeline
+    /// still holds entries, so every idle CPU WFI-halts on
+    /// nr_running==0 and never attempts the pick (the R20-2 recheck is
+    /// counter-gated): the stranded entry starves with all CPUs idle.
+    /// Recount the timeline and resync the counter + class bit when
+    /// they disagree. GRQ-HELD by the caller; 1 Hz cadence (the phantom
+    /// sweep) keeps the walk cost out of the hot path. Returns
+    /// (was, now) for the heal report, or None when paired.
+    pub fn resync_nr_running_from_timeline(&mut self) -> Option<(u64, u64)> {
+        let truth = self.timeline_head_diag(&mut []) as u64;
+        let was = self.nr_running.load(Ordering::Acquire);
+        if truth == was {
+            return None;
+        }
+        self.nr_running.store(truth, Ordering::Release);
+        if truth > 0 {
+            crate::sched::sched::class_nonempty_set(
+                crate::sched::sched::CLASS_CFS_BIT,
+            );
+        } else {
+            crate::sched::sched::class_nonempty_clear(
+                crate::sched::sched::CLASS_CFS_BIT,
+            );
+        }
+        Some((was, truth))
     }
 
     /// nanosleep-loss lane (hunt instrument): bounded in-order walk of
@@ -3667,7 +3715,16 @@ impl CfsRunQueue {
 
         // Multiply first, then divide to avoid integer truncation to 0.
         // This matches Linux's approach (period * weight / total_weight).
-        let slice = (sched_period as u128 * se.load.weight as u128 / load_weight as u128) as u64;
+        // grq-hold-slim Cut 1: 64-bit form (the reference's own
+        // arithmetic class — fair.c computes the slice with 64-bit
+        // multiply/divide). The u128 lowering pulled a software 128-bit
+        // divide into the GRQ-held pick on every switch; every real
+        // input is far below overflow (sched_period <= ~3 s even at the
+        // garbage-capped count, weight <= ~87x NICE_0_LOAD, product
+        // <= ~2.7e17 << u64::MAX), and counts beyond the 1e6 tripwire
+        // above are already reported, so saturating_mul returns the
+        // exact u128 value wherever the value is meaningful.
+        let slice = sched_period.saturating_mul(se.load.weight) / load_weight;
 
         // Ensure not less than minimum granularity
         slice.max(SCHED_MIN_GRANULARITY_NS)
@@ -3747,6 +3804,9 @@ impl CfsRunQueue {
         self.curr = core::ptr::null_mut();
         self.nr_running.store(0, Ordering::Release);
         self.load_weight.store(0, Ordering::Release);
+        // grq-hold-slim Cut 2: the drain emptied CFS — clear the class
+        // bit (GRQ-held).
+        crate::sched::sched::class_nonempty_clear(crate::sched::sched::CLASS_CFS_BIT);
     }
 }
 
@@ -3912,42 +3972,3 @@ impl SchedClass for FairSchedClass {
 /// Global fair scheduling class instance
 pub static FAIR_SCHED_CLASS: FairSchedClass = FairSchedClass::new();
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_load_weight() {
-        // nice = 0 weight should be 1024
-        let lw = LoadWeight::from_nice(0);
-        assert_eq!(lw.weight, 1024);
-
-        // nice = -20 weight should be largest
-        let lw_high = LoadWeight::from_nice(-20);
-        assert!(lw_high.weight > lw.weight);
-
-        // nice = 19 weight should be smallest
-        let lw_low = LoadWeight::from_nice(19);
-        assert!(lw_low.weight < lw.weight);
-    }
-
-    #[test]
-    fn test_vruntime_calculation() {
-        let se = SchedEntity::new();
-
-        // When nice = 0, vruntime should equal actual runtime
-        let delta = 1_000_000; // 1ms
-        let vruntime = se.calc_delta_fair(delta);
-        assert_eq!(vruntime, delta);
-    }
-
-    #[test]
-    fn test_cfs_rq_enqueue_dequeue() {
-        let mut rq = CfsRunQueue::new();
-
-        // Create test task structure
-        // Note: Actual testing requires valid Task pointers
-        assert!(rq.is_empty());
-        assert_eq!(rq.nr_running(), 0);
-    }
-}

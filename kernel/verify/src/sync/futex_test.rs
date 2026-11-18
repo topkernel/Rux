@@ -51,11 +51,15 @@ pub struct FutexKey {
     /// keys via `new`, which leaves it 0 like the kernel's torn-down and
     /// kernel-thread paths; only `new_user` resolves it in the kernel).
     pub phys: usize,
+    /// OBJECT identity (kernel field): true when the word lives in a
+    /// shared-object mapping and keys on the physical frame. Tests build
+    /// keys via `new`, which leaves it false like the kernel.
+    pub object: bool,
 }
 
 impl FutexKey {
     pub fn new(uaddr: usize, mm: usize, flags: u32) -> Self {
-        Self { uaddr, mm, flags, phys: 0 }
+        Self { uaddr, mm, flags, phys: 0, object: false }
     }
 
     pub fn matches(&self, other: &FutexKey) -> bool {

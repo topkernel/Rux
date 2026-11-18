@@ -81,11 +81,19 @@ impl DlRunQueue {
     /// fair.rs nr_running_dec): a raw fetch_sub wraps on an unbalanced
     /// decrement and is_empty() then reads false forever.
     fn dl_nr_dec(&self) {
-        let _ = self.dl_nr_running.fetch_update(
+        // grq-hold-slim Cut 2: on the 1 -> 0 transition clear the DL
+        // class bit (GRQ-held; see CLASS_NONEMPTY in sched.rs).
+        if let Ok(old) = self.dl_nr_running.fetch_update(
             Ordering::AcqRel,
             Ordering::Acquire,
             |v| v.checked_sub(1),
-        );
+        ) {
+            if old == 1 {
+                crate::sched::sched::class_nonempty_clear(
+                    crate::sched::sched::CLASS_DL_BIT,
+                );
+            }
+        }
     }
 
     /// Enqueue a task
@@ -123,7 +131,14 @@ impl DlRunQueue {
             self.tasks.insert(key, task);
 
             // Update counters
-            self.dl_nr_running.fetch_add(1, Ordering::AcqRel);
+            // grq-hold-slim Cut 2: on the 0 -> nonempty transition set
+            // the DL class bit (GRQ-held).
+            let dl_old = self.dl_nr_running.fetch_add(1, Ordering::AcqRel);
+            if dl_old == 0 {
+                crate::sched::sched::class_nonempty_set(
+                    crate::sched::sched::CLASS_DL_BIT,
+                );
+            }
 
             // Update earliest deadline
             let curr_earliest = self.earliest_dl.load(Ordering::Acquire);

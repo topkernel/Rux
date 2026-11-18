@@ -2303,30 +2303,3 @@ fn linger_drain_wait(tcp_fd: i32, secs: u32) {
 // Tests
 // ============================================================================
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_sockaddr_in() {
-        let addr = SockAddrIn {
-            sin_family: 2,
-            sin_port: 8080u16.to_be(),
-            sin_addr: 0x7F000001u32.to_be(),
-            sin_zero: [0; 8],
-        };
-
-        assert_eq!(addr.port(), 8080);
-        assert_eq!(addr.addr(), 0x7F000001);
-    }
-
-    #[test]
-    fn test_socket_type() {
-        let tcp_socket = Socket::new(SocketType::Tcp);
-        assert_eq!(tcp_socket.sock_type, SocketType::Tcp);
-        assert_eq!(*tcp_socket.state.lock(), SocketState::Unconnected);
-
-        let udp_socket = Socket::new(SocketType::Udp);
-        assert_eq!(udp_socket.sock_type, SocketType::Udp);
-    }
-}

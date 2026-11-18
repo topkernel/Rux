@@ -126,6 +126,40 @@ pub static SOFTIRQ_WIN: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MA
 /// read_time() ticks when the open window began (0 = closed).
 pub static SOFTIRQ_WIN_T0: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
+/// r-strand instrument (lat_fs conviction round, 2026-11-19): stuck
+/// softirq-window probe for the tick-side watchdog. While a window is
+/// stuck (one handler never returned), this cpu's irq-exit cannot
+/// dispatch anything — the per-cpu timer vector starves, the wheel
+/// stops being processed, and every timed wait on this cpu strands.
+/// The softirq-side watchdog cannot report the stuck window (it runs
+/// BEHIND the same IN_PROGRESS guard), so the tick hardirq probes it
+/// from outside. Returns Some((vector_bit, age_ticks)) when cpu's
+/// window has been open longer than 1 s, else None.
+pub fn stuck_window(cpu: usize) -> Option<(u64, u64)> {
+    if cpu >= MAX_CPUS {
+        return None;
+    }
+    // SAFETY: per-CPU arrays; bounded index above.
+    let inprog = unsafe { SOFTIRQ_IN_PROGRESS[cpu].load(Ordering::Acquire) };
+    if inprog == 0 {
+        return None;
+    }
+    let win = SOFTIRQ_WIN[cpu].load(Ordering::Acquire);
+    if win & (1u64 << 63) == 0 {
+        return None;
+    }
+    let t0 = SOFTIRQ_WIN_T0[cpu].load(Ordering::Acquire);
+    if t0 == 0 {
+        return None;
+    }
+    let age = crate::drivers::timer::read_time().saturating_sub(t0);
+    if age <= crate::config::TIMER_CLOCK_FREQ_HZ {
+        return None;
+    }
+    let vec = (win >> 48) & 0xFF;
+    Some((vec, age))
+}
+
 #[inline]
 fn win_note(cpu: usize, open: bool, bit: usize, restart: usize, pending: u32) {
     let v = if open {
@@ -362,7 +396,16 @@ pub fn __do_softirq() -> bool {
     // as IRQ-BRACKET-LEAK; first_pending names the vector class that ran.
     let tp_entry = crate::arch::cpu::get_thread_id() as usize;
 
-    // Enter softirq context in preempt_count
+    // Enter softirq context in preempt_count — booked on the ENTRY
+    // task (119th HARDIRQ discipline, extended to the SOFTIRQ face):
+    // the window can span a context switch (a handler wakes a waiter
+    // and the coroutine resume lands the exit epilogue in another
+    // task's frame), and the old unconditional sub-on-current stranded
+    // +SOFTIRQ_OFFSET on the entry task forever (the Session-6
+    // count-migration leak: a lat_fs worker observed carrying
+    // preempt=0x...2 for 377 ticks, unpreemptible, un-sleepable — the
+    // lock-convoy strand root). The exit releases on the BOOKED task.
+    let sirq_entry_task = crate::arch::cpu::get_thread_id() as usize;
     crate::interrupt::preempt_count_add(
         crate::interrupt::preempt::SOFTIRQ_OFFSET
     );
@@ -464,10 +507,37 @@ pub fn __do_softirq() -> bool {
         }
     }
 
-    // Leave softirq context
-    crate::interrupt::preempt_count_sub(
-        crate::interrupt::preempt::SOFTIRQ_OFFSET
-    );
+    // Leave softirq context — release on the BOOKED task (see the
+    // entry-site comment): same-cpu fast path is the plain sub; a
+    // window that spanned a switch releases through the remote helper
+    // (refcount-checked; a freed task's count is meaningless).
+    {
+        let sirq_exit_task = crate::arch::cpu::get_thread_id() as usize;
+        if sirq_exit_task == sirq_entry_task {
+            crate::interrupt::preempt_count_sub(
+                crate::interrupt::preempt::SOFTIRQ_OFFSET
+            );
+        } else {
+            let released = crate::process::task::Task::release_hardirq_base_on(
+                sirq_entry_task as *mut crate::process::task::Task,
+                crate::interrupt::preempt::SOFTIRQ_OFFSET,
+                core::panic::Location::caller(),
+            );
+            if !released {
+                // Entry task exited inside the window: the base dies
+                // with its page (the safe accessor skipped it). The
+                // CURRENT task never carried this bit — do not sub it.
+                static SEXIT_N: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                if SEXIT_N.fetch_add(1, Ordering::Relaxed) < 12 {
+                    crate::pr_err!(
+                        "SOFTIRQ-EXIT-SPANNED released=0 entry_task={:#x}",
+                        sirq_entry_task
+                    );
+                }
+            }
+        }
+    }
     // CARRIER-HEAL (123rd): window-closed stamp, AFTER the booking sub
     // so the slot never says closed while the count still carries the
     // bit. (Between this store pair and the flag clear below, the slot

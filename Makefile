@@ -159,23 +159,34 @@ oh-run: build-x86-release oh-image
 test: probes
 	@PLATFORM=$(PLATFORM) ./scripts/test/run.sh test
 
-# Run formal verification (sync check + proptest)
+# Run formal verification (sync check + unsafe gate + proptest)
 verify:
-	@echo "=== Step 1/2: Sync check ==="
+	@echo "=== Step 1/3: Sync check ==="
 	@python3 scripts/verify_sync_check.py
 	@echo ""
-	@echo "=== Step 2/2: Run verification tests ==="
+	@echo "=== Step 2/3: Unsafe verification gate ==="
+	@python3 scripts/unsafe_gate.py --check
+	@echo ""
+	@echo "=== Step 3/3: Run verification tests ==="
 	@cd kernel/verify && cargo test --target x86_64-unknown-linux-gnu
 	@echo ""
 	@echo "=== All verify steps passed ==="
 
-# Run Miri UB detection on verify crate
+# Whole-kernel coverage report over the in-kernel test suite: boots an
+# instrumented kernel (COV=1 make test), extracts the profile from the
+# rootfs, and prints a per-subsystem table including 0% files.
+# scripts/coverage-report.sh --record refreshes
+# docs/development/coverage-latest.txt.
+coverage:
+	@bash scripts/coverage-report.sh
+
+# Miri UB detection on verify crate
 miri:
 	@echo "=== Step 1/2: Sync check ==="
 	@python3 scripts/verify_sync_check.py
 	@echo ""
 	@echo "=== Step 2/2: Run Miri UB detection ==="
-	@cd kernel/verify && MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test
+	@cd kernel/verify && MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-permissive-provenance" cargo +nightly miri test
 	@echo ""
 	@echo "=== All Miri checks passed (no UB found) ==="
 

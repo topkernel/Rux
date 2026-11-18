@@ -83,5 +83,23 @@ pub fn test_listhead() {
         test_fail("is_empty after remove all", "list should be empty");
     }
 
+    // Head-insert (add) wiring, ported from the dead #[cfg(test)] block
+    // in kernel/src/list.rs: exact pointer relationships after add().
+    let mut head = ListHead::new();
+    head.init();
+    let mut node_h = ListHead::new();
+    node_h.init();
+    unsafe {
+        node_h.add(&mut head);
+    }
+    if !head.is_empty()
+        && head.next == &node_h as *const _ as *mut _
+        && head.prev == &node_h as *const _ as *mut _
+    {
+        test_pass("add head-insert wiring");
+    } else {
+        test_fail("add head-insert wiring", "head.next/prev must point at the inserted node");
+    }
+
     test_println!("test: ListHead testing completed.");
 }

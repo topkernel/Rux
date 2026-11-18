@@ -967,12 +967,24 @@ pub fn alloc_page_batch(gfp_flags: GfpFlags, n: usize, out: &mut [usize]) -> usi
         if let Some(zone) = node.zone_mut(zone_type) {
             if zone.is_initialized() {
                 let want = core::cmp::min(n, out.len());
-                let got = zone.alloc_pages_order0_batch(want, out);
+                // BUFW-PARITY: per-CPU row first (the reference's
+                // per-cpu-pageset handout shape) — frames a recent free
+                // cached on this CPU are handed out with no zone round
+                // trip at all; only the remainder pays the (bulk) zone
+                // path. ZoneNormal only, matching the row's discipline.
+                let mut got = 0usize;
+                // (alloc_page_batch is order-0-only by definition.)
+                if zone_type == ZoneType::ZoneNormal {
+                    got = super::pcp::alloc_order0_batch(zone, want, out);
+                }
+                if got < want {
+                    got += zone.alloc_pages_order0_batch(want - got, &mut out[got..]);
+                }
                 if got > 0 {
                     ZONE_ALLOCS.fetch_add(got, Ordering::Relaxed);
                 }
                 // pfn -> phys for API symmetry with alloc_page.
-                for p in out.iter_mut().take(want) {
+                for p in out.iter_mut().take(got) {
                     *p = pfn_to_phys(*p);
                 }
                 return got;

@@ -176,15 +176,13 @@ pub mod x86_track {
     pub static TICK_SKIP: core::sync::atomic::AtomicU64 =
         core::sync::atomic::AtomicU64::new(0);
     #[inline]
-    fn bump(c: &core::sync::atomic::AtomicU64, tag: &str) {
-        let n = c.fetch_add(1, Ordering::Relaxed);
-        if n % 100 == 0 {
-            crate::pr_info!(
-                "vdc-instr {} n={}",
-                tag,
-                n + 1
-            );
-        }
+    fn bump(c: &core::sync::atomic::AtomicU64, _tag: &str) {
+        // Counters only, no console prints: the hunt prints fired every
+        // 100 events and flooded the serial on SMP8 boots (ub2404:
+        // 22k+ track-none events = 220+ lines/boot interleaved with
+        // systemd output, burying getty and every diagnostic read-back).
+        // Observability policy: instruments print nothing unless asked.
+        c.fetch_add(1, Ordering::Relaxed);
     }
     /// Public bump for callers outside this module (vdso_data_tick).
     pub fn bump_pub(c: &core::sync::atomic::AtomicU64, tag: &str) {

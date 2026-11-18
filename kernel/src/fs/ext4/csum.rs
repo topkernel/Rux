@@ -45,7 +45,7 @@
 #![forbid(unsafe_code)]
 
 /// crc32c (Castagnoli, reflected 0x82F63B78) table.
-const CRC32C_TABLE: [u32; 256] = make_table();
+pub(crate) const CRC32C_TABLE: [u32; 256] = make_table();
 
 const fn make_table() -> [u32; 256] {
     let mut t = [0u32; 256];
@@ -341,64 +341,3 @@ pub fn extent_block_csum_set(dir_seed: u32, block: &mut [u8]) {
     block[n - 4..n].copy_from_slice(&c.to_le_bytes());
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The table's first entries are the standard Castagnoli values.
-    #[test]
-    fn test_table_prefix() {
-        assert_eq!(CRC32C_TABLE[0], 0);
-        assert_eq!(CRC32C_TABLE[1], 0x82F6_3B78);
-        assert_eq!(CRC32C_TABLE[255], 0x7937_7907);
-    }
-
-    /// The write helpers round-trip through the verify helpers: set
-    /// then ok on the same bytes must hold for every object size class
-    /// the mount can encounter.
-    #[test]
-    fn test_csum_set_round_trip() {
-        // Inode: good-old 128 and a 256-byte slot (checksum hi half used).
-        for size in [128usize, 256] {
-            let mut raw = vec![0u8; size];
-            for i in 0..size {
-                raw[i] = (i * 7 + 3) as u8;
-            }
-            inode_csum_set(0x1234_5678, 42, &mut raw);
-            assert!(inode_csum_ok(0x1234_5678, 42, &raw), "inode size {size}");
-            // Any content change must break the checksum.
-            raw[8] ^= 0xFF;
-            assert!(!inode_csum_ok(0x1234_5678, 42, &raw), "inode size {size}");
-        }
-        // Group descriptor: 32-byte (64-bit desc hi half beyond 32 is
-        // covered by the desc_size>32 case below).
-        for dsize in [32usize, 64] {
-            let mut desc = vec![0u8; dsize];
-            for i in 0..dsize {
-                desc[i] = (i * 13 + 5) as u8;
-            }
-            group_desc_csum_set(0x9ABC_DEF0, 7, &mut desc);
-            assert!(group_desc_csum_ok(0x9ABC_DEF0, 7, &desc), "desc size {dsize}");
-            desc[4] ^= 0x01;
-            assert!(!group_desc_csum_ok(0x9ABC_DEF0, 7, &desc), "desc size {dsize}");
-        }
-        // Superblock: 1024 bytes, checksum lives at 0x3FC.
-        let mut sb = vec![0u8; 1024];
-        for i in 0..0x3FC {
-            sb[i] = (i * 31 + 11) as u8;
-        }
-        superblock_csum_set(&mut sb);
-        assert!(superblock_csum_ok(&sb));
-        sb[0] ^= 0x80;
-        assert!(!superblock_csum_ok(&sb));
-    }
-
-    /// crc32c("123456789") with init ~0 and final XOR is 0xE306_9283
-    /// (RFC 3720 / iSCSI test vector); the raw update returns the
-    /// pre-final state.
-    #[test]
-    fn test_iscsi_vector() {
-        let raw = crc32c(0xFFFF_FFFF, b"123456789");
-        assert_eq!(raw ^ 0xFFFF_FFFF, 0xE306_9283);
-    }
-}

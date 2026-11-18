@@ -58,8 +58,8 @@ const KDGETMODE: u32 = 0x4B3B;
 const KDGKBMODE: u32 = 0x4B44;
 const KDSKBMODE: u32 = 0x4B45;
 
-const VT_AUTO: u8 = 0x00;
-const VT_PROCESS: u8 = 0x01;
+pub(crate) const VT_AUTO: u8 = 0x00;
+pub(crate) const VT_PROCESS: u8 = 0x01;
 
 const KD_TEXT: u32 = 0x00;
 const KD_GRAPHICS: u32 = 0x01;
@@ -68,12 +68,12 @@ const KD_GRAPHICS: u32 = 0x01;
 const KB_101: u8 = 0x02;
 
 /// struct vt_mode (8 bytes): mode, waitv, relsig, acqsig, frsig.
-struct VtMode {
-    mode: u8,
-    waitv: u8,
-    relsig: u16,
-    acqsig: u16,
-    frsig: u16,
+pub(crate) struct VtMode {
+    pub(crate) mode: u8,
+    pub(crate) waitv: u8,
+    pub(crate) relsig: u16,
+    pub(crate) acqsig: u16,
+    pub(crate) frsig: u16,
 }
 
 // ============================================================================
@@ -86,11 +86,11 @@ static ACTIVE_VT: AtomicU32 = AtomicU32::new(1);
 /// Open-fd refcount per VT number (index 0 = /dev/tty0 master view, not
 /// itself allocatable by VT_OPENQRY). VT_OPENQRY skips in-use VTs so
 /// two displays never share a VT.
-static VT_REFS: [AtomicU32; (NR_VT as usize) + 1] =
+pub(crate) static VT_REFS: [AtomicU32; (NR_VT as usize) + 1] =
     [const { AtomicU32::new(0) }; (NR_VT as usize) + 1];
 
 /// Active-console vt_mode (single display → single mode register).
-static VT_MODE: Spinlock<VtMode> = Spinlock::new(VtMode {
+pub(crate) static VT_MODE: Spinlock<VtMode> = Spinlock::new(VtMode {
     mode: VT_AUTO,
     waitv: 0,
     relsig: 0,
@@ -430,47 +430,3 @@ pub fn vt_file_ioctl(file: &crate::fs::file::File, request: u32, arg: usize) -> 
 // Tests
 // ============================================================================
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test_case]
-    fn test_vt_openqry_skips_in_use() {
-        // Reset refs for the test's VTs.
-        VT_REFS[1].store(1, Ordering::Relaxed); // gdm holds tty1
-        VT_REFS[2].store(0, Ordering::Relaxed);
-        // Simulate the OPENQRY scan.
-        let mut found = 0;
-        for n in 1..=(NR_VT as usize) {
-            if VT_REFS[n].load(Ordering::Relaxed) == 0 {
-                found = n;
-                break;
-            }
-        }
-        crate::test_assert_eq!(found, 2, "openqry returns first free VT");
-        VT_REFS[1].store(0, Ordering::Relaxed);
-    }
-
-    #[test_case]
-    fn test_vt_mode_roundtrip_layout() {
-        let mut buf = [0u8; 8];
-        {
-            let mut m = VT_MODE.lock_irqsave();
-            m.mode = VT_PROCESS;
-            m.relsig = 10; // SIGUSR1
-            m.acqsig = 10;
-            buf[0] = m.mode;
-            buf[1] = m.waitv;
-            buf[2..4].copy_from_slice(&m.relsig.to_le_bytes());
-            buf[4..6].copy_from_slice(&m.acqsig.to_le_bytes());
-            buf[6..8].copy_from_slice(&m.frsig.to_le_bytes());
-            m.mode = VT_AUTO;
-            m.relsig = 0;
-            m.acqsig = 0;
-        }
-        // struct vt_mode: mode@0, waitv@1, relsig@2, acqsig@4, frsig@6.
-        crate::test_assert_eq!(buf[0], VT_PROCESS);
-        crate::test_assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 10);
-        crate::test_assert_eq!(u16::from_le_bytes([buf[4], buf[5]]), 10);
-    }
-}

@@ -136,6 +136,17 @@ def normalize(text):
     # Remove crate::pr_warn!(...) calls (kernel-only logging)
     text = re.sub(r'\s*crate::pr_warn!.*?;\s*\n?', '\n', text, flags=re.DOTALL)
 
+    # Remove crate::dfx::... statement calls (kernel-only forensics probes,
+    # e.g. mmforensics::note_ref). Single statements ending at the first
+    # ';'. The trailing [ \t]*\n? eats exactly the statement's own newline
+    # so the next line keeps its indentation.
+    text = re.sub(r'[ \t]*crate::dfx::[^;]*;[ \t]*\n?', '', text)
+
+    # Remove preempt_count_add/sub balance pairs (kernel-only preemption
+    # gating around spinlock critical sections; the verification models
+    # treat preemption as an explicit environment hook instead).
+    text = re.sub(r'[ \t]*crate::interrupt::preempt::preempt_count_(?:add|sub)\([^;]*\);[ \t]*\n?', '', text)
+
     # Remove #[inline], #[inline(never)], #[inline(always)]
     text = re.sub(r'#\[inline[^\]]*\]\s*\n?', '', text)
 
@@ -401,12 +412,15 @@ MAPPINGS = [
         "type": None,  # free functions
         "compare": [
             "heap_size_to_order", "size_to_order", "get_buddy_idx",
-            "page_idx_to_addr", "addr_to_page_idx",
+            "page_idx_to_addr",
         ],
         "skip_diff": [
             "heap_size_to_order", "size_to_order", "get_buddy_idx",
-            "page_idx_to_addr", "addr_to_page_idx",
-        ],  # verify uses pub const/const, kernel uses different visibility
+            "page_idx_to_addr",
+        ],
+        # addr_to_page_idx was removed from the kernel (replaced by the
+        # bounds-checked method addr_to_page_idx_checked); verify uses
+        # pub const/const, kernel uses different visibility
     },
     # ---- Phase 2 mappings ----
     {
@@ -1116,9 +1130,12 @@ MAPPINGS = [
         "verify": "kernel/verify/src/ipc/ipc_id_test.rs",
         "kernel": "kernel/src/ipc/util.rs",
         "type": None,  # free functions
-        "compare": ["ipc_build_id", "ipc_id_to_index", "ipc_id_seq", "ipc_update_mode", "owner_bits", "group_bits", "other_bits"],
+        # ipc_update_mode / owner_bits / group_bits / other_bits were
+        # removed from the kernel's ipc/util.rs (mode bits now handled
+        # inline); drop them from the mirror contract.
+        "compare": ["ipc_build_id", "ipc_id_to_index", "ipc_id_seq"],
         "skip": [],
-        "skip_diff": ["ipc_build_id", "ipc_id_to_index", "ipc_id_seq", "ipc_update_mode", "owner_bits", "group_bits", "other_bits"],
+        "skip_diff": ["ipc_build_id", "ipc_id_to_index", "ipc_id_seq"],
         # verify copies standalone fns with simplified signatures; kernel uses private methods
         "check_new": False,
     },
@@ -1145,9 +1162,11 @@ MAPPINGS = [
         "verify": "kernel/verify/src/drivers/pci_offset_test.rs",
         "kernel": "kernel/src/drivers/pci/mod.rs",
         "type": None,  # constants + free functions
-        "compare": ["is_io_bar", "is_memory_bar", "is_64bit_memory_bar"],
+        # is_io_bar / is_memory_bar / is_64bit_memory_bar were removed
+        # from the kernel's PCI code; nothing left to compare.
+        "compare": [],
         "skip": [],
-        "skip_diff": ["is_io_bar", "is_memory_bar", "is_64bit_memory_bar"],
+        "skip_diff": [],
         # verify copies as standalone fns; kernel has in impl block
         "check_new": False,
     },
@@ -1156,9 +1175,12 @@ MAPPINGS = [
         "verify": "kernel/verify/src/net/tcp_state_test.rs",
         "kernel": "kernel/src/net/tcp.rs",
         "type": None,  # enum constants + free functions
-        "compare": ["tcp_dof", "tcp_header_len", "tcp_syn", "tcp_ack", "tcp_fin", "tcp_rst", "tcp_psh"],
+        # tcp_dof / tcp_header_len / tcp_syn / tcp_ack / tcp_fin /
+        # tcp_rst / tcp_psh helpers were removed from the kernel's
+        # tcp.rs (header flag access is inline now); nothing to compare.
+        "compare": [],
         "skip": [],
-        "skip_diff": ["tcp_dof", "tcp_header_len", "tcp_syn", "tcp_ack", "tcp_fin", "tcp_rst", "tcp_psh"],
+        "skip_diff": [],
         # verify copies as standalone fns; kernel methods are on TcpHdr impl
         "check_new": False,
     },
@@ -1492,10 +1514,35 @@ MAPPINGS = [
         "verify": "kernel/verify/src/arch/riscv64/mm/uaccess_test.rs",
         "kernel": "kernel/src/arch/riscv64/uaccess.rs",
         "type": None,
-        "compare": ["access_ok"],
+        "compare": ["access_ok", "get_user", "put_user", "strnlen_user", "strncpy_from_user"],
         "skip": [],
         # kernel body opens with `use super::mm::user_addr::...`; the verify
-        # copy defines USER_START/USER_END as module constants instead
+        # copy defines USER_START/USER_END as module constants instead, and
+        # strncpy_from_user references the same path for its user_end read
+        "transforms": [(r'super::mm::user_addr::USER_END', 'USER_END')],
+        # The verify mirrors' user-memory model splits the user pointer's
+        # two roles: the mirrored text reads the pointer's VALUE through
+        # model_addr_of(p) (the MODEL_BASE-space address the kernel-side
+        # text derives from `p as usize`), while the pointer itself
+        # carries real allocation provenance for Miri. The v_transform
+        # canonicalizes the hook back to `X as usize` for comparison, so
+        # the compared text stays kernel-faithful.
+        "v_transforms": [
+            (r'model_addr_of\((from|str|to)\)', r'\1 as usize'),
+        ],
+        "skip_diff": ["access_ok"],
+        "check_new": False,
+    },
+    {
+        "name": "arch/x86_uaccess_bounds",
+        "verify": "kernel/verify/src/arch/x86_64/mm/uaccess_test.rs",
+        "kernel": "kernel/src/arch/x86_64/uaccess.rs",
+        "type": None,
+        "compare": ["access_ok"],
+        "skip": [],
+        # the x86_64 twin references USER_END from its memory_layout import;
+        # the verify copy defines it as a module constant (no low floor
+        # check on this arch — address 0 is accepted by the gate by design)
         "skip_diff": ["access_ok"],
         "check_new": False,
     },

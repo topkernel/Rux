@@ -134,6 +134,8 @@ mod panic_policy;
 mod trace;
 mod perf;
 mod module;
+#[cfg(feature = "cov-dump")]
+mod cov;
 
 #[cfg(feature = "unit-test")]
 mod tests;
@@ -1010,6 +1012,15 @@ pub fn rust_main_tail() -> ! {
         {
             interrupt::ksoftirqd::init();
             print_status("softirq", "ksoftirqd per-CPU threads", true);
+        }
+
+        // RT-plan R5: activate forced per-IRQ threading. IRQ
+        // registrations run long before sched::init (the serial line,
+        // the virtio probes), so their per-IRQ threads deferred to here;
+        // until this point the dispatchers' inline fallbacks ran every
+        // action in hardirq. No-op unless irqthread=1.
+        {
+            interrupt::irqthread::boot_init();
         }
 
         // Start the hung-task detector kthread here (late boot — after

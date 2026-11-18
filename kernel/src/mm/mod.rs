@@ -36,6 +36,10 @@ pub mod vdso;
 /// hp89 hunt: PTE-clearing-event attribution ring (see module doc).
 pub mod unwatch;
 
+/// Pin user pages for direct I/O (the reference's pin_user_pages shape;
+/// GUP-DIO lane).
+pub mod gup;
+
 pub mod pcp;
 
 // pcp.rs history: an earlier per-CPU pages module was removed in wave-6

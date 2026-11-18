@@ -36,7 +36,7 @@ jobs:
 
       - name: Run Miri
         env:
-          MIRIFLAGS: "-Zmiri-disable-isolation"
+          MIRIFLAGS: "-Zmiri-disable-isolation -Zmiri-permissive-provenance"
         run: |
           set -o pipefail
           cd kernel/verify

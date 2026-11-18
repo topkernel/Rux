@@ -981,3 +981,22 @@ registered per the data-corruption doctrine.
   §5 candidate: per-task effective-priority tree in the reference's
   shape); the sticky-boost downgrade divergence (D-26 note). Artifacts:
   run/RT-R6.md (§3-§5), run/c*.log, run/g*.log.
+
+  **Region-based batch allocation for order-0 bursts (bufw-parity,
+  2026-11-18).** The page-cache bulk path's frame source (a 1 MiB
+  buffered write asks for 256 pages in 64-bursts) paid four locked
+  RMWs on shared lines per page inside the zone lock; the batch shape
+  now claims each counter once per batch, drains the order-0 list
+  directly, full-shatters one higher-order block when the list empties
+  mid-burst, and serves the CPU's pcp row first — with the per-page
+  safety invariants KEPT (MM-H2 descriptor init stays inside the zone
+  lock; the SEED-ALLOC-BAD-POP pop-state forensic runs per page;
+  INV-PCP-1/2/3 hold via the same three-state transitions, batched).
+  Same-window interleaved A/B (q35 KVM smp8/8G, medians of 3): 1M
+  buffered write avg-clat 78.4 vs reference 93.4 µs (1.19x ahead, from
+  0.94x), BW 11.7 GiB/s vs 9600 MiB/s; the op's allocation term
+  55k → 14k cycles (TSC phase probe). Kernel-vs-kernel pbench boards:
+  all comparable rows flat or better (p6_append −3.6%, p6_unlink
+  −3.5%, rest ≤ ±5.3%). fio verify=md5 buffered 4k+1M, unaligned-head
+  4k+1M, write→fsync→read-back all err=0; make test 1335/1335;
+  triple-arch rc=0. [lane worktree bufw-parity run/BUFW-PARITY.md]

@@ -238,6 +238,23 @@ numbers this register cites).
     exhaustion-class stress runs complete their full budgets: 5.42M
     ops in the 100 s window, zero strike-only kills
     (stress-port/run/stress-runs/findings.md).
+  - GUP-pinned user-page DIO (gup-dio lane, 2026-11-18): the reference's
+    pin_user_pages / bio_iov_iter_get_pages shape — mm/gup.rs walks the
+    current task's page tables under the mm PTE lock (INV-LOCK-7) after
+    fault-in (FOLL_WRITE discipline for BOTH DMA directions), takes a
+    page refcount per frame (reclaim's refcount==1 gate keeps pinned
+    frames DMA-safe); the ext4 direct reader/writer build their SG
+    chains straight from the frames' direct-map aliases (physically
+    adjacent pages merged into one segment; chains sized by the
+    negotiated virtqueue seg_max, descriptor-budget waves), unpinnable
+    pages become typed holes served by the staged paths. Same-rig
+    kernel-vs-kernel (q35 KVM smp8/8G, 48 MiB psync 1M direct, clean
+    window): GUP 8000 MiB/s clat 109 µs vs the same tree's staging
+    path 6000 MiB/s / 145 µs — the full-request staging copy and the
+    copyout/copyin terms are gone (pin 10 µs/MiB); fio --verify=md5
+    direct 1M/64k/4k + unaligned-offset heads err=0; pbench Tier-2
+    rows in band or improved; riscv make test 1334 PASS.
+    Evidence: /home/william/rux-agents/gup-dio/run/GUP-DIO.md.
   - Also: execveat flags/AT_EMPTY_PATH/ELOOP semantics (5587c257),
     O_DIRECT read flushes the dirty page-cache range first (99ea87e3),
     poll rejects nfds above RLIMIT_NOFILE before allocating
@@ -1030,3 +1047,58 @@ the open gap — the fire-late/hrtimer-re-arm attribution is queued (rt-r4).
 - Artifacts: run/FIO-MERGE-SG.md (A/B/C tables, floor decomposition,
   verification protocol), run/abc-*.txt, run/vfinal-*.log,
   run/pbench-gate.log, run/pbench-fs.log.
+
+## S. Region-based batch allocation for order-0 bursts (bufw-parity lane, 2026-11-18, evidence-backed)
+
+- **One batch, one claim per shared line — the per-cpu-pageset handout
+  shape for the page-cache bulk path** (branch `bufw-parity`, commit
+  3aa437e96; mm/zone.rs, mm/pcp.rs, mm/page_alloc.rs): a 1 MiB buffered
+  write asks the frame allocator for 256 pages in bursts of 64. The old
+  batch loop called the single-page allocator per page under one zone
+  lock — paying four locked RMWs on shared cachelines PER PAGE
+  (`free_pages`, `free_area[0].nr_free`, the `ZTRACE_ALLOC` forensic
+  ring cursor, the vmstat pgalloc counter) plus the full order scan and
+  a double descriptor init (alloc_from_order stamps refcount/order/
+  next_free, then alloc_pages_locked's loop re-stamps flags/mapcount/
+  refcount). The new shape: drain the order-0 free list directly in one
+  pass; when it empties with >=8 pages still wanted, pop the smallest
+  available higher-order block ONCE and hand its members out directly
+  (full shatter; excess members go to the order-0 list; small
+  remainders keep the per-page split so short asks do not shatter big
+  blocks); claim every shared counter once per batch; and serve this
+  CPU's pcp row FIRST (`pcp::alloc_order0_batch`, one irq-off window —
+  frames a recent free cached never touch the zone). The per-page
+  residue is the forensic seed-check loads, the head-pointer store and
+  ONE descriptor init inside the zone lock (review MM-H2 unchanged);
+  INV-PCP-1/2/3 hold by the same transitions as the single-frame path,
+  batched.
+- **Measured** (q35 KVM `-cpu host` smp8/8G, fio 3.36 psync, 48 MiB
+  run, interleaved same-window kernel-vs-reference ×3 clean reps at
+  host load ~1.3, plus the TSC phase probe of the BUFW-2X method,
+  run/BUFW-PARITY.md): the 1M buffered-write row went from 0.94x
+  (BUFW-2X close-out) to **avg-clat 78.4 vs reference 93.4 µs (1.19x
+  AHEAD), BW 11.7 GiB/s vs 9600 MiB/s (1.25x), min-lat 29-31 vs
+  38-39 µs**; the allocation term inside the op collapsed 55k → 14k
+  cycles/op (~188 → ~55 c/page class). Kernel-vs-kernel pbench boards
+  (debug class, smp2/2G KVM, 2 boards each, medians): every comparable
+  row flat or better — p6_append 4.543 → 4.378 µs (−3.6%, the
+  buffered-write family; the pcp refill shares the batched claims),
+  p6_unlink −3.5%, p1/p2/p3/p4/p5 families within ±5.3% noise.
+- **Why it is Rust-native, not a C port**: the reference's pcp batches
+  per-CPU vmstat deltas and keeps a per-CPU pageset LIST; here the
+  batch is a value-typed stack array handed between three pure stages
+  (row drain → zone bulk → shatter hand-out), every counter claim is
+  an explicit `fetch_add/sub` whose count provably equals the frames
+  handed out (the `drained` vs `bulk` split: nr_free[0] covers exactly
+  the list-drain pops, free_pages/vmstat/ZTRACE cover all hand-outs),
+  and the forensic invariants (MM-H2 descriptor-init-under-lock, the
+  SEED-ALLOC-BAD-POP pop-state check, INV-PCP-1's three-state frame
+  lifecycle) are kept per page while the accounting collapses per
+  batch — the safety checks and the amortization compose instead of
+  trading off. Gates: riscv64 make test 1335/1335, triple-arch builds
+  rc=0, fio --verify=md5 buffered 4k + 1M, unaligned head offset=4196
+  bs=8k and offset=100 bs=1M, write→fsync→read-back — all err=0.
+- Artifacts: run/BUFW-PARITY.md (phase-probe tables, A/B columns,
+  pbench adjudication), run/ab-seqw1m_buf-{base,fix2,fix3}.txt,
+  run/pbench-ab.log, run/probe-instrumentation.patch (the removable
+  TSC probe).

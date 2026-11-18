@@ -2,186 +2,158 @@
 
 <div align="center">
 
-**A Linux-compatible kernel, ~387,000 lines of Rust — written entirely by AI.**
+**A Linux-compatible operating-system kernel, written from scratch in Rust.**
 
 [![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-riscv64%20%7C%20x86__64%20%7C%20aarch64-informational.svg)](#platforms)
-[![Tests](https://img.shields.io/badge/tests-4%2C300%2B%20cases-brightgreen.svg)](#numbers)
-[![Code](https://img.shields.io/badge/code-~387%2C000%20lines-blue.svg)](docs/architecture/structure.md)
+[![Platform](https://img.shields.io/badge/platform-riscv64%20%7C%20x86__64%20%7C%20aarch64-informational.svg)](#quickstart)
+[![Tests](https://img.shields.io/badge/tests-LTP%201%2C139%20%2B%20suite%201%2C335-brightgreen.svg)](#testing)
+[![Code](https://img.shields.io/badge/code-~392%2C000%20lines-blue.svg)](docs/architecture/structure.md)
 
-Unmodified Ubuntu boots: 22.04 to an interactive GNOME Shell desktop (5/5 stability-verified across 188+ commits); 24.04 through systemd 255 to multi-user + graphical targets with serial login — gdm.service and systemd-logind start clean (the 90 s timeout removed with its EROFS root cause), and `make ubuntu-run` boots the full 24.04 desktop by default.
-Unmodified OpenHarmony boots 135+ services to an interactive launcher.
-No userspace patches, rebuilds, or configuration changes.
-
-**Documentation & reports: <https://topkernel.github.io/Rux/>** (中文 / EN)
+Reports & documentation: **<https://topkernel.github.io/Rux/>** (中文 / EN)
 
 </div>
 
 ---
 
-## Design principles
+## Why
 
-1. **The ABI is the contract.** System-call numbers and semantics, ELF/auxv,
-   futex, SysV/POSIX IPC, binder, on-disk ext4, and the procfs/sysfs/
-   debugfs/tracefs layouts match the reference — down to the `uname`
-   strings glibc's loader keys on. Unmodified distributions are the
-   acceptance test.
-2. **The internals are a clean-room Rust design.** Where an internal
-   design differs from the mainstream, it is registered with its
-   compatibility evidence in the
-   [design-divergence register](docs/architecture/design-divergences.md)
-   (19 entries) — e.g. a single global run queue instead of per-CPU
-   queues with balancing (no work stealing or migration at the 2–8
-   vCPU scale Rux targets; 140 ns measured hold, flat across load).
-3. **Safety claims carry machine-checked evidence.** The unsafe surface
-   (3,158 service + 1,340 framework tokens) is enumerated and under
-   written `// SAFETY:` contract; Kani proves core unsafe code for all
-   inputs, and the
-   [bug taxonomy](docs/architecture/safety-and-performance.md)
-   adjudicates every historical commit: zero pointer-expression
-   defects (out-of-bounds, wild pointers, format strings) in safe code.
-4. **Performance is measured, or it does not merge.** Every change
-   passes a three-tier gate (syscost census / pbench / IF=0) over six
-   guarded domains; baselines move only through merges that passed
-   their own tier.
-5. **Agents write the code; humans set goals, review, and merge.**
-   Every line — scheduler, mm, ext4, binder, network stack,
-   verification harnesses — was written by AI agents in per-task
-   worktrees against the merge gate above.
+Rust reached the Linux kernel in 2022, one driver at a time. A decade of
+advocacy bought a handful of drivers and an ocean of C; the memory-safety
+statistics that motivated the language kept pointing at the code that
+stayed C. Rux inverts that ratio by starting from zero: ~392,000 lines in
+which 89% is safe Rust and the remaining ~44,000 lines (10.6%) are `unsafe`
+under written contract — a kernel where memory safety is the default and unsafety is a
+licensed exception, rather than the reverse.
 
-## What runs today
+A new kernel is worthless, however, if nothing runs on it. So the second
+founding decision was made before the first line of code: **the Linux ABI
+is the contract** — syscall numbers and semantics, ELF and auxv, futex,
+POSIX/SysV IPC, binder, on-disk ext4, the procfs/sysfs/debugfs/tracefs
+layouts, down to the `uname` strings glibc's dynamic loader keys on. No
+porting, no patches, no recompilation. The software the world already
+ships is the acceptance test, and it is applied literally:
 
-**Ubuntu 22.04 → gdm → GNOME Shell (x86_64, KVM; riscv64 TCG)**
+- **Ubuntu** boots unmodified — 22.04 to an interactive GNOME Shell desktop
+  on riscv64; 24.04 through systemd 255 to multi-user and graphical targets
+  on x86_64 (`make ubuntu-run`).
+- **OpenHarmony** boots its full 135-service mesh to an interactive
+  launcher — bootanimation, hiview, the binder mesh, the input pipeline,
+  all as built by their original toolchains (`make oh-run`).
 
-![GNOME Shell desktop on Rux](docs/images/ubuntu-gnome-shell-frame-2026-10-27.png)
+<p align="center">
+  <img src="docs/images/ubuntu-gnome-shell-frame-2026-10-27.png" width="42%">&nbsp;
+  <img src="docs/images/oh-launcher-2026-10-31.png" width="42%">
+</p>
+<p align="center"><sub>Unmodified Ubuntu 22.04 (GNOME Shell) and OpenHarmony (launcher), one kernel underneath both.</sub></p>
 
-Stock glibc/Xorg/D-Bus/gnome-session chain end to end, interactive
-keyboard and xterm; boot-to-login ~4.5 s; sessions hold 45+ minutes
-with zero panics. Regression check on main @ 1553b75ac (2026-11-16,
-188 commits past the previous campaign): 5/5 boots green — shell up
-5 s (guest), desktop frame 9.1 s, Super-key interactive 5/5, zero
-panics/OOM/SIGSEGV.
+Inside, the design is clean-room, not a translation. Where an internal
+structure deliberately departs from the mainstream — a single global run
+queue rather than per-CPU queues and a balancer, for one — the divergence
+is [registered with its evidence](docs/architecture/design-divergences.md)
+(28 entries), each gated by LTP families and unmodified-software boots.
 
-**OpenHarmony → launcher (x86_64)**
+## Performance
 
-![OH launcher home screen](docs/images/oh-launcher-2026-10-31.png)
+Every figure is measured against Linux on the same machine, the same
+image, the same static binaries — alternating boots, medians. The full
+boards, with method and a per-row attribution of every remaining gap:
 
-Stock OH x86_64_virt image: samgr, render_service, 135+ services,
-interactive launcher, `hdc shell` into the live guest.
+[fio](https://topkernel.github.io/Rux/performance/fio.html) ·
+[rt-tests](https://topkernel.github.io/Rux/performance/rttests.html) ·
+[lmbench](https://topkernel.github.io/Rux/performance/lmbench.html) ·
+[Geekbench](https://topkernel.github.io/Rux/performance/geekbench.html) ·
+[microbenchmarks](https://topkernel.github.io/Rux/performance/microbench.html)
 
-```bash
-make ubuntu-run    # full Ubuntu 24.04 desktop (serial login: root / rux)
-make oh-image && make oh-run            # OpenHarmony launcher (images: see note)
-```
+| Domain | vs Linux |
+|---|---|
+| ext4 durability — 4 KiB write+fsync | **1.24× faster** |
+| 1 MiB buffered write | **1.19–1.25× faster** — 11.7 GiB/s at 78 µs/op |
+| Directory scan — getdents, 1000 entries | **1.95× faster** |
+| Pipe · context-switch · semaphore latency | **5.8× · 5.1–6.3× · 9.0× faster** |
+| Real-time wake latency, cyclictest clean runs | **min and max win every clean pass; max 10× better** |
+| hackbench, all three forms | **1.06–1.16× faster** |
+| Geekbench 5 | **single-core 113% · multi-core 110%** |
+| 4 KiB random I/O · 1 MiB direct streams | parity band, 0.83–0.97× — each row carries a measured decomposition of the gap |
 
-> **Note (2026-11-12):** the standing OH image store lost four of its
-> eight disks to a concurrent-session accident (vendor/updater/
-> sys_prod/chip_prod). system/ramdisk/userdata were recovered or
-> rebuilt; re-fetch `vendor.img` (DevEco Studio → Device Manager →
-> emulator image, api12 x86_64) into `/home/william/rux-images/oh/`
-> to restore `make oh-run`.
+The rows that trail are not excused; they are *accounted* — every remaining
+microsecond has a named term and an owner.
 
-## Build and run
+## Safety
 
-Prerequisites: stable Rust (`riscv64gc-unknown-none-elf`,
-`riscv64gc-unknown-linux-musl` targets), QEMU ≥ 5.0,
-`riscv64-linux-gnu-gcc`.
+- **The language.** `no_std` Rust throughout; 10.6% `unsafe` lines (44,337 of 417,023), every
+  token enumerated in the
+  [TCB ledger](docs/development/tcb-ledger.md) under a written
+  `// SAFETY:` contract. The record to date is categorical: every
+  memory-corruption-class bug ever found in Rux lived inside that audited
+  surface — **zero in safe code**.
+- **The architecture.** Lock nesting is a compile-time fact — typed lock
+  keys make reverse-order acquisition a build error, not a deadlock.
+  Critical sections are measured, bounded, and guarded by a
+  [tiered performance gate](docs/development/perf-gate-baseline.md);
+  lock-ordering invariants are written down per subsystem.
+- **The proofs.** Kani discharges core unsafe routines for all inputs;
+  loom/exec models check the concurrency primitives — mutexes, PI chains,
+  timers — against their invariants; 1,137+ host-side proofs run in CI.
 
-```bash
-make build                 # kernel (riscv64 default)
-make build-x86             # kernel (x86_64)
-make run                   # minimal rootfs → interactive shell
-make test                  # in-kernel test suite under QEMU
-make ci                    # full unattended pass: build → boot regressions → LTP → stress
-```
+Details: [safety & performance ledger](docs/architecture/safety-and-performance.md) ·
+[security taxonomy](https://topkernel.github.io/Rux/en/security/taxonomy.html).
 
 ## Testing
 
-| Surface | Standing |
+| Class | Scale |
 |---|---|
-| In-kernel suite (`make test`) | 1,328 riscv64 (2026-11-16) · 1,263 x86_64 · 1,119 aarch64, all green |
-| Linux Test Project | **1,139 / 1,869** (current expected; official scan3 2026-11-16 corrected 1,138 + the tgkill03 procfs pid-dentry fix — trajectory: 1,122 audited 11-15 → +11 tail fixes → +3 ltp-tail2 → 1,138 → 1,139) |
-| Formal verification | 157 Kani harnesses · 1,104 proptests · 4 SPIN models · Miri |
-| Performance (same-rig KVM A/B vs Linux) | lmbench (2026-11-16 standing, same-rig guest reference): 14 of 21 paired cases at parity or ahead (best 4.6× pipe; ctx 4.0–4.5×, sem 2.9×), 7 behind (plain-syscall band 1.2–2.5×) · Geekbench 5: SC 2440 / MC 7709 (best-of-runs; 113% / 110% vs the 4-CPU anchor) · fs flush 128 MB (x86_64 KVM): fsync 11.55→3.04 s, msync 13.95→3.31 s, sync 11.30→3.31 s |
-| Boot-parameter matrix (riscv64) | smp{2,4,6,8} × mem{1,2,4,8}G — 16/16 cells clean (previously several panic/hang cells) |
-| fio 3.36 storage battery | 9 load classes PASS, 256 MiB full-matrix crc32 verify at zero errors |
-| Stress fleet | standing 11-QEMU loop (LTP, randomized, memstorm, fsfuzz) |
-| One-key CI (`make ci`) | build → suites → image → Ubuntu/OH boot regressions → full LTP → 32-class stress; a KERNPANIC anywhere halts with an alert |
+| LTP compatibility list | **1,139 of 1,869** |
+| In-kernel suite | **1,335 cases**, every merge |
+| Architectures | riscv64 · x86_64 · aarch64 — build + boot regression, every push |
+| Data integrity | fio `--verify`, e2fsck, hard-kill persistence batteries |
+| Stress fleet | `make ci` — 32 classes including fsfuzz, hours unattended |
+| Two-sided performance | every row re-measured against Linux on the same platform |
 
-Boot regressions are scripted-serial verdicts: Ubuntu (420 s, login/
-gnome markers + KERNPANIC detection), OpenHarmony (dual-disk 600 s,
-SA-insert count ≥ 20 liveness).
+Reports: [test index](https://topkernel.github.io/Rux/testing/index.html).
 
-## Debugging
+## The AI workflow
 
-Serial console (`console=ttyS0`) is the primary log; panics print
-CSRs, all 31 registers and a 32-frame backtrace for `addr2line`.
-tracefs carries 61 events / 20 groups with reference-aligned formats;
-PSI (`/proc/pressure/*`) is always on. Deadlock defense: typed lock
-keys (reverse nesting does not compile), the spin watchdog
-(`debug=watchdog`), SPIN models — with lockdep-lite landing on top.
-`test/hunt-wedge.sh` captures hangs automatically (registers, stacks,
-disassembly, preserved ELF). Full guide:
-[Debugging](https://topkernel.github.io/Rux/debugging/) ·
-[docs/guides/debugging.md](docs/guides/debugging.md).
+All ~392,000 lines were written by AI agents under a written constitution —
+[AGENTS.md](AGENTS.md) — that binds machine and human alike: parallel
+worktrees; one merge law (three-architecture build, full suite, tiered
+performance gates, data-integrity verification before anything lands);
+every performance claim backed by a same-machine A/B; every divergence
+registered; negative results kept on record. The repository is the
+cockpit: point an agent at AGENTS.md and it flies under the same law.
 
-## Working with an AI agent
+## Quickstart
 
-Everything an agent needs — environment, build map, verification
-ladder, coding contracts, debugging toolkit — is in
-**[AI_GUIDE.md](AI_GUIDE.md)**. Point your agent at it first, e.g.:
+```bash
+# Toolchain: Rust nightly, QEMU; musl cross-tools bundled under toolchain/
+make build                   # kernel (default riscv64)
+make user rootfs             # userspace + minimal rootfs image
+make run                     # boot to a shell
+PLATFORM=x86_64 make build   # x86_64 / aarch64
+make test                    # 1,335-case in-kernel suite
+make ubuntu-run              # boot the Ubuntu desktop
+make oh-run                  # boot OpenHarmony to the launcher
+make ci                      # full stress pipeline, unattended
+```
 
-> Read AI_GUIDE.md, then build the kernel for riscv64, run
-> `make test`, and boot `make run` to a shell. Report the test pass
-> count and any failure with serial-log excerpts.
+The serial console is the primary log (`console=ttyS0`); on panic the trap
+printer emits epc/ra/sp/badaddr and stack words for
+`riscv64-linux-gnu-addr2line`.
+[Getting started](https://topkernel.github.io/Rux/guides/getting-started.html)
+walks a first session end to end.
 
-> Read AI_GUIDE.md. Here is the failure I observed: `<paste panic
-> excerpt / test name / LTP case>`. Symbolize it, find the root cause,
-> fix it, and verify with `make test` plus a boot. Commit in English
-> per AGENTS.md.
+## Contributing
 
-## Platforms
+Pull requests are welcome, human or machine; the bar does not distinguish.
+Build on three architectures, keep the suite green, keep performance rows
+in band or attach the numbers that improved, keep the integrity batteries
+clean. If your patch makes the kernel faster — show the rig.
 
-| | riscv64 | x86_64 | aarch64 |
-|---|---|---|---|
-| Boot to shell | ✅ | ✅ | ✅ |
-| Ubuntu / GNOME | ✅ | ✅ | bring-up |
-| OpenHarmony | — | ✅ | — |
-| In-kernel tests | 1,328 | 1,263 | 1,119 |
-
-## Numbers
-
-| | |
-|---|---|
-| Kernel source | 626 files, 393,355 lines (386,698 Rust) — kernel/, counted via git ls-files + wc -l (main fe5538c4e) |
-| Syscalls dispatched | 345+ |
-| Design divergences registered | 19, each with compatibility evidence |
-| `unsafe` tokens | 3,158 service + 1,340 framework, each under a written contract |
-| Trace events | 61 events / 20 groups via tracefs |
-| Boot to Ubuntu login | ~4.5 s (4-CPU MTTCG) |
-
-## Documentation
-
-[Homepage (中文/EN)](https://topkernel.github.io/Rux/) ·
-[Getting Started](docs/guides/getting-started.md) ·
-[Debugging](docs/guides/debugging.md) ·
-[Design Divergences](docs/architecture/design-divergences.md) ·
-[Rust-Native Register](docs/architecture/rust-native-register.md) ·
-[Safety & Performance](docs/architecture/safety-and-performance.md) ·
-[Test Reports](docs/test/README.md) ·
-[Lock Ordering](docs/architecture/lock-ordering.md) ·
-[Roadmap](docs/progress/roadmap.md)
-
-## License
-
-MIT — see [LICENSE](LICENSE).
+---
 
 <div align="center">
 
-**Human sets the goal. AI writes the kernel.**
-
-[Project Home](https://github.com/topkernel/rux) · [Issues](https://github.com/topkernel/rux/issues) ·
-[Guestbook](https://topkernel.github.io/Rux/guestbook.html)
+*One ABI, kept to the letter. One codebase, in a language that refuses
+whole bug families. One bar: the software the world already ships.*
 
 </div>

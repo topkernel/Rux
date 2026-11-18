@@ -440,64 +440,6 @@ pub const STATUS_FIELDS: &[&str] = &[
     "nonvoluntary_ctxt_switches",
 ];
 
-/// Conversion pins for /proc/[pid]/status (D-4 kvtab slice): the key
-/// sequence, the `Key:\t<value>\n` byte shape, and the hex-mask/kB
-/// value formats are pinned against a live render of the CURRENT task
-/// (the unit-test runner itself is a task, so the renderer runs for
-/// real). Callable bodies for the in-kernel unit-test suite.
-#[cfg(any(test, feature = "unit-test"))]
-pub mod status_file_tests {
-    /// Mechanical floor: every declared key renders `Key:\t0\n`-shaped
-    /// (colon, ONE tab, value, newline; empty value → trailing tab).
-    pub fn shape_check() {
-        for k in super::STATUS_FIELDS {
-            let got = crate::fs::procfs::procfile::render_kvtab(&[(k, &0u64)]);
-            assert_eq!(got, alloc::format!("{}:\t0\n", k), "kvtab shape drifted for {}", k);
-        }
-        // The empty-value row keeps its trailing tab (status's Groups).
-        let got = crate::fs::procfs::procfile::render_kvtab(&[("Groups", &"")]);
-        assert_eq!(got, "Groups:\t\n", "kvtab empty-value shape drifted");
-    }
-
-    /// Live pin: the current task's status file carries exactly
-    /// STATUS_FIELDS, in order, one row each.
-    pub fn order_check() {
-        let pid = crate::process::current_pid() as u64;
-        let bytes = super::generate_status(pid);
-        let text = alloc::string::String::from_utf8(bytes)
-            .unwrap_or_else(|_| panic!("/proc/[pid]/status must be UTF-8"));
-        let keys: alloc::vec::Vec<&str> = text
-            .lines()
-            .map(|l| l.split_once(":\t").map(|(k, _)| k).unwrap_or(l))
-            .collect();
-        assert_eq!(
-            keys, super::STATUS_FIELDS,
-            "/proc/[pid]/status key order drifted"
-        );
-        // Value-format pins: the hex masks are 16 lower-hex digits, the
-        // Vm rows carry the kB suffix, Uid/Gid are four tab-separated
-        // fields.
-        for line in text.lines() {
-            if let Some(v) = line.strip_prefix("SigBlk:\t") {
-                assert_eq!(v.len(), 16, "SigBlk mask width drifted: {:?}", v);
-                assert!(v.bytes().all(|b| b.is_ascii_hexdigit()), "SigBlk not hex: {:?}", v);
-            }
-            if let Some(v) = line.strip_prefix("VmRSS:\t") {
-                assert!(v.ends_with(" kB"), "VmRSS unit suffix drifted: {:?}", v);
-            }
-            if let Some(v) = line.strip_prefix("Uid:\t") {
-                assert_eq!(v.split('\t').count(), 4, "Uid quadruple drifted: {:?}", v);
-            }
-        }
-    }
-
-    #[cfg(test)]
-    #[test]
-    fn status_shape() {
-        shape_check();
-        order_check();
-    }
-}
 
 /// Read a range of USER memory from an arbitrary task's address space.
 ///

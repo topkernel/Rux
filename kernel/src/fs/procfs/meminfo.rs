@@ -237,10 +237,4 @@ pub mod meminfo_file_tests {
             assert!(tail.starts_with(' '), "no gap after key field: {:?}", line);
         }
     }
-
-    #[cfg(test)]
-    #[test]
-    fn keys_in_declared_order_linux_shape() {
-        keys_shape_check();
-    }
 }

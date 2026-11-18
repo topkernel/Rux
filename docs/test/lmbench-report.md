@@ -168,6 +168,215 @@ handoff), open (1.44x — walk loop + File construct), read (1.42x —
 copy tail), write (1.13x). lat_fs re-polluted by boot noise (no
 honest number this round).
 
+## Patrol round 2 (2026-11-19 03:xx): strand-recovery round landed (4 commits); captures name the lock-convoy root
+
+Landed and gated (riscv 1334/1334, triple-arch rc=0, pushed
+d023bc051..b4793146c):
+
+1. Aged switch-out marks read as not-in-flight (d023bc051) —
+task_is_mid_switch_out and pick_owner_live now age-check
+SWITCHING_OUT marks against SWITCHING_OUT_JIF (50-jiffy bar vs a
+microsecond-scale window): a lost retire no longer blocks the phantom
+sweep and the pick's stale-mark heal forever.
+2. Ghost-node guard (3cbf8af22) — the idle slot heal requeues its
+victim only when NO other cpu names it; the dump evidence (two slots
+naming one worker) showed the requeue inserting a node for a task
+running elsewhere.
+3. Phantom sweep completion (26b3f7530) — the relink retires aged
+marks and clears stale qwords (otherwise the strand re-forms at the
+next pick), plus the STRAND-ID scan naming any residual linked-stale
+shape at 1 Hz.
+4. SOFTIRQ-STUCK-WINDOW watchdog (b4793146c) — the tick hardirq probes
+the per-cpu softirq window from outside the IN_PROGRESS guard.
+
+New captures this round (all against the correct ELF):
+
+- The hang is a **lock convoy**: softlockups report lat_fs workers
+  spinning 10 s+ in RawSpinlock::lock (pc=0 clean) while MemFree stays
+  ~950 MB — NOT memory, NOT a stuck softirq window (the watchdog never
+  fired), NOT a linked strand (STRAND-ID silent). One worker strands
+  MID-CRITICAL-SECTION holding a spinlock; every other worker spins on
+  that lock and the battery wall-crawls (rows still print at full
+  speed when a round gets scheduled).
+- The stranded worker's state: RUNNING + unlinked + preempt=0..2 +
+  ownership marks stale (claim=N while a DIFFERENT cpu's slot names it
+  — the qword/slot pair disagreeing across cpus). The __schedule
+  discipline should refuse switching out a pc!=0 non-sleeping task, so
+  the switch-out that stranded these workers bypassed or mis-ordered
+  the discipline — the pick/publish protocol (slot vs qword
+  consistency across cpus) is the remaining hole.
+- PREEMPT-HEAL-REFUSED fires on a kernel thread carrying pc=0x10001
+  with "live acquire/carrier evidence" — the heal refusing a leaked
+  count it believes is a live holder (face B).
+
+Next-round levers: (1) audit the __schedule pick/publish sequence for
+the slot-vs-qword cross-cpu consistency hole (the pick publishes the
+slot under GRQ but the qword claim publishes at the switch-in — a
+task switched in on cpu Y while its qword still says claim=X is the
+captured mismatch); (2) trace which spinlock the convoy spins on
+(bucket? dcache? VFS_STATE?) by adding the lock name to the
+softlockup dump; (3) re-verify the battery after each.
+
+## Patrol round (2026-11-19 02:xx): two strand heals landed (c736ec7d9, f315e95df); hang face re-identified in round 2
+
+The patrol's lever on the convicted family: two surgical heals on the
+strand mechanisms, both following existing in-tree heal patterns,
+gated (riscv 1334/1334, triple-arch rc=0, pushed):
+
+1. pick_owner_live discounts idle-marked cpus' slot names — an
+idle-marked cpu runs only its idle task, so a slot name surviving on
+one is the provably stale-slot face (the convicted capture: why=1
+oncpu=1 claim=1 slot=2 while the naming cpu sat halted-idle); the
+why=1 stale-mark heal can now fire instead of refusing forever.
+2. The 1 Hz phantom sweep recounts the timeline and resyncs the GRQ
+counter + class bit on desync — face (a): counter 0 while the tree
+holds the task WFI-halts every idle CPU on the nr_running==0 gate and
+the linked task starves with all CPUs idle.
+
+Verification boot on the release-opt heal kernel: the previously
+deterministic 1k-round hang COMPLETED (row 19046/17006 at full speed)
+with zero false-positive heal fires — but the battery still stalled
+after the 1k row, so the boot's residual hang is a third face, now
+evidence-armed:
+
+- CORRECTION (wrong-ELF symbolization, fixed same round): the
+  PREEMPT-LEAK pc=0x10000 lines ON IDLE TASKS are the probe measuring
+  its own tick bracket (the probe samples inside the hardirq) — not
+  leaks; re-symbolized against the booted kernel's own ELF the rip is
+  cpu_idle_loop. The softirq-context decoder-wedge reading
+  (oh68_holder_decode_tgid) came from symbolizing against a DIFFERENT
+  tree's ELF and is RETRACTED. RULE: every rip symbolization must
+  quote the exact ELF of the booted bzImage (the cgu hash suffix is
+  NOT a build identity — two trees print the same cgu name).
+- What stands: cpu1's TIMER-SOFTIRQ-STALL (HRES scan idle >14 s while
+  its current task slept in IoCompletion::wait, ELF-correct) — the
+  dispatch was skipped with IRQs arriving; the two skip causes in the
+  watchdog comment are in_softirq deferral to a starved ksoftirqd or
+  a stuck SOFTIRQ_IN_PROGRESS window. The write-task spin face
+  (preempt=2) matches a GRQ-held walk or the bio.rs bucket lock
+  (preempt_disable only) — the GRQ-holder identity at skip time is
+  the missing instrument.
+
+Next-round levers (priority order): (1) instrument the GRQ-holder at
+PICK-SKIP-ALL time — when a walk refuses everything, name which cpu
+holds the GRQ and that cpu's current rip (the allocwatch pattern);
+(2) audit the buffer-cache sync_all / bucket-lock preempt discipline
+behind the preempt=2 write spin; (3) adjudicate the stuck
+SOFTIRQ_IN_PROGRESS window (one rate-capped print naming the vector
+when a window ages past 1 s). lat_fs + bw_tcp rows stay open pending
+this.
+
+## lat_fs stall family CONVICTED (2026-11-19 night, strand anatomy captured)
+
+The phase-decomposition probe (latfsinit, per-round -s runs + 2 s wall
+ticks + QEMU monitor + migrated trace tokens) split the "slow mode"
+into its real faces. Benchmark numbers are NOT degraded: every boot
+prints its 0k/1k rows at standing-band rates (19948/18795, 20098/18587,
+19131/16881). What stalls is the WAKE/PICK machinery after phases
+complete:
+
+- Face A (deterministic, default run): after the last row prints, the
+  benchmp parent sleeps in select() FOREVER — QEMU monitor snapshot
+  ~45 s in: every vCPU halted-idle, nothing runnable, nothing picking.
+- Face B: a lat_fs worker spins in write(2) with leaked preempt
+  (preempt=2 RUNNING, no progress); PREEMPT-LEAK fires at window end
+  with pc=0x10002 (HARDIRQ+softirq counts) on another task.
+- Face C (nohz boot): a task parked in IoCompletion::wait while the
+  timer softirq on cpu1 is stalled (WW: TIMER-SOFTIRQ-STALL growing
+  1.1 s -> 14.3 s+); the 10 s deadline escape never fires because the
+  timer wheel itself is not being processed.
+- Face D (shutdown tail, intermittent, pre-existing): pid=1 frozen in
+  shutdown_cascade -> dealloc_untracked at a constant rip for 12k
+  frozen-cpu samples.
+
+The conviction capture (trace_event=schedtrace boot, PICK-SKIP-ALL
+report): `pid=321 why=1 oncpu=1 claim=1 pk=1 st=0x0 slot=2 swout=0
+aff=0xff` — a task linked in the GRQ timeline (anatomy: on_rq=true,
+cfs_nr=1, tree_total=1) that every pick refuses because its ownership
+marks say "current on cpu1" (slot=2 = cpu1's slot names it, no
+SWITCHING_OUT). But cpu1 is halted-idle in the same window: the slot
+is STALE — named by a switch that never published its completion. The
+strand protocol audit: the reference clears a CPU's current slot when
+that CPU picks its next task; Rux's idle pick path must publish the
+slot update too — an idle CPU whose slot still names a linked task
+refuses that task's pick on every CPU forever (and the count-vs-tree
+desync seen in the dumps — grq nr_running=0 while the timeline holds
+the entry — is the same family's counter face).
+
+Working root (next round): the timer softirq/wheel processing loop —
+cpu0 caught RUNNING in read_time while the machine idles, TIMER-SOFTIRQ
+stalls, deadline escapes dead, PREEMPT-LEAK pc=0x10002 — one cpu stuck
+inside the timer wheel processing (or its re-arm) starves the tick
+machine-wide; the strand/ownership faces are downstream. The nohz
+one-shot re-arm (merged 11-16) is a prime suspect for the nohz boot;
+the non-nohz boot hung too, so the wheel audit must not assume nohz.
+
+Round verdict: shared-GP closed the RCU gen-race face (GP-BOUND dumps
+gone in clean boots); the residual stall is the strand/timer face
+above. lat_fs + bw_tcp rows stay open pending this fix.
+
+## Shared-GP RCU round (2026-11-18, main merge on ec18cdc1a): gen-race closed, slow-mode family still open
+
+Root cause fixed: concurrent `synchronize_rcu` waiters each did
+`RCU_GEN.fetch_add`, so a close-storm's waiters pushed the completion
+target past every CPU's freshest quiescent report (the RCU-GP-BOUND
+dumps showed qs trailing the target by 1-3 generations) — each waiter
+timed out, deferred, and rejoined: a self-amplifying waiter storm that
+was one face of the lat_fs / bw_tcp slow-mode family. The fix is the
+reference `synchronize_rcu` shape: concurrent waiters share ONE
+in-flight grace period (first waiter opens it via GP_IN_FLIGHT + a
+single fetch_add, joiners latch the same target; a late joiner's
+target is always >= entry gen + 1 — the reference
+`wait_rcu_gp(gp_seq + 1)` form — so an older quiescent report can
+never satisfy its wait). Landed as b2f187c89, merged to main.
+
+Effect on the stall family: REDUCED, not closed. Battery on the fixed
+kernel (5 boots): the clean boots show zero GP-BOUND dumps (the
+gen-race signature is gone) and lat_fs rows in the standing band
+(19922/19658, 21214/18636 create/delete); but 3 boots still exceeded
+the runner's 35 s budget (TIMEOUT then DONE — the battery completes in
+the slow mode, rows unchanged: 24176/15425, 18147/15624). So the
+residual slow mode is no longer the RCU gen race.
+
+Sharper anatomy from the same logs: lat_fs upstream runs FOUR rounds
+(0, 1k, 4k, 10k — create+write+delete each); every slow boot printed
+exactly one row (the 0k round) and was killed inside the 1k round —
+the slow face is the 1k write round, not the create/delete measured
+by the row. Phase-decomposition probe built for the next round
+(latfsinit: per-round -s runs + 2 s wall ticks) to split create vs
+write vs delete inside the 1k round.
+
+Separately, the reboot tail intermittently wedges (1/4 shared-GP
+boots, and the same tail signature in older boots lf-b180/lf-orig-*):
+after "reboot: Power down" pid=1 freezes in shutdown_cascade ->
+dealloc_untracked (frozen-cpu detector: constant rip over 12k
+samples; fdreap's shutdown-time RCU wait then starves because the
+frozen cpu never reports quiescent). Pre-existing, intermittent, does
+not affect the measured batteries (they complete before power-down) —
+logged as a standing open item, not a shared-GP regression.
+
+Also this round: the riscv `tcp-synopts` failure reported last round
+was a tooling-swallowed edit (a python in-place edit dropped the
+`self.state = TCP_ESTABLISHED` line from `handle_synack_recv` in the
+working tree) — the line was never deleted in any commit, the tree was
+restored, and the riscv suite is green. No kernel regression existed.
+
+Scoreboard unchanged: 19 ahead / 3 near-ceiling / 4 behind / lat_fs +
+bw_tcp open (slow-mode family).
+
+## bw_tcp adjudicated (2026-11-21): functional, bimodal slow mode
+
+Parameter-grid bisect (-N x -W, six cells): ALL complete; the same
+args (-N 3 -W 1) measured 150 s in one boot and 5.2 s in another —
+high-variance bimodal, same family as the lat_fs load-coupled stall.
+The TCP data path itself is millisecond-class (hand-rolled probe: 4MB
+send ~1 ms / receive ~3 ms; ENOUGH env has no effect — the calibration
+hypothesis was refuted). The runner-path boots (budget=140) hit the
+slow mode 2/2 — the startup phase lands in the slow mode with high
+probability under the runner. Status: functional, honest number pending
+the stall-family fix; wire evidence and the six-cell grid archived
+(bis-a1..a5, bwbench*, bwt* probes).
+
 ## lat_connect root cause FIXED (2026-11-20, main=6957aa1f0): the fabricated ETIMEDOUT
 
 The connect() blocking wait treated every non-ESTABLISHED,

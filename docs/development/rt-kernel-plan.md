@@ -152,7 +152,26 @@ The starting-point table above predates the evening merges; current state:
   green; INV-M1..M6 still pass. Residual: multi-lock-PI-owner
   chain-restore (never wrong-low), sticky downgrade boost (both
   documented, run/RT-R6.md §5).
-- R1, R4, R5, R7: unchanged (open).
+- R5: LANDED (rt-r5 lane, 2026-11-18): forced threading extended to
+  the x86_64 fast paths (the MSI-X blk vector gate + the PIC INTx
+  line table — the landed irqdesc infrastructure was x86_64-dead) via
+  the ThreadedIrq primitive (SCHED_FIFO 50, W3 park discipline,
+  spawns deferred past sched::init); timer/IPI stay raw hardirq;
+  also fixed the first cut's early-return that left threaded PLIC
+  registrations unmasked. SHIPPING SHAPE: `irqthread=1` threads
+  everything EXCEPT the IRQF_NO_THREAD opt-outs — the virtio-blk
+  completion queue opts out (measured: threading it costs 28% of 4k
+  randwrite direct, 31.8 vs 44.3 MiB/s interleaved medians, and RAISES
+  per-completion hardirq IF=0 8.4-9.2 → 13.1 µs/write because the
+  wake machinery from the top half costs more IF=0 than the lean
+  DIO-CONC walker it replaces); `irqthread=all` overrides the opt-outs
+  as the standing measurement arm. Cyclictest FIFO under fio load:
+  threaded shape same class as unthreaded (no cost), three-stat dual
+  column banked. Gates: make test green, dual-arch builds, riscv
+  regression boot clean, Tier-2 fs rows in band/improved (p2 the
+  documented load-hostage row), census quiet boot clean. Full data:
+  run/RT-R5.md (rt-r5 worktree).
+- R1, R4, R7: unchanged (open).
 - Known blocker for clean-window measurement: a release-profile
   CLOCK_MONOTONIC poison under host load ≥6 (both kernels, suspect the
   vDSO TSC-track path) — hunt queued; use debug-class windows or quiet

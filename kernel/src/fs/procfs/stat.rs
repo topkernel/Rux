@@ -357,10 +357,4 @@ pub mod stat_file_tests {
             }
         }
     }
-
-    #[cfg(test)]
-    #[test]
-    fn stat_line_order() {
-        line_order_check();
-    }
 }

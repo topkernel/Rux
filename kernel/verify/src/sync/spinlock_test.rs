@@ -33,7 +33,7 @@ impl RawSpinlock {
     pub fn try_lock(&self) -> bool {
         let ok = self.locked.compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire).is_ok();
         if ok {
-            self.record_owner();
+            self.record_owner(caller_return_address());
         }
         ok
     }
@@ -45,9 +45,11 @@ impl RawSpinlock {
     }
 
     /// The kernel records the lock owner for its deadlock detector; the
-    /// copy keeps the shape with an inert stub.
+    /// copy keeps the shape with an inert stub. (The kernel's
+    /// preempt_count_add/sub balance around the critical section is
+    /// preemption gating, stripped by the sync-checker normalization.)
     #[inline]
-    fn record_owner(&self) {}
+    fn record_owner(&self, _ra: usize) {}
 
     /// See record_owner().
     #[inline]
@@ -57,6 +59,13 @@ impl RawSpinlock {
     pub fn is_locked(&self) -> bool {
         self.locked.load(Ordering::Acquire) != 0
     }
+}
+
+/// The kernel captures the call-site return address for deadlock
+/// diagnostics; the copy has no frames to capture, so it is constant.
+#[inline]
+fn caller_return_address() -> usize {
+    0
 }
 
 // ============================================================================
