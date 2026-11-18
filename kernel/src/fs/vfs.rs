@@ -32,6 +32,7 @@ use alloc::string::String;
 use alloc::format;
 use alloc::sync::Arc;
 use alloc::collections::BTreeMap;
+use alloc::collections::BTreeSet;
 use core::sync::atomic::Ordering;
 use crate::sync::spinlock::Spinlock;
 
@@ -941,13 +942,23 @@ pub fn vfs_umount_object(mnt: &Arc<VfsMountInternal>) {
         if let Some(top) = cur.as_ref() {
             if !Arc::ptr_eq(top, mnt) {
                 // Shadowed by a newer mount at the same mountpoint: detach
-                // from the registry only. sc181: the chain-index entry
-                // STAYS — the mount's mountpoint back-ref is still set, so
-                // the old scan's climb (and thus the DFS) still reaches
-                // mounts inside this mount's tree.
+                // from the registry AND the chain index. The old code kept
+                // the index row on purpose (the DFS still reached this
+                // mount's subtree), but that left STALE rows behind after
+                // the mount left the registry: every MS_REC clone walk
+                // (collect_subtree_mounts iterates the INDEX, not the
+                // registry) then cloned these dead mounts into each new
+                // namespace — a compounding multiplier (ub2404: registry
+                // grew to 4258 mounts in minutes; each polluted clone
+                // attached stale subtrees over live paths, and later
+                // executors found /var/lib gone — the accounts-daemon
+                // STATE_DIRECTORY ENOENT that blocks the gdm greeter).
+                // A dying mount's subtree is unmounted by its own
+                // namespace Drop iterations (iter().rev() ordering).
                 drop(cur);
                 let mut state = VFS_STATE.lock();
                 state.mounts.retain(|m| !Arc::ptr_eq(m, mnt));
+                mount_index_remove(&mut state, mnt, &mp);
                 return;
             }
             *cur = None;
@@ -1134,7 +1145,15 @@ fn collect_subtree_mounts(
 ) -> Vec<(Vec<String>, Arc<Dentry>, MntFlags)> {
     let state = VFS_STATE.lock();
     let mut found: Vec<(u64, Vec<String>, Arc<Dentry>, MntFlags)> = Vec::new();
-    let mut visited: Vec<*const VfsMountInternal> = Vec::new();
+    // Visited-mount dedup as a SET, not a Vec scan: the ub2404 boot
+    // wedged with one CPU monopolizing collect_subtree_mounts while
+    // every other task piled up on VFS_STATE — the Vec::contains linear
+    // probe made the DFS O(mounts^2) and a service-restart-polluted
+    // registry (thousands of namespace rows) turned that into a
+    // minutes-long critical section (MONOPOLIST-TICK pid=603 at
+    // collect_subtree_mounts+0x239, the cmp/lea/jn scan loop; soft
+    // lockups on CPUs 2/4/6/7; serial silent from there).
+    let mut visited: BTreeSet<*const VfsMountInternal> = BTreeSet::new();
     let mut stack: Vec<Arc<Dentry>> = Vec::new();
     stack.push(anc.clone());
     while let Some(node) = stack.pop() {
@@ -1143,10 +1162,9 @@ fn collect_subtree_mounts(
         };
         for mnt in bucket.mounts.iter() {
             let mptr = Arc::as_ptr(mnt) as *const VfsMountInternal;
-            if visited.contains(&mptr) {
+            if !visited.insert(mptr) {
                 continue;
             }
-            visited.push(mptr);
             // Never clone the just-attached bind onto itself.
             if Arc::ptr_eq(&mnt.root, fresh_root) {
                 continue;
@@ -1167,6 +1185,30 @@ fn collect_subtree_mounts(
                 if !rel.is_empty() {
                     found.push((mnt.seq, rel, mnt.root.clone(), *mnt.flags.lock()));
                 }
+            }
+        }
+        // Anomaly report (one line per call that crosses the threshold):
+        // a subtree clone that visits thousands of mounts means the
+        // registry is polluted (dying-namespace rows surviving) or the
+        // walk escaped the source subtree — either way the MS_REC bind
+        // cost is about to be visible in every VFS_STATE waiter.
+        if visited.len() == 4096 {
+            crate::pr_warn!(
+                "vfs: MS_REC clone walk crossed {} mounts (registry pollution or subtree escape); registry mounts={} chain_index={}",
+                visited.len(),
+                state.mounts.len(),
+                state.mount_chain_index.len()
+            );
+            // Identity sample: the 8 most-recently-attached registry rows'
+            // mountpoint paths — who is filling the registry.
+            let n = state.mounts.len();
+            for m in state.mounts.iter().skip(n.saturating_sub(8)) {
+                let mp = m
+                    .root
+                    .get_mountpoint_back()
+                    .and_then(|d| d.build_path_rooted(None))
+                    .unwrap_or_else(|| alloc::string::String::from("(no-mp)"));
+                crate::pr_warn!("vfs: registry row mp={} seq={}", mp, m.seq);
             }
         }
     }
@@ -7213,9 +7255,33 @@ fn mem_file_close(file: &File) -> i32 {
     0
 }
 
+/// Mem-file poll (seq_poll parity): read-only procfs snapshot files
+/// answer DEFAULT_POLLMASK-shaped readiness — always readable/writable
+/// as requested. epoll_ctl ADD answers EPERM for poll-less files, so
+/// without this op every fd handed out by the /proc read shortcut was
+/// un-epollable: systemd's mount monitor (libmount mnt_monitor_get_fd:
+/// epoll_ctl of the /proc/self/mountinfo fd — "Failed to acquire watch
+/// file descriptor: Operation not permitted") and the swap unit watch
+/// (sd_event_add_io(fd, EPOLLPRI) on /proc/swaps — "Failed to watch
+/// /proc/swaps: Operation not permitted") both died on it (ub2404
+/// graphical boot, ub-gfx 2026-11-17). Reference: Linux seq_file poll
+/// unconditionally returns DEFAULT_POLLMASK.
+fn mem_file_poll(_file: &File, events: u16) -> u16 {
+    use crate::syscall::misc::poll_events::*;
+    let mut r = 0u16;
+    if events & POLLIN != 0 {
+        r |= POLLIN | POLLRDNORM;
+    }
+    if events & POLLOUT != 0 {
+        r |= POLLOUT | POLLWRNORM;
+    }
+    r
+}
+
 static MEM_FILE_OPS: FileOps = FileOps::builder()
     .read(mem_file_read)
     .lseek(mem_file_lseek)
+    .poll(mem_file_poll)
     .close(mem_file_close)
     .build();
 

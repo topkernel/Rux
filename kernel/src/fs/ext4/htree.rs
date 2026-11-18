@@ -459,7 +459,7 @@ pub fn dx_find_entry(
             visited[level] = block;
             let Some(nbh) = read_dir_logical_block(fs, dir, block as u64) else {
                 dx_release(&mut frames);
-                return Some(Err(-(crate::errno::Errno::IOError.as_neg_i32())));
+                return Some(Err(crate::errno::Errno::IOError.as_neg_i32()));
             };
             let parsed = {
                 // SAFETY: nbh just read; read-only access.
@@ -499,7 +499,7 @@ pub fn dx_find_entry(
     }
 
     // --- leaf search loop (ext4_dx_find_entry + ext4_htree_next_block) ---
-    let enoent = -(crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+    let enoent = crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32();
     let result: Result<Ext4DirEntry, i32> = loop {
         let (leaf_block, target_hash) = {
             let top = &frames[frames.len() - 1];
@@ -510,7 +510,7 @@ pub fn dx_find_entry(
             )
         };
         let Some(lbh) = read_dir_logical_block(fs, dir, leaf_block as u64) else {
-            break Err(-(crate::errno::Errno::IOError.as_neg_i32()));
+            break Err(crate::errno::Errno::IOError.as_neg_i32());
         };
         let mut found: Option<Ext4DirEntry> = None;
         {
@@ -557,7 +557,15 @@ pub fn dx_find_entry(
             // SAFETY: bh alive in the frame; read-only access.
             unsafe { entry_hash(&(*fr.bh).b_data, fr.entries_off, fr.at) }
         };
-        if bhash & !1 != target_hash {
+        // ext4_htree_next_block's stop rule: only for LSB-0 (even)
+        // lookup hashes does the walk stop, and only when the next
+        // block's boundary hash reached the target ((bhash & ~1) >=
+        // hash). Odd hashes keep walking until the frames are
+        // exhausted; and a boundary hash still BELOW the target (can
+        // happen after index splits) must continue too. The old
+        // `bhash & !1 != target_hash` equality test stopped those walks
+        // early - a name living in the next block answered ENOENT.
+        if target_hash & 1 == 0 && bhash & !1 >= target_hash {
             dx_release(&mut frames);
             return Some(Err(enoent));
         }
@@ -571,7 +579,7 @@ pub fn dx_find_entry(
             level += 1;
             let Some(nbh) = read_dir_logical_block(fs, dir, block as u64) else {
                 dx_release(&mut frames);
-                return Some(Err(-(crate::errno::Errno::IOError.as_neg_i32())));
+                return Some(Err(crate::errno::Errno::IOError.as_neg_i32()));
             };
             let parsed = {
                 // SAFETY: nbh just read; read-only access.
