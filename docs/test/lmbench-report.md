@@ -168,6 +168,38 @@ handoff), open (1.44x — walk loop + File construct), read (1.42x —
 copy tail), write (1.13x). lat_fs re-polluted by boot noise (no
 honest number this round).
 
+## No-number rows CLOSED (2026-11-19/20, user directive round): every row adjudicated
+
+Concentrated pass over the remaining no-number rows (isolated boots,
+budget overrides, fixed-runner image):
+
+- **bw_mmap_rd RECOVERED: 79,954 MB/s = 1.04x ahead of the native
+  ceiling (77,100)** — stale-runner-era classification, row returns.
+- **lat_tcp RECOVERED: 10.35 µs** (ceiling 4.89 → 2.12x behind) and
+  **lat_udp RECOVERED: 9.00 µs** (ceiling 4.147 → 2.17x behind) — the
+  handshake family WORKS on the current tree (full SYN/SYN-ACK/ACK/
+  data exchanges visible); the historic 11-03 strand is gone.
+- **lat_fs: honest number + bimodal stall.** Low-load boots complete
+  sub-second at **24.0k/20.6k files/s create/delete vs the native
+  445k — 19-22x behind, the largest true gap on the board (the fs
+  create/delete churn hot path)**. Under host load a slow/hang mode
+  appears (40 s to 240 s+, budget kills) — 5/5 completions at load 1,
+  hang boots archived; open item (condition-specific).
+- **lat_connect: EMFILE kernel-bug face** — "socket: No file
+  descriptors available" under the connect storm (fd exhaustion; the
+  accept/close accounting under storm is the suspect), plus the boot
+  hit the TSC-anchor wedge whose HPET escape worked as designed.
+  Open kernel item with reproducer (/tmp/net-conn.log).
+- **bw_tcp: TIMEOUT** under the transfer storm — open, same family
+  as lat_connect.
+
+**Final full-board scoreboard (29/29 adjudicated): 19 ahead/parity ·
+3 near-ceiling (fork 1.08 / exec 1.05 / mmap 1.12) · 8 behind with
+honest numbers (open 1.71 / read 1.55 / write 1.30 / stat 1.13 /
+tcp 2.12 / udp 2.17 / lat_fs 19-22x / connect+bw_tcp = open bugs).**
+The two open kernel items: fd exhaustion under connect storm;
+lat_fs's load-coupled stall.
+
 ## Context-tracking QS round (2026-11-19, main=64f790cc2): bw_file_rd recovered
 
 Landed (64f790cc2): (1) the syscall-ENTRY QS report — rcu_user_exit
