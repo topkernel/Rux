@@ -168,6 +168,55 @@ handoff), open (1.44x — walk loop + File construct), read (1.42x —
 copy tail), write (1.13x). lat_fs re-polluted by boot noise (no
 honest number this round).
 
+## Shared-GP RCU round (2026-11-18, main merge on ec18cdc1a): gen-race closed, slow-mode family still open
+
+Root cause fixed: concurrent `synchronize_rcu` waiters each did
+`RCU_GEN.fetch_add`, so a close-storm's waiters pushed the completion
+target past every CPU's freshest quiescent report (the RCU-GP-BOUND
+dumps showed qs trailing the target by 1-3 generations) — each waiter
+timed out, deferred, and rejoined: a self-amplifying waiter storm that
+was one face of the lat_fs / bw_tcp slow-mode family. The fix is the
+reference `synchronize_rcu` shape: concurrent waiters share ONE
+in-flight grace period (first waiter opens it via GP_IN_FLIGHT + a
+single fetch_add, joiners latch the same target; a late joiner's
+target is always >= entry gen + 1 — the reference
+`wait_rcu_gp(gp_seq + 1)` form — so an older quiescent report can
+never satisfy its wait). Landed as b2f187c89, merged to main.
+
+Effect on the stall family: REDUCED, not closed. Battery on the fixed
+kernel (5 boots): the clean boots show zero GP-BOUND dumps (the
+gen-race signature is gone) and lat_fs rows in the standing band
+(19922/19658, 21214/18636 create/delete); but 3 boots still exceeded
+the runner's 35 s budget (TIMEOUT then DONE — the battery completes in
+the slow mode, rows unchanged: 24176/15425, 18147/15624). So the
+residual slow mode is no longer the RCU gen race.
+
+Sharper anatomy from the same logs: lat_fs upstream runs FOUR rounds
+(0, 1k, 4k, 10k — create+write+delete each); every slow boot printed
+exactly one row (the 0k round) and was killed inside the 1k round —
+the slow face is the 1k write round, not the create/delete measured
+by the row. Phase-decomposition probe built for the next round
+(latfsinit: per-round -s runs + 2 s wall ticks) to split create vs
+write vs delete inside the 1k round.
+
+Separately, the reboot tail intermittently wedges (1/4 shared-GP
+boots, and the same tail signature in older boots lf-b180/lf-orig-*):
+after "reboot: Power down" pid=1 freezes in shutdown_cascade ->
+dealloc_untracked (frozen-cpu detector: constant rip over 12k
+samples; fdreap's shutdown-time RCU wait then starves because the
+frozen cpu never reports quiescent). Pre-existing, intermittent, does
+not affect the measured batteries (they complete before power-down) —
+logged as a standing open item, not a shared-GP regression.
+
+Also this round: the riscv `tcp-synopts` failure reported last round
+was a tooling-swallowed edit (a python in-place edit dropped the
+`self.state = TCP_ESTABLISHED` line from `handle_synack_recv` in the
+working tree) — the line was never deleted in any commit, the tree was
+restored, and the riscv suite is green. No kernel regression existed.
+
+Scoreboard unchanged: 19 ahead / 3 near-ceiling / 4 behind / lat_fs +
+bw_tcp open (slow-mode family).
+
 ## bw_tcp adjudicated (2026-11-21): functional, bimodal slow mode
 
 Parameter-grid bisect (-N x -W, six cells): ALL complete; the same

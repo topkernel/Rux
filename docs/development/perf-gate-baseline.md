@@ -6,6 +6,18 @@ perf-audit lane's accepted measurements on main@257698a5 (pa38 battery,
 pb1/pa-series, census streaks) — refresh the whole table at once when a new
 main lands, do not cherry-pick rows.
 
+> **Census token migrated (2026-11-18)**: the dfx→trace migration retired
+> the bespoke switch table — the Tier-1 census lines (TERM-DESCHED,
+> WAKE-REFUSED, WW heartbeat) are now armed by the unified trace
+> parameter. Lane pa-boot.sh copies must pass
+> `syscost=1 trace_event=wwcensus` (bare event name works; the grammar
+> is the reference set_event token set). A boot still carrying the old
+> `dfx=wwcensus` token gets `dfx: unknown switch 'wwcensus'` at boot and
+> the census rows read 0 — that is instrument fallout, not a scheduler
+> regression; rerun with the migrated token before weighing the census
+> rows. Historical anchors below record the old token as it was used at
+> the time.
+
 > **Tier-1 vehicle restored (2026-10-31, perf-audit lane)**: the OH
 > image set is back — 7 read-only seed images in the central store
 > `/home/william/rux-images/oh/`, symlinked into `run/oh-img/` and
