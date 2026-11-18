@@ -184,7 +184,13 @@ macro_rules! test_assert_eq {
 #[cfg(feature = "unit-test")]
 pub mod binder;
 #[cfg(feature = "unit-test")]
+pub mod net_hdrs;
+#[cfg(feature = "unit-test")]
+pub mod net_pins;
+#[cfg(feature = "unit-test")]
 pub mod procfs;
+#[cfg(all(feature = "unit-test", feature = "x86_64"))]
+pub mod pt_regs;
 #[cfg(feature = "unit-test")]
 pub mod perf;
 #[cfg(feature = "unit-test")]
@@ -533,6 +539,11 @@ pub fn run_all_tests() {
     mount_flags::test_mount_flags();
 
     // ===== 4. Process management =====
+    // x86_64 ABI pins (kernel/src/tests/pt_regs.rs) — run only on
+    // x86_64 kernels (make test PLATFORM=x86_64).
+    #[cfg(feature = "x86_64")]
+    pt_regs::test_pt_regs();
+
     test_group_start("scheduler");
     scheduler::test_scheduler();
 
@@ -629,6 +640,11 @@ pub fn run_all_tests() {
 
     test_group_start("ipc_sysv");
     ipc_sysv::test_ipc_sysv();
+
+    // Network pins (kernel/src/tests/net_pins.rs): skb core, header
+    // sizes, UDP/TCP state machines, checksums, ARP, routes, IPv6,
+    // loopback. LAST — it plants ARP/route table entries.
+    net_pins::test_net_pins();
 
     // Binder group (kernel/src/tests/binder.rs): alloc recycle, event
     // name table, device contexts. Formerly an in-module test inside

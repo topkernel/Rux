@@ -208,7 +208,7 @@ fn handle_na(src: &Ipv6Addr, body: &[u8]) {
 }
 
 /// Extract a link-layer option's MAC from an NDP message body.
-fn parse_ll_option(body: &[u8], want: u8) -> Option<[u8; 6]> {
+pub(crate) fn parse_ll_option(body: &[u8], want: u8) -> Option<[u8; 6]> {
     let mut i = 20usize; // skip the fixed 20-byte NS/NA prefix
     while i + 2 <= body.len() {
         let typ = body[i];
@@ -285,21 +285,3 @@ pub fn icmpv6_min_mtu() -> usize {
     1280 - IPV6_HDR_LEN
 }
 
-#[cfg(test)]
-mod tests {
-    use super::super::*;
-    use super::{ndp_option, parse_ll_option};
-
-    #[test]
-    fn test_option_parse() {
-        let mut body = [0u8; 28];
-        body[20] = ndp_option::TARGET_LL_ADDR;
-        body[21] = 1;
-        body[22..28].copy_from_slice(&[1, 2, 3, 4, 5, 6]);
-        assert_eq!(
-            parse_ll_option(&body, ndp_option::TARGET_LL_ADDR),
-            Some([1, 2, 3, 4, 5, 6])
-        );
-        assert_eq!(parse_ll_option(&body, ndp_option::SOURCE_LL_ADDR), None);
-    }
-}

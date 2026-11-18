@@ -410,19 +410,3 @@ pub fn icmp_send_port_unreach(local_ip: u32, remote_ip: u32, udp_hdr8: &[u8]) {
     let _ = crate::net::ipv4::ipv4_send(skb, remote_ip, 1); // IPPROTO_ICMP = 1
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_icmphdr_size() {
-        assert_eq!(core::mem::size_of::<IcmpHdr>(), 8);
-    }
-
-    #[test]
-    fn test_icmp_checksum() {
-        let hdr = [0x08, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01]; // Echo request
-        let csum = IcmpHdr::compute_checksum(&hdr, &[]);
-        assert_ne!(csum, 0);
-    }
-}

@@ -10,7 +10,7 @@ use crate::sync::seqlock::SeqLock;
 use crate::sync::spinlock::Spinlock;
 
 /// Loopback device statistics (protected by SeqLock)
-static LO_STATS: SeqLock<DeviceStats> = SeqLock::new(DeviceStats {
+pub(crate) static LO_STATS: SeqLock<DeviceStats> = SeqLock::new(DeviceStats {
     rx_packets: 0,
     tx_packets: 0,
     rx_bytes: 0,
@@ -206,41 +206,3 @@ pub fn loopback_poll() -> Option<SkBuff> {
     Some(skb)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_loopback_init() {
-        let device = loopback_init();
-        assert!(device.is_some());
-
-        let device = device.unwrap();
-        assert_eq!(device.get_name(), "lo");
-        assert_eq!(device.mtu, 65536);
-        assert!(device.is_up());
-        assert!(device.is_running());
-    }
-
-    #[test]
-    fn test_loopback_xmit() {
-        // Initialize loopback device
-        loopback_init();
-
-        // Create test packet
-        let skb = SkBuff::alloc(100).unwrap();
-
-        // Send packet (queued into the backlog, not delivered inline)
-        let result = loopback_send(skb);
-        assert_eq!(result, 0);
-
-        // Drain through the poll path (single consumer)
-        let drained = loopback_poll();
-        assert!(drained.is_some());
-
-        // Check statistics
-        let stats = LO_STATS.read();
-        assert_eq!(stats.tx_packets, 1);
-        assert_eq!(stats.rx_packets, 1);
-    }
-}
