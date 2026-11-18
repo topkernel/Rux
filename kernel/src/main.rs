@@ -134,6 +134,8 @@ mod panic_policy;
 mod trace;
 mod perf;
 mod module;
+#[cfg(feature = "cov-dump")]
+mod cov;
 
 #[cfg(feature = "unit-test")]
 mod tests;
