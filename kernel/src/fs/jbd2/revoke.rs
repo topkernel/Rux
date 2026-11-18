@@ -224,7 +224,6 @@ pub fn jbd2_journal_write_revoke_records(
         return Ok(0);
     }
 
-    let blk_offset = journal.j_blk_offset;
     let block_size = journal.j_blocksize as usize;
     let entry_size = journal.revoke_entry_size();
     let header_len = core::mem::size_of::<journal_header_t>() + core::mem::size_of::<u32>();
@@ -253,7 +252,13 @@ pub fn jbd2_journal_write_revoke_records(
     while idx < records.len() {
         let mut current_journal_block =
             journal.j_head.load(core::sync::atomic::Ordering::SeqCst);
-        let abs_block = blk_offset + current_journal_block;
+        // ext4-persist P0 fix: resolve through the extent map (jmap);
+        // 0 = unmapped hole — refuse rather than write onto foreign
+        // metadata (the multi-extent journal layout).
+        let abs_block = journal.jmap(current_journal_block);
+        if abs_block == 0 {
+            return Err(EIO);
+        }
 
         // SAFETY: bio::bread returns a valid BufferHead or None.
         let bh = unsafe {

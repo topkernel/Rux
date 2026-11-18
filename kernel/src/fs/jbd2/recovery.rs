@@ -58,7 +58,11 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
         return Ok(RecoveryInfo::default());
     }
 
-    let blk_offset = journal.j_blk_offset;
+    // ext4-persist P0 fix: every journal-block address resolves through
+    // the extent map (Journal::jmap) — the journal inode's extents may be
+    // non-contiguous, and the old blk_offset+logical reads replayed the
+    // WRONG physical blocks (and, on the write side, overwrote live
+    // metadata).
     let block_size = journal.j_blocksize as usize;
     let journal_first = journal.j_first;
     let journal_last = journal.j_last;
@@ -66,7 +70,7 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
     // Read journal superblock to get s_start and s_sequence
     // SAFETY: bio::bread returns a valid BufferHead or None (handled).
     let sb_bh = unsafe {
-        match bio::bread(device, blk_offset) {
+        match bio::bread(device, journal.jmap(0)) {
             Some(b) => b,
             None => return Err(EIO),
         }
@@ -111,7 +115,10 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
 
     while scanned < max_scan {
         scanned += 1;
-        let abs_block = blk_offset + next_block;
+        let abs_block = journal.jmap(next_block);
+        if abs_block == 0 {
+            break; // unmapped hole between journal extents
+        }
         // SAFETY: bio::bread returns a valid BufferHead or None (break on None).
         let bh = unsafe {
             match bio::bread(device, abs_block) {
@@ -205,7 +212,10 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
 
     while scanned < max_scan {
         scanned += 1;
-        let abs_block = blk_offset + cur;
+        let abs_block = journal.jmap(cur);
+        if abs_block == 0 {
+            break; // unmapped hole between journal extents
+        }
         // SAFETY: bio::bread returns a valid BufferHead or None (break on None).
         let bh = unsafe {
             match bio::bread(device, abs_block) {
@@ -250,7 +260,7 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
                         if super::revoke::block_is_revoked_for(journal, tag.blocknr, sequence) {
                             continue;
                         }
-                        replay_data(device, blk_offset, cur, tag.blocknr, journal, tag.csum, sequence);
+                        replay_data(device, cur, tag.blocknr, journal, tag.csum, sequence);
                     }
                 } else {
                     let nr = count_tags(bh, tag_size, header_size, tail_size, block_size);
@@ -289,10 +299,9 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
 
 fn write_clean_sb(journal: &Arc<Journal>, next_seq: u32) -> Result<(), i32> {
     let device = journal.j_bio_device;
-    let blk_offset = journal.j_blk_offset;
     // SAFETY: bio::bread returns a valid BufferHead or None (handled).
     let sb_bh = unsafe {
-        match bio::bread(device, blk_offset) {
+        match bio::bread(device, journal.jmap(0)) {
             Some(b) => b,
             None => return Err(EIO),
         }
@@ -469,14 +478,16 @@ fn block_tag_csum_verify(
 /// skips the block: "Invalid checksum recovering data block").
 fn replay_data(
     device: *const crate::drivers::blkdev::GenDisk,
-    blk_offset: u64,
     journal_block: u64,
     fs_block: u64,
     journal: &Arc<Journal>,
     tag_csum: Option<u32>,
     sequence: u32,
 ) {
-    let data_abs = blk_offset + journal_block;
+    let data_abs = journal.jmap(journal_block);
+    if data_abs == 0 {
+        return; // unmapped hole — nothing to replay from
+    }
     // SAFETY: bio::bread returns a valid BufferHead or None (handled by returning).
     let data_bh = unsafe { match bio::bread(device, data_abs) { Some(b) => b, None => return } };
     if let Some(csum) = tag_csum {
