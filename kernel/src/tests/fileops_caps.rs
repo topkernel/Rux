@@ -306,7 +306,11 @@ pub fn test_fileops_caps() {
     check(
         "vfs mem-file caps",
         crate::fs::vfs::caps_shape::mem_file_ops(),
-        Expect { read: true, write: false, lseek: true, close: true, poll: false, read_at: false },
+        // poll: true since the ub-gfx bring-up (ff8cd7a08) — MEM_FILE_OPS
+        // gained mem_file_poll (seq_poll parity / DEFAULT_POLLMASK) so the
+        // procfs read_file-shortcut fds are epollable; systemd 255's mount
+        // monitor and swap watch epoll exactly these.
+        Expect { read: true, write: false, lseek: true, close: true, poll: true, read_at: false },
     );
 
     // D-6 refactor-lane slice 4: the printk streams, the char-device
