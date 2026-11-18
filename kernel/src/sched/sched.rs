@@ -3671,6 +3671,9 @@ unsafe fn __schedule() {
     if switching {
         crate::sched::sched::ww_record(next, WW_EV_PICK_PUB);
     }
+    if !next.is_null() {
+        pick_trace(next, if switching { 3 } else { 4 });
+    }
     slot_tag_write(cpu_id, SLOT_W_SCHED_PICK, next);
     // r11: open this CPU's pick generation — retired when the picked
     // context actually resumes (post-context_switch / schedule_tail /
@@ -4092,6 +4095,83 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
     pcpu.idle
 }
 
+// ==================== nanosleep-loss pick-phase tracer (hunt) ================
+//
+// Per-task milestone stamps across the pick→switch handoff, so a frozen
+// task's last recorded phase names exactly where its pick died. Phases:
+// 1 walk-unlinked   (fair.rs walk allowed-branch, post-unlink)
+// 2 mark_picked     (publish done)
+// 3 slot-published  (__schedule current=next)
+// 4 repick-return   (__schedule next==prev fast path)
+// 5 wrapper-enter   (context_switch entry)
+// 6 affirm-ok       (try_affirm_pick Ok)
+// 7 affirm-fail     (try_affirm_pick Err)
+// 8 early-abort     (wrapper revoked-pick check)
+// 9 asm-abort       (x86_switch_abort)
+// a post-switch     (context_switch returned / new context)
+// Side table keyed by task pointer (validated); 32 slots.
+
+pub static PT_TASK: [core::sync::atomic::AtomicUsize; 32] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; 32];
+pub static PT_CODE: [core::sync::atomic::AtomicU32; 32] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; 32];
+pub static PT_JIF: [core::sync::atomic::AtomicU64; 32] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 32];
+
+#[inline]
+pub fn pick_trace(task: *mut Task, code: u32) {
+    let t = task as usize;
+    if t == 0 {
+        return;
+    }
+    for s in 0..32 {
+        let cur = PT_TASK[s].load(core::sync::atomic::Ordering::Relaxed);
+        if cur == t {
+            PT_CODE[s].store(code, core::sync::atomic::Ordering::Relaxed);
+            PT_JIF[s].store(
+                crate::drivers::timer::get_jiffies(),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+            return;
+        }
+    }
+    // claim a free slot (racy claim is fine — worst case a lost stamp)
+    for s in 0..32 {
+        if PT_TASK[s]
+            .compare_exchange(
+                0,
+                t,
+                core::sync::atomic::Ordering::Relaxed,
+                core::sync::atomic::Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            PT_CODE[s].store(code, core::sync::atomic::Ordering::Relaxed);
+            PT_JIF[s].store(
+                crate::drivers::timer::get_jiffies(),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+            return;
+        }
+    }
+}
+
+/// Reader-side: the task's last recorded phase (code, jiffies-ago).
+pub fn pick_trace_peek(task: *mut Task) -> Option<(u32, u64)> {
+    let t = task as usize;
+    for s in 0..32 {
+        if PT_TASK[s].load(core::sync::atomic::Ordering::Relaxed) == t {
+            return Some((
+                PT_CODE[s].load(core::sync::atomic::Ordering::Relaxed),
+                crate::drivers::timer::get_jiffies().saturating_sub(
+                    PT_JIF[s].load(core::sync::atomic::Ordering::Relaxed),
+                ),
+            ));
+        }
+    }
+    None
+}
+
 // ==================== pick→switch handoff ledger (wake-fastrepro) ====================
 //
 // ORPHAN-MARK hunt: exactly ONE site publishes the ownership qword
@@ -4340,6 +4420,7 @@ unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
             crate::arch::cpu_id() as usize,
             if live { crate::process::task::PICK_LIVE } else { crate::process::task::PICK_PICKED },
         );
+        pick_trace(task, 2);
     }
 }
 
@@ -5540,15 +5621,66 @@ pub fn wake_up_enqueue_opt(
                 // wwcensus family — ordinary boots stay clean.
                 if !w3_benign_running
                     && crate::trace::EVENT_WWCENSUS.armed()
+                    && crate::drivers::timer::get_jiffies() > 300
                 {
                     w3_print_refused =
-                        W3_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32;
+                        W3_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400;
                 }
                 let w3_pid = (*task).pid();
                 let w3_st_bits = st.bits();
                 let w3_on_cpu = (*task).on_cpu();
                 let w3_pk = (*task).pick_state();
                 let w3_cpu = (*task).ti_cpu();
+                // nanosleep-loss lane (hunt instrument, printed after the
+                // guard drop below): the linked-true refusal is the freeze's
+                // visible face — capture the ownership qword, the stored
+                // timeline key, on_rq, and the timeline's head rows so one
+                // boot adjudicates "node in tree but skipped" (vr position
+                // + wall) against "stale key, node unreachable" (the walk
+                // never lists the pid).
+                let w3_qword = unsafe {
+                    core::ptr::read_volatile(
+                        core::ptr::addr_of!((*task).ti_on_cpu) as *const u64,
+                    )
+                };
+                let w3_onrq = unsafe {
+                    (*task).sched_entity().on_rq.load(core::sync::atomic::Ordering::Relaxed)
+                };
+                let (w3_key_vr, w3_key_id) =
+                    match unsafe { (*task).sched_entity().timeline_key() } {
+                        Some(k) => (k.vruntime, k.task_id),
+                        None => (u64::MAX, u64::MAX),
+                    };
+                let w3_cfs_nr = grq_guard.cfs_rq.nr_running();
+                let mut w3_tree: [(u32, u64, bool, i32); 6] = [(0, 0, false, 0); 6];
+                let w3_tree_total =
+                    grq_guard.cfs_rq.timeline_head_diag(&mut w3_tree);
+                // nanosleep-loss lane: the victim's preempt_count and saved
+                // kernel context (switch-out retaddr + first stack words)
+                // — names the loop a spin-shaped freeze sits in.
+                let w3_pc = (*task).preempt_count();
+                #[cfg(feature = "x86_64")]
+                let (w3_ra, w3_sp, w3_w) = {
+                    let sp = (*task).thread.sp as *const u64;
+                    let mut ws = [0u64; 24];
+                    if sp as usize > 0x1000 {
+                        for k in 0..24 {
+                            ws[k] = core::ptr::read_volatile(sp.add(k));
+                        }
+                    }
+                    ((*task).thread.callee.ret_addr as u64, sp as u64, ws)
+                };
+                #[cfg(not(feature = "x86_64"))]
+                let (w3_ra, w3_sp, w3_w) = {
+                    let sp = (*task).thread.sp as *const u64;
+                    let mut ws = [0u64; 24];
+                    if sp as usize > 0x1000 {
+                        for k in 0..24 {
+                            ws[k] = core::ptr::read_volatile(sp.add(k));
+                        }
+                    }
+                    ((*task).thread.ra as u64, sp as u64, ws)
+                };
                 // Frozen-slot capture (filled by the W3S block below; read
                 // out after the guard drop).
                 let mut w3_fz_ready = false;
@@ -5666,6 +5798,115 @@ pub fn wake_up_enqueue_opt(
                         w3_pk,
                         w3_cpu
                     );
+                    // nanosleep-loss lane: the same refusal with the
+                    // linkage/ownership anatomy (see the capture above).
+                    crate::pr_warn!(
+                        "W3-ANATOMY pid={} qword={:#x} on_rq={} key={:#x}/{} cfs_nr={} tree_total={} head={:?} stashovf={} skipall={}",
+                        w3_pid,
+                        w3_qword,
+                        w3_onrq,
+                        w3_key_vr,
+                        w3_key_id,
+                        w3_cfs_nr,
+                        w3_tree_total,
+                        w3_tree,
+                        crate::sched::fair::pick_giveups().0,
+                        crate::sched::fair::pick_giveups().1
+                    );
+                    crate::pr_warn!(
+                        "W3-CTX pid={} preempt={:#x} ra={:#x} sp={:#x} pt={:?} sw={:?}",
+                        w3_pid,
+                        w3_pc,
+                        w3_ra,
+                        w3_sp,
+                        pick_trace_peek(task),
+                        w3_w
+                    );
+                    {
+                        // user trap frame at stack_top-168: dump the frame
+                        // words (userspace rip/cs/rfl/rsp/ss live there)
+                        let mut uf = [0u64; 21];
+                        let okf = (*task).get_kernel_stack().map_or(false, |top| {
+                            let base = (top as usize).saturating_sub(168) as *const u64;
+                            // SAFETY: diagnostic read of the task's own
+                            // kernel-stack entry frame region.
+                            unsafe {
+                                for k in 0..21 {
+                                    uf[k] = core::ptr::read_volatile(base.add(k));
+                                }
+                            }
+                            true
+                        });
+                        crate::pr_warn!(
+                            "W3-USER pid={} frame_ok={} uf={:?}",
+                            w3_pid,
+                            okf,
+                            uf
+                        );
+                        let k = (*task).timed_sleep_kind.load(core::sync::atomic::Ordering::Relaxed);
+                        let d = (*task).timed_sleep_deadline.load(core::sync::atomic::Ordering::Relaxed);
+                        let n = crate::drivers::timer::read_time();
+                        crate::pr_warn!(
+                            "W3-TSL pid={} kind={} deadline={} now={} delta_ms={} dur_ms={} timer_id={} sigpend={:#x} sigmask={:#x}",
+                            w3_pid,
+                            k,
+                            d,
+                            n,
+                            d.saturating_sub(n) * 1000 / crate::config::TIMER_CLOCK_FREQ_HZ as u64,
+                            (*task).timed_sleep_dur_ms.load(core::sync::atomic::Ordering::Relaxed),
+                            (*task).timed_sleep_timer_id.load(core::sync::atomic::Ordering::Relaxed),
+                            (*task).pending.get_all(),
+                            (*task).sigmask,
+                        );
+                    }
+                    // nanosleep-loss lane: enroll the refusing pid in the
+                    // WW watch on first sight, and on every later refusal
+                    // dump its lifecycle ring (W/L/P/S/D/K/R/A tokens) —
+                    // the pick/abort livelock vs the wake/link loop vs the
+                    // silent park, told apart in one line.
+                    {
+                        static W3_WATCHED: [core::sync::atomic::AtomicU32; 8] =
+                            [const {
+                                core::sync::atomic::AtomicU32::new(0)
+                            }; 8];
+                        let mut enrolled = false;
+                        for s in W3_WATCHED.iter() {
+                            if s.load(core::sync::atomic::Ordering::Relaxed) == w3_pid {
+                                enrolled = true;
+                                break;
+                            }
+                        }
+                        if !enrolled {
+                            for s in W3_WATCHED.iter() {
+                                if s
+                                    .compare_exchange(
+                                        0,
+                                        w3_pid,
+                                        core::sync::atomic::Ordering::AcqRel,
+                                        core::sync::atomic::Ordering::Acquire,
+                                    )
+                                    .is_ok()
+                                {
+                                    ww_watch_add(task);
+                                    break;
+                                }
+                            }
+                        } else {
+                            let mut buf = alloc::string::String::new();
+                            use core::fmt::Write;
+                            let _ = write!(
+                                &mut buf,
+                                "W3-WWDUMP pid={} ",
+                                w3_pid
+                            );
+                            ww_append_dump(
+                                &mut buf,
+                                task,
+                                crate::drivers::timer::get_jiffies(),
+                            );
+                            crate::pr_warn!("{}", buf);
+                        }
+                    }
                 }
                 if w3_fz_ready {
                     crate::pr_warn!(
@@ -9251,6 +9492,7 @@ pub fn scheduler_tick() {
 
 unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
+    pick_trace(next, 5);
 
     // cctx probe: CW_N counted here; the phase stamps live inside
     // arch::context::context_switch (the phases — FPU save, CR3, MSRs,

@@ -640,6 +640,7 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     if (*next).pid() != 0 {
         let st = next.pick_state();
         if st != crate::process::task::PICK_PICKED {
+            crate::sched::sched::pick_trace(next as *mut Task, 8);
             x86_switch_abort(prev, next, 0);
             return;
         }
@@ -897,5 +898,6 @@ pub unsafe extern "C" fn x86_switch_abort(
     if !next.is_null() {
         crate::sched::sched::abort_next_release_orphans(cpu, next);
         crate::sched::sched::psledger_consume(next);
+        crate::sched::sched::pick_trace(next, 9);
     }
 }

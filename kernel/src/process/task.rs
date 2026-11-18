@@ -5359,6 +5359,7 @@ impl Task {
             core::sync::atomic::Ordering::Acquire,
         ) {
             Ok(_) => {
+                crate::sched::sched::pick_trace(self as *const Task as *mut Task, 6);
                 // Wakewatch (dfx=schedtrace): the switch-in affirm — the
                 // pick materialized into a register restore.
                 crate::sched::sched::ww_record(
@@ -5372,7 +5373,10 @@ impl Task {
                 );
                 Ok(())
             }
-            Err(observed) => Err(observed),
+            Err(observed) => {
+                crate::sched::sched::pick_trace(self as *const Task as *mut Task, 7);
+                Err(observed)
+            }
         }
     }
 

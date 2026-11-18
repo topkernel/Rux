@@ -2096,6 +2096,45 @@ impl CfsRunQueue {
         se.timeline_key().is_some()
     }
 
+    /// nanosleep-loss lane (hunt instrument): bounded in-order walk of
+    /// the timeline filling `rows` with (pid, vruntime, on_cpu, claim)
+    /// in PICK ORDER (leftmost first) — the traversal the pick uses, so
+    /// a pid absent from these rows while its stored key says Some is a
+    /// node the pick can never reach. Returns the TOTAL number of nodes
+    /// reachable by the walk (capped at 999). GRQ-HELD by the caller.
+    pub fn timeline_head_diag(
+        &mut self,
+        rows: &mut [(u32, u64, bool, i32)],
+    ) -> usize {
+        let nil = self.timeline.nil();
+        let mut node = self.timeline.leftmost;
+        let mut total = 0usize;
+        let mut filled = 0usize;
+        while node != nil && !node.is_null() && RbTimeline::node_ok(node) && total < 999 {
+            let t = task_of_node(node);
+            if !t.is_null() && filled < rows.len() {
+                // SAFETY: linked, in-range node — valid Task; the qword
+                // read mirrors ownership_pickable's decode.
+                let q = unsafe {
+                    core::ptr::read_volatile(
+                        core::ptr::addr_of!((*t).ti_on_cpu) as *const u64,
+                    )
+                };
+                rows[filled] = (
+                    unsafe { (*t).pid() },
+                    unsafe { (*t).sched_entity().get_vruntime() },
+                    (q & 0xFF) != 0,
+                    (q >> 32) as i32,
+                );
+                filled += 1;
+            }
+            // SAFETY: linked, in-range node.
+            node = unsafe { self.timeline.next(node) };
+            total += 1;
+        }
+        total
+    }
+
     /// 60th (RUNQ-STRAND census): bounded in-order walk of the timeline
     /// naming the WALL below a stranded victim — every entry whose key
     /// sorts before the victim's stored key is consulted by EVERY pick
@@ -3087,6 +3126,136 @@ impl CfsRunQueue {
                             }
                         } else {
                             skip_reason = 1;
+                            // nanosleep-loss lane (hunt instrument): the
+                            // owner_live why=1 refusal — name the candidate's
+                            // qword + the owner bits (slot / SWITCHING_OUT)
+                            // at DECISION time (schedtrace-gated, budgeted).
+                            {
+                                static WHY1_N: core::sync::atomic::AtomicU32 =
+                                    core::sync::atomic::AtomicU32::new(0);
+                                if crate::trace::EVENT_SCHEDTRACE.armed()
+                                    && crate::drivers::timer::get_jiffies() > 300
+                                    && WHY1_N.fetch_add(
+                                        1,
+                                        core::sync::atomic::Ordering::Relaxed,
+                                    ) < 400
+                                {
+                                    use crate::dfx::taskdump::putc_brief as putchar;
+                                    fn ph(mut v: u64) {
+                                        for _ in 0..16 {
+                                            let n = (v >> 60) as u8;
+                                            putchar(if n < 10 {
+                                                b'0' + n
+                                            } else {
+                                                b'a' + n - 10
+                                            });
+                                            v <<= 4;
+                                        }
+                                    }
+                                    for &b in b"\nWHY1-OWNER-REFUSED pid=" {
+                                        putchar(b);
+                                    }
+                                    let mut v = unsafe { (*task).pid() } as u64;
+                                    for _ in 0..8 {
+                                        let n = (v >> 28) as u8;
+                                        putchar(if n < 10 {
+                                            b'0' + n
+                                        } else {
+                                            b'a' + n - 10
+                                        });
+                                        v <<= 4;
+                                    }
+                                    for &b in b" qword=0x" {
+                                        putchar(b);
+                                    }
+                                    ph(whole_qword);
+                                    for &b in b" slot=0x" {
+                                        putchar(b);
+                                    }
+                                    ph(crate::sched::sched::owner_slot_mask(task) as u64);
+                                    for &b in b" swout=0x" {
+                                        putchar(b);
+                                    }
+                                    ph(crate::sched::sched::switching_out_mask(task) as u64);
+                                    for &b in b" pk=" {
+                                        putchar(b);
+                                    }
+                                    let mut p9 = unsafe { (*task).pick_state() } as u64;
+                                    for _ in 0..4 {
+                                        let n = (p9 >> 28) as u8;
+                                        putchar(b'0' + n);
+                                        p9 <<= 4;
+                                    }
+                                    if let Some((ptc, ptj)) =
+                                        crate::sched::sched::pick_trace_peek(task)
+                                    {
+                                        for &b in b" pt=" {
+                                            putchar(b);
+                                        }
+                                        putchar(b'0' + ptc as u8);
+                                        for &b in b"/ago" {
+                                            putchar(b);
+                                        }
+                                        let mut j = ptj;
+                                        let mut buf = [0u8; 12];
+                                        let mut n = 0;
+                                        while j > 0 && n < 12 {
+                                            buf[n] = b'0' + (j % 10) as u8;
+                                            j /= 10;
+                                            n += 1;
+                                        }
+                                        if n == 0 {
+                                            putchar(b'0');
+                                        }
+                                        while n > 0 {
+                                            n -= 1;
+                                            putchar(buf[n]);
+                                        }
+                                    }
+                                    // nanosleep-loss lane: the pick→switch
+                                    // handoff ledger entry (publisher cpu,
+                                    // published pk, publish jiffies) — an
+                                    // intact entry names the CPU whose pick
+                                    // never reached its switch.
+                                    if let Some((pc, ppk, pj)) =
+                                        crate::sched::sched::psledger_peek(task)
+                                    {
+                                        for &b in b" psl=(cpu:" {
+                                            putchar(b);
+                                        }
+                                        let mut v = pc as u64;
+                                        for _ in 0..2 {
+                                            putchar(b'0' + (v & 0xF) as u8);
+                                            v >>= 4;
+                                        }
+                                        for &b in b",pk:" {
+                                            putchar(b);
+                                        }
+                                        putchar(b'0' + ppk as u8);
+                                        for &b in b",jif:" {
+                                            putchar(b);
+                                        }
+                                        let mut j =
+                                            crate::drivers::timer::get_jiffies().saturating_sub(pj);
+                                        let mut buf = [0u8; 12];
+                                        let mut n = 0;
+                                        while j > 0 && n < 12 {
+                                            buf[n] = b'0' + (j % 10) as u8;
+                                            j /= 10;
+                                            n += 1;
+                                        }
+                                        if n == 0 {
+                                            putchar(b'0');
+                                        }
+                                        while n > 0 {
+                                            n -= 1;
+                                            putchar(buf[n]);
+                                        }
+                                        putchar(b')');
+                                    }
+                                    putchar(b'\n');
+                                }
+                            }
                         }
                         false
                     }
@@ -3121,6 +3290,7 @@ impl CfsRunQueue {
 
                 result = Some(task);
                 crate::sched::sched::ww_record(task, crate::sched::sched::WW_EV_UNLINK_PICK);
+                crate::sched::sched::pick_trace(task, 1);
                 break;
             }
 

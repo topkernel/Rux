@@ -1503,6 +1503,60 @@ fn ww_heartbeat(now_time: u64) {
 
     let sched = crate::sched::sched::ww_sched_snapshot();
 
+    // nanosleep-loss lane (hunt): per-task pick-phase census — every
+    // heartbeat, one line per task: pid, last pick-phase (1 walk-unlink,
+    // 2 mark_picked, 3 slot-published, 4 repick-return, 5 wrapper-enter,
+    // 6 affirm-ok, 7 affirm-fail, 8 early-abort, 9 asm-abort), phase age
+    // (jiffies), ownership qword, pk, linked, state. A frozen task names
+    // its terminal phase directly.
+    {
+        use crate::dfx::taskdump::putc_brief as putchar;
+        fn pdec(mut v: u64) {
+            use crate::dfx::taskdump::putc_brief as p;
+            let mut buf = [0u8; 20];
+            let mut n = 0;
+            if v == 0 { p(b'0'); return; }
+            while v > 0 && n < buf.len() { buf[n] = b'0' + (v % 10) as u8; v /= 10; n += 1; }
+            for k in (0..n).rev() { p(buf[k]); }
+        }
+        static PTBUDGET: core::sync::atomic::AtomicU64 =
+            core::sync::atomic::AtomicU64::new(0);
+        if PTBUDGET.fetch_add(1, Ordering::Relaxed) < 60 {
+            putchar(b'\n');
+            crate::process::pid_hash::pid_hash_for_each_task_try(|task| unsafe {
+                let pid = (*task).pid();
+                if pid == 0 || pid == crate::sched::sched::TASK_POISON { return; }
+                let q = core::ptr::read_volatile(
+                    core::ptr::addr_of!((*task).ti_on_cpu) as *const u64);
+                let st = (*task).state().bits();
+                let linked = match (*task).policy() {
+                    crate::process::task::SchedPolicy::Fifo
+                    | crate::process::task::SchedPolicy::Rr => false,
+                    _ => (*task).sched_entity().timeline_key().is_some(),
+                };
+                let (ptc, ptj) =
+                    match crate::sched::sched::pick_trace_peek(task) {
+                        Some(x) => x,
+                        None => (0, 0),
+                    };
+                for &b in b"PTC pid=" { putchar(b); }
+                pdec(pid as u64);
+                for &b in b" ph=" { putchar(b); }
+                pdec(ptc as u64);
+                for &b in b" ago=" { putchar(b); }
+                pdec(ptj);
+                for &b in b" q=0x" { putchar(b); }
+                pdec(q);
+                for &b in b" pk=" { putchar(b); }
+                pdec((*task).pick_state() as u64);
+                for &b in b" lnk=" { putchar(b); }
+                pdec(linked as u64);
+                for &b in b" st=0x" { putchar(b); }
+                pdec(st as u64);
+                putchar(b'\n');
+            });
+        }
+    }
     // s16 (WW5, A2 census): pick-walk and heal deltas plus cumulative
     // sub-gate strand counts — the counter-based adjudication of the
     // msg-region strand family (see fair.rs WW_* counters). OWN pr_info:
