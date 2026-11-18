@@ -366,16 +366,208 @@ impl Zone {
     /// pages individually, so no compound/allocation-group semantics are
     /// involved. Returns the number of pages popped; their PFNs are
     /// written to `out`.
+    ///
+    /// BUFW-PARITY (2026-11-18): the per-page body inside the lock also
+    /// paid one locked RMW on EACH shared line per page — free_pages,
+    /// free_area[0].nr_free, the ZTRACE_ALLOC ring cursor and the vmstat
+    /// pgalloc counter — plus the full order-scan and a double descriptor
+    /// init (alloc_from_order stamps refcount/order/next_free, then
+    /// alloc_pages_locked's loop re-stamps flags/mapcount/refcount). The
+    /// TSC phase probe measured ~188 c/page here (~48k cycles per 1 MiB
+    /// buffered write, the row's largest non-copy term after the
+    /// mandatory cold-frame fill). This bulk form pops the order-0 free
+    /// list directly and claims every shared counter ONCE PER BATCH:
+    /// per page only the forensic seed-check loads, the head-pointer
+    /// store and ONE descriptor init remain (MM-H2 holds — descriptor
+    /// init stays inside the zone lock). When the order-0 list empties
+    /// mid-batch the existing single-page path (alloc_pages_locked(0),
+    /// which splits a higher-order block and re-seeds the order-0 list)
+    /// serves the remainder with its original exact accounting; the
+    /// ZTRACE ring cursor is claimed once per batch for the bulk-popped
+    /// segment only, so every entry still names a real page (the ring is
+    /// a best-effort relaxed forensic ledger — see mmforensics).
     pub fn alloc_pages_order0_batch(&self, n: usize, out: &mut [usize]) -> usize {
         let _guard = self.lock.lock();
+        let want = n.min(out.len());
         let mut got = 0usize;
-        while got < n && got < out.len() {
+        let mut bulk = 0usize; // pages served off the zone fast path:
+        // list-drain pops + full-shatter hand-outs (free_pages/vmstat/
+        // ZTRACE are claimed once for all of them below).
+        let mut drained = 0usize; // subset popped off the order-0 free
+        // list (free_area[0].nr_free covers exactly these; shatter
+        // hand-outs were counted at nr_free[shard_order], not here).
+        let mut bulk_pfns: [usize; 64] = [0; 64]; // ZTRACE entries (capped segments)
+        const BULK_PFNS_MAX: usize = 64;
+
+        while got < want {
+            // Bulk segment: drain the order-0 free list directly.
+            let mut head = self.free_area[0].free_list.load(Ordering::Acquire);
+            while head != FREE_LIST_NULL && got < want {
+                let page = pfn_to_page(head);
+                if page.is_null() {
+                    // Defensive: descriptor missing — treat as list end
+                    // (same stance as remove_from_free_list).
+                    self.free_area[0].free_list.store(FREE_LIST_NULL, Ordering::Release);
+                    head = FREE_LIST_NULL;
+                    break;
+                }
+                // SAFETY: head came from the order-0 free list under the
+                // zone lock; descriptor access is exclusive here.
+                let (rc, linked, next) = unsafe {
+                    ((*page).refcount(), (*page).test_flag(PageFlag::OnFreelist), (*page).next_free())
+                };
+                // SEED-ALLOC-BAD-POP twin (fake-OOM family): a popped block
+                // must be refcount==0 and carry OnFreelist — same forensic
+                // as alloc_from_order, kept per page.
+                if rc != 0 || !linked {
+                    if SEED_ALARMS.fetch_add(1, Ordering::Relaxed) < 8 {
+                        crate::pr_err!(
+                            "SEED-ALLOC-BAD-POP pfn={} bulk order=0: refcount={} on_freelist={} zone_free_cnt={}",
+                            head, rc, linked,
+                            self.free_pages.load(Ordering::Relaxed)
+                        );
+                    }
+                }
+                // Pop: head := next (Release pairs with the free-side push).
+                self.free_area[0].free_list.store(next, Ordering::Release);
+                // Descriptor init INSIDE the zone lock (review MM-H2):
+                // leaving refcount=0 (free-looking) outside the lock let a
+                // concurrent free path treat these pages as buddies and
+                // corrupt the free lists. One pass — flags, mapcount,
+                // refcount, order, and the stale next_free severed.
+                unsafe {
+                    (*page).clear_all_flags();
+                    (*page).reset_mapcount();
+                    (*page).set_refcount(1);
+                    (*page).set_order(0);
+                    (*page).set_next_free(FREE_LIST_NULL);
+                }
+                out[got] = head;
+                if bulk < BULK_PFNS_MAX {
+                    bulk_pfns[bulk] = head;
+                }
+                got += 1;
+                bulk += 1;
+                drained += 1;
+                head = next;
+            }
+            if got >= want {
+                break;
+            }
+            // Order-0 exhausted. Full-shatter arm (BUFW-PARITY): when the
+            // remainder still wants a run of pages, pop the SMALLEST
+            // available higher-order block ONCE and hand its members out
+            // directly — one list unlink, one batched set of shared-line
+            // claims, per page only the in-use descriptor init. The old
+            // per-page split path (alloc_pages_locked(0)) remains for
+            // small remainders: it leaves buddies at every intermediate
+            // order, which keeps fragmentation coarser when only a page
+            // or two are needed. Frees re-merge shattered order-0 runs,
+            // so the choice is a policy, not an invariant.
+            let remaining = want - got;
+            if remaining >= 8 {
+                let mut shard_order = 0usize;
+                for m in 1..=MAX_ORDER {
+                    if self.free_area[m].free_list.load(Ordering::Acquire) != FREE_LIST_NULL {
+                        shard_order = m;
+                        break;
+                    }
+                }
+                if shard_order > 0 {
+                    let block = self.free_area[shard_order].free_list.load(Ordering::Acquire);
+                    let page = pfn_to_page(block);
+                    if !page.is_null() {
+                        // SAFETY: block came from the shard_order free
+                        // list under the zone lock.
+                        let (rc, linked) = unsafe {
+                            ((*page).refcount(), (*page).test_flag(PageFlag::OnFreelist))
+                        };
+                        if rc != 0 || !linked {
+                            if SEED_ALARMS.fetch_add(1, Ordering::Relaxed) < 8 {
+                                crate::pr_err!(
+                                    "SEED-ALLOC-BAD-POP pfn={} shatter order={}: refcount={} on_freelist={} zone_free_cnt={}",
+                                    block, shard_order, rc, linked,
+                                    self.free_pages.load(Ordering::Relaxed)
+                                );
+                            }
+                        }
+                    }
+                    // Unlink the block from its list (one unlink;
+                    // remove_from_free_list owns the nr_free decrement
+                    // and clears the head's OnFreelist bit).
+                    self.remove_from_free_list(block, shard_order);
+                    let block_n = 1usize << shard_order;
+                    let n_take = block_n.min(remaining);
+                    // Hand out the first n_take members as order-0 pages.
+                    for i in 0..n_take {
+                        let p = pfn_to_page_mut(block + i);
+                        if !p.is_null() {
+                            // SAFETY: member of the just-popped block;
+                            // zone lock held (MM-H2).
+                            unsafe {
+                                (*p).clear_all_flags();
+                                (*p).reset_mapcount();
+                                (*p).set_refcount(1);
+                                (*p).set_order(0);
+                                (*p).set_next_free(FREE_LIST_NULL);
+                            }
+                        }
+                        out[got + i] = block + i;
+                        if bulk < BULK_PFNS_MAX {
+                            bulk_pfns[bulk] = block + i;
+                        }
+                        bulk += 1;
+                    }
+                    got += n_take;
+                    // Excess members go to the order-0 free list (they
+                    // stay "free" for accounting — only the handed-out
+                    // n_take leave it; the batched free_pages sub below
+                    // covers exactly those).
+                    let excess = block_n - n_take;
+                    if excess > 0 {
+                        let mut h = self.free_area[0].free_list.load(Ordering::Acquire);
+                        for j in (0..excess).rev() {
+                            let p = pfn_to_page_mut(block + n_take + j);
+                            if !p.is_null() {
+                                // SAFETY: member of the just-popped block;
+                                // zone lock held.
+                                unsafe {
+                                    (*p).set_refcount(0);
+                                    (*p).set_order(0);
+                                    (*p).set_next_free(h);
+                                    (*p).set_flag(PageFlag::OnFreelist);
+                                }
+                            }
+                            h = block + n_take + j;
+                        }
+                        self.free_area[0].free_list.store(h, Ordering::Release);
+                        self.free_area[0].nr_free.fetch_add(excess, Ordering::Relaxed);
+                    }
+                    continue;
+                }
+            }
+            // Small remainder: the original per-page path (its
+            // free_pages/nr_free/vmstat/ZTRACE accounting stays per-page
+            // and exact — the counters below only cover the bulk segment).
             match self.alloc_pages_locked(0) {
                 Some(pfn) => {
                     out[got] = pfn;
                     got += 1;
                 }
                 None => break,
+            }
+        }
+
+        // Batched shared-line accounting for the bulk segment only.
+        if bulk > 0 {
+            self.free_pages.fetch_sub(bulk, Ordering::Relaxed);
+            self.free_area[0].nr_free.fetch_sub(drained, Ordering::Relaxed);
+            super::vmstat::note_alloc(self.zone_type, bulk as u64);
+            let claimed = bulk.min(BULK_PFNS_MAX);
+            let base = ZALLOC_CUR.fetch_add(claimed, Ordering::Relaxed);
+            for i in 0..claimed {
+                ZTRACE_ALLOC[(base + i) % ZTRACE_ALLOC.len()]
+                    .store((bulk_pfns[i] as u64) << 4, Ordering::Relaxed);
             }
         }
         got
