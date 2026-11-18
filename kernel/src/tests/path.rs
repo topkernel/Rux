@@ -117,13 +117,12 @@ pub fn test_path() {
         // was never executed until the port).
         ("usr/local/../../bin", "bin"),
         ("", ""),
-        // DEVIATION FLAG (reference-behavior audit pending): the current
-        // implementation returns "" for the exact-cancellation relative
-        // case; directory-lookup semantics (each .. resolves the parent,
-        // like the reference's path walk) would give ".." — 3 downs and
-        // 3 ups land one above the start. Pinned AS-IS to prevent silent
-        // drift; changing it is a kernel-behavior decision, not a test
-        // decision (path_normalize feeds every path operation).
+        // Linux path-resolution alignment: relative paths resolve from
+        // the cwd, so 3 downs + 3 ups return to the cwd exactly ("").
+        // (An earlier port flagged this as a deviation; recounting the
+        // walk — cwd/a/b/c .. .. .. → cwd/a/b, cwd/a, cwd — shows the
+        // kernel's "" IS the Linux behavior. The dead block's ".."
+        // expectation was the error.)
         ("a/b/c/../../..", ""),
         ("/a/b/c/../../..", "/"),
         ("/a/./b/../c", "/a/c"),
