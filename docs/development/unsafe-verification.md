@@ -19,18 +19,18 @@ census id is accounted for here.
 
 ## Totals
 
-- unsafe regions: **6399**
+- unsafe regions: **6409**
 - with artifact (non-GAP): **0** (0.0%)
-- GAP: **6399**
-- by kind: block=5522, unsafe-extern=31, unsafe-fn=697, unsafe-impl=149
-- by category (regions carry 0..n tags): ptr-ops=1712, volatile=365, asm=275, addr-arith=144, raw-construct=126, no-preempt=44, ffi=40, layout-meta=22, static-mut=5, transmute=4
+- GAP: **6409**
+- by kind: block=5532, unsafe-extern=31, unsafe-fn=697, unsafe-impl=149
+- by category (regions carry 0..n tags): ptr-ops=1722, volatile=365, asm=275, addr-arith=144, raw-construct=126, no-preempt=44, ffi=40, layout-meta=22, static-mut=5, transmute=4
 
 ## Per-subsystem
 
 | subsystem | regions | non-GAP | GAP |
 |-----------|---------|---------|-----|
 | fs | 1199 | 0 | 1199 |
-| arch | 964 | 0 | 964 |
+| arch | 974 | 0 | 974 |
 | syscall | 893 | 0 | 893 |
 | drivers | 549 | 0 | 549 |
 | sync | 459 | 0 | 459 |
@@ -2249,14 +2249,24 @@ census id is accounted for here.
 | 218 | <module> | unsafe-fn | asm | GAP | `5367436f537c` |
 | 302 | <module> | unsafe-fn | asm | GAP | `a21e1d0ff0f4` |
 
-### kernel/src/arch/uaccess_safe.rs (4)
+### kernel/src/arch/uaccess_safe.rs (14)
 
 | line | fn | kind | categories | artifact | id |
 |------|----|------|------------|----------|----|
 | 35 | copy_out | block | ptr-ops | GAP | `0dbfe572e27e` |
 | 49 | copy_in | block | ptr-ops | GAP | `239b40c4d955` |
 | 61 | read_user | block | ptr-ops | GAP | `64663ceb3909` |
-| 71 | write_user | block | ptr-ops | GAP | `3df5064efd4a` |
+| 71 | write_user | block | ptr-ops | GAP | `d384df1245c5` |
+| 81 | clear_user | block | ptr-ops | GAP | `069905c564d6` |
+| 91 | strnlen_user | block | ptr-ops | GAP | `6a1b94881124` |
+| 101 | futex_cmpxchg_u32 | block | ptr-ops | GAP | `ccd4e001aeba` |
+| 150 | read | block | ptr-ops | GAP | `8b57225476b4` |
+| 158 | write | block | ptr-ops | GAP | `3e9202b94b94` |
+| 231 | copy_in | block | ptr-ops | GAP | `82bad81df26e` |
+| 242 | copy_out | block | ptr-ops | GAP | `4ce0b7812c05` |
+| 249 | clear | block | ptr-ops | GAP | `a2a3187b8881` |
+| 262 | read_at | block | ptr-ops | GAP | `03b1357c7805` |
+| 275 | write_at | block | ptr-ops | GAP | `6c2992d4265d` |
 
 ### kernel/src/arch/x86_64/boot.rs (5)
 

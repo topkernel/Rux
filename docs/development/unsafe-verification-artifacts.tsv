@@ -540,10 +540,20 @@ fdbb4d362161	kernel/src/arch/riscv64/vext.rs	vstate_first_use_init	158	asm	GAP
 f6da9d4e33f7	kernel/src/arch/riscv64/vext.rs	vstate_first_use_init	166		GAP
 5367436f537c	kernel/src/arch/riscv64/vext.rs	<module>	218	asm	GAP
 a21e1d0ff0f4	kernel/src/arch/riscv64/vext.rs	<module>	302	asm	GAP
-0dbfe572e27e	kernel/src/arch/uaccess_safe.rs	copy_out	35	ptr-ops	GAP
-239b40c4d955	kernel/src/arch/uaccess_safe.rs	copy_in	49	ptr-ops	GAP
-64663ceb3909	kernel/src/arch/uaccess_safe.rs	read_user	61	ptr-ops	GAP
-3df5064efd4a	kernel/src/arch/uaccess_safe.rs	write_user	71	ptr-ops	GAP
+0dbfe572e27e	kernel/src/arch/uaccess_safe.rs	copy_out	35	ptr-ops	INV:INV-UACCESS-1
+239b40c4d955	kernel/src/arch/uaccess_safe.rs	copy_in	49	ptr-ops	INV:INV-UACCESS-1
+64663ceb3909	kernel/src/arch/uaccess_safe.rs	read_user	61	ptr-ops	INV:INV-UACCESS-1
+d384df1245c5	kernel/src/arch/uaccess_safe.rs	write_user	71	ptr-ops	INV:INV-UACCESS-1
+069905c564d6	kernel/src/arch/uaccess_safe.rs	clear_user	81	ptr-ops	INV:INV-UACCESS-1
+6a1b94881124	kernel/src/arch/uaccess_safe.rs	strnlen_user	91	ptr-ops	INV:INV-UACCESS-1
+ccd4e001aeba	kernel/src/arch/uaccess_safe.rs	futex_cmpxchg_u32	101	ptr-ops	INV:INV-UACCESS-1
+8b57225476b4	kernel/src/arch/uaccess_safe.rs	read	150	ptr-ops	INV:INV-UACCESS-1
+3e9202b94b94	kernel/src/arch/uaccess_safe.rs	write	158	ptr-ops	INV:INV-UACCESS-1
+82bad81df26e	kernel/src/arch/uaccess_safe.rs	copy_in	231	ptr-ops	INV:INV-UACCESS-1
+4ce0b7812c05	kernel/src/arch/uaccess_safe.rs	copy_out	242	ptr-ops	INV:INV-UACCESS-1
+a2a3187b8881	kernel/src/arch/uaccess_safe.rs	clear	249	ptr-ops	INV:INV-UACCESS-1
+03b1357c7805	kernel/src/arch/uaccess_safe.rs	read_at	262	ptr-ops	INV:INV-UACCESS-1
+6c2992d4265d	kernel/src/arch/uaccess_safe.rs	write_at	275	ptr-ops	INV:INV-UACCESS-1
 08d6b0321921	kernel/src/arch/x86_64/boot.rs	get_boot_magic	76	volatile	GAP
 31e8174666e3	kernel/src/arch/x86_64/boot.rs	early_boot_init	97	volatile,ptr-ops	GAP
 907348efa182	kernel/src/arch/x86_64/boot.rs	early_boot_init	106	volatile,ptr-ops	GAP
