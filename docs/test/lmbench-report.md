@@ -168,7 +168,56 @@ handoff), open (1.44x — walk loop + File construct), read (1.42x —
 copy tail), write (1.13x). lat_fs re-polluted by boot noise (no
 honest number this round).
 
-## Patrol round (2026-11-19 02:xx): two strand heals landed (c736ec7d9, f315e95df); remaining hang face = alloc/IO-completion convoy
+## Patrol round 2 (2026-11-19 03:xx): strand-recovery round landed (4 commits); captures name the lock-convoy root
+
+Landed and gated (riscv 1334/1334, triple-arch rc=0, pushed
+d023bc051..b4793146c):
+
+1. Aged switch-out marks read as not-in-flight (d023bc051) —
+task_is_mid_switch_out and pick_owner_live now age-check
+SWITCHING_OUT marks against SWITCHING_OUT_JIF (50-jiffy bar vs a
+microsecond-scale window): a lost retire no longer blocks the phantom
+sweep and the pick's stale-mark heal forever.
+2. Ghost-node guard (3cbf8af22) — the idle slot heal requeues its
+victim only when NO other cpu names it; the dump evidence (two slots
+naming one worker) showed the requeue inserting a node for a task
+running elsewhere.
+3. Phantom sweep completion (26b3f7530) — the relink retires aged
+marks and clears stale qwords (otherwise the strand re-forms at the
+next pick), plus the STRAND-ID scan naming any residual linked-stale
+shape at 1 Hz.
+4. SOFTIRQ-STUCK-WINDOW watchdog (b4793146c) — the tick hardirq probes
+the per-cpu softirq window from outside the IN_PROGRESS guard.
+
+New captures this round (all against the correct ELF):
+
+- The hang is a **lock convoy**: softlockups report lat_fs workers
+  spinning 10 s+ in RawSpinlock::lock (pc=0 clean) while MemFree stays
+  ~950 MB — NOT memory, NOT a stuck softirq window (the watchdog never
+  fired), NOT a linked strand (STRAND-ID silent). One worker strands
+  MID-CRITICAL-SECTION holding a spinlock; every other worker spins on
+  that lock and the battery wall-crawls (rows still print at full
+  speed when a round gets scheduled).
+- The stranded worker's state: RUNNING + unlinked + preempt=0..2 +
+  ownership marks stale (claim=N while a DIFFERENT cpu's slot names it
+  — the qword/slot pair disagreeing across cpus). The __schedule
+  discipline should refuse switching out a pc!=0 non-sleeping task, so
+  the switch-out that stranded these workers bypassed or mis-ordered
+  the discipline — the pick/publish protocol (slot vs qword
+  consistency across cpus) is the remaining hole.
+- PREEMPT-HEAL-REFUSED fires on a kernel thread carrying pc=0x10001
+  with "live acquire/carrier evidence" — the heal refusing a leaked
+  count it believes is a live holder (face B).
+
+Next-round levers: (1) audit the __schedule pick/publish sequence for
+the slot-vs-qword cross-cpu consistency hole (the pick publishes the
+slot under GRQ but the qword claim publishes at the switch-in — a
+task switched in on cpu Y while its qword still says claim=X is the
+captured mismatch); (2) trace which spinlock the convoy spins on
+(bucket? dcache? VFS_STATE?) by adding the lock name to the
+softlockup dump; (3) re-verify the battery after each.
+
+## Patrol round (2026-11-19 02:xx): two strand heals landed (c736ec7d9, f315e95df); hang face re-identified in round 2
 
 The patrol's lever on the convicted family: two surgical heals on the
 strand mechanisms, both following existing in-tree heal patterns,
