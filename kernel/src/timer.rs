@@ -1450,6 +1450,44 @@ fn fw_record(pid: u32, ok: bool, on_rq: bool, key: bool, st: u32) {
     }
 }
 
+// nanosleep-loss conviction: timed-sleep loop-iteration counter (side
+// table keyed by task pointer; no Task layout change). One relaxed add
+// per nanosleep_impl loop pass; read by the heartbeat census.
+pub static NSL_TASK: [AtomicUsize; 16] = [const { AtomicUsize::new(0) }; 16];
+pub static NSL_ITER: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
+
+#[inline]
+pub fn nsleep_iter_bump() {
+    let Some(t) = crate::sched::current() else { return };
+    let key = t as *mut crate::process::Task as usize;
+    for k in 0..16 {
+        if NSL_TASK[k].load(Ordering::Relaxed) == key {
+            NSL_ITER[k].fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    }
+    for k in 0..16 {
+        if NSL_TASK[k]
+            .compare_exchange(0, key, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            NSL_ITER[k].fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    }
+}
+
+/// Reader: the task's timed-sleep loop-iteration count (0 = unseen).
+pub fn nsleep_iter_of(task: *mut crate::process::Task) -> u64 {
+    let key = task as usize;
+    for k in 0..16 {
+        if NSL_TASK[k].load(Ordering::Relaxed) == key {
+            return NSL_ITER[k].load(Ordering::Relaxed);
+        }
+    }
+    0
+}
+
 /// Wakewatch: count a nanosleep early-token-consumption re-arm.
 pub fn ww_note_rearm() {
     WW_REARM_N.fetch_add(1, Ordering::Relaxed);
@@ -1587,6 +1625,9 @@ fn ww_heartbeat(now_time: u64) {
             while v > 0 && n < buf.len() { buf[n] = b'0' + (v % 10) as u8; v /= 10; n += 1; }
             for k in (0..n).rev() { p(buf[k]); }
         }
+        for &b in b"NSLPARK rescued=" { putchar(b); }
+        pdec9(crate::sched::sched::NSLPARK_RESCUED.load(Ordering::Relaxed));
+        putchar(b'\n');
         for &b in b"ARMS id=" { putchar(b); }
         pdec9(NEXT_TIMER_ID.load(Ordering::Relaxed).saturating_sub(1));
         for &b in b" fires=" { putchar(b); }
@@ -1663,6 +1704,8 @@ fn ww_heartbeat(now_time: u64) {
                 }
                 for &b in b" st=0x" { putchar(b); }
                 pdec(st as u64);
+                for &b in b" itr=" { putchar(b); }
+                pdec(crate::timer::nsleep_iter_of(task));
                 // last fire-record for this pid (per-pid table)
                 for k in 0..32 {
                     if FWT_PID[k].load(Ordering::Relaxed) == pid {

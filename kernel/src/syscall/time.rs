@@ -420,6 +420,7 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
     // jiffies / pending signal and we exit the loop instead of sleeping.
     // Mirrors sys_rt_sigtimedwait's established pattern.
     loop {
+        crate::timer::nsleep_iter_bump();
         // Precise wake condition: the time CSR has reached the deadline.
         let now = timer::read_time();
 

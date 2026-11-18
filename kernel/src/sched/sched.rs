@@ -2197,6 +2197,11 @@ pub static IN_TASK_ALLOC: core::sync::atomic::AtomicBool =
 /// The hunt2 postmortem needs this: a 100 s strand produced ZERO
 /// PARKED-LEAK lines, and the counters distinguish "walk blind" from
 /// "victim parked clean, the phantom arose at resume".
+/// nanosleep-loss: parks refused because the sleeper's one-shot wheel
+/// entry was already consumed (the lost-wake rescue counter).
+pub static NSLPARK_RESCUED: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
 pub static PARKWALK_CENSUS: [core::sync::atomic::AtomicU64; 3] =
     [
         core::sync::atomic::AtomicU64::new(0),
@@ -3533,8 +3538,44 @@ unsafe fn __schedule() {
     // Deactivate prev: dequeue from the correct class-specific runqueue.
     let cc_acct = crate::dfx::cctx::now();
     crate::dfx::cctx::add(&crate::dfx::cctx::SCH_ACCT_NS, cc_t2);
-    let prev_running = (*prev).state() == TaskState::new(TaskState::RUNNING);
+    let mut prev_running = (*prev).state() == TaskState::new(TaskState::RUNNING);
+    // nanosleep-loss fix (reference shape): a timed sleeper parks ONLY
+    // with a live waker — hrtimer_nanosleep's
+    //     set_current_state(TASK_INTERRUPTIBLE);
+    //     if (likely(t.task)) ret = schedule();
+    // where the callback (or its cancellation) clears t.task BEFORE the
+    // sleeper can schedule on it; a consumed sleeper never sleeps. Here
+    // the equivalent adjudication runs at the park decision itself, under
+    // this GRQ hold (the same lock the wake path's state gate and enqueue
+    // serialize on): a task carrying a timed-sleep shadow whose wheel
+    // entry is GONE (fired — its wake was delivered into the RUNNING
+    // phase of the park protocol and consumed as the designed-benign
+    // redundant class, or otherwise spent) must NOT park — it has no
+    // waker left. Flip it back to RUNNING so the requeue branch below
+    // keeps it runnable; its wait loop re-checks the condition (now
+    // past-deadline) and re-arms through the guard's belt-and-braces
+    // path. Lock order note: this introduces GRQ -> TIMER_TABLE
+    // (timer_pending's lock); no path holds TIMER_TABLE and takes GRQ
+    // (delivery happens after the table lock is released — R12-3), so
+    // the order is safe.
     if !prev_running && prev_pid != 0 {
+        let kind = (*prev)
+            .timed_sleep_kind
+            .load(core::sync::atomic::Ordering::Relaxed);
+        if kind != crate::timer::TSLEEP_NONE {
+            let id = (*prev)
+                .timed_sleep_timer_id
+                .load(core::sync::atomic::Ordering::Relaxed);
+            if id != 0 && !crate::timer::timer_pending(id) {
+                // SAFETY: prev is this CPU's current task.
+                (*prev).set_state(TaskState::new(TaskState::RUNNING));
+                prev_running = true;
+                NSLPARK_RESCUED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+    if !prev_running && prev_pid != 0 {
+        pick_trace(prev, 10);
         match prev_policy {
             SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
                 if grq_guard.cfs_rq.dequeue(prev) {
@@ -6621,9 +6662,11 @@ pub fn wake_up_enqueue_opt(
         // route the two true-arms through one binding first (the else
         // arm keeps its inline refusal print).
         let woken = if enqueue_task_locked(&mut *grq_guard, task) {
+            pick_trace(task, 11);
             true
         } else if ensure_linked_locked(&mut *grq_guard, task) {
             (*task).set_state(TaskState::new(TaskState::RUNNING));
+            pick_trace(task, 11);
             true
         } else {
             // W2 twin: both the insert and the heal refused — name the

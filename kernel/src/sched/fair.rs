@@ -1464,6 +1464,31 @@ impl CfsRunQueue {
     #[inline]
     fn timeline_insert(&mut self, key: VruntimeKey, task: *mut crate::process::Task) -> bool {
         let t0 = crate::dfx::cctx::now();
+        // nanosleep-loss conviction: inserting a node that is STILL
+        // PHYSICALLY LINKED (a prior removal failed silently — pick_next
+        // ignores timeline_remove's failure) corrupts the tree (the
+        // insert overwrites the in-tree node's parent/child links,
+        // orphaning whatever referenced it). Name it live.
+        if !task.is_null() {
+            let node = node_of_task(task);
+            if unsafe { (*node).linked } {
+                static DI_N: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                if DI_N.fetch_add(1, Ordering::Relaxed) < 12 {
+                    use crate::dfx::taskdump::putc_brief as putchar;
+                    fn ph(mut v: u64) {
+                        for _ in 0..8 {
+                            let n = (v >> 28) as u8;
+                            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                            v <<= 4;
+                        }
+                    }
+                    for &b in b"\nTL-INSERT-OF-LINKED pid=0x" { putchar(b); }
+                    ph(unsafe { (*task).pid() } as u64);
+                    putchar(b'\n');
+                }
+            }
+        }
         // Store the ORDER key first (the tree's comparisons read it —
         // insert stores, the descent reads candidate keys).
         // SAFETY: every insert site passes a valid Task pointer
@@ -1520,6 +1545,27 @@ impl CfsRunQueue {
             // Refused (poison discipline or not-linked): report; leave
             // the counters paired with the timeline (the entry is still
             // linked).
+            // nanosleep-loss conviction: name the refusal live (the
+            // silent producer of still-linked nodes — a later insert of
+            // such a node corrupts the tree).
+            static TRE_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            if !task.is_null()
+                && unsafe { (*node_of_task(task)).linked }
+                && TRE_N.fetch_add(1, Ordering::Relaxed) < 12
+            {
+                use crate::dfx::taskdump::putc_brief as putchar;
+                fn ph(mut v: u64) {
+                    for _ in 0..8 {
+                        let n = (v >> 28) as u8;
+                        putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                        v <<= 4;
+                    }
+                }
+                for &b in b"\nTL-ERASE-REFUSED-ON-LINKED pid=0x" { putchar(b); }
+                ph(unsafe { (*task).pid() } as u64);
+                putchar(b'\n');
+            }
             TL_POISON.erases.fetch_add(1, Ordering::Relaxed);
             crate::dfx::cctx::add(&crate::dfx::cctx::FAIR_TL_NS, t0);
             crate::dfx::cctx::bump(&crate::dfx::cctx::FAIR_TL_N);
