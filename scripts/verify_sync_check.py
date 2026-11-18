@@ -256,11 +256,15 @@ MAPPINGS = [
                 "post": [(r'\s*let now = now;\s*\n?', '\n'), (r';\s*$', '; take')],
             },
             {
-                # release()'s outermost-drop section
+                # release()'s outermost-drop section. The end anchor
+                # stops at the rt-handoff block (oh-launch fix: the
+                # state machine now runs BEFORE the rt wake, matching
+                # release_if_owner's order); WHICH waiter a release
+                # wakes is mode behavior, not model state.
                 "fn": "release_outermost",
                 "in_fn": "release",
                 "start": "if st.depth > 0 {",
-                "end": "let woke = self.wait.wake_up_one();",
+                "end": "if self.rt {",
                 "post": [(r'\s*\}\s*$', '')],  # slice includes the wrapper close
             },
             {
