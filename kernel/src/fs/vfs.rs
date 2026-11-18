@@ -32,6 +32,7 @@ use alloc::string::String;
 use alloc::format;
 use alloc::sync::Arc;
 use alloc::collections::BTreeMap;
+use alloc::collections::BTreeSet;
 use core::sync::atomic::Ordering;
 use crate::sync::spinlock::Spinlock;
 
@@ -1134,7 +1135,15 @@ fn collect_subtree_mounts(
 ) -> Vec<(Vec<String>, Arc<Dentry>, MntFlags)> {
     let state = VFS_STATE.lock();
     let mut found: Vec<(u64, Vec<String>, Arc<Dentry>, MntFlags)> = Vec::new();
-    let mut visited: Vec<*const VfsMountInternal> = Vec::new();
+    // Visited-mount dedup as a SET, not a Vec scan: the ub2404 boot
+    // wedged with one CPU monopolizing collect_subtree_mounts while
+    // every other task piled up on VFS_STATE — the Vec::contains linear
+    // probe made the DFS O(mounts^2) and a service-restart-polluted
+    // registry (thousands of namespace rows) turned that into a
+    // minutes-long critical section (MONOPOLIST-TICK pid=603 at
+    // collect_subtree_mounts+0x239, the cmp/lea/jn scan loop; soft
+    // lockups on CPUs 2/4/6/7; serial silent from there).
+    let mut visited: BTreeSet<*const VfsMountInternal> = BTreeSet::new();
     let mut stack: Vec<Arc<Dentry>> = Vec::new();
     stack.push(anc.clone());
     while let Some(node) = stack.pop() {
@@ -1143,10 +1152,9 @@ fn collect_subtree_mounts(
         };
         for mnt in bucket.mounts.iter() {
             let mptr = Arc::as_ptr(mnt) as *const VfsMountInternal;
-            if visited.contains(&mptr) {
+            if !visited.insert(mptr) {
                 continue;
             }
-            visited.push(mptr);
             // Never clone the just-attached bind onto itself.
             if Arc::ptr_eq(&mnt.root, fresh_root) {
                 continue;
@@ -1168,6 +1176,17 @@ fn collect_subtree_mounts(
                     found.push((mnt.seq, rel, mnt.root.clone(), *mnt.flags.lock()));
                 }
             }
+        }
+        // Anomaly report (one line per call that crosses the threshold):
+        // a subtree clone that visits thousands of mounts means the
+        // registry is polluted (dying-namespace rows surviving) or the
+        // walk escaped the source subtree — either way the MS_REC bind
+        // cost is about to be visible in every VFS_STATE waiter.
+        if visited.len() == 4096 {
+            crate::pr_warn!(
+                "vfs: MS_REC clone walk crossed {} mounts (registry pollution or subtree escape)",
+                visited.len()
+            );
         }
     }
     drop(state);
