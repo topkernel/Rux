@@ -291,6 +291,37 @@ pub fn kill_other_threads(current: *mut Task) {
                     pd((*m).pending.get_all());
                     for &b in b" ra=0x" { putchar(b); }
                     pd(ra);
+                    // per-pid LAST fire (collision-free FWT table)
+                    for k in 0..32 {
+                        if crate::timer::FWT_PID[k].load(
+                            core::sync::atomic::Ordering::Relaxed,
+                        ) == (*m).pid()
+                        {
+                            for &b in b" fw(ok" { putchar(b); }
+                            pd(crate::timer::FWT_OK[k].load(
+                                core::sync::atomic::Ordering::Relaxed,
+                            ) as u64);
+                            for &b in b",rq" { putchar(b); }
+                            pd(crate::timer::FWT_ONRQ[k].load(
+                                core::sync::atomic::Ordering::Relaxed,
+                            ) as u64);
+                            for &b in b",key" { putchar(b); }
+                            pd(crate::timer::FWT_KEY[k].load(
+                                core::sync::atomic::Ordering::Relaxed,
+                            ) as u64);
+                            for &b in b",st" { putchar(b); }
+                            pd(crate::timer::FWT_ST[k].load(
+                                core::sync::atomic::Ordering::Relaxed,
+                            ) as u64);
+                            for &b in b")j-ago=" { putchar(b); }
+                            pd(crate::drivers::timer::get_jiffies().saturating_sub(
+                                crate::timer::FWT_JIF[k].load(
+                                    core::sync::atomic::Ordering::Relaxed,
+                                ),
+                            ));
+                            break;
+                        }
+                    }
                     if tid != 0 {
                         for &b in b" del=" { putchar(b); }
                         match crate::timer::del_lookup(tid) {
@@ -306,6 +337,28 @@ pub fn kill_other_threads(current: *mut Task) {
                         }
                         for &b in b" tp=" { putchar(b); }
                         pd(crate::timer::timer_pending(tid) as u64);
+                        // fire-side: did this entry ever fire?
+                        {
+                            let d = tid as usize & 0x3FFF;
+                            if crate::timer::FWHOW_ID[d].load(
+                                core::sync::atomic::Ordering::Relaxed,
+                            ) == tid
+                            {
+                                for &b in b" FIRED ok=" { putchar(b); }
+                                pd(crate::timer::FWHOW_OK[d].load(
+                                    core::sync::atomic::Ordering::Relaxed,
+                                ) as u64);
+                                for &b in b"/" { putchar(b); }
+                                pd(crate::drivers::timer::get_jiffies().saturating_sub(
+                                    crate::timer::FWHOW_JIF[d].load(
+                                        core::sync::atomic::Ordering::Relaxed,
+                                    ),
+                                ));
+                                for &b in b"j-ago" { putchar(b); }
+                            } else {
+                                for &b in b" NOFIRE" { putchar(b); }
+                            }
+                        }
                     }
                     putchar(b'\n');
                 }

@@ -431,7 +431,20 @@ fn del_note(id: u64) {
         Ordering::Relaxed,
     );
     DEL_JIF[slot].store(crate::drivers::timer::get_jiffies(), Ordering::Relaxed);
+    // direct-mapped id table (survives the ring's roll): 16K slots,
+    // key = id itself — the wheel's ids are monotonic and sparse, so a
+    // slot's id word validates the entry.
+    let d = id as usize & 0x3FFF;
+    DELDM_ID[d].store(id, Ordering::Relaxed);
+    DELDM_RA[d].store(
+        core::panic::Location::caller().line() as u64,
+        Ordering::Relaxed,
+    );
+    DELDM_JIF[d].store(crate::drivers::timer::get_jiffies(), Ordering::Relaxed);
 }
+pub static DELDM_ID: [AtomicU64; 16384] = [const { AtomicU64::new(0) }; 16384];
+pub static DELDM_RA: [AtomicU64; 16384] = [const { AtomicU64::new(0) }; 16384];
+pub static DELDM_JIF: [AtomicU64; 16384] = [const { AtomicU64::new(0) }; 16384];
 
 /// Was `id` deleted (and from which source line, how long ago)?
 pub fn del_lookup(id: u64) -> Option<(u64, u64)> {
@@ -976,12 +989,31 @@ pub fn expire_hres_inline() -> bool {
             WW_HRES_N[cpu].fetch_add(1, Ordering::Relaxed);
         }
     }
-    static mut HRES_FAST_BUF: [FiredToken; wheel::EXPIRY_BUDGET] =
-        [FiredToken { id: 0, action: Action::None, late_ticks: 0, deadline: 0 }; wheel::EXPIRY_BUDGET];
-    // SAFETY: single-CPU-use buffer owned by this call path (see the
-    // nesting note above); the wheel writes at most EXPIRY_BUDGET tokens.
-    let buf: *mut [FiredToken; wheel::EXPIRY_BUDGET] =
-        core::ptr::addr_of_mut!(HRES_FAST_BUF) as *mut [FiredToken; wheel::EXPIRY_BUDGET];
+    // nanosleep-loss fix (lost-wake, the pichek class): the hardirq
+    // fast path's token buffer is PER-CPU. The single shared row raced
+    // across CPUs — CPU A's expire_hres_inline had collected its tokens
+    // into the row and released TIMER_TABLE; CPU B's LAPIC one-shot then
+    // fired its own hardirq expiry, whose collect OVERWROTE the shared
+    // row before A's deliver_fired read it. The collected one-shot
+    // entries were already freed from the wheel (the sleeper's entry
+    // reads spent ever after) yet their wakes were never delivered —
+    // the sleeper parks on with no waker left anywhere: three of four
+    // pichek threads frozen permanently, every interval 100us..20ms,
+    // the OH-campaign "wake TRUE, task unlinked" signature. Per-CPU
+    // rows close it (the reference runs hrtimer expiry on per-CPU
+    // bases; a shared expiry buffer is unrepresentable there).
+    static mut HRES_FAST_BUF: [[FiredToken; wheel::EXPIRY_BUDGET];
+        crate::config::MAX_CPUS] =
+        [[FiredToken { id: 0, action: Action::None, late_ticks: 0, deadline: 0 }; wheel::EXPIRY_BUDGET];
+            crate::config::MAX_CPUS];
+    let cpu = crate::arch::cpu_id() as usize;
+    // SAFETY: per-CPU row owned by THIS cpu's hardirq path (same shape
+    // as the softirq EXPIRED_BUF row above); the wheel writes at most
+    // EXPIRY_BUDGET tokens.
+    let buf: *mut [FiredToken; wheel::EXPIRY_BUDGET] = unsafe {
+        (core::ptr::addr_of_mut!(HRES_FAST_BUF) as *mut [FiredToken; wheel::EXPIRY_BUDGET])
+            .add(cpu % crate::config::MAX_CPUS)
+    };
     let current = timer::get_jiffies();
     run_wheel_sweep(current, now_time, true, buf);
     true
@@ -1294,6 +1326,17 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
                 let task = crate::process::pid_hash::pid_hash_lookup_pinned(pid);
                 if !task.is_null() {
                     let ok = crate::sched::wake_up_process(task);
+                    // nanosleep-loss conviction: fire-side direct map —
+                    // every FIRED wake id + jiffies.
+                    {
+                        let d = token.id as usize & 0x3FFF;
+                        FWHOW_ID[d].store(token.id, Ordering::Relaxed);
+                        FWHOW_JIF[d].store(
+                            crate::drivers::timer::get_jiffies(),
+                            Ordering::Relaxed,
+                        );
+                        FWHOW_OK[d].store(ok as u8, Ordering::Relaxed);
+                    }
                     // nanosleep-loss hunt: the wake's outcome + the
                     // target's post-wake linkage state.
                     if !task.is_null() {
@@ -1434,6 +1477,11 @@ pub static FW_OK: [AtomicU8; 64] = [const { AtomicU8::new(0) }; 64];
 pub static FW_ONRQ: [AtomicU8; 64] = [const { AtomicU8::new(0) }; 64];
 pub static FW_KEY: [AtomicU8; 64] = [const { AtomicU8::new(0) }; 64];
 pub static FW_ST: [AtomicU32; 64] = [const { AtomicU32::new(0) }; 64];
+
+// nanosleep-loss conviction: fire-side direct map (id-keyed).
+pub static FWHOW_ID: [AtomicU64; 16384] = [const { AtomicU64::new(0) }; 16384];
+pub static FWHOW_JIF: [AtomicU64; 16384] = [const { AtomicU64::new(0) }; 16384];
+pub static FWHOW_OK: [AtomicU8; 16384] = [const { AtomicU8::new(0) }; 16384];
 
 // nanosleep-loss hunt: per-pid LAST-fire record (module level).
 pub static FWT_PID: [AtomicU32; 32] = [const { AtomicU32::new(0) }; 32];
