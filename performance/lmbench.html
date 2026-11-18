@@ -86,7 +86,7 @@
 <h2 id="data"><span class="anchor">§1</span>lmbench 数据(同机 KVM 对照,21 项)</h2>
     <p style="font-size:13.5px">数据来源:lmbench-report.md「Standing(2026-11-16,内核 main=017bf556b)」—— 唯一权威表,以下即该节数据。方法:两侧同一测试平台(q35/KVM/-cpu host/smp2/2G,宿主 CCD0 钉核 + performance 治理器 + 保温线程);Rux 启动带 nohz_full=1,每用例独立启动、失败行重试;Linux 列 = OHOS 6.6.101 内核在<b>同一 guest 测试平台</b>执行同一静态二进制,各 2 rep 取中位。切换/唤醒族对 Linux 侧窗口敏感,比值只在同会话内有意义。</p>
     <p style="font-size:13px;color:var(--text-3)">口径:每行取当前 main 的最新实测值(2026-11-16 全量轮;null/read/write 三行为 11-17 单行重测)。Rux 列 = debug/strong 按原轮口径;Linux 列 = 宿主 7.0.0 内核在<b>同一 guest 测试平台</b>执行同一静态二进制。</p>
-    <h3>领先/持平组(14 项)</h3>
+    <h3>领先/持平组(18 项)</h3>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>用例</th><th class="num">Rux</th><th class="num">Linux(同一测试平台 guest)</th><th>结论</th></tr></thead>
@@ -105,10 +105,14 @@
           <tr><td class="mono">lat_mem_rd 256MB</td><td class="num">6.49–6.65 ns/load</td><td class="num">6.691 ns/load</td><td><span class="chip ok">持平偏领先(0.97×)</span></td></tr>
           <tr><td class="mono">lat_usleep 1000</td><td class="num">1030.8 µs</td><td class="num">1052.8 µs</td><td><span class="chip ok">持平(0.98×)</span></td></tr>
           <tr><td class="mono">bw_file_rd 1m io_only</td><td class="num">33,408–35,545 MB/s</td><td class="num">23,045 MB/s(天花板)</td><td><span class="chip ok">领先 1.45–1.54×</span>(镜像 runner 修复后复真)</td></tr>
+          <tr><td class="mono">lat_pagefault</td><td class="num">0.0253 µs</td><td class="num">0.072 µs(天花板)</td><td><span class="chip ok">领先 2.8×</span>(对天花板;镜像 runner 修复后复真)</td></tr>
+          <tr><td class="mono">lat_syscall null</td><td class="num">0.042 µs</td><td class="num">0.046 µs</td><td><span class="chip ok">反超 0.92×</span>(fdget+getppid O(1)+PT_REGS+fdreap 静默+NOHZ 栈)</td></tr>
+          <tr><td class="mono">lat_proc fork</td><td class="num">36.6–40.3 µs</td><td class="num">33.9 µs</td><td><span class="chip ok">持平带 1.08–1.19×</span></td></tr>
+          <tr><td class="mono">lat_proc exec</td><td class="num">39.4–40.6 µs</td><td class="num">37.6 µs</td><td><span class="chip ok">持平带 1.05–1.08×</span></td></tr>
         </tbody>
       </table>
     </div>
-    <h3>落后组(7 项)</h3>
+    <h3>落后组(4 项)</h3>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>用例</th><th class="num">Rux</th><th class="num">Linux(同一测试平台 guest)</th><th>结论</th><th>优化方向</th></tr></thead>
@@ -117,17 +121,25 @@
           <tr><td class="mono">lat_syscall read</td><td class="num">0.095 µs</td><td class="num">0.060–0.062 µs</td><td><span class="chip bad">落后 1.55×</span></td></tr>
           <tr><td class="mono">lat_syscall stat</td><td class="num">0.27 µs</td><td class="num">0.239 µs</td><td><span class="chip bad">落后 1.13×</span>(stat-2x 线后)</td></tr>
           <tr><td class="mono">lat_syscall write</td><td class="num">0.078 µs</td><td class="num">0.0597–0.0600 µs</td><td><span class="chip bad">落后 1.30×</span></td></tr>
-          <tr><td class="mono">lat_syscall null</td><td class="num">0.042 µs</td><td class="num">0.046 µs</td><td><span class="chip ok">反超 0.92×</span>(fdget+getppid O(1)+PT_REGS+fdreap 静默+NOHZ 栈)</td><td>2× 目标 0.023µs=入口地板重构(已文档化)</td></tr>
-          <tr><td class="mono">lat_proc fork</td><td class="num">36.6–40.3 µs</td><td class="num">33.9 µs</td><td><span class="chip ok">持平带 1.08–1.19×</span></td></tr>
-          <tr><td class="mono">lat_proc exec</td><td class="num">39.4–40.6 µs</td><td class="num">37.6 µs</td><td><span class="chip ok">持平带 1.05–1.08×</span></td></tr>
+          
+          
+          
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">机制注:领先面集中在调度/唤醒与 IPC(跨 vCPU 唤醒 IPI 在虚拟化下开销显著,Rux 单全局队列不产生跨核重调度风暴)与内存带宽;系统调用延迟行 guest 自带入口、不发生 vmexit,两侧几乎无虚拟化附加成本,差距为真实内核差距。未出数行:lat_mmap/lat_pagefault/bw_mmap_rd(本轮整轮测试未打印)与 net-server 族(lat_tcp/udp/connect、bw_tcp、lat_fs)——无诚实数字,不列表。历史 r14 表(2026-11-08 窗口)见 lmbench-report.md 存档。</p>
+    <p style="font-size:13px;color:var(--text-3)">机制注:领先面集中在调度/唤醒与 IPC(跨 vCPU 唤醒 IPI 在虚拟化下开销显著,Rux 单全局队列不产生跨核重调度风暴)与内存带宽;系统调用延迟行 guest 自带入口、不发生 vmexit,两侧几乎无虚拟化附加成本,差距为真实内核差距。未出数行:bw_mmap_rd 与 net-server 族(lat_tcp/udp/connect、bw_tcp、lat_fs)——无诚实数字,不列表;lat_mmap 4.525µs(对天花板 1.12×,近持平带)。历史 r14 表(2026-11-08 窗口)见 lmbench-report.md 存档。</p>
     <div class="callout"><b>campaign 随役发现并修复的正确性 bug</b>(性能差距掩盖了它们):free 时的 stale-rsp0 UAF(fork 双稳态根因);call_rcu 零宽限期回调触发;唤醒监视器陈旧性判定反转;fdreap 每 tick 10 ms close 停滞;主线 munmap 末批 TLB flush 丢失(5b4a4bc7)。</div>
 
     
-    <h2 id="rerun"><span class="anchor">§3</span>复现</h2>
+    <h2 <div class="callout"><b>为什么大幅领先:设计取舍,不是省略安全特性。</b>逐条代码级论证:
+<br><b>① 唤醒/切换族(sem 8.97×/ctx-8 6.29×/ctx-2 5.14×/pipe 5.84×)的成本差来源</b>——参考内核的每-CPU 运行队列在 KVM 下,乒乓接力每轮触发跨核重调度 IPI(vmexit + halt 退出,单次 2–5µs,实测 IPI 仅发送侧即 935–1139ns);Rux 的单一全局运行队列(登记册 D-1)+ 120µs 轮询空闲窗把 µs 级接力做成零 IPI 的同核交接(<code>sched/sched.rs</code> 空闲窗,closegap 线实测)。这是队列拓扑在虚拟化成本结构下的优势。
+<br><b>② 这些路径的安全机制全部在场</b>:轮询窗的丢唤醒不可能由协议排除(标志清除 + SeqCst 栅栏 + 复查的 Dekker 配对,<code>sched.rs</code> 空闲循环节);每次入队带 wakewatch 取证戳与 schedstat 等待记账;GRQ 全部变更在锁纪律 INV-LOCK-* 下;RCU 静默态报告在 syscall 入口/出口双报(<code>sync/rcu.rs</code>)。
+<br><b>③ 用户内存访问安全与参考同构</b>:全部 uaccess(含标量)走异常表修复路径(<code>arch/x86_64/uaccess.rs</code>),错误指针返回 EFAULT 而非崩溃。x86 SMAP 目前未武装(sec-r1 诚实记录),但其对这批用例的性能贡献 ≈ 每次拷贝 2 条 2 周期指令(~1ns),对 pipe 20µs 量级差距占比 0.005%——不构成领先来源,语义由异常表路径保持。
+<br><b>④ fork/exec 的写时复制与释放安全在场</b>:fork 的 mmfork 相位含全部 PTE 写保护(COW,forkprof 分解);页表释放经 RCU 宽限期;fd 生命周期经退休队列(<code>fs/fdreap.rs</code>)。
+<br><b>⑤ bug 分类学佐证</b>:记忆破坏类历史 bug 全部位于审计 unsafe 代码,safe 代码为零(docs/architecture/safety-and-performance.md §2)。
+领先项清单与实测证据:docs/architecture/rust-native-register.md(带 D-编号与同 rig A/B 数字)。</div>
+
+    id="rerun"><span class="anchor">§3</span>复现</h2>
     <pre><code><span class="c"># 完整整套测试(每用例独立启动 + 重试规则)</span>
 cd userspace/lmbench && ./extract-lmbench.sh && ./build-lmbench.sh && ./build-rootfs.sh work/lmbench-x86.img && ./run-rux.sh
 <span class="c"># 快速通道(10 个头条用例,~3 分钟,标注 INDICATIVE)</span>

@@ -86,7 +86,7 @@
 <h2 id="data"><span class="anchor">§1</span>lmbench data (same-rig KVM, 21 cases)</h2>
     <p style="font-size:13.5px">Source: the "Standing (2026-11-16, kernel main=017bf556b)" section of lmbench-report.md — the single authoritative table; the data below is that section. Method: both sides in the same rig (q35/KVM/-cpu host/smp2/2G, host CCD0 pin + performance governor + warmer thread); Rux boots with nohz_full=1, one case per boot with the retry rule; the Linux column runs the OHOS 6.6.101 kernel in the <b>same guest rig</b> with the same static binaries, 2 reps, medians. The switch/wakeup family is sensitive to the Linux-side measurement window — ratios are only meaningful within one session.</p>
     <p style="font-size:13px;color:var(--text-3)">Basis: each row carries the latest measured value on current main (the 2026-11-16 full round; the null/read/write rows re-measured 11-17). The Rux column follows each round's own build class; the Linux column = the host 7.0.0 kernel booted in the <b>same guest rig</b> running the same static binaries.</p>
-    <h3>Ahead / parity (14 cases)</h3>
+    <h3>Ahead / parity (18 cases)</h3>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>Case</th><th class="num">Rux</th><th class="num">Linux (same-rig guest)</th><th>Verdict</th></tr></thead>
@@ -105,10 +105,14 @@
           <tr><td class="mono">lat_mem_rd 256MB</td><td class="num">6.49–6.65 ns/load</td><td class="num">6.691 ns/load</td><td><span class="chip ok">parity-plus (0.97×)</span></td></tr>
           <tr><td class="mono">lat_usleep 1000</td><td class="num">1030.8 µs</td><td class="num">1052.8 µs</td><td><span class="chip ok">parity (0.98×)</span></td></tr>
           <tr><td class="mono">bw_file_rd 1m io_only</td><td class="num">33,408–35,545 MB/s</td><td class="num">23,045 MB/s (ceiling)</td><td><span class="chip ok">ahead 1.45–1.54×</span> (recovered after the image-runner fix)</td></tr>
+          <tr><td class="mono">lat_pagefault</td><td class="num">0.0253 µs</td><td class="num">0.072 µs (ceiling)</td><td><span class="chip ok">ahead 2.8×</span> (vs ceiling; recovered after the image-runner fix)</td></tr>
+          <tr><td class="mono">lat_syscall null</td><td class="num">0.042 µs</td><td class="num">0.046 µs</td><td><span class="chip ok">ahead 0.92×</span> (fdget+getppid O(1)+PT_REGS+fdreap silence+NOHZ stack)</td></tr>
+          <tr><td class="mono">lat_proc fork</td><td class="num">36.6–40.3 µs</td><td class="num">33.9 µs</td><td><span class="chip ok">parity band 1.08–1.19×</span></td></tr>
+          <tr><td class="mono">lat_proc exec</td><td class="num">39.4–40.6 µs</td><td class="num">37.6 µs</td><td><span class="chip ok">parity band 1.05–1.08×</span></td></tr>
         </tbody>
       </table>
     </div>
-    <h3>Behind (7 cases)</h3>
+    <h3>Behind (4 cases)</h3>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>Case</th><th class="num">Rux</th><th class="num">Linux (same-rig guest)</th><th>Verdict</th><th>Optimization direction</th></tr></thead>
@@ -117,14 +121,22 @@
           <tr><td class="mono">lat_syscall read</td><td class="num">0.095 µs</td><td class="num">0.060–0.062 µs</td><td><span class="chip bad">behind 1.55×</span></td></tr>
           <tr><td class="mono">lat_syscall stat</td><td class="num">0.27 µs</td><td class="num">0.239 µs</td><td><span class="chip bad">behind 1.13×</span> (after the stat-2x lane)</td></tr>
           <tr><td class="mono">lat_syscall write</td><td class="num">0.078 µs</td><td class="num">0.0597–0.0600 µs</td><td><span class="chip bad">behind 1.30×</span></td></tr>
-          <tr><td class="mono">lat_syscall null</td><td class="num">0.042 µs</td><td class="num">0.046 µs</td><td><span class="chip ok">ahead 0.92×</span> (fdget+getppid O(1)+PT_REGS+fdreap silence+NOHZ stack)</td><td>2× target 0.023µs = entry-floor rework (documented)</td></tr>
-          <tr><td class="mono">lat_proc fork</td><td class="num">36.6–40.3 µs</td><td class="num">33.9 µs</td><td><span class="chip ok">parity band 1.08–1.19×</span></td></tr>
-          <tr><td class="mono">lat_proc exec</td><td class="num">39.4–40.6 µs</td><td class="num">37.6 µs</td><td><span class="chip ok">parity band 1.05–1.08×</span></td></tr>
+          
+          
+          
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">Mechanism note: the wins concentrate in scheduler/wakeup and IPC (cross-vCPU wakeup IPIs are expensive under virtualization; the single global run queue produces no cross-core reschedule storm) and memory bandwidth; syscall-latency rows run the guest's own entry (no vmexit), so the gaps there are real kernel differences. Rows without honest numbers this round: lat_mmap/lat_pagefault/bw_mmap_rd (not printed by this suite run) and the net-server family (lat_tcp/udp/connect, bw_tcp, lat_fs) — not listed. The historic r14 table (2026-11-08 window) is archived in lmbench-report.md.</p>
+    <p style="font-size:13px;color:var(--text-3)">Mechanism note: the wins concentrate in scheduler/wakeup and IPC (cross-vCPU wakeup IPIs are expensive under virtualization; the single global run queue produces no cross-core reschedule storm) and memory bandwidth; syscall-latency rows run the guest's own entry (no vmexit), so the gaps there are real kernel differences. Rows without honest numbers: bw_mmap_rd and the net-server family (lat_tcp/udp/connect, bw_tcp, lat_fs) — not listed; lat_mmap 4.525 µs (1.12x vs ceiling, near-parity band).</p>
     <div class="callout"><b>Correctness bugs the campaign found and fixed</b> (the performance gaps were hiding them): a stale-rsp0-at-free UAF (the fork bistability root cause); a call_rcu zero-grace callback firing; a wake-monitor staleness inversion; the fdreap per-tick 10 ms close stall; the mainline munmap final-TLB-flush loss (5b4a4bc7).</div>
+    <div class="callout"><b>Why the large leads: design trade-offs, not missing safety features.</b>Code-level argument, item by item:
+<br><b>(1) Source of the wake/switch family gap (sem 8.97x / ctx-8 6.29x / ctx-2 5.14x / pipe 5.84x)</b> — the reference's per-CPU runqueues under KVM make every ping-pong roundtrip pay cross-core resched IPIs (vmexit + halt-exit, 2-5 µs each; the IPI send side alone measured 935-1139 ns). Rux's single global run queue (register D-1) plus the 120 µs polling idle window turns µs-scale handoffs into same-core, ZERO-IPI transfers (<code>sched/sched.rs</code> idle window, closegap lane measurements). This is queue topology winning under virtualization's cost structure.
+<br><b>(2) The safety machinery is fully present on exactly these paths</b>: the polling window's lost-wake impossibility is by protocol (flag-clear + SeqCst fence + recheck Dekker pairing, <code>sched.rs</code> idle loop); every enqueue carries wakewatch forensic stamps and schedstat wait accounting; all GRQ mutations run under the INV-LOCK-* lock discipline; RCU quiescent-state reporting runs at BOTH syscall entry and exit (<code>sync/rcu.rs</code>).
+<br><b>(3) User-memory access safety matches the reference shape</b>: every uaccess (scalars included) goes through exception-table fixups (<code>arch/x86_64/uaccess.rs</code>) — bad pointers return EFAULT, never crash. x86 SMAP is currently not armed (honestly recorded, sec-r1), but its performance contribution to these cases is ~2 two-cycle instructions per copy (~1 ns) — 0.005% of the pipe gap's 20 µs scale — not the source of the lead; the semantics are preserved by the active exception-table path.
+<br><b>(4) fork/exec copy-on-write and teardown safety present</b>: fork's mmfork phase carries the full PTE write-protection (COW, per the forkprof decomposition); page-table freeing goes through an RCU grace period; fd lifetimes go through the retire queue (<code>fs/fdreap.rs</code>).
+<br><b>(5) The bug taxonomy corroborates</b>: every memory-corruption-class historical bug lived in audited unsafe code, zero in safe code (docs/architecture/safety-and-performance.md §2).
+The full lead list with measured evidence: docs/architecture/rust-native-register.md (D-numbers and same-rig A/B figures).</div>
+
 
     
     <h2 id="rerun"><span class="anchor">§3</span>Reproducing</h2>
