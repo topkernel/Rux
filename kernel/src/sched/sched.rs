@@ -1703,10 +1703,35 @@ pub fn claim_idle_cpu_for(affinity: u32) -> Option<usize> {
 }
 
 /// R3 (rt-r3 lane): placement-preferring idle claim — see
-/// `GlobalRunQueue::claim_idle_cpu_prefer`. `prefer` < 0 behaves exactly
-/// like `claim_idle_cpu_for`.
+/// `GlobalRunQueue::claim_idle_cpu_prefer`.
+///
+/// RT-R4 unification note (P0 hunt, 2026-11-18): rt-r3's rewiring moved
+/// the wake dispatch here, and the CFS leg (prefer < 0) fell through to
+/// the raw rotating claim — silently bypassing claim_idle_cpu_for's
+/// LOCAL-idle preference (rt-r4), which had been the dispatch entry.
+/// The two targeting decisions are ONE decision again: placement first
+/// (RT/DL), then LOCAL-when-idle (all classes — the waker executing
+/// this wake picks it at its own idle-loop schedule() with zero IPI),
+/// then the rotating spread. One function, one order, no disagreeing
+/// paths.
 pub fn claim_idle_cpu_for_prefer(affinity: u32, prefer: i32) -> Option<usize> {
-    grq().claim_idle_cpu_prefer(affinity, prefer)
+    // 1. Placement (RT/DL): the reference's check_preempt_curr target
+    //    rq; a timer hardirq fires on the sleeper's own cpu, so claiming
+    //    the placement is a zero-IPI self-poke (rt-r3).
+    if prefer >= 0 && (prefer as usize) < MAX_CPUS && (affinity & (1u32 << prefer)) != 0 {
+        if grq().clear_idle(prefer as usize) {
+            return Some(prefer as usize);
+        }
+    }
+    // 2. LOCAL-when-idle (all classes, rt-r4): the waker executing this
+    //    very wake picks the task at its own idle-loop schedule() with
+    //    zero IPI and zero halt-exit.
+    let this = crate::arch::cpu_id() as usize;
+    if this < MAX_CPUS && affinity & (1u32 << this) != 0 && grq().clear_idle(this) {
+        return Some(this);
+    }
+    // 3. The rotating spread (idle spreading, review batch 8).
+    grq().claim_idle_cpu(affinity)
 }
 
 /// Busy-CPU dispatch for a wake that found no idle CPU (perf-ipc): poke

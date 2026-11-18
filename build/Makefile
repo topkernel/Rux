@@ -42,17 +42,27 @@ menuconfig:
 # falling back to Kernel.toml's default_platform. Override per-invocation
 # with `make PLATFORM=x86_64` (same spirit as Linux's ARCH=).
 PLATFORM := $(shell $(BUILD_DIR)/current-platform.sh)
+# LOCKOWNER=1 appends the dfx-lock-owner feature (RawSpinlock holder
+# stamps: owner cpu + acquirer pid/site/jiffies, printed by the
+# deadlock_warn path + one remote-BT of the holder per stuck lock) —
+# HUNT boots only: ~4 relaxed stores per raw acquire on the hottest
+# allocator locks (165M slab acquires/boot) is measurable baseline
+# noise, so it stays opt-in. rt-r4 P0 lesson: every prior DEADLOCK
+# print was holder-anonymous because these forensics were compiled out
+# of every standard build.
+comma := ,
+LOCKOWNER_FEAT := $(if $(LOCKOWNER),$(comma)dfx-lock-owner,)
 ifeq ($(PLATFORM),x86_64)
 CARGO_TARGET := x86_64-unknown-none
-CARGO_FEATURE_FLAGS := --no-default-features --features x86_64
+CARGO_FEATURE_FLAGS := --no-default-features --features x86_64$(LOCKOWNER_FEAT)
 KERNEL_BIN := $(PROJECT_ROOT)/target/$(CARGO_TARGET)/debug/rux
 else ifeq ($(PLATFORM),aarch64)
 CARGO_TARGET := aarch64-unknown-none
-CARGO_FEATURE_FLAGS := --no-default-features --features aarch64
+CARGO_FEATURE_FLAGS := --no-default-features --features aarch64$(LOCKOWNER_FEAT)
 KERNEL_BIN := $(PROJECT_ROOT)/target/$(CARGO_TARGET)/debug/rux
 else ifeq ($(PLATFORM),riscv64)
 CARGO_TARGET := riscv64gc-unknown-none-elf
-CARGO_FEATURE_FLAGS :=
+CARGO_FEATURE_FLAGS := $(if $(LOCKOWNER),dfx-lock-owner,)
 KERNEL_BIN := $(PROJECT_ROOT)/target/$(CARGO_TARGET)/debug/rux
 else
 $(error Unsupported platform '$(PLATFORM)' — run `make menuconfig`)
