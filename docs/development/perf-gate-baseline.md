@@ -17,6 +17,29 @@ main lands, do not cherry-pick rows.
 > regression; rerun with the migrated token before weighing the census
 > rows. Historical anchors below record the old token as it was used at
 > the time.
+>
+> **Post-migration re-anchor REQUIRED (2026-11-19, first post-migration
+> Tier-1 run: run/pa-rcushare2-serial.log)**: with the census armed the
+> run returned TERM-DESCHED 8 (band exact) but WAKE-REFUSED 162
+> (band 32±4) and syscall volume ~900M (band 50M release / 15.5M debug).
+> Evidence the bands are stale rather than a scheduler regression: (1)
+> every W3-RUNWAKE-REFUSED line is the same anatomy — target
+> state=0x0 linked=true curr_on=false on_cpu=false, i.e. a second wake
+> racing a queued-but-unpicked task (benign double-wake), spread over
+> OH service pids (1, 820, 842, 743...), not a stranded-wake pattern;
+> (2) the volume grew 18x in the same direction the OH userspace got
+> healthier (ub2404 mount-registry fix, connect() fix — more services
+> survive and generate traffic); (3) TERM-DESCHED — the syscost-probe's
+> own counter — is exactly in band, so the probe vehicle is unchanged.
+> Additional instrument fallout to fix before re-banking: the
+> higher print pressure garbles concurrent serial lines (char-level
+> interleaving), which breaks the dumps/tick-rate/per-op parses (0
+> dumps read from a serial that contains ~3700 SYSCOST lines), and the
+> GRQ row's "top sched.rs rest site" heuristic picked a different site
+> after the dfx table migration (49→6 rows) — 449ns vs the 1200-7320ns
+> band is the new site, not the GRQ lock. Re-bank Tier-1 on
+> post-migration main with a garble-tolerant parse, then restore the
+> bands.
 
 > **Tier-1 vehicle restored (2026-10-31, perf-audit lane)**: the OH
 > image set is back — 7 read-only seed images in the central store
