@@ -22,8 +22,8 @@ Rust reached the Linux kernel in 2022, one driver at a time. A decade of
 advocacy bought a handful of drivers and an ocean of C; the memory-safety
 statistics that motivated the language kept pointing at the code that
 stayed C. Rux inverts that ratio by starting from zero: ~392,000 lines in
-which 87% is safe Rust and the remaining 13% is `unsafe` under written
-contract — a kernel where memory safety is the default and unsafety is a
+which 89% is safe Rust and the remaining ~44,000 lines (10.6%) are `unsafe`
+under written contract — a kernel where memory safety is the default and unsafety is a
 licensed exception, rather than the reverse.
 
 A new kernel is worthless, however, if nothing runs on it. So the second
@@ -81,7 +81,7 @@ microsecond has a named term and an owner.
 
 ## Safety
 
-- **The language.** `no_std` Rust throughout; 12.9% `unsafe` lines, every
+- **The language.** `no_std` Rust throughout; 10.6% `unsafe` lines (44,337 of 417,023), every
   token enumerated in the
   [TCB ledger](docs/development/tcb-ledger.md) under a written
   `// SAFETY:` contract. The record to date is categorical: every
