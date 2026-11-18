@@ -11383,7 +11383,38 @@ pub fn idle_heal_own_slot(cpu: usize) -> *mut Task {
         cpu_state_mut(cpu).current = idle_task;
         slot_tag_write(cpu, SLOT_W_IDLE_HEAL, idle_task);
         pick_gen_supersede(cpu, idle_task);
-        victim = curr;
+        // r-strand (lat_fs conviction round, 2026-11-19): the victim may
+        // be CURRENT on ANOTHER cpu — a task is named by exactly one
+        // slot; a second naming cpu holds a stale slot from a switch
+        // whose publish was lost. Requeueing a live-owned victim
+        // inserts a GHOST NODE (linked while running elsewhere — every
+        // later pick refuses it, the tree degrades, the strand
+        // re-forms). Rewrite THIS slot only; the live owner keeps the
+        // task. (The dump evidence: cpu slots `0 319 319 0 ...` — two
+        // slots naming one worker.)
+        let mut live_elsewhere = false;
+        for c in 0..MAX_CPUS {
+            if c != cpu
+                && (cpu_state(c).current == curr
+                    || (SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire)
+                        == curr as u64
+                        && {
+                            let born = SWITCHING_OUT_JIF[c].load(
+                                core::sync::atomic::Ordering::Acquire,
+                            );
+                            born != 0
+                                && crate::drivers::timer::get_jiffies()
+                                    .wrapping_sub(born)
+                                    < SWITCHING_OUT_STALE_JIF
+                        }))
+            {
+                live_elsewhere = true;
+                break;
+            }
+        }
+        if !live_elsewhere {
+            victim = curr;
+        }
     }
     // Census (rate-limited): the healed pid + the tag of the writer that
     // left the stale name — the producer hunt's anchor.
