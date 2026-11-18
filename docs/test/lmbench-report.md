@@ -168,6 +168,55 @@ handoff), open (1.44x — walk loop + File construct), read (1.42x —
 copy tail), write (1.13x). lat_fs re-polluted by boot noise (no
 honest number this round).
 
+## lat_fs stall family CONVICTED (2026-11-19 night, strand anatomy captured)
+
+The phase-decomposition probe (latfsinit, per-round -s runs + 2 s wall
+ticks + QEMU monitor + migrated trace tokens) split the "slow mode"
+into its real faces. Benchmark numbers are NOT degraded: every boot
+prints its 0k/1k rows at standing-band rates (19948/18795, 20098/18587,
+19131/16881). What stalls is the WAKE/PICK machinery after phases
+complete:
+
+- Face A (deterministic, default run): after the last row prints, the
+  benchmp parent sleeps in select() FOREVER — QEMU monitor snapshot
+  ~45 s in: every vCPU halted-idle, nothing runnable, nothing picking.
+- Face B: a lat_fs worker spins in write(2) with leaked preempt
+  (preempt=2 RUNNING, no progress); PREEMPT-LEAK fires at window end
+  with pc=0x10002 (HARDIRQ+softirq counts) on another task.
+- Face C (nohz boot): a task parked in IoCompletion::wait while the
+  timer softirq on cpu1 is stalled (WW: TIMER-SOFTIRQ-STALL growing
+  1.1 s -> 14.3 s+); the 10 s deadline escape never fires because the
+  timer wheel itself is not being processed.
+- Face D (shutdown tail, intermittent, pre-existing): pid=1 frozen in
+  shutdown_cascade -> dealloc_untracked at a constant rip for 12k
+  frozen-cpu samples.
+
+The conviction capture (trace_event=schedtrace boot, PICK-SKIP-ALL
+report): `pid=321 why=1 oncpu=1 claim=1 pk=1 st=0x0 slot=2 swout=0
+aff=0xff` — a task linked in the GRQ timeline (anatomy: on_rq=true,
+cfs_nr=1, tree_total=1) that every pick refuses because its ownership
+marks say "current on cpu1" (slot=2 = cpu1's slot names it, no
+SWITCHING_OUT). But cpu1 is halted-idle in the same window: the slot
+is STALE — named by a switch that never published its completion. The
+strand protocol audit: the reference clears a CPU's current slot when
+that CPU picks its next task; Rux's idle pick path must publish the
+slot update too — an idle CPU whose slot still names a linked task
+refuses that task's pick on every CPU forever (and the count-vs-tree
+desync seen in the dumps — grq nr_running=0 while the timeline holds
+the entry — is the same family's counter face).
+
+Working root (next round): the timer softirq/wheel processing loop —
+cpu0 caught RUNNING in read_time while the machine idles, TIMER-SOFTIRQ
+stalls, deadline escapes dead, PREEMPT-LEAK pc=0x10002 — one cpu stuck
+inside the timer wheel processing (or its re-arm) starves the tick
+machine-wide; the strand/ownership faces are downstream. The nohz
+one-shot re-arm (merged 11-16) is a prime suspect for the nohz boot;
+the non-nohz boot hung too, so the wheel audit must not assume nohz.
+
+Round verdict: shared-GP closed the RCU gen-race face (GP-BOUND dumps
+gone in clean boots); the residual stall is the strand/timer face
+above. lat_fs + bw_tcp rows stay open pending this fix.
+
 ## Shared-GP RCU round (2026-11-18, main merge on ec18cdc1a): gen-race closed, slow-mode family still open
 
 Root cause fixed: concurrent `synchronize_rcu` waiters each did
