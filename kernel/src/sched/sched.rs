@@ -1543,13 +1543,56 @@ pub fn switching_out_mask(task: *mut Task) -> u32 {
 /// owner is found, release the marks with the exact store the switch
 /// protocol would have made — idempotent if the real release ever
 /// lands — and report loudly (first 8 per boot).
+///
+/// R87 (oh-launch round 10, the scribbler producer): the adjudication is
+/// EXIT-STRICT — stricter than pick_owner_live in exactly one dimension:
+/// a SWITCHING_OUT marker naming the member counts as a LIVE in-flight
+/// switch REGARDLESS OF AGE. The mark's window is not just the register
+/// swap: between the mark's publish (under the GRQ, before the slot
+/// flip) and the asm release store, the switching CPU still executes the
+/// whole publish chain — x86_switch_publish, the rsp0 install, every
+/// armed diagnostic — ON THE MEMBER'S OWN KERNEL STACK, with IRQs off.
+/// Under a monopolist window, a KVM host deschedule, or a long armed-boot
+/// ring dump, that window can exceed any fixed age bar; the 50-jiffy
+/// discount then read a still-live switch as stale, this heal
+/// force-cleared the ownership qword, the FDM wait exited, and
+/// free_kernel_stack freed pages the switching CPU was still executing
+/// on — the producer behind the string-byte execution hijacks
+/// (rip='s.boot.s', rsp='os.requi'), the 0xb9 page-table face, and the
+/// R83 ti_kernel_sp family. The pick side keeps its age discount (a
+/// wrong call there relinks a task); the exit side may not (a wrong call
+/// here frees a live stack). An aged mark is AMBIGUOUS and ambiguity
+/// defers: free_dead_member re-parks the member for the next sweep
+/// instead of proceeding.
 pub fn member_release_stale_ownership(member: *mut Task) -> bool {
     if member.is_null() {
         return false;
     }
     let guard = grq().lock_irqsave();
-    if pick_owner_live(member) {
-        return false; // guard drops here — legitimately owned, keep waiting
+    // Exit-strict liveness (R87): any SWITCHING_OUT marker (ANY age) or
+    // any non-idle-discounted current slot names a live owner. The idle
+    // discount keeps pick_owner_live's sound half: an idle-marked cpu
+    // runs only its idle task (its idle bit is cleared under the same
+    // GRQ hold as every real-task pick), so a member's name surviving in
+    // an idle-marked slot is the lost-slot-flip face — and the idle task
+    // never touches the member's kernel stack.
+    let idle_mask = grq().idle_cpus.load(core::sync::atomic::Ordering::Acquire);
+    let mut live = false;
+    for c in 0..MAX_CPUS {
+        if SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire) == member as u64 {
+            live = true; // in-flight switch-out, any age (R87)
+            break;
+        }
+        if c < 32 && idle_mask & (1u32 << c) != 0 {
+            continue;
+        }
+        if cpu_state(c).current == member {
+            live = true;
+            break;
+        }
+    }
+    if live {
+        return false; // guard drops here — owned or ambiguous, keep waiting
     }
     // SAFETY: the member is DEAD and unlinked (the caller's dead-list
     // invariant); no picker can touch it, and the GRQ hold above excludes
@@ -1589,6 +1632,40 @@ pub fn member_release_stale_ownership(member: *mut Task) -> bool {
         );
     }
     true
+}
+
+/// R87 (stack-free tail window, oh-launch round 10): does any CPU's
+/// SWITCHING_OUT marker name `task`, at ANY age? The marker brackets the
+/// switch path's ENTIRE set of references to prev's kernel stack: it is
+/// published under the GRQ BEFORE the per-CPU slot flips (so before any
+/// GRQ-serialized observer can see the switch starting) and cleared only
+/// in the incoming frame's post-switch tail — AFTER __switch_to's rsp
+/// swap abandoned prev's stack for good (both the x86_64 and riscv64
+/// tails clear it after context_switch returns).
+///
+/// on_cpu alone does NOT cover the switch tail. The asm release store
+/// (x86_64 context.rs, the R65 order) lands BEFORE the register restore:
+/// with {on_cpu=false, claim=-1} already published, the switching CPU
+/// still executes its final loads, the resume push and the ret ON PREV'S
+/// OWN STACK. Under KVM the host can deschedule the switcher for
+/// milliseconds right after the release store while the freeing vCPU
+/// races ahead — wait-exit, RCU poll, free, slab recycle — and the
+/// switcher's ret then lands in reallocated memory (the recycled-frame
+/// scribbler's tail face; fr1: the scribble reporter's own ret popping a
+/// foreign return address 1.29 s into the boot, no heal and no deadline
+/// involved). Every kernel-stack free must therefore treat a live marker
+/// as "do not free", the exact discipline free_task_slot (FTS) already
+/// applies to the Task page.
+pub fn switching_out_names(task: *mut Task) -> bool {
+    if task.is_null() {
+        return false;
+    }
+    for c in 0..MAX_CPUS {
+        if SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire) == task as u64 {
+            return true;
+        }
+    }
+    false
 }
 
 /// R85: pick-side time confirmation for a stale-ownership adjudication.

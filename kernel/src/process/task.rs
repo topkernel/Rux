@@ -22,7 +22,7 @@ use crate::list::ListHead;
 ///
 /// RISC-V typically uses 16KB kernel stack, but we increase to 32KB
 /// because some operations (like FdTable creation) need larger stack space
-const KERNEL_STACK_SIZE: usize = crate::config::KERNEL_STACK_SIZE;
+pub(crate) const KERNEL_STACK_SIZE: usize = crate::config::KERNEL_STACK_SIZE;
 
 // ==================== Stack Cache Implementation ====================
 
@@ -380,10 +380,13 @@ fn stack_cache_alloc() -> *mut u8 {
             let mut first_off = 0usize;
             let mut first_val = 0u64;
             // SAFETY: the whole stack is KERNEL_STACK_SIZE bytes of
-            // readable memory owned by this allocation.
+            // readable memory owned by this allocation. Word 0 is the
+            // canary slot — never painted (R87 paint skips it so
+            // stack_cache_free's check stays meaningful) and still
+            // holding the old canary at scan time — skip it.
             unsafe {
                 let words = KERNEL_STACK_SIZE / 8;
-                for i in 0..words {
+                for i in 1..words {
                     let v = core::ptr::read_volatile((base + i * 8) as *const u64);
                     if v != 0xA5A5_A5A5_A5A5_A5A5 {
                         if hits == 0 {
@@ -5661,28 +5664,89 @@ impl Task {
                 }
             }
 
-            // DFX (LTP chunk@700 panic hunt, 2026-11-02): if any CPU's
-            // live TSS.rsp0 still points at THIS stack's top, every later
-            // user-origin trap entry on that CPU pushes its frame into
-            // freed-and-recycled memory — the stale-rsp0 engine behind the
-            // deterministic rip=0 "Kernel stack overflow" panics (frames
-            // observed ~7KB deep inside an unowned kstack slot). The
-            // switch path re-installs rsp0 on every switch, so a hit here
-            // names the exact ordering hole. Raw UART, no allocation.
+            // DFX (LTP chunk@700 panic hunt, 2026-11-02) + R87 CLOSURE
+            // (oh-launch round 10): if any CPU's live TSS.rsp0 still
+            // points at THIS stack's top, every later user-origin trap
+            // entry on that CPU pushes its frame into freed-and-recycled
+            // memory — the stale-rsp0 engine behind the deterministic
+            // rip=0 "Kernel stack overflow" panics (frames observed ~7KB
+            // deep inside an unowned kstack slot), and the LIVE producer
+            // of the recycled-stack foreign-content writes: fr3 caught it
+            // in the act (STACKFREE-LIVE-RSP0 cpu=3, an aborted switch
+            // leaves the dying task's top installed, the stack freed and
+            // recycled, the next trap frame / re-carve tearing the new
+            // owner — user-range pt_regs values in kernel frames, the
+            // #GP-on-ret family at 1.2-1.5 s on every armed boot).
+            // x86_update_rsp0 has TWO silent keep-the-old-value legs
+            // (top==0, out-of-heap-bound — the idle task's static boot
+            // stack fails the bound), and the abort path skips the rsp0
+            // install entirely — so the free side must be the closure:
+            // NEVER hand the stack to the cache while a live rsp0 names
+            // it. Bounded wait (the next switch-in on that CPU installs
+            // its own top, microseconds normally); past the budget the
+            // stack is WITHHELD — leaked from the cache forever (a trap
+            // frame pushed at a leaked stack writes into memory nobody
+            // will ever own) — never recycled under a live rsp0. The old
+            // detector here was pr_debug (the campaign's fifth blind
+            // printer — invisible at LOGLEVEL=4); it now reports through
+            // the raw-uart taskdump channel, bounded, on the withhold
+            // only.
             #[cfg(feature = "x86_64")]
-            for c in 0..crate::config::MAX_CPUS {
-                let rsp0 = crate::arch::x86_64::smp::PER_CPU[c]
-                    .tss_rsp0
-                    .load(core::sync::atomic::Ordering::Acquire);
-                if rsp0 == stack_top as u64 {
-                    crate::pr_debug!(
-                        "STACKFREE-LIVE-RSP0 cpu={} top={:#x} freeing_pid={}",
-                        c,
-                        stack_top as u64,
-                        self.pid()
-                    );
+            let recycle_ok = {
+                const SFR_RSP0_WAIT_JIFFIES: u64 = 3;
+                let sfr_armed_at = crate::drivers::timer::get_jiffies();
+                loop {
+                    let mut stale_cpu: usize = usize::MAX;
+                    for c in 0..crate::config::MAX_CPUS {
+                        let rsp0 = crate::arch::x86_64::smp::PER_CPU[c]
+                            .tss_rsp0
+                            .load(core::sync::atomic::Ordering::Acquire);
+                        if rsp0 == stack_top as u64 {
+                            stale_cpu = c;
+                            break;
+                        }
+                    }
+                    if stale_cpu == usize::MAX {
+                        break true;
+                    }
+                    if crate::drivers::timer::get_jiffies()
+                        .wrapping_sub(sfr_armed_at)
+                        >= SFR_RSP0_WAIT_JIFFIES
+                    {
+                        static RSP0_SEEN: core::sync::atomic::AtomicU32 =
+                            core::sync::atomic::AtomicU32::new(0);
+                        let n = RSP0_SEEN
+                            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n < 64 {
+                            crate::dfx::taskdump::taskdump_raw_line(
+                                b"STACKFREE-LIVE-RSP0 cpu=",
+                            );
+                            crate::dfx::taskdump::taskdump_dec(stale_cpu as u64);
+                            crate::dfx::taskdump::taskdump_raw_line(b" top=0x");
+                            let mut v = stack_top as u64;
+                            let mut sh: i32 = 64;
+                            while sh > 0 {
+                                sh -= 4;
+                                let nb = ((v >> sh) & 0xF) as u8;
+                                crate::dfx::taskdump::taskdump_raw_line(&[(if nb < 10 {
+                                    b'0' + nb
+                                } else {
+                                    b'a' + nb - 10
+                                })]);
+                            }
+                            crate::dfx::taskdump::taskdump_raw_line(b" freeing_pid=");
+                            crate::dfx::taskdump::taskdump_dec(self.pid() as u64);
+                            crate::dfx::taskdump::taskdump_raw_line(
+                                b" (recycle WITHHELD - leaked, never re-carved)\n",
+                            );
+                        }
+                        break false;
+                    }
+                    core::hint::spin_loop();
                 }
-            }
+            };
+            #[cfg(not(feature = "x86_64"))]
+            let recycle_ok = true;
 
             // DFX: record for the freed-stack execution detector.
             note_kstack_freed(
@@ -5701,18 +5765,28 @@ impl Task {
             // non-poison word WITH its previous owner. Armed boots only
             // (rux:scribble); the paint is the same cost class as the
             // leg-16 zeroing.
-            if crate::trace::EVENT_SCRIBBLE.armed() {
-                unsafe {
-                    core::ptr::write_bytes(
-                        stack_bottom,
-                        0xA5,
-                        KERNEL_STACK_SIZE,
-                    );
+            // R87 (instrument correction): skip the canary qword at the
+            // bottom — the round-9 paint covered it, so EVERY armed-boot
+            // free tripped stack_cache_free's canary check below and
+            // printed a false STACK-OVERFLOW (fr1: canary read back as
+            // the paint value 0xa5a5...), burying the real overflow
+            // signal under one artifact line per free.
+            // R87 (rsp0 closure): a withheld stack (live rsp0 naming it)
+            // is never recycled — no paint, no cache return.
+            if recycle_ok {
+                if crate::trace::EVENT_SCRIBBLE.armed() {
+                    unsafe {
+                        core::ptr::write_bytes(
+                            stack_bottom.add(8),
+                            0xA5,
+                            KERNEL_STACK_SIZE - 8,
+                        );
+                    }
                 }
-            }
 
-            // Return to cache instead of deallocating
-            stack_cache_free(stack_bottom);
+                // Return to cache instead of deallocating
+                stack_cache_free(stack_bottom);
+            }
 
             // Clear reference
             self.kernel_stack = None;

@@ -1023,3 +1023,40 @@ registered per the data-corruption doctrine.
   write_fsync +0.7%, mkdrmdir +1.6%, unlink −4.4%); riscv make test and
   triple-arch builds green. [lane worktree journal-life
   run/JOURNAL-LIFE.md]
+
+  **The exit-path stack-free safety closure (oh-launch round 10,
+  2026-11-19).** Three stacked races could free a kernel stack its
+  owner still executed on — the recycled-frame scribbler behind the
+  string-byte execution hijacks (rip='s.boot.s'), the 0xb9 PTE face
+  and the R83 ti_kernel_sp family: (1) the R86 deadline-heal reused
+  the pick-side liveness check whose 50-jiffy age discount reads a
+  monopolist/KVM-stalled switch-out as stale, then force-released the
+  ownership qword under a still-switching owner; (2) the asm release
+  store precedes the register restore, so the switcher's final
+  loads/push/ret still ran on its own stack with on_cpu already
+  false — a host deschedule there let the free win the race; (3) THE
+  stale-rsp0 engine, caught in the act (fr3: STACKFREE-LIVE-RSP0 at
+  1.472 s, panic 1 ms later): an aborted switch skips the rsp0
+  install and a switch to idle silently keeps the previous value
+  (the idle task's static boot-stack top fails the heap-bound
+  screen), leaving a dying task's top installed while its stack was
+  freed, recycled, and torn by the next trap frame pushed through
+  it. The safety shape, all three: positive knowledge before a free
+  (any-age SWITCHING_OUT marker, no live rsp0 naming the top),
+  recovery paths that DEFER or WITHHOLD instead of proceeding
+  (heal-fail re-parks the member for the next sweep; a stale-rsp0
+  stack is leaked, never re-carved; bounded waits, never a spinning
+  reaper), and two more blind printers unblinded (the rsp0 detector
+  was pr_debug; both rsp0 keep-legs printed via putchar_no_lock —
+  the fifth and sixth of the campaign). Evidence: the armed battery
+  boots fr1/fr2/fr3 struck at 1.2-1.5 s on every prior kernel (the
+  #GP-on-ret family); fr4 with the closure is the FIRST armed boot
+  through the window — all three defenses fired in production (the
+  same top=0xffff888079280000/pid=316 stack that killed fr3 was
+  WITHHELD on fr4; FDM-DEFER member=319; FTS-SLOT-LEAK pid=316), 1187
+  R56 aborts churned with zero early panic. Remaining honest gap:
+  the 5-15 s degradation layer (stranded PICKED picks under the
+  abort storm, panic-dumper re-entry halting a CPU, timer stall into
+  a GRQ deadlock at 15.5 s) — the historical 6-22 s window family,
+  now the outermost. make test 1555/1555 fresh rootfs; triple-arch
+  rc=0. [lane worktree oh-launch run/OH-LAUNCH.md round 10]
