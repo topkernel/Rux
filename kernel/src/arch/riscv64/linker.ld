@@ -100,7 +100,9 @@ SECTIONS
 	/* RUX-RISCV-LAYOUT-6 (hp89): 24MB -> 26MB (PMD[12] added to BOTH
 	 * boot.S tables). 26MB == KERNEL_HEAP_PHYS — the next extension must
 	 * move the heap base together. */
-	ASSERT(_end <= 0xffffffff81c00000, "kernel image outgrew the boot.S 28MB early window: extend the window (both PMD tables) and move heap+reservation together")
+	/* RUX-RISCV-LAYOUT-8 (cov campaign): window 28MB -> 32MB (PMD[14]/[15]
+	 * in both boot.S tables); heap+reserve moved to 0x82200000 together. */
+	ASSERT(_end <= 0xffffffff82000000, "kernel image outgrew the boot.S 32MB early window: extend the window (both PMD tables) and move heap+reservation together")
 
 	/DISCARD/ :
 	{
