@@ -673,13 +673,14 @@ pub fn raw_file_of_file(file: &Arc<File>) -> Option<(Arc<RawSocket>, bool)> {
 
 /// Write the bound sockaddr (sockaddr_ll for AF_PACKET, sockaddr_in for
 /// raw) to user (getsockname).
-/// SAFETY: addr_ptr/addrlen_ptr access_ok-validated for 20/4 bytes.
-pub unsafe fn put_sockaddr_raw(
+/// Contract: addr_ptr/addrlen_ptr access_ok-validated for 20/4 bytes;
+/// the typed family is the exception-table copy path.
+pub fn put_sockaddr_raw(
     sock: &Arc<RawSocket>,
     addr_ptr: *mut u8,
     addrlen_ptr: *mut u32,
 ) {
-    use crate::arch::uaccess::{copy_to_user, put_user};
+    use crate::arch::uaccess_safe as ua;
     match sock.kind {
         RawKind::Packet => {
             let proto = sock.protocol.load(core::sync::atomic::Ordering::Relaxed);
@@ -689,34 +690,34 @@ pub unsafe fn put_sockaddr_raw(
             buf[2..4].copy_from_slice(&((proto as u16).to_be_bytes()));
             buf[4..8].copy_from_slice(&ifix.to_le_bytes());
             buf[11] = 0; // unbound address
-            let _ = copy_to_user(addr_ptr, buf.as_ptr(), SOCKADDR_LL_LEN);
-            let _ = put_user(addrlen_ptr, SOCKADDR_LL_LEN as u32);
+            let _ = ua::copy_out(addr_ptr as usize, &buf[..SOCKADDR_LL_LEN]);
+            let _ = ua::write_user(addrlen_ptr as usize, SOCKADDR_LL_LEN as u32);
         }
         RawKind::Inet => {
             let mut buf = [0u8; SOCKADDR_IN_LEN];
             buf[0..2].copy_from_slice(&2u16.to_le_bytes()); // AF_INET
-            let _ = copy_to_user(addr_ptr, buf.as_ptr(), SOCKADDR_IN_LEN);
-            let _ = put_user(addrlen_ptr, SOCKADDR_IN_LEN as u32);
+            let _ = ua::copy_out(addr_ptr as usize, &buf[..SOCKADDR_IN_LEN]);
+            let _ = ua::write_user(addrlen_ptr as usize, SOCKADDR_IN_LEN as u32);
         }
     }
 }
 
 /// Copy a received source sockaddr to the user msg_name buffer, honoring
-/// the user's namelen. SAFETY: addr_ptr access_ok-validated for
-/// user_namelen bytes.
-pub unsafe fn copy_src_to_user(
+/// the user's namelen. Contract: addr_ptr access_ok-validated for
+/// user_namelen bytes; the typed family is the exception-table copy path.
+pub fn copy_src_to_user(
     src: ([u8; SOCKADDR_LL_LEN], u8),
     addr_ptr: *mut u8,
     user_namelen: u32,
     addrlen_ptr: *mut u32,
 ) {
-    use crate::arch::uaccess::copy_to_user;
+    use crate::arch::uaccess_safe as ua;
     let (addr, len) = src;
     let copy = (len as usize).min(user_namelen as usize);
     if copy > 0 {
-        let _ = copy_to_user(addr_ptr, addr.as_ptr(), copy);
+        let _ = ua::copy_out(addr_ptr as usize, &addr[..copy]);
     }
     if !addrlen_ptr.is_null() {
-        let _ = crate::arch::uaccess::put_user(addrlen_ptr, len as u32);
+        let _ = ua::write_user(addrlen_ptr as usize, len as u32);
     }
 }

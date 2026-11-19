@@ -1499,15 +1499,15 @@ pub fn netlink_fionread(sock: &Arc<NetlinkSocket>) -> usize {
 /// bring-up gdmr19). Linux's netlink_recvmsg hands multicast receivers
 /// the destination group in the source sockaddr; groups=0 stays
 /// correct for rtnetlink replies (unicast kernel answers).
-/// SAFETY: addr_ptr/addrlen_ptr access_ok-validated for 12/4 bytes.
-pub unsafe fn put_sockaddr_nl(addr_ptr: *mut u8, addrlen_ptr: *mut u32, groups: u32) {
+/// Contract: addr_ptr/addrlen_ptr access_ok-validated for 12/4 bytes.
+pub fn put_sockaddr_nl(addr_ptr: *mut u8, addrlen_ptr: *mut u32, groups: u32) {
     put_sockaddr_nl_bound_groups(addr_ptr, addrlen_ptr, 0, groups);
 }
 
 /// Write a sockaddr_nl { AF_NETLINK, pid=portid, groups=0 } to user
 /// (getsockname on a bound netlink socket).
-/// SAFETY: addr_ptr/addrlen_ptr access_ok-validated for 12/4 bytes.
-pub unsafe fn put_sockaddr_nl_bound(addr_ptr: *mut u8, addrlen_ptr: *mut u32, portid: u32) {
+/// Contract: addr_ptr/addrlen_ptr access_ok-validated for 12/4 bytes.
+pub fn put_sockaddr_nl_bound(addr_ptr: *mut u8, addrlen_ptr: *mut u32, portid: u32) {
     put_sockaddr_nl_bound_groups(addr_ptr, addrlen_ptr, portid, 0);
 }
 
@@ -1517,25 +1517,26 @@ pub unsafe fn put_sockaddr_nl_bound(addr_ptr: *mut u8, addrlen_ptr: *mut u32, po
 /// length is the full 12-byte kernel size; the old form wrote all 12
 /// bytes unconditionally, clobbering whatever followed a short caller
 /// object.
-/// SAFETY: addr_ptr/addrlen_ptr access_ok-validated for 12/4 bytes.
-pub unsafe fn put_sockaddr_nl_bound_groups(
+/// Contract: addr_ptr/addrlen_ptr access_ok-validated for 12/4 bytes;
+/// the typed family is the exception-table copy path.
+pub fn put_sockaddr_nl_bound_groups(
     addr_ptr: *mut u8,
     addrlen_ptr: *mut u32,
     portid: u32,
     groups: u32,
 ) {
-    use crate::arch::uaccess::{copy_to_user, get_user, put_user};
+    use crate::arch::uaccess_safe as ua;
     let mut buf = [0u8; SOCKADDR_NL_LEN];
     buf[0] = AF_NETLINK as u8;
     buf[4..8].copy_from_slice(&portid.to_le_bytes());
     buf[8..12].copy_from_slice(&groups.to_le_bytes());
     // review F6: clamp to the caller's object (a faulting length read
-    // falls back to the full write; the put_user below reports it).
-    let copy_len = get_user::<u32>(addrlen_ptr)
+    // falls back to the full write; the write_user below reports it).
+    let copy_len = ua::read_user::<u32>(addrlen_ptr as usize)
         .map(|v| (v as usize).min(SOCKADDR_NL_LEN))
         .unwrap_or(SOCKADDR_NL_LEN);
-    let _ = copy_to_user(addr_ptr, buf.as_ptr(), copy_len);
-    let _ = put_user(addrlen_ptr, SOCKADDR_NL_LEN as u32);
+    let _ = ua::copy_out(addr_ptr as usize, &buf[..copy_len]);
+    let _ = ua::write_user(addrlen_ptr as usize, SOCKADDR_NL_LEN as u32);
 }
 
 // ============================================================================
