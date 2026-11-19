@@ -35,6 +35,10 @@ if [ "${1:-}" != "report-only" ]; then
     RUSTFLAGS="-C instrument-coverage -Zno-profiler-runtime" \
     cargo build --target riscv64gc-unknown-none-elf --features "riscv64,cov-dump"
 
+    # Preserve the ELF that generated these counters — later builds
+    # overwrite the target path and llvm-cov needs the matching object.
+    cp "$KERNEL_ELF" "$COV_DIR/rux.elf"
+
     echo "=== [2/4] Boot init=/test/kselftest ==="
     # Same shape as the suite.sh probe boots: bounded run, snapshot-free
     # scratch image, verdict parsed from the log (the test suite triggers
