@@ -72,6 +72,14 @@ pub enum NotifyWidth {
 /// VirtIO virtual queue
 ///
 /// Uses Modern VirtIO (v1.0+) layout
+///
+/// Unsafe-slim round 3: the ring memory is a `safety::dma::DmaBlock`
+/// (INV-DMA-1..3) carved once into the descriptor table, available
+/// ring, and used ring; all ring/index access goes through the
+/// block's bounds-checked volatile paths or the disjoint typed slots,
+/// so the per-access unsafe blocks this file used to carry are gone.
+/// The only remaining unsafe here is `notify()`'s arch fences and the
+/// register write (inherently asm/MMIO), plus the Send/Sync impls.
 pub struct VirtQueue {
     /// Queue size
     pub queue_size: u16,
@@ -85,16 +93,9 @@ pub struct VirtQueue {
     interrupt_status: u64,
     /// Interrupt acknowledge address (VIRTIO_MMIO_INTERRUPT_ACK - Write Only)
     interrupt_ack: u64,
-    /// Descriptor table pointer (at start of contiguous memory block)
-    pub(crate) desc: *mut Desc,
-    /// Available Ring pointer
-    pub(crate) avail: *mut AvailRing,
-    /// Used Ring pointer
-    pub(crate) used: *mut UsedRing,
-    /// vring address
-    vring_addr: u64,
-    /// Layout of the combined vring allocation (for free_vring)
-    vring_layout: alloc::alloc::Layout,
+    /// The vring allocation (None after free_vring): one DMA block
+    /// (INV-DMA-1) carved into desc/avail/used (INV-DMA-2).
+    vring: Option<Vring>,
     /// Next descriptor index to allocate
     next_desc: AtomicU16,
     /// Chains whose wait timed out and whose descriptors are LEAKED (the
@@ -123,8 +124,79 @@ pub struct VirtQueue {
     descs_held: AtomicU16,
 }
 
+/// The carved vring (INV-DMA-1/2): the block owns the allocation; the
+/// slots are disjoint zero-drop views into it (block declared first
+/// only for documentation — slot drops are no-ops).
+struct Vring {
+    block: crate::safety::dma::DmaBlock,
+    /// Descriptor table [queue_size] (driver-owned; device reads).
+    desc: crate::safety::dma::DmaSlot<[Desc]>,
+    /// Available ring header (driver-written).
+    avail: crate::safety::dma::DmaSlot<AvailRing>,
+    /// Used ring header (device-written — read volatile only).
+    used: crate::safety::dma::DmaSlot<UsedRing>,
+    /// Byte offsets of the carved sections (volatile-at offsets and
+    /// register programming derive from these).
+    off_avail: usize,
+    off_used: usize,
+}
+
 unsafe impl Send for VirtQueue {}
 unsafe impl Sync for VirtQueue {}
+
+// ---- Safe used-ring / response readers (safe-call discipline,
+// INV-SAFECALL-1..3): the ONE audited volatile edge per shape; every
+// poll loop and forensic printer in the virtio stack calls these. ----
+
+/// Read the used ring's `idx` (device-written) volatily.
+///
+/// INV: `used_ring` originates from `VirtQueue::used_ring_ptr()` on a
+/// queue whose vring is still allocated (the callers hold the queue
+/// reference); offset 2 is the idx field of the v1.0 used ring.
+pub fn used_ring_idx(used_ring: *const UsedRing) -> u16 {
+    if used_ring.is_null() {
+        return 0;
+    }
+    // SAFETY: the invariant above — a live vring's used ring; the u16
+    // at +2 is within the allocation; volatile because the device
+    // writes it (INV-DMA-3).
+    unsafe { core::ptr::read_volatile((used_ring as usize + 2) as *const u16) }
+}
+
+/// Read a used-ring entry's descriptor id (device-written) volatily.
+///
+/// INV: as `used_ring_idx`; `slot` must be < queue_size (callers wrap
+/// with `% queue_size`, which the device protocol also guarantees).
+pub fn used_ring_elem_id(used_ring: *const UsedRing, slot: usize) -> u32 {
+    if used_ring.is_null() {
+        return u32::MAX;
+    }
+    // SAFETY: live used ring; the entry at +4+slot*8 is within the
+    // allocation for slot < queue_size; volatile device-written memory.
+    unsafe {
+        core::ptr::read_volatile((used_ring as usize + 4 + slot * 8) as *const u32)
+    }
+}
+
+/// True once the device has written THIS request's response byte.
+///
+/// INV: `resp_status` points at this request's response status byte
+/// (device writes it exactly once on completion; initialized 0xFF at
+/// submit) or is null (treated as not-done).
+pub fn resp_done(resp_status: *const u8) -> bool {
+    resp_status_byte(resp_status) != 0xFF
+}
+
+/// Volatile read of a request's response status byte (null reads as
+/// the 0xFF "pending" sentinel). Same INV as [`resp_done`].
+pub fn resp_status_byte(resp_status: *const u8) -> u8 {
+    if resp_status.is_null() {
+        return 0xFF;
+    }
+    // SAFETY: caller-owned response byte of a live request; volatile
+    // so each poll re-reads DMA memory (INV-DMA-3).
+    unsafe { core::ptr::read_volatile(resp_status) }
+}
 
 /// r-strand instrument (lat_fs conviction round, 2026-11-19): the sync
 /// wait loop's phase counts, printed by the periodic dump. A stranded
@@ -170,41 +242,53 @@ impl VirtQueue {
 
         let total_size = desc_size_aligned + avail_size_aligned + used_size_aligned;
 
-        let layout = alloc::alloc::Layout::from_size_align(total_size, PAGE_SIZE).ok()?;
-        // SAFETY: layout is non-zero, page-aligned; null check follows.
-        let mem_ptr = unsafe { alloc::alloc::alloc(layout) as *mut u8 };
-        if mem_ptr.is_null() {
+        // INV-DMA-1/2: one page-aligned tracked allocation; the carve
+        // below checks alignment, bounds, and disjointness so the old
+        // hand offset arithmetic is gone. Each v1.0 section starts on
+        // its own page boundary; the ring arrays after each header are
+        // carved too, so every device-shared byte belongs to a carved
+        // range.
+        let mut block = crate::safety::dma::DmaBlock::new(total_size, PAGE_SIZE)?;
+        let (mut desc, off_desc) =
+            block.carve_array_aligned::<Desc>(queue_size as usize, PAGE_SIZE)?;
+        if off_desc != 0 {
+            crate::println!("virtio: ERROR: vring desc carve not page-aligned!");
+            return None;
+        }
+        let avail_off_expected = off_desc + desc_size_aligned;
+        let (mut avail, off_avail) = block.carve_aligned::<AvailRing>(PAGE_SIZE)?;
+        if off_avail != avail_off_expected {
+            crate::println!("virtio: ERROR: vring avail carve offset wrong!");
+            return None;
+        }
+        // avail ring entries + used_event (driver-written).
+        let (_avail_ring, _) =
+            block.carve_array::<u16>(queue_size as usize + 1)?;
+        let used_off_expected = off_avail + avail_size_aligned;
+        let (mut used, off_used) = block.carve_aligned::<UsedRing>(PAGE_SIZE)?;
+        if off_used != used_off_expected {
+            crate::println!("virtio: ERROR: vring used carve offset wrong!");
+            return None;
+        }
+        // used ring entries + avail_event (device-written).
+        let (_used_ring, _) =
+            block.carve_array::<UsedElem>(queue_size as usize)?;
+        let (_avail_event, _) = block.carve_array::<u16>(1)?;
+        let expected_total = used_off_expected + used_size_aligned;
+        if block.frontier_offset() > expected_total {
+            crate::println!("virtio: ERROR: vring carve exceeded section math!");
             return None;
         }
 
-        let addr = mem_ptr as usize;
-        if addr & (PAGE_SIZE - 1) != 0 {
-            crate::println!("virtio: ERROR: vring not page-aligned!");
-            // SAFETY: mem_ptr was allocated above with the same layout but failed alignment; reclaim it.
-            unsafe { alloc::alloc::dealloc(mem_ptr, layout) };
-            return None;
+        // INV-DMA-2: driver-owned init through the disjoint slots
+        // (the struct below adopts them after init).
+        for i in 0..queue_size as usize {
+            desc[i] = Desc { addr: 0, len: 0, flags: 0, next: 0 };
         }
-
-        let desc = mem_ptr as *mut Desc;
-        // SAFETY: pointers are within the allocated region; offsets are computed from
-        // page-aligned sizes and do not exceed total_size.
-        let avail = unsafe { (mem_ptr as usize + desc_size_aligned) as *mut AvailRing };
-        let used = unsafe { (mem_ptr as usize + desc_size_aligned + avail_size_aligned) as *mut UsedRing };
-
-        // SAFETY: avail and used are within the allocated region; initializing ring fields.
-        unsafe {
-            (*avail).flags = 0;
-            (*avail).idx = 0;
-            (*used).flags = 0;
-            (*used).idx = 0;
-        }
-
-        for i in 0..queue_size {
-            // SAFETY: i < queue_size, and desc points to queue_size descriptors in the allocation.
-            unsafe {
-                *desc.add(i as usize) = Desc { addr: 0, len: 0, flags: 0, next: 0 };
-            }
-        }
+        avail.flags = 0;
+        avail.idx = 0;
+        used.flags = 0;
+        used.idx = 0;
 
         Some(Self {
             queue_size,
@@ -213,11 +297,14 @@ impl VirtQueue {
             notify_width,
             interrupt_status,
             interrupt_ack,
-            desc,
-            avail,
-            used,
-            vring_addr: mem_ptr as u64,
-            vring_layout: layout,
+            vring: Some(Vring {
+                block,
+                desc,
+                avail,
+                used,
+                off_avail,
+                off_used,
+            }),
             next_desc: AtomicU16::new(0),
             leaked_chains: AtomicU16::new(0),
             avail_shadow: AtomicU16::new(0),
@@ -234,32 +321,33 @@ impl VirtQueue {
     /// desc 失败清理" — the allocation leak fired on the desc-failure early
     /// returns too).
     ///
-    /// # Safety
-    /// The queue must not be registered with a device (no in-flight DMA).
-    pub unsafe fn free_vring(&mut self) {
-        if !self.desc.is_null() {
-            // SAFETY: vring_layout is the exact layout used for the single
-            // allocation that desc/avail/used all point into.
-            unsafe {
-                alloc::alloc::dealloc(self.desc as *mut u8, self.vring_layout);
-            }
-            self.desc = core::ptr::null_mut();
-            self.avail = core::ptr::null_mut();
-            self.used = core::ptr::null_mut();
-        }
+    /// Now safe (INV-DMA-1): dropping the DmaBlock deallocates with the
+    /// stored layout; the slots are zero-drop views, so drop order cannot
+    /// use-after-free.
+    ///
+    /// Precondition (unchanged, still the caller's contract): the queue
+    /// must not be registered with a device (no in-flight DMA).
+    pub fn free_vring(&mut self) {
+        self.vring = None;
     }
 
     /// Get current available index
-    /// Get current available index
     pub fn get_avail(&self) -> u16 {
-        // SAFETY: avail is set in new() and points to the VirtIO available ring in our allocation.
-        unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*self.avail).idx)) }
+        match self.vring.as_ref() {
+            // INV-DMA-3: device-visible ring index, bounds-checked
+            // volatile read at the carve offset.
+            Some(vr) => vr.block.read_volatile_at::<u16>(vr.off_avail + 2),
+            None => 0,
+        }
     }
 
     /// Get current used index
     pub fn get_used(&self) -> u16 {
-        // SAFETY: used is set in new() and points to the VirtIO used ring in our allocation.
-        unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*self.used).idx)) }
+        match self.vring.as_ref() {
+            // INV-DMA-3: device-written used index.
+            Some(vr) => vr.block.read_volatile_at::<u16>(vr.off_used + 2),
+            None => 0,
+        }
     }
 
     /// Get element from used ring
@@ -270,17 +358,10 @@ impl VirtQueue {
     /// # Returns
     /// UsedElem containing descriptor ID and length
     pub fn get_used_elem(&self, idx: u16) -> Option<UsedElem> {
-        if self.used.is_null() {
-            return None;
-        }
-
-        // SAFETY: idx is wrapped to queue_size; ring_base is within the used ring allocation.
-        unsafe {
-            // Used ring structure: flags (2) + idx (2) + ring (queue_size * 8)
-            let ring_base = (self.used as usize) + 4;
-            let elem_ptr = (ring_base + (idx % self.queue_size) as usize * 8) as *const UsedElem;
-            Some(core::ptr::read_volatile(elem_ptr))
-        }
+        let vr = self.vring.as_ref()?;
+        // Used ring structure: flags (2) + idx (2) + ring (queue_size * 8)
+        let slot = (idx % self.queue_size) as usize;
+        Some(vr.block.read_volatile_at::<UsedElem>(vr.off_used + 4 + slot * 8))
     }
 
     /// Get last processed used index (for tracking)
@@ -376,7 +457,7 @@ impl VirtQueue {
     /// IRQ-blackout window (review TIMING: xmit used 10M+50M iters — tens
     /// of seconds of disabled interrupts under TCG).
     pub fn wait_for_completion_max(&self, prev_used: u16, max_iters: u64) -> u16 {
-        if self.used.is_null() {
+        if self.vring.is_none() {
             return prev_used;
         }
 
@@ -386,12 +467,7 @@ impl VirtQueue {
             // Use memory barrier to ensure read ordering
             core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
 
-            // SAFETY: used points to the VirtIO used ring in our allocation;
-            // offset 2 is the idx field (u16), within the used ring structure.
-            let used_idx = unsafe {
-                let used_idx_ptr = (self.used as usize + 2) as *const u16;
-                core::ptr::read_volatile(used_idx_ptr)
-            };
+            let used_idx = self.get_used();
 
             if used_idx != prev_used {
                 return used_idx;
@@ -406,9 +482,14 @@ impl VirtQueue {
         }
     }
 
-    /// Get raw pointer to used ring (for interrupt-driven wait outside queue lock)
+    /// Get raw pointer to used ring (for interrupt-driven wait outside
+    /// queue lock). INV: valid while the queue's vring is allocated;
+    /// read it through [`used_ring_idx`]/[`used_ring_elem_id`].
     pub fn used_ring_ptr(&self) -> *const UsedRing {
-        self.used
+        match self.vring.as_ref() {
+            Some(vr) => vr.used.as_ptr(),
+            None => core::ptr::null(),
+        }
     }
 
     /// Kernel-side submission ordinal snapshot (VW forensic
@@ -470,22 +551,12 @@ impl VirtQueue {
             putchar(c);
         }
         pdec(blk_slot as u64);
-        let rv = if resp_status.is_null() {
-            0xFFu8
-        } else {
-            // SAFETY: diagnostic volatile read of the caller-owned
-            // response byte.
-            unsafe { core::ptr::read_volatile(resp_status) }
-        };
+        let rv = resp_status_byte(resp_status);
         for &c in b" resp=0x" {
             putchar(c);
         }
         pdec(rv as u64);
-        // SAFETY: used_ring offset 2 is the idx field (same read as the
-        // poll loop).
-        let used_idx = unsafe {
-            core::ptr::read_volatile((used_ring as usize + 2) as *const u16)
-        };
+        let used_idx = used_ring_idx(used_ring);
         for &c in b" used=" {
             putchar(c);
         }
@@ -540,7 +611,8 @@ impl VirtQueue {
     /// wedge. They poll instead; the device writes the response via DMA
     /// regardless of CPU IRQ state.
     ///
-    /// # Safety
+    /// Pointer contracts (INV-SAFECALL-2 boundary; reads route through
+    /// [`used_ring_idx`]/[`resp_done`]):
     /// - `used_ring` must point to a valid VirtIO used ring
     /// - `wait_queue` must be the correct wait queue for this device's interrupt
     /// - `resp_status` must point to this request's response status byte and
@@ -554,19 +626,6 @@ impl VirtQueue {
     ) -> u16 {
         if used_ring.is_null() {
             return prev_used;
-        }
-
-        /// True once the device has written THIS request's response.
-        ///
-        /// # Safety
-        /// `resp_status` points to the caller's response byte which the
-        /// device writes (DMA) exactly once, on completion of THIS request.
-        unsafe fn resp_done(resp_status: *const u8) -> bool {
-            if resp_status.is_null() {
-                return false;
-            }
-            // SAFETY: see above; volatile so each poll re-reads DMA memory.
-            core::ptr::read_volatile(resp_status) != 0xFF
         }
 
         // Detect early boot phase: no current task or PID 0 (idle/boot thread).
@@ -681,12 +740,8 @@ impl VirtQueue {
                 // Early boot / lock holder: pure spin-poll (no scheduler).
                 if poll_only {
                     // SAFETY: resp_done reads the caller-owned response byte.
-                    if unsafe { resp_done(resp_status) } {
-                        // SAFETY: used_ring offset 2 is the idx field.
-                        break 'wait_done unsafe {
-                            let used_idx_ptr = (used_ring as usize + 2) as *const u16;
-                            core::ptr::read_volatile(used_idx_ptr)
-                        };
+                    if resp_done(resp_status) {
+                        break 'wait_done used_ring_idx(used_ring);
                     }
 
                     // Wall-clock recovery + deadline (see the constants
@@ -721,13 +776,8 @@ impl VirtQueue {
                                 crate::drivers::virtio::pci_process_async_completions_slot(
                                     blk_slot,
                                 );
-                                if unsafe { resp_done(resp_status) } {
-                                    // SAFETY: used_ring offset 2 is the idx field.
-                                    break 'wait_done unsafe {
-                                        let used_idx_ptr =
-                                            (used_ring as usize + 2) as *const u16;
-                                        core::ptr::read_volatile(used_idx_ptr)
-                                    };
+                                if resp_done(resp_status) {
+                                    break 'wait_done used_ring_idx(used_ring);
                                 }
                                 *next_recover = now + POLL_RECOVER_TICKS;
                             }
@@ -768,12 +818,8 @@ impl VirtQueue {
 
                 // Fast check: our own request may have completed already.
                 // SAFETY: resp_done reads the caller-owned response byte.
-                if unsafe { resp_done(resp_status) } {
-                    // SAFETY: used_ring offset 2 is the idx field.
-                    break 'wait_done unsafe {
-                        let used_idx_ptr = (used_ring as usize + 2) as *const u16;
-                        core::ptr::read_volatile(used_idx_ptr)
-                    };
+                if resp_done(resp_status) {
+                    break 'wait_done used_ring_idx(used_ring);
                 }
 
                 // SLEEP-PATH RECOVER PASS (see the SLEEP_RECOVER_MS block
@@ -800,12 +846,8 @@ impl VirtQueue {
                     crate::drivers::virtio::pci_blk_kick(blk_slot);
                     crate::drivers::virtio::pci_process_async_completions_slot(blk_slot);
                     // SAFETY: resp_done reads the caller-owned response byte.
-                    if unsafe { resp_done(resp_status) } {
-                        // SAFETY: used_ring offset 2 is the idx field.
-                        break 'wait_done unsafe {
-                            let used_idx_ptr = (used_ring as usize + 2) as *const u16;
-                            core::ptr::read_volatile(used_idx_ptr)
-                        };
+                    if resp_done(resp_status) {
+                        break 'wait_done used_ring_idx(used_ring);
                     }
                     recover_at = now.saturating_add(
                         crate::drivers::timer::msecs_to_jiffies(SLEEP_RECOVER_MS),
@@ -836,7 +878,7 @@ impl VirtQueue {
                 // Re-check AFTER registering: a completion whose interrupt
                 // fired between the fast check above and prepare_to_wait is
                 // caught here instead of sleeping on a queue nobody will wake.
-                if unsafe { resp_done(resp_status) } {
+                if resp_done(resp_status) {
                     VW_WAIT_RESP.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     wait_queue.finish_wait(current);
                     // R36-B2 compensation (IoCompletion::wait discipline): a
@@ -844,11 +886,7 @@ impl VirtQueue {
                     // finish — take ourselves back off the GRQ or nr_running
                     // stays inflated until our next context switch.
                     crate::sched::dequeue_task(&*current);
-                    // SAFETY: used_ring offset 2 is the idx field.
-                    break 'wait_done unsafe {
-                        let used_idx_ptr = (used_ring as usize + 2) as *const u16;
-                        core::ptr::read_volatile(used_idx_ptr)
-                    };
+                    break 'wait_done used_ring_idx(used_ring);
                 }
 
                 // Deadline check AFTER prepare_to_wait: we are about to sleep,
@@ -867,12 +905,8 @@ impl VirtQueue {
                     crate::drivers::virtio::vw_report("sync-deadline");
                     crate::drivers::virtio::pci_blk_kick(blk_slot);
                     crate::drivers::virtio::pci_process_async_completions_slot(blk_slot);
-                    if unsafe { resp_done(resp_status) } {
-                        // SAFETY: used_ring offset 2 is the idx field.
-                        break 'wait_done unsafe {
-                            let used_idx_ptr = (used_ring as usize + 2) as *const u16;
-                            core::ptr::read_volatile(used_idx_ptr)
-                        };
+                    if resp_done(resp_status) {
+                        break 'wait_done used_ring_idx(used_ring);
                     }
                     // prev_used sentinel: caller runs its late-drain and
                     // retry (R21-N2 — never free a buffer the device may
@@ -1012,21 +1046,13 @@ break 'wait_done prev_used;
         for _iteration in 0..max_iterations {
             // Read the current used ring index
             core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
-            let used_idx = unsafe {
-                let used_idx_ptr = (used_ring as usize + 2) as *const u16;
-                core::ptr::read_volatile(used_idx_ptr)
-            };
+            let used_idx = used_ring_idx(used_ring);
 
             // Scan all new entries since start_idx looking for our descriptor
             let mut scan_idx = start_idx;
             while scan_idx != used_idx {
                 let ring_slot = scan_idx as usize % queue_size as usize;
-                // SAFETY: UsedRing is [flags:u16, idx:u16, ring:UsedElem[]];
-                // offset 4 + ring_slot * 8 is within the allocated ring.
-                let entry_id = unsafe {
-                    let elem_ptr = (used_ring as usize + 4 + ring_slot * 8) as *const u32;
-                    core::ptr::read_volatile(elem_ptr)
-                };
+                let entry_id = used_ring_elem_id(used_ring, ring_slot);
                 if entry_id == expected_desc_id {
                     return true;  // Our descriptor was completed
                 }
@@ -1057,17 +1083,11 @@ break 'wait_done prev_used;
             // Fast re-check after registering (lost-wakeup protection):
             // a completion that landed between the scan above and the
             // prepare_to_wait is caught here without sleeping.
-            let used_idx2 = unsafe {
-                let used_idx_ptr = (used_ring as usize + 2) as *const u16;
-                core::ptr::read_volatile(used_idx_ptr)
-            };
+            let used_idx2 = used_ring_idx(used_ring);
             let mut si = start_idx;
             while si != used_idx2 {
                 let ring_slot = si as usize % queue_size as usize;
-                let eid = unsafe {
-                    let elem_ptr = (used_ring as usize + 4 + ring_slot * 8) as *const u32;
-                    core::ptr::read_volatile(elem_ptr)
-                };
+                let eid = used_ring_elem_id(used_ring, ring_slot);
                 if eid == expected_desc_id {
                     wait_queue.finish_wait(current);
                     // R36-B2 compensation (same as wait_for_used_interruptible
@@ -1108,28 +1128,25 @@ break 'wait_done prev_used;
         /// anything (permanent I/O wedge).
         let idx = self.avail_shadow.fetch_add(1, Ordering::AcqRel) as usize;
         let ring_idx = idx % self.queue_size as usize;
-        // SAFETY: avail points to the available ring in our allocation; the ring
-        // pointer at offset 4 is within the allocated region; all volatile
-        // writes target fields of the VirtIO vring we own.
-        unsafe {
-            let avail = &mut *self.avail;
+        let Some(vr) = self.vring.as_ref() else { return };
+        // INV-DMA-2/3: bounds-checked volatile writes into the carved
+        // avail section (the device reads this memory concurrently).
 
-            // Memory barrier before writing to available ring
-            core::sync::atomic::fence(Ordering::Release);
+        // Memory barrier before writing to available ring
+        core::sync::atomic::fence(Ordering::Release);
 
-            // Write descriptor head index to available ring
-            let ring_ptr = (self.avail as usize + 4) as *mut u16;
-            core::ptr::write_volatile(ring_ptr.add(ring_idx), head_idx);
+        // Write descriptor head index to available ring
+        vr.block
+            .write_volatile_at(vr.off_avail + 4 + ring_idx * 2, head_idx);
 
-            // Memory barrier to ensure ring write completes before index update
-            core::sync::atomic::fence(Ordering::Release);
+        // Memory barrier to ensure ring write completes before index update
+        core::sync::atomic::fence(Ordering::Release);
 
-            // Update available index (this signals to device that new
-            // request is ready). Derived from the shadow — this also
-            // REPAIRS a corrupted ring index on every submit.
-            let new_idx = (idx as u16).wrapping_add(1);
-            core::ptr::write_volatile(&mut (*avail).idx as *mut u16, new_idx);
-        }
+        // Update available index (this signals to device that new
+        // request is ready). Derived from the shadow — this also
+        // REPAIRS a corrupted ring index on every submit.
+        let new_idx = (idx as u16).wrapping_add(1);
+        vr.block.write_volatile_at(vr.off_avail + 2, new_idx);
     }
 
     /// Add descriptor chain to queue and notify device
@@ -1145,12 +1162,9 @@ break 'wait_done prev_used;
 
     /// Get descriptor
     pub fn get_desc(&mut self, idx: u16) -> Option<Desc> {
-        if idx < self.queue_size {
-            // SAFETY: idx < queue_size, desc points to queue_size descriptors in the allocation.
-            unsafe { Some(*self.desc.add(idx as usize)) }
-        } else {
-            None
-        }
+        let vr = self.vring.as_ref()?;
+        // INV-DMA-2: bounds-checked disjoint slot read.
+        vr.desc.get(idx as usize).copied()
     }
 
     /// Allocate new descriptor (reclaims from used ring when possible).
@@ -1347,38 +1361,98 @@ break 'wait_done prev_used;
 
     /// Set descriptor content
     pub fn set_desc(&mut self, idx: u16, addr: u64, len: u32, flags: u16, next: u16) {
-        if idx < self.queue_size {
-            // SAFETY: idx < queue_size, desc points to queue_size descriptors in the allocation.
-            unsafe {
-                *self.desc.add(idx as usize) = Desc { addr, len, flags, next };
+        if let Some(vr) = self.vring.as_mut() {
+            // INV-DMA-2: bounds-checked disjoint slot write (device
+            // reads; the release fence orders the publish).
+            if let Some(d) = vr.desc.get_mut(idx as usize) {
+                *d = Desc { addr, len, flags, next };
+                core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
             }
-            core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
         }
     }
 
-    /// Get descriptor table address
+    /// Get descriptor table address (0 when freed)
     pub fn get_desc_addr(&self) -> u64 {
-        self.desc as u64
+        self.vring
+            .as_ref()
+            .map(|vr| vr.desc.as_ptr() as *mut Desc as u64)
+            .unwrap_or(0)
     }
 
-    /// Get Available Ring address
+    /// Get Available Ring address (0 when freed)
     pub fn get_avail_addr(&self) -> u64 {
-        self.avail as u64
+        self.vring.as_ref().map(|vr| vr.avail.as_ptr() as u64).unwrap_or(0)
     }
 
-    /// Get Used Ring address
+    /// Get Used Ring address (0 when freed)
     pub fn get_used_addr(&self) -> u64 {
-        self.used as u64
+        self.vring.as_ref().map(|vr| vr.used.as_ptr() as u64).unwrap_or(0)
     }
 
-    /// Get vring base address
+    /// Get vring base address (0 when freed)
     pub fn get_vring_addr(&self) -> u64 {
-        self.vring_addr
+        self.vring.as_ref().map(|vr| vr.block.addr() as u64).unwrap_or(0)
     }
 
     /// Get queue notification address
     pub fn get_notify_addr(&self) -> u64 {
         self.queue_notify
+    }
+
+    // ---- Typed ring access for drivers that program the vring
+    // directly (GPU/input control queues). INV-DMA-2: bounds-checked
+    // disjoint-slot views; device-visible ring-entry writes are
+    // volatile. ----
+
+    /// Bounds-checked mutable view of descriptor `idx` through a
+    /// shared queue handle.
+    ///
+    /// The vring's descriptor table is driver-owned memory that the
+    /// device only READS; submission is serialized by each driver's
+    /// device lock (the same exclusion the pre-conversion raw-pointer
+    /// code relied on). This is the ONE audited reborrow edge for that
+    /// pattern (INV-DMA-2: bounds-checked disjoint slot).
+    pub(crate) fn desc_mut(&self, idx: u16) -> Option<&mut Desc> {
+        let vr = self.vring.as_ref()?;
+        let base = vr.desc.as_ptr() as *mut Desc;
+        if (idx as usize) < vr.desc.len() {
+            // SAFETY: idx bounds-checked above; the slot's range is
+            // disjoint from every other slot (INV-DMA-2); caller's
+            // device lock provides the exclusion.
+            Some(unsafe { &mut *base.add(idx as usize) })
+        } else {
+            None
+        }
+    }
+
+    /// Mutable view of the available-ring header (driver-owned; same
+    /// caller-lock discipline as [`desc_mut`]).
+    pub(crate) fn avail_header_mut(&self) -> Option<&mut AvailRing> {
+        let vr = self.vring.as_ref()?;
+        let base = vr.avail.as_ptr();
+        // SAFETY: disjoint slot (INV-DMA-2); the avail header is
+        // driver-written; caller's device lock serializes.
+        Some(unsafe { &mut *base })
+    }
+
+    /// Volatile write of avail ring slot `ring_idx` (device reads).
+    pub(crate) fn write_avail_ring_slot(&self, ring_idx: usize, head: u16) {
+        if let Some(vr) = self.vring.as_ref() {
+            vr.block
+                .write_volatile_at(vr.off_avail + 4 + ring_idx * 2, head);
+        }
+    }
+
+    /// Volatile write of the avail header idx (publish).
+    pub(crate) fn write_avail_idx(&self, new_idx: u16) {
+        if let Some(vr) = self.vring.as_ref() {
+            vr.block.write_volatile_at(vr.off_avail + 2, new_idx);
+        }
+    }
+
+    /// Volatile read of the avail header idx (= [`get_avail`]).
+    pub(crate) fn avail_idx(&self) -> u16 {
+        self.get_avail()
     }
 }
 

@@ -228,13 +228,13 @@ impl VirtioInputDevice {
 
         // Get queue physical addresses
         let desc_phys = crate::arch::mm::virt_to_phys(
-            crate::arch::mm::VirtAddr::new(unsafe { queue.desc as u64 })
+            crate::arch::mm::VirtAddr::new(queue.get_desc_addr())
         ).0;
         let avail_phys = crate::arch::mm::virt_to_phys(
-            crate::arch::mm::VirtAddr::new(unsafe { queue.avail as u64 })
+            crate::arch::mm::VirtAddr::new(queue.get_avail_addr())
         ).0;
         let used_phys = crate::arch::mm::virt_to_phys(
-            crate::arch::mm::VirtAddr::new(unsafe { queue.used as u64 })
+            crate::arch::mm::VirtAddr::new(queue.get_used_addr())
         ).0;
 
         // Set queue addresses
@@ -364,24 +364,23 @@ impl VirtioInputDevice {
 
         let queue_size = queue.queue_size as usize;
 
-        unsafe {
+        // INV-DMA-2: typed bounds-checked ring views.
+        {
             // Submit all buffers
             for i in 0..queue_size {
                 let event_ptr = self.event_buffer_phys + (i * core::mem::size_of::<VirtioInputEvent>()) as u64;
 
-                let desc = &mut *queue.desc.add(i);
+                let Some(desc) = queue.desc_mut(i as u16) else { continue };
                 desc.addr = event_ptr;
                 desc.len = core::mem::size_of::<VirtioInputEvent>() as u32;
                 desc.flags = 0x02; // VIRTQ_DESC_F_WRITE
                 desc.next = 0;
 
                 // Add to available ring
-                let avail = &mut *queue.avail;
-                let ring_ptr = (queue.avail as *mut u8).add(4) as *mut u16;
-                let idx = avail.idx as usize;
-                write_volatile(ring_ptr.add(idx % queue_size), i as u16);
+                let idx = queue.avail_idx() as usize;
+                queue.write_avail_ring_slot(idx % queue_size, i as u16);
                 fence(Ordering::SeqCst);
-                write_volatile(core::ptr::addr_of_mut!(avail.idx), avail.idx.wrapping_add(1));
+                queue.write_avail_idx((idx as u16).wrapping_add(1));
             }
 
             fence(Ordering::SeqCst);
@@ -393,9 +392,8 @@ impl VirtioInputDevice {
     pub fn read_event(&mut self) -> Option<InputEvent> {
         let queue = self.event_queue.as_ref()?;
 
-        unsafe {
-            let used = &*queue.used;
-            let used_idx = core::ptr::read_volatile(&used.idx) as usize;
+        {
+            let used_idx = queue.get_used() as usize;
             let last_used = self.last_used as usize;
 
             if crate::trace::EVENT_INPUTTRACE.armed() {
@@ -411,27 +409,32 @@ impl VirtioInputDevice {
             }
 
             // Get used descriptor (volatile read: device writes via DMA)
-            let used_ring = (queue.used as *const u8).add(4) as *const UsedElem;
-            let used_elem = read_volatile(used_ring.add(last_used % queue.queue_size as usize));
+            let used_elem = queue
+                .get_used_elem((last_used % queue.queue_size as usize) as u16)
+                .unwrap_or(crate::drivers::virtio::queue::UsedElem { id: 0, len: 0 });
 
             let desc_idx = used_elem.id as usize;
             let _len = used_elem.len;
 
             // Read event
-            let event = read_volatile(self.event_buffer.add(desc_idx));
+            // SAFETY: the event buffer is a live registered DMA buffer
+            // of queue_size events (INV at init); volatile because the
+            // device writes it.
+            let event = unsafe { read_volatile(self.event_buffer.add(desc_idx)) };
 
             // Resubmit buffer
-            let desc = &mut *queue.desc.add(desc_idx);
+            let Some(desc) = queue.desc_mut(desc_idx as u16) else {
+                return None;
+            };
             desc.addr = self.event_buffer_phys + (desc_idx * core::mem::size_of::<VirtioInputEvent>()) as u64;
             desc.len = core::mem::size_of::<VirtioInputEvent>() as u32;
             desc.flags = 0x02;
             desc.next = 0;
 
-            let avail = &mut *queue.avail;
-            let ring_ptr = (queue.avail as *mut u8).add(4) as *mut u16;
-            write_volatile(ring_ptr.add(avail.idx as usize % queue.queue_size as usize), desc_idx as u16);
+            let aidx = queue.avail_idx() as usize;
+            queue.write_avail_ring_slot(aidx % queue.queue_size as usize, desc_idx as u16);
             fence(Ordering::SeqCst);
-            avail.idx = avail.idx.wrapping_add(1);
+            queue.write_avail_idx((aidx as u16).wrapping_add(1));
             self.last_used = self.last_used.wrapping_add(1);
 
             fence(Ordering::SeqCst);
@@ -452,13 +455,11 @@ impl VirtioInputDevice {
     }
 
     pub fn has_event(&self) -> bool {
-        if let Some(queue) = &self.event_queue {
-            unsafe {
-                let used = &*queue.used;
-                used.idx as usize != self.last_used as usize
-            }
-        } else {
-            false
+        // INV-DMA-3: device-written used index via the typed volatile
+        // getter.
+        match &self.event_queue {
+            Some(queue) => queue.get_used() as usize != self.last_used as usize,
+            None => false,
         }
     }
 

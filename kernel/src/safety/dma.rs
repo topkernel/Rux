@@ -76,6 +76,12 @@ impl DmaBlock {
         .0
     }
 
+    /// Virtual address of the block (register programming that takes
+    /// the VA, or legacy VA-based paths).
+    pub fn addr(&self) -> usize {
+        self.ptr.as_ptr() as usize
+    }
+
     /// Physical address of byte offset `off` (a previously returned
     /// carve offset; unchecked arithmetic on purpose — offsets come
     /// from carve results, not device input).
@@ -104,6 +110,39 @@ impl DmaBlock {
         // because the frontier only advances.
         let base = unsafe { self.ptr.as_ptr().add(off) } as *mut T;
         let ptr = NonNull::slice_from_raw_parts(NonNull::new(base)?, count);
+        Some((DmaSlot { ptr, _tag: PhantomData }, off))
+    }
+
+    /// Carve `count` elements of `T` at the frontier with an EXPLICIT
+    /// alignment (stricter than `align_of::<T>`), for layouts the
+    /// device protocol fixes (e.g. page-aligned vring sections).
+    /// Same INV-DMA-2 checks as [`carve_array`].
+    pub fn carve_array_aligned<T>(
+        &mut self,
+        count: usize,
+        align: usize,
+    ) -> Option<(DmaSlot<[T]>, usize)> {
+        let size = core::mem::size_of::<T>().checked_mul(count)?;
+        let align = align.max(1);
+        let off = (self.frontier + align - 1) & !(align - 1);
+        let end = off.checked_add(size)?;
+        if end > self.len {
+            return None;
+        }
+        self.frontier = end;
+        // SAFETY: INV-DMA-2 — bounds/alignment/disjointness proven
+        // above (explicit align variant).
+        let base = unsafe { self.ptr.as_ptr().add(off) } as *mut T;
+        let ptr = NonNull::slice_from_raw_parts(NonNull::new(base)?, count);
+        Some((DmaSlot { ptr, _tag: PhantomData }, off))
+    }
+
+    /// Carve ONE `T` at the frontier with an EXPLICIT alignment
+    /// (device-protocol-fixed layouts); same INV-DMA-2 checks.
+    pub fn carve_aligned<T>(&mut self, align: usize) -> Option<(DmaSlot<T>, usize)> {
+        let (slot, off) = self.carve_array_aligned::<T>(1, align)?;
+        // SAFETY: 1-element slice; base pointer is a valid aligned *mut T.
+        let ptr = NonNull::new(slot.ptr.as_ptr() as *mut T)?;
         Some((DmaSlot { ptr, _tag: PhantomData }, off))
     }
 

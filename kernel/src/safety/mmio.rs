@@ -69,6 +69,14 @@ impl MmioRegion {
         unsafe { core::ptr::read_volatile(addr) }
     }
 
+    /// Volatile u16 read (INV-MMIO-2/3).
+    #[inline]
+    pub fn read_u16(&self, off: usize) -> u16 {
+        let addr = self.check(off, 2, "read_u16") as *const u16;
+        // SAFETY: INV-MMIO-1/2/3 — bounds-checked mapped window; volatile.
+        unsafe { core::ptr::read_volatile(addr) }
+    }
+
     /// Volatile u32 read (INV-MMIO-2/3).
     #[inline]
     pub fn read_u32(&self, off: usize) -> u32 {
@@ -94,6 +102,14 @@ impl MmioRegion {
         let addr = self.check(off, 1, "write_u8") as *mut u8;
         // SAFETY: INV-MMIO-1/2/3 — bounds-checked mapped window;
         // volatile write reaches the device exactly once.
+        unsafe { core::ptr::write_volatile(addr, val) }
+    }
+
+    /// Volatile u16 write (INV-MMIO-2/3).
+    #[inline]
+    pub fn write_u16(&self, off: usize, val: u16) {
+        let addr = self.check(off, 2, "write_u16") as *mut u16;
+        // SAFETY: INV-MMIO-1/2/3 — as read_u16, write direction.
         unsafe { core::ptr::write_volatile(addr, val) }
     }
 
