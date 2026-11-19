@@ -94,32 +94,3 @@ crate::procfile! {
     }
 }
 
-/// Conversion pins for /proc/diskstats (D-4 slice): the macro's shape
-/// floor covers token count and spacing; this snapshot pins the exact
-/// row BYTES — 20 single-space-separated fields, the zeros in Linux's
-/// merged/discard/flush slots — so a column added, dropped or swapped
-/// in the declaration fails here, not in a user's parser. Callable body
-/// for the in-kernel unit-test suite.
-#[cfg(any(test, feature = "unit-test"))]
-pub mod diskstats_file_tests {
-    pub fn snapshot_check() {
-        let got = super::diskstats_row(
-            "254 0 vda",
-            14, 0, 34, 2,      // reads family
-            7, 0, 19, 3,       // writes family
-            1, 12, 12,         // in-flight, io time, weighted
-            0, 0, 0, 0,        // discards
-            0, 0,              // flush
-        );
-        assert_eq!(
-            got,
-            "254 0 vda 14 0 34 2 7 0 19 3 1 12 12 0 0 0 0 0 0\n",
-            "/proc/diskstats row bytes drifted from Linux's 20-field layout"
-        );
-        // Field-count floor: 3 identity tokens + the declared columns.
-        assert_eq!(super::DISKSTAT_COLUMNS.len(), 17, "declared column count drifted");
-        let tokens = got.trim_end_matches('\n')
-            .split(' ').filter(|t| !t.is_empty()).count();
-        assert_eq!(tokens, 3 + super::DISKSTAT_COLUMNS.len(), "/proc/diskstats field count drifted");
-    }
-}

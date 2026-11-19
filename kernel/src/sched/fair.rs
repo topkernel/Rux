@@ -615,17 +615,13 @@ pub(crate) struct VruntimeKey {
 }
 
 impl VruntimeKey {
-    fn new(vruntime: u64, task_id: u64) -> Self {
+    pub(crate) fn new(vruntime: u64, task_id: u64) -> Self {
         Self { vruntime, task_id }
     }
 }
 
 /// grq-10ns: unit-test key constructor (tests/fair_timeline.rs drives a
 /// local RbTimeline; the key type itself stays private to this module).
-#[cfg(any(test, feature = "unit-test"))]
-pub(crate) fn vruntime_key_for_test(vruntime: u64, task_id: u64) -> VruntimeKey {
-    VruntimeKey::new(vruntime, task_id)
-}
 
 // ============================================================================
 // grq-10ns: entity-embedded intrusive red-black timeline (the reference

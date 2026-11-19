@@ -589,7 +589,7 @@ pub fn timer_interrupt_handler() -> u64 {
         1
     };
 
-    // RT-2X item 4 (pair-battery queue): expire due high-resolution
+    // RT-2X item 4 (paired-test queue): expire due high-resolution
     // timers HERE, at the top of the IRQ, before the tick body — the
     // reference's hrtimer_interrupt shape. Precise sleeps then wake
     // ahead of the per-tick accounting / scheduler_tick / scribble /

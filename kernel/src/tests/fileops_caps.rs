@@ -64,7 +64,7 @@ fn check_errno_matrix() {
     };
 
     // Op-less type: epoll table (close only).
-    let epoll_file = mk(Some(crate::syscall::misc::caps_shape::epoll_ops()));
+    let epoll_file = mk(Some(&crate::syscall::misc::EPOLL_OPS));
     if epoll_file.missing_op_errno(FileOpKind::Read) != -22 {
         test_fail("errno-matrix", "epoll read: want EINVAL (-22)");
         return;
@@ -79,7 +79,7 @@ fn check_errno_matrix() {
     }
 
     // Stream type: pipe table (read/write/poll/close, no seek state).
-    let pipe_file = mk(Some(crate::syscall::misc::caps_shape::pipe_ops()));
+    let pipe_file = mk(Some(&crate::fs::pipe::PIPE_OPS));
     if pipe_file.missing_op_errno(FileOpKind::ReadAt) != -29 {
         test_fail("errno-matrix", "pipe pread: want ESPIPE (-29)");
         return;
@@ -118,38 +118,38 @@ pub fn test_fileops_caps() {
     // read() takes the central EINVAL path.
     check(
         "epoll caps",
-        crate::syscall::misc::caps_shape::epoll_ops(),
+        &crate::syscall::misc::EPOLL_OPS,
         Expect { read: false, write: false, lseek: false, close: true, poll: true, read_at: false },
     );
 
     check(
         "eventfd caps",
-        crate::syscall::misc::caps_shape::eventfd_ops(),
+        &crate::syscall::misc::EVENTFD_OPS,
         Expect { read: true, write: true, lseek: false, close: true, poll: true, read_at: false },
     );
 
     check(
         "timerfd caps",
-        crate::syscall::misc::caps_shape::timerfd_ops(),
+        &crate::syscall::misc::TIMERFD_OPS,
         Expect { read: true, write: false, lseek: false, close: true, poll: true, read_at: false },
     );
 
     check(
         "signalfd caps",
-        crate::syscall::misc::caps_shape::signalfd_ops(),
+        &crate::syscall::misc::SIGNALFD_OPS,
         Expect { read: true, write: false, lseek: false, close: true, poll: true, read_at: false },
     );
 
     // The canonical STREAM set: read/write/poll/close, never seek.
     check(
         "pipe caps",
-        crate::syscall::misc::caps_shape::pipe_ops(),
+        &crate::fs::pipe::PIPE_OPS,
         Expect { read: true, write: true, lseek: false, close: true, poll: true, read_at: false },
     );
 
     check(
         "inotify caps",
-        crate::syscall::misc::caps_shape::inotify_ops(),
+        &crate::fs::inotify::INOTIFY_OPS,
         Expect { read: true, write: false, lseek: false, close: true, poll: true, read_at: false },
     );
 
@@ -206,22 +206,22 @@ pub fn test_fileops_caps() {
     // vfs mem-file is read-only positional.
     check(
         "nulldev caps",
-        crate::fs::devfs::caps_shape::nulldev_ops(),
+        &crate::fs::devfs::NULLDEV_OPS,
         Expect { read: true, write: true, lseek: false, close: false, poll: true, read_at: false },
     );
     check(
         "zerodev caps",
-        crate::fs::devfs::caps_shape::zerodev_ops(),
+        &crate::fs::devfs::ZERODEV_OPS,
         Expect { read: true, write: true, lseek: false, close: false, poll: true, read_at: false },
     );
     check(
         "fulldev caps",
-        crate::fs::devfs::caps_shape::fulldev_ops(),
+        &crate::fs::devfs::FULLDEV_OPS,
         Expect { read: true, write: true, lseek: false, close: false, poll: true, read_at: false },
     );
     check(
         "randdev caps",
-        crate::fs::devfs::caps_shape::randdev_ops(),
+        &crate::fs::devfs::RANDDEV_OPS,
         Expect { read: true, write: true, lseek: false, close: false, poll: true, read_at: false },
     );
     check(
@@ -300,12 +300,12 @@ pub fn test_fileops_caps() {
     );
     check(
         "selinuxfs file caps",
-        crate::fs::selinuxfs::caps_shape::selinuxfs_ops(),
+        &crate::fs::selinuxfs::SELINUXFS_FILE_OPS,
         Expect { read: true, write: true, lseek: false, close: false, poll: false, read_at: true },
     );
     check(
         "vfs mem-file caps",
-        crate::fs::vfs::caps_shape::mem_file_ops(),
+        &crate::fs::vfs::MEM_FILE_OPS,
         // poll: true since the ub-gfx bring-up (ff8cd7a08) — MEM_FILE_OPS
         // gained mem_file_poll (seq_poll parity / DEFAULT_POLLMASK) so the
         // procfs read_file-shortcut fds are epollable; systemd 255's mount
@@ -346,7 +346,7 @@ pub fn test_fileops_caps() {
     );
     check(
         "nsfile caps",
-        crate::process::ns::caps_shape::ns_file_ops(),
+        &crate::process::ns::NS_FILE_OPS,
         Expect { read: true, write: false, lseek: false, close: true, poll: false, read_at: false },
     );
 

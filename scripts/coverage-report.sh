@@ -70,6 +70,10 @@ if [ "$PROF_SIZE" -lt 64 ]; then
     exit 1
 fi
 
+# Preserve the ELF that generated these counters (see the kselftest
+# script's note).
+cp "$KERNEL_ELF" "$COV_DIR/rux.elf" 2>/dev/null || true
+
 echo "=== [3/5] llvm-profdata merge ==="
 "$PROFDATA" merge -sparse "$COV_DIR/rux.profraw" -o "$COV_DIR/rux.profdata"
 

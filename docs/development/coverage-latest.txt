@@ -1,0 +1,64 @@
+NOTE: 64 mapped file(s) outside kernel/src (ignored):
+    /home/william/.cargo/git/checkouts/riscv-6a4b33e1303dde78/11d43cf/src/addr/gpax4.rs
+    /home/william/.cargo/git/checkouts/riscv-6a4b33e1303dde78/11d43cf/src/addr/page.rs
+    /home/william/.cargo/git/checkouts/riscv-6a4b33e1303dde78/11d43cf/src/addr/sv32.rs
+    /home/william/.cargo/git/checkouts/riscv-6a4b33e1303dde78/11d43cf/src/addr/sv39.rs
+    /home/william/.cargo/git/checkouts/riscv-6a4b33e1303dde78/11d43cf/src/addr/sv48.rs
+    /home/william/.cargo/git/checkouts/riscv-6a4b33e1303dde78/11d43cf/src/asm.rs
+    /home/william/.cargo/git/checkouts/riscv-6a4b33e1303dde78/11d43cf/src/interrupt.rs
+    /home/william/.cargo/git/checkouts/riscv-6a4b33e1303dde78/11d43cf/src/paging/frame_alloc.rs
+    /home/william/.cargo/git/checkouts/riscv-6a4b33e1303dde78/11d43cf/src/paging/mapper.rs
+    /home/william/.cargo/git/checkouts/riscv-6a4b33e1303dde78/11d43cf/src/paging/multi_level.rs
+    ... and 54 more
+KERNEL COVERAGE (in-kernel test suite boot)
+  files: 396/459 exercised (86.3%)
+  lines: 47167/161248 (29.3%)  regions: 55794/192118 (29.0%)  functions: 3985/10603 (37.6%)
+
+subsystem        lines%        lines  regions%   funcs%  files
+fs                33.3%  12376/37120     32.3%    38.4%     85
+syscall           13.2%   2850/21645     12.5%    18.2%     12
+ipc                8.1%    939/11554      7.7%    13.8%      9
+drivers           25.3%   2669/10546     23.7%    37.2%     40
+net               25.7%   2586/10065     23.9%    31.9%     18
+sync              13.2%   1279/9661      11.4%    29.9%     13
+sched             29.5%   2719/9229      28.7%    37.7%     12
+tests             80.8%   7237/8954      75.5%    94.5%     87
+mm                43.2%   3642/8434      45.1%    52.0%     31
+process           47.9%   3870/8071      43.4%    51.9%     12
+dfx                9.2%    727/7869       8.3%    27.7%     41
+arch              37.0%   2351/6351      35.3%    44.2%     63
+<top>             47.9%   2711/5657      47.5%    58.7%     15
+trace              6.3%    109/1735       5.2%     2.6%      2
+interrupt         39.1%    534/1365      38.8%    52.5%      9
+perf               4.7%     55/1167       3.4%    23.5%      1
+timer             52.4%    428/817       48.7%    58.2%      3
+io_uring           0.0%      0/570        0.0%     0.0%      1
+module             0.0%      0/265        0.0%     0.0%      1
+security          49.1%     85/173       49.2%    43.3%      4
+
+worst files (lines% ascending, files with any coverage):
+    0.0%       0/7      kernel/src/mm/pagemap.rs
+    0.0%       0/9      kernel/src/fs/procfs/kallsyms.rs
+    0.0%       0/11     kernel/src/fs/procfs/cmdline.rs
+    0.0%       0/12     kernel/src/fs/mod.rs
+    0.0%       0/13     kernel/src/fs/procfs/self_proc.rs
+    0.0%       0/15     kernel/src/fs/procfs/swaps.rs
+    0.0%       0/17     kernel/src/fs/procfs/version.rs
+    0.0%       0/24     kernel/src/fs/procfs/locks.rs
+    0.0%       0/24     kernel/src/print.rs
+    0.0%       0/25     kernel/src/drivers/gpu/fb_simple.rs
+    0.0%       0/25     kernel/src/drivers/input/event.rs
+    0.0%       0/26     kernel/src/fs/procfs/configgz.rs
+    0.0%       0/26     kernel/src/fs/procfs/softirqs.rs
+    0.0%       0/28     kernel/src/fs/procfs/diskstats.rs
+    0.0%       0/29     kernel/src/dfx/bug.rs
+    0.0%       0/29     kernel/src/panic_policy.rs
+    0.0%       0/41     kernel/src/fs/procfs/timer_list.rs
+    0.0%       0/41     kernel/src/sched/stop_task.rs
+    0.0%       0/42     kernel/src/fs/procfs/vmstat.rs
+    0.0%       0/42     kernel/src/sched/idle.rs
+    0.0%       0/43     kernel/src/sync/condvar.rs
+    0.0%       0/44     kernel/src/dfx/sbi_debug.rs
+    0.0%       0/46     kernel/src/dfx/hexdump.rs
+    0.0%       0/47     kernel/src/dfx/ksyms.rs
+    0.0%       0/48     kernel/src/fs/jbd2/types.rs

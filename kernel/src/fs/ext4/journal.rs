@@ -213,7 +213,7 @@ impl Ext4FileSystem {
 
         // JOURNAL BLOCK MAP (ext4-persist P0 fix): e2fsprogs lays the
         // journal inode out as MULTIPLE extents with physical holes
-        // between them (the 96M battery image: logical 0-9 -> 19-28,
+        // between them (the 96M test image: logical 0-9 -> 19-28,
         // 10-24 -> 30-44, 25-1023 -> 1582-2580; physical 29 is the
         // inode BITMAP and 45..1581 the inode TABLES). The old
         // `j_blk_offset + logical` arithmetic assumed one contiguous

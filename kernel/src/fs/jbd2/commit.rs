@@ -111,7 +111,7 @@ pub fn jbd2_journal_commit_transaction(
     // in <32B chunks blew the 30s wall clock) back to ~one wait.
     if commit_transaction.t_revoke_records.lock().is_empty() {
         crate::dfx::fsw::note_j_commit_fast(dirty_buffers.len());
-        // BATCHED WRITE-THROUGH (pair-battery item 3): the old loop paid
+        // BATCHED WRITE-THROUGH (paired-test item 3): the old loop paid
         // ONE SYNCHRONOUS device round trip per registered buffer — the
         // measured 3.8 ms/fsync class (five-plus serialized 4 KiB writes
         // per commit). Same write-through semantics as before (see the
@@ -152,7 +152,7 @@ pub fn jbd2_journal_commit_transaction(
     // through bio::sync_dirty_buffer's per-block publication-constraint
     // guard, exactly like the fast path.
     {
-        // BATCHED WRITE-THROUGH (pair-battery item 3) — same shape and
+        // BATCHED WRITE-THROUGH (paired-test item 3) — same shape and
         // rationale as the fast path above: one drain window instead of
         // one serialized round trip per registered buffer.
         let blocks: alloc::vec::Vec<u64> =

@@ -184,6 +184,8 @@ macro_rules! test_assert_eq {
 #[cfg(feature = "unit-test")]
 pub mod binder;
 #[cfg(feature = "unit-test")]
+pub mod fs_io;
+#[cfg(feature = "unit-test")]
 pub mod fs_pins;
 #[cfg(feature = "unit-test")]
 pub mod mm_sched_pins;
@@ -450,22 +452,6 @@ pub fn run_all_tests() {
 
     // procfile! shape floors + conversion pins (leg-35 wiring: the
     // bare #[cfg(test)] forms never join the unit-test feature build,
-    // so leg-34's suite run did not execute them — the macro now emits
-    // pub shape_check bodies gated on any(test, unit-test)).
-    test_group_start("procfile-shape");
-    crate::fs::procfs::vmstat::vmstat_shape::shape_check();
-    crate::fs::procfs::vmstat::vmstat_file_tests::snapshot_check();
-    crate::fs::procfs::meminfo::meminfo_shape::shape_check();
-    crate::fs::procfs::meminfo::meminfo_file_tests::keys_shape_check();
-    // leg-36: the cols (stat-family rows) form — /proc/stat cpu rows
-    // + whole-file line order, /proc/schedstat cpu rows.
-    crate::fs::procfs::stat::stat_row_shape::shape_check();
-    crate::fs::procfs::stat::stat_file_tests::line_order_check();
-    crate::fs::procfs::schedstat::schedstat_row_shape::shape_check();
-    // D-4 slice (refactor lane): /proc/diskstats rows — cols form with
-    // the zero columns declared by name, plus the exact-bytes snapshot.
-    crate::fs::procfs::diskstats::diskstats_row_shape::shape_check();
-    crate::fs::procfs::diskstats::diskstats_file_tests::snapshot_check();
     // D-4 kvtab slice (refactor lane): /proc/[pid]/status — key order,
     // tab shape and value formats pinned against a live render.
     // procfs renderer pins (kernel/src/tests/procfs.rs): /proc/cpuinfo
@@ -644,6 +630,11 @@ pub fn run_all_tests() {
 
     test_group_start("ipc_sysv");
     ipc_sysv::test_ipc_sysv();
+
+    // Real-filesystem test suite (kernel/src/tests/fs_io.rs): the ext4
+    // root is mounted BEFORE the suite runs — drive it (create/write/
+    // read-back/fsync-shape/stat/append/getdents/unlink + errno pins).
+    fs_io::test_fs_io();
 
     // FS + MM/sched pins (kernel/src/tests/{fs_pins,mm_sched_pins}.rs):
     // stat/superblock/vt/rootfs/ext4 csum+indirect, slab classes, VMA,

@@ -325,36 +325,3 @@ crate::procfile! {
     }
 }
 
-/// Conversion pins for /proc/stat (leg-36): the macro's shape floor
-/// covers the row form; this module pins the whole-file LINE ORDER —
-/// the fixed prefixes must appear in Linux's order, which no per-line
-/// test can see. Callable bodies for the in-kernel unit-test suite.
-#[cfg(any(test, feature = "unit-test"))]
-pub mod stat_file_tests {
-    /// Byte order of /proc/stat's structural line prefixes.
-    pub const LINE_PREFIXES: &[&str] = &[
-        "cpu ", "cpu0", "\nintr ", "\nctxt ", "\nbtime ", "\nprocesses ",
-        "\nprocs_running ", "\nprocs_blocked ", "\nsoftirq",
-    ];
-
-    pub fn line_order_check() {
-        let bytes = super::generate();
-        let text =
-            alloc::string::String::from_utf8(bytes).expect("/proc/stat must be UTF-8");
-        let mut last = 0usize;
-        for p in LINE_PREFIXES {
-            let at = text.find(p).unwrap_or_else(|| {
-                panic!("/proc/stat line order: missing prefix {:?} after byte {}", p, last)
-            });
-            assert!(at >= last, "/proc/stat prefix {:?} out of order ({} < {})", p, at, last);
-            last = at;
-        }
-        // The cpu row shape itself is pinned by stat_row_shape; here
-        // also pin that no per-cpu row leaked a trailing space.
-        for line in text.lines() {
-            if line.starts_with("cpu") {
-                assert_eq!(line.trim_end(), line, "trailing space on cpu row");
-            }
-        }
-    }
-}

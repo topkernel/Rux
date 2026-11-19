@@ -175,7 +175,7 @@ pub fn ext4_ext_get_block_ex(
     r
 }
 
-/// Maximal mapped run covering `logical_block` (pair-battery item 1,
+/// Maximal mapped run covering `logical_block` (paired-test item 1,
 /// 2026-11-17): returns `(physical start block, run length in blocks,
 /// unwritten)`. The window `[logical_block, logical_block + len)` maps
 /// one-to-one onto `[phys, phys + len)` — a whole extent resolved with

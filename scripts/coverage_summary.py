@@ -32,13 +32,19 @@ def main() -> None:
         print(__doc__)
         sys.exit(2)
     cov_json = json.loads(Path(sys.argv[1]).read_text())
-    all_files = [f for f in sys.argv[2:] if f.endswith(".rs")]
+    def norm(name: str) -> str:
+        # llvm-cov emits ABSOLUTE paths (worktree-dependent); the file
+        # list is relative. Normalize both to the kernel/src/... suffix.
+        i = name.find("kernel/src/")
+        return name[i:] if i >= 0 else name
+
+    all_files = [norm(f) for f in sys.argv[2:] if f.endswith(".rs")]
 
     # llvm-cov export --summary-only: {"data": [{"files": [{filename,
     # summary: {lines: {count, covered}, regions: {...}, functions: {...}}}],
     # "totals": {...}}]}
     data = cov_json["data"][0]["files"]
-    by_path = {f["filename"]: f["summary"] for f in data}
+    by_path = {norm(f["filename"]): f["summary"] for f in data}
 
     def stats(path):
         s = by_path.get(path)

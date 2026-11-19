@@ -12601,7 +12601,7 @@ pub fn cpu_idle_loop() -> ! {
             // reference's polling-idle / need_resched-before-halt.
             POLLING_IDLE[cpu_id].store(true, core::sync::atomic::Ordering::Release);
             let poll_t0 = crate::drivers::timer::monotonic_ns_since_boot();
-            // battery2 (perf-r3, 2026-11-03): the 30 us window already
+            // paired-test 2 (perf-r3, 2026-11-03): the 30 us window already
             // absorbs most ping-pong handoffs, but the unix r/w roundtrip
             // anatomy showed IPIs still firing (815/1915 wakes) at a mean
             // 995 ns — handoffs landing just past the window. Widening to

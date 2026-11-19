@@ -47,6 +47,18 @@ MOD_TESTS_RE = re.compile(r'\b(?:pub\s+)?mod\s+tests\b')
 ATTR_TEST_RE = re.compile(r'#\[test\]')
 
 
+# Files allowed to carry cfg(unit-test) items outside kernel/src/tests/:
+# the harness wiring itself and the test-support helpers that must live
+# inside their own modules (fake time, shared fixtures).
+CFG_ALLOWLIST_FILES = {
+    "kernel/src/main.rs",                    # mod tests; + run_all_tests wiring
+    "kernel/src/drivers/timer/riscv64.rs",   # test_advance_jiffies fake
+    "kernel/src/drivers/timer/x86_64.rs",
+    "kernel/src/drivers/timer/aarch64.rs",
+    "kernel/src/timer/wheel.rs",             # test_shared fixture
+}
+
+
 def scan():
     violations = []
     for path in sorted(KERNEL_SRC.rglob("*.rs")):
@@ -65,6 +77,12 @@ def scan():
             idx = line.find("//")
             if idx >= 0:
                 line = line[:idx]
+            # Blanket rule: NO cfg(unit-test)/cfg(test)-gated items
+            # outside tests/ outside the allowlist. This catches the
+            # callable-test-bodies pattern (shape_check/snapshot_check
+            # mods, caps_shape shims) the fn-name patterns miss.
+            if ("unit-test" in line and "#[cfg" in line) and rel not in CFG_ALLOWLIST_FILES:
+                violations.append(f"{rel}:{lineno}: cfg-gated test item outside kernel/src/tests/ (not in the file allowlist)")
             if "#[cfg(test)]" in line:
                 violations.append(f"{rel}:{lineno}: #[cfg(test)] block (host tests never run in this crate)")
             if ATTR_TEST_RE.search(line):

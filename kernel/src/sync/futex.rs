@@ -8680,9 +8680,9 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
             futex_wake_op(uaddr, flags, val as i32, _timeout as i32, uaddr2, val3)
         }
         FUTEX_LOCK_PI | FUTEX_LOCK_PI2 | FUTEX_TRYLOCK_PI | FUTEX_UNLOCK_PI => {
-            // RT-2X item 7 (pair-battery queue): dispatch the PI ops to
+            // RT-2X item 7 (paired-test queue): dispatch the PI ops to
             // the long-implemented-but-never-wired futex_pi module (the
-            // pair battery's pi_stress row failed here with ENOSYS).
+            // pair test suite's pi_stress row failed here with ENOSYS).
             // Shared/private rides the FLAGS_PRIVATE bit like every
             // other op. LOCK_PI/LOCK_PI2 treat the timeout as an
             // ABSOLUTE CLOCK_MONOTONIC timespec (the module parks on an

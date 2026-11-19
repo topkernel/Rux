@@ -182,40 +182,6 @@ macro_rules! procfile {
         #[doc = concat!("Declared field order of [`", stringify!($fname), "`].")]
         pub const $fields: &[&str] = &[ $( $key ),* ];
 
-        #[cfg(any(test, feature = "unit-test"))]
-        pub mod $tmod {
-            /// Mechanical drift floor: each declared key renders as
-            /// exactly `"<key> <digits>\n"` — one space, no padding,
-            /// no trailing space, newline-terminated. `shape_check` is
-            /// the callable body (the in-kernel `unit-test` suite runs
-            /// it via tests/mod.rs — a bare `#[cfg(test)]` never joins
-            /// that build); the `#[test]` wrapper covers cargo test.
-            pub fn shape_check() {
-                let keys: &[&str] = &[ $( $key ),* ];
-                for k in keys {
-                    let got = $crate::fs::procfs::procfile::render_kv(&[(k, &0u64)]);
-                    assert_eq!(got, alloc::format!("{} 0\n", k), "kv shape drifted for {}", k);
-                }
-                // Cross-check the generated list against the renderer:
-                // the const and the fn must describe the same file.
-                let rendered = $crate::fs::procfs::procfile::render_kv(
-                    &[$( ($key, &0u64 as &dyn core::fmt::Display) ),*],
-                );
-                let expect: alloc::string::String = {
-                    let mut s = alloc::string::String::new();
-                    $(
-                        s.push_str($key);
-                        s.push_str(" 0\n");
-                    )*
-                    s
-                };
-                assert_eq!(rendered, expect);
-                assert_eq!($crate::fs::procfs::procfile::render_kv(
-                    keys.iter().map(|k| (*k, &0u64 as &dyn core::fmt::Display))
-                        .collect::<alloc::vec::Vec<_>>().as_slice()),
-                    expect);
-            }
-        }
     };
 
     (
@@ -240,29 +206,6 @@ macro_rules! procfile {
         /// rendered output.
         pub const $fields: &[&str] = &[ $( $key ),* ];
 
-        #[cfg(any(test, feature = "unit-test"))]
-        pub mod $tmod {
-            /// Mechanical drift floor for the pad shape (Linux meminfo
-            /// layout): key+colon left-justified to width, `0`
-            /// right-justified at width+8, space, unit, newline — and
-            /// `!`-marked keys render unitless. Callable body for the
-            /// in-kernel unit-test suite (see the kv form's note).
-            pub fn shape_check() {
-                let keys: &[&str] = &[ $( $key ),* ];
-                for k in keys {
-                    let got = $crate::fs::procfs::procfile::render_pad(&[(k, &0u64)], $width, $unit);
-                    let (key, unit_suffix) = if let Some(s) = k.strip_suffix('!') {
-                        (s, alloc::string::String::from("\n"))
-                    } else {
-                        (*k, alloc::format!(" {}\n", $unit))
-                    };
-                    let key = alloc::format!("{}:", key);
-                    let expect = alloc::format!(
-                        "{:<w$}{:>8}{}", key, 0u64, unit_suffix, w = $width);
-                    assert_eq!(got, expect, "pad shape drifted for {}", k);
-                }
-            }
-        }
     };
 
     // `cols` form — stat-family rows: label prefix, then one
@@ -289,38 +232,5 @@ macro_rules! procfile {
         #[doc = concat!("Declared column order of [`", stringify!($fname), "`].")]
         pub const $columns: &[&str] = &[ $( $col ),* ];
 
-        #[cfg(any(test, feature = "unit-test"))]
-        pub mod $tmod {
-            /// Mechanical drift floor for the cols shape: the row
-            /// renders as `label` + ` <value>` per declared column +
-            /// `\n` — single spaces, no trailing space, and as many
-            /// value tokens as the columns const lists (the const, the
-            /// derived signature and the renderer describe one file).
-            /// Callable body for the in-kernel unit-test suite (see the
-            /// kv form's note).
-            pub fn shape_check() {
-                let cols: &[&str] = &[ $( $col ),* ];
-                // The zero-call must mention $arg per repetition
-                // (macro_rules rejects repetitions with no syntax
-                // variable); stringify! is the no-op consumption.
-                let got = super::$fname(
-                    "shape",
-                    $( { let _ = stringify!($arg); 0u64 } ),*
-                );
-                let mut expect = alloc::string::String::from("shape");
-                for _ in cols {
-                    expect.push_str(" 0");
-                }
-                expect.push('\n');
-                assert_eq!(got, expect, "cols shape drifted");
-                // The rendered token count must equal the declared
-                // column count (a column added to the list without a
-                // parameter — or vice versa — breaks compilation, this
-                // catches a hand-edited renderer instead).
-                let tokens = got.trim_end_matches('\n')
-                    .split(' ').filter(|t| !t.is_empty()).count();
-                assert_eq!(tokens, cols.len() + 1, "cols token/column mismatch");
-            }
-        }
     };
 }

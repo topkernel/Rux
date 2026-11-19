@@ -659,6 +659,12 @@ pub fn console_emit_pending_flag() -> bool {
 ///
 /// Returns the number of lines emitted (diagnostics).
 pub fn console_drain_pending(budget: usize) -> usize {
+    // A coverage dump owns the console stream right now: emitting here
+    // would interleave into the hex. Lines stay in the ring.
+    #[cfg(feature = "cov-dump")]
+    if crate::cov::console_dump_active() {
+        return 0;
+    }
     let mut emitted = 0usize;
     while emitted < budget {
         let next = RING_NEXT_SEQ.load(Ordering::Relaxed);

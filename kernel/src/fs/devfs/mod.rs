@@ -276,7 +276,7 @@ fn nulldev_poll(_file: &crate::fs::file::File, _events: u16) -> u16 {
     POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM
 }
 
-static NULLDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
+pub(crate) static NULLDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
     .read(nulldev_read)
     .write(nulldev_write)
     .poll(nulldev_poll)
@@ -382,7 +382,7 @@ fn zerodev_poll(_file: &crate::fs::file::File, _events: u16) -> u16 {
     POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM
 }
 
-static ZERODEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
+pub(crate) static ZERODEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
     .read(zerodev_read)
     .write(zerodev_write)
     .poll(zerodev_poll)
@@ -393,7 +393,7 @@ fn fulldev_write(_file: &crate::fs::file::File, _buf: &[u8]) -> isize {
     -(crate::errno::constants::ENOSPC as isize)
 }
 
-static FULLDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
+pub(crate) static FULLDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
     .read(zerodev_read)
     .write(fulldev_write)
     .poll(zerodev_poll)
@@ -431,7 +431,7 @@ fn randdev_poll(_file: &crate::fs::file::File, _events: u16) -> u16 {
     POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM
 }
 
-static RANDDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
+pub(crate) static RANDDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
     .read(randdev_read)
     .write(zerodev_write)
     .poll(randdev_poll)
@@ -439,22 +439,6 @@ static RANDDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder
 
 /// D-6 shape-test accessors: expose the private char-device tables to
 /// the unit-test group `fileops-caps` without widening the runtime API.
-#[cfg(any(test, feature = "unit-test"))]
-pub mod caps_shape {
-    pub fn nulldev_ops() -> &'static crate::fs::file::FileOps {
-        &super::NULLDEV_OPS
-    }
-    pub fn zerodev_ops() -> &'static crate::fs::file::FileOps {
-        &super::ZERODEV_OPS
-    }
-    pub fn fulldev_ops() -> &'static crate::fs::file::FileOps {
-        &super::FULLDEV_OPS
-    }
-    pub fn randdev_ops() -> &'static crate::fs::file::FileOps {
-        &super::RANDDEV_OPS
-    }
-}
-
 /// /dev/kmsg is owned by printk.rs's record-ring implementation
 /// (KMSG_OPS): blocking reads in the `prio,seq,timestamp_us,-;text`
 /// record format, lseek positioning, poll that reports POLLIN only when

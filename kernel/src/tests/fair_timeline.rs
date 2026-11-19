@@ -44,7 +44,7 @@ fn walk_keys(tl: &mut RbTimeline, entities: &mut [SchedEntity]) -> Vec<(u64, u64
             let se = (node as *mut u8)
                 .sub(core::mem::offset_of!(SchedEntity, run_node))
                 as *mut SchedEntity;
-            (*se).timeline_key().unwrap_or(crate::sched::fair::vruntime_key_for_test(u64::MAX, u64::MAX))
+            (*se).timeline_key().unwrap_or(crate::sched::fair::VruntimeKey::new(u64::MAX, u64::MAX))
         };
         out.push((k.vruntime, k.task_id));
         // SAFETY: as above.
@@ -106,11 +106,11 @@ pub fn test_fair_timeline() {
             // SAFETY: test-owned entity.
             unsafe {
                 (*core::ptr::addr_of_mut!(entities[i].timeline_key)).replace(Some(
-                    crate::sched::fair::vruntime_key_for_test(vr, i as u64),
+                    crate::sched::fair::VruntimeKey::new(vr, i as u64),
                 ));
             }
             // SAFETY: heap entity in the linear map.
-            let ok = unsafe { tl.insert(crate::sched::fair::vruntime_key_for_test(vr, i as u64), node_at(&mut entities, i)) };
+            let ok = unsafe { tl.insert(crate::sched::fair::VruntimeKey::new(vr, i as u64), node_at(&mut entities, i)) };
             if !ok {
                 test_fail("sorted_insert", "insert refused (range check)");
                 return;
@@ -145,10 +145,10 @@ pub fn test_fair_timeline() {
             // SAFETY: test-owned entity.
             unsafe {
                 (*core::ptr::addr_of_mut!(entities[i].timeline_key)).replace(Some(
-                    crate::sched::fair::vruntime_key_for_test(vr, i as u64),
+                    crate::sched::fair::VruntimeKey::new(vr, i as u64),
                 ));
                 // SAFETY: heap entity in the linear map.
-                tl.insert(crate::sched::fair::vruntime_key_for_test(vr, i as u64), node_at(&mut entities, i));
+                tl.insert(crate::sched::fair::VruntimeKey::new(vr, i as u64), node_at(&mut entities, i));
             }
         }
         let order = shuffle(&mut 0xBADF00D, 64);
@@ -203,10 +203,10 @@ pub fn test_fair_timeline() {
             // SAFETY: test-owned entity.
             unsafe {
                 (*core::ptr::addr_of_mut!(entities[i as usize].timeline_key)).replace(Some(
-                    crate::sched::fair::vruntime_key_for_test(vr, i),
+                    crate::sched::fair::VruntimeKey::new(vr, i),
                 ));
                 // SAFETY: heap entity.
-                tl.insert(crate::sched::fair::vruntime_key_for_test(vr, i), node_at(&mut entities, i as usize));
+                tl.insert(crate::sched::fair::VruntimeKey::new(vr, i), node_at(&mut entities, i as usize));
             }
         }
         // SAFETY: leftmost is linked.
@@ -252,10 +252,10 @@ pub fn test_fair_timeline() {
             // SAFETY: test-owned entity.
             unsafe {
                 (*core::ptr::addr_of_mut!(entities[i as usize].timeline_key)).replace(Some(
-                    crate::sched::fair::vruntime_key_for_test(5_000, i),
+                    crate::sched::fair::VruntimeKey::new(5_000, i),
                 ));
                 // SAFETY: heap entity.
-                tl.insert(crate::sched::fair::vruntime_key_for_test(5_000, i), node_at(&mut entities, i as usize));
+                tl.insert(crate::sched::fair::VruntimeKey::new(5_000, i), node_at(&mut entities, i as usize));
             }
         }
         let keys = walk_keys(&mut tl, &mut entities);
@@ -289,10 +289,10 @@ pub fn test_fair_timeline() {
                 // SAFETY: test-owned entity.
                 unsafe {
                     (*core::ptr::addr_of_mut!(entities[i].timeline_key)).replace(Some(
-                        crate::sched::fair::vruntime_key_for_test(vr, (round * 4 + i as u64)),
+                        crate::sched::fair::VruntimeKey::new(vr, (round * 4 + i as u64)),
                     ));
                     // SAFETY: heap entity.
-                    tl.insert(crate::sched::fair::vruntime_key_for_test(vr, (round * 4 + i as u64)), node_at(&mut entities, i));
+                    tl.insert(crate::sched::fair::VruntimeKey::new(vr, (round * 4 + i as u64)), node_at(&mut entities, i));
                 }
             }
             let keys = walk_keys(&mut tl, &mut entities);
