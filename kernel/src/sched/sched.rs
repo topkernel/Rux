@@ -3074,6 +3074,42 @@ pub extern "C" fn asm_schedule() {
 /// stranding a CPU for), clear anything that can make the discipline or
 /// the recursion guard refuse the switch, and retry until a REAL context
 /// switch happens. Never returns to the caller on success.
+/// Death-path GRQ release (oh-launch round 6): a task/CPU that dies or
+/// parks forever inside a GRQ section strands the lock WORD (its paired
+/// unlock will never run) — every later GRQ acquirer spins permanently.
+/// gw1 (gdbstub): 4 CPUs at RawSpinlock::lock+1359 behind a task whose
+/// terminal switch had cleared only the preempt count; gw2: 7 CPUs
+/// behind a CPU parked in the KERNPANIC halt loop with the GRQ held.
+/// GRQ_HELD is the per-CPU positive-knowledge tracker written at
+/// acquire/release under IRQs-off; force-release ONLY when this CPU's
+/// own hold is still marked — never speculatively. Callers: the
+/// terminal switch (schedule_dead_never_returns) and the x86 kernel-
+/// panic halt paths (the re-entered short arm and the full dump's halt).
+pub fn terminal_release_grq_if_held() {
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu < GRQ_HELD.len()
+        && GRQ_HELD[cpu].swap(false, core::sync::atomic::Ordering::Relaxed)
+    {
+        static GRQFORCE_N: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        let n = GRQFORCE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 8 {
+            let pid = crate::sched::current()
+                .map(|t| unsafe { (*t).pid() })
+                .unwrap_or(0);
+            crate::pr_warn!(
+                "TERM-GRQ-FORCE pid={} cpu={} released the runqueue lock stranded by the dying section",
+                pid,
+                cpu
+            );
+        }
+        // SAFETY: grq() returns the initialized GRQ (late callers run
+        // well past sched init); the per-CPU hold marker proves this
+        // CPU's acquire.
+        unsafe { grq().lock.force_unlock_terminal() };
+    }
+}
+
 pub fn schedule_dead_never_returns() {
     use crate::process::task::task_flags::TaskFlags;
     const IN_SCHED: u32 = TaskFlags::TIF_IN_SCHED.bits();
@@ -3140,36 +3176,9 @@ pub fn schedule_dead_never_returns() {
                     crate::interrupt::preempt::preempt_count_reset();
                 }
                 // gw1 (oh-launch round 6): the count clear above is only
-                // half the terminal cleanup — a task that faulted inside
-                // a GRQ section also strands the LOCK WORD (its paired
-                // unlock will never run), and every later GRQ acquirer
-                // spun forever (the permanent wedge: 4 CPUs at
-                // RawSpinlock::lock+1359, gdbstub capture). GRQ_HELD is
-                // the per-CPU positive-knowledge tracker written at
-                // acquire/release under IRQs-off; force-release ONLY
-                // when this CPU's own hold is still marked. The section
-                // it protected is dead with the task — same trade the
-                // preempt-count reset above already makes.
-                {
-                    let cpu = crate::arch::cpu_id() as usize;
-                    if cpu < GRQ_HELD.len()
-                        && GRQ_HELD[cpu].swap(false, core::sync::atomic::Ordering::Relaxed)
-                    {
-                        static GRQFORCE_N: core::sync::atomic::AtomicU32 =
-                            core::sync::atomic::AtomicU32::new(0);
-                        let n = GRQFORCE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                        if n < 8 {
-                            crate::pr_warn!(
-                                "TERM-GRQ-FORCE pid={} cpu={} released the runqueue lock stranded by the dying section",
-                                (*cur).pid(),
-                                cpu
-                            );
-                        }
-                        // SAFETY: grq() returns the initialized GRQ; the
-                        // per-CPU hold marker proves this CPU's acquire.
-                        unsafe { grq().lock.force_unlock_terminal() };
-                    }
-                }
+                // half the terminal cleanup — see terminal_release_grq_
+                // if_held (the shared death-path helper).
+                terminal_release_grq_if_held();
             }
         }
         schedule();

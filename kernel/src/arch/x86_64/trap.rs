@@ -3759,9 +3759,19 @@ fn handle_page_fault(regs: &mut PtRegs) {
             //   kernel-stack top (16K-aligned rsp heuristic when there is
             //   no task context), stopping at the first past-top word.
             if KP_DUMP_ENTERED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                // gw2 (oh-launch round 6, gdbstub on the live wedge): a
+                // CPU arriving here parks in the eternal halt loop WITH
+                // WHATEVER IT HELD — seven CPUs spun on the GRQ behind
+                // one such parker. Release the stranded runqueue lock
+                // (positive per-CPU knowledge via the GRQ_HELD tracker)
+                // BEFORE halting; the section it protected is dead with
+                // this CPU either way. uart_putc_raw: the old marker was
+                // putchar_no_lock — SILENT on release builds, so these
+                // parks were invisible (every "silent" permanent wedge).
                 for &b in b"trap: KERNPANIC re-entered during dump; halting\n" {
-                    crate::console::putchar_no_lock(b);
+                    crate::console::uart_putc_raw(b);
                 }
+                crate::sched::sched::terminal_release_grq_if_held();
                 // SAFETY: hlt halts until the next interrupt; safe in a
                 // halt loop.
                 loop {
