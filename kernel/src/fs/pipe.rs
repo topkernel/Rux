@@ -1271,7 +1271,7 @@ fn oasync_signal_owner(kind: u8, id: i32, sig: i32, poll_code: i32, band: i32, f
         }
         2 => {
             let pgid = id.unsigned_abs();
-            crate::process::pid_hash::pid_hash_for_each_task(|task| unsafe {
+            crate::process::pid_hash::pid_hash_for_each_task(|task| {
                 if (*task).pgid() == pgid {
                     let _ = crate::signal::send_signal_with_info_directed((*task).pid(), info);
                 }

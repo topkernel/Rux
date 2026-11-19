@@ -306,7 +306,7 @@ fn ext4_dio_read_batched(
                         len: 0,
                     }; GUP_SEG_CAP];
                 // GUP chain geometry from the negotiated ring depth.
-                let gup_slot = unsafe { (*fs.device).private_data }
+                let gup_slot = (*fs.device).private_data
                     .map(|p| p as usize)
                     .unwrap_or(0);
                 let (seg_max, desc_budget) =
@@ -1913,7 +1913,7 @@ fn ext4_file_write_src(
         match &wsrc {
             DioWriteSrc::Staging(_) => Some(DioWin::Batch(bio::WriteBatch::new())),
             DioWriteSrc::User { .. } => {
-                if unsafe { (*fs.device).has_async_write_sg() } {
+                if (*fs.device).has_async_write_sg() {
                     Some(DioWin::Gup(GupWriteChains::new(fs.device)))
                 } else {
                     None // no SG chains: per-block body (correct, staged)
@@ -2082,7 +2082,7 @@ fn ext4_file_write_src(
                                 // fully-scattered 1 MiB run rides 2-3 big
                                 // chains instead of 16 small ones.
                                 const W_SEG_CAP: usize = 128;
-                                let gup_slot = unsafe { (*fs.device).private_data }
+                                let gup_slot = (*fs.device).private_data
                                     .map(|p| p as usize)
                                     .unwrap_or(0);
                                 let (seg_max, _w_budget) =
@@ -2243,7 +2243,7 @@ fn ext4_file_write_src(
                             crate::fs::ext4::extent::exthunt_zzero(
                                 "hole", inode.ino, block_index, new_block,
                             );
-                            unsafe {
+                            {
                                 if let Some(bh) = bio::getblk_zero(fs.device, new_block) {
                                     bio::brelse(bh);
                                 } else {
@@ -3304,7 +3304,7 @@ fn ext4_sync_file_inner(
         let mut walk_err: Option<i32> = None;
         for blk in notes {
             // SAFETY: fs.device is the fs's registered GenDisk (probe only).
-            if unsafe { bio::block_dirty_cached(fs.device, blk) } {
+            if bio::block_dirty_cached(fs.device, blk) {
                 batch.push(blk);
             }
             if batch.len() >= 4096 {
@@ -3364,7 +3364,7 @@ fn ext4_sync_file_inner(
             // the 3.9M breads/s CPU burn (fsw br=59M on the test suite row).
             // SAFETY: fs.device is the fs's registered GenDisk.
             for k in 0..n {
-                if unsafe { bio::block_dirty_cached(fs.device, phys + k) } {
+                if bio::block_dirty_cached(fs.device, phys + k) {
                     batch.push(phys + k);
                 }
             }
@@ -3395,7 +3395,7 @@ fn ext4_sync_file_inner(
                 continue; // sparse hole
             }
             // SAFETY: fs.device is the fs's registered GenDisk.
-            if unsafe { bio::block_absent_durable(fs.device, block) } {
+            if bio::block_absent_durable(fs.device, block) {
                 continue;
             }
             // SAFETY: bio::bread returns a valid BufferHead on success.
@@ -3430,7 +3430,7 @@ fn ext4_sync_file_inner(
     // round trip.
     if let Some(tbl_blk) = super::inode::inode_table_block_of(fs, inode.ino) {
         // SAFETY: fs.device is the fs's registered GenDisk (probe only).
-        if unsafe { bio::block_dirty_cached(fs.device, tbl_blk) } {
+        if bio::block_dirty_cached(fs.device, tbl_blk) {
             let rc = bio::sync_dirty_blocks_batched(
                 fs.device,
                 core::slice::from_ref(&tbl_blk),
@@ -3643,7 +3643,7 @@ pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {    // SAFETY: 
                     // owned by this VFS inode; the big lock above
                     // serializes writers, and readers of atime tolerate
                     // torn u32 values (advisory field).
-                    unsafe {
+                    {
                         stamp_atime_relatime(inode.sb.unwrap() as *mut super::inode::Ext4Inode);
                     }
                 }
@@ -3703,7 +3703,7 @@ pub fn ext4_file_read_user_vfs(file: &File, dst: *mut u8, count: usize) -> isize
                     // (stamp_atime_relatime doc).
                     // SAFETY: same as ext4_file_read_vfs (advisory field,
                     // big lock serializes writers).
-                    unsafe {
+                    {
                         stamp_atime_relatime(inode.sb.unwrap() as *mut super::inode::Ext4Inode);
                     }
                     // inotify IN_ACCESS, same as the staged read path below
@@ -3774,7 +3774,7 @@ fn ext4_dio_read_gup_core(
         return None;
     }
     // The GUP arm expresses runs only as SG chains of pinned pieces.
-    if !unsafe { (*fs.device).has_async_read_sg() } {
+    if !(*fs.device).has_async_read_sg() {
         return None;
     }
     let mut dst = DioReadDst::User { pins, va };
@@ -4351,7 +4351,7 @@ fn ext4_dio_write_gup_run(
 ) -> Option<isize> {
     // SG chains are the only zero-copy expression of discontiguous
     // frames; without them the staged path is the shape.
-    if !unsafe { (*fs.device).has_async_write_sg() } {
+    if !(*fs.device).has_async_write_sg() {
         return None;
     }
     if fs.block_size != 4096 {
@@ -4506,7 +4506,7 @@ pub fn ext4_kernel_write_at(
 ) -> isize {
     // SAFETY: fs is a valid Ext4FileSystem reference; the core owns all
     // locking and operates on (fs, ino) exactly like the fd paths.
-    unsafe { ext4_write_at_core(fs, ext4_ino, None, offset, true, buf, &[0], false) }
+    { ext4_write_at_core(fs, ext4_ino, None, offset, true, buf, &[0], false) }
 }
 
 /// Buffered (delayed-allocation) write for regular files — the reference
@@ -4963,8 +4963,7 @@ unsafe fn ext4_buffered_write(
                     &bounce
                 }
             };
-            // SAFETY: same (fs, ino, inode) discipline as write_vfs.
-            let r = unsafe {
+            let r = {
                 ext4_write_at_core(fs, inode.ino as u32, Some(inode), file_off, true, src_slice, &[0], false)
             };
             if r < 0 {
@@ -5241,7 +5240,7 @@ fn refresh_cached_vfs_inode(
 /// next lookup reads the just-written on-disk inode).
 /// Staged-slice wrapper — the pre-GUP signature (see
 /// ext4_write_at_core_src).
-unsafe fn ext4_write_at_core(
+fn ext4_write_at_core(
     fs: &crate::fs::ext4::Ext4FileSystem,
     ext4_ino: u32,
     inode: Option<&crate::fs::inode::Inode>,
@@ -5606,8 +5605,7 @@ pub fn ext4_flush_dirty_inode(
             )
         };
         if let Some(tbl_blk) = tbl_blk {
-            // SAFETY: dev is the fs's registered GenDisk; identity reads.
-            let (mj, mi) = unsafe { ((*dev).major, (*dev).first_minor) };
+            let (mj, mi) = { ((*dev).major, (*dev).first_minor) };
             // SAFETY: probe/pin of the fs's ITB cache block; the pin is
             // balanced inside submit_span's settle (or the put below).
             unsafe {
@@ -5712,7 +5710,7 @@ fn flush_run(
 
     // SAFETY: same (fs, ino, inode) discipline as the fd write paths;
     // stage[..run_bytes] carries the pinned frames' bytes.
-    let written = unsafe {
+    let written = {
         ext4_write_at_core(
             fs,
             inode.ino as u32,
@@ -5747,13 +5745,12 @@ fn flush_run(
         // SAFETY: same discipline as the run write; src borrows the
         // staged bytes (the pinned frames' copy).
         let mut written =
-            unsafe { ext4_write_at_core(fs, inode.ino as u32, Some(inode), off, true, src, &[pfn], false) };
+            { ext4_write_at_core(fs, inode.ino as u32, Some(inode), off, true, src, &[pfn], false) };
         if written != n_bytes as isize {
             let mut tries = 0u32;
             while tries < 3 {
                 tries += 1;
-                // SAFETY: same discipline as the first attempt.
-                written = unsafe {
+                written = {
                     ext4_write_at_core(
                         fs,
                         inode.ino as u32,
@@ -5906,7 +5903,7 @@ impl SpanFlusher {
                 }
                 for &bh in bhs.iter() {
                     // SAFETY: pinned by peek_buffer; balanced put.
-                    unsafe { crate::fs::bio::get_block_cache().put(bh) };
+                    crate::fs::bio::get_block_cache().put(bh);
                 }
                 bhs.clear();
                 return;
@@ -5970,8 +5967,7 @@ impl SpanFlusher {
                 }
             }
             for &bh in bhs.iter() {
-                // SAFETY: pinned by peek_buffer; balanced put.
-                unsafe { cache.put(bh) };
+                { cache.put(bh) };
             }
         }
         self.pending_snaps.clear();
@@ -6030,7 +6026,7 @@ fn run_sync_spans(
     let dev = fs.device;
     // SAFETY: dev is the fs's registered GenDisk; only identity fields
     // are read here.
-    let (mj, mi) = unsafe { ((*dev).major, (*dev).first_minor) };
+    let (mj, mi) = { ((*dev).major, (*dev).first_minor) };
     let cache = crate::fs::bio::get_block_cache();
 
     // Span assembly state: pinned dirty buffer heads whose block numbers
@@ -6088,7 +6084,7 @@ fn run_sync_spans(
         };
         // SAFETY: peek_buffer pins the returned head; every pin is
         // balanced by a put below or inside close_span!.
-        let bh = match unsafe { cache.peek_buffer((mj, mi), phys) } {
+        let bh = match { cache.peek_buffer((mj, mi), phys) } {
             Some(b) => b,
             None => {
                 // Evicted after the write core dirtied it: the eviction's
@@ -6099,18 +6095,16 @@ fn run_sync_spans(
         };
         let dirty = unsafe { (*bh).is_dirty() };
         if !dirty {
-            // SAFETY: pinned above; not part of any span.
-            unsafe { cache.put(bh) };
+            { cache.put(bh) };
             close_span!();
             continue;
         }
         // Publication-constrained block: the guarded drain owns its
         // ordering — sync_dirty_buffer satisfies the constraint first.
-        if unsafe { crate::fs::bio::publication_constrained(mj, mi, phys) } {
+        if crate::fs::bio::publication_constrained(mj, mi, phys) {
             // SAFETY: bh is a pinned dirty BufferHead.
-            let _ = unsafe { crate::fs::bio::sync_dirty_buffer(bh) };
-            // SAFETY: pinned above.
-            unsafe { cache.put(bh) };
+            let _ = crate::fs::bio::sync_dirty_buffer(bh);
+            { cache.put(bh) };
             close_span!();
             continue;
         }
@@ -6164,7 +6158,7 @@ unsafe fn stamp_atime_relatime(ino: *mut super::inode::Ext4Inode) {
     }
 }
 
-unsafe fn get_or_create_ra_state<'a>(file: &File, block_size: u64) -> &'a mut ReadAheadState {
+fn get_or_create_ra_state<'a>(file: &File, block_size: u64) -> &'a mut ReadAheadState {
     // SAFETY: file.ra is written only at File::new (None) and here
     // under io_lock by the description's reader; readers of the state
     // hold the same lock.
@@ -6295,7 +6289,7 @@ fn ext4_file_read_at_vfs_inner(file: &File, offset: u64, buf: &mut [u8]) -> isiz
             // SAFETY: the cached Ext4Inode in inode.sb is a Box owned
             // by this VFS inode; advisory field, plain volatile write
             // (same discipline as ext4_file_read_vfs).
-            unsafe {
+            {
                 core::ptr::write_volatile(
                     &mut (*(inode.sb.unwrap() as *mut super::inode::Ext4Inode)).atime,
                     atime,

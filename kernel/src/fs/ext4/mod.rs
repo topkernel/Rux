@@ -473,7 +473,7 @@ impl Ext4FileSystem {
                 // available — high 64-bit fields default to zero.
                 let mut gd = superblock::Ext4GroupDesc::default();
                 let copy_len = desc_size.min(core::mem::size_of::<superblock::Ext4GroupDesc>());
-                unsafe {
+                {
                     core::ptr::copy_nonoverlapping(
                         gd_data.as_ptr().add(gd_offset),
                         &mut gd as *mut superblock::Ext4GroupDesc as *mut u8,
@@ -1101,7 +1101,7 @@ fn read_file_internal(device: &'static blkdev::GenDisk, path: &str, depth: u32) 
     // SAFETY: device is a valid GenDisk pointer from the block device layer;
     // Box::into_raw leaks the Box to make a static-lifetime pointer stored in
     // GLOBAL_EXT4_FS; this is called once during mount and cleaned up on unmount.
-    unsafe {
+    {
         // The boot init loader runs before the VFS mount — and the fresh
         // instance's uninitialized extent walk mis-mapped the noble rootfs's
         // indexed directory extents (/sbin lookup ENOENTed while the
@@ -1453,8 +1453,7 @@ pub fn sync_flushed_data(targets: &[(u64, u64)]) -> usize {
             // at its eviction, so the ordered-data obligation for it is
             // already met — re-reading it paid one synchronous 4 KiB read
             // per absent block (the sync(2) wall after a large flush).
-            // SAFETY: fs.device is a valid GenDisk of a live instance.
-            if unsafe { crate::fs::bio::block_absent_durable(fs.device, block) } {
+            if { crate::fs::bio::block_absent_durable(fs.device, block) } {
                 continue;
             }
             // SAFETY: fs.device is a valid GenDisk of a live instance;
@@ -1545,7 +1544,7 @@ fn resolve_path(path: &str) -> String {
     } else {
         // Get current working directory
         let cwd = if let Some(current) = crate::sched::current() {
-            let cwd_bytes = unsafe { (*current).get_cwd() };
+            let cwd_bytes = { (*current).get_cwd() };
             match core::str::from_utf8(&cwd_bytes) {
                 Ok(s) => String::from(s),
                 Err(_) => String::from("/"),
@@ -3189,7 +3188,7 @@ unsafe fn ext4_destroy_inode(inode: &mut crate::fs::inode::Inode) {
     if let Ok(fs) = get_ext4_fs_from_inode(inode) {
         // SAFETY: read_inode only touches the block layer under the big
         // lock taken below; queueing avoids I/O in this Drop context.
-        unsafe {
+        {
             if let Ok(disk) = inode::read_inode(fs, inode.ino as u32) {
                 if disk.i_links_count == 0 && disk.i_dtime == 0 {
                     let mut q = PENDING_REAPS.lock();
@@ -3489,7 +3488,7 @@ unsafe fn ext4_unlink_wrapper(dir: &Inode, name: &[u8]) -> i32 {
 
 /// Wrapper for ext4_rename to match VFS signature
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn ext4_rename_wrapper(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_name: &[u8]) -> i32 {
+fn ext4_rename_wrapper(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_name: &[u8]) -> i32 {
     let _ext4_guard = EXT4_BIG_LOCK.lock();
     let fs = match get_ext4_fs_rw_from_inode(old_dir) {
         Ok(f) => f,
@@ -3531,7 +3530,7 @@ fn get_ext4_fs_rw_from_inode(inode: &Inode) -> Result<&'static Ext4FileSystem, i
 
 /// Get file operations for ext4 regular files and directories
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn ext4_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
+fn ext4_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
     if inode.mode.is_regular_file() {
         Some(&file::EXT4_FILE_OPS)
     } else if inode.mode.is_directory() {
