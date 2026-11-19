@@ -1682,8 +1682,16 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                 for &b in b"trap: KERNPANIC re-entered during dump; halting\n" {
                     put(b);
                 }
-                // SAFETY: wfi stalls until the next interrupt; safe in a
-                // halt loop.
+                // R11 (the parked-CPU interrupt strand, x86_64 twin's fr7
+                // conviction): park with interrupts DISABLED — an
+                // interrupt-enabled park wakes on the next timer tick and
+                // runs scheduler_tick on top of this broken dumper
+                // context, which can acquire the runqueue lock and wedge
+                // inside it. A dead CPU never takes interrupts again
+                // (the reference's panic_smp_self_stop shape).
+                crate::arch::cpu::disable_irq();
+                // SAFETY: wfi with interrupts disabled never wakes — the
+                // intentional permanent park of a crashed CPU.
                 loop {
                     unsafe { core::arch::asm!("wfi") };
                 }
