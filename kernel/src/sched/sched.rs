@@ -4023,13 +4023,26 @@ unsafe fn __schedule() {
         // running here, and the deferred-delivery protocol exists
         // precisely to keep an unreaped parent from freeing a task that
         // is still on a CPU.
+        // fg1 (oh-launch round 5): the notify fires with IRQs ON, AFTER
+        // the repick bookkeeping — it used to run in the IRQs-off window
+        // this path inherits from unlock_irqretain (the context_switch
+        // discipline), and its wake chain (send_signal -> signal_wake_up
+        // / wake_group_chldexit -> WaitQueueHead::wake_up -> wake_up_
+        // enqueue) then held the CPU with interrupts DISABLED for as
+        // long as the waitqueue lock was contended — 4.5+ s on the
+        // wedged boots ("not servicing IPIs", the GRQ standoff's holder;
+        // REMOTE-BT: schedule -> process_deferred_exit_pid -> wake_up).
+        // The reference never wakes from the switcher with IRQs off
+        // (wake_q; the post-switch tail runs enabled). Decide here,
+        // deliver after enable_irq.
         let cpu = crate::arch::cpu_id() as usize;
+        let mut fire_notify = false;
         if cpu < MAX_CPUS {
             let packed = DEFERRED_EXIT_NOTIFY[cpu].load(core::sync::atomic::Ordering::Relaxed);
             if packed != 0 {
                 let (_parent, child) = unpack_notify(packed);
                 if child != prev_pid {
-                    process_deferred_exit_notify_cpu(cpu);
+                    fire_notify = true;
                 }
             }
         }
@@ -4041,6 +4054,9 @@ unsafe fn __schedule() {
         pick_gen_retire(cpu_id);
         sched_cs_stamp(cpu_id, 0);
         crate::arch::cpu::enable_irq();
+        if fire_notify {
+            process_deferred_exit_notify_cpu(cpu);
+        }
         return;
     }
 
@@ -9931,6 +9947,15 @@ pub extern "C" fn schedule_tail(_prev: *mut Task) {
     // the parent's SIGCHLD forever (silent wait hang in fork+fast-exit
     // pipelines). Process it here; the slot clear makes this idempotent
     // with the __schedule tail.
+    //
+    // fg1 (oh-launch round 5): enable IRQs BEFORE the notify — the
+    // newborn frame inherits the switcher's IRQs-off window, and the
+    // notify's wake chain (signal_wake_up / wake_group_chldexit ->
+    // wake_up) must never spin on a waitqueue lock with interrupts
+    // disabled (the 4.5 s "not servicing IPIs" holder shape; same fix
+    // as the repick path). The trap-exit tails do their own cli before
+    // the register pops, so returning IF=1 here is safe (SP-5).
+    crate::arch::cpu::enable_irq();
     process_deferred_exit_notify_cpu(crate::arch::cpu_id() as usize);
     // R63: for the same reason, retire the switch-out ownership mark the
     // replaced task's __schedule set on this CPU — a newborn's first
