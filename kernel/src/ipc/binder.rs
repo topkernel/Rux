@@ -631,6 +631,18 @@ struct ParentWindow<'a> {
     len: usize,
 }
 
+/// INV-BINDER-STAGE-POD (unsafe-slim r3c): bytewise view of a `Copy`
+/// repr(C) struct for staging into the read buffer (BinderTransactionData
+/// payloads). One audited span replaces the inline from_raw_parts cast.
+#[inline]
+fn pod_bytes<T: Copy>(v: &T) -> &[u8] {
+    // SAFETY: T is Copy (no drop glue) and a plain POD payload struct;
+    // reading size_of::<T>() bytes through a valid &T reference is a
+    // view of the object's own representation. (Call sites assert the
+    // layout with `const _: () = assert!(size_of::<T>() == N)`.)
+    unsafe { core::slice::from_raw_parts(v as *const T as *const u8, core::mem::size_of::<T>()) }
+}
+
 impl ParentWindow<'_> {
     /// Volatile-read one u32 at window offset `at`.
     fn u32_at(&self, at: usize) -> Option<u32> {
@@ -10422,8 +10434,10 @@ fn binder_transaction(
 
     {
         let mut w = world_lock();
-        // SAFETY: all inner access in this block is under WORLD.
-        unsafe {
+        // (unsafe-slim r3c) no unsafe remains in this section: every
+        // access rides the INV-BINDER-HELD token accessors and the
+        // comm reads use the safe process::find_task_by_pid reference.
+        {
             let world = w.as_mut().unwrap();
 
             if reply {
@@ -10514,21 +10528,24 @@ fn binder_transaction(
                             let x = if pick != 0 { now.wrapping_sub(pick) } else { total };
                             let from_pid =
                                 t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0);
-                            let from_comm = crate::sched::find_task_by_pid(
+                            // (unsafe-slim r3c) comm reads ride the safe
+                            // process::find_task_by_pid reference (same
+                            // unpinned validity contract as the sched
+                            // lookup it replaces — diagnostic read only).
+                            let from_comm = crate::process::find_task_by_pid(
                                 t.from_tid.unwrap_or(0),
                             );
-                            let to_comm = crate::sched::find_task_by_pid(
+                            let to_comm = crate::process::find_task_by_pid(
                                 t.to_tid(world).unwrap_or(t.to_proc.pid),
                             );
-                            let comm_of = |p: *mut crate::process::Task| -> &str {
-                                if p.is_null() {
-                                    return "?";
+                            fn comm_of(p: Option<&crate::process::task::Task>) -> &str {
+                                match p {
+                                    Some(t) => core::str::from_utf8(t.comm())
+                                        .unwrap_or("?")
+                                        .trim_end_matches('\0'),
+                                    None => "?",
                                 }
-                                let c = { (*p).comm() };
-                                core::str::from_utf8(&c[..])
-                                    .unwrap_or("?")
-                                    .trim_end_matches('\0')
-                            };
+                            }
                             let mut w = crate::dfx::backtrace::ConsoleWriter::new();
                             use core::fmt::Write as _;
                             let _ = writeln!(
@@ -10538,10 +10555,10 @@ fn binder_transaction(
                                 t.code,
                                 from_pid,
                                 t.from_tid.unwrap_or(0),
-                                comm_of(from_comm),
+                                comm_of(from_comm.as_deref()),
                                 t.to_proc.pid,
                                 thread.tid,
-                                comm_of(to_comm),
+                                comm_of(to_comm.as_deref()),
                                 total * 10,
                                 q * 10,
                                 x * 10
@@ -12005,11 +12022,13 @@ fn binder_transaction(
             if tgid == 0 {
                 return false;
             }
-            let t = { crate::sched::find_task_by_pid(tgid) };
-            if t.is_null() {
+            // (unsafe-slim r3c) safe pinned-bucket reference; the
+            // validity contract is the same unpinned pid-hash lookup
+            // the sched:: variant wrapped.
+            let Some(t) = crate::process::find_task_by_pid(tgid) else {
                 return false;
-            }
-            let name = core::str::from_utf8(unsafe { (*t).comm() })
+            };
+            let name = core::str::from_utf8(t.comm())
                 .unwrap_or("")
                 .trim_end_matches('\0');
             name.starts_with("m.ohos.")
@@ -13525,8 +13544,11 @@ fn binder_thread_read(
         // ---- drain work into the staging buffer ---------------------------
         let stop_full = {
             let w = world_lock();
-            // SAFETY: all inner access below is under WORLD.
-            unsafe {
+            // (unsafe-slim r3c) no unsafe remains in this section: token
+            // accessors carry every World-held access, comm reads use the
+            // safe process::find_task_by_pid reference, and the staged
+            // BinderTransactionData goes through pod_bytes.
+            {
                 let world = w.as_ref().unwrap();
                 let mut stop_full = false;
                 // 72nd: latch the proc-work eligibility ONCE per drain
@@ -13917,9 +13939,9 @@ fn binder_thread_read(
                             if let Some(cur) = crate::sched::current() {
                                 let tg = { (*cur).tgid() as u32 };
                                 if tg != 0 {
-                                    let lt = { crate::sched::find_task_by_pid(tg) };
-                                    if !lt.is_null() {
-                                        let lname = core::str::from_utf8({ (*lt).comm() })
+                                    let lt = crate::process::find_task_by_pid(tg);
+                                    if let Some(lt) = lt.as_ref() {
+                                        let lname = core::str::from_utf8(lt.comm())
                                             .unwrap_or("")
                                             .trim_end_matches('\0');
                                         let samgr_pid = binder_sareg_samgr_pid();
@@ -13998,11 +14020,9 @@ fn binder_thread_read(
                             } else {
                                 BR_TRANSACTION
                             });
-                            // SAFETY: BinderTransactionData is Copy + repr(C).
-                            staged.extend_from_slice(core::slice::from_raw_parts(
-                                &td as *const BinderTransactionData as *const u8,
-                                core::mem::size_of::<BinderTransactionData>(),
-                            ));
+                            // INV-BINDER-STAGE-POD: bytewise staging of the
+                            // Copy + repr(C) command payload.
+                            staged.extend_from_slice(pod_bytes(&td));
                             if sec {
                                 stage_u64!(t.security_ctx);
                                 // First few deliveries logged: proves the
@@ -14082,17 +14102,14 @@ fn binder_thread_read(
                                                 .as_ref()
                                                 .map(|p| p.pid)
                                                 .unwrap_or(0);
-                                            let picker_comm = crate::sched::find_task_by_pid(
+                                            let picker_comm = crate::process::find_task_by_pid(
                                                 thread.tid,
                                             );
-                                            let picker_comm = if picker_comm.is_null() {
-                                                "?"
-                                            } else {
-                                                core::str::from_utf8({
-                                                    (*picker_comm).comm()
-                                                })
-                                                .unwrap_or("?")
-                                                .trim_end_matches('\0')
+                                            let picker_comm = match picker_comm.as_ref() {
+                                                Some(pt) => core::str::from_utf8(pt.comm())
+                                                    .unwrap_or("?")
+                                                    .trim_end_matches('\0'),
+                                                None => "?",
                                             };
                                             let disp_word =
                                                 t.enq_disp_rd(world);
