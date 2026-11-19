@@ -1075,6 +1075,24 @@ pub struct Task {
     /// re-enqueued it, running one task on two harts.
     pub ti_pick_state: core::sync::atomic::AtomicU32,
 
+    /// R11 (oh-launch round 11, the terminal-release window): set ONLY
+    /// when this task's FINAL context switch-out has really completed —
+    /// written at the SWITCHING_OUT retire sites (sched.rs) in the
+    /// INCOMING task's context, never on the abort path (current ==
+    /// prev there). The terminal deschedule loop
+    /// (schedule_dead_never_returns) must release the ownership pair
+    /// BEFORE calling schedule() so the pick machinery can resolve
+    /// another task (the sc191 v2 fix) — but from that release until the
+    /// SWITCHING_OUT publish inside schedule(), the task reads
+    /// {on_cpu=false, no marker} and the free-side waits alone would let
+    /// the kernel stack be freed WHILE THE TASK IS STILL EXECUTING ITS
+    /// OWN SCHEDULE CHAIN ON IT (every abort/retry cycle of the terminal
+    /// loop re-opens the window — the rip=0x1/rip=heap/#GP-on-ret family
+    /// at exit-storm time). This flag is the positive knowledge the free
+    /// side requires: the real switch completed, the marker retired, the
+    /// stack is referenced by nothing.
+    pub terminal_switch_done: core::sync::atomic::AtomicBool,
+
     /// Scratch registers for trap handling (thread_info.a0/a1/a2)
     ti_a0: core::sync::atomic::AtomicU64,
     ti_a1: core::sync::atomic::AtomicU64,
@@ -1847,6 +1865,7 @@ impl Task {
             ti_on_cpu: core::sync::atomic::AtomicBool::new(false),
             running_on_cpu: core::sync::atomic::AtomicI32::new(-1),
             ti_pick_state: core::sync::atomic::AtomicU32::new(PICK_PICKED),
+            terminal_switch_done: core::sync::atomic::AtomicBool::new(false),
             journal_handle: core::cell::Cell::new(core::ptr::null_mut()),
             task_refcnt: core::sync::atomic::AtomicU32::new(1),
             ti_a0: core::sync::atomic::AtomicU64::new(0),
@@ -2075,6 +2094,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, ti_pick_state)) as *mut core::sync::atomic::AtomicU32,
             core::sync::atomic::AtomicU32::new(PICK_PICKED),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, terminal_switch_done)) as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, journal_handle)) as *mut core::cell::Cell<*mut crate::fs::jbd2::Handle>,
@@ -2848,6 +2871,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, ti_pick_state)) as *mut core::sync::atomic::AtomicU32,
             core::sync::atomic::AtomicU32::new(PICK_PICKED),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, terminal_switch_done)) as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, journal_handle)) as *mut core::cell::Cell<*mut crate::fs::jbd2::Handle>,

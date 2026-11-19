@@ -939,6 +939,22 @@ pub fn grq_dump_holder(why: &str) {
     grq_raw_puts(b"\nGRQ-CRIME-SCENE ");
     grq_raw_puts(why.as_bytes());
     grq_raw_puts(b"\n");
+    // R11 (deadlock-layer unblinding): the GRQ lock WORD value — the one
+    // datum that discriminates "a real holder the site stamps missed"
+    // (word == 1) from "the word itself was scribbled" (word ∉ {0,1}).
+    // fr4/fr5's wedges printed all-waiting rows and no holder on standard
+    // builds; this line closes that blind spot.
+    grq_raw_puts(b"GRQ-LOCK locked=0x");
+    {
+        let mut v = grq().lock.locked_word() as u64;
+        let mut sh: i32 = 8;
+        while sh > 0 {
+            sh -= 4;
+            let nb = ((v >> sh) & 0xF) as u8;
+            grq_raw_puts(&[(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 })]);
+        }
+    }
+    grq_raw_puts(b"\n");
     for cpu in 0..MAX_CPUS {
         let site = GRQ_SITE[cpu].load(core::sync::atomic::Ordering::Relaxed);
         if site == 0 {
@@ -3716,6 +3732,19 @@ pub fn schedule_dead_never_returns() {
                 // never reaches a switch. Release it explicitly — the
                 // same store the R56 heal paths use — so this CPU's pick
                 // can move to anything else, including idle.
+                // R11 (the terminal-release window): the release above is
+                // exactly what makes the free-side waits alone UNSAFE —
+                // from here until the SWITCHING_OUT publish inside the
+                // schedule() below, the task reads {on_cpu=false, no
+                // marker} while still executing on its own stack. Re-arm
+                // the positive terminal flag each round: only the REAL
+                // final switch-out (the retire site, in the incoming
+                // context) sets it again — the free side waits on it, so
+                // the window closes for every retry of this loop.
+                (*cur).terminal_switch_done.store(
+                    false,
+                    core::sync::atomic::Ordering::Release,
+                );
                 (*cur).release_pick_ownership();
                 let pc = (*cur).preempt_count();
                 if pc != 0 {
@@ -4771,8 +4800,29 @@ unsafe fn __schedule() {
     // fully saved and published; retire the ownership mark. (Runs in the
     // incoming task's coroutine frame, but on the SAME CPU, and cpu_id()
     // reads the per-CPU hardware slot, so it still names this CPU.)
+    // R11 (the terminal-release window): this is the ONLY point with
+    // positive knowledge that prev's final switch-out REALLY completed
+    // (the marker retiring in the INCOMING context; an aborted switch
+    // also reaches this tail, but there current() == prev — the aborted
+    // prev keeps running — so the discriminator below stays false and a
+    // resumed terminal loop is not marked done). Publish that for the
+    // exit-path frees: schedule_dead_never_returns releases the
+    // ownership pair BEFORE its schedule() call (the sc191 v2 fix), and
+    // until this store the free-side waits alone cannot distinguish
+    // "switch-out complete" from "released, switch not yet started" —
+    // the freed-under-its-own-schedule-chain producer (rip=0x1 /
+    // rip=heap / #GP-on-ret at exit-storm time).
     if switching {
         SWITCHING_OUT[crate::arch::cpu_id() as usize].store(0, core::sync::atomic::Ordering::Release);
+        if !prev.is_null()
+            && crate::sched::current().map(|c| c as *mut Task) != Some(prev)
+        {
+            unsafe {
+                (*prev)
+                    .terminal_switch_done
+                    .store(true, core::sync::atomic::Ordering::Release);
+            }
+        }
     }
     // r11: the pick generation materialized — the picked context is
     // resuming right here (this frame's own switch-in). Retire the
@@ -10634,6 +10684,19 @@ pub extern "C" fn schedule_tail(_prev: *mut Task) {
     // linger until this CPU's next context switch and keep the phantom
     // heal conservative for a task that is already fully switched out.
     SWITCHING_OUT[crate::arch::cpu_id() as usize].store(0, core::sync::atomic::Ordering::Release);
+    // R11 (terminal-release window): the newborn's context is by
+    // definition not the replaced task's — the replaced prev's final
+    // switch-out has really completed here, so publish the positive
+    // terminal flag for the exit-path frees (same store as the
+    // __schedule-tail retire site; a dying task the newborn replaced
+    // would otherwise wait for a tail that never runs).
+    if !_prev.is_null() {
+        unsafe {
+            (*_prev)
+                .terminal_switch_done
+                .store(true, core::sync::atomic::Ordering::Release);
+        }
+    }
     // r11: and retire the pick generation that switched us in — the
     // newborn is the materialization of this CPU's current generation
     // (the fourth retire site; without it every fork child leaves its
