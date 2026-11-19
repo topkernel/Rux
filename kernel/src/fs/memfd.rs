@@ -146,7 +146,7 @@ pub fn memfd_name_by_ino(ino: u64) -> Option<&'static str> {
 /// setattr for memfd inodes: the only attribute we implement is ATTR_SIZE
 /// (ftruncate). Resize is grow-with-zeros / shrink — the FileBuffer content
 //  is the single copy of the data.
-unsafe fn memfd_setattr(inode: &Inode, attr: u32, arg1: u64, _arg2: u64) -> i32 {
+fn memfd_setattr(inode: &Inode, attr: u32, arg1: u64, _arg2: u64) -> i32 {
     if attr == setattr_attr::ATTR_SIZE {
         let new_size = arg1 as usize;
 
@@ -208,11 +208,13 @@ fn inode_seals(inode: &Inode) -> u32 {
 }
 
 /// destroy_inode hook: free the MemfdState Box.
-unsafe fn memfd_destroy_inode(inode: &mut Inode) {
+fn memfd_destroy_inode(inode: &mut Inode) {
     if let Some(p) = inode.private_data.take() {
         // SAFETY: the Box was created by memfd_create and is exclusively
         // owned by this inode; the last Arc<Inode> is dropping now.
-        drop(alloc::boxed::Box::from_raw(p as *mut MemfdState));
+        // SAFETY: private_data holds the Box leaked by into_raw at inode
+        // creation (INV-FS-PRIVDATA-1); this Drop is the single reclaim.
+        drop(unsafe { alloc::boxed::Box::from_raw(p as *mut MemfdState) });
     }
 }
 

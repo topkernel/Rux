@@ -883,9 +883,9 @@ pub fn ensure_registered() {
 /// Recover the node from a VFS inode's private_data.
 // SAFETY: private_data was installed by tmpfs_make_inode / tmpfs_iget as an
 // Arc::into_raw reference; it stays alive at least as long as the inode.
-unsafe fn node_of(inode: &Inode) -> Result<&'static TmpfsNode, i32> {
-    match inode.private_data {
-        Some(ptr) => Ok(&*(ptr as *const TmpfsNode)),
+fn node_of<'a>(inode: &'a Inode) -> Result<&'a TmpfsNode, i32> {
+    match crate::fs::unsafe_edges::privdata_ref::<TmpfsNode>(inode) {
+        Some(node) => Ok(node),
         None => Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
     }
 }
@@ -924,7 +924,7 @@ fn tmpfs_subtree_contains(node: &TmpfsNode, candidate: &TmpfsNode) -> bool {
 }
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
-unsafe fn tmpfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
+fn tmpfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
     let node = node_of(dir)?;
     if !node.is_dir() {
         return Err(errno::Errno::NotADirectory);
@@ -936,7 +936,7 @@ unsafe fn tmpfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
 }
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
-unsafe fn tmpfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, errno::Errno> {
+fn tmpfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, errno::Errno> {
     let node = node_of(dir)?;
     if !node.is_dir() {
         return Err(errno::Errno::NotADirectory);
@@ -956,7 +956,7 @@ unsafe fn tmpfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<
 }
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
-unsafe fn tmpfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, errno::Errno> {
+fn tmpfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, errno::Errno> {
     let node = node_of(dir)?;
     if !node.is_dir() {
         return Err(errno::Errno::NotADirectory);
@@ -975,7 +975,7 @@ unsafe fn tmpfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<I
 }
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
-unsafe fn tmpfs_symlink(dir: &Inode, name: &[u8], target: &[u8]) -> Result<Arc<Inode>, errno::Errno> {
+fn tmpfs_symlink(dir: &Inode, name: &[u8], target: &[u8]) -> Result<Arc<Inode>, errno::Errno> {
     let node = node_of(dir)?;
     if !node.is_dir() {
         return Err(errno::Errno::NotADirectory);
@@ -998,7 +998,7 @@ unsafe fn tmpfs_symlink(dir: &Inode, name: &[u8], target: &[u8]) -> Result<Arc<I
 }
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
-unsafe fn tmpfs_mknod(
+fn tmpfs_mknod(
     dir: &Inode,
     name: &[u8],
     mode: InodeMode,
@@ -1041,7 +1041,7 @@ unsafe fn tmpfs_mknod(
 }
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
-unsafe fn tmpfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
+fn tmpfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
     let dir_node = match node_of(dir) {
         Ok(n) => n,
         Err(e) => return e,
@@ -1084,7 +1084,7 @@ unsafe fn tmpfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
 }
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
-unsafe fn tmpfs_unlink(dir: &Inode, name: &[u8]) -> i32 {
+fn tmpfs_unlink(dir: &Inode, name: &[u8]) -> i32 {
     let node = match node_of(dir) {
         Ok(n) => n,
         Err(e) => return e,
@@ -1108,7 +1108,7 @@ unsafe fn tmpfs_unlink(dir: &Inode, name: &[u8]) -> i32 {
 }
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
-unsafe fn tmpfs_rmdir(dir: &Inode, name: &[u8]) -> i32 {
+fn tmpfs_rmdir(dir: &Inode, name: &[u8]) -> i32 {
     let node = match node_of(dir) {
         Ok(n) => n,
         Err(e) => return e,
@@ -1135,7 +1135,7 @@ unsafe fn tmpfs_rmdir(dir: &Inode, name: &[u8]) -> i32 {
 }
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
-unsafe fn tmpfs_rename(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_name: &[u8]) -> i32 {
+fn tmpfs_rename(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_name: &[u8]) -> i32 {
     let old_dir_node = match node_of(old_dir) {
         Ok(n) => n,
         Err(e) => return e,
@@ -1181,7 +1181,7 @@ unsafe fn tmpfs_rename(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_na
 }
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
-unsafe fn tmpfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
+fn tmpfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
     let node = match node_of(inode) {
         Ok(n) => n,
         Err(e) => return e as isize,
@@ -1200,7 +1200,7 @@ unsafe fn tmpfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
 }
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
-unsafe fn tmpfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
+fn tmpfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     let node = match node_of(inode) {
         Ok(n) => n,
         Err(e) => return e,
@@ -1234,7 +1234,7 @@ unsafe fn tmpfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
 }
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
-unsafe fn tmpfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
+fn tmpfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
     let node = match node_of(inode) {
         Ok(n) => n,
         Err(e) => return e,
@@ -1304,7 +1304,7 @@ unsafe fn tmpfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
 }
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
-unsafe fn tmpfs_readdir(inode: &Inode) -> Option<Vec<VfsDirEntry>> {
+fn tmpfs_readdir(inode: &Inode) -> Option<Vec<VfsDirEntry>> {
     let node = node_of(inode).ok()?;
     if !node.is_dir() {
         return None;
@@ -1344,7 +1344,7 @@ unsafe fn tmpfs_readdir(inode: &Inode) -> Option<Vec<VfsDirEntry>> {
 }
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
-unsafe fn tmpfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errno::Errno> {
+fn tmpfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errno::Errno> {
     let node = node_of(parent)?;
     if !node.is_dir() {
         return Err(errno::Errno::NotADirectory);
@@ -1357,7 +1357,7 @@ unsafe fn tmpfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>
 }
 
 // SAFETY: VFS callback contract — called when the inode's refcount hits 0.
-unsafe fn tmpfs_destroy_inode(inode: &mut Inode) {
+fn tmpfs_destroy_inode(inode: &mut Inode) {
     // Drop any MAP_SHARED page-cache aliases of this file (the frames
     // stay alive while user PTEs pin them; the ENTRIES must not survive
     // the inode — a recycled (fs_id, ino) pair would otherwise observe
@@ -1366,7 +1366,9 @@ unsafe fn tmpfs_destroy_inode(inode: &mut Inode) {
         .invalidate_inode(inode.fs_id, inode.ino as u64);
     if let Some(ptr) = inode.private_data.take() {
         // Reclaim the leaked Arc reference (idempotent via Option::take).
-        let _ = Arc::from_raw(ptr as *const TmpfsNode);
+        // SAFETY: private_data holds an Arc leaked by into_raw at inode
+        // creation (INV-FS-PRIVDATA-1); this Drop is the single reclaim.
+        let _ = unsafe { Arc::from_raw(ptr as *const TmpfsNode) };
     }
 }
 
@@ -1556,7 +1558,7 @@ fn tmpfs_file_read_at(file: &crate::fs::File, offset: u64, buf: &mut [u8]) -> is
 }
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
-unsafe fn tmpfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
+fn tmpfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
     if inode.mode.is_directory() {
         Some(&crate::fs::file::DIR_FILE_OPS)
     } else if inode.mode.is_regular_file() {

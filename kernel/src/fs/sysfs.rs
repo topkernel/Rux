@@ -2078,10 +2078,8 @@ pub struct SysfsEntryData {
 
 /// Recover the entry data from an inode.
 /// SAFETY: private_data must have come from sysfs_iget/create_root_inode.
-unsafe fn entry_of(inode: &Inode) -> Option<&'static SysfsEntryData> {
-    inode
-        .private_data
-        .map(|p| &*(p as *const SysfsEntryData))
+fn entry_of<'a>(inode: &'a Inode) -> Option<&'a SysfsEntryData> {
+    crate::fs::unsafe_edges::privdata_ref::<SysfsEntryData>(inode)
 }
 
 /// Resolve a child of `dir` to (kobj, attr, link) for lookup/iget.
@@ -2117,7 +2115,7 @@ fn resolve_child(
 
 /// sysfs lookup: child kobject ino, attribute ino, or ENOENT.
 /// SAFETY: VFS callback contract.
-unsafe fn sysfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
+fn sysfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
     let entry = entry_of(dir).ok_or(errno::Errno::NotADirectory)?;
     match resolve_child(entry, name) {
         Some((kobj, _, _)) => Ok(kobj.ino),
@@ -2127,7 +2125,7 @@ unsafe fn sysfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
 
 /// sysfs iget: instantiate the VFS Inode for a resolved child.
 /// SAFETY: VFS callback contract.
-unsafe fn sysfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errno::Errno> {
+fn sysfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errno::Errno> {
     let parent_entry = entry_of(parent).ok_or(errno::Errno::NotADirectory)?;
     let (kobj, attr, link) = resolve_child(parent_entry, name)
         .ok_or(errno::Errno::NoSuchFileOrDirectory)?;
@@ -2158,7 +2156,7 @@ unsafe fn sysfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>
 
 /// sysfs getattr.
 /// SAFETY: VFS callback contract.
-unsafe fn sysfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
+fn sysfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     let entry = match entry_of(inode) {
         Some(e) => e,
         None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
@@ -2205,7 +2203,7 @@ unsafe fn sysfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
 /// (the why-slow error-stream diff: those rows were ours-only). The
 /// tree CONTENT stays kernel-owned; only the metadata words move.
 /// SAFETY: VFS callback contract.
-unsafe fn sysfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
+fn sysfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
     use crate::fs::inode::setattr_attr;
     if attr == setattr_attr::ATTR_SIZE {
         return 0;
@@ -2245,7 +2243,7 @@ unsafe fn sysfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
 
 /// sysfs readlink.
 /// SAFETY: VFS callback contract.
-unsafe fn sysfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
+fn sysfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
     let entry = match entry_of(inode) {
         Some(e) => e,
         None => return errno::Errno::InvalidArgument.as_neg_i32() as isize,
@@ -2261,7 +2259,7 @@ unsafe fn sysfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
 
 /// sysfs readdir: children (dirs + links) then attributes.
 /// SAFETY: VFS callback contract.
-unsafe fn sysfs_readdir(inode: &Inode) -> Option<Vec<VfsDirEntry>> {
+fn sysfs_readdir(inode: &Inode) -> Option<Vec<VfsDirEntry>> {
     let entry = entry_of(inode)?;
     if entry.kobj.kind != NodeKind::Directory {
         return None;
@@ -2297,7 +2295,7 @@ unsafe fn sysfs_readdir(inode: &Inode) -> Option<Vec<VfsDirEntry>> {
 /// sysfs open: snapshot the attribute content into file-private storage
 /// (same discipline as procfs — read side never re-enters the tree).
 /// SAFETY: VFS callback contract.
-unsafe fn sysfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
+fn sysfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
     if !inode.mode.is_regular_file() {
         return 0;
     }
@@ -2321,7 +2319,7 @@ unsafe fn sysfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
 
 /// sysfs get_file_ops.
 /// SAFETY: VFS callback contract.
-unsafe fn sysfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
+fn sysfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
     if inode.mode.is_regular_file() {
         Some(&SYSFS_FILE_OPS)
     } else if inode.mode.is_directory() {
@@ -2333,9 +2331,11 @@ unsafe fn sysfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::
 
 /// sysfs destroy_inode: reclaim the leaked Box<SysfsEntryData>.
 /// SAFETY: VFS callback contract; Drop-time hook.
-unsafe fn sysfs_destroy_inode(inode: &mut Inode) {
+fn sysfs_destroy_inode(inode: &mut Inode) {
     if let Some(ptr) = inode.private_data.take() {
-        drop(Box::from_raw(ptr as *mut SysfsEntryData));
+        // SAFETY: the Box was leaked by into_raw at inode creation
+        // (INV-FS-PRIVDATA-1); this Drop is the single reclaim.
+        drop(unsafe { Box::from_raw(ptr as *mut SysfsEntryData) });
     }
 }
 
@@ -2346,7 +2346,7 @@ unsafe fn sysfs_destroy_inode(inode: &mut Inode) {
 /// /sys/fs/cgroup/{systemd,unified,...} subdirs after mounting cgroup2.
 /// The reference kernel handles this by having cgroupfs own that subtree;
 /// we route sysfs mkdir through the tmpfs layer.
-unsafe fn sysfs_mkdir(
+fn sysfs_mkdir(
     _parent: &Inode,
     name: &[u8],
     mode: crate::fs::inode::InodeMode,

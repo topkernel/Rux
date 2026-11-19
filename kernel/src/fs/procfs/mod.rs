@@ -1508,7 +1508,7 @@ pub fn mount_procfs() -> Result<(), i32> {
 
 /// ProcFS inode lookup operation
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
+fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
     // PID directory parent: looking up files inside /proc/[pid]/
     if dir.private_data.is_none() && pid::is_valid_pid(dir.ino) {
         let pid_val = dir.ino;
@@ -1615,8 +1615,7 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
         return Err(errno::Errno::NoSuchFileOrDirectory);
     }
 
-    let node_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory)?;
-    let node = &*(node_ptr as *const ProcFSNode);
+    let node = crate::fs::unsafe_edges::privdata_ref::<ProcFSNode>(dir).ok_or(errno::Errno::NotADirectory)?;
 
     if !node.is_dir() {
         return Err(errno::Errno::NotADirectory);
@@ -1642,7 +1641,7 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
 
 /// ProcFS getattr operation
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
+fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     // Distinct st_dev for procfs: fallback only — the central stat exits
     // overwrite this with the instance's anonymous device
     // (inode::stat_dev_user, Linux get_anon_bdev semantics), so procfs
@@ -1719,8 +1718,7 @@ unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
 
     // /proc/[pid]/attr label files: owned by the target task (see the
     // matching iget branch).
-    if let Some(node_ptr) = inode.private_data {
-        let node = &*(node_ptr as *const ProcFSNode);
+    if let Some(node) = crate::fs::unsafe_edges::privdata_ref::<ProcFSNode>(inode) {
         if matches!(
             node.pid_file_kind,
             Some(
@@ -1786,11 +1784,10 @@ unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
         return 0;
     }
 
-    let node_ptr = match inode.private_data {
-        Some(ptr) => ptr,
-        None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
-    };
-    let node = &*(node_ptr as *const ProcFSNode);
+    let node = match crate::fs::unsafe_edges::privdata_ref::<ProcFSNode>(inode) {
+            Some(v) => v,
+            None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
+        };
 
     stat.st_ino = node.ino;
     stat.st_mode = if node.is_dir() {
@@ -1848,7 +1845,7 @@ unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
 
 /// ProcFS readlink operation
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn procfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
+fn procfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
     // Synthetic fd-link inodes carry no ProcFSNode; the (pid, fd) pair is
     // encoded in the ino (see procfs_iget). Review 5.7: /proc/self/fd/N
     // used to resolve only through the syscall-layer string shortcut.
@@ -1878,11 +1875,10 @@ unsafe fn procfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
         return errno::Errno::InvalidArgument.as_neg_i32() as isize;
     }
 
-    let node_ptr = match inode.private_data {
-        Some(ptr) => ptr,
-        None => return errno::Errno::InvalidArgument.as_neg_i32() as isize,
-    };
-    let node = &*(node_ptr as *const ProcFSNode);
+    let node = match crate::fs::unsafe_edges::privdata_ref::<ProcFSNode>(inode) {
+            Some(v) => v,
+            None => return errno::Errno::InvalidArgument.as_neg_i32() as isize,
+        };
 
     if !node.is_symlink() {
         return errno::Errno::InvalidArgument.as_neg_i32() as isize;
@@ -1896,7 +1892,7 @@ unsafe fn procfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
 
 /// ProcFS iget: instantiate a VFS Inode from (parent_inode, name, child_ino).
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errno::Errno> {
+fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errno::Errno> {
     // PID directory parent: creating inode for files inside /proc/[pid]/
     if parent.private_data.is_none() && pid::is_valid_pid(parent.ino) {
         let pid_val = parent.ino;
@@ -2136,8 +2132,7 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
         return Ok(Arc::new(inode));
     }
 
-    let node_ptr = parent.private_data.ok_or(errno::Errno::NotADirectory)?;
-    let parent_node = &*(node_ptr as *const ProcFSNode);
+    let parent_node = crate::fs::unsafe_edges::privdata_ref::<ProcFSNode>(parent).ok_or(errno::Errno::NotADirectory)?;
 
     // Check for PID directory
     if pid::is_pid_dir(name) {
@@ -2336,9 +2331,8 @@ fn procfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isiz
             // readers do not rewind-and-expect-change).
             if new_offset == 0 {
                 let mut kind = None;
-                if let Some(inode) = (*file.inode.get()).as_ref() {
-                    if let Some(node_ptr) = inode.private_data {
-                        let node = &*(node_ptr as *const ProcFSNode);
+                if let Some(inode) = file.get_inode() {
+                    if let Some(node) = crate::fs::unsafe_edges::privdata_ref::<ProcFSNode>(inode) {
                         kind = node.pid_file_kind;
                     }
                 }
@@ -2381,16 +2375,15 @@ fn procfs_file_close(file: &crate::fs::File) -> i32 {
 /// /proc/net/fib_trie at boot; the old EPERM was an ours-only error row
 /// in the why-slow boot error-stream diff). Content stays kernel-owned.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn procfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
+fn procfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
     use crate::fs::inode::setattr_attr;
     if attr == setattr_attr::ATTR_SIZE {
         return 0;
     }
-    let node_ptr = match inode.private_data {
-        Some(ptr) => ptr,
-        None => return errno::Errno::OperationNotPermitted.as_neg_i32(),
-    };
-    let node = &*(node_ptr as *const ProcFSNode);
+    let node = match crate::fs::unsafe_edges::privdata_ref::<ProcFSNode>(inode) {
+            Some(v) => v,
+            None => return errno::Errno::OperationNotPermitted.as_neg_i32(),
+        };
     match attr {
         setattr_attr::ATTR_MODE => {
             node.mode_ovr.store((arg1 as u32) & 0o7777, Ordering::Relaxed);
@@ -2469,7 +2462,7 @@ pub static PROC_PIDDIR_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
 
 /// ProcFS get_file_ops: return ops based on inode type
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn procfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
+fn procfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
     if inode.mode.is_regular_file() {
         // /proc/kmsg is a BLOCKING STREAM, not a snapshot dynamic file:
         // hilogd.rd_kmsg read-EOF-looped at 60-92K/s on the snapshot
@@ -2477,9 +2470,7 @@ unsafe fn procfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file:
         // — the node is created with create_dynamic_file("kmsg",
         // printk::generate_kmsg); procfs_open applies the matching
         // special case (single-reader gate, no snapshot Box).
-        let node = inode
-            .private_data
-            .map(|p| &*(p as *const ProcFSNode));
+        let node = crate::fs::unsafe_edges::privdata_ref::<ProcFSNode>(inode);
         if let Some(node) = node {
             if node.content_generator == Some(crate::printk::generate_kmsg) {
                 return Some(&crate::printk::PROC_KMSG_OPS);
@@ -2504,7 +2495,7 @@ unsafe fn procfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file:
 
 /// ProcFS open: pre-read content for regular files
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn procfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
+fn procfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
     if !inode.mode.is_regular_file() {
         // /proc/<pid> directories: attach the pinned pidfd identity at
         // open (instance-checked; a later pid reuse under the same pid
@@ -2521,11 +2512,10 @@ unsafe fn procfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
         }
         return 0;
     }
-    let node_ptr = match inode.private_data {
-        Some(ptr) => ptr,
-        None => return 0,
-    };
-    let node = &*(node_ptr as *const ProcFSNode);
+    let node = match crate::fs::unsafe_edges::privdata_ref::<ProcFSNode>(inode) {
+            Some(v) => v,
+            None => return 0,
+        };
 
     // /proc/sysrq-trigger: a write-only node (mode 0200) — an
     // open for read is refused, as on the live host.
@@ -2561,7 +2551,7 @@ unsafe fn procfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
 
 /// Generate directory entries for a /proc/[pid]/ directory
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn generate_pid_dir_entries(pid: u64) -> alloc::vec::Vec<crate::fs::inode::VfsDirEntry> {
+fn generate_pid_dir_entries(pid: u64) -> alloc::vec::Vec<crate::fs::inode::VfsDirEntry> {
     use crate::fs::inode::file_type;
 
     let mut entries = alloc::vec::Vec::new();
@@ -2613,7 +2603,7 @@ unsafe fn generate_pid_dir_entries(pid: u64) -> alloc::vec::Vec<crate::fs::inode
 
 /// ProcFS readdir: list directory entries
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn procfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inode::VfsDirEntry>> {
+fn procfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inode::VfsDirEntry>> {
     use crate::fs::inode::file_type;
 
     // PID directory: private_data is None, inode.ino stores the PID
@@ -2689,8 +2679,7 @@ unsafe fn procfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::ino
         return Some(entries);
     }
 
-    let node_ptr = inode.private_data?;
-    let node = &*(node_ptr as *const ProcFSNode);
+    let node = crate::fs::unsafe_edges::privdata_ref::<ProcFSNode>(inode)?;
     if !node.is_dir() {
         return None;
     }
@@ -2767,7 +2756,7 @@ pub static PROCFS_INODE_OPS: INodeOps = INodeOps {
 
 /// Lookup inside the ns directory: "<kind>" → ns-link ino.
 /// SAFETY: VFS callback contract; private_data stores the PID.
-unsafe fn procfs_ns_dir_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
+fn procfs_ns_dir_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
     let pid_val = match dir.private_data {
         Some(p) => p as usize as u64,
         None => return Err(errno::Errno::NotADirectory),
@@ -2781,7 +2770,7 @@ unsafe fn procfs_ns_dir_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::E
 /// Instantiate the ns-link inode: a symlink whose (pid, kind) pair is
 /// encoded in the ino (readlink/getattr dispatch on that range).
 /// SAFETY: VFS callback contract.
-unsafe fn procfs_ns_dir_iget(
+fn procfs_ns_dir_iget(
     _parent: &Inode,
     _name: &[u8],
     ino: Ino,
@@ -2796,7 +2785,7 @@ unsafe fn procfs_ns_dir_iget(
 
 /// Readdir of the ns directory: ".", ".." and the six kind links.
 /// SAFETY: VFS callback contract; private_data stores the PID.
-unsafe fn procfs_ns_dir_readdir(
+fn procfs_ns_dir_readdir(
     inode: &Inode,
 ) -> Option<alloc::vec::Vec<crate::fs::inode::VfsDirEntry>> {
     use crate::fs::inode::file_type;
@@ -2824,7 +2813,7 @@ unsafe fn procfs_ns_dir_readdir(
 
 /// Getattr of the ns directory itself.
 /// SAFETY: VFS callback contract.
-unsafe fn procfs_ns_dir_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
+fn procfs_ns_dir_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     stat.st_ino = inode.ino;
     stat.st_mode = InodeMode::S_IFDIR | 0o555;
     stat.st_size = 0;
@@ -2847,7 +2836,7 @@ unsafe fn procfs_ns_dir_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i3
 /// PATH — with lookup: None the walk failed ENOTDIR and every
 /// socket-owning OH service child died at its socket chmod.
 /// SAFETY: VFS callback contract; private_data stores the PID.
-pub unsafe fn procfs_fd_dir_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
+pub fn procfs_fd_dir_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
     let pid_val = match dir.private_data {
         Some(p) => p as usize as u64,
         None => return Err(errno::Errno::NotADirectory),
@@ -2880,7 +2869,7 @@ pub unsafe fn procfs_fd_dir_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errn
 /// Instantiate the fd magic-link inode (symlink; readlink handled by
 /// procfs_readlink's FD_LINK branch).
 /// SAFETY: VFS callback contract.
-pub unsafe fn procfs_fd_dir_iget(
+pub fn procfs_fd_dir_iget(
     _parent: &Inode,
     _name: &[u8],
     ino: Ino,

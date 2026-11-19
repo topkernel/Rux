@@ -4330,24 +4330,23 @@ fn ext4_dio_write_gup_run(
         // Pin hole: request-granularity fallback (module doc above).
         return None;
     }
-    // SAFETY: fs/inode resolution mirrors ext4_file_write_user_vfs; the
-    // core owns locking; the pins outlive the call (dropped at scope
-    // end — after the core's drains device-acked every span).
-    let written = unsafe {
-        ext4_write_at_core_src(
-            fs,
-            ext4_ino,
-            inode,
-            offset,
-            true,
-            DioWriteSrc::User {
-                pins: &pins,
-                va: src as usize,
-            },
-            &[0],
-            true,
-        )
-    };
+    // fs/inode resolution mirrors ext4_file_write_user_vfs; the core
+    // owns locking; the pins outlive the call (dropped at scope end —
+    // after the core's drains device-acked every span). The core is a
+    // safe fn (unsafe-slim L4).
+    let written = ext4_write_at_core_src(
+        fs,
+        ext4_ino,
+        inode,
+        offset,
+        true,
+        DioWriteSrc::User {
+            pins: &pins,
+            va: src as usize,
+        },
+        &[0],
+        true,
+    );
     Some(written)
 }
 
@@ -4503,7 +4502,7 @@ pub fn ext4_kernel_write_at(
 ///   back to the write-through core for that page after bounded rounds;
 /// - crash class: identical to the reference — a write(2) that returned
 ///   without a following fsync/sync is not durable.
-unsafe fn ext4_buffered_write(
+fn ext4_buffered_write(
     fs: &crate::fs::ext4::Ext4FileSystem,
     inode: &crate::fs::inode::Inode,
     offset: u64,
@@ -4515,11 +4514,17 @@ unsafe fn ext4_buffered_write(
     if srclen == 0 {
         return 0;
     }
+    // The cached Ext4Inode box behind inode.sb (INV-EXT4-SBRES-1),
+    // resolved through the ext4 framework edge; the raw word is kept
+    // only for the audited advisory-store epilog below.
     let sb_ptr = match inode.sb {
         Some(p) => p as *mut super::inode::Ext4Inode,
         None => return errno::Errno::IOError.as_neg_i32() as isize,
     };
-    let sbi = &*sb_ptr;
+    // SAFETY: INV-EXT4-SBRES-1 — the sb box lives for the inode; this
+    // shared view is read-mostly (the epilog's advisory stores go
+    // through the audited helper below, under the big lock).
+    let sbi = unsafe { &*sb_ptr };
     let fs_id = fs as *const crate::fs::ext4::Ext4FileSystem as u64;
     let ino = inode.ino as u64;
     let cache = page_cache::get_page_cache();
@@ -4694,7 +4699,9 @@ unsafe fn ext4_buffered_write(
         let src_off = (first_full * ps - offset) as usize;
         match src {
             WriteSrc::Kernel(p, _) => {
-                // SAFETY: the caller's slice is valid for srclen bytes.
+                // SAFETY: the caller's kernel slice is valid for srclen
+                // bytes (ext4_kernel_write_at passes a real slice's
+                // start+length; the syscall layer never builds Kernel).
                 let buf = unsafe { core::slice::from_raw_parts(p, srclen) };
                 let consumed = cache.insert_dirty_batch(
                     fs_id,
@@ -4997,16 +5004,11 @@ unsafe fn ext4_buffered_write(
     {
         let _g = crate::fs::ext4::EXT4_BIG_LOCK.lock();
         let now = crate::drivers::rtc::wall_secs() as u32;
-        // SAFETY: sb_ptr is the inode's boxed copy, installed at open and
-        // never freed while the inode lives; advisory field, volatile
-        // store (same discipline as the atime update in the read path).
-        unsafe {
-            if pub_end > (*sb_ptr).size {
-                core::ptr::write_volatile(&mut (*sb_ptr).size, pub_end);
-            }
-            core::ptr::write_volatile(&mut (*sb_ptr).mtime, now);
-            core::ptr::write_volatile(&mut (*sb_ptr).ctime, now);
-        }
+        // Audited advisory-field store (INV-EXT4-ATIME discipline):
+        // the write-tail epilog. SAFETY: sb_ptr is the inode's boxed
+        // copy, installed at open and never freed while the inode
+        // lives (INV-EXT4-SBRES-1).
+        unsafe { stamp_write_tail(sb_ptr, pub_end, now) };
         // Exact-EOF watermark for the revival guard (create_vfs_inode_in):
         // data is already in the dirty frames, so a later icache eviction +
         // re-instantiation can recover the byte-exact size. CAS-max inside
@@ -5205,13 +5207,13 @@ fn ext4_write_at_core(
     skip_pfns: &[u64],
     dio_fast: bool,
 ) -> isize {
-    unsafe { ext4_write_at_core_src(fs, ext4_ino, inode, offset, defer_unjournaled, DioWriteSrc::Staging(buf), skip_pfns, dio_fast) }
+    ext4_write_at_core_src(fs, ext4_ino, inode, offset, defer_unjournaled, DioWriteSrc::Staging(buf), skip_pfns, dio_fast)
 }
 
 /// The write core (source-parameterized GUP-DIO form): staging slice or
 /// pinned user frames; the journal/locking/write-through discipline is
 /// identical.
-unsafe fn ext4_write_at_core_src(
+fn ext4_write_at_core_src(
     fs: &crate::fs::ext4::Ext4FileSystem,
     ext4_ino: u32,
     inode: Option<&crate::fs::inode::Inode>,
@@ -5269,7 +5271,9 @@ unsafe fn ext4_write_at_core_src(
     // slot that later calls reused (the exact dead-frame deref M3 was
     // meant to remove, in the main write path).
     if let Some(h) = journal_handle.as_mut() {
-        super::namei::set_current_handle(h);
+        // SAFETY: h is the journal handle this core just created; the
+        // setter only stores it into the current task's cell.
+        unsafe { super::namei::set_current_handle(h) };
     }
 
     // Read ext4 inode from disk (write needs fresh on-disk data)
@@ -5277,7 +5281,8 @@ unsafe fn ext4_write_at_core_src(
         Ok(inode) => inode,
         Err(e) => {
             if journal_handle.is_some() {
-                super::namei::clear_current_handle();
+                // SAFETY: clears the same cell the setter above filled.
+                unsafe { super::namei::clear_current_handle() };
                 if let Some(mut h) = journal_handle {
                     let _ = super::journal::ext4_journal_stop(&mut h);
                 }
@@ -5404,7 +5409,9 @@ unsafe fn ext4_write_at_core_src(
 
     // Stop journal transaction
     if journal_handle.is_some() {
-        super::namei::clear_current_handle();
+        // SAFETY: clears the current task's journal-handle cell (the
+        // setter's twin).
+        unsafe { super::namei::clear_current_handle() };
         if let Some(mut h) = journal_handle {
             let _ = super::journal::ext4_journal_stop(&mut h);
         }
@@ -6094,6 +6101,27 @@ fn run_sync_spans(
 ///
 /// SAFETY: `ino` is the cached Ext4Inode box owned by the VFS inode;
 /// callers hold the io_lock/big-lock serialization the direct store had.
+/// INV-EXT4-ATIME twin for the buffered-write epilog: publish the
+/// post-write size (monotonic max — delayed allocation may have already
+/// published a longer dirty tail) and mtime/ctime. Advisory fields;
+/// readers tolerate torn u32s; callers hold the big lock (the write
+/// path's own serialization).
+///
+/// SAFETY: `ino` is the cached Ext4Inode box owned by the VFS inode;
+/// valid until the inode's Drop (INV-EXT4-SBRES-1).
+unsafe fn stamp_write_tail(ino: *mut super::inode::Ext4Inode, pub_end: u64, now: u32) {
+    // SAFETY: caller pins the Box (INV-EXT4-SBRES-1); the fields below
+    // are advisory u32/u64 stores, volatile to keep the same
+    // torn-tolerant discipline the direct store had.
+    unsafe {
+        if pub_end > (*ino).size {
+            core::ptr::write_volatile(&mut (*ino).size, pub_end);
+        }
+        core::ptr::write_volatile(&mut (*ino).mtime, now);
+        core::ptr::write_volatile(&mut (*ino).ctime, now);
+    }
+}
+
 unsafe fn stamp_atime_relatime(ino: *mut super::inode::Ext4Inode) {
     // SAFETY: caller pins the Box; the time fields are u32s read-only
     // here and written once below.

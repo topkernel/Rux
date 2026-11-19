@@ -7561,7 +7561,7 @@ pub(crate) static PROCFS_DIR_OPS: INodeOps = INodeOps {
 /// Readdir callback for synthetic procfs directories.
 /// Reads PID from inode.private_data, calls procfs::pid::list_fds().
 // SAFETY: private_data stores a valid PID value; list_fds is a safe fallible function
-unsafe fn procfs_dir_readdir(inode: &Inode) -> Option<alloc::vec::Vec<VfsDirEntry>> {
+fn procfs_dir_readdir(inode: &Inode) -> Option<alloc::vec::Vec<VfsDirEntry>> {
     let pid = inode.private_data? as u64;
     let fds = crate::fs::procfs::pid::list_fds(pid);
 

@@ -28,12 +28,12 @@ impl Ext4DirEntry {
     /// Minimum directory entry size: inode(4) + rec_len(2) + name_len(1) + file_type(1)
     const MIN_ENTRY_SIZE: usize = 8;
 
-    /// Create directory entry from byte data
+    /// Create directory entry from byte data.
     ///
-    /// # Safety
-    /// bytes must contain at least 8 bytes; this is verified at runtime.
-    // SAFETY: length check prevents OOB; name_len bounds check prevents OOB read
-    pub unsafe fn from_bytes(bytes: &[u8], block_size: usize) -> Self {
+    /// Fully safe (unsafe-slim L4): every field read is bounds-checked
+    /// (the MIN_ENTRY_SIZE gate below); short slices and corrupt
+    /// rec_len/name_len yield an all-zero entry, never OOB.
+    pub fn from_bytes(bytes: &[u8], block_size: usize) -> Self {
         if bytes.len() < Self::MIN_ENTRY_SIZE {
             return Self {
                 inode: 0,
@@ -44,8 +44,8 @@ impl Ext4DirEntry {
             };
         }
 
-        let inode = u32::from_le_bytes(*(bytes[0..4].as_ptr() as *const [u8; 4]));
-        let rec_len = u16::from_le_bytes(*(bytes[4..6].as_ptr() as *const [u8; 2]));
+        let inode = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        let rec_len = u16::from_le_bytes(bytes[4..6].try_into().unwrap());
         let mut name_len = bytes[6];
         let file_type = bytes[7];
 

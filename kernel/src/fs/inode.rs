@@ -174,50 +174,50 @@ pub struct INodeOps {
 
     /// Lookup entry in directory
     /// Returns inode number if found, or error
-    pub lookup: Option<unsafe fn(&Inode, &[u8]) -> Result<Ino, Errno>>,
+    pub lookup: Option<fn(&Inode, &[u8]) -> Result<Ino, Errno>>,
 
     /// Create regular file
-    pub create: Option<unsafe fn(&Inode, &[u8], InodeMode) -> Result<Arc<Inode>, Errno>>,
+    pub create: Option<fn(&Inode, &[u8], InodeMode) -> Result<Arc<Inode>, Errno>>,
 
     /// Create hard link
     /// Arguments: (dir, name, target_inode)
-    pub link: Option<unsafe fn(&Inode, &[u8], &Inode) -> i32>,
+    pub link: Option<fn(&Inode, &[u8], &Inode) -> i32>,
 
     /// Remove directory entry (unlink file)
-    pub unlink: Option<unsafe fn(&Inode, &[u8]) -> i32>,
+    pub unlink: Option<fn(&Inode, &[u8]) -> i32>,
 
     /// Create symbolic link
     /// Arguments: (dir, name, target_path)
-    pub symlink: Option<unsafe fn(&Inode, &[u8], &[u8]) -> Result<Arc<Inode>, Errno>>,
+    pub symlink: Option<fn(&Inode, &[u8], &[u8]) -> Result<Arc<Inode>, Errno>>,
 
     /// Create directory
-    pub mkdir: Option<unsafe fn(&Inode, &[u8], InodeMode) -> Result<Arc<Inode>, Errno>>,
+    pub mkdir: Option<fn(&Inode, &[u8], InodeMode) -> Result<Arc<Inode>, Errno>>,
 
     /// Remove empty directory
-    pub rmdir: Option<unsafe fn(&Inode, &[u8]) -> i32>,
+    pub rmdir: Option<fn(&Inode, &[u8]) -> i32>,
 
     /// Create device node (mknod)
-    pub mknod: Option<unsafe fn(&Inode, &[u8], InodeMode, u64) -> Result<Arc<Inode>, Errno>>,
+    pub mknod: Option<fn(&Inode, &[u8], InodeMode, u64) -> Result<Arc<Inode>, Errno>>,
 
     /// Rename file/directory
     /// Arguments: (old_dir, old_name, new_dir, new_name)
-    pub rename: Option<unsafe fn(&Inode, &[u8], &Inode, &[u8]) -> i32>,
+    pub rename: Option<fn(&Inode, &[u8], &Inode, &[u8]) -> i32>,
 
     // ==================== Symlink Operations ====================
 
     /// Read symbolic link target
     /// Returns number of bytes written to buffer, or negative errno
-    pub readlink: Option<unsafe fn(&Inode, &mut [u8]) -> isize>,
+    pub readlink: Option<fn(&Inode, &mut [u8]) -> isize>,
 
     // ==================== File Operations (delegated) ====================
 
     /// Get file operations for this inode
     /// This allows inode-specific file operations
-    pub get_file_ops: Option<unsafe fn(&Inode) -> Option<&'static crate::fs::file::FileOps>>,
+    pub get_file_ops: Option<fn(&Inode) -> Option<&'static crate::fs::file::FileOps>>,
 
     /// List directory entries.
     /// Returns a vector of VfsDirEntry on success, None if not a directory / error.
-    pub readdir: Option<unsafe fn(&Inode) -> Option<alloc::vec::Vec<VfsDirEntry>>>,
+    pub readdir: Option<fn(&Inode) -> Option<alloc::vec::Vec<VfsDirEntry>>>,
 
     /// Incremental directory read — the reference kernel's ext4_readdir
     /// shape (getdents lane, 2026-11-17). Fills `buf` with packed
@@ -246,7 +246,7 @@ pub struct INodeOps {
     /// block-at-a-time filldir loop. `readdir` above stays as the
     /// Vec-returning fallback for callers that want whole listings.
     pub readdir_fill:
-        Option<unsafe fn(&Inode, pos: u64, buf: &mut [u8]) -> Result<(usize, u64), i32>>,
+        Option<fn(&Inode, pos: u64, buf: &mut [u8]) -> Result<(usize, u64), i32>>,
 
     /// F4 route-4 (getdents64 cache): whether this filesystem's
     /// directory listings may be cached across getdents64 calls on one
@@ -263,48 +263,54 @@ pub struct INodeOps {
 
     /// Called when a file is opened. Allows FS to set up file.private_data.
     /// Returns 0 on success, negative errno on failure.
-    pub open: Option<unsafe fn(&Inode, &crate::fs::File) -> i32>,
+    pub open: Option<fn(&Inode, &crate::fs::File) -> i32>,
 
     // ==================== Permission Operations ====================
 
     /// Check permission
     /// Returns 0 if allowed, negative errno if denied
-    pub permission: Option<unsafe fn(&Inode, u32) -> i32>,
+    pub permission: Option<fn(&Inode, u32) -> i32>,
 
     // ==================== Attribute Operations ====================
 
     /// Get attributes (stat)
     /// Returns 0 on success, fills in stat structure
-    pub getattr: Option<unsafe fn(&Inode, &mut crate::fs::Stat) -> i32>,
+    pub getattr: Option<fn(&Inode, &mut crate::fs::Stat) -> i32>,
 
     /// Set attributes
     /// attr: ATTR_MODE (1), ATTR_UID (2), ATTR_GID (3), ATTR_SIZE (4), ATTR_UID_GID (5)
     /// arg1/arg2: attribute-specific values
-    pub setattr: Option<unsafe fn(&Inode, u32, u64, u64) -> i32>,
+    pub setattr: Option<fn(&Inode, u32, u64, u64) -> i32>,
 
     // ==================== Inode Instantiation ====================
 
     /// Instantiate a VFS Inode from (parent_inode, name, child_ino).
     /// Called by dentry-based path_lookup after op_lookup returns the inode number.
     /// Each filesystem implements this to create a fully populated VFS Inode.
-    pub iget: Option<unsafe fn(&Inode, &[u8], Ino) -> Result<Arc<Inode>, Errno>>,
+    pub iget: Option<fn(&Inode, &[u8], Ino) -> Result<Arc<Inode>, Errno>>,
 
     // ==================== Inode Lifecycle ====================
 
     /// Called when an inode is about to be freed (refcount drops to zero).
     /// Use this to reclaim private_data (e.g., Arc::from_raw for leaked Arcs).
-    pub destroy_inode: Option<unsafe fn(&mut Inode)>,
+    pub destroy_inode: Option<fn(&mut Inode)>,
 }
 
-/// INV-VFSOPS-1 (unsafe-slim round 3): every dispatch through an
+/// INV-VFSOPS-1 (unsafe-slim rounds 3-4): every dispatch through an
 /// INodeOps fn-pointer slot goes through one of the `call_*` methods
-/// below — the single marked call per op. The fn pointers are typed
-/// `unsafe` only because they are function pointers stored in static
-/// tables; the callee contract is "VFS callback with safe parameter
-/// types": tables are built once at filesystem registration from
-/// in-tree callbacks, the `&Inode` receiver is the shared Arc the
-/// caller already holds, and every other argument is a plain
-/// reference/scalar. `None` slots are mapped to the caller's
+/// below (plus the `op_*` conveniences) — one place per op to read.
+/// UNSAFE-SLIM L4 (2026-11-20): the pointer types are now SAFE `fn`
+/// pointers, matching the FileOps precedent — every slot signature
+/// carries only safe parameter types (`&Inode`, `&[u8]`, scalars,
+/// `Result`), so no unsafe contract remains at the dispatch boundary.
+/// The callee contract is "VFS callback with safe parameter types":
+/// tables are built once at filesystem registration from in-tree
+/// callbacks, the `&Inode` receiver is the shared Arc the caller
+/// already holds, and every other argument is a plain
+/// reference/scalar. Implementations that need raw access (ext4's
+/// block edges, per-FS private_data views) keep narrow inner audited
+/// blocks at their own bottoms — see fs/unsafe_edges.rs.
+/// `None` slots are mapped to the caller's
 /// `unsupported` errno so each call site keeps its LTP-observed error
 /// precedence (mkdir-family sites answer EROFS, mknod EOPNOTSUPP,
 /// create EACCES — these differ on purpose).
@@ -317,7 +323,7 @@ impl INodeOps {
         unsupported: Result<Ino, Errno>,
     ) -> Result<Ino, Errno> {
         match self.lookup {
-            Some(f) => unsafe { f(dir, name) },
+            Some(f) => f(dir, name),
             None => unsupported,
         }
     }
@@ -331,7 +337,7 @@ impl INodeOps {
         unsupported: Result<Arc<Inode>, Errno>,
     ) -> Result<Arc<Inode>, Errno> {
         match self.create {
-            Some(f) => unsafe { f(dir, name, mode) },
+            Some(f) => f(dir, name, mode),
             None => unsupported,
         }
     }
@@ -339,7 +345,7 @@ impl INodeOps {
     #[inline]
     pub fn call_link(&self, dir: &Inode, name: &[u8], target: &Inode, unsupported: i32) -> i32 {
         match self.link {
-            Some(f) => unsafe { f(dir, name, target) },
+            Some(f) => f(dir, name, target),
             None => unsupported,
         }
     }
@@ -347,7 +353,7 @@ impl INodeOps {
     #[inline]
     pub fn call_unlink(&self, dir: &Inode, name: &[u8], unsupported: i32) -> i32 {
         match self.unlink {
-            Some(f) => unsafe { f(dir, name) },
+            Some(f) => f(dir, name),
             None => unsupported,
         }
     }
@@ -361,7 +367,7 @@ impl INodeOps {
         unsupported: Result<Arc<Inode>, Errno>,
     ) -> Result<Arc<Inode>, Errno> {
         match self.symlink {
-            Some(f) => unsafe { f(dir, name, target) },
+            Some(f) => f(dir, name, target),
             None => unsupported,
         }
     }
@@ -375,7 +381,7 @@ impl INodeOps {
         unsupported: Result<Arc<Inode>, Errno>,
     ) -> Result<Arc<Inode>, Errno> {
         match self.mkdir {
-            Some(f) => unsafe { f(dir, name, mode) },
+            Some(f) => f(dir, name, mode),
             None => unsupported,
         }
     }
@@ -383,7 +389,7 @@ impl INodeOps {
     #[inline]
     pub fn call_rmdir(&self, dir: &Inode, name: &[u8], unsupported: i32) -> i32 {
         match self.rmdir {
-            Some(f) => unsafe { f(dir, name) },
+            Some(f) => f(dir, name),
             None => unsupported,
         }
     }
@@ -398,7 +404,7 @@ impl INodeOps {
         unsupported: Result<Arc<Inode>, Errno>,
     ) -> Result<Arc<Inode>, Errno> {
         match self.mknod {
-            Some(f) => unsafe { f(dir, name, mode, dev) },
+            Some(f) => f(dir, name, mode, dev),
             None => unsupported,
         }
     }
@@ -413,7 +419,7 @@ impl INodeOps {
         unsupported: i32,
     ) -> i32 {
         match self.rename {
-            Some(f) => unsafe { f(old_dir, old_name, new_dir, new_name) },
+            Some(f) => f(old_dir, old_name, new_dir, new_name),
             None => unsupported,
         }
     }
@@ -421,7 +427,7 @@ impl INodeOps {
     #[inline]
     pub fn call_readlink(&self, inode: &Inode, buf: &mut [u8], unsupported: isize) -> isize {
         match self.readlink {
-            Some(f) => unsafe { f(inode, buf) },
+            Some(f) => f(inode, buf),
             None => unsupported,
         }
     }
@@ -434,7 +440,7 @@ impl INodeOps {
         // get_file_ops has no "unsupported errno" — every site treats
         // both None layers identically (keep the existing ops / skip).
         match self.get_file_ops {
-            Some(f) => unsafe { f(inode) },
+            Some(f) => f(inode),
             None => None,
         }
     }
@@ -445,7 +451,7 @@ impl INodeOps {
         dir: &Inode,
     ) -> Option<alloc::vec::Vec<VfsDirEntry>> {
         match self.readdir {
-            Some(f) => unsafe { f(dir) },
+            Some(f) => f(dir),
             None => None,
         }
     }
@@ -458,7 +464,7 @@ impl INodeOps {
         buf: &mut [u8],
     ) -> Option<Result<(usize, u64), i32>> {
         match self.readdir_fill {
-            Some(f) => Some(unsafe { f(dir, pos, buf) }),
+            Some(f) => Some(f(dir, pos, buf)),
             None => None,
         }
     }
@@ -466,7 +472,7 @@ impl INodeOps {
     #[inline]
     pub fn call_open(&self, inode: &Inode, file: &crate::fs::File, unsupported: i32) -> i32 {
         match self.open {
-            Some(f) => unsafe { f(inode, file) },
+            Some(f) => f(inode, file),
             None => unsupported,
         }
     }
@@ -474,7 +480,7 @@ impl INodeOps {
     #[inline]
     pub fn call_permission(&self, inode: &Inode, mask: u32, unsupported: i32) -> i32 {
         match self.permission {
-            Some(f) => unsafe { f(inode, mask) },
+            Some(f) => f(inode, mask),
             None => unsupported,
         }
     }
@@ -482,7 +488,7 @@ impl INodeOps {
     #[inline]
     pub fn call_getattr(&self, inode: &Inode, stat: &mut crate::fs::Stat, unsupported: i32) -> i32 {
         match self.getattr {
-            Some(f) => unsafe { f(inode, stat) },
+            Some(f) => f(inode, stat),
             None => unsupported,
         }
     }
@@ -497,7 +503,7 @@ impl INodeOps {
         unsupported: i32,
     ) -> i32 {
         match self.setattr {
-            Some(f) => unsafe { f(inode, attr, arg1, arg2) },
+            Some(f) => f(inode, attr, arg1, arg2),
             None => unsupported,
         }
     }
@@ -511,7 +517,7 @@ impl INodeOps {
         unsupported: Result<Arc<Inode>, Errno>,
     ) -> Result<Arc<Inode>, Errno> {
         match self.iget {
-            Some(f) => unsafe { f(parent, name, ino) },
+            Some(f) => f(parent, name, ino),
             None => unsupported,
         }
     }
@@ -522,7 +528,7 @@ impl INodeOps {
     pub fn call_destroy_inode(&self, inode: &mut Inode) -> bool {
         match self.destroy_inode {
             Some(f) => {
-                unsafe { f(inode) };
+                f(inode);
                 true
             }
             None => false,
@@ -740,7 +746,7 @@ impl Drop for Inode {
         // Option::take(), so they are idempotent.
         if let Some(ops) = self.ops {
             if let Some(destroy_fn) = ops.destroy_inode {
-                unsafe { destroy_fn(self) };
+                destroy_fn(self);
             }
         }
     }
@@ -958,7 +964,7 @@ impl Inode {
     pub fn op_lookup(&self, name: &[u8]) -> Result<Ino, Errno> {
         if let Some(ops) = self.ops {
             if let Some(lookup_fn) = ops.lookup {
-                return unsafe { lookup_fn(self, name) };
+                return lookup_fn(self, name);
             }
         }
         Err(crate::errno::Errno::FunctionNotImplemented)
@@ -969,7 +975,7 @@ impl Inode {
     pub fn op_create(&self, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, Errno> {
         if let Some(ops) = self.ops {
             if let Some(create_fn) = ops.create {
-                return unsafe { create_fn(self, name, mode) };
+                return create_fn(self, name, mode);
             }
         }
         Err(crate::errno::Errno::FunctionNotImplemented)
@@ -980,7 +986,7 @@ impl Inode {
     pub fn op_mkdir(&self, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, Errno> {
         if let Some(ops) = self.ops {
             if let Some(mkdir_fn) = ops.mkdir {
-                return unsafe { mkdir_fn(self, name, mode) };
+                return mkdir_fn(self, name, mode);
             }
         }
         Err(crate::errno::Errno::FunctionNotImplemented)
@@ -991,7 +997,7 @@ impl Inode {
     pub fn op_unlink(&self, name: &[u8]) -> i32 {
         if let Some(ops) = self.ops {
             if let Some(unlink_fn) = ops.unlink {
-                return unsafe { unlink_fn(self, name) };
+                return unlink_fn(self, name);
             }
         }
         crate::errno::Errno::FunctionNotImplemented.as_neg_i32()
@@ -1002,7 +1008,7 @@ impl Inode {
     pub fn op_rmdir(&self, name: &[u8]) -> i32 {
         if let Some(ops) = self.ops {
             if let Some(rmdir_fn) = ops.rmdir {
-                return unsafe { rmdir_fn(self, name) };
+                return rmdir_fn(self, name);
             }
         }
         crate::errno::Errno::FunctionNotImplemented.as_neg_i32()
@@ -1013,7 +1019,7 @@ impl Inode {
     pub fn op_link(&self, name: &[u8], target: &Inode) -> i32 {
         if let Some(ops) = self.ops {
             if let Some(link_fn) = ops.link {
-                return unsafe { link_fn(self, name, target) };
+                return link_fn(self, name, target);
             }
         }
         crate::errno::Errno::FunctionNotImplemented.as_neg_i32()
@@ -1024,7 +1030,7 @@ impl Inode {
     pub fn op_symlink(&self, name: &[u8], target: &[u8]) -> Result<Arc<Inode>, Errno> {
         if let Some(ops) = self.ops {
             if let Some(symlink_fn) = ops.symlink {
-                return unsafe { symlink_fn(self, name, target) };
+                return symlink_fn(self, name, target);
             }
         }
         Err(crate::errno::Errno::FunctionNotImplemented)
@@ -1035,7 +1041,7 @@ impl Inode {
     pub fn op_rename(&self, old_name: &[u8], new_dir: &Inode, new_name: &[u8]) -> i32 {
         if let Some(ops) = self.ops {
             if let Some(rename_fn) = ops.rename {
-                return unsafe { rename_fn(self, old_name, new_dir, new_name) };
+                return rename_fn(self, old_name, new_dir, new_name);
             }
         }
         crate::errno::Errno::FunctionNotImplemented.as_neg_i32()
@@ -1046,7 +1052,7 @@ impl Inode {
     pub fn op_readlink(&self, buf: &mut [u8]) -> isize {
         if let Some(ops) = self.ops {
             if let Some(readlink_fn) = ops.readlink {
-                return unsafe { readlink_fn(self, buf) };
+                return readlink_fn(self, buf);
             }
         }
         crate::errno::Errno::FunctionNotImplemented.as_neg_i32() as isize
@@ -1057,7 +1063,7 @@ impl Inode {
     pub fn op_getattr(&self, stat: &mut crate::fs::Stat) -> i32 {
         if let Some(ops) = self.ops {
             if let Some(getattr_fn) = ops.getattr {
-                return unsafe { getattr_fn(self, stat) };
+                return getattr_fn(self, stat);
             }
         }
         // Default implementation
@@ -1072,7 +1078,7 @@ impl Inode {
     pub fn op_setattr(&self, attr: u32, arg1: u64, arg2: u64) -> i32 {
         if let Some(ops) = self.ops {
             if let Some(setattr_fn) = ops.setattr {
-                return unsafe { setattr_fn(self, attr, arg1, arg2) };
+                return setattr_fn(self, attr, arg1, arg2);
             }
         }
         crate::errno::Errno::ReadOnlyFileSystem.as_neg_i32()
@@ -1083,7 +1089,7 @@ impl Inode {
     pub fn op_permission(&self, mask: u32) -> i32 {
         if let Some(ops) = self.ops {
             if let Some(perm_fn) = ops.permission {
-                return unsafe { perm_fn(self, mask) };
+                return perm_fn(self, mask);
             }
         }
         // Default: allow all
