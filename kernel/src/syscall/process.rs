@@ -1191,9 +1191,15 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
     // Linux. Must run BEFORE the address space is replaced: sibling
     // threads sharing this mm would otherwise keep executing the OLD
     // image against the NEW mm / already-cloexec'd fdtable. ----
+    // FATAL-SIGNAL ESCAPE (oh-launch round 3): a drain blocked forever
+    // by an unkillable member (the round-2 foundation wedge —
+    // mmi_service's execveat never returned) unwinds here with EINTR
+    // instead of parking the exec forever. Nothing has been installed
+    // yet, so the abort leaves the old image fully consistent; the
+    // pending SIGKILL is delivered at the syscall exit.
     // SAFETY: current is the running task (checked above).
-    unsafe {
-        crate::process::exit::de_thread(current);
+    if !unsafe { crate::process::exit::de_thread(current) } {
+        return -(errno::EINTR as i64) as u64;
     }
 
     // Pinned file identities for the exec-time segment VMAs (vm_file

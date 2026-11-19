@@ -417,7 +417,15 @@ pub fn kill_other_threads(current: *mut Task) {
 /// A member stuck in UNINTERRUPTIBLE kernel sleep will wedge us here
 /// (same trade-off as Linux's exit_group on D-state threads is NOT
 /// taken there — documented as a known risk).
-pub fn wait_for_thread_group_death(current: *mut Task) {
+///
+/// `killable` gates the fatal-signal escape: the EXEC (de_thread)
+/// caller passes true — its own pending SIGKILL aborts the drain
+/// (returns false, drain incomplete) so the exec can unwind with EINTR
+/// before anything is installed; the do_exit caller passes false — an
+/// exiting leader CANNOT unwind, and the shared-mm-dependent teardown
+/// below it requires the drain, so the wait parks regardless of its
+/// own pending signals (the pre-existing contract).
+pub fn wait_for_thread_group_death(current: *mut Task, killable: bool) -> bool {
     crate::arch::cpu::restore_irq(true);
     // timer-gap lane (pi_stress -g 2 shutdown wedge): the wait must PARK,
     // not spin. A RUNNING leader's schedule() requeues and re-picks it
@@ -429,8 +437,23 @@ pub fn wait_for_thread_group_death(current: *mut Task) {
     // INTERRUPTIBLE: the pick skips a sleeping leader, the members run
     // their fatal-signal exits, and thread_group_leave's decrement-side
     // wake (see task.rs) brings us back to re-check nr_threads.
+    //
+    // FATAL-SIGNAL ESCAPE, killable arm only (oh-launch round 3): a
+    // member that cannot exit (stuck in an unkillable in-kernel wait —
+    // the round-2 foundation wedge: one open() parked forever blocked
+    // the group drain, which parked the exec'ing thread's execveat
+    // forever and silenced the whole service) used to park THIS wait
+    // forever too. The exec'ing task's own pending SIGKILL aborts the
+    // drain and unwinds the exec with EINTR — safe there because
+    // de_thread runs BEFORE any state is installed (no new mm, no
+    // fdtable switch); the already-SIGKILLed members keep dying on
+    // their own, and the abandoning thread returns to userspace where
+    // its SIGKILL is delivered and it exits normally.
     // SAFETY: current stays valid (it is the running task).
     while unsafe { (*current).nr_threads() } > 1 {
+        if killable && crate::signal::fatal_signal_pending() {
+            return false;
+        }
         unsafe {
             (*current).set_state(crate::process::task::TaskState::new(
                 crate::process::task::TaskState::INTERRUPTIBLE,
@@ -443,6 +466,7 @@ pub fn wait_for_thread_group_death(current: *mut Task) {
             ));
         }
     }
+    true
 }
 
 /// de_thread — exec-time group teardown (Linux de_thread):
@@ -450,14 +474,18 @@ pub fn wait_for_thread_group_death(current: *mut Task) {
 /// new image is installed. Called from the execve path AFTER all
 /// fail-able preparation (a failed exec leaves the process single-
 /// threaded, matching Linux's point-of-no-return behavior).
-pub fn de_thread(current: *mut Task) {
+/// Returns false when the drain was aborted by the exec'ing task's
+/// own fatal signal (the caller unwinds the exec with EINTR — see
+/// wait_for_thread_group_death).
+pub fn de_thread(current: *mut Task) -> bool {
     // SAFETY: caller (execve path) passes the running task.
     unsafe {
         if (*current).nr_threads() > 1 {
             kill_other_threads(current);
-            wait_for_thread_group_death(current);
+            return wait_for_thread_group_death(current, true);
         }
     }
+    true
 }
 
 /// Free one exited group member whose context switch-out has completed.
@@ -2061,7 +2089,10 @@ pub fn do_exit(exit_code: i32) -> ! {
         // down the shared-mm-dependent state any further.
         if (*current).nr_threads() > 1 {
             kill_other_threads(current);
-            wait_for_thread_group_death(current);
+            // NOT killable: an exiting leader cannot unwind, and the
+            // shared-mm teardown below requires the drain (see the
+            // wait_for_thread_group_death doc).
+            wait_for_thread_group_death(current, false);
         }
 
         // ===== pid-namespace init exit: tear the namespace down =====
