@@ -2836,7 +2836,41 @@ pub fn segv_hist_age(tid: u32) -> Option<(u64, u64)> {
 /// garbage pointer (the gnome-shell ELF-magic wild-jump class:
 /// fault == 0x010102464c457f == LE bytes "\x7fELF\x02\x01\x01\x00").
 /// Diagnostic only: every read is checked through the page-table walk.
+static USEGV_FOR_ENTERED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
+    // R13 (fr13's silent death): a re-entrancy latch for the forensic
+    // path itself. The full-decode body probes userspace memory and
+    // walks stacks; on a kernel whose memory is under an active
+    // corruption hunt those reads CAN fault, and the fault re-entered
+    // the trap path mid-forensics — fr13's serial ended MID-TRACE with
+    // no park marker (the second fault's own dump also died), parking
+    // CPUs silently and wedgeing the box with zero evidence. The KERNPANIC
+    // dump has had exactly this latch since R73; this path did not.
+    // Second entry: one raw marker, release any stranded runqueue, IRQs
+    // off, eternal halt (the round-11 parked-CPU discipline — a dead CPU
+    // never takes interrupts again).
+    if USEGV_FOR_ENTERED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        for &b in b"trap: user_segv_forensics re-entered; halting cpu=" {
+            crate::console::uart_putc_raw(b);
+        }
+        {
+            let c = crate::arch::cpu_id();
+            if c < 10 {
+                crate::console::uart_putc_raw(b'0' + c as u8);
+            } else {
+                crate::console::uart_putc_raw(b'A' + (c - 10) as u8);
+            }
+        }
+        crate::console::uart_putc_raw(b'\n');
+        crate::sched::sched::terminal_release_grq_if_held();
+        crate::arch::cpu::disable_irq();
+        loop {
+            // SAFETY: hlt with IF=0 never wakes — the intentional
+            // permanent park of a crashed forensic context.
+            unsafe { core::arch::asm!("hlt") };
+        }
+    }
     segv_hist_note(fault_addr);
     let pid = crate::sched::get_current_pid();
     // sc112: name the crashing process — the memfd USB DDK PnP NULL-walk

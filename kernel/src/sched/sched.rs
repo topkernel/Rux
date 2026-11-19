@@ -1030,7 +1030,37 @@ pub fn grq_dump_holder(why: &str) {
             fp = next;
         }
         if n == 0 {
-            grq_raw_puts(b"GRQ-BT  (no frames)\n");
+            grq_raw_puts(b"GRQ-BT  (no frames)");
+            // R13 (fr12's unnameable inner-spin holder): when the frame
+            // chain is unwalkable (fp stamp 0/invalid or the chain
+            // corrupt), dump the holder's stack TOP raw — the deepest
+            // 16 qwords below the top carry the most recent context
+            // (an IRQ-interrupted frame's pt_regs + the interrupted
+            // return addresses), symbolizable offline. The holder is
+            // wedged, so the reads are consistent.
+            let cur = unsafe { crate::sched::sched::cpu_state(cpu).current };
+            if !cur.is_null() {
+                let top = unsafe { (*cur).kernel_stack_top() };
+                if top != 0 {
+                    grq_raw_puts(b" top-raw:\n");
+                    let mut off = 168 + 16 * 8; // below the pt_regs anchor
+                    while off >= 8 * 8 {
+                        off -= 8;
+                        // SAFETY: the holder's own kernel stack, in-bounds
+                        // by construction (top - off within the 16K stack).
+                        let v = unsafe {
+                            core::ptr::read_volatile((top - off) as *const u64)
+                        };
+                        grq_raw_puts(b"GRQ-BT   @-");
+                        grq_raw_putdec(off as u64);
+                        grq_raw_puts(b" 0x");
+                        grq_raw_puthex(v);
+                        grq_raw_puts(b"\n");
+                    }
+                }
+            } else {
+                grq_raw_puts(b"\n");
+            }
         }
     }
 }
