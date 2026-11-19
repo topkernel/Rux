@@ -266,7 +266,7 @@
       <li><b>safe-by-construction 即优化</b>:D-1 单结构取证(OH 战役调度 bug 族实际靠它找到);叶子表直走 unmap(vm-op 族 15→5 s/CPU-min);负向查找缓存(negative memo)(oracle 475k/963k/0)。</li>
       <li><b>语义分歧靠 diff Linux 树发现、靠采纳其行为修复</b>(根因而非症状):execve ETXTBSY、SysV IPC 按 namespace、共享 futex 键解析到物理字、tmpfs MAP_SHARED 经页缓存一致、binder poll 三条件、O_DIRECT 读先冲脏页缓存、SYSRET TF|RF 回退、用户态可写字符串全查 UTF-8。</li>
       <li><b>安全性质(C 内核靠工具租的类)</b>:构造性内存安全 + SMAP/CR0.WP/无恒等窗/用户态 W^X/seccomp/能力模型 + panic 面设计化(每实例收编 + 回归测试)。</li>
-      <li><b>重设计落地的性能(同一测试平台 A/B)</b>:lmbench 四行领先(lat_ctx 3.4×、lat_pipe 2.6×、exec 1.39×、fstat 1.19×)、切换 −58%、p5 族 −90~93%、fs 元数据族 −65~−88%;Geekbench 多核 7369(4-CPU 绑核)。</li>
+      <li><b>重设计落地的性能(同一测试平台 A/B)</b>:lmbench 四行领先(lat_ctx 3.4×、lat_pipe 2.6×、exec 1.39×、fstat 1.19×)、切换 −58%、p5 族 −90~93%、fs 元数据族 −65~−88%;Geekbench 多核 7504(4-CPU 绑核)。</li>
       <li><b>诚实占位(G 区)</b>:typed binder 事务 FSM、ext4/jbd2 宿主测试切片、内部完成环回写基底 —— 尚无 A/B 数字,离开占位区的唯一方式是交出实测行。</li>
     </ul>
 
