@@ -24,8 +24,8 @@ use crate::fs::bio;
 // Error codes
 // ============================================================================
 
-const EIO: i32 = 5;
-const EFSCORRUPTED: i32 = 117;
+const EIO: i32 = -5; // negative errno (transaction.rs convention)
+const EFSCORRUPTED: i32 = -117; // negative errno
 
 // ============================================================================
 // Recovery info

@@ -24,8 +24,8 @@ use crate::fs::bio;
 // Error codes
 // ============================================================================
 
-const EIO: i32 = 5;
-const ENOMEM: i32 = 12;
+// Negative errno (see transaction.rs's convention note).
+const EIO: i32 = -5;
 
 // ============================================================================
 // Main commit function
@@ -214,13 +214,46 @@ pub fn jbd2_journal_commit_transaction(
     let journal_first = journal.j_first;
     let journal_last = journal.j_last;
 
-    // Check space
-    let journal_free = journal.j_free.load(core::sync::atomic::Ordering::SeqCst);
-    if total_journal_blocks as u64 > journal_free {
-        crate::console::puts("jbd2: journal full, cannot commit\n");
-        journal.abort(ENOMEM);
+    // Space check — reference shape: the reference never aborts a journal
+    // for running out of its own log; jbd2_journal_commit_transaction
+    // callers block in __jbd2_log_wait_for_space, which checkpoints old
+    // transactions until the span fits. In THIS write-through design the
+    // wait would be a no-op with nothing to free: every completed commit
+    // checkpoints everything (Phase 4: j_tail == j_head, j_free ==
+    // capacity), so between commits the log is EMPTY and a span larger
+    // than the whole log area can never fit, now or later. The check is
+    // therefore against the LOG CAPACITY (not the possibly-stale j_free
+    // counter), and the response is the graceful one: the write-through
+    // pass at the head of this slow path has ALREADY persisted every
+    // registered buffer to its final location, and recovery only ever
+    // replays the crash-window transaction (sequence >= s_sequence of the
+    // last superblock write), so skipping the journal-area copy for an
+    // oversized transaction loses nothing — complete it fast-path shaped
+    // (sequences advance, log untouched) and WARN once instead of killing
+    // the filesystem. The lazy-batch high-water in jbd2_journal_stop is
+    // capacity-derived, so this arm is a belt-and-suspenders guard.
+    let log_capacity = journal.j_last.saturating_sub(journal.j_first);
+    if total_journal_blocks as u64 > log_capacity {
+        static OVERSIZE_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if OVERSIZE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+            crate::pr_warn!(
+                "jbd2: transaction span {} exceeds log area {}; committed write-through only (tid {})",
+                total_journal_blocks,
+                log_capacity,
+                tid
+            );
+        }
+        // Self-heal the free counter while we are here (head==tail ring).
+        journal.j_free.store(log_capacity, core::sync::atomic::Ordering::SeqCst);
+        journal
+            .j_commit_sequence
+            .store(tid, core::sync::atomic::Ordering::SeqCst);
+        journal
+            .j_tail_sequence
+            .store(tid, core::sync::atomic::Ordering::SeqCst);
         *commit_transaction.t_state.lock() = TransactionState::Finished;
-        return Err(ENOMEM);
+        return Ok(());
     }
 
     let mut current_journal_block = journal_head;
