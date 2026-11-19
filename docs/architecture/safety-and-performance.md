@@ -42,6 +42,57 @@ bytes / `None` / `false`. Handles are `!Send`/`!Sync` (they alias user
 mappings valid only for the current syscall on the current CPU). Call
 sites carry no `unsafe`.
 
+**INV-KPTR-1..5 (owned kernel allocation, unsafe-slim round 3 lane A,
+2026-11-19):** `safety::ptr::KPtr<T>` is the kernel's `Box` for
+device-visible memory: INV-KPTR-1 construction is the single audited
+`alloc` edge (null-checked, layout derived from the same `T` as the
+eventual dealloc); INV-KPTR-2 uniqueness gives safe `Deref`/`DerefMut`
+(exactly one owner, the `Box` aliasing contract); INV-KPTR-3 drop
+deallocates with the same `Layout::new::<T>()` — the layout-drift
+bug class is structurally closed; INV-KPTR-4 `as_ptr`/`phys`/
+`into_raw`/`from_raw` are the DMA escape hatches (block must stay
+alive while the device holds the address; re-adopt exactly once);
+INV-KPTR-5 device-written memory is read via `read_volatile`, never
+plain `Deref`.
+
+**INV-SREF-1..3 (machine-lifetime shared references, round 3 lane
+A):** `safety::ptr::StaticRef<T>` holds a shared view of storage that
+outlives the machine (INV-SREF-1: static / boxed-once registry /
+deliberate leak — each `from_parts` site names its storage), hands
+out only `&T` (INV-SREF-2: mutation stays behind the storage's own
+lock), and preserves provenance (INV-SREF-3: no offset arithmetic
+inside the type; projections re-audit via `map`). The INV-BLKDEV-1
+gen_disk hand-out generalized.
+
+**INV-DMA-1..3 (device-shared carve, round 3 lane A):**
+`safety::dma::DmaBlock` is one allocation carved into disjoint typed
+slots for virtqueue-style rings: INV-DMA-1 single tracked allocation,
+`Drop` deallocates with the stored layout; INV-DMA-2 `carve*` checks
+alignment, bounds, and disjointness (append-only frontier) and the
+owning block outlives its slots (both live in the same struct);
+INV-DMA-3 device-written fields are read only through the
+bounds-checked volatile paths, so accesses are neither torn nor
+elided.
+
+**INV-MMIO-1..3 (device-register window, round 3 lane A):**
+`safety::mmio::MmioRegion` is a bounds-checked volatile window:
+INV-MMIO-1 construction at probe carries the mapping proof;
+INV-MMIO-2 every accessor checks `offset + width <= len` before the
+access (an out-of-range offset panics loudly — a driver bug — instead
+of walking foreign memory); INV-MMIO-3 all accesses are volatile.
+Fence discipline (device ordering) stays with the driver.
+
+**INV-SAFECALL-1..3 / INV-SAFECAST-1 (unsafe-fn-call discipline,
+round 3 lane A):** an unsafe fn whose precondition discharges once
+gets exactly ONE safe wrapper (INV-SAFECALL-1) whose signature makes
+violations impossible or loud (INV-SAFECALL-2), and the unsafe
+original is never routed back through the wrapper or itself at its
+own call sites — the round-2 self-recursion class (INV-SAFECALL-3).
+`safety_cast` is the transmute-shaped edge: size assert first, ONE
+audited `transmute_copy` (INV-SAFECAST-1). The `safe_call!` macro
+generates wrapper boilerplate with the unsafe call existing only in
+the expansion.
+
 ### 2.1 The bug taxonomy v1 (round-3 sweep, 2026-11-03)
 
 Method. The sweep covered the entire bug history available to this

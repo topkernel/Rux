@@ -216,6 +216,8 @@ pub mod vma_flags;
 #[cfg(feature = "unit-test")]
 pub mod listhead;
 #[cfg(feature = "unit-test")]
+pub mod safety_primitives;
+#[cfg(feature = "unit-test")]
 pub mod path;
 #[cfg(feature = "unit-test")]
 pub mod file_flags;
@@ -471,6 +473,11 @@ pub fn run_all_tests() {
     // ===== 2. Core data structures =====
     test_group_start("listhead");
     listhead::test_listhead();
+
+    // Safety primitives (unsafe-slim round 3 lane A): KPtr/StaticRef/
+    // DmaBlock/MmioRegion/safety_cast.
+    test_group_start("safety primitives");
+    safety_primitives::test_safety_primitives();
 
     test_group_start("path");
     path::test_path();

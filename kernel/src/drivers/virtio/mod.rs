@@ -120,68 +120,56 @@ impl VirtIOBlkDevice {
         const QUEUE_NUM_MAX_OFFSET: u64 = 0x034;
         const QUEUE_NUM_OFFSET: u64 = 0x038;
 
-        // Helper macro: print register read/write
-        macro_rules! read_reg {
-            ($offset:expr, $name:expr) => {
-                {
-                    let ptr = (self.base_addr + $offset) as *const u32;
-                    core::ptr::read_volatile(ptr)
-                }
-            };
-        }
-
-        macro_rules! write_reg {
-            ($offset:expr, $name:expr, $val:expr) => {
-                {
-                    let ptr = (self.base_addr + $offset) as *mut u32;
-                    core::ptr::write_volatile(ptr, $val);
-                }
-            };
-        }
-
-        unsafe {
+        // INV-MMIO-1..3 (unsafe-slim round 3): the device's register
+        // window as a bounds-checked MmioRegion — every access below
+        // is a safe volatile op (offsets are protocol constants; the
+        // 0x200 window covers the config area the capacity read uses).
+        let mmio = crate::safety::mmio::MmioRegion::new(self.base_addr as usize, 0x200);
+        let read_reg = |off: u64| mmio.read_u32(off as usize);
+        let write_reg = |off: u64, val: u32| mmio.write_u32(off as usize, val);
+        {
+            let _ = &read_reg; let _ = &write_reg;
             // 1. Verify magic number
-            let magic = read_reg!(MAGIC_VALUE_OFFSET, "MAGIC_VALUE");
+            let magic = read_reg(MAGIC_VALUE_OFFSET);
             if magic != 0x74726976 {
                 return Err("Invalid VirtIO magic value");
             }
 
             // 2. Verify version (only support Modern VirtIO 1.0+)
-            let version = read_reg!(VERSION_OFFSET, "VERSION");
+            let version = read_reg(VERSION_OFFSET);
             if version != 2 {
                 return Err("Unsupported VirtIO version: only Modern VirtIO 1.0+ (version 2) is supported, Legacy VirtIO is not supported");
             }
 
             // 3. Verify device ID
-            let device_id = read_reg!(DEVICE_ID_OFFSET, "DEVICE_ID");
+            let device_id = read_reg(DEVICE_ID_OFFSET);
             if device_id != 2 {
                 return Err("Not a VirtIO block device");
             }
 
-            // SAFETY: MMIO base_addr points to valid device registers; all register
-            // offsets follow the VirtIO MMIO device spec. The `read_reg!` and
-            // `write_reg!` macros use volatile reads/writes at the correct offsets.
+            // (Register discipline: see the MmioRegion binding above —
+            // offsets follow the VirtIO MMIO device spec.)
             // 4. State machine: Reset device
-            write_reg!(STATUS_OFFSET, "STATUS", 0x00);
+            write_reg(STATUS_OFFSET, 0x00);
 
             // 5. State machine: ACKNOWLEDGE (0x01)
-            write_reg!(STATUS_OFFSET, "STATUS", 0x01);
-            let status = read_reg!(STATUS_OFFSET, "STATUS");
+            write_reg(STATUS_OFFSET, 0x01);
+            let status = read_reg(STATUS_OFFSET);
             if status & 0x01 == 0 {
                 return Err("Device rejected ACKNOWLEDGE status");
             }
 
             // 6. State machine: DRIVER (0x02)
-            write_reg!(STATUS_OFFSET, "STATUS", 0x01 | 0x02);
-            let status = read_reg!(STATUS_OFFSET, "STATUS");
+            write_reg(STATUS_OFFSET, 0x01 | 0x02);
+            let status = read_reg(STATUS_OFFSET);
             if status & 0x02 == 0 {
                 return Err("Device rejected DRIVER status");
             }
 
             // Check if device needs reset (NEEDS_RESET bit)
             if status & 0x40 != 0 {
-                write_reg!(STATUS_OFFSET, "STATUS", 0x00);
-                write_reg!(STATUS_OFFSET, "STATUS", 0x01 | 0x02);
+                write_reg(STATUS_OFFSET, 0x00);
+                write_reg(STATUS_OFFSET, 0x01 | 0x02);
             }
 
             // 7. Feature negotiation (R35, modeled on the R34 virtio_net fix):
@@ -199,24 +187,24 @@ impl VirtIOBlkDevice {
             const F_VERSION_1: u32 = 1 << 0;
 
             // Read word 1 and require VERSION_1
-            write_reg!(DEVICE_FEATURES_SEL_OFFSET, "DEVICE_FEATURES_SEL", 1);
-            let feats_hi = read_reg!(DEVICE_FEATURES_OFFSET, "DEVICE_FEATURES");
+            write_reg(DEVICE_FEATURES_SEL_OFFSET, 1);
+            let feats_hi = read_reg(DEVICE_FEATURES_OFFSET);
             if feats_hi & F_VERSION_1 == 0 {
                 return Err("Device does not offer VIRTIO_F_VERSION_1");
             }
-            write_reg!(DEVICE_FEATURES_SEL_OFFSET, "DEVICE_FEATURES_SEL", 0);
-            let _feats_lo = read_reg!(DEVICE_FEATURES_OFFSET, "DEVICE_FEATURES");
+            write_reg(DEVICE_FEATURES_SEL_OFFSET, 0);
+            let _feats_lo = read_reg(DEVICE_FEATURES_OFFSET);
 
             // Write back: word 0 = 0 (nothing implemented), word 1 = VERSION_1
-            write_reg!(DRIVER_FEATURES_SEL_OFFSET, "DRIVER_FEATURES_SEL", 0);
-            write_reg!(DRIVER_FEATURES_OFFSET, "DRIVER_FEATURES", 0);
-            write_reg!(DRIVER_FEATURES_SEL_OFFSET, "DRIVER_FEATURES_SEL", 1);
-            write_reg!(DRIVER_FEATURES_OFFSET, "DRIVER_FEATURES", F_VERSION_1);
+            write_reg(DRIVER_FEATURES_SEL_OFFSET, 0);
+            write_reg(DRIVER_FEATURES_OFFSET, 0);
+            write_reg(DRIVER_FEATURES_SEL_OFFSET, 1);
+            write_reg(DRIVER_FEATURES_OFFSET, F_VERSION_1);
 
             // 9.5. Set FEATURES_OK bit and verify the device accepted the
             // negotiated set (a modern device clears the bit on rejection).
-            write_reg!(STATUS_OFFSET, "STATUS", 0x01 | 0x02 | 0x08);
-            let status = read_reg!(STATUS_OFFSET, "STATUS");
+            write_reg(STATUS_OFFSET, 0x01 | 0x02 | 0x08);
+            let status = read_reg(STATUS_OFFSET);
             if status & 0x08 == 0 {
                 return Err("Device rejected negotiated features (features_ok cleared)");
             }
@@ -224,10 +212,10 @@ impl VirtIOBlkDevice {
             // ========== VirtQueue setup ==========
 
             // 10. Select queue 0
-            write_reg!(QUEUE_SEL_OFFSET, "QUEUE_SEL", 0);
+            write_reg(QUEUE_SEL_OFFSET, 0);
 
             // 11. Read max queue size
-            let max_queue_size = read_reg!(QUEUE_NUM_MAX_OFFSET, "QUEUE_NUM_MAX");
+            let max_queue_size = read_reg(QUEUE_NUM_MAX_OFFSET);
 
             if max_queue_size == 0 {
                 return Err("VirtIO device has zero queue size");
@@ -236,7 +224,7 @@ impl VirtIOBlkDevice {
             self.queue_size = if max_queue_size < 8 { 4 } else { 8 };
 
             // 12. Set queue count
-            write_reg!(QUEUE_NUM_OFFSET, "QUEUE_NUM", self.queue_size as u32);
+            write_reg(QUEUE_NUM_OFFSET, self.queue_size as u32);
 
             // 13. Create VirtQueue (allocate vring memory)
             // R35 (W32): virtio-mmio drops any register access whose size
@@ -286,29 +274,25 @@ impl VirtIOBlkDevice {
             ).0;
 
             // Write descriptor table address (low 32 bits)
-            write_reg!(QUEUE_DESC_LO_OFFSET, "QUEUE_DESC_LO", (desc_phys_addr & 0xFFFFFFFF) as u32);
+            write_reg(QUEUE_DESC_LO_OFFSET, (desc_phys_addr & 0xFFFFFFFF) as u32);
             // Write descriptor table address (high 32 bits)
-            write_reg!(QUEUE_DESC_HI_OFFSET, "QUEUE_DESC_HI", (desc_phys_addr >> 32) as u32);
+            write_reg(QUEUE_DESC_HI_OFFSET, (desc_phys_addr >> 32) as u32);
 
             // Write available ring address (low 32 bits)
-            write_reg!(QUEUE_DRIVER_LO_OFFSET, "QUEUE_DRIVER_LO", (avail_phys_addr & 0xFFFFFFFF) as u32);
+            write_reg(QUEUE_DRIVER_LO_OFFSET, (avail_phys_addr & 0xFFFFFFFF) as u32);
             // Write available ring address (high 32 bits)
-            write_reg!(QUEUE_DRIVER_HI_OFFSET, "QUEUE_DRIVER_HI", (avail_phys_addr >> 32) as u32);
+            write_reg(QUEUE_DRIVER_HI_OFFSET, (avail_phys_addr >> 32) as u32);
 
             // Write used ring address (low 32 bits)
-            write_reg!(QUEUE_DEVICE_LO_OFFSET, "QUEUE_DEVICE_LO", (used_phys_addr & 0xFFFFFFFF) as u32);
+            write_reg(QUEUE_DEVICE_LO_OFFSET, (used_phys_addr & 0xFFFFFFFF) as u32);
             // Write used ring address (high 32 bits)
-            write_reg!(QUEUE_DEVICE_HI_OFFSET, "QUEUE_DEVICE_HI", (used_phys_addr >> 32) as u32);
+            write_reg(QUEUE_DEVICE_HI_OFFSET, (used_phys_addr >> 32) as u32);
 
             // Set queue ready bit
-            write_reg!(QUEUE_READY_OFFSET, "QUEUE_READY", 1);
+            write_reg(QUEUE_READY_OFFSET, 1);
 
-            // 15. Read device capacity
-            const VIRTIO_BLK_CONFIG_CAPACITY: u64 = 0x100;
-            let cap_ptr = (self.base_addr + VIRTIO_BLK_CONFIG_CAPACITY) as *const u64;
-            // SAFETY: MMIO config space read; must use volatile to prevent
-            // compiler from optimizing out or reordering the device access.
-            self.capacity = unsafe { core::ptr::read_volatile(cap_ptr) };
+            // 15. Read device capacity (INV-MMIO-3: volatile u64 config read)
+            self.capacity = mmio.read_u64(0x100);
 
             // 16. Update block device info
             self.disk.set_capacity(self.capacity as u64);
@@ -318,7 +302,7 @@ impl VirtIOBlkDevice {
             *self.virtqueue.lock() = Some(virtqueue);
 
             // 17. State machine: DRIVER_OK (0x04)
-            write_reg!(STATUS_OFFSET, "STATUS", 0x01 | 0x02 | 0x08 | 0x04);
+            write_reg(STATUS_OFFSET, 0x01 | 0x02 | 0x08 | 0x04);
 
             // Memory barrier
             core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
@@ -400,7 +384,7 @@ impl VirtIOBlkDevice {
         }
 
         // Phase 1: Set up and submit request (under queue lock)
-        let (used_ring_ptr, prev_used, submitted_desc_id, queue_sz, header_ptr, header_layout, resp_ptr, resp_layout) = {
+        let (used_ring_ptr, prev_used, submitted_desc_id, queue_sz, header, resp) = {
             // Get VirtQueue (irqsafe: IRQ handler also takes this lock)
             let mut queue_guard = self.virtqueue.lock_irqsave();
             let _nest = VirtioLockNest::new();
@@ -418,39 +402,20 @@ impl VirtIOBlkDevice {
                 sector,
             };
 
-            // Allocate request header buffer (needs to persist until request completes)
-            let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
-            let header_ptr: *mut VirtIOBlkReqHeader;
-            // SAFETY: Layout is non-zero-sized; null check follows immediately.
-            unsafe {
-                header_ptr = alloc::alloc::alloc(header_layout) as *mut VirtIOBlkReqHeader;
-            }
-            if header_ptr.is_null() {
-                return Err(-12);  // ENOMEM
-            }
-            // SAFETY: header_ptr is non-null and properly aligned.
-            unsafe {
-                *header_ptr = req_header;
-            }
-
-            // Allocate response buffer
-            let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
-            let resp_ptr: *mut VirtIOBlkResp;
-            // SAFETY: Layout is non-zero-sized; null check follows immediately.
-            unsafe {
-                resp_ptr = alloc::alloc::alloc(resp_layout) as *mut VirtIOBlkResp;
-            }
-            if resp_ptr.is_null() {
-                // SAFETY: header_ptr was allocated with header_layout and is still valid.
-                unsafe {
-                    alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-                }
-                return Err(-12);  // ENOMEM
-            }
-            // SAFETY: resp_ptr is non-null and properly aligned.
-            unsafe {
-                (*resp_ptr).status = 0xFF;  // Initialize to invalid state
-            }
+            // INV-KPTR-1: the ONE audited allocation per buffer; error
+            // paths below need no manual dealloc (Drop owns it now).
+            let header = match crate::safety::ptr::KPtr::new(req_header) {
+                Some(h) => h,
+                None => return Err(-12),  // ENOMEM
+            };
+            let resp = match crate::safety::ptr::KPtr::new(VirtIOBlkResp {
+                status: 0xFF,  // Initialize to invalid state
+            }) {
+                Some(r) => r,
+                None => return Err(-12),  // ENOMEM
+            };
+            let header_ptr = header.as_ptr();
+            let resp_ptr = resp.as_ptr();
 
             // VirtIO descriptor flags
             const VIRTQ_DESC_F_NEXT: u16 = 1;
@@ -469,36 +434,11 @@ impl VirtIOBlkDevice {
 
             // Allocate three descriptors — R22-6: dealloc header/resp on
             // failure (write_block already had this; read_block leaked).
-            let header_desc_idx = match queue.alloc_desc() {
-                Some(idx) => idx,
-                None => {
-                    unsafe {
-                        alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-                        alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
-                    }
-                    return Err(-5);
-                }
-            };
-            let data_desc_idx = match queue.alloc_desc() {
-                Some(idx) => idx,
-                None => {
-                    unsafe {
-                        alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-                        alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
-                    }
-                    return Err(-5);
-                }
-            };
-            let resp_desc_idx = match queue.alloc_desc() {
-                Some(idx) => idx,
-                None => {
-                    unsafe {
-                        alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-                        alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
-                    }
-                    return Err(-5);
-                }
-            };
+            // (alloc failures drop header/resp via KPtr::drop — the
+            // manual dealloc sites are gone.)
+            let header_desc_idx = queue.alloc_desc().ok_or(-5)?;
+            let data_desc_idx = queue.alloc_desc().ok_or(-5)?;
+            let resp_desc_idx = queue.alloc_desc().ok_or(-5)?;
 
             // Set request header descriptor (read-only, device reads) - use physical address
             queue.set_desc(
@@ -551,7 +491,7 @@ impl VirtIOBlkDevice {
             let used_ptr = queue.used_ring_ptr();
             let q_size = queue.queue_size;
 
-            (used_ptr, prev, header_desc_idx as u32, q_size, header_ptr, header_layout, resp_ptr, resp_layout)
+            (used_ptr, prev, header_desc_idx as u32, q_size, header, resp)
         };
         // queue_guard dropped here — VirtQueue spinlock released
 
@@ -577,45 +517,44 @@ impl VirtIOBlkDevice {
             // under the queue lock in Phase 1; read_volatile is the I/O
             // access pattern the completion path already uses.
             let mut late = false;
-            unsafe {
-                // Same ring-scan discipline as wait_for_desc_completion:
-                // UsedRing is [flags:u16, idx:u16, ring:UsedElem[]].
-                for _ in 0..50_000_000u64 {
-                    core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
-                    let used_idx = core::ptr::read_volatile((used_ring_ptr as usize + 2) as *const u16);
-                    let mut scan = prev_used;
-                    while scan != used_idx {
-                        let slot = scan as usize % queue_sz as usize;
-                        let entry_id = core::ptr::read_volatile((used_ring_ptr as usize + 4 + slot * 8) as *const u32);
-                        if entry_id == submitted_desc_id {
-                            late = true;
-                            break;
-                        }
-                        scan = scan.wrapping_add(1);
-                    }
-                    if late {
+            // Same ring-scan discipline as wait_for_desc_completion,
+            // through the typed volatile readers (INV-SAFECALL).
+            for _ in 0..50_000_000u64 {
+                core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+                let used_idx = queue::used_ring_idx(used_ring_ptr);
+                let mut scan = prev_used;
+                while scan != used_idx {
+                    let slot = scan as usize % queue_sz as usize;
+                    let entry_id = queue::used_ring_elem_id(used_ring_ptr, slot);
+                    if entry_id == submitted_desc_id {
+                        late = true;
                         break;
                     }
-                    core::hint::spin_loop();
+                    scan = scan.wrapping_add(1);
                 }
+                if late {
+                    break;
+                }
+                core::hint::spin_loop();
             }
             if !late {
+                // R21-N2 unchanged: LEAK header/resp on a true timeout
+                // (the device may still DMA into them) — KPtr must NOT
+                // drop here.
+                core::mem::forget(header);
+                core::mem::forget(resp);
                 return Err(-5); // EIO — header/resp deliberately leaked
             }
             // Completed late — fall through to the normal status handling.
         }
 
-        // SAFETY: resp_ptr was allocated above; device has completed the response.
-        unsafe {
-            let status = (*resp_ptr).status;
-            alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-            alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
-
-            if status == queue::status::VIRTIO_BLK_S_OK {
-                Ok(())
-            } else {
-                Err(-5)  // EIO
-            }
+        // INV-KPTR-5: the device wrote the status byte; volatile read.
+        // (header/resp dealloc is KPtr::drop at scope end.)
+        let status = resp.read_volatile().status;
+        if status == queue::status::VIRTIO_BLK_S_OK {
+            Ok(())
+        } else {
+            Err(-5)  // EIO
         }
     }
 
@@ -626,7 +565,7 @@ impl VirtIOBlkDevice {
         }
 
         // Phase 1: Set up and submit request (under queue lock)
-        let (used_ring_ptr, prev_used, submitted_desc_id, queue_sz, header_ptr, header_layout, resp_ptr, resp_layout) = {
+        let (used_ring_ptr, prev_used, submitted_desc_id, queue_sz, header, resp) = {
             // Get VirtQueue (irqsafe: IRQ handler also takes this lock)
             let mut queue_guard = self.virtqueue.lock_irqsave();
             let _nest = VirtioLockNest::new();
@@ -641,39 +580,20 @@ impl VirtIOBlkDevice {
                 sector,
             };
 
-            // Allocate request header buffer (needs to persist until request completes)
-            let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
-            let header_ptr: *mut VirtIOBlkReqHeader;
-            // SAFETY: Layout is non-zero-sized; null check follows immediately.
-            unsafe {
-                header_ptr = alloc::alloc::alloc(header_layout) as *mut VirtIOBlkReqHeader;
-            }
-            if header_ptr.is_null() {
-                return Err(-12);  // ENOMEM
-            }
-            // SAFETY: header_ptr is non-null and properly aligned.
-            unsafe {
-                *header_ptr = req_header;
-            }
-
-            // Allocate response buffer
-            let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
-            let resp_ptr: *mut VirtIOBlkResp;
-            // SAFETY: Layout is non-zero-sized; null check follows immediately.
-            unsafe {
-                resp_ptr = alloc::alloc::alloc(resp_layout) as *mut VirtIOBlkResp;
-            }
-            if resp_ptr.is_null() {
-                // SAFETY: header_ptr was allocated with header_layout and is still valid.
-                unsafe {
-                    alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-                }
-                return Err(-12);  // ENOMEM
-            }
-            // SAFETY: resp_ptr is non-null and properly aligned.
-            unsafe {
-                (*resp_ptr).status = 0xFF;  // Initialize to invalid state
-            }
+            // INV-KPTR-1: the ONE audited allocation per buffer; error
+            // paths below need no manual dealloc (Drop owns it now).
+            let header = match crate::safety::ptr::KPtr::new(req_header) {
+                Some(h) => h,
+                None => return Err(-12),  // ENOMEM
+            };
+            let resp = match crate::safety::ptr::KPtr::new(VirtIOBlkResp {
+                status: 0xFF,  // Initialize to invalid state
+            }) {
+                Some(r) => r,
+                None => return Err(-12),  // ENOMEM
+            };
+            let header_ptr = header.as_ptr();
+            let resp_ptr = resp.as_ptr();
 
             // VirtIO descriptor flags
             const VIRTQ_DESC_F_NEXT: u16 = 1;
@@ -746,7 +666,7 @@ impl VirtIOBlkDevice {
             let used_ptr = queue.used_ring_ptr();
             let q_size = queue.queue_size;
 
-            (used_ptr, prev, header_desc_idx as u32, q_size, header_ptr, header_layout, resp_ptr, resp_layout)
+            (used_ptr, prev, header_desc_idx as u32, q_size, header, resp)
         };
         // queue_guard dropped here — VirtQueue spinlock released
 
@@ -772,45 +692,44 @@ impl VirtIOBlkDevice {
             // under the queue lock in Phase 1; read_volatile is the I/O
             // access pattern the completion path already uses.
             let mut late = false;
-            unsafe {
-                // Same ring-scan discipline as wait_for_desc_completion:
-                // UsedRing is [flags:u16, idx:u16, ring:UsedElem[]].
-                for _ in 0..50_000_000u64 {
-                    core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
-                    let used_idx = core::ptr::read_volatile((used_ring_ptr as usize + 2) as *const u16);
-                    let mut scan = prev_used;
-                    while scan != used_idx {
-                        let slot = scan as usize % queue_sz as usize;
-                        let entry_id = core::ptr::read_volatile((used_ring_ptr as usize + 4 + slot * 8) as *const u32);
-                        if entry_id == submitted_desc_id {
-                            late = true;
-                            break;
-                        }
-                        scan = scan.wrapping_add(1);
-                    }
-                    if late {
+            // Same ring-scan discipline as wait_for_desc_completion,
+            // through the typed volatile readers (INV-SAFECALL).
+            for _ in 0..50_000_000u64 {
+                core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+                let used_idx = queue::used_ring_idx(used_ring_ptr);
+                let mut scan = prev_used;
+                while scan != used_idx {
+                    let slot = scan as usize % queue_sz as usize;
+                    let entry_id = queue::used_ring_elem_id(used_ring_ptr, slot);
+                    if entry_id == submitted_desc_id {
+                        late = true;
                         break;
                     }
-                    core::hint::spin_loop();
+                    scan = scan.wrapping_add(1);
                 }
+                if late {
+                    break;
+                }
+                core::hint::spin_loop();
             }
             if !late {
+                // R21-N2 unchanged: LEAK header/resp on a true timeout
+                // (the device may still DMA into them) — KPtr must NOT
+                // drop here.
+                core::mem::forget(header);
+                core::mem::forget(resp);
                 return Err(-5); // EIO — header/resp deliberately leaked
             }
             // Completed late — fall through to the normal status handling.
         }
 
-        // SAFETY: resp_ptr was allocated above; device has completed the response.
-        unsafe {
-            let status = (*resp_ptr).status;
-            alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-            alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
-
-            if status == queue::status::VIRTIO_BLK_S_OK {
-                Ok(())
-            } else {
-                Err(-5)  // EIO
-            }
+        // INV-KPTR-5: the device wrote the status byte; volatile read.
+        // (header/resp dealloc is KPtr::drop at scope end.)
+        let status = resp.read_volatile().status;
+        if status == queue::status::VIRTIO_BLK_S_OK {
+            Ok(())
+        } else {
+            Err(-5)  // EIO
         }
     }
 }
@@ -855,41 +774,22 @@ impl VirtIOBlkDevice {
             None => return Err(-5),
         };
 
-        // Allocate header and response buffers
-        let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
-        let header_ptr: *mut u8;
-        // SAFETY: Layout is non-zero-sized; null check follows immediately.
-        unsafe {
-            header_ptr = alloc::alloc::alloc(header_layout);
-        }
-        if header_ptr.is_null() {
-            return Err(-12);
-        }
-        // SAFETY: header_ptr is non-null and properly aligned for VirtIOBlkReqHeader.
-        unsafe {
-            let header = header_ptr as *mut VirtIOBlkReqHeader;
-            (*header) = VirtIOBlkReqHeader {
-                type_: queue::req_type::VIRTIO_BLK_T_IN,
-                reserved: 0,
-                sector,
-            };
-        }
-
-        let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
-        let resp_ptr: *mut u8;
-        // SAFETY: Layout is non-zero-sized; null check follows immediately.
-        unsafe {
-            resp_ptr = alloc::alloc::alloc(resp_layout);
-        }
-        if resp_ptr.is_null() {
-            // SAFETY: header_ptr was allocated with header_layout and is still valid.
-            unsafe { alloc::alloc::dealloc(header_ptr, header_layout); }
-            return Err(-12);
-        }
-        // SAFETY: resp_ptr is non-null and properly aligned for VirtIOBlkResp.
-        unsafe {
-            *(resp_ptr as *mut VirtIOBlkResp) = VirtIOBlkResp { status: 0xFF };
-        }
+        // INV-KPTR-1: one audited allocation per buffer; every error
+        // path below drops them automatically (no manual deallocs).
+        let header = match crate::safety::ptr::KPtr::new(VirtIOBlkReqHeader {
+            type_: queue::req_type::VIRTIO_BLK_T_IN,
+            reserved: 0,
+            sector,
+        }) {
+            Some(h) => h,
+            None => return Err(-12),
+        };
+        let resp = match crate::safety::ptr::KPtr::new(VirtIOBlkResp { status: 0xFF }) {
+            Some(r) => r,
+            None => return Err(-12),
+        };
+        let header_ptr = header.as_ptr() as *mut u8;
+        let resp_ptr = resp.as_ptr() as *mut u8;
 
         const VIRTQ_DESC_F_NEXT: u16 = 1;
         const VIRTQ_DESC_F_WRITE: u16 = 2;
@@ -904,39 +804,10 @@ impl VirtIOBlkDevice {
             crate::arch::mm::VirtAddr::new(resp_ptr as u64),
         ).0;
 
-        let header_desc_idx = match queue.alloc_desc() {
-            Some(idx) => idx,
-            None => {
-                // SAFETY: Both pointers were allocated above and are still valid.
-                unsafe {
-                    alloc::alloc::dealloc(header_ptr, header_layout);
-                    alloc::alloc::dealloc(resp_ptr, resp_layout);
-                }
-                return Err(-5);
-            }
-        };
-        let data_desc_idx = match queue.alloc_desc() {
-            Some(idx) => idx,
-            None => {
-                // SAFETY: Both pointers were allocated above and are still valid.
-                unsafe {
-                    alloc::alloc::dealloc(header_ptr, header_layout);
-                    alloc::alloc::dealloc(resp_ptr, resp_layout);
-                }
-                return Err(-5);
-            }
-        };
-        let resp_desc_idx = match queue.alloc_desc() {
-            Some(idx) => idx,
-            None => {
-                // SAFETY: Both pointers were allocated above and are still valid.
-                unsafe {
-                    alloc::alloc::dealloc(header_ptr, header_layout);
-                    alloc::alloc::dealloc(resp_ptr, resp_layout);
-                }
-                return Err(-5);
-            }
-        };
+        // (alloc failures drop header/resp via KPtr::drop.)
+        let header_desc_idx = queue.alloc_desc().ok_or(-5)?;
+        let data_desc_idx = queue.alloc_desc().ok_or(-5)?;
+        let resp_desc_idx = queue.alloc_desc().ok_or(-5)?;
 
         queue.set_desc(header_desc_idx, header_phys,
             core::mem::size_of::<VirtIOBlkReqHeader>() as u32,
@@ -959,12 +830,6 @@ impl VirtIOBlkDevice {
         {
             let table = VIRTIO_MMIO_PENDING.lock_irqsave();
             if table[slot].is_some() {
-                // SAFETY: both buffers were allocated above and are still
-                // owned by this frame; no chain was submitted for them.
-                unsafe {
-                    alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-                    alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
-                }
                 return Err(-5);
             }
         }
@@ -973,12 +838,16 @@ impl VirtIOBlkDevice {
         increment_mmio_expected_used_idx();
 
         // Store in pending table
+        // INV-KPTR-4: ownership transfers to the pending table (the
+        // walker frees or pools header_ptr exactly as before).
+        core::mem::forget(header);
+        core::mem::forget(resp);
         let pending = PendingIo {
             completion: completion as *const _ as *mut _,
             resp_ptr,
-            resp_layout,
+            resp_layout: alloc::alloc::Layout::new::<VirtIOBlkResp>(),
             header_ptr,
-            header_layout,
+            header_layout: alloc::alloc::Layout::new::<VirtIOBlkReqHeader>(),
             // Device-truth keys for the walker below (same discipline as
             // the PCI path): the chain's head descriptor id — what the
             // used ring's UsedElem.id names when the chain completes —
@@ -1042,41 +911,22 @@ impl VirtIOBlkDevice {
             None => return Err(-5),
         };
 
-        // Allocate header and response buffers
-        let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
-        let header_ptr: *mut u8;
-        // SAFETY: Layout is non-zero-sized; null check follows immediately.
-        unsafe {
-            header_ptr = alloc::alloc::alloc(header_layout);
-        }
-        if header_ptr.is_null() {
-            return Err(-12);
-        }
-        // SAFETY: header_ptr is non-null and properly aligned for VirtIOBlkReqHeader.
-        unsafe {
-            let header = header_ptr as *mut VirtIOBlkReqHeader;
-            (*header) = VirtIOBlkReqHeader {
-                type_: queue::req_type::VIRTIO_BLK_T_OUT,
-                reserved: 0,
-                sector,
-            };
-        }
-
-        let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
-        let resp_ptr: *mut u8;
-        // SAFETY: Layout is non-zero-sized; null check follows immediately.
-        unsafe {
-            resp_ptr = alloc::alloc::alloc(resp_layout);
-        }
-        if resp_ptr.is_null() {
-            // SAFETY: header_ptr was allocated with header_layout and is still valid.
-            unsafe { alloc::alloc::dealloc(header_ptr, header_layout); }
-            return Err(-12);
-        }
-        // SAFETY: resp_ptr is non-null and properly aligned for VirtIOBlkResp.
-        unsafe {
-            *(resp_ptr as *mut VirtIOBlkResp) = VirtIOBlkResp { status: 0xFF };
-        }
+        // INV-KPTR-1: one audited allocation per buffer; error paths
+        // drop automatically.
+        let header = match crate::safety::ptr::KPtr::new(VirtIOBlkReqHeader {
+            type_: queue::req_type::VIRTIO_BLK_T_OUT,
+            reserved: 0,
+            sector,
+        }) {
+            Some(h) => h,
+            None => return Err(-12),
+        };
+        let resp = match crate::safety::ptr::KPtr::new(VirtIOBlkResp { status: 0xFF }) {
+            Some(r) => r,
+            None => return Err(-12),
+        };
+        let header_ptr = header.as_ptr() as *mut u8;
+        let resp_ptr = resp.as_ptr() as *mut u8;
 
         const VIRTQ_DESC_F_NEXT: u16 = 1;
         const VIRTQ_DESC_F_WRITE: u16 = 2;
@@ -1091,39 +941,10 @@ impl VirtIOBlkDevice {
             crate::arch::mm::VirtAddr::new(resp_ptr as u64),
         ).0;
 
-        let header_desc_idx = match queue.alloc_desc() {
-            Some(idx) => idx,
-            None => {
-                // SAFETY: Both pointers were allocated above and are still valid.
-                unsafe {
-                    alloc::alloc::dealloc(header_ptr, header_layout);
-                    alloc::alloc::dealloc(resp_ptr, resp_layout);
-                }
-                return Err(-5);
-            }
-        };
-        let data_desc_idx = match queue.alloc_desc() {
-            Some(idx) => idx,
-            None => {
-                // SAFETY: Both pointers were allocated above and are still valid.
-                unsafe {
-                    alloc::alloc::dealloc(header_ptr, header_layout);
-                    alloc::alloc::dealloc(resp_ptr, resp_layout);
-                }
-                return Err(-5);
-            }
-        };
-        let resp_desc_idx = match queue.alloc_desc() {
-            Some(idx) => idx,
-            None => {
-                // SAFETY: Both pointers were allocated above and are still valid.
-                unsafe {
-                    alloc::alloc::dealloc(header_ptr, header_layout);
-                    alloc::alloc::dealloc(resp_ptr, resp_layout);
-                }
-                return Err(-5);
-            }
-        };
+        // (alloc failures drop header/resp via KPtr::drop.)
+        let header_desc_idx = queue.alloc_desc().ok_or(-5)?;
+        let data_desc_idx = queue.alloc_desc().ok_or(-5)?;
+        let resp_desc_idx = queue.alloc_desc().ok_or(-5)?;
 
         queue.set_desc(header_desc_idx, header_phys,
             core::mem::size_of::<VirtIOBlkReqHeader>() as u32,
@@ -1143,12 +964,6 @@ impl VirtIOBlkDevice {
         {
             let table = VIRTIO_MMIO_PENDING.lock_irqsave();
             if table[slot].is_some() {
-                // SAFETY: both buffers were allocated above and are still
-                // owned by this frame; no chain was submitted for them.
-                unsafe {
-                    alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-                    alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
-                }
                 return Err(-5);
             }
         }
@@ -1157,12 +972,16 @@ impl VirtIOBlkDevice {
         increment_mmio_expected_used_idx();
 
         // Store in pending table
+        // INV-KPTR-4: ownership transfers to the pending table (the
+        // walker frees or pools header_ptr exactly as before).
+        core::mem::forget(header);
+        core::mem::forget(resp);
         let pending = PendingIo {
             completion: completion as *const _ as *mut _,
             resp_ptr,
-            resp_layout,
+            resp_layout: alloc::alloc::Layout::new::<VirtIOBlkResp>(),
             header_ptr,
-            header_layout,
+            header_layout: alloc::alloc::Layout::new::<VirtIOBlkReqHeader>(),
             // Device-truth key for the walker (same discipline as the read
             // path): match the used-ring entry by the chain's head id.
             head_desc: header_desc_idx as u32,
@@ -1325,6 +1144,72 @@ pub(crate) fn io_buf_free(p: *mut u8) {
     }
     // SAFETY: p was allocated with IO_BUF_LAYOUT.
     unsafe { alloc::alloc::dealloc(p, IO_BUF_LAYOUT) };
+}
+
+/// Split one pooled 64-byte io_buf into its typed halves and
+/// initialize them (INV-SAFECALL-1: header at offset 0, response at
+/// +48 — the R17-C combined block; THE one audited carve edge for the
+/// pool shape; `io_buf` must come from `io_buf_alloc`).
+pub(crate) fn io_buf_init(
+    io_buf: *mut u8,
+    type_: u32,
+    sector: u64,
+) -> (*mut queue::VirtIOBlkReqHeader, *mut queue::VirtIOBlkResp) {
+    // SAFETY: io_buf is non-null (callers check), 64 bytes, 16-aligned;
+    // +48 leaves 16 bytes for the response — both in bounds. The
+    // initializations follow immediately.
+    unsafe {
+        let header_ptr = io_buf as *mut queue::VirtIOBlkReqHeader;
+        let resp_ptr = io_buf.add(48) as *mut queue::VirtIOBlkResp;
+        *header_ptr = queue::VirtIOBlkReqHeader {
+            type_,
+            reserved: 0,
+            sector,
+        };
+        (*resp_ptr).status = 0xFF;
+        (header_ptr, resp_ptr)
+    }
+}
+
+/// Release a pending entry's io block: the per-CPU pool when the layout
+/// is the pooled R17-C shape, the heap otherwise (INV-SAFECALL-1: the
+/// ONE audited free edge for the pending-walker family; `ptr`/`layout`
+/// come from a PendingIo the walker just retired).
+pub(crate) fn io_buf_release(ptr: *mut u8, layout: alloc::alloc::Layout) {
+    if ptr.is_null() {
+        return; // tombstone shape: nothing was ever allocated
+    }
+    if layout.size() == IO_BUF_LAYOUT.size() && layout.align() == IO_BUF_LAYOUT.align() {
+        io_buf_free(ptr);
+    } else {
+        // SAFETY: dealloc with the exact layout the submitter allocated
+        // with (non-pool shape).
+        unsafe { alloc::alloc::dealloc(ptr, layout) };
+    }
+}
+
+/// Deliver a pending entry's completion (INV-SAFECALL-1: the ONE
+/// audited deref edge; the delivering-protocol count taken under the
+/// table lock keeps the IoCompletion (and its waiter's stack) alive
+/// across the call).
+/// Mark a pending's completion as under delivery (the walker-vs-abandon
+/// handshake; same audited-deref discipline as [`deliver_completion`]).
+pub(crate) fn begin_delivery(completion: *mut crate::fs::io_completion::IoCompletion) {
+    // SAFETY: the count protocol keeps the IoCompletion alive; callers
+    // hold the pending-table lock that serializes the handshake.
+    unsafe { (*completion).begin_delivery(); }
+}
+
+pub(crate) fn deliver_completion(
+    completion: *mut crate::fs::io_completion::IoCompletion,
+    status: i32,
+    token: usize,
+) {
+    // SAFETY: see doc — count protocol + retire order.
+    unsafe {
+        (*completion).complete_with_token(status, token);
+        (*completion).end_delivery();
+    }
 }
 
 /// PCI virtio-blk devices (one per slot; slot 0 is the boot disk when the
@@ -1521,12 +1406,7 @@ fn pci_blk_contended_forensics(slot: usize, waiter_site: usize) {
         wedge_put(b);
     }
     let used = match get_pci_device_queue_at(slot) {
-        Some(q) => {
-            // SAFETY: same idx read as the walker's fast path.
-            unsafe {
-                core::ptr::read_volatile((q.used_ring_ptr() as usize + 2) as *const u16) as u64
-            }
-        }
+        Some(q) => queue::used_ring_idx(q.used_ring_ptr()) as u64,
         None => 0,
     };
     wedge_dec(used);
@@ -1677,14 +1557,7 @@ pub fn pci_blk_holder_watchdog(now: u64) {
             PCI_BLK_HOLDER_CTX[slot].load(core::sync::atomic::Ordering::Acquire),
             crate::drivers::timer::jiffies_to_msecs(now.saturating_sub(at)),
             get_pci_device_queue_at(slot)
-                .map(|q| {
-                    // SAFETY: same idx read as the walker's fast path.
-                    unsafe {
-                        core::ptr::read_volatile(
-                            (q.used_ring_ptr() as usize + 2) as *const u16,
-                        ) as u64
-                    }
-                })
+                .map(|q| queue::used_ring_idx(q.used_ring_ptr()) as u64)
                 .unwrap_or(0),
             PCI_BLK_PENDING_LAST[slot].load(core::sync::atomic::Ordering::Acquire) as u64,
             PCI_BLK_EXPECTED_USED_IDX[slot].load(core::sync::atomic::Ordering::Acquire) as u64,
@@ -2486,27 +2359,21 @@ unsafe fn pci_submit_data_async_sg(
     // the same R17-C combined allocation the sync path uses. SUBMIT-2X:
     // popped from the per-CPU io_buf pool (no global-allocator lock on
     // the submit path).
-    let io_layout = alloc::alloc::Layout::from_size_align(64, 16).unwrap();
     let io_buf = io_buf_alloc();
     if io_buf.is_null() {
         return Err(-12); // ENOMEM
     }
-    let header_ptr = io_buf as *mut VirtIOBlkReqHeader;
-    // SAFETY: io_buf is non-null, 64 bytes, 16-byte aligned; +48 is in bounds.
-    let resp_ptr = unsafe { io_buf.add(48) } as *mut VirtIOBlkResp;
-    // SAFETY: pointers derived above are valid and aligned.
-    unsafe {
-        *header_ptr = VirtIOBlkReqHeader {
-            type_: if is_write {
-                queue::req_type::VIRTIO_BLK_T_OUT
-            } else {
-                queue::req_type::VIRTIO_BLK_T_IN
-            },
-            reserved: 0,
-            sector,
-        };
-        (*resp_ptr).status = 0xFF;
-    }
+    let io_layout = alloc::alloc::Layout::from_size_align(64, 16).unwrap();
+    // INV-SAFECALL: typed split+init of the pooled R17-C block.
+    let (header_ptr, resp_ptr) = io_buf_init(
+        io_buf,
+        if is_write {
+            queue::req_type::VIRTIO_BLK_T_OUT
+        } else {
+            queue::req_type::VIRTIO_BLK_T_IN
+        },
+        sector,
+    );
 
     const VIRTQ_DESC_F_NEXT: u16 = 1;
     const VIRTQ_DESC_F_WRITE: u16 = 2;
@@ -2894,9 +2761,7 @@ pub fn vw_report(tag: &str) {
             continue;
         }
         // SAFETY: same idx read as the walker's fast path.
-        let used_idx = unsafe {
-            core::ptr::read_volatile((used_ring as usize + 2) as *const u16)
-        };
+        let used_idx =             queue::used_ring_idx(used_ring);
         let last = PCI_BLK_PENDING_LAST[disk].load(core::sync::atomic::Ordering::Acquire);
         crate::pr_err!(
             "VW-REPORT {} disk={} used={} last={} lag={} expected={} \
@@ -3011,9 +2876,7 @@ pub fn vw_snap_direct() {
             None => continue,
         };
         // SAFETY: same idx read as the walker's fast path.
-        let used_idx = unsafe {
-            core::ptr::read_volatile((used_ring as usize + 2) as *const u16)
-        };
+        let used_idx =             queue::used_ring_idx(used_ring);
         ps(b" | d");
         pd(disk as u64);
         ps(b" used=");
@@ -3057,9 +2920,7 @@ pub fn vw_lag_watchdog(now: u64) {
             continue;
         }
         // SAFETY: same idx read as the walker's fast path.
-        let used_idx = unsafe {
-            core::ptr::read_volatile((used_ring as usize + 2) as *const u16)
-        };
+        let used_idx =             queue::used_ring_idx(used_ring);
         let last = PCI_BLK_PENDING_LAST[disk].load(core::sync::atomic::Ordering::Acquire);
         // Device-side stall component: chains published to the avail ring
         // that the device has NOT completed (avail_shadow - used). Combined
@@ -3203,9 +3064,7 @@ pub fn pci_process_async_completions_slot(slot: usize) -> usize {
     }
     // SAFETY: used ring offset 2 is the idx field (u16); the queue is alive
     // (PCI_BLK_READY was checked by get_pci_device_queue_at).
-    let used_idx = unsafe {
-        core::ptr::read_volatile((used_ring as usize + 2) as *const u16)
-    };
+    let used_idx =         queue::used_ring_idx(used_ring);
     let last = PCI_BLK_PENDING_LAST[slot].load(core::sync::atomic::Ordering::Acquire);
     if used_idx == last {
         vw_exit(0, false);
@@ -3260,9 +3119,7 @@ pub fn pci_process_async_completions_slot(slot: usize) -> usize {
             let _nest = VirtioLockNest::new();
             // Re-read under the lock (a submission may have landed since).
             // SAFETY: same field, queue alive.
-            let used_idx = unsafe {
-                core::ptr::read_volatile((used_ring as usize + 2) as *const u16)
-            };
+            let used_idx =                 queue::used_ring_idx(used_ring);
             let mut i = PCI_BLK_PENDING_LAST[slot].load(core::sync::atomic::Ordering::Acquire);
             while i != used_idx && budget > 0 && collected < CHUNK {
                 budget -= 1;
@@ -3272,11 +3129,7 @@ pub fn pci_process_async_completions_slot(slot: usize) -> usize {
                 // the chain — including its DMA writes — is done).
                 // SAFETY: ring position `i % queue_sz` is within the used ring.
                 let ring_pos = (i as usize) % queue_sz as usize;
-                let entry_id = unsafe {
-                    core::ptr::read_volatile(
-                        (used_ring as usize + 4 + ring_pos * 8) as *const u32
-                    )
-                };
+                let entry_id = queue::used_ring_elem_id(used_ring, ring_pos);
                 // Positional fast path: entry i belongs at ordinal slot
                 // i % MAX_PENDING_IO_PCI when completion order equals
                 // submission order. (NOTE: `slot` is the DISK; the pending
@@ -3413,24 +3266,14 @@ pub fn pci_process_async_completions_slot(slot: usize) -> usize {
                 }
                 continue;
             }
-            let status = unsafe { *(pending.resp_ptr as *mut u8) };
+            let status = queue::resp_status_byte(pending.resp_ptr as *const u8);
             let io_status = if status == 0 { 0 } else { -5i32 };
             // The combined R17-C block: header at base, resp at +48, both
             // inside the single 64-byte allocation. SUBMIT-2X: return it
             // to the per-CPU pool (layout-checked; anything not the exact
             // R17-C shape keeps the heap dealloc). The used-ring entry was
             // consumed above, so the device is done DMA-ing into it.
-            if pending.header_layout.size() == IO_BUF_LAYOUT.size()
-                && pending.header_layout.align() == IO_BUF_LAYOUT.align()
-            {
-                io_buf_free(pending.header_ptr);
-            } else {
-                // SAFETY: dealloc with the layout the submitter allocated
-                // with (non-pool shape).
-                unsafe {
-                    alloc::alloc::dealloc(pending.header_ptr, pending.header_layout);
-                }
-            }
+            io_buf_release(pending.header_ptr, pending.header_layout);
             // block:block_rq_complete — the async chain's IRQ-side
             // completion, with the geometry stored at submit time
             // (tombstones and sync chains carry zeros and skip).
@@ -3449,13 +3292,7 @@ pub fn pci_process_async_completions_slot(slot: usize) -> usize {
             // — abandon waits for it before unwinding. Token = the chain's
             // DMA data pointer: bread_wait's zero-serve guard uses it to
             // prove THIS buffer's chain completed.
-            unsafe {
-                (*pending.completion).complete_with_token(
-                    io_status,
-                    pending.data_ptr,
-                );
-            }
-            unsafe { (*pending.completion).end_delivery(); }
+            deliver_completion(pending.completion, io_status, pending.data_ptr);
         }
 
         if i_end != PCI_BLK_PENDING_LAST[slot].load(core::sync::atomic::Ordering::Acquire) {
@@ -3467,9 +3304,7 @@ pub fn pci_process_async_completions_slot(slot: usize) -> usize {
         // Caught up? Re-read the ring: completions may have landed while we
         // delivered (budget re-check keeps the loop bounded either way).
         // SAFETY: same field read as the fast path.
-        let fresh_used = unsafe {
-            core::ptr::read_volatile((used_ring as usize + 2) as *const u16)
-        };
+        let fresh_used =             queue::used_ring_idx(used_ring);
         if fresh_used == i_end {
             vw_exit(1, false);
             break;
@@ -3520,9 +3355,7 @@ pub fn pci_rescue_lagged_completions(slot: usize) {
         None => return,
     };
     // SAFETY: same used-ring idx read as the walker's fast path.
-    let used_idx = unsafe {
-        core::ptr::read_volatile((used_ring as usize + 2) as *const u16)
-    };
+    let used_idx =         queue::used_ring_idx(used_ring);
     let last = PCI_BLK_PENDING_LAST[slot].load(core::sync::atomic::Ordering::Acquire);
     if used_idx != last {
         pci_process_async_completions_slot(slot);
@@ -3799,9 +3632,10 @@ pub fn register_pci_gen_disk(slot: usize) {
         } else {
             pci_dev.common_cfg_bar + 0x2000
         };
-        let capacity_ptr = device_cfg_addr as *const u64;
-        // SAFETY: the device cfg region is valid MMIO for this function.
-        let capacity_sectors = unsafe { core::ptr::read_volatile(capacity_ptr) };
+        // INV-MMIO-1..3: the device-config region for this function
+        // (dedicated BAR, or common-cfg + 0x2000 per the fallback above).
+        let capacity_sectors =
+            crate::safety::mmio::MmioRegion::new(device_cfg_addr as usize, 8).read_u64(0);
         disk.set_capacity(capacity_sectors as u64);
     }
 
@@ -3990,30 +3824,33 @@ pub fn interrupt_handler_pci(_irq: u32, dev_id: usize) -> crate::interrupt::IrqR
     if slot >= MAX_PCI_BLK_DISKS {
         return crate::interrupt::IrqReturn::None;
     }
-    // SAFETY: the slot's device is initialized before its IRQ registration.
-    unsafe {
-        if let Some(pci_device) = get_pci_device_at(slot) {
-            // Read ISR status FIRST: per the virtio 1.1 spec the read drops
-            // the device's interrupt line (device-side EOI for level-
-            // triggered INTx). Skipping it caused immediate re-entry
-            // storms once the IRQ line actually fires (review DRIV-H3).
-            // Bit 0 = queue used, bit 1 = configuration change.
-            if pci_device.isr_cfg_bar != 0 {
-                let isr = core::ptr::read_volatile(pci_device.isr_cfg_bar as *const u32);
-                if isr == 0 {
-                    // Not ours — spurious or another device on the shared line.
-                    return crate::interrupt::IrqReturn::None;
-                }
+    // (Registry access via the audited accessor; the ISR read is the
+    // device-side EOI — INV-MMIO-1..3.)
+    if let Some(pci_device) = get_pci_device_at(slot) {
+        // Read ISR status FIRST: per the virtio 1.1 spec the read drops
+        // the device's interrupt line (device-side EOI for level-
+        // triggered INTx). Skipping it caused immediate re-entry
+        // storms once the IRQ line actually fires (review DRIV-H3).
+        // Bit 0 = queue used, bit 1 = configuration change.
+        if pci_device.isr_cfg_bar != 0 {
+            let isr = crate::safety::mmio::MmioRegion::new(
+                pci_device.isr_cfg_bar as usize,
+                4,
+            )
+            .read_u32(0);
+            if isr == 0 {
+                // Not ours — spurious or another device on the shared line.
+                return crate::interrupt::IrqReturn::None;
             }
-            // Deferred-wake discipline (R12-3): collect in the top half,
-            // deliver in the bottom half. The Block softirq runs at
-            // irq_exit() time, so wakeup latency stays bounded while the
-            // hard-IRQ section stays minimal.
-            VW_IRQS[slot].fetch_add(1, core::sync::atomic::Ordering::AcqRel);
-            crate::interrupt::softirq::raise_softirq_irqoff(
-                crate::interrupt::softirq::SoftirqIndex::Block as usize,
-            );
         }
+        // Deferred-wake discipline (R12-3): collect in the top half,
+        // deliver in the bottom half. The Block softirq runs at
+        // irq_exit() time, so wakeup latency stays bounded while the
+        // hard-IRQ section stays minimal.
+        VW_IRQS[slot].fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+        crate::interrupt::softirq::raise_softirq_irqoff(
+            crate::interrupt::softirq::SoftirqIndex::Block as usize,
+        );
     }
     crate::interrupt::IrqReturn::Handled
 }
@@ -4024,26 +3861,23 @@ pub fn interrupt_handler_pci(_irq: u32, dev_id: usize) -> crate::interrupt::IrqR
 /// to the Block softirq bottom half.
 /// Registered via request_irq. EOI is done by the IRQ framework.
 pub fn interrupt_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
-    // SAFETY: VIRTIO_BLK is initialized before IRQ registration; MMIO register
-    // reads/writes use volatile access at correct offsets per VirtIO spec.
-    unsafe {
-        // MMIO VirtIO device (Legacy VirtIO)
-        if let Some(device) = VIRTIO_BLK.as_ref() {
-            // Read interrupt status (INTERRUPT_STATUS at 0x60)
-            let irq_status_ptr = (device.base_addr + 0x60) as *const u32;
-            let irq_status = core::ptr::read_volatile(irq_status_ptr);
+    // INV-MMIO-1..3: the device's register window; registry access via
+    // the audited get_device accessor.
+    if let Some(device) = get_device() {
+        // MMIO VirtIO device
+        // Read interrupt status (INTERRUPT_STATUS at 0x60)
+        let mmio = crate::safety::mmio::MmioRegion::new(device.base_addr as usize, 0x120);
+        let irq_status = mmio.read_u32(0x60);
 
-            if irq_status != 0 {
-                // Clear interrupt (INTERRUPT_ACK at 0x64)
-                let irq_ack_ptr = (device.base_addr + 0x64) as *mut u32;
-                core::ptr::write_volatile(irq_ack_ptr, irq_status);
+        if irq_status != 0 {
+            // Clear interrupt (INTERRUPT_ACK at 0x64)
+            mmio.write_u32(0x64, irq_status);
 
-                // Defer completion processing to Block softirq bottom half
-                crate::interrupt::softirq::raise_softirq_irqoff(
-                    crate::interrupt::softirq::SoftirqIndex::Block as usize,
-                );
-                return crate::interrupt::IrqReturn::Handled;
-            }
+            // Defer completion processing to Block softirq bottom half
+            crate::interrupt::softirq::raise_softirq_irqoff(
+                crate::interrupt::softirq::SoftirqIndex::Block as usize,
+            );
+            return crate::interrupt::IrqReturn::Handled;
         }
     }
     crate::interrupt::IrqReturn::None
@@ -4063,9 +3897,11 @@ pub fn interrupt_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqRetu
 pub fn block_bh_handler(_vec: usize) {
     // SAFETY: Runs in softirq context; VIRTIO_BLK is initialized. The irqsave
     // lock on virtqueue ensures mutual exclusion with hardirq handlers.
-    unsafe {
+    // (Registry access via the audited get_device accessor; every ring
+    // read routes through the typed volatile helpers.)
+    {
         let mut mmio_collected = 0usize;
-        if let Some(device) = VIRTIO_BLK.as_ref() {
+        if let Some(device) = get_device() {
             // MMIO pending table holds at most MAX_PENDING_IO live entries,
             // so one collection array covers a full catch-up pass.
             let mut done: [Option<PendingIo>; MAX_PENDING_IO] =
@@ -4078,9 +3914,7 @@ pub fn block_bh_handler(_vec: usize) {
                 let _nest = VirtioLockNest::new();
                 if let Some(ref queue) = *queue_guard {
                     let used_ring = queue.used_ring_ptr();
-                    let used_idx = core::ptr::read_volatile(
-                        (used_ring as usize + 2) as *const u16
-                    );
+                    let used_idx = queue::used_ring_idx(used_ring);
                     let last_processed = VIRTIO_MMIO_LAST_PROCESSED
                         .load(core::sync::atomic::Ordering::Acquire);
 
@@ -4121,10 +3955,7 @@ pub fn block_bh_handler(_vec: usize) {
                         // SAFETY: ring position `i % queue_sz` is within the
                         // used ring.
                         let ring_pos = (i as usize) % queue_sz;
-                        let entry_id = core::ptr::read_volatile(
-                            (used_ring as usize + 4 + ring_pos * 8)
-                                as *const u32,
-                        );
+                        let entry_id = queue::used_ring_elem_id(used_ring, ring_pos);
                         let ordinal_slot = i as usize % MAX_PENDING_IO;
                         let mut fired: Option<PendingIo> = None;
                         {
@@ -4157,7 +3988,7 @@ pub fn block_bh_handler(_vec: usize) {
                             // drops.
                             if let Some(p) = fired.as_ref() {
                                 if !p.completion.is_null() {
-                                    (*p.completion).begin_delivery();
+                                    begin_delivery(p.completion);
                                 }
                             }
                         }
@@ -4215,21 +4046,21 @@ pub fn block_bh_handler(_vec: usize) {
                     if pending.completion.is_null() {
                         continue;
                     }
-                    // Read response status
+                    // Read response status (volatile: device-written)
                     let status = if !pending.resp_ptr.is_null() {
-                        *(pending.resp_ptr as *mut u8)
+                        queue::resp_status_byte(pending.resp_ptr as *const u8)
                     } else {
                         0
                     };
                     let io_status = if status == 0 { 0 } else { -5i32 };
 
-                    // Free allocated buffers
-                    alloc::alloc::dealloc(
-                        pending.header_ptr, pending.header_layout,
-                    );
-                    alloc::alloc::dealloc(
-                        pending.resp_ptr, pending.resp_layout,
-                    );
+                    // Free allocated buffers (pool-aware release)
+                    io_buf_release(pending.header_ptr, pending.header_layout);
+                    if pending.resp_layout.size() != 0
+                        && pending.resp_ptr != pending.header_ptr
+                    {
+                        io_buf_release(pending.resp_ptr, pending.resp_layout);
+                    }
 
                     // block:block_rq_complete — the async chain's
                     // softirq-side completion, geometry from submit.
@@ -4247,13 +4078,7 @@ pub fn block_bh_handler(_vec: usize) {
                     // Signal completion, stamped with the chain's DMA data
                     // pointer: bread_wait's zero-serve guard verifies it
                     // against the waiter's own buffer.
-                    unsafe {
-                        (*pending.completion).complete_with_token(
-                            io_status,
-                            pending.data_ptr,
-                        );
-                    }
-                    unsafe { (*pending.completion).end_delivery(); }
+                    deliver_completion(pending.completion, io_status, pending.data_ptr);
                 }
             }
             mmio_collected = collected;

@@ -49,6 +49,37 @@ documented in the script header; the important ones:
   `kernel/src/dfx/ksyms_generated.rs`) are excluded so a bare checkout
   and a built tree produce the same table.
 
+## Baseline 2026-11-19 (unsafe-slim round 3, lane A: primitives + mm/drivers conversion)
+
+| Subsystem | .rs files | .rs lines | unsafe blocks | unsafe lines | unsafe % | unsafe fn/impl | fn/impl lines | dual unsafe lines | dual % |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| fs | 85 | 76849 | 808 | 7644 | 9.9% | 263 | 6576 | 14056 | 18.3% |
+| process | 13 | 18609 | 314 | 4271 | 23.0% | 47 | 3311 | 7389 | 39.7% |
+| sched | 12 | 20580 | 358 | 4610 | 22.4% | 33 | 2660 | 6915 | 33.6% |
+| ipc | 9 | 21920 | 353 | 5331 | 24.3% | 41 | 1301 | 6572 | 30.0% |
+| arch/x86_64 | 20 | 20055 | 334 | 2772 | 13.8% | 82 | 4026 | 6144 | 30.6% |
+| arch/riscv64 | 21 | 15088 | 226 | 1960 | 13.0% | 69 | 3434 | 5303 | 35.1% |
+| syscall | 12 | 41227 | 627 | 3556 | 8.6% | 8 | 310 | 3865 | 9.4% |
+| (top-level files) | 14 | 15181 | 150 | 1368 | 9.0% | 34 | 2043 | 3298 | 21.7% |
+| arch/aarch64 | 20 | 9636 | 185 | 1458 | 15.1% | 58 | 1676 | 2493 | 25.9% |
+| drivers | 40 | 26280 | 296 | 1189 | 4.5% | 64 | 1174 | 2330 | 8.9% |
+| dfx | 40 | 19097 | 214 | 1434 | 7.5% | 11 | 586 | 1979 | 10.4% |
+| sync | 13 | 21022 | 391 | 860 | 4.1% | 59 | 1141 | 1968 | 9.4% |
+| mm | 31 | 20126 | 182 | 805 | 4.0% | 59 | 1171 | 1928 | 9.6% |
+| net | 18 | 20560 | 243 | 1571 | 7.6% | 17 | 216 | 1766 | 8.6% |
+| interrupt | 9 | 3339 | 52 | 239 | 7.2% | 0 | 0 | 239 | 7.2% |
+| io_uring | 1 | 1173 | 43 | 131 | 11.2% | 0 | 0 | 131 | 11.2% |
+| perf | 1 | 2109 | 46 | 124 | 5.9% | 0 | 0 | 124 | 5.9% |
+| safety | 5 | 817 | 28 | 34 | 4.2% | 4 | 8 | 42 | 5.1% |
+| security | 4 | 584 | 7 | 41 | 7.0% | 0 | 0 | 41 | 7.0% |
+| arch (shared) | 2 | 389 | 16 | 30 | 7.7% | 0 | 0 | 30 | 7.7% |
+| trace | 2 | 4640 | 4 | 15 | 0.3% | 4 | 4 | 19 | 0.4% |
+| module | 1 | 486 | 4 | 12 | 2.5% | 0 | 0 | 12 | 2.5% |
+| timer | 3 | 1814 | 2 | 8 | 0.4% | 0 | 0 | 8 | 0.4% |
+| **Whole kernel** | **376** | **361581** | **4883** | **39463** | **10.9%** | **853** | **29637** | **66652** | **18.4%** |
+
+Lane A delta vs its fork point: drivers 2985 -> 1189 unsafe block-lines (-60%, unsafe %% 11.2 -> 4.5), mm 1385 -> 805 (-42%%, 6.8 -> 4.0); territory total 4370 -> 1994 (-54.4%%). Whole-kernel unsafe %% 11.6 -> 10.9.
+
 ## Current baseline
 | Subsystem | .rs files | .rs lines | unsafe blocks | unsafe lines | unsafe % | unsafe fn/impl | fn/impl lines | dual unsafe lines | dual % |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|

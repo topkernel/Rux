@@ -109,6 +109,13 @@ pub struct VirtIOPCI {
 }
 
 impl VirtIOPCI {
+    /// The common-config register window (INV-MMIO-1: the BAR mapping
+    /// proven at probe; every register offset below is a spec constant,
+    /// so accesses are safe bounds-checked volatiles — INV-MMIO-2/3).
+    fn common_cfg(&self) -> crate::safety::mmio::MmioRegion {
+        crate::safety::mmio::MmioRegion::new(self.common_cfg_bar as usize, 0x100)
+    }
+
     /// Find VirtIO PCI capability
     ///
     /// # Parameters
@@ -117,9 +124,9 @@ impl VirtIOPCI {
     /// # Returns
     /// Returns capability offset position, or 0 if not found
     fn find_virtio_capability(&self, cap_type: VirtIOCapType) -> Option<u8> {
-        // SAFETY: PCI config space access uses pre-mapped MMIO addresses obtained
-        // from ECAM; reads are well-formed single-byte operations at valid offsets.
-        unsafe {
+        // (Config-space access through the mapped ECAM window; the
+        // byte reads are safe accessors.)
+        {
             // Start from capabilities list pointer
             let mut cap_ptr = self.pci_config.read_config_byte(PCI_CAPABILITY_LIST);
             let mut iterations = 0;
@@ -165,9 +172,8 @@ impl VirtIOPCI {
     /// # Returns
     /// (bar_index, bar_offset, length)
     fn read_virtio_cap(&self, cap_offset: u8) -> Option<(u8, u32, u32)> {
-        // SAFETY: PCI config space access uses pre-mapped MMIO addresses;
-        // all reads are single-byte operations at valid capability offsets.
-        unsafe {
+        // (Config-space access through the mapped ECAM window.)
+        {
             // Read capability fields
             let bar = self.pci_config.read_config_byte(cap_offset + 4);
 
@@ -623,29 +629,17 @@ impl VirtIOPCI {
 
     /// Reset device
     pub fn reset_device(&self) {
-        // SAFETY: common_cfg_bar points to a valid MMIO-mapped VirtIO common config region.
-        unsafe {
-            let status_ptr = (self.common_cfg_bar + 0x14) as *mut u32;
-            core::ptr::write_volatile(status_ptr, 0);
-        }
+        self.common_cfg().write_u32(0x14, 0);
     }
 
     /// Set device status
     pub fn set_status(&self, status: u32) {
-        // SAFETY: common_cfg_bar points to a valid MMIO-mapped VirtIO common config region.
-        unsafe {
-            let status_ptr = (self.common_cfg_bar + 0x14) as *mut u32;
-            core::ptr::write_volatile(status_ptr, status);
-        }
+        self.common_cfg().write_u32(0x14, status);
     }
 
     /// Get device status
     pub fn get_status(&self) -> u32 {
-        // SAFETY: common_cfg_bar points to a valid MMIO-mapped VirtIO common config region.
-        unsafe {
-            let status_ptr = (self.common_cfg_bar + 0x14) as *const u32;
-            core::ptr::read_volatile(status_ptr)
-        }
+        self.common_cfg().read_u32(0x14)
     }
 
     /// Read device features
@@ -654,17 +648,11 @@ impl VirtIOPCI {
     /// - 0x00: device_feature_select (write-only) - select feature bit set
     /// - 0x04: device_feature (read-only) - actual feature bits
     pub fn read_device_features(&self) -> u32 {
-        // SAFETY: common_cfg_bar points to a valid MMIO-mapped VirtIO common config region;
-        // device_feature_select is write-only, device_feature is read-only per spec.
-        unsafe {
-            // First write 0 to device_feature_select to select feature bits 0-31
-            let select_ptr = (self.common_cfg_bar + 0x00) as *mut u32;
-            core::ptr::write_volatile(select_ptr, 0u32);
-
-            // Then read actual feature bits from device_feature
-            let features_ptr = (self.common_cfg_bar + 0x04) as *const u32;
-            core::ptr::read_volatile(features_ptr)
-        }
+        let cfg = self.common_cfg();
+        // First write 0 to device_feature_select to select feature bits 0-31
+        cfg.write_u32(0x00, 0u32);
+        // Then read actual feature bits from device_feature
+        cfg.read_u32(0x04)
     }
 
     /// Write driver features
@@ -673,38 +661,26 @@ impl VirtIOPCI {
     /// - 0x08: driver_feature_select (write-only) - select feature bit set
     /// - 0x0C: driver_feature (write-only) - actual feature bits
     pub fn write_driver_features(&self, features: u32) {
-        // SAFETY: common_cfg_bar points to a valid MMIO-mapped VirtIO common config region;
-        // both registers are write-only per VirtIO 1.0 spec.
-        unsafe {
-            // First write 0 to driver_feature_select to select feature bits 0-31
-            let select_ptr = (self.common_cfg_bar + 0x08) as *mut u32;
-            core::ptr::write_volatile(select_ptr, 0u32);
+        let cfg = self.common_cfg();
+        // First write 0 to driver_feature_select to select feature bits 0-31
+        cfg.write_u32(0x08, 0u32);
+        // Then write to driver_feature
+        cfg.write_u32(0x0C, features);
 
-            // Then write to driver_feature
-            let features_ptr = (self.common_cfg_bar + 0x0C) as *mut u32;
-            core::ptr::write_volatile(features_ptr, features);
-
-            // Word 1: acknowledge VIRTIO_F_VERSION_1 (bit 32). Modern-only
-            // devices (disable-legacy=on) reject negotiation without it.
-            core::ptr::write_volatile(select_ptr, 1u32);
-            core::ptr::write_volatile(features_ptr, 1u32);
-        }
+        // Word 1: acknowledge VIRTIO_F_VERSION_1 (bit 32). Modern-only
+        // devices (disable-legacy=on) reject negotiation without it.
+        cfg.write_u32(0x08, 1u32);
+        cfg.write_u32(0x0C, 1u32);
     }
 
     /// Setup queue
     pub fn setup_queue(&self, queue_index: u16, virt_queue: &queue::VirtQueue) -> Result<(), &'static str> {
-        // SAFETY: common_cfg_bar points to a valid MMIO-mapped VirtIO common config region;
-        // writing queue_select selects the queue register set per spec.
-        unsafe {
-            let queue_select_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_SELECT as u64) as *mut u16;
-            core::ptr::write_volatile(queue_select_ptr, queue_index);
-        }
+        let cfg = self.common_cfg();
+        // Writing queue_select selects the queue register set per spec.
+        cfg.write_u16(offset::COMMON_CFG_QUEUE_SELECT as usize, queue_index);
 
-        // SAFETY: common_cfg_bar points to valid MMIO region; queue_size is read-only per spec.
-        unsafe {
-            let queue_size_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_SIZE as u64) as *const u16;
-            let queue_max_size = core::ptr::read_volatile(queue_size_ptr);
-
+        {
+            let queue_max_size = cfg.read_u16(offset::COMMON_CFG_QUEUE_SIZE as usize);
             if queue_max_size == 0 {
                 return Err("Queue not available");
             }
@@ -729,36 +705,17 @@ impl VirtIOPCI {
             crate::arch::mm::VirtAddr::new(used_addr)
         ).0;
 
-        // SAFETY: common_cfg_bar points to a valid MMIO-mapped VirtIO common config region;
-        // writing descriptor table physical address split into two 32-bit writes per spec.
-        unsafe {
-            let desc_lo_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_DESC_LO as u64) as *mut u32;
-            let desc_hi_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_DESC_HI as u64) as *mut u32;
-            core::ptr::write_volatile(desc_lo_ptr, (desc_phys & 0xFFFFFFFF) as u32);
-            core::ptr::write_volatile(desc_hi_ptr, (desc_phys >> 32) as u32);
-        }
+        cfg.write_u32(offset::COMMON_CFG_QUEUE_DESC_LO as usize, (desc_phys & 0xFFFFFFFF) as u32);
+        cfg.write_u32(offset::COMMON_CFG_QUEUE_DESC_HI as usize, (desc_phys >> 32) as u32);
 
-        // SAFETY: common_cfg_bar points to valid MMIO region; writing avail ring address.
-        unsafe {
-            let driver_lo_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_DRIVER_LO as u64) as *mut u32;
-            let driver_hi_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_DRIVER_HI as u64) as *mut u32;
-            core::ptr::write_volatile(driver_lo_ptr, (avail_phys & 0xFFFFFFFF) as u32);
-            core::ptr::write_volatile(driver_hi_ptr, (avail_phys >> 32) as u32);
-        }
+        cfg.write_u32(offset::COMMON_CFG_QUEUE_DRIVER_LO as usize, (avail_phys & 0xFFFFFFFF) as u32);
+        cfg.write_u32(offset::COMMON_CFG_QUEUE_DRIVER_HI as usize, (avail_phys >> 32) as u32);
 
-        // SAFETY: common_cfg_bar points to valid MMIO region; writing used ring address.
-        unsafe {
-            let device_lo_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_DEVICE_LO as u64) as *mut u32;
-            let device_hi_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_DEVICE_HI as u64) as *mut u32;
-            core::ptr::write_volatile(device_lo_ptr, (used_phys & 0xFFFFFFFF) as u32);
-            core::ptr::write_volatile(device_hi_ptr, (used_phys >> 32) as u32);
-        }
+        cfg.write_u32(offset::COMMON_CFG_QUEUE_DEVICE_LO as usize, (used_phys & 0xFFFFFFFF) as u32);
+        cfg.write_u32(offset::COMMON_CFG_QUEUE_DEVICE_HI as usize, (used_phys >> 32) as u32);
 
-        // SAFETY: common_cfg_bar points to valid MMIO region; writing queue enable flag.
-        unsafe {
-            let queue_enable_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_ENABLE as u64) as *mut u16;
-            core::ptr::write_volatile(queue_enable_ptr, 1);
-        }
+        // Writing queue enable flag.
+        cfg.write_u16(offset::COMMON_CFG_QUEUE_ENABLE as usize, 1);
 
         Ok(())
     }
@@ -781,12 +738,9 @@ impl VirtIOPCI {
         // SAFETY: common_cfg_bar points to a valid MMIO-mapped VirtIO
         // common config region; queue_select/queue_notify_off are standard
         // per-queue registers.
-        let notify_off: u16 = unsafe {
-            let select_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_SELECT as u64) as *mut u16;
-            core::ptr::write_volatile(select_ptr, queue_index);
-            let noff_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_NOTIFY_OFF as u64) as *const u16;
-            core::ptr::read_volatile(noff_ptr)
-        };
+        let cfg = self.common_cfg();
+        cfg.write_u16(offset::COMMON_CFG_QUEUE_SELECT as usize, queue_index);
+        let notify_off: u16 = cfg.read_u16(offset::COMMON_CFG_QUEUE_NOTIFY_OFF as usize);
         self.notify_cfg_bar + self.notify_cfg_offset as u64
             + notify_off as u64 * self.notify_off_multiplier as u64
     }
@@ -794,12 +748,12 @@ impl VirtIOPCI {
     /// Notify device
     pub fn notify(&self, queue_index: u16) {
         let notify_addr = self.get_notify_addr(queue_index);
-        // SAFETY: notify_addr is computed from valid BAR base + offset per VirtIO 1.0 spec.
-        unsafe {
-            let notify_ptr = notify_addr as *mut u16;
-            // VirtIO 1.0 specification: write queue index (16-bit) to notification register
-            core::ptr::write_volatile(notify_ptr, queue_index);
-        }
+        // INV-MMIO-1..3: notify_addr comes from the mapped notify BAR
+        // plus the spec's multiplier arithmetic; the 16-bit write is the
+        // virtio-pci doorbell (matches Linux iowrite16).
+        let notify_region =
+            crate::safety::mmio::MmioRegion::new(notify_addr as usize, 2);
+        notify_region.write_u16(0, queue_index);
     }
 
     /// Enable device interrupt
@@ -902,9 +856,9 @@ impl VirtIOPCI {
     /// config-space capability list. Distinct from find_virtio_capability,
     /// which matches vendor capabilities (id 0x09) by virtio cfg type.
     fn find_pci_capability(&self, cap_id: u8) -> Option<u8> {
-        // SAFETY: config-space access through the mapped ECAM window;
-        // offsets bounded by the cap-list iteration guard.
-        unsafe {
+        // (Config-space access through the mapped ECAM window; offsets
+        // bounded by the cap-list iteration guard.)
+        {
             let mut cap_ptr = self.pci_config.read_config_byte(PCI_CAPABILITY_LIST);
             let mut iterations = 0;
             while cap_ptr != 0 && iterations < 16 {
@@ -944,17 +898,16 @@ impl VirtIOPCI {
         // Entry layout: addr_lo @0, addr_hi @4, data @8, vector_control @12.
         // Program masked first, then fill, then unmask (PCI spec 6.8.2.5:
         // software must not touch an unmasked entry's fields).
-        let e = self.msix_table_va as usize;
-        unsafe {
-            let ctrl_ptr = e + 12;
-            core::ptr::write_volatile(ctrl_ptr as *mut u32, 1); // masked
-            // Delivery: fixed, edge-triggered, physical destination, the
-            // BSP (APIC ID 0). 0xFEE00000 base + dest<<12.
-            core::ptr::write_volatile((e) as *mut u32, 0xFEE0_0000);
-            core::ptr::write_volatile((e + 4) as *mut u32, 0);
-            core::ptr::write_volatile((e + 8) as *mut u32, MSIX_BLK_VECTOR as u32);
-            core::ptr::write_volatile(ctrl_ptr as *mut u32, 0); // unmask
-        }
+        // INV-MMIO-1..3: the MSI-X table entry as a 16-byte register
+        // window (the table BAR mapping proven at probe).
+        let e = crate::safety::mmio::MmioRegion::new(self.msix_table_va as usize, 16);
+        e.write_u32(12, 1); // masked
+        // Delivery: fixed, edge-triggered, physical destination, the
+        // BSP (APIC ID 0). 0xFEE00000 base + dest<<12.
+        e.write_u32(0, 0xFEE0_0000);
+        e.write_u32(4, 0);
+        e.write_u32(8, MSIX_BLK_VECTOR as u32);
+        e.write_u32(12, 0); // unmask
         // Message Control (cap+2): MSI-X Enable (bit 14) set, Function
         // Mask (bit 15) clear. Bits 10:0 are the read-only table size-1.
         let msg_ctrl = self.pci_config.read_config_word((cap + 2) as u8);
@@ -993,11 +946,10 @@ impl VirtIOPCI {
         // register is COMMON_CFG_QUEUE_MSIX_VECTOR (0x1A) — the old code
         // wrote 0x1C, which is QUEUE_ENABLE, and would have disabled the
         // queue had anything ever called this.
-        unsafe {
-            let select_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_SELECT as u64) as *mut u16;
-            core::ptr::write_volatile(select_ptr, queue_index);
-            let vector_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_MSIX_VECTOR as u64) as *mut u16;
-            core::ptr::write_volatile(vector_ptr, vector);
+        {
+            let cfg = self.common_cfg();
+            cfg.write_u16(offset::COMMON_CFG_QUEUE_SELECT as usize, queue_index);
+            cfg.write_u16(offset::COMMON_CFG_QUEUE_MSIX_VECTOR as usize, vector);
         }
     }
 
@@ -1044,39 +996,21 @@ impl VirtIOPCI {
             sector,
         };
 
-        // Allocate request header buffer
-        let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
-        let header_ptr: *mut VirtIOBlkReqHeader;
-        // SAFETY: Layout is non-zero-sized; null check follows immediately.
-        unsafe {
-            header_ptr = alloc::alloc::alloc(header_layout) as *mut VirtIOBlkReqHeader;
-        }
-        if header_ptr.is_null() {
-            return Err("Failed to allocate header");
-        }
-        // SAFETY: header_ptr is non-null and properly aligned for VirtIOBlkReqHeader.
-        unsafe {
-            *header_ptr = req_header;
-        }
-
-        // Allocate response buffer
-        let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
-        let resp_ptr: *mut VirtIOBlkResp;
-        // SAFETY: Layout is non-zero-sized; null check follows immediately.
-        unsafe {
-            resp_ptr = alloc::alloc::alloc(resp_layout) as *mut VirtIOBlkResp;
-        }
-        if resp_ptr.is_null() {
-            // SAFETY: header_ptr was allocated with header_layout above and is still valid.
-            unsafe {
-                alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-            }
-            return Err("Failed to allocate response");
-        }
-        // SAFETY: resp_ptr is non-null and properly aligned for VirtIOBlkResp.
-        unsafe {
-            (*resp_ptr).status = 0xFF;  // Initialize to invalid status
-        }
+        // INV-KPTR-1: one audited allocation per buffer (Drop owns the
+        // frees; the timeout path below keeps its deliberate leak via
+        // mem::forget).
+        let header = match crate::safety::ptr::KPtr::new(req_header) {
+            Some(h) => h,
+            None => return Err("Failed to allocate header"),
+        };
+        let resp = match crate::safety::ptr::KPtr::new(VirtIOBlkResp {
+            status: 0xFF,  // Initialize to invalid status
+        }) {
+            Some(r) => r,
+            None => return Err("Failed to allocate response"),
+        };
+        let header_ptr = header.as_ptr();
+        let resp_ptr = resp.as_ptr();
 
         // VirtIO descriptor flags
         const VIRTQ_DESC_F_NEXT: u16 = 1;
@@ -1137,23 +1071,19 @@ impl VirtIOPCI {
             // NOTE: the chain may still be in flight, so the vring is NOT
             // freed here — only the request buffers are (device-visible
             // DMA for them ended with the used-ring stall check above).
-            // SAFETY: Both pointers were allocated above and are still valid.
-            unsafe {
-                alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-                alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
-            }
+            // R21-N2 unchanged: LEAK on a true timeout — KPtr must NOT
+            // drop while the chain may still be in flight.
+            core::mem::forget(header);
+            core::mem::forget(resp);
             return Err("VirtIO request timeout");
         }
 
-        // SAFETY: resp_ptr was allocated above; device has completed the write.
-        let status = unsafe { *resp_ptr };
+        // INV-KPTR-5: device-written status, volatile read.
+        let status = resp.read_volatile();
 
-        // SAFETY: Both pointers were allocated with their respective layouts and are valid.
-        unsafe {
-            alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-            alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
-            virt_queue.free_vring();
-        }
+        drop(header);
+        drop(resp);
+        virt_queue.free_vring();
 
         match status.status {
             crate::drivers::virtio::queue::status::VIRTIO_BLK_S_OK => Ok(buf.len()),
@@ -1189,7 +1119,7 @@ impl VirtIOPCI {
             Some(idx) => idx,
             None => {
                 // SAFETY: queue was never submitted to the device.
-                unsafe { virt_queue.free_vring() };
+                virt_queue.free_vring();
                 return Err("Failed to alloc header descriptor");
             }
         };
@@ -1197,7 +1127,7 @@ impl VirtIOPCI {
             Some(idx) => idx,
             None => {
                 // SAFETY: queue was never submitted to the device.
-                unsafe { virt_queue.free_vring() };
+                virt_queue.free_vring();
                 return Err("Failed to alloc data descriptor");
             }
         };
@@ -1205,7 +1135,7 @@ impl VirtIOPCI {
             Some(idx) => idx,
             None => {
                 // SAFETY: queue was never submitted to the device.
-                unsafe { virt_queue.free_vring() };
+                virt_queue.free_vring();
                 return Err("Failed to alloc response descriptor");
             }
         };
@@ -1217,40 +1147,23 @@ impl VirtIOPCI {
             sector,
         };
 
-        let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
-        let header_ptr: *mut VirtIOBlkReqHeader;
-        // SAFETY: Layout is non-zero-sized; null check follows immediately.
-        unsafe {
-            header_ptr = alloc::alloc::alloc(header_layout) as *mut VirtIOBlkReqHeader;
-        }
-        if header_ptr.is_null() {
-            // SAFETY: queue was never submitted to the device.
-            unsafe { virt_queue.free_vring() };
-            return Err("Failed to allocate header");
-        }
-        // SAFETY: header_ptr is non-null and properly aligned.
-        unsafe {
-            *header_ptr = req_header;
-        }
-
-        let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
-        let resp_ptr: *mut VirtIOBlkResp;
-        // SAFETY: Layout is non-zero-sized; null check follows immediately.
-        unsafe {
-            resp_ptr = alloc::alloc::alloc(resp_layout) as *mut VirtIOBlkResp;
-        }
-        if resp_ptr.is_null() {
-            // SAFETY: header_ptr was allocated with header_layout above and is still valid.
-            unsafe {
-                alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+        // INV-KPTR-1: one audited allocation per buffer.
+        let header = match crate::safety::ptr::KPtr::new(req_header) {
+            Some(h) => h,
+            None => {
                 virt_queue.free_vring();
+                return Err("Failed to allocate header");
             }
-            return Err("Failed to allocate response");
-        }
-        // SAFETY: resp_ptr is non-null and properly aligned.
-        unsafe {
-            (*resp_ptr).status = 0xFF;
-        }
+        };
+        let resp = match crate::safety::ptr::KPtr::new(VirtIOBlkResp { status: 0xFF }) {
+            Some(r) => r,
+            None => {
+                virt_queue.free_vring();
+                return Err("Failed to allocate response");
+            }
+        };
+        let header_ptr = header.as_ptr();
+        let resp_ptr = resp.as_ptr();
 
         const VIRTQ_DESC_F_NEXT: u16 = 1;
         const VIRTQ_DESC_F_WRITE: u16 = 2;
@@ -1300,24 +1213,19 @@ impl VirtIOPCI {
         let new_used = virt_queue.wait_for_completion(prev_used);
 
         if new_used == prev_used {
-            // Chain possibly still in flight — vring not freed (see above).
-            // SAFETY: Both pointers were allocated above and are still valid.
-            unsafe {
-                alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-                alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
-                }
+            // Chain possibly still in flight — vring not freed (see
+            // above); R21-N2 leak via forget.
+            core::mem::forget(header);
+            core::mem::forget(resp);
             return Err("VirtIO write request timeout");
         }
 
-        // SAFETY: resp_ptr was allocated above; device has completed the write.
-        let status = unsafe { *resp_ptr };
+        // INV-KPTR-5: device-written status, volatile read.
+        let status = resp.read_volatile();
 
-        // SAFETY: Both pointers were allocated with their respective layouts and are valid.
-        unsafe {
-            alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-            alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
-            virt_queue.free_vring();
-        }
+        drop(header);
+        drop(resp);
+        virt_queue.free_vring();
 
         match status.status {
             crate::drivers::virtio::queue::status::VIRTIO_BLK_S_OK => Ok(buf.len()),
@@ -1392,26 +1300,19 @@ fn read_block_once(
     // lock nested inside this lock's IRQ-off window was a contention
     // amplifier, and the b125 wedge hunt demands the BLK critical
     // section contain only ring RAM writes (see mod.rs forensics).
-    let io_layout = alloc::alloc::Layout::from_size_align(64, 16).unwrap();
     // SUBMIT-2X: per-CPU io_buf pool — no global-allocator lock on the
     // synchronous submit path either.
     let io_buf: *mut u8 = crate::drivers::virtio::io_buf_alloc();
     if io_buf.is_null() {
         return Err("Failed to allocate header");
     }
-    let header_layout = io_layout; // dealloc layout for the combined block
-    let header_ptr = io_buf as *mut VirtIOBlkReqHeader;
-    // SAFETY: io_buf is non-null and 64 bytes; +48 is in bounds.
-    let resp_ptr = unsafe { io_buf.add(48) } as *mut VirtIOBlkResp;
-    // SAFETY: header_ptr is non-null and properly aligned (16B).
-    unsafe {
-        *header_ptr = VirtIOBlkReqHeader {
-            type_: req_type::VIRTIO_BLK_T_IN,
-            reserved: 0,
-            sector,
-        };
-        (*resp_ptr).status = 0xFF;  // Initialize to invalid status
-    }
+    let header_layout = alloc::alloc::Layout::from_size_align(64, 16).unwrap(); // dealloc layout for the combined block
+    // INV-SAFECALL: typed split+init of the pooled R17-C block.
+    let (header_ptr, resp_ptr) = crate::drivers::virtio::io_buf_init(
+        io_buf,
+        req_type::VIRTIO_BLK_T_IN,
+        sector,
+    );
 
     // VirtIO descriptor flags
     const VIRTQ_DESC_F_NEXT: u16 = 1;
@@ -1574,9 +1475,9 @@ fn read_block_once(
         used_ring_ptr,
         crate::drivers::virtio::get_pci_blk_wait_queue(slot),
         prev_expected,
-        // SAFETY: resp_ptr was allocated above and stays owned by this
-        // frame until the wait returns; the wait only reads its status.
-        unsafe { core::ptr::addr_of!((*resp_ptr).status) as *const u8 },
+        // status is the response struct's first byte; the typed
+        // volatile reader (INV-SAFECALL) handles the polling.
+        resp_ptr as *const u8,
         slot,
     );
 
@@ -1589,9 +1490,7 @@ fn read_block_once(
         // instead of freeing in-flight DMA targets.
         let mut late = false;
         for _ in 0..2_000_000u64 {
-            let idx = unsafe {
-                core::ptr::read_volatile((used_ring_ptr as usize + 2) as *const u16)
-            };
+            let idx = queue::used_ring_idx(used_ring_ptr);
             if idx != prev_expected {
                 late = true;
                 break;
@@ -1613,8 +1512,8 @@ fn read_block_once(
         // completed late — fall through to status handling
     }
 
-    // SAFETY: resp_ptr was allocated above; device has completed the write.
-    let status = unsafe { *resp_ptr };
+    // INV-DMA-3: device-written status byte, volatile read.
+    let status = VirtIOBlkResp { status: crate::drivers::virtio::queue::resp_status_byte(resp_ptr as *const u8) };
 
     // header_ptr is the base of the single combined R17-C block; resp
     // lives inside it at +48. The device completed the chain, so the
@@ -1674,26 +1573,19 @@ fn write_block_once(
 
     // R17-C combined header+resp block, allocated BEFORE the BLK lock
     // (same discipline as read_block_once — see the comment there).
-    let io_layout = alloc::alloc::Layout::from_size_align(64, 16).unwrap();
     // SUBMIT-2X: per-CPU io_buf pool — no global-allocator lock on the
     // synchronous submit path either.
     let io_buf: *mut u8 = crate::drivers::virtio::io_buf_alloc();
     if io_buf.is_null() {
         return Err("Failed to allocate header");
     }
-    let header_layout = io_layout; // dealloc layout for the combined block
-    let header_ptr = io_buf as *mut VirtIOBlkReqHeader;
-    // SAFETY: io_buf is non-null and 64 bytes; +48 is in bounds.
-    let resp_ptr = unsafe { io_buf.add(48) } as *mut VirtIOBlkResp;
-    // SAFETY: header_ptr is non-null and properly aligned (16B).
-    unsafe {
-        *header_ptr = VirtIOBlkReqHeader {
-            type_: req_type::VIRTIO_BLK_T_OUT,
-            reserved: 0,
-            sector,
-        };
-        (*resp_ptr).status = 0xFF;  // Initialize to invalid status
-    }
+    let header_layout = alloc::alloc::Layout::from_size_align(64, 16).unwrap(); // dealloc layout for the combined block
+    // INV-SAFECALL: typed split+init of the pooled R17-C block.
+    let (header_ptr, resp_ptr) = crate::drivers::virtio::io_buf_init(
+        io_buf,
+        req_type::VIRTIO_BLK_T_OUT,
+        sector,
+    );
 
     // VirtIO descriptor flags
     const VIRTQ_DESC_F_NEXT: u16 = 1;
@@ -1830,9 +1722,9 @@ fn write_block_once(
         used_ring_ptr,
         crate::drivers::virtio::get_pci_blk_wait_queue(slot),
         prev_expected,
-        // SAFETY: resp_ptr was allocated above and stays owned by this
-        // frame until the wait returns; the wait only reads its status.
-        unsafe { core::ptr::addr_of!((*resp_ptr).status) as *const u8 },
+        // status is the response struct's first byte; the typed
+        // volatile reader (INV-SAFECALL) handles the polling.
+        resp_ptr as *const u8,
         slot,
     );
 
@@ -1845,9 +1737,7 @@ fn write_block_once(
         // instead of freeing in-flight DMA targets.
         let mut late = false;
         for _ in 0..2_000_000u64 {
-            let idx = unsafe {
-                core::ptr::read_volatile((used_ring_ptr as usize + 2) as *const u16)
-            };
+            let idx = queue::used_ring_idx(used_ring_ptr);
             if idx != prev_expected {
                 late = true;
                 break;
@@ -1866,8 +1756,8 @@ fn write_block_once(
         // completed late — fall through to status handling
     }
 
-    // SAFETY: resp_ptr was allocated above; device has completed the write.
-    let status = unsafe { *resp_ptr };
+    // INV-DMA-3: device-written status byte, volatile read.
+    let status = VirtIOBlkResp { status: crate::drivers::virtio::queue::resp_status_byte(resp_ptr as *const u8) };
 
     // header_ptr is the base of the single combined R17-C block; resp
     // lives inside it at +48. The device completed the chain, so the
@@ -1923,26 +1813,16 @@ fn flush_block_once(slot: usize) -> Result<usize, &'static str> {
 
     // Combined header+resp block (R17-C discipline, same as RW paths),
     // allocated BEFORE the BLK lock (see read_block_once).
-    let io_layout = alloc::alloc::Layout::from_size_align(64, 16).unwrap();
     // SUBMIT-2X: per-CPU io_buf pool — no global-allocator lock on the
     // synchronous submit path either.
     let io_buf: *mut u8 = crate::drivers::virtio::io_buf_alloc();
     if io_buf.is_null() {
         return Err("Failed to allocate flush header");
     }
-    let header_layout = io_layout;
-    let header_ptr = io_buf as *mut VirtIOBlkReqHeader;
-    // SAFETY: io_buf is non-null and 64 bytes; +48 is in bounds.
-    let resp_ptr = unsafe { io_buf.add(48) } as *mut VirtIOBlkResp;
-    // SAFETY: header_ptr is non-null and 16B-aligned.
-    unsafe {
-        *header_ptr = VirtIOBlkReqHeader {
-            type_: req_type::VIRTIO_BLK_T_FLUSH,
-            reserved: 0,
-            sector: 0,
-        };
-        (*resp_ptr).status = 0xFF;
-    }
+    let header_layout = alloc::alloc::Layout::from_size_align(64, 16).unwrap();
+    // INV-SAFECALL: typed split+init of the pooled R17-C block.
+    let (header_ptr, resp_ptr) =
+        crate::drivers::virtio::io_buf_init(io_buf, req_type::VIRTIO_BLK_T_FLUSH, 0);
 
     const VIRTQ_DESC_F_NEXT: u16 = 1;
     const VIRTQ_DESC_F_WRITE: u16 = 2;
@@ -2045,9 +1925,9 @@ fn flush_block_once(slot: usize) -> Result<usize, &'static str> {
         used_ring_ptr,
         crate::drivers::virtio::get_pci_blk_wait_queue(slot),
         prev_expected,
-        // SAFETY: resp_ptr was allocated above and stays owned by this
-        // frame until the wait returns; the wait only reads its status.
-        unsafe { core::ptr::addr_of!((*resp_ptr).status) as *const u8 },
+        // status is the response struct's first byte; the typed
+        // volatile reader (INV-SAFECALL) handles the polling.
+        resp_ptr as *const u8,
         slot,
     );
 
@@ -2057,9 +1937,7 @@ fn flush_block_once(slot: usize) -> Result<usize, &'static str> {
         // block instead of freeing in-flight DMA targets.
         let mut late = false;
         for _ in 0..2_000_000u64 {
-            let idx = unsafe {
-                core::ptr::read_volatile((used_ring_ptr as usize + 2) as *const u16)
-            };
+            let idx = queue::used_ring_idx(used_ring_ptr);
             if idx != prev_expected {
                 late = true;
                 break;
@@ -2077,8 +1955,8 @@ fn flush_block_once(slot: usize) -> Result<usize, &'static str> {
         }
     }
 
-    // SAFETY: resp_ptr was allocated above; device has completed the flush.
-    let status = unsafe { *resp_ptr };
+    // INV-DMA-3: device-written status byte, volatile read.
+    let status = VirtIOBlkResp { status: crate::drivers::virtio::queue::resp_status_byte(resp_ptr as *const u8) };
     // header_ptr is the base of the combined R17-C block; resp at +48.
     // Device completed the chain — return the block to the pool.
     crate::drivers::virtio::io_buf_free(header_ptr as *mut u8);
@@ -2167,11 +2045,14 @@ mod intx {
             if isr_addr == 0 {
                 continue;
             }
-            // SAFETY: registered addresses point at a virtio-pci ISR
-            // capability (MMIO, 1 meaningful byte); the read is the
-            // device-side interrupt acknowledge per virtio 1.0 spec 4.1.4.5
-            // and returns 0 when this device did not assert the line.
-            let isr = unsafe { core::ptr::read_volatile(isr_addr as *const u32) } & 0x3;
+            // INV-MMIO-1..3: registered address points at a virtio-pci
+            // ISR capability (MMIO, 1 meaningful byte); the read is the
+            // device-side interrupt acknowledge per virtio 1.0 spec
+            // 4.1.4.5 and returns 0 when this device did not assert the
+            // line.
+            let isr = crate::safety::mmio::MmioRegion::new(isr_addr as usize, 4)
+                .read_u32(0)
+                & 0x3;
             if isr != 0 {
                 let svc = SERVICES[i].load(Ordering::Acquire);
                 if svc != 0 {
@@ -2185,9 +2066,10 @@ mod intx {
                             isr_addr
                         );
                     }
-                    // SAFETY: nonzero values were stored from fn pointers
-                    // by `register`.
-                    let f: fn() = unsafe { core::mem::transmute(svc) };
+                    // INV-SAFECAST-1: nonzero values were stored from
+                    // fn pointers by `register` (u64 and fn() are both
+                    // 8 bytes on all Rux targets).
+                    let f: fn() = crate::safety::call::safety_cast::<u64, fn()>(svc);
                     f();
                 }
             }

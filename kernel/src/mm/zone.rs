@@ -32,7 +32,7 @@ use alloc::string::ToString;
 use crate::sync::spinlock::Spinlock;
 
 use super::PAGE_SIZE;
-use super::page_desc::{pfn_to_page, pfn_to_page_mut, PageFlag};
+use super::page_desc::{pfn_to_page, pfn_to_page_mut, PageFlag, page_desc};
 
 // ==================== Zone Type Definitions ====================
 
@@ -500,17 +500,14 @@ impl Zone {
                     let n_take = block_n.min(remaining);
                     // Hand out the first n_take members as order-0 pages.
                     for i in 0..n_take {
-                        let p = pfn_to_page_mut(block + i);
-                        if !p.is_null() {
+                        if let Some(p) = page_desc(block + i) {
                             // SAFETY: member of the just-popped block;
                             // zone lock held (MM-H2).
-                            unsafe {
-                                (*p).clear_all_flags();
-                                (*p).reset_mapcount();
-                                (*p).set_refcount(1);
-                                (*p).set_order(0);
-                                (*p).set_next_free(FREE_LIST_NULL);
-                            }
+                                                    p.clear_all_flags();
+                            p.reset_mapcount();
+                            p.set_refcount(1);
+                            p.set_order(0);
+                            p.set_next_free(FREE_LIST_NULL);
                         }
                         out[got + i] = block + i;
                         if bulk < BULK_PFNS_MAX {
@@ -527,16 +524,13 @@ impl Zone {
                     if excess > 0 {
                         let mut h = self.free_area[0].free_list.load(Ordering::Acquire);
                         for j in (0..excess).rev() {
-                            let p = pfn_to_page_mut(block + n_take + j);
-                            if !p.is_null() {
+                            if let Some(p) = page_desc(block + n_take + j) {
                                 // SAFETY: member of the just-popped block;
                                 // zone lock held.
-                                unsafe {
-                                    (*p).set_refcount(0);
-                                    (*p).set_order(0);
-                                    (*p).set_next_free(h);
-                                    (*p).set_flag(PageFlag::OnFreelist);
-                                }
+                                                            p.set_refcount(0);
+                                p.set_order(0);
+                                p.set_next_free(h);
+                                p.set_flag(PageFlag::OnFreelist);
                             }
                             h = block + n_take + j;
                         }
@@ -609,35 +603,29 @@ impl Zone {
                     // /proc/vmstat pgalloc_* counters.
                     super::vmstat::note_alloc(self.zone_type, count as u64);
                     for i in 0..count {
-                        let page = pfn_to_page_mut(pfn + i);
-                        if !page.is_null() {
+                        if let Some(page) = page_desc(pfn + i) {
                             // SAFETY: pfn+i from alloc_from_order is valid; lock held.
-                            unsafe {
-                                (*page).clear_all_flags();
-                                (*page).reset_mapcount();
-                                (*page).set_refcount(1);
-                            }
+                                                    page.clear_all_flags();
+                            page.reset_mapcount();
+                            page.set_refcount(1);
                         }
                     }
-                    let leader = pfn_to_page_mut(pfn);
-                    if !leader.is_null() {
+                    if let Some(leader) = page_desc(pfn) {
                         // SAFETY: leader pfn valid; lock held.
-                        unsafe {
-                            (*leader).set_order(order as u8);
-                            // SP-7 (stress-port r7): NO Referenced flag
-                            // here. The reference kernel's prep_new_page
-                            // hands out flag-clear pages — PG_referenced
-                            // exists only after mark_page_accessed(). The
-                            // old plant made every freshly allocated page
-                            // look hot to reclaim: measured on the
-                            // exhaustion class, 46% of all examined anon
-                            // candidates rotated away on flags that no
-                            // access ever set (the SP-7 VSCAN-CENSUS
-                            // baseline; nothing in Rux sets Referenced on
-                            // anon pages legitimately — lru_note_refs has
-                            // no callers and the hardware accessed bit is
-                            // never propagated).
-                        }
+                                            leader.set_order(order as u8);
+                        // SP-7 (stress-port r7): NO Referenced flag
+                        // here. The reference kernel's prep_new_page
+                        // hands out flag-clear pages — PG_referenced
+                        // exists only after mark_page_accessed(). The
+                        // old plant made every freshly allocated page
+                        // look hot to reclaim: measured on the
+                        // exhaustion class, 46% of all examined anon
+                        // candidates rotated away on flags that no
+                        // access ever set (the SP-7 VSCAN-CENSUS
+                        // baseline; nothing in Rux sets Referenced on
+                        // anon pages legitimately — lru_note_refs has
+                        // no callers and the hardware accessed bit is
+                        // never propagated).
                     }
                 }
                 return result;
@@ -698,15 +686,12 @@ impl Zone {
         self.free_pages.fetch_sub(1usize << target_order, Ordering::Relaxed);
 
         // Update page descriptor
-        let page = pfn_to_page_mut(pfn);
-        if !page.is_null() {
+        if let Some(page) = page_desc(pfn) {
             // SAFETY: pfn is within zone range (validated above), lock is held.
-            unsafe {
-                (*page).set_refcount(1);
-                (*page).set_order(target_order as u8);
-                // CRITICAL: Clear next_free to prevent stale pointer corruption
-                (*page).set_next_free(FREE_LIST_NULL);
-            }
+                    page.set_refcount(1);
+            page.set_order(target_order as u8);
+            // CRITICAL: Clear next_free to prevent stale pointer corruption
+            page.set_next_free(FREE_LIST_NULL);
         }
 
         Some(pfn)
@@ -795,12 +780,9 @@ impl Zone {
         // merge involving them (order-0 accumulation, INV-REF-2 violation)
         // and meminfo miscounted them as used.
         {
-            let page = pfn_to_page_mut(pfn);
-            if !page.is_null() {
-                unsafe {
-                    (*page).set_refcount(0);
-                    (*page).clear_flag(super::page_desc::PageFlag::Referenced);
-                }
+            if let Some(page) = page_desc(pfn) {
+                            page.set_refcount(0);
+                page.clear_flag(super::page_desc::PageFlag::Referenced);
             }
         }
 
@@ -821,20 +803,17 @@ impl Zone {
         // observed RAW-FREE-OF-LIVE-TABLE mid-flight re-stamp). Refuse
         // identically: leak + taint, never double-link.
         {
-            let page = pfn_to_page_mut(pfn);
-            if !page.is_null() {
-                unsafe {
-                    if (*page).test_flag(PageFlag::OnFreelist)
-                        || (*page).test_flag(PageFlag::OnPcp)
-                    {
-                        // Taint-only reporting: this runs under the zone
-                        // lock; raw putchar / printk here can wedge the
-                        // console path (same discipline as the heap
-                        // buddy's R43 tripwires).
-                        crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
-                        DOUBLE_FREE_COUNT.fetch_add(1, Ordering::Relaxed);
-                        return;
-                    }
+            if let Some(page) = page_desc(pfn) {
+                            if page.test_flag(PageFlag::OnFreelist)
+                    || page.test_flag(PageFlag::OnPcp)
+                {
+                    // Taint-only reporting: this runs under the zone
+                    // lock; raw putchar / printk here can wedge the
+                    // console path (same discipline as the heap
+                    // buddy's R43 tripwires).
+                    crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
+                    DOUBLE_FREE_COUNT.fetch_add(1, Ordering::Relaxed);
+                    return;
                 }
             }
         }
@@ -943,14 +922,11 @@ impl Zone {
         let head = self.free_area[order].free_list.load(Ordering::Acquire);
 
         // Update Page descriptor's free list pointers
-        let page = pfn_to_page_mut(pfn);
-        if !page.is_null() {
+        if let Some(page) = page_desc(pfn) {
             // SAFETY: pfn is from alloc_pages (valid), lock is held.
-            unsafe {
-                (*page).set_next_free(head);
-                (*page).set_flag(PageFlag::OnFreelist);
-                (*page).set_order(order as u8);
-            }
+                    page.set_next_free(head);
+            page.set_flag(PageFlag::OnFreelist);
+            page.set_order(order as u8);
         }
 
         // Set new head
@@ -964,14 +940,11 @@ impl Zone {
         let head = self.free_area[order].free_list.load(Ordering::Acquire);
 
         // Update Page descriptor's free list pointers
-        let page = pfn_to_page_mut(pfn);
-        if !page.is_null() {
+        if let Some(page) = page_desc(pfn) {
             // SAFETY: pfn is within zone range, called during init (single-threaded).
-            unsafe {
-                (*page).set_next_free(head);
-                (*page).set_order(order as u8);
-                (*page).set_flag(PageFlag::OnFreelist);
-            }
+                    page.set_next_free(head);
+            page.set_order(order as u8);
+            page.set_flag(PageFlag::OnFreelist);
         }
 
         // Set new head

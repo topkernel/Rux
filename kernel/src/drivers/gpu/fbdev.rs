@@ -389,55 +389,36 @@ const FB_CMAP_HDR_SIZE: usize = 48;
 /// nonsensical length (> 4096 entries) gets EINVAL instead of unbounded
 /// copy work.
 fn fbioget_cmap(arg: usize) -> i64 {
-    // SAFETY of accesses below: access_ok validated the user pointers;
-    // the local header is properly initialized memory.
-    unsafe {
-        if !crate::arch::uaccess::access_ok(arg, FB_CMAP_HDR_SIZE) {
-            return -14; // EFAULT
+    // INV-UACCESS-1 (unsafe-slim round 3): every user access routes
+    // through the safe uaccess capsule — the kernel side is
+    // slice-typed, the user side access_ok-checked and fault-safe.
+    let mut hdr = [0u8; FB_CMAP_HDR_SIZE];
+    if crate::arch::uaccess_safe::copy_in(&mut hdr, arg) != 0 {
+        return -14;
+    }
+    let len = u32::from_ne_bytes(hdr[4..8].try_into().unwrap()) as usize;
+    if len > 4096 {
+        return -22; // EINVAL
+    }
+    let zeros = [0u8; 64];
+    let left = len * 2; // u16 entries
+    let chans: [usize; 4] = [
+        usize::from_ne_bytes(hdr[8..16].try_into().unwrap()),
+        usize::from_ne_bytes(hdr[16..24].try_into().unwrap()),
+        usize::from_ne_bytes(hdr[24..32].try_into().unwrap()),
+        usize::from_ne_bytes(hdr[32..40].try_into().unwrap()),
+    ];
+    for chan in chans {
+        if chan == 0 {
+            continue;
         }
-        let mut hdr = [0u8; FB_CMAP_HDR_SIZE];
-        if crate::arch::uaccess::copy_from_user(
-            hdr.as_mut_ptr(),
-            arg as *const u8,
-            FB_CMAP_HDR_SIZE,
-        ) != 0
-        {
-            return -14;
-        }
-        let start = u32::from_ne_bytes(hdr[0..4].try_into().unwrap());
-        let len = u32::from_ne_bytes(hdr[4..8].try_into().unwrap()) as usize;
-        let _ = start; // no CLUT: start selects nothing
-        if len > 4096 {
-            return -22; // EINVAL
-        }
-        let zeros = [0u8; 64];
-        let mut left = len * 2; // u16 entries
-        let chans: [usize; 4] = [
-            usize::from_ne_bytes(hdr[8..16].try_into().unwrap()),
-            usize::from_ne_bytes(hdr[16..24].try_into().unwrap()),
-            usize::from_ne_bytes(hdr[24..32].try_into().unwrap()),
-            usize::from_ne_bytes(hdr[32..40].try_into().unwrap()),
-        ];
-        for chan in chans {
-            if chan == 0 {
-                continue;
+        let mut off = 0usize;
+        while off < left {
+            let n = core::cmp::min(zeros.len(), left - off);
+            if crate::arch::uaccess_safe::copy_out(chan + off, &zeros[..n]) != 0 {
+                return -14;
             }
-            let mut off = 0usize;
-            while off < left {
-                if !crate::arch::uaccess::access_ok(chan + off, 1) {
-                    return -14;
-                }
-                let n = core::cmp::min(zeros.len(), left - off);
-                if crate::arch::uaccess::copy_to_user(
-                    (chan + off) as *mut u8,
-                    zeros.as_ptr(),
-                    n,
-                ) != 0
-                {
-                    return -14;
-                }
-                off += n;
-            }
+            off += n;
         }
     }
     0
@@ -496,16 +477,10 @@ pub fn fbdev_ioctl(cmd: u32, arg: usize) -> i64 {
             if !crate::arch::uaccess::access_ok(arg, core::mem::size_of::<FbVarScreeninfo>()) {
                 return -14; // EFAULT
             }
-            let mut req = FbVarScreeninfo::default();
-            // SAFETY: access_ok validated the user pointer; req is a local.
-            unsafe {
-                let uncopied = crate::arch::uaccess::copy_from_user(
-                    &mut req as *mut FbVarScreeninfo as *mut u8,
-                    arg as *const u8,
-                    core::mem::size_of::<FbVarScreeninfo>(),
-                );
-                if uncopied != 0 { return -14; }
-            }
+            // INV-UACCESS-1: typed safe user read.
+            let Some(req) = crate::arch::uaccess_safe::read_user::<FbVarScreeninfo>(arg) else {
+                return -14;
+            };
             let cur = create_var_screeninfo(&info);
             let same_geometry = req.xres == cur.xres
                 && req.yres == cur.yres
@@ -521,15 +496,9 @@ pub fn fbdev_ioctl(cmd: u32, arg: usize) -> i64 {
             if !same_geometry {
                 return -22; // EINVAL: mode change not supported
             }
-            // Echo the accepted request back verbatim.
-            // SAFETY: access_ok validated the user pointer.
-            unsafe {
-                let uncopied = crate::arch::uaccess::copy_to_user(
-                    arg as *mut u8,
-                    &req as *const FbVarScreeninfo as *const u8,
-                    core::mem::size_of::<FbVarScreeninfo>(),
-                );
-                if uncopied != 0 { return -14; }
+            // Echo the accepted request back verbatim (typed safe write).
+            if !crate::arch::uaccess_safe::write_user(arg, req) {
+                return -14;
             }
             0
         }
@@ -545,14 +514,9 @@ pub fn fbdev_ioctl(cmd: u32, arg: usize) -> i64 {
             let mut var = create_var_screeninfo(&info);
             var.xoffset = 0;
             var.yoffset = 0;
-            // SAFETY: access_ok validated the user pointer.
-            unsafe {
-                let uncopied = crate::arch::uaccess::copy_to_user(
-                    arg as *mut u8,
-                    &var as *const FbVarScreeninfo as *const u8,
-                    core::mem::size_of::<FbVarScreeninfo>(),
-                );
-                if uncopied != 0 { return -14; }
+            // INV-UACCESS-1: typed safe write.
+            if !crate::arch::uaccess_safe::write_user(arg, var) {
+                return -14;
             }
             0
         }

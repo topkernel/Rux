@@ -288,15 +288,16 @@ impl VirtioGpuDevice {
             isr_base + 4,
         )?;
 
-        // Convert virtual addresses to physical addresses
+        // Convert virtual addresses to physical addresses (typed
+        // getters; no raw field access anymore).
         let desc_phys = crate::arch::mm::virt_to_phys(
-            crate::arch::mm::VirtAddr::new(unsafe { queue.desc as u64 })
+            crate::arch::mm::VirtAddr::new(queue.get_desc_addr())
         ).0;
         let avail_phys = crate::arch::mm::virt_to_phys(
-            crate::arch::mm::VirtAddr::new(unsafe { queue.avail as u64 })
+            crate::arch::mm::VirtAddr::new(queue.get_avail_addr())
         ).0;
         let used_phys = crate::arch::mm::virt_to_phys(
-            crate::arch::mm::VirtAddr::new(unsafe { queue.used as u64 })
+            crate::arch::mm::VirtAddr::new(queue.get_used_addr())
         ).0;
 
         unsafe {
@@ -770,40 +771,45 @@ impl VirtioGpuDevice {
         // LIMITATION: Hardcodes descriptors 0 and 1, so only one GPU command can
         // be in-flight at a time. Proper fix would use the descriptor allocator
         // (queue.alloc_desc()) for concurrent command support.
-        unsafe {
+        {
+            // INV-DMA-2: typed bounds-checked ring views replace the raw
+            // desc/avail pointer programming.
             // Set command descriptor
-            let desc0 = &mut *queue.desc.add(0);
+            let desc0 = queue.desc_mut(0).unwrap();
             desc0.addr = cmd_phys;
             desc0.len = cmd_size as u32;
             desc0.flags = 0x01; // VIRTQ_DESC_F_NEXT
             desc0.next = 1;
 
             // Set response descriptor
-            let desc1 = &mut *queue.desc.add(1);
-            desc1.addr = resp_phys;
-            desc1.len = resp_size as u32;
-            desc1.flags = 0x02; // VIRTQ_DESC_F_WRITE
-            desc1.next = 0;
+            {
+                let desc1 = queue.desc_mut(1).unwrap();
+                desc1.addr = resp_phys;
+                desc1.len = resp_size as u32;
+                desc1.flags = 0x02; // VIRTQ_DESC_F_WRITE
+                desc1.next = 0;
+            }
 
             // Update available ring
             // AvailRing structure: flags (u16) + idx (u16) + ring[] (u16 array)
             // ring array starts at offset 4
-            let avail = &mut *queue.avail;
-            let idx = avail.idx as usize;
+            let idx = queue.avail_idx() as usize;
             let ring_idx = idx % queue.queue_size as usize;
 
             // ring array immediately follows AvailRing struct
-            let ring_ptr = (queue.avail as *mut u8).add(4) as *mut u16;
-            write_volatile(ring_ptr.add(ring_idx), 0); // Descriptor index 0
+            queue.write_avail_ring_slot(ring_idx, 0); // Descriptor index 0
 
             // Ensure all writes are visible to device (memory barrier)
             fence(Ordering::SeqCst);
 
             // RISC-V needs to flush CPU cache to memory
             #[cfg(feature = "riscv64")]
-            core::arch::asm!("fence");
+            // SAFETY: bare cache/memory fence instruction, no operands.
+            unsafe {
+                core::arch::asm!("fence");
+            }
 
-            write_volatile(core::ptr::addr_of_mut!(avail.idx), avail.idx.wrapping_add(1));
+            queue.write_avail_idx(((idx as u16).wrapping_add(1)));
             fence(Ordering::SeqCst);
 
             // Notify device
@@ -837,7 +843,9 @@ impl VirtioGpuDevice {
             let mut spins: u32 = 0;
             loop {
                 fence(Ordering::SeqCst);
-                let used = &*queue.used;
+                // INV-DMA-3: device-written used index via the typed
+                // volatile getter.
+                let used_idx_now = queue.get_used();
                 // Wrap-safe completion check: vring indices are free-running
                 // u16 counters. Entry state is used.idx == idx (the cmd_lock
                 // spans the previous command's wait, so everything submitted
@@ -847,7 +855,7 @@ impl VirtioGpuDevice {
                 // never satisfy `used.idx >= 0x10000`, so EVERY command from
                 // the wrap on timed out after 10 s — a long GUI session
                 // (2-3 commands per flip) reaches the wrap in hours.
-                if used.idx != idx as u16 {
+                if used_idx_now != idx as u16 {
                     completed = true;
                     break;
                 }
@@ -867,7 +875,13 @@ impl VirtioGpuDevice {
                 // the caller's buffer before the block is freed.
                 // SAFETY: the device wrote resp_size bytes at resp_ptr
                 // (desc1 was the device-writable half of the chain).
-                core::ptr::copy_nonoverlapping(resp_ptr, resp as *mut RESP as *mut u8, resp_size);
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        resp_ptr,
+                        resp as *mut RESP as *mut u8,
+                        resp_size,
+                    );
+                }
             }
         }
 

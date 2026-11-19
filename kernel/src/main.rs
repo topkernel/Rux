@@ -107,6 +107,7 @@ pub fn print_status_ex(module: &str, desc: &str, success: Option<bool>) {
 #[cfg(feature = "riscv64")]
 mod sbi;
 mod mm;
+mod safety;
 mod console;
 mod print;
 mod printk;

@@ -17,7 +17,7 @@ extern crate alloc;
 
 use core::sync::atomic::Ordering;
 
-use super::page_desc::{PageFlag, pfn_to_page_mut};
+use super::page_desc::{PageFlag, pfn_to_page_mut, page_desc};
 use super::page_alloc::free_page;
 use super::zone::{ZoneType, WMARK_LOW};
 use super::pglist::{
@@ -618,15 +618,14 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
             break;
         }
 
-        let page = pfn_to_page_mut(pfn);
-        if page.is_null() {
+        let Some(p) = page_desc(pfn) else {
             VS_NULLP.fetch_add(1, Relaxed);
             continue;
-        }
+        };
 
-        // SAFETY: page is non-null (checked above); pfn is within [MIN_PFN, MAX_PFN).
-        unsafe {
-            let p = &*page;
+        // (INV-FRAME-1: the shared vmemmap descriptor view — every
+        // field access below is an atomic/&self method.)
+        {
 
             // Skip non-anonymous pages
             if !p.is_anonymous() {

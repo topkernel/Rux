@@ -144,50 +144,39 @@ impl VirtioInputDevice {
     fn init_virtio(&mut self) -> Option<()> {
         let common_cfg = self.pci.common_cfg_bar + self.pci.common_cfg_offset as u64;
 
+        // INV-MMIO-1..3: the common-config register window for the
+        // whole init sequence below.
+        let common = crate::safety::mmio::MmioRegion::new(common_cfg as usize, 0x100);
+
         // Step 1: Reset device
-        unsafe {
-            write_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *mut u8, 0);
-        }
+        common.write_u8(offset::DEVICE_STATUS as usize, 0);
         fence(Ordering::SeqCst);
 
         // Steps 2-3: Set ACKNOWLEDGE | DRIVER
-        unsafe {
-            write_volatile(
-                (common_cfg + offset::DEVICE_STATUS as u64) as *mut u8,
-                (status::ACKNOWLEDGE | status::DRIVER) as u8,
-            );
-        }
+        common.write_u8(
+            offset::DEVICE_STATUS as usize,
+            (status::ACKNOWLEDGE | status::DRIVER) as u8,
+        );
         fence(Ordering::SeqCst);
 
         // Steps 4-6: Feature negotiation (no special features needed)
-        unsafe {
-            write_volatile(
-                (common_cfg + offset::DEVICE_STATUS as u64) as *mut u8,
-                (status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK) as u8,
-            );
-        }
+        common.write_u8(
+            offset::DEVICE_STATUS as usize,
+            (status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK) as u8,
+        );
         fence(Ordering::SeqCst);
 
         // Step 7: Verify FEATURES_OK
-        let status_val = unsafe {
-            read_volatile((common_cfg + offset::DEVICE_STATUS as u64) as *const u8)
-        };
+        let status_val = common.read_u8(offset::DEVICE_STATUS as usize);
         if (status_val & status::FEATURES_OK as u8) == 0 {
             return None;
         }
 
         // Step 8: Initialize event queue
-        unsafe {
-            write_volatile(
-                (common_cfg + offset::COMMON_CFG_QUEUE_SELECT as u64) as *mut u16,
-                EVENT_QUEUE,
-            );
-        }
+        common.write_u16(offset::COMMON_CFG_QUEUE_SELECT as usize, EVENT_QUEUE);
         fence(Ordering::SeqCst);
 
-        let queue_size = unsafe {
-            read_volatile((common_cfg + offset::COMMON_CFG_QUEUE_SIZE as u64) as *const u16)
-        };
+        let queue_size = common.read_u16(offset::COMMON_CFG_QUEUE_SIZE as usize);
 
         if queue_size == 0 {
             return None;
@@ -228,62 +217,36 @@ impl VirtioInputDevice {
 
         // Get queue physical addresses
         let desc_phys = crate::arch::mm::virt_to_phys(
-            crate::arch::mm::VirtAddr::new(unsafe { queue.desc as u64 })
+            crate::arch::mm::VirtAddr::new(queue.get_desc_addr())
         ).0;
         let avail_phys = crate::arch::mm::virt_to_phys(
-            crate::arch::mm::VirtAddr::new(unsafe { queue.avail as u64 })
+            crate::arch::mm::VirtAddr::new(queue.get_avail_addr())
         ).0;
         let used_phys = crate::arch::mm::virt_to_phys(
-            crate::arch::mm::VirtAddr::new(unsafe { queue.used as u64 })
+            crate::arch::mm::VirtAddr::new(queue.get_used_addr())
         ).0;
 
-        // Set queue addresses
-        unsafe {
-            write_volatile(
-                (common_cfg + offset::COMMON_CFG_QUEUE_DESC_LO as u64) as *mut u32,
-                desc_phys as u32,
-            );
-            write_volatile(
-                (common_cfg + offset::COMMON_CFG_QUEUE_DESC_HI as u64) as *mut u32,
-                (desc_phys >> 32) as u32,
-            );
-            write_volatile(
-                (common_cfg + offset::COMMON_CFG_QUEUE_DRIVER_LO as u64) as *mut u32,
-                avail_phys as u32,
-            );
-            write_volatile(
-                (common_cfg + offset::COMMON_CFG_QUEUE_DRIVER_HI as u64) as *mut u32,
-                (avail_phys >> 32) as u32,
-            );
-            write_volatile(
-                (common_cfg + offset::COMMON_CFG_QUEUE_DEVICE_LO as u64) as *mut u32,
-                used_phys as u32,
-            );
-            write_volatile(
-                (common_cfg + offset::COMMON_CFG_QUEUE_DEVICE_HI as u64) as *mut u32,
-                (used_phys >> 32) as u32,
-            );
-        }
+        // Set queue addresses (INV-MMIO-1..3: the common-config window).
+        let common = crate::safety::mmio::MmioRegion::new(common_cfg as usize, 0x100);
+        common.write_u32(offset::COMMON_CFG_QUEUE_DESC_LO as usize, desc_phys as u32);
+        common.write_u32(offset::COMMON_CFG_QUEUE_DESC_HI as usize, (desc_phys >> 32) as u32);
+        common.write_u32(offset::COMMON_CFG_QUEUE_DRIVER_LO as usize, avail_phys as u32);
+        common.write_u32(offset::COMMON_CFG_QUEUE_DRIVER_HI as usize, (avail_phys >> 32) as u32);
+        common.write_u32(offset::COMMON_CFG_QUEUE_DEVICE_LO as usize, used_phys as u32);
+        common.write_u32(offset::COMMON_CFG_QUEUE_DEVICE_HI as usize, (used_phys >> 32) as u32);
         fence(Ordering::SeqCst);
 
         // Enable queue
-        unsafe {
-            write_volatile(
-                (common_cfg + offset::COMMON_CFG_QUEUE_ENABLE as u64) as *mut u16,
-                1,
-            );
-        }
+        common.write_u16(offset::COMMON_CFG_QUEUE_ENABLE as usize, 1);
         fence(Ordering::SeqCst);
 
         self.event_queue = Some(queue);
 
         // Step 9: Set DRIVER_OK
-        unsafe {
-            write_volatile(
-                (common_cfg + offset::DEVICE_STATUS as u64) as *mut u8,
-                (status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK | status::DRIVER_OK) as u8,
-            );
-        }
+        common.write_u8(
+            offset::DEVICE_STATUS as usize,
+            (status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK | status::DRIVER_OK) as u8,
+        );
         fence(Ordering::SeqCst);
 
         // Submit initial buffers to receive events
@@ -302,17 +265,18 @@ impl VirtioInputDevice {
         // as a keyboard (review BUG: virtio-input 从错误 BAR 读 config).
         let config_base = self.pci.device_cfg_bar;
 
-        // Read device name
-        unsafe {
+        // INV-MMIO-1..3: the device-config register window (select/
+        // subsel/size + 32-byte payload at +8).
+        let cfg = crate::safety::mmio::MmioRegion::new(config_base as usize, 0x28);
+        {
             // Select ID_NAME configuration
-            write_volatile((config_base + 0) as *mut u8, VIRTIO_INPUT_CFG_ID_NAME);
-            write_volatile((config_base + 1) as *mut u8, 0);
+            cfg.write_u8(0, VIRTIO_INPUT_CFG_ID_NAME);
+            cfg.write_u8(1, 0);
             fence(Ordering::SeqCst);
 
             // Read name
-            let payload = (config_base + 8) as *const u8;
-            for i in 0..31 {
-                let c = read_volatile(payload.add(i));
+            for i in 0..31usize {
+                let c = cfg.read_u8(8 + i);
                 if c == 0 {
                     break;
                 }
@@ -329,27 +293,28 @@ impl VirtioInputDevice {
         // Device CFG BAR — see read_device_info.
         let config_base = self.pci.device_cfg_bar;
 
-        unsafe {
+        // INV-MMIO-1..3: device-config window (see read_device_info).
+        let cfg = crate::safety::mmio::MmioRegion::new(config_base as usize, 0x28);
+        {
             // Check EV_ABS event (absolute coordinates)
-            write_volatile((config_base + 0) as *mut u8, VIRTIO_INPUT_CFG_EV_BITS);
-            write_volatile((config_base + 1) as *mut u8, EV_ABS as u8);
+            cfg.write_u8(0, VIRTIO_INPUT_CFG_EV_BITS);
+            cfg.write_u8(1, EV_ABS as u8);
             fence(Ordering::SeqCst);
 
-            let payload = (config_base + 8) as *const u8;
             // Check ABS_X and ABS_Y bits
-            let has_abs_x = (read_volatile(payload) & 0x01) != 0;
+            let has_abs_x = (cfg.read_u8(8) & 0x01) != 0;
 
             if has_abs_x {
                 return true;
             }
 
             // Check EV_REL event (relative coordinates)
-            write_volatile((config_base + 0) as *mut u8, VIRTIO_INPUT_CFG_EV_BITS);
-            write_volatile((config_base + 1) as *mut u8, EV_REL as u8);
+            cfg.write_u8(0, VIRTIO_INPUT_CFG_EV_BITS);
+            cfg.write_u8(1, EV_REL as u8);
             fence(Ordering::SeqCst);
 
             // Check REL_X and REL_Y bits
-            let has_rel_x = (read_volatile(payload) & 0x01) != 0;
+            let has_rel_x = (cfg.read_u8(8) & 0x01) != 0;
 
             has_rel_x
         }
@@ -364,24 +329,23 @@ impl VirtioInputDevice {
 
         let queue_size = queue.queue_size as usize;
 
-        unsafe {
+        // INV-DMA-2: typed bounds-checked ring views.
+        {
             // Submit all buffers
             for i in 0..queue_size {
                 let event_ptr = self.event_buffer_phys + (i * core::mem::size_of::<VirtioInputEvent>()) as u64;
 
-                let desc = &mut *queue.desc.add(i);
+                let Some(desc) = queue.desc_mut(i as u16) else { continue };
                 desc.addr = event_ptr;
                 desc.len = core::mem::size_of::<VirtioInputEvent>() as u32;
                 desc.flags = 0x02; // VIRTQ_DESC_F_WRITE
                 desc.next = 0;
 
                 // Add to available ring
-                let avail = &mut *queue.avail;
-                let ring_ptr = (queue.avail as *mut u8).add(4) as *mut u16;
-                let idx = avail.idx as usize;
-                write_volatile(ring_ptr.add(idx % queue_size), i as u16);
+                let idx = queue.avail_idx() as usize;
+                queue.write_avail_ring_slot(idx % queue_size, i as u16);
                 fence(Ordering::SeqCst);
-                write_volatile(core::ptr::addr_of_mut!(avail.idx), avail.idx.wrapping_add(1));
+                queue.write_avail_idx((idx as u16).wrapping_add(1));
             }
 
             fence(Ordering::SeqCst);
@@ -393,9 +357,8 @@ impl VirtioInputDevice {
     pub fn read_event(&mut self) -> Option<InputEvent> {
         let queue = self.event_queue.as_ref()?;
 
-        unsafe {
-            let used = &*queue.used;
-            let used_idx = core::ptr::read_volatile(&used.idx) as usize;
+        {
+            let used_idx = queue.get_used() as usize;
             let last_used = self.last_used as usize;
 
             if crate::trace::EVENT_INPUTTRACE.armed() {
@@ -411,27 +374,32 @@ impl VirtioInputDevice {
             }
 
             // Get used descriptor (volatile read: device writes via DMA)
-            let used_ring = (queue.used as *const u8).add(4) as *const UsedElem;
-            let used_elem = read_volatile(used_ring.add(last_used % queue.queue_size as usize));
+            let used_elem = queue
+                .get_used_elem((last_used % queue.queue_size as usize) as u16)
+                .unwrap_or(crate::drivers::virtio::queue::UsedElem { id: 0, len: 0 });
 
             let desc_idx = used_elem.id as usize;
             let _len = used_elem.len;
 
             // Read event
-            let event = read_volatile(self.event_buffer.add(desc_idx));
+            // SAFETY: the event buffer is a live registered DMA buffer
+            // of queue_size events (INV at init); volatile because the
+            // device writes it.
+            let event = unsafe { read_volatile(self.event_buffer.add(desc_idx)) };
 
             // Resubmit buffer
-            let desc = &mut *queue.desc.add(desc_idx);
+            let Some(desc) = queue.desc_mut(desc_idx as u16) else {
+                return None;
+            };
             desc.addr = self.event_buffer_phys + (desc_idx * core::mem::size_of::<VirtioInputEvent>()) as u64;
             desc.len = core::mem::size_of::<VirtioInputEvent>() as u32;
             desc.flags = 0x02;
             desc.next = 0;
 
-            let avail = &mut *queue.avail;
-            let ring_ptr = (queue.avail as *mut u8).add(4) as *mut u16;
-            write_volatile(ring_ptr.add(avail.idx as usize % queue.queue_size as usize), desc_idx as u16);
+            let aidx = queue.avail_idx() as usize;
+            queue.write_avail_ring_slot(aidx % queue.queue_size as usize, desc_idx as u16);
             fence(Ordering::SeqCst);
-            avail.idx = avail.idx.wrapping_add(1);
+            queue.write_avail_idx((aidx as u16).wrapping_add(1));
             self.last_used = self.last_used.wrapping_add(1);
 
             fence(Ordering::SeqCst);
@@ -452,13 +420,11 @@ impl VirtioInputDevice {
     }
 
     pub fn has_event(&self) -> bool {
-        if let Some(queue) = &self.event_queue {
-            unsafe {
-                let used = &*queue.used;
-                used.idx as usize != self.last_used as usize
-            }
-        } else {
-            false
+        // INV-DMA-3: device-written used index via the typed volatile
+        // getter.
+        match &self.event_queue {
+            Some(queue) => queue.get_used() as usize != self.last_used as usize,
+            None => false,
         }
     }
 
@@ -508,20 +474,21 @@ impl VirtioInputDevice {
         if config_base == 0 {
             return 0;
         }
-        unsafe {
-            write_volatile((config_base) as *mut u8, VIRTIO_INPUT_CFG_EV_BITS);
-            write_volatile((config_base + 1) as *mut u8, ev_type);
+        // INV-MMIO-1..3: device-config window.
+        let cfg = crate::safety::mmio::MmioRegion::new(config_base as usize, 0x28);
+        {
+            cfg.write_u8(0, VIRTIO_INPUT_CFG_EV_BITS);
+            cfg.write_u8(1, ev_type);
             fence(Ordering::SeqCst);
 
             // u.size = bitmap size in bytes (spec: 5.10.6.2)
-            let size = read_volatile((config_base + 2) as *const u8) as usize;
+            let size = cfg.read_u8(2) as usize;
             if size == 0 {
                 return 0;
             }
             let n = size.min(out.len()).min(128);
-            let payload = (config_base + 8) as *const u8;
             for i in 0..n {
-                out[i] = read_volatile(payload.add(i));
+                out[i] = cfg.read_u8(8 + i);
             }
             n
         }
@@ -537,21 +504,22 @@ impl VirtioInputDevice {
         if config_base == 0 {
             return None;
         }
-        unsafe {
-            write_volatile((config_base) as *mut u8, VIRTIO_INPUT_CFG_ABS_INFO);
-            write_volatile((config_base + 1) as *mut u8, axis);
+        // INV-MMIO-1..3: device-config window.
+        let cfg = crate::safety::mmio::MmioRegion::new(config_base as usize, 0x28);
+        {
+            cfg.write_u8(0, VIRTIO_INPUT_CFG_ABS_INFO);
+            cfg.write_u8(1, axis);
             fence(Ordering::SeqCst);
 
-            let size = read_volatile((config_base + 2) as *const u8) as usize;
+            let size = cfg.read_u8(2) as usize;
             if size < 20 {
                 return None;
             }
-            let payload = (config_base + 8) as *const u8;
             let mut vals = [0u32; 5];
             for (i, v) in vals.iter_mut().enumerate() {
                 let mut b = [0u8; 4];
                 for (j, bj) in b.iter_mut().enumerate() {
-                    *bj = read_volatile(payload.add(i * 4 + j));
+                    *bj = cfg.read_u8(8 + i * 4 + j);
                 }
                 *v = u32::from_le_bytes(b);
             }

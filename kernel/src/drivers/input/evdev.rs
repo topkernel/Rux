@@ -502,19 +502,50 @@ pub static mut EVDEV_POINTER: Option<EvdevDevice> = None;
 /// touch protocol for OH multimodalinput.
 pub static mut EVDEV_TOUCHSCREEN: Option<EvdevDevice> = None;
 
+// Registry accessors (INV-SREF-1 shape, unsafe-slim round 3): the
+// three device slots are written ONCE by init_evdev (single-threaded
+// boot) and never cleared; every EvdevDevice field readers/writers
+// touch is an atomic or Spinlock-guarded, so shared/mutable views
+// handed out here are sound post-init. These are the ONLY audited
+// edges — call sites carry no unsafe.
+
+pub fn evdev_keyboard() -> Option<&'static EvdevDevice> {
+    // SAFETY: init-once registry (see above).
+    unsafe { EVDEV_KEYBOARD.as_ref() }
+}
+pub fn evdev_pointer() -> Option<&'static EvdevDevice> {
+    // SAFETY: init-once registry.
+    unsafe { EVDEV_POINTER.as_ref() }
+}
+pub fn evdev_touchscreen() -> Option<&'static EvdevDevice> {
+    // SAFETY: init-once registry.
+    unsafe { EVDEV_TOUCHSCREEN.as_ref() }
+}
+pub(crate) fn evdev_keyboard_mut() -> Option<&'static mut EvdevDevice> {
+    // SAFETY: init-once registry; mutable view for the init path's
+    // capability fills before the device is reachable.
+    unsafe { EVDEV_KEYBOARD.as_mut() }
+}
+pub(crate) fn evdev_pointer_mut() -> Option<&'static mut EvdevDevice> {
+    // SAFETY: as evdev_keyboard_mut.
+    unsafe { EVDEV_POINTER.as_mut() }
+}
+pub(crate) fn evdev_touchscreen_mut() -> Option<&'static mut EvdevDevice> {
+    // SAFETY: as evdev_keyboard_mut.
+    unsafe { EVDEV_TOUCHSCREEN.as_mut() }
+}
+
 /// Whether a file id belongs to one of the three open evdev file
 /// descriptions (the epoll_ctl probe uses this to filter).
 pub fn file_id_is_input(fid: u64) -> bool {
-    unsafe {
-        [EVDEV_KEYBOARD.as_ref(), EVDEV_POINTER.as_ref(), EVDEV_TOUCHSCREEN.as_ref()]
-            .iter()
-            .flatten()
-            .any(|d| {
-                let ids = d.open_file_ids.lock_irqsave();
-                let n = d.open_file_count.load(Ordering::Acquire) as usize;
-                ids.iter().take(n.min(ids.len())).any(|&x| x == fid)
-            })
-    }
+    [evdev_keyboard(), evdev_pointer(), evdev_touchscreen()]
+        .iter()
+        .flatten()
+        .any(|d| {
+            let ids = d.open_file_ids.lock_irqsave();
+            let n = d.open_file_count.load(Ordering::Acquire) as usize;
+            ids.iter().take(n.min(ids.len())).any(|&x| x == fid)
+        })
 }
 
 /// Pids that opened an evdev node this boot (wake-drop hunt, max 8):
@@ -550,11 +581,11 @@ pub fn evdev_opener_pid(pid: u32) -> bool {
 /// path uses this to stamp the device with the new file description).
 pub fn device_of_devno(devno: DevNo) -> Option<&'static EvdevDevice> {
     if devno == DEV_EVDEV_KEYBOARD {
-        unsafe { EVDEV_KEYBOARD.as_ref() }
+        evdev_keyboard()
     } else if devno == DEV_EVDEV_POINTER {
-        unsafe { EVDEV_POINTER.as_ref() }
+        evdev_pointer()
     } else if devno == crate::fs::dev_t::DEV_EVDEV_TOUCHSCREEN {
-        unsafe { EVDEV_TOUCHSCREEN.as_ref() }
+        evdev_touchscreen()
     } else {
         None
     }
@@ -572,11 +603,11 @@ unsafe fn device_of_file(file: &File) -> Option<&'static EvdevDevice> {
     };
     let devno = *(ptr as *const DevNo);
     if devno == DEV_EVDEV_KEYBOARD {
-        EVDEV_KEYBOARD.as_ref()
+        evdev_keyboard()
     } else if devno == DEV_EVDEV_POINTER {
-        EVDEV_POINTER.as_ref()
+        evdev_pointer()
     } else if devno == crate::fs::dev_t::DEV_EVDEV_TOUCHSCREEN {
-        EVDEV_TOUCHSCREEN.as_ref()
+        evdev_touchscreen()
     } else {
         None
     }
@@ -662,11 +693,11 @@ unsafe fn node_of_file(file: &File) -> Option<(&'static EvdevDevice, u32)> {
     };
     let devno = *(ptr as *const DevNo);
     if devno == DEV_EVDEV_KEYBOARD {
-        unsafe { EVDEV_KEYBOARD.as_ref() }.map(|d| (d, devno.minor))
+        evdev_keyboard().map(|d| (d, devno.minor))
     } else if devno == DEV_EVDEV_POINTER {
-        unsafe { EVDEV_POINTER.as_ref() }.map(|d| (d, devno.minor))
+        evdev_pointer().map(|d| (d, devno.minor))
     } else if devno == crate::fs::dev_t::DEV_EVDEV_TOUCHSCREEN {
-        unsafe { EVDEV_TOUCHSCREEN.as_ref() }.map(|d| (d, devno.minor))
+        evdev_touchscreen().map(|d| (d, devno.minor))
     } else {
         None
     }
@@ -1666,34 +1697,32 @@ pub fn push_input_event(is_pointer: bool, event: InputEvent) {
     if !is_pointer {
         cad_detect(event);
     }
-    // SAFETY: EVDEV_KEYBOARD and EVDEV_POINTER are initialized by init_evdev()
-    // before any events can be pushed.
-    unsafe {
-        if is_pointer {
-            if let Some(ref dev) = EVDEV_POINTER {
-                dev.push_event(event);
+    // (Registry access through the audited accessors; event delivery
+    // serializes through each device's internal lock.)
+    if is_pointer {
+        if let Some(dev) = evdev_pointer() {
+            dev.push_event(event);
+        }
+        // Mirror to the touchscreen: translate pointer events to
+        // touch protocol (OH multimodalinput). BTN_LEFT(0x110) ->
+        // BTN_TOUCH(0x14a); ABS_X/Y -> also ABS_MT_POSITION_X/Y.
+        if let Some(ts) = evdev_touchscreen() {
+            let ev_type = event.type_;
+            let ev_code = event.code;
+            let mut ts_event = event;
+            if ev_type == 1 && ev_code == 0x110 {
+                // EV_KEY / BTN_LEFT -> BTN_TOUCH
+                ts_event.code = 0x14a;
+            } else if ev_type == 3 && (ev_code == 0x00 || ev_code == 0x01) {
+                // EV_ABS / ABS_X(0) or ABS_Y(1) -> also emit
+                // ABS_MT_POSITION_X(0x35) or ABS_MT_POSITION_Y(0x36)
+                ts_event.code = if ev_code == 0x00 { 0x35 } else { 0x36 };
             }
-            // Mirror to the touchscreen: translate pointer events to
-            // touch protocol (OH multimodalinput). BTN_LEFT(0x110) ->
-            // BTN_TOUCH(0x14a); ABS_X/Y -> also ABS_MT_POSITION_X/Y.
-            if let Some(ref ts) = EVDEV_TOUCHSCREEN {
-                let ev_type = event.type_;
-                let ev_code = event.code;
-                let mut ts_event = event;
-                if ev_type == 1 && ev_code == 0x110 {
-                    // EV_KEY / BTN_LEFT -> BTN_TOUCH
-                    ts_event.code = 0x14a;
-                } else if ev_type == 3 && (ev_code == 0x00 || ev_code == 0x01) {
-                    // EV_ABS / ABS_X(0) or ABS_Y(1) -> also emit
-                    // ABS_MT_POSITION_X(0x35) or ABS_MT_POSITION_Y(0x36)
-                    ts_event.code = if ev_code == 0x00 { 0x35 } else { 0x36 };
-                }
-                ts.push_event(ts_event);
-            }
-        } else {
-            if let Some(ref dev) = EVDEV_KEYBOARD {
-                dev.push_event(event);
-            }
+            ts.push_event(ts_event);
+        }
+    } else {
+        if let Some(dev) = evdev_keyboard() {
+            dev.push_event(event);
         }
     }
 }
