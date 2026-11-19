@@ -4852,7 +4852,14 @@ pub fn futex_stuck_census() {
         chn_head: u64,          // ring-closing hop = the lock object's list head
         chn_head_win: [u64; 8], // words at chn_head-0x28 .. +0x28
     }
-    let mut stuck: Vec<Stuck> = Vec::new();
+    // NO-ALLOC-UNDER-LOCK (oh-launch round 4): Phase A pushes into this
+    // Vec while holding each bucket's lock (IRQs off) — a growth there
+    // allocates inside the section, the pile-up ingredient the wake
+    // paths just lost. The walk caps collection at 192, so reserving
+    // that capacity up front (one alloc, no locks held) makes every
+    // in-section push capacity-bounded: no allocation under any bucket
+    // lock for the whole census.
+    let mut stuck: Vec<Stuck> = Vec::with_capacity(192);
     let mut total = 0usize;
 
     // ---- Phase A: bucket chains (POD + task ptr copy only) ----
@@ -6685,7 +6692,24 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
     // kernel/futex/waitwake.c wake_futex() + wake_q_add(). Dynamically
     // sized: a fixed 8-entry array silently stranded every waiter past the
     // 8th (pthread_cond_broadcast) — review IPC-C3.
-    let mut wake_list: alloc::vec::Vec<*mut Task> = alloc::vec::Vec::new();
+    //
+    // NO-ALLOC-UNDER-LOCK (oh-launch round 4): the pushes below run
+    // INSIDE the bucket-lock section, and a Vec growth there allocates
+    // with IRQs off — the pile-up ingredient (fdk3: 3 CPUs spun 2 s+ on
+    // HASH_HEADS+0x870 at 6-8 s). The reference's bucket sections never
+    // allocate (wake_q is stack-preallocated; waiters embed their list
+    // nodes). The walk breaks at ret >= nr_wake, so reserving nr_wake
+    // slots BEFORE the lock makes the section allocation-free by
+    // construction; nr_wake <= 0 callers never reach the walk.
+    let mut wake_list: alloc::vec::Vec<*mut Task> =
+        // CLAMP (fc1/fc2 postmortem): libc's pthread_cond_broadcast
+        // passes nr_wake=INT_MAX — reserving it verbatim asked bigalloc
+        // for 0x3fffffff8 bytes, the reject threw, and the
+        // alloc_error_handler SIGKILLed init at 1.8 s (2/2 boots).
+        // Real wakes on one bucket are single digits; broadcasts spike
+        // to tens. 1024 covers every observed shape; an overflow past
+        // it merely grows the Vec (the pre-fix behavior), not a die.
+        alloc::vec::Vec::with_capacity((nr_wake as usize).clamp(1, 1024));
 
     // Hold the hash bucket lock for the entire traversal so no
     // concurrent futex_wait can insert/remove while we walk.
@@ -7711,7 +7735,21 @@ pub fn futex_requeue(
     // Collect tasks to wake. Dynamically sized: fixed 8/32-entry arrays
     // silently stranded waiters past their capacity (pthread_cond_broadcast)
     // — review IPC-C3/M7.
-    let mut wake_list: alloc::vec::Vec<*mut Task> = alloc::vec::Vec::new();
+    //
+    // NO-ALLOC-UNDER-LOCK (oh-launch round 4): pushes run inside the
+    // (double) bucket-lock sections and are bounded by the walk's
+    // woken < nr_wake break — reserve that capacity BEFORE the locks so
+    // the sections never allocate (the reference's wake_q discipline;
+    // see futex_wake_in_mm's note for the pile-up this closes).
+    let mut wake_list: alloc::vec::Vec<*mut Task> =
+        // CLAMP (fc1/fc2 postmortem): libc's pthread_cond_broadcast
+        // passes nr_wake=INT_MAX — reserving it verbatim asked bigalloc
+        // for 0x3fffffff8 bytes, the reject threw, and the
+        // alloc_error_handler SIGKILLed init at 1.8 s (2/2 boots).
+        // Real wakes on one bucket are single digits; broadcasts spike
+        // to tens. 1024 covers every observed shape; an overflow past
+        // it merely grows the Vec (the pre-fix behavior), not a die.
+        alloc::vec::Vec::with_capacity((nr_wake as usize).clamp(1, 1024));
 
     // Lock both buckets to prevent requeued entries from being in limbo.
     // Use index ordering (lower first) to avoid ABBA deadlock — same

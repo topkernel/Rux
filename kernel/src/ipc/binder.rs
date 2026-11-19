@@ -2092,6 +2092,45 @@ struct WorldGuard<'a> {
     inner: crate::sync::spinlock::SpinlockIrqGuard<'a, Option<World>>,
     t0: u64,
     loc: &'static core::panic::Location<'static>,
+    /// LAST FIELD ON PURPOSE: fields drop in declaration order, so this
+    /// drops AFTER `inner` has released WORLD — the deferred wakes run
+    /// with the lock GONE (the reference's wake_q discipline; see
+    /// DeferredWakes).
+    deferred: DeferredWakes,
+}
+
+/// Direct-thread wakes requested while WORLD is held (the reference's
+/// wake_q shape). fh4 conviction (oh-launch round 4): do_exit's file
+/// teardown → binder_close held binder::WORLD for 2 s+ with the holder
+/// sampled inside wake_thread's waitqueue unlock — every WORLD waiter
+/// (any binder syscall) piled up behind the exit path, and the waiters
+/// themselves held futex buckets, stacking the pile-up (the fdk3 fire
+/// was the bucket face of the same root). The reference never wakes
+/// under the big lock: wake_q_add defers, the unlock processes the
+/// list. Pushers hold WORLD (single pusher at a time — WORLD
+/// serializes them); the WORLD releaser drains AFTER the release, so
+/// no waitqueue/scheduler nest ever exists inside a WORLD section.
+/// Losing a deferred wake is a correctness bug, so the drain rides the
+/// guard's own field drop — no releaser can forget it.
+static DEFERRED_THREAD_WAKES: Spinlock<Vec<Arc<BinderThread>>> = Spinlock::new(Vec::new());
+
+/// Guard-carried drain list (see WorldGuard.deferred). Drop wakes every
+/// carried thread — runs strictly after WORLD is released.
+struct DeferredWakes(Vec<Arc<BinderThread>>);
+
+impl Drop for DeferredWakes {
+    fn drop(&mut self) {
+        for t in self.0.drain(..) {
+            wake_thread(&t);
+        }
+    }
+}
+
+/// Queue a direct-thread wake for AFTER the current WORLD section ends
+/// (callers must hold WORLD — the deferral is the whole point; use
+/// wake_thread directly outside WORLD).
+fn defer_wake_thread(t: Arc<BinderThread>) {
+    DEFERRED_THREAD_WAKES.lock().push(t);
 }
 
 impl core::ops::Deref for WorldGuard<'_> {
@@ -2111,6 +2150,11 @@ impl core::ops::DerefMut for WorldGuard<'_> {
 
 impl Drop for WorldGuard<'_> {
     fn drop(&mut self) {
+        // Snatch this section's deferred wakes into the LAST field before
+        // anything can return: after drop() completes, fields drop in
+        // declaration order — `inner` releases WORLD, THEN `deferred`
+        // wakes. Every early return below keeps that order.
+        self.deferred.0 = core::mem::take(&mut *DEFERRED_THREAD_WAKES.lock());
         // Span measured before the inner guard's unlock (Drop::drop runs
         // before field drops). Raw TSC; converted at print time.
         let span = crate::arch::cpu::read_counter().saturating_sub(self.t0);
@@ -2235,6 +2279,7 @@ fn world_lock() -> WorldGuard<'static> {
         inner: g,
         t0: crate::arch::cpu::read_counter(),
         loc: core::panic::Location::caller(),
+        deferred: DeferredWakes(Vec::new()),
     }
 }
 
@@ -2844,10 +2889,13 @@ pub fn binder_close(file: &crate::fs::File) -> i32 {
             // that points at one of our nodes and carries an Armed death
             // request fires now (Linux binder_node_release walking
             // node->refs).
-            for q in world.procs.clone() {
+            // oh-launch round 4 (fh4 no-alloc-under-WORLD): by-index —
+            // the old whole-procs Vec clone under the lock is gone; the
+            // per-q Arc is taken only when a death actually queued.
+            for qi in 0..world.procs.len() {
                 let mut deaths: Vec<(u32, u64)> = Vec::new();
                 {
-                    let qim = pm(world, &q).im();
+                    let qim = pm(world, &world.procs[qi]).im();
                     for r in qim.refs.iter_mut() {
                         if r.node.proc_id != proc.id {
                             continue;
@@ -2882,14 +2930,14 @@ pub fn binder_close(file: &crate::fs::File) -> i32 {
                         let _ = writeln!(
                             w,
                             "binder: death notice pid {} desc {} cookie {:#x} (owner {} died)",
-                            q.pid, desc, cookie, proc.pid
+                            world.procs[qi].pid, desc, cookie, proc.pid
                         );
                     }
-                    let qim = pm(world, &q).im();
+                    let qim = pm(world, &world.procs[qi]).im();
                     for (desc, cookie) in deaths {
                         qim.todo.push_back(Work::DeadBinder { desc, cookie });
                     }
-                    wake_targets.push(q.clone());
+                    wake_targets.push(world.procs[qi].clone());
                 }
             }
 
@@ -2914,27 +2962,35 @@ pub fn binder_close(file: &crate::fs::File) -> i32 {
             // BR_TRANSACTION_COMPLETE, binder.c 6.6:3806-3812 — our
             // reply_target_gone path). Here we only drop dead works from
             // foreign todos.
-            for p in world.procs.clone() {
+            // oh-launch round 4 (fh4 no-alloc-under-WORLD): the sweep
+            // used to clone the WHOLE procs Vec plus EVERY proc's
+            // thread Vec inside the section — hundreds of heap
+            // allocations under the global lock on the OH image (the
+            // 2 s+ holder). By-index iteration with one Arc clone per
+            // actually-woken proc: zero Vec allocations under WORLD.
+            for pi in 0..world.procs.len() {
                 let mut needs_wake = false;
-                for t in pm(world, &p).im().threads.clone() {
-                    let th = t.st();
+                let pim = pm(world, &world.procs[pi]).im();
+                for ti in 0..pim.threads.len() {
+                    let th = pim.threads[ti].st();
                     if !th.todo.is_empty() {
                         needs_wake = true;
                     }
                     th.todo.retain(|wk| !work_involves(wk, &proc));
                 }
-                if !pm(world, &p).im().todo.is_empty() {
+                if !pim.todo.is_empty() {
                     needs_wake = true;
                 }
-                pm(world, &p).im().todo.retain(|wk| !work_involves(wk, &proc));
+                pim.todo.retain(|wk| !work_involves(wk, &proc));
                 if needs_wake {
-                    wake_targets.push(p.clone());
+                    wake_targets.push(world.procs[pi].clone());
                 }
             }
 
             // Drop our remaining work, releasing buffers and node pins.
-            for t in proc.im().threads.clone() {
-                let th = t.st();
+            // (by-index — no thread-Vec clone under WORLD; round 4)
+            for ti in 0..proc.im().threads.len() {
+                let th = proc.im().threads[ti].st();
                 let queued: Vec<Work> = th.todo.drain(..).collect();
                 for wk in queued {
                     if let Work::Transaction(x) = &wk {
@@ -3036,6 +3092,9 @@ unsafe fn unpin_txn_node(world: &World, t: &BinderTxn) {
             // pops the most recently parked reader — max park_seq, not
             // the earliest-created thread (list_add-at-head + first_entry
             // parity, same as wake_proc_one).
+            // oh-launch round 4 (fh4): the wake itself is DEFERRED to the
+            // WORLD release (wake_q discipline) — no waitqueue/scheduler
+            // nest inside the section.
             let pick = {
                 let th = owner
                     .im()
@@ -3050,7 +3109,7 @@ unsafe fn unpin_txn_node(world: &World, t: &BinderTxn) {
                 th
             };
             if let Some(t) = pick {
-                wake_thread(&t);
+                defer_wake_thread(t);
             }
         }
     }
@@ -3119,12 +3178,17 @@ unsafe fn dead_reply_to_sender(
     let same = Arc::ptr_eq(fp, dying);
     let mut delivered = false;
     if let Some(ftid) = txn.from_tid {
-        let pool = if same {
-            dying.im().threads.clone()
+        // oh-launch round 4: find the sender thread WITHOUT cloning the
+        // whole thread Vec under WORLD (per-txn heap allocations inside
+        // the section — the same no-alloc-under-lock discipline as the
+        // futex bucket fixes). One Arc clone of the match only; the
+        // borrow ends at the .cloned().
+        let ft = if same {
+            dying.im().threads.iter().find(|ct| ct.tid == ftid).cloned()
         } else {
-            pm(world, fp).im().threads.clone()
+            pm(world, fp).im().threads.iter().find(|ct| ct.tid == ftid).cloned()
         };
-        if let Some(ft) = pool.into_iter().find(|ct| ct.tid == ftid) {
+        if let Some(ft) = ft {
             let fth = ft.st();
             // The call this thread is parked in is dead: unstack the
             // txn so the from-walk stops routing nested calls to the
@@ -3158,7 +3222,10 @@ unsafe fn dead_reply_to_sender(
             // pick-one wake (wake_proc_one) only selects threads with an
             // EMPTY todo, so a thread carrying this ReturnError would
             // sleep on until unrelated work arrived.
-            wake_thread(&ft);
+            // oh-launch round 4 (fh4): DEFERRED to the WORLD release
+            // (wake_q discipline) — this fn runs under WORLD and its
+            // direct wake was the 2 s+ pile-up holder's sampled site.
+            defer_wake_thread(ft);
             delivered = true;
         }
     }
@@ -3254,7 +3321,10 @@ unsafe fn send_failed_reply(
                     );
                 }
             }
-            wake_thread(&ft);
+            // oh-launch round 4 (fh4): DEFERRED to the WORLD release
+            // (wake_q discipline — under-WORLD direct wakes were the
+            // 2 s+ holder's sampled site).
+            defer_wake_thread(ft);
         }
     }
 }
