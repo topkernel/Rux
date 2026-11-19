@@ -1039,7 +1039,7 @@ fn epoll_file_poll(file: &crate::fs::file::File, events: u16) -> u16 {
 /// — no read/write/seek; read() on an epoll fd takes the central EINVAL
 /// path, the §1 incident's fd family. poll is the reference's ep_poll
 /// semantics — see epoll_file_poll).
-static EPOLL_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+pub(crate) static EPOLL_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
     .close(epoll_file_close)
     .poll(epoll_file_poll)
     .build();
@@ -1047,28 +1047,6 @@ static EPOLL_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
 /// D-6 shape-test accessors: expose the (otherwise private) converted
 /// ops tables to the unit-test group `fileops-caps`
 /// (kernel/src/tests/fileops_caps.rs) without widening the runtime API.
-#[cfg(any(test, feature = "unit-test"))]
-pub mod caps_shape {
-    pub fn epoll_ops() -> &'static crate::fs::FileOps {
-        &super::EPOLL_OPS
-    }
-    pub fn eventfd_ops() -> &'static crate::fs::FileOps {
-        &super::EVENTFD_OPS
-    }
-    pub fn timerfd_ops() -> &'static crate::fs::FileOps {
-        &super::TIMERFD_OPS
-    }
-    pub fn signalfd_ops() -> &'static crate::fs::FileOps {
-        &super::SIGNALFD_OPS
-    }
-    pub fn pipe_ops() -> &'static crate::fs::FileOps {
-        &crate::fs::pipe::PIPE_OPS
-    }
-    pub fn inotify_ops() -> &'static crate::fs::FileOps {
-        &crate::fs::inotify::INOTIFY_OPS
-    }
-}
-
 /// oh67 (67th session): diagnostic readiness decode for census poll
 /// rows — the KERNEL-SIDE view of the fd an infinite-timeout poll is
 /// parked on. eventfd: the live counter (counter>0 while a POLLIN poll
@@ -4893,7 +4871,7 @@ fn eventfd_close(file: &crate::fs::File) -> i32 {
 }
 
 /// EventFd file operations (D-6 builder form)
-pub static EVENTFD_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+pub(crate) static EVENTFD_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
     .read(eventfd_read)
     .write(eventfd_write)
     .close(eventfd_close)
@@ -5110,7 +5088,7 @@ fn tfd_remaining(tfd: &TimerFd) -> (i64, i64) {
 }
 
 /// TimerFd file operations (D-6 builder form)
-static TIMERFD_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+pub(crate) static TIMERFD_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
     .read(timerfd_read)
     .close(timerfd_close)
     .poll(timerfd_poll)
@@ -5440,7 +5418,7 @@ fn signalfd_close(file: &crate::fs::File) -> i32 {
 }
 
 /// SignalFd file operations (D-6 builder form)
-static SIGNALFD_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+pub(crate) static SIGNALFD_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
     .read(signalfd_read)
     .close(signalfd_close)
     .poll(signalfd_poll)

@@ -1185,20 +1185,13 @@ fn ns_file_close(file: &crate::fs::File) -> i32 {
     0
 }
 
-static NS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+pub(crate) static NS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
     .read(ns_file_read)
     .close(ns_file_close)
     .build();
 
 /// D-6 shape-test accessor: expose the private table to the unit-test
 /// group `fileops-caps` without widening the runtime API.
-#[cfg(any(test, feature = "unit-test"))]
-pub mod caps_shape {
-    pub fn ns_file_ops() -> &'static crate::fs::file::FileOps {
-        &super::NS_FILE_OPS
-    }
-}
-
 /// Intercept /proc/[pid]/ns/<kind> opens from sys_openat. Returns
 /// Some(fd-or-negative-errno) when the path matched.
 pub fn try_open_ns_path(path: &str, flags: u32) -> Option<i64> {

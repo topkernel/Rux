@@ -7289,7 +7289,7 @@ fn mem_file_poll(_file: &File, events: u16) -> u16 {
     r
 }
 
-static MEM_FILE_OPS: FileOps = FileOps::builder()
+pub(crate) static MEM_FILE_OPS: FileOps = FileOps::builder()
     .read(mem_file_read)
     .lseek(mem_file_lseek)
     .poll(mem_file_poll)
@@ -7298,13 +7298,6 @@ static MEM_FILE_OPS: FileOps = FileOps::builder()
 
 /// D-6 shape-test accessor: expose the private table to the unit-test
 /// group `fileops-caps` without widening the runtime API.
-#[cfg(any(test, feature = "unit-test"))]
-pub mod caps_shape {
-    pub fn mem_file_ops() -> &'static crate::fs::file::FileOps {
-        &super::MEM_FILE_OPS
-    }
-}
-
 // ============================================================================
 // fallocate / utimensat (fs-side helpers)
 // ============================================================================
