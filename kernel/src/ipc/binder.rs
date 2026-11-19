@@ -12972,34 +12972,58 @@ fn release_block(proc: &Arc<BinderProc>, off: usize) {
 /// binder_translate_fd: install a sender fd into the TARGET process's fd
 /// table (fget in the sender, get_unused_fd + fd_install on the target
 /// opener task). Runs in the sender's ioctl context and NEVER under WORLD
+/// INV-BINDER-PINTASK (unsafe-slim r3c): RAII twin of procfs's PinnedTask
+/// guard for the fd-translate paths — pid_hash_lookup_pinned takes a
+/// task_refcnt the guard releases on scope end (Drop), so no early-return
+/// path can leak the pin or use the task after release.
+struct PinnedTask {
+    ptr: *mut crate::process::task::Task,
+}
+impl PinnedTask {
+    fn lookup(pid: u32) -> Option<PinnedTask> {
+        let p = crate::process::pid_hash::pid_hash_lookup_pinned(pid);
+        if p.is_null() {
+            None
+        } else {
+            Some(PinnedTask { ptr: p })
+        }
+    }
+    fn get(&self) -> &crate::process::task::Task {
+        // SAFETY: pinned at construction (task_refcnt held until Drop).
+        // Shared borrow only: the task may be mutated concurrently by its
+        // own CPU, so callers touch only internally-locked members here
+        // (the fdtable handles carry their own locks).
+        unsafe { &*self.ptr }
+    }
+}
+impl Drop for PinnedTask {
+    fn drop(&mut self) {
+        crate::process::task::Task::task_put(self.ptr);
+    }
+}
+
 /// — fd-table locks and file close ops may nest back into binder code.
 /// Returns the new target fd, or None (invalid fd / target gone / full).
 fn translate_fd_into(sender_fd: u32, target: &Arc<BinderProc>) -> Option<usize> {
     let cur = crate::sched::current()?;
     let sender_fdt = cur.try_fdtable()?;
     let file = sender_fdt.get_file(sender_fd as usize)?;
-    let ttask = crate::process::pid_hash::pid_hash_lookup_pinned(target.pid);
-    if ttask.is_null() {
-        return None;
-    }
-    // SAFETY: pinned task pointer (task_refcnt held by the lookup).
-    let r = unsafe {
-        match (*ttask).try_fdtable().and_then(|t| t.alloc_fd()) {
-            Some(fd) => {
-                let fdt = (*ttask).try_fdtable().unwrap();
-                if fdt.install_fd(fd, file).is_err() {
-                    // Return the slot (cannot realistically fail on a
-                    // just-allocated fd, but do not leak it).
-                    let _ = fdt.close_fd(fd);
-                    None
-                } else {
-                    Some(fd)
-                }
+    let ttask = PinnedTask::lookup(target.pid)?;
+    let r = match ttask.get().try_fdtable().and_then(|t| t.alloc_fd()) {
+        Some(fd) => {
+            let fdt = ttask.get().try_fdtable().unwrap();
+            if fdt.install_fd(fd, file).is_err() {
+                // Return the slot (cannot realistically fail on a
+                // just-allocated fd, but do not leak it).
+                let _ = fdt.close_fd(fd);
+                None
+            } else {
+                Some(fd)
             }
-            None => None,
         }
+        None => None,
     };
-    { crate::process::task::Task::task_put(ttask) };
+    drop(ttask);
     r
 }
 
@@ -13008,16 +13032,10 @@ fn translate_fd_into(sender_fd: u32, target: &Arc<BinderProc>) -> Option<usize> 
 /// fd cleanup loop). NEVER under WORLD: close_fd runs file close ops.
 fn close_installed_fds(installed: &[(u32, usize)]) {
     for (pid, fd) in installed {
-        let t = crate::process::pid_hash::pid_hash_lookup_pinned(*pid);
-        if t.is_null() {
-            continue;
-        }
-        // SAFETY: pinned task pointer.
-        unsafe {
-            if let Some(fdt) = (*t).try_fdtable() {
+        if let Some(t) = PinnedTask::lookup(*pid) {
+            if let Some(fdt) = t.get().try_fdtable() {
                 let _ = fdt.close_fd(*fd);
             }
-            crate::process::task::Task::task_put(t);
         }
     }
 }
