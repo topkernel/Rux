@@ -955,7 +955,7 @@ pub fn timer_softirq_handler(_nr: usize) {
     softirq_diagnostics(current);
 }
 
-/// RT-2X item 4 (pair-battery queue): hardirq-context fast expiry, the
+/// RT-2X item 4 (paired-test queue): hardirq-context fast expiry, the
 /// reference's hrtimer_interrupt shape. Called at the TOP of the timer
 /// IRQ (before the tick body) whenever a high-resolution deadline is
 /// due: the precise-sleep wake then happens before the per-tick

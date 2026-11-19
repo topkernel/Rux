@@ -248,7 +248,7 @@ pub fn timer_interrupt_handler() {
         );
     }
 
-    // 2.4 RT-2X item 4 (pair-battery queue): expire due high-resolution
+    // 2.4 RT-2X item 4 (paired-test queue): expire due high-resolution
     //     timers at the TOP of the IRQ — the reference's
     //     hrtimer_interrupt shape (the x86_64 twin carries the measured
     //     story; run/RT-2X.md). The raise below stays for timers armed

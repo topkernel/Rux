@@ -113,7 +113,7 @@ def main():
     ap.add_argument("--p2f", action="store_true",
                     help="stage the pbench_p2f wrapper (boots init=/test/"
                          "pbench_p2f -> probe argv 'p2fonly': just the "
-                         "futex wake->run battery — quiet + kernel-hog + "
+                         "futex wake->run suite — quiet + kernel-hog + "
                          "user-hog regimes, perf-sched lane)")
     ap.add_argument("--nojournal", action="store_true",
                     help="F4 arm-1 (leg 44): mkfs the probe rootfs WITHOUT "

@@ -857,7 +857,7 @@ self.create_dynamic_file("cgroups", || {
             self.alloc_ino(),
         )));
         // cov_dump — write-side coverage trigger for the userspace test
-        // battery (KCOV alignment; cov-dump builds only).
+        // test suite (KCOV alignment; cov-dump builds only).
         #[cfg(feature = "cov-dump")]
         kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
             b"cov_dump".to_vec(),

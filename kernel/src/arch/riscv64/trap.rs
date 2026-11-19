@@ -539,7 +539,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
 /// schedule()d out instead of running until its next syscall return.
 /// Without this, every wake behind a kernel-executing CPU is quantized
 /// by the incumbent's syscall length (measured on the x86_64 twin with
-/// the pbench p2f futex battery: TCG 5608us vs reference 86us; KVM
+/// the pbench p2f futex suite: TCG 5608us vs reference 86us; KVM
 /// 163us vs 8.2us; hook collapses both to parity — see the x86_64
 /// comment for the full table and the sc70-era leak-amplification
 /// history that kept this OFF until WAKE-HEAL bounded it).
@@ -549,7 +549,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
 ///   on riscv64 (this twin is not yet stable — see the verdict-cache
 ///   comment below; the x86_64 twin defaults ON since RT-plan R1,
 ///   2026-11-18 — flip this twin only after the R53/R84/R85 asm frame
-///   families are stabilized, with its own battery + soak numbers).
+///   families are stabilized, with its own suite + soak numbers).
 /// - user-origin frames are skipped: ret_from_exception's asm loop
 ///   owns user preemption.
 /// - preempt_count != 0 (spinlock/bh/RCU held) refuses the switch.
@@ -575,11 +575,11 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
                     // about (R46/R49 phantom-heal cascade into an idle-
                     // task user-frame KERNPANIC ~30s into the quiet
                     // regime) while the x86_64 twin, whose guards were
-                    // tuned through sc65-sc73, runs the same battery
+                    // tuned through sc65-sc73, runs the same suite
                     // clean. Stabilize against the R53/R84/R85 asm
                     // families first (the .Lcheck_resched_kernel dead
                     // path documents the missing frame discipline), then
-                    // flip this default with battery + soak numbers.
+                    // flip this default with suite + soak numbers.
                     let v = if crate::cmdline::get_param("kpreempt")
                         .as_deref()
                         == Some("1")

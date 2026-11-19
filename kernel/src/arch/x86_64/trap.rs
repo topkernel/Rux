@@ -1638,7 +1638,7 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
     // wake->run") was unsatisfiable on the 11-01 tip because the D-14
     // measured-wait gate never raised need_resched for batch peers.
     // R2's hardirq hres expiry (RT-2X) has since replaced the wake
-    // path's delivery context; the R1 acceptance is the pair-battery
+    // path's delivery context; the R1 acceptance is the paired-test
     // cyclictest SCHED_OTHER avg (107 -> the 63-70 µs class against
     // the banked reference column), measured on the same rig.
     //
@@ -1647,7 +1647,7 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
     // counts zeroed at wake before the monopoly can form) and the
     // rotation-proof 2s tick heal, so the amplifier's fuel is bounded.
     //
-    // Default-ON evidence (perf-sched lane, pbench p2f futex battery,
+    // Default-ON evidence (perf-sched lane, pbench p2f futex suite,
     // TCG q35 smp2/2G and KVM, kernel = 159111af lineage + mprotect fix):
     // with a pread(4MB)-cached hog pinned to the woken waiter's CPU (one
     // syscall = one contiguous kernel stretch; hogcal TCG 5.5ms / KVM
@@ -1655,9 +1655,9 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
     //   TCG: med 5608us (97% of wakes 1-10ms) vs reference 86us = 65x
     //   KVM: med 163us vs reference 8.2us = 20x
     // kpreempt=1 collapses it to reference parity (TCG 23us, KVM 9.5us)
-    // and the full P1-P7 battery shows no row moved beyond noise
+    // and the full P1-P7 suite shows no row moved beyond noise
     // (KVM kp=0 vs kp=1 back-to-back: all rows within ±5%, p2_ctxsw
-    // 0.18->0.175). Boot beacon delta on the same battery: PREEMPT-HEAL
+    // 0.18->0.175). Boot beacon delta on the same test suite: PREEMPT-HEAL
     // events went DOWN with the hook on (49 -> 2), zero WAKE-STRANDED.
     // The verdict-cache discipline mirrors syscost::on(): never cache a
     // verdict before the cmdline exists (the first vector can fire

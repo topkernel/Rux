@@ -619,7 +619,7 @@ impl BlockCache {
     /// Called by the block allocator when it frees a block: the freed
     /// block's cached content is DEAD — leaving the dirty buffer in the
     /// cache means the next publication drain / eviction / commit writes
-    /// dead data to disk (the P6 mkdrmdir battery dirtied one fresh dir
+    /// dead data to disk (the P6 mkdrmdir suite dirtied one fresh dir
     /// block per mkdir and freed it in the paired rmdir: every ordered
     /// drain then synchronously wrote ~64 already-freed blocks — the
     /// 3.1ms/pair amortized floor after the publication-batching fix).
@@ -1779,7 +1779,7 @@ pub fn block_cached(device: *const blkdev::GenDisk, blocknr: u64) -> bool {
     }
 }
 
-/// Dirty-presence probe (pair-battery item 3): TRUE only when the block
+/// Dirty-presence probe (paired-test item 3): TRUE only when the block
 /// has a live cache entry that is BH_Dirty RIGHT NOW (bucket-lock walk,
 /// no pin, no LRU touch). fsync's data walk uses it to skip absent and
 /// already-clean blocks without the bread() pin round trip — the
@@ -2036,7 +2036,7 @@ pub struct WriteBatch {
 }
 
 /// DMA source of a batch entry: the batch's private copy (submit) or the
-/// CALLER's buffer (submit_ref — pair-battery item 1: the DIO write fast
+/// CALLER's buffer (submit_ref — paired-test item 1: the DIO write fast
 /// path DMAs straight from the syscall's staging slice, saving one full
 /// copy per span; the caller guarantees the bytes stay valid and
 /// unmodified until the drain).
@@ -2185,7 +2185,7 @@ impl WriteBatch {
     /// Submit one span WITHOUT the private copy: the device DMAs directly
     /// from `data` (the caller's buffer). The caller guarantees the bytes
     /// stay valid and unmodified until the NEXT flush() returns — the
-    /// drain waits every entry before giving the buffer back (pair-battery
+    /// drain waits every entry before giving the buffer back (paired-test
     /// item 1: the DIO write fast path's staging slice). On a completion
     /// timeout the batch cannot leak a borrowed source; it spins on the
     /// completion (a virtio write that outlives a 10 s deadline means the
@@ -2552,7 +2552,7 @@ impl Drop for WriteBatch {
 }
 
 /// Batched write-through push for a set of block-cache buffers
-/// (pair-battery item 3, 2026-11-17): pins each block, optionally marks
+/// (paired-test item 3, 2026-11-17): pins each block, optionally marks
 /// it dirty (the commit write-through belt), submits ONE device write
 /// per dirty buffer through 32-span windows with a single drain per
 /// window, clears BH_Dirty only for device-acked spans, and releases

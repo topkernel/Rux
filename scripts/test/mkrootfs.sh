@@ -240,26 +240,26 @@ fi
 # "Permission denied at __cfi_slowpath" SIGSEGV family that kills samgr).
 MUSL_SDK="$PROJECT_ROOT/toolchain/riscv64-rux-linux-musl"
 
-# Build + install the kselftest coverage battery (the reference-shaped
-# syscall-ABI battery; see test/kselftest_battery.c). musl recipe per
+# Build + install the kselftest coverage program (the reference-shaped
+# syscall-ABI test suite; see test/kselftest.c). musl recipe per
 # biglock_fair below — static glibc SIGILLs on the pinned QEMU CPU.
-KSELFTEST_SRC="$PROJECT_ROOT/test/kselftest_battery.c"
+KSELFTEST_SRC="$PROJECT_ROOT/test/kselftest.c"
 MUSL_SDK_RISCV="$PROJECT_ROOT/toolchain/riscv64-rux-linux-musl"
 if [ ! -d "$MUSL_SDK_RISCV/lib" ]; then
     MUSL_SDK_RISCV="/home/william/workspace/Rux/toolchain/riscv64-rux-linux-musl"
 fi
 if [ -f "$KSELFTEST_SRC" ] && [ -d "$MUSL_SDK_RISCV/lib" ]; then
-    echo "Installing kselftest_battery to /test/kselftest_battery..."
+    echo "Installing kselftest to /test/kselftest..."
     if riscv64-linux-gnu-gcc -march=rv64gc_zba_zbb_zbs -static -O2 -Wall \
          -nostdinc -isystem "$MUSL_SDK_RISCV/include" -nostdlib \
-         -o "$STAGING/test/kselftest_battery" "$KSELFTEST_SRC" \
+         -o "$STAGING/test/kselftest" "$KSELFTEST_SRC" \
          "$MUSL_SDK_RISCV/lib/crt1.o" "$MUSL_SDK_RISCV/lib/crti.o" "$MUSL_SDK_RISCV/lib/crtn.o" \
          -L"$MUSL_SDK_RISCV/lib" -lc \
          $(riscv64-linux-gnu-gcc -march=rv64gc_zba_zbb_zbs -print-libgcc-file-name); then
-        chmod +x "$STAGING/test/kselftest_battery"
+        chmod +x "$STAGING/test/kselftest"
     else
-        echo "Warning: kselftest_battery failed to compile (skipped)"
-        rm -f "$STAGING/test/kselftest_battery"
+        echo "Warning: kselftest failed to compile (skipped)"
+        rm -f "$STAGING/test/kselftest"
     fi
 fi
 

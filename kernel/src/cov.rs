@@ -31,7 +31,7 @@ const LINE_HEX: usize = 2048;
 
 /// Raw console line writer (same byte stream the unit-test suite's
 /// test_println produces: batched UART bytes, '\n' then '\r'). Works in
-/// ANY boot shape — the in-kernel suite AND the userspace-battery boot
+/// ANY boot shape — the in-kernel suite AND the userspace-test boot
 /// (init=/test/...), where test_println does not exist.
 fn cov_line(bytes: &[u8]) {
     let mut out = alloc::vec::Vec::with_capacity(bytes.len() + 2);

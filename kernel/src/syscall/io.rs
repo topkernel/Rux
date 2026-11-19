@@ -262,7 +262,7 @@ fn read_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: us
     // have — pipe reads still return as soon as data exists
     // (pipe capacity 16KB < RW_CHUNK).
     //
-    // O_DIRECT ext4 exception (pair-battery item 1, 2026-11-17): the
+    // O_DIRECT ext4 exception (paired-test item 1, 2026-11-17): the
     // batched direct reader inside ext4 coalesces a whole request into
     // multi-block device reads; a 64 KiB chunk cap serialized a 1 MiB
     // direct read into 16 windows. Stage whole MiBs for ext4 O_DIRECT.
@@ -337,7 +337,7 @@ fn read_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: us
 /// - args[3]: offset - file offset (signed)
 ///
 /// Staging-window cap for positional rw on ext4 O_DIRECT descriptors
-/// (pair-battery item 1): the batched direct path inside ext4 amortizes
+/// (paired-test item 1): the batched direct path inside ext4 amortizes
 /// per-call costs (journal bracket, extent resolve, plugged drain) over
 /// the whole request, so pread64/pwrite64 stage whole MiBs instead of
 /// RW_CHUNK slices. Everything else keeps the 64 KiB bound.
@@ -418,7 +418,7 @@ pub fn sys_pread64(args: SyscallArgs) -> i64 {
                 // position-invariant read_at() instead.
                 // Chunked (SYSA-C1): bounded staging buffer, sequential
                 // offset advance; short read ends the loop.
-                // O_DIRECT ext4 exception (pair-battery item 1): the
+                // O_DIRECT ext4 exception (paired-test item 1): the
                 // batched direct reader coalesces whole requests; stage
                 // MiBs so one pread carries the full request (fio's psync
                 // engine preads — the 64 KiB cap serialized a 1 MiB read
@@ -857,7 +857,7 @@ fn write_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: u
     // ends the loop and returns what was accepted (POSIX
     // partial-write semantics).
     //
-    // O_DIRECT ext4 exception (pair-battery item 1, 2026-11-17): one
+    // O_DIRECT ext4 exception (paired-test item 1, 2026-11-17): one
     // whole-MiB write call carries the request into ext4's journal
     // bracket ONCE and lets the post-write plugged drain push the whole
     // range as one span (the 64 KiB cap paid 16 brackets + 16 drains
@@ -2193,7 +2193,7 @@ pub fn sys_pwrite64(args: SyscallArgs) -> i64 {
             // shared fd position under concurrent I/O.
             // Chunked (SYSA-C1): bounded staging, sequential offset
             // advance; partial chunk write ends the loop.
-            // O_DIRECT ext4 exception (pair-battery item 1): one
+            // O_DIRECT ext4 exception (paired-test item 1): one
             // whole-MiB write call = one journal bracket + one plugged
             // drain per direct pwrite (the 64 KiB cap paid 16 brackets
             // per 1 MiB).

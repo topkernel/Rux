@@ -491,7 +491,7 @@ pub fn init() {
 /// them sat in sip.SSIP pending-but-disabled, the handler never ran,
 /// need_resched was never set by the IPI, and a woken task waited for
 /// the target's next 10 ms timer tick (whose own scheduler work is what
-/// finally ran it). Measured with the pbench p2f futex battery
+/// finally ran it). Measured with the pbench p2f futex suite
 /// (riscv64 strong, TCG virt SMP2, waiter pinned to hart 1):
 ///   quiet futex wake->run med 9118us (49% of wakes clustered at the
 ///     10 ms tick; p99 10009us) with the pin moved to hart 0 (no

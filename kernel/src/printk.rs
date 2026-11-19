@@ -661,6 +661,7 @@ pub fn console_emit_pending_flag() -> bool {
 pub fn console_drain_pending(budget: usize) -> usize {
     // A coverage dump owns the console stream right now: emitting here
     // would interleave into the hex. Lines stay in the ring.
+    #[cfg(feature = "cov-dump")]
     if crate::cov::console_dump_active() {
         return 0;
     }

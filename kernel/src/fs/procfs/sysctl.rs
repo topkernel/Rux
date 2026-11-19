@@ -160,7 +160,7 @@ pub fn generate_panic_on_oops() -> Vec<u8> {
 }
 
 /// /proc/sys/kernel/cov_dump — write to capture+emit the whole-kernel
-/// coverage profile (cov-dump builds only; the userspace test battery's
+/// coverage profile (cov-dump builds only; the userspace test program's
 /// KCOV-alignment trigger).
 #[cfg(feature = "cov-dump")]
 pub fn generate_cov_dump() -> Vec<u8> {

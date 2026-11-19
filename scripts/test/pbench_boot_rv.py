@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """pbench_boot_rv.py — riscv64 twin of pbench_boot.py: boot the Rux
 riscv64 kernel (strong or debug ELF) with the pbench probe (or the
-p2fonly futex battery) as init and collect the PBENCH lines.
+p2fonly futex suite) as init and collect the PBENCH lines.
 
 Machine class copies `make run` (test/run-qemu defaults): virt, TCG
 thread=multi, rv64, 2G, SMP2, virtio-blk-pci, serial to file. The
@@ -83,7 +83,7 @@ def main():
     ap.add_argument("--smp", type=int, default=2)
     ap.add_argument("--mem", default="2G")
     ap.add_argument("--p2f", action="store_true",
-                    help="stage the p2fonly futex battery as init")
+                    help="stage the p2fonly futex suite as init")
     ap.add_argument("--probe-bin", default=None,
                     help="ship this prebuilt probe instead of building pbench.c")
     ap.add_argument("--append-extra", default=None)

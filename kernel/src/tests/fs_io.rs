@@ -2,12 +2,12 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! Real-filesystem I/O battery (kernel/src/tests/fs_io.rs).
+//! Real-filesystem I/O test suite (kernel/src/tests/fs_io.rs).
 //!
 //! The unit-test boot mounts the ext4 root BEFORE running the suite
 //! (main.rs: mount_root_filesystem() at boot step ~830, run_all_tests()
 //! at ~1160) — but until now no test TOUCHED it: ext4/bio/page-cache/
-//! vfs sat dark at 9-29% coverage while fully mounted. This battery
+//! vfs sat dark at 9-29% coverage while fully mounted. This test suite
 //! drives the whole stack through the kernel-side file API
 //! (file_open/file_write/... — the same entry layer the syscall
 //! wrappers call): create, write+read-back, fsync, stat, truncate,
@@ -208,7 +208,7 @@ pub fn test_fs_io() {
         Err(_) => crate::tests::test_fail("getdents lists entries", "opendir failed"),
     }
     // rename: inner.txt -> moved.txt (via create+copy+unlink through the API
-    // layers; the vfs rename entry is exercised by the syscall battery).
+    // layers; the vfs rename entry is exercised by the syscall test suite).
     let mp = "/rux-cov/d1/moved.txt";
     let renamed = match (file_open(np, O_RO, 0o644), file_open(mp, O_WCT, 0o644)) {
         (Ok(sf), Ok(df)) => {

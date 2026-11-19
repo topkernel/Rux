@@ -59,7 +59,7 @@ pub fn ext4_file_read(
 
     let block_size = fs.block_size as usize;
 
-    // BATCHED O_DIRECT (pair-battery item 1, 2026-11-17): the per-block
+    // BATCHED O_DIRECT (paired-test item 1, 2026-11-17): the per-block
     // body below served every 4 KiB block with its own synchronous
     // bread round trip — a 1 MiB direct read was 256 serialized device
     // waits (226x off the reference's single 1 MiB request). Resolve the
@@ -167,7 +167,7 @@ impl<'a> DioReadDst<'a> {
     }
 }
 
-/// Batched O_DIRECT read body (pair-battery item 1, 2026-11-17; GUP-DIO
+/// Batched O_DIRECT read body (paired-test item 1, 2026-11-17; GUP-DIO
 /// destination parameterization 2026-11-18).
 ///
 /// DMAs straight into the CALLER's buffer: the syscall layer's staging
@@ -595,7 +595,7 @@ fn ext4_dio_read_batched(
         let block_index = current_offset / block_size as u64;
         let full_blocks_available = remaining / block_size;
 
-        // ONE extent walk resolves the maximal run (pair-battery item 1):
+        // ONE extent walk resolves the maximal run (paired-test item 1):
         // per-block get_data_block paid 1-2 cached breads per 4 KiB on
         // depth>=1 files (512 per 1 MiB read — the fsw br=25k signature).
         let (run_phys, run_avail, run_unwritten) = match crate::fs::ext4::extent::ext4_ext_get_run(
@@ -1897,7 +1897,7 @@ fn ext4_file_write_src(
         }
     }
 
-    // DIRECT FAST RUNS (pair-battery item 1, 2026-11-17): for O_DIRECT
+    // DIRECT FAST RUNS (paired-test item 1, 2026-11-17): for O_DIRECT
     // writes, full-block spans whose physical blocks are consecutive and
     // absent from the block cache go to the device DIRECTLY from the
     // caller's buffer (WriteBatch::submit_ref — the syscall staging
@@ -3262,7 +3262,7 @@ fn ext4_sync_file_inner(
     fs: &crate::fs::ext4::Ext4FileSystem,
     inode: &crate::fs::ext4::inode::Ext4Inode,
 ) -> Result<(), i32> {
-    // Big-lock bracket for the whole durability point (pair-battery item
+    // Big-lock bracket for the whole durability point (paired-test item
     // 3): the batched windows below DMA straight from pinned buffer
     // bytes, which must not change under a racing write core mid-window
     // — the same serialization SpanFlusher::drain applies to its settle.
@@ -3283,7 +3283,7 @@ fn ext4_sync_file_inner(
     // sync_dirty_buffer / eviction / commit write-through).
     let _ = bio::flush_publications_scoped();
 
-    // RUN-BASED data sync (pair-battery item 3, 2026-11-17): the old
+    // RUN-BASED data sync (paired-test item 3, 2026-11-17): the old
     // shape materialized the WHOLE file map (one extent lookup per block,
     // a Vec per fsync) then walked every block with a cache probe. For an
     // extent file, ONE extent-tree walk per run resolves the whole span
@@ -3364,7 +3364,7 @@ fn ext4_sync_file_inner(
             // fsync nothing. The no-pin `block_dirty_cached` probe
             // replaces the old absent-check + bread pin of EVERY cached
             // block — 2048 hash+LRU pins per fsync of an 8 MiB file was
-            // the 3.9M breads/s CPU burn (fsw br=59M on the battery row).
+            // the 3.9M breads/s CPU burn (fsw br=59M on the test suite row).
             // SAFETY: fs.device is the fs's registered GenDisk.
             for k in 0..n {
                 if unsafe { bio::block_dirty_cached(fs.device, phys + k) } {
@@ -3427,7 +3427,7 @@ fn ext4_sync_file_inner(
     // fsync must persist). Only the third state needs help; syncing the
     // block is idempotent for the other two.
     //
-    // Pair-battery item 3: the no-pin dirty probe skips the bread pin on
+    // Pair-test suite item 3: the no-pin dirty probe skips the bread pin on
     // the common clean path; a dirty table block rides the SAME batched
     // window the data walk used (one drain) instead of its own serial
     // round trip.
@@ -4037,7 +4037,7 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
                 offset + written as u64
             };
             file.set_pos(end);
-            // O_DIRECT write-return durability (pair-battery item 1,
+            // O_DIRECT write-return durability (paired-test item 1,
             // 2026-11-17): the core leaves the range's data blocks
             // BH_Dirty in the block cache; a direct write is contractually
             // on the device when write(2) returns (the reference's DIO
@@ -4116,7 +4116,7 @@ pub unsafe fn ext4_file_write_at_vfs(file: &File, offset: u64, buf: *const u8, c
                 durability & crate::fs::file::FileFlags::O_DIRECT != 0,
             );
             // O_DIRECT write-return durability — see the write(2) twin
-            // (pair-battery item 1): plugged span drain of the written
+            // (paired-test item 1): plugged span drain of the written
             // range so a direct pwrite is device-acked at return.
             if written > 0
                 && durability & crate::fs::file::FileFlags::O_DIRECT != 0
@@ -5276,7 +5276,7 @@ unsafe fn ext4_write_at_core_src(
     // frame copied onto itself is a self-overlap; the run-batched flush
     // passes EVERY source frame of its staged run). `&[0]` = no skip.
     skip_pfns: &[u64],
-    // O_DIRECT fast arm (pair-battery item 1): the fd callers set this
+    // O_DIRECT fast arm (paired-test item 1): the fd callers set this
     // from the description's O_DIRECT bit — full-block runs then go to
     // the device straight from the caller's staging slice (or, GUP-DIO,
     // its pinned user frames).
@@ -5394,7 +5394,7 @@ unsafe fn ext4_write_at_core_src(
                     // cache (p3c cold 14.1 us/page vs warm 0.94) instead
                     // of repopulating through the read machinery.
                     if written_bytes > 0 {
-                        // DIO fast arm (pair-battery item 1): UPDATE-only.
+                        // DIO fast arm (paired-test item 1): UPDATE-only.
                         // The direct spans' bytes are device-acked at this
                         // point (ext4_file_write drained before returning)
                         // and the fast arm leaves NO block-cache entry, so
