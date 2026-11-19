@@ -33,7 +33,7 @@
 //! run with IRQs off), one report per distinct victim address (8-entry
 //! ring), hard cap of 16 printed reports so the console cannot flood.
 
-use crate::console::putchar_no_lock as putchar;
+use crate::console::uart_putc_raw as putchar;
 use crate::process::task::{task_offsets as offs, Task};
 use crate::sched::sched::TASK_POISON;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
