@@ -118,14 +118,12 @@ pub mod features {
 /// printk expansion decodes (the block events' dev column convention).
 #[inline]
 pub(crate) fn dev_id(fs: &Ext4FileSystem) -> u32 {
-    // SAFETY: fs.device is the installed GenDisk pointer, valid for the
-    // filesystem's lifetime (set at mount, never detached).
-    unsafe { ((*fs.device).major << 20) | (*fs.device).first_minor }
+    (fs.device.major << 20) | fs.device.first_minor
 }
 
 pub struct Ext4FileSystem {
-    /// Block device
-    pub device: *const blkdev::GenDisk,
+    /// Block device (typed handle; INV-BLKDEV-1 on blkdev::get_disk)
+    pub device: &'static blkdev::GenDisk,
     /// Superblock information
     pub sb_info: Option<Box<superblock::Ext4SuperBlockInfo>>,
     /// Block group descriptor table (Mutex-protected for safe concurrent access)
@@ -186,7 +184,7 @@ unsafe impl Sync for Ext4FileSystem {}
 
 impl Ext4FileSystem {
     /// Create new ext4 filesystem instance
-    pub fn new(device: *const blkdev::GenDisk) -> Self {
+    pub fn new(device: &'static blkdev::GenDisk) -> Self {
         Self {
             device,
             sb_info: None,
@@ -1054,25 +1052,12 @@ unsafe extern "C" fn ext4_mount(fc: &FsContext) -> Result<*mut SuperBlock, i32> 
     // Simplified implementation: assume device is already registered
     // Need to implement device name to device mapping
 
-    // Create ext4 filesystem instance
-    let mut fs = Box::new(Ext4FileSystem::new(core::ptr::null()));
-
-    // Initialize filesystem
-    fs.init()?;
-
-    // Create VFS superblock
-    let mut sb = Box::new(SuperBlock::new(fs.block_size as usize, EXT4_SUPER_MAGIC as u32));
-    sb.set_type(&EXT4_FS_TYPE);
-    sb.set_flags(crate::fs::superblock::SuperBlockFlags::new(
-        crate::fs::superblock::SuperBlockFlags::SB_RDONLY,
-    ));
-
-    // Set private data
-    let fs_ptr = Box::into_raw(fs) as *mut u8;
-    sb.set_fs_info(fs_ptr);
-    ext4_instance_register(fs_ptr as *mut Ext4FileSystem);
-
-    Ok(Box::into_raw(sb) as *mut SuperBlock)
+    // This legacy extern mount entry never resolved a device (the old
+    // body fabricated Ext4FileSystem::new(null), which could not pass
+    // init — the real mounts go through mount_ext4_flags /
+    // mount_loop_instance with a typed &'static GenDisk handle).
+    // Refuse instead of fabricating a device-less instance.
+    Err(-6) // ENXIO
 }
 
 /// Kill an ext4 superblock during unmount. Called from VFS umount path.
@@ -1100,12 +1085,12 @@ unsafe extern "C" fn ext4_kill_sb(sb: *mut SuperBlock) {
 /// # Returns
 /// - `Some(data)`: File content
 /// - `None`: Read failed
-pub fn read_file(device: *const blkdev::GenDisk, path: &str) -> Option<Vec<u8>> {
+pub fn read_file(device: &'static blkdev::GenDisk, path: &str) -> Option<Vec<u8>> {
     read_file_internal(device, path, 0)
 }
 
 /// Internal implementation, supports recursion depth limit to prevent circular symbolic links
-fn read_file_internal(device: *const blkdev::GenDisk, path: &str, depth: u32) -> Option<Vec<u8>> {
+fn read_file_internal(device: &'static blkdev::GenDisk, path: &str, depth: u32) -> Option<Vec<u8>> {
     use alloc::vec::Vec;
 
     // Prevent circular symbolic links, max recursion depth 8
@@ -1497,7 +1482,7 @@ pub fn sync_flushed_data(targets: &[(u64, u64)]) -> usize {
 /// # Returns
 /// - `Ok(())`: Mount successful
 /// - `Err(code)`: Mount failed
-pub fn mount_ext4(device: *const blkdev::GenDisk) -> Result<(), i32> {
+pub fn mount_ext4(device: &'static blkdev::GenDisk) -> Result<(), i32> {
     mount_ext4_flags(device, false)
 }
 
@@ -1505,14 +1490,10 @@ pub fn mount_ext4(device: *const blkdev::GenDisk) -> Result<(), i32> {
 /// mounts read-only (the write path does not maintain checksums yet);
 /// the read path verifies superblock/group/inode crc32c (csum.rs).
 pub fn mount_ext4_flags(
-    device: *const blkdev::GenDisk,
+    device: &'static blkdev::GenDisk,
     read_only: bool,
 ) -> Result<(), i32> {
     use core::sync::atomic::Ordering;
-
-    if device.is_null() {
-        return Err(-22); // EINVAL
-    }
 
     // Create ext4 filesystem instance
     let mut fs = Box::new(Ext4FileSystem::new(device));
@@ -3900,7 +3881,7 @@ static LOOP_INSTANCE_REUSE: [LoopInstanceReuse; LOOP_REUSE_SLOTS] = [const {
 /// Read the on-disk superblock UUID of `disk` through the buffer cache
 /// (same read init() uses: block 0, byte offset 1024; s_uuid at +0x68).
 /// None when the block cannot be read.
-fn sb_uuid_of(disk: *const crate::drivers::blkdev::GenDisk) -> Option<(u64, u64)> {
+fn sb_uuid_of(disk: &'static crate::drivers::blkdev::GenDisk) -> Option<(u64, u64)> {
     // SAFETY: bread on a live GenDisk returns a valid BufferHead whose
     // b_data covers the full block; brelse drops the reference.
     unsafe {
@@ -3915,9 +3896,9 @@ fn sb_uuid_of(disk: *const crate::drivers::blkdev::GenDisk) -> Option<(u64, u64)
 
 /// Publish a fresh instance for its device (replacing any stale row for
 /// the same disk). Called under EXT4_BIG_LOCK.
-fn loop_instance_publish(disk: *const crate::drivers::blkdev::GenDisk, fs_ptr: *mut Ext4FileSystem) {
+fn loop_instance_publish(disk: &'static crate::drivers::blkdev::GenDisk, fs_ptr: *mut Ext4FileSystem) {
     use core::sync::atomic::Ordering;
-    let disk_bits = disk as u64;
+    let disk_bits = disk as *const _ as u64;
     let fs_bits = fs_ptr as u64;
     let uuid = sb_uuid_of(disk).unwrap_or((0, 0));
     for slot in LOOP_INSTANCE_REUSE.iter() {
@@ -3940,14 +3921,14 @@ fn loop_instance_publish(disk: *const crate::drivers::blkdev::GenDisk, fs_ptr: *
 /// Drop the reuse row for a device. The loop driver's re-bind path calls
 /// this (takes EXT4_BIG_LOCK); the mount-failure path uses the _locked
 /// variant (already under the lock — SleepMutex is not reentrant).
-pub fn loop_instance_invalidate(disk: *const crate::drivers::blkdev::GenDisk) {
+pub fn loop_instance_invalidate(disk: &crate::drivers::blkdev::GenDisk) {
     let _ext4_guard = EXT4_BIG_LOCK.lock();
     loop_instance_invalidate_locked(disk);
 }
 
-fn loop_instance_invalidate_locked(disk: *const crate::drivers::blkdev::GenDisk) {
+fn loop_instance_invalidate_locked(disk: &crate::drivers::blkdev::GenDisk) {
     use core::sync::atomic::Ordering;
-    let disk_bits = disk as u64;
+    let disk_bits = disk as *const _ as u64;
     for slot in LOOP_INSTANCE_REUSE.iter() {
         if slot.disk.load(Ordering::Acquire) == disk_bits {
             // fs first, then the key: a racing mount either sees the row
@@ -3965,13 +3946,9 @@ fn loop_instance_invalidate_locked(disk: *const crate::drivers::blkdev::GenDisk)
 /// The instance is intentionally leaked (single mount per boot test
 /// lifecycle; umount drops the dentry tree).
 pub fn mount_loop_instance(
-    disk: *const blkdev::GenDisk,
+    disk: &'static blkdev::GenDisk,
     read_only: bool,
 ) -> Result<(alloc::sync::Arc<Inode>, bool), i32> {
-    if disk.is_null() {
-        return Err(errno::Errno::InvalidArgument.as_neg_i32());
-    }
-
     // SUPERBLOCK REUSE (reference get_tree_bdev/sget shape): a mount of
     // a device that already has a LIVE instance reuses it. Linux's sget
     // searches for an existing superblock by bdev BEFORE reading one —

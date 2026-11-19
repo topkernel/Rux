@@ -29,6 +29,19 @@ SAFETY-comment coverage 3,207/5,009 (64%); 157 Kani harnesses, 1,104
 proptests, 4 SPIN models, Miri on the verify crate (generated ledger:
 docs/development/tcb-ledger.md; security-design.md §0).
 
+**INV-UACCESS-1 (user-copy soundness, unsafe-slim round, 2026-11-19):**
+user-memory access outside `arch/` routes through `arch::uaccess_safe`
+(`copy_out`/`copy_in`/`read_user`/`write_user`/`clear_user`/
+`strnlen_user`/`futex_cmpxchg_u32` and the typed `UserPtr<T>`/
+`UserSlice` handles). Soundness contract, held inside that one module:
+the kernel-side operand is proven by the type system (`&[u8]`/
+`&mut [u8]`/`T: Copy` — no drop glue, no partial writes), the user side
+is access_ok-checked and faults through the exception table, so ANY
+user address value is sound to pass and a bad one reports uncopied
+bytes / `None` / `false`. Handles are `!Send`/`!Sync` (they alias user
+mappings valid only for the current syscall on the current CPU). Call
+sites carry no `unsafe`.
+
 ### 2.1 The bug taxonomy v1 (round-3 sweep, 2026-11-03)
 
 Method. The sweep covered the entire bug history available to this

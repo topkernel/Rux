@@ -778,7 +778,7 @@ pub fn handle_mm_fault(
                     effective_size,
                     vma_file_size as usize,
                     vma_file_fd,
-                    unsafe { crate::process::current_pid() },
+                    crate::process::current_pid(),
                     vm_file
                         .as_ref()
                         .map(|f| f.path())
@@ -899,7 +899,7 @@ pub fn handle_mm_fault(
         if vma_flags.contains(crate::mm::vma::VmaFlags::SHARED) {
             let file = vm_file
                 .clone()
-                .or_else(|| unsafe { crate::fs::get_file_fd(vma_file_fd as usize) });
+                .or_else(|| crate::fs::get_file_fd(vma_file_fd as usize));
             if let Some(file) = file.filter(|f| {
                 crate::fs::ext4::file::is_ext4_file(f.as_ref())
                     || crate::fs::tmpfs::is_tmpfs_file(f.as_ref())
@@ -1451,7 +1451,7 @@ pub fn handle_mm_fault(
             // SAFETY: fd-table lookup by number for the CURRENT task,
             // same as the single-page fill arm; we are in that task's
             // fault context.
-            unsafe { crate::fs::get_file_fd(vma_file_fd as usize) }
+            crate::fs::get_file_fd(vma_file_fd as usize)
         });
         if let Some(file) = file {
             let fault_page = page_virt_addr.as_usize() & !(PAGE_SIZE_USIZE - 1);

@@ -1834,7 +1834,7 @@ fn prime_fd_to_handle(arg: usize, size: usize) -> i64 {
     if prime_fd < 0 {
         return -22;
     }
-    let Some(file) = (unsafe { crate::fs::file::get_file_fd(prime_fd as usize) }) else {
+    let Some(file) = (crate::fs::file::get_file_fd(prime_fd as usize)) else {
         static DEAD_N: AtomicU32 = AtomicU32::new(0);
         let n = DEAD_N.fetch_add(1, Ordering::Relaxed);
         if n < 20 {

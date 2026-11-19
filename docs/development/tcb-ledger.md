@@ -38,33 +38,43 @@ documented in the script header; the important ones:
   `}` (inclusive), unioned across blocks (a line in two blocks counts
   once); comments and string/char literal contents are stripped first so
   braces inside literals cannot skew the span.
-- `unsafe fn` / `unsafe impl` bodies are **not** counted (only explicit
-  `unsafe` blocks); their bodies are ordinary safe-by-default code from
-  this metric's viewpoint, which undercounts raw-pointer `unsafe fn`s —
-  acceptable for a monotone budget metric.
+- **Dual metric** (unsafe-slim campaign, 2026-11-19): `unsafe fn` /
+  `unsafe impl` / `unsafe trait` / `unsafe extern` bodies are counted as
+  a second series (item count + body span lines, scanner shared with
+  `scripts/unsafe_census.py`), plus a union column "dual unsafe lines".
+  The block-only series undercounted raw-pointer `unsafe fn`s; the dual
+  column is the honest total.  The block-only series is kept for trend
+  continuity.
+- Generated sources (`kernel/src/config.rs`,
+  `kernel/src/dfx/ksyms_generated.rs`) are excluded so a bare checkout
+  and a built tree produce the same table.
 
 ## Current baseline
-| Subsystem | .rs files | .rs lines | unsafe blocks | unsafe lines | unsafe % |
-|---|---:|---:|---:|---:|---:|
-| fs | 66 | 42313 | 509 | 5352 | 12.6% |
-| syscall | 11 | 24992 | 570 | 3955 | 15.8% |
-| process | 12 | 11398 | 191 | 2807 | 24.6% |
-| drivers | 30 | 13546 | 295 | 2131 | 15.7% |
-| net | 18 | 16504 | 215 | 1418 | 8.6% |
-| arch/riscv64 | 20 | 10778 | 151 | 1262 | 11.7% |
-| sched | 9 | 6403 | 108 | 1129 | 17.6% |
-| (top-level files) | 12 | 7596 | 69 | 863 | 11.4% |
-| mm | 25 | 11887 | 112 | 813 | 6.8% |
-| dfx | 11 | 2603 | 43 | 369 | 14.2% |
-| interrupt | 8 | 1802 | 29 | 200 | 11.1% |
-| ipc | 6 | 4402 | 51 | 185 | 4.2% |
-| arch/x86_64 | 20 | 2498 | 41 | 150 | 6.0% |
-| io_uring | 1 | 1167 | 49 | 137 | 11.7% |
-| sync | 8 | 3699 | 51 | 103 | 2.8% |
-| security | 4 | 559 | 6 | 40 | 7.2% |
-| module | 1 | 476 | 4 | 12 | 2.5% |
-| arch (shared) | 1 | 54 | 0 | 0 | 0.0% |
-| **Whole kernel** | **263** | **162677** | **2494** | **20926** | **12.9%** |
+| Subsystem | .rs files | .rs lines | unsafe blocks | unsafe lines | unsafe % | unsafe fn/impl | fn/impl lines | dual unsafe lines | dual % |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| fs | 85 | 76500 | 913 | 8821 | 11.5% | 279 | 6914 | 15527 | 20.3% |
+| process | 13 | 18244 | 310 | 4238 | 23.2% | 47 | 3171 | 7222 | 39.6% |
+| sched | 11 | 19713 | 338 | 4780 | 24.2% | 32 | 2622 | 7052 | 35.8% |
+| ipc | 9 | 21850 | 354 | 5321 | 24.4% | 41 | 1287 | 6548 | 30.0% |
+| arch/x86_64 | 20 | 19833 | 334 | 2764 | 13.9% | 82 | 3948 | 6039 | 30.4% |
+| arch/riscv64 | 21 | 15061 | 226 | 1960 | 13.0% | 69 | 3434 | 5303 | 35.2% |
+| drivers | 40 | 26541 | 478 | 3189 | 12.0% | 61 | 1103 | 4241 | 16.0% |
+| syscall | 12 | 41221 | 627 | 3558 | 8.6% | 8 | 310 | 3867 | 9.4% |
+| (top-level files) | 14 | 14933 | 147 | 1357 | 9.1% | 33 | 2042 | 3286 | 22.0% |
+| mm | 31 | 20132 | 204 | 1376 | 6.8% | 59 | 1171 | 2499 | 12.4% |
+| arch/aarch64 | 20 | 9636 | 185 | 1458 | 15.1% | 58 | 1676 | 2493 | 25.9% |
+| dfx | 40 | 18937 | 211 | 1428 | 7.5% | 11 | 586 | 1973 | 10.4% |
+| sync | 13 | 20748 | 388 | 857 | 4.1% | 59 | 1141 | 1965 | 9.5% |
+| net | 18 | 20460 | 239 | 1563 | 7.6% | 16 | 144 | 1694 | 8.3% |
+| interrupt | 9 | 3255 | 52 | 239 | 7.3% | 0 | 0 | 239 | 7.3% |
+| io_uring | 1 | 1173 | 43 | 131 | 11.2% | 0 | 0 | 131 | 11.2% |
+| perf | 1 | 2109 | 46 | 124 | 5.9% | 0 | 0 | 124 | 5.9% |
+| security | 4 | 584 | 7 | 41 | 7.0% | 0 | 0 | 41 | 7.0% |
+| arch (shared) | 2 | 389 | 16 | 30 | 7.7% | 0 | 0 | 30 | 7.7% |
+| trace | 2 | 4531 | 3 | 14 | 0.3% | 4 | 4 | 18 | 0.4% |
+| module | 1 | 486 | 4 | 12 | 2.5% | 0 | 0 | 12 | 2.5% |
+| timer | 3 | 1814 | 2 | 8 | 0.4% | 0 | 0 | 8 | 0.4% |
+| **Whole kernel** | **370** | **358150** | **5127** | **43269** | **12.1%** | **859** | **29553** | **70312** | **19.6%** |
 
 Reading the baseline:
 

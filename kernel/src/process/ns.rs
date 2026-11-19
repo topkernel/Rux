@@ -602,12 +602,11 @@ pub fn resolve_vpid(local: u32) -> Option<u32> {
     let mut found: Option<u32> = None;
     // SAFETY: callback receives hash-table task pointers; we only read
     // pid/ns fields that are immutable after fork-enqueue.
-    unsafe {
-        crate::process::pid_hash::pid_hash_for_each_task(|t| {
-            if found.is_some() || t.is_null() {
+    {
+        crate::process::pid_hash::pid_hash_for_each_task(|task| {
+            if found.is_some() {
                 return;
             }
-            let task = &*t;
             if upid_in_ns(task, &ns) == Some(local) && task.pid() == task.tgid() {
                 found = Some(task.pid());
             }
@@ -630,12 +629,11 @@ pub fn resolve_vtid(local: u32) -> Option<u32> {
     let mut found: Option<u32> = None;
     // SAFETY: callback receives hash-table task pointers; we only read
     // pid/ns fields that are immutable after fork-enqueue.
-    unsafe {
-        crate::process::pid_hash::pid_hash_for_each_task(|t| {
-            if found.is_some() || t.is_null() {
+    {
+        crate::process::pid_hash::pid_hash_for_each_task(|task| {
+            if found.is_some() {
                 return;
             }
-            let task = &*t;
             if upid_in_ns(task, &ns) == Some(local) {
                 found = Some(task.pid());
             }
@@ -1249,7 +1247,7 @@ pub fn setns(fd: i32, nstype: u64) -> Result<(), i32> {
     }
 
     // SAFETY: fd validated non-negative; get_file_fd returns an Arc clone.
-    let file = unsafe { crate::fs::get_file_fd(fd as usize) }
+    let file = crate::fs::get_file_fd(fd as usize)
         .ok_or(crate::errno::Errno::BadFileNumber.as_neg_i32())?;
 
     // SAFETY: inode is written once at open time; read-only access here.

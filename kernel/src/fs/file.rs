@@ -494,6 +494,17 @@ impl File {
         unsafe { *self.dentry.get() = Some(dentry); }
     }
 
+    /// Get the backing dentry of this open file description, if it has one.
+    ///
+    /// Same cell discipline as [`Self::get_inode`]: the dentry cell is
+    /// written at open/creation time before the File is published to an
+    /// fd table and is not mutated afterwards, so a shared read through
+    /// a shared `&self` borrow is race-free.
+    pub fn get_dentry(&self) -> Option<&Arc<Dentry>> {
+        // SAFETY: no write to the cell after publication (see doc).
+        unsafe { &*self.dentry.get() }.as_ref()
+    }
+
     /// Set file operations
     pub fn set_ops(&self, ops: &'static FileOps) {
         unsafe { *self.ops.get() = Some(ops); }
@@ -501,6 +512,8 @@ impl File {
 
     /// Get file operations
     pub fn get_ops(&self) -> Option<&'static FileOps> {
+        // SAFETY: write-once cell (see get_inode doc); no write after
+        // the File is published to an fd table.
         unsafe { *self.ops.get() }
     }
 
@@ -554,7 +567,7 @@ impl File {
             FileOpKind::Read | FileOpKind::Write => -22, // EINVAL
             FileOpKind::LSeek => -29,                    // ESPIPE
             FileOpKind::ReadAt => {
-                let ops = unsafe { *self.ops.get() };
+                let ops = self.get_ops();
                 match ops {
                     Some(o) if o.read.is_none() && o.read_at.is_none() => -22, // EINVAL (op-less type)
                     _ => -29, // ESPIPE (stream type)
@@ -576,7 +589,7 @@ impl File {
     /// convention now lives here once.
     pub fn poll_dispatch(&self, events: u16) -> u16 {
         use crate::syscall::misc::poll_events::*;
-        let ops = unsafe { *self.ops.get() };
+        let ops = self.get_ops();
         match ops.and_then(|o| o.poll) {
             Some(poll_fn) => poll_fn(self, events),
             None => {
@@ -745,7 +758,7 @@ impl File {
     /// read_at op, an lseek op (position-swing fallback), or an inode with
     /// data ops all qualify; pipes/sockets/fifos do not (ESPIPE).
     fn positional_capable(&self) -> bool {
-        if let Some(ops) = unsafe { *self.ops.get() } {
+        if let Some(ops) = self.get_ops() {
             if ops.read_at.is_some() || ops.lseek.is_some() {
                 return true;
             }
@@ -1663,7 +1676,7 @@ pub fn gather_append_user(dst: &mut alloc::vec::Vec<u8>, src_user: usize, len: u
     true
 }
 
-pub unsafe fn get_file_fd(fd: usize) -> Option<Arc<File>> {
+pub fn get_file_fd(fd: usize) -> Option<Arc<File>> {
     use crate::sched;
     sched::get_current_fdtable()?.get_file(fd)
 }
@@ -1726,7 +1739,7 @@ pub unsafe fn get_file_fd_install(file: Arc<File>) -> Option<usize> {
     sched::get_current_fdtable()?.install_lowest_fd(file)
 }
 
-pub unsafe fn close_file_fd(fd: usize) -> Result<(), i32> {
+pub fn close_file_fd(fd: usize) -> Result<(), i32> {
     use crate::sched;
     match sched::get_current_fdtable() {
         Some(fdtable) => fdtable.close_fd(fd).map_err(|_| errno::Errno::BadFileNumber.as_neg_i32()),
@@ -1736,7 +1749,7 @@ pub unsafe fn close_file_fd(fd: usize) -> Result<(), i32> {
 
 /// close_file_fd that reports the removed description's identity
 /// (see FdTable::close_fd_report — the oc-rc single-resolution close).
-pub unsafe fn close_file_fd_report(
+pub fn close_file_fd_report(
     fd: usize,
 ) -> Result<(u64, alloc::sync::Weak<File>), i32> {
     use crate::sched;
@@ -1752,11 +1765,11 @@ pub unsafe fn close_file_fd_report(
 // Kernel thread standard input/output
 // ============================================================================
 
-pub unsafe fn get_stdin() -> Option<Arc<File>> {
+pub fn get_stdin() -> Option<Arc<File>> {
     get_file_fd(0)
 }
 
-pub unsafe fn get_stdout() -> Option<Arc<File>> {
+pub fn get_stdout() -> Option<Arc<File>> {
     get_file_fd(1)
 }
 

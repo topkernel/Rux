@@ -63,7 +63,7 @@
 use crate::arch::mm::{phys_to_virt, PhysAddr};
 use crate::mm::lru;
 use crate::mm::page_alloc::{alloc_page, alloc_page_batch, free_page};
-use crate::mm::page_desc::{pfn_to_page_mut, Page, PageFlag, PageType};
+use crate::mm::page_desc::{page_desc, pfn_to_page_mut, Page, PageFlag, PageType};
 use crate::mm::pglist::{first_online_node, LRU_INACTIVE_FILE};
 use crate::mm::zone::{GfpFlags, ZoneType};
 use crate::mm::{pfn_to_phys, PAGE_SIZE};
@@ -528,6 +528,20 @@ pub struct PageCache {
     total_pages: AtomicU32,
 }
 
+/// Revive an owned `Arc<InodePageCache>` from a slot pointer loaded under
+/// a reader claim (INV-PC-CLAIM): the increment happens while the claim
+/// (bank counter or slow_read) blocks the drain that would otherwise free
+/// the entry, so the strong count cannot transit zero. The round-1
+/// Arc-clone-from-raw shape, specialized to this table's claim protocol.
+fn claim_entry_arc(p: *mut InodePageCache) -> Arc<InodePageCache> {
+    // SAFETY: INV-PC-CLAIM — p was published by a writer from an owned
+    // Arc and the caller's claim keeps it alive across the increment.
+    unsafe {
+        Arc::increment_strong_count(p);
+        Arc::from_raw(p)
+    }
+}
+
 /// Combine (fs_id, ino) into the single u64 map key. Distinct inputs map to
 /// distinct keys for all practical purposes (splitmix-style mixing); the
 /// fs_id for each filesystem is a stable instance tag (ext4: instance
@@ -600,14 +614,10 @@ impl PageCache {
             bank.0.fetch_add(1, Ordering::SeqCst);
             let p = self.probe_slot_ptr(key);
             let out = if !p.is_null() {
-                // SAFETY: p was published by a writer from an owned Arc and
-                // is kept alive by the slot or by `retired` until a drain
-                // observes all banks zero — our bank claim is exactly what
-                // that drain waits for.
-                unsafe {
-                    Arc::increment_strong_count(p);
-                    Some(Arc::from_raw(p))
-                }
+                // p is kept alive by the slot or by `retired` until a
+                // drain observes all banks zero — our bank claim is
+                // exactly what that drain waits for (INV-PC-CLAIM).
+                Some(claim_entry_arc(p))
             } else {
                 None
             };
@@ -619,13 +629,10 @@ impl PageCache {
             let _slow = self.slow_read.lock_irqsave();
             let p = self.probe_slot_ptr(key);
             if !p.is_null() {
-                // SAFETY: drains hold slow_read across the drop of
-                // retired Arcs (see drain_retired), so either the slot
-                // or a parked reference keeps p alive here.
-                unsafe {
-                    Arc::increment_strong_count(p);
-                    Some(Arc::from_raw(p))
-                }
+                // Drains hold slow_read across the drop of retired Arcs
+                // (see drain_retired), so either the slot or a parked
+                // reference keeps p alive here (INV-PC-CLAIM).
+                Some(claim_entry_arc(p))
             } else {
                 None
             }
@@ -887,11 +894,8 @@ impl PageCache {
             page.pin_locked();
 
             // Mark page as recently accessed for LRU rotation
-            let page_desc = pfn_to_page_mut(page.pfn);
-            if !page_desc.is_null() {
-                unsafe {
-                    (*page_desc).set_flag(PageFlag::Referenced);
-                }
+            if let Some(page_desc) = page_desc(page.pfn) {
+                    page_desc.set_flag(PageFlag::Referenced);
             }
 
             let phys = pfn_to_phys(page.pfn);
@@ -938,11 +942,8 @@ impl PageCache {
             }
             STAT_HITS.fetch_add(1, Ordering::Relaxed);
             page.pin_locked();
-            let page_desc = pfn_to_page_mut(page.pfn);
-            if !page_desc.is_null() {
-                unsafe {
-                    (*page_desc).set_flag(PageFlag::Referenced);
-                }
+            if let Some(page_desc) = page_desc(page.pfn) {
+                    page_desc.set_flag(PageFlag::Referenced);
             }
             Some(pfn_to_phys(page.pfn) as u64)
         };
@@ -967,11 +968,8 @@ impl PageCache {
             let page = g.get_mut(&page_index)?;
             STAT_HITS.fetch_add(1, Ordering::Relaxed);
             page.pin_locked();
-            let page_desc = pfn_to_page_mut(page.pfn);
-            if !page_desc.is_null() {
-                unsafe {
-                    (*page_desc).set_flag(PageFlag::Referenced);
-                }
+            if let Some(page_desc) = page_desc(page.pfn) {
+                    page_desc.set_flag(PageFlag::Referenced);
             }
             let phys = pfn_to_phys(page.pfn);
             Some(phys_to_virt_ptr(phys) as *const u8)
@@ -1005,11 +1003,8 @@ impl PageCache {
             }
             STAT_HITS.fetch_add(1, Ordering::Relaxed);
             page.pin_locked();
-            let page_desc = pfn_to_page_mut(page.pfn);
-            if !page_desc.is_null() {
-                unsafe {
-                    (*page_desc).set_flag(PageFlag::Referenced);
-                }
+            if let Some(page_desc) = page_desc(page.pfn) {
+                    page_desc.set_flag(PageFlag::Referenced);
             }
             Some(pfn_to_phys(page.pfn) as u64)
         };
@@ -1090,11 +1085,8 @@ impl PageCache {
                     break;
                 }
                 page.pin_locked();
-                let page_desc = pfn_to_page_mut(page.pfn);
-                if !page_desc.is_null() {
-                    unsafe {
-                        (*page_desc).set_flag(PageFlag::Referenced);
-                    }
+                if let Some(page_desc) = page_desc(page.pfn) {
+                        page_desc.set_flag(PageFlag::Referenced);
                 }
                 let phys = pfn_to_phys(page.pfn);
                 out[n] = (idx, phys_to_virt_ptr(phys) as *const u8);
@@ -1222,11 +1214,8 @@ impl PageCache {
                         let pfn = page.pfn;
                         dirty_account_removed(page);
                         g.remove(&page_index);
-                        let page_desc = pfn_to_page_mut(pfn);
-                        if !page_desc.is_null() {
-                            unsafe {
-                                lru::page_remove_lru(&*page_desc);
-                            }
+                        if let Some(page_desc) = page_desc(pfn) {
+                                lru::page_remove_lru(page_desc);
                         }
                         release_page_frame(pfn);
                         self.total_pages.fetch_sub(1, Ordering::Relaxed);
@@ -1279,11 +1268,8 @@ impl PageCache {
                         let pfn = page.pfn;
                         dirty_account_removed(page);
                         g.remove(&page_index);
-                        let page_desc = pfn_to_page_mut(pfn);
-                        if !page_desc.is_null() {
-                            unsafe {
-                                lru::page_remove_lru(&*page_desc);
-                            }
+                        if let Some(page_desc) = page_desc(pfn) {
+                                lru::page_remove_lru(page_desc);
                         }
                         release_page_frame(pfn);
                         self.total_pages.fetch_sub(1, Ordering::Relaxed);
@@ -1323,11 +1309,8 @@ impl PageCache {
                     let pfn = page.pfn;
                     dirty_account_removed(page);
                     g.remove(&page_index);
-                    let page_desc = pfn_to_page_mut(pfn);
-                    if !page_desc.is_null() {
-                        unsafe {
-                            lru::page_remove_lru(&*page_desc);
-                        }
+                    if let Some(page_desc) = page_desc(pfn) {
+                            lru::page_remove_lru(page_desc);
                     }
                     release_page_frame(pfn);
                     self.total_pages.fetch_sub(1, Ordering::Relaxed);
@@ -1364,11 +1347,8 @@ impl PageCache {
                     let pfn = page.pfn;
                     dirty_account_removed(page);
                     g.remove(&page_index);
-                    let page_desc = pfn_to_page_mut(pfn);
-                    if !page_desc.is_null() {
-                        unsafe {
-                            lru::page_remove_lru(&*page_desc);
-                        }
+                    if let Some(page_desc) = page_desc(pfn) {
+                            lru::page_remove_lru(page_desc);
                     }
                     release_page_frame(pfn);
                     self.total_pages.fetch_sub(1, Ordering::Relaxed);
@@ -1416,11 +1396,8 @@ impl PageCache {
                         let pfn = page.pfn;
                         dirty_account_removed(page);
                         g.remove(&page_index);
-                        let page_desc = pfn_to_page_mut(pfn);
-                        if !page_desc.is_null() {
-                            unsafe {
-                                lru::page_remove_lru(&*page_desc);
-                            }
+                        if let Some(page_desc) = page_desc(pfn) {
+                                lru::page_remove_lru(page_desc);
                         }
                         release_page_frame(pfn);
                         self.total_pages.fetch_sub(1, Ordering::Relaxed);
@@ -1466,11 +1443,8 @@ impl PageCache {
                     false
                 } else {
                     page.pin_locked();
-                    let page_desc = pfn_to_page_mut(page.pfn);
-                    if !page_desc.is_null() {
-                        unsafe {
-                            (*page_desc).set_flag(PageFlag::Referenced);
-                        }
+                    if let Some(page_desc) = page_desc(page.pfn) {
+                            page_desc.set_flag(PageFlag::Referenced);
                     }
                     true
                 }
@@ -1525,18 +1499,16 @@ impl PageCache {
     /// descriptor's eviction keys (set by insert). No-op for non-cache
     /// frames (mapping() == 0) and foreign descriptors.
     pub fn mark_dirty_pfn(&self, pfn: usize) {
-        use crate::mm::page_desc::pfn_to_page_mut;
-        let page = pfn_to_page_mut(pfn);
-        if page.is_null() {
+        let Some(page) = page_desc(pfn) else {
             return;
-        }
-        // SAFETY: descriptor of a live frame; mapping/index are written
-        // only by the cache's insert/release paths.
-        let key = unsafe { (*page).mapping() as u64 };
+        };
+        // INV-FRAME-1: descriptor of a live frame; mapping/index are
+        // written only by the cache's insert/release paths.
+        let key = page.mapping() as u64;
         if key == 0 {
             return;
         }
-        let index = unsafe { (*page).index() as u64 };
+        let index = page.index() as u64;
         self.mark_dirty_by_key(key, index);
     }
 
@@ -2094,11 +2066,8 @@ impl PageCache {
                         let pfn = page.pfn;
                         dirty_account_removed(page);
                         g.remove(&page_index);
-                        let page_desc = pfn_to_page_mut(pfn);
-                        if !page_desc.is_null() {
-                            unsafe {
-                                lru::page_remove_lru(&*page_desc);
-                            }
+                        if let Some(page_desc) = page_desc(pfn) {
+                                lru::page_remove_lru(page_desc);
                         }
                         release_page_frame(pfn);
                         self.total_pages.fetch_sub(1, Ordering::Relaxed);
@@ -2148,10 +2117,9 @@ impl PageCache {
                     // invalidated now, reclaimed by the eviction walk's
                     // mapcount check once the last mapping drops.
                     let mapped = {
-                        let pd = pfn_to_page_mut(page.pfn);
-                        // SAFETY: vmemmap descriptor of a live cache frame;
-                        // read-only is_mapped check under the inode lock.
-                        !pd.is_null() && unsafe { (*pd).is_mapped() }
+                        // INV-FRAME-1: read-only is_mapped under the inode
+                        // lock.
+                        page_desc(page.pfn).is_some_and(|pd| pd.is_mapped())
                     };
                     if page.ref_count.load(Ordering::Acquire) == 0 && !mapped {
                         page.invalidated = true; // marker; removed below
@@ -2168,11 +2136,8 @@ impl PageCache {
                     if let Some(removed) = g.remove(&idx) {
                         dirty_account_removed(&removed);
                     }
-                    let page_desc = pfn_to_page_mut(pfn);
-                    if !page_desc.is_null() {
-                        unsafe {
-                            lru::page_remove_lru(&*page_desc);
-                        }
+                    if let Some(page_desc) = page_desc(pfn) {
+                            lru::page_remove_lru(page_desc);
                     }
                     release_page_frame(pfn);
                 }
@@ -2246,10 +2211,9 @@ impl PageCache {
                     // invalidated now, reclaimed by the eviction walk's
                     // mapcount check once the last mapping drops.
                     let mapped = {
-                        let pd = pfn_to_page_mut(page.pfn);
-                        // SAFETY: vmemmap descriptor of a live cache frame;
-                        // read-only is_mapped check under the inode lock.
-                        !pd.is_null() && unsafe { (*pd).is_mapped() }
+                        // INV-FRAME-1: read-only is_mapped under the inode
+                        // lock.
+                        page_desc(page.pfn).is_some_and(|pd| pd.is_mapped())
                     };
                     if page.ref_count.load(Ordering::Acquire) == 0 && !mapped {
                         page.invalidated = true; // marker; removed below
@@ -2263,11 +2227,8 @@ impl PageCache {
                     if let Some(removed) = g.remove(&idx) {
                         dirty_account_removed(&removed);
                     }
-                    let page_desc = pfn_to_page_mut(pfn);
-                    if !page_desc.is_null() {
-                        unsafe {
-                            lru::page_remove_lru(&*page_desc);
-                        }
+                    if let Some(page_desc) = page_desc(pfn) {
+                            lru::page_remove_lru(page_desc);
                     }
                     release_page_frame(pfn);
                 }
@@ -2403,19 +2364,16 @@ impl PageCache {
                         if !stale.invalidated {
                             false
                         } else {
-                            let pd = pfn_to_page_mut(stale.pfn);
-                            let mapped = !pd.is_null() && unsafe { (*pd).is_mapped() };
+                            let mapped =
+                                page_desc(stale.pfn).is_some_and(|pd| pd.is_mapped());
                             stale.ref_count.load(Ordering::Acquire) == 0 && !mapped
                         }
                     };
                     if reap {
                         let stale = g.remove(&page_index).expect("contains_key");
                         dirty_account_removed(&stale);
-                        let page_desc = pfn_to_page_mut(stale.pfn);
-                        if !page_desc.is_null() {
-                            unsafe {
-                                lru::page_remove_lru(&*page_desc);
-                            }
+                        if let Some(page_desc) = page_desc(stale.pfn) {
+                                lru::page_remove_lru(page_desc);
                         }
                         release_page_frame(stale.pfn);
                         self.total_pages.fetch_sub(1, Ordering::Relaxed);
@@ -2455,15 +2413,12 @@ impl PageCache {
                 }
                 if !fresh_unused {
                     let pfn = phys_addr / PAGE_SIZE;
-                    let page_desc = pfn_to_page_mut(pfn);
-                    if !page_desc.is_null() {
-                        unsafe {
-                            (*page_desc).set_page_type(PageType::PageCache);
-                            (*page_desc).set_flag(PageFlag::UpToDate);
-                            (*page_desc).set_mapping(key as usize as *mut core::ffi::c_void);
-                            (*page_desc).set_index(page_index as usize);
-                        }
-                        lru::page_add_file_lru_young(unsafe { &*page_desc });
+                    if let Some(pd) = page_desc(pfn) {
+                        pd.set_page_type(PageType::PageCache);
+                        pd.set_flag(PageFlag::UpToDate);
+                        pd.set_mapping(key as usize as *mut core::ffi::c_void);
+                        pd.set_index(page_index as usize);
+                        lru::page_add_file_lru_young(pd);
                     }
                     g.insert(
                         page_index,
@@ -2599,8 +2554,7 @@ impl PageCache {
                             false
                         } else {
                             let mapped = {
-                                let pd = pfn_to_page_mut(stale.pfn);
-                                !pd.is_null() && unsafe { (*pd).is_mapped() }
+                                page_desc(stale.pfn).is_some_and(|pd| pd.is_mapped())
                             };
                             stale.ref_count.load(Ordering::Acquire) == 0 && !mapped
                         }
@@ -2608,11 +2562,8 @@ impl PageCache {
                     if reap {
                         let stale = g.remove(&page_index).expect("contains_key");
                         dirty_account_removed(&stale);
-                        let page_desc = pfn_to_page_mut(stale.pfn);
-                        if !page_desc.is_null() {
-                            unsafe {
-                                lru::page_remove_lru(&*page_desc);
-                            }
+                        if let Some(page_desc) = page_desc(stale.pfn) {
+                                lru::page_remove_lru(page_desc);
                         }
                         release_page_frame(stale.pfn);
                         self.total_pages.fetch_sub(1, Ordering::Relaxed);
@@ -2677,20 +2628,17 @@ impl PageCache {
                     let pfn = phys_addr / PAGE_SIZE;
 
                     // Mark page descriptor and add to LRU
-                    let page_desc = pfn_to_page_mut(pfn);
-                    if !page_desc.is_null() {
-                        unsafe {
-                            (*page_desc).set_page_type(PageType::PageCache);
-                            (*page_desc).set_flag(PageFlag::UpToDate);
-                            // Store reverse-lookup info for eviction (the combined key)
-                            (*page_desc).set_mapping(key as usize as *mut core::ffi::c_void);
-                            (*page_desc).set_index(page_index as usize);
-                        }
+                    if let Some(pd) = page_desc(pfn) {
+                        pd.set_page_type(PageType::PageCache);
+                        pd.set_flag(PageFlag::UpToDate);
+                        // Store reverse-lookup info for eviction (the combined key)
+                        pd.set_mapping(key as usize as *mut core::ffi::c_void);
+                        pd.set_index(page_index as usize);
                         // Add to LRU_INACTIVE_FILE at the YOUNG end — must happen after
                         // setting flags. (Two-tier policy: young at head, reclaim from
                         // tail; linking at the tail made the eviction scan see the
                         // freshest page first.)
-                        lru::page_add_file_lru_young(unsafe { &*page_desc });
+                        lru::page_add_file_lru_young(pd);
                     }
 
                     // Copy data into the physical page via linear mapping
@@ -2837,17 +2785,13 @@ impl PageCache {
         // before every discard free — same stores release_page_frame does.
         #[inline]
         fn discard_prepared_frame(phys: usize) {
-            let page_desc = pfn_to_page_mut(phys / PAGE_SIZE);
-            if !page_desc.is_null() {
-                // SAFETY: frame was allocated by this batch's pre-stage
-                // (exclusive ownership) and is being discarded.
-                unsafe {
-                    let page = &*page_desc;
-                    page.set_page_type(PageType::Normal);
-                    page.clear_flag(PageFlag::UpToDate);
-                    page.set_mapping(core::ptr::null_mut());
-                    page.set_index(0);
-                }
+            if let Some(pd) = page_desc(phys / PAGE_SIZE) {
+                // Frame was allocated by this batch's pre-stage (exclusive
+                // ownership) and is being discarded.
+                pd.set_page_type(PageType::Normal);
+                pd.clear_flag(PageFlag::UpToDate);
+                pd.set_mapping(core::ptr::null_mut());
+                pd.set_index(0);
             }
             free_page(phys);
         }
@@ -2993,16 +2937,13 @@ impl PageCache {
                         }
                     }
                 }
-                let page_desc = pfn_to_page_mut(pfn);
-                if !page_desc.is_null() {
-                    // SAFETY: pfn came from the zone allocator; its page
-                    // descriptor is valid for the frame's lifetime.
-                    unsafe {
-                        (*page_desc).set_page_type(PageType::PageCache);
-                        (*page_desc).set_flag(PageFlag::UpToDate);
-                        (*page_desc).set_mapping(key as usize as *mut core::ffi::c_void);
-                        (*page_desc).set_index(page_index as usize);
-                    }
+                if let Some(pd) = page_desc(pfn) {
+                    // pfn came from the zone allocator; its page descriptor
+                    // is valid for the frame's lifetime (INV-FRAME-1).
+                    pd.set_page_type(PageType::PageCache);
+                    pd.set_flag(PageFlag::UpToDate);
+                    pd.set_mapping(key as usize as *mut core::ffi::c_void);
+                    pd.set_index(page_index as usize);
                 }
             }
 
@@ -3093,19 +3034,16 @@ impl PageCache {
                             Entry::Vacant(v) => {
                                 // Install the pre-filled fresh frame (born
                                 // dirty on the write shape).
-                                let page_desc = pfn_to_page_mut(pfn);
-                                if !page_desc.is_null() {
-                                    // SAFETY: pfn came from the zone
-                                    // allocator; descriptor valid.
-                                    unsafe {
-                                        (*page_desc).set_page_type(PageType::PageCache);
-                                        (*page_desc).set_flag(PageFlag::UpToDate);
-                                        (*page_desc).set_mapping(
-                                            key as usize as *mut core::ffi::c_void,
-                                        );
-                                        (*page_desc).set_index(page_index as usize);
-                                    }
-                                    lru_batch[lru_n] = page_desc;
+                                if let Some(pd) = page_desc(pfn) {
+                                    // pfn came from the zone allocator;
+                                    // descriptor valid (INV-FRAME-1).
+                                    pd.set_page_type(PageType::PageCache);
+                                    pd.set_flag(PageFlag::UpToDate);
+                                    pd.set_mapping(
+                                        key as usize as *mut core::ffi::c_void,
+                                    );
+                                    pd.set_index(page_index as usize);
+                                    lru_batch[lru_n] = pd as *const Page as *mut Page;
                                     lru_n += 1;
                                 }
                                 v.insert(CachedPage {
@@ -3178,35 +3116,28 @@ impl PageCache {
                                 }
                                 let reap = {
                                     let stale = e.get();
-                                    let pd = pfn_to_page_mut(stale.pfn);
-                                    let mapped =
-                                        !pd.is_null() && unsafe { (*pd).is_mapped() };
+                                    let mapped = page_desc(stale.pfn)
+                                        .is_some_and(|pd| pd.is_mapped());
                                     stale.ref_count.load(Ordering::Acquire) == 0 && !mapped
                                 };
                                 if reap {
                                     let stale = e.remove();
                                     dirty_account_removed(&stale);
-                                    let pd = pfn_to_page_mut(stale.pfn);
-                                    if !pd.is_null() {
-                                        unsafe {
-                                            lru::page_remove_lru(&*pd);
-                                        }
+                                    if let Some(pd) = page_desc(stale.pfn) {
+                                            lru::page_remove_lru(pd);
                                     }
                                     release_page_frame(stale.pfn);
                                     self.total_pages.fetch_sub(1, Ordering::Relaxed);
                                     // Squatter gone: install the batch frame.
-                                    let page_desc = pfn_to_page_mut(pfn);
-                                    if !page_desc.is_null() {
-                                        // SAFETY: as the Vacant arm.
-                                        unsafe {
-                                            (*page_desc).set_page_type(PageType::PageCache);
-                                            (*page_desc).set_flag(PageFlag::UpToDate);
-                                            (*page_desc).set_mapping(
-                                                key as usize as *mut core::ffi::c_void,
-                                            );
-                                            (*page_desc).set_index(page_index as usize);
-                                        }
-                                        lru_batch[lru_n] = page_desc;
+                                    if let Some(pd) = page_desc(pfn) {
+                                        // As the Vacant arm.
+                                        pd.set_page_type(PageType::PageCache);
+                                        pd.set_flag(PageFlag::UpToDate);
+                                        pd.set_mapping(
+                                            key as usize as *mut core::ffi::c_void,
+                                        );
+                                        pd.set_index(page_index as usize);
+                                        lru_batch[lru_n] = pd as *const Page as *mut Page;
                                         lru_n += 1;
                                     }
                                     g.insert(
@@ -3440,8 +3371,7 @@ impl PageCache {
                     if page.count_locked() != 0 || page.dirty.load(Ordering::Acquire) {
                         continue;
                     }
-                    let pd = pfn_to_page_mut(page.pfn);
-                    if !pd.is_null() && unsafe { (*pd).is_mapped() } {
+                    if page_desc(page.pfn).is_some_and(|pd| pd.is_mapped()) {
                         continue;
                     }
                     victims[n] = (idx, page.pfn);
@@ -3460,11 +3390,8 @@ impl PageCache {
             // allocation, same funnel as every eviction arm.
             for k in 0..n {
                 let pfn = victims[k].1;
-                let pd = pfn_to_page_mut(pfn);
-                if !pd.is_null() {
-                    unsafe {
-                        lru::page_remove_lru(&*pd);
-                    }
+                if let Some(pd) = page_desc(pfn) {
+                        lru::page_remove_lru(pd);
                 }
                 release_page_frame(pfn);
                 self.total_pages.fetch_sub(1, Ordering::Relaxed);
@@ -3735,13 +3662,11 @@ impl PageCache {
 
             while pfn != 0 && scanned < MAX_SCAN {
                 scanned += 1;
-                let page_desc = pfn_to_page_mut(pfn);
-                if page_desc.is_null() {
+                let Some(page) = page_desc(pfn) else {
                     break;
-                }
+                };
 
-                unsafe {
-                    let page = &*page_desc;
+                {
                     // Tail = oldest end; lru_prev walks toward the head
                     // (younger). Capture BEFORE any move of this page.
                     let next_pfn = page.lru_prev();
@@ -3770,9 +3695,10 @@ impl PageCache {
                     let verdict = match self.table_find(key) {
                         Some(i) => {
                             let ptr = self.slots[i].0.load(Ordering::Acquire);
-                            // SAFETY: wlock excludes removal; the entry is alive
-                            // (this deref rides the enclosing LRU-walk unsafe block).
-                            let entry = &*ptr;
+                            // SAFETY: wlock excludes removal; the entry is
+                            // alive and keyed (write-once `key` checked by
+                            // table_find).
+                            let entry = unsafe { &*ptr };
                             let mut g = entry.lock.lock();
                             let verdict = match g.get(&page_index) {
                                 Some(cached) => {
@@ -3787,10 +3713,8 @@ impl PageCache {
                                     // page_mapped() shape).
                                     let pinned = cached.count_locked() != 0;
                                     let dirty = cached.dirty.load(Ordering::Acquire);
-                                    let mapped = {
-                                        let pg_desc = pfn_to_page_mut(cached.pfn);
-                                        !pg_desc.is_null() && (*pg_desc).is_mapped()
-                                    };
+                                    let mapped = page_desc(cached.pfn)
+                                        .is_some_and(|pd| pd.is_mapped());
                                     if pinned {
                                         EV_SKIP_PINNED.fetch_add(1, Ordering::Relaxed);
                                     }
@@ -3804,12 +3728,10 @@ impl PageCache {
                                     if !evictable {
                                         Victim::Skip
                                     } else {
-                                        let pg_desc = pfn_to_page_mut(cached.pfn);
-                                        let referenced = if !pg_desc.is_null() {
-                                            (*pg_desc).test_flag(PageFlag::Referenced)
-                                        } else {
-                                            false
-                                        };
+                                        let referenced = page_desc(cached.pfn)
+                                            .is_some_and(|pd| {
+                                                pd.test_flag(PageFlag::Referenced)
+                                            });
                                         if referenced {
                                             Victim::SecondChance
                                         } else {
@@ -3828,11 +3750,10 @@ impl PageCache {
                                                 if let Some(slot) =
                                                     parked.iter_mut().find(|p| p.is_none())
                                                 {
-                                                    // SAFETY: the slot's reference
-                                                    // is handed over here (see
-                                                    // remove_entry; rides the
-                                                    // enclosing unsafe block).
-                                                    *slot = Some(Arc::from_raw(ptr));
+                                                    // SAFETY: the slot's
+                                                    // reference is handed over
+                                                    // here (see remove_entry).
+                                                    *slot = Some(unsafe { Arc::from_raw(ptr) });
                                                 }
                                             }
                                             Victim::Evict
@@ -3917,20 +3838,16 @@ impl PageCache {
                 if page.count_locked() != 0 || page.dirty.load(Ordering::Acquire) {
                     continue;
                 }
-                let page_desc = pfn_to_page_mut(page.pfn);
-                if !page_desc.is_null() {
-                    unsafe {
-                        let p = &*page_desc;
-                        // PCACHE_RO alias guard (see the LRU-walk twin): a
-                        // mapped frame is not evictable.
-                        if p.is_mapped() {
-                            continue;
-                        }
-                        if p.test_flag(PageFlag::Referenced) {
-                            p.clear_flag(PageFlag::Referenced);
-                            lru::lru_activate_young(p);
-                            continue; // second chance — keep scanning
-                        }
+                // PCACHE_RO alias guard (see the LRU-walk twin): a mapped
+                // frame is not evictable.
+                if let Some(p) = page_desc(page.pfn) {
+                    if p.is_mapped() {
+                        continue;
+                    }
+                    if p.test_flag(PageFlag::Referenced) {
+                        p.clear_flag(PageFlag::Referenced);
+                        lru::lru_activate_young(p);
+                        continue; // second chance — keep scanning
                     }
                 }
                 victim = Some((page_idx, page.pfn));
@@ -3948,11 +3865,8 @@ impl PageCache {
                     }
                 }
                 drop(g);
-                let page_desc = pfn_to_page_mut(pfn);
-                if !page_desc.is_null() {
-                    unsafe {
-                        lru::page_remove_lru(&*page_desc);
-                    }
+                if let Some(page_desc) = page_desc(pfn) {
+                        lru::page_remove_lru(page_desc);
                 }
                 release_page_frame(pfn);
                 self.total_pages.fetch_sub(1, Ordering::Relaxed);
@@ -4028,15 +3942,8 @@ fn release_page_frame(pfn: usize) {
     }
 
     // Clear page cache metadata
-    let page_desc = pfn_to_page_mut(pfn);
-    if !page_desc.is_null() {
-        unsafe {
-            let page = &*page_desc;
-            page.set_page_type(PageType::Normal);
-            page.clear_flag(PageFlag::UpToDate);
-            page.set_mapping(core::ptr::null_mut());
-            page.set_index(0);
-        }
+    if let Some(pd) = page_desc(pfn) {
+        pd.set_index(0);
     }
 
     free_page(phys_addr);

@@ -746,7 +746,7 @@ pub fn epoll_interest_snapshot() {
     if !crate::trace::EVENT_SOCKSNAP.armed() {
         return;
     }
-    crate::trace::trace_socksnap(0, unsafe { crate::process::current_pid() }, 0, 0);
+    crate::trace::trace_socksnap(0, crate::process::current_pid(), 0, 0);
     // (epoll ptr, owner pid, wait count, [(fd, events, file_id, last_reported, reports); ..])
     // — collected under the registry + entries locks, printed after release.
     let mut out: alloc::vec::Vec<(
@@ -3286,9 +3286,9 @@ pub fn param_stall_dump() {
             }
             let mut leader: *mut crate::process::task::Task = core::ptr::null_mut();
             crate::sched::for_each_task_try(|task| {
-                let tk = unsafe { &*task };
-                if leader.is_null() && tk.tgid() as u32 == tgid && tk.pid() as u32 == tgid {
-                    leader = task;
+                if leader.is_null() && task.tgid() as u32 == tgid && task.pid() as u32 == tgid {
+                    leader = task as *const crate::process::task::Task
+                        as *mut crate::process::task::Task;
                 }
             });
             if leader.is_null() {
@@ -3427,9 +3427,11 @@ pub fn param_stall_dump() {
     // fd-table file identities for fd 0-8 of the main thread. The ladder
     // break is "which syscall is init's main thread parked in" — this
     // answers it directly at 300 s.
-    unsafe {
+    {
         crate::process::pid_hash::pid_hash_for_each_task_try(|t| {
-            let tk = &*t;
+            let t = t as *const crate::process::task::Task
+                as *mut crate::process::task::Task;
+            let tk = unsafe { &*t };
             if tk.tgid() != 1 {
                 return;
             }
@@ -3533,7 +3535,9 @@ pub fn param_sender_dump() {
                 return;
             }
             rows += 1;
-            let linked = match crate::sched::sched::grq_diag_cfs_linked(t) {
+            let linked = match crate::sched::sched::grq_diag_cfs_linked(
+                t as *const crate::process::task::Task as *mut crate::process::task::Task,
+            ) {
                 Some(true) => "1",
                 Some(false) => "0",
                 None => "?",
@@ -5787,7 +5791,7 @@ pub fn sys_timerfd_create(args: SyscallArgs) -> i64 {
     };
     if tfdc_log {
         let comm = crate::sched::current()
-            .map(|t| unsafe { (*t).comm() })
+            .map(|t| t.comm())
             .map(|c| core::str::from_utf8(c).unwrap_or(""))
             .unwrap_or("")
             .trim_end_matches('\0');
@@ -5926,7 +5930,7 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> i64 {
 
     // Validate fd and get file
     // SAFETY: fd is a valid timerfd file descriptor from timerfd_create.
-    let file = match unsafe { crate::fs::get_file_fd(fd as usize) } {
+    let file = match crate::fs::get_file_fd(fd as usize) {
         Some(f) => f,
         None => return -(errno::EBADF as i64),
     };
@@ -6143,7 +6147,7 @@ pub fn sys_timerfd_gettime(args: SyscallArgs) -> i64 {
     // fd=-1 with a NULL buffer and expects EBADF, not EFAULT), then the
     // not-a-timerfd EINVAL, and only then touches the user buffer.
     // SAFETY: fd is a valid timerfd file descriptor from timerfd_create.
-    let file = match unsafe { crate::fs::get_file_fd(fd as usize) } {
+    let file = match crate::fs::get_file_fd(fd as usize) {
         Some(f) => f,
         None => return -(errno::EBADF as i64),
     };

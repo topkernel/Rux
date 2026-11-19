@@ -55,6 +55,21 @@ struct TimespecForGettime {
     tv_nsec: i64,
 }
 
+/// Typed (sec, nsec) store pair into a user `TimespecForGettime` via
+/// the exception-table path (SUM=0 safe). Both stores are attempted,
+/// matching the reference put_user x2 shape; a faulting store must
+/// surface as EFAULT (LTP clock_gettime02's bad_addr), not be
+/// swallowed into success.
+fn put_timespec_pair(dst_user: usize, sec: i64, nsec: i64) -> bool {
+    let t = crate::arch::uaccess_safe::UserSlice::new(
+        dst_user,
+        core::mem::size_of::<TimespecForGettime>(),
+    );
+    let ok1 = t.write_at(core::mem::offset_of!(TimespecForGettime, tv_sec), sec);
+    let ok2 = t.write_at(core::mem::offset_of!(TimespecForGettime, tv_nsec), nsec);
+    ok1 && ok2
+}
+
 /// sys_gettimeofday - Get current time
 ///
 /// # Arguments
@@ -99,17 +114,16 @@ pub fn sys_gettimeofday(args: SyscallArgs) -> i64 {
     let sec = total_ns / 1_000_000_000;
     let usec = (total_ns % 1_000_000_000) / 1_000;
 
-    // SAFETY: tv_ptr validated with access_ok; put_user is the
-    // exception-table copy path (SUM=0 safe).
-    // SAFETY: tv_ptr validated with access_ok; put_user is the
-    // exception-table copy path. A faulting store is EFAULT (LTP
-    // gettimeofday01's bad_addr case).
-    unsafe {
-        let ok1 = crate::arch::uaccess::put_user(&raw mut (*tv_ptr).tv_sec, sec as i64);
-        let ok2 = crate::arch::uaccess::put_user(&raw mut (*tv_ptr).tv_usec, usec as i64);
-        if !ok1 || !ok2 {
-            return -(errno::EFAULT as i64);
-        }
+    // Typed user stores (exception-table path, SUM=0 safe). A faulting
+    // store is EFAULT (LTP gettimeofday01's bad_addr case).
+    let tv = crate::arch::uaccess_safe::UserSlice::new(
+        tv_ptr as usize,
+        core::mem::size_of::<TimeVal>(),
+    );
+    let ok1 = tv.write_at(core::mem::offset_of!(TimeVal, tv_sec), sec as i64);
+    let ok2 = tv.write_at(core::mem::offset_of!(TimeVal, tv_usec), usec as i64);
+    if !ok1 || !ok2 {
+        return -(errno::EFAULT as i64);
     }
 
     0
@@ -156,31 +170,18 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> i64 {
                 });
             let sec = total_ns / 1_000_000_000;
             let mono_nsec = (total_ns % 1_000_000_000) as u64;
-            // SAFETY: tp_ptr validated with access_ok; put_user is the
-            // exception-table copy path (SUM=0 safe).
-            // SAFETY: tp_ptr validated with access_ok; put_user is the
-            // exception-table copy path (SUM=0 safe). A store that faults
-            // (PROT_NONE / unmapped — LTP clock_gettime02's bad_addr)
-            // must surface as EFAULT, not be swallowed into success.
-            unsafe {
-                let ok1 = crate::arch::uaccess::put_user(&raw mut (*tp_ptr).tv_sec, sec as i64);
-                let ok2 = crate::arch::uaccess::put_user(&raw mut (*tp_ptr).tv_nsec, mono_nsec as i64);
-                if !ok1 || !ok2 {
-                    return -(errno::EFAULT as i64);
-                }
+            // Typed user store pair (exception-table path); EFAULT on
+            // a faulting store (LTP clock_gettime02's bad_addr).
+            if !put_timespec_pair(tp_ptr as usize, sec as i64, mono_nsec as i64) {
+                return -(errno::EFAULT as i64);
             }
             0
         }
         CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_MONOTONIC_COARSE | CLOCK_BOOTTIME => {
             let (sec, nsec) = monotonic_time();
-            // SAFETY: tp_ptr validated with access_ok; put_user is the
-            // exception-table copy path (SUM=0 safe). EFAULT on fault.
-            unsafe {
-                let ok1 = crate::arch::uaccess::put_user(&raw mut (*tp_ptr).tv_sec, sec as i64);
-                let ok2 = crate::arch::uaccess::put_user(&raw mut (*tp_ptr).tv_nsec, nsec as i64);
-                if !ok1 || !ok2 {
-                    return -(errno::EFAULT as i64);
-                }
+            // Typed user store pair (exception-table path); EFAULT on fault.
+            if !put_timespec_pair(tp_ptr as usize, sec as i64, nsec as i64) {
+                return -(errno::EFAULT as i64);
             }
             0
         }
@@ -199,14 +200,9 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> i64 {
             }
             let sec = total_ns / 1_000_000_000;
             let nsec = total_ns % 1_000_000_000;
-            // SAFETY: tp_ptr validated with access_ok; put_user is the
-            // exception-table copy path (SUM=0 safe).
-            unsafe {
-                let ok1 = crate::arch::uaccess::put_user(&raw mut (*tp_ptr).tv_sec, sec as i64);
-                let ok2 = crate::arch::uaccess::put_user(&raw mut (*tp_ptr).tv_nsec, nsec as i64);
-                if !ok1 || !ok2 {
-                    return -(errno::EFAULT as i64);
-                }
+            // Typed user store pair (exception-table path); EFAULT on fault.
+            if !put_timespec_pair(tp_ptr as usize, sec as i64, nsec as i64) {
+                return -(errno::EFAULT as i64);
             }
             0
         }
@@ -217,18 +213,14 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> i64 {
             let cputime_ns = crate::process::current_task()
                 .map(|t| t.sched_entity().sum_exec_runtime.load(core::sync::atomic::Ordering::Acquire))
                 .unwrap_or(0);
-            // SAFETY: tp_ptr validated with access_ok; put_user is the
-            // exception-table copy path (SUM=0 safe).
-            // SAFETY: tp_ptr validated with access_ok; EFAULT on a
-            // faulting store (LTP clock_gettime02).
-            unsafe {
-                let ok1 = crate::arch::uaccess::put_user(
-                    &raw mut (*tp_ptr).tv_sec, (cputime_ns / 1_000_000_000) as i64);
-                let ok2 = crate::arch::uaccess::put_user(
-                    &raw mut (*tp_ptr).tv_nsec, (cputime_ns % 1_000_000_000) as i64);
-                if !ok1 || !ok2 {
-                    return -(errno::EFAULT as i64);
-                }
+            // Typed user store pair (exception-table path); EFAULT on
+            // a faulting store (LTP clock_gettime02).
+            if !put_timespec_pair(
+                tp_ptr as usize,
+                (cputime_ns / 1_000_000_000) as i64,
+                (cputime_ns % 1_000_000_000) as i64,
+            ) {
+                return -(errno::EFAULT as i64);
             }
             0
         }
@@ -279,15 +271,10 @@ pub fn sys_nanosleep(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // SAFETY: req_ptr validated with access_ok; copy_from_user is the
-    // exception-table copy path (SUM=0 safe) and zero-fills on fault.
+    // Typed exception-table copy (SUM=0 safe, zero-fills on fault).
     let mut req = Timespec { tv_sec: 0, tv_nsec: 0 };
-    unsafe {
-        let uncopied = crate::arch::uaccess::copy_from_user(
-            &mut req as *mut Timespec as *mut u8,
-            req_ptr as *const u8,
-            core::mem::size_of::<Timespec>(),
-        );
+    {
+        let uncopied = crate::arch::uaccess_safe::copy_in_t(&mut req, req_ptr as usize);
         if uncopied != 0 {
             nsfault("nanosleep copy_from_user(req)", req_ptr as usize);
             return -(errno::EFAULT as i64);
@@ -337,9 +324,9 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
     // is arbitrary, so the round-up added a uniform 0..slack_ns delay
     // to EVERY interval). Slack 1 ns (the well-defined floor of the
     // modulo below) = no coalescing.
-    let is_rt_task = crate::sched::current().is_some_and(|t| unsafe {
+    let is_rt_task = crate::sched::current().is_some_and(|t| {
         matches!(
-            (*t).policy(),
+            t.policy(),
             process::task::SchedPolicy::Fifo | process::task::SchedPolicy::Rr
         )
     });
@@ -347,7 +334,7 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
         1
     } else {
         crate::sched::current()
-            .and_then(|t| unsafe { (*t).signal.as_ref() })
+            .and_then(|t| t.signal.as_ref())
             .map(|s| s.timer_slack_ns.load(core::sync::atomic::Ordering::Relaxed))
             .unwrap_or(50_000)
             .max(1)
@@ -372,17 +359,17 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
     // from this path entirely — the early-fire mixed-compare bug class
     // has no caller-side residue left.
 
-    // Get current task pointer + PID for timer wakeup
+    // Get current task reference + PID for timer wakeup (typed:
+    // sched::current() returns &mut Task, valid for the whole syscall —
+    // we are it; the loop below reborrow it for state changes).
     let current = match crate::sched::current() {
-        Some(c) => c as *mut process::task::Task,
+        Some(c) => c,
         None => {
             nsfault("sched::current()=None", 0);
             return -(errno::EFAULT as i64);
         }
     };
-    // SAFETY: current is the currently running task's pointer from
-    // sched::current(), valid for the whole syscall (we are it).
-    let my_pid = unsafe { (*current).pid() };
+    let my_pid = current.pid();
 
     // Register a one-shot HIGH-RESOLUTION timer to wake us up at the
     // precise deadline (jiffy fallback inside the wheel).
@@ -448,17 +435,14 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
             // failure over the EINTR (LTP clock_nanosleep01's
             // bad-rmtp-with-signal case).
             if !rem_ptr.is_null() {
-                // SAFETY: rem_ptr validated with access_ok in caller;
-                // copy_to_user is the exception-table copy path (SUM=0 safe).
-                unsafe {
+                {
+                    // Typed exception-table copy (SUM=0 safe).
                     // Convert milliseconds to timespec
                     let rem_sec = (remaining_msecs / 1000) as i64;
                     let rem_nsec = ((remaining_msecs % 1000) * 1_000_000) as i64;
-                    if crate::arch::uaccess::copy_to_user(
-                        rem_ptr as *mut u8,
-                        &Timespec { tv_sec: rem_sec, tv_nsec: rem_nsec }
-                            as *const Timespec as *const u8,
-                        core::mem::size_of::<Timespec>(),
+                    if crate::arch::uaccess_safe::copy_out_t(
+                        rem_ptr as usize,
+                        &Timespec { tv_sec: rem_sec, tv_nsec: rem_nsec },
                     ) != 0
                     {
                         return -(errno::EFAULT as i64);
@@ -487,12 +471,9 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
 
         if wake.is_some() {
             // Mark INTERRUPTIBLE BEFORE the final re-check (state-first).
-            // SAFETY: current is the running task's pointer (see above).
-            unsafe {
-                (*current).set_state(process::task::TaskState::new(
-                    process::task::TaskState::INTERRUPTIBLE
-                ));
-            }
+            current.set_state(process::task::TaskState::new(
+                process::task::TaskState::INTERRUPTIBLE
+            ));
 
             // Re-check AFTER marking sleeping: the one-shot timer (or a
             // signal) may have fired between the checks above and the
@@ -500,20 +481,14 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
             // state (we may already be RUNNING + enqueued again), or the
             // condition is now observable — either way we must not sleep.
             if timer::read_time() >= hres_deadline || signal::signal_pending() {
-                // SAFETY: current is the running task's pointer.
-                unsafe {
-                    (*current).set_state(process::task::TaskState::new(
-                        process::task::TaskState::RUNNING
-                    ));
-                }
+                current.set_state(process::task::TaskState::new(
+                    process::task::TaskState::RUNNING
+                ));
                 // NEW-C2: a wake in the window above may have enqueued us
                 // while we are in fact still executing on this CPU — take
                 // ourselves back off before looping, or a second CPU could
                 // pick and run this very task.
-                // SAFETY: current is the running task's pointer (see above).
-                unsafe {
-                    crate::sched::dequeue_task(&*current);
-                }
+                crate::sched::dequeue_task(current);
                 continue;
             }
 
@@ -549,12 +524,9 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
             // rearm_if_spent refreshes the spent guard; its refresh and
             // the loop's deadline check terminate the sleep normally).
             if !wake.as_ref().is_some_and(|w| w.pending()) {
-                // SAFETY: current is the running task's pointer (see above).
-                unsafe {
-                    (*current).set_state(process::task::TaskState::new(
-                        process::task::TaskState::RUNNING
-                    ));
-                }
+                current.set_state(process::task::TaskState::new(
+                    process::task::TaskState::RUNNING
+                ));
                 continue;
             }
 
@@ -574,12 +546,9 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
             // after (D) already ran) would turn this yield into an
             // eternal park (the r41v15/v17 power_host shape: sys=35,
             // INTERRUPTIBLE, no wheel entry, no shadow-visible id).
-            // SAFETY: current is the running task's pointer.
-            unsafe {
-                (*current).set_state(process::task::TaskState::new(
-                    process::task::TaskState::RUNNING
-                ));
-            }
+            current.set_state(process::task::TaskState::new(
+                process::task::TaskState::RUNNING
+            ));
             crate::sched::schedule();
         }
     }
@@ -632,15 +601,8 @@ pub fn sys_clock_settime(args: SyscallArgs) -> i64 {
 
     // struct timespec (64-bit): { i64 tv_sec; i64 tv_nsec; }
     let mut ts = [0i64; 2];
-    // SAFETY: tp_ptr validated with access_ok; copy_from_user is the
-    // exception-table copy path (SUM=0 safe) and zero-fills on fault.
-    let residual = unsafe {
-        crate::arch::uaccess::copy_from_user(
-            ts.as_mut_ptr() as *mut u8,
-            tp_ptr,
-            16,
-        )
-    };
+    // Typed exception-table copy (SUM=0 safe, zero-fills on fault).
+    let residual = crate::arch::uaccess_safe::copy_in_t(&mut ts, tp_ptr as usize);
     if residual != 0 {
         return -(errno::EFAULT as i64);
     }
@@ -694,10 +656,11 @@ pub fn sys_clock_getres(args: SyscallArgs) -> i64 {
         // `*res = ...` store faults on the U-bit user page with SUM=0 and,
         // having no exception-table entry, panicked the kernel (Xorg's
         // clock_getres on its main stack, badaddr=0x3fffffe5a8).
-        unsafe {
+        {
             // timespec structure: tv_sec (8 bytes) + tv_nsec (8 bytes)
-            let ok_sec = crate::arch::uaccess::put_user(res, 0u64);          // tv_sec = 0
-            let ok_nsec = crate::arch::uaccess::put_user(res.offset(1), res_ns);  // tv_nsec
+            let res_slice = crate::arch::uaccess_safe::UserSlice::new(res as usize, 16);
+            let ok_sec = res_slice.write_at(0, 0u64);          // tv_sec = 0
+            let ok_nsec = res_slice.write_at(8, res_ns);       // tv_nsec
             if !ok_sec || !ok_nsec {
                 return -(errno::EFAULT as i64);
             }
@@ -786,13 +749,14 @@ pub fn sys_getitimer(args: SyscallArgs) -> i64 {
     // discarded — getitimer with an unmapped user pointer returned 0
     // while writing nothing. The reference reports the failed
     // copy_to_user as -EFAULT.
-    unsafe {
-        // it_interval (offset 0)
-        let p = curr_value as *mut i64;
-        let ok = crate::arch::uaccess::put_user(p, interval_sec)
-            && crate::arch::uaccess::put_user(p.add(1), interval_usec)
-            && crate::arch::uaccess::put_user(p.add(2), value_sec)
-            && crate::arch::uaccess::put_user(p.add(3), value_usec);
+    {
+        // it_interval (offset 0) — typed stores, short-circuit chain
+        // preserved (stores stop at the first failure, as before).
+        let it = crate::arch::uaccess_safe::UserSlice::new(curr_value as usize, 32);
+        let ok = it.write_at(0, interval_sec)
+            && it.write_at(8, interval_usec)
+            && it.write_at(16, value_sec)
+            && it.write_at(24, value_usec);
         if !ok {
             return -(crate::syscall::errno::EFAULT as i64);
         }
@@ -872,12 +836,13 @@ pub fn sys_setitimer(args: SyscallArgs) -> i64 {
         // uafault probe (2026-10-31): discarded put_user results made a
         // bad old_value pointer "succeed" silently; the reference
         // reports the failed copy_to_user as -EFAULT.
-        unsafe {
-            let p = old_value as *mut i64;
-            let ok = crate::arch::uaccess::put_user(p, i_sec)
-                && crate::arch::uaccess::put_user(p.add(1), i_usec)
-                && crate::arch::uaccess::put_user(p.add(2), v_sec)
-                && crate::arch::uaccess::put_user(p.add(3), v_usec);
+        {
+            // Typed stores; short-circuit chain preserved.
+            let ov = crate::arch::uaccess_safe::UserSlice::new(old_value as usize, 32);
+            let ok = ov.write_at(0, i_sec)
+                && ov.write_at(8, i_usec)
+                && ov.write_at(16, v_sec)
+                && ov.write_at(24, v_usec);
             if !ok {
                 return -(crate::syscall::errno::EFAULT as i64);
             }
@@ -899,13 +864,7 @@ pub fn sys_setitimer(args: SyscallArgs) -> i64 {
     // Read struct itimerval via the exception-table copy path so an
     // unmapped user page yields EFAULT instead of a kernel page fault.
     let mut itimer_bits = [0u8; 32];
-    let uncopied = unsafe {
-        crate::arch::uaccess::copy_from_user(
-            itimer_bits.as_mut_ptr(),
-            new_value as *const u8,
-            32,
-        )
-    };
+    let uncopied = crate::arch::uaccess_safe::copy_in(&mut itimer_bits, new_value as usize);
     if uncopied > 0 {
         return -(errno::EFAULT as i64);
     }
@@ -1146,13 +1105,7 @@ pub fn sys_clock_nanosleep(args: SyscallArgs) -> i64 {
     // kernel — glibc sleep() hits this on its first call.
     let mut req = Timespec { tv_sec: 0, tv_nsec: 0 };
     {
-        let uncopied = unsafe {
-            crate::arch::uaccess::copy_from_user(
-                &mut req as *mut Timespec as *mut u8,
-                rqtp as *const u8,
-                core::mem::size_of::<Timespec>(),
-            )
-        };
+        let uncopied = crate::arch::uaccess_safe::copy_in_t(&mut req, rqtp as usize);
         if uncopied != 0 {
             nsfault("copy_from_user(rqtp)", rqtp as usize);
             return fail(errno::EFAULT);
@@ -1231,14 +1184,14 @@ pub fn sys_timer_create(args: SyscallArgs) -> i64 {
         // {signo=0, notify=SIGEV_SIGNAL} and created a default timer
         // instead of failing (reference timer_create: copy_from_user of
         // the sigevent fails with EFAULT).
-        unsafe {
-            let p = sigevent_ptr as *const i32;
+        {
             // sigev_value is 8 bytes (union), then sigev_signo at offset 8
-            let signo = match crate::arch::uaccess::get_user(p.add(2)) {
+            let se = crate::arch::uaccess_safe::UserSlice::new(sigevent_ptr as usize, 64);
+            let signo = match se.read_at::<i32>(8) {
                 Some(v) => v,
                 None => return -(errno::EFAULT as i64),
             };
-            let notify = match crate::arch::uaccess::get_user(p.add(3)) {
+            let notify = match se.read_at::<i32>(12) {
                 Some(v) => v,
                 None => return -(errno::EFAULT as i64),
             };
@@ -1271,7 +1224,7 @@ pub fn sys_timer_create(args: SyscallArgs) -> i64 {
                         return -(errno::EINVAL as i64);
                     }
                     // tid at union offset 16
-                    let tid = match crate::arch::uaccess::get_user(p.add(4)) {
+                    let tid = match se.read_at::<i32>(16) {
                         Some(v) => v,
                         None => return -(errno::EFAULT as i64),
                     };
@@ -1336,10 +1289,9 @@ pub fn sys_timer_create(args: SyscallArgs) -> i64 {
     // timer becomes visible, and its failure unwinds the timer (EFAULT).
     // The old code pushed first and IGNORED the put_user error — a bad
     // timer-id pointer returned SUCCESS (LTP timer_create02 case 2).
-    // SAFETY: put_user is the exception-table copy path (SUM=0 safe).
-    let wrote = unsafe {
-        crate::arch::uaccess::put_user(timerid_ptr, user_timer_id)
-    };
+    // Typed exception-table store (SUM=0 safe).
+    let wrote = crate::arch::uaccess_safe::UserPtr::new(timerid_ptr as usize)
+        .write(user_timer_id);
     if !wrote {
         return -(errno::EFAULT as i64);
     }
@@ -1382,12 +1334,11 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
     };
 
     // Read struct itimerspec { struct timespec it_interval, struct timespec it_value }
-    // SAFETY: new_value validated with access_ok(32); get_user is the
-    // exception-table copy path (SUM=0 safe). Unreadable fields read as 0.
-    let (int_sec, int_nsec, val_sec, val_nsec) = unsafe {
-        let p = new_value as *const i64;
-        let get = crate::arch::uaccess::get_user::<i64>;
-        match (get(p), get(p.add(1)), get(p.add(2)), get(p.add(3))) {
+    // Typed exception-table reads (SUM=0 safe); any unreadable field is
+    // EFAULT.
+    let (int_sec, int_nsec, val_sec, val_nsec) = {
+        let nv = crate::arch::uaccess_safe::UserSlice::new(new_value as usize, 32);
+        match (nv.read_at::<i64>(0), nv.read_at::<i64>(8), nv.read_at::<i64>(16), nv.read_at::<i64>(24)) {
             (Some(a), Some(b), Some(c), Some(d)) => (a, b, c, d),
             _ => return -(errno::EFAULT as i64),
         }
@@ -1420,12 +1371,11 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
             return -(errno::EFAULT as i64);
         }
         let (oi, on, ov, vn) = posix_timer_current(timer);
-        // SAFETY: old_value validated with access_ok(32); put_user is the
-        // exception-table copy path (SUM=0 safe).
-        unsafe {
-            let p = old_value as *mut i64;
-            let put = crate::arch::uaccess::put_user;
-            let ok = put(p, oi) & put(p.add(1), on) & put(p.add(2), ov) & put(p.add(3), vn);
+        {
+            // Typed stores; non-short-circuit chain preserved (& means
+            // all four stores are attempted).
+            let oldv = crate::arch::uaccess_safe::UserSlice::new(old_value as usize, 32);
+            let ok = oldv.write_at(0, oi) & oldv.write_at(8, on) & oldv.write_at(16, ov) & oldv.write_at(24, vn);
             if !ok {
                 return -(errno::EFAULT as i64);
             }
@@ -1634,15 +1584,13 @@ pub fn sys_timer_gettime(args: SyscallArgs) -> i64 {
     let (int_sec, int_nsec, val_sec, val_nsec) = posix_timer_current(timer);
 
     // Write struct itimerspec { struct timespec it_interval, struct timespec it_value }
-    // SAFETY: curr_value validated with access_ok(32); put_user is the
-    // exception-table copy path (SUM=0 safe).
-    unsafe {
-        let p = curr_value as *mut i64;
-        let put = crate::arch::uaccess::put_user;
-        let ok1 = put(p, int_sec);
-        let ok2 = put(p.add(1), int_nsec);
-        let ok3 = put(p.add(2), val_sec);
-        let ok4 = put(p.add(3), val_nsec);
+    // Typed stores (exception-table path); all four attempted.
+    {
+        let cv = crate::arch::uaccess_safe::UserSlice::new(curr_value as usize, 32);
+        let ok1 = cv.write_at(0, int_sec);
+        let ok2 = cv.write_at(8, int_nsec);
+        let ok3 = cv.write_at(16, val_sec);
+        let ok4 = cv.write_at(24, val_nsec);
         if !ok1 || !ok2 || !ok3 || !ok4 {
             return -(errno::EFAULT as i64);
         }
@@ -1745,13 +1693,10 @@ pub fn sys_time(args: SyscallArgs) -> i64 {
         if !crate::arch::uaccess::access_ok(tloc as usize, 8) {
             return -(errno::EFAULT as i64);
         }
-        // SAFETY: tloc access_ok'd above; put_user is the exception-table
-        // copy path — a faulting store surfaces as EFAULT, not a kernel
-        // fault.
-        unsafe {
-            if !crate::arch::uaccess::put_user(tloc, secs) {
-                return -(errno::EFAULT as i64);
-            }
+        // Typed exception-table store — a faulting store surfaces as
+        // EFAULT, not a kernel fault.
+        if !crate::arch::uaccess_safe::UserPtr::new(tloc as usize).write(secs) {
+            return -(errno::EFAULT as i64);
         }
     }
     secs
@@ -1781,12 +1726,8 @@ pub fn sys_settimeofday(args: SyscallArgs) -> i64 {
             return -(errno::EFAULT as i64);
         }
         let mut tz = [0u8; 8];
-        // SAFETY: tz_ptr validated with access_ok; copy_from_user is the
-        // exception-table copy path (SUM=0 safe) and zero-fills on fault.
-        if unsafe {
-            crate::arch::uaccess::copy_from_user(tz.as_mut_ptr(), tz_ptr, 8)
-        } != 0
-        {
+        // Typed exception-table copy (SUM=0 safe, zero-fills on fault).
+        if crate::arch::uaccess_safe::copy_in(&mut tz, tz_ptr as usize) != 0 {
             return -(errno::EFAULT as i64);
         }
         let minuteswest = i32::from_le_bytes([tz[0], tz[1], tz[2], tz[3]]);
@@ -1802,15 +1743,8 @@ pub fn sys_settimeofday(args: SyscallArgs) -> i64 {
 
     // struct timeval (64-bit): { i64 tv_sec; i64 tv_usec; }
     let mut tv = [0i64; 2];
-    // SAFETY: tv_ptr validated with access_ok; copy_from_user is the
-    // exception-table copy path (SUM=0 safe) and zero-fills on fault.
-    let residual = unsafe {
-        crate::arch::uaccess::copy_from_user(
-            tv.as_mut_ptr() as *mut u8,
-            tv_ptr,
-            16,
-        )
-    };
+    // Typed exception-table copy (SUM=0 safe, zero-fills on fault).
+    let residual = crate::arch::uaccess_safe::copy_in_t(&mut tv, tv_ptr as usize);
     if residual != 0 {
         return -(errno::EFAULT as i64);
     }
@@ -1856,12 +1790,8 @@ fn adjtimex_common(buf_ptr: *mut u8) -> i64 {
     // Read the request (a bad pointer is EFAULT — LTP clock_adjtime02's
     // bad_addr case; the old stub never read the buffer at all).
     let mut buf = [0u8; 128];
-    // SAFETY: buf_ptr validated with access_ok(128); copy_from_user is the
-    // exception-table copy path (SUM=0 safe).
-    if unsafe {
-        crate::arch::uaccess::copy_from_user(buf.as_mut_ptr(), buf_ptr, 128)
-    } != 0
-    {
+    // Typed exception-table copy (SUM=0 safe).
+    if crate::arch::uaccess_safe::copy_in(&mut buf, buf_ptr as usize) != 0 {
         return -(errno::EFAULT as i64);
     }
     let modes = u32::from_le_bytes(buf[0..4].try_into().unwrap());
@@ -1998,10 +1928,8 @@ fn adjtimex_common(buf_ptr: *mut u8) -> i64 {
         let usec = (ns / 1_000) as u64;
         out[80..88].copy_from_slice(&usec.to_le_bytes());
     }
-    unsafe {
-        if crate::arch::uaccess::copy_to_user(buf_ptr, out.as_ptr(), 128) != 0 {
-            return -(errno::EFAULT as i64);
-        }
+    if crate::arch::uaccess_safe::copy_out(buf_ptr as usize, &out) != 0 {
+        return -(errno::EFAULT as i64);
     }
     0
 }
@@ -2079,12 +2007,14 @@ pub fn sys_get_robust_list(args: SyscallArgs) -> i64 {
     {
         return -(errno::EFAULT as i64);
     }
-    // SAFETY: both pointers validated with access_ok(8); put_user is the
-    // exception-table copy path.
-    unsafe {
+    {
+        // Typed stores (exception-table path); results deliberately
+        // discarded, matching the reference's unconditional stores.
         // size_t len: 8 bytes on 64-bit (sizeof(struct robust_list_head))
-        let _ = crate::arch::uaccess::put_user(len_ptr as *mut u64, 24u64);
-        let _ = crate::arch::uaccess::put_user(head_ptr, 0u64);
+        let _: bool = crate::arch::uaccess_safe::UserPtr::<u64>::new(len_ptr as usize)
+            .write(24u64);
+        let _: bool = crate::arch::uaccess_safe::UserPtr::<u64>::new(head_ptr as usize)
+            .write(0u64);
     }
     0
 }

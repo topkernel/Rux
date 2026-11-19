@@ -71,26 +71,22 @@ pub fn sys_getpriority(args: SyscallArgs) -> i64 {
             let target_pid = if who == 0 {
                 // who = 0 means current process
                 match crate::sched::current() {
-                    // SAFETY: sched::current() returns a valid Task pointer when Some.
-                    Some(t) => unsafe { (*t).pid() },
+                    Some(t) => t.pid(),
                     None => return -(errno::ESRCH as i64),
                 }
             } else {
                 who
             };
 
-            // Find target process
-            // SAFETY: find_task_by_pid returns a valid pointer when non-null; checked below.
-            let task = unsafe { crate::sched::find_task_by_pid(target_pid) };
-            if task.is_null() {
+            // Find target process (syscall-context short read: TaskBorrow).
+            let Some(task) = crate::process::task_ref::TaskBorrow::lookup(target_pid) else {
                 return -(errno::ESRCH as i64);  // Process does not exist
-            }
+            };
 
             // Linux ABI returns 20 - nice (nice -20 → 40, nice 19 → 1). The old
             // nice + 20 encoding made glibc compute the negated nice value
             // (review M-12).
-            // SAFETY: task is validated non-null above; nice() reads the task's nice field.
-            let nice = unsafe { (*task).nice() };
+            let nice = task.nice();
             (20 - nice) as i64
         }
         // Group/user-wide queries (review批次1: previously EINVAL). who==0
@@ -99,10 +95,9 @@ pub fn sys_getpriority(args: SyscallArgs) -> i64 {
         PRIO_PGRP | PRIO_USER => {
             let key = if who == 0 {
                 match crate::sched::current() {
-                    // SAFETY: sched::current() returns a valid Task pointer when Some.
-                    Some(t) => unsafe {
-                        if which == PRIO_PGRP { (*t).pgid() } else { (*t).cred().uid }
-                    },
+                    Some(t) => {
+                        if which == PRIO_PGRP { t.pgid() } else { t.cred().uid }
+                    }
                     None => return -(errno::ESRCH as i64),
                 }
             } else {
@@ -110,14 +105,11 @@ pub fn sys_getpriority(args: SyscallArgs) -> i64 {
             };
             let mut best_nice: Option<i32> = None;
             crate::process::pid_hash::pid_hash_for_each_task(|t| {
-                // SAFETY: the callback runs under the bucket lock; the task
-                // pointer is valid for the duration of the callback.
-                let matches = unsafe {
-                    if which == PRIO_PGRP { (*t).pgid() == key } else { (*t).cred().uid == key }
-                };
+                // The callback runs under the bucket lock (typed walk).
+                let matches =
+                    if which == PRIO_PGRP { t.pgid() == key } else { t.cred().uid == key };
                 if matches {
-                    // SAFETY: nice() only reads the task's nice field.
-                    let n = unsafe { (*t).nice() };
+                    let n = t.nice();
                     best_nice = Some(match best_nice {
                         Some(b) if b <= n => b,
                         _ => n,
@@ -158,10 +150,9 @@ pub fn sys_setpriority(args: SyscallArgs) -> i64 {
         PRIO_PROCESS => {
             target_pids.push(if who == 0 {
                 match crate::sched::current() {
-                    // SAFETY: sched::current() returns a valid Task pointer when Some.
-                    Some(t) => unsafe { (*t).pid() },
+                    Some(t) => t.pid(),
                     None => return -(errno::ESRCH as i64),
-                }
+                    }
             } else {
                 who
             });
@@ -169,10 +160,9 @@ pub fn sys_setpriority(args: SyscallArgs) -> i64 {
         PRIO_PGRP | PRIO_USER => {
             let key = if who == 0 {
                 match crate::sched::current() {
-                    // SAFETY: sched::current() returns a valid Task pointer when Some.
-                    Some(t) => unsafe {
-                        if which == PRIO_PGRP { (*t).pgid() } else { (*t).cred().uid }
-                    },
+                    Some(t) => {
+                        if which == PRIO_PGRP { t.pgid() } else { t.cred().uid }
+                    }
                     None => return -(errno::ESRCH as i64),
                 }
             } else {
@@ -181,13 +171,11 @@ pub fn sys_setpriority(args: SyscallArgs) -> i64 {
             // Collect under the bucket lock, apply after it drops (renice
             // takes the GRQ lock — never nest it inside a pid-hash bucket).
             crate::process::pid_hash::pid_hash_for_each_task(|t| {
-                // SAFETY: callback runs under the bucket lock; pid() reads
-                // the task's pid field.
-                let matches = unsafe {
-                    if which == PRIO_PGRP { (*t).pgid() == key } else { (*t).cred().uid == key }
-                };
+                // Callback runs under the bucket lock (typed walk).
+                let matches =
+                    if which == PRIO_PGRP { t.pgid() == key } else { t.cred().uid == key };
                 if matches {
-                    target_pids.push(unsafe { (*t).pid() });
+                    target_pids.push(t.pid());
                 }
             });
             if target_pids.is_empty() {
@@ -203,32 +191,27 @@ pub fn sys_setpriority(args: SyscallArgs) -> i64 {
 
     for target_pid in target_pids {
         // Pin the task across the renice (a concurrent exit could otherwise
-        // free it between lookup and use).
-        // SAFETY: pid_hash_lookup_pinned returns a pinned valid task or null.
-        let task = unsafe { crate::process::pid_hash::pid_hash_lookup_pinned(target_pid) };
-        if task.is_null() {
+        // free it between lookup and use). TaskRef owns the pin: every
+        // `continue` below releases it via Drop — the four manual
+        // task_put sites collapsed into the handle.
+        let Some(mut task) = crate::process::task_ref::TaskRef::lookup(target_pid) else {
             last_err = -(errno::ESRCH as i64);
             continue;
-        }
+        };
 
         // Permission checks (Linux setpriority):
         // - another process's priority requires CAP_SYS_NICE (EPERM);
         // - RAISING priority (lowering nice) requires CAP_SYS_NICE even for
         //   self (EACCES) — previously any self-renice passed (review批次1).
-        // SAFETY: task validated non-null; nice() only reads.
-        let cur_nice = unsafe { (*task).nice() };
+        let cur_nice = task.nice();
         if target_pid != current_pid {
             if !crate::security::capable(crate::security::CAP_SYS_NICE) {
-                // SAFETY: release the pin taken above.
-                unsafe { crate::process::task::Task::task_put(task); }
                 last_err = -(errno::EPERM as i64);
                 continue;
             }
         } else if niceval < cur_nice
             && !crate::security::capable(crate::security::CAP_SYS_NICE)
         {
-            // SAFETY: release the pin taken above.
-            unsafe { crate::process::task::Task::task_put(task); }
             last_err = -(errno::EACCES as i64);
             continue;
         }
@@ -237,12 +220,7 @@ pub fn sys_setpriority(args: SyscallArgs) -> i64 {
         // R25-6: renice under the GRQ lock with load_weight rebalance — the
         // plain write let CFS enqueue/dequeue fetch_add/sub mismatched weights
         // (load_weight wrapped -> garbage sched_slice) and raced the runqueue.
-        // SAFETY: task is pinned and valid.
-        unsafe {
-            crate::sched::sched::sched_renice_locked(task, niceval);
-        }
-        // SAFETY: release the pin taken above.
-        unsafe { crate::process::task::Task::task_put(task); }
+        crate::sched::sched::sched_renice_locked(&mut *task, niceval);
         applied += 1;
     }
 
@@ -324,36 +302,28 @@ pub fn sys_sched_setscheduler(args: SyscallArgs) -> i64 {
     if !crate::arch::uaccess::access_ok(param_ptr as usize, core::mem::size_of::<SchedParam>()) {
         return -(errno::EFAULT as i64);
     }
-    let mut param = core::mem::MaybeUninit::<SchedParam>::uninit();
-    // SAFETY: param_ptr is access_ok-validated; SchedParam is repr(C) plain data.
-    let uncopied = unsafe {
-        crate::arch::uaccess::copy_from_user(
-            param.as_mut_ptr() as *mut u8,
-            param_ptr as *const u8,
-            core::mem::size_of::<SchedParam>(),
-        )
-    };
+    let mut param = SchedParam { sched_priority: 0 };
+    // Typed exception-table copy; SchedParam is repr(C) plain data.
+    let uncopied =
+        crate::arch::uaccess_safe::copy_in_t(&mut param, param_ptr as usize);
     if uncopied != 0 {
         return -(errno::EFAULT as i64);
     }
-    let param = unsafe { param.assume_init() };
 
     // Find target task
     let target_pid = if pid == 0 {
         match crate::sched::current() {
-            // SAFETY: sched::current() returns a valid Task pointer when Some.
-            Some(t) => unsafe { (*t).pid() },
+            Some(t) => t.pid(),
             None => return -(errno::ESRCH as i64),
         }
     } else {
         pid
     };
 
-    // SAFETY: find_task_by_pid returns a valid pointer when non-null; checked below.
-    let task = unsafe { crate::sched::find_task_by_pid(target_pid) };
-    if task.is_null() {
-        return -(errno::ESRCH as i64);
-    }
+    let mut task = match crate::process::find_task_by_pid(target_pid) {
+        Some(t) => t,
+        None => return -(errno::ESRCH as i64),
+    };
 
     // Permission check: moving ANY task (including self) ONTO an RT/DL
     // policy requires CAP_SYS_NICE — self could otherwise lock up every
@@ -375,9 +345,7 @@ pub fn sys_sched_setscheduler(args: SyscallArgs) -> i64 {
     }
 
     // Store the RESET_ON_FORK request where fork() can see it.
-    unsafe {
-        (*task).set_sched_reset_on_fork(reset_on_fork);
-    }
+    task.set_sched_reset_on_fork(reset_on_fork);
     // Convert and apply with run-queue migration under the GRQ lock
     // (review PROC-P07).
     let new_policy = match policy {
@@ -389,11 +357,13 @@ pub fn sys_sched_setscheduler(args: SyscallArgs) -> i64 {
         SCHED_DEADLINE => crate::process::task::SchedPolicy::Deadline,
         _ => return -(errno::EINVAL as i64),
     };
-    // SAFETY: task is validated non-null above; change_task_policy takes
-    // the GRQ lock internally.
-    unsafe {
-        crate::sched::change_task_policy(task, new_policy, param.sched_priority as u32);
-    }
+    // change_task_policy takes the GRQ lock internally (still raw-ptr
+    // typed: it also serves pinned/raw callers).
+    crate::sched::change_task_policy(
+        task as *mut crate::process::task::Task,
+        new_policy,
+        param.sched_priority as u32,
+    );
 
     0
 }
@@ -415,22 +385,18 @@ pub fn sys_sched_getscheduler(args: SyscallArgs) -> i64 {
 
     let target_pid = if pid == 0 {
         match crate::sched::current() {
-            // SAFETY: sched::current() returns a valid Task pointer when Some.
-            Some(t) => unsafe { (*t).pid() },
+            Some(t) => t.pid(),
             None => return -(errno::ESRCH as i64),
         }
     } else {
         pid
     };
 
-    // SAFETY: find_task_by_pid returns a valid pointer when non-null; checked below.
-    let task = unsafe { crate::sched::find_task_by_pid(target_pid) };
-    if task.is_null() {
+    let Some(task) = crate::process::task_ref::TaskBorrow::lookup(target_pid) else {
         return -(errno::ESRCH as i64);
-    }
+    };
 
-    // SAFETY: task is validated non-null above; policy() reads the task's scheduling policy.
-    let policy = unsafe { (*task).policy() };
+    let policy = task.policy();
     match policy {
         crate::process::task::SchedPolicy::Normal => SCHED_NORMAL as i64,
         crate::process::task::SchedPolicy::Fifo => SCHED_FIFO as i64,
@@ -464,35 +430,26 @@ pub fn sys_sched_setparam(args: SyscallArgs) -> i64 {
     if !crate::arch::uaccess::access_ok(param_ptr as usize, core::mem::size_of::<SchedParam>()) {
         return -(errno::EFAULT as i64);
     }
-    let mut param = core::mem::MaybeUninit::<SchedParam>::uninit();
-    // SAFETY: param_ptr is access_ok-validated; SchedParam is repr(C) plain data.
-    let uncopied = unsafe {
-        crate::arch::uaccess::copy_from_user(
-            param.as_mut_ptr() as *mut u8,
-            param_ptr as *const u8,
-            core::mem::size_of::<SchedParam>(),
-        )
-    };
+    let mut param = SchedParam { sched_priority: 0 };
+    // Typed exception-table copy; SchedParam is repr(C) plain data.
+    let uncopied = crate::arch::uaccess_safe::copy_in_t(&mut param, param_ptr as usize);
     if uncopied != 0 {
         return -(errno::EFAULT as i64);
     }
-    let param = unsafe { param.assume_init() };
 
     let target_pid = if pid == 0 {
         match crate::sched::current() {
-            // SAFETY: sched::current() returns a valid Task pointer when Some.
-            Some(t) => unsafe { (*t).pid() },
+            Some(t) => t.pid(),
             None => return -(errno::ESRCH as i64),
-        }
+            }
     } else {
         pid
     };
 
-    // SAFETY: find_task_by_pid returns a valid pointer when non-null; checked below.
-    let task = unsafe { crate::sched::find_task_by_pid(target_pid) };
-    if task.is_null() {
-        return -(errno::ESRCH as i64);
-    }
+    let mut task = match crate::process::find_task_by_pid(target_pid) {
+        Some(t) => t,
+        None => return -(errno::ESRCH as i64),
+    };
 
     // R32-F4b: this used to write rt_priority directly. rt_rq keys its
     // per-priority lists AND its bitmap by rt_priority, so mutating the
@@ -503,8 +460,7 @@ pub fn sys_sched_setparam(args: SyscallArgs) -> i64 {
     // sys_sched_setscheduler enforces. Route through change_task_policy()
     // (dequeue + field update + re-enqueue under the GRQ lock) and mirror
     // the setscheduler validation.
-    // SAFETY: task is validated non-null above; policy() reads the task's field.
-    let policy = unsafe { (*task).policy() };
+    let policy = task.policy();
     if matches!(policy, crate::process::task::SchedPolicy::Fifo | crate::process::task::SchedPolicy::Rr) {
         // RT parameter changes require CAP_SYS_NICE, mirroring the RT
         // policy-switch check in sys_sched_setscheduler.
@@ -552,33 +508,22 @@ pub fn sys_sched_getparam(args: SyscallArgs) -> i64 {
 
     let target_pid = if pid == 0 {
         match crate::sched::current() {
-            // SAFETY: sched::current() returns a valid Task pointer when Some.
-            Some(t) => unsafe { (*t).pid() },
+            Some(t) => t.pid(),
             None => return -(errno::ESRCH as i64),
-        }
+            }
     } else {
         pid
     };
 
-    // SAFETY: find_task_by_pid returns a valid pointer when non-null; checked below.
-    let task = unsafe { crate::sched::find_task_by_pid(target_pid) };
-    if task.is_null() {
+    let Some(task) = crate::process::task_ref::TaskBorrow::lookup(target_pid) else {
         return -(errno::ESRCH as i64);
-    }
+    };
 
-    // SAFETY: task is validated non-null; param_ptr is access_ok-validated above.
-    unsafe {
-        let task_ref = &*task;
-        let priority = task_ref.rt_priority() as i32;
-        let out = SchedParam { sched_priority: priority };
-        let uncopied = crate::arch::uaccess::copy_to_user(
-            param_ptr as *mut u8,
-            &out as *const SchedParam as *const u8,
-            core::mem::size_of::<SchedParam>(),
-        );
-        if uncopied != 0 {
-            return -(errno::EFAULT as i64);
-        }
+    let priority = task.rt_priority() as i32;
+    let out = SchedParam { sched_priority: priority };
+    let uncopied = crate::arch::uaccess_safe::copy_out_t(param_ptr as usize, &out);
+    if uncopied != 0 {
+        return -(errno::EFAULT as i64);
     }
 
     0
@@ -625,22 +570,18 @@ pub fn sys_sched_getattr(args: SyscallArgs) -> i64 {
 
     let target_pid = if pid == 0 {
         match crate::sched::current() {
-            // SAFETY: sched::current() returns a valid Task pointer when Some.
-            Some(t) => unsafe { (*t).pid() },
+            Some(t) => t.pid(),
             None => return -(errno::ESRCH as i64),
-        }
+            }
     } else {
         pid
     };
 
-    // SAFETY: find_task_by_pid returns a valid pointer when non-null; checked below.
-    let task = unsafe { crate::sched::find_task_by_pid(target_pid) };
-    if task.is_null() {
+    let Some(task) = crate::process::task_ref::TaskBorrow::lookup(target_pid) else {
         return -(errno::ESRCH as i64);
-    }
+    };
 
-    // SAFETY: task is validated non-null; attr_ptr is access_ok-validated above.
-    unsafe {
+    {
         let task_ref = &*task;
         let policy = task_ref.policy();
 
@@ -669,11 +610,17 @@ pub fn sys_sched_getattr(args: SyscallArgs) -> i64 {
             sched_util_min: 0,
             sched_util_max: core::u32::MAX,
         };
-        let uncopied = crate::arch::uaccess::copy_to_user(
-            attr_ptr as *mut u8,
-            &attr as *const SchedAttr as *const u8,
-            copy_len,
-        );
+        // Header-truncated out-copy (copy_len <= size_of::<SchedAttr>()).
+        // SAFETY: `attr` is a live local, aligned, plain data, and
+        // copy_len was clamped to its size above.
+        let src = unsafe {
+            core::slice::from_raw_parts(
+                &attr as *const SchedAttr as *const u8,
+                copy_len,
+            )
+        };
+        let uncopied = crate::arch::uaccess_safe::UserSlice::new(attr_ptr as usize, copy_len)
+            .copy_out(src);
         if uncopied != 0 {
             return -(errno::EFAULT as i64);
         }
@@ -717,9 +664,8 @@ pub fn sys_sched_setattr(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
     let mut size_word = [0u8; 4];
-    // SAFETY: attr_ptr validated with access_ok(8) above (covers these 4).
-    if unsafe { crate::arch::uaccess::copy_from_user(
-        size_word.as_mut_ptr(), attr_ptr as *const u8, 4) } != 0 {
+    // Typed exception-table copy (access_ok(8) above covers these 4).
+    if crate::arch::uaccess_safe::copy_in(&mut size_word, attr_ptr as usize) != 0 {
         return -(errno::EFAULT as i64);
     }
     let user_size = u32::from_le_bytes(size_word) as usize;
@@ -734,15 +680,11 @@ pub fn sys_sched_setattr(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
     let mut attr_storage = [0u8; core::mem::size_of::<SchedAttr>()];
-    // SAFETY: attr_ptr is access_ok-validated for user_size; copying into a
-    // zeroed stack buffer leaves any fields beyond user_size as zero.
-    let uncopied = unsafe {
-        crate::arch::uaccess::copy_from_user(
-            attr_storage.as_mut_ptr(),
-            attr_ptr as *const u8,
-            user_size,
-        )
-    };
+    // Typed exception-table copy: attr_ptr is access_ok-validated for
+    // user_size; copying into a zeroed stack buffer leaves any fields
+    // beyond user_size as zero.
+    let uncopied = crate::arch::uaccess_safe::UserSlice::new(attr_ptr as usize, user_size)
+        .copy_in(&mut attr_storage[..user_size]);
     if uncopied != 0 {
         return -(errno::EFAULT as i64);
     }
@@ -754,19 +696,17 @@ pub fn sys_sched_setattr(args: SyscallArgs) -> i64 {
 
     let target_pid = if pid == 0 {
         match crate::sched::current() {
-            // SAFETY: sched::current() returns a valid Task pointer when Some.
-            Some(t) => unsafe { (*t).pid() },
+            Some(t) => t.pid(),
             None => return -(errno::ESRCH as i64),
         }
     } else {
         pid
     };
 
-    // SAFETY: find_task_by_pid returns a valid pointer when non-null; checked below.
-    let task = unsafe { crate::sched::find_task_by_pid(target_pid) };
-    if task.is_null() {
-        return -(errno::ESRCH as i64);
-    }
+    let task = match crate::process::find_task_by_pid(target_pid) {
+        Some(t) => t,
+        None => return -(errno::ESRCH as i64),
+    };
 
     // R32-F4: this used to write policy/priority/DL fields directly. That
     // bypassed change_task_policy()'s class-queue migration under the GRQ
@@ -835,7 +775,7 @@ pub fn sys_sched_setattr(args: SyscallArgs) -> i64 {
     // (update_deadline + replenish_runtime) already sees them; they are
     // inert while the task is not on the Deadline policy.
     if new_policy == crate::process::task::SchedPolicy::Deadline {
-        let dl = unsafe { (*task).dl_entity_mut() };
+        let dl = task.dl_entity_mut();
         dl.dl_runtime.store(attr.sched_runtime, core::sync::atomic::Ordering::Release);
         dl.dl_period.store(dl_period, core::sync::atomic::Ordering::Release);
         // Keep the user's relative deadline for sched_getattr readback —
@@ -846,16 +786,19 @@ pub fn sys_sched_setattr(args: SyscallArgs) -> i64 {
 
     // Apply the policy switch with run-queue migration under the GRQ lock
     // (review PROC-P07). change_task_policy takes the GRQ lock internally.
-    crate::sched::change_task_policy(task, new_policy, attr.sched_priority);
+    crate::sched::change_task_policy(
+        task as *mut crate::process::task::Task,
+        new_policy,
+        attr.sched_priority,
+    );
 
     // Set nice for normal tasks: route through the locked renice helper
     // (R31-3c: bare set_nice raced the CFS accounting).
     if matches!(new_policy, crate::process::task::SchedPolicy::Normal | crate::process::task::SchedPolicy::Batch) {
-        // SAFETY: task is validated non-null above; sched_renice_locked
-        // takes the GRQ lock internally.
-        unsafe {
-            crate::sched::sched::sched_renice_locked(task, attr.sched_nice.clamp(MIN_NICE, MAX_NICE));
-        }
+        crate::sched::sched::sched_renice_locked(
+            task,
+            attr.sched_nice.clamp(MIN_NICE, MAX_NICE),
+        );
     }
 
     0
@@ -871,7 +814,8 @@ pub fn sys_sched_setattr(args: SyscallArgs) -> i64 {
 /// 0 on success, negative error code on failure
 pub fn sys_sched_rr_get_interval(args: SyscallArgs) -> i64 {
     #[repr(C)]
-    struct TimeSpec {
+    #[derive(Clone, Copy)]
+struct TimeSpec {
         tv_sec: i64,
         tv_nsec: i64,
     }
@@ -893,38 +837,27 @@ pub fn sys_sched_rr_get_interval(args: SyscallArgs) -> i64 {
 
     let target_pid = if pid == 0 {
         match crate::sched::current() {
-            // SAFETY: sched::current() returns a valid Task pointer when Some.
-            Some(t) => unsafe { (*t).pid() },
+            Some(t) => t.pid(),
             None => return -(errno::ESRCH as i64),
-        }
+            }
     } else {
         pid
     };
 
-    // SAFETY: find_task_by_pid returns a valid pointer when non-null.
-    let task = unsafe { crate::sched::find_task_by_pid(target_pid) };
-    if task.is_null() {
+    let Some(task) = crate::process::task_ref::TaskBorrow::lookup(target_pid) else {
         return -(errno::ESRCH as i64);
-    }
+    };
 
     // Linux reports the real RR timeslice only for SCHED_RR tasks; every
     // other policy gets {0, 0} (LTP sched_rr_get_interval02 runs with
     // SCHED_FIFO and requires an all-zero timespec).
-    // SAFETY: task validated non-null; policy() reads the task's field.
-    let policy = unsafe { (*task).policy() };
+    let policy = task.policy();
     let ts = if policy == crate::process::task::SchedPolicy::Rr {
         TimeSpec { tv_sec: 0, tv_nsec: 100_000_000 }
     } else {
         TimeSpec { tv_sec: 0, tv_nsec: 0 }
     };
-    // SAFETY: ts_ptr is access_ok-validated above.
-    let uncopied = unsafe {
-        crate::arch::uaccess::copy_to_user(
-            ts_ptr as *mut u8,
-            &ts as *const TimeSpec as *const u8,
-            core::mem::size_of::<TimeSpec>(),
-        )
-    };
+    let uncopied = crate::arch::uaccess_safe::copy_out_t(ts_ptr as usize, &ts);
     if uncopied != 0 {
         return -(errno::EFAULT as i64);
     }
@@ -962,15 +895,14 @@ pub fn sys_sched_setaffinity(args: SyscallArgs) -> i64 {
         Some(t) => t,
         None => return -(errno::ESRCH as i64),
     };
-    let task = if pid == 0 || pid as u32 == crate::process::current_pid() {
+    let task: &mut crate::process::task::Task = if pid == 0 || pid as u32 == crate::process::current_pid() {
         current
     } else {
-        // SAFETY: find_task_by_pid returns a valid task pointer or null.
-        let target = unsafe { crate::sched::find_task_by_pid(pid) };
-        if target.is_null() {
+        let Some(target) = crate::process::find_task_by_pid(pid) else {
             return -(errno::ESRCH as i64);
-        }
-        if target != current && !crate::security::capable(crate::security::CAP_SYS_NICE) {
+        };
+        let same = core::ptr::eq(target, current as &crate::process::task::Task);
+        if !same && !crate::security::capable(crate::security::CAP_SYS_NICE) {
             return -(errno::EPERM as i64);
         }
         target
@@ -1011,11 +943,13 @@ pub fn sys_sched_setaffinity(args: SyscallArgs) -> i64 {
     let mask_words = core::cmp::min(size / core::mem::size_of::<usize>(), 8);
     let mut stored_mask: u32 = 0;
     for i in 0..mask_words {
-        // SAFETY: mask_ptr is access_ok-validated for size bytes; get_user
-        // is the exception-table copy path (SUM=0 safe).
-        let word = match unsafe {
-            crate::arch::uaccess::get_user(mask_ptr.add(i))
-        } {
+        // Typed exception-table read (SUM=0 safe); an UNREADABLE word is
+        // EFAULT, not a silent zero.
+        let word = match crate::arch::uaccess_safe::UserPtr::<usize>::new(
+            mask_ptr as usize + i * core::mem::size_of::<usize>(),
+        )
+        .read()
+        {
             Some(w) => w,
             None => return -(errno::EFAULT as i64),
         };
@@ -1033,10 +967,7 @@ pub fn sys_sched_setaffinity(args: SyscallArgs) -> i64 {
     if stored_mask == 0 {
         return -(errno::EINVAL as i64);
     }
-    // SAFETY: task validated non-null; set_cpus_allowed is a locked store.
-    unsafe {
-        (*task).set_cpus_allowed(stored_mask);
-    }
+    task.set_cpus_allowed(stored_mask);
     // Linux semantics: when the new mask removes the CPU a task is
     // currently running (or enqueued) on, the task must migrate promptly
     // — not at its next natural preemption. Without this, getcpu()
@@ -1070,8 +1001,7 @@ pub fn sys_sched_setaffinity(args: SyscallArgs) -> i64 {
                 // allowed CPU before or after this point, getcpu() now
                 // reports an allowed CPU.
             } else {
-                // SAFETY: task validated non-null above (find_task_by_pid).
-                let ti_cpu = unsafe { (*task).ti_cpu() } as usize;
+                let ti_cpu = task.ti_cpu() as usize;
                 if ti_cpu < crate::config::MAX_CPUS && ti_cpu != this {
                     crate::sched::resched_cpu(ti_cpu);
                 } else if target < crate::config::MAX_CPUS {
@@ -1121,18 +1051,16 @@ pub fn sys_sched_getaffinity(args: SyscallArgs) -> i64 {
             None => return -(errno::ESRCH as i64),
         }
     } else {
-        // SAFETY: find_task_by_pid returns a valid task pointer or null.
-        let target = unsafe { crate::sched::find_task_by_pid(pid) };
-        if target.is_null() {
+        let Some(target) = crate::process::find_task_by_pid(pid) else {
             return -(errno::ESRCH as i64);
-        }
+        };
         target
     };
 
     // Report the STORED affinity mask (review批次1: previously always
     // all-CPUs regardless of what setaffinity installed).
-    // SAFETY: task validated non-null; cpus_allowed() is an atomic read.
-    let allowed = unsafe { (*task).cpus_allowed() };
+    // The STORED affinity mask (cpus_allowed() is an atomic read).
+    let allowed = task.cpus_allowed();
     let mut kernel_mask = alloc::vec![0u8; bytes_needed];
     for cpu in 0..ncpus {
         if allowed & (1 << cpu) != 0 {
@@ -1140,15 +1068,10 @@ pub fn sys_sched_getaffinity(args: SyscallArgs) -> i64 {
         }
     }
 
-    unsafe {
-        let uncopied = crate::arch::uaccess::copy_to_user(
-            mask_ptr,
-            kernel_mask.as_ptr(),
-            ret_len,
-        );
-        if uncopied != 0 {
-            return -(errno::EFAULT as i64);
-        }
+    let uncopied = crate::arch::uaccess_safe::UserSlice::new(mask_ptr as usize, ret_len)
+        .copy_out(&kernel_mask[..ret_len]);
+    if uncopied != 0 {
+        return -(errno::EFAULT as i64);
     }
 
     ret_len as i64

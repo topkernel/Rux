@@ -696,7 +696,7 @@ fn io_uring_op_read(sqe: &IoUringSqe) -> i32 {
     if len == 0 { return 0; }
     if !access_ok(buf, len) { return -14; } // EFAULT
 
-    let file = match unsafe { crate::fs::file::get_file_fd(fd) } {
+    let file = match crate::fs::file::get_file_fd(fd) {
         Some(f) => f,
         None => return -9, // EBADF
     };
@@ -781,7 +781,7 @@ fn io_uring_op_write(sqe: &IoUringSqe) -> i32 {
     if len == 0 { return 0; }
     if !access_ok(buf, len) { return -14; } // EFAULT
 
-    let file = match unsafe { crate::fs::file::get_file_fd(fd) } {
+    let file = match crate::fs::file::get_file_fd(fd) {
         Some(f) => f,
         None => return -9, // EBADF
     };
@@ -859,7 +859,7 @@ fn io_uring_op_close(sqe: &IoUringSqe) -> i32 {
     // Guard: refuse to close a file whose ops match IO_URING_OPS, as that
     // would be the ring fd itself. Closing it would leave the ring mapped
     // in user memory but with freed kernel structures — a UAF.
-    if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd) } {
+    if let Some(file) = crate::fs::file::get_file_fd(fd) {
         if let Some(ops) = file.get_ops() {
             if core::ptr::eq(ops, &IO_URING_OPS as *const FileOps) {
                 return -22; // EINVAL
@@ -1043,7 +1043,7 @@ pub fn sys_io_uring_enter(args: [u64; 6]) -> u64 {
         return -(22i64) as u64;
     }
 
-    let file = match unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+    let file = match crate::fs::file::get_file_fd(fd as usize) {
         Some(f) => f,
         None => return -(9i64) as u64, // EBADF
     };
@@ -1111,7 +1111,7 @@ pub fn sys_io_uring_register(args: [u64; 6]) -> u64 {
     let arg = args[2] as u64;
     let nr_args = args[3] as u32;
 
-    let file = match unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+    let file = match crate::fs::file::get_file_fd(fd as usize) {
         Some(f) => f,
         None => return -(9i64) as u64, // EBADF
     };
@@ -1150,7 +1150,7 @@ pub fn sys_io_uring_register(args: [u64; 6]) -> u64 {
             // Hold the actual file reference (immune to fd reuse) and verify
             // it really is an eventfd — anything else would make completion
             // notification write garbage into an unrelated file.
-            let efile = match unsafe { crate::fs::file::get_file_fd(eventfd_fd as usize) } {
+            let efile = match crate::fs::file::get_file_fd(eventfd_fd as usize) {
                 Some(f) => f,
                 None => return -(9i64) as u64,
             };

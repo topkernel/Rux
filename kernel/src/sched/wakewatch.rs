@@ -628,8 +628,9 @@ pub fn stallwatch_tick() {
     // skips held buckets — a skipped round just misses tasks for one
     // ~5s scan, harmless for a stall detector that re-scans forever.
     let _skipped = crate::process::pid_hash::pid_hash_for_each_task_try(|t| {
-        // SAFETY: for_each_task pins the task (per-bucket lock); reads
-        // are of stable fields.
+        // for_each_task pins the task (per-bucket lock); reads are of
+        // stable fields. The side-table helpers take raw identity.
+        let t = t as *const crate::process::Task as *mut crate::process::Task;
         let tk = unsafe { &*t };
         let comm = core::str::from_utf8(&tk.comm()[..]).unwrap_or("");
         let comm = comm.trim_end_matches('\0');

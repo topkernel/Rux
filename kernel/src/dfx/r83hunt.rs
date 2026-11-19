@@ -276,10 +276,11 @@ pub fn audit_tick() {
         return;
     }
     crate::process::pid_hash::pid_hash_for_each_task_try(|task| {
-        let pid = unsafe { (*task).pid() };
+        let pid = task.pid();
         if pid == 0 || pid == TASK_POISON {
             return;
         }
+        let task = task as *const crate::process::task::Task as *mut crate::process::task::Task;
         let bad = unsafe { bad_fields(task) };
         if !bad[0].0.is_empty() {
             report(b"audit", task, &bad);
@@ -430,10 +431,11 @@ pub fn sched_tick_audit() {
                 .is_ok()
             {
                 crate::process::pid_hash::pid_hash_for_each_task_try(|task| {
-                    let pid = unsafe { (*task).pid() };
+                    let pid = task.pid();
                     if pid == 0 || pid == TASK_POISON {
                         return;
                     }
+                    let task = task as *const crate::process::task::Task as *mut crate::process::task::Task;
                     let bad = unsafe { bad_fields(task) };
                     if !bad[0].0.is_empty() {
                         report(b"tick-hash", task, &bad);

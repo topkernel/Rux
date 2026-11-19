@@ -186,7 +186,7 @@ impl Ext4FileSystem {
         journal.j_feature_incompat
             .store(j_features, core::sync::atomic::Ordering::SeqCst);
         journal.j_blk_offset = journal_start_block as u64;
-        journal.j_bio_device = self.device;
+        journal.j_bio_device = Some(self.device);
         journal.j_first = j_first as u64;
         journal.j_last = j_last;
 

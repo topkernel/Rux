@@ -961,7 +961,7 @@ fn recv_describe(fd: usize, out: &[AtomicU8; 96]) {
             peer_name,
             if nonblock { " O_NONBLOCK" } else { "" }
         );
-    } else if let Some(file) = unsafe { crate::fs::get_file_fd(fd) } {
+    } else if let Some(file) = crate::fs::get_file_fd(fd) {
         let ops = unsafe { (*file.ops.get()).map(|p| p as *const _ as u64).unwrap_or(0) };
         let path = unsafe {
             match &*file.dentry.get() {
@@ -1025,7 +1025,7 @@ pub fn recv_census(nr: usize, fd: usize, flags: i32, ret: i64) {
     // Retarget on fd change (follow the current description, RD_DATA
     // pattern; the shape counters restart so the dump shows ONE fd's
     // loop shape at a time).
-    let cur_file = unsafe { crate::fs::get_file_fd(fd) };
+    let cur_file = crate::fs::get_file_fd(fd);
     let fid = cur_file.as_ref().map(|f| f.file_id).unwrap_or(0);
     if s.file_id.load(Relaxed) != fid || s.fd.load(Relaxed) != fd as u64 {
         s.file_id.store(fid, Relaxed);
@@ -1110,7 +1110,7 @@ pub fn note_read_fail(fd: usize, ret: i64) {
         RD_FAIL[i].ret.store(ret, Relaxed);
         RD_FAIL[i].fd.store(fd as u64, Relaxed);
         RD_FAIL[i].n.store(1, Relaxed);
-        match unsafe { crate::fs::get_file_fd(fd) } {
+        match crate::fs::get_file_fd(fd) {
             Some(file) => {
                 let mode = file.flags.load(Relaxed) & crate::fs::file::FileFlags::O_ACCMODE;
                 RD_FAIL[i].fd_state.store(

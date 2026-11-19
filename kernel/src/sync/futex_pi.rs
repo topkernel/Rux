@@ -461,7 +461,7 @@ unsafe fn pi_restore_saved(task: *mut Task, sv: &SavedSched) {
         // change_task_policy does not restore the nice (it only moves
         // class/priority) — a boosted-then-converted owner returns to
         // its CFS weight here.
-        crate::sched::sched::sched_renice_locked(task, sv.nice);
+        crate::sched::sched::sched_renice_locked(&mut *task, sv.nice);
         return;
     }
     if matches!(sv.policy, SchedPolicy::Fifo | SchedPolicy::Rr) {
@@ -471,7 +471,7 @@ unsafe fn pi_restore_saved(task: *mut Task, sv: &SavedSched) {
         return;
     }
     if (*task).nice() != sv.nice {
-        crate::sched::sched::sched_renice_locked(task, sv.nice);
+        crate::sched::sched::sched_renice_locked(&mut *task, sv.nice);
     }
 }
 
@@ -592,7 +592,7 @@ unsafe fn pi_adjust_owner_boost(si: usize) {
             if !matches!((*task).policy(), SchedPolicy::Fifo | SchedPolicy::Rr)
                 && (*task).nice() > nice
             {
-                crate::sched::sched::sched_renice_locked(task, nice);
+                crate::sched::sched::sched_renice_locked(&mut *task, nice);
             }
         }
     }

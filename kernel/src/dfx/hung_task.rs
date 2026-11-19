@@ -179,7 +179,7 @@ fn check_tasks() {
                 let elapsed = now.saturating_sub(last_time);
                 if elapsed > timeout_ns {
                     // Hung task detected!
-                    report_hung_task(task, elapsed / 1_000_000_000);
+                    report_hung_task(task as *const crate::process::task::Task as *mut crate::process::task::Task, elapsed / 1_000_000_000);
 
                     // Reset to avoid repeated reports
                     task_ref.hung_task_since.store(now, Ordering::Release);

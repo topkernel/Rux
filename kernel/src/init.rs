@@ -147,14 +147,16 @@ fn load_init_program(path: &str, rootfs_first: bool) -> Option<Vec<u8>> {
     let read_ext4 = |path: &str| -> Option<Vec<u8>> {
         // 1. PCI VirtIO block device's ext4 filesystem
         if let Some(disk) = crate::drivers::virtio::get_pci_gen_disk() {
-            if let Some(data) = crate::fs::ext4::read_file(disk as *const _, path) {
+            if let Some(data) = crate::fs::ext4::read_file(disk, path) {
                 return Some(data);
             }
         }
         // 2. MMIO VirtIO block device's ext4 filesystem
         if let Some(virtio_dev) = crate::drivers::virtio::get_device() {
-            let disk_ptr = &virtio_dev.disk as *const crate::drivers::blkdev::GenDisk;
-            if let Some(data) = crate::fs::ext4::read_file(disk_ptr, path) {
+            // get_device() returns &'static VirtIOBlkDevice, so the disk
+            // field borrow is machine-long.
+            let disk: &'static crate::drivers::blkdev::GenDisk = &virtio_dev.disk;
+            if let Some(data) = crate::fs::ext4::read_file(disk, path) {
                 return Some(data);
             }
         }

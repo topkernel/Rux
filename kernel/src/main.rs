@@ -1837,7 +1837,7 @@ fn mount_root_filesystem() {
             &format!("root {} -> {}", root, dev_name),
             None,
         );
-        mount_ext4_root_from(disk as *const drivers::blkdev::GenDisk);
+        mount_ext4_root_from(disk);
         return;
     }
 
@@ -1854,13 +1854,12 @@ fn mount_root_filesystem() {
 /// first, MMIO fallback), then rebuild the /proc and cgroup2 mounts the
 /// ext4 root overlay shadowed (same sequence the pre-OH boot used).
 fn mount_boot_disk_ext4() {
-    let disk: Option<*const drivers::blkdev::GenDisk> =
-        drivers::virtio::get_pci_gen_disk()
-            .map(|d| d as *const drivers::blkdev::GenDisk)
-            .or_else(|| {
-                drivers::virtio::get_device()
-                    .map(|v| &v.disk as *const drivers::blkdev::GenDisk)
-            });
+    let disk: Option<&'static drivers::blkdev::GenDisk> =
+        drivers::virtio::get_pci_gen_disk().or_else(|| {
+            // get_device() returns &'static VirtIOBlkDevice; the field
+            // borrow is machine-long.
+            drivers::virtio::get_device().map(|v| &v.disk)
+        });
     let Some(disk) = disk else {
         // No block device at all (initrd-only run) — nothing to mount.
         return;
@@ -1870,7 +1869,7 @@ fn mount_boot_disk_ext4() {
 
 /// Mount `disk`'s ext4 as THE root (full mount path with journal replay),
 /// then rebuild the /proc and cgroup2 mounts the ext4 overlay shadowed.
-fn mount_ext4_root_from(disk: *const drivers::blkdev::GenDisk) {
+fn mount_ext4_root_from(disk: &'static drivers::blkdev::GenDisk) {
     let mount_result = fs::ext4::mount_ext4(disk);
     let mount_point = crate::config::EXT4_MOUNT_POINT;
     print_status("fs", &format!("ext4 mounted {}", mount_point), mount_result.is_ok());

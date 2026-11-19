@@ -7759,23 +7759,23 @@ pub fn runq_strand_census(now_j: u64) {
         if nc >= SLOTS {
             return;
         }
-        // SAFETY: diagnostic reads under the for_each_task contract.
-        let tk = unsafe { &*task };
-        if !tk.sched_entity().is_on_rq() {
+        // Diagnostic reads under the for_each_task contract (typed).
+        if !task.sched_entity().is_on_rq() {
             return;
         }
-        if tk.state().bits() != crate::process::task::TaskState::RUNNING {
+        if task.state().bits() != crate::process::task::TaskState::RUNNING {
             return;
         }
-        if tk.on_cpu() {
+        if task.on_cpu() {
             return;
         }
-        if tk.running_on_cpu.load(Acquire) != -1 {
+        if task.running_on_cpu.load(Acquire) != -1 {
             return;
         }
         let mut is_current = false;
+        let task_id = task as *const Task as usize;
         for c in 0..MAX_CPUS {
-            if cpu_state(c).current == task {
+            if cpu_state(c).current as usize == task_id {
                 is_current = true;
                 break;
             }
@@ -7783,11 +7783,11 @@ pub fn runq_strand_census(now_j: u64) {
         if is_current {
             return;
         }
-        let exec = tk
+        let exec = task
             .sched_entity()
             .sum_exec_runtime
             .load(core::sync::atomic::Ordering::Relaxed);
-        cands[nc] = (task as usize, exec);
+        cands[nc] = (task_id, exec);
         nc += 1;
     });
     // Mark slots not seen this burst dead so a recycled pointer cannot
@@ -9587,25 +9587,29 @@ pub fn scheduler_tick() {
             let mut visited: [Option<Visit>; 128] = [const { None }; 128];
             let mut nvisited = 0usize;
             crate::process::pid_hash::pid_hash_for_each_task_try(|task| {
-                unsafe {
-                    let pid = (*task).pid();
+                {
+                    let pid = task.pid();
                     if pid == 0 || pid == TASK_POISON {
                         return;
                     }
                     // Skip the do_exit R9-3 windows: DEAD/ZOMBIE (and
                     // anything PF_EXITING) may park with a transient
                     // count while the exit path unwinds.
-                    if (*task).state().is_dead()
-                        || ((*task).ti_flags()
+                    if task.state().is_dead()
+                        || (task.ti_flags()
                             & crate::process::task::task_flags::TaskFlags::PF_EXITING
                                 .bits()
                             != 0)
                     {
                         return;
                     }
-                    let pc = (*task).preempt_count();
+                    let pc = task.preempt_count();
                     let mut running = false;
                     let mut tp_named = false;
+                    // The side-table stores raw identity — recover the
+                    // pointer from the walk reference (same value).
+                    let task = task as *const crate::process::Task
+                        as *mut crate::process::Task;
                     for c in 0..crate::config::MAX_CPUS {
                         if cpu_state(c).current == task {
                             running = true;
@@ -10516,16 +10520,20 @@ pub extern "C" fn schedule_tail(_prev: *mut Task) {
 /// R25-6: renice a possibly-queued task under the GRQ lock with
 /// load_weight rebalance (bare set_nice made enqueue/dequeue weights
 /// mismatch and wrap the counter).
-pub unsafe fn sched_renice_locked(task: *mut Task, niceval: i32) {
+///
+/// Safe since 2026-11-19 (unsafe-slim): the body takes the GRQ lock
+/// itself; the caller's obligation is purely liveness of `task` (hold a
+/// pin or be the task's own CPU), expressed by the `&mut Task` type.
+pub fn sched_renice_locked(task: &mut Task, niceval: i32) {
     // R31-3: actually take the GRQ lock, and gate the load_weight
     // rebalance on the task being IN THE TREE (picked tasks are off it —
     // the unconditional adjust permanently shifted the counter for the
     // common running/sleeping renice target).
     let _g = grq().lock_irqsave();
-    let old_weight = (*task).sched_entity().load.weight;
-    let was_on_rq = (*task).sched_entity().is_on_rq();
-    (*task).set_nice(niceval);
-    let new_weight = (*task).sched_entity().load.weight;
+    let old_weight = task.sched_entity().load.weight;
+    let was_on_rq = task.sched_entity().is_on_rq();
+    task.set_nice(niceval);
+    let new_weight = task.sched_entity().load.weight;
     if was_on_rq && old_weight != new_weight {
         let g = grq();
         g.cfs_rq.load_weight.fetch_add(new_weight, core::sync::atomic::Ordering::AcqRel);
@@ -10590,7 +10598,7 @@ pub fn yield_cpu() {
 /// while `f` runs. `f` must not sleep or take a PID-hash bucket lock.
 pub fn for_each_task<F>(mut f: F)
 where
-    F: FnMut(*mut Task),
+    F: FnMut(&Task),
 {
     crate::process::pid_hash::pid_hash_for_each_task(|t| f(t));
 }
@@ -10620,7 +10628,7 @@ where
 /// converge: a bucket skipped one round is usually free the next.
 pub fn for_each_task_try<F>(mut f: F) -> usize
 where
-    F: FnMut(*mut Task),
+    F: FnMut(&Task),
 {
     crate::process::pid_hash::pid_hash_for_each_task_try(|t| f(t))
 }
@@ -10656,7 +10664,7 @@ pub fn get_current_ppid() -> u32 {
     }
 }
 
-pub unsafe fn find_task_by_pid(pid: Pid) -> *mut Task {
+pub fn find_task_by_pid(pid: Pid) -> *mut Task {
     crate::process::pid_hash::pid_hash_lookup(pid)
 }
 
@@ -11726,7 +11734,9 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
     }
     let now = crate::drivers::timer::get_jiffies();
     crate::process::pid_hash::pid_hash_for_each_task_try(|t| {
-        let pid = (*t).pid();
+        // Helper APIs (heals, watch, relink) still take *mut Task.
+        let t = t as *const Task as *mut Task;
+        let pid = unsafe { (*t).pid() };
         // Idle tasks are RUNNING ∧ unlinked by design; freed pages must
         // not be touched further.
         if pid == 0 || pid == TASK_POISON {
@@ -11746,12 +11756,12 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
             return;
         }
         let heal_body = || {
-        if !(*t).state().is_running() {
+        if !unsafe { (*t).state() }.is_running() {
             return;
         }
         let onrq = task_onrq_flag(t);
-        let oncpu = (*t).on_cpu();
-        let slot = (0..MAX_CPUS).find(|&c| cpu_state(c).current == t);
+        let oncpu = unsafe { (*t).on_cpu() };
+        let slot = (0..MAX_CPUS).find(|&c| cpu_state(c).current == t as *const Task as *mut Task);
         if !onrq {
             match slot {
                 None => {
@@ -11799,7 +11809,7 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
                                 crate::trace::trace_schedtrace(2, pid as u32, c as u64, 0);
                             }
                         }
-                    } else if (*t).preempt_count() == 0
+                    } else if unsafe { (*t).preempt_count() } == 0
                         && orphan_watch_confirm(t, pid, now, 3)
                         && cpu_tick_stale_ms(c) >= 5000
                         // R57 (n1-organic postmortem): tick-staleness alone
@@ -12108,22 +12118,21 @@ pub fn relink_unlinked_running_phantoms() -> u32 {
         if n >= MAXCAND {
             return;
         }
-        // SAFETY: the pid-hash walk yields live task pointers (the bucket
-        // lock is held for the duration of this callback).
-        unsafe {
-            let tk = &*t;
-            if tk.pid() == 0 || tk.pid() == u32::MAX {
+        {
+            if t.pid() == 0 || t.pid() == u32::MAX {
                 return;
             }
-            if tk.state() != TaskState::new(TaskState::RUNNING) {
+            if t.state() != TaskState::new(TaskState::RUNNING) {
                 return;
             }
-            if tk.ti_flags() & TaskFlags::PF_EXITING.bits() != 0 {
+            if t.ti_flags() & TaskFlags::PF_EXITING.bits() != 0 {
                 return;
             }
             // Pin against a concurrent exit freeing the page between this
             // walk and the GRQ re-verify below (same discipline as
-            // idle_heal_own_slot).
+            // idle_heal_own_slot). The candidate table stores raw
+            // identity — recover the pointer from the walk reference.
+            let t = t as *const Task as *mut Task;
             if !crate::process::task::Task::try_pin(t) {
                 return;
             }

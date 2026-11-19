@@ -706,8 +706,10 @@ pub struct Journal {
     pub j_blocksize: u32,
     /// Starting block offset into the device where we store the journal
     pub j_blk_offset: u64,
-    /// Filesystem block device pointer (for bio I/O during commit)
-    pub j_bio_device: *const crate::drivers::blkdev::GenDisk,
+    /// Filesystem block device handle (for bio I/O during commit).
+    /// None until ext4 installs it at journal load (mount order: load
+    /// precedes any commit/recovery I/O).
+    pub j_bio_device: Option<&'static crate::drivers::blkdev::GenDisk>,
     /// Journal device name
     pub j_devname: [u8; 64],
     /// Device which holds the client fs
@@ -827,7 +829,7 @@ impl Journal {
             j_dev: core::ptr::null_mut(),
             j_blocksize: block_size,
             j_blk_offset: 0,
-            j_bio_device: core::ptr::null(),
+            j_bio_device: None,
             j_devname: [0; 64],
             j_fs_dev: core::ptr::null_mut(),
             j_total_len: total_len,

@@ -509,7 +509,7 @@ impl FutexKey {
             let n = FXK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if n < 400 {
                 let pid = crate::sched::current()
-                    .map(|t| unsafe { (*t).pid() })
+                    .map(|t| t.pid())
                     .unwrap_or(0);
                 let comm = crate::sched::current()
                     .map(|t| unsafe {
@@ -8540,7 +8540,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                             "FXDV #{} tid={} op={} uaddr={:#x} val={:#x} jif={}",
                             n,
                             crate::sched::current()
-                                .map(|t| unsafe { (*t).pid() })
+                                .map(|t| t.pid())
                                 .unwrap_or(0),
                             match cmd {
                                 FUTEX_WAIT => "WAIT",
@@ -8588,8 +8588,8 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                 crate::pr_warn!(
                     "FXDV2 #{} tgid={} tid={} op={} uaddr={:#x} val={:#x} jif={}",
                     n,
-                    crate::sched::current().map(|t| unsafe { (*t).tgid() }).unwrap_or(0),
-                    crate::sched::current().map(|t| unsafe { (*t).pid() }).unwrap_or(0),
+                    crate::sched::current().map(|t| t.tgid()).unwrap_or(0),
+                    crate::sched::current().map(|t| t.pid()).unwrap_or(0),
                     match cmd {
                         FUTEX_WAIT => "WAIT",
                         FUTEX_WAIT_BITSET => "WAITB",
@@ -8796,10 +8796,10 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                     core::sync::atomic::AtomicUsize::new(0);
                 if SMW_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 3000 {
                     let tid = crate::sched::current()
-                        .map(|t| unsafe { (*t).pid() })
+                        .map(|t| t.pid())
                         .unwrap_or(0);
                     let comm = crate::sched::current()
-                        .map(|t| unsafe { (*t).comm() })
+                        .map(|t| t.comm())
                         .map(|c| core::str::from_utf8(c).unwrap_or(""))
                         .unwrap_or("")
                         .trim_end_matches('\0');
@@ -9424,12 +9424,12 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
             if NS.load(core::sync::atomic::Ordering::Relaxed) < 400 {
                 NS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 let comm = crate::sched::current()
-                    .map(|t| unsafe { (*t).comm() })
+                    .map(|t| t.comm())
                     .map(|c| core::str::from_utf8(c).unwrap_or(""))
                     .unwrap_or("")
                     .trim_end_matches('\0');
                 let tid = crate::sched::current()
-                    .map(|t| unsafe { (*t).pid() })
+                    .map(|t| t.pid())
                     .unwrap_or(0);
                 crate::pr_warn!(
                     "stkfutex: tid {} op={:#x} uaddr={:#x} val={:#x} comm='{}'",
@@ -9472,13 +9472,13 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                 let n = FXRS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 if n < FXRS_BUDGET {
                     let tid = crate::sched::current()
-                        .map(|t| unsafe { (*t).pid() })
+                        .map(|t| t.pid())
                         .unwrap_or(0);
                     let tgid = crate::sched::current()
-                        .map(|t| unsafe { (*t).tgid() })
+                        .map(|t| t.tgid())
                         .unwrap_or(0);
                     let comm = crate::sched::current()
-                        .map(|t| unsafe { (*t).comm() })
+                        .map(|t| t.comm())
                         .map(|c| core::str::from_utf8(c).unwrap_or(""))
                         .unwrap_or("")
                         .trim_end_matches('\0');
@@ -9789,7 +9789,8 @@ pub fn kill_dump_tgid(tgid: u32) {
     // the documented pin discipline; task_put at the end.
     let threads_cell = core::cell::RefCell::new(alloc::vec::Vec::<*mut Task>::new());
     crate::sched::for_each_task(|t| {
-        if unsafe { (*t).tgid() as u32 } == tgid {
+        if t.tgid() as u32 == tgid {
+            let t = t as *const Task as *mut Task;
             if crate::process::task::Task::try_pin(t) {
                 threads_cell.borrow_mut().push(t);
             }

@@ -720,11 +720,10 @@ pub fn timer_softirq_handler(_nr: usize) {
                     None, None, None, None, None, None, None, None, None];
                 let mut ghost_rows = 0usize;
                 let nfound = crate::sched::for_each_task_try(|t| {
-                    if t.is_null() {
-                        return;
-                    }
-                    // SAFETY: diagnostic reads of a live task pinned by
-                    // the pid-hash walk.
+                    // Diagnostic reads of a live task pinned by the
+                    // pid-hash walk; helper entry_sys takes raw identity.
+                    let t = t as *const crate::process::task::Task
+                        as *mut crate::process::task::Task;
                     let (kind, sleeping) = unsafe {
                         (
                             (*t).timed_sleep_kind.load(Ordering::Acquire),
@@ -1776,7 +1775,12 @@ fn ww_heartbeat(now_time: u64) {
         if crate::arch::cpu_id() as usize == 0
             && PTBUDGET.fetch_add(1, Ordering::Relaxed) < 60 {
             putchar(b'\n');
-            crate::process::pid_hash::pid_hash_for_each_task_try(|task| unsafe {
+            crate::process::pid_hash::pid_hash_for_each_task_try(|task| {
+                // Helper APIs (pick_trace_peek / nsleep_iter_of) take raw
+                // identity; recover it once.
+                let task = task as *const crate::process::task::Task
+                    as *mut crate::process::task::Task;
+                unsafe {
                 let pid = (*task).pid();
                 if pid == 0 || pid == crate::sched::sched::TASK_POISON { return; }
                 let q = core::ptr::read_volatile(
@@ -1842,6 +1846,7 @@ fn ww_heartbeat(now_time: u64) {
                     }
                 }
                 putchar(b'\n');
+                }
             });
         }
     }

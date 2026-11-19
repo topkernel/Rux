@@ -618,10 +618,10 @@ pub fn dump_all_tasks(reason: &str) {
     // pid_hash_remove, which the iterator's bucket locks serialize against.
     let skipped = unsafe {
         crate::process::pid_hash::pid_hash_for_each_task_try(|task_ptr| {
-            let t = &*task_ptr;
+            let t: &crate::process::task::Task = task_ptr;
             count += 1;
             puts("task @0x");
-            put_hex(task_ptr as u64);
+            put_hex(task_ptr as *const _ as u64);
             puts(" pid=");
             put_dec(t.pid() as u64);
             // Thread-group attribution: comm alone cannot say which
@@ -678,7 +678,8 @@ pub fn dump_all_tasks(reason: &str) {
             // runs under the GRQ try-lock; a busy lock reports '?' (counted
             // below) — never a lockless tree walk, which races structural
             // mutation on other CPUs and corrupts the iterator.
-            let linked = crate::sched::sched::grq_diag_cfs_linked(task_ptr);
+            let linked = crate::sched::sched::grq_diag_cfs_linked(
+                task_ptr as *const crate::process::task::Task as *mut crate::process::task::Task);
             match linked {
                 Some(b) => {
                     puts(" linked=");

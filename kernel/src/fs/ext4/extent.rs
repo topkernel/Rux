@@ -91,13 +91,27 @@ impl Ext4ExtentIdx {
     }
 }
 
+/// Byte view of the root node's i_block array (INV-EXT-VIEW: same
+/// 60-byte allocation, transmuted view in one place).
+#[inline]
+pub fn i_block_bytes(i_block: &[u32; 15]) -> &[u8] {
+    // SAFETY: [u32; 15] and [u8; 60] are the same size and alignment
+    // (4-byte aligned >= u8); the slice covers exactly the array.
+    unsafe { core::slice::from_raw_parts(i_block.as_ptr() as *const u8, 60) }
+}
+
+/// Mutable twin of [`i_block_bytes`].
+#[inline]
+pub fn i_block_bytes_mut(i_block: &mut [u32; 15]) -> &mut [u8] {
+    // SAFETY: as above; exclusive borrow.
+    unsafe { core::slice::from_raw_parts_mut(i_block.as_mut_ptr() as *mut u8, 60) }
+}
+
 /// Parse extent header from i_block array
 pub fn get_extent_header(i_block: &[u32; 15]) -> &Ext4ExtentHeader {
-    // SAFETY: i_block is a &[u32; 15] (60 bytes), which is larger than
-    // Ext4ExtentHeader (12 bytes), so the cast is within bounds of the allocation.
-    unsafe {
-        &*(i_block.as_ptr() as *const Ext4ExtentHeader)
-    }
+    // i_block is 60 bytes; the header is 12 — node_header's size guard
+    // is structurally satisfied (INV-EXT-VIEW).
+    node_header(i_block_bytes(i_block))
 }
 
 /// Unwritten-extent flag (bit 15 of ee_len): the blocks are allocated in
@@ -210,27 +224,23 @@ fn ext4_ext_get_run_impl(
 
     // Root-node leaves only for depth 0; deep trees walk down.
     if header.eh_depth != 0 {
-        // SAFETY: i_block is 60 bytes; index entries stay in-bounds
-        // (same slice construction as ext4_ext_get_block_ex_inner).
-        unsafe {
-            let idxs = core::slice::from_raw_parts(
-                (i_block.as_ptr() as *const u8).add(core::mem::size_of::<Ext4ExtentHeader>())
-                    as *const Ext4ExtentIdx,
-                core::cmp::min(header.eh_entries as usize, ROOT_NODE_CAP),
-            );
-            let mut child = 0u64;
-            for idx in idxs {
-                if logical_block >= idx.ei_block as u64 {
-                    child = idx.leaf_block();
-                } else {
-                    break;
-                }
+        // INV-EXT-VIEW: idx slice bounded by ROOT_NODE_CAP.
+        let idxs = node_indices(
+            i_block_bytes(i_block),
+            core::cmp::min(header.eh_entries as usize, ROOT_NODE_CAP),
+        );
+        let mut child = 0u64;
+        for idx in idxs {
+            if logical_block >= idx.ei_block as u64 {
+                child = idx.leaf_block();
+            } else {
+                break;
             }
-            if child == 0 {
-                return Ok((0, 0, false));
-            }
-            return find_run_in_external_extent(fs, child, logical_block, 0, for_write);
         }
+        if child == 0 {
+            return Ok((0, 0, false));
+        }
+        return find_run_in_external_extent(fs, child, logical_block, 0, for_write);
     }
 
     let max_entries = (60 - core::mem::size_of::<Ext4ExtentHeader>())
@@ -238,15 +248,8 @@ fn ext4_ext_get_run_impl(
     if header.eh_entries as usize > max_entries {
         return Err(errno::Errno::IOError.as_neg_i32());
     }
-    // SAFETY: entries follow the 12-byte header inside the 60-byte
-    // i_block; eh_entries validated against max_entries above.
-    let entries = unsafe {
-        core::slice::from_raw_parts(
-            (i_block.as_ptr() as *const u8).add(core::mem::size_of::<Ext4ExtentHeader>())
-                as *const Ext4Extent,
-            header.eh_entries as usize,
-        )
-    };
+    // INV-EXT-VIEW: eh_entries validated against max_entries above.
+    let entries = node_extents(i_block_bytes(i_block), header.eh_entries as usize);
     Ok(run_from_entries(entries, logical_block, for_write))
 }
 
@@ -315,10 +318,9 @@ fn run_from_entries(entries: &[Ext4Extent], logical_block: u64, for_write: bool)
 }
 
 /// Deep-tree run resolver: one walk per level, whole-extent verdict.
-///
-/// # Safety
-/// `block_num` must be a valid extent-tree block of this fs.
-unsafe fn find_run_in_external_extent(
+/// `block_num` must be a valid extent-tree block of this fs (walker
+/// discipline); the on-disk views go through the INV-EXT-VIEW accessors.
+fn find_run_in_external_extent(
     fs: &crate::fs::ext4::Ext4FileSystem,
     block_num: u64,
     logical_block: u64,
@@ -328,14 +330,13 @@ unsafe fn find_run_in_external_extent(
     if depth > 5 {
         return Err(errno::Errno::IOError.as_neg_i32());
     }
-    // SAFETY: bio::bread returns a pinned BufferHead whose b_data is a
-    // block-sized slice; casts below stay within it, with eh_entries
-    // validated the same way as find_block_in_external_extent_ex.
-    unsafe {
-        let bh = bio::bread(fs.device, block_num)
-            .ok_or(errno::Errno::IOError.as_neg_i32())?;
-        let data = &(*bh).b_data;
-        let header = &*(data.as_ptr() as *const Ext4ExtentHeader);
+    // SAFETY: bh is pinned by bread; b_data is a block-sized slice.
+    let bh = unsafe {
+        bio::bread(fs.device, block_num).ok_or(errno::Errno::IOError.as_neg_i32())?
+    };
+    let data = unsafe { &(*bh).b_data };
+    {
+        let header = node_header(data);
         if header.eh_magic != EXT4_EXT_MAGIC || header.eh_entries > header.eh_max {
             bio::brelse(bh);
             return Err(errno::Errno::IOError.as_neg_i32());
@@ -347,16 +348,10 @@ unsafe fn find_run_in_external_extent(
             return Err(errno::Errno::IOError.as_neg_i32());
         }
         let result = if header.eh_depth == 0 {
-            let entries = core::slice::from_raw_parts(
-                data.as_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4Extent,
-                header.eh_entries as usize,
-            );
+            let entries = node_extents(data, header.eh_entries as usize);
             Ok(run_from_entries(entries, logical_block, for_write))
         } else {
-            let indices = core::slice::from_raw_parts(
-                data.as_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4ExtentIdx,
-                header.eh_entries as usize,
-            );
+            let indices = node_indices(data, header.eh_entries as usize);
             let mut child_block = 0u64;
             for idx in indices {
                 if logical_block >= idx.ei_block as u64 {
@@ -395,26 +390,24 @@ fn ext4_ext_get_block_ex_inner(
     if header.eh_depth != 0 {
         // Deep trees: resolve through the external walker, preserving the
         // unwritten flag (deep trees hold fallocate preallocations now).
-        // SAFETY: i_block is 60 bytes; the index entries stay in-bounds.
-        unsafe {
-            let idxs = core::slice::from_raw_parts(
-                (i_block.as_ptr() as *const u8).add(core::mem::size_of::<Ext4ExtentHeader>())
-                    as *const Ext4ExtentIdx,
-                core::cmp::min(header.eh_entries as usize, ROOT_NODE_CAP),
-            );
-            let mut child = 0u64;
-            for idx in idxs {
-                if logical_block >= idx.ei_block as u64 {
-                    child = idx.leaf_block();
-                } else {
-                    break;
-                }
+        // INV-EXT-VIEW: idx slice bounded by ROOT_NODE_CAP.
+        let idxs = node_indices(
+            i_block_bytes(i_block),
+            core::cmp::min(header.eh_entries as usize, ROOT_NODE_CAP),
+        );
+        let mut child = 0u64;
+        for idx in idxs {
+            if logical_block >= idx.ei_block as u64 {
+                child = idx.leaf_block();
+            } else {
+                break;
             }
-            if child == 0 {
-                return Ok((0, false));
-            }
-            return find_block_in_external_extent_ex(fs, child, logical_block, 0);
         }
+        if child == 0 {
+            return Ok((0, false));
+        }
+        // SAFETY: child is a valid extent-tree block (walker discipline).
+        return unsafe { find_block_in_external_extent_ex(fs, child, logical_block, 0) };
     }
 
     let max_entries = (60 - core::mem::size_of::<Ext4ExtentHeader>())
@@ -422,15 +415,8 @@ fn ext4_ext_get_block_ex_inner(
     if header.eh_entries as usize > max_entries {
         return Err(errno::Errno::IOError.as_neg_i32());
     }
-    // SAFETY: entries follow the 12-byte header inside the 60-byte i_block;
-    // eh_entries is validated against max_entries above.
-    let entries = unsafe {
-        core::slice::from_raw_parts(
-            (i_block.as_ptr() as *const u8).add(core::mem::size_of::<Ext4ExtentHeader>())
-                as *const Ext4Extent,
-            header.eh_entries as usize
-        )
-    };
+    // INV-EXT-VIEW: eh_entries validated against max_entries above.
+    let entries = node_extents(i_block_bytes(i_block), header.eh_entries as usize);
 
     for ext in entries {
         let start = ext.ee_block as u64;
@@ -475,15 +461,8 @@ fn materialize_block_inline(
     // Find the covering entry index.
     let mut hit: Option<usize> = None;
     {
-        // SAFETY: entries live inside the 60-byte i_block after the
-        // 12-byte header; count validated above.
-        let entries = unsafe {
-            core::slice::from_raw_parts(
-                (i_block.as_ptr() as *const u8).add(core::mem::size_of::<Ext4ExtentHeader>())
-                    as *const Ext4Extent,
-                n_entries as usize
-            )
-        };
+        // INV-EXT-VIEW: count validated above.
+        let entries = node_extents(i_block_bytes(i_block), n_entries as usize);
         for (i, ext) in entries.iter().enumerate() {
             let start = ext.ee_block as u64;
             let end = start + ext.length() as u64;
@@ -501,14 +480,12 @@ fn materialize_block_inline(
         return Ok(None); // hole
     };
 
-    // Work on a byte view of the entry array for the split.
-    // SAFETY: i_block is 60 bytes; header 12 bytes; entry idx*12 within
-    // the remaining 48 bytes (validated via eh_entries above).
-    let (ee_block, ee_len, phys) = unsafe {
-        let e = ((i_block.as_mut_ptr() as *mut u8)
-            .add(core::mem::size_of::<Ext4ExtentHeader>() + idx * core::mem::size_of::<Ext4Extent>())
-            ) as *mut Ext4Extent;
-        ((*e).ee_block, (*e).length(), (*e).start_block())
+    // Work on a mutable entry view for the split (INV-EXT-VIEW: idx was
+    // found within the validated entry count).
+    let (ee_block, ee_len, phys) = {
+        let entries = node_extents_mut(i_block_bytes_mut(i_block), n_entries as usize);
+        let e = &entries[idx];
+        (e.ee_block, e.length(), e.start_block())
     };
 
     let prefix = (logical_block - ee_block as u64) as u16; // blocks before
@@ -519,12 +496,9 @@ fn materialize_block_inline(
     }
 
     // Rebuild the entry list with the split pieces (single memmove-sized
-    // shift; root arrays are at most 4 entries).
-    // SAFETY: building on the in-place array; total entries <= 4*12+12=60.
-    unsafe {
-        let base = (i_block.as_mut_ptr() as *mut u8)
-            .add(core::mem::size_of::<Ext4ExtentHeader>());
-        let entries = core::slice::from_raw_parts_mut(base as *mut Ext4Extent, max_entries);
+    // shift; root arrays are at most 4 entries; INV-EXT-VIEW).
+    {
+        let entries = node_extents_mut(i_block_bytes_mut(i_block), max_entries);
         // Shift the tail right by needed_extra slots.
         let tail_len = n_entries as usize - idx - 1;
         for i in (idx + 1..idx + 1 + tail_len).rev() {
@@ -555,10 +529,12 @@ fn materialize_block_inline(
                 ee_start_lo: (phys + prefix as u64 + 1) as u32,
             };
         }
-        // Update the entry count.
-        let hdr = (i_block.as_mut_ptr() as *mut u8) as *mut Ext4ExtentHeader;
-        (*hdr).eh_entries = n_entries + needed_extra;
-        n_entries = (*hdr).eh_entries;
+        // Update the entry count (INV-EXT-VIEW).
+        {
+            let hdr = node_header_mut(i_block_bytes_mut(i_block));
+            hdr.eh_entries = n_entries + needed_extra;
+            n_entries = hdr.eh_entries;
+        }
     }
 
     Ok(Some(phys + prefix as u64))
@@ -590,12 +566,10 @@ fn insert_written_inline(
         return Err(errno::Errno::IOError.as_neg_i32());
     }
 
-    // SAFETY: entry array sits after the 12-byte header in the 60-byte
-    // i_block; the count was validated above.
-    unsafe {
-        let base = (i_block.as_mut_ptr() as *mut u8)
-            .add(core::mem::size_of::<Ext4ExtentHeader>());
-        let entries = core::slice::from_raw_parts_mut(base as *mut Ext4Extent, max_entries as usize);
+    // Entry array after the 12-byte header in the 60-byte i_block;
+    // count validated above (INV-EXT-VIEW).
+    {
+        let entries = node_extents_mut(i_block_bytes_mut(i_block), max_entries as usize);
 
         // Try merging with an adjacent entry first.
         for i in 0..n_entries as usize {
@@ -646,9 +620,9 @@ fn insert_written_inline(
             ee_start_hi: (phys >> 32) as u16,
             ee_start_lo: phys as u32,
         };
-        let hdr = (i_block.as_mut_ptr() as *mut u8) as *mut Ext4ExtentHeader;
+        let hdr = node_header_mut(i_block_bytes_mut(i_block));
         n_entries += 1;
-        (*hdr).eh_entries = n_entries;
+        hdr.eh_entries = n_entries;
     }
     Ok(())
 }
@@ -729,7 +703,7 @@ pub fn exthunt_read_hole(ino: u32, i_block: &[u32; 15], logical_block: u64) {
     let header = get_extent_header(i_block);
     crate::pr_info!(
         "EXT-HUNT-READHOLE pid={} ino={} logical={} root[magic={:x} depth={} entries={} max={}]",
-        unsafe { crate::process::current_pid() },
+        crate::process::current_pid(),
         ino,
         logical_block,
         header.eh_magic,
@@ -815,7 +789,7 @@ pub fn exthunt_wr_put(ino: u32, logical: u64, phys: u64, pat: u8, buf_ptr: *cons
     }
     crate::pr_info!(
         "EXT-HUNT-WRPUT pid={} ino={} logical={} phys={} pat={:02x} buf={:p}",
-        unsafe { crate::process::current_pid() },
+        crate::process::current_pid(),
         ino,
         logical,
         phys,
@@ -837,7 +811,7 @@ pub fn exthunt_rd_serve(ino: u64, logical: u64, phys: u64, b0: u8, b1: u8) {
     }
     crate::pr_info!(
         "EXT-HUNT-RDSERVE pid={} ino={} logical={} phys={} b0={:02x}{:02x}",
-        unsafe { crate::process::current_pid() },
+        crate::process::current_pid(),
         ino,
         logical,
         phys,
@@ -860,7 +834,7 @@ pub fn exthunt_rd_batch(ino: u64, logical: u64, phys: u64, nblocks: u32) {
     }
     crate::pr_info!(
         "EXT-HUNT-RDBATCH pid={} ino={} logical={} phys={} n={}",
-        unsafe { crate::process::current_pid() },
+        crate::process::current_pid(),
         ino,
         logical,
         phys,
@@ -880,7 +854,7 @@ pub fn exthunt_rd_od(ino: u64, logical: u64, phys: u64, b0: u8, b1: u8, buf_ptr:
     }
     crate::pr_info!(
         "EXT-HUNT-RDOD pid={} ino={} logical={} phys={} b0={:02x}{:02x} buf={:p}",
-        unsafe { crate::process::current_pid() },
+        crate::process::current_pid(),
         ino,
         logical,
         phys,
@@ -904,7 +878,7 @@ pub fn exthunt_rd_hit(ino: u64, logical: u64, b0: u8, b1: u8) {
     }
     crate::pr_info!(
         "EXT-HUNT-RDHIT pid={} ino={} logical={} b0={:02x}{:02x}",
-        unsafe { crate::process::current_pid() },
+        crate::process::current_pid(),
         ino,
         logical,
         b0,
@@ -977,7 +951,7 @@ pub fn exthunt_evict_unhash(blocknr: u64, dirty: bool) {
     }
     crate::pr_info!(
         "EXT-HUNT-EVICT pid={} blk={} dirty={}",
-        unsafe { crate::process::current_pid() },
+        crate::process::current_pid(),
         blocknr,
         dirty as u8
     );
@@ -995,7 +969,7 @@ pub fn exthunt_evict_done(blocknr: u64, rc: i32) {
     }
     crate::pr_info!(
         "EXT-HUNT-EVICTED pid={} blk={} rc={}",
-        unsafe { crate::process::current_pid() },
+        crate::process::current_pid(),
         blocknr,
         rc
     );
@@ -1018,7 +992,7 @@ pub fn exthunt_fab(blocknr: u64, skipped_evicting: bool, sync_path: bool) {
     }
     crate::pr_info!(
         "EXT-HUNT-FAB pid={} blk={} skip={} path={}",
-        unsafe { crate::process::current_pid() },
+        crate::process::current_pid(),
         blocknr,
         skipped_evicting as u8,
         if sync_path { "sync" } else { "async" }
@@ -1038,7 +1012,7 @@ pub fn exthunt_bc_blind(blocknr: u64) {
     }
     crate::pr_info!(
         "EXT-HUNT-BCBLIND pid={} blk={}",
-        unsafe { crate::process::current_pid() },
+        crate::process::current_pid(),
         blocknr
     );
 }
@@ -1060,7 +1034,7 @@ pub fn exthunt_rxbhit(blocknr: u64, buf_ptr: *const u8, b0: u8, b1: u8) {
     }
     crate::pr_info!(
         "EXT-HUNT-RXBHIT pid={} blk={} b0={:02x}{:02x} buf={:p}",
-        unsafe { crate::process::current_pid() },
+        crate::process::current_pid(),
         blocknr,
         b0,
         b1,
@@ -1087,7 +1061,7 @@ pub fn exthunt_zzero(kind: &str, ino: u32, logical: u64, phys: u64) {
     crate::pr_info!(
         "EXT-HUNT-ZZERO-{} pid={} ino={} logical={} phys={}",
         kind,
-        unsafe { crate::process::current_pid() },
+        crate::process::current_pid(),
         ino,
         logical,
         phys
@@ -1101,8 +1075,8 @@ fn find_block_in_extent_tree(
     logical_block: u64,
     depth: u32,
 ) -> Result<u64, i32> {
-    // SAFETY: data is a &[u32; 15] (60 bytes), larger than ExtentExtentHeader (12 bytes).
-    let header = unsafe { &*(data.as_ptr() as *const Ext4ExtentHeader) };
+    // INV-EXT-VIEW: i_block is 60 bytes (header 12 + entries).
+    let header = node_header(i_block_bytes(data));
 
     if header.eh_depth == 0 {
         // Leaf node: search for extent in i_block array
@@ -1112,14 +1086,7 @@ fn find_block_in_extent_tree(
         if header.eh_entries as usize > max_entries {
             return Err(errno::Errno::IOError.as_neg_i32());
         }
-        // SAFETY: offset by header size (12 bytes) stays within the 60-byte i_block array;
-        // eh_entries was validated above against max_entries.
-        let entries = unsafe {
-            core::slice::from_raw_parts(
-                (data.as_ptr() as *const u8).add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4Extent,
-                header.eh_entries as usize
-            )
-        };
+        let entries = node_extents(i_block_bytes(data), header.eh_entries as usize);
 
         for ext in entries {
             let start = ext.ee_block as u64;
@@ -1144,15 +1111,8 @@ fn find_block_in_extent_tree(
         if header.eh_entries as usize > max_entries {
             return Err(errno::Errno::IOError.as_neg_i32());
         }
-        // SAFETY: offset by header size (12 bytes) stays within the 60-byte i_block array;
-        // eh_entries was validated above against max_entries.
-        let indices = unsafe {
-            core::slice::from_raw_parts(
-                (data.as_ptr() as *const u8).add(core::mem::size_of::<Ext4ExtentHeader>())
-                    as *const Ext4ExtentIdx,
-                header.eh_entries as usize
-            )
-        };
+        // INV-EXT-VIEW: eh_entries validated above against max_entries.
+        let indices = node_indices(i_block_bytes(data), header.eh_entries as usize);
 
         let mut child_block = 0u64;
         for idx in indices {
@@ -1231,10 +1191,7 @@ fn find_block_in_external_extent_ex(
             return Err(errno::Errno::IOError.as_neg_i32());
         }
         let result = if header.eh_depth == 0 {
-            let entries = core::slice::from_raw_parts(
-                data.as_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4Extent,
-                header.eh_entries as usize,
-            );
+            let entries = node_extents(data, header.eh_entries as usize);
             // Binary search (entries sorted by ee_block): O(log n) per
             // lookup instead of the linear scan (wrfsync lane).
             let r = search_extent_entry(entries, logical_block);
@@ -1246,10 +1203,7 @@ fn find_block_in_external_extent_ex(
                 Ok((0u64, false))
             }
         } else {
-            let indices = core::slice::from_raw_parts(
-                data.as_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4ExtentIdx,
-                header.eh_entries as usize,
-            );
+            let indices = node_indices(data, header.eh_entries as usize);
             let mut child_block = 0u64;
             for idx in indices {
                 if logical_block >= idx.ei_block as u64 {
@@ -1291,7 +1245,7 @@ fn find_block_in_external_extent(
             .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
         let data = &(*bh).b_data;
-        let header = &*(data.as_ptr() as *const Ext4ExtentHeader);
+        let header = node_header(data);
 
         if header.eh_magic != EXT4_EXT_MAGIC {
             bio::brelse(bh);
@@ -1312,10 +1266,7 @@ fn find_block_in_external_extent(
 
         if header.eh_depth == 0 {
             // Leaf node
-            let entries = core::slice::from_raw_parts(
-                data.as_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4Extent,
-                header.eh_entries as usize
-            );
+            let entries = node_extents(data, header.eh_entries as usize);
 
             for ext in entries {
                 let start = ext.ee_block as u64;
@@ -1336,10 +1287,7 @@ fn find_block_in_external_extent(
             Ok(0)
         } else {
             // Internal node: recursive search
-            let indices = core::slice::from_raw_parts(
-                data.as_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4ExtentIdx,
-                header.eh_entries as usize
-            );
+            let indices = node_indices(data, header.eh_entries as usize);
 
             // Binary search for appropriate index
             let mut child_block = 0;
@@ -1430,44 +1378,93 @@ fn external_node_cap(fs: &crate::fs::ext4::Ext4FileSystem) -> usize {
         / core::mem::size_of::<Ext4Extent>()) as usize
 }
 
-/// Header/entries accessors over a raw node buffer (root 60B or 4KB node).
-/// SAFETY requirement: `data.len() >= 12 + 12 * cap.
+// Header/entries accessors over a raw node buffer (root 60B or 4KB node).
+//
+// INV-EXT-VIEW (unsafe-slim round 2): these are the typed on-disk views
+// the whole file routes through — each accessor bounds-guards its cast.
+// Callers validate eh_entries against the node capacity beforehand (the
+// tree walkers' standing checks); the guards only fire where the
+// previous open-coded casts read out of bounds (UB, corrupt-disk class).
+// The header accessors assert the 12-byte minimum: every caller passes
+// an i_block (60 B) or a full block, and a too-small buffer was UB
+// before, not a value path.
+
 fn node_header(data: &[u8]) -> &Ext4ExtentHeader {
+    assert!(
+        data.len() >= core::mem::size_of::<Ext4ExtentHeader>(),
+        "extent node buffer smaller than its header"
+    );
+    // SAFETY: repr(C) on-disk layout; size asserted above.
     unsafe { &*(data.as_ptr() as *const Ext4ExtentHeader) }
 }
 
 fn node_header_mut(data: &mut [u8]) -> &mut Ext4ExtentHeader {
+    assert!(
+        data.len() >= core::mem::size_of::<Ext4ExtentHeader>(),
+        "extent node buffer smaller than its header"
+    );
+    // SAFETY: repr(C) on-disk layout; size asserted above.
     unsafe { &mut *(data.as_mut_ptr() as *mut Ext4ExtentHeader) }
 }
 
-/// SAFETY: caller guarantees the buffer holds `count` 12-byte entries
-/// after the 12-byte header (root: 60 bytes; external: block_size).
-unsafe fn node_extents(data: &[u8], count: usize) -> &[Ext4Extent] {
-    core::slice::from_raw_parts(
-        data.as_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4Extent,
-        count,
-    )
+fn node_extents(data: &[u8], count: usize) -> &[Ext4Extent] {
+    let need =
+        core::mem::size_of::<Ext4ExtentHeader>() + count * core::mem::size_of::<Ext4Extent>();
+    if count == 0 || data.len() < need {
+        return &[];
+    }
+    // SAFETY: repr(C) layout; bounds checked above.
+    unsafe {
+        core::slice::from_raw_parts(
+            data.as_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4Extent,
+            count,
+        )
+    }
 }
 
-unsafe fn node_extents_mut(data: &mut [u8], count: usize) -> &mut [Ext4Extent] {
-    core::slice::from_raw_parts_mut(
-        data.as_mut_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *mut Ext4Extent,
-        count,
-    )
+fn node_extents_mut(data: &mut [u8], count: usize) -> &mut [Ext4Extent] {
+    let need =
+        core::mem::size_of::<Ext4ExtentHeader>() + count * core::mem::size_of::<Ext4Extent>();
+    if count == 0 || data.len() < need {
+        return &mut [];
+    }
+    // SAFETY: repr(C) layout; bounds checked above.
+    unsafe {
+        core::slice::from_raw_parts_mut(
+            data.as_mut_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *mut Ext4Extent,
+            count,
+        )
+    }
 }
 
-unsafe fn node_indices(data: &[u8], count: usize) -> &[Ext4ExtentIdx] {
-    core::slice::from_raw_parts(
-        data.as_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4ExtentIdx,
-        count,
-    )
+fn node_indices(data: &[u8], count: usize) -> &[Ext4ExtentIdx] {
+    let need =
+        core::mem::size_of::<Ext4ExtentHeader>() + count * core::mem::size_of::<Ext4ExtentIdx>();
+    if count == 0 || data.len() < need {
+        return &[];
+    }
+    // SAFETY: repr(C) layout; bounds checked above.
+    unsafe {
+        core::slice::from_raw_parts(
+            data.as_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4ExtentIdx,
+            count,
+        )
+    }
 }
 
-unsafe fn node_indices_mut(data: &mut [u8], count: usize) -> &mut [Ext4ExtentIdx] {
-    core::slice::from_raw_parts_mut(
-        data.as_mut_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *mut Ext4ExtentIdx,
-        count,
-    )
+fn node_indices_mut(data: &mut [u8], count: usize) -> &mut [Ext4ExtentIdx] {
+    let need =
+        core::mem::size_of::<Ext4ExtentHeader>() + count * core::mem::size_of::<Ext4ExtentIdx>();
+    if count == 0 || data.len() < need {
+        return &mut [];
+    }
+    // SAFETY: repr(C) layout; bounds checked above.
+    unsafe {
+        core::slice::from_raw_parts_mut(
+            data.as_mut_ptr().add(core::mem::size_of::<Ext4ExtentHeader>()) as *mut Ext4ExtentIdx,
+            count,
+        )
+    }
 }
 
 /// Allocate one metadata (index/leaf) block, zero it, and account the
@@ -1499,14 +1496,15 @@ fn alloc_meta_block(
     Ok(blk)
 }
 
-/// Read one external node into a fresh buffer.
-/// SAFETY: blk is a valid filesystem block number on fs.device.
-unsafe fn read_node(
+/// Read one external node into a fresh buffer. `blk` is a valid
+/// filesystem block number on fs.device.
+fn read_node(
     fs: &crate::fs::ext4::Ext4FileSystem,
     blk: u64,
 ) -> Result<alloc::vec::Vec<u8>, i32> {
+    // SAFETY: bh pinned by bread; b_data is a block-sized slice.
     let bh = bio::bread(fs.device, blk).ok_or(errno::Errno::IOError.as_neg_i32())?;
-    let data = (*bh).b_data.to_vec();
+    let data = unsafe { (*bh).b_data.to_vec() };
     bio::brelse(bh);
     Ok(data)
 }
@@ -1524,8 +1522,8 @@ unsafe fn read_node(
 /// by the caller via `csum_seed`. The READ side stays permissive (no
 /// verify): images written by pre-fix kernels carry zero tails and must
 /// keep working on Rux.
-/// SAFETY: blk is a valid filesystem block; data.len() == fs.block_size.
-unsafe fn write_node(
+/// `blk` is a valid filesystem block; data.len() == fs.block_size.
+fn write_node(
     fs: &crate::fs::ext4::Ext4FileSystem,
     blk: u64,
     data: &[u8],
@@ -1545,21 +1543,27 @@ unsafe fn write_node(
         let mut sealed = alloc::vec::Vec::from(data);
         crate::fs::ext4::csum::extent_block_csum_set(csum_seed, &mut sealed);
         let bh = bio::bread(fs.device, blk).ok_or(errno::Errno::IOError.as_neg_i32())?;
-        (*bh).b_data.copy_from_slice(&sealed);
-        (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-        if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
-            let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
+        // SAFETY: bh pinned by bread; whole-block copy into b_data.
+        unsafe {
+            (*bh).b_data.copy_from_slice(&sealed);
+            (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+            if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
+                let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
+            }
         }
         let sync_res = bio::sync_dirty_buffer(bh);
         bio::brelse(bh);
         return sync_res;
     }
     let bh = bio::bread(fs.device, blk).ok_or(errno::Errno::IOError.as_neg_i32())?;
-    (*bh).b_data.copy_from_slice(data);
-    (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-    // Family b: journal registration (see the sealed branch above).
-    if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
-        let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
+    // SAFETY: bh pinned by bread; whole-block copy + dirty mark.
+    unsafe {
+        (*bh).b_data.copy_from_slice(data);
+        (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+        // Family b: journal registration (see the sealed branch above).
+        if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
+            let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
+        }
     }
     let sync_res = bio::sync_dirty_buffer(bh);
     bio::brelse(bh);
@@ -1599,9 +1603,9 @@ fn append_node(
         // Merge with the last entry (same state, logical+physical
         // contiguity, u15 headroom).
         if n > 0 {
-            // SAFETY: n <= cap entries fit in the buffer per the caller's
+            // n <= cap entries fit in the buffer per the caller's
             // contract (root 60B/4, external block_size/cap).
-            let last = unsafe { &mut node_extents_mut(data, cap)[n - 1] };
+            let last = &mut node_extents_mut(data, cap)[n - 1];
             let last_raw = RawExtent::from_disk(last);
             if last_raw.end() == e.ee_block as u64
                 && last_raw.phys + last_raw.len as u64 == e.phys
@@ -1613,8 +1617,8 @@ fn append_node(
             }
         }
         if n < cap {
-            // SAFETY: slot n < cap is within the buffer contract.
-            let slot = unsafe { &mut node_extents_mut(data, cap)[n] };
+            // slot n < cap is within the buffer contract.
+            let slot = &mut node_extents_mut(data, cap)[n];
             *slot = e.to_disk();
             node_header_mut(data).eh_entries = (n + 1) as u16;
             return Ok(None);
@@ -1636,7 +1640,7 @@ fn append_node(
         unsafe { node_extents_mut(&mut nd, ext_cap)[0] = e.to_disk() };
         node_header_mut(&mut nd).eh_entries = 1;
         // SAFETY: blk was just allocated (valid fs block).
-        unsafe { write_node(fs, blk, &nd, csum_seed)? };
+        write_node(fs, blk, &nd, csum_seed)?;
         Ok(Some(SplitIdx { ei_block: e.ee_block, child: blk }))
     } else {
         let n = node_header(data).eh_entries as usize;
@@ -1653,7 +1657,7 @@ fn append_node(
         match append_node(fs, &mut child, external_node_cap(fs), depth - 1, e, meta_sectors, csum_seed)? {
             None => {
                 // SAFETY: last_child valid.
-                unsafe { write_node(fs, last_child, &child, csum_seed)? };
+                write_node(fs, last_child, &child, csum_seed)?;
                 Ok(None)
             }
             Some(split) => {
@@ -1687,7 +1691,7 @@ fn append_node(
                     }
                     node_header_mut(&mut nd).eh_entries = 1;
                     // SAFETY: blk just allocated.
-                    unsafe { write_node(fs, blk, &nd, csum_seed)? };
+                    write_node(fs, blk, &nd, csum_seed)?;
                     Ok(Some(SplitIdx { ei_block: split.ei_block, child: blk }))
                 }
             }
@@ -1732,7 +1736,7 @@ pub fn ext4_ext_append(
             // layout, more slots).
             node_header_mut(&mut down_data).eh_max = external_node_cap(fs) as u16;
             // SAFETY: down just allocated.
-            unsafe { write_node(fs, down, &down_data, csum_seed)? };
+            write_node(fs, down, &down_data, csum_seed)?;
             let new_depth = old_depth + 1;
             init_node_header(&mut root, new_depth, old_cap);
             // SAFETY: root 60B holds 4 index entries per contract.
@@ -1793,7 +1797,7 @@ pub fn ext4_ext_gather(
     i_block: &[u32; 15],
 ) -> Result<alloc::vec::Vec<RawExtent>, i32> {
     let mut out = alloc::vec::Vec::new();
-    let root = unsafe { core::slice::from_raw_parts(i_block.as_ptr() as *const u8, 60) };
+    let root = i_block_bytes(i_block);
     let h = node_header(root);
     if h.eh_magic != EXT4_EXT_MAGIC {
         return Ok(out);
@@ -1806,7 +1810,7 @@ pub fn ext4_ext_gather(
 }
 
 /// SAFETY: data holds cap 12-byte entries after the header.
-unsafe fn gather_node(
+fn gather_node(
     fs: &crate::fs::ext4::Ext4FileSystem,
     data: &[u8],
     cap: usize,
@@ -1845,18 +1849,18 @@ pub fn ext4_ext_collect_index_blocks(
     i_block: &[u32; 15],
     deferred: &mut alloc::vec::Vec<u64>,
 ) -> Result<(), i32> {
-    let root = unsafe { core::slice::from_raw_parts(i_block.as_ptr() as *const u8, 60) };
+    let root = i_block_bytes(i_block);
     let h = node_header(root);
     if h.eh_magic != EXT4_EXT_MAGIC || h.eh_depth == 0 {
         return Ok(());
     }
     // SAFETY: root node access bounded by ROOT_NODE_CAP.
-    unsafe { collect_index_node(fs, root, ROOT_NODE_CAP, h.eh_depth, deferred) }
+    collect_index_node(fs, root, ROOT_NODE_CAP, h.eh_depth, deferred)
 }
 
 /// Collecting twin of free_index_node (same walk, no allocator free).
 /// SAFETY: data holds cap 12-byte entries after the header.
-unsafe fn collect_index_node(
+fn collect_index_node(
     fs: &crate::fs::ext4::Ext4FileSystem,
     data: &[u8],
     cap: usize,
@@ -1890,18 +1894,16 @@ pub fn ext4_ext_free_index_blocks(
     i_block: &[u32; 15],
     freed_sectors: &mut u64,
 ) -> Result<(), i32> {
-    let root = unsafe { core::slice::from_raw_parts(i_block.as_ptr() as *const u8, 60) };
+    let root = i_block_bytes(i_block);
     let h = node_header(root);
     if h.eh_magic != EXT4_EXT_MAGIC || h.eh_depth == 0 {
         return Ok(());
     }
     let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
-    // SAFETY: root node access bounded by ROOT_NODE_CAP.
-    unsafe { free_index_node(fs, root, ROOT_NODE_CAP, h.eh_depth, &allocator, freed_sectors) }
+    free_index_node(fs, root, ROOT_NODE_CAP, h.eh_depth, &allocator, freed_sectors)
 }
 
-/// SAFETY: data holds cap 12-byte entries after the header.
-unsafe fn free_index_node(
+fn free_index_node(
     fs: &crate::fs::ext4::Ext4FileSystem,
     data: &[u8],
     cap: usize,
@@ -1943,7 +1945,7 @@ pub fn ext4_ext_rebuild(
     ext4_ext_free_index_blocks(fs, i_block, &mut freed)?;
     init_node_header(
         // SAFETY: i_block is 60 bytes; header write is in-bounds.
-        unsafe { core::slice::from_raw_parts_mut(i_block.as_mut_ptr() as *mut u8, 60) },
+        i_block_bytes_mut(i_block),
         0,
         ROOT_NODE_CAP as u16,
     );
@@ -1979,7 +1981,7 @@ pub fn ext4_ext_rebuild_deferred(
     freed = deferred_meta.len() as u64 * (fs.block_size / 512) as u64;
     init_node_header(
         // SAFETY: i_block is 60 bytes; header write is in-bounds.
-        unsafe { core::slice::from_raw_parts_mut(i_block.as_mut_ptr() as *mut u8, 60) },
+        i_block_bytes_mut(i_block),
         0,
         ROOT_NODE_CAP as u16,
     );
@@ -1998,7 +2000,7 @@ fn find_covering_leaf_blk(
     i_block: &[u32; 15],
     logical_block: u64,
 ) -> Result<u64, i32> {
-    let root = unsafe { core::slice::from_raw_parts(i_block.as_ptr() as *const u8, 60) };
+    let root = i_block_bytes(i_block);
     let h = node_header(root);
     if h.eh_magic != EXT4_EXT_MAGIC || h.eh_depth == 0 {
         return Ok(0);
@@ -2174,7 +2176,7 @@ pub fn ext4_ext_convert_unwritten(
         return Ok(());
     }
     let end = start.saturating_add(len);
-    let root = unsafe { core::slice::from_raw_parts(i_block.as_ptr() as *const u8, 60) };
+    let root = i_block_bytes(i_block);
     let rh = node_header(root);
     if rh.eh_magic != EXT4_EXT_MAGIC {
         return Ok(());
@@ -2300,7 +2302,7 @@ pub fn ext4_ext_materialize_block(
 ) -> Result<Option<u64>, i32> {
     // Resolve the covering node: the inline root (depth 0) or the
     // external leaf reached through the index walk.
-    let root = unsafe { core::slice::from_raw_parts(i_block.as_ptr() as *const u8, 60) };
+    let root = i_block_bytes(i_block);
     let rh = node_header(root);
     if rh.eh_magic != EXT4_EXT_MAGIC {
         return Ok(None);
@@ -2421,7 +2423,7 @@ pub fn ext4_ext_insert_written(
     csum_seed: u32,
 ) -> Result<(), i32> {
     {
-        let root = unsafe { core::slice::from_raw_parts(i_block.as_ptr() as *const u8, 60) };
+        let root = i_block_bytes(i_block);
         let h = node_header(root);
         if h.eh_magic != EXT4_EXT_MAGIC {
             return Ok(());

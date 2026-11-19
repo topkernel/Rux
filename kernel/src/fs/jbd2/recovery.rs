@@ -53,10 +53,9 @@ impl Default for RecoveryInfo {
 
 /// Recover the journal using two-pass algorithm.
 pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32> {
-    let device = journal.j_bio_device;
-    if device.is_null() {
+    let Some(device) = journal.j_bio_device else {
         return Ok(RecoveryInfo::default());
-    }
+    };
 
     // ext4-persist P0 fix: every journal-block address resolves through
     // the extent map (Journal::jmap) — the journal inode's extents may be
@@ -298,7 +297,9 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
 // ============================================================================
 
 fn write_clean_sb(journal: &Arc<Journal>, next_seq: u32) -> Result<(), i32> {
-    let device = journal.j_bio_device;
+    let device = journal
+        .j_bio_device
+        .expect("jbd2: bio device used before ext4 install");
     // SAFETY: bio::bread returns a valid BufferHead or None (handled).
     let sb_bh = unsafe {
         match bio::bread(device, journal.jmap(0)) {
@@ -477,7 +478,7 @@ fn block_tag_csum_verify(
 /// block bytes first (reference jbd2_block_tag_csum_verify — a mismatch
 /// skips the block: "Invalid checksum recovering data block").
 fn replay_data(
-    device: *const crate::drivers::blkdev::GenDisk,
+    device: &'static crate::drivers::blkdev::GenDisk,
     journal_block: u64,
     fs_block: u64,
     journal: &Arc<Journal>,

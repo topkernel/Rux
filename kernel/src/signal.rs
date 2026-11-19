@@ -2974,7 +2974,7 @@ pub fn send_signal_from_user(pid: u32, sig: i32) -> Result<(), i32> {
             core::sync::atomic::AtomicUsize::new(0);
         if K9_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
             let scomm = crate::sched::current()
-                .map(|t| unsafe { (*t).comm() })
+                .map(|t| t.comm())
                 .map(|c| core::str::from_utf8(c).unwrap_or(""))
                 .unwrap_or("")
                 .trim_end_matches('\0');
@@ -3199,7 +3199,7 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
             core::sync::atomic::AtomicUsize::new(0);
         if K9T_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
             let scomm = crate::sched::current()
-                .map(|t| unsafe { (*t).comm() })
+                .map(|t| t.comm())
                 .map(|c| core::str::from_utf8(c).unwrap_or(""))
                 .unwrap_or("")
                 .trim_end_matches('\0');

@@ -35,18 +35,14 @@ pub fn sys_socket(args: SyscallArgs) -> i64 {
 /// Returns None on copy failure.
 fn copy_sockaddr_in_from_user(addr_ptr: *const u8) -> Option<[u8; 16]> {
     let mut buf = [0u8; 16];
-    let uncopied = unsafe {
-        crate::arch::uaccess::copy_from_user(buf.as_mut_ptr(), addr_ptr, 16)
-    };
+    let uncopied = crate::arch::uaccess_safe::copy_in(&mut buf, addr_ptr as usize);
     if uncopied > 0 { None } else { Some(buf) }
 }
 
 /// Copy a 28-byte sockaddr_in6 from user memory (exception-table path).
 fn copy_sockaddr_in6_from_user(addr_ptr: *const u8) -> Option<[u8; 28]> {
     let mut buf = [0u8; 28];
-    let uncopied = unsafe {
-        crate::arch::uaccess::copy_from_user(buf.as_mut_ptr(), addr_ptr, 28)
-    };
+    let uncopied = crate::arch::uaccess_safe::copy_in(&mut buf, addr_ptr as usize);
     if uncopied > 0 { None } else { Some(buf) }
 }
 
@@ -135,14 +131,7 @@ fn parse_raw_send_dest(
                 return Err(-(errno::EFAULT as i64));
             }
             let mut sll = [0u8; SOCKADDR_LL_LEN];
-            // SAFETY: access_ok(SOCKADDR_LL_LEN) validated; exception copy.
-            if unsafe {
-                crate::arch::uaccess::copy_from_user(
-                    sll.as_mut_ptr(),
-                    addr_ptr,
-                    SOCKADDR_LL_LEN,
-                )
-            } != 0
+            if crate::arch::uaccess_safe::copy_in(&mut sll, addr_ptr as usize) != 0
             {
                 return Err(-(errno::EFAULT as i64));
             }
@@ -168,11 +157,8 @@ fn parse_sockaddr_ll(addr_ptr: *const u8) -> Result<(i32, i32), i64> {
         return Err(-(errno::EFAULT as i64));
     }
     let mut sll = [0u8; SOCKADDR_LL_LEN];
-    // SAFETY: access_ok(SOCKADDR_LL_LEN) validated; exception copy.
-    if unsafe {
-        crate::arch::uaccess::copy_from_user(sll.as_mut_ptr(), addr_ptr, SOCKADDR_LL_LEN)
-    } != 0
-    {
+    // access_ok(SOCKADDR_LL_LEN) validated above.
+    if crate::arch::uaccess_safe::copy_in(&mut sll, addr_ptr as usize) != 0 {
         return Err(-(errno::EFAULT as i64));
     }
     let family = u16::from_le_bytes([sll[0], sll[1]]);
@@ -244,10 +230,8 @@ pub fn sys_bind(args: SyscallArgs) -> i64 {
             return -(errno::EFAULT as i64);
         }
         let mut ubuf = [0u8; SOCKADDR_UN_LEN];
-        // SAFETY: addr_ptr/want validated with access_ok; exception-table copy.
-        if unsafe {
-            crate::arch::uaccess::copy_from_user(ubuf.as_mut_ptr(), addr_ptr, want)
-        } != 0
+        if crate::arch::uaccess_safe::UserSlice::new(addr_ptr as usize, want)
+            .copy_in(&mut ubuf[..want]) != 0
         {
             return -(errno::EFAULT as i64);
         }
@@ -290,15 +274,8 @@ pub fn sys_bind(args: SyscallArgs) -> i64 {
                     && crate::arch::uaccess::access_ok(addr_ptr as usize, 12)
                 {
                     let mut nl = [0u8; 12];
-                    // SAFETY: addr_ptr validated with access_ok(12) above.
-                    if unsafe {
-                        crate::arch::uaccess::copy_from_user(
-                            nl.as_mut_ptr(),
-                            addr_ptr,
-                            12,
-                        )
-                    } == 0
-                    {
+                    // addr_ptr validated with access_ok(12) above.
+                    if crate::arch::uaccess_safe::copy_in(&mut nl, addr_ptr as usize) == 0 {
                         let nl_pid = u32::from_le_bytes([nl[4], nl[5], nl[6], nl[7]]);
                         let groups = u32::from_le_bytes([nl[8], nl[9], nl[10], nl[11]]);
                         // review F11: adopt a chosen nl_pid (portid-routed
@@ -472,14 +449,13 @@ pub fn sys_listen(args: SyscallArgs) -> i64 {
 /// undoing recvfrom's explicit clamp. A NULL addrlen_ptr (recvfrom's
 /// NULL-fromlen case) stores no length word. Callers must access_ok both
 /// pointers for 16 bytes; failures are dropped.
-unsafe fn put_sockaddr_in(
-    addr_ptr: *mut u8,
-    addrlen_ptr: *mut u32,
+fn put_sockaddr_in(
+    addr_user: usize,
+    addrlen_user: usize,
     limit: usize,
     port: u16,
     addr: u32,
 ) {
-    use crate::arch::uaccess::{copy_to_user, put_user};
     let mut sa = [0u8; 16];
     sa[0..2].copy_from_slice(&2u16.to_ne_bytes()); // sin_family = AF_INET
     sa[2..4].copy_from_slice(&port.to_be_bytes());
@@ -487,10 +463,11 @@ unsafe fn put_sockaddr_in(
     // sin_zero stays zeroed
     let n = limit.min(16);
     if n > 0 {
-        let _ = copy_to_user(addr_ptr, sa.as_ptr(), n);
+        let _ = crate::arch::uaccess_safe::UserSlice::new(addr_user, n)
+            .copy_out(&sa[..n]);
     }
-    if !addrlen_ptr.is_null() {
-        let _ = put_user(addrlen_ptr, 16u32);
+    if addrlen_user != 0 {
+        let _ = crate::arch::uaccess_safe::UserPtr::<u32>::new(addrlen_user).write(16u32);
     }
 }
 
@@ -500,14 +477,13 @@ unsafe fn put_sockaddr_in(
 /// access_ok-validate both pointers for 28 / 4 bytes. Link-local
 /// addresses report the single-interface scope id 2 (eth0, the reference
 /// kernel's ifindex convention); everything else 0.
-unsafe fn put_sockaddr_in6(
-    addr_ptr: *mut u8,
-    addrlen_ptr: *mut u32,
+fn put_sockaddr_in6(
+    addr_user: usize,
+    addrlen_user: usize,
     limit: usize,
     port: u16,
     addr: crate::net::ipv6::Ipv6Addr,
 ) {
-    use crate::arch::uaccess::{copy_to_user, put_user};
     let scope_id: u32 = if crate::net::ipv6::is_link_local(&addr) { 2 } else { 0 };
     let mut sa = [0u8; 28];
     sa[0..2].copy_from_slice(&10u16.to_ne_bytes()); // sin6_family = AF_INET6
@@ -517,10 +493,11 @@ unsafe fn put_sockaddr_in6(
     sa[24..28].copy_from_slice(&scope_id.to_ne_bytes());
     let n = limit.min(28);
     if n > 0 {
-        let _ = copy_to_user(addr_ptr, sa.as_ptr(), n);
+        let _ = crate::arch::uaccess_safe::UserSlice::new(addr_user, n)
+            .copy_out(&sa[..n]);
     }
-    if !addrlen_ptr.is_null() {
-        let _ = put_user(addrlen_ptr, 28u32);
+    if addrlen_user != 0 {
+        let _ = crate::arch::uaccess_safe::UserPtr::<u32>::new(addrlen_user).write(28u32);
     }
 }
 
@@ -529,20 +506,20 @@ unsafe fn put_sockaddr_in6(
 /// (v4 sources are reported v4-mapped). `limit` is the caller's buffer
 /// length in bytes (clamped inside each helper); `addrlen_ptr` may be
 /// null, in which case no length word is written.
-unsafe fn put_sockaddr_family(
+fn put_sockaddr_family(
     socket: &crate::net::socket::Socket,
-    addr_ptr: *mut u8,
-    addrlen_ptr: *mut u32,
+    addr_user: usize,
+    addrlen_user: usize,
     limit: usize,
     port: u16,
     src: crate::net::ipv6::IpAddr,
 ) {
     if socket.is_ipv6() {
-        put_sockaddr_in6(addr_ptr, addrlen_ptr, limit, port, src.as_v6());
+        put_sockaddr_in6(addr_user, addrlen_user, limit, port, src.as_v6());
     } else {
         put_sockaddr_in(
-            addr_ptr,
-            addrlen_ptr,
+            addr_user,
+            addrlen_user,
             limit,
             port,
             src.as_v4().unwrap_or(0),
@@ -553,8 +530,8 @@ unsafe fn put_sockaddr_family(
 /// Read one usize field of a user iovec/msghdr through get_user.
 /// `addr` is the raw user address (usize, as stored in msghdr/iovec fields).
 /// An unreadable field reads as 0 (callers already range-check).
-unsafe fn get_user_usize(addr: usize) -> usize {
-    crate::arch::uaccess::get_user(addr as *const usize).unwrap_or(0)
+fn get_user_usize(addr: usize) -> usize {
+    crate::arch::uaccess_safe::UserPtr::<usize>::new(addr).read().unwrap_or(0)
 }
 
 /// P0-1 (SCM_RIGHTS) / P2 (SCM_CREDENTIALS): parse the cmsg buffer of a
@@ -571,8 +548,12 @@ fn parse_unix_cmsgs(
 
     // msghdr layout (64-bit): msg_control @32, msg_controllen @40.
     // SAFETY: msg_ptr was access_ok(64)-validated by the caller.
-    let control = unsafe { get_user::<usize>(msg_ptr.add(32) as *const usize).unwrap_or(0) };
-    let controllen = unsafe { get_user::<usize>(msg_ptr.add(40) as *const usize).unwrap_or(0) };
+    let control = crate::arch::uaccess_safe::UserPtr::<usize>::new(msg_ptr as usize + 32)
+        .read()
+        .unwrap_or(0);
+    let controllen = crate::arch::uaccess_safe::UserPtr::<usize>::new(msg_ptr as usize + 40)
+        .read()
+        .unwrap_or(0);
     let mut files = alloc::vec::Vec::new();
     let mut want_cred = false;
     if control == 0 || controllen == 0 {
@@ -589,7 +570,9 @@ fn parse_unix_cmsgs(
     }
     let mut cbuf = alloc::vec![0u8; controllen];
     // SAFETY: control/controllen validated with access_ok above.
-    if unsafe { copy_from_user(cbuf.as_mut_ptr(), control as *const u8, controllen) } != 0 {
+    if crate::arch::uaccess_safe::UserSlice::new(control, controllen)
+        .copy_in(&mut cbuf[..controllen]) != 0
+    {
         return Err(-(errno::EFAULT as i64));
     }
     let fdtable = match crate::sched::get_current_fdtable() {
@@ -1043,12 +1026,10 @@ fn sys_accept_common(fd: usize, flags: i32, addr_ptr: *mut u8, addrlen_ptr: *mut
                     };
                     // SAFETY: addr_ptr/addrlen_ptr validated with access_ok;
                     // put_sockaddr_* use the exception-table copy path.
-                    unsafe {
-                        if want == 28 {
-                            put_sockaddr_in6(addr_ptr, addrlen_ptr, limit, pport, paddr6);
-                        } else {
-                            put_sockaddr_in(addr_ptr, addrlen_ptr, limit, pport, paddr);
-                        }
+                    if want == 28 {
+                        put_sockaddr_in6(addr_ptr as usize, addrlen_ptr as usize, limit, pport, paddr6);
+                    } else {
+                        put_sockaddr_in(addr_ptr as usize, addrlen_ptr as usize, limit, pport, paddr);
                     }
                 }
             }
@@ -1141,10 +1122,8 @@ pub fn sys_connect(args: SyscallArgs) -> i64 {
             return -(errno::EFAULT as i64);
         }
         let mut ubuf = [0u8; SOCKADDR_UN_LEN];
-        // SAFETY: addr_ptr/want validated with access_ok; exception-table copy.
-        if unsafe {
-            crate::arch::uaccess::copy_from_user(ubuf.as_mut_ptr(), addr_ptr, want)
-        } != 0
+        if crate::arch::uaccess_safe::UserSlice::new(addr_ptr as usize, want)
+            .copy_in(&mut ubuf[..want]) != 0
         {
             return -(errno::EFAULT as i64);
         }
@@ -1180,7 +1159,7 @@ pub fn sys_connect(args: SyscallArgs) -> i64 {
                                 e,
                                 uaddr.key,
                                 uaddr.key.len(),
-                                unsafe { crate::process::current_pid() }
+                                crate::process::current_pid()
                             );
                         }
                         e as i64
@@ -1287,11 +1266,8 @@ fn parse_netlink_dest(addr_ptr: *const u8, addrlen: u32) -> (u32, u32) {
         return (0, 0);
     }
     let mut nl = [0u8; 12];
-    // SAFETY: addr_ptr validated with access_ok(12) above.
-    if unsafe {
-        crate::arch::uaccess::copy_from_user(nl.as_mut_ptr(), addr_ptr, 12)
-    } != 0
-    {
+    // addr_ptr validated with access_ok(12) above.
+    if crate::arch::uaccess_safe::copy_in(&mut nl, addr_ptr as usize) != 0 {
         return (0, 0);
     }
     // struct sockaddr_nl { sa_family_t nl_family; u16 pad;
@@ -1322,7 +1298,7 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
     // per call), the single biggest contributor to the 132-144M
     // get_file/boot REST volume (perf-report 8.10.22).
     // SAFETY: fdtable read only; the Arc is dropped at function exit.
-    let file = match unsafe { crate::fs::get_file_fd(fd) } {
+    let file = match crate::fs::get_file_fd(fd) {
         Some(f) => f,
         None => return -(errno::EBADF as i64),
     };
@@ -1383,8 +1359,12 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
         if kbuf.try_reserve_exact(stage).is_err() {
             return -(errno::ENOMEM as i64);
         }
-        // SAFETY: capacity is exactly stage; the copy below fills all of
-        // it or the call returns EFAULT (set_len only runs on success).
+        // Capacity is exactly stage; the copy fills all of it or the
+        // call returns EFAULT (set_len only runs on success). The Vec's
+        // spare capacity has no safe view (as_mut_vec is unstable), so
+        // this stays a minimal raw-buffer span.
+        // SAFETY: kbuf has capacity `stage`; set_len runs only after a
+        // complete copy.
         unsafe {
             if crate::arch::uaccess::copy_from_user(kbuf.as_mut_ptr(), buf_ptr, stage) != 0 {
                 return -(errno::EFAULT as i64);
@@ -1398,10 +1378,9 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
                 return -(errno::EFAULT as i64);
             }
             let mut ubuf = [0u8; SOCKADDR_UN_LEN];
-            // SAFETY: validated with access_ok above.
-            if unsafe {
-                crate::arch::uaccess::copy_from_user(ubuf.as_mut_ptr(), addr_ptr, want)
-            } != 0
+            // validated with access_ok above.
+            if crate::arch::uaccess_safe::UserSlice::new(addr_ptr as usize, want)
+                .copy_in(&mut ubuf[..want]) != 0
             {
                 return -(errno::EFAULT as i64);
             }
@@ -1623,7 +1602,7 @@ pub fn sys_getsockname(args: SyscallArgs) -> i64 {
     // fd is ENOTSOCK (LTP getsockname01/getpeername01 first cases probe
     // fd=400 and /dev/null).
     // SAFETY: read-only fd table lookup.
-    if unsafe { crate::fs::get_file_fd(fd) }.is_none() {
+    if crate::fs::get_file_fd(fd).is_none() {
         return -(errno::EBADF as i64);
     }
     if addr_ptr.is_null() || addrlen_ptr.is_null() {
@@ -1778,9 +1757,9 @@ pub fn sys_getsockname(args: SyscallArgs) -> i64 {
             } else {
                 local6
             };
-            put_sockaddr_in6(addr_ptr, addrlen_ptr, addrlen, local_port, addr6);
+            put_sockaddr_in6(addr_ptr as usize, addrlen_ptr as usize, addrlen, local_port, addr6);
         } else {
-            put_sockaddr_in(addr_ptr, addrlen_ptr, addrlen, local_port, local_addr);
+            put_sockaddr_in(addr_ptr as usize, addrlen_ptr as usize, addrlen, local_port, local_addr);
         }
     }
     0
@@ -1801,7 +1780,7 @@ pub fn sys_getpeername(args: SyscallArgs) -> i64 {
     // fd is ENOTSOCK (LTP getsockname01/getpeername01 first cases probe
     // fd=400 and /dev/null).
     // SAFETY: read-only fd table lookup.
-    if unsafe { crate::fs::get_file_fd(fd) }.is_none() {
+    if crate::fs::get_file_fd(fd).is_none() {
         return -(errno::EBADF as i64);
     }
     if addr_ptr.is_null() || addrlen_ptr.is_null() {
@@ -1882,18 +1861,16 @@ pub fn sys_getpeername(args: SyscallArgs) -> i64 {
                 return -(errno::EFAULT as i64);
             }
             // SAFETY: addr_ptr/addrlen_ptr validated with access_ok; exception-table copy.
-            unsafe {
-                if socket.is_ipv6() {
-                    put_sockaddr_in6(
-                        addr_ptr,
-                        addrlen_ptr,
-                        addrlen,
-                        peer_port,
-                        *socket.remote_addr6.lock(),
-                    );
-                } else {
-                    put_sockaddr_in(addr_ptr, addrlen_ptr, addrlen, peer_port, peer_addr);
-                }
+            if socket.is_ipv6() {
+                put_sockaddr_in6(
+                    addr_ptr as usize,
+                    addrlen_ptr as usize,
+                    addrlen,
+                    peer_port,
+                    *socket.remote_addr6.lock(),
+                );
+            } else {
+                put_sockaddr_in(addr_ptr as usize, addrlen_ptr as usize, addrlen, peer_port, peer_addr);
             }
             return 0;
         }
@@ -2525,7 +2502,7 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
     // Linux sockfd_lookup: a nonexistent fd is EBADF, a valid non-socket
     // fd is ENOTSOCK (LTP getsockopt01 probes fd=400 then /dev/null).
     // SAFETY: read-only fd table lookup.
-    if unsafe { crate::fs::get_file_fd(fd) }.is_none() {
+    if crate::fs::get_file_fd(fd).is_none() {
         return -(errno::EBADF as i64);
     }
     if optval.is_null() || optlen_ptr.is_null() {
@@ -3147,7 +3124,7 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
     // generic ENOTSOCK below, exactly the errno shape the old per-family
     // lookups produced.
     // SAFETY: fdtable read only; the Arc is dropped at function exit.
-    let file_opt = unsafe { crate::fs::get_file_fd(fd as usize) };
+    let file_opt = crate::fs::get_file_fd(fd as usize);
 
     // P0-1: AF_UNIX sendmsg — full path with SCM_RIGHTS support. Runs
     // BEFORE the total_len==0 early return: a zero-length payload with
@@ -3373,7 +3350,7 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
     // Leg-52 lever A: resolve the descriptor ONCE and pass &file through
     // the family ladder (see sys_sendto's note).
     // SAFETY: fdtable read only; the Arc is dropped at function exit.
-    let file = match unsafe { crate::fs::get_file_fd(fd as usize) } {
+    let file = match crate::fs::get_file_fd(fd as usize) {
         Some(f) => f,
         None => return -(errno::EBADF as i64),
     };
@@ -3912,7 +3889,7 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
                 };
                 // SAFETY: pointers validated with access_ok; exception-table copy.
                 unsafe {
-                    put_sockaddr_family(&socket, msg_name_ptr, msg_namelen_ptr, limit, port, addr);
+                    put_sockaddr_family(&socket, msg_name_ptr as usize, msg_namelen_ptr as usize, limit, port, addr);
                 }
             }
         }
@@ -4499,7 +4476,7 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
     // the family ladder (see sys_sendto's note) — the old shape paid one
     // get_file per family probe on every recvfrom.
     // SAFETY: fdtable read only; the Arc is dropped at function exit.
-    let file = match unsafe { crate::fs::get_file_fd(fd) } {
+    let file = match crate::fs::get_file_fd(fd) {
         Some(f) => f,
         None => return -(errno::EBADF as i64),
     };
@@ -4879,7 +4856,7 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
                 // buffer is well-formed. put_sockaddr_* skip the length
                 // word for a NULL addrlen_ptr.
                 unsafe {
-                    put_sockaddr_family(&socket, addr_ptr, core::ptr::null_mut(), klen, port, addr);
+                    put_sockaddr_family(&socket, addr_ptr as usize, 0, klen, port, addr);
                 }
             } else {
                 // SAFETY: exception-table read of the user length word.
@@ -4895,16 +4872,14 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
                         // copy below is bounded by the caller's value via
                         // `limit` and the length store goes back to the
                         // same word.
-                        unsafe {
-                            put_sockaddr_family(
-                                &socket,
-                                addr_ptr,
-                                addrlen_ptr,
-                                (u as usize).min(128),
-                                port,
-                                addr,
-                            );
-                        }
+                        put_sockaddr_family(
+                            &socket,
+                            addr_ptr as usize,
+                            addrlen_ptr as usize,
+                            (u as usize).min(128),
+                            port,
+                            addr,
+                        );
                     }
                 }
             }

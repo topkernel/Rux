@@ -75,17 +75,16 @@ pub const S_IRWXO: u16 = 0o0007;
 // ============================================================================
 
 /// Read a block into a Vec<u8>
-// SAFETY: device pointer is valid; bio::bread returns valid bh or error
-unsafe fn read_block_to_vec(device: *const crate::drivers::blkdev::GenDisk, blocknr: u64, block_size: usize) -> Result<Vec<u8>, i32> {
+fn read_block_to_vec(device: &'static crate::drivers::blkdev::GenDisk, blocknr: u64, block_size: usize) -> Result<Vec<u8>, i32> {
     let bh = bio::bread(device, blocknr).ok_or(errno::Errno::IOError.as_neg_i32())?;
-    let data = (*bh).b_data.clone();
+    // SAFETY: bh is pinned by bread; the clone reads block_size bytes.
+    let data = unsafe { (*bh).b_data.clone() };
     bio::brelse(bh);
     Ok(data)
 }
 
 /// Write a Vec<u8> to a block
-// SAFETY: device pointer is valid; bio functions handle buffer lifecycle
-unsafe fn write_block_from_vec(device: *const crate::drivers::blkdev::GenDisk, blocknr: u64, data: &[u8]) -> Result<(), i32> {
+fn write_block_from_vec(device: &'static crate::drivers::blkdev::GenDisk, blocknr: u64, data: &[u8]) -> Result<(), i32> {
     // Full-block overwrite: fetch the buffer WITHOUT reading it from disk
     // (perf: the plain bread here read EVERY block it was about to
     // completely overwrite — a fresh dir block allocated by mkdir was
@@ -106,19 +105,24 @@ unsafe fn write_block_from_vec(device: *const crate::drivers::blkdev::GenDisk, b
     }
     .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-    // Get mutable reference to buffer head
-    let bh_ref = &mut *bh;
+    // SAFETY: bh is pinned by bread/getblk_overwrite above; the manual
+    // refactors of this body keep the same aliasing window as before
+    // (bucket lock + pin).
+    unsafe {
+        // Get mutable reference to buffer head
+        let bh_ref = &mut *bh;
 
-    // Copy data to buffer
-    let buf_len = bh_ref.b_data.len().min(data.len());
-    bh_ref.b_data[0..buf_len].copy_from_slice(&data[0..buf_len]);
+        // Copy data to buffer
+        let buf_len = bh_ref.b_data.len().min(data.len());
+        bh_ref.b_data[0..buf_len].copy_from_slice(&data[0..buf_len]);
 
-    // Mark dirty and sync
-    bh_ref.set_state_bit(BufferState::BH_Dirty);
+        // Mark dirty and sync
+        bh_ref.set_state_bit(BufferState::BH_Dirty);
 
-    // If a journal handle is active, register this buffer
-    if let Some(handle) = get_current_handle() {
-        let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
+        // If a journal handle is active, register this buffer
+        if let Some(handle) = get_current_handle() {
+            let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
+        }
     }
 
     let sync_res = bio::sync_dirty_buffer(bh);

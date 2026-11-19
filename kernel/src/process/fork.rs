@@ -436,8 +436,8 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                 .rlimit(crate::process::task::rlimit_res::NPROC);
             if nproc_cur != u64::MAX {
                 let mut user_procs: u64 = 0;
-                crate::process::pid_hash::pid_hash_for_each_task(|t| unsafe {
-                    if !t.is_null() && (*t).address_space().is_some() {
+                crate::process::pid_hash::pid_hash_for_each_task(|t| {
+                    if t.address_space().is_some() {
                         user_procs += 1;
                     }
                 });

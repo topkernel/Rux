@@ -319,11 +319,9 @@ pub fn jbd2_journal_stop(handle: &mut Handle) -> Result<(), i32> {
         let jbd2_dev = if crate::trace::EVENT_JBD2_START_COMMIT.armed()
             || crate::trace::EVENT_JBD2_END_COMMIT.armed()
         {
-            // SAFETY: j_bio_device is the installed GenDisk pointer,
-            // valid for the journal's lifetime.
-            Some(unsafe {
-                ((*journal.j_bio_device).major << 20) | (*journal.j_bio_device).first_minor
-            })
+            journal
+                .j_bio_device
+                .map(|d| (d.major << 20) | d.first_minor)
         } else {
             None
         };

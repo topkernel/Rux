@@ -51,7 +51,7 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> i64 {
             return -(errno::EFAULT as i64);
         }
         // Exception-table copy: unmapped page → EFAULT, not a kernel fault.
-        match unsafe { crate::arch::uaccess::get_user(set_ptr) } {
+        match crate::arch::uaccess_safe::UserPtr::<u64>::new(set_ptr as usize).read() {
             Some(v) => v,
             None => return -(errno::EFAULT as i64),
         }
@@ -59,15 +59,14 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> i64 {
         0
     };
 
-    // Get current process
-    let current = match crate::sched::current() {
-        Some(c) => c as *const _ as *mut crate::process::task::Task,
+    // Get current process (typed: sched::current() returns &mut Task)
+    let mut current = match crate::sched::current() {
+        Some(c) => c,
         None => return -(errno::EPERM as i64),
     };
 
     // Get current signal mask
-    // SAFETY: current from sched::current() is a valid Task pointer for the running task.
-    let old_mask = unsafe { (*current).sigmask };
+    let old_mask = current.sigmask;
 
     // Set new signal mask.
     //
@@ -107,10 +106,7 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> i64 {
     let result_mask = result_mask & !((1u64 << 8) | (1u64 << 18));
 
     // Update current process signal mask
-    // SAFETY: current is the running task's Task pointer from sched::current().
-    unsafe {
-        (*current).sigmask = result_mask;
-    }
+    current.sigmask = result_mask;
 
     // Return old signal mask
     if !oldset_ptr.is_null() {
@@ -119,7 +115,9 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> i64 {
             return -(errno::EFAULT as i64);
         }
         // Exception-table copy: unmapped page → EFAULT, not a kernel fault.
-        if !unsafe { crate::arch::uaccess::put_user(oldset_ptr, old_mask) } {
+        if !crate::arch::uaccess_safe::UserPtr::<u64>::new(oldset_ptr as usize)
+            .write(old_mask)
+        {
             return -(errno::EFAULT as i64);
         }
     }
@@ -148,6 +146,7 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> i64 {
 /// and jumped execution into it on handler return.
 #[cfg(feature = "riscv64")]
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct SigActionUser {
     sa_handler: usize,
     sa_flags: u64,
@@ -158,6 +157,7 @@ struct SigActionUser {
 /// sa_mask +24} — 32 bytes. glibc ALWAYS sets SA_RESTORER here.
 #[cfg(feature = "x86_64")]
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct SigActionUser {
     sa_handler: usize,
     sa_flags: u64,
@@ -169,6 +169,7 @@ struct SigActionUser {
 /// sa_restorer; glibc always sets SA_RESTORER) — 32 bytes.
 #[cfg(feature = "aarch64")]
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct SigActionUser {
     sa_handler: usize,
     sa_flags: u64,
@@ -196,7 +197,7 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
                 "rt_sigaction EINVAL: signum={} sigsetsize={} pid={}",
                 signum,
                 sigsetsize,
-                unsafe { crate::process::current_pid() }
+                crate::process::current_pid()
             );
         }
         return -(errno::EINVAL as i64);
@@ -208,7 +209,7 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
             crate::pr_info!(
                 "rt_sigaction EINVAL: signum={} pid={}",
                 signum,
-                unsafe { crate::process::current_pid() }
+                crate::process::current_pid()
             );
         }
         return -(errno::EINVAL as i64);
@@ -220,27 +221,25 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
             crate::pr_info!(
                 "rt_sigaction EINVAL: signum={} is SIGKILL/SIGSTOP, pid={}",
                 signum,
-                unsafe { crate::process::current_pid() }
+                crate::process::current_pid()
             );
         }
         return -(errno::EINVAL as i64);
     }
 
-    // Get current process
+    // Get current process (typed: sched::current() returns &mut Task)
     let current = match crate::sched::current() {
-        Some(c) => c as *const _ as *mut crate::process::task::Task,
+        Some(c) => c,
         None => return -(errno::EPERM as i64),
     };
 
-    // SAFETY: current is the running task's Task pointer from sched::current();
     // oldact_ptr/act_ptr validated with access_ok where non-null.
-    unsafe {
-        let signal_struct = (*current).signal.as_mut();
+    let signal_struct = current.signal.as_mut();
         if signal_struct.is_none() {
             crate::pr_info!(
                 "rt_sigaction EINVAL: no signal_struct, signum={} pid={}",
                 signum,
-                unsafe { crate::process::current_pid() }
+                crate::process::current_pid()
             );
             return -(errno::EINVAL as i64);
         }
@@ -262,13 +261,16 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
                 sa_mask: old_action.sa_mask,
             };
             let src = &user_action as *const SigActionUser as *const u8;
-            let uncopied = unsafe {
-                crate::arch::uaccess::copy_to_user(
-                    oldact_ptr as *mut u8,
+            let uncopied = crate::arch::uaccess_safe::UserSlice::new(
+                oldact_ptr as usize,
+                core::mem::size_of::<SigActionUser>(),
+            )
+            .copy_out(unsafe {
+                core::slice::from_raw_parts(
                     src,
                     core::mem::size_of::<SigActionUser>(),
                 )
-            };
+            });
             if uncopied > 0 {
                 return -(errno::EFAULT as i64);
             }
@@ -288,14 +290,10 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
                 sa_restorer: 0,
                 sa_mask: 0,
             };
-            let dst = &mut user_action as *mut SigActionUser as *mut u8;
-            let uncopied = unsafe {
-                crate::arch::uaccess::copy_from_user(
-                    dst,
-                    act_ptr as *const u8,
-                    core::mem::size_of::<SigActionUser>(),
-                )
-            };
+            let uncopied = crate::arch::uaccess_safe::copy_in_t(
+                &mut user_action,
+                act_ptr as usize,
+            );
             if uncopied > 0 {
                 return -(errno::EFAULT as i64);
             }
@@ -321,7 +319,7 @@ let new_action = SigAction {
                     crate::pr_info!(
                         "rt_sigaction EINVAL: set_action rejected signum={} pid={}",
                         signum,
-                        unsafe { crate::process::current_pid() }
+                        crate::process::current_pid()
                     );
                     -(errno::EINVAL as i64)
                 }
@@ -329,7 +327,6 @@ let new_action = SigAction {
         } else {
             0  // Success (just query)
         }
-    }
 }
 
 /// sys_rt_sigreturn - Return from signal handler

@@ -375,7 +375,7 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
     // costing UART emit + hilogd drain).
     if ret > 0 && crate::dfx::switches::oh_hunt_prints_on() {
         let comm = crate::sched::current()
-            .map(|t| unsafe { (*t).comm() })
+            .map(|t| t.comm())
             .map(|c| core::str::from_utf8(c).unwrap_or(""))
             .unwrap_or("")
             .trim_end_matches('\0');
@@ -394,9 +394,7 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
                     core::sync::atomic::AtomicUsize::new(0);
                 if NF.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400 {
                     let path = crate::sched::current()
-                        .and_then(|t| unsafe {
-                            (*t).try_fdtable().and_then(|fdt| fdt.get_file(fd as usize))
-                        })
+                        .and_then(|t| t.try_fdtable().and_then(|fdt| fdt.get_file(fd as usize)))
                         .map(|f| f.path())
                         .unwrap_or_else(|| alloc::string::String::from("?"));
                     crate::pr_debug!(
@@ -472,8 +470,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     const READ_IMPLIES_EXEC: u32 = 0x0400_000; // include/uapi personality.h
     if prot_flags & prot::PROT_READ != 0 {
         if let Some(t) = crate::sched::current() {
-            // SAFETY: `t` is the current task pointer; a u32 field read.
-            if unsafe { (*t).personality } & READ_IMPLIES_EXEC != 0 {
+            if t.personality & READ_IMPLIES_EXEC != 0 {
                 prot_flags |= prot::PROT_EXEC;
             }
         }
@@ -651,7 +648,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
         if fd < 0 {
             return mmap_error::EBADF;
         }
-        match unsafe { crate::fs::get_file_fd(fd as usize) } {
+        match crate::fs::get_file_fd(fd as usize) {
             None => return mmap_error::EBADF,
             Some(file) => {
                 let accmode = file.flags().bits()
@@ -701,7 +698,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     // Check if this is an io_uring fd
     if fd >= 0 {
         // SAFETY: fd is a valid file descriptor; get_file_fd returns valid File or None.
-        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        if let Some(file) = crate::fs::file::get_file_fd(fd as usize) {
             if let Some(ops) = file.get_ops() {
                 let io_uring_ops = core::ptr::addr_of!(crate::io_uring::IO_URING_OPS);
                 if core::ptr::eq(ops as *const _, io_uring_ops as *const _) {
@@ -721,7 +718,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     // Dispatch on the File's ops identity (binder/io_uring pattern).
     if fd >= 0 {
         // SAFETY: fd is valid; get_file_fd returns a valid Arc<File>.
-        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        if let Some(file) = crate::fs::file::get_file_fd(fd as usize) {
             if let Some(ops) = file.get_ops() {
                 if core::ptr::eq(ops as *const _, &crate::perf::PERF_OPS as *const _) {
                     return match crate::perf::perf_mmap_handler(
@@ -745,7 +742,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     // them via the offsets handed out in BR_TRANSACTION/BR_REPLY).
     if fd >= 0 {
         // SAFETY: fd is valid; get_file_fd returns a valid Arc<File>.
-        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        if let Some(file) = crate::fs::file::get_file_fd(fd as usize) {
             if let Some(ops) = file.get_ops() {
                 if core::ptr::eq(ops as *const _, &crate::ipc::binder::BINDER_OPS as *const _) {
                     return match crate::ipc::binder::binder_mmap_handler(
@@ -771,7 +768,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     // Non-anonymous mapping: the file must exist and be mappable (Linux:
     // -ENODEV when the file has no ->mmap; -EBADF when the fd is bad).
     if (map_flags & map::MAP_ANONYMOUS == 0) && fd >= 0 {
-        match unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        match crate::fs::file::get_file_fd(fd as usize) {
             Some(file) => {
                 if file.get_ops().is_none() {
                     return mmap_error::ENODEV;
@@ -784,13 +781,12 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                 // the SIGBUS spawned a hung processdump, and its SIGALRM
                 // exit left the whole boot graph frozen. Userspace handles
                 // a clean ENODEV; it cannot handle the delayed SIGBUS.
-                let is_dir = unsafe {
-                    let inode_opt = &*file.inode.get();
-                    inode_opt
-                        .as_ref()
-                        .map(|i| i.mode.is_directory())
-                        .unwrap_or(false)
-                };
+                // SAFETY: inode is write-once and the File Arc keeps it alive.
+                let inode_opt = unsafe { &*file.inode.get() };
+                let is_dir = inode_opt
+                    .as_ref()
+                    .map(|i| i.mode.is_directory())
+                    .unwrap_or(false);
                 if is_dir {
                     return mmap_error::ENODEV;
                 }
@@ -832,7 +828,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                             core::sync::atomic::AtomicUsize::new(0);
                         if NR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
                             let comm = crate::sched::current()
-                                .map(|t| unsafe { (*t).comm() })
+                                .map(|t| t.comm())
                                 .map(|c| core::str::from_utf8(c).unwrap_or(""))
                                 .unwrap_or("")
                                 .trim_end_matches('\0');
@@ -860,7 +856,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                     core::sync::atomic::AtomicUsize::new(0);
                 if NC.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
                     let comm = crate::sched::current()
-                        .map(|t| unsafe { (*t).comm() })
+                        .map(|t| t.comm())
                         .map(|c| core::str::from_utf8(c).unwrap_or(""))
                         .unwrap_or("")
                         .trim_end_matches('\0');
@@ -943,18 +939,13 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                     // size 0). LTP mmap10 mmaps /dev/zero and forks
                     // writers into it.
                     if vma_type == VmaType::FileBacked && fd >= 0 {
-                        let is_zero_dev = unsafe {
-                            crate::fs::file::get_file_fd(fd as usize)
-                                .and_then(|f| {
-                                    let inode_opt = &*f.inode.get();
-                                    inode_opt.as_ref().map(|i| {
-                                        i.mode.is_char_device()
-                                            && i.rdev
-                                                == crate::fs::dev_t::DEV_ZERO.to_user_dev()
-                                    })
-                                })
-                                .unwrap_or(false)
-                        };
+                        // SAFETY: the File Arc keeps the write-once inode alive.
+                        let is_zero_dev = crate::fs::file::get_file_fd(fd as usize)
+                            .and_then(|f| unsafe { &*f.inode.get() }.as_ref().map(|i| {
+                                i.mode.is_char_device()
+                                    && i.rdev == crate::fs::dev_t::DEV_ZERO.to_user_dev()
+                            }))
+                            .unwrap_or(false);
                         if is_zero_dev {
                             vma_type = VmaType::Anonymous;
                             // The generic file attach below must not pin
@@ -968,7 +959,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                             // case 3). Capture the file here; it is pinned
                             // onto the VMA after the mapping succeeds.
                             zero_dev_shared_file = if map_flags & map::MAP_SHARED != 0 {
-                                unsafe { crate::fs::file::get_file_fd(fd as usize) }
+                                crate::fs::file::get_file_fd(fd as usize)
                             } else {
                                 None
                             };
@@ -985,7 +976,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                     // PageTableEntry::{V,R,W,U,A,D} flag names alias the
                     // identical bits in both mm layers.
                     if fd >= 0 {
-                        let is_fb = unsafe { crate::fs::file::get_file_fd(fd as usize) }
+                        let is_fb = crate::fs::file::get_file_fd(fd as usize)
                             .map(|f| crate::drivers::gpu::fbdev::is_fb_file(&f))
                             .unwrap_or(false);
                         if is_fb {
@@ -1056,7 +1047,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                     // returned. Same device-mapping discipline as fb0:
                     // physical pages installed up front, Device VMA.
                     if fd >= 0 {
-                        let drm_file = unsafe { crate::fs::file::get_file_fd(fd as usize) };
+                        let drm_file = crate::fs::file::get_file_fd(fd as usize);
                         if let Some(file) = drm_file {
                             if crate::drivers::drm::is_drm_file(&file)
                                 || crate::drivers::drm::is_prime_file(&file)
@@ -1152,7 +1143,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                     if fd >= 0 {
                         // SAFETY: fd validated above; get_file_fd returns a
                         // valid Arc<File> or None.
-                        let ashmem_file = unsafe { crate::fs::file::get_file_fd(fd as usize) };
+                        let ashmem_file = crate::fs::file::get_file_fd(fd as usize);
                         if let Some(file) = ashmem_file {
                             if crate::drivers::ashmem::is_ashmem_file(&file) {
                                 let shared = map_flags & map::MAP_SHARED != 0;
@@ -1188,10 +1179,10 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                     // every binder waiter on their txn stacks (the
                     // bootevent.account.ready stall).
                     if vma_type == VmaType::FileBacked && fd >= 0 {
-                        let unmappable = unsafe {
-                            crate::fs::file::get_file_fd(fd as usize)
+                        let unmappable = crate::fs::file::get_file_fd(fd as usize)
                                 .map(|f| {
-                                    let inode_opt = &*f.inode.get();
+                                    // SAFETY: File Arc keeps the write-once inode alive.
+                                    let inode_opt = unsafe { &*f.inode.get() };
                                     match inode_opt.as_ref() {
                                         None => true, // bare anon_inode
                                         Some(inode) => {
@@ -1205,14 +1196,11 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                         }
                                     }
                                 })
-                                .unwrap_or(false)
-                        };
+                                .unwrap_or(false);
                         if unmappable {
-                            let ops_tag = unsafe {
-                                crate::fs::file::get_file_fd(fd as usize)
-                                    .and_then(|f| f.get_ops().map(|o| o as *const _ as usize))
-                                    .unwrap_or(0)
-                            };
+                            let ops_tag = crate::fs::file::get_file_fd(fd as usize)
+                                .and_then(|f| f.get_ops().map(|o| o as *const _ as usize))
+                                .unwrap_or(0);
                             crate::pr_info!(
                                 "MMAP-ENODEV pid {} fd {} len {:#x} prot {:#x} flags {:#x} ops {:#x} path {}",
                                 crate::process::current_pid(),
@@ -1263,7 +1251,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 // Pin the file itself (Linux vm_file): demand
                                 // faults after the caller closes the fd must
                                 // still read the mapped file, not zero-fill.
-                                if let Some(file) = unsafe { crate::fs::get_file_fd(fd as usize) } {
+                                if let Some(file) = crate::fs::get_file_fd(fd as usize) {
                                     address_space.pin_vma_file(mapped_addr.as_usize(), file);
                                 }
                             }
@@ -2634,7 +2622,7 @@ fn vma_file_by_range(
     if fd < 0 {
         return None;
     }
-    unsafe { crate::fs::get_file_fd(fd as usize) }
+    crate::fs::get_file_fd(fd as usize)
 }
 /// Copy page contents from old virtual address range to new virtual address range.
 ///
