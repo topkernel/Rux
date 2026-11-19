@@ -2839,7 +2839,7 @@ fn event_pid_passes() -> bool {
         return true; // no filter armed — everything passes
     }
     let (tid, tgid) = match crate::sched::current() {
-        Some(cur) => unsafe { ((*cur).pid() as u32, (*cur).tgid() as u32) },
+        Some(cur) => (cur.pid() as u32, cur.tgid() as u32),
         None => return false, // no task context (early IRQ) — filtered
     };
     for slot in EVENT_PIDS.iter().take(n) {
@@ -2966,7 +2966,7 @@ pub struct TraceRecord {
 /// One CPU's ring buffer.
 pub struct TraceRing {
     /// The records.
-    pub records: [TraceRecord; RING_CAPACITY],
+    records: core::cell::UnsafeCell<[TraceRecord; RING_CAPACITY]>,
     /// The next slot to write.
     pub head: AtomicUsize,
     /// How many records are stored.
@@ -2988,9 +2988,33 @@ pub struct TraceRing {
     pub dropped_events: AtomicU64,
 }
 
-// SAFETY: the ring's mutable state is behind atomics.
+// SAFETY: the ring's mutable state is behind atomics; the slot array's
+// interior mutability is behind the slot protocol (INV-TRACERING-1).
 unsafe impl Send for TraceRing {}
 unsafe impl Sync for TraceRing {}
+
+impl TraceRing {
+    /// Shared slot view (INV-TRACERING-1): a reader may trust the slot
+    /// only for slots below the published `count` — the same contract
+    /// printk's RecordsArray documents for its ring.
+    #[inline]
+    fn slot(&self, idx: usize) -> &TraceRecord {
+        // SAFETY: INV-TRACERING-1 — idx is masked into range by the
+        // caller's modulo; the array is machine-lifetime static storage.
+        unsafe { &(*self.records.get())[idx] }
+    }
+
+    /// Exclusive slot view for the writer that owns the slot between
+    /// the head hand-out and the count publication (INV-TRACERING-1).
+    #[inline]
+    fn slot_mut(&self, idx: usize) -> &mut TraceRecord {
+        // SAFETY: INV-TRACERING-1 — the head counter hands out distinct
+        // slots to concurrent writers; the record is written before the
+        // count is published. A reader may race with the write and
+        // observe a torn record — the documented debug-facility trade.
+        unsafe { &mut (*self.records.get())[idx] }
+    }
+}
 
 impl TraceRing {
     const fn new() -> Self {
@@ -3001,7 +3025,8 @@ impl TraceRing {
             // what keeps the ring arrays in .bss — a '.' initializer
             // would put 512 KiB of stored bytes into the image PER
             // ring set (the live one AND the snapshot spare).
-            records: [TraceRecord {
+            records: core::cell::UnsafeCell::new([const {
+                TraceRecord {
                 seq: 0,
                 ts_ns: 0,
                 pid: 0,
@@ -3010,7 +3035,8 @@ impl TraceRing {
                 flags: [0; 5],
                 comm: [0; COMM_LEN],
                 args: [0; TRACE_ARGS],
-            }; RING_CAPACITY],
+                }
+            }; RING_CAPACITY]),
             head: AtomicUsize::new(0),
             count: AtomicUsize::new(0),
             seq: AtomicU64::new(0),
@@ -3036,16 +3062,9 @@ impl TraceRing {
             return;
         }
         let idx = self.head.fetch_add(1, Ordering::Relaxed) % RING_CAPACITY;
-        // SAFETY: the head counter hands out distinct slots to
-        // concurrent writers, so this slot is owned by this push; the
-        // record is written before the count is published. A reader
-        // may race with the write and observe a torn record — an
-        // acceptable debug-facility trade (the reference kernel excludes readers
-        // with per-CPU buffer locks; the cost is not warranted here).
-        unsafe {
-            let slot = &self.records[idx] as *const TraceRecord as *mut TraceRecord;
-            slot.write(record);
-        }
+        // INV-TRACERING-1: the head hand-out owns this slot until the
+        // count publishes it (contract named at slot_mut).
+        *self.slot_mut(idx) = record;
         let mut count = self.count.load(Ordering::Relaxed);
         while count < RING_CAPACITY {
             match self.count.compare_exchange(
@@ -3142,11 +3161,8 @@ pub fn record(event: &TraceEvent, args: [u64; TRACE_ARGS]) -> bool {
     let mut comm = [0u8; COMM_LEN];
     let mut pid = 0u32;
     if let Some(cur) = crate::sched::current() {
-        // SAFETY: cur is the running task.
-        unsafe {
-            comm = *(*cur).comm();
-            pid = (*cur).pid() as u32;
-        }
+        comm = *cur.comm();
+        pid = cur.pid() as u32;
     }
     let ring = &RINGS[cpu];
     // Per-CPU sequencing: this CPU's ring counter, not a global one —
@@ -3312,11 +3328,10 @@ pub fn save_snapshot() {
         // SAFETY: SAVING above excludes a concurrent save, so this
         // thread owns every spare slot — the same discipline
         // TraceRing::push relies on for its own slot writes.
-        unsafe {
-            for i in 0..RING_CAPACITY {
-                let dst = &spare.records[i] as *const TraceRecord as *mut TraceRecord;
-                dst.write(ring.records[i]);
-            }
+        for i in 0..RING_CAPACITY {
+            // Both rings' slots are owned by this thread (SAVING excludes
+            // a concurrent save; the source ring is read-only here).
+            *spare.slot_mut(i) = *ring.slot(i);
         }
         spare.head.store(head, Ordering::Release);
         spare.count.store(count, Ordering::Release);
@@ -3409,7 +3424,7 @@ pub fn cpu_stats(cpu: usize) -> String {
     let record_bytes = core::mem::size_of::<TraceRecord>();
     let start = (head + RING_CAPACITY - count) % RING_CAPACITY;
     let oldest = (0..count)
-        .map(|i| ring.records[(start + i) % RING_CAPACITY].ts_ns)
+        .map(|i| ring.slot((start + i) % RING_CAPACITY).ts_ns)
         .min()
         .unwrap_or(0);
     let now = crate::drivers::timer::monotonic_ns_since_boot();
@@ -3433,7 +3448,7 @@ fn collect_ring(ring: &TraceRing, out: &mut Vec<TraceRecord>) -> usize {
     let head = ring.head.load(Ordering::Acquire);
     let start = (head + RING_CAPACITY - count) % RING_CAPACITY;
     for i in 0..count {
-        out.push(ring.records[(start + i) % RING_CAPACITY]);
+        out.push(*ring.slot((start + i) % RING_CAPACITY));
     }
     count
 }

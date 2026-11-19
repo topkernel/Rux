@@ -1149,9 +1149,7 @@ fn syslog_read_sequential(bufp: *mut u8, maxlen: usize) -> i64 {
     };
 
     if produced > 0 {
-        let uncopied = unsafe {
-            crate::arch::uaccess::copy_to_user(bufp, kbuf.as_ptr(), produced)
-        };
+        let uncopied = crate::arch::uaccess_safe::copy_out(bufp as usize, &kbuf[..produced]);
         if uncopied > 0 {
             return -(crate::syscall::errno::EFAULT as i64);
         }
@@ -1239,9 +1237,7 @@ fn syslog_read_all(bufp: *mut u8, maxlen: usize, clear: bool) -> i64 {
     };
 
     if produced > 0 {
-        let uncopied = unsafe {
-            crate::arch::uaccess::copy_to_user(bufp, kbuf.as_ptr(), produced)
-        };
+        let uncopied = crate::arch::uaccess_safe::copy_out(bufp as usize, &kbuf[..produced]);
         if uncopied > 0 {
             return -(crate::syscall::errno::EFAULT as i64);
         }
@@ -1318,7 +1314,9 @@ pub fn ring_tail(n: usize) -> alloc::string::String {
             r.pid,
             r.cpu_id,
         );
-        out.push_str(unsafe { core::str::from_utf8_unchecked(&header_buf[..hlen]) });
+        // Header bytes are ASCII we just formatted — checked decode with
+        // a lossy fallback costs one branch on the rare tail render.
+        out.push_str(core::str::from_utf8(&header_buf[..hlen]).unwrap_or(""));
         // Lossy-UTF8 substitute that stays in core: kernel and console
         // records are overwhelmingly valid UTF-8; anything else prints
         // with invalid bytes masked rather than dropped.
@@ -1562,9 +1560,10 @@ fn kmsg_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
                     drop(rb2);
                     if ready {
                         KMSG_READ_WQ.finish_wait(current);
-                        // SAFETY: current is the running task; undo a
-                        // racing wake enqueue (NEW-C2 discipline).
-                        unsafe { crate::sched::dequeue_task(&*current); }
+                        // Undo a racing wake enqueue (NEW-C2 discipline):
+                        // current is the running task reference handed to
+                        // prepare_to_wait.
+                        crate::sched::dequeue_task(current);
                         continue;
                     }
                 }
@@ -1945,12 +1944,14 @@ fn kmsg_poll_sleep(ms: u64) -> bool {
     let target =
         crate::drivers::timer::get_jiffies() + crate::drivers::timer::msecs_to_jiffies(ms);
 
-    let current = match crate::sched::current() {
-        Some(c) => c as *mut Task,
+    // The running-task borrow is re-derived at each use window and never
+    // held across schedule() — the reborrow discipline that replaces the
+    // raw-pointer dodge (two live &mut Task aliases across schedule() were
+    // the unsound shape this used to paper over).
+    let pid = match crate::sched::current() {
+        Some(c) => c.pid(),
         None => return false,
     };
-    // SAFETY: current is the running task (we are it); pid() is a const read.
-    let pid = unsafe { (*current).pid() };
 
     let timer_id = crate::timer::add_timer_wakeup(target, pid);
     if timer_id == 0 {
@@ -1964,20 +1965,13 @@ fn kmsg_poll_sleep(ms: u64) -> bool {
         }
         // Mark INTERRUPTIBLE BEFORE the final re-check (state-first
         // lost-wakeup discipline, same as sys_nanosleep).
-        // SAFETY: current is the running task's pointer.
-        unsafe {
-            (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
-        }
+        crate::sched::current().map(|c| c.set_state(TaskState::new(TaskState::INTERRUPTIBLE)));
         if crate::drivers::timer::get_jiffies() >= target || crate::signal::signal_pending() {
-            // SAFETY: current is the running task's pointer.
-            unsafe {
-                (*current).set_state(TaskState::new(TaskState::RUNNING));
-            }
-            // A racing wake may have enqueued us while still executing —
-            // take ourselves back off (NEW-C2 discipline).
-            // SAFETY: current is the running task's pointer.
-            unsafe {
-                crate::sched::dequeue_task(&*current);
+            if let Some(c) = crate::sched::current() {
+                c.set_state(TaskState::new(TaskState::RUNNING));
+                // A racing wake may have enqueued us while still executing —
+                // take ourselves back off (NEW-C2 discipline).
+                crate::sched::dequeue_task(c);
             }
             crate::timer::del_timer(timer_id);
             return true;
@@ -2324,30 +2318,27 @@ mod persistent_log {
             if crate::process::kthread::kthread_should_stop() {
                 break;
             }
-            let current = match crate::sched::current() {
-                Some(t) => t as *mut crate::process::task::Task,
+            let my_pid = match crate::sched::current() {
+                Some(t) => t.pid(),
                 None => break,
             };
-            // SAFETY: current is this kthread's own task pointer.
-            let my_pid = unsafe { (*current).pid() };
             let target = crate::drivers::timer::get_jiffies() + interval_jiffies;
             let timer_id = crate::timer::add_timer_wakeup(target, my_pid);
             if timer_id != 0 {
-                // SAFETY: current is the running task's pointer.
-                unsafe {
-                    (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
-                }
+                // Re-derive the running-task borrow per window (never held
+                // across schedule() — the discipline that replaces the raw
+                // pointer this loop used to carry).
+                crate::sched::current().map(|t| t.set_state(TaskState::new(TaskState::INTERRUPTIBLE)));
                 // Re-check AFTER marking sleeping: the one-shot timer may
                 // have fired between arming and set_state — either its wake
                 // captured the INTERRUPTIBLE state, or the deadline is
                 // already visible.
                 if crate::drivers::timer::get_jiffies() >= target {
-                    // SAFETY: see above.
-                    unsafe {
-                        (*current).set_state(TaskState::new(TaskState::RUNNING));
+                    if let Some(t) = crate::sched::current() {
+                        t.set_state(TaskState::new(TaskState::RUNNING));
                         // NEW-C2: a racing wake may have enqueued us while we
                         // are still executing — take ourselves back off.
-                        crate::sched::dequeue_task(&*current);
+                        crate::sched::dequeue_task(t);
                     }
                     crate::timer::del_timer(timer_id);
                 } else {
