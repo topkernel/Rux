@@ -3107,19 +3107,15 @@ pub fn free_task_slot(task_ptr: *mut Task) {
                 );
             }
             if unlinked > 0 {
-                use crate::dfx::taskdump::putc_brief as putchar;
-                const MSG: &[u8] = b"\nFREED-WHILE-LINKED-UNLINKED task=0x";
-                for &b in MSG {
-                    putchar(b);
-                }
-                let mut v = task_ptr as usize;
-                for _ in 0..16 {
-                    let n = (v >> 60) as u8;
-                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                    v <<= 4;
-                }
-                putchar(b'0' + unlinked as u8);
-                putchar(b'\n');
+                // Rule 1 (grq-lock-1st): event ring, not the console
+                // (pid = the dying task's last pid, a = the task page,
+                // b = how many class queues it was unlinked from).
+                crate::sched::sched_ev::sched_ev(
+                    crate::sched::sched_ev::EV_FREED_WHILE_LINKED,
+                    unsafe { (*task_ptr).pid() },
+                    task_ptr as usize as u64,
+                    unlinked as u64,
+                );
             }
         }
         // Scribble hunter (dfx=scribble): stop tracking before the page
@@ -4149,27 +4145,15 @@ unsafe fn __schedule() {
                     u64::MAX
                 };
                 if rt_nr != 0 || rr_nr != 0 {
-                    static DSN: core::sync::atomic::AtomicU32 =
-                        core::sync::atomic::AtomicU32::new(0);
-                    if DSN.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
-                        use crate::dfx::taskdump::putc_brief as putchar;
-                        fn ph(mut v: u64) {
-                            for _ in 0..16 {
-                                let n = (v >> 60) as u8;
-                                putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                                v <<= 4;
-                            }
-                        }
-                        for &b in b"NR-RUNNING-DESYNC cpu=" { putchar(b); }
-                        ph(crate::arch::cpu_id() as u64);
-                        for &b in b" nr=0 rt=" { putchar(b); }
-                        ph(rt_nr);
-                        for &b in b" rr=" { putchar(b); }
-                        ph(rr_nr);
-                        for &b in b" cfs=0x" { putchar(b); }
-                        ph(cfs_linked);
-                        putchar(b'\n');
-                    }
+                    // Rule 1 (grq-lock-1st): event ring, not the
+                    // console (pid = cpu, a packs rt|rr counts, b = the
+                    // CFS linked bitmap witness).
+                    crate::sched::sched_ev::sched_ev(
+                        crate::sched::sched_ev::EV_NR_RUNNING_DESYNC,
+                        crate::arch::cpu_id() as u32,
+                        ((rt_nr as u64) << 32) | rr_nr as u64,
+                        cfs_linked,
+                    );
                 }
             }
             return;
@@ -4414,20 +4398,16 @@ unsafe fn __schedule() {
         // enqueue_task's check_rt_preempt).
         let prev_mask = (*prev).cpus_allowed();
         if prev_mask & (1u32 << cpu_id) == 0 {
+            // Rule 1 (grq-lock-1st): the opt-in rt2xdbg census — event
+            // ring, not the console (a = the affinity mask driving the
+            // migration dispatch).
             if crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1") {
-                static RQD: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(0);
-                if RQD.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
-                    use crate::dfx::taskdump::putc_brief as putchar;
-                    for &b in b"RQD-MIGRATE-DISPATCH pid=" { putchar(b); }
-                    let mut v = prev_pid as u64;
-                    for _ in 0..8 {
-                        let n = (v >> 28) as u8;
-                        putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                        v <<= 4;
-                    }
-                    putchar(b'\n');
-                }
+                crate::sched::sched_ev::sched_ev(
+                    crate::sched::sched_ev::EV_RQD_MIGRATE,
+                    prev_pid,
+                    prev_mask as u64,
+                    0,
+                );
             }
             match crate::sched::claim_idle_cpu_for(prev_mask) {
                 Some(idle_cpu) => resched_cpu(idle_cpu),
@@ -4835,30 +4815,18 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
     if class_mask & CLASS_RT_BIT != 0 {
         let rt_is_throttled = rt_throttled(cpu_id);
         if rt_is_throttled {
+        // Rule 1 (grq-lock-1st): the opt-in rt2xdbg census — event
+        // ring, not the console (a packs used|period_start, b packs
+        // now|rt_nr).
         if cpu_id == 0 && crate::cmdline::get_param("rt2xdbg").as_deref() == Some("1") {
-            static TRS: core::sync::atomic::AtomicU32 =
-                core::sync::atomic::AtomicU32::new(0);
-            if TRS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
-                use crate::dfx::taskdump::putc_brief as putchar;
-                fn ph(mut v: u64) {
-                    for _ in 0..16 {
-                        let n = (v >> 60) as u8;
-                        putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-                        v <<= 4;
-                    }
-                }
-                for &b in b"RT-CLASS-THROTTLED cpu=" { putchar(b); }
-                ph(cpu_id as u64);
-                for &b in b" used=" { putchar(b); }
-                ph(RT_TIME_USED[cpu_id].load(core::sync::atomic::Ordering::Relaxed));
-                for &b in b" ps=" { putchar(b); }
-                ph(RT_PERIOD_START[cpu_id].load(core::sync::atomic::Ordering::Relaxed));
-                for &b in b" now=" { putchar(b); }
-                ph(crate::drivers::timer::get_jiffies());
-                for &b in b" rt_nr=" { putchar(b); }
-                ph(grq.rt_rq.nr_running() as u64);
-                putchar(b'\n');
-            }
+            crate::sched::sched_ev::sched_ev(
+                crate::sched::sched_ev::EV_RT_THROTTLED,
+                cpu_id as u32,
+                (RT_TIME_USED[cpu_id].load(core::sync::atomic::Ordering::Relaxed) << 32)
+                    | RT_PERIOD_START[cpu_id].load(core::sync::atomic::Ordering::Relaxed),
+                (crate::drivers::timer::get_jiffies() << 32)
+                    | grq.rt_rq.nr_running() as u64,
+            );
         }
     }
         if !rt_is_throttled {
@@ -8497,12 +8465,14 @@ pub fn dequeue_if_enqueued(task: &Task) {
 
 pub fn scheduler_tick() {
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
-    // grq-lock-1st: service a deferred /dev/kmsg reader wake. The printk
-    // path defers the wake when the printing cpu holds the GRQ (the wake
-    // would re-acquire the GRQ — self-deadlock / GRQ<->WQ ABAA). The tick
-    // runs with NO scheduler lock held, so it is the safe servicer; the
-    // reader's delivery latency costs at most one tick.
+    // grq-lock-1st: service the printk deferrals (the deferred kmsg
+    // reader wake + one pending console line) and drain the Rule-1
+    // scheduler event ring. All three run with NO scheduler lock held —
+    // the tick is the designated safe servicer (printk is Rule-2-safe
+    // from here: the ring write is lock-free and the console emit
+    // defers).
     crate::printk::service_deferred_kmsg_wake();
+    crate::sched::sched_ev::sched_ev_drain(6);
     crate::dfx::softlockup::touch(cpu_id);
     // Linux's schedstat sched_count: one scheduler invocation.
     crate::fs::procfs::schedstat::note_sched_run(cpu_id);
@@ -11109,10 +11079,14 @@ pub fn harvest_relink(task: *mut Task) -> bool {
                         return false;
                     }
                     (*task).release_pick_ownership();
-                    r56_print_pid(
-                        b"R80-LIVE-MARK-CLEARED pid=",
+                    // Rule 1 (grq-lock-1st): event ring, not the console.
+                    crate::sched::sched_ev::sched_ev(
+                        crate::sched::sched_ev::EV_R80_LIVE_MARK,
                         pid,
-                        b" was_claim=",
+                        (*task).running_on_cpu.load(
+                            core::sync::atomic::Ordering::Acquire,
+                        ) as u64,
+                        0,
                     );
                     r56_print_pid(
                         b"",
@@ -11129,11 +11103,13 @@ pub fn harvest_relink(task: *mut Task) -> bool {
                         return false;
                     }
                     (*task).release_pick_ownership();
-                    r56_print_pid(
-                        b"R56-QUEUED-MARK-CLEARED pid=",
-                        pid,
-                        b"\n",
-                    );
+                        // Rule 1 (grq-lock-1st): event ring, not the console.
+                        crate::sched::sched_ev::sched_ev(
+                            crate::sched::sched_ev::EV_R56_QUEUED_MARK,
+                            pid,
+                            0,
+                            0,
+                        );
                     outcome = true;
                 }
             } else if linked {
@@ -11205,11 +11181,15 @@ pub fn harvest_relink(task: *mut Task) -> bool {
                             // superseded (the aborted switch-in's
                             // republish would supersede again — harmless).
                             pick_gen_supersede(c, idle_task);
-                            r56_print_pid(
-                                b"R56-SLOT-CAPTURE-HEALED cpu=",
-                                c as u32,
-                                b" pid=",
-                            );
+                                // Rule 1 (grq-lock-1st): event ring, not
+                                // the console (pid = the healed task, a =
+                                // the slot's cpu).
+                                crate::sched::sched_ev::sched_ev(
+                                    crate::sched::sched_ev::EV_R56_SLOT_CAPTURE,
+                                    pid,
+                                    c as u64,
+                                    0,
+                                );
                             r56_print_pid(b"", pid, b"\n");
                         }
                     }
@@ -11223,10 +11203,14 @@ pub fn harvest_relink(task: *mut Task) -> bool {
                 (*task).release_pick_ownership();
                 outcome = enqueue_task_locked(&mut g, task);
                 // R56-STEAL diagnostics tail: st/sw/rq on ONE line.
-                r56_print_pid(b"R56-STEAL pid=", pid, b" st=");
-                r56_print_pid(b"", _pre_state, b" sw=");
-                r56_print_pid(b"", _sw_mask, b" rq=");
-                r56_print_pid(b"", if outcome { 1 } else { 0 }, b"\n");
+                // Rule 1 (grq-lock-1st): event ring, not the console
+                // (a packs pre_state|sw_mask, b packs rq|outcome).
+                crate::sched::sched_ev::sched_ev(
+                    crate::sched::sched_ev::EV_R56_STEAL,
+                    pid,
+                    ((_pre_state as u64) << 32) | _sw_mask as u64,
+                    outcome as u64,
+                );
             }
         }
     }
