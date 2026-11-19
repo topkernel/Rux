@@ -296,6 +296,240 @@ pub struct INodeOps {
     pub destroy_inode: Option<unsafe fn(&mut Inode)>,
 }
 
+/// INV-VFSOPS-1 (unsafe-slim round 3): every dispatch through an
+/// INodeOps fn-pointer slot goes through one of the `call_*` methods
+/// below — the single marked call per op. The fn pointers are typed
+/// `unsafe` only because they are function pointers stored in static
+/// tables; the callee contract is "VFS callback with safe parameter
+/// types": tables are built once at filesystem registration from
+/// in-tree callbacks, the `&Inode` receiver is the shared Arc the
+/// caller already holds, and every other argument is a plain
+/// reference/scalar. `None` slots are mapped to the caller's
+/// `unsupported` errno so each call site keeps its LTP-observed error
+/// precedence (mkdir-family sites answer EROFS, mknod EOPNOTSUPP,
+/// create EACCES — these differ on purpose).
+impl INodeOps {
+    #[inline]
+    pub fn call_lookup(
+        &self,
+        dir: &Inode,
+        name: &[u8],
+        unsupported: Result<Ino, Errno>,
+    ) -> Result<Ino, Errno> {
+        match self.lookup {
+            Some(f) => unsafe { f(dir, name) },
+            None => unsupported,
+        }
+    }
+
+    #[inline]
+    pub fn call_create(
+        &self,
+        dir: &Inode,
+        name: &[u8],
+        mode: InodeMode,
+        unsupported: Result<Arc<Inode>, Errno>,
+    ) -> Result<Arc<Inode>, Errno> {
+        match self.create {
+            Some(f) => unsafe { f(dir, name, mode) },
+            None => unsupported,
+        }
+    }
+
+    #[inline]
+    pub fn call_link(&self, dir: &Inode, name: &[u8], target: &Inode, unsupported: i32) -> i32 {
+        match self.link {
+            Some(f) => unsafe { f(dir, name, target) },
+            None => unsupported,
+        }
+    }
+
+    #[inline]
+    pub fn call_unlink(&self, dir: &Inode, name: &[u8], unsupported: i32) -> i32 {
+        match self.unlink {
+            Some(f) => unsafe { f(dir, name) },
+            None => unsupported,
+        }
+    }
+
+    #[inline]
+    pub fn call_symlink(
+        &self,
+        dir: &Inode,
+        name: &[u8],
+        target: &[u8],
+        unsupported: Result<Arc<Inode>, Errno>,
+    ) -> Result<Arc<Inode>, Errno> {
+        match self.symlink {
+            Some(f) => unsafe { f(dir, name, target) },
+            None => unsupported,
+        }
+    }
+
+    #[inline]
+    pub fn call_mkdir(
+        &self,
+        dir: &Inode,
+        name: &[u8],
+        mode: InodeMode,
+        unsupported: Result<Arc<Inode>, Errno>,
+    ) -> Result<Arc<Inode>, Errno> {
+        match self.mkdir {
+            Some(f) => unsafe { f(dir, name, mode) },
+            None => unsupported,
+        }
+    }
+
+    #[inline]
+    pub fn call_rmdir(&self, dir: &Inode, name: &[u8], unsupported: i32) -> i32 {
+        match self.rmdir {
+            Some(f) => unsafe { f(dir, name) },
+            None => unsupported,
+        }
+    }
+
+    #[inline]
+    pub fn call_mknod(
+        &self,
+        dir: &Inode,
+        name: &[u8],
+        mode: InodeMode,
+        dev: u64,
+        unsupported: Result<Arc<Inode>, Errno>,
+    ) -> Result<Arc<Inode>, Errno> {
+        match self.mknod {
+            Some(f) => unsafe { f(dir, name, mode, dev) },
+            None => unsupported,
+        }
+    }
+
+    #[inline]
+    pub fn call_rename(
+        &self,
+        old_dir: &Inode,
+        old_name: &[u8],
+        new_dir: &Inode,
+        new_name: &[u8],
+        unsupported: i32,
+    ) -> i32 {
+        match self.rename {
+            Some(f) => unsafe { f(old_dir, old_name, new_dir, new_name) },
+            None => unsupported,
+        }
+    }
+
+    #[inline]
+    pub fn call_readlink(&self, inode: &Inode, buf: &mut [u8], unsupported: isize) -> isize {
+        match self.readlink {
+            Some(f) => unsafe { f(inode, buf) },
+            None => unsupported,
+        }
+    }
+
+    #[inline]
+    pub fn call_get_file_ops(
+        &self,
+        inode: &Inode,
+    ) -> Option<&'static crate::fs::file::FileOps> {
+        // get_file_ops has no "unsupported errno" — every site treats
+        // both None layers identically (keep the existing ops / skip).
+        match self.get_file_ops {
+            Some(f) => unsafe { f(inode) },
+            None => None,
+        }
+    }
+
+    #[inline]
+    pub fn call_readdir(
+        &self,
+        dir: &Inode,
+    ) -> Option<alloc::vec::Vec<VfsDirEntry>> {
+        match self.readdir {
+            Some(f) => unsafe { f(dir) },
+            None => None,
+        }
+    }
+
+    #[inline]
+    pub fn call_readdir_fill(
+        &self,
+        dir: &Inode,
+        pos: u64,
+        buf: &mut [u8],
+    ) -> Option<Result<(usize, u64), i32>> {
+        match self.readdir_fill {
+            Some(f) => Some(unsafe { f(dir, pos, buf) }),
+            None => None,
+        }
+    }
+
+    #[inline]
+    pub fn call_open(&self, inode: &Inode, file: &crate::fs::File, unsupported: i32) -> i32 {
+        match self.open {
+            Some(f) => unsafe { f(inode, file) },
+            None => unsupported,
+        }
+    }
+
+    #[inline]
+    pub fn call_permission(&self, inode: &Inode, mask: u32, unsupported: i32) -> i32 {
+        match self.permission {
+            Some(f) => unsafe { f(inode, mask) },
+            None => unsupported,
+        }
+    }
+
+    #[inline]
+    pub fn call_getattr(&self, inode: &Inode, stat: &mut crate::fs::Stat, unsupported: i32) -> i32 {
+        match self.getattr {
+            Some(f) => unsafe { f(inode, stat) },
+            None => unsupported,
+        }
+    }
+
+    #[inline]
+    pub fn call_setattr(
+        &self,
+        inode: &Inode,
+        attr: u32,
+        arg1: u64,
+        arg2: u64,
+        unsupported: i32,
+    ) -> i32 {
+        match self.setattr {
+            Some(f) => unsafe { f(inode, attr, arg1, arg2) },
+            None => unsupported,
+        }
+    }
+
+    #[inline]
+    pub fn call_iget(
+        &self,
+        parent: &Inode,
+        name: &[u8],
+        ino: Ino,
+        unsupported: Result<Arc<Inode>, Errno>,
+    ) -> Result<Arc<Inode>, Errno> {
+        match self.iget {
+            Some(f) => unsafe { f(parent, name, ino) },
+            None => unsupported,
+        }
+    }
+
+    /// Dispatch destroy_inode (used by Inode::drop). Returns true when a
+    /// hook ran.
+    #[inline]
+    pub fn call_destroy_inode(&self, inode: &mut Inode) -> bool {
+        match self.destroy_inode {
+            Some(f) => {
+                unsafe { f(inode) };
+                true
+            }
+            None => false,
+        }
+    }
+}
+
 /// Inode state
 ///
 #[repr(C)]

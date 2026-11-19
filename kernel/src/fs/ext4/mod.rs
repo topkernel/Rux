@@ -121,6 +121,21 @@ pub(crate) fn dev_id(fs: &Ext4FileSystem) -> u32 {
     (fs.device.major << 20) | fs.device.first_minor
 }
 
+/// INV-EXT-VIEW twin for the on-disk superblock: the single cast point,
+/// bounds-guarded. The 4 KiB block-0 read always covers 1024 + the struct.
+fn superblock_on_disk(disk: &[u8]) -> &superblock::Ext4SuperBlockOnDisk {
+    let view = &disk[1024..];
+    assert!(
+        view.len() >= core::mem::size_of::<superblock::Ext4SuperBlockOnDisk>(),
+        "block-0 read too small for the on-disk superblock"
+    );
+    // SAFETY: view covers at least the struct; the struct is #[repr(C)]
+    // of integer fields read only (no reference fields), and every read
+    // below goes through unaligned-safe loads on riscv64/x86_64 alike
+    // because the on-disk image itself was DMA'd byte-aligned.
+    unsafe { &*(view.as_ptr() as *const superblock::Ext4SuperBlockOnDisk) }
+}
+
 pub struct Ext4FileSystem {
     /// Block device (typed handle; INV-BLKDEV-1 on blkdev::get_disk)
     pub device: &'static blkdev::GenDisk,
@@ -268,7 +283,7 @@ impl Ext4FileSystem {
         // SAFETY: self.device is a valid GenDisk pointer set during filesystem creation;
         // bio::bread reads a block and returns a valid BufferHead, and the superblock
         // is at a known fixed offset (1024 bytes into block 0).
-        unsafe {
+        {
             // Read superblock
             // ext4 superblock is at byte offset 1024
             // - For 1KB blocks: superblock at start of block 1
@@ -277,9 +292,11 @@ impl Ext4FileSystem {
             let sb_bh = bio::bread(self.device, 0)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-            let sb_data = &(*sb_bh).b_data;
+            let sb_data = bio::bh_data(&sb_bh);
             // Superblock is at 1024 byte offset within block
-            let ext4_sb = &*(sb_data.as_ptr().add(1024) as *const superblock::Ext4SuperBlockOnDisk);
+            // (unsafe-slim r3) typed view via superblock_on_disk below
+            // (bounds-guarded; same INV-EXT-VIEW discipline as extent.rs).
+            let ext4_sb = superblock_on_disk(sb_data);
 
             // Verify magic number
             if ext4_sb.s_magic != EXT4_SUPER_MAGIC {
@@ -444,7 +461,7 @@ impl Ext4FileSystem {
                 let gd_bh = bio::bread(self.device, gd_block as u64)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-                let gd_data = &(*gd_bh).b_data;
+                let gd_data = bio::bh_data(&gd_bh);
                 // Use actual descriptor size for offset calculation
                 let gd_offset = gd_index * desc_size;
 
@@ -473,12 +490,19 @@ impl Ext4FileSystem {
                 // available — high 64-bit fields default to zero.
                 let mut gd = superblock::Ext4GroupDesc::default();
                 let copy_len = desc_size.min(core::mem::size_of::<superblock::Ext4GroupDesc>());
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        gd_data.as_ptr().add(gd_offset),
-                        &mut gd as *mut superblock::Ext4GroupDesc as *mut u8,
-                        copy_len,
-                    );
+                {
+                    // (unsafe-slim r3) slice-indexed source; the one raw
+                    // copy moves copy_len bytes into the packed struct.
+                    let src_bytes = &gd_data[gd_offset..gd_offset + copy_len];
+                    // SAFETY: src_bytes has exactly copy_len readable bytes
+                    // and gd is a live local of at least that size.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            src_bytes.as_ptr(),
+                            &mut gd as *mut superblock::Ext4GroupDesc as *mut u8,
+                            copy_len,
+                        );
+                    }
                 }
 
                 group_descs.push(Box::new(gd));
@@ -584,7 +608,7 @@ impl Ext4FileSystem {
         let bh = bio::bread(self.device, inode_block as u64)
             .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-        let data = unsafe { &(*bh).b_data };
+        let data = bio::bh_data(&bh);
 
         // Bounds check (read-side twin of the write paths' R20-FS2 clamp,
         // review EXT4-M1 refined): the parse is clamped to the ON-DISK
@@ -739,7 +763,7 @@ impl Ext4FileSystem {
                 let bh = bio::bread(self.device, *block)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-                let data = &(*bh).b_data;
+                let data = bio::bh_data(&bh);
                 let mut offset = 0;
 
                 while offset < self.block_size as usize {
@@ -828,7 +852,7 @@ impl Ext4FileSystem {
                 let bh = bio::bread(self.device, *block)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-                let data = &(*bh).b_data;
+                let data = bio::bh_data(&bh);
                 let mut offset = 0;
 
                 while offset < self.block_size as usize {
@@ -916,10 +940,10 @@ impl Ext4FileSystem {
         for block in blocks {
             // SAFETY: self.device is a valid GenDisk pointer; block numbers come from
             // get_data_blocks; bio::bread returns a valid BufferHead.
-            unsafe {
+            {
                 let bh = bio::bread(self.device, block)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
-                let data = &(*bh).b_data;
+                let data = bio::bh_data(&bh);
 
                 let remaining = size - target.len();
                 let to_read = core::cmp::min(remaining, self.block_size as usize);
@@ -1101,7 +1125,7 @@ fn read_file_internal(device: &'static blkdev::GenDisk, path: &str, depth: u32) 
     // SAFETY: device is a valid GenDisk pointer from the block device layer;
     // Box::into_raw leaks the Box to make a static-lifetime pointer stored in
     // GLOBAL_EXT4_FS; this is called once during mount and cleaned up on unmount.
-    unsafe {
+    {
         // The boot init loader runs before the VFS mount — and the fresh
         // instance's uninitialized extent walk mis-mapped the noble rootfs's
         // indexed directory extents (/sbin lookup ENOENTed while the
@@ -1394,20 +1418,18 @@ pub fn sync_inode_tables(targets: &[(u64, u64)]) -> usize {
         let Some(tbl_blk) = inode::inode_table_block_of(fs, ino as u32) else {
             continue;
         };
-        // SAFETY: fs.device is a valid GenDisk of a live instance; bread
-        // returns a valid BufferHead on success.
-        unsafe {
-            if let Some(bh) = crate::fs::bio::bread(fs.device, tbl_blk) {
-                let dirty = (*bh).is_dirty();
-                let res = if dirty {
-                    crate::fs::bio::sync_dirty_buffer(bh)
-                } else {
-                    Ok(())
-                };
-                crate::fs::bio::brelse(bh);
-                if res.is_ok() && dirty {
-                    n += 1;
-                }
+        // INV-BIO-BHREF: bread pins until brelse; the dirty query rides
+        // the safe accessor.
+        if let Some(bh) = crate::fs::bio::bread(fs.device, tbl_blk) {
+            let dirty = crate::fs::bio::bh_is_dirty(&bh);
+            let res = if dirty {
+                crate::fs::bio::sync_dirty_buffer(bh)
+            } else {
+                Ok(())
+            };
+            crate::fs::bio::brelse(bh);
+            if res.is_ok() && dirty {
+                n += 1;
             }
         }
     }
@@ -1453,21 +1475,17 @@ pub fn sync_flushed_data(targets: &[(u64, u64)]) -> usize {
             // at its eviction, so the ordered-data obligation for it is
             // already met — re-reading it paid one synchronous 4 KiB read
             // per absent block (the sync(2) wall after a large flush).
-            // SAFETY: fs.device is a valid GenDisk of a live instance.
-            if unsafe { crate::fs::bio::block_absent_durable(fs.device, block) } {
+            if { crate::fs::bio::block_absent_durable(fs.device, block) } {
                 continue;
             }
-            // SAFETY: fs.device is a valid GenDisk of a live instance;
-            // bread returns a valid BufferHead on success.
-            unsafe {
-                if let Some(bh) = crate::fs::bio::bread(fs.device, block) {
-                    let dirty = (*bh).is_dirty();
-                    if dirty {
-                        let _ = crate::fs::bio::sync_dirty_buffer(bh);
-                        n += 1;
-                    }
-                    crate::fs::bio::brelse(bh);
+            // INV-BIO-BHREF: as sync_inode_tables.
+            if let Some(bh) = crate::fs::bio::bread(fs.device, block) {
+                let dirty = crate::fs::bio::bh_is_dirty(&bh);
+                if dirty {
+                    let _ = crate::fs::bio::sync_dirty_buffer(bh);
+                    n += 1;
                 }
+                crate::fs::bio::brelse(bh);
             }
         }
     }
@@ -1545,7 +1563,7 @@ fn resolve_path(path: &str) -> String {
     } else {
         // Get current working directory
         let cwd = if let Some(current) = crate::sched::current() {
-            let cwd_bytes = unsafe { (*current).get_cwd() };
+            let cwd_bytes = { (*current).get_cwd() };
             match core::str::from_utf8(&cwd_bytes) {
                 Ok(s) => String::from(s),
                 Err(_) => String::from("/"),
@@ -1641,25 +1659,24 @@ pub fn ext4_shutdown_sync() -> Result<(), i32> {
     let _ = sync_inode_tables(&flushed_targets);
 
     // 2. Superblock clean marking (block 0, byte offset 1024 + 58).
-    let fs_ptr = GLOBAL_EXT4_FS.load(Ordering::Acquire);
-    if fs_ptr.is_null() {
-        return Ok(()); // no ext4 root — nothing to mark
-    }
-    // SAFETY: fs_ptr was set by mount_ext4 (Box::into_raw) and the fs is
-    // still mounted; only the device pointer and block size are read.
-    unsafe {
-        let device = (*fs_ptr).device;
-        if let Some(bh) = crate::fs::bio::bread(device, 0) {
-            // s_state offset within the on-disk superblock: 13 u32 fields
-            // (52) + s_mnt_count(2) + s_max_mnt_count(2) + s_magic(2) = 58.
-            const SB_OFF: usize = 1024;
-            const S_STATE_OFF: usize = SB_OFF + 58;
-            const EXT4_VALID_FS: u16 = 1;
-            (*bh).write(S_STATE_OFF, &EXT4_VALID_FS.to_le_bytes());
-            let r = crate::fs::bio::sync_dirty_buffer(bh);
-            crate::fs::bio::brelse(bh);
-            r?;
-        }
+    // No ext4 root — nothing to mark.
+    let device = match mounted_ext4_fs() {
+        Some(fs) => fs.device,
+        None => return Ok(()),
+    };
+    if let Some(bh) = crate::fs::bio::bread(device, 0) {
+        // s_state offset within the on-disk superblock: 13 u32 fields
+        // (52) + s_mnt_count(2) + s_max_mnt_count(2) + s_magic(2) = 58.
+        const SB_OFF: usize = 1024;
+        const S_STATE_OFF: usize = SB_OFF + 58;
+        const EXT4_VALID_FS: u16 = 1;
+        // INV-BIO-BHREF: the s_state store goes through the exclusive
+        // data view (BufferHead::write's body is this slice store).
+        crate::fs::bio::bh_data_mut(&bh)[S_STATE_OFF..S_STATE_OFF + 2]
+            .copy_from_slice(&EXT4_VALID_FS.to_le_bytes());
+        let r = crate::fs::bio::sync_dirty_buffer(bh);
+        crate::fs::bio::brelse(bh);
+        r?;
     }
 
     // 3. Disk-side volatile cache.
@@ -1669,25 +1686,18 @@ pub fn ext4_shutdown_sync() -> Result<(), i32> {
 /// Create a VFS inode for the ext4 root directory (inode 2).
 /// Called during mount to set up the root dentry's inode.
 pub fn create_root_inode() -> alloc::sync::Arc<Inode> {
-    let fs_ptr = GLOBAL_EXT4_FS.load(core::sync::atomic::Ordering::Acquire);
-    if fs_ptr.is_null() {
-        // Fallback: shouldn't happen at mount time
+    let fallback = || {
         let mut inode = Inode::new(2, InodeMode::new(InodeMode::S_IFDIR | 0o755));
         inode.ops = Some(&EXT4_INODE_OPS);
-        return alloc::sync::Arc::new(inode);
-    }
-    // SAFETY: fs_ptr was loaded from GLOBAL_EXT4_FS with null check above;
-    // the pointer is valid for the lifetime of the mount (set in ext4_mount).
-    unsafe {
-        let fs = &*fs_ptr;
-        match fs.read_inode(2) {
+        alloc::sync::Arc::new(inode)
+    };
+    match mounted_ext4_fs() {
+        Some(fs) => match fs.read_inode(2) {
             Ok(ext4_inode) => create_vfs_inode(2, &ext4_inode),
-            Err(_) => {
-                let mut inode = Inode::new(2, InodeMode::new(InodeMode::S_IFDIR | 0o755));
-                inode.ops = Some(&EXT4_INODE_OPS);
-                alloc::sync::Arc::new(inode)
-            }
-        }
+            // Fallback: shouldn't happen at mount time.
+            Err(_) => fallback(),
+        },
+        None => fallback(),
     }
 }
 
@@ -1723,41 +1733,30 @@ pub fn unmount_ext4() {
 /// - `Some(data)`: File content
 /// - `None`: Read failed
 pub fn read_file_from_mounted(path: &str) -> Option<alloc::vec::Vec<u8>> {
-    use core::sync::atomic::Ordering;
-
-    let fs_ptr = GLOBAL_EXT4_FS.load(Ordering::Acquire);
-    if fs_ptr.is_null() {
-        return None;
-    }
-
     // Parse path to absolute path
     let abs_path = resolve_path(path);
 
-    // SAFETY: fs_ptr was loaded from GLOBAL_EXT4_FS with null check above;
-    // the pointer is valid for the lifetime of the mount.
-    unsafe {
-        let fs = &*fs_ptr;
+    let fs = mounted_ext4_fs()?;
 
-        // Use the global mounted filesystem directly instead of creating
-        // a temporary Ext4FileSystem, which avoids unnecessary buffer
-        // cache pressure and potential eviction issues.
-        let (_, inode) = fs.lookup_path(&abs_path).ok()?;
+    // Use the global mounted filesystem directly instead of creating
+    // a temporary Ext4FileSystem, which avoids unnecessary buffer
+    // cache pressure and potential eviction issues.
+    let (_, inode) = fs.lookup_path(&abs_path).ok()?;
 
-        let file_size = inode.get_size() as usize;
-        if file_size == 0 {
-            return Some(alloc::vec::Vec::new());
+    let file_size = inode.get_size() as usize;
+    if file_size == 0 {
+        return Some(alloc::vec::Vec::new());
+    }
+
+    let mut buffer = alloc::vec::Vec::with_capacity(file_size);
+    buffer.resize(file_size, 0);
+
+    match file::ext4_file_read(fs, &inode, 0, &mut buffer) {
+        Ok(n) => {
+            buffer.truncate(n);
+            Some(buffer)
         }
-
-        let mut buffer = alloc::vec::Vec::with_capacity(file_size);
-        buffer.resize(file_size, 0);
-
-        match file::ext4_file_read(fs, &inode, 0, &mut buffer) {
-            Ok(n) => {
-                buffer.truncate(n);
-                Some(buffer)
-            }
-            Err(_) => None,
-        }
+        Err(_) => None,
     }
 }
 
@@ -1817,7 +1816,7 @@ pub fn create_file(path: &str, mode: u32) -> Result<alloc::sync::Arc<Inode>, i32
         };
 
         // Initialize extent header in i_block
-        let header = &mut *(new_inode.block.as_mut_ptr() as *mut Ext4ExtentHeader);
+        let header = extent::get_extent_header_mut(&mut new_inode.block);
         header.eh_magic = EXT4_EXT_MAGIC;
         header.eh_entries = 0;
         header.eh_max = 4;
@@ -2012,7 +2011,7 @@ pub fn ext4_fallocate_on(
                         if ind == 0 { return None; }
                         let bh = crate::fs::bio::bread(fs.device, ind)?;
                         let o = ((blk - 12) * 4) as usize;
-                        let d = &(*bh).b_data;
+                        let d = bio::bh_data(&bh);
                         let b = u32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]]);
                         crate::fs::bio::brelse(bh);
                         if b != 0 { Some(b as u64) } else { None }
@@ -2027,9 +2026,9 @@ pub fn ext4_fallocate_on(
                         if let Some(phys) = resolve(blk) {
                             if phys != 0 {
                                 if let Some(bh) = crate::fs::bio::bread(fs.device, phys) {
-                                    let d = &mut (*bh).b_data;
+                                    let d = bio::bh_data_mut(&bh);
                                     d[(in_blk as usize)..(in_blk + n) as usize].fill(0);
-                                    (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                                    bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
                                     let _ = crate::fs::bio::sync_dirty_buffer(bh);
                                     crate::fs::bio::brelse(bh);
                                 }
@@ -2049,7 +2048,7 @@ pub fn ext4_fallocate_on(
                 // Any-depth punch via gather/classify/rebuild (the old
                 // inline-root-only walker refused deep trees and could
                 // not represent more than 4 surviving fragments).
-                let hdr = &*(ext4_inode.block.as_ptr() as *const Ext4ExtentHeader);
+                let hdr = extent::get_extent_header(&ext4_inode.block);
                 if hdr.eh_magic == EXT4_EXT_MAGIC {
                     // R108 (crash-ordering, see ext4_setattr): the punch
                     // frees are DEFERRED until the punched map is durably
@@ -2183,7 +2182,7 @@ pub fn ext4_fallocate_on(
                     let ent_last_excl = core::cmp::min(last.saturating_sub(12) + 1, ents_per_blk);
                     if ent_first < ent_last_excl {
                         if let Some(bh) = crate::fs::bio::bread(fs.device, ind_blk) {
-                            let data = &mut (*bh).b_data;
+                            let data = bio::bh_data_mut(&bh);
                             for ei in ent_first..ent_last_excl {
                                 let o = ei * 4;
                                 let b = u32::from_le_bytes([
@@ -2195,7 +2194,7 @@ pub fn ext4_fallocate_on(
                                     data[o..o + 4].fill(0);
                                 }
                             }
-                            (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                            bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
                             let _ = crate::fs::bio::sync_dirty_buffer(bh);
                             crate::fs::bio::brelse(bh);
                         }
@@ -2434,10 +2433,10 @@ fn add_dir_entry(
 
         // SAFETY: fs.device is a valid GenDisk pointer; *block_num is a non-zero
         // block number from get_data_blocks; bio::bread returns a valid BufferHead.
-        unsafe {
+        {
             let bh = bio::bread(fs.device, *block_num)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
-            let data = &mut (*bh).b_data;
+            let data = bio::bh_data_mut(&bh);
 
             // Try to find space in this block
             let mut offset = 0;
@@ -2462,7 +2461,7 @@ fn add_dir_entry(
                     create_dir_entry(entry_data, ino, name, file_type, rec_len as u16);
                     // metadata_csum: refresh the block's dir tail.
                     super::ext4::namei::dir_block_seal(fs, parent.ino, data);
-                    (*bh).set_state_bit(bio::BufferState::BH_Dirty);
+                    bio::bh_set_state_bit(&bh, bio::BufferState::BH_Dirty);
                     let sync_res = bio::sync_dirty_buffer(bh);
                     bio::brelse(bh);
                     sync_res?;
@@ -2502,7 +2501,7 @@ fn add_dir_entry(
 
                 // metadata_csum: refresh the block's dir tail.
                 super::ext4::namei::dir_block_seal(fs, parent.ino, data);
-                (*bh).set_state_bit(bio::BufferState::BH_Dirty);
+                bio::bh_set_state_bit(&bh, bio::BufferState::BH_Dirty);
                 let sync_res = bio::sync_dirty_buffer(bh);
                 bio::brelse(bh);
                 sync_res?;
@@ -2547,23 +2546,23 @@ fn append_dir_block(
     // Zero the new block and create the directory entry
     // SAFETY: fs.device is a valid GenDisk pointer; new_block is a freshly allocated
     // block number; bio::bread returns a valid BufferHead.
-    unsafe {
+    {
         let bh = bio::bread(fs.device, new_block)
             .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
         // Zero the block
-        for byte in (*bh).b_data.iter_mut() {
+        for byte in bio::bh_data_mut(&bh).iter_mut() {
             *byte = 0;
         }
 
         // Create a single entry spanning the whole block
         // Since we don't have checksum, use full block size
-        let data = &mut (*bh).b_data;
+        let data = bio::bh_data_mut(&bh);
         create_dir_entry(data, ino, name, file_type, block_size as u16);
 
         // metadata_csum: refresh the block's dir tail.
         super::ext4::namei::dir_block_seal(fs, parent_ino, data);
-        (*bh).set_state_bit(bio::BufferState::BH_Dirty);
+        bio::bh_set_state_bit(&bh, bio::BufferState::BH_Dirty);
         let sync_res = bio::sync_dirty_buffer(bh);
         bio::brelse(bh);
         sync_res?;
@@ -2880,9 +2879,7 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                     // tree is rebuilt from the survivors (the old code only
                     // handled the 4-entry inline root and refused deep
                     // trees).
-                    let hdr = unsafe {
-                        &*(ext4_inode.block.as_ptr() as *const Ext4ExtentHeader)
-                    };
+                    let hdr = extent::get_extent_header(&ext4_inode.block);
                     if hdr.eh_magic == EXT4_EXT_MAGIC {
                         let all = match crate::fs::ext4::extent::ext4_ext_gather(fs, &ext4_inode.block) {
                             Ok(a) => a,
@@ -3034,17 +3031,11 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                         if block_nr != 0 {
                             let tail_start = (new_size % block_size) as usize;
                             if let Some(bh) = crate::fs::bio::bread(fs.device, block_nr) {
-                                // SAFETY: bh is a one-block buffer from
-                                // bread; the tail range is in-bounds and
-                                // the buffer is released after the sync.
-                                unsafe {
-                                    let data = (*bh).b_data.as_mut_ptr();
-                                    core::ptr::write_bytes(
-                                        data.add(tail_start),
-                                        0,
-                                        (block_size as usize) - tail_start,
-                                    );
-                                }
+                                // INV-BIO-BHREF: bh is a one-block buffer
+                                // from bread; the tail range is in-bounds
+                                // and the buffer is released after sync.
+                                let data = crate::fs::bio::bh_data_mut(&bh);
+                                data[tail_start..block_size as usize].fill(0);
                                 let _ = crate::fs::bio::sync_dirty_buffer(bh);
                                 crate::fs::bio::brelse(bh);
                             }
@@ -3189,7 +3180,7 @@ unsafe fn ext4_destroy_inode(inode: &mut crate::fs::inode::Inode) {
     if let Ok(fs) = get_ext4_fs_from_inode(inode) {
         // SAFETY: read_inode only touches the block layer under the big
         // lock taken below; queueing avoids I/O in this Drop context.
-        unsafe {
+        {
             if let Ok(disk) = inode::read_inode(fs, inode.ino as u32) {
                 if disk.i_links_count == 0 && disk.i_dtime == 0 {
                     let mut q = PENDING_REAPS.lock();
@@ -3489,7 +3480,7 @@ unsafe fn ext4_unlink_wrapper(dir: &Inode, name: &[u8]) -> i32 {
 
 /// Wrapper for ext4_rename to match VFS signature
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn ext4_rename_wrapper(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_name: &[u8]) -> i32 {
+fn ext4_rename_wrapper(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_name: &[u8]) -> i32 {
     let _ext4_guard = EXT4_BIG_LOCK.lock();
     let fs = match get_ext4_fs_rw_from_inode(old_dir) {
         Ok(f) => f,
@@ -3500,6 +3491,19 @@ unsafe fn ext4_rename_wrapper(old_dir: &Inode, old_name: &[u8], new_dir: &Inode,
         Ok(()) => 0,
         Err(e) => e,
     }
+}
+
+/// INV-EXT4-GLOBALFS (unsafe-slim r3c): the one audited read of the
+/// GLOBAL_EXT4_FS singleton — the Box is installed by mount_ext4 and only
+/// reclaimed by unmount_ext4, so a non-null Acquire load is live for the
+/// 'static mount lifetime. Every global-fs wrapper rides this.
+pub fn mounted_ext4_fs() -> Option<&'static Ext4FileSystem> {
+    let p = GLOBAL_EXT4_FS.load(core::sync::atomic::Ordering::Acquire);
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: INV-EXT4-GLOBALFS above.
+    Some(unsafe { &*p })
 }
 
 /// Get Ext4FileSystem pointer from inode's private_data
@@ -3531,7 +3535,7 @@ fn get_ext4_fs_rw_from_inode(inode: &Inode) -> Result<&'static Ext4FileSystem, i
 
 /// Get file operations for ext4 regular files and directories
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn ext4_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
+fn ext4_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
     if inode.mode.is_regular_file() {
         Some(&file::EXT4_FILE_OPS)
     } else if inode.mode.is_directory() {
@@ -3672,7 +3676,7 @@ unsafe fn ext4_readdir_fill(
         // SAFETY: bread returns a valid, pinned BufferHead whose b_data
         // covers one full block; we only read it and brelse before any
         // early exit below.
-        let data = unsafe { &(*bh).b_data };
+        let data = bio::bh_data(&bh);
         while off + 8 <= block_size as usize {
             let rec = &data[off..];
             let entry_ino = u32::from_le_bytes([rec[0], rec[1], rec[2], rec[3]]);
@@ -3882,16 +3886,19 @@ static LOOP_INSTANCE_REUSE: [LoopInstanceReuse; LOOP_REUSE_SLOTS] = [const {
 /// (same read init() uses: block 0, byte offset 1024; s_uuid at +0x68).
 /// None when the block cannot be read.
 fn sb_uuid_of(disk: &'static crate::drivers::blkdev::GenDisk) -> Option<(u64, u64)> {
-    // SAFETY: bread on a live GenDisk returns a valid BufferHead whose
-    // b_data covers the full block; brelse drops the reference.
-    unsafe {
-        let bh = crate::fs::bio::bread(disk, 0)?;
-        let data = (*bh).b_data.as_ptr();
-        let lo = core::ptr::read_unaligned(data.add(1024 + 0x68) as *const u64);
-        let hi = core::ptr::read_unaligned(data.add(1024 + 0x70) as *const u64);
-        crate::fs::bio::brelse(bh);
-        Some((lo.to_le(), hi.to_le()))
-    }
+    // INV-BIO-BHREF: bread on a live GenDisk returns a pinned BufferHead
+    // whose b_data covers the full block; the UUID fields are read as
+    // little-endian byte slices (equivalent to the old unaligned loads).
+    let bh = crate::fs::bio::bread(disk, 0)?;
+    let data = crate::fs::bio::bh_data(&bh);
+    let lo = u64::from_le_bytes(
+        data[1024 + 0x68..1024 + 0x68 + 8].try_into().expect("uuid lo"),
+    );
+    let hi = u64::from_le_bytes(
+        data[1024 + 0x70..1024 + 0x70 + 8].try_into().expect("uuid hi"),
+    );
+    crate::fs::bio::brelse(bh);
+    Some((lo, hi))
 }
 
 /// Publish a fresh instance for its device (replacing any stale row for

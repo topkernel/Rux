@@ -107,6 +107,12 @@ pub fn i_block_bytes_mut(i_block: &mut [u32; 15]) -> &mut [u8] {
     unsafe { core::slice::from_raw_parts_mut(i_block.as_mut_ptr() as *mut u8, 60) }
 }
 
+/// Mutable twin of [`get_extent_header`] (INV-EXT-VIEW: the single
+/// transmute point is i_block_bytes_mut).
+pub fn get_extent_header_mut(i_block: &mut [u32; 15]) -> &mut Ext4ExtentHeader {
+    node_header_mut(i_block_bytes_mut(i_block))
+}
+
 /// Parse extent header from i_block array
 pub fn get_extent_header(i_block: &[u32; 15]) -> &Ext4ExtentHeader {
     // i_block is 60 bytes; the header is 12 — node_header's size guard
@@ -1405,6 +1411,44 @@ fn node_header_mut(data: &mut [u8]) -> &mut Ext4ExtentHeader {
     );
     // SAFETY: repr(C) on-disk layout; size asserted above.
     unsafe { &mut *(data.as_mut_ptr() as *mut Ext4ExtentHeader) }
+}
+
+/// INV-EXT4-IBLOCK-HDR (unsafe-slim r3c): typed header views of an
+/// extent-file 60-byte i_block array — the cached `Ext4Inode.block` and
+/// the on-disk `i_block` share the layout. The 12-byte repr(C) header is
+/// in-bounds, and the array's u32 alignment implies the header's u16
+/// alignment. Replaces the per-site `as_mut_ptr() as *mut Ext4ExtentHeader`
+/// casts (3 in file.rs, 2 in namei.rs).
+pub fn iblock_header(i_block: &[u32; 15]) -> &Ext4ExtentHeader {
+    // SAFETY: INV-EXT4-IBLOCK-HDR above (size and alignment hold by
+    // layout; the byte view of a [u32; 15] is its own representation).
+    unsafe { &*(core::ptr::from_ref(i_block) as *const Ext4ExtentHeader) }
+}
+
+/// Exclusive twin of [`iblock_header`].
+pub fn iblock_header_mut(i_block: &mut [u32; 15]) -> &mut Ext4ExtentHeader {
+    // SAFETY: INV-EXT4-IBLOCK-HDR above.
+    unsafe { &mut *(core::ptr::from_mut(i_block) as *mut Ext4ExtentHeader) }
+}
+
+/// Exclusive view of extent entry `index` following the header in an
+/// i_block array (bounds: header + (index+1) entries must fit the 60 B
+/// array). INV-EXT4-IBLOCK-HDR family.
+pub fn iblock_extent_mut(i_block: &mut [u32; 15], index: usize) -> Option<&mut Ext4Extent> {
+    let off = core::mem::size_of::<Ext4ExtentHeader>()
+        + index.checked_mul(core::mem::size_of::<Ext4Extent>())?;
+    if off + core::mem::size_of::<Ext4Extent>() > core::mem::size_of::<u32>() * 15 {
+        return None;
+    }
+    // SAFETY: bounds checked above; repr(C) layout; the array's u32
+    // alignment implies Ext4Extent's u32 alignment.
+    unsafe {
+        Some(&mut *(
+            core::ptr::from_mut(i_block)
+                .cast::<u8>()
+                .add(off) as *mut Ext4Extent
+        ))
+    }
 }
 
 fn node_extents(data: &[u8], count: usize) -> &[Ext4Extent] {

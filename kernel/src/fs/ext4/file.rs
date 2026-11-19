@@ -243,14 +243,14 @@ fn ext4_dio_read_batched(
                 None => None,
             };
         }
-        // SAFETY: bio::bread returns a valid pinned BufferHead; b_data
-        // is block_size bytes.
-        unsafe {
+        // INV-BIO-BHREF: bread pins the BufferHead until brelse; the
+        // data view rides the safe accessor.
+        {
             let bh = match bio::bread(fs.device, phys) {
                 Some(b) => b,
                 None => return None,
             };
-            let data = &(*bh).b_data;
+            let data = bio::bh_data(&bh);
             crate::fs::ext4::extent::exthunt_rd_od(
                 inode.ino as u64,
                 block_index,
@@ -306,7 +306,7 @@ fn ext4_dio_read_batched(
                         len: 0,
                     }; GUP_SEG_CAP];
                 // GUP chain geometry from the negotiated ring depth.
-                let gup_slot = unsafe { (*fs.device).private_data }
+                let gup_slot = (*fs.device).private_data
                     .map(|p| p as usize)
                     .unwrap_or(0);
                 let (seg_max, desc_budget) =
@@ -770,13 +770,13 @@ fn ext4_file_read_perblock(
             continue;
         }
 
-        // SAFETY: bio::bread returns a valid pinned BufferHead on success;
-        // b_data points to a block-sized buffer aligned to block_size.
-        unsafe {
+        // INV-BIO-BHREF: bread pins the BufferHead until brelse; the
+        // data view rides the safe accessor (block-sized, aligned).
+        {
             let bh = bio::bread(fs.device, this_block)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-            let data = &(*bh).b_data;
+            let data = bio::bh_data(&bh);
             // rux:exthunt (retired dfx=exthunt): O_DIRECT serve truth (see exthunt_rd_od).
             crate::fs::ext4::extent::exthunt_rd_od(
                 inode.ino as u64,
@@ -1188,38 +1188,36 @@ fn ext4_file_read_cached_dst(
                 Err(_) => return Err(errno::Errno::IOError.as_neg_i32()),
             };
             if block_nr != 0 {
-                // SAFETY: bio::bread returns a valid pinned BufferHead on
-                // success; b_data points to a block-sized buffer.
-                unsafe {
-                    if let Some(bh) = bio::bread(fs.device, block_nr) {
-                        let data = &(*bh).b_data;
-                        // rux:exthunt (retired dfx=exthunt): sync-fallback serve truth (see
-                        // exthunt_rd_serve).
-                        crate::fs::ext4::extent::exthunt_rd_serve(
-                            ino,
-                            page_index,
-                            block_nr,
-                            data[0],
-                            data[1],
-                        );
-                        let avail = block_size_usize - page_offset;
-                        let copy_len = core::cmp::min(remaining, avail);
-                        match dst.put(buf_offset, data.as_ptr().add(page_offset), copy_len) {
-                            Ok(copied) => {
-                                total_read += copied;
-                                buf_offset += copied;
-                                current_offset += copied as u64;
-                            }
-                            Err(e) => {
-                                cache.insert(fs_id, ino, page_index, block_nr, data);
-                                bio::brelse(bh);
-                                return if total_read == 0 { Err(e) } else { Ok(total_read) };
-                            }
+                if let Some(bh) = bio::bread(fs.device, block_nr) {
+                    let data = bio::bh_data(&bh);
+                    // rux:exthunt (retired dfx=exthunt): sync-fallback serve truth (see
+                    // exthunt_rd_serve).
+                    crate::fs::ext4::extent::exthunt_rd_serve(
+                        ino,
+                        page_index,
+                        block_nr,
+                        data[0],
+                        data[1],
+                    );
+                    let avail = block_size_usize - page_offset;
+                    let copy_len = core::cmp::min(remaining, avail);
+                    // SAFETY: the audited ReadDst::put span — the raw
+                    // window add + user/kernel copy ride its contract.
+                    match unsafe { dst.put(buf_offset, data.as_ptr().add(page_offset), copy_len) } {
+                        Ok(copied) => {
+                            total_read += copied;
+                            buf_offset += copied;
+                            current_offset += copied as u64;
                         }
-                        cache.insert(fs_id, ino, page_index, block_nr, data);
-                        bio::brelse(bh);
-                        continue;
+                        Err(e) => {
+                            cache.insert(fs_id, ino, page_index, block_nr, data);
+                            bio::brelse(bh);
+                            return if total_read == 0 { Err(e) } else { Ok(total_read) };
+                        }
                     }
+                    cache.insert(fs_id, ino, page_index, block_nr, data);
+                    bio::brelse(bh);
+                    continue;
                 }
                 // Synchronous read failed: report I/O error rather than
                 // silently returning zeros for real data.
@@ -1438,9 +1436,9 @@ fn fill_page_cache_batch(
                     // on success; b_data points to a block-sized buffer.
                     let mut ok = true;
                     for k in 0..n {
-                        unsafe {
+                        {
                             if let Some(bh) = bio::bread(fs.device, block_nr + k) {
-                                let data = &(*bh).b_data;
+                                let data = bio::bh_data(&bh);
                                 cache.insert(fs_id, ino, run_first + k, block_nr + k, &data);
                                 bio::brelse(bh);
                             } else {
@@ -1488,54 +1486,55 @@ fn drain_batch(
     }
     // Insert completed pages into the page cache under their own indices.
     for i in 0..count {
-        // SAFETY: bread_wait has completed, so bh_ptrs[i] points to a valid
-        // BufferHead with fully populated b_data (status 0 only).
-        unsafe {
-            if status[i] == 0 {
-                let data = &(*bh_ptrs[i]).b_data;
-                let blocks = ra_len[i] as usize;
-                if blocks <= 1 {
-                    cache.insert(fs_id, ino, ra_idx[i], ra_blk[i], data);
-                } else {
-                    // Multi-block request: one bulk insert for the whole
-                    // contiguous buffer (one lock, buddy-alloc chunks, one
-                    // BTreeMap append — see insert_batch).
-                    cache.insert_batch(fs_id, ino, ra_idx[i], data.len() / blocks, data);
-                }
+        // bread_wait has completed, so bh_ptrs[i] points to a valid
+        // BufferHead with fully populated b_data (status 0 only); the
+        // data view rides the INV-BIO-BHREF accessor.
+        if status[i] == 0 {
+            let data = bio::bh_data(&bh_ptrs[i]);
+            let blocks = ra_len[i] as usize;
+            if blocks <= 1 {
+                cache.insert(fs_id, ino, ra_idx[i], ra_blk[i], data);
+            } else {
+                // Multi-block request: one bulk insert for the whole
+                // contiguous buffer (one lock, buddy-alloc chunks, one
+                // BTreeMap append — see insert_batch).
+                cache.insert_batch(fs_id, ino, ra_idx[i], data.len() / blocks, data);
             }
-            if ra_len[i] <= 1 {
-                // Single-block requests went through bread_async: they live
-                // in the block cache, release with brelse.
-                //
-                // Abandon discipline (10s-deadline): on WAIT_TIMED_OUT the
-                // device may still DMA into b_data, so the buffer must NOT
-                // re-enter the block cache for reuse — the pin is
-                // intentionally held forever (bounded by the rarity of 10s
-                // stalls; freeing it corrupted unrelated pages). A real
-                // device EIO COMPLETED its chain — brelse is safe there.
-                if status[i] == crate::fs::io_completion::WAIT_TIMED_OUT {
-                    crate::pr_err!(
-                        "ext4: leaked timed-out read-ahead bh (block {}) — device may still DMA",
-                        ra_blk[i]
-                    );
-                } else {
-                    bio::brelse(bh_ptrs[i]);
-                }
-            } else if status[i] == crate::fs::io_completion::WAIT_TIMED_OUT {
-                // Multi-block private buffer, timed out (the waiter already
-                // abandoned the pending so no late completion fires into
-                // its stack): the device may still DMA into it.
-                // NEVER free a buffer the device may still write — leak it
-                // (R21-N2 discipline: integrity over a bounded leak).
+        }
+        if ra_len[i] <= 1 {
+            // Single-block requests went through bread_async: they live
+            // in the block cache, release with brelse.
+            //
+            // Abandon discipline (10s-deadline): on WAIT_TIMED_OUT the
+            // device may still DMA into b_data, so the buffer must NOT
+            // re-enter the block cache for reuse — the pin is
+            // intentionally held forever (bounded by the rarity of 10s
+            // stalls; freeing it corrupted unrelated pages). A real
+            // device EIO COMPLETED its chain — brelse is safe there.
+            if status[i] == crate::fs::io_completion::WAIT_TIMED_OUT {
                 crate::pr_err!(
-                    "ext4: leaked timed-out multi-block read-ahead ({} blocks from {}) — device may still DMA",
-                    ra_len[i], ra_blk[i]
+                    "ext4: leaked timed-out read-ahead bh (block {}) — device may still DMA",
+                    ra_blk[i]
                 );
             } else {
-                // Multi-block buffers are private: free directly. A real
-                // device EIO completed its chain — the DMA is done.
-                bio::bfree_multi(bh_ptrs[i]);
+                bio::brelse(bh_ptrs[i]);
             }
+        } else if status[i] == crate::fs::io_completion::WAIT_TIMED_OUT {
+            // Multi-block private buffer, timed out (the waiter already
+            // abandoned the pending so no late completion fires into
+            // its stack): the device may still DMA into it.
+            // NEVER free a buffer the device may still write — leak it
+            // (R21-N2 discipline: integrity over a bounded leak).
+            crate::pr_err!(
+                "ext4: leaked timed-out multi-block read-ahead ({} blocks from {}) — device may still DMA",
+                ra_len[i], ra_blk[i]
+            );
+        } else {
+            // Multi-block buffers are private: free directly. A real
+            // device EIO completed its chain — the DMA is done.
+            // SAFETY: bfree_multi's contract — private (non-cached)
+            // buffer, DMA quiesced (status != WAIT_TIMED_OUT above).
+            unsafe { bio::bfree_multi(bh_ptrs[i]) };
         }
     }
 }
@@ -1913,7 +1912,7 @@ fn ext4_file_write_src(
         match &wsrc {
             DioWriteSrc::Staging(_) => Some(DioWin::Batch(bio::WriteBatch::new())),
             DioWriteSrc::User { .. } => {
-                if unsafe { (*fs.device).has_async_write_sg() } {
+                if (*fs.device).has_async_write_sg() {
                     Some(DioWin::Gup(GupWriteChains::new(fs.device)))
                 } else {
                     None // no SG chains: per-block body (correct, staged)
@@ -2082,7 +2081,7 @@ fn ext4_file_write_src(
                                 // fully-scattered 1 MiB run rides 2-3 big
                                 // chains instead of 16 small ones.
                                 const W_SEG_CAP: usize = 128;
-                                let gup_slot = unsafe { (*fs.device).private_data }
+                                let gup_slot = (*fs.device).private_data
                                     .map(|p| p as usize)
                                     .unwrap_or(0);
                                 let (seg_max, _w_budget) =
@@ -2189,9 +2188,9 @@ fn ext4_file_write_src(
                             crate::fs::ext4::extent::exthunt_zzero(
                                 "mat", inode.ino, block_index, phys,
                             );
-                            unsafe {
+                            {
                                 if let Some(bh) = bio::getblk_zero(fs.device, phys) {
-                                    (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                                    bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
                                     bio::brelse(bh);
                                 } else {
                                     partial_or_err!('block_loop, errno::Errno::IOError.as_neg_i32());
@@ -2243,7 +2242,7 @@ fn ext4_file_write_src(
                             crate::fs::ext4::extent::exthunt_zzero(
                                 "hole", inode.ino, block_index, new_block,
                             );
-                            unsafe {
+                            {
                                 if let Some(bh) = bio::getblk_zero(fs.device, new_block) {
                                     bio::brelse(bh);
                                 } else {
@@ -2269,16 +2268,16 @@ fn ext4_file_write_src(
                     // cache write-back persists it — see ext4_file_write).
                     // SAFETY: bio::bread returns a valid BufferHead;
                     // b_data is a block-sized writable buffer.
-                    unsafe {
+                    {
                         let bh = match bio::bread(fs.device, new_block) {
                             Some(b) => b,
                             None => partial_or_err!('block_loop, errno::Errno::IOError.as_neg_i32()),
                         };
 
-                        for byte in (*bh).b_data.iter_mut() {
+                        for byte in bio::bh_data_mut(&bh).iter_mut() {
                             *byte = 0;
                         }
-                        (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                        bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
                         bio::brelse(bh);
                     }
 
@@ -2303,7 +2302,7 @@ fn ext4_file_write_src(
 
         // SAFETY: bio::bread returns a valid BufferHead; b_data is a writable
         // block-sized buffer. The slice ranges are bounded by block_size.
-        unsafe {
+        {
             // FULL-BLOCK OVERWRITE (flush-wall fix, 2026-11): when this
             // loop step covers the whole buffer-cache block (4096 — the
             // cache's fixed granularity), fetch it with getblk_overwrite
@@ -2336,7 +2335,7 @@ fn ext4_file_write_src(
                 None => partial_or_err!('block_loop, errno::Errno::IOError.as_neg_i32()),
             };
 
-            let data = &mut (*bh).b_data;
+            let data = bio::bh_data_mut(&bh);
             let remaining = to_write as usize - total_written;
             let available_in_block = block_size as usize - block_offset;
             let write_in_block = core::cmp::min(remaining, available_in_block);
@@ -2365,7 +2364,7 @@ fn ext4_file_write_src(
             // (ext4_sync_file syncs the file's dirty data blocks), the
             // buffer-cache eviction path (dirty victims are synced before
             // reuse), and sync(2).
-            (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+            bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
             bio::brelse(bh);
             // Dirty-note (see DIRTY_DATA_BLOCKS): the fsync walk is
             // note-driven for regular files — every data block left
@@ -2513,15 +2512,15 @@ pub fn allocate_blocks_for_file(
             // Zero newly allocated data block (deferred-dirty).
             // SAFETY: bio::bread returns a valid BufferHead; b_data is a
             // block-sized writable buffer. We zero it before use.
-            unsafe {
+            {
                 let bh = bio::bread(fs.device, data_block)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-                for byte in (*bh).b_data.iter_mut() {
+                for byte in bio::bh_data_mut(&bh).iter_mut() {
                     *byte = 0;
                 }
 
-                (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
                 bio::brelse(bh);
             }
             // Dirty-note (see DIRTY_DATA_BLOCKS).
@@ -2582,8 +2581,8 @@ pub fn preallocate_unwritten_extents(
         };
         // Make sure the root carries a valid (empty) extent header.
         {
-            // SAFETY: inode.block is 60 bytes; the 12-byte header is in-bounds.
-            let header = unsafe { &mut *(inode.block.as_mut_ptr() as *mut Ext4ExtentHeader) };
+            // INV-EXT4-IBLOCK-HDR: typed header view of the 60-byte root.
+            let header = crate::fs::ext4::extent::iblock_header_mut(&mut inode.block);
             if header.eh_magic != EXT4_EXT_MAGIC {
                 header.eh_magic = EXT4_EXT_MAGIC;
                 header.eh_entries = 0;
@@ -2642,13 +2641,13 @@ fn allocate_blocks_with_extents(
         // SAFETY: bio::bread returns a valid BufferHead; b_data is a
         // block-sized writable buffer.
         for b in run_start..run_start + run_len as u64 {
-            unsafe {
+            {
                 let bh = bio::bread(fs.device, b)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
-                for byte in (*bh).b_data.iter_mut() {
+                for byte in bio::bh_data_mut(&bh).iter_mut() {
                     *byte = 0;
                 }
-                (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
                 bio::brelse(bh);
             }
         }
@@ -2657,9 +2656,8 @@ fn allocate_blocks_with_extents(
 
         // Valid (possibly empty) extent header on the root.
         {
-            // SAFETY: inode.block is 60 bytes; header at its start is
-            // in-bounds.
-            let header = unsafe { &mut *(inode.block.as_mut_ptr() as *mut Ext4ExtentHeader) };
+            // INV-EXT4-IBLOCK-HDR: typed header view of the 60-byte root.
+            let header = crate::fs::ext4::extent::iblock_header_mut(&mut inode.block);
             if header.eh_magic != EXT4_EXT_MAGIC {
                 header.eh_magic = EXT4_EXT_MAGIC;
                 header.eh_entries = 0;
@@ -2735,9 +2733,8 @@ fn allocate_blocks_unwritten_dio(
         // Valid (possibly empty) extent header on the root (same as the
         // written twin).
         {
-            // SAFETY: inode.block is 60 bytes; header at its start is
-            // in-bounds.
-            let header = unsafe { &mut *(inode.block.as_mut_ptr() as *mut Ext4ExtentHeader) };
+            // INV-EXT4-IBLOCK-HDR: typed header view of the 60-byte root.
+            let header = crate::fs::ext4::extent::iblock_header_mut(&mut inode.block);
             if header.eh_magic != EXT4_EXT_MAGIC {
                 header.eh_magic = EXT4_EXT_MAGIC;
                 header.eh_entries = 0;
@@ -2797,15 +2794,15 @@ pub fn allocate_indirect_block(
             // SAFETY: bio::bread returns a valid BufferHead; b_data is a
             // block-sized writable buffer. We zero it to initialize block
             // pointers before use.
-            unsafe {
+            {
                 let bh = bio::bread(fs.device, indirect_block)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-                for byte in (*bh).b_data.iter_mut() {
+                for byte in bio::bh_data_mut(&bh).iter_mut() {
                     *byte = 0;
                 }
 
-                (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
                 let sync_res = bio::sync_dirty_buffer(bh);
                 bio::brelse(bh);
                 sync_res?;
@@ -2838,11 +2835,11 @@ pub fn allocate_indirect_block(
                     let bh = bio::bread(fs.device, double_block)
                         .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-                    for byte in (*bh).b_data.iter_mut() {
+                    for byte in bio::bh_data_mut(&bh).iter_mut() {
                         *byte = 0;
                     }
 
-                    (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                    bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
                     // Family b: journal registration (metadata zeroing).
                     if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
                         let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
@@ -2876,11 +2873,11 @@ pub fn allocate_indirect_block(
                     let bh = bio::bread(fs.device, indirect_block)
                         .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-                    for byte in (*bh).b_data.iter_mut() {
+                    for byte in bio::bh_data_mut(&bh).iter_mut() {
                         *byte = 0;
                     }
 
-                    (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                    bio::bh_set_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty);
                     // Family b: journal registration (metadata zeroing).
                     if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
                         let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
@@ -3304,7 +3301,7 @@ fn ext4_sync_file_inner(
         let mut walk_err: Option<i32> = None;
         for blk in notes {
             // SAFETY: fs.device is the fs's registered GenDisk (probe only).
-            if unsafe { bio::block_dirty_cached(fs.device, blk) } {
+            if bio::block_dirty_cached(fs.device, blk) {
                 batch.push(blk);
             }
             if batch.len() >= 4096 {
@@ -3364,7 +3361,7 @@ fn ext4_sync_file_inner(
             // the 3.9M breads/s CPU burn (fsw br=59M on the test suite row).
             // SAFETY: fs.device is the fs's registered GenDisk.
             for k in 0..n {
-                if unsafe { bio::block_dirty_cached(fs.device, phys + k) } {
+                if bio::block_dirty_cached(fs.device, phys + k) {
                     batch.push(phys + k);
                 }
             }
@@ -3395,15 +3392,14 @@ fn ext4_sync_file_inner(
                 continue; // sparse hole
             }
             // SAFETY: fs.device is the fs's registered GenDisk.
-            if unsafe { bio::block_absent_durable(fs.device, block) } {
+            if bio::block_absent_durable(fs.device, block) {
                 continue;
             }
-            // SAFETY: bio::bread returns a valid BufferHead on success.
-            unsafe {
+            {
                 let bh = bio::bread(fs.device, block)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-                let sync_res = if (*bh).is_dirty() {
+                let sync_res = if bio::bh_is_dirty(&bh) {
                     bio::sync_dirty_buffer(bh)
                 } else {
                     Ok(())
@@ -3430,7 +3426,7 @@ fn ext4_sync_file_inner(
     // round trip.
     if let Some(tbl_blk) = super::inode::inode_table_block_of(fs, inode.ino) {
         // SAFETY: fs.device is the fs's registered GenDisk (probe only).
-        if unsafe { bio::block_dirty_cached(fs.device, tbl_blk) } {
+        if bio::block_dirty_cached(fs.device, tbl_blk) {
             let rc = bio::sync_dirty_blocks_batched(
                 fs.device,
                 core::slice::from_ref(&tbl_blk),
@@ -3482,7 +3478,7 @@ fn ext4_sync_file_inner(
         if !inode.has_extent() {
             // SAFETY: bio::bread returns valid BufferHeads; the indirect
             // blocks are plain metadata blocks of this inode.
-            unsafe {
+            {
                 let mut chain = [0u64; 2];
                 if inode.block[12] != 0 {
                     chain[0] = inode.block[12] as u64;
@@ -3499,7 +3495,7 @@ fn ext4_sync_file_inner(
                         None => continue,
                     };
                     // Sync the top-level indirect block itself.
-                    if (*bh).is_dirty() {
+                    if bio::bh_is_dirty(&bh) {
                         let _ = bio::sync_dirty_buffer(bh);
                     }
                     // Double-indirect: sync each pointed single-indirect
@@ -3508,7 +3504,7 @@ fn ext4_sync_file_inner(
                         let ppc = (fs.block_size / 4) as usize;
                         for i in 0..ppc {
                             let v = {
-                                let src = &(*bh).b_data;
+                                let src = bio::bh_data(&bh);
                                 let mut b4 = [0u8; 4];
                                 let end = (i * 4 + 4).min(src.len());
                                 if i * 4 < end {
@@ -3519,7 +3515,7 @@ fn ext4_sync_file_inner(
                             };
                             if v != 0 {
                                 if let Some(sb) = bio::bread(fs.device, v) {
-                                    if (*sb).is_dirty() {
+                                    if bio::bh_is_dirty(&sb) {
                                         let _ = bio::sync_dirty_buffer(sb);
                                     }
                                     bio::brelse(sb);
@@ -3555,94 +3551,113 @@ fn ext4_sync_file_inner(
 // VFS Wrapper Functions
 // ============================================================================
 
+/// INV-EXT4-FILERES (unsafe-slim r3c): the ONE audited resolution of a
+/// VFS File to its ext4 (VFS-inode, fs, cached-inode) triple. All three
+/// raw fields ride the same open-time contract: file.inode is installed
+/// once at ext4_open and never re-pointed for the file's lifetime; the
+/// VFS Inode's private_data (Ext4FileSystem) and sb (Box'd Ext4Inode)
+/// are fixed when the inode is instantiated. Every VFS wrapper in this
+/// file used to re-deref all three inside its own unsafe wrapper (and
+/// re-state the same contract); they all ride this accessor now.
+fn file_ext4(
+    file: &File,
+) -> Option<(
+    &alloc::sync::Arc<Inode>,
+    &crate::fs::ext4::Ext4FileSystem,
+    &super::inode::Ext4Inode,
+)> {
+    // SAFETY: file.inode.get() points at the file's Option<Arc<Inode>>
+    // slot, valid for the `file` borrow (INV-EXT4-FILERES above).
+    let inode = unsafe { &*file.inode.get() }.as_ref()?;
+    // SAFETY: private_data/sb are installed at open and never cleared
+    // while the inode lives (INV-EXT4-FILERES above).
+    let fs = unsafe {
+        &*(inode.private_data? as *const crate::fs::ext4::Ext4FileSystem)
+    };
+    let ext4_ino = unsafe { &*(inode.sb? as *const super::inode::Ext4Inode) };
+    Some((inode, fs, ext4_ino))
+}
+
+/// (INV-EXT4-FILERES) safe twin for the EBADF/EIO split: is the file's
+/// VFS inode slot empty at all?
+fn file_inode_missing(file: &File) -> bool {
+    // SAFETY: same slot contract as file_ext4 (INV-EXT4-FILERES above).
+    unsafe { &*file.inode.get() }.is_none()
+}
+
 /// VFS read wrapper - calls ext4_file_read_cached with page cache and read-ahead
-pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {    // SAFETY: file.inode.get() returns a valid pointer to Option<Arc<Inode>>;
-    // when Some, the Arc and its contents (private_data, sb) are valid for the
-    // lifetime of the file. The ext4 filesystem pointer in private_data and the
-    // cached Ext4Inode in inode.sb are set during file open and remain valid.
-    unsafe {
-        // Get VFS inode from file
-        let inode_opt = &*file.inode.get();
-        let inode = match inode_opt {
-            Some(i) => i,
-            None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
-        };
+pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {
+    let Some((inode, fs, ext4_inode)) = file_ext4(file) else {
+        // Resolution distinguishes no-inode (EBADF) from no-fs/sb (EIO).
+        if file_inode_missing(file) {
+            return errno::Errno::BadFileNumber.as_neg_i32() as isize;
+        }
+        return errno::Errno::IOError.as_neg_i32() as isize;
+    };
 
-        // Get ext4 filesystem pointer from inode's private_data
-        let fs_ptr = match inode.private_data {
-            Some(ptr) => ptr as *const crate::fs::ext4::Ext4FileSystem,
-            None => return errno::Errno::IOError.as_neg_i32() as isize,
-        };
-        let fs = &*fs_ptr;
+    // Serialize the whole get_pos → read → set_pos sequence against
+    // other readers/writers sharing this open file description
+    // (fork-inherited fds): without the lock, two CPUs can both read
+    // at the old pos and both store pos+1 — a lost offset update
+    // (LTP fork07: parent's EOF read() returned 1). Linux calls this
+    // f_pos_lock. Sleeping mutex — the read may block on disk I/O.
+    let _pos_guard = file.io_lock.guard();
 
-        // Use cached Ext4Inode from inode.sb instead of re-reading from disk
-        let ext4_inode = match inode.sb {
-            Some(ptr) => &*(ptr as *const super::inode::Ext4Inode),
-            None => return errno::Errno::IOError.as_neg_i32() as isize,
-        };
+    // Get current file position
+    let offset = file.get_pos() as u64;
 
-        // Serialize the whole get_pos → read → set_pos sequence against
-        // other readers/writers sharing this open file description
-        // (fork-inherited fds): without the lock, two CPUs can both read
-        // at the old pos and both store pos+1 — a lost offset update
-        // (LTP fork07: parent's EOF read() returned 1). Linux calls this
-        // f_pos_lock. Sleeping mutex — the read may block on disk I/O.
-        let _pos_guard = file.io_lock.guard();
-
-        // Get current file position
-        let offset = file.get_pos() as u64;
-
-        // P2 O_DIRECT: bypass the page cache entirely and serve straight
-        // from the block layer (ext4_file_read walks bio::bread). The
-        // write side already runs uncached-synchronous (ext4_file_write),
-        // so only the read path needs the branch. Simplification vs Linux:
-        // offset/length block alignment is not enforced.
-        if file.flags_bits() & crate::fs::file::FileFlags::O_DIRECT != 0 {
-            // Reference parity (generic_file_read_iter's DIO leg):
-            // filemap_write_and_wait_range BEFORE the direct read — a
-            // buffered writer's dirty page-cache frames must reach the
-            // disk this read serves from. Since the delayed-allocation
-            // change, buffered write(2) leaves data ONLY in dirty frames
-            // (see sys_sync), so without this flush a direct read of a
-            // just-buffered-written range served stale blocks (LTP
-            // diotest2/5 testblock 1: buffered write + O_DIRECT read,
-            // read/write comparison failed).
-            if !buf.is_empty() {
-                let ps = crate::mm::PAGE_SIZE as u64;
-                let first_index = offset / ps;
-                let last_index = (offset + buf.len() as u64 - 1) / ps;
-                super::file::ext4_flush_dirty_inode(inode, first_index, last_index);
+    // P2 O_DIRECT: bypass the page cache entirely and serve straight
+    // from the block layer (ext4_file_read walks bio::bread). The
+    // write side already runs uncached-synchronous (ext4_file_write),
+    // so only the read path needs the branch. Simplification vs Linux:
+    // offset/length block alignment is not enforced.
+    if file.flags_bits() & crate::fs::file::FileFlags::O_DIRECT != 0 {
+        // Reference parity (generic_file_read_iter's DIO leg):
+        // filemap_write_and_wait_range BEFORE the direct read — a
+        // buffered writer's dirty page-cache frames must reach the
+        // disk this read serves from. Since the delayed-allocation
+        // change, buffered write(2) leaves data ONLY in dirty frames
+        // (see sys_sync), so without this flush a direct read of a
+        // just-buffered-written range served stale blocks (LTP
+        // diotest2/5 testblock 1: buffered write + O_DIRECT read,
+        // read/write comparison failed).
+        if !buf.is_empty() {
+            let ps = crate::mm::PAGE_SIZE as u64;
+            let first_index = offset / ps;
+            let last_index = (offset + buf.len() as u64 - 1) / ps;
+            super::file::ext4_flush_dirty_inode(inode, first_index, last_index);
+        }
+        match ext4_file_read(fs, ext4_inode, offset, buf) {
+            Ok(read_bytes) => {
+                file.set_pos(offset + read_bytes as u64);
+                // No IN_ACCESS here: this runs as ops.read behind
+                // File::read, whose wrapper owns the notify. Op-level
+                // self-notify double-fired the event (hidden by the
+                // inotify last-event merge, but a duplicate surfaced
+                // whenever another watcher event interleaved — review
+                // CR-3). Only the read(2) FAST path below self-notifies
+                // (it bypasses File::read entirely).
+                read_bytes as isize
             }
-            match ext4_file_read(fs, ext4_inode, offset, buf) {
-                Ok(read_bytes) => {
-                    file.set_pos(offset + read_bytes as u64);
-                    // No IN_ACCESS here: this runs as ops.read behind
-                    // File::read, whose wrapper owns the notify. Op-level
-                    // self-notify double-fired the event (hidden by the
-                    // inotify last-event merge, but a duplicate surfaced
-                    // whenever another watcher event interleaved — review
-                    // CR-3). Only the read(2) FAST path below self-notifies
-                    // (it bypasses File::read entirely).
-                    read_bytes as isize
-                }
-                Err(e) => e as isize,
-            }
-        } else {
-            // Get or create read-ahead state from file.private_data
-            let ra_state = get_or_create_ra_state(file, fs.block_size as u64);
+            Err(e) => e as isize,
+        }
+    } else {
+        // Get or create read-ahead state from file.private_data
+        let ra_state = get_or_create_ra_state(file, fs.block_size as u64);
 
-            // Call cached read function
-            match ext4_file_read_cached(fs, ext4_inode, offset, buf, ra_state) {
+        // Call cached read function
+        match ext4_file_read_cached(fs, ext4_inode, offset, buf, ra_state) {
             Ok(read_bytes) => {
                 file.set_pos(offset + read_bytes as u64);
                 // atime: keep the CACHED inode in sync with the read,
                 // gated by the reference-default relatime rule
                 // (stamp_atime_relatime doc).
                 if read_bytes > 0 {
-                    // SAFETY: the cached Ext4Inode in inode.sb is a Box
-                    // owned by this VFS inode; the big lock above
+                    // INV-EXT4-ATIME: the cached Ext4Inode in inode.sb is
+                    // a Box owned by this VFS inode; the io_lock above
                     // serializes writers, and readers of atime tolerate
-                    // torn u32 values (advisory field).
+                    // torn u32 values (advisory field). stamp_atime_
+                    // relatime is the audited write span.
                     unsafe {
                         stamp_atime_relatime(inode.sb.unwrap() as *mut super::inode::Ext4Inode);
                     }
@@ -3650,7 +3665,6 @@ pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {    // SAFETY: 
                 read_bytes as isize
             }
             Err(e) => e as isize,
-            }
         }
     }
 }
@@ -3661,75 +3675,64 @@ pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {    // SAFETY: 
 /// `dst` must be access_ok-validated for `count` bytes. O_DIRECT falls back
 /// to the caller's staged path (rare, unaligned semantics kept simple).
 pub fn ext4_file_read_user_vfs(file: &File, dst: *mut u8, count: usize) -> isize {
-    // SAFETY: same inode/fs lifetime guarantees as ext4_file_read_vfs.
-    unsafe {
-        // rux:filerd (retired dfx=filerd): outer bracket for the whole fast path (the lock /
-        // pin / copy / unpin / epilog phases are charged inside; the
-        // residue vs their sum is resolution + ra_state + loop scaffolding).
-        let probe = crate::dfx::filerd::on();
-        let t_outer = if probe { crate::dfx::filerd::now() } else { 0 };
-        let inode_opt = &*file.inode.get();
-        let inode = match inode_opt {
-            Some(i) => i,
-            None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
-        };
-        let fs_ptr = match inode.private_data {
-            Some(ptr) => ptr as *const crate::fs::ext4::Ext4FileSystem,
-            None => return errno::Errno::IOError.as_neg_i32() as isize,
-        };
-        let fs = &*fs_ptr;
-        let ext4_inode = match inode.sb {
-            Some(ptr) => &*(ptr as *const super::inode::Ext4Inode),
-            None => return errno::Errno::IOError.as_neg_i32() as isize,
-        };
-        // Same pos-race serialization as ext4_file_read_vfs (LTP fork07).
-        let t_lock = if probe { crate::dfx::filerd::now() } else { 0 };
-        let _pos_guard = file.io_lock.guard();
-        let offset = file.get_pos() as u64;
-        if probe {
-            crate::dfx::filerd::charge(&crate::dfx::filerd::LOCK_CYCLES, t_lock);
+    // rux:filerd (retired dfx=filerd): outer bracket for the whole fast path (the lock /
+    // pin / copy / unpin / epilog phases are charged inside; the
+    // residue vs their sum is resolution + ra_state + loop scaffolding).
+    let probe = crate::dfx::filerd::on();
+    let t_outer = if probe { crate::dfx::filerd::now() } else { 0 };
+    let Some((inode, fs, ext4_inode)) = file_ext4(file) else {
+        if file_inode_missing(file) {
+            return errno::Errno::BadFileNumber.as_neg_i32() as isize;
         }
+        return errno::Errno::IOError.as_neg_i32() as isize;
+    };
+    // Same pos-race serialization as ext4_file_read_vfs (LTP fork07).
+    let t_lock = if probe { crate::dfx::filerd::now() } else { 0 };
+    let _pos_guard = file.io_lock.guard();
+    let offset = file.get_pos() as u64;
+    if probe {
+        crate::dfx::filerd::charge(&crate::dfx::filerd::LOCK_CYCLES, t_lock);
+    }
 
-        let ra_state = get_or_create_ra_state(file, fs.block_size as u64);
-        match ext4_file_read_cached_dst(
-            fs, ext4_inode, offset,
-            ReadDst::User(dst, count), ra_state,
-        ) {
-            Ok(read_bytes) => {
-                let t_ep = if probe { crate::dfx::filerd::now() } else { 0 };
-                file.set_pos(offset + read_bytes as u64);
-                if read_bytes > 0 {
-                    // atime via the reference-default relatime gate
-                    // (stamp_atime_relatime doc).
-                    // SAFETY: same as ext4_file_read_vfs (advisory field,
-                    // big lock serializes writers).
-                    unsafe {
-                        stamp_atime_relatime(inode.sb.unwrap() as *mut super::inode::Ext4Inode);
-                    }
-                    // inotify IN_ACCESS, same as the staged read path below
-                    // (line ~1240): this fast path bypasses File::read, so
-                    // without an explicit notify every read(2) on an ext4
-                    // file dropped the event (LTP inotify01: the whole
-                    // expected-event train shifted by one).
-                    crate::fs::inotify::notify_file(
-                        file,
-                        crate::fs::inotify::inotify_events::IN_ACCESS,
-                    );
+    let ra_state = get_or_create_ra_state(file, fs.block_size as u64);
+    match ext4_file_read_cached_dst(
+        fs, ext4_inode, offset,
+        ReadDst::User(dst, count), ra_state,
+    ) {
+        Ok(read_bytes) => {
+            let t_ep = if probe { crate::dfx::filerd::now() } else { 0 };
+            file.set_pos(offset + read_bytes as u64);
+            if read_bytes > 0 {
+                // atime via the reference-default relatime gate
+                // (stamp_atime_relatime doc).
+                // INV-EXT4-ATIME: same contract as ext4_file_read_vfs
+                // (advisory field, io_lock serializes writers).
+                unsafe {
+                    stamp_atime_relatime(inode.sb.unwrap() as *mut super::inode::Ext4Inode);
                 }
-                if probe {
-                    crate::dfx::filerd::charge(&crate::dfx::filerd::EPILOG_CYCLES, t_ep);
-                    crate::dfx::filerd::charge(&crate::dfx::filerd::OUTER_CYCLES, t_outer);
-                    crate::dfx::filerd::OUTER_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                }
-                read_bytes as isize
+                // inotify IN_ACCESS, same as the staged read path below
+                // (line ~1240): this fast path bypasses File::read, so
+                // without an explicit notify every read(2) on an ext4
+                // file dropped the event (LTP inotify01: the whole
+                // expected-event train shifted by one).
+                crate::fs::inotify::notify_file(
+                    file,
+                    crate::fs::inotify::inotify_events::IN_ACCESS,
+                );
             }
-            Err(e) => {
-                if probe {
-                    crate::dfx::filerd::charge(&crate::dfx::filerd::OUTER_CYCLES, t_outer);
-                    crate::dfx::filerd::OUTER_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                }
-                e as isize
+            if probe {
+                crate::dfx::filerd::charge(&crate::dfx::filerd::EPILOG_CYCLES, t_ep);
+                crate::dfx::filerd::charge(&crate::dfx::filerd::OUTER_CYCLES, t_outer);
+                crate::dfx::filerd::OUTER_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             }
+            read_bytes as isize
+        }
+        Err(e) => {
+            if probe {
+                crate::dfx::filerd::charge(&crate::dfx::filerd::OUTER_CYCLES, t_outer);
+                crate::dfx::filerd::OUTER_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+            e as isize
         }
     }
 }
@@ -3774,7 +3777,7 @@ fn ext4_dio_read_gup_core(
         return None;
     }
     // The GUP arm expresses runs only as SG chains of pinned pieces.
-    if !unsafe { (*fs.device).has_async_read_sg() } {
+    if !(*fs.device).has_async_read_sg() {
         return None;
     }
     let mut dst = DioReadDst::User { pins, va };
@@ -3786,49 +3789,48 @@ fn ext4_dio_read_gup_core(
 /// path is not applicable (caller: staged loop unchanged). `dst` must
 /// be access_ok-validated for `count`.
 pub fn ext4_file_read_dio_user_vfs(file: &File, dst: *mut u8, count: usize) -> Option<isize> {
-    // SAFETY: same inode/fs lifetime guarantees as ext4_file_read_user_vfs.
-    unsafe {
-        let inode_opt = &*file.inode.get();
-        let inode = inode_opt.as_ref()?;
-        let fs_ptr = inode.private_data? as *const crate::fs::ext4::Ext4FileSystem;
-        let fs = &*fs_ptr;
-        let ext4_inode = inode.sb? as *const super::inode::Ext4Inode;
-        // The device must express SG chains before anything else.
-        if !(*fs.device).has_async_read_sg() {
-            return None;
-        }
-        // Pin BEFORE the io_lock (the fault-in may sleep/allocate).
-        let pins = crate::mm::gup::pin_user_pages(dst as usize, count, false)?;
-
-        let _pos_guard = file.io_lock.guard();
-        let offset = file.get_pos() as u64;
-        let file_size = (*ext4_inode).get_size();
-        let to_read = core::cmp::min(count as u64, file_size.saturating_sub(offset)) as usize;
-        let n = match ext4_dio_read_gup_core(fs, &*ext4_inode, offset, &pins, dst as usize, to_read)
-        {
-            Some(n) => n,
-            None => return None, // staged fallback owns the whole call
-        };
-        if n == 0 && to_read > 0 {
-            // Nothing delivered of a non-empty request: the staged twin
-            // reports the failing errno (a faulted user window = EFAULT,
-            // a device failure = EIO). A pin hole at the first byte is
-            // the EFAULT face; anything else that zeroed the read is
-            // the EIO face.
-            return Some(if !pins.range_pinned(0, 1) {
-                errno::Errno::BadAddress.as_neg_i32() as isize
-            } else {
-                errno::Errno::IOError.as_neg_i32() as isize
-            });
-        }
-        if n > 0 {
-            file.set_pos(offset + n as u64);
-            // atime + IN_ACCESS: same discipline as ext4_file_read_user_vfs.
-            stamp_atime_relatime(ext4_inode as *mut super::inode::Ext4Inode);
-            crate::fs::inotify::notify_file(file, crate::fs::inotify::inotify_events::IN_ACCESS);
-        }
-        Some(n as isize)
+    let (_, fs, ext4_inode) = file_ext4(file)?;
+    // The device must express SG chains before anything else.
+    if !fs.device.has_async_read_sg() {
+        return None;
     }
+    // Pin BEFORE the io_lock (the fault-in may sleep/allocate).
+    let pins = crate::mm::gup::pin_user_pages(dst as usize, count, false)?;
+
+    let _pos_guard = file.io_lock.guard();
+    let offset = file.get_pos() as u64;
+    let file_size = ext4_inode.get_size();
+    let to_read = core::cmp::min(count as u64, file_size.saturating_sub(offset)) as usize;
+    let n = match ext4_dio_read_gup_core(fs, ext4_inode, offset, &pins, dst as usize, to_read) {
+        Some(n) => n,
+        None => return None, // staged fallback owns the whole call
+    };
+    if n == 0 && to_read > 0 {
+        // Nothing delivered of a non-empty request: the staged twin
+        // reports the failing errno (a faulted user window = EFAULT,
+        // a device failure = EIO). A pin hole at the first byte is
+        // the EFAULT face; anything else that zeroed the read is
+        // the EIO face.
+        return Some(if !pins.range_pinned(0, 1) {
+            errno::Errno::BadAddress.as_neg_i32() as isize
+        } else {
+            errno::Errno::IOError.as_neg_i32() as isize
+        });
+    }
+    if n > 0 {
+        file.set_pos(offset + n as u64);
+        // atime + IN_ACCESS: same discipline as ext4_file_read_user_vfs
+        // (INV-EXT4-ATIME: the sb Box lives for the inode; io_lock
+        // serializes; stamp_atime_relatime is the audited write span).
+        unsafe {
+            stamp_atime_relatime(
+                ext4_inode as *const super::inode::Ext4Inode
+                    as *mut super::inode::Ext4Inode,
+            );
+        }
+        crate::fs::inotify::notify_file(file, crate::fs::inotify::inotify_events::IN_ACCESS);
+    }
+    Some(n as isize)
 }
 
 /// pread64(2) O_DIRECT GUP entry — the read(2) twin at an explicit
@@ -3840,45 +3842,46 @@ pub fn ext4_file_pread_dio_user_vfs(
     dst: *mut u8,
     count: usize,
 ) -> Option<isize> {
-    // SAFETY: same resolution discipline as ext4_file_read_dio_user_vfs.
-    unsafe {
-        let inode_opt = &*file.inode.get();
-        let inode = inode_opt.as_ref()?;
-        let fs_ptr = inode.private_data? as *const crate::fs::ext4::Ext4FileSystem;
-        let fs = &*fs_ptr;
-        let ext4_inode = inode.sb? as *const super::inode::Ext4Inode;
-        if !(*fs.device).has_async_read_sg() {
-            return None;
-        }
-        let pins = crate::mm::gup::pin_user_pages(dst as usize, count, false)?;
-
-        let _io_guard = file.io_lock.guard();
-        let file_size = (*ext4_inode).get_size();
-        let to_read = core::cmp::min(count as u64, file_size.saturating_sub(offset)) as usize;
-        let n = match ext4_dio_read_gup_core(fs, &*ext4_inode, offset, &pins, dst as usize, to_read)
-        {
-            Some(n) => n,
-            None => return None,
-        };
-        if n == 0 && to_read > 0 {
-            // Same errno discipline as the read(2) entry (staged twin).
-            return Some(if !pins.range_pinned(0, 1) {
-                errno::Errno::BadAddress.as_neg_i32() as isize
-            } else {
-                errno::Errno::IOError.as_neg_i32() as isize
-            });
-        }
-        if n > 0 {
-            // atime (advisory, same as ext4_file_read_at_vfs_inner); no
-            // IN_ACCESS here — File::read_at's native-op arm owns the
-            // notify on this path's staged twin, and the syscall layer
-            // dispatches here INSTEAD of it, so mirror the entry it
-            // replaces (none fired for the O_DIRECT arm).
-            let atime = crate::drivers::rtc::wall_secs() as u32;
-            core::ptr::write_volatile(&mut (*(ext4_inode as *mut super::inode::Ext4Inode)).atime, atime);
-        }
-        Some(n as isize)
+    let (_, fs, ext4_inode) = file_ext4(file)?;
+    if !fs.device.has_async_read_sg() {
+        return None;
     }
+    let pins = crate::mm::gup::pin_user_pages(dst as usize, count, false)?;
+
+    let _io_guard = file.io_lock.guard();
+    let file_size = ext4_inode.get_size();
+    let to_read = core::cmp::min(count as u64, file_size.saturating_sub(offset)) as usize;
+    let n = match ext4_dio_read_gup_core(fs, ext4_inode, offset, &pins, dst as usize, to_read) {
+        Some(n) => n,
+        None => return None,
+    };
+    if n == 0 && to_read > 0 {
+        // Same errno discipline as the read(2) entry (staged twin).
+        return Some(if !pins.range_pinned(0, 1) {
+            errno::Errno::BadAddress.as_neg_i32() as isize
+        } else {
+            errno::Errno::IOError.as_neg_i32() as isize
+        });
+    }
+    if n > 0 {
+        // atime (advisory, same as ext4_file_read_at_vfs_inner —
+        // INV-EXT4-ATIME); no IN_ACCESS here — File::read_at's native-op
+        // arm owns the notify on this path's staged twin, and the
+        // syscall layer dispatches here INSTEAD of it, so mirror the
+        // entry it replaces (none fired for the O_DIRECT arm).
+        let atime = crate::drivers::rtc::wall_secs() as u32;
+        // SAFETY: audited advisory-field store (INV-EXT4-ATIME); the sb
+        // Box is exclusively ours while io_lock is held.
+        unsafe {
+            core::ptr::write_volatile(
+                &mut (*(ext4_inode as *const super::inode::Ext4Inode
+                    as *mut super::inode::Ext4Inode))
+                    .atime,
+                atime,
+            );
+        }
+    }
+    Some(n as isize)
 }
 
 /// mm filemap_fault cache warm-up (x86_64 demand faults): run ONE
@@ -3893,173 +3896,148 @@ pub fn ext4_file_pread_dio_user_vfs(
 /// not resolvable through the ext4 read path (treated as "not cacheable"
 /// by the fault arm, which falls back to a private copy).
 pub fn ext4_fault_populate_cache(file: &File, offset: u64) -> bool {
-    // SAFETY: same inode/fs/sb resolution discipline as
-    // ext4_file_read_at_vfs_inner (fields written at open time, read-only
-    // afterwards; io_lock serializes readahead state with plain reads).
-    unsafe {
-        let inode = match (&*file.inode.get()).as_ref() {
-            Some(i) => i,
-            None => return false,
-        };
-        let fs_ptr = match inode.private_data {
-            Some(ptr) => ptr as *const crate::fs::ext4::Ext4FileSystem,
-            None => return false,
-        };
-        let fs = &*fs_ptr;
-        let ext4_inode = match inode.sb {
-            Some(ptr) => &*(ptr as *const super::inode::Ext4Inode),
-            None => return false,
-        };
-        let _io_guard = file.io_lock.guard();
-        let ra_state = get_or_create_ra_state(file, fs.block_size as u64);
-        matches!(
-            ext4_file_read_cached_dst(
-                fs,
-                ext4_inode,
-                offset,
-                ReadDst::Discard(crate::mm::PAGE_SIZE),
-                ra_state
-            ),
-            Ok(n) if n > 0
-        )
-    }
+    let Some((_, fs, ext4_inode)) = file_ext4(file) else {
+        return false;
+    };
+    let _io_guard = file.io_lock.guard();
+    let ra_state = get_or_create_ra_state(file, fs.block_size as u64);
+    matches!(
+        ext4_file_read_cached_dst(
+            fs,
+            ext4_inode,
+            offset,
+            ReadDst::Discard(crate::mm::PAGE_SIZE),
+            ra_state
+        ),
+        Ok(n) if n > 0
+    )
 }
 
 /// VFS write wrapper - calls ext4_file_write
 pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
-    // SAFETY: file.inode.get() returns a valid pointer to Option<Arc<Inode>>;
-    // when Some, the Arc and its contents (private_data, sb) are valid for the
-    // lifetime of the file. The ext4 filesystem pointer and cached inode in
-    // inode.sb are set during file open and remain valid.
-    unsafe {
-        // Get VFS inode from file
-        let inode_opt = &*file.inode.get();
-        let inode = match inode_opt {
-            Some(i) => i,
-            None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
-        };
+    let Some((inode, fs, _)) = file_ext4(file) else {
+        if file_inode_missing(file) {
+            return errno::Errno::BadFileNumber.as_neg_i32() as isize;
+        }
+        return errno::Errno::IOError.as_neg_i32() as isize;
+    };
+    let ext4_ino = inode.ino as u32;
 
-        // Get ext4 filesystem pointer from inode's private_data
-        let fs_ptr = match inode.private_data {
-            Some(ptr) => ptr as *const crate::fs::ext4::Ext4FileSystem,
-            None => return errno::Errno::IOError.as_neg_i32() as isize,
-        };
-        let fs = &*fs_ptr;
-        let ext4_ino = inode.ino as u32;
+    // Serialize the get_pos → write → set_pos sequence against
+    // concurrent readers of the same open file description (they hold
+    // no ext4 lock — see ext4_file_read_vfs). Taken BEFORE the big
+    // lock so a slow file-level waiter never pins the machine-wide
+    // ext4 lock (LTP fork07, Linux f_pos_lock discipline).
+    let _pos_guard = file.io_lock.guard();
 
-        // Serialize the get_pos → write → set_pos sequence against
-        // concurrent readers of the same open file description (they hold
-        // no ext4 lock — see ext4_file_read_vfs). Taken BEFORE the big
-        // lock so a slow file-level waiter never pins the machine-wide
-        // ext4 lock (LTP fork07, Linux f_pos_lock discipline).
-        let _pos_guard = file.io_lock.guard();
+    // Get current file position (O_APPEND: always write at end of file)
+    let offset = if file.flags().bits() & crate::fs::file::FileFlags::O_APPEND != 0 {
+        // Computed inside the core, from the disk-fresh inode under the
+        // big lock — an append racing on a different open description
+        // must be visible before our offset is fixed.
+        u64::MAX
+    } else {
+        file.get_pos()
+    };
 
-        // Get current file position (O_APPEND: always write at end of file)
-        let offset = if file.flags().bits() & crate::fs::file::FileFlags::O_APPEND != 0 {
-            // Computed inside the core, from the disk-fresh inode under the
-            // big lock — an append racing on a different open description
-            // must be visible before our offset is fixed.
-            u64::MAX
-        } else {
-            file.get_pos()
-        };
-
-        // RLIMIT_FSIZE (Linux generic_write_checks — ext4 files carry their
-        // own write op, so the reg_file_write twin is not enough): a write
-        // starting at/after the soft limit fails EFBIG with SIGXFSZ; a
-        // write that would CROSS the limit is silently truncated to the
-        // boundary (LTP setrlimit01 case 2 sets the limit to 10, writes 26
-        // and requires write() to return exactly 10).
-        let mut buf = buf;
-        if let Some(task) = crate::sched::current() {
-            let (fsz_cur, _) = task.rlimit(crate::process::task::rlimit_res::FSIZE);
-            if fsz_cur != u64::MAX {
-                let start = if offset == u64::MAX {
-                    inode.size.load(core::sync::atomic::Ordering::Acquire)
-                } else {
-                    offset
-                };
-                if start >= fsz_cur {
-                    let _ = crate::signal::send_signal(
-                        task.pid() as u32,
-                        crate::signal::Signal::SIGXFSZ as i32,
-                    );
-                    return crate::errno::Errno::FileTooLarge.as_neg_i32() as isize;
-                }
-                let allowed = (fsz_cur - start) as usize;
-                if buf.len() > allowed {
-                    buf = &buf[..allowed];
-                }
+    // RLIMIT_FSIZE (Linux generic_write_checks — ext4 files carry their
+    // own write op, so the reg_file_write twin is not enough): a write
+    // starting at/after the soft limit fails EFBIG with SIGXFSZ; a
+    // write that would CROSS the limit is silently truncated to the
+    // boundary (LTP setrlimit01 case 2 sets the limit to 10, writes 26
+    // and requires write() to return exactly 10).
+    let mut buf = buf;
+    if let Some(task) = crate::sched::current() {
+        let (fsz_cur, _) = task.rlimit(crate::process::task::rlimit_res::FSIZE);
+        if fsz_cur != u64::MAX {
+            let start = if offset == u64::MAX {
+                inode.size.load(core::sync::atomic::Ordering::Acquire)
+            } else {
+                offset
+            };
+            if start >= fsz_cur {
+                let _ = crate::signal::send_signal(
+                    task.pid() as u32,
+                    crate::signal::Signal::SIGXFSZ as i32,
+                );
+                return crate::errno::Errno::FileTooLarge.as_neg_i32() as isize;
+            }
+            let allowed = (fsz_cur - start) as usize;
+            if buf.len() > allowed {
+                buf = &buf[..allowed];
             }
         }
+    }
 
-        // Route-1: defer the write on journal-less images unless the
-        // description demands write-return durability.
-        let durability = file.flags().bits()
-            & (crate::fs::file::FileFlags::O_SYNC
-                | crate::fs::file::FileFlags::O_DSYNC
-                | crate::fs::file::FileFlags::O_DIRECT);
-        // Delayed allocation (perf-gaps 2026-11): plain buffered writes
-        // (no O_SYNC/O_DSYNC/O_DIRECT) take the page-cache fast path —
-        // write(2) copies into (dirty) frames and defers allocation +
-        // journaling to the writeback points; see ext4_buffered_write.
-        // SAFETY: fs/inode resolution above; buf is the caller's slice.
-        let written = if durability == 0
-            && inode.mode.is_regular_file()
-            && !fs.read_only
-        {
+    // Route-1: defer the write on journal-less images unless the
+    // description demands write-return durability.
+    let durability = file.flags().bits()
+        & (crate::fs::file::FileFlags::O_SYNC
+            | crate::fs::file::FileFlags::O_DSYNC
+            | crate::fs::file::FileFlags::O_DIRECT);
+    // Delayed allocation (perf-gaps 2026-11): plain buffered writes
+    // (no O_SYNC/O_DSYNC/O_DIRECT) take the page-cache fast path —
+    // write(2) copies into (dirty) frames and defers allocation +
+    // journaling to the writeback points; see ext4_buffered_write.
+    let written = if durability == 0
+        && inode.mode.is_regular_file()
+        && !fs.read_only
+    {
+        // SAFETY: the audited ext4_buffered_write span (kernel-source
+        // staging slice, page-cache copy discipline).
+        unsafe {
             ext4_buffered_write(
                 fs,
                 inode,
                 offset,
                 WriteSrc::Kernel(buf.as_ptr(), buf.len()),
             )
-        } else {
-            ext4_write_at_core(
-                fs,
-                ext4_ino,
-                Some(inode),
-                offset,
-                durability & (crate::fs::file::FileFlags::O_SYNC
-                    | crate::fs::file::FileFlags::O_DSYNC) == 0,
-                buf,
-                &[0],
-                durability & crate::fs::file::FileFlags::O_DIRECT != 0,
-            )
-        };
-        if written > 0 {
-            let end = if offset == u64::MAX {
-                inode.size.load(core::sync::atomic::Ordering::Acquire)
-            } else {
-                offset + written as u64
-            };
-            file.set_pos(end);
-            // O_DIRECT write-return durability (paired-test item 1,
-            // 2026-11-17): the core leaves the range's data blocks
-            // BH_Dirty in the block cache; a direct write is contractually
-            // on the device when write(2) returns (the reference's DIO
-            // submits bios and waits). Push the written range through the
-            // plugged span pipeline (ONE batched submit + drain — a 1 MiB
-            // contiguous write is one span) instead of leaving 256 dirty
-            // victims to serialized one-at-a-time eviction syncs (the
-            // measured 10.6 ms 1 MiB DIO write class). no-op for block
-            // sizes the span machinery cannot express.
-            if durability & crate::fs::file::FileFlags::O_DIRECT != 0 && !fs.read_only {
-                let mut stage: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-                let mut flusher = SpanFlusher::new();
-                run_sync_spans(
-                    fs,
-                    inode,
-                    end - written as u64,
-                    written as usize,
-                    &mut stage,
-                    &mut flusher,
-                );
-                flusher.drain();
-            }
         }
-        written
+    } else {
+        ext4_write_at_core(
+            fs,
+            ext4_ino,
+            Some(inode),
+            offset,
+            durability & (crate::fs::file::FileFlags::O_SYNC
+                | crate::fs::file::FileFlags::O_DSYNC) == 0,
+            buf,
+            &[0],
+            durability & crate::fs::file::FileFlags::O_DIRECT != 0,
+        )
+    };
+    if written > 0 {
+        let end = if offset == u64::MAX {
+            inode.size.load(core::sync::atomic::Ordering::Acquire)
+        } else {
+            offset + written as u64
+        };
+        file.set_pos(end);
+        // O_DIRECT write-return durability (paired-test item 1,
+        // 2026-11-17): the core leaves the range's data blocks
+        // BH_Dirty in the block cache; a direct write is contractually
+        // on the device when write(2) returns (the reference's DIO
+        // submits bios and waits). Push the written range through the
+        // plugged span pipeline (ONE batched submit + drain — a 1 MiB
+        // contiguous write is one span) instead of leaving 256 dirty
+        // victims to serialized one-at-a-time eviction syncs (the
+        // measured 10.6 ms 1 MiB DIO write class). no-op for block
+        // sizes the span machinery cannot express.
+        if durability & crate::fs::file::FileFlags::O_DIRECT != 0 && !fs.read_only {
+            let mut stage: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+            let mut flusher = SpanFlusher::new();
+            run_sync_spans(
+                fs,
+                inode,
+                end - written as u64,
+                written as usize,
+                &mut stage,
+                &mut flusher,
+            );
+            flusher.drain();
+        }
     }
+    written
 }
 
 /// Positional write for the ext4 file ops (FileOps::write_at, session 25):
@@ -4074,65 +4052,64 @@ pub unsafe fn ext4_file_write_at_vfs(file: &File, offset: u64, buf: *const u8, c
     if file.flags().is_readonly() {
         return -9; // EBADF
     }
-    let inode_opt = &*file.inode.get();
-    let inode = match inode_opt.as_ref() {
-        Some(i) => i,
-        None => return -9,
+    let Some((inode, fs, _)) = file_ext4(file) else {
+        if file_inode_missing(file) {
+            return -9;
+        }
+        return errno::Errno::IOError.as_neg_i32() as isize;
     };
-    let fs_ptr = match inode.private_data {
-        Some(ptr) => ptr as *const crate::fs::ext4::Ext4FileSystem,
-        None => return errno::Errno::IOError.as_neg_i32() as isize,
-    };
+    // SAFETY: the fn's own contract — `buf` holds `count` readable bytes
+    // (the caller's raw-pointer write_at boundary).
     let data = core::slice::from_raw_parts(buf, count);
     // Same routing as write(2): plain buffered writes take the
     // delayed-allocation page-cache path (pwrite/mmap-writeback flushes
     // still come through ext4_write_at_core directly).
-    // SAFETY: fs/inode resolution above; data is the caller's buffer.
     let durability = file.flags().bits()
         & (crate::fs::file::FileFlags::O_SYNC
             | crate::fs::file::FileFlags::O_DSYNC
             | crate::fs::file::FileFlags::O_DIRECT);
-    unsafe {
-        if durability == 0 && inode.mode.is_regular_file() && !(*fs_ptr).read_only {
+    if durability == 0 && inode.mode.is_regular_file() && !fs.read_only {
+        // SAFETY: unsafe fn body — the audited ext4_buffered_write span.
+        unsafe {
             ext4_buffered_write(
-                &*fs_ptr,
+                fs,
                 inode,
                 offset,
                 WriteSrc::Kernel(data.as_ptr(), data.len()),
             )
-        } else {
-            let written = ext4_write_at_core(
-                &*fs_ptr,
-                inode.ino as u32,
-                Some(inode),
-                offset,
-                durability & (crate::fs::file::FileFlags::O_SYNC
-                    | crate::fs::file::FileFlags::O_DSYNC) == 0,
-                data,
-                &[0],
-                durability & crate::fs::file::FileFlags::O_DIRECT != 0,
-            );
-            // O_DIRECT write-return durability — see the write(2) twin
-            // (paired-test item 1): plugged span drain of the written
-            // range so a direct pwrite is device-acked at return.
-            if written > 0
-                && durability & crate::fs::file::FileFlags::O_DIRECT != 0
-                && !(*fs_ptr).read_only
-            {
-                let mut stage: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-                let mut flusher = SpanFlusher::new();
-                run_sync_spans(
-                    &*fs_ptr,
-                    inode,
-                    offset,
-                    written as usize,
-                    &mut stage,
-                    &mut flusher,
-                );
-                flusher.drain();
-            }
-            written
         }
+    } else {
+        let written = ext4_write_at_core(
+            fs,
+            inode.ino as u32,
+            Some(inode),
+            offset,
+            durability & (crate::fs::file::FileFlags::O_SYNC
+                | crate::fs::file::FileFlags::O_DSYNC) == 0,
+            data,
+            &[0],
+            durability & crate::fs::file::FileFlags::O_DIRECT != 0,
+        );
+        // O_DIRECT write-return durability — see the write(2) twin
+        // (paired-test item 1): plugged span drain of the written
+        // range so a direct pwrite is device-acked at return.
+        if written > 0
+            && durability & crate::fs::file::FileFlags::O_DIRECT != 0
+            && !fs.read_only
+        {
+            let mut stage: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+            let mut flusher = SpanFlusher::new();
+            run_sync_spans(
+                fs,
+                inode,
+                offset,
+                written as usize,
+                &mut stage,
+                &mut flusher,
+            );
+            flusher.drain();
+        }
+        written
     }
 }
 
@@ -4149,107 +4126,102 @@ pub fn ext4_file_write_user_vfs(file: &File, src: *const u8, count: usize) -> is
     if count == 0 {
         return 0;
     }
-    // SAFETY: same inode/fs lifetime guarantees as ext4_file_write_vfs.
-    unsafe {
-        let inode_opt = &*file.inode.get();
-        let inode = match inode_opt {
-            Some(i) => i,
-            None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
-        };
-        let fs_ptr = match inode.private_data {
-            Some(ptr) => ptr as *const crate::fs::ext4::Ext4FileSystem,
-            None => return errno::Errno::IOError.as_neg_i32() as isize,
-        };
-        let fs = &*fs_ptr;
-
-        // f_pos discipline (LTP fork07): serialize get_pos → write →
-        // set_pos against the same description's readers/writers, taken
-        // BEFORE the big lock (a slow waiter must not pin the machine-wide
-        // ext4 lock). Sleeping mutex — the user copies below may fault
-        // and sleep inside it (Linux holds i_rwsem across exactly this).
-        let _pos_guard = file.io_lock.guard();
-
-        let offset = if file.flags().bits() & crate::fs::file::FileFlags::O_APPEND != 0 {
-            u64::MAX
-        } else {
-            file.get_pos()
-        };
-
-        // RLIMIT_FSIZE (generic_write_checks twin — see
-        // ext4_file_write_vfs): at/after the soft limit EFBIG + SIGXFSZ;
-        // crossing it truncates silently to the boundary.
-        let mut wsrc = WriteSrc::User(src, count);
-        if let Some(task) = crate::sched::current() {
-            let (fsz_cur, _) = task.rlimit(crate::process::task::rlimit_res::FSIZE);
-            if fsz_cur != u64::MAX {
-                let start = if offset == u64::MAX {
-                    inode.size.load(core::sync::atomic::Ordering::Acquire)
-                } else {
-                    offset
-                };
-                if start >= fsz_cur {
-                    let _ = crate::signal::send_signal(
-                        task.pid() as u32,
-                        crate::signal::Signal::SIGXFSZ as i32,
-                    );
-                    return crate::errno::Errno::FileTooLarge.as_neg_i32() as isize;
-                }
-                let allowed = (fsz_cur - start) as usize;
-                if wsrc.len() > allowed {
-                    wsrc = wsrc.truncate(allowed);
-                }
-            }
+    let Some((inode, fs, _)) = file_ext4(file) else {
+        if file_inode_missing(file) {
+            return errno::Errno::BadFileNumber.as_neg_i32() as isize;
         }
+        return errno::Errno::IOError.as_neg_i32() as isize;
+    };
 
-        let durability = file.flags().bits()
-            & (crate::fs::file::FileFlags::O_SYNC
-                | crate::fs::file::FileFlags::O_DSYNC
-                | crate::fs::file::FileFlags::O_DIRECT);
-        let written = if durability == 0 && inode.mode.is_regular_file() && !fs.read_only {
-            ext4_buffered_write(fs, inode, offset, wsrc)
-        } else {
-            // Safety net (the syscall layer does not dispatch durable
-            // writes here): stage the user bytes once and run the
-            // write-through core, exactly like the staged path would.
-            let mut staged = alloc::vec![0u8; wsrc.len()];
-            // SAFETY: staged is a valid kernel destination of wsrc.len().
-            let uncopied = wsrc.copy_to_frame(0, staged.as_mut_ptr(), staged.len());
-            if uncopied > 0 {
-                let landed = staged.len() - uncopied;
-                if landed == 0 {
-                    return errno::Errno::BadAddress.as_neg_i32() as isize;
-                }
-                staged.truncate(landed);
-            }
-            ext4_write_at_core(
-                fs,
-                inode.ino as u32,
-                Some(inode),
-                offset,
-                durability & (crate::fs::file::FileFlags::O_SYNC
-                    | crate::fs::file::FileFlags::O_DSYNC) == 0,
-                &staged,
-                &[0],
-                durability & crate::fs::file::FileFlags::O_DIRECT != 0,
-            )
-        };
-        if written > 0 {
-            let end = if offset == u64::MAX {
+    // f_pos discipline (LTP fork07): serialize get_pos → write →
+    // set_pos against the same description's readers/writers, taken
+    // BEFORE the big lock (a slow waiter must not pin the machine-wide
+    // ext4 lock). Sleeping mutex — the user copies below may fault
+    // and sleep inside it (Linux holds i_rwsem across exactly this).
+    let _pos_guard = file.io_lock.guard();
+
+    let offset = if file.flags().bits() & crate::fs::file::FileFlags::O_APPEND != 0 {
+        u64::MAX
+    } else {
+        file.get_pos()
+    };
+
+    // RLIMIT_FSIZE (generic_write_checks twin — see
+    // ext4_file_write_vfs): at/after the soft limit EFBIG + SIGXFSZ;
+    // crossing it truncates silently to the boundary.
+    let mut wsrc = WriteSrc::User(src, count);
+    if let Some(task) = crate::sched::current() {
+        let (fsz_cur, _) = task.rlimit(crate::process::task::rlimit_res::FSIZE);
+        if fsz_cur != u64::MAX {
+            let start = if offset == u64::MAX {
                 inode.size.load(core::sync::atomic::Ordering::Acquire)
             } else {
-                offset + written as u64
+                offset
             };
-            file.set_pos(end);
-            // inotify IN_MODIFY: this fast path bypasses File::write,
-            // whose wrapper owns the notify on the staged path (same
-            // discipline as the read twin, LTP inotify01).
-            crate::fs::inotify::notify_file(
-                file,
-                crate::fs::inotify::inotify_events::IN_MODIFY,
-            );
+            if start >= fsz_cur {
+                let _ = crate::signal::send_signal(
+                    task.pid() as u32,
+                    crate::signal::Signal::SIGXFSZ as i32,
+                );
+                return crate::errno::Errno::FileTooLarge.as_neg_i32() as isize;
+            }
+            let allowed = (fsz_cur - start) as usize;
+            if wsrc.len() > allowed {
+                wsrc = wsrc.truncate(allowed);
+            }
         }
-        written
     }
+
+    let durability = file.flags().bits()
+        & (crate::fs::file::FileFlags::O_SYNC
+            | crate::fs::file::FileFlags::O_DSYNC
+            | crate::fs::file::FileFlags::O_DIRECT);
+    let written = if durability == 0 && inode.mode.is_regular_file() && !fs.read_only {
+        // SAFETY: the audited ext4_buffered_write span (user-source copy
+        // contract: wsrc is access_ok-validated by the syscall layer).
+        unsafe { ext4_buffered_write(fs, inode, offset, wsrc) }
+    } else {
+        // Safety net (the syscall layer does not dispatch durable
+        // writes here): stage the user bytes once and run the
+        // write-through core, exactly like the staged path would.
+        let mut staged = alloc::vec![0u8; wsrc.len()];
+        // SAFETY: staged is a valid kernel destination of wsrc.len().
+        let uncopied = unsafe { wsrc.copy_to_frame(0, staged.as_mut_ptr(), staged.len()) };
+        if uncopied > 0 {
+            let landed = staged.len() - uncopied;
+            if landed == 0 {
+                return errno::Errno::BadAddress.as_neg_i32() as isize;
+            }
+            staged.truncate(landed);
+        }
+        ext4_write_at_core(
+            fs,
+            inode.ino as u32,
+            Some(inode),
+            offset,
+            durability & (crate::fs::file::FileFlags::O_SYNC
+                | crate::fs::file::FileFlags::O_DSYNC) == 0,
+            &staged,
+            &[0],
+            durability & crate::fs::file::FileFlags::O_DIRECT != 0,
+        )
+    };
+    if written > 0 {
+        let end = if offset == u64::MAX {
+            inode.size.load(core::sync::atomic::Ordering::Acquire)
+        } else {
+            offset + written as u64
+        };
+        file.set_pos(end);
+        // inotify IN_MODIFY: this fast path bypasses File::write,
+        // whose wrapper owns the notify on the staged path (same
+        // discipline as the read twin, LTP inotify01).
+        crate::fs::inotify::notify_file(
+            file,
+            crate::fs::inotify::inotify_events::IN_MODIFY,
+        );
+    }
+    written
 }
 
 /// pwrite(2) fast path for ext4 regular files, USER source (BUFW-2X): the
@@ -4262,63 +4234,58 @@ pub fn ext4_file_pwrite_user_vfs(file: &File, offset: u64, src: *const u8, count
     if count == 0 {
         return 0;
     }
-    // SAFETY: same inode/fs lifetime guarantees as ext4_file_write_at_vfs.
-    unsafe {
-        let inode_opt = &*file.inode.get();
-        let inode = match inode_opt {
-            Some(i) => i,
-            None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
-        };
-        let fs_ptr = match inode.private_data {
-            Some(ptr) => ptr as *const crate::fs::ext4::Ext4FileSystem,
-            None => return errno::Errno::IOError.as_neg_i32() as isize,
-        };
-        let fs = &*fs_ptr;
-
-        let durability = file.flags().bits()
-            & (crate::fs::file::FileFlags::O_SYNC
-                | crate::fs::file::FileFlags::O_DSYNC
-                | crate::fs::file::FileFlags::O_DIRECT);
-        let written = if durability == 0 && inode.mode.is_regular_file() && !fs.read_only {
-            ext4_buffered_write(fs, inode, offset, WriteSrc::User(src, count))
-        } else {
-            // Safety net (the syscall layer does not dispatch durable
-            // pwrites here): stage once, run the write-through core —
-            // exactly the staged path's shape.
-            let mut staged = alloc::vec![0u8; count];
-            // SAFETY: staged is a valid kernel destination of count bytes.
-            let uncopied =
-                WriteSrc::User(src, count).copy_to_frame(0, staged.as_mut_ptr(), count);
-            if uncopied > 0 {
-                let landed = count - uncopied;
-                if landed == 0 {
-                    return errno::Errno::BadAddress.as_neg_i32() as isize;
-                }
-                staged.truncate(landed);
-            }
-            ext4_write_at_core(
-                fs,
-                inode.ino as u32,
-                Some(inode),
-                offset,
-                durability & (crate::fs::file::FileFlags::O_SYNC
-                    | crate::fs::file::FileFlags::O_DSYNC) == 0,
-                &staged,
-                &[0],
-                durability & crate::fs::file::FileFlags::O_DIRECT != 0,
-            )
-        };
-        if written > 0 {
-            // inotify IN_MODIFY: the staged path's File::write_at wrapper
-            // owns the notify; this fast path bypasses it (same discipline
-            // as the read twin, LTP inotify01).
-            crate::fs::inotify::notify_file(
-                file,
-                crate::fs::inotify::inotify_events::IN_MODIFY,
-            );
+    let Some((inode, fs, _)) = file_ext4(file) else {
+        if file_inode_missing(file) {
+            return errno::Errno::BadFileNumber.as_neg_i32() as isize;
         }
-        written
+        return errno::Errno::IOError.as_neg_i32() as isize;
+    };
+
+    let durability = file.flags().bits()
+        & (crate::fs::file::FileFlags::O_SYNC
+            | crate::fs::file::FileFlags::O_DSYNC
+            | crate::fs::file::FileFlags::O_DIRECT);
+    let written = if durability == 0 && inode.mode.is_regular_file() && !fs.read_only {
+        // SAFETY: the audited ext4_buffered_write span (user-source copy
+        // contract: wsrc is access_ok-validated by the syscall layer).
+        unsafe { ext4_buffered_write(fs, inode, offset, WriteSrc::User(src, count)) }
+    } else {
+        // Safety net (the syscall layer does not dispatch durable
+        // pwrites here): stage once, run the write-through core —
+        // exactly the staged path's shape.
+        let mut staged = alloc::vec![0u8; count];
+        // SAFETY: staged is a valid kernel destination of count bytes.
+        let uncopied =
+            unsafe { WriteSrc::User(src, count).copy_to_frame(0, staged.as_mut_ptr(), count) };
+        if uncopied > 0 {
+            let landed = count - uncopied;
+            if landed == 0 {
+                return errno::Errno::BadAddress.as_neg_i32() as isize;
+            }
+            staged.truncate(landed);
+        }
+        ext4_write_at_core(
+            fs,
+            inode.ino as u32,
+            Some(inode),
+            offset,
+            durability & (crate::fs::file::FileFlags::O_SYNC
+                | crate::fs::file::FileFlags::O_DSYNC) == 0,
+            &staged,
+            &[0],
+            durability & crate::fs::file::FileFlags::O_DIRECT != 0,
+        )
+    };
+    if written > 0 {
+        // inotify IN_MODIFY: the staged path's File::write_at wrapper
+        // owns the notify; this fast path bypasses it (same discipline
+        // as the read twin, LTP inotify01).
+        crate::fs::inotify::notify_file(
+            file,
+            crate::fs::inotify::inotify_events::IN_MODIFY,
+        );
     }
+    written
 }
 
 // ==================== GUP-pinned O_DIRECT writes (GUP-DIO) ====================
@@ -4351,7 +4318,7 @@ fn ext4_dio_write_gup_run(
 ) -> Option<isize> {
     // SG chains are the only zero-copy expression of discontiguous
     // frames; without them the staged path is the shape.
-    if !unsafe { (*fs.device).has_async_write_sg() } {
+    if !(*fs.device).has_async_write_sg() {
         return None;
     }
     if fs.block_size != 4096 {
@@ -4387,75 +4354,69 @@ fn ext4_dio_write_gup_run(
 /// write(2) O_DIRECT GUP entry. None = use the staged path unchanged.
 /// `src` must be access_ok-validated for `count`.
 pub fn ext4_file_write_dio_user_vfs(file: &File, src: *const u8, count: usize) -> Option<isize> {
-    // SAFETY: same inode/fs lifetime guarantees as ext4_file_write_user_vfs.
-    unsafe {
-        let inode_opt = &*file.inode.get();
-        let inode = inode_opt.as_ref()?;
-        if !inode.mode.is_regular_file() {
-            return None;
-        }
-        let fs_ptr = inode.private_data? as *const crate::fs::ext4::Ext4FileSystem;
-        let fs = &*fs_ptr;
-        if fs.read_only {
-            return None;
-        }
+    let (inode, fs, _) = file_ext4(file)?;
+    if !inode.mode.is_regular_file() {
+        return None;
+    }
+    if fs.read_only {
+        return None;
+    }
 
-        // RLIMIT_FSIZE clip (generic_write_checks twin — see
-        // ext4_file_write_user_vfs): at/after the limit EFBIG+SIGXFSZ,
-        // crossing truncates to the boundary.
-        let mut count = count;
-        let offset = if file.flags().bits() & crate::fs::file::FileFlags::O_APPEND != 0 {
-            u64::MAX
-        } else {
-            file.get_pos()
-        };
-        if let Some(task) = crate::sched::current() {
-            let (fsz_cur, _) = task.rlimit(crate::process::task::rlimit_res::FSIZE);
-            if fsz_cur != u64::MAX {
-                let start = if offset == u64::MAX {
-                    inode.size.load(core::sync::atomic::Ordering::Acquire)
-                } else {
-                    offset
-                };
-                if start >= fsz_cur {
-                    let _ = crate::signal::send_signal(
-                        task.pid() as u32,
-                        crate::signal::Signal::SIGXFSZ as i32,
-                    );
-                    // The staged twin reports EFBIG; keep the observable
-                    // behavior by NOT falling back (the staged path would
-                    // re-send the signal and EFBIG identically — hand the
-                    // verdict back through the None contract's sibling:
-                    // report it directly here).
-                    return Some(errno::Errno::FileTooLarge.as_neg_i32() as isize);
-                }
-                let allowed = (fsz_cur - start) as usize;
-                if count > allowed {
-                    count = allowed;
-                }
-            }
-        }
-        if count == 0 {
-            return Some(0);
-        }
-
-        let _pos_guard = file.io_lock.guard();
-        let written = ext4_dio_write_gup_run(fs, Some(inode), inode.ino as u32, offset, src, count)?;
-        if written > 0 {
-            let end = if offset == u64::MAX {
+    // RLIMIT_FSIZE clip (generic_write_checks twin — see
+    // ext4_file_write_user_vfs): at/after the limit EFBIG+SIGXFSZ,
+    // crossing truncates to the boundary.
+    let mut count = count;
+    let offset = if file.flags().bits() & crate::fs::file::FileFlags::O_APPEND != 0 {
+        u64::MAX
+    } else {
+        file.get_pos()
+    };
+    if let Some(task) = crate::sched::current() {
+        let (fsz_cur, _) = task.rlimit(crate::process::task::rlimit_res::FSIZE);
+        if fsz_cur != u64::MAX {
+            let start = if offset == u64::MAX {
                 inode.size.load(core::sync::atomic::Ordering::Acquire)
             } else {
-                offset + written as u64
+                offset
             };
-            file.set_pos(end);
-            // IN_MODIFY: same discipline as ext4_file_write_user_vfs.
-            crate::fs::inotify::notify_file(
-                file,
-                crate::fs::inotify::inotify_events::IN_MODIFY,
-            );
+            if start >= fsz_cur {
+                let _ = crate::signal::send_signal(
+                    task.pid() as u32,
+                    crate::signal::Signal::SIGXFSZ as i32,
+                );
+                // The staged twin reports EFBIG; keep the observable
+                // behavior by NOT falling back (the staged path would
+                // re-send the signal and EFBIG identically — hand the
+                // verdict back through the None contract's sibling:
+                // report it directly here).
+                return Some(errno::Errno::FileTooLarge.as_neg_i32() as isize);
+            }
+            let allowed = (fsz_cur - start) as usize;
+            if count > allowed {
+                count = allowed;
+            }
         }
-        Some(written)
     }
+    if count == 0 {
+        return Some(0);
+    }
+
+    let _pos_guard = file.io_lock.guard();
+    let written = ext4_dio_write_gup_run(fs, Some(inode), inode.ino as u32, offset, src, count)?;
+    if written > 0 {
+        let end = if offset == u64::MAX {
+            inode.size.load(core::sync::atomic::Ordering::Acquire)
+        } else {
+            offset + written as u64
+        };
+        file.set_pos(end);
+        // IN_MODIFY: same discipline as ext4_file_write_user_vfs.
+        crate::fs::inotify::notify_file(
+            file,
+            crate::fs::inotify::inotify_events::IN_MODIFY,
+        );
+    }
+    Some(written)
 }
 
 /// pwrite(2) O_DIRECT GUP entry — the write(2) twin at an explicit
@@ -4466,32 +4427,26 @@ pub fn ext4_file_pwrite_dio_user_vfs(
     src: *const u8,
     count: usize,
 ) -> Option<isize> {
-    // SAFETY: same resolution discipline as ext4_file_pwrite_user_vfs.
-    unsafe {
-        let inode_opt = &*file.inode.get();
-        let inode = inode_opt.as_ref()?;
-        if !inode.mode.is_regular_file() {
-            return None;
-        }
-        let fs_ptr = inode.private_data? as *const crate::fs::ext4::Ext4FileSystem;
-        let fs = &*fs_ptr;
-        if fs.read_only {
-            return None;
-        }
-        if count == 0 {
-            return Some(0);
-        }
-        let _io_guard = file.io_lock.guard();
-        let written =
-            ext4_dio_write_gup_run(fs, Some(inode), inode.ino as u32, offset, src, count)?;
-        if written > 0 {
-            crate::fs::inotify::notify_file(
-                file,
-                crate::fs::inotify::inotify_events::IN_MODIFY,
-            );
-        }
-        Some(written)
+    let (inode, fs, _) = file_ext4(file)?;
+    if !inode.mode.is_regular_file() {
+        return None;
     }
+    if fs.read_only {
+        return None;
+    }
+    if count == 0 {
+        return Some(0);
+    }
+    let _io_guard = file.io_lock.guard();
+    let written =
+        ext4_dio_write_gup_run(fs, Some(inode), inode.ino as u32, offset, src, count)?;
+    if written > 0 {
+        crate::fs::inotify::notify_file(
+            file,
+            crate::fs::inotify::inotify_events::IN_MODIFY,
+        );
+    }
+    Some(written)
 }
 
 /// Kernel-side positional write for callers with no VFS file description
@@ -4506,7 +4461,7 @@ pub fn ext4_kernel_write_at(
 ) -> isize {
     // SAFETY: fs is a valid Ext4FileSystem reference; the core owns all
     // locking and operates on (fs, ino) exactly like the fd paths.
-    unsafe { ext4_write_at_core(fs, ext4_ino, None, offset, true, buf, &[0], false) }
+    { ext4_write_at_core(fs, ext4_ino, None, offset, true, buf, &[0], false) }
 }
 
 /// Buffered (delayed-allocation) write for regular files — the reference
@@ -4963,8 +4918,7 @@ unsafe fn ext4_buffered_write(
                     &bounce
                 }
             };
-            // SAFETY: same (fs, ino, inode) discipline as write_vfs.
-            let r = unsafe {
+            let r = {
                 ext4_write_at_core(fs, inode.ino as u32, Some(inode), file_off, true, src_slice, &[0], false)
             };
             if r < 0 {
@@ -5241,7 +5195,7 @@ fn refresh_cached_vfs_inode(
 /// next lookup reads the just-written on-disk inode).
 /// Staged-slice wrapper — the pre-GUP signature (see
 /// ext4_write_at_core_src).
-unsafe fn ext4_write_at_core(
+fn ext4_write_at_core(
     fs: &crate::fs::ext4::Ext4FileSystem,
     ext4_ino: u32,
     inode: Option<&crate::fs::inode::Inode>,
@@ -5606,17 +5560,16 @@ pub fn ext4_flush_dirty_inode(
             )
         };
         if let Some(tbl_blk) = tbl_blk {
-            // SAFETY: dev is the fs's registered GenDisk; identity reads.
-            let (mj, mi) = unsafe { ((*dev).major, (*dev).first_minor) };
+            let (mj, mi) = { ((*dev).major, (*dev).first_minor) };
             // SAFETY: probe/pin of the fs's ITB cache block; the pin is
             // balanced inside submit_span's settle (or the put below).
-            unsafe {
+            {
                 if bio::block_dirty_cached(dev, tbl_blk) {
                     let cache = crate::fs::bio::get_block_cache();
                     if let Some(bh) = cache.peek_buffer((mj, mi), tbl_blk) {
-                        if (*bh).is_dirty() {
+                        if bio::bh_is_dirty(&bh) {
                             let mut bhs = alloc::vec![bh];
-                            let bytes: &[u8] = &(*bh).b_data;
+                            let bytes: &[u8] = bio::bh_data(&bh);
                             flusher.submit_span(
                                 dev,
                                 tbl_blk * (4096 / 512),
@@ -5712,7 +5665,7 @@ fn flush_run(
 
     // SAFETY: same (fs, ino, inode) discipline as the fd write paths;
     // stage[..run_bytes] carries the pinned frames' bytes.
-    let written = unsafe {
+    let written = {
         ext4_write_at_core(
             fs,
             inode.ino as u32,
@@ -5747,13 +5700,12 @@ fn flush_run(
         // SAFETY: same discipline as the run write; src borrows the
         // staged bytes (the pinned frames' copy).
         let mut written =
-            unsafe { ext4_write_at_core(fs, inode.ino as u32, Some(inode), off, true, src, &[pfn], false) };
+            { ext4_write_at_core(fs, inode.ino as u32, Some(inode), off, true, src, &[pfn], false) };
         if written != n_bytes as isize {
             let mut tries = 0u32;
             while tries < 3 {
                 tries += 1;
-                // SAFETY: same discipline as the first attempt.
-                written = unsafe {
+                written = {
                     ext4_write_at_core(
                         fs,
                         inode.ino as u32,
@@ -5899,14 +5851,14 @@ impl SpanFlusher {
                     for &bh in bhs.iter() {
                         // SAFETY: bh is a pinned cached BufferHead whose
                         // content just persisted.
-                        unsafe {
-                            (*bh).clear_state_bit(crate::fs::bio::BufferState::BH_Dirty)
+                        {
+                            bio::bh_clear_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty)
                         };
                     }
                 }
                 for &bh in bhs.iter() {
                     // SAFETY: pinned by peek_buffer; balanced put.
-                    unsafe { crate::fs::bio::get_block_cache().put(bh) };
+                    crate::fs::bio::get_block_cache().put(bh);
                 }
                 bhs.clear();
                 return;
@@ -5944,7 +5896,7 @@ impl SpanFlusher {
                 for &bh in bhs.iter() {
                     // SAFETY: bh is a pinned cached BufferHead; b_data is
                     // its block-sized buffer.
-                    let cur = unsafe { &(*bh).b_data };
+                    let cur = bio::bh_data(&bh);
                     if !snap.is_empty() {
                         if snap.len() - off < cur.len() || cur[..] != snap[off..off + cur.len()] {
                             // Settle guard tripped: the buffer changed
@@ -5963,15 +5915,14 @@ impl SpanFlusher {
                         // SAFETY: bh is a pinned cached BufferHead; the
                         // span's device write was acked AND the buffer
                         // still matches the persisted bytes.
-                        unsafe {
-                            (*bh).clear_state_bit(crate::fs::bio::BufferState::BH_Dirty)
+                        {
+                            bio::bh_clear_state_bit(&bh, crate::fs::bio::BufferState::BH_Dirty)
                         };
                     }
                 }
             }
             for &bh in bhs.iter() {
-                // SAFETY: pinned by peek_buffer; balanced put.
-                unsafe { cache.put(bh) };
+                { cache.put(bh) };
             }
         }
         self.pending_snaps.clear();
@@ -6030,7 +5981,7 @@ fn run_sync_spans(
     let dev = fs.device;
     // SAFETY: dev is the fs's registered GenDisk; only identity fields
     // are read here.
-    let (mj, mi) = unsafe { ((*dev).major, (*dev).first_minor) };
+    let (mj, mi) = { ((*dev).major, (*dev).first_minor) };
     let cache = crate::fs::bio::get_block_cache();
 
     // Span assembly state: pinned dirty buffer heads whose block numbers
@@ -6053,7 +6004,7 @@ fn run_sync_spans(
                 for &bh in span_bhs.iter() {
                     // SAFETY: bh is pinned (peek_buffer) and holds a
                     // 4096-byte b_data Vec.
-                    let src = unsafe { &(*bh).b_data };
+                    let src = bio::bh_data(&bh);
                     stage[dst_off..dst_off + src.len()].copy_from_slice(src);
                     dst_off += src.len();
                 }
@@ -6088,7 +6039,7 @@ fn run_sync_spans(
         };
         // SAFETY: peek_buffer pins the returned head; every pin is
         // balanced by a put below or inside close_span!.
-        let bh = match unsafe { cache.peek_buffer((mj, mi), phys) } {
+        let bh = match { cache.peek_buffer((mj, mi), phys) } {
             Some(b) => b,
             None => {
                 // Evicted after the write core dirtied it: the eviction's
@@ -6097,20 +6048,18 @@ fn run_sync_spans(
                 continue;
             }
         };
-        let dirty = unsafe { (*bh).is_dirty() };
+        let dirty = bio::bh_is_dirty(&bh);
         if !dirty {
-            // SAFETY: pinned above; not part of any span.
-            unsafe { cache.put(bh) };
+            { cache.put(bh) };
             close_span!();
             continue;
         }
         // Publication-constrained block: the guarded drain owns its
         // ordering — sync_dirty_buffer satisfies the constraint first.
-        if unsafe { crate::fs::bio::publication_constrained(mj, mi, phys) } {
+        if crate::fs::bio::publication_constrained(mj, mi, phys) {
             // SAFETY: bh is a pinned dirty BufferHead.
-            let _ = unsafe { crate::fs::bio::sync_dirty_buffer(bh) };
-            // SAFETY: pinned above.
-            unsafe { cache.put(bh) };
+            let _ = crate::fs::bio::sync_dirty_buffer(bh);
+            { cache.put(bh) };
             close_span!();
             continue;
         }
@@ -6164,7 +6113,7 @@ unsafe fn stamp_atime_relatime(ino: *mut super::inode::Ext4Inode) {
     }
 }
 
-unsafe fn get_or_create_ra_state<'a>(file: &File, block_size: u64) -> &'a mut ReadAheadState {
+fn get_or_create_ra_state<'a>(file: &File, block_size: u64) -> &'a mut ReadAheadState {
     // SAFETY: file.ra is written only at File::new (None) and here
     // under io_lock by the description's reader; readers of the state
     // hold the same lock.
@@ -6237,73 +6186,61 @@ fn fs_block_size_of(file: &File) -> u64 {
 }
 
 fn ext4_file_read_at_vfs_inner(file: &File, offset: u64, buf: &mut [u8]) -> isize {
-    unsafe {
-        let inode_opt = &*file.inode.get();
-        let inode = match inode_opt {
-            Some(i) => i,
-            None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
-        };
-
-        let fs_ptr = match inode.private_data {
-            Some(ptr) => ptr as *const crate::fs::ext4::Ext4FileSystem,
-            None => return errno::Errno::IOError.as_neg_i32() as isize,
-        };
-        let fs = &*fs_ptr;
-
-        let ext4_inode = match inode.sb {
-            Some(ptr) => &*(ptr as *const super::inode::Ext4Inode),
-            None => return errno::Errno::IOError.as_neg_i32() as isize,
-        };
-
-        let _io_guard = file.io_lock.guard();
-
-        // atime on a successful positional read, same as the shared-pos
-        // read(2) paths (Linux file_accessed in vfs_read — pread64 is
-        // the same path; filemap_fault's read_at demand fills are the
-        // mmap-fault arm). Advisory volatile write, no disk I/O.
-        let mut atime_pending = false;
-
-        // No IN_ACCESS in either arm: this runs as ops.read_at behind
-        // File::read_at, whose native-op arm owns the notify. The
-        // op-level self-notify double-fired the event — masked by the
-        // inotify last-event merge except when another watcher event
-        // interleaved between the two fires (review CR-3).
-        let ret = if file.flags_bits() & crate::fs::file::FileFlags::O_DIRECT != 0 {
-            match ext4_file_read(fs, ext4_inode, offset, buf) {
-                Ok(read_bytes) => {
-                    if read_bytes > 0 {
-                        atime_pending = true;
-                    }
-                    read_bytes as isize
-                }
-                Err(e) => e as isize,
-            }
-        } else {
-            let ra_state = get_or_create_ra_state(file, fs.block_size as u64);
-            match ext4_file_read_cached(fs, ext4_inode, offset, buf, ra_state) {
-                Ok(read_bytes) => {
-                    if read_bytes > 0 {
-                        atime_pending = true;
-                    }
-                    read_bytes as isize
-                }
-                Err(e) => e as isize,
-            }
-        };
-        if atime_pending {
-            let atime = crate::drivers::rtc::wall_secs() as u32;
-            // SAFETY: the cached Ext4Inode in inode.sb is a Box owned
-            // by this VFS inode; advisory field, plain volatile write
-            // (same discipline as ext4_file_read_vfs).
-            unsafe {
-                core::ptr::write_volatile(
-                    &mut (*(inode.sb.unwrap() as *mut super::inode::Ext4Inode)).atime,
-                    atime,
-                );
-            }
+    let Some((inode, fs, ext4_inode)) = file_ext4(file) else {
+        if file_inode_missing(file) {
+            return errno::Errno::BadFileNumber.as_neg_i32() as isize;
         }
-        ret
+        return errno::Errno::IOError.as_neg_i32() as isize;
+    };
+
+    let _io_guard = file.io_lock.guard();
+
+    // atime on a successful positional read, same as the shared-pos
+    // read(2) paths (Linux file_accessed in vfs_read — pread64 is
+    // the same path; filemap_fault's read_at demand fills are the
+    // mmap-fault arm). Advisory volatile write, no disk I/O.
+    let mut atime_pending = false;
+
+    // No IN_ACCESS in either arm: this runs as ops.read_at behind
+    // File::read_at, whose native-op arm owns the notify. The
+    // op-level self-notify double-fired the event — masked by the
+    // inotify last-event merge except when another watcher event
+    // interleaved between the two fires (review CR-3).
+    let ret = if file.flags_bits() & crate::fs::file::FileFlags::O_DIRECT != 0 {
+        match ext4_file_read(fs, ext4_inode, offset, buf) {
+            Ok(read_bytes) => {
+                if read_bytes > 0 {
+                    atime_pending = true;
+                }
+                read_bytes as isize
+            }
+            Err(e) => e as isize,
+        }
+    } else {
+        let ra_state = get_or_create_ra_state(file, fs.block_size as u64);
+        match ext4_file_read_cached(fs, ext4_inode, offset, buf, ra_state) {
+            Ok(read_bytes) => {
+                if read_bytes > 0 {
+                    atime_pending = true;
+                }
+                read_bytes as isize
+            }
+            Err(e) => e as isize,
+        }
+    };
+    if atime_pending {
+        let atime = crate::drivers::rtc::wall_secs() as u32;
+        // SAFETY: the cached Ext4Inode in inode.sb is a Box owned
+        // by this VFS inode; advisory field, plain volatile write
+        // (INV-EXT4-ATIME, same discipline as ext4_file_read_vfs).
+        unsafe {
+            core::ptr::write_volatile(
+                &mut (*(inode.sb.unwrap() as *mut super::inode::Ext4Inode)).atime,
+                atime,
+            );
+        }
     }
+    ret
 }
 
 /// Default regular file lseek implementation

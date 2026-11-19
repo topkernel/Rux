@@ -6322,7 +6322,7 @@ pub fn sys_open_by_handle_at(args: SyscallArgs) -> i64 {
             }
         }
     }
-    match unsafe { crate::fs::file::get_file_fd_install(file) } {
+    match crate::fs::file::get_file_fd_install(file) {
         Some(fd) => fd as i64,
         None => -(errno::EMFILE as i64),
     }

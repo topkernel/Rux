@@ -509,21 +509,22 @@ pub fn do_mount(
             // reference's driver-registered configfs groups) INSIDE the
             // instance, before it is published by the mount.
             if let Some(ops) = root_inode.ops {
-                if let Some(mkdir) = ops.mkdir {
-                    // SAFETY: root_inode is the freshly created instance
-                    // root; mkdir is the tmpfs mkdir twin.
-                    unsafe {
-                        let _ = mkdir(
-                            &root_inode,
-                            b"hmdfs",
-                            crate::fs::inode::InodeMode::new(0o755),
-                        );
-                        let _ = mkdir(
-                            &root_inode,
-                            b"sharefs",
-                            crate::fs::inode::InodeMode::new(0o755),
-                        );
-                    }
+                if ops.mkdir.is_some() {
+                    // INV-VFSOPS-1 dispatcher (root_inode is the freshly
+                    // created instance root; mkdir is the tmpfs mkdir
+                    // twin).
+                    let _ = ops.call_mkdir(
+                        &root_inode,
+                        b"hmdfs",
+                        crate::fs::inode::InodeMode::new(0o755),
+                        Err(crate::errno::Errno::ReadOnlyFileSystem),
+                    );
+                    let _ = ops.call_mkdir(
+                        &root_inode,
+                        b"sharefs",
+                        crate::fs::inode::InodeMode::new(0o755),
+                        Err(crate::errno::Errno::ReadOnlyFileSystem),
+                    );
                 }
             }
             crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);

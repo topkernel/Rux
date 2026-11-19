@@ -313,10 +313,9 @@ pub fn memfd_create(name: &[u8], flags: u32) -> Result<usize, i32> {
     file.set_inode(Arc::clone(&inode));
     file.set_ops(&MEMFD_FILE_OPS);
 
-    // SAFETY: the File was fully initialized above (ops + inode installed
-    // before publication); get_file_fd_install only inserts it into the
-    // current task's fd table.
-    let fd = unsafe { crate::fs::file::get_file_fd_install(Arc::clone(&file)) }
+    // (unsafe-slim r3) get_file_fd_install is safe (un-signed, verified):
+    // it only inserts the fully initialized File into the fd table.
+    let fd = crate::fs::file::get_file_fd_install(Arc::clone(&file))
         .ok_or(errno::Errno::TooManyOpenFiles.as_neg_i32())?;
     if flags & MFD_CLOEXEC != 0 {
         crate::fs::set_cloexec_fd(fd, true);

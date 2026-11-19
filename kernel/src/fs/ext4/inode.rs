@@ -336,12 +336,12 @@ impl Ext4Inode {
 
             // SAFETY: fs.device is a valid GenDisk pointer for the mounted filesystem;
             // this_block is a resolved data block; bio::bread returns a valid BufferHead.
-            unsafe {
+            {
                 let bh = bio::bread(fs.device, this_block)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
                 // SAFETY: bh is a valid buffer head from bio::bread; b_data is block_size bytes
-                let data = &(*bh).b_data;
+                let data = bio::bh_data(&bh);
                 let remaining = to_read - total_read;
                 let available_in_block = block_size - block_offset;
                 let read_in_block = core::cmp::min(remaining, available_in_block);
@@ -422,7 +422,7 @@ pub fn read_inode(
         .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
     // SAFETY: bh is a valid BufferHead from bio::bread.
-    let data = unsafe { &(*bh).b_data };
+    let data = bio::bh_data(&bh);
 
     // Bounds check (read-side twin of the write paths' R20-FS2 clamp):
     // the copy is clamped to the ON-DISK slot size (s_inode_size). With
@@ -549,7 +549,7 @@ pub fn write_inode(
         .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
     // SAFETY: bh is a valid BufferHead from bio::bread; b_data is block_size bytes.
-    let data = unsafe { &mut (*bh).b_data };
+    let data = bio::bh_data_mut(&bh);
 
     // Bounds check: copy length clamped to the on-disk slot size so the
     // 172-byte in-memory struct never spills into the next inode's slot
@@ -623,7 +623,7 @@ pub fn write_inode(
     // Mark buffer dirty and sync
     // SAFETY: bh is a valid buffer head from bio::bread; set_state_bit modifies
     // the buffer state flags through an internal spinlock.
-    unsafe { (*bh).set_state_bit(bio::BufferState::BH_Dirty) };
+    bio::bh_set_state_bit(&bh, bio::BufferState::BH_Dirty);
 
     // Journal the inode table block if a transaction is active
     // SAFETY: bh is a valid buffer head from bio::bread
@@ -680,9 +680,9 @@ pub fn sync_inode_table_block(
     if let Some(tbl_blk) = inode_table_block_of(fs, ino) {
         // SAFETY: bio::bread returns a valid BufferHead on success; the
         // inode-table block is a plain metadata block.
-        unsafe {
+        {
             if let Some(bh) = bio::bread(fs.device, tbl_blk) {
-                let sync_res = if (*bh).is_dirty() {
+                let sync_res = if bio::bh_is_dirty(&bh) {
                     bio::sync_dirty_buffer(bh)
                 } else {
                     Ok(())
@@ -801,7 +801,7 @@ pub fn write_inode_disk(
 
     // SAFETY: bh is a valid BufferHead from bio::bread; b_data is a valid
     // mutable slice of block_size bytes containing the inode table block.
-    let data = unsafe { &mut (*bh).b_data };
+    let data = bio::bh_data_mut(&bh);
 
     // Bounds check (R20-FS2): the copy is clamped to the ON-DISK inode slot
     // size (s_inode_size) AND to the block: with s_inode_size < 172 the full
@@ -842,7 +842,7 @@ pub fn write_inode_disk(
     // Mark buffer dirty and sync
     // SAFETY: bh is a valid BufferHead from bio::bread; set_state_bit modifies
     // the buffer state flags through an internal spinlock.
-    unsafe { (*bh).set_state_bit(bio::BufferState::BH_Dirty) };
+    bio::bh_set_state_bit(&bh, bio::BufferState::BH_Dirty);
 
     // Journal the inode table block if a transaction is active
     // SAFETY: bh is a valid buffer head from bio::bread
