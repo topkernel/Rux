@@ -858,34 +858,6 @@ syscalls × bad pointer → EFAULT) in the packed probe set.
 
 ---
 
-## D-21: RT kernel without the PREEMPT_RT full-tree spinlock conversion
-
-**Design.** The RT plan (docs/development/rt-kernel-plan.md) delivers
-real-time wakeup semantics through staged Rux-native mechanisms: the D-14
-wakeup gate resized to the wakeup granularity (0.7 ms), irq-exit kernel
-preemption armed by default, timer hardirq delivery (RT-2X split), forced
-per-IRQ threading (SCHED_FIFO 50 kthreads), and PI futex numeric chains —
-WITHOUT converting the whole tree's raw spinlocks to sleeping rt_mutexes.
-
-**Why this is an advantage.** Rux's measured critical sections are small
-(GRQ actual hold ~102 ns; switch machinery ~620 ns) and lock nesting is a
-compile fact (D-11 typed lock keys). The PREEMPT_RT conversion trades the
-entire tree's lock discipline for sleeping mutexes to enable preemption; on
-Rux the same preemption comes from the irq-exit hook + preempt accounting in
-RawSpinlock (INV-LOCK-1 automatic) with a tree that is already
-preemption-safe by construction. The raw_spin_lock raw semantics match the
-reference's CONFIG_PREEMPT (not PREEMPT_RT) kernel — a supported, widely
-deployed real-time configuration.
-
-**Compatibility.** No ABI face. cyclictest dual-column acceptance: max 263
-vs 887 µs held; avg gap (46 vs 12 µs) tracked as the fire-late attribution
-row. pi_stress -g 2 completes 372k+370k inversions.
-
-**Known cost.** Without the full conversion, a non-preemptible raw-lock
-holder still bounds wakeup latency by its hold time (measured ~102 ns GRQ /
-~620 ns switch machinery — small, bounded, and enforced by the preempt
-accounting added with the R1 accounting fix).
-
 ## D-20: Writer-side dirty writeback watermark on a free-fraction mark (no global dirty accounting)
 
 **Design.** Buffered-write throttling (kernel/src/fs/ext4/file.rs +
@@ -1261,3 +1233,38 @@ when a filter is armed, one relaxed zero-load + branch when not
 (behind the existing armed() gate) — off in default boots.
 
 **Guard.** trace-unit tests + the mm-diff rig (run/mm-diff.py).
+
+---
+
+## D-29: RT kernel without the PREEMPT_RT full-tree spinlock conversion
+
+**Design.** The RT plan (docs/development/rt-kernel-plan.md) delivers
+real-time wakeup semantics through staged Rux-native mechanisms: the D-14
+wakeup gate resized to the wakeup granularity (0.7 ms), irq-exit kernel
+preemption armed by default, timer hardirq delivery (RT-2X split), forced
+per-IRQ threading (SCHED_FIFO 50 kthreads), and PI futex numeric chains —
+WITHOUT converting the whole tree's raw spinlocks to sleeping rt_mutexes.
+
+**Why this is an advantage.** Rux's measured critical sections are small
+(GRQ in-lock hold 241–273 ns; the call-site IF=0 span of 2786 ns includes
+the acquisition wait, not the hold; switch machinery ~620 ns) and lock
+nesting is a compile fact (D-11 typed lock keys). The PREEMPT_RT conversion
+trades the entire tree's lock discipline for sleeping mutexes to enable
+preemption; on Rux the same preemption comes from the irq-exit hook plus
+preempt accounting in RawSpinlock (INV-LOCK-1, automatic) with a tree that
+is already preemption-safe by construction. The raw_spin_lock semantics
+match the reference's CONFIG_PREEMPT (not PREEMPT_RT) kernel — a supported,
+widely deployed real-time configuration.
+
+**Compatibility.** No ABI face. cyclictest dual-column acceptance: max 263
+vs 887 µs held; avg gap (46 vs 12 µs) tracked as the fire-late attribution
+row. pi_stress -g 2 completes 372k+370k inversions.
+
+**Known cost.** Without the full conversion, a non-preemptible raw-lock
+holder still bounds wakeup latency by its hold time (measured 241–273 ns
+GRQ / ~620 ns switch machinery — small, bounded, and enforced by the preempt
+accounting added with the R1 accounting fix).
+
+**Numbering note.** This entry was first landed as "D-21", colliding with
+the poll-before-sleep entry above; renumbered to D-29 on 2026-11-20 (the
+register's IDs are unique and are never reused).
