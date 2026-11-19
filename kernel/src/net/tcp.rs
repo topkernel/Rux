@@ -3005,9 +3005,11 @@ impl TcpConnectionManager {
         // Pass (a) + (b) listener detection in a single table scan.
         // SAFETY: single-core softirq/syscall serialization for the global
         // TCP socket table (full locking is review NET-M15).
-        unsafe {
-            let table = &mut TCP_SOCKET_TABLE;
-            for fd in 0..table.count {
+        // TCP_SOCKET_TABLE mutations run under TCP_TABLE_LOCK (taken by
+        // tcp_rcv around this call); the accessor carries the contract.
+        let table = get_tcp_socket_table();
+        for fd in 0..table.count {
+            {
                 let socket = match table.sockets[fd].as_mut() {
                     Some(s) => s,
                     None => continue,
@@ -3072,43 +3074,43 @@ impl TcpConnectionManager {
                     return Ok(Some(TcpRvWake { socket: fd as i32, parent: None }));
                 }
             }
+        }
 
-            // Pass (b): inbound SYN for a listening port — spawn a child
-            // connection in its own table slot.
-            if is_syn {
-                if let Some(parent) = listen_parent {
-                    // Backlog cap: bound the number of not-yet-accepted
-                    // children per listener (review NET-M8).
-                    let mut children = 0usize;
-                    for slot in table.sockets.iter().take(table.count) {
-                        if let Some(s) = slot.as_ref() {
-                            if s.parent_fd == Some(parent) && !s.accepted {
-                                children += 1;
-                            }
+        // Pass (b): inbound SYN for a listening port — spawn a child
+        // connection in its own table slot.
+        if is_syn {
+            if let Some(parent) = listen_parent {
+                // Backlog cap: bound the number of not-yet-accepted
+                // children per listener (review NET-M8).
+                let mut children = 0usize;
+                for slot in table.sockets.iter().take(table.count) {
+                    if let Some(s) = slot.as_ref() {
+                        if s.parent_fd == Some(parent) && !s.accepted {
+                            children += 1;
                         }
                     }
-                    if children >= MAX_BACKLOG_PER_LISTEN {
-                        return Ok(None); // drop the SYN
-                    }
-
-                    let slot = match table.alloc_slot() {
-                        Ok(s) => s,
-                        Err(_) => return Ok(None),
-                    };
-                    let mut new_socket = TcpSocket::new();
-                    new_socket.local_port = dest_port;
-                    new_socket.local_ip = dest_ip;
-                    new_socket.remote_port = src_port;
-                    new_socket.remote_ip = src_ip;
-                    new_socket.state = TcpState::TCP_LISTEN;
-                    new_socket.parent_fd = Some(parent);
-                    // State machine drives itself from LISTEN: SYN →
-                    // handle_syn_recv → sends SYN-ACK → SYN_RECV.
-                    let opts = tcp_option_slice(skb, tcp_hdr.header_len());
-                    let _ = new_socket.handle_packet(&tcp_hdr, opts, &[], tx);
-                    let _ = table.install(slot, new_socket);
-                    return Ok(Some(TcpRvWake { socket: slot as i32, parent: Some(parent) }));
                 }
+                if children >= MAX_BACKLOG_PER_LISTEN {
+                    return Ok(None); // drop the SYN
+                }
+
+                let slot = match table.alloc_slot() {
+                    Ok(s) => s,
+                    Err(_) => return Ok(None),
+                };
+                let mut new_socket = TcpSocket::new();
+                new_socket.local_port = dest_port;
+                new_socket.local_ip = dest_ip;
+                new_socket.remote_port = src_port;
+                new_socket.remote_ip = src_ip;
+                new_socket.state = TcpState::TCP_LISTEN;
+                new_socket.parent_fd = Some(parent);
+                // State machine drives itself from LISTEN: SYN →
+                // handle_syn_recv → sends SYN-ACK → SYN_RECV.
+                let opts = tcp_option_slice(skb, tcp_hdr.header_len());
+                let _ = new_socket.handle_packet(&tcp_hdr, opts, &[], tx);
+                let _ = table.install(slot, new_socket);
+                return Ok(Some(TcpRvWake { socket: slot as i32, parent: Some(parent) }));
             }
         }
 
@@ -3142,11 +3144,11 @@ impl TcpConnectionManager {
         let is_syn = tcp_hdr.syn() && !tcp_hdr.ack();
         let mut listen_parent: Option<i32> = None;
 
-        // SAFETY: TCP_SOCKET_TABLE mutations run under TCP_TABLE_LOCK
-        // (taken by tcp_rcv6 around this call).
-        unsafe {
-            let table = &mut TCP_SOCKET_TABLE;
-            for fd in 0..table.count {
+        // TCP_SOCKET_TABLE mutations run under TCP_TABLE_LOCK (taken by
+        // tcp_rcv6 around this call); the accessor carries the contract.
+        let table = get_tcp_socket_table();
+        for fd in 0..table.count {
+            {
                 let socket = match table.sockets[fd].as_mut() {
                     Some(s) => s,
                     None => continue,
@@ -3198,39 +3200,39 @@ impl TcpConnectionManager {
                     return Ok(Some(TcpRvWake { socket: fd as i32, parent: None }));
                 }
             }
+        }
 
-            // Pass (b): inbound SYN for a v6 listener — spawn a v6 child.
-            if is_syn {
-                if let Some(parent) = listen_parent {
-                    let mut children = 0usize;
-                    for slot in table.sockets.iter().take(table.count) {
-                        if let Some(s) = slot.as_ref() {
-                            if s.parent_fd == Some(parent) && !s.accepted {
-                                children += 1;
-                            }
+        // Pass (b): inbound SYN for a v6 listener — spawn a v6 child.
+        if is_syn {
+            if let Some(parent) = listen_parent {
+                let mut children = 0usize;
+                for slot in table.sockets.iter().take(table.count) {
+                    if let Some(s) = slot.as_ref() {
+                        if s.parent_fd == Some(parent) && !s.accepted {
+                            children += 1;
                         }
                     }
-                    if children >= MAX_BACKLOG_PER_LISTEN {
-                        return Ok(None);
-                    }
-
-                    let slot = match table.alloc_slot() {
-                        Ok(s) => s,
-                        Err(_) => return Ok(None),
-                    };
-                    let mut new_socket = TcpSocket::new();
-                    new_socket.is_v6 = true;
-                    new_socket.local_port = dest_port;
-                    new_socket.local_ip6 = *dest6;
-                    new_socket.remote_port = src_port;
-                    new_socket.remote_ip6 = *src6;
-                    new_socket.state = TcpState::TCP_LISTEN;
-                    new_socket.parent_fd = Some(parent);
-                    let opts = tcp_option_slice(skb, tcp_hdr.header_len());
-                    let _ = new_socket.handle_packet(&tcp_hdr, opts, &[], tx);
-                    let _ = table.install(slot, new_socket);
-                    return Ok(Some(TcpRvWake { socket: slot as i32, parent: Some(parent) }));
                 }
+                if children >= MAX_BACKLOG_PER_LISTEN {
+                    return Ok(None);
+                }
+
+                let slot = match table.alloc_slot() {
+                    Ok(s) => s,
+                    Err(_) => return Ok(None),
+                };
+                let mut new_socket = TcpSocket::new();
+                new_socket.is_v6 = true;
+                new_socket.local_port = dest_port;
+                new_socket.local_ip6 = *dest6;
+                new_socket.remote_port = src_port;
+                new_socket.remote_ip6 = *src6;
+                new_socket.state = TcpState::TCP_LISTEN;
+                new_socket.parent_fd = Some(parent);
+                let opts = tcp_option_slice(skb, tcp_hdr.header_len());
+                let _ = new_socket.handle_packet(&tcp_hdr, opts, &[], tx);
+                let _ = table.install(slot, new_socket);
+                return Ok(Some(TcpRvWake { socket: slot as i32, parent: Some(parent) }));
             }
         }
 
@@ -3455,13 +3457,11 @@ pub static TCP_TABLE_LOCK: crate::sync::spinlock::Spinlock<()> =
 pub fn tcp_socket_alloc() -> Result<i32, i32> {
     // SAFETY: TCP_SOCKET_TABLE is a global static; no concurrent mutation hazard
     // in current single-core kernel context.
-    unsafe {
-        let _g = TCP_TABLE_LOCK.lock_irqsave();
-        match TCP_SOCKET_TABLE.alloc() {
-            Ok(fd) => Ok(fd as i32),
-            // W3: protocol table exhausted → EMFILE (Linux behavior), not EIO
-            Err(_) => Err(-24), // EMFILE
-        }
+    let _g = TCP_TABLE_LOCK.lock_irqsave();
+    match tcp_socket_table_mut().alloc() {
+        Ok(fd) => Ok(fd as i32),
+        // W3: protocol table exhausted → EMFILE (Linux behavior), not EIO
+        Err(_) => Err(-24), // EMFILE
     }
 }
 
@@ -3471,10 +3471,8 @@ pub fn tcp_socket_alloc() -> Result<i32, i32> {
 /// - `fd`: Socket file descriptor
 pub fn tcp_socket_free(fd: i32) {
     // SAFETY: TCP_SOCKET_TABLE is a global static; fd was returned by tcp_socket_alloc.
-    unsafe {
-        let _g = TCP_TABLE_LOCK.lock_irqsave();
-        TCP_SOCKET_TABLE.free(fd as usize);
-    }
+    let _g = TCP_TABLE_LOCK.lock_irqsave();
+    tcp_socket_table_mut().free(fd as usize);
     // r-bwslow (bw_tcp teardown deadlock, 2026-11-19): every sleeper on
     // this slot must re-evaluate NOW — sendto/select waiters whose
     // condition flipped (slot gone => send-ready-true / poll-error)
@@ -3492,6 +3490,14 @@ pub fn tcp_socket_free(fd: i32) {
 /// This function returns mutable reference to global socket table, caller must ensure synchronization
 pub fn get_tcp_socket_table() -> &'static mut TcpSocketTable {
     // SAFETY: Caller must ensure no other mutable reference exists (timer-only use).
+    tcp_socket_table_mut()
+}
+
+/// The one consolidated &mut TCP_SOCKET_TABLE reference formation (see
+/// get_tcp_socket_table / tcp_socket_table_ref for the contracts).
+fn tcp_socket_table_mut() -> &'static mut TcpSocketTable {
+    // SAFETY: caller-serialized (TCP_TABLE_LOCK or the documented
+    // single-threaded init paths).
     unsafe { &mut TCP_SOCKET_TABLE }
 }
 
@@ -3504,9 +3510,7 @@ pub fn get_tcp_socket_table() -> &'static mut TcpSocketTable {
 /// Socket reference
 pub fn tcp_socket_get(fd: i32) -> Option<&'static mut TcpSocket> {
     // SAFETY: TCP_SOCKET_TABLE is a global; caller ensures no concurrent access.
-    unsafe {
-        TCP_SOCKET_TABLE.get_mut(fd as usize)
-    }
+    tcp_socket_table_mut().get_mut(fd as usize)
 }
 
 /// Locked snapshot of a socket's connection outcome (review finding 7):
@@ -3516,8 +3520,9 @@ pub fn tcp_socket_get(fd: i32) -> Option<&'static mut TcpSocket> {
 /// race (UB) and could miss a transition or a recorded errno.
 pub fn tcp_connect_snapshot(fd: i32) -> Option<(TcpState, i32)> {
     let _g = TCP_TABLE_LOCK.lock_irqsave();
-    // SAFETY: shared read under the table lock.
-    unsafe { (*&raw const TCP_SOCKET_TABLE).get(fd as usize) }
+    // Shared read under the table lock (the accessor carries it).
+    tcp_socket_table_ref()
+        .get(fd as usize)
         .map(|ts| (ts.state, ts.pending_error))
 }
 
@@ -3531,68 +3536,74 @@ pub fn tcp_connect_snapshot(fd: i32) -> Option<(TcpState, i32)> {
 /// 0 on success, error code on failure
 pub fn tcp_bind(fd: i32, port: TcpPort) -> i32 {
     let _table_g = TCP_TABLE_LOCK.lock_irqsave();
-    // SAFETY: TCP_SOCKET_TABLE is a global static; fd was returned by tcp_socket_alloc.
-    unsafe {
-        // R32-N9: reject a port already held by another live socket. The
-        // old code accepted every bind, so two listeners (or a listener
-        // and a connecting client) could share a port; RX then delivered
-        // to whichever slot the scan found first. Port 0 means "assign
-        // now" (ephemeral, W3) and never conflicts.
-        let effective_port = if port == 0 {
-            // W3: bind(0) assigns the ephemeral port IMMEDIATELY (Linux
-            // semantics — getsockname must report it right after bind),
-            // instead of deferring to connect().
-            match alloc_ephemeral_port_checked() {
-                Some(p) => p,
-                None => return -99, // EADDRNOTAVAIL — ephemeral range exhausted
-            }
-        } else {
-            if let Some(conflict_fd) = tcp_find_port_conflict(port, fd) {
-                // W3 (SO_REUSEADDR, Linux semantics): both binders opting
-                // in may coexist on the same port (server restart pattern;
-                // this stack's binds are wildcard — the exact/wildcard
-                // distinction needs per-bind address tracking, listed as a
-                // leftover). One-sided or missing opt-in is still EADDRINUSE.
-                // SAFETY: caller holds TCP_TABLE_LOCK; index verified by the scan.
-                let both_reuse = TCP_SOCKET_TABLE.sockets[conflict_fd as usize]
-                    .as_ref()
-                    .map(|s| s.reuseaddr)
-                    .unwrap_or(false)
-                    && TCP_SOCKET_TABLE
-                        .get(fd as usize)
-                        .map(|s| s.reuseaddr)
-                        .unwrap_or(false);
-                if !both_reuse {
-                    return -98; // EADDRINUSE
-                }
-            }
-            port
-        };
-        if let Some(socket) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
-            match socket.bind(effective_port) {
-                Ok(()) => 0,
-                Err(()) => -5, // EIO
-            }
-        } else {
-            -5 // EBADF
+    // TCP_SOCKET_TABLE is a global static under TCP_TABLE_LOCK (fd came
+    // from tcp_socket_alloc; the accessors carry the contract).
+    // R32-N9: reject a port already held by another live socket. The
+    // old code accepted every bind, so two listeners (or a listener
+    // and a connecting client) could share a port; RX then delivered
+    // to whichever slot the scan found first. Port 0 means "assign
+    // now" (ephemeral, W3) and never conflicts.
+    let effective_port = if port == 0 {
+        // W3: bind(0) assigns the ephemeral port IMMEDIATELY (Linux
+        // semantics — getsockname must report it right after bind),
+        // instead of deferring to connect().
+        match alloc_ephemeral_port_checked() {
+            Some(p) => p,
+            None => return -99, // EADDRNOTAVAIL — ephemeral range exhausted
         }
+    } else {
+        if let Some(conflict_fd) = tcp_find_port_conflict(port, fd) {
+            // W3 (SO_REUSEADDR, Linux semantics): both binders opting
+            // in may coexist on the same port (server restart pattern;
+            // this stack's binds are wildcard — the exact/wildcard
+            // distinction needs per-bind address tracking, listed as a
+            // leftover). One-sided or missing opt-in is still EADDRINUSE.
+            // Index verified by the scan; table lock held.
+            let both_reuse = tcp_socket_table_ref().sockets[conflict_fd as usize]
+                .as_ref()
+                .map(|s| s.reuseaddr)
+                .unwrap_or(false)
+                && tcp_socket_table_ref()
+                    .get(fd as usize)
+                    .map(|s| s.reuseaddr)
+                    .unwrap_or(false);
+            if !both_reuse {
+                return -98; // EADDRINUSE
+            }
+        }
+        port
+    };
+    if let Some(socket) = tcp_socket_get(fd) {
+        match socket.bind(effective_port) {
+            Ok(()) => 0,
+            Err(()) => -5, // EIO
+        }
+    } else {
+        -5 // EBADF
     }
+}
+
+/// Read-only whole-table view (the scans and conflict checks; caller
+/// holds TCP_TABLE_LOCK or the softirq/syscall serialization it
+/// documents).
+fn tcp_socket_table_ref() -> &'static TcpSocketTable {
+    // SAFETY: read-only view of the global table; caller-serialized
+    // against mutation (same contract as get_tcp_socket_table).
+    unsafe { &TCP_SOCKET_TABLE }
 }
 
 /// R32-N9 helper: another live (non-CLOSE) socket already bound to `port`?
 /// Excludes `self_fd`. Returns the conflicting slot's index.
 fn tcp_find_port_conflict(port: TcpPort, self_fd: i32) -> Option<i32> {
-    // (caller holds TCP_TABLE_LOCK)
-    // SAFETY: single-core serialization of the global table (review NET-M15).
-    unsafe {
-        for i in 0..TCP_SOCKET_TABLE.count {
-            if i == self_fd as usize {
-                continue;
-            }
-            if let Some(s) = TCP_SOCKET_TABLE.sockets[i].as_ref() {
-                if s.local_port == port && s.state != TcpState::TCP_CLOSE {
-                    return Some(i as i32);
-                }
+    // (caller holds TCP_TABLE_LOCK; the accessor carries the contract)
+    let table = tcp_socket_table_ref();
+    for i in 0..table.count {
+        if i == self_fd as usize {
+            continue;
+        }
+        if let Some(s) = table.sockets[i].as_ref() {
+            if s.local_port == port && s.state != TcpState::TCP_CLOSE {
+                return Some(i as i32);
             }
         }
     }
@@ -3609,23 +3620,22 @@ fn tcp_find_port_conflict(port: TcpPort, self_fd: i32) -> Option<i32> {
 /// 0 on success, error code on failure
 pub fn tcp_listen(fd: i32, backlog: u32) -> i32 {
     let _table_g = TCP_TABLE_LOCK.lock_irqsave();
-    // SAFETY: TCP_SOCKET_TABLE is a global static; fd was returned by tcp_socket_alloc.
-    let ret = unsafe {
-        if let Some(socket) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
-            match socket.listen(backlog) {
-                Ok(()) => 0,
-                Err(()) => -5, // EIO
-            }
-        } else {
-            -5 // EBADF
+    // TCP_SOCKET_TABLE is a global static under TCP_TABLE_LOCK (the
+    // accessor carries the contract).
+    let ret = if let Some(socket) = tcp_socket_get(fd) {
+        match socket.listen(backlog) {
+            Ok(()) => 0,
+            Err(()) => -5, // EIO
         }
+    } else {
+        -5 // EBADF
     };
     // b143: one line per successful listen — hdcd's TCP bridge port
     // comes from persist.hdc.port (or a random ephemeral when unset)
     // and nothing else names it; same for any service the host wants
     // to reach through a QEMU hostfwd.
     if ret == 0 {
-        if let Some(socket) = unsafe { TCP_SOCKET_TABLE.get(fd as usize) } {
+        if let Some(socket) = tcp_socket_table_ref().get(fd as usize) {
             crate::pr_info!(
                 "tcp-listen: pid {} port {}",
                 crate::process::current_pid(),
@@ -3649,26 +3659,25 @@ fn alloc_ephemeral_port() -> TcpPort {
 /// (every port held by a live socket); callers translate None into an
 /// errno instead of silently binding port 0.
 fn alloc_ephemeral_port_checked() -> Option<TcpPort> {
-    // (caller tcp_connect/tcp_bind already holds TCP_TABLE_LOCK — no nested take)
-    // SAFETY: single-core serialization of the global table (review NET-M15).
-    unsafe {
-        for _ in 0..(EPHEMERAL_PORT_MAX - 32768 + 1) {
-            let port = NEXT_EPHEMERAL_PORT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            let port = if port > EPHEMERAL_PORT_MAX { port % EPHEMERAL_PORT_MAX + 1024 } else { port };
-            let in_use = (0..TCP_SOCKET_TABLE.count).any(|i| {
-                TCP_SOCKET_TABLE
-                    .sockets
-                    .get(i)
-                    .and_then(|s| s.as_ref())
-                    .map(|s| s.local_port == port && s.state != TcpState::TCP_CLOSE)
-                    .unwrap_or(false)
-            });
-            if !in_use {
-                return Some(port);
-            }
+    // (caller tcp_connect/tcp_bind already holds TCP_TABLE_LOCK — no
+    // nested take; the accessor carries the serialization contract)
+    let table = tcp_socket_table_ref();
+    for _ in 0..(EPHEMERAL_PORT_MAX - 32768 + 1) {
+        let port = NEXT_EPHEMERAL_PORT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let port = if port > EPHEMERAL_PORT_MAX { port % EPHEMERAL_PORT_MAX + 1024 } else { port };
+        let in_use = (0..table.count).any(|i| {
+            table
+                .sockets
+                .get(i)
+                .and_then(|s| s.as_ref())
+                .map(|s| s.local_port == port && s.state != TcpState::TCP_CLOSE)
+                .unwrap_or(false)
+        });
+        if !in_use {
+            return Some(port);
         }
-        None
     }
+    None
 }
 
 /// Connect to remote address
@@ -3692,9 +3701,9 @@ pub fn tcp_connect(fd: i32, ip: u32, port: TcpPort) -> i32 {
     let ret;
     {
         let _table_g = TCP_TABLE_LOCK.lock_irqsave();
-        // SAFETY: TCP_SOCKET_TABLE is a global static; fd was returned by tcp_socket_alloc.
-        unsafe {
-            if let Some(socket) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
+        // TCP_SOCKET_TABLE is a global static under TCP_TABLE_LOCK (the
+        // accessor carries the contract).
+        if let Some(socket) = tcp_socket_get(fd) {
                 // Fresh connect attempt: clear any stale protocol error
                 // recorded on a reused slot (Linux clears sk_err on
                 // connect) — a leftover ECONNREFUSED would fail a
@@ -3717,13 +3726,12 @@ pub fn tcp_connect(fd: i32, ip: u32, port: TcpPort) -> i32 {
                         crate::net::arp::get_local_ip()
                     };
                 }
-                ret = match socket.connect(ip, port, &mut tx) {
-                    Ok(()) => 0,
-                    Err(()) => -5, // EIO
-                };
-            } else {
-                ret = -5; // EBADF
-            }
+            ret = match socket.connect(ip, port, &mut tx) {
+                Ok(()) => 0,
+                Err(()) => -5, // EIO
+            };
+        } else {
+            ret = -5; // EBADF
         }
     }
     tx.emit_all();
@@ -3739,9 +3747,9 @@ pub fn tcp_connect6(fd: i32, ip6: &crate::net::ipv6::Ipv6Addr, port: TcpPort) ->
     let ret;
     {
         let _table_g = TCP_TABLE_LOCK.lock_irqsave();
-        // SAFETY: TCP_SOCKET_TABLE is a global static; fd was returned by tcp_socket_alloc.
-        unsafe {
-            if let Some(socket) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
+        // TCP_SOCKET_TABLE is a global static under TCP_TABLE_LOCK (the
+        // accessor carries the contract).
+        if let Some(socket) = tcp_socket_get(fd) {
                 // See tcp_connect: stale protocol errors must not leak
                 // into a fresh connect attempt.
                 socket.pending_error = 0;
@@ -3761,13 +3769,12 @@ pub fn tcp_connect6(fd: i32, ip6: &crate::net::ipv6::Ipv6Addr, port: TcpPort) ->
                         }
                     };
                 }
-                ret = match socket.connect6(ip6, port, &mut tx) {
-                    Ok(()) => 0,
-                    Err(()) => -5, // EIO
-                };
-            } else {
-                ret = -5; // EBADF
-            }
+            ret = match socket.connect6(ip6, port, &mut tx) {
+                Ok(()) => 0,
+                Err(()) => -5, // EIO
+            };
+        } else {
+            ret = -5; // EBADF
         }
     }
     tx.emit_all();
@@ -3794,10 +3801,11 @@ pub fn tcp_accept(fd: i32) -> i32 {
     // here: sys_accept drains ethernet_poll() BEFORE calling this, and
     // tcp_accept itself never re-enters tcp_rcv.
     let _table_g = TCP_TABLE_LOCK.lock_irqsave();
-    // SAFETY: single-core softirq/syscall serialization (review NET-M15).
-    unsafe {
+    // TCP_SOCKET_TABLE under TCP_TABLE_LOCK (the accessors carry the
+    // contract).
+    {
         // Validate the listening socket
-        let listen_socket = match TCP_SOCKET_TABLE.get(fd as usize) {
+        let listen_socket = match tcp_socket_table_ref().get(fd as usize) {
             Some(s) => s,
             None => return -9, // EBADF
         };
@@ -3812,8 +3820,9 @@ pub fn tcp_accept(fd: i32) -> i32 {
         // and sat in CLOSE_WAIT until the orphan timeout; handing them
         // out now delivers the buffered data + EOF to the application
         // (recv is legal in CLOSE_WAIT).
-        for i in 0..TCP_SOCKET_TABLE.count {
-            if let Some(socket) = TCP_SOCKET_TABLE.sockets[i].as_mut() {
+        let table = tcp_socket_table_mut();
+        for i in 0..table.count {
+            if let Some(socket) = table.sockets[i].as_mut() {
                 if socket.parent_fd == Some(fd)
                     && !socket.accepted
                     && (socket.state == TcpState::TCP_ESTABLISHED
@@ -3837,9 +3846,8 @@ pub fn tcp_accept(fd: i32) -> i32 {
 /// but EAGAIN)? Used by the blocking-read re-check and poll.
 pub fn tcp_readable(fd: i32) -> bool {
     let _g = TCP_TABLE_LOCK.lock_irqsave();
-    // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
-    unsafe {
-        match TCP_SOCKET_TABLE.get(fd as usize) {
+    // TCP_SOCKET_TABLE under TCP_TABLE_LOCK (the accessor carries it).
+    match tcp_socket_table_ref().get(fd as usize) {
             Some(ts) => {
                 !ts.recv_buffer.is_empty()
                     || ts.pending_error != 0
@@ -3853,8 +3861,7 @@ pub fn tcp_readable(fd: i32) -> bool {
                     || ts.state == TcpState::TCP_TIME_WAIT
                     || ts.state == TcpState::TCP_CLOSING
             }
-            None => true, // slot gone — let recv() surface the error
-        }
+        None => true, // slot gone — let recv() surface the error
     }
 }
 
@@ -3862,19 +3869,17 @@ pub fn tcp_readable(fd: i32) -> bool {
 /// terminal state whose error returns immediately)?
 pub fn tcp_send_ready(fd: i32) -> bool {
     let _g = TCP_TABLE_LOCK.lock_irqsave();
-    // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
-    unsafe {
-        match TCP_SOCKET_TABLE.get(fd as usize) {
-            Some(ts) => match ts.state {
-                TcpState::TCP_SYN_SENT | TcpState::TCP_SYN_RECV => false, // handshake pending
-                TcpState::TCP_ESTABLISHED => {
-                    let in_flight = ts.snd_nxt.wrapping_sub(ts.snd_una);
-                    core::cmp::min(ts.snd_wnd as u32, ts.congestion.cwnd) > in_flight
-                }
-                _ => true, // terminal: send() errors out immediately
-            },
-            None => true,
-        }
+    // TCP_SOCKET_TABLE under TCP_TABLE_LOCK (the accessor carries it).
+    match tcp_socket_table_ref().get(fd as usize) {
+        Some(ts) => match ts.state {
+            TcpState::TCP_SYN_SENT | TcpState::TCP_SYN_RECV => false, // handshake pending
+            TcpState::TCP_ESTABLISHED => {
+                let in_flight = ts.snd_nxt.wrapping_sub(ts.snd_una);
+                core::cmp::min(ts.snd_wnd as u32, ts.congestion.cwnd) > in_flight
+            }
+            _ => true, // terminal: send() errors out immediately
+        },
+        None => true,
     }
 }
 
@@ -3882,30 +3887,29 @@ pub fn tcp_send_ready(fd: i32) -> bool {
 /// (Blocking-accept wait condition; mirrors tcp_accept's scan.)
 pub fn tcp_accept_pending(fd: i32) -> bool {
     let _g = TCP_TABLE_LOCK.lock_irqsave();
-    // SAFETY: the guard above is held.
-    unsafe { tcp_listen_has_pending_child_locked(fd) }
+    // The guard above is held (the locked helper's contract).
+    tcp_listen_has_pending_child_locked(fd)
 }
 
 /// Caller holds TCP_TABLE_LOCK (socket poll inlines this under its own
 /// guard — the public helper above would re-lock and deadlock).
 pub fn tcp_listen_has_pending_child(fd: i32) -> bool {
-    // SAFETY: caller holds TCP_TABLE_LOCK.
-    unsafe { tcp_listen_has_pending_child_locked(fd) }
+    // Caller holds TCP_TABLE_LOCK (the locked helper's contract).
+    tcp_listen_has_pending_child_locked(fd)
 }
 
 /// PRECONDITION: TCP_TABLE_LOCK held.
-unsafe fn tcp_listen_has_pending_child_locked(fd: i32) -> bool {
-    // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
-    unsafe {
-        for i in 0..TCP_SOCKET_TABLE.count {
-            if let Some(s) = TCP_SOCKET_TABLE.sockets[i].as_ref() {
-                if s.parent_fd == Some(fd)
-                    && !s.accepted
-                    && (s.state == TcpState::TCP_ESTABLISHED
-                        || s.state == TcpState::TCP_CLOSE_WAIT)
-                {
-                    return true;
-                }
+fn tcp_listen_has_pending_child_locked(fd: i32) -> bool {
+    // TCP_SOCKET_TABLE under TCP_TABLE_LOCK (the accessor carries it).
+    let table = tcp_socket_table_ref();
+    for i in 0..table.count {
+        if let Some(s) = table.sockets[i].as_ref() {
+            if s.parent_fd == Some(fd)
+                && !s.accepted
+                && (s.state == TcpState::TCP_ESTABLISHED
+                    || s.state == TcpState::TCP_CLOSE_WAIT)
+            {
+                return true;
             }
         }
     }
@@ -3915,70 +3919,60 @@ unsafe fn tcp_listen_has_pending_child_locked(fd: i32) -> bool {
 /// Locked read of a slot's bound local port (ephemeral bind readback).
 pub fn tcp_local_port(fd: i32) -> u16 {
     let _g = TCP_TABLE_LOCK.lock_irqsave();
-    // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
-    unsafe { TCP_SOCKET_TABLE.get(fd as usize).map(|s| s.local_port).unwrap_or(0) }
+    // TCP_SOCKET_TABLE under TCP_TABLE_LOCK (the accessor carries it).
+    tcp_socket_table_ref().get(fd as usize).map(|s| s.local_port).unwrap_or(0)
 }
 
 /// W3: locked read of a slot's remote endpoint (accept's addr writeout).
 pub fn tcp_remote_endpoint(fd: i32) -> (u32, u16) {
     let _g = TCP_TABLE_LOCK.lock_irqsave();
-    // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
-    unsafe {
-        TCP_SOCKET_TABLE
-            .get(fd as usize)
-            .map(|s| (s.remote_ip, s.remote_port))
-            .unwrap_or((0, 0))
-    }
+    // TCP_SOCKET_TABLE under TCP_TABLE_LOCK (the accessor carries it).
+    tcp_socket_table_ref()
+        .get(fd as usize)
+        .map(|s| (s.remote_ip, s.remote_port))
+        .unwrap_or((0, 0))
 }
 
 /// P1 IPv6: locked read of a slot's v6 remote endpoint (accept's addr
 /// writeout on AF_INET6 sockets; unspecified for v4 slots).
 pub fn tcp_remote_endpoint6(fd: i32) -> (crate::net::ipv6::Ipv6Addr, u16) {
     let _g = TCP_TABLE_LOCK.lock_irqsave();
-    // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
-    unsafe {
-        TCP_SOCKET_TABLE
-            .get(fd as usize)
-            .map(|s| (s.remote_ip6, s.remote_port))
-            .unwrap_or((crate::net::ipv6::IPV6_ADDR_UNSPECIFIED, 0))
-    }
+    // TCP_SOCKET_TABLE under TCP_TABLE_LOCK (the accessor carries it).
+    tcp_socket_table_ref()
+        .get(fd as usize)
+        .map(|s| (s.remote_ip6, s.remote_port))
+        .unwrap_or((crate::net::ipv6::IPV6_ADDR_UNSPECIFIED, 0))
 }
 
 /// P1 IPv6: locked read of a slot's v6 local endpoint (getsockname mirror
 /// after tcp_connect6 filled the source).
 pub fn tcp_local_endpoint6(fd: i32) -> (crate::net::ipv6::Ipv6Addr, u16) {
     let _g = TCP_TABLE_LOCK.lock_irqsave();
-    // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
-    unsafe {
-        TCP_SOCKET_TABLE
-            .get(fd as usize)
-            .map(|s| (s.local_ip6, s.local_port))
-            .unwrap_or((crate::net::ipv6::IPV6_ADDR_UNSPECIFIED, 0))
-    }
+    // TCP_SOCKET_TABLE under TCP_TABLE_LOCK (the accessor carries it).
+    tcp_socket_table_ref()
+        .get(fd as usize)
+        .map(|s| (s.local_ip6, s.local_port))
+        .unwrap_or((crate::net::ipv6::IPV6_ADDR_UNSPECIFIED, 0))
 }
 
 /// P1 IPv6: locked read of a slot's family flag (accept's addr shape).
 pub fn tcp_is_v6(fd: i32) -> bool {
     let _g = TCP_TABLE_LOCK.lock_irqsave();
-    // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
-    unsafe {
-        TCP_SOCKET_TABLE
-            .get(fd as usize)
-            .map(|s| s.is_v6)
-            .unwrap_or(false)
-    }
+    // TCP_SOCKET_TABLE under TCP_TABLE_LOCK (the accessor carries it).
+    tcp_socket_table_ref()
+        .get(fd as usize)
+        .map(|s| s.is_v6)
+        .unwrap_or(false)
 }
 
 /// P1 IPv6: mark a slot as v6 with its local address (bind path — a v6
 /// listener must match in handle_tcp_packet6's spawn pass).
 pub fn tcp_set_v6_local(fd: i32, addr6: crate::net::ipv6::Ipv6Addr) {
     let _g = TCP_TABLE_LOCK.lock_irqsave();
-    // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
-    unsafe {
-        if let Some(s) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
-            s.is_v6 = true;
-            s.local_ip6 = addr6;
-        }
+    // TCP_SOCKET_TABLE under TCP_TABLE_LOCK (the accessor carries it).
+    if let Some(s) = tcp_socket_get(fd) {
+        s.is_v6 = true;
+        s.local_ip6 = addr6;
     }
 }
 
@@ -4018,24 +4012,23 @@ pub fn tcp_dump() -> alloc::vec::Vec<TcpSlotInfo> {
     let _g = TCP_TABLE_LOCK.lock_irqsave();
     let mut out = alloc::vec::Vec::new();
     // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
-    unsafe {
-        let table = &TCP_SOCKET_TABLE;
-        for slot in table.sockets.iter().take(table.count) {
-            if let Some(s) = slot.as_ref() {
-                if s.state == TcpState::TCP_CLOSE && !s.bound {
-                    continue; // never-used slot
-                }
-                out.push(TcpSlotInfo {
-                    local_ip: s.local_ip,
-                    local_port: s.local_port,
-                    remote_ip: s.remote_ip,
-                    remote_port: s.remote_port,
-                    linux_state: tcp_linux_state(s.state),
-                    is_v6: s.is_v6,
-                    local_ip6: s.local_ip6,
-                    remote_ip6: s.remote_ip6,
-                });
+    // TCP_SOCKET_TABLE read under TCP_TABLE_LOCK (the accessor carries it).
+    let table = tcp_socket_table_ref();
+    for slot in table.sockets.iter().take(table.count) {
+        if let Some(s) = slot.as_ref() {
+            if s.state == TcpState::TCP_CLOSE && !s.bound {
+                continue; // never-used slot
             }
+            out.push(TcpSlotInfo {
+                local_ip: s.local_ip,
+                local_port: s.local_port,
+                remote_ip: s.remote_ip,
+                remote_port: s.remote_port,
+                linux_state: tcp_linux_state(s.state),
+                is_v6: s.is_v6,
+                local_ip6: s.local_ip6,
+                remote_ip6: s.remote_ip6,
+            });
         }
     }
     out
@@ -4045,11 +4038,9 @@ pub fn tcp_dump() -> alloc::vec::Vec<TcpSlotInfo> {
 pub fn tcp_take_pending_error(fd: i32) -> i32 {
     let _g = TCP_TABLE_LOCK.lock_irqsave();
     // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
-    unsafe {
-        match TCP_SOCKET_TABLE.get_mut(fd as usize) {
-            Some(s) => core::mem::replace(&mut s.pending_error, 0),
-            None => 0,
-        }
+    match tcp_socket_get(fd) {
+        Some(s) => core::mem::replace(&mut s.pending_error, 0),
+        None => 0,
     }
 }
 
@@ -4057,10 +4048,8 @@ pub fn tcp_take_pending_error(fd: i32) -> i32 {
 pub fn tcp_set_reuseaddr(fd: i32, on: bool) {
     let _g = TCP_TABLE_LOCK.lock_irqsave();
     // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
-    unsafe {
-        if let Some(s) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
-            s.reuseaddr = on;
-        }
+    if let Some(s) = tcp_socket_get(fd) {
+        s.reuseaddr = on;
     }
 }
 
@@ -4071,16 +4060,14 @@ pub fn tcp_set_reuseaddr(fd: i32, on: bool) {
 pub fn tcp_set_keepalive(fd: i32, on: bool, idle_s: u32, intvl_s: u32, cnt: u32) {
     let _g = TCP_TABLE_LOCK.lock_irqsave();
     // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
-    unsafe {
-        if let Some(s) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
-            s.keepalive = on;
-            s.ka_idle_s = idle_s;
-            s.ka_intvl_s = intvl_s;
-            s.ka_cnt = cnt;
-            if !on {
-                s.timers.keepalive_deadline = 0;
-                s.timers.keepalive_probes = 0;
-            }
+    if let Some(s) = tcp_socket_get(fd) {
+        s.keepalive = on;
+        s.ka_idle_s = idle_s;
+        s.ka_intvl_s = intvl_s;
+        s.ka_cnt = cnt;
+        if !on {
+            s.timers.keepalive_deadline = 0;
+            s.timers.keepalive_probes = 0;
         }
     }
 }
@@ -4090,10 +4077,8 @@ pub fn tcp_set_keepalive(fd: i32, on: bool, idle_s: u32, intvl_s: u32, cnt: u32)
 pub fn tcp_set_ttl(fd: i32, ttl: u8) {
     let _g = TCP_TABLE_LOCK.lock_irqsave();
     // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
-    unsafe {
-        if let Some(s) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
-            s.ttl = ttl;
-        }
+    if let Some(s) = tcp_socket_get(fd) {
+        s.ttl = ttl;
     }
 }
 
@@ -4740,9 +4725,10 @@ pub fn tcp_v4_err(
         let _g = TCP_TABLE_LOCK.lock_irqsave();
         // SAFETY: TCP_SOCKET_TABLE is a global; caller (icmp_rcv softirq /
         // syscall poll) is serialized by the table lock.
-        unsafe {
-            'scan: for i in 0..TCP_SOCKET_TABLE.count {
-                let socket = match TCP_SOCKET_TABLE.sockets[i].as_mut() {
+        // TCP_SOCKET_TABLE under the guard above (the accessor carries it).
+        let table = tcp_socket_table_mut();
+        'scan: for i in 0..table.count {
+                let socket = match table.sockets[i].as_mut() {
                     Some(s) => s,
                     None => continue,
                 };
@@ -4787,7 +4773,6 @@ pub fn tcp_v4_err(
                     break 'scan;
                 }
             }
-        }
     }
     // W3: wake blocked writers/readers sleeping on the aborted connection.
     if let Some(fd) = wake_fd {

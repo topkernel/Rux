@@ -892,14 +892,15 @@ pub fn parse_sockaddr_un(bytes: &[u8]) -> Option<UnixAddr> {
 /// length is the full kernel size; the old form wrote `total` bytes
 /// unconditionally, clobbering whatever followed a short caller object.
 ///
-/// SAFETY: `addr_ptr`/`addrlen_ptr` must be access_ok-validated by the
-/// caller for up to SOCKADDR_UN_LEN / 4 bytes.
-pub unsafe fn put_sockaddr_un(
+/// Contract: `addr_ptr`/`addrlen_ptr` must be access_ok-validated by
+/// the caller for up to SOCKADDR_UN_LEN / 4 bytes; the typed family is
+/// the exception-table copy path.
+pub fn put_sockaddr_un(
     addr_ptr: *mut u8,
     addrlen_ptr: *mut u32,
     name: Option<&str>,
 ) -> bool {
-    use crate::arch::uaccess::{copy_to_user, get_user, put_user};
+    use crate::arch::uaccess_safe as ua;
     let mut buf = [0u8; SOCKADDR_UN_LEN];
     buf[0] = AF_UNIX as u8;
     buf[1] = 0;
@@ -921,13 +922,13 @@ pub unsafe fn put_sockaddr_un(
     };
     // review F6: clamp to the caller's object (a faulting length read
     // falls back to the full write; the put_user below reports it).
-    let copy_len = get_user::<u32>(addrlen_ptr)
+    let copy_len = ua::read_user::<u32>(addrlen_ptr as usize)
         .map(|v| (v as usize).min(total))
         .unwrap_or(total);
-    if copy_to_user(addr_ptr, buf.as_ptr(), copy_len) != 0 {
+    if ua::copy_out(addr_ptr as usize, &buf[..copy_len]) != 0 {
         return false;
     }
-    let _ = put_user(addrlen_ptr, total as u32);
+    let _ = ua::write_user(addrlen_ptr as usize, total as u32);
     true
 }
 
@@ -1110,10 +1111,9 @@ impl<'a> UserIovCursor<'a> {
             }
             let (base, len) = self.iovs[self.idx];
             let n = (len - self.off).min(src.len());
-            // SAFETY: base was access_ok-validated for `len` bytes at
-            // snapshot time; we write at most len bytes from base+off.
-            let uncopied =
-                unsafe { copy_to_user((base + self.off) as *mut u8, src.as_ptr(), n) };
+            // base was access_ok-validated for `len` bytes at snapshot
+            // time; copy_out is the exception-table copy path.
+            let uncopied = crate::arch::uaccess_safe::copy_out(base + self.off, &src[..n]);
             let landed = n - uncopied;
             good += landed;
             self.off += landed;
@@ -1505,7 +1505,7 @@ fn create_socket_node(
                 0,
             );
             // SAFETY: fd is a valid open descriptor from file_open above.
-            unsafe { crate::fs::close_file_fd(fd); }
+            crate::fs::close_file_fd(fd);
             if ret != 0 {
                 return Err(ret);
             }
@@ -3169,13 +3169,19 @@ pub fn unix_close(sock: &Arc<UnixSocket>) {
 // ============================================================================
 
 /// Recover a strong Arc<UnixSocket> from a File's private_data.
-/// SAFETY: the caller must have identity-checked the File against
+/// Contract: the caller must have identity-checked the File against
 /// UNIX_SOCKET_OPS first (unix_socket_from_fd / unix_file_of do).
-unsafe fn unix_of_file(file: &File) -> Option<Arc<UnixSocket>> {
-    let ptr = (*file.private_data.get())?;
-    let socket_ptr = ptr as *const UnixSocket;
-    Arc::increment_strong_count(socket_ptr);
-    Some(Arc::from_raw(socket_ptr))
+fn unix_of_file(file: &File) -> Option<Arc<UnixSocket>> {
+    // SAFETY: ops identity checked by the caller; private_data holds an
+    // Arc<UnixSocket> installed at socket creation (kept alive by the
+    // file). This is the one consolidated Arc revival.
+    unsafe {
+        let ptr = *file.private_data.get();
+        let ptr = ptr?;
+        let socket_ptr = ptr as *const UnixSocket;
+        Arc::increment_strong_count(socket_ptr);
+        Some(Arc::from_raw(socket_ptr))
+    }
 }
 
 /// sc97 KILLDUMP support: identity-checked reconstruction for a File
@@ -3187,7 +3193,7 @@ pub fn unix_of_file_diag(file: &File) -> Option<Arc<UnixSocket>> {
         return None;
     }
     // SAFETY: ops identity checked above.
-    unsafe { unix_of_file(file) }
+    unix_of_file(file)
 }
 
 fn unix_file_nonblock(file: &File) -> bool {
@@ -3197,7 +3203,7 @@ fn unix_file_nonblock(file: &File) -> bool {
 fn unix_file_read(file: &File, buf: &mut [u8]) -> isize {
     // SAFETY: ops identity was verified — this File was created by
     // unix_socket_install with a UnixSocket Arc in private_data.
-    let socket = match unsafe { unix_of_file(file) } {
+    let socket = match unix_of_file(file) {
         Some(s) => s,
         None => return -9,
     };
@@ -3211,7 +3217,7 @@ fn unix_file_read(file: &File, buf: &mut [u8]) -> isize {
 
 fn unix_file_write(file: &File, buf: &[u8]) -> isize {
     // SAFETY: ops identity was verified (see unix_file_read).
-    let socket = match unsafe { unix_of_file(file) } {
+    let socket = match unix_of_file(file) {
         Some(s) => s,
         None => return -9,
     };
@@ -3248,7 +3254,7 @@ pub fn unix_write_user(file: &File, src: *const u8, count: usize) -> isize {
     // private_data holds the UnixSocket Arc installed at open. `count`
     // is at most RW_CHUNK (the dispatcher's guard): one bounded segment
     // allocation per call, same heap discipline as the generic staging.
-    let socket = match unsafe { unix_of_file(file) } {
+    let socket = match unix_of_file(file) {
         Some(s) => s,
         None => return cc_out(-9), // EBADF
     };
@@ -3286,7 +3292,7 @@ pub fn unix_write_user(file: &File, src: *const u8, count: usize) -> isize {
 pub fn unix_write_slice_owned(file: &File, gathered: alloc::vec::Vec<u8>) -> isize {
     // SAFETY: dispatcher verified ops identity (unix_file_of_file in
     // sys_writev) — private_data holds the UnixSocket Arc.
-    let socket = match unsafe { unix_of_file(file) } {
+    let socket = match unix_of_file(file) {
         Some(s) => s,
         None => return -9,
     };
@@ -3392,7 +3398,7 @@ pub fn unix_read_user(file: &File, dst: *mut u8, count: usize) -> isize {
 fn unix_read_user_inner(file: &File, dst: *mut u8, count: usize) -> isize {
     // SAFETY: ops identity verified by the dispatcher (is_unix_file) —
     // private_data holds the UnixSocket Arc installed at open.
-    let socket = match unsafe { unix_of_file(file) } {
+    let socket = match unix_of_file(file) {
         Some(s) => s,
         None => return -9, // EBADF
     };
@@ -3695,7 +3701,7 @@ fn unix_file_close(file: &File) -> i32 {
 fn unix_file_poll(file: &File, events: u16) -> u16 {
     use crate::syscall::misc::poll_events::*;
     // SAFETY: ops identity was verified (see unix_file_read).
-    let socket = match unsafe { unix_of_file(file) } {
+    let socket = match unix_of_file(file) {
         Some(s) => s,
         None => return POLLERR,
     };
@@ -3761,7 +3767,7 @@ pub fn unix_poll_wait(file: &File, task: *mut crate::process::task::Task) -> boo
     // SAFETY: ops identity was verified by the dispatcher (UNIX_SOCKET_OPS)
     // before this is called; private_data holds Arc::into_raw(UnixSocket)
     // and the caller's Arc<File> keeps the socket alive.
-    match unsafe { unix_of_file(file) } {
+    match unix_of_file(file) {
         Some(socket) => {
             socket
                 .wait_queue
@@ -3775,7 +3781,7 @@ pub fn unix_poll_wait(file: &File, task: *mut crate::process::task::Task) -> boo
 /// Remove a registration added by unix_poll_wait.
 pub fn unix_poll_unwait(file: &File, task: *mut crate::process::task::Task) {
     // SAFETY: same identity/ownership contract as unix_poll_wait.
-    if let Some(socket) = unsafe { unix_of_file(file) } {
+    if let Some(socket) = unix_of_file(file) {
         socket.wait_queue.remove(task);
     }
 }
@@ -3950,7 +3956,7 @@ pub fn unix_socketpair(type_: i32) -> Result<(usize, usize), i32> {
             // Unwind the first fd so neither side leaks.
             // SAFETY: close_file_fd operates on the current task's fd
             // table; fd0 was just installed by unix_socket_install.
-            let _ = unsafe { crate::fs::file::close_file_fd(fd0) };
+            let _ = crate::fs::file::close_file_fd(fd0);
             Err(e)
         }
     }
@@ -3977,7 +3983,7 @@ pub fn unix_socket_from_fd(fd: usize) -> Option<Arc<UnixSocket>> {
     }
     // SAFETY: ops identity confirmed; private_data is a leaked
     // Arc<UnixSocket> from Arc::into_raw.
-    unsafe { unix_of_file(&file) }
+    unix_of_file(&file)
 }
 
 /// (UnixSocket, file O_NONBLOCK) for a fd.
@@ -4004,7 +4010,7 @@ pub fn unix_file_of_file(file: &Arc<File>) -> Option<(Arc<UnixSocket>, bool)> {
     }
     let nonblock = (file.flags().bits() & FileFlags::O_NONBLOCK) != 0;
     // SAFETY: ops identity confirmed above.
-    let socket = unsafe { unix_of_file(file) }?;
+    let socket = unix_of_file(file)?;
     Some((socket, nonblock))
 }
 

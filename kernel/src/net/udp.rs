@@ -285,13 +285,11 @@ pub const UDP_RCVBUF_BUDGET: usize = 128 * 1024;
 pub fn udp_socket_alloc() -> Result<i32, i32> {
     // SAFETY: UDP_SOCKET_TABLE is a global static accessed under
     // UDP_TABLE_LOCK (R24).
-    unsafe {
-        let _g = UDP_TABLE_LOCK.lock_irqsave();
-        match UDP_SOCKET_TABLE.alloc() {
-            Ok(fd) => Ok(fd as i32),
-            // W3: protocol table exhausted → EMFILE (Linux), not EIO
-            Err(_) => Err(-24), // EMFILE
-        }
+    let _g = UDP_TABLE_LOCK.lock_irqsave();
+    match udp_table_mut().alloc() {
+        Ok(fd) => Ok(fd as i32),
+        // W3: protocol table exhausted → EMFILE (Linux), not EIO
+        Err(_) => Err(-24), // EMFILE
     }
 }
 
@@ -301,10 +299,8 @@ pub fn udp_socket_alloc() -> Result<i32, i32> {
 /// - `fd`: Socket file descriptor
 pub fn udp_socket_free(fd: i32) {
     // SAFETY: UDP_SOCKET_TABLE is a global; fd was returned by udp_socket_alloc.
-    unsafe {
-        let _g = UDP_TABLE_LOCK.lock_irqsave();
-        UDP_SOCKET_TABLE.free(fd as usize);
-    }
+    let _g = UDP_TABLE_LOCK.lock_irqsave();
+    udp_table_mut().free(fd as usize);
 }
 
 /// Get UDP socket
@@ -319,6 +315,29 @@ pub fn udp_socket_get(fd: i32) -> Option<&'static mut UdpSocket> {
     unsafe {
         UDP_SOCKET_TABLE.get_mut(fd as usize)
     }
+}
+
+/// Read-only view of the UDP protocol-table slot (the same liveness
+/// contract as udp_socket_get: global table, caller-serialized).
+pub fn udp_socket_read(fd: i32) -> Option<&'static UdpSocket> {
+    // SAFETY: read-only access to the global table; caller ensures no
+    // concurrent mutation (same contract as udp_socket_get).
+    unsafe { UDP_SOCKET_TABLE.get(fd as usize) }
+}
+
+/// Whole-table views for the scans (bind-conflict walk, udp_rcv
+/// delivery walk, dump). Contract: the caller serializes against other
+/// table writers (UDP_TABLE_LOCK or the softirq/syscall discipline the
+/// scan sites already document).
+pub fn udp_table_mut() -> &'static mut UdpSocketTable {
+    // SAFETY: no re-entrancy inside (pure reference formation); the
+    // caller holds the documented serialization.
+    unsafe { &mut UDP_SOCKET_TABLE }
+}
+
+pub fn udp_table_ref() -> &'static UdpSocketTable {
+    // SAFETY: read-only view; caller-serialized against mutation.
+    unsafe { &UDP_SOCKET_TABLE }
 }
 
 /// Bind socket to local address and port
@@ -336,8 +355,9 @@ pub fn udp_bind(fd: i32, ip: u32, port: UdpPort) -> i32 {
     // R24 (HIGH-6): table leaf lock — serializes against udp_rcv (NetRx
     // softirq) and other syscalls touching the same slot.
     let _g = UDP_TABLE_LOCK.lock_irqsave();
-    // SAFETY: UDP_SOCKET_TABLE is a global; fd was returned by udp_socket_alloc.
-    unsafe {
+    // UDP_SOCKET_TABLE is a global; fd was returned by udp_socket_alloc
+    // and the table lock is held (accessors carry the contract).
+    {
         // R32-N9: reject a port already held by another bound socket — the
         // old code accepted every bind and udp_rcv then delivered to
         // whichever slot the scan found first. Port 0 (ephemeral) never
@@ -354,11 +374,12 @@ pub fn udp_bind(fd: i32, ip: u32, port: UdpPort) -> i32 {
                 None => return -99, // EADDRNOTAVAIL — ephemeral range exhausted
             }
         } else {
-            for i in 0..UDP_SOCKET_TABLE.count {
+            let table = udp_table_ref();
+            for i in 0..table.count {
                 if i == fd as usize {
                     continue;
                 }
-                if let Some(s) = UDP_SOCKET_TABLE.sockets[i].as_ref() {
+                if let Some(s) = table.sockets[i].as_ref() {
                     if s.bound && s.local_port == port {
                         return -98; // EADDRINUSE
                     }
@@ -366,7 +387,7 @@ pub fn udp_bind(fd: i32, ip: u32, port: UdpPort) -> i32 {
             }
             port
         };
-        if let Some(socket) = UDP_SOCKET_TABLE.get_mut(fd as usize) {
+        if let Some(socket) = udp_socket_get(fd) {
             match socket.bind(ip, effective_port) {
                 Ok(()) => 0,
                 Err(()) => -5, // EIO
@@ -385,47 +406,45 @@ const UDP_EPHEMERAL_PORT_MAX: u16 = 60999;
 /// Allocate an unused UDP local port in the ephemeral range.
 /// Caller must hold UDP_TABLE_LOCK.
 fn udp_alloc_ephemeral_port() -> Option<UdpPort> {
-    // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
-    unsafe {
-        for _ in 0..(UDP_EPHEMERAL_PORT_MAX - 32768 + 1) {
-            let port = NEXT_UDP_EPHEMERAL_PORT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            let port = if port > UDP_EPHEMERAL_PORT_MAX {
-                port % UDP_EPHEMERAL_PORT_MAX + 1024
-            } else {
-                port
-            };
-            let in_use = (0..UDP_SOCKET_TABLE.count).any(|i| {
-                UDP_SOCKET_TABLE
-                    .sockets
-                    .get(i)
-                    .and_then(|s| s.as_ref())
-                    .map(|s| s.bound && s.local_port == port)
-                    .unwrap_or(false)
-            });
-            if !in_use {
-                return Some(port);
-            }
+    // UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK (the
+    // accessors carry the contract).
+    let table = udp_table_ref();
+    for _ in 0..(UDP_EPHEMERAL_PORT_MAX - 32768 + 1) {
+        let port = NEXT_UDP_EPHEMERAL_PORT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let port = if port > UDP_EPHEMERAL_PORT_MAX {
+            port % UDP_EPHEMERAL_PORT_MAX + 1024
+        } else {
+            port
+        };
+        let in_use = (0..table.count).any(|i| {
+            table
+                .sockets
+                .get(i)
+                .and_then(|s| s.as_ref())
+                .map(|s| s.bound && s.local_port == port)
+                .unwrap_or(false)
+        });
+        if !in_use {
+            return Some(port);
         }
-        None
     }
+    None
 }
 
 /// W3: locked read of a slot's bound local port (ephemeral bind readback).
 pub fn udp_local_port(fd: i32) -> u16 {
     let _g = UDP_TABLE_LOCK.lock_irqsave();
     // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
-    unsafe { UDP_SOCKET_TABLE.get(fd as usize).map(|s| s.local_port).unwrap_or(0) }
+    udp_socket_read(fd).map(|s| s.local_port).unwrap_or(0)
 }
 
 /// W3: read-and-clear the slot's pending error (SO_ERROR semantics).
 pub fn udp_take_pending_error(fd: i32) -> i32 {
     let _g = UDP_TABLE_LOCK.lock_irqsave();
     // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
-    unsafe {
-        match UDP_SOCKET_TABLE.get_mut(fd as usize) {
-            Some(s) => core::mem::replace(&mut s.pending_error, 0),
-            None => 0,
-        }
+    match udp_socket_get(fd) {
+        Some(s) => core::mem::replace(&mut s.pending_error, 0),
+        None => 0,
     }
 }
 
@@ -436,14 +455,12 @@ pub fn udp_connect(fd: i32, ip: u32, port: UdpPort) -> i32 {
     crate::pr_info!("udp-conn fd={} ip={:#x} port={}", fd, ip, port);
     let _g = UDP_TABLE_LOCK.lock_irqsave();
     // SAFETY: UDP_SOCKET_TABLE is a global; fd was returned by udp_socket_alloc.
-    unsafe {
-        match UDP_SOCKET_TABLE.get_mut(fd as usize) {
-            Some(socket) => {
-                let _ = socket.connect(ip, port);
-                0
-            }
-            None => -9, // EBADF
+    match udp_socket_get(fd) {
+        Some(socket) => {
+            let _ = socket.connect(ip, port);
+            0
         }
+        None => -9, // EBADF
     }
 }
 
@@ -514,7 +531,7 @@ pub fn udp_send(fd: i32, buf: &[u8]) -> isize {
     let built = {
         let _g = UDP_TABLE_LOCK.lock_irqsave();
         // Get socket
-        let socket = match unsafe { UDP_SOCKET_TABLE.get_mut(fd as usize) } {
+        let socket = match udp_socket_get(fd) {
             Some(s) => s,
             None => return -9, // EBADF
         };
@@ -583,7 +600,7 @@ pub fn udp_sendto(fd: i32, buf: &[u8], dest_ip: u32, dest_port: u16) -> isize {
     let built = {
         let _g = UDP_TABLE_LOCK.lock_irqsave();
         // Get socket
-        let socket = match unsafe { UDP_SOCKET_TABLE.get_mut(fd as usize) } {
+        let socket = match udp_socket_get(fd) {
             Some(s) => s,
             None => return -9, // EBADF
         };
@@ -608,56 +625,55 @@ pub fn udp_sendto(fd: i32, buf: &[u8], dest_ip: u32, dest_port: u16) -> isize {
 /// (ephemeral assignment, same-family conflict check).
 pub fn udp_bind6(fd: i32, ip6: crate::net::ipv6::Ipv6Addr, port: UdpPort) -> i32 {
     let _g = UDP_TABLE_LOCK.lock_irqsave();
-    // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
-    unsafe {
-        let effective_port = if port == 0 {
-            match udp_alloc_ephemeral_port() {
-                Some(p) => p,
-                None => return -99, // EADDRNOTAVAIL
-            }
-        } else {
-            // Conflict check within the same family (v4/wildcard v6 dual
-            // binding is out of scope — first binder wins, like udp_bind).
-            for i in 0..UDP_SOCKET_TABLE.count {
-                if i == fd as usize {
-                    continue;
-                }
-                if let Some(s) = UDP_SOCKET_TABLE.sockets[i].as_ref() {
-                    if s.bound && s.local_port == port && s.is_v6 {
-                        return -98; // EADDRINUSE
-                    }
-                }
-            }
-            port
-        };
-        match UDP_SOCKET_TABLE.get_mut(fd as usize) {
-            Some(socket) => {
-                socket.is_v6 = true;
-                socket.local_ip6 = ip6;
-                socket.local_port = effective_port;
-                socket.bound = true;
-                0
-            }
-            None => -5, // EBADF
+    // UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK (the
+    // accessors carry the contract).
+    let effective_port = if port == 0 {
+        match udp_alloc_ephemeral_port() {
+            Some(p) => p,
+            None => return -99, // EADDRNOTAVAIL
         }
+    } else {
+        // Conflict check within the same family (v4/wildcard v6 dual
+        // binding is out of scope — first binder wins, like udp_bind).
+        let table = udp_table_ref();
+        for i in 0..table.count {
+            if i == fd as usize {
+                continue;
+            }
+            if let Some(s) = table.sockets[i].as_ref() {
+                if s.bound && s.local_port == port && s.is_v6 {
+                    return -98; // EADDRINUSE
+                }
+            }
+        }
+        port
+    };
+    match udp_socket_get(fd) {
+        Some(socket) => {
+            socket.is_v6 = true;
+            socket.local_ip6 = ip6;
+            socket.local_port = effective_port;
+            socket.bound = true;
+            0
+        }
+        None => -5, // EBADF
     }
 }
 
 /// Connect a UDP slot to a pure v6 remote (R24 discipline: locked entry).
 pub fn udp_connect6(fd: i32, ip6: crate::net::ipv6::Ipv6Addr, port: UdpPort) -> i32 {
     let _g = UDP_TABLE_LOCK.lock_irqsave();
-    // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
-    unsafe {
-        match UDP_SOCKET_TABLE.get_mut(fd as usize) {
-            Some(socket) => {
-                socket.is_v6 = true;
-                socket.remote_ip6 = ip6;
-                socket.remote_port = port;
-                socket.connected = true;
-                0
-            }
-            None => -9, // EBADF
+    // UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK (the
+    // accessor carries the contract).
+    match udp_socket_get(fd) {
+        Some(socket) => {
+            socket.is_v6 = true;
+            socket.remote_ip6 = ip6;
+            socket.remote_port = port;
+            socket.connected = true;
+            0
         }
+        None => -9, // EBADF
     }
 }
 
@@ -673,7 +689,7 @@ pub fn udp_sendto6(
     let built = {
         let _g = UDP_TABLE_LOCK.lock_irqsave();
         // SAFETY: UDP_SOCKET_TABLE is a global; fd was returned by udp_socket_alloc.
-        let socket = match unsafe { UDP_SOCKET_TABLE.get_mut(fd as usize) } {
+        let socket = match udp_socket_get(fd) {
             Some(s) => s,
             None => return -9, // EBADF
         };
@@ -751,16 +767,17 @@ fn udp_build_locked6(
     };
 
     // Mandatory checksum over header + payload + v6 pseudo-header.
-    // SAFETY: skb.data holds UDP_HLEN valid header bytes; payload follows.
-    unsafe {
-        let hdr = &mut *(skb.data as *mut UdpHdr);
-        let total = (UDP_HLEN + buf.len()) as u32;
+    // skb.data holds UDP_HLEN valid header bytes; payload follows (the
+    // typed skb views carry the size guards).
+    let total = (UDP_HLEN + buf.len()) as u32;
+    if let Some(hdr) = skb.hdr_mut::<UdpHdr>() {
         hdr.check = 0;
-        let seg = core::slice::from_raw_parts(skb.data as *const u8, total as usize);
-        let mut csum = ipv6::transport_checksum6(&src6, &dest6, next_header::UDP, seg);
-        if csum == 0 {
-            csum = 0xFFFF; // 0x0000 would read as "computed 0"
-        }
+    }
+    let mut csum = ipv6::transport_checksum6(&src6, &dest6, next_header::UDP, skb.data_slice(total));
+    if csum == 0 {
+        csum = 0xFFFF; // 0x0000 would read as "computed 0"
+    }
+    if let Some(hdr) = skb.hdr_mut::<UdpHdr>() {
         hdr.check = csum.to_be();
     }
 
@@ -783,7 +800,7 @@ pub fn udp_recvfrom_ext(
 ) -> Result<(isize, crate::net::ipv6::IpAddr, u16), isize> {
     let _g = UDP_TABLE_LOCK.lock_irqsave();
     // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
-    let socket = match unsafe { UDP_SOCKET_TABLE.get_mut(fd as usize) } {
+    let socket = match udp_socket_get(fd) {
         Some(s) => s,
         None => return Err(-9), // EBADF
     };
@@ -842,18 +859,16 @@ pub fn udp_rcv6(
         return Ok(());
     }
     let data_len = (udp_hdr.len() as usize).saturating_sub(UDP_HLEN);
-    // SAFETY: udp_parse_packet validated the length against skb.len.
-    let data = if data_len > 0 {
-        unsafe { core::slice::from_raw_parts(skb.data.add(UDP_HLEN), data_len) }
+    // udp_parse_packet validated the length against skb.len; the typed
+    // views are len-bounded.
+    let data: &[u8] = if data_len > 0 {
+        skb.data_slice_at(UDP_HLEN as u32, data_len as u32)
     } else {
         &[]
     };
     // Verify over the full segment (header with stored checksum + data):
     // a valid datagram sums to zero.
-    // SAFETY: header bytes [0, UDP_HLEN) are validated.
-    let seg = unsafe {
-        core::slice::from_raw_parts(skb.data as *const u8, UDP_HLEN + data_len)
-    };
+    let seg = skb.data_slice((UDP_HLEN + data_len) as u32);
     if ipv6::transport_checksum6(src6, dst6, next_header::UDP, seg) != 0 {
         return Ok(()); // silently drop
     }
@@ -866,10 +881,11 @@ pub fn udp_rcv6(
     let mut trace_qlen: u32 = 0;
     {
         let _g = UDP_TABLE_LOCK.lock_irqsave();
-        // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
-        unsafe {
-            for i in 0..UDP_SOCKET_TABLE.count {
-                if let Some(ref mut socket) = UDP_SOCKET_TABLE.sockets[i] {
+        // UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK
+        // (the accessor carries the contract).
+        let table = udp_table_mut();
+        for i in 0..table.count {
+            if let Some(ref mut socket) = table.sockets[i] {
                     if socket.is_v6
                         && socket.bound
                         && socket.local_port == dest_port
@@ -894,7 +910,6 @@ pub fn udp_rcv6(
                         break;
                     }
                 }
-            }
         }
     }
     crate::trace::trace_net_udp_deliver(trace_fd, dest_port, src_port, trace_qlen);
@@ -985,15 +1000,14 @@ fn udp_build_locked(
 
     // W3: compute the UDP checksum (TX used to be sent with checksum 0 —
     // RFC 768 allows it, but strict peers/VMs drop those datagrams).
-    // SAFETY: skb.data holds UDP_HLEN valid header bytes; payload follows.
-    unsafe {
-        let hdr = &*(skb.data as *const UdpHdr);
-        let payload = core::slice::from_raw_parts(skb.data.add(UDP_HLEN), buf.len());
+    // skb.data holds UDP_HLEN valid header bytes; payload follows (the
+    // typed skb view carries the size guard).
+    if let Some((hdr, payload)) = skb.hdr_and_tail::<UdpHdr>() {
         let mut csum = udp_checksum(src_ip.to_be(), dest_ip.to_be(), hdr, payload);
         if csum == 0 {
             csum = 0xFFFF; // 0 would mean "no checksum" on the wire
         }
-        (*(skb.data as *mut UdpHdr)).check = csum.to_be();
+        hdr.check = csum.to_be();
     }
 
     Ok(BuiltUdp::V4 {
@@ -1008,10 +1022,8 @@ fn udp_build_locked(
 pub fn udp_set_broadcast(fd: i32, on: bool) {
     let _g = UDP_TABLE_LOCK.lock_irqsave();
     // SAFETY: UDP_SOCKET_TABLE is a global; protected by UDP_TABLE_LOCK.
-    unsafe {
-        if let Some(s) = UDP_SOCKET_TABLE.get_mut(fd as usize) {
-            s.broadcast = on;
-        }
+    if let Some(s) = udp_socket_get(fd) {
+        s.broadcast = on;
     }
 }
 
@@ -1020,10 +1032,8 @@ pub fn udp_set_broadcast(fd: i32, on: bool) {
 pub fn udp_set_ttl(fd: i32, ttl: u8) {
     let _g = UDP_TABLE_LOCK.lock_irqsave();
     // SAFETY: UDP_SOCKET_TABLE is a global; protected by UDP_TABLE_LOCK.
-    unsafe {
-        if let Some(s) = UDP_SOCKET_TABLE.get_mut(fd as usize) {
-            s.ttl = ttl;
-        }
+    if let Some(s) = udp_socket_get(fd) {
+        s.ttl = ttl;
     }
 }
 
@@ -1043,7 +1053,7 @@ pub fn udp_add_membership(fd: i32, group: u32) -> i32 {
     {
         let _g = UDP_TABLE_LOCK.lock_irqsave();
         // SAFETY: UDP_SOCKET_TABLE is a global; protected by UDP_TABLE_LOCK.
-        let socket = match unsafe { UDP_SOCKET_TABLE.get_mut(fd as usize) } {
+        let socket = match udp_socket_get(fd) {
             Some(s) => s,
             None => return -9, // EBADF
         };
@@ -1068,7 +1078,7 @@ pub fn udp_drop_membership(fd: i32, group: u32) -> i32 {
     let removed = {
         let _g = UDP_TABLE_LOCK.lock_irqsave();
         // SAFETY: UDP_SOCKET_TABLE is a global; protected by UDP_TABLE_LOCK.
-        let socket = match unsafe { UDP_SOCKET_TABLE.get_mut(fd as usize) } {
+        let socket = match udp_socket_get(fd) {
             Some(s) => s,
             None => return -9, // EBADF
         };
@@ -1136,7 +1146,7 @@ pub fn udp_recv(fd: i32, buf: &mut [u8], _len: usize) -> isize {
     // R24 (HIGH-6): leaf lock around the dequeue.
     let _g = UDP_TABLE_LOCK.lock_irqsave();
     // Get socket
-    let socket = match unsafe { UDP_SOCKET_TABLE.get_mut(fd as usize) } {
+    let socket = match udp_socket_get(fd) {
         Some(s) => s,
         None => return -9, // EBADF
     };
@@ -1172,7 +1182,7 @@ pub fn udp_recvfrom(fd: i32, buf: &mut [u8], _len: usize) -> Result<(isize, u32,
     // R24 (HIGH-6): leaf lock around the dequeue.
     let _g = UDP_TABLE_LOCK.lock_irqsave();
     // Get socket
-    let socket = match unsafe { UDP_SOCKET_TABLE.get_mut(fd as usize) } {
+    let socket = match udp_socket_get(fd) {
         Some(s) => s,
         None => return Err(-9), // EBADF
     };
@@ -1201,12 +1211,9 @@ pub fn udp_recvfrom(fd: i32, buf: &mut [u8], _len: usize) -> Result<(isize, u32,
 pub fn udp_poll_readable(fd: i32) -> bool {
     let _g = UDP_TABLE_LOCK.lock_irqsave();
     // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
-    unsafe {
-        UDP_SOCKET_TABLE
-            .get(fd as usize)
-            .map(|s| !s.recv_buffer.is_empty())
-            .unwrap_or(false)
-    }
+    udp_socket_read(fd)
+        .map(|s| !s.recv_buffer.is_empty())
+        .unwrap_or(false)
 }
 
 /// W3: length of the next queued datagram (None = empty). recvmsg uses it
@@ -1214,12 +1221,9 @@ pub fn udp_poll_readable(fd: i32) -> bool {
 pub fn udp_next_dgram_len(fd: i32) -> Option<usize> {
     let _g = UDP_TABLE_LOCK.lock_irqsave();
     // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
-    unsafe {
-        UDP_SOCKET_TABLE
-            .get(fd as usize)
-            .and_then(|s| s.recv_buffer.front())
-            .map(|p| p.data.len())
-    }
+    udp_socket_read(fd)
+        .and_then(|s| s.recv_buffer.front())
+        .map(|p| p.data.len())
 }
 
 /// W3: does this UDP slot carry a pending (ICMP) error? Part of the
@@ -1228,12 +1232,9 @@ pub fn udp_next_dgram_len(fd: i32) -> Option<usize> {
 pub fn udp_has_error(fd: i32) -> bool {
     let _g = UDP_TABLE_LOCK.lock_irqsave();
     // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
-    unsafe {
-        UDP_SOCKET_TABLE
-            .get(fd as usize)
-            .map(|s| s.pending_error != 0)
-            .unwrap_or(true)
-    }
+    udp_socket_read(fd)
+        .map(|s| s.pending_error != 0)
+        .unwrap_or(true)
 }
 
 /// P1 /proc/net/udp(+udp6): one protocol-slot snapshot.
@@ -1253,25 +1254,24 @@ pub struct UdpSlotInfo {
 pub fn udp_dump() -> alloc::vec::Vec<UdpSlotInfo> {
     let _g = UDP_TABLE_LOCK.lock_irqsave();
     let mut out = alloc::vec::Vec::new();
-    // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
-    unsafe {
-        let table = &UDP_SOCKET_TABLE;
-        for i in 0..table.count {
-            if let Some(s) = table.sockets[i].as_ref() {
-                if !s.bound {
-                    continue;
-                }
-                out.push(UdpSlotInfo {
-                    local_ip: s.local_ip,
-                    local_port: s.local_port,
-                    remote_ip: s.remote_ip,
-                    remote_port: s.remote_port,
-                    connected: s.connected,
-                    is_v6: s.is_v6,
-                    local_ip6: s.local_ip6,
-                    remote_ip6: s.remote_ip6,
-                });
+    // UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK (the
+    // accessor carries the contract).
+    let table = udp_table_ref();
+    for i in 0..table.count {
+        if let Some(s) = table.sockets[i].as_ref() {
+            if !s.bound {
+                continue;
             }
+            out.push(UdpSlotInfo {
+                local_ip: s.local_ip,
+                local_port: s.local_port,
+                remote_ip: s.remote_ip,
+                remote_port: s.remote_port,
+                connected: s.connected,
+                is_v6: s.is_v6,
+                local_ip6: s.local_ip6,
+                remote_ip6: s.remote_ip6,
+            });
         }
     }
     out
@@ -1350,13 +1350,12 @@ pub fn udp_build_packet(
     data: &[u8],
 ) -> Result<(), ()> {
     // Allocate space for UDP header
-    let ptr = skb.skb_push(UDP_HLEN as u32).ok_or(())?;
+    skb.skb_push(UDP_HLEN as u32).ok_or(())?;
 
-    // SAFETY: skb_push returned a valid, properly aligned pointer of at least
-    // UDP_HLEN bytes; writing fields of repr(C) UdpHdr is well-defined.
-    unsafe {
-        let udp_hdr = &mut *(ptr as *mut UdpHdr);
-
+    // skb_push returned a valid, properly aligned pointer of at least
+    // UDP_HLEN bytes; writing fields of repr(C) UdpHdr is well-defined
+    // (the typed view carries the size guard).
+    if let Some(udp_hdr) = skb.hdr_mut::<UdpHdr>() {
         // Source port
         udp_hdr.source = source.to_be();
 
@@ -1384,8 +1383,8 @@ pub fn udp_build_packet(
 /// # Returns
 /// UDP header reference, or None if parsing fails
 pub fn udp_parse_packet(skb: &SkBuff) -> Option<&UdpHdr> {
-    // SAFETY: skb.data and skb.len describe a valid byte range in the skb buffer.
-    let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
+    // data_slice is the typed view of the skb data area (len-bounded).
+    let data = skb.data_slice(skb.len);
 
     if data.len() < UDP_HLEN {
         return None;
@@ -1455,13 +1454,10 @@ pub fn udp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
     // Verify UDP checksum (per RFC 768: checksum=0 means no checksum)
     if udp_hdr.check() != 0 {
         let data_len = (udp_hdr.len() as usize).saturating_sub(UDP_HLEN);
-        let data = if data_len > 0 {
-            // SAFETY: skb.data + UDP_HLEN is within the skb's valid data range
-            // since udp_parse_packet validated the length.
-            unsafe {
-                let data_ptr = skb.data.add(UDP_HLEN);
-                core::slice::from_raw_parts(data_ptr, data_len)
-            }
+        let data: &[u8] = if data_len > 0 {
+            // udp_parse_packet validated the length; the typed view is
+            // len-bounded.
+            skb.data_slice_at(UDP_HLEN as u32, data_len as u32)
         } else {
             &[]
         };
@@ -1533,10 +1529,11 @@ pub fn udp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
     let mut trace_qlen: u32 = 0;
     {
         let _g = UDP_TABLE_LOCK.lock_irqsave();
-        // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
-        unsafe {
-            for i in 0..UDP_SOCKET_TABLE.count {
-                if let Some(ref mut socket) = UDP_SOCKET_TABLE.sockets[i] {
+        // UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK
+        // (the accessor carries the contract).
+        let table = udp_table_mut();
+        for i in 0..table.count {
+            if let Some(ref mut socket) = table.sockets[i] {
                     if socket.bound
                         && socket.local_port == dest_port
                         && (socket.local_ip == 0 || socket.local_ip == dest_ip)
@@ -1567,7 +1564,6 @@ pub fn udp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
                         break;
                     }
                 }
-            }
         }
     }
     crate::trace::trace_net_udp_deliver(trace_fd, dest_port, src_port, trace_qlen);
@@ -1590,9 +1586,9 @@ pub fn udp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
     // patterns hung until their timeout).
     let is_local = dest_ip == crate::net::arp::get_local_ip() || (dest_ip >> 24) == 127;
     if is_local && !is_broadcast_addr(dest_ip) {
-        // SAFETY: skb.data holds the received UDP header (8 bytes) —
+        // skb.data holds the received UDP header (8 bytes) —
         // udp_parse_packet validated at least UDP_HLEN bytes.
-        let udp_hdr8 = unsafe { core::slice::from_raw_parts(skb.data, UDP_HLEN) };
+        let udp_hdr8 = skb.data_slice(UDP_HLEN as u32);
         crate::net::icmp::icmp_send_port_unreach(dest_ip, src_ip, udp_hdr8);
     }
 
@@ -1618,10 +1614,11 @@ pub fn udp_v4_err(
     let mut wake_fd: Option<i32> = None;
     {
         let _g = UDP_TABLE_LOCK.lock_irqsave();
-        // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
-        unsafe {
-            'scan: for i in 0..UDP_SOCKET_TABLE.count {
-                let socket = match UDP_SOCKET_TABLE.sockets[i].as_mut() {
+        // UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK
+        // (the accessor carries the contract).
+        let table = udp_table_mut();
+        'scan: for i in 0..table.count {
+                let socket = match table.sockets[i].as_mut() {
                     Some(s) => s,
                     None => continue,
                 };
@@ -1648,7 +1645,6 @@ pub fn udp_v4_err(
                     }
                     break 'scan;
                 }
-            }
         }
     }
     if let Some(fd) = wake_fd {

@@ -412,6 +412,77 @@ impl SkBuff {
         self.len == 0
     }
 
+    /// Borrow `n` bytes of the data area as a shared slice (clamped to
+    /// the buffer length). Packet buffers are single-owner by
+    /// construction (`alloc_skb` hands out exclusive buffers), so the
+    /// borrow cannot alias another live reference.
+    pub fn data_slice(&self, n: u32) -> &[u8] {
+        let n = n.min(self.len);
+        // SAFETY: data..data+n is inside the allocation (len is the
+        // allocated length); exclusive ownership per the type doc.
+        unsafe { core::slice::from_raw_parts(self.data, n as usize) }
+    }
+
+    /// Borrow `n` bytes of the data area starting at `off` as a shared
+    /// slice (clamped to the buffer end).
+    pub fn data_slice_at(&self, off: u32, n: u32) -> &[u8] {
+        if off >= self.len {
+            return &[];
+        }
+        let n = n.min(self.len - off);
+        // SAFETY: same exclusive-ownership contract as data_slice; the
+        // range was clamped to the buffer end.
+        unsafe { core::slice::from_raw_parts(unsafe { self.data.add(off as usize) }, n as usize) }
+    }
+
+    /// Typed read view of the header at the data-area start: `T` must
+    /// fit within `len` (returns None otherwise — a corrupt/truncated
+    /// frame yields no view instead of an out-of-bounds read).
+    pub fn hdr<T>(&self) -> Option<&T> {
+        if (core::mem::size_of::<T>() as u32) > self.len {
+            return None;
+        }
+        // SAFETY: T fits (checked above); the buffer is exclusively
+        // owned; T is a plain wire header (Copy, no padding contracts
+        // beyond repr(C)).
+        Some(unsafe { &*(self.data as *const T) })
+    }
+
+    /// Typed write view of the header at the data-area start: `T` must
+    /// fit within `len` (None otherwise).
+    pub fn hdr_mut<T>(&mut self) -> Option<&mut T> {
+        if (core::mem::size_of::<T>() as u32) > self.len {
+            return None;
+        }
+        // SAFETY: T fits (checked above); exclusive ownership; the
+        // caller serializes against readers (packet build paths are
+        // single-threaded per buffer).
+        Some(unsafe { &mut *(self.data as *mut T) })
+    }
+
+    /// Typed write view of the header plus the byte tail behind it, in
+    /// one borrow (the header checksum-over-segment shape): returns
+    /// None when `T` does not fit. The two borrows are disjoint ranges
+    /// of the exclusively-owned buffer.
+    pub fn hdr_and_tail<T>(&mut self) -> Option<(&mut T, &[u8])> {
+        let hlen = core::mem::size_of::<T>() as u32;
+        if hlen > self.len {
+            return None;
+        }
+        // SAFETY: exclusive ownership; the header reference covers
+        // [0, hlen) and the tail slice [hlen, len) — disjoint by
+        // construction.
+        Some(unsafe {
+            let p = self.data;
+            let hdr = &mut *(p as *mut T);
+            let tail = core::slice::from_raw_parts(
+                p.add(hlen as usize),
+                (self.len - hlen) as usize,
+            );
+            (hdr, tail)
+        })
+    }
+
     /// Copy SkBuff data
     ///
     /// # Arguments

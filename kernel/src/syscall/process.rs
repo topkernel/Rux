@@ -323,11 +323,12 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                             && APPSPAWN_TGID.load(core::sync::atomic::Ordering::Relaxed) != 0
                         {
                             if let Some(t) = crate::sched::current() {
-                                // SAFETY: t is the current (forking) task.
-                                unsafe {
+                                // t is the current (forking) task —
+                                // current() hands out &mut Task directly.
+                                {
                                     let spawn_tgid = APPSPAWN_TGID
                                         .load(core::sync::atomic::Ordering::Relaxed);
-                                    if (*t).tgid() as u32 != spawn_tgid {
+                                    if t.tgid() as u32 != spawn_tgid {
                                         static NT: core::sync::atomic::AtomicUsize =
                                             core::sync::atomic::AtomicUsize::new(0);
                                         if NT.fetch_add(
@@ -338,45 +339,48 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                                             use core::fmt::Write;
                                             const RL: usize =
                                                 crate::process::task::LAST_CALLS_LEN;
-                                            let cur = (*t)
+                                            let cur = t
                                                 .last_calls_cur
                                                 .load(core::sync::atomic::Ordering::Relaxed);
                                             let mut s2 = alloc::string::String::new();
                                             let _ = write!(
                                                 s2,
                                                 "APP-THR: tgid {} comm='{}' leader='{}' calls:",
-                                                (*t).tgid(),
-                                                core::str::from_utf8((*t).comm())
+                                                t.tgid(),
+                                                core::str::from_utf8(t.comm())
                                                     .unwrap_or("")
                                                     .trim_end_matches('\0'),
-                                                core::str::from_utf8(
-                                                    (*(*t).group_leader_ptr()).comm()
-                                                )
+                                                // SAFETY: the forking
+                                                // task's leader is live.
+                                                core::str::from_utf8(unsafe {
+                                                    &*t.group_leader_ptr()
+                                                }
+                                                .comm())
                                                 .unwrap_or("")
                                                 .trim_end_matches('\0')
                                             );
                                             for k in 0..RL {
                                                 let i = (cur + RL - k) % RL; // newest first
-                                                let v = (*t).last_calls[i]
+                                                let v = t.last_calls[i]
                                                     .load(core::sync::atomic::Ordering::Relaxed);
                                                 if v != 0 {
                                                     let _ = write!(s2, " {}", v);
                                                 }
                                             }
                                             crate::pr_warn!("{}", s2);
-                                            let cur8 = (*t)
+                                            let cur8 = t
                                                 .last_fails_cur
                                                 .load(core::sync::atomic::Ordering::Relaxed);
                                             let mut s = alloc::string::String::new();
-                                            let _ = write!(s, "APP-THR: tgid {} fails:", (*t).tgid());
+                                            let _ = write!(s, "APP-THR: tgid {} fails:", t.tgid());
                                             for k in 0..8 {
                                                 let i = (cur8 + 8 - 1 - k) % 8;
-                                                let v = (*t).last_fails[i]
+                                                let v = t.last_fails[i]
                                                     .load(core::sync::atomic::Ordering::Relaxed);
                                                 if v != 0 {
-                                                    let a0 = (*t).last_fails_a0[i]
+                                                    let a0 = t.last_fails_a0[i]
                                                         .load(core::sync::atomic::Ordering::Relaxed);
-                                                    let a1 = (*t).last_fails_a1[i]
+                                                    let a1 = t.last_fails_a1[i]
                                                         .load(core::sync::atomic::Ordering::Relaxed);
                                                     let _ = write!(
                                                         s,
@@ -400,18 +404,18 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                                                 use core::sync::atomic::Ordering::Relaxed;
                                                 const RL: usize =
                                                     crate::process::task::INIT_CALLS_LEN;
-                                                let icur = (*t)
+                                                let icur = t
                                                     .init_calls_cur
                                                     .load(Relaxed);
                                                 let mut s4 = alloc::string::String::new();
                                                 let _ = write!(
                                                     s4,
                                                     "APP-THR: tgid {} init:",
-                                                    (*t).tgid()
+                                                    t.tgid()
                                                 );
                                                 for k in 0..RL {
                                                     let i = (icur + RL - k) % RL;
-                                                    let v = (*t).init_calls[i]
+                                                    let v = t.init_calls[i]
                                                         .load(Relaxed);
                                                     if v != 0 {
                                                         let _ = write!(s4, " {}", v);
@@ -422,14 +426,14 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                                                 let _ = write!(
                                                     s5,
                                                     "APP-THR: tgid {} initA:",
-                                                    (*t).tgid()
+                                                    t.tgid()
                                                 );
                                                 for k in 0..32.min(RL) {
                                                     let i = (icur + RL - k) % RL;
-                                                    let v = (*t).init_calls[i]
+                                                    let v = t.init_calls[i]
                                                         .load(Relaxed);
                                                     if v != 0 {
-                                                        let a0 = (*t).init_a0[i]
+                                                        let a0 = t.init_a0[i]
                                                             .load(Relaxed);
                                                         let _ =
                                                             write!(s5, " {}@{:#x}", v, a0);
@@ -1096,8 +1100,10 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
 
         // SAFETY: current is a valid, non-null task pointer from
         // sched::current(); cred_mut() gives exclusive cred access.
-        unsafe {
-            let cred = (*current).cred_mut();
+        {
+            // SAFETY: current is the caller's task (valid for this
+            // syscall; the cred mutation is serialized by the syscall).
+            let cred = unsafe { &mut *current }.cred_mut();
                 // Snapshot BEFORE any mutation — the rollback path must
                 // restore the pre-exec credentials, not the elevated ones.
                 cred_saved = Some(cred.clone());
@@ -2234,15 +2240,15 @@ pub fn sys_uname(args: SyscallArgs) -> i64 {
     };
 
     // SAFETY: buf validated with access_ok above; copy_to_user handles SUM bit.
-    unsafe {
-        let remaining = crate::arch::uaccess::copy_to_user(
-            buf as *mut u8,
+    // SAFETY: byte view of the fully-initialized local Utsname.
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
             &uname as *const Utsname as *const u8,
             core::mem::size_of::<Utsname>(),
-        );
-        if remaining != 0 {
-            return -(errno::EFAULT as i64);
-        }
+        )
+    };
+    if crate::arch::uaccess_safe::copy_out(buf as usize, bytes) != 0 {
+        return -(errno::EFAULT as i64);
     }
 
     0
@@ -2293,8 +2299,10 @@ pub fn sys_setuid(args: SyscallArgs) -> i64 {
     if let Some(task) = crate::sched::current() {
         // SAFETY: task pointer from sched::current() is valid; cred_mut() returns
         // a mutable reference to the task's credential structure.
-        unsafe {
-            let cred = (*task).cred_mut();
+        {
+            // SAFETY: task is the caller's task (valid for this
+            // syscall; the cred mutation is serialized by the syscall).
+            let cred = unsafe { &mut *task }.cred_mut();
             if crate::security::capable(crate::security::CAP_SETUID) {
                 // CAP_SETUID: set all uid fields
                 cred.uid = uid;
@@ -2339,8 +2347,10 @@ pub fn sys_setgid(args: SyscallArgs) -> i64 {
     if let Some(task) = crate::sched::current() {
         // SAFETY: task pointer from sched::current() is valid; cred_mut() returns
         // a mutable reference to the task's credential structure.
-        unsafe {
-            let cred = (*task).cred_mut();
+        {
+            // SAFETY: task is the caller's task (valid for this
+            // syscall; the cred mutation is serialized by the syscall).
+            let cred = unsafe { &mut *task }.cred_mut();
             if crate::security::capable(crate::security::CAP_SETGID) {
                 // CAP_SETGID: set all gid fields
                 cred.gid = gid;
@@ -2372,8 +2382,10 @@ pub fn sys_setreuid(args: SyscallArgs) -> i64 {
     if let Some(task) = crate::sched::current() {
         // SAFETY: task pointer from sched::current() is valid; cred_mut() returns
         // a mutable reference to the task's credential structure.
-        unsafe {
-            let cred = (*task).cred_mut();
+        {
+            // SAFETY: task is the caller's task (valid for this
+            // syscall; the cred mutation is serialized by the syscall).
+            let cred = unsafe { &mut *task }.cred_mut();
             let old_ruid = cred.uid;
             let old_euid = cred.euid;
             let old_suid = cred.suid;
@@ -2443,8 +2455,10 @@ pub fn sys_setregid(args: SyscallArgs) -> i64 {
     if let Some(task) = crate::sched::current() {
         // SAFETY: task pointer from sched::current() is valid; cred_mut() returns
         // a mutable reference to the task's credential structure.
-        unsafe {
-            let cred = (*task).cred_mut();
+        {
+            // SAFETY: task is the caller's task (valid for this
+            // syscall; the cred mutation is serialized by the syscall).
+            let cred = unsafe { &mut *task }.cred_mut();
             let old_rgid = cred.gid;
             let old_egid = cred.egid;
             let old_sgid = cred.sgid;
@@ -2496,8 +2510,10 @@ pub fn sys_setresuid(args: SyscallArgs) -> i64 {
     if let Some(task) = crate::sched::current() {
         // SAFETY: task pointer from sched::current() is valid; cred_mut() returns
         // a mutable reference to the task's credential structure.
-        unsafe {
-            let cred = (*task).cred_mut();
+        {
+            // SAFETY: task is the caller's task (valid for this
+            // syscall; the cred mutation is serialized by the syscall).
+            let cred = unsafe { &mut *task }.cred_mut();
             let old_euid = cred.euid;
 
             // Determine new ruid
@@ -2585,24 +2601,25 @@ pub fn sys_getresuid(args: SyscallArgs) -> i64 {
         // SAFETY: task pointer from sched::current() is valid; cred() returns a reference.
         let cred = unsafe { (*task).cred() };
         // SAFETY: task is valid; user pointers are validated with access_ok before each write.
-        unsafe {
+        // write_user is the exception-table copy path.
+        {
             if !ruid_ptr.is_null() {
                 if !crate::arch::uaccess::access_ok(ruid_ptr as usize, 4) {
                     return -(errno::EFAULT as i64);
                 }
-                let _ = crate::arch::uaccess::put_user(ruid_ptr, cred.uid);
+                let _ = crate::arch::uaccess_safe::write_user(ruid_ptr as usize, cred.uid);
             }
             if !euid_ptr.is_null() {
                 if !crate::arch::uaccess::access_ok(euid_ptr as usize, 4) {
                     return -(errno::EFAULT as i64);
                 }
-                let _ = crate::arch::uaccess::put_user(euid_ptr, cred.euid);
+                let _ = crate::arch::uaccess_safe::write_user(euid_ptr as usize, cred.euid);
             }
             if !suid_ptr.is_null() {
                 if !crate::arch::uaccess::access_ok(suid_ptr as usize, 4) {
                     return -(errno::EFAULT as i64);
                 }
-                let _ = crate::arch::uaccess::put_user(suid_ptr, cred.suid);
+                let _ = crate::arch::uaccess_safe::write_user(suid_ptr as usize, cred.suid);
             }
         }
         0
@@ -2624,8 +2641,10 @@ pub fn sys_setresgid(args: SyscallArgs) -> i64 {
     if let Some(task) = crate::sched::current() {
         // SAFETY: task pointer from sched::current() is valid; cred_mut() returns
         // a mutable reference to the task's credential structure.
-        unsafe {
-            let cred = (*task).cred_mut();
+        {
+            // SAFETY: task is the caller's task (valid for this
+            // syscall; the cred mutation is serialized by the syscall).
+            let cred = unsafe { &mut *task }.cred_mut();
 
             // Determine new rgid
             let new_rgid = if rgid == -1 {
@@ -2692,24 +2711,25 @@ pub fn sys_getresgid(args: SyscallArgs) -> i64 {
         // SAFETY: task pointer from sched::current() is valid; cred() returns a reference.
         let cred = unsafe { (*task).cred() };
         // SAFETY: task is valid; user pointers validated with access_ok before each write.
-        unsafe {
+        // write_user is the exception-table copy path.
+        {
             if !rgid_ptr.is_null() {
                 if !crate::arch::uaccess::access_ok(rgid_ptr as usize, 4) {
                     return -(errno::EFAULT as i64);
                 }
-                let _ = crate::arch::uaccess::put_user(rgid_ptr, cred.gid);
+                let _ = crate::arch::uaccess_safe::write_user(rgid_ptr as usize, cred.gid);
             }
             if !egid_ptr.is_null() {
                 if !crate::arch::uaccess::access_ok(egid_ptr as usize, 4) {
                     return -(errno::EFAULT as i64);
                 }
-                let _ = crate::arch::uaccess::put_user(egid_ptr, cred.egid);
+                let _ = crate::arch::uaccess_safe::write_user(egid_ptr as usize, cred.egid);
             }
             if !sgid_ptr.is_null() {
                 if !crate::arch::uaccess::access_ok(sgid_ptr as usize, 4) {
                     return -(errno::EFAULT as i64);
                 }
-                let _ = crate::arch::uaccess::put_user(sgid_ptr, cred.sgid);
+                let _ = crate::arch::uaccess_safe::write_user(sgid_ptr as usize, cred.sgid);
             }
         }
         0
@@ -2751,13 +2771,10 @@ pub fn sys_getgroups(args: SyscallArgs) -> i64 {
     if ngroups > 0 {
         let groups = &task.cred().groups;
         let bytes = ngroups * core::mem::size_of::<u32>();
-        unsafe {
-            crate::arch::uaccess::copy_to_user(
-                list_ptr as *mut u8,
-                groups.as_ptr() as *const u8,
-                bytes,
-            );
-        }
+        // SAFETY: byte view of the initialized group ids.
+        let bytes_view =
+            unsafe { core::slice::from_raw_parts(groups.as_ptr() as *const u8, bytes) };
+        let _ = crate::arch::uaccess_safe::copy_out(list_ptr as usize, bytes_view);
     }
 
     ngroups as i64
@@ -2805,13 +2822,15 @@ pub fn sys_setgroups(args: SyscallArgs) -> i64 {
     // fault (guarded buffers, bad pointers) MUST surface as EFAULT — the
     // return value was previously dropped and the syscall silently
     // installed zero-filled groups (LTP setgroups03's EFAULT case).
-    unsafe {
-        if crate::arch::uaccess::copy_from_user(
-            groups.as_mut_ptr() as *mut u8,
-            list_ptr as *const u8,
-            size as usize * 4,
-        ) != 0
-        {
+    // SAFETY: byte view of the sized u32 group array.
+    {
+        let view = unsafe {
+            core::slice::from_raw_parts_mut(
+                groups.as_mut_ptr() as *mut u8,
+                size as usize * 4,
+            )
+        };
+        if crate::arch::uaccess_safe::copy_in(view, list_ptr as usize) != 0 {
             return -(errno::EFAULT as i64);
         }
     }
@@ -3041,17 +3060,11 @@ pub fn sys_prlimit64(args: SyscallArgs) -> i64 {
 
     if !new_rlim.is_null() {
         // SAFETY: new_rlim validated with access_ok(16); reads two u64s.
-        let new_vals = unsafe {
-            let mut buf = [0u64; 2];
-            if crate::arch::uaccess::copy_from_user(
-                buf.as_mut_ptr() as *mut u8,
-                new_rlim,
-                core::mem::size_of::<[u64; 2]>(),
-            ) != 0 {
-                return -(errno::EFAULT as i64);
-            }
-            buf
-        };
+        let mut buf = [0u64; 2];
+        if crate::arch::uaccess_safe::copy_in_t(&mut buf, new_rlim as usize) != 0 {
+            return -(errno::EFAULT as i64);
+        }
+        let new_vals = buf;
         let (req_cur, req_max) = (new_vals[0], new_vals[1]);
 
         if req_cur > req_max {
@@ -3090,13 +3103,7 @@ pub fn sys_prlimit64(args: SyscallArgs) -> i64 {
     if !old_rlim.is_null() {
         let rlimit: [u64; 2] = [old_vals[resource].0, old_vals[resource].1];
         // SAFETY: old_rlim validated non-null and access_ok above.
-        let uncopied = unsafe {
-            crate::arch::uaccess::copy_to_user(
-                old_rlim,
-                rlimit.as_ptr() as *const u8,
-                core::mem::size_of::<[u64; 2]>(),
-            )
-        };
+        let uncopied = crate::arch::uaccess_safe::copy_out_t(old_rlim as usize, &rlimit);
         if uncopied != 0 {
             return -(errno::EFAULT as i64);
         }
@@ -3215,9 +3222,11 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
             }
             // SAFETY: ptr validated with access_ok; current is valid; comm() returns a
             // reference to a fixed-size internal buffer of 16 bytes.
-            unsafe {
-                let comm = (*current).comm();
-                if copy_to_user(ptr, comm.as_ptr(), 16) != 0 {
+            {
+                // SAFETY: current is the running task.
+                let cur = unsafe { &*current };
+                let comm = cur.comm();
+                if crate::arch::uaccess_safe::copy_out(ptr as usize, &comm[..16]) != 0 {
                     return -(errno::EFAULT as i64);
                 }
             }
@@ -3249,12 +3258,8 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
                 } else {
                     0
                 };
-                // Returns uncopied byte count (0 = success).
-                if crate::arch::uaccess::copy_to_user(
-                    arg2 as *mut u8,
-                    val.to_ne_bytes().as_ptr(),
-                    4,
-                ) == 0
+                // copy_out is the exception-table path.
+                if crate::arch::uaccess_safe::copy_out(arg2 as usize, &val.to_ne_bytes()) == 0
                 {
                     0
                 } else {
@@ -3397,8 +3402,10 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
             }
             // SAFETY: current is a valid task pointer; cred_mut returns
             // the task's own credential structure.
-            unsafe {
-                let cred = (*current).cred_mut();
+            {
+                // SAFETY: current is the caller's task (valid for this
+                // syscall; the cred mutation is serialized by the syscall).
+                let cred = unsafe { &mut *current }.cred_mut();
                 // Locked bits never clear once set (issecure() rule);
                 // honor it by OR-ing the locked-alive bits back.
                 let old = cred.securebits;
@@ -3607,13 +3614,7 @@ pub fn sys_rt_sigqueueinfo(args: SyscallArgs) -> i64 {
     // Read si_code (offset 8) — user-sent siginfo must carry a NEGATIVE
     // si_code (Linux: si_code >= 0 is reserved for the kernel → EPERM).
     let mut code_buf = [0u8; 4];
-    if unsafe {
-        crate::arch::uaccess::copy_from_user(
-            code_buf.as_mut_ptr(),
-            uinfo.add(8),
-            4,
-        )
-    } != 0
+    if crate::arch::uaccess_safe::copy_in(&mut code_buf, uinfo as usize + 8) != 0
     {
         return -(errno::EFAULT as i64);
     }
@@ -3630,13 +3631,7 @@ pub fn sys_rt_sigqueueinfo(args: SyscallArgs) -> i64 {
     // sival_int=777 and checks it). Linux rebuilds si_pid/si_uid from the
     // SENDER but keeps the user's si_errno/si_value bytes.
     let mut payload = [0u8; 8]; // sival_int/sival_ptr at siginfo offset 24
-    if unsafe {
-        crate::arch::uaccess::copy_from_user(
-            payload.as_mut_ptr(),
-            uinfo.add(24),
-            8,
-        )
-    } != 0
+    if crate::arch::uaccess_safe::copy_in(&mut payload, uinfo as usize + 24) != 0
     {
         return -(errno::EFAULT as i64);
     }
@@ -3941,13 +3936,7 @@ pub fn sys_getcpu(args: SyscallArgs) -> i64 {
         }
         let cpu = cpu_id() as u32;
         // SAFETY: 4-byte validated pointer, exception-table path.
-        let uncopied = unsafe {
-            crate::arch::uaccess::copy_to_user(
-                cpuset_ptr as *mut u8,
-                &cpu as *const u32 as *const u8,
-                4,
-            )
-        };
+        let uncopied = crate::arch::uaccess_safe::copy_out_t(cpuset_ptr as usize, &cpu);
         if uncopied > 0 {
             return -(errno::EFAULT as i64);
         }
@@ -3958,13 +3947,7 @@ pub fn sys_getcpu(args: SyscallArgs) -> i64 {
         }
         let node = 0u32;
         // SAFETY: 4-byte validated pointer, exception-table path.
-        let uncopied = unsafe {
-            crate::arch::uaccess::copy_to_user(
-                node_ptr as *mut u8,
-                &node as *const u32 as *const u8,
-                4,
-            )
-        };
+        let uncopied = crate::arch::uaccess_safe::copy_out_t(node_ptr as usize, &node);
         if uncopied > 0 {
             return -(errno::EFAULT as i64);
         }
@@ -4156,7 +4139,7 @@ pub fn sys_times(args: SyscallArgs) -> i64 {
         // Self ticks from the timer-IRQ CPU accounting; child ticks are
         // folded into this task at each child's exit (see do_exit).
         let (utime, stime, cutime, cstime) = match crate::sched::current() {
-            Some(t) => unsafe {
+            Some(t) => {
                 use core::sync::atomic::Ordering::Relaxed;
                 (
                     (*t).utime_ticks.load(Relaxed) as i64,
@@ -4169,12 +4152,14 @@ pub fn sys_times(args: SyscallArgs) -> i64 {
         };
         // SAFETY: buf_ptr validated with access_ok above; each field write
         // goes through put_user (exception-table path, SUM=0 safe).
-        unsafe {
-            let put = crate::arch::uaccess::put_user::<u64>;
-            if !put(buf_ptr as *mut u64, utime as u64)
-                || !put(buf_ptr.add(1) as *mut u64, stime as u64)
-                || !put(buf_ptr.add(2) as *mut u64, cutime as u64)
-                || !put(buf_ptr.add(3) as *mut u64, cstime as u64)
+        // write_user is the exception-table copy path (SUM=0 safe).
+        {
+            let put = crate::arch::uaccess_safe::write_user::<u64>;
+            let base = buf_ptr as usize;
+            if !put(base, utime as u64)
+                || !put(base + 8, stime as u64)
+                || !put(base + 16, cutime as u64)
+                || !put(base + 24, cstime as u64)
             {
                 return -(errno::EFAULT as i64);
             }
@@ -4196,44 +4181,43 @@ pub fn sys_sysinfo(args: SyscallArgs) -> i64 {
     if !crate::arch::uaccess::access_ok(info_ptr as usize, 112) {
         return -(errno::EFAULT as i64);
     }
-    // struct sysinfo: 112 bytes, fill with available info
-    // SAFETY: info_ptr validated with access_ok above; every field write goes
-    // through put_user (exception-table copy path, SUM=0 safe).
-    unsafe {
-        let put_u64 = crate::arch::uaccess::put_user::<u64>;
+    // struct sysinfo: 112 bytes, fill with available info.
+    // info_ptr validated with access_ok above; every field write goes
+    // through write_user (the typed exception-table family, SUM=0 safe).
+    {
+        use crate::arch::uaccess_safe as ua;
+        let base = info_ptr as usize;
         // uptime (seconds) - from jiffies
         let uptime = crate::drivers::timer::get_jiffies() as u64 / crate::drivers::timer::HZ as u64;
-        let _ = put_u64(info_ptr as *mut u64, uptime);
-        // loads[1],2,3] - zero
-        let _ = put_u64(info_ptr.add(8) as *mut u64, 0);
-        let _ = put_u64(info_ptr.add(16) as *mut u64, 0);
-        let _ = put_u64(info_ptr.add(24) as *mut u64, 0);
+        let _ = ua::write_user::<u64>(base, uptime);
+        // loads - zero
+        let _ = ua::write_user::<u64>(base + 8, 0);
+        let _ = ua::write_user::<u64>(base + 16, 0);
+        let _ = ua::write_user::<u64>(base + 24, 0);
         // totalram (bytes): the discovered memory map (runtime descriptor
         // count), not the Kernel.toml nominal size — sysinfo(2) callers
         // (installers, OOM-aware daemons) size their behavior off these
         // fields; freeram used to be a hard-coded "half of nominal".
         let mem = crate::mm::meminfo::get_basic_memory_info();
-        let _ = put_u64(info_ptr.add(32) as *mut u64, mem.mem_total as u64);
+        let _ = ua::write_user::<u64>(base + 32, mem.mem_total as u64);
         // freeram
-        let _ = put_u64(info_ptr.add(40) as *mut u64, mem.mem_free as u64);
+        let _ = ua::write_user::<u64>(base + 40, mem.mem_free as u64);
         // sharedram, bufferram
-        let _ = put_u64(info_ptr.add(48) as *mut u64, 0);
-        let _ = put_u64(info_ptr.add(56) as *mut u64, 0);
+        let _ = ua::write_user::<u64>(base + 48, 0);
+        let _ = ua::write_user::<u64>(base + 56, 0);
         // totalswap, freeswap
-        let _ = put_u64(info_ptr.add(64) as *mut u64, 0);
-        let _ = put_u64(info_ptr.add(72) as *mut u64, 0);
+        let _ = ua::write_user::<u64>(base + 64, 0);
+        let _ = ua::write_user::<u64>(base + 72, 0);
         // procs (current process count)
         use core::sync::atomic::{AtomicU16, Ordering};
         static PROC_COUNT: AtomicU16 = AtomicU16::new(0);
         PROC_COUNT.store(0, Ordering::Relaxed);
         crate::sched::for_each_task(|_| { PROC_COUNT.fetch_add(1, Ordering::Relaxed); });
-        let _ = crate::arch::uaccess::put_user::<u16>(
-            info_ptr.add(80) as *mut u16, PROC_COUNT.load(Ordering::Relaxed));
+        let _ = ua::write_user::<u16>(base + 80, PROC_COUNT.load(Ordering::Relaxed));
         // totalhigh, freehigh, mem_unit
-        let _ = put_u64(info_ptr.add(88) as *mut u64, 0);
-        let _ = put_u64(info_ptr.add(96) as *mut u64, 0);
-        let _ = crate::arch::uaccess::put_user::<u32>(
-            info_ptr.add(104) as *mut u32, 1); // mem_unit = 1 (bytes)
+        let _ = ua::write_user::<u64>(base + 88, 0);
+        let _ = ua::write_user::<u64>(base + 96, 0);
+        let _ = ua::write_user::<u32>(base + 104, 1); // mem_unit = 1 (bytes)
     }
     0
 }
@@ -4532,21 +4516,27 @@ fn process_vm_rw(args: SyscallArgs, to_remote: bool) -> i64 {
         alloc::vec![PvmIovec { iov_base: core::ptr::null_mut(), iov_len: 0 }; liovcnt];
     let mut riovs: alloc::vec::Vec<PvmIovec> =
         alloc::vec![PvmIovec { iov_base: core::ptr::null_mut(), iov_len: 0 }; riovcnt];
-    unsafe {
-        if copy_from_user(
-            liovs.as_mut_ptr() as *mut u8,
-            lvec as *const u8,
-            liovcnt * core::mem::size_of::<PvmIovec>(),
-        ) != 0
-        {
+    {
+        // copy_in is the exception-table copy path; each view is a byte
+        // window over `iovcnt` initialized PvmIovec elements.
+        // SAFETY: liovs byte view (liovcnt * size_of::<PvmIovec>()).
+        let lview = unsafe {
+            core::slice::from_raw_parts_mut(
+                liovs.as_mut_ptr() as *mut u8,
+                liovcnt * core::mem::size_of::<PvmIovec>(),
+            )
+        };
+        if crate::arch::uaccess_safe::copy_in(lview, lvec as usize) != 0 {
             return -(errno::EFAULT as i64);
         }
-        if copy_from_user(
-            riovs.as_mut_ptr() as *mut u8,
-            rvec as *const u8,
-            riovcnt * core::mem::size_of::<PvmIovec>(),
-        ) != 0
-        {
+        // SAFETY: riovs byte view (riovcnt * size_of::<PvmIovec>()).
+        let rview = unsafe {
+            core::slice::from_raw_parts_mut(
+                riovs.as_mut_ptr() as *mut u8,
+                riovcnt * core::mem::size_of::<PvmIovec>(),
+            )
+        };
+        if crate::arch::uaccess_safe::copy_in(rview, rvec as usize) != 0 {
             return -(errno::EFAULT as i64);
         }
     }
@@ -4908,11 +4898,8 @@ pub fn sys_seccomp(args: SyscallArgs) -> i64 {
                 return -(errno::EFAULT as i64);
             }
             // SAFETY: validated non-null; exception-table zero-write.
-            unsafe {
-                let zeros = [0u8; 6];
-                if crate::arch::uaccess::copy_to_user(uargs as *mut u8, zeros.as_ptr(), 6) != 0 {
-                    return -(errno::EFAULT as i64);
-                }
+            if crate::arch::uaccess_safe::copy_out(uargs as usize, &[0u8; 6]) != 0 {
+                return -(errno::EFAULT as i64);
             }
             0
         }
@@ -5759,9 +5746,10 @@ pub fn sys_getrlimit(args: SyscallArgs) -> i64 {
     // discarded — getrlimit with an unmapped user pointer returned 0
     // ("success") while writing nothing. The reference do_prlimit
     // reports the failed copy_to_user as -EFAULT; so does prlimit64.
-    unsafe {
-        let ok_cur = crate::arch::uaccess::put_user(rlim_ptr, cur);
-        let ok_max = crate::arch::uaccess::put_user(rlim_ptr.add(1), max);
+    {
+        let base = rlim_ptr as usize;
+        let ok_cur = crate::arch::uaccess_safe::write_user(base, cur);
+        let ok_max = crate::arch::uaccess_safe::write_user(base + 8, max);
         if !ok_cur || !ok_max {
             return -(errno::EFAULT as i64);
         }
@@ -5799,18 +5787,16 @@ pub fn sys_setrlimit(args: SyscallArgs) -> i64 {
     // be EFAULT — the old unwrap_or(0) read it as {0, 0} and silently
     // clamped the limit to zero instead of failing (reference
     // do_prlimit: copy_from_user of struct rlimit fails with EFAULT).
-    let rlim_cur = unsafe {
-        match crate::arch::uaccess::get_user(rlim_ptr) {
+    let rlim_cur =
+        match crate::arch::uaccess_safe::read_user::<u64>(rlim_ptr as usize) {
             Some(v) => v,
             None => return -(errno::EFAULT as i64),
-        }
-    };
-    let rlim_max = unsafe {
-        match crate::arch::uaccess::get_user(rlim_ptr.add(1)) {
+        };
+    let rlim_max =
+        match crate::arch::uaccess_safe::read_user::<u64>(rlim_ptr as usize + 8) {
             Some(v) => v,
             None => return -(errno::EFAULT as i64),
-        }
-    };
+        };
 
     if rlim_cur > rlim_max {
         return -(errno::EINVAL as i64);
@@ -5882,7 +5868,7 @@ pub fn sys_getrusage(args: SyscallArgs) -> i64 {
     //   72 ru_nvcsw 80 ru_nivcsw (padded to 96) — struct is 96 bytes on musl;
     //   the old code zeroed 144 (glibc layout), keep zeroing the whole 144.
     let (utime_ticks, stime_ticks) = match crate::sched::current() {
-        Some(t) => unsafe {
+        Some(t) => {
             use core::sync::atomic::Ordering::Relaxed;
             if who == RUSAGE_CHILDREN {
                 (
@@ -5913,7 +5899,7 @@ pub fn sys_getrusage(args: SyscallArgs) -> i64 {
     // assertions read it).
     let maxrss_kb: u64 = if who == RUSAGE_CHILDREN {
         crate::sched::current()
-            .map(|t| unsafe {
+            .map(|t| {
                 (*t).cmaxrss_kb
                     .load(core::sync::atomic::Ordering::Relaxed)
             })
@@ -5927,17 +5913,18 @@ pub fn sys_getrusage(args: SyscallArgs) -> i64 {
 
     // SAFETY: rusage_ptr validated with access_ok; zero fill via the
     // exception-table copy, then per-field put_user updates.
-    unsafe {
+    {
         let zeros = [0u8; 144];
-        if crate::arch::uaccess::copy_to_user(rusage_ptr, zeros.as_ptr(), 144) != 0 {
+        if crate::arch::uaccess_safe::copy_out(rusage_ptr as usize, &zeros) != 0 {
             return -(errno::EFAULT as i64);
         }
-        let put = crate::arch::uaccess::put_user::<u64>;
-        let _ = put(rusage_ptr as *mut u64, utv.0);
-        let _ = put(rusage_ptr.add(8) as *mut u64, utv.1);
-        let _ = put(rusage_ptr.add(16) as *mut u64, stv.0);
-        let _ = put(rusage_ptr.add(24) as *mut u64, stv.1);
-        let _ = put(rusage_ptr.add(32) as *mut u64, maxrss_kb);
+        let put = crate::arch::uaccess_safe::write_user::<u64>;
+        let base = rusage_ptr as usize;
+        let _ = put(base, utv.0);
+        let _ = put(base + 8, utv.1);
+        let _ = put(base + 16, stv.0);
+        let _ = put(base + 24, stv.1);
+        let _ = put(base + 32, maxrss_kb);
     }
     0
 }
@@ -6792,7 +6779,10 @@ pub fn sys_riscv_hwprobe(args: SyscallArgs) -> i64 {
     // exception-table copy paths (SUM=0 safe).
     unsafe {
         for i in 0..count {
-            let key = crate::arch::uaccess::get_user(pairs_ptr.add(i * 2)).unwrap_or(u64::MAX);
+            let key = crate::arch::uaccess_safe::read_user::<u64>(
+                pairs_ptr as usize + i * 16,
+            )
+            .unwrap_or(u64::MAX);
             let value = match key {
                 // mvendorid/marchid/mimpid are M-mode CSRs and trap in S-mode;
                 // report 0 ("not implemented") like an SBI-less platform would.
@@ -6816,7 +6806,10 @@ pub fn sys_riscv_hwprobe(args: SyscallArgs) -> i64 {
                 KEY_IMA_EXT_0 => IMA_EXT_FD | IMA_EXT_C | v_bit,
                 _ => u64::MAX,
             };
-            let _ = crate::arch::uaccess::put_user(pairs_ptr.add(i * 2 + 1), value);
+            let _ = crate::arch::uaccess_safe::write_user::<u64>(
+                pairs_ptr as usize + i * 16 + 8,
+                value,
+            );
         }
     }
 
@@ -6932,7 +6925,7 @@ pub fn sys_pidfd_send_signal(args: SyscallArgs) -> i64 {
     // SENDER (the kernel never trusts the user's values).
     let (sender_pid, sender_uid) = match crate::sched::current() {
         // SAFETY: current is the running task.
-        Some(t) => unsafe { ((*t).pid(), (*t).cred().uid) },
+        Some(t) => { ((*t).pid(), (*t).cred().uid) },
         None => (0, 0),
     };
     let info = if uinfo.is_null() {
