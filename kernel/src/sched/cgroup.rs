@@ -230,7 +230,7 @@ impl CgroupNode {
                     }
                     // SAFETY: parent Arc outlives `cur` (children keep
                     // parents alive; nodes are never freed).
-                    cur = unsafe { &*(Arc::as_ptr(p) as *const CgroupNode) };
+                    cur = p;
                 }
                 None => break,
             }
@@ -269,7 +269,7 @@ impl CgroupNode {
             match cur.parent.as_ref() {
                 Some(p) => {
                     // SAFETY: see path().
-                    cur = unsafe { &*(Arc::as_ptr(p) as *const CgroupNode) };
+                    cur = p;
                 }
                 None => return,
             }
@@ -439,7 +439,11 @@ pub fn cgroup_lookup_child(parent: &Arc<CgroupNode>, name: &str) -> Option<Arc<C
 /// the r9 and r10tail sweeps).
 #[inline]
 pub fn task_cgroup(task: *const Task) -> Option<&'static CgroupNode> {
-    let ptr = unsafe { (*task).cgroup_ptr() };
+    // SAFETY (one adopt edge): callers pass a live task (fork/exit hook,
+    // find_task_by_pid result) — TaskBorrow's short-read contract; the
+    // DEAD-cgroup_ptr containment below tolerates a stale payload.
+    let tk = unsafe { crate::process::task_ref::TaskBorrow::from_raw(task as *mut Task) }?;
+    let ptr = tk.cgroup_ptr();
     if ptr.is_null() {
         return None;
     }
@@ -461,7 +465,7 @@ pub fn task_cgroup(task: *const Task) -> Option<&'static CgroupNode> {
             static REPORTED: core::sync::atomic::AtomicBool =
                 core::sync::atomic::AtomicBool::new(false);
             if !REPORTED.swap(true, core::sync::atomic::Ordering::AcqRel) {
-                let (pid, policy) = unsafe { ((*task).pid(), (*task).policy()) };
+                let (pid, policy) = (tk.pid(), tk.policy());
                 crate::pr_err!(
                     "cgroup: DEAD cgroup_ptr={:#x} on task pid={} policy={:?} — \
                      treating as root (freed-task walk, R90 containment)",
@@ -485,10 +489,11 @@ fn attach_task(node: &CgroupNode, task: *mut Task, pid: u32) {
         tasks.push(pid);
     }
     drop(tasks);
-    // SAFETY: exclusive access to the child's field; pointer stays valid
+    // SAFETY (one adopt edge): exclusive task handle from the caller
+    // (fork/exit hook or pinned lookup); the node pointer stays valid
     // forever (nodes are never freed), so no refcount is needed.
-    unsafe {
-        (*task).set_cgroup_ptr(node as *const CgroupNode as *mut CgroupNode);
+    if let Some(mut tk) = unsafe { crate::process::task_ref::TaskBorrow::from_raw(task) } {
+        tk.set_cgroup_ptr(node as *const CgroupNode as *mut CgroupNode);
     }
 }
 
@@ -507,9 +512,11 @@ fn detach_task(node: &CgroupNode, pid: u32) {
 /// cgroup limits too).
 pub fn attach_init_to_root(task: *mut Task) {
     if let Some(root) = cgroup_root() {
-        let pid = unsafe { (*task).pid() };
-        // SAFETY: root is a live Arc for the whole boot.
-        attach_task(unsafe { &*(Arc::as_ptr(&root) as *const CgroupNode) }, task, pid);
+        // SAFETY (one adopt edge): the boot init task handle (live).
+        let pid = unsafe { crate::process::task_ref::TaskBorrow::from_raw(task) }
+            .map(|t| t.pid())
+            .unwrap_or(1);
+        attach_task(&root, task, pid);
     }
 }
 
@@ -544,13 +551,17 @@ pub fn cgroup_on_fork(parent: *mut Task, child: *mut Task) -> Result<(), i32> {
         match cur.parent.as_ref() {
             Some(p) => {
                 // SAFETY: nodes are never freed.
-                cur = unsafe { &*(Arc::as_ptr(p) as *const CgroupNode) };
+                cur = p;
             }
             None => break,
         }
     }
 
-    let child_pid = unsafe { (*child).pid() };
+    // SAFETY (one adopt edge): the fork hook's just-built child (live,
+    // pre-enqueue — exclusive by construction).
+    let child_pid = unsafe { crate::process::task_ref::TaskBorrow::from_raw(child) }
+        .map(|t| t.pid())
+        .ok_or(crate::errno::Errno::TryAgain.as_neg_i32())?;
     attach_task(node, child, child_pid);
     Ok(())
 }
@@ -568,7 +579,10 @@ pub fn cgroup_attach_pid(node: &Arc<CgroupNode>, pid: u32) -> Result<(), i32> {
     // Ledger BEFORE moving (migration transfers the task's charge; the
     // new chain is charged without a limit check — Linux memcg migration
     // moves charges and cannot fail the cgroup.procs write here).
-    let charged = unsafe { (*task).cgroup_mem_charged() };
+    // SAFETY (one adopt edge): live task handle for this context.
+    let charged = unsafe { crate::process::task_ref::TaskBorrow::from_raw(task) }
+        .map(|t| t.cgroup_mem_charged())
+        .unwrap_or(0);
 
     let old = task_cgroup(task);
     if let Some(old_node) = old {
@@ -578,10 +592,10 @@ pub fn cgroup_attach_pid(node: &Arc<CgroupNode>, pid: u32) -> Result<(), i32> {
         }
     }
     // SAFETY: node is a live Arc for the duration of the write.
-    attach_task(unsafe { &*(Arc::as_ptr(node) as *const CgroupNode) }, task, pid);
+    attach_task(node, task, pid);
     if charged > 0 {
         // SAFETY: see above.
-        charge_bytes(unsafe { &*(Arc::as_ptr(node) as *const CgroupNode) }, charged);
+        charge_bytes(node, charged);
     }
     Ok(())
 }
@@ -600,7 +614,10 @@ pub fn cgroup_exit(task: *mut Task) {
     let pid = unsafe { (*task).pid() };
     detach_task(node, pid);
 
-    let charged = unsafe { (*task).cgroup_mem_charged() };
+    // SAFETY (one adopt edge): live task handle for this context.
+    let charged = unsafe { crate::process::task_ref::TaskBorrow::from_raw(task) }
+        .map(|t| t.cgroup_mem_charged())
+        .unwrap_or(0);
     if charged > 0 {
         uncharge_bytes(node, charged);
         // SAFETY: task is the exiting task; ledger reset is defensive.
@@ -670,13 +687,13 @@ fn cpu_period_rollover(now: u64) -> bool {
         };
         for c in children {
             // SAFETY: nodes are never freed.
-            walk(unsafe { &*(Arc::as_ptr(&c) as *const CgroupNode) }, now, unthrottled_any);
+            walk(&c, now, unthrottled_any);
         }
     }
 
     if let Some(root) = cgroup_root() {
         // SAFETY: nodes are never freed.
-        walk(unsafe { &*(Arc::as_ptr(&root) as *const CgroupNode) }, now, &mut unthrottled_any);
+        walk(&root, now, &mut unthrottled_any);
     }
     unthrottled_any
 }
@@ -724,7 +741,7 @@ pub fn note_cpu_limit_changed(node: &Arc<CgroupNode>, was_limited: bool, now_lim
         CPU_LIMITED_NODES.fetch_add(1, Ordering::AcqRel);
         let now = crate::sched::fair::sched_clock();
         // SAFETY: nodes are never freed.
-        let n = unsafe { &*(Arc::as_ptr(node) as *const CgroupNode) };
+        let n = node;
         n.cpu_period_start_ns.store(now, Ordering::Release);
         n.cpu_usage_period_ns.store(0, Ordering::Release);
     }
