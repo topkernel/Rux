@@ -3952,6 +3952,33 @@ pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::pt_regs::PtR
 /// # Example
 /// ```no_run
 /// # use rux::signal;
+/// Fatal-signal check (the reference's `fatal_signal_pending` shape):
+/// SIGKILL pending and unblocked. SIGKILL is unblockable in the
+/// reference; the mask term keeps parity with blocked-kill corner
+/// cases. Killable sleeps (the mutex_lock_killable family, exec's
+/// de_thread drain) break out on this instead of parking forever —
+/// the escape that lets a SIGKILLed member of a threading group
+/// always reach its exit.
+pub fn fatal_signal_pending() -> bool {
+    use crate::sched;
+
+    // SAFETY: sched::current() returns the running task's valid pointer.
+    unsafe {
+        if let Some(current) = sched::current() {
+            let pending = (*current).pending.get_all();
+            const SIGKILL_BIT: u64 = 1 << 8; // signal 9
+            (pending & !(*current).sigmask & SIGKILL_BIT) != 0
+        } else {
+            false
+        }
+    }
+}
+
+/// Check for signal arrival in any potentially blocking operation
+///
+/// # Example
+/// ```no_run
+/// # use rux::signal;
 /// // Check for signals in sleep loop
 /// loop {
 ///     if signal_pending() {

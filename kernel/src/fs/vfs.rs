@@ -5461,8 +5461,19 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
         // the same non-existent name both allocate an inode / directory
         // entry. Bracket the whole sequence with the coarse VFS mutation
         // lock (see VFS_MUTATION_LOCK note for the design choice).
+        //
+        // KILLABLE (oh-launch round 3): a task SIGKILLed while queued here
+        // (de_thread / exit_group teardown of a threading group) unwinds
+        // with EINTR instead of parking UNINTERRUPTIBLE forever — the
+        // reference's killable namei waits (rwsem/mutex *_killable). The
+        // waiter never held the lock, so nothing needs undoing; a healthy
+        // caller cannot observe the EINTR (its SIGKILL is delivered at
+        // the syscall exit and the task dies), which keeps the ABI clean.
         let _mutation_guard = if o_creat {
-            Some(VFS_MUTATION_LOCK.guard())
+            match VFS_MUTATION_LOCK.lock_killable() {
+                Some(g) => Some(g),
+                None => return Err(errno::Errno::InterruptedSystemCall.as_neg_i32()),
+            }
         } else {
             None
         };

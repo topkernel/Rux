@@ -361,6 +361,38 @@ impl SleepMutex {
     /// NOT for interrupt context (see module doc); syscall/task context
     /// only. Returns a guard that releases on drop (outermost only).
     pub fn lock(&'static self) -> SleepMutexGuard {
+        match self.lock_inner(false) {
+            Some(g) => g,
+            // Unkillable acquisition: the only abort path is the
+            // killable one below — unreachable here by construction.
+            None => unreachable!("lock_inner(false) never aborts"),
+        }
+    }
+
+    /// Killable acquisition (the reference's mutex_lock_killable /
+    /// rwsem_down_write_killable family): identical to `lock`, but the
+    /// park honors a pending fatal signal — a waiter whose SIGKILL is
+    /// pending aborts the wait and returns None instead of parking
+    /// forever. The abort is SAFE by construction: the waiter never
+    /// held the mutex, so there is no critical section to unwind; the
+    /// waiter count is left in the registration critical section and a
+    /// dropped wake token is recovered by the existing R85 self-heals
+    /// (handoff epoch + ANTI_STARVE override). Normal signals do NOT
+    /// abort (the park only re-checks on a wake); only SIGKILL does —
+    /// matching signal_pending_state(TASK_KILLABLE).
+    ///
+    /// oh-launch round 3: this is the foundation-wedge escape. A member
+    /// SIGKILLed by exec's de_thread (or exit_group) while blocked in
+    /// open(O_CREAT) on VFS_MUTATION_LOCK used to park UNINTERRUPTIBLE
+    /// forever — signal_wake_up DID wake it, but the loop had no fatal
+    /// arm and just re-parked — so the member never reached do_exit,
+    /// the group never drained, and the exec'ing leader parked in
+    /// de_thread forever (the 150 s foundation freeze, 3/3 boots).
+    pub fn lock_killable(&'static self) -> Option<SleepMutexGuard> {
+        self.lock_inner(true)
+    }
+
+    fn lock_inner(&'static self, killable: bool) -> Option<SleepMutexGuard> {
         let pid = crate::process::current_pid();
         if self.fsw_notes {
             crate::dfx::fsw::note_biglock();
@@ -384,7 +416,7 @@ impl SleepMutex {
         // out immediately.
         'outer: for _ in 0..100 {
             match self.optimistic_probe(pid) {
-                OptimisticProbe::Acquired(g) => return g,
+                OptimisticProbe::Acquired(g) => return Some(g),
                 // Holder off-CPU / handoff window: spinning is waste —
                 // queue now (reference: mutex_spin_on_owner false).
                 OptimisticProbe::Stop => break 'outer,
@@ -423,7 +455,7 @@ impl SleepMutex {
             _ => {
                 loop {
                     if let Some(g) = self.try_acquire_or_recurse(pid) {
-                        return g;
+                        return Some(g);
                     }
                     for _ in 0..64 {
                         core::hint::spin_loop();
@@ -466,6 +498,32 @@ impl SleepMutex {
         let mut pi_q: Option<(usize, usize)> = None;
 
         loop {
+            // KILLABLE ABORT (mutex_lock_killable shape): a waiter whose
+            // SIGKILL is pending leaves the queue instead of re-parking —
+            // the reference's signal_pending_state(TASK_KILLABLE) arm in
+            // __mutex_lock_common's wait loop. Cleanup mirrors the take
+            // paths: leave the waiter count under the state lock (when
+            // counted), finish_wait removes the entry; the anti-starve
+            // timer is already deleted by the post-schedule code above
+            // every arrival at this arm. A wake token we held is dropped
+            // on exit — the R85 handoff-epoch / ANTI_STARVE self-heals
+            // recover the free lock for the remaining waiters (that is
+            // their design purpose). Runs BEFORE the handoff spend so an
+            // aborting waiter never takes a lock it will immediately
+            // drop.
+            if killable && crate::signal::fatal_signal_pending() {
+                if counted {
+                    let mut st = self.state.lock();
+                    if st.waiters > 0 {
+                        st.waiters -= 1;
+                    }
+                }
+                self.wait.finish_wait(cur);
+                if self.rt {
+                    self.rt_leave(&mut pi_q);
+                }
+                return None;
+            }
             if woken_retry {
                 // Handoff: the free lock is ours if it is still free.
                 // Losing it means another token holder won the race or a
@@ -476,7 +534,7 @@ impl SleepMutex {
                     if self.rt {
                         self.rt_leave(&mut pi_q);
                     }
-                    return g;
+                    return Some(g);
                 }
                 woken_retry = false;
             }
@@ -484,7 +542,7 @@ impl SleepMutex {
                 if self.rt {
                     self.rt_leave(&mut pi_q);
                 }
-                return g;
+                return Some(g);
             }
             // R83b (R74 producer hunt): every capture so far had the
             // victim parked in THIS wait when its ti_kernel_sp turned to
@@ -513,8 +571,13 @@ impl SleepMutex {
             // EXCLUSIVE + tail insert => FIFO, one wake per release.
             // The state set here is the waiter's OWN sleep state, set
             // immediately before its OWN schedule() below — reference
-            // rule 2's park-site ownership.
-            self.wait.prepare_to_wait(cur, true, false);
+            // rule 2's park-site ownership. Killable acquisitions park
+            // INTERRUPTIBLE (TASK_KILLABLE): signal_wake_up's kick then
+            // reaches the park and the loop-top fatal arm decides; a
+            // non-fatal wake is a spurious retry, same as any foreign
+            // wake (the loop re-parks). Unkillable acquisitions keep
+            // UNINTERRUPTIBLE — the reference's plain mutex_lock.
+            self.wait.prepare_to_wait(cur, true, killable);
             // R85: snapshot the orphaned-handoff epoch BEFORE the
             // registration critical section below — a release() that
             // dropped its wake (empty queue) between this read and the
@@ -587,7 +650,7 @@ impl SleepMutex {
                     if self.rt {
                         self.rt_leave(&mut pi_q);
                     }
-                    return SleepMutexGuard { lock: self };
+                    return Some(SleepMutexGuard { lock: self });
                 }
             }
             // R6 rt mode: register the PI waiter once, when the first
@@ -612,9 +675,11 @@ impl SleepMutex {
                     st.rt_waiters += 1;
                 }
             }
-            // Sleep until release() wakes us (UNINTERRUPTIBLE: sections
-            // protected by this lock are not signal-interruptible and the
-            // guard must be carried back out of the critical section).
+            // Sleep until release() wakes us (UNINTERRUPTIBLE for plain
+            // lock(): sections protected by this lock are not signal-
+            // interruptible and the guard must be carried back out of the
+            // critical section; lock_killable() parks TASK_KILLABLE — see
+            // the prepare_to_wait note above).
             //
             // R77 wedge-hunt tripwire: a holder that never releases
             // (killed synchronously inside the critical section — RAII

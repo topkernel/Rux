@@ -344,6 +344,10 @@ impl RawSpinlock {
                 }
                 if spins == Self::DEADLOCK_WARN_ITERS {
                     Self::deadlock_warn(self as *const Self, caller_ra);
+                    // Once-per-(lock,site) per boot (the dedup lives in
+                    // deadlock_warn): a truly stuck lock re-fires every
+                    // ~100M spins — hundreds of fires on the 32 s
+                    // monopolist spins would flood the serial.
                     spins = 0; // continue spinning (might resolve)
                 }
                 core::hint::spin_loop();
@@ -369,20 +373,35 @@ impl RawSpinlock {
 
     /// Print deadlock warning via SBI (works even with interrupts disabled).
     fn deadlock_warn(lock_addr: *const Self, caller_ra: usize) {
-        // Use SBI putchar directly — printk might need locks we're spinning on
+        // Raw UART output — printk might need locks we're spinning on.
+        // uart_putc_raw, NOT putchar_no_lock: the latter is compiled out
+        // of release builds, so this warn printed NOTHING on every
+        // production-config boot (the round-2 monopolist spun 32 s in
+        // kill() with zero DEADLOCK lines for exactly this reason).
+        // Once per (lock, site) per boot — see the call site.
+        {
+            static SEEN: [core::sync::atomic::AtomicUsize; 64] =
+                [const { core::sync::atomic::AtomicUsize::new(0) }; 64];
+            let key = (lock_addr as usize >> 4) ^ (caller_ra << 8);
+            let slot = &SEEN[key % 64];
+            if slot.load(Ordering::Relaxed) == key {
+                return;
+            }
+            slot.store(key, Ordering::Relaxed);
+        }
         let cpu = crate::arch::smp::cpu_id();
         let msg = b"DEADLOCK: spinlock stuck cpu=";
         for &b in msg {
-            unsafe { crate::console::putchar_no_lock(b); }
+            unsafe { crate::console::uart_putc_raw(b); }
         }
         // Print CPU id as decimal digit
         if cpu < 10 {
-            unsafe { crate::console::putchar_no_lock(b'0' + cpu as u8); }
+            unsafe { crate::console::uart_putc_raw(b'0' + cpu as u8); }
         }
         // Print lock address in hex
         let msg2 = b" lock=0x";
         for &b in msg2 {
-            unsafe { crate::console::putchar_no_lock(b); }
+            unsafe { crate::console::uart_putc_raw(b); }
         }
         let addr = lock_addr as usize;
         let mut shift = (core::mem::size_of::<usize>() * 8) as i32;
@@ -390,20 +409,20 @@ impl RawSpinlock {
             shift -= 4;
             let nibble = (addr >> (shift as usize)) & 0xF;
             let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
-            unsafe { crate::console::putchar_no_lock(c); }
+            unsafe { crate::console::uart_putc_raw(c); }
         }
 
         // Print caller return address (ra) for debugging
         let msg3 = b" ra=0x";
         for &b in msg3 {
-            unsafe { crate::console::putchar_no_lock(b); }
+            unsafe { crate::console::uart_putc_raw(b); }
         }
         let mut shift = (core::mem::size_of::<usize>() * 8) as i32;
         while shift > 0 {
             shift -= 4;
             let nibble = (caller_ra >> shift) & 0xF;
             let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
-            unsafe { crate::console::putchar_no_lock(c); }
+            unsafe { crate::console::uart_putc_raw(c); }
         }
 
         // Holder identity: owner = hart+1 (0 = free / mid-handoff).
@@ -417,7 +436,7 @@ impl RawSpinlock {
         {
             let msg4 = b" holder=";
             for &b in msg4 {
-                unsafe { crate::console::putchar_no_lock(b); }
+                unsafe { crate::console::uart_putc_raw(b); }
             }
             // SAFETY: lock_addr is a valid RawSpinlock pointer (from lock()).
             let holder = unsafe { (&*lock_addr).owner.load(Ordering::Relaxed) };
@@ -425,13 +444,13 @@ impl RawSpinlock {
             if holder == 0 {
                 let msg5 = b"switching";
                 for &b in msg5 {
-                    unsafe { crate::console::putchar_no_lock(b); }
+                    unsafe { crate::console::uart_putc_raw(b); }
                 }
             } else {
                 let h = holder - 1;
                 holder_cpu = Some(h);
                 if h < 10 {
-                    unsafe { crate::console::putchar_no_lock(b'0' + h as u8); }
+                    unsafe { crate::console::uart_putc_raw(b'0' + h as u8); }
                 }
                 // Holder CPU's current task: pid + comm (best-effort —
                 // an irqsave holder cannot migrate, so this is the task
@@ -446,30 +465,30 @@ impl RawSpinlock {
                     let pid = unsafe { (*cur).pid() };
                     let msg_pid = b" task=";
                     for &b in msg_pid {
-                        unsafe { crate::console::putchar_no_lock(b); }
+                        unsafe { crate::console::uart_putc_raw(b); }
                     }
                     Self::putdec(pid as u64);
                     // SAFETY: comm is a fixed [u8;16], no allocation.
                     let comm = unsafe { (*cur).comm() };
-                    unsafe { crate::console::putchar_no_lock(b'('); }
+                    unsafe { crate::console::uart_putc_raw(b'('); }
                     let mut any = false;
                     for &b in comm.iter() {
                         if b == 0 {
                             break;
                         }
                         if (0x20..0x7f).contains(&b) {
-                            unsafe { crate::console::putchar_no_lock(b); }
+                            unsafe { crate::console::uart_putc_raw(b); }
                             any = true;
                         }
                     }
                     if !any {
-                        unsafe { crate::console::putchar_no_lock(b'?'); }
+                        unsafe { crate::console::uart_putc_raw(b'?'); }
                     }
-                    unsafe { crate::console::putchar_no_lock(b')'); }
+                    unsafe { crate::console::uart_putc_raw(b')'); }
                 }
             }
 
-        unsafe { crate::console::putchar_no_lock(b'\n'); }
+        unsafe { crate::console::uart_putc_raw(b'\n'); }
 
         // Leak forensics (dfx-lock-owner): the LAST acquirer's pid,
         // call site and acquire age — these persist past a cleared
@@ -488,27 +507,27 @@ impl RawSpinlock {
             let now = crate::drivers::timer::get_jiffies();
             let msg = b"LOCK-ACQ: word=";
             for &b in msg {
-                unsafe { crate::console::putchar_no_lock(b); }
+                unsafe { crate::console::uart_putc_raw(b); }
             }
             Self::puthex(wv as u64);
             let msg = b" pid=";
             for &b in msg {
-                unsafe { crate::console::putchar_no_lock(b); }
+                unsafe { crate::console::uart_putc_raw(b); }
             }
             Self::putdec(apid as u64);
             let msg = b" site=0x";
             for &b in msg {
-                unsafe { crate::console::putchar_no_lock(b); }
+                unsafe { crate::console::uart_putc_raw(b); }
             }
             Self::puthex(asite as u64);
             let msg = b" age=";
             for &b in msg {
-                unsafe { crate::console::putchar_no_lock(b); }
+                unsafe { crate::console::uart_putc_raw(b); }
             }
             Self::putdec(now.wrapping_sub(ajif));
             let msg = b"j\n";
             for &b in msg {
-                unsafe { crate::console::putchar_no_lock(b); }
+                unsafe { crate::console::uart_putc_raw(b); }
             }
         }
 
@@ -520,17 +539,17 @@ impl RawSpinlock {
         if let Some((base, sz)) = crate::mm::small_alloc::object_span(lock_addr as usize) {
             let msg = b"LOCK-OBJ: small kmalloc-";
             for &b in msg {
-                unsafe { crate::console::putchar_no_lock(b); }
+                unsafe { crate::console::uart_putc_raw(b); }
             }
             Self::putdec(sz as u64);
             let msg = b" base=0x";
             for &b in msg {
-                unsafe { crate::console::putchar_no_lock(b); }
+                unsafe { crate::console::uart_putc_raw(b); }
             }
             Self::puthex(base as u64);
             let msg = b" words=";
             for &b in msg {
-                unsafe { crate::console::putchar_no_lock(b); }
+                unsafe { crate::console::uart_putc_raw(b); }
             }
             for i in 0..6 {
                 // SAFETY: diagnostic read of the object's first words;
@@ -539,10 +558,10 @@ impl RawSpinlock {
                 let w = unsafe { ((base + i * 8) as *const u64).read_unaligned() };
                 Self::puthex(w);
                 if i < 5 {
-                    unsafe { crate::console::putchar_no_lock(b','); }
+                    unsafe { crate::console::uart_putc_raw(b','); }
                 }
             }
-            unsafe { crate::console::putchar_no_lock(b'\n'); }
+            unsafe { crate::console::uart_putc_raw(b'\n'); }
         } else if let Some((base, order, free)) =
             crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.buddy_block_span(lock_addr as usize)
         {
@@ -553,22 +572,22 @@ impl RawSpinlock {
             // object, printed as words=FREE.
             let msg = b"LOCK-OBJ: buddy order-";
             for &b in msg {
-                unsafe { crate::console::putchar_no_lock(b); }
+                unsafe { crate::console::uart_putc_raw(b); }
             }
             Self::putdec(order as u64);
             let msg = b" base=0x";
             for &b in msg {
-                unsafe { crate::console::putchar_no_lock(b); }
+                unsafe { crate::console::uart_putc_raw(b); }
             }
             Self::puthex(base as u64);
             let msg = b" free=";
             for &b in msg {
-                unsafe { crate::console::putchar_no_lock(b); }
+                unsafe { crate::console::uart_putc_raw(b); }
             }
             Self::putdec(free as u64);
             let msg = b" words=";
             for &b in msg {
-                unsafe { crate::console::putchar_no_lock(b); }
+                unsafe { crate::console::uart_putc_raw(b); }
             }
             for i in 0..6 {
                 // SAFETY: diagnostic read of the block's first words;
@@ -577,10 +596,10 @@ impl RawSpinlock {
                 let w = unsafe { ((base + i * 8) as *const u64).read_unaligned() };
                 Self::puthex(w);
                 if i < 5 {
-                    unsafe { crate::console::putchar_no_lock(b','); }
+                    unsafe { crate::console::uart_putc_raw(b','); }
                 }
             }
-            unsafe { crate::console::putchar_no_lock(b'\n'); }
+            unsafe { crate::console::uart_putc_raw(b'\n'); }
         }
 
         // One REMOTE-BT per unique lock address per boot: the IPI
@@ -606,7 +625,7 @@ impl RawSpinlock {
         }
         #[cfg(not(feature = "dfx-lock-owner"))]
         {
-            unsafe { crate::console::putchar_no_lock(b'\n'); }
+            unsafe { crate::console::uart_putc_raw(b'\n'); }
 
             // The heap-object span dump is cheap and holder-independent:
             // keep it on default builds too (the meltdown hunts run
@@ -614,34 +633,34 @@ impl RawSpinlock {
             if let Some((base, sz)) = crate::mm::small_alloc::object_span(lock_addr as usize) {
                 let msg = b"LOCK-OBJ: small kmalloc-";
                 for &b in msg {
-                    unsafe { crate::console::putchar_no_lock(b); }
+                    unsafe { crate::console::uart_putc_raw(b); }
                 }
                 Self::putdec(sz as u64);
                 let msg = b" base=0x";
                 for &b in msg {
-                    unsafe { crate::console::putchar_no_lock(b); }
+                    unsafe { crate::console::uart_putc_raw(b); }
                 }
                 Self::puthex(base as u64);
-                unsafe { crate::console::putchar_no_lock(b'\n'); }
+                unsafe { crate::console::uart_putc_raw(b'\n'); }
             } else if let Some((base, order, free)) =
                 crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.buddy_block_span(lock_addr as usize)
             {
                 let msg = b"LOCK-OBJ: buddy order-";
                 for &b in msg {
-                    unsafe { crate::console::putchar_no_lock(b); }
+                    unsafe { crate::console::uart_putc_raw(b); }
                 }
                 Self::putdec(order as u64);
                 let msg = b" base=0x";
                 for &b in msg {
-                    unsafe { crate::console::putchar_no_lock(b); }
+                    unsafe { crate::console::uart_putc_raw(b); }
                 }
                 Self::puthex(base as u64);
                 let msg = b" free=";
                 for &b in msg {
-                    unsafe { crate::console::putchar_no_lock(b); }
+                    unsafe { crate::console::uart_putc_raw(b); }
                 }
                 Self::putdec(free as u64);
-                unsafe { crate::console::putchar_no_lock(b'\n'); }
+                unsafe { crate::console::uart_putc_raw(b'\n'); }
             }
         }
 
