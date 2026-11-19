@@ -387,24 +387,24 @@ fn load_and_setup_elf(
         .and_then(crate::syscall::process::open_file_arc);
 
     // SAFETY: task_ptr points to the freshly built PID 1 task (static
-    // INIT_TASK_STORAGE); do_execve_elf only needs it to carry a valid
-    // kernel stack + pt_regs, both allocated by Task::new_task_at.
-    let result = unsafe {
-        crate::process::exec::do_execve_elf(
-            task_ptr,
-            program_data,
-            &argv,
-            &envp,
-            entry,
-            phdr_count,
-            &ehdr,
-            init_path,
-            interp_data.as_deref(),
-            false,
-            init_file_arc.as_ref(),
-            interp_file_arc.as_ref(),
-        )
-    };
+    // INIT_TASK_STORAGE) — one typed-borrow edge for the loader call; the
+    // task is not runnable yet and nothing else holds a borrow of it.
+    // do_execve_elf only needs it to carry a valid kernel stack + pt_regs,
+    // both allocated by Task::new_task_at.
+    let result = crate::process::exec::do_execve_elf(
+        unsafe { &mut *task_ptr },
+        program_data,
+        &argv,
+        &envp,
+        entry,
+        phdr_count,
+        &ehdr,
+        init_path,
+        interp_data.as_deref(),
+        false,
+        init_file_arc.as_ref(),
+        interp_file_arc.as_ref(),
+    );
     match result {
         Ok(()) => {}
         Err(e) => {
