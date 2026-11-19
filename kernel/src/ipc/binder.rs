@@ -1562,13 +1562,16 @@ pub(crate) struct BinderTxn {
     from_tid: Option<u32>,
     to_proc: Arc<BinderProc>,
     /// Set when the transaction is delivered (BR_TRANSACTION): the
-    /// receiving thread, which will later issue BC_REPLY.
-    to_tid: core::cell::UnsafeCell<Option<u32>>,
+    /// receiving thread, which will later issue BC_REPLY. Atomic with
+    /// 0 = None (unsafe-slim r3: real binder tids are >= 1, so the
+    /// sentinel cannot collide; Relaxed is enough — the value is a
+    /// plain word, no pointer, no ordering contract).
+    to_tid: core::sync::atomic::AtomicU32,
     target_node: Option<Arc<BinderNode>>,
     /// Set while this txn holds the node's async slot (TF_ONE_WAY).
     /// Interior-mutable: a parked oneway claims the slot only when the
     /// in-flight buffer is freed and it graduates to the proc todo.
-    holds_async_slot: core::cell::UnsafeCell<bool>,
+    holds_async_slot: core::sync::atomic::AtomicBool,
     code: u32,
     flags: u32,
     sender_pid: i32,
@@ -1587,72 +1590,76 @@ pub(crate) struct BinderTxn {
     /// split for any sync txn over 5 s — where the 30 s goes (server not
     /// picking up vs handler running long) names the next chain link.
     enq_j: u32,
-    pick_j: core::cell::UnsafeCell<u32>,
+    /// (unsafe-slim r3) all five census cells below are Relaxed atomics:
+    /// every prior UnsafeCell variant trusted "single mutator under
+    /// WORLD"; the enqueue-wake latch (binder_transaction) writes two of
+    /// them AFTER the WORLD release, which was a bare single-writer
+    /// assumption. Atomics carry the same cost (one plain word store on
+    /// both targets) and drop the trust.
+    pick_j: core::sync::atomic::AtomicU32,
     /// 23rd PICK-LATE evidence: eligible proc-work readers on the target
     /// at proc-todo enqueue time (the wake_proc_one predicate count).
     /// 0 = nobody to wake — every reader busy in its own handler (a
-    /// capacity signal, not a lost wake). SAFETY: written under WORLD at
+    /// capacity signal, not a lost wake). Written under WORLD at
     /// enqueue, read in the PICK-LATE probe under WORLD.
-    enq_elig: core::cell::UnsafeCell<u8>,
+    enq_elig: core::sync::atomic::AtomicU8,
     /// 105th RTT census (rux:bindertrace (retired dfx=bindertrace)), ns-domain twins of the
     /// jiffies stamps: enq_ns = constructor time (request: enqueue;
     /// reply: submit), pick_ns = server BR_TRANSACTION staging time, 0
     /// until then. Jiffies (10 ms) cannot resolve the 4-5 ms fast-path
-    /// RTT class the 103rd measured vs the reference's ~1 ms. SAFETY:
-    /// written once on the txn lifecycle path under WORLD, read at the
-    /// census accumulation points under WORLD.
+    /// RTT class the 103rd measured vs the reference's ~1 ms. Written
+    /// once on the txn lifecycle path under WORLD, read at the census
+    /// accumulation points under WORLD.
     enq_ns: u64,
-    pick_ns: core::cell::UnsafeCell<u64>,
+    pick_ns: core::sync::atomic::AtomicU64,
     /// 105th wake-dispatch census: latched right after this txn's sync
     /// wake — bits 0-3 = sched::WAKE_DISP code (1 idle-claim+IPI, 2 no-
     /// idle sync, 3 no-idle async), bits 4-11 = idle mask at wake entry,
     /// bits 12-19 = min(grq nr_running, 255). Read by the QPICK print.
-    /// SAFETY: written once at the enqueue-wake point, read at pickup
-    /// under WORLD.
-    enq_disp: core::cell::UnsafeCell<u32>,
+    /// Latched once at the enqueue-wake point (outside WORLD, single
+    /// enqueuing thread — atomic anyway), read at pickup under WORLD.
+    enq_disp: core::sync::atomic::AtomicU32,
     /// 105th: the wake-issued stamp (0 until the enqueue's wake loops
     /// ran) — q splits into sender-build (enq_ns->wake_ns) and
-    /// server-wait (wake_ns->pick_ns). SAFETY: same contract as enq_disp.
-    wake_ns: core::cell::UnsafeCell<u64>,
+    /// server-wait (wake_ns->pick_ns). Same contract as enq_disp.
+    wake_ns: core::sync::atomic::AtomicU64,
 }
 
 impl BinderTxn {
     /// INV-BINDER-HELD (unsafe-slim r3): the WORLD-held proof rides the
-    /// &World token (see BinderNode::st); the UnsafeCell derefs live in
-    /// these accessor bodies only.
+    /// &World token (see BinderNode::st). (unsafe-slim r3b) the census
+    /// cells are Relaxed atomics now, so these accessors are pure safe
+    /// code — the token stays as the World-held proof for the SEMANTIC
+    /// contract (who may logically write what when), not for memory
+    /// safety any more.
     fn to_tid(&self, _held: &World) -> Option<u32> {
-        // SAFETY: WORLD held (token proof); single mutator at a time.
-        unsafe { *self.to_tid.get() }
+        match self.to_tid.load(core::sync::atomic::Ordering::Relaxed) {
+            0 => None,
+            tid => Some(tid),
+        }
     }
     fn set_to_tid(&self, _held: &World, tid: u32) {
-        // SAFETY: WORLD held (token proof).
-        unsafe { *self.to_tid.get() = Some(tid) }
+        self.to_tid.store(tid, core::sync::atomic::Ordering::Relaxed);
     }
     /// pick_j / pick_ns / enq_elig / enq_disp / wake_ns census cells
     /// (all written under WORLD; see the field docs).
     fn pick_j_rd(&self, _held: &World) -> u32 {
-        // SAFETY: WORLD held (token proof).
-        unsafe { *self.pick_j.get() }
+        self.pick_j.load(core::sync::atomic::Ordering::Relaxed)
     }
     fn pick_ns_rd(&self, _held: &World) -> u64 {
-        // SAFETY: WORLD held (token proof).
-        unsafe { *self.pick_ns.get() }
+        self.pick_ns.load(core::sync::atomic::Ordering::Relaxed)
     }
     fn enq_elig_wr(&self, _held: &World, v: u8) {
-        // SAFETY: WORLD held (token proof).
-        unsafe { *self.enq_elig.get() = v }
+        self.enq_elig.store(v, core::sync::atomic::Ordering::Relaxed);
     }
     fn enq_disp_wr(&self, _held: &World, v: u32) {
-        // SAFETY: WORLD held (token proof).
-        unsafe { *self.enq_disp.get() = v }
+        self.enq_disp.store(v, core::sync::atomic::Ordering::Relaxed);
     }
     fn enq_disp_rd(&self, _held: &World) -> u32 {
-        // SAFETY: WORLD held (token proof).
-        unsafe { *self.enq_disp.get() }
+        self.enq_disp.load(core::sync::atomic::Ordering::Relaxed)
     }
     fn wake_ns_wr(&self, _held: &World, v: u64) {
-        // SAFETY: WORLD held (token proof).
-        unsafe { *self.wake_ns.get() = v }
+        self.wake_ns.store(v, core::sync::atomic::Ordering::Relaxed);
     }
 
     /// TF_UPDATE_TXN match test (reference binder_can_update_transaction,
@@ -1682,12 +1689,12 @@ impl BinderTxn {
     }
 
     fn holds_async_slot(&self, _held: &World) -> bool {
-        // SAFETY: WORLD held (token proof); single word read.
-        unsafe { *self.holds_async_slot.get() }
+        self.holds_async_slot
+            .load(core::sync::atomic::Ordering::Relaxed)
     }
     fn set_holds_async_slot(&self, _held: &World, v: bool) {
-        // SAFETY: WORLD held (token proof).
-        unsafe { *self.holds_async_slot.get() = v }
+        self.holds_async_slot
+            .store(v, core::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -8868,8 +8875,9 @@ fn binder_ioctl_write_read(
                                 t.to_proc.pid,
                                 t.enq_j,
                                 // (unsafe-slim r3) diagnostic print runs after the
-                                // guard dropped; single-word census read stays raw.
-                                unsafe { *t.pick_j.get() }
+                                // guard dropped; the census cell is a Relaxed
+                                // atomic, so the read needs no token.
+                                t.pick_j.load(core::sync::atomic::Ordering::Relaxed)
                             );
                         }
                     }
@@ -11069,9 +11077,9 @@ fn binder_transaction(
         from_proc: if !reply && !oneway { Some(proc.clone()) } else { None },
         from_tid: if !reply && !oneway { Some(thread.tid) } else { None },
         to_proc: target.clone(),
-        to_tid: core::cell::UnsafeCell::new(None),
+        to_tid: core::sync::atomic::AtomicU32::new(0),
         target_node: target_node.clone(),
-        holds_async_slot: core::cell::UnsafeCell::new(false),
+        holds_async_slot: core::sync::atomic::AtomicBool::new(false),
         code: tr.code,
         flags: tr.flags,
         sender_pid,
@@ -11081,12 +11089,12 @@ fn binder_transaction(
         buffer_off: block_off,
         security_ctx,
         enq_j: crate::drivers::timer::get_jiffies() as u32,
-        pick_j: core::cell::UnsafeCell::new(0),
-        enq_elig: core::cell::UnsafeCell::new(0),
+        pick_j: core::sync::atomic::AtomicU32::new(0),
+        enq_elig: core::sync::atomic::AtomicU8::new(0),
         enq_ns: crate::arch::cpu::read_time(),
-        pick_ns: core::cell::UnsafeCell::new(0),
-        enq_disp: core::cell::UnsafeCell::new(0),
-        wake_ns: core::cell::UnsafeCell::new(0),
+        pick_ns: core::sync::atomic::AtomicU64::new(0),
+        enq_disp: core::sync::atomic::AtomicU32::new(0),
+        wake_ns: core::sync::atomic::AtomicU64::new(0),
     });
 
     // binder:binder_transaction — the transaction was built and is about
@@ -12508,19 +12516,17 @@ fn binder_transaction(
     // path is inside the old q.
     if !reply && !oneway {
         // (unsafe-slim r3) census latch runs AFTER the WORLD release (see
-        // the wake-loop comments above): single-writer cells, raw writes
-        // stay.
-        unsafe {
-            *txn.enq_disp.get() = (crate::sched::WAKE_DISP
-                .load(core::sync::atomic::Ordering::Relaxed)
-                & 0xF)
-                | (crate::sched::WAKE_IDLE_MASK
-                    .load(core::sync::atomic::Ordering::Relaxed)
-                    << 4)
-                | (((crate::sched::grq_nr_running_now() as u32).min(0xFF))
-                    << 12);
-            *txn.wake_ns.get() = crate::arch::cpu::read_time();
-        }
+        // the wake-loop comments above). (unsafe-slim r3b) the cells are
+        // Relaxed atomics now — the latch is a plain store, no unsafe and
+        // no single-writer trust.
+        txn.enq_disp.store(
+            (crate::sched::WAKE_DISP.load(core::sync::atomic::Ordering::Relaxed) & 0xF)
+                | (crate::sched::WAKE_IDLE_MASK.load(core::sync::atomic::Ordering::Relaxed) << 4)
+                | (((crate::sched::grq_nr_running_now() as u32).min(0xFF)) << 12),
+            core::sync::atomic::Ordering::Relaxed,
+        );
+        txn.wake_ns
+            .store(crate::arch::cpu::read_time(), core::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -13756,7 +13762,7 @@ fn binder_thread_read(
                                                 (disp_word >> 4) & 0xFF;
                                             let disp_nr = disp_word >> 12;
                                             let wake_ns =
-                                                { *t.wake_ns.get() };
+                                                t.wake_ns.load(core::sync::atomic::Ordering::Relaxed);
                                             let q2_us = if wake_ns != 0 {
                                                 now_ns.saturating_sub(wake_ns)
                                                     / RTT_TICKS_PER_US
@@ -13779,7 +13785,8 @@ fn binder_thread_read(
                                                 q_us,
                                                 q2_us,
                                                 q3_us,
-                                                { *t.enq_elig.get() },
+                                                t.enq_elig
+                                                    .load(core::sync::atomic::Ordering::Relaxed),
                                                 proc.pid,
                                                 thread.tid,
                                                 from_pid,
@@ -13792,15 +13799,19 @@ fn binder_thread_read(
                                     }
                                     {
                                         // 105th RTT census twin (ns domain).
-                                        *t.pick_ns.get() = now_ns;
+                                        t.pick_ns
+                                            .store(now_ns, core::sync::atomic::Ordering::Relaxed);
                                     }
                                 } else {
                                     {
-                                        *t.pick_ns.get() = crate::arch::cpu::read_time();
+                                        t.pick_ns.store(
+                                            crate::arch::cpu::read_time(),
+                                            core::sync::atomic::Ordering::Relaxed,
+                                        );
                                     }
                                 }
                                 {
-                                    *t.pick_j.get() = nowj;
+                                    t.pick_j.store(nowj, core::sync::atomic::Ordering::Relaxed);
                                 }
                                 // 23rd session PICK-LATE probe (lb348/349
                                 // forensics): the wedge seed is a nested
@@ -13837,7 +13848,7 @@ fn binder_thread_read(
                                             t.enq_j,
                                             nowj,
                                             nowj.wrapping_sub(t.enq_j),
-                                            { *t.enq_elig.get() }
+                                            t.enq_elig.load(core::sync::atomic::Ordering::Relaxed)
                                         );
                                     }
                                 }
