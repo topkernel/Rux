@@ -168,6 +168,32 @@ handoff), open (1.44x — walk loop + File construct), read (1.42x —
 copy tail), write (1.13x). lat_fs re-polluted by boot noise (no
 honest number this round).
 
+## Patrol round 5 (2026-11-19 11:xx): lat_fs CLOSED as a stall — four-round numbers on the official rig; tmpfs alloc fix landed
+
+The round-4 residual chain is fixed at its head (63825a62b, gated
+1334/1334 + triple-arch): tmpfs write_at allocated its 4 KiB page Box
+INSIDE the pages spinlock, chaining the node lock into the allocator
+(slab refill -> buddy -> pressure slowpath -> PageCache::shrink wlock)
+— the cpu-wedged-at-IF=0 head of the mkdir-EIO chain. The page is now
+allocated BEFORE the lock (the reference shmem's shmem_getpage shape:
+alloc first, the locked section only installs); unused speculation's
+Drop returns the budget slot.
+
+Official-rig results (lmbench_run, budget=300): FOUR-ROUND COMPLETE,
+zero TIMEOUTs, zero mkdirfails (was 8/boot), zero lockups —
+0k 18773/17127, 1k 16726-18773/14993-17127, 4k 2866-4129/2517-3956,
+10k 1645/1516 files/s (create/delete). The 19-22x-vs-native gap
+remains (structural: per-file journal/bookkeeping work), but the
+LOAD-COUPLED STALL — the reason this row was open — is GONE: the row
+moves from "open bug" to "honest number, structural gap". A guest-vs-
+guest reference column for lat_fs does not exist yet; per the
+denominator discipline no ratio is computed until it is measured.
+
+Also this round: the mkinit2 "ENOENT repro" was a PROBE BUG (the child
+path format string added an extra /s level — the kernel's ENOENT was
+correct); the deterministic 8-mkdirfail face was real and is fixed by
+the tmpfs alloc change (3 boots × 0).
+
 ## Patrol round 4 (2026-11-19 08:xx): LIVOLOCK ROOT FIXED (eb37a3b57) — lat_fs default battery completes 3/3; official runner DONE; residual tmpfs-write wedge → mkdir EIO chain open
 
 THE FIX (eb37a3b57, gated 1334/1334 + triple-arch rc=0): __schedule's
