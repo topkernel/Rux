@@ -1159,7 +1159,7 @@ pub unsafe fn free_user_page_tables(
         let ppn3 = pte4.ppn();
         let table3_phys = ppn3 << PAGE_SHIFT;
 
-        if !phys_valid(table3_phys as usize) {
+        if table3_phys == 0 || !phys_valid(table3_phys as usize) {
             continue;
         }
 
@@ -1189,7 +1189,7 @@ pub unsafe fn free_user_page_tables(
                     continue;
                 }
                 let phys_addr = pte3.ppn() << PAGE_SHIFT;
-                if !phys_valid(phys_addr as usize) {
+                if phys_addr == 0 || !phys_valid(phys_addr as usize) {
                     continue;
                 }
                 // Foreign frame (kernel-heap GEM/fb backing mapped into
@@ -1230,7 +1230,7 @@ pub unsafe fn free_user_page_tables(
             let ppn2 = pte3.ppn();
             let table2_phys = ppn2 << PAGE_SHIFT;
 
-            if !phys_valid(table2_phys as usize) {
+            if table2_phys == 0 || !phys_valid(table2_phys as usize) {
                 continue;
             }
 
@@ -1270,7 +1270,7 @@ pub unsafe fn free_user_page_tables(
                         continue;
                     }
                     let phys_addr = pte2.ppn() << PAGE_SHIFT;
-                    if !phys_valid(phys_addr as usize) {
+                    if phys_addr == 0 || !phys_valid(phys_addr as usize) {
                         continue;
                     }
                     // Foreign frame (kernel-heap GEM/fb backing mapped into
@@ -1306,7 +1306,7 @@ pub unsafe fn free_user_page_tables(
                 let ppn1 = pte2.ppn();
                 let table1_phys = ppn1 << PAGE_SHIFT;
 
-                if !phys_valid(table1_phys as usize) {
+                if table1_phys == 0 || !phys_valid(table1_phys as usize) {
                     continue;
                 }
 
