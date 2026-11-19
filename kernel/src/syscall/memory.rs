@@ -2822,7 +2822,7 @@ pub fn sys_mremap(args: [u64; 6]) -> i64 {
     if crate::trace::EVENT_SYSCALLTRACE.armed() {
         let pid = crate::process::current_pid();
         let comm_bytes = crate::sched::current()
-            .map(|t| unsafe { (*t).comm() }.to_vec())
+            .map(|t| { (*t).comm() }.to_vec())
             .unwrap_or_default();
         let comm = core::str::from_utf8(&comm_bytes).unwrap_or("?");
         crate::pr_info!(

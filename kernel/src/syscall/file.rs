@@ -2133,12 +2133,14 @@ pub fn sys_getcwd(args: SyscallArgs) -> i64 {
 
         // SAFETY: buf validated with access_ok(size); cwd_len < size; writes cwd_len + 1 bytes.
         // Use copy_to_user for proper SUM bit handling.
-        unsafe {
-            let remaining = crate::arch::uaccess::copy_to_user(buf, cwd.as_ptr(), cwd_len);
+        // copy_out is the exception-table copy path.
+        {
+            let base = buf as usize;
+            let remaining = crate::arch::uaccess_safe::copy_out(base, &cwd[..cwd_len]);
             if remaining != 0 {
                 return -(errno::EFAULT as i64);
             }
-            let remaining = crate::arch::uaccess::copy_to_user(buf.add(cwd_len), &0u8, 1);
+            let remaining = crate::arch::uaccess_safe::copy_out(base + cwd_len, &[0u8]);
             if remaining != 0 {
                 return -(errno::EFAULT as i64);
             }
@@ -2265,9 +2267,7 @@ pub fn sys_sysfs(args: SyscallArgs) -> i64 {
             let mut out = [0u8; NAME_MAX];
             out[..fs.len()].copy_from_slice(fs.as_bytes());
             // SAFETY: buf was access_ok-validated for `len` bytes.
-            if unsafe {
-                crate::arch::uaccess::copy_to_user(buf as *mut u8, out.as_ptr(), len)
-            } != 0
+            if crate::arch::uaccess_safe::copy_out(buf as usize, &out[..len]) != 0
             {
                 return -(errno::EFAULT as i64);
             }
@@ -3212,13 +3212,7 @@ pub fn sys_futimesat(args: SyscallArgs) -> i64 {
         }
         let mut buf = [0u8; 32];
         // SAFETY: times_ptr validated with access_ok(32); exception-table copy.
-        let uncopied = unsafe {
-            crate::arch::uaccess::copy_from_user(
-                buf.as_mut_ptr(),
-                times_ptr as *const u8,
-                32,
-            )
-        };
+        let uncopied = crate::arch::uaccess_safe::copy_in(&mut buf[..32], times_ptr as usize);
         if uncopied > 0 {
             return -(errno::EFAULT as i64);
         }
@@ -3317,9 +3311,7 @@ pub fn sys_utime(args: SyscallArgs) -> i64 {
         }
         let mut b = [0u8; 16];
         // SAFETY: buf_ptr validated with access_ok(16); exception-table copy.
-        let uncopied = unsafe {
-            crate::arch::uaccess::copy_from_user(b.as_mut_ptr(), buf_ptr, 16)
-        };
+        let uncopied = crate::arch::uaccess_safe::copy_in(&mut b, buf_ptr as usize);
         if uncopied > 0 {
             return -(errno::EFAULT as i64);
         }
@@ -3359,7 +3351,7 @@ fn parse_user_timeval(times_ptr: *const u8) -> Result<(Option<u64>, Option<u64>,
     }
     let mut b = [0u8; 32];
     // SAFETY: times_ptr validated with access_ok(32); exception-table copy.
-    let uncopied = unsafe { crate::arch::uaccess::copy_from_user(b.as_mut_ptr(), times_ptr, 32) };
+    let uncopied = crate::arch::uaccess_safe::copy_in(&mut b, times_ptr as usize);
     if uncopied > 0 {
         return Err(-(errno::EFAULT as i64));
     }
@@ -4100,13 +4092,14 @@ pub fn sys_statfs(args: SyscallArgs) -> i64 {
 
     // Copy to user space
     // SAFETY: buf_ptr validated with access_ok(size_of::<Statfs>); copies Statfs to user.
-    let uncopied = unsafe {
-        crate::arch::uaccess::copy_to_user(
-            buf_ptr as *mut u8,
+    // SAFETY: byte view of the fully-initialized local Statfs.
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
             &statfs_buf as *const Statfs as *const u8,
             core::mem::size_of::<Statfs>(),
         )
     };
+    let uncopied = crate::arch::uaccess_safe::copy_out(buf_ptr as usize, bytes);
     if uncopied > 0 {
         return -(errno::EFAULT as i64);
     }
@@ -4156,13 +4149,14 @@ pub fn sys_fstatfs(args: SyscallArgs) -> i64 {
     }
 
     // SAFETY: buf_ptr validated with access_ok(size_of::<Statfs>); copies Statfs to user.
-    let uncopied = unsafe {
-        crate::arch::uaccess::copy_to_user(
-            buf_ptr as *mut u8,
+    // SAFETY: byte view of the fully-initialized local Statfs.
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
             &statfs_buf as *const Statfs as *const u8,
             core::mem::size_of::<Statfs>(),
         )
     };
+    let uncopied = crate::arch::uaccess_safe::copy_out(buf_ptr as usize, bytes);
     if uncopied > 0 {
         return -(errno::EFAULT as i64);
     }
@@ -4362,13 +4356,14 @@ pub fn sys_statx(args: SyscallArgs) -> i64 {
 
     // Copy to user space
     // SAFETY: statxbuf validated with access_ok(size_of::<Statx>); copies Statx to user.
-    let uncopied = unsafe {
-        crate::arch::uaccess::copy_to_user(
-            statxbuf as *mut u8,
+    // SAFETY: byte view of the fully-initialized local Statx.
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
             &stx as *const Statx as *const u8,
             core::mem::size_of::<Statx>(),
         )
     };
+    let uncopied = crate::arch::uaccess_safe::copy_out(statxbuf as usize, bytes);
     if uncopied != 0 {
         return -(errno::EFAULT as i64);
     }
@@ -4421,13 +4416,7 @@ pub fn sys_openat2(args: SyscallArgs) -> i64 {
     let mut buf = [0u8; OPEN_HOW_MAX_SIZE + 4096];
     // SAFETY: how_ptr validated with access_ok(size); copies size bytes from
     // user into a buffer of at least that size (bounded above).
-    let uncopied = unsafe {
-        crate::arch::uaccess::copy_from_user(
-            buf.as_mut_ptr(),
-            how_ptr as *const u8,
-            size,
-        )
-    };
+    let uncopied = crate::arch::uaccess_safe::copy_in(&mut buf[..size], how_ptr as usize);
     if uncopied > 0 {
         return -(errno::EFAULT as i64);
     }
@@ -4511,9 +4500,7 @@ pub fn sys_openat2(args: SyscallArgs) -> i64 {
     let mut raw = [0u8; 4096];
     // SAFETY: pathname_ptr access_ok-checked; read a bounded window and
     // stop at the first NUL below.
-    unsafe {
-        crate::arch::uaccess::copy_from_user(raw.as_mut_ptr(), pathname_ptr, 4096);
-    }
+    let _ = crate::arch::uaccess_safe::copy_in(&mut raw, pathname_ptr as usize);
     let nul = raw.iter().position(|&b| b == 0).unwrap_or(4096);
     let user_path = match core::str::from_utf8(&raw[..nul]) {
         Ok(p) => p,
@@ -4523,7 +4510,7 @@ pub fn sys_openat2(args: SyscallArgs) -> i64 {
     // Resolve the base: dirfd's path (AT_FDCWD → cwd).
     let base: alloc::string::String = if dirfd == -100 {
         match crate::sched::current() {
-            Some(t) => unsafe {
+            Some(t) => {
                 let cwd = (*t).get_cwd();
                 alloc::string::String::from_utf8_lossy(&cwd).into_owned()
             },
@@ -5259,9 +5246,7 @@ fn xattr_read_value(ptr: u64, size: u64) -> Result<alloc::vec::Vec<u8>, i64> {
     }
     let mut buf = alloc::vec![0u8; size];
     // SAFETY: ptr/size validated with access_ok above.
-    if unsafe {
-        crate::arch::uaccess::copy_from_user(buf.as_mut_ptr(), ptr as *const u8, size)
-    } != 0
+    if crate::arch::uaccess_safe::copy_in(&mut buf[..size], ptr as usize) != 0
     {
         return Err(-(errno::EFAULT as i64));
     }
@@ -5305,13 +5290,7 @@ fn do_getxattr(inode: &crate::fs::inode::Inode, args: SyscallArgs) -> i64 {
     match crate::fs::xattr::get(inode, &name, Some(&mut buf)) {
         Ok(n) => {
             // SAFETY: value_ptr/size validated with access_ok above.
-            if unsafe {
-                crate::arch::uaccess::copy_to_user(
-                    value_ptr as *mut u8,
-                    buf.as_ptr(),
-                    n,
-                )
-            } != 0
+            if crate::arch::uaccess_safe::copy_out(value_ptr as usize, &buf[..n]) != 0
             {
                 return -(errno::EFAULT as i64);
             }
@@ -5338,13 +5317,7 @@ fn do_listxattr(inode: &crate::fs::inode::Inode, args: SyscallArgs) -> i64 {
     match crate::fs::xattr::list(inode, Some(&mut buf)) {
         Ok(n) => {
             // SAFETY: list_ptr/size validated with access_ok above.
-            if unsafe {
-                crate::arch::uaccess::copy_to_user(
-                    list_ptr as *mut u8,
-                    buf.as_ptr(),
-                    n,
-                )
-            } != 0
+            if crate::arch::uaccess_safe::copy_out(list_ptr as usize, &buf[..n]) != 0
             {
                 return -(errno::EFAULT as i64);
             }
@@ -5534,9 +5507,7 @@ fn xattrat_read_args(ptr: u64) -> Result<(u64, u64, i32), i64> {
     }
     let mut raw = [0u8; 24];
     // SAFETY: ptr/24 validated with access_ok above.
-    if unsafe {
-        crate::arch::uaccess::copy_from_user(raw.as_mut_ptr(), ptr as *const u8, 24)
-    } != 0
+    if crate::arch::uaccess_safe::copy_in(&mut raw, ptr as usize) != 0
     {
         return Err(-(errno::EFAULT as i64));
     }
@@ -5597,13 +5568,7 @@ pub fn sys_getxattrat(args: SyscallArgs) -> i64 {
     match crate::fs::xattr::get(&inode, &name, Some(&mut buf)) {
         Ok(n) => {
             // SAFETY: value_ptr/size validated with access_ok above.
-            if unsafe {
-                crate::arch::uaccess::copy_to_user(
-                    value_ptr as *mut u8,
-                    buf.as_ptr(),
-                    n,
-                )
-            } != 0
+            if crate::arch::uaccess_safe::copy_out(value_ptr as usize, &buf[..n]) != 0
             {
                 return -(errno::EFAULT as i64);
             }
@@ -5636,13 +5601,7 @@ pub fn sys_listxattrat(args: SyscallArgs) -> i64 {
     match crate::fs::xattr::list(&inode, Some(&mut buf)) {
         Ok(n) => {
             // SAFETY: list_ptr/size validated with access_ok above.
-            if unsafe {
-                crate::arch::uaccess::copy_to_user(
-                    list_ptr as *mut u8,
-                    buf.as_ptr(),
-                    n,
-                )
-            } != 0
+            if crate::arch::uaccess_safe::copy_out(list_ptr as usize, &buf[..n]) != 0
             {
                 return -(errno::EFAULT as i64);
             }
@@ -6109,14 +6068,9 @@ pub fn sys_name_to_handle_at(args: SyscallArgs) -> i64 {
         // Empty path + AT_EMPTY_PATH: the dfd's own inode. An EMPTY
         // pathname WITHOUT the flag is ENOENT (getname semantics).
         let mut path_buf = [0u8; 4];
-        let empty = unsafe {
-            crate::arch::uaccess::copy_from_user(
-                path_buf.as_mut_ptr(),
-                path_ptr,
-                1,
-            ) != 0
-                || path_buf[0] == 0
-        };
+        let empty = crate::arch::uaccess_safe::copy_in(&mut path_buf[..1], path_ptr as usize)
+            != 0
+            || path_buf[0] == 0;
         if empty {
             if dfd == -100 {
                 // AT_FDCWD + AT_EMPTY_PATH: the current directory itself.
@@ -6166,9 +6120,7 @@ pub fn sys_name_to_handle_at(args: SyscallArgs) -> i64 {
     // and handle_bytes back BEFORE returning EOVERFLOW on a size probe —
     // a bad mount_id pointer is EFAULT even in the probe case.
     let mut hb = [0u8; 4];
-    if unsafe {
-        crate::arch::uaccess::copy_from_user(hb.as_mut_ptr(), handle_ptr, 4)
-    } != 0
+    if crate::arch::uaccess_safe::copy_in(&mut hb, handle_ptr as usize) != 0
     {
         return -(errno::EFAULT as i64);
     }
@@ -6183,20 +6135,13 @@ pub fn sys_name_to_handle_at(args: SyscallArgs) -> i64 {
     let mid = (inode.fs_id as u32 as i32).to_le_bytes();
     let size_probe = handle_bytes < HANDLE_BYTES;
     let out_size = if size_probe { HANDLE_BYTES } else { handle_bytes };
-    unsafe {
-        if crate::arch::uaccess::copy_to_user(
-            mount_id_ptr as *mut u8,
-            mid.as_ptr(),
-            4,
-        ) != 0
+    // copy_out is the exception-table copy path.
+    {
+        if crate::arch::uaccess_safe::copy_out(mount_id_ptr as usize, &mid[..4]) != 0
         {
             return -(errno::EFAULT as i64);
         }
-        if crate::arch::uaccess::copy_to_user(
-            handle_ptr,
-            out_size.to_le_bytes().as_ptr(),
-            4,
-        ) != 0
+        if crate::arch::uaccess_safe::copy_out(handle_ptr as usize, &out_size.to_le_bytes()) != 0
         {
             return -(errno::EFAULT as i64);
         }
@@ -6211,16 +6156,13 @@ pub fn sys_name_to_handle_at(args: SyscallArgs) -> i64 {
     payload[4..].copy_from_slice(&(inode.ino as u64).to_le_bytes());
     let mut scratch = [0u8; 8];
     scratch[..4].copy_from_slice(&HANDLE_TYPE.to_le_bytes());
-    unsafe {
-        crate::arch::uaccess::copy_to_user(handle_ptr.add(4), scratch.as_ptr(), 4);
-        if crate::arch::uaccess::copy_to_user(
-            handle_ptr.add(8),
-            payload.as_ptr(),
-            HANDLE_BYTES as usize,
-        ) != 0
-        {
-            return -(errno::EFAULT as i64);
-        }
+    let _ = crate::arch::uaccess_safe::copy_out(handle_ptr as usize + 4, &scratch[..4]);
+    if crate::arch::uaccess_safe::copy_out(
+        handle_ptr as usize + 8,
+        &payload[..HANDLE_BYTES as usize],
+    ) != 0
+    {
+        return -(errno::EFAULT as i64);
     }
     0
 }
@@ -6311,9 +6253,7 @@ pub fn sys_open_by_handle_at(args: SyscallArgs) -> i64 {
     // Decode the handle. The header copy is fault-checked first: a bad
     // handle pointer is EFAULT, not a size/shape EINVAL.
     let mut hdr = [0u8; 8];
-    if unsafe {
-        crate::arch::uaccess::copy_from_user(hdr.as_mut_ptr(), handle_ptr, 8)
-    } != 0
+    if crate::arch::uaccess_safe::copy_in(&mut hdr, handle_ptr as usize) != 0
     {
         return -(errno::EFAULT as i64);
     }
@@ -6415,7 +6355,7 @@ pub fn sys_copy_file_range(args: SyscallArgs) -> i64 {
         }
         let mut buf = [0u8; 8];
         // SAFETY: off_in_ptr validated with access_ok(8).
-        if unsafe { crate::arch::uaccess::copy_from_user(buf.as_mut_ptr(), off_in_ptr as *const u8, 8) } != 0 {
+        if crate::arch::uaccess_safe::copy_in(&mut buf[..8], off_in_ptr as usize) != 0 {
             return -(errno::EFAULT as i64);
         }
         let v = i64::from_le_bytes(buf.try_into().unwrap());
@@ -6431,7 +6371,7 @@ pub fn sys_copy_file_range(args: SyscallArgs) -> i64 {
         }
         let mut buf = [0u8; 8];
         // SAFETY: off_out_ptr validated with access_ok(8).
-        if unsafe { crate::arch::uaccess::copy_from_user(buf.as_mut_ptr(), off_out_ptr as *const u8, 8) } != 0 {
+        if crate::arch::uaccess_safe::copy_in(&mut buf[..8], off_out_ptr as usize) != 0 {
             return -(errno::EFAULT as i64);
         }
         let v = i64::from_le_bytes(buf.try_into().unwrap());
@@ -6571,7 +6511,7 @@ pub fn sys_copy_file_range(args: SyscallArgs) -> i64 {
         // callers looping to EOF (e.g. coreutils cp) spun forever.
         if !off_in_ptr.is_null() {
             // SAFETY: off_in_ptr validated with access_ok(8).
-            if unsafe { crate::arch::uaccess::copy_to_user(off_in_ptr as *mut u8, cur_in.to_le_bytes().as_ptr(), 8) } != 0 {
+            if crate::arch::uaccess_safe::copy_out(off_in_ptr as usize, &cur_in.to_le_bytes()) != 0 {
                 return -(errno::EFAULT as i64);
             }
         } else {
@@ -6579,7 +6519,7 @@ pub fn sys_copy_file_range(args: SyscallArgs) -> i64 {
         }
         if !off_out_ptr.is_null() {
             // SAFETY: off_out_ptr validated with access_ok(8).
-            if unsafe { crate::arch::uaccess::copy_to_user(off_out_ptr as *mut u8, cur_out.to_le_bytes().as_ptr(), 8) } != 0 {
+            if crate::arch::uaccess_safe::copy_out(off_out_ptr as usize, &cur_out.to_le_bytes()) != 0 {
                 return -(errno::EFAULT as i64);
             }
         } else {
@@ -7657,9 +7597,7 @@ pub fn sys_epoll_pwait2(args: SyscallArgs) -> i64 {
         let mut buf = [0u8; 16];
         // SAFETY: timeout_ptr was access_ok-validated for 16 bytes above;
         // buf is a 16-byte stack buffer (exception-table copy).
-        let uncopied = unsafe {
-            crate::arch::uaccess::copy_from_user(buf.as_mut_ptr(), timeout_ptr, 16)
-        };
+        let uncopied = crate::arch::uaccess_safe::copy_in(&mut buf, timeout_ptr as usize);
         if uncopied > 0 {
             return -(errno::EFAULT as i64);
         }
@@ -7805,10 +7743,9 @@ pub fn sys_mount_setattr(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
     let mut buf = [0u8; 32];
-    // SAFETY: attr_ptr was access_ok-validated for 32 bytes above; buf
-    // is a 32-byte stack buffer (exception-table copy).
-    let uncopied =
-        unsafe { crate::arch::uaccess::copy_from_user(buf.as_mut_ptr(), attr_ptr, 32) };
+    // attr_ptr was access_ok-validated for 32 bytes above; copy_in is
+    // the exception-table copy path.
+    let uncopied = crate::arch::uaccess_safe::copy_in(&mut buf, attr_ptr as usize);
     if uncopied > 0 {
         return -(errno::EFAULT as i64);
     }
