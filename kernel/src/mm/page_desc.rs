@@ -1335,3 +1335,25 @@ pub unsafe fn get_page_mut(pfn: PhysFrameNr) -> &'static mut Page {
     &mut *pfn_to_page_mut(pfn)
 }
 
+/// Safe shared view of a frame's page descriptor (unsafe-slim round 2).
+///
+/// INV-FRAME-1: the vmemmap descriptor array covers every physical frame
+/// and is never reallocated; `Page` mutates only through atomics (the
+/// whole struct is interior-mutable by construction), so a shared
+/// `&'static Page` from a `&self` method is sound no matter how many
+/// holders alias the same frame. This is the typed replacement for the
+/// `let p = pfn_to_page_mut(pfn); if !p.is_null() { unsafe { (*p)... } }`
+/// idiom — out-of-range pfns return None (the null check, lifted into
+/// the type).
+#[inline]
+pub fn page_desc(pfn: PhysFrameNr) -> Option<&'static Page> {
+    let p = pfn_to_page(pfn);
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: INV-FRAME-1 — vmemmap descriptors exist for the whole
+    // machine lifetime; non-null check above mirrors pfn_to_page's
+    // range validation.
+    Some(unsafe { &*p })
+}
+

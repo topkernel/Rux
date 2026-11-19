@@ -2628,7 +2628,7 @@ fn sbx_trace(kind: &str, key: &str, detail: &str) {
         total,
         *n,
         detail,
-        unsafe { crate::process::current_pid() }
+        crate::process::current_pid()
     );
 }
 

@@ -175,8 +175,8 @@ pub struct Request {
     pub sector: u64,
     /// Data buffer
     pub buffer: Vec<u8>,
-    /// Block device pointer
-    pub device: *const GenDisk,
+    /// Block device (typed handle; see INV-BLKDEV-1 on [`get_disk`])
+    pub device: &'static GenDisk,
     /// Completion callback
     pub end_io: Option<unsafe fn(&Request, i32)>,
     /// Final device status (R8-M2): set by the driver before end_io fires.
@@ -234,14 +234,23 @@ impl BlockDeviceManager {
         Ok(())
     }
 
-    /// Find block device
-    pub fn get_disk(&self, major: u32) -> Option<*const GenDisk> {
+    /// Find block device.
+    ///
+    /// INV-BLKDEV-1 (unsafe-slim round 2): the returned `&'static GenDisk`
+    /// is sound because a registered disk is boxed ONCE into the manager's
+    /// Vec and never removed (no unregister path exists), and a Box's heap
+    /// allocation is address-stable across Vec growth. Every raw-pointer
+    /// hand-out this used to require is gone: callers hold a typed shared
+    /// reference whose lifetime is the machine's.
+    pub fn get_disk(&self, major: u32) -> Option<&'static GenDisk> {
         let disks = self.disks.lock();
 
         for d in disks.iter() {
             if let Some(ref gd) = d {
                 if gd.major == major {
-                    return Some(gd.as_ref() as *const GenDisk);
+                    // SAFETY: INV-BLKDEV-1 above — the Box outlives the
+                    // lock and the machine; the allocation is stable.
+                    return Some(unsafe { &*(gd.as_ref() as *const GenDisk) });
                 }
             }
         }
@@ -250,17 +259,14 @@ impl BlockDeviceManager {
     }
 
     /// Submit I/O request
-    pub fn submit_request(&self, disk: *const GenDisk, req: &mut Request) -> i32 {
-        // SAFETY: disk is a valid pointer registered via register_disk; caller ensures it remains valid.
-        unsafe {
-            let gd = &*disk;
-
-            if let Some(request_fn) = gd.request_fn {
-                request_fn(req);
-                0  // Success
-            } else {
-                -6  // ENXIO
-            }
+    pub fn submit_request(&self, disk: &GenDisk, req: &mut Request) -> i32 {
+        if let Some(request_fn) = disk.request_fn {
+            // SAFETY: the driver's fn-pointer contract — registered by the
+            // device owner, invoked on a fully-initialized Request.
+            unsafe { request_fn(req) }
+            0  // Success
+        } else {
+            -6  // ENXIO
         }
     }
 }
@@ -280,18 +286,17 @@ impl BlockDeviceManager {
 pub mod iostat;
 
 pub fn blkdev_read_async(
-    disk: *const GenDisk,
+    disk: &'static GenDisk,
     sector: u64,
     buf: &mut [u8],
     completion: &crate::fs::io_completion::IoCompletion,
 ) -> Result<(), i32> {
-    unsafe {
-        let gd = &*disk;
-        if let Some(async_fn) = gd.async_read_fn {
+    {
+        if let Some(async_fn) = disk.async_read_fn {
             // /proc/diskstats: the async path does not go through
             // submit_request, so it is counted here.
-            let major = gd.major;
-            let minor = gd.first_minor;
+            let major = disk.major;
+            let minor = disk.first_minor;
             let sectors = (buf.len() / 512) as u64;
             let t0 = crate::drivers::timer::read_time();
             // block:block_rq_issue (async read): the completion lands
@@ -312,7 +317,10 @@ pub fn blkdev_read_async(
                     );
                 }
             }
-            let ret = async_fn(disk, sector, buf, completion as *const _ as *mut _);
+            // SAFETY: the driver's fn-pointer contract — disk is the
+            // registered handle; buf and completion stay live until the
+            // completion fires.
+            let ret = unsafe { async_fn(disk as *const GenDisk, sector, buf, completion as *const _ as *mut _) };
             let elapsed_ns = crate::drivers::timer::read_time().saturating_sub(t0) * 100
                 / crate::config::TIMER_CLOCK_FREQ_HZ;
             iostat::note_io(major, minor, false, sectors, elapsed_ns);
@@ -351,18 +359,17 @@ static BLOCK_MANAGER: BlockDeviceManager = BlockDeviceManager::new();
 // SAFETY: disk is a valid GenDisk pointer from register_disk; completion and
 // buf outlive the async operation.
 pub fn blkdev_write_async(
-    disk: *const GenDisk,
+    disk: &'static GenDisk,
     sector: u64,
     buf: &[u8],
     completion: &crate::fs::io_completion::IoCompletion,
 ) -> Result<(), i32> {
-    unsafe {
-        let gd = &*disk;
-        if let Some(async_fn) = gd.async_write_fn {
+    {
+        if let Some(async_fn) = disk.async_write_fn {
             // /proc/diskstats: the async path does not go through
             // submit_request, so it is counted here (is_write = true).
-            let major = gd.major;
-            let minor = gd.first_minor;
+            let major = disk.major;
+            let minor = disk.first_minor;
             let sectors = (buf.len() / 512) as u64;
             let t0 = crate::drivers::timer::read_time();
             // block:block_rq_issue (async write): completion lands in the
@@ -383,7 +390,10 @@ pub fn blkdev_write_async(
                     );
                 }
             }
-            let ret = async_fn(disk, sector, buf, completion as *const _ as *mut _);
+            // SAFETY: the driver's fn-pointer contract — disk is the
+            // registered handle; the DMA source bytes stay stable until
+            // the completion fires.
+            let ret = unsafe { async_fn(disk as *const GenDisk, sector, buf, completion as *const _ as *mut _) };
             let elapsed_ns = crate::drivers::timer::read_time().saturating_sub(t0) * 100
                 / crate::config::TIMER_CLOCK_FREQ_HZ;
             iostat::note_io(major, minor, true, sectors, elapsed_ns);
@@ -414,16 +424,15 @@ pub fn blkdev_write_async(
 // SAFETY: disk is a valid GenDisk from register_disk; segments and
 // completion outlive the async operation.
 pub fn blkdev_read_async_sg(
-    disk: *const GenDisk,
+    disk: &'static GenDisk,
     sector: u64,
     segs: &[DmaSeg],
     completion: &crate::fs::io_completion::IoCompletion,
 ) -> Result<(), i32> {
-    unsafe {
-        let gd = &*disk;
-        if let Some(async_fn) = gd.async_read_sg_fn {
-            let major = gd.major;
-            let minor = gd.first_minor;
+    {
+        if let Some(async_fn) = disk.async_read_sg_fn {
+            let major = disk.major;
+            let minor = disk.first_minor;
             let total: u64 = segs.iter().map(|s| (s.len / 512) as u64).sum();
             let t0 = crate::drivers::timer::read_time();
             if crate::trace::EVENT_BLOCK_RQ_ISSUE.armed() {
@@ -441,7 +450,10 @@ pub fn blkdev_read_async_sg(
                     );
                 }
             }
-            let ret = async_fn(disk, sector, segs, completion as *const _ as *mut _);
+            // SAFETY: the driver's fn-pointer contract — disk is the
+            // registered handle; every segment stays a valid DMA target
+            // until the completion fires.
+            let ret = unsafe { async_fn(disk as *const GenDisk, sector, segs, completion as *const _ as *mut _) };
             let elapsed_ns = crate::drivers::timer::read_time().saturating_sub(t0) * 100
                 / crate::config::TIMER_CLOCK_FREQ_HZ;
             iostat::note_io(major, minor, false, total, elapsed_ns);
@@ -465,16 +477,15 @@ pub fn blkdev_read_async_sg(
 // SAFETY: disk is a valid GenDisk from register_disk; segments stay
 // stable DMA sources and the completion outlives the operation.
 pub fn blkdev_write_async_sg(
-    disk: *const GenDisk,
+    disk: &'static GenDisk,
     sector: u64,
     segs: &[DmaSeg],
     completion: &crate::fs::io_completion::IoCompletion,
 ) -> Result<(), i32> {
-    unsafe {
-        let gd = &*disk;
-        if let Some(async_fn) = gd.async_write_sg_fn {
-            let major = gd.major;
-            let minor = gd.first_minor;
+    {
+        if let Some(async_fn) = disk.async_write_sg_fn {
+            let major = disk.major;
+            let minor = disk.first_minor;
             let total: u64 = segs.iter().map(|s| (s.len / 512) as u64).sum();
             let t0 = crate::drivers::timer::read_time();
             if crate::trace::EVENT_BLOCK_RQ_ISSUE.armed() {
@@ -492,7 +503,10 @@ pub fn blkdev_write_async_sg(
                     );
                 }
             }
-            let ret = async_fn(disk, sector, segs, completion as *const _ as *mut _);
+            // SAFETY: the driver's fn-pointer contract — disk is the
+            // registered handle; every segment stays a stable DMA source
+            // until the completion fires.
+            let ret = unsafe { async_fn(disk as *const GenDisk, sector, segs, completion as *const _ as *mut _) };
             let elapsed_ns = crate::drivers::timer::read_time().saturating_sub(t0) * 100
                 / crate::config::TIMER_CLOCK_FREQ_HZ;
             iostat::note_io(major, minor, true, total, elapsed_ns);
@@ -513,15 +527,15 @@ pub fn register_disk(disk: Box<GenDisk>) -> Result<(), &'static str> {
     BLOCK_MANAGER.register_disk(disk)
 }
 
-pub fn get_disk(major: u32) -> Option<*const GenDisk> {
+pub fn get_disk(major: u32) -> Option<&'static GenDisk> {
     BLOCK_MANAGER.get_disk(major)
 }
 
-pub fn submit_request(disk: *const GenDisk, req: &mut Request) -> i32 {
+pub fn submit_request(disk: &GenDisk, req: &mut Request) -> i32 {
     // /proc/diskstats: count the request and the time it took. The
     // request carries the transfer size, so the sector count is exact.
-    let major = unsafe { (*disk).major };
-    let minor = unsafe { (*disk).first_minor };
+    let major = disk.major;
+    let minor = disk.first_minor;
     let is_write = matches!(req.cmd_type, ReqCmd::Write);
     let sectors = (req.buffer.len() / 512) as u64;
     let t0 = crate::drivers::timer::read_time();
@@ -580,64 +594,54 @@ fn req_rwbs(cmd: &ReqCmd) -> &'static str {
     }
 }
 
-pub fn blkdev_read(disk: *const GenDisk, sector: u64, buf: &mut [u8]) -> Result<usize, i32> {
-    // SAFETY: disk is a valid GenDisk pointer from register_disk; req is a local Request.
-    unsafe {
-        let _gd = &*disk;
+pub fn blkdev_read(disk: &'static GenDisk, sector: u64, buf: &mut [u8]) -> Result<usize, i32> {
+    let mut req = Request {
+        cmd_type: ReqCmd::Read,
+        sector,
+        buffer: vec![0u8; buf.len()],
+        device: disk,
+        end_io: None,
+        completion: None,
+        error: core::sync::atomic::AtomicI32::new(0),
+    };
 
-        let mut req = Request {
-            cmd_type: ReqCmd::Read,
-            sector,
-            buffer: vec![0u8; buf.len()],
-            device: disk,
-            end_io: None,
-            completion: None,
-            error: core::sync::atomic::AtomicI32::new(0),
-        };
-
-        let ret = submit_request(disk, &mut req);
-        if ret < 0 {
-            return Err(ret);
-        }
-        // R8-M2: device-side errors reach the caller (was swallowed).
-        let dev_err = req.error.load(core::sync::atomic::Ordering::Acquire);
-        if dev_err != 0 {
-            return Err(dev_err);
-        }
-
-        // Copy data
-        buf.copy_from_slice(&req.buffer);
-        Ok(buf.len())
+    let ret = BLOCK_MANAGER.submit_request(disk, &mut req);
+    if ret < 0 {
+        return Err(ret);
     }
+    // R8-M2: device-side errors reach the caller (was swallowed).
+    let dev_err = req.error.load(core::sync::atomic::Ordering::Acquire);
+    if dev_err != 0 {
+        return Err(dev_err);
+    }
+
+    // Copy data
+    buf.copy_from_slice(&req.buffer);
+    Ok(buf.len())
 }
 
-pub fn blkdev_write(disk: *const GenDisk, sector: u64, buf: &[u8]) -> Result<usize, i32> {
-    // SAFETY: disk is a valid GenDisk pointer from register_disk; req is a local Request.
-    unsafe {
-        let _gd = &*disk;
+pub fn blkdev_write(disk: &'static GenDisk, sector: u64, buf: &[u8]) -> Result<usize, i32> {
+    let mut req = Request {
+        cmd_type: ReqCmd::Write,
+        sector,
+        buffer: buf.to_vec(),
+        device: disk,
+        end_io: None,
+        completion: None,
+        error: core::sync::atomic::AtomicI32::new(0),
+    };
 
-        let mut req = Request {
-            cmd_type: ReqCmd::Write,
-            sector,
-            buffer: buf.to_vec(),
-            device: disk,
-            end_io: None,
-            completion: None,
-            error: core::sync::atomic::AtomicI32::new(0),
-        };
-
-        let ret = submit_request(disk, &mut req);
-        if ret < 0 {
-            return Err(ret);
-        }
-        // R9-4: device-side errors reach the caller (read path had this
-        // since R8-M2a; without it a failed write was marked clean by
-        // BufferHead::sync and swap-out silently discarded page data).
-        let dev_err = req.error.load(core::sync::atomic::Ordering::Acquire);
-        if dev_err != 0 {
-            return Err(dev_err);
-        }
-
-        Ok(buf.len())
+    let ret = BLOCK_MANAGER.submit_request(disk, &mut req);
+    if ret < 0 {
+        return Err(ret);
     }
+    // R9-4: device-side errors reach the caller (read path had this
+    // since R8-M2a; without it a failed write was marked clean by
+    // BufferHead::sync and swap-out silently discarded page data).
+    let dev_err = req.error.load(core::sync::atomic::Ordering::Acquire);
+    if dev_err != 0 {
+        return Err(dev_err);
+    }
+
+    Ok(buf.len())
 }

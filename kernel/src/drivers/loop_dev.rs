@@ -231,7 +231,7 @@ pub fn loop_set_fd(idx: usize, file: Arc<File>) -> Result<(), i32> {
         // reused ext4 instance for this disk so the next mount reads the
         // device, never the stale in-memory superblock (see
         // ext4::mount_loop_instance's reuse block).
-        crate::fs::ext4::loop_instance_invalidate(disk as *const _);
+        crate::fs::ext4::loop_instance_invalidate(disk);
     }
     Ok(())
 }
@@ -265,7 +265,7 @@ pub fn loop_clr_fd(idx: usize) -> Result<(), i32> {
                 disk.capacity.store(0, Ordering::Release);
                 // The device image is going away: a reused ext4 instance
                 // must not outlive its disk (see loop_set_fd).
-                crate::fs::ext4::loop_instance_invalidate(disk as *const _);
+                crate::fs::ext4::loop_instance_invalidate(disk);
                 // Drop every cached buffer of this loop, dirty ones
                 // included (Linux invalidate_bdev on detach). A dirty
                 // buffer whose writeback failed cannot be synced against
@@ -273,7 +273,7 @@ pub fn loop_clr_fd(idx: usize) -> Result<(), i32> {
                 // the NEXT full-cache sync fail with this device's ENXIO
                 // and poison unrelated syscalls (the mkdtemp ENXIO storm
                 // after a failed mkfs-on-loop).
-                crate::fs::bio::invalidate_device(disk as *const _);
+                crate::fs::bio::invalidate_device(disk);
             }
             Ok(())
         }
@@ -509,8 +509,7 @@ pub fn loop_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
         let blocknr = (pos + done) / bs;
         let in_off = (pos + done) % bs;
         let want = core::cmp::min(bs - in_off, buf.len() - done);
-        // SAFETY: disk is the loop GenDisk registered at init.
-        let bh = match unsafe { crate::fs::bio::bread(disk as *const _, blocknr as u64) } {
+        let bh = match crate::fs::bio::bread(disk, blocknr as u64) {
             Some(b) => b,
             None => break,
         };
@@ -554,8 +553,7 @@ pub fn loop_file_write(file: &crate::fs::file::File, buf: &[u8]) -> isize {
         let blocknr = (pos + done) / bs;
         let in_off = (pos + done) % bs;
         let want = core::cmp::min(bs - in_off, buf.len() - done);
-        // SAFETY: disk is the registered loop GenDisk.
-        let bh = match unsafe { crate::fs::bio::bread(disk as *const _, blocknr as u64) } {
+        let bh = match crate::fs::bio::bread(disk, blocknr as u64) {
             Some(b) => b,
             None => break,
         };

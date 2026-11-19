@@ -203,13 +203,11 @@ pub fn swap_init() {
 /// Shared by boot-time `swap_init()` and the swapon(2) syscall.
 /// Returns `(start_sector, max_slots)` on success.
 pub fn swap_activate(
-    disk: *const crate::drivers::blkdev::GenDisk,
+    disk: &'static crate::drivers::blkdev::GenDisk,
 ) -> Result<(u64, usize), i32> {
-    // Get disk capacity in 512-byte sectors
-    // SAFETY: disk is a non-null pointer from find_block_device() (boot) or
-    // get_disk() (swapon), both of which return valid GenDisk pointers from
-    // the block device layer.
-    let capacity = unsafe { (*disk).capacity.load(Ordering::Relaxed) } as u64;
+    // Get disk capacity in 512-byte sectors (typed handle from
+    // find_block_device()/get_disk(); INV-BLKDEV-1).
+    let capacity = disk.capacity.load(Ordering::Relaxed) as u64;
     if capacity == 0 {
         return Err(-5); // EIO: zero-capacity device
     }
@@ -287,7 +285,7 @@ pub fn swap_activate(
     // half-initialized device (see nr_active_swap / swap_alloc_slot).
     unsafe {
         let dev = &mut SWAP_DEVICES[0];
-        dev.disk.store(disk as usize, Ordering::Release);
+        dev.disk.store(disk as *const _ as usize, Ordering::Release);
         dev.swap_type = 0;
         dev.start_sector = start_sector;
         dev.max_slots = max_slots;
@@ -322,7 +320,7 @@ pub fn swap_deactivate() -> Result<(), i32> {
 
 /// Read the ext4 superblock and return the filesystem end in 512-byte
 /// sectors, or None when the disk does not carry an ext4 filesystem.
-fn ext4_fs_end_sector(disk: *const crate::drivers::blkdev::GenDisk) -> Option<u64> {
+fn ext4_fs_end_sector(disk: &'static crate::drivers::blkdev::GenDisk) -> Option<u64> {
     // The ext4 superblock lives at byte offset 1024 (sector 2) regardless
     // of block size; 1024 bytes cover the fields we need.
     let mut sb = [0u8; 1024];
@@ -346,7 +344,7 @@ fn ext4_fs_end_sector(disk: *const crate::drivers::blkdev::GenDisk) -> Option<u6
 
 /// Public accessor for the syscall layer: the first registered block
 /// device (the same disk selection boot-time swap_init uses).
-pub fn swap_boot_disk() -> Option<*const crate::drivers::blkdev::GenDisk> {
+pub fn swap_boot_disk() -> Option<&'static crate::drivers::blkdev::GenDisk> {
     find_block_device()
 }
 
@@ -532,30 +530,30 @@ pub fn swap_stats() -> SwapStats {
 // ==================== Internal Helpers ====================
 
 /// Find the first available block device (VirtIO-blk).
-fn find_block_device() -> Option<*const crate::drivers::blkdev::GenDisk> {
+fn find_block_device() -> Option<&'static crate::drivers::blkdev::GenDisk> {
     // Try common major numbers for VirtIO-blk
     for major in 0..256 {
         if let Some(disk) = crate::drivers::blkdev::get_disk(major) {
-            if !disk.is_null() {
-                return Some(disk);
-            }
+            return Some(disk);
         }
     }
     None
 }
 
-/// Get the block device pointer for a swap type.
-fn get_swap_disk(swap_type: u32) -> Result<*const crate::drivers::blkdev::GenDisk, i32> {
+/// Get the block device handle for a swap type.
+fn get_swap_disk(swap_type: u32) -> Result<&'static crate::drivers::blkdev::GenDisk, i32> {
     if (swap_type as usize) >= MAX_SWAP_DEVICES {
         return Err(-22); // EINVAL
     }
-    // SAFETY: swap_type is bounds-checked above; SWAP_DEVICES is initialized.
+    // SAFETY: swap_type is bounds-checked above; SWAP_DEVICES is
+    // initialized. The stored bits are a registered &'static GenDisk
+    // (INV-BLKDEV-1) put there by swap_activate.
     unsafe {
         let dev = &SWAP_DEVICES[swap_type as usize];
         if !dev.is_enabled() {
             return Err(-22);
         }
-        Ok(dev.disk.load(Ordering::Acquire) as *const crate::drivers::blkdev::GenDisk)
+        Ok(&*(dev.disk.load(Ordering::Acquire) as *const crate::drivers::blkdev::GenDisk))
     }
 }
 

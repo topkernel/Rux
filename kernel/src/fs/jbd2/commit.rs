@@ -46,10 +46,10 @@ pub fn jbd2_journal_commit_transaction(
     // and therefore every fsync/fdatasync, which force a commit — pay the
     // global publication backlog, looping for as long as creators kept
     // appending (the sc310 43-min hiview fdatasync family).
-    let device = journal.j_bio_device;
-    if device.is_null() {
-        return Ok(());
-    }
+    let device = match journal.j_bio_device {
+        Some(d) => d,
+        None => return Ok(()), // no bio device installed (never mounted)
+    };
 
     let block_size = journal.j_blocksize as usize;
     let tid = commit_transaction.t_tid;
@@ -639,7 +639,7 @@ fn block_tag_csum(journal: &Journal, sequence: Tid, data: &[u8]) -> u32 {
 /// logical 0, resolved by the caller through Journal::jmap).
 fn write_journal_superblock(
     journal: &Journal,
-    device: *const crate::drivers::blkdev::GenDisk,
+    device: &'static crate::drivers::blkdev::GenDisk,
     sb_block: u64,
     new_start: u64,
     new_sequence: u32,

@@ -1638,7 +1638,7 @@ const MAX_GUP_WRITE_SPANS: usize = 32;
 /// beyond it). The frames are unpinned after the caller's fail-cut
 /// accounting, exactly like a staging buffer would be released.
 struct GupWriteChains {
-    device: *const crate::drivers::blkdev::GenDisk,
+    device: &'static crate::drivers::blkdev::GenDisk,
     completions: [IoCompletion; MAX_GUP_WRITE_SPANS],
     /// Per span: the chain's first-segment pointer (the completion
     /// token the virtio walker stamps).
@@ -1649,7 +1649,7 @@ struct GupWriteChains {
 }
 
 impl GupWriteChains {
-    fn new(device: *const crate::drivers::blkdev::GenDisk) -> Self {
+    fn new(device: &'static crate::drivers::blkdev::GenDisk) -> Self {
         Self {
             device,
             completions: [const { IoCompletion::new() }; MAX_GUP_WRITE_SPANS],
@@ -1673,18 +1673,15 @@ impl GupWriteChains {
             return false;
         }
         let i = self.n;
-        // SAFETY: device is the registered GenDisk recorded at new();
-        // the caller guarantees the pinned frames stable (and the user
-        // bytes unmodified) until the drain — the GUP write contract.
-        let ok = unsafe {
-            crate::drivers::blkdev::blkdev_write_async_sg(
-                self.device,
-                base_sector,
-                &segs[..k],
-                &self.completions[i],
-            )
-            .is_ok()
-        };
+        // The GUP write contract: the caller guarantees the pinned
+        // frames stable (and the user bytes unmodified) until the drain.
+        let ok = crate::drivers::blkdev::blkdev_write_async_sg(
+            self.device,
+            base_sector,
+            &segs[..k],
+            &self.completions[i],
+        )
+        .is_ok();
         if ok {
             self.token[i] = segs[0].ptr as usize;
             self.n += 1;
@@ -5853,7 +5850,7 @@ struct SpanFlusher {
     /// our span persists the older-but-valid snapshot (harmless).
     pending_snaps: alloc::vec::Vec<alloc::vec::Vec<u8>>,
     /// Device of the in-flight spans (one fs per flush pass).
-    dev: *const crate::drivers::blkdev::GenDisk,
+    dev: Option<&'static crate::drivers::blkdev::GenDisk>,
 }
 
 impl SpanFlusher {
@@ -5862,7 +5859,7 @@ impl SpanFlusher {
             batch: crate::fs::bio::WriteBatch::new(),
             pending_bhs: alloc::vec::Vec::new(),
             pending_snaps: alloc::vec::Vec::new(),
-            dev: core::ptr::null(),
+            dev: None,
         }
     }
 
@@ -5875,13 +5872,13 @@ impl SpanFlusher {
     /// `pending_snaps`); pass None for unguarded data spans.
     fn submit_span(
         &mut self,
-        dev: *const crate::drivers::blkdev::GenDisk,
+        dev: &'static crate::drivers::blkdev::GenDisk,
         sector: u64,
         bytes: &[u8],
         bhs: &mut alloc::vec::Vec<*mut crate::fs::bio::BufferHead>,
         snap: Option<&[u8]>,
     ) {
-        self.dev = dev;
+        self.dev = Some(dev);
         if !self.batch.submit(dev, sector, bytes) {
             // Window full or soft submission failure: drain the window
             // (frees device pending-table pressure), then try once more.
@@ -5895,9 +5892,9 @@ impl SpanFlusher {
                 // return (under the caller's big-lock hold, so no racing
                 // mutation can be in flight), and any later writer
                 // re-dirties the buffer under its own lock.
-                // SAFETY: dev is the fs's registered GenDisk; bytes covers
-                // exactly the span's consecutive blocks.
-                let rc = unsafe { crate::drivers::blkdev::blkdev_write(dev, sector, bytes) };
+                // dev is the fs's registered GenDisk; bytes covers exactly
+                // the span's consecutive blocks.
+                let rc = crate::drivers::blkdev::blkdev_write(dev, sector, bytes);
                 if rc.is_ok() {
                     for &bh in bhs.iter() {
                         // SAFETY: bh is a pinned cached BufferHead whose

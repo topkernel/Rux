@@ -2044,7 +2044,7 @@ pub fn shared_fault_file_page(file: &crate::fs::File, file_off: usize) -> Option
             file.path(),
             file_off,
             pfn,
-            unsafe { crate::process::current_pid() }
+            crate::process::current_pid()
         );
     }
     Some((pfn << 12) as u64)
@@ -2426,7 +2426,7 @@ unsafe fn devfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                         entry.name,
                         inode.get_size(),
                         arg1,
-                        unsafe { crate::process::current_pid() }
+                        crate::process::current_pid()
                     );
                     // Shared backing active: keep it canonical. Grow
                     // extends the page array (zero-filled); shrink just

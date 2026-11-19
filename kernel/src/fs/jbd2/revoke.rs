@@ -214,10 +214,9 @@ pub fn jbd2_journal_write_revoke_records(
 ) -> Result<usize, i32> {
     use crate::fs::bio;
 
-    let device = journal.j_bio_device;
-    if device.is_null() {
+    let Some(device) = journal.j_bio_device else {
         return Ok(0);
-    }
+    };
 
     let records = take_revoke_records(commit_transaction);
     if records.is_empty() {

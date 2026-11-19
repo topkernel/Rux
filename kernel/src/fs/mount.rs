@@ -273,13 +273,12 @@ pub fn do_mount(
             // second view of the first (the old code ignored the source
             // and always mounted the boot disk — silently wrong for every
             // multi-disk layout).
-            let disk_of_source = |src: &str| -> Option<*const crate::drivers::blkdev::GenDisk> {
+            let disk_of_source = |src: &str| -> Option<&'static crate::drivers::blkdev::GenDisk> {
                 let trimmed = src
                     .trim_start_matches("/dev/block/")
                     .trim_start_matches("/dev/")
                     .trim_matches('/');
                 crate::drivers::virtio::get_pci_gen_disk_by_name(trimmed)
-                    .map(|d| d as *const _)
             };
 
             if let Some(disk) = disk_of_source(source) {
@@ -332,11 +331,15 @@ pub fn do_mount(
                 .ok_or(errno::Errno::NoSuchDevice.as_neg_i32())?;
             // Mount ext4 if not already mounted
             if let Some(disk) = crate::drivers::virtio::get_pci_gen_disk() {
-                crate::fs::ext4::mount_ext4(disk as *const _)
+                crate::fs::ext4::mount_ext4(disk)
                     .map_err(|e| e as i32)?;
             } else if let Some(virtio_dev) = crate::drivers::virtio::get_device() {
-                let disk_ptr = &virtio_dev.disk as *const crate::drivers::blkdev::GenDisk;
-                crate::fs::ext4::mount_ext4(disk_ptr)
+                // get_device() hands out a &'static VirtIOBlkDevice
+                // (VIRTIO_BLK static), so its disk field borrows for the
+                // machine's lifetime.
+                let disk: &'static crate::drivers::blkdev::GenDisk =
+                    &virtio_dev.disk;
+                crate::fs::ext4::mount_ext4(disk)
                     .map_err(|e| e as i32)?;
             } else {
                 return Err(errno::Errno::NoSuchDevice.as_neg_i32());

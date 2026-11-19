@@ -494,6 +494,17 @@ impl File {
         unsafe { *self.dentry.get() = Some(dentry); }
     }
 
+    /// Get the backing dentry of this open file description, if it has one.
+    ///
+    /// Same cell discipline as [`Self::get_inode`]: the dentry cell is
+    /// written at open/creation time before the File is published to an
+    /// fd table and is not mutated afterwards, so a shared read through
+    /// a shared `&self` borrow is race-free.
+    pub fn get_dentry(&self) -> Option<&Arc<Dentry>> {
+        // SAFETY: no write to the cell after publication (see doc).
+        unsafe { &*self.dentry.get() }.as_ref()
+    }
+
     /// Set file operations
     pub fn set_ops(&self, ops: &'static FileOps) {
         unsafe { *self.ops.get() = Some(ops); }

@@ -778,7 +778,7 @@ pub fn handle_mm_fault(
                     effective_size,
                     vma_file_size as usize,
                     vma_file_fd,
-                    unsafe { crate::process::current_pid() },
+                    crate::process::current_pid(),
                     vm_file
                         .as_ref()
                         .map(|f| f.path())

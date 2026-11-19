@@ -382,8 +382,7 @@ pub fn create_fs_root(
                 .trim_start_matches("/dev/block/")
                 .trim_start_matches("/dev/")
                 .trim_matches('/');
-            let disk =
-                crate::drivers::virtio::get_pci_gen_disk_by_name(trimmed).map(|d| d as *const _);
+            let disk = crate::drivers::virtio::get_pci_gen_disk_by_name(trimmed);
             if let Some(disk) = disk {
                 let (root, effective_ro) =
                     crate::fs::ext4::mount_loop_instance(disk, ro)?;

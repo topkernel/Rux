@@ -72,8 +72,8 @@ impl BufferState {
 // ============================================================================
 
 pub struct BufferHead {
-    /// Block device
-    pub b_device: Option<*const blkdev::GenDisk>,
+    /// Block device (typed handle; INV-BLKDEV-1 on blkdev::get_disk)
+    pub b_device: Option<&'static blkdev::GenDisk>,
     /// Block number
     pub b_blocknr: u64,
     /// Block size
@@ -132,11 +132,7 @@ impl BufferHead {
     }
 
     /// Set block device
-    pub fn set_device(&mut self, device: *const blkdev::GenDisk) {
-        if device.is_null() {
-            crate::console::puts("bio: set_device: NULL device!\n");
-            return;
-        }
+    pub fn set_device(&mut self, device: &'static blkdev::GenDisk) {
         self.b_device = Some(device);
     }
 
@@ -220,16 +216,12 @@ impl BufferHead {
         }
 
         if let Some(device) = self.b_device {
-            // SAFETY: self.b_device is a valid GenDisk pointer set by set_device();
-            // b_data is a valid buffer of b_size bytes; blkdev_write handles the I/O.
-            unsafe {
-                blkdev::blkdev_write(
-                    device,
-                    self.b_blocknr * (self.b_size as u64 / 512),
-                    &self.b_data,
-                )?;
-                self.clear_state_bit(BufferState::BH_Dirty);
-            }
+            blkdev::blkdev_write(
+                device,
+                self.b_blocknr * (self.b_size as u64 / 512),
+                &self.b_data,
+            )?;
+            self.clear_state_bit(BufferState::BH_Dirty);
             crate::dfx::fsw::note_dev_write();
         }
         Ok(())
@@ -698,11 +690,13 @@ impl BlockCache {
     }
 
     /// Get or create buffer (synchronous read on cache miss).
-    fn get(&self, device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
-        // SAFETY: device is a valid GenDisk pointer passed from the block device layer;
-        // all CacheEntry pointers in the hash chain were created by Box::into_raw.
+    fn get(&self, device: &'static blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
+        // SAFETY (remainder, chain-walk only): all CacheEntry pointers in
+        // the hash chain were created by Box::into_raw and stay valid
+        // while linked under the bucket lock (Commit B converts these to
+        // typed accessors).
         unsafe {
-            let (device_major, device_minor) = ((*device).major, (*device).first_minor);
+            let (device_major, device_minor) = (device.major, device.first_minor);
             let index = self.hash_index(device_major, device_minor, blocknr);
 
             // Phase 1: Lookup under bucket lock
@@ -921,7 +915,7 @@ impl BlockCache {
     /// disk read a bread() would do. Only for blocks whose existing disk
     /// contents are irrelevant (freshly allocated blocks being zeroed) —
     /// reading through this API would fabricate zeros for real data.
-    fn get_zero(&self, device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
+    fn get_zero(&self, device: &'static blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
         self.get_zero_impl(device, blocknr, true)
     }
 
@@ -933,21 +927,22 @@ impl BlockCache {
     /// rewrite whole blocks (directory blocks, bitmaps, group descriptors):
     /// reading a just-allocated directory block from disk before rewriting
     /// it cost one synchronous round trip per create.
-    fn get_overwrite(&self, device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
+    fn get_overwrite(&self, device: &'static blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
         self.get_zero_impl(device, blocknr, false)
     }
 
     fn get_zero_impl(
         &self,
-        device: *const blkdev::GenDisk,
+        device: &'static blkdev::GenDisk,
         blocknr: u64,
         zero_on_hit: bool,
     ) -> Option<*mut BufferHead> {
-        // SAFETY: same entry-lifetime guarantees as get(); the BufferHead is
-        // either found in the cache (pinned via get()) or freshly created and
-        // inserted below, never freed while the caller holds a reference.
+        // SAFETY (remainder, chain-walk only): same entry-lifetime
+        // guarantees as get(); the BufferHead is either found in the cache
+        // (pinned via get()) or freshly created and inserted below, never
+        // freed while the caller holds a reference.
         unsafe {
-            let (device_major, device_minor) = ((*device).major, (*device).first_minor);
+            let (device_major, device_minor) = (device.major, device.first_minor);
             let index = self.hash_index(device_major, device_minor, blocknr);
 
             // Phase 1: lookup under bucket lock (hit path identical to get)
@@ -1135,7 +1130,7 @@ impl BlockCache {
     /// with a refcount bump, sync without any lock held).
     fn sync_all_excluding(
         &self,
-        device: *const blkdev::GenDisk,
+        device: &'static blkdev::GenDisk,
         skip: Option<u64>,
     ) -> Result<(), i32> {
         let mut dirty_list: Vec<*mut BufferHead> = Vec::new();
@@ -1156,7 +1151,8 @@ impl BlockCache {
                         continue;
                     }
                     let bh = &*entry.bh;
-                    if bh.is_dirty() && bh.b_device == Some(device) && Some(bh.b_blocknr) != skip {
+                    let same_dev = bh.b_device.is_some_and(|d| core::ptr::eq(d, device));
+                    if bh.is_dirty() && same_dev && Some(bh.b_blocknr) != skip {
                         bh.get();
                         dirty_list.push(entry.bh);
                     }
@@ -1319,7 +1315,7 @@ pub fn get_block_cache() -> &'static BlockCache {
 /// Read a block from cache (or disk if not cached)
 ///
 /// Read a block from cache (or disk if not cached)
-pub fn bread(device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
+pub fn bread(device: &'static blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
     crate::dfx::fsw::note_bread();
     get_block_cache().get(device, blocknr)
 }
@@ -1327,7 +1323,7 @@ pub fn bread(device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut Buffer
 /// Fetch a block for a full-block overwrite: no disk read on a miss — the
 /// buffer is created zeroed and dirty (see BlockCache::get_zero). Callers
 /// must overwrite the whole block (or rely on the zeros).
-pub fn getblk_zero(device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
+pub fn getblk_zero(device: &'static blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
     get_block_cache().get_zero(device, blocknr)
 }
 
@@ -1335,19 +1331,15 @@ pub fn getblk_zero(device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut 
 /// buffer is created zeroed and dirty) and no zeroing on a hit. The caller
 /// MUST overwrite the whole block before the buffer becomes observable.
 /// See BlockCache::get_overwrite.
-pub fn getblk_overwrite(device: *const crate::drivers::blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
+pub fn getblk_overwrite(device: &'static crate::drivers::blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
     get_block_cache().get_overwrite(device, blocknr)
 }
 
 /// Forget a FREED block's dirty buffer without writing it (see
 /// BlockCache::drop_block). Best-effort: pinned or clean buffers are
 /// left in place.
-pub fn drop_freed_block(device: *const crate::drivers::blkdev::GenDisk, blocknr: u64) {
-    // SAFETY: device is a valid GenDisk pointer; only its major/first_minor
-    // fields are read.
-    unsafe {
-        get_block_cache().drop_block((*device).major, (*device).first_minor, blocknr);
-    }
+pub fn drop_freed_block(device: &'static crate::drivers::blkdev::GenDisk, blocknr: u64) {
+    get_block_cache().drop_block(device.major, device.first_minor, blocknr);
 }
 
 /// Forget a FREED block's dirty buffer AND its jbd2 registration: same as
@@ -1357,33 +1349,28 @@ pub fn drop_freed_block(device: *const crate::drivers::blkdev::GenDisk, blocknr:
 /// into the journal area on the revoke slow path). Called from the block
 /// allocator's free path, which always runs inside the freeing op's
 /// journal bracket.
-pub fn drop_freed_block_forgotten(device: *const crate::drivers::blkdev::GenDisk, blocknr: u64) {
-    // SAFETY: device is a valid GenDisk pointer; only its major/first_minor
-    // fields are read.
-    unsafe {
-        let (mj, mi) = ((*device).major, (*device).first_minor);
-        // Forget under NO bio locks (peek pins, jbd2 locks only its own
-        // transaction lists — no bucket->t_dirty nesting exists).
-        if let Some(bh) = get_block_cache().peek_buffer((mj, mi), blocknr) {
-            // SAFETY: get_current_handle is task-local and null-safe; the
-            // handle outlives this call (the freeing op's bracket).
-            if let Some(h) = crate::fs::ext4::namei::get_current_handle() {
-                let _ = crate::fs::jbd2::jbd2_journal_forget(&mut *h, bh);
-            }
-            get_block_cache().put(bh);
+pub fn drop_freed_block_forgotten(
+    device: &'static crate::drivers::blkdev::GenDisk,
+    blocknr: u64,
+) {
+    let (mj, mi) = (device.major, device.first_minor);
+    // Forget under NO bio locks (peek pins, jbd2 locks only its own
+    // transaction lists — no bucket->t_dirty nesting exists).
+    if let Some(bh) = get_block_cache().peek_buffer((mj, mi), blocknr) {
+        // SAFETY: get_current_handle is task-local and null-safe; the
+        // handle outlives this call (the freeing op's bracket).
+        if let Some(h) = unsafe { crate::fs::ext4::namei::get_current_handle() } {
+            let _ = unsafe { crate::fs::jbd2::jbd2_journal_forget(&mut *h, bh) };
         }
-        get_block_cache().drop_block(mj, mi, blocknr);
+        get_block_cache().put(bh);
     }
+    get_block_cache().drop_block(mj, mi, blocknr);
 }
 
 /// Invalidate every cached buffer of `device` without writing anything
 /// back (loop detach — see BlockCache::invalidate_device).
-pub fn invalidate_device(device: *const blkdev::GenDisk) {
-    // SAFETY: device is a valid GenDisk pointer from the block layer;
-    // only its major/first_minor fields are read.
-    unsafe {
-        get_block_cache().invalidate_device((*device).major, (*device).first_minor);
-    }
+pub fn invalidate_device(device: &blkdev::GenDisk) {
+    get_block_cache().invalidate_device(device.major, device.first_minor);
 }
 
 /// Async block read: submit I/O without blocking, return buffer head immediately.
@@ -1444,14 +1431,15 @@ unsafe fn wait_buffer_io_done(bh: *mut BufferHead) -> i32 {
 }
 
 pub fn bread_async(
-    device: *const blkdev::GenDisk,
+    device: &'static blkdev::GenDisk,
     blocknr: u64,
     completion: &crate::fs::io_completion::IoCompletion,
 ) -> Option<*mut BufferHead> {
-    // SAFETY: device is a valid GenDisk pointer from the block device layer;
-    // all CacheEntry pointers in the hash chain were created by Box::into_raw.
+    // SAFETY (remainder, chain-walk only): all CacheEntry pointers in the
+    // hash chain were created by Box::into_raw and stay valid while linked
+    // under the bucket lock.
     unsafe {
-        let (device_major, device_minor) = ((*device).major, (*device).first_minor);
+        let (device_major, device_minor) = (device.major, device.first_minor);
         let cache = get_block_cache();
         let index = cache.hash_index(device_major, device_minor, blocknr);
 
@@ -1738,7 +1726,7 @@ pub fn brelse(bh: *const BufferHead) {
 /// bytes and poison the page cache with them. Callers must split such
 /// runs and use per-block `bread_async`, which returns the cached
 /// (uptodate, possibly dirty) contents instead.
-pub fn block_cached(device: *const blkdev::GenDisk, blocknr: u64) -> bool {
+pub fn block_cached(device: &'static blkdev::GenDisk, blocknr: u64) -> bool {
     // SAFETY: device is a valid GenDisk pointer from the block device layer;
     // entry traversal mirrors bread_async Phase 1 under the bucket lock.
     unsafe {
@@ -1787,7 +1775,7 @@ pub fn block_cached(device: *const blkdev::GenDisk, blocknr: u64) -> bool {
 /// operations per fsync (the measured 3.9M breads/s burn on the
 /// write+fsync row). A mid-eviction entry reports true (the caller's
 /// bread slow path sees the settled state).
-pub fn block_dirty_cached(device: *const blkdev::GenDisk, blocknr: u64) -> bool {
+pub fn block_dirty_cached(device: &'static blkdev::GenDisk, blocknr: u64) -> bool {
     // SAFETY: device is a valid GenDisk pointer; only identity fields
     // are read, and the entry walk mirrors block_cached under the same
     // bucket lock.
@@ -1833,7 +1821,7 @@ pub fn block_dirty_cached(device: *const blkdev::GenDisk, blocknr: u64) -> bool 
 /// synchronous re-read of every evicted block (the post-flush wall:
 /// a 128 MB file turns over the 8192-entry cache ~4x, and the loop's
 /// bread() of each absent block paid one 4 KiB device read apiece).
-pub fn block_absent_durable(device: *const blkdev::GenDisk, blocknr: u64) -> bool {
+pub fn block_absent_durable(device: &'static blkdev::GenDisk, blocknr: u64) -> bool {
     // SAFETY: device is a valid GenDisk pointer; bucket traversal
     // mirrors block_cached under the same bucket lock.
     unsafe {
@@ -1873,7 +1861,7 @@ pub fn block_absent_durable(device: *const blkdev::GenDisk, blocknr: u64) -> boo
 /// A return of None means submission failed (no async support / queue
 /// full); the caller falls back to per-block reads.
 pub fn bread_async_multi(
-    device: *const blkdev::GenDisk,
+    device: &'static blkdev::GenDisk,
     start_blocknr: u64,
     nblocks: u32,
     completion: &crate::fs::io_completion::IoCompletion,
@@ -1978,7 +1966,7 @@ struct WriteSlot {
     /// fusion key. Only meaningful on the deferred path.
     sector: u64,
     /// Target device of this span — groups never fuse across devices.
-    dev: *const blkdev::GenDisk,
+    dev: Option<&'static blkdev::GenDisk>,
 }
 
 impl WriteSlot {
@@ -1989,7 +1977,7 @@ impl WriteSlot {
         },
         completion: crate::fs::io_completion::IoCompletion::new(),
         sector: 0,
-        dev: core::ptr::null(),
+        dev: None,
     };
 }
 
@@ -2112,12 +2100,10 @@ impl WriteBatch {
     /// Decide the submission mode from the device's capability (first
     /// submit). Returns false when the device has NEITHER SG NOR plain
     /// async write (the caller's synchronous fallback owns the span).
-    fn mode_probe(&mut self, device: *const blkdev::GenDisk) -> bool {
+    fn mode_probe(&mut self, device: &'static blkdev::GenDisk) -> bool {
         if !self.mode_set {
-            // SAFETY: identity-field reads on a registered GenDisk.
-            let (has_sg, has_plain) = unsafe {
-                ((*device).has_async_write_sg(), (*device).async_write_fn.is_some())
-            };
+            let (has_sg, has_plain) =
+                (device.has_async_write_sg(), device.async_write_fn.is_some());
             if !has_sg && !has_plain {
                 return false;
             }
@@ -2136,7 +2122,7 @@ impl WriteBatch {
     /// submission happens at flush() — see the struct's FUSION note.
     pub fn submit(
         &mut self,
-        device: *const blkdev::GenDisk,
+        device: &'static blkdev::GenDisk,
         sector: u64,
         data: &[u8],
     ) -> bool {
@@ -2152,13 +2138,13 @@ impl WriteBatch {
         if self.deferred {
             self.slots[self.len].data = WriteSource::Owned(owned);
             self.slots[self.len].sector = sector;
-            self.slots[self.len].dev = device;
+            self.slots[self.len].dev = Some(device);
             self.len += 1;
             return true;
         }
-        // SAFETY: device is a registered GenDisk; `owned` and the slot's
-        // inline completion stay valid (and unmodified) until the
-        // completion fires — the write-batch contract.
+        // The write-batch contract lives on: `owned` and the slot's inline
+        // completion stay valid (and unmodified) until the completion
+        // fires — now enforced by the DMA-source discipline comments.
         let rc = blkdev::blkdev_write_async(
             device,
             sector,
@@ -2169,7 +2155,7 @@ impl WriteBatch {
             Ok(()) => {
                 self.slots[self.len].data = WriteSource::Owned(owned);
                 self.slots[self.len].sector = sector;
-                self.slots[self.len].dev = device;
+                self.slots[self.len].dev = Some(device);
                 self.len += 1;
                 true
             }
@@ -2192,7 +2178,7 @@ impl WriteBatch {
     /// machine is wedged far beyond this span).
     pub fn submit_ref(
         &mut self,
-        device: *const blkdev::GenDisk,
+        device: &'static blkdev::GenDisk,
         sector: u64,
         data: &[u8],
     ) -> bool {
@@ -2208,13 +2194,13 @@ impl WriteBatch {
                 len: data.len(),
             };
             self.slots[self.len].sector = sector;
-            self.slots[self.len].dev = device;
+            self.slots[self.len].dev = Some(device);
             self.len += 1;
             return true;
         }
-        // SAFETY: device is a registered GenDisk; the caller's `data` and
-        // the slot's inline completion stay valid (and the bytes
-        // unmodified) until the drain — the submit_ref contract above.
+        // submit_ref contract above: the caller's `data` and the slot's
+        // inline completion stay valid (and the bytes unmodified) until
+        // the drain.
         let rc = blkdev::blkdev_write_async(
             device,
             sector,
@@ -2228,7 +2214,7 @@ impl WriteBatch {
                     len: data.len(),
                 };
                 self.slots[self.len].sector = sector;
-                self.slots[self.len].dev = device;
+                self.slots[self.len].dev = Some(device);
                 self.len += 1;
                 true
             }
@@ -2367,7 +2353,11 @@ impl WriteBatch {
             // the segment cap leaves room. Two integer compares per span
             // — the reference's back-merge test.
             let adj = |a: usize, b: usize| -> bool {
-                self.slots[a].dev == self.slots[b].dev
+                let same_dev = match (self.slots[a].dev, self.slots[b].dev) {
+                    (Some(x), Some(y)) => core::ptr::eq(x, y),
+                    _ => false,
+                };
+                same_dev
                     && self.slots[a].sector + (self.slots[a].data.len() / 512) as u64
                         == self.slots[b].sector
                     && self.slots[a].data.len() % 512 == 0
@@ -2392,8 +2382,15 @@ impl WriteBatch {
             // dev is a registered GenDisk (recorded at submit); every
             // segment's buffer stays a stable DMA source until this
             // flush's waits return — the write-batch contract.
-            let submitted =
-                blkdev::blkdev_write_async_sg(dev, sector0, &segs[..k], &self.slots[i].completion);
+            let submitted = match dev {
+                Some(d) => blkdev::blkdev_write_async_sg(
+                    d,
+                    sector0,
+                    &segs[..k],
+                    &self.slots[i].completion,
+                ),
+                None => Err(-5),
+            };
             match submitted {
                 Ok(()) => {
                     for si in i..e {
@@ -2409,12 +2406,15 @@ impl WriteBatch {
                     for si in i..e {
                         let d = self.slots[si].data.as_slice();
                         // Same dev/sector contract as the SG arm.
-                        let rc = blkdev::blkdev_write_async(
-                            dev,
-                            self.slots[si].sector,
-                            d,
-                            &self.slots[si].completion,
-                        );
+                        let rc = match dev {
+                            Some(disk) => blkdev::blkdev_write_async(
+                                disk,
+                                self.slots[si].sector,
+                                d,
+                                &self.slots[si].completion,
+                            ),
+                            None => Err(-5),
+                        };
                         if rc.is_ok() {
                             span_armed[si] = true;
                         } else {
@@ -2527,7 +2527,7 @@ impl WriteBatch {
             };
             self.slots[i].completion.reset();
             self.slots[i].sector = 0;
-            self.slots[i].dev = core::ptr::null();
+            self.slots[i].dev = None;
         }
         self.len = 0;
     }
@@ -2564,7 +2564,7 @@ impl Drop for WriteBatch {
 /// the call (the ext4 callers hold EXT4_BIG_LOCK, the same
 /// serialization SpanFlusher::drain applies to its settle).
 pub fn sync_dirty_blocks_batched(
-    device: *const blkdev::GenDisk,
+    device: &'static blkdev::GenDisk,
     blocks: &[u64],
     force_dirty: bool,
 ) -> i32 {
@@ -2592,8 +2592,7 @@ pub fn sync_dirty_blocks_batched(
     }
 
     let spb = get_block_cache().block_size as u64 / 512;
-    // SAFETY: device is a registered GenDisk; only identity fields read.
-    let (mj, mi) = unsafe { ((*device).major, (*device).first_minor) };
+    let (mj, mi) = (device.major, device.first_minor);
     let mut batch = WriteBatch::new();
     let mut pinned: alloc::vec::Vec<*mut BufferHead> = alloc::vec::Vec::new();
     let mut first_err = 0i32;
@@ -2716,7 +2715,7 @@ pub fn sync_buffers() -> Result<(), i32> {
 /// Unlike sync_dirty_buffer this flushes regardless of any active ext4
 /// journal handle.
 pub fn sync_device_buffers_excluding(
-    device: *const crate::drivers::blkdev::GenDisk,
+    device: &'static crate::drivers::blkdev::GenDisk,
     skip: Option<u64>,
 ) -> Result<(), i32> {
     // Ordered-publication guard (same rationale as sync_buffers).
@@ -2955,14 +2954,13 @@ fn publication_cookie() -> u64 {
     }
 }
 
-fn dev_key(device: *const blkdev::GenDisk) -> (u32, u32) {
-    // SAFETY: callers pass a valid GenDisk pointer (the fs device).
-    unsafe { ((*device).major, (*device).first_minor) }
+fn dev_key(device: &blkdev::GenDisk) -> (u32, u32) {
+    (device.major, device.first_minor)
 }
 
 /// Public (major, minor) of a GenDisk — used by ext4 to address a
 /// handle's post-capture window to the right device.
-pub fn dev_key_of(device: *const blkdev::GenDisk) -> (u32, u32) {
+pub fn dev_key_of(device: &blkdev::GenDisk) -> (u32, u32) {
     dev_key(device)
 }
 
@@ -2970,7 +2968,7 @@ pub fn dev_key_of(device: *const blkdev::GenDisk) -> (u32, u32) {
 /// before `entry_block`. Returns the record id (used by the delete-side
 /// capture; create-side callers ignore it).
 pub fn publication_defer(
-    device: *const blkdev::GenDisk,
+    device: &blkdev::GenDisk,
     pre_blocks: &[u64],
     entry_block: u64,
 ) -> u64 {
@@ -3011,7 +3009,7 @@ pub fn publication_defer(
 /// caller performs next, which it captures via
 /// jbd2::Handle::begin_post_capture. Returns the record id.
 pub fn publication_defer_entry_only(
-    device: *const blkdev::GenDisk,
+    device: &blkdev::GenDisk,
     entry_block: u64,
 ) -> u64 {
     let id = NEXT_PUBLICATION_ID.fetch_add(1, Ordering::Relaxed);
@@ -3049,7 +3047,7 @@ pub fn publication_defer_entry_only(
 /// Runs in the dirty-marking hot path; the unarmed fast path is two loads
 /// (task, handle).
 fn publication_capture_note_dirty(
-    device: Option<*const blkdev::GenDisk>,
+    device: Option<&'static blkdev::GenDisk>,
     blocknr: u64,
 ) {
     use crate::fs::jbd2::journal::{CAPTURE_POST, CAPTURE_PRE};

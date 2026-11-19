@@ -4632,7 +4632,7 @@ pub fn sleep_snapshot() {
     if !crate::trace::EVENT_SLEEPSNAP.armed() {
         return;
     }
-    crate::trace::trace_sleepsnap(0, unsafe { crate::process::current_pid() }, 0, 0);
+    crate::trace::trace_sleepsnap(0, crate::process::current_pid(), 0, 0);
     // sc207 (launcher leg 13): NEVER print inside the for_each_task
     // callback - it runs under the pid-hash bucket lock, and one printk
     // per S-state task held each bucket across console port-IO for ~a
