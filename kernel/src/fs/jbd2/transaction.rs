@@ -264,7 +264,16 @@ pub fn jbd2_journal_stop(handle: &mut Handle) -> Result<(), i32> {
     // window; fsync/sync still force immediate commits, and credit
     // exhaustion in start_this_handle bounds the batch at
     // j_max_transaction_buffers anyway.
-    const LAZY_COMMIT_MAX_BUFFERS: usize = 1024;
+    // Capacity-derived (journal-life): the journal-area copy of a batch
+    // needs ~1 block per registered buffer + descriptor/revoke/commit
+    // overhead, and the log area is only j_last - j_first blocks. The
+    // old flat 1024 let a pathological all-unique-blocks batch exceed a
+    // 1023-block log (the span check in the commit would then take the
+    // write-through-only fallback). Cap the batch below capacity with
+    // headroom for the overhead blocks.
+    let lazy_commit_max_buffers = (journal.j_last.saturating_sub(journal.j_first)
+        .saturating_sub(8) as usize)
+        .clamp(64, 1024);
     // Arm-2 (f4-ext4-route-map.md §6.2 R3): revokes used to force a
     // synchronous slow-path commit at the NEXT stop after any free
     // (unlink/rmdir/rename-replace) — 8-12 virtio round trips per delete
@@ -279,7 +288,7 @@ pub fn jbd2_journal_stop(handle: &mut Handle) -> Result<(), i32> {
     if err == 0 && !handle.h_sync {
         let dirty_len = txn.t_dirty_buffers.lock().len();
         let revoke_len = txn.t_revoke_records.lock().len();
-        if dirty_len < LAZY_COMMIT_MAX_BUFFERS && revoke_len < LAZY_COMMIT_MAX_REVOKES {
+        if dirty_len < lazy_commit_max_buffers && revoke_len < LAZY_COMMIT_MAX_REVOKES {
             // Leave j_running_transaction in place: the next
             // start_this_handle joins this transaction.
             crate::dfx::fsw::note_j_lazy();
