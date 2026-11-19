@@ -80,7 +80,7 @@ fn syscall_set_return_value(regs: &mut PtRegs, value: i64) {
     regs.set_return_value(value);
 }
 
-/// dfx=strace1: one console line per loader-relevant syscall of PID 1.
+/// rux:strace1 (retired dfx=strace1): one console line per loader-relevant syscall of PID 1.
 ///
 /// Numbers are the GENERIC (asm-generic) dispatch numbers — the x86_64
 /// native numbers were translated before the dispatch match.
@@ -223,7 +223,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     if crate::trace::EVENT_SYS_EXIT.armed() {
         crate::trace::trace_sys_exit(sc_nr as i64, syscall_get_return(regs) as i64);
     }
-    // 118th EIO hunt (dfx=eiotrace rides DfxSwitch::EpollTrace): name the
+    // 118th EIO hunt (rux:eiotrace (retired dfx=eiotrace) rides DfxSwitch::EpollTrace): name the
     // EXACT syscall returning -EIO ('init_hisysevent.c:140 Failed to write
     // event ret -5' — the write(2) path logger never fired, so the -5 rides
     // a different syscall). Budgeted direct-console line: nr, args head,
@@ -457,7 +457,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // lastsys= field reads the per-task latch.
     // (perf-syscall lane) Both the ring record and this SECOND latch
     // (post-translate numbers) are hunt instrumentation — 12 atomics
-    // per syscall — and now sit behind dfx=sysforensic. The
+    // per syscall — and now sit behind rux:sysforensic (retired dfx=sysforensic). The
     // pre-translate latch above stays always-on: it is what makes a
     // parked task's taskdump show the syscall it is parked IN, and it
     // costs 3 stores.
@@ -935,7 +935,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     //
     // RETIRED (probe-retire): the trace was unconditional (37 lines per
     // ub2404 boot). It now lives behind the existing OH hunt-print
-    // master gate (dfx=ohhunt); the switch is checked only on the
+    // master gate (rux:ohhunt (retired dfx=ohhunt)); the switch is checked only on the
     // EFAULT return path, so the hot path is untouched.
     if result == -(errno::EFAULT as i64)
         && crate::dfx::switches::oh_hunt_prints_on()
@@ -961,7 +961,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // whole budget before the implemented-but-ENOSYS families printed.
     //
     // RETIRED (probe-retire): unconditional (budget 200 lines/boot);
-    // behind the existing OH hunt-print master gate (dfx=ohhunt).
+    // behind the existing OH hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)).
     if result == -(38i64)
         && !unknown_nr
         && crate::dfx::switches::oh_hunt_prints_on()
@@ -979,7 +979,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         }
     }
 
-    // STRACE1 (loader hunts, dfx=strace1): one line per file/memory
+    // STRACE1 (loader hunts, rux:strace1 (retired dfx=strace1)): one line per file/memory
     // syscall of PID 1, with the pathname decoded for path-taking calls.
     // musl ld.so's "Error loading shared library" carries no errno — this
     // turns that into "which step failed" (search-open, fstat, mmap,
@@ -992,7 +992,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
 
     syscall_set_return_value(regs, result);
 
-    // STEPTRACE (dfx=steptrace): one line per syscall return. Left
+    // STEPTRACE (rux:steptrace (retired dfx=steptrace)): one line per syscall return. Left
     // ungated this flooded the emulated UART (2.7GB per OH boot) and the
     // printing alone slowed services enough to lose races — see the
     // switch catalog note in dfx/switches.rs.
@@ -1064,14 +1064,14 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // last_calls/init_calls/birth rings, the fail-tail ring and the
     // sc-series comm-gated hooks (appioctl/applog/appconn/prctl-einval/
     // missstat/openmiss) — is hunt instrumentation costing ~15 atomics
-    // plus comm scans on EVERY syscall. Gated behind dfx=sysforensic;
+    // plus comm scans on EVERY syscall. Gated behind rux:sysforensic (retired dfx=sysforensic);
     // quiet boots pay one atomic load.
     if !crate::trace::EVENT_SYSFORENSIC.armed() {
         return;
     }
 
     // FORENSIC ring: last N syscalls per boot (pid, nr, a0, a1, ret).
-    // Same dfx=sysring gate as the entry-side record — see above.
+    // Same rux:sysring (retired dfx=sysring) gate as the entry-side record — see above.
     if crate::trace::EVENT_SYSRING.armed() {
         SYSCALL_RING[SYSCALL_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % SYSCALL_RING.len()]
             .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], result as u64);
@@ -1205,7 +1205,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             || comm == "appspawn"
             || comm.contains("foundation")
             || comm.contains("sa_main");
-        // dfx=writetrace: the fd3 hilog writev capture settled the
+        // rux:writetrace (retired dfx=writetrace): the fd3 hilog writev capture settled the
         // chain questions (sandbox narration, SA-501 attempts); in
         // milestone boots it only adds ~2.4k kernel lines for
         // hilogd.rd_kmsg to copy (the b128/b129 vCPU lesson).

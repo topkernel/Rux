@@ -239,7 +239,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
         // the child's engine thread creation (CLONE_VM|CLONE_THREAD).
         let is_spawn = comm == "appspawn";
         // 110th: the whole census block (print + the binder-tracer child
-        // registration, which only feeds dfx=bindertrace print filters)
+        // registration, which only feeds rux:bindertrace (retired dfx=bindertrace) print filters)
         // rides the ohhunt gate — ~120 lines per perf boot; the
         // fall-through below does the identical do_clone + parent-ns
         // translation.
@@ -799,7 +799,7 @@ fn copy_envp_from_user(envp_ptr: *const *const u8) -> Result<alloc::vec::Vec<all
     Ok(envs)
 }
 
-/// EXECCOST (dfx=execcost, abi-review lane): per-stage execve cost
+/// EXECCOST (rux:execcost (retired dfx=execcost), abi-review lane): per-stage execve cost
 /// breakdown in raw read_time() ticks. Two lines per exec — the ladder
 /// stages here, the image stages in do_execve_elf (EXECCOST2). Prints
 /// only when the switch is armed, and only for recursion depth 0
@@ -1365,7 +1365,7 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
     // fd's CLOEXEC state (LISTEN_FDS fds must pass with CLOEXEC CLEAR).
     //
     // RETIRED (probe-retire): unconditional (26 lines per ub2404 boot);
-    // behind the existing OH hunt-print master gate (dfx=ohhunt).
+    // behind the existing OH hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)).
     if crate::dfx::switches::oh_hunt_prints_on() {
         static UEEX_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
@@ -1501,7 +1501,7 @@ pub fn sys_exit_group(args: SyscallArgs) -> i64 {
             .filter(|s| !s.is_empty())
             .count() >= 4;
         if deep {
-            // Ring recorded only under dfx=sysring (perf lane 2026-11).
+            // Ring recorded only under rux:sysring (retired dfx=sysring) (perf lane 2026-11).
             if crate::trace::EVENT_SYSRING.armed() {
                 use core::sync::atomic::Ordering::Relaxed;
                 let pid = crate::process::current_pid() as u32;
@@ -1542,7 +1542,7 @@ pub fn sys_exit_group(args: SyscallArgs) -> i64 {
                 }
             } else {
                 crate::pr_warn!(
-                    "childexit pid={} root='{}' status={:#x} (syscall ring off; boot with dfx=sysring)",
+                    "childexit pid={} root='{}' status={:#x} (syscall ring off; boot with rux:sysring (retired dfx=sysring))",
                     crate::process::current_pid(),
                     root_str,
                     args[0] as u32
@@ -1649,7 +1649,7 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
             Ok(child_pid) => {
                 // 125th waitid leg: the WNOHANG reap path the first wait4
                 // arm missed (glib-style reaper threads poll WNOHANG) —
-                // same dfx=schedtrace gate, dfx/reaper.rs.
+                // same rux:schedtrace (retired dfx=schedtrace) gate, dfx/reaper.rs.
                 if crate::dfx::reaper::on() {
                     let st = if wstatus.is_null() {
                         0
@@ -1727,7 +1727,7 @@ fn report_wait_pid(global_pid: u32) -> i64 {
 }
 
 /// 125th waitid leg: the reaper forensics print for a SUCCESSFUL waitid
-/// event (dfx=schedtrace, dfx/reaper.rs). Reads back the siginfo waitid
+/// event (rux:schedtrace (retired dfx=schedtrace), dfx/reaper.rs). Reads back the siginfo waitid
 /// just wrote (si_code at offset 8, si_pid at 16, si_status at 24 — the
 /// write_siginfo layout); infop was access_ok-validated above.
 fn reaper_note_waitid(idtype: i32, id: i32, options: i32, infop: *mut u8, via_pidfd: bool) {
@@ -1882,7 +1882,7 @@ pub fn sys_waitid(args: SyscallArgs) -> i64 {
         Ok(true) => {
             // 125th waitid leg: the launcher/systemui reap path hunt —
             // log who reaped which child with what status (incl. WNOWAIT
-            // peeks, marked -nw by dfx/reaper.rs). dfx=schedtrace-gated.
+            // peeks, marked -nw by dfx/reaper.rs). rux:schedtrace (retired dfx=schedtrace)-gated.
             reaper_note_waitid(idtype, id, options, infop, false);
             0
         }
@@ -3194,7 +3194,7 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
                 Ok(_) => unsafe {
                     (*current).set_comm(&buf);
                     // 125th waitid leg: SPAWN clock for com.*-named tasks
-                    // (the OH bundle-name convention); dfx=schedtrace-gated
+                    // (the OH bundle-name convention); rux:schedtrace (retired dfx=schedtrace)-gated
                     // (dfx/reaper.rs).
                     if crate::dfx::reaper::on() {
                         crate::dfx::reaper::note_nameset((*current).pid(), &buf);
@@ -5603,7 +5603,7 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
     //
     // RETIRED (probe-retire): the hunt print was unconditional (22 lines
     // per ub2404 boot); behind the existing OH hunt-print master gate
-    // (dfx=ohhunt).
+    // (rux:ohhunt (retired dfx=ohhunt)).
     if crate::dfx::switches::oh_hunt_prints_on() {
         if let Some(rd) = root_dentry.as_ref() {
             crate::pr_info!(
@@ -5700,7 +5700,7 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
     // RETIRED (probe-retire): the pivot_root success trace was
     // unconditional (22 lines per ub2404 boot across the 11 pivots
     // systemd performs); behind the existing OH hunt-print master gate
-    // (dfx=ohhunt).
+    // (rux:ohhunt (retired dfx=ohhunt)).
     if crate::dfx::switches::oh_hunt_prints_on() {
         crate::pr_info!("pivot_root: new root '{}' (old root at '{}')", new_root, put_old);
     }

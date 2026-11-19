@@ -333,7 +333,7 @@ pub fn balance_pgdat(order: i32) -> usize {
 /// Returns the number of pages reclaimed.
 pub fn try_to_free_pages(order: i32) -> usize {
     // Leg-15 pace: cumulative round count + jiffies spent here, read by
-    // the schbd heartbeat (dfx=schb). No lock held; note_drct is a
+    // the schbd heartbeat (rux:schb (retired dfx=schb)). No lock held; note_drct is a
     // counter tick unless the switch is off.
     let j0 = crate::drivers::timer::get_jiffies();
     super::page_alloc::gate_note_phase(super::page_alloc::GATE_PHASE_ROUND);

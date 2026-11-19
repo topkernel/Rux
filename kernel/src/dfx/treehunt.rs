@@ -1,4 +1,4 @@
-//! Process-tree invariant validator (dfx=treehunt).
+//! Process-tree invariant validator (rux:treehunt (retired dfx=treehunt)).
 //!
 //! Leg-29A root-cause hunt for the E8-REPAR "unlinked snapshot" family:
 //! sc304's reparent Oops walked a LIVE task's ancestor chain into an
@@ -30,7 +30,7 @@
 //! teardown). Reads are racy-by-design diagnostics under the pid-hash
 //! bucket lock (for_each_task contract); no PROCESS_TREE_LOCK nesting.
 //! Per-(pid,kind) dedupe ring plus a 64-lines/60-s cap; zero cost when
-//! dfx=treehunt is off.
+//! rux:treehunt (retired dfx=treehunt) is off.
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 

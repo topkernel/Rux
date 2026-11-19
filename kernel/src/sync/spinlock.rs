@@ -778,7 +778,7 @@ impl RawSpinlock {
             }
         }
 
-        // dfx=watchdog (dfx-migrate: rux:taskdump kind=WATCHDOG):
+        // rux:watchdog (retired dfx=watchdog) (dfx-migrate: rux:taskdump kind=WATCHDOG):
         // follow the warning with a full task-state snapshot
         // (silent-wedge diagnosis — CPUs idle + sleepers never woken).
         if crate::trace::EVENT_TASKDUMP.armed() {

@@ -134,7 +134,7 @@ pub unsafe fn stts() {
 /// linear map, and device windows are all mapped P|RW — WP only ever
 /// bites user-side COW/RO pages (the trap path resolves those: see
 /// mm/exception.rs kernel_data_fill CowPending) and deliberately-guarded
-/// kernel statics (dfx=wildwatch).
+/// kernel statics (rux:wildwatch (retired dfx=wildwatch)).
 pub fn enable_write_protect() {
     // SAFETY: single-bit RMW; PE/PG/PAE and the rest of CR0 are preserved.
     unsafe {

@@ -904,7 +904,7 @@ pub fn pte_install_log(root_ppn: u64, va: u64, ppn: u64) {
     // Hot path (every user PTE install — a fork copies hundreds of them):
     // the ring writes are forensic-only (fake-OOM PTE-alias hunt) and cost
     // 4 emulated atomics per copied PTE under TCG. Behind the
-    // dfx=mmforensics runtime switch — LTP fork_procs lost seconds per
+    // rux:mmforensics (retired dfx=mmforensics) runtime switch — LTP fork_procs lost seconds per
     // 1000 fork+exit cycles to this logging.
     if !crate::trace::EVENT_MMFORENSICS.armed() {
         return;
@@ -1182,7 +1182,7 @@ pub unsafe fn free_user_page_tables(
     // behind do_wait children-list panics). Ring is small; a hit here is
     // not proof for old trees, but a fresh repeat IS.
     // Every exit pays a 1024-entry linear scan for it — behind the
-    // dfx=mmforensics runtime switch (see pte_install_log).
+    // rux:mmforensics (retired dfx=mmforensics) runtime switch (see pte_install_log).
     if crate::trace::EVENT_MMFORENSICS.armed() {
         use core::sync::atomic::Ordering::Relaxed;
         for k in 0..FUT_RING.len() {

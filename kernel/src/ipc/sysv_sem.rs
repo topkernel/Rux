@@ -1207,7 +1207,7 @@ fn semop_blocking_loop(
                                 crate::sched::dequeue_task(&*current);
                                 return -(errno::ENOMEM as i64);
                             }
-                            // Lost-park ring (dfx=lostpark): park-enter
+                            // Lost-park ring (rux:lostpark (retired dfx=lostpark)): park-enter
                             // snapshot — pid, preempt_count, state bits.
                             if crate::dfx::lostpark::armed() {
                                 crate::dfx::lostpark::record(
@@ -1447,7 +1447,7 @@ fn try_apply_semops(idx: usize, sops: &[SemBuf], semid: i32) -> Result<(), i32> 
         entry.inner.sem_otime.store(ipc_current_time(), Ordering::Relaxed);
         entry.inner.sem_padid.store(caller_pid, Ordering::Relaxed);
 
-        // Lost-park ring (dfx=lostpark): the value transition of a
+        // Lost-park ring (rux:lostpark (retired dfx=lostpark)): the value transition of a
         // successful apply — a=sem0 value, b=sem1 value (2-sem probe
         // sets; more/less record what exists).
         if crate::dfx::lostpark::armed() && sems.len() >= 1 {

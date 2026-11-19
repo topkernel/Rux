@@ -1350,7 +1350,7 @@ pub fn report_poisoned_rq_entry(cpu: usize, raw: usize) {
     putchar(b'\n');
 }
 
-/// Scribble hunter (dfx=scribble): trylock the GRQ for the diagnostic
+/// Scribble hunter (rux:scribble (retired dfx=scribble)): trylock the GRQ for the diagnostic
 /// consistency scan. None when uninitialized or currently held.
 pub fn try_grq_lock() -> Option<GrqGuard<'static>> {
     if !GRQ_READY.load(core::sync::atomic::Ordering::Acquire) {
@@ -2030,7 +2030,7 @@ fn process_deferred_exit_pid(packed: i64) {
     // EXITNOTIFY (dbus-activation hunt): activation stalls were traced to
     // the parent never learning its spawned child exited. Log each
     // delivered exit notification (parent, child, signal rc).
-    // serial-clean: default off — available only behind dfx=schedtrace
+    // serial-clean: default off — available only behind rux:schedtrace (retired dfx=schedtrace)
     // (it fired on every child exit and polluted every boot log).
     if crate::trace::EVENT_SCHEDTRACE.armed() {
         static EN_N: core::sync::atomic::AtomicUsize =
@@ -2465,7 +2465,7 @@ pub fn preempt_check_wake(task: *mut Task) {
 }
 
 /// 63rd session (strand-wall hunt): gate for the persistent per-task
-/// pick/wake history. The OH boots carry dfx=fuxstuck (the census burst)
+/// pick/wake history. The OH boots carry rux:fuxstuck (retired dfx=fuxstuck) (the census burst)
 /// without schedtrace, and the 61st's burst-sampled RUNQ-STRAND missed
 /// the wheel thread's refusal input — so the history follows the census
 /// gate too. One relaxed switch-table load per event.
@@ -2885,7 +2885,7 @@ fn task_page_unmark(ptr: *mut u8) {
 pub static IN_TASK_ALLOC: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
-/// stress-port r3 parkwalk census (dfx=leakhunt only): [0] walks run,
+/// stress-port r3 parkwalk census (rux:leakhunt (retired dfx=leakhunt) only): [0] walks run,
 /// [1] task observations, [2] parked-with-nonzero-count observations.
 /// The hunt2 postmortem needs this: a 100 s strand produced ZERO
 /// PARKED-LEAK lines, and the counters distinguish "walk blind" from
@@ -3217,7 +3217,7 @@ pub fn free_task_slot(task_ptr: *mut Task) {
         // every later walk of that queue dereferences the recycled page —
         // the "POISONED rq entry" / pick-path KERNPANIC family at
         // T+15-19min. The old check only REPORTED and only under
-        // dfx=scribble; unlink for real, unconditionally, while the page
+        // rux:scribble (retired dfx=scribble); unlink for real, unconditionally, while the page
         // is still valid so del()/BTreeMap-removal write to the real
         // neighbors. RT uses force_unlink (does not trust the possibly
         // stale on_rq flag); CFS/DL dequeue scan by pointer and are
@@ -3262,7 +3262,7 @@ pub fn free_task_slot(task_ptr: *mut Task) {
                 );
             }
         }
-        // Scribble hunter (dfx=scribble): stop tracking before the page
+        // Scribble hunter (rux:scribble (retired dfx=scribble)): stop tracking before the page
         // is dropped/deallocated (it may be recycled immediately).
         #[cfg(feature = "x86_64")]
         crate::dfx::scribble::unregister(task_ptr);
@@ -3320,7 +3320,7 @@ pub fn free_task_slot(task_ptr: *mut Task) {
         // sem_undo / dead_threads / wait_chldexit Vecs, queued siginfo,
         // seccomp_filter — and dealloc() below releases only the Task's
         // own bytes, so every one of those allocations used to leak.
-        // Observed signature (dfx=memwatch): MEMLIVE site
+        // Observed signature (rux:memwatch (retired dfx=memwatch)): MEMLIVE site
         // Task::set_exe_path b=3 sz=9 live=603 a=603 f=0 under a pure
         // exec loop — one 9-byte Box per exec pinning a whole 4kB buddy
         // page (+4kB/exec, +1.2MB/min steady-state HeapUsed growth).
@@ -3762,7 +3762,7 @@ pub fn schedule_dead_never_returns() {
                 // "helper ran silently with pc==0" — sc191/sc192 both
                 // stranded with ZERO TERM-DESCHED lines and the two were
                 // indistinguishable in the log. Serial-cleanliness:
-                // census boots only (dfx=wwcensus); ordinary boots fire
+                // census boots only (rux:wwcensus (retired dfx=wwcensus)); ordinary boots fire
                 // this on every exiting child.
                 if rounds == 0
                     && crate::trace::EVENT_WWCENSUS.armed()
@@ -4265,7 +4265,7 @@ unsafe fn __schedule() {
                 // unpreemptible poll, its slot keeps naming it (curr_on)
                 // and every later wake is refused (why=c). Name the
                 // outermost acquire site of that holdout directly
-                // (dfx=leakhunt-gated; IRQs are off but the report is
+                // (rux:leakhunt (retired dfx=leakhunt)-gated; IRQs are off but the report is
                 // direct-console, GRQ NOT held here — printk would also
                 // work, keep it raw for the IRQ-off window).
                 if voluntary_sleep && holdout != 0 {
@@ -5299,7 +5299,7 @@ fn psl_slot(task: *mut Task) -> usize {
 }
 
 /// Record a pick publication (GRQ held; single writer per task).
-/// dfx=leakhunt-gated: the unconditional cost is one relaxed load.
+/// rux:leakhunt (retired dfx=leakhunt)-gated: the unconditional cost is one relaxed load.
 pub fn psledger_note_publish(task: *mut Task, cpu: usize, pk: u32) {
     if !crate::trace::EVENT_LEAKHUNT.armed() {
         return;
@@ -5425,7 +5425,7 @@ unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
                 r56_print_pid(b"", tp_is_task as u32, b"\n");
             }
         }
-        // Scribble hunter: record the pick (dfx=scribble).
+        // Scribble hunter: record the pick (rux:scribble (retired dfx=scribble)).
         #[cfg(feature = "x86_64")]
         crate::dfx::scribble::ring_log(
             crate::arch::cpu_id() as usize,
@@ -5739,7 +5739,7 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
     // wake — the idle fast path in __schedule then never triggered again.
     let inserted = match policy {
         SchedPolicy::Fifo | SchedPolicy::Rr => {
-            // Scribble hunter: record the class insert (dfx=scribble).
+            // Scribble hunter: record the class insert (rux:scribble (retired dfx=scribble)).
             #[cfg(feature = "x86_64")]
             crate::dfx::scribble::ring_log(
                 crate::arch::cpu_id() as usize,
@@ -5795,7 +5795,7 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
             grq.dl_rq.enqueue(task)
         }
         SchedPolicy::Normal | SchedPolicy::Batch => {
-            // Scribble hunter: record the class insert (dfx=scribble).
+            // Scribble hunter: record the class insert (rux:scribble (retired dfx=scribble)).
             #[cfg(feature = "x86_64")]
             crate::dfx::scribble::ring_log(
                 crate::arch::cpu_id() as usize,
@@ -6076,7 +6076,7 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
     wake_up_enqueue_opt(task, None)
 }
 
-/// Wakewatch ring (dfx=schedtrace): the last WW_RING scheduler
+/// Wakewatch ring (rux:schedtrace (retired dfx=schedtrace)): the last WW_RING scheduler
 /// lifecycle events system-wide, each stamped with jiffies. The
 /// binder-stall WAKE-RUN-LEAK census prints a victim's tail of the
 /// ring, so a "kick claimed success yet the task never ran" capture
@@ -7316,7 +7316,7 @@ pub fn wake_up_enqueue_opt(
                         // collision-churned on OH boots (2048 slots vs
                         // thousands of tasks — both control boots printed
                         // WAKE-HEAL with zero ORIGIN lines). The victim's
-                        // own last_calls syscall ring (dfx=sysforensic,
+                        // own last_calls syscall ring (rux:sysforensic (retired dfx=sysforensic),
                         // 96 deep, per-task) survives churn by
                         // construction: dump its tail here so the pc=1
                         // face names the syscall path it rides in.
@@ -7371,7 +7371,7 @@ pub fn wake_up_enqueue_opt(
                     // ate the heal — without this the zero-fire state is
                     // indistinguishable between "never reached" and
                     // "predicate always skips" (the lb17 capture: 21
-                    // PARKED-LEAK, 0 WAKE-HEAL). 110th: rides dfx=schb —
+                    // PARKED-LEAK, 0 WAKE-HEAL). 110th: rides rux:schb (retired dfx=schb) —
                     // ~56 direct-console lines rode the pre-launcher
                     // window of every perf boot.
                     static WHS_N: core::sync::atomic::AtomicU32 =
@@ -7425,7 +7425,7 @@ pub fn wake_up_enqueue_opt(
                         // SKIPPED for curr_on victims, so the producer was
                         // invisible precisely on the permanent-strand
                         // family. Report the outermost acquire site here
-                        // too (dfx=leakhunt-gated, own 200-line budget,
+                        // too (rux:leakhunt (retired dfx=leakhunt)-gated, own 200-line budget,
                         // still direct-console: GRQ held).
                         if curr_on {
                             crate::dfx::leakorigin::report_outermost(
@@ -7433,7 +7433,7 @@ pub fn wake_up_enqueue_opt(
                                 task,
                             );
                         }
-                        // Lost-park census tail (dfx=lostpark): when the
+                        // Lost-park census tail (rux:lostpark (retired dfx=lostpark)): when the
                         // refusal is curr_on, name the lying slot's CPU +
                         // writer tag and the victim's full ownership word —
                         // the wedged-park signature (a satisfiable sleeper
@@ -7584,7 +7584,7 @@ pub static SCHED_CALLS: [core::sync::atomic::AtomicU64; MAX_CPUS] =
 /// stamp age). A kernel-mode RIP constant across bursts names the
 /// unpreemptible spin loop (symbolize offline); a user-mode RIP with a
 /// live need_resched names a broken user-return preempt gate; a stale
-/// stamp names a halted/tick-starved CPU. Runs under dfx=fuxstuck (the
+/// stamp names a halted/tick-starved CPU. Runs under rux:fuxstuck (retired dfx=fuxstuck) (the
 /// futex census burst calls it, right after runq_strand_census); the
 /// stamps themselves ride the tick (TICK_ENTRY_* are always on, same
 /// as leg-33B). Prints only when at least one monopolist exists —
@@ -7729,7 +7729,7 @@ pub fn monopolist_census(now_j: u64) {
 /// candidate with every refusal input the pick path consults, plus the
 /// incumbent per CPU (with activation length + preempt_count) so a
 /// preempt-disabled monopolist is named in the same line. Runs under
-/// dfx=fuxstuck (the futex census burst calls it); zero cost otherwise.
+/// rux:fuxstuck (retired dfx=fuxstuck) (the futex census burst calls it); zero cost otherwise.
 pub fn runq_strand_census(now_j: u64) {
     use core::sync::atomic::Ordering::{Acquire, Release};
 
@@ -8187,7 +8187,7 @@ pub fn ffrt_wait_census() {
     );
 }
 
-/// dfx=claiminject adjudication hook (GNOME-wedge hunt): leak a claim of
+/// rux:claiminject (retired dfx=claiminject) adjudication hook (GNOME-wedge hunt): leak a claim of
 /// the nonexistent CPU 7 onto every linked CFS task currently showing the
 /// pickable state {on_cpu=false, claim=-1}. Called from the timer softirq
 /// every 50 jiffies. Returns the number of tasks poisoned (the caller
@@ -8199,7 +8199,7 @@ pub fn dfx_claim_inject() -> usize {
     }
 }
 
-/// dfx=oncpuinject adjudication hook (R85 tail-wedge hunt): stamp the
+/// rux:oncpuinject (retired dfx=oncpuinject) adjudication hook (R85 tail-wedge hunt): stamp the
 /// lost-release ownership shape {on_cpu=true, claim=7, pk=LIVE} onto
 /// every linked CFS task currently showing the pickable state
 /// {on_cpu=false, claim=-1}. Called from the timer softirq every 50
@@ -8724,10 +8724,10 @@ pub fn scheduler_tick() {
     crate::fs::procfs::schedstat::note_sched_run(cpu_id);
     // phantom-bits orphan scan: bits the interrupted task carried INTO
     // the tick whose release never executed (softirq bit outside any
-    // open window / stranded hardirq bit). dfx=leakhunt-gated inside.
+    // open window / stranded hardirq bit). rux:leakhunt (retired dfx=leakhunt)-gated inside.
     crate::interrupt::preempt::tick_orphan_scan(cpu_id);
 
-    // Allocator class-lock holder watch (dfx=allocwatch): scan ALL mm
+    // Allocator class-lock holder watch (rux:allocwatch (retired dfx=allocwatch)): scan ALL mm
     // stamp slots CROSS-CPU and name any holder frozen >1 s mid-section.
     // The holder sits at IF=0 (lock_irqsave), so its OWN CPU's tick is
     // dead — this check only ever fires from the OTHER CPU. The waiters
@@ -8989,7 +8989,7 @@ pub fn scheduler_tick() {
                     if t0 != 0
                             && now.wrapping_sub(t0) >= 200
                             // Serial-noise policy: the periodic PREEMPT-LEAK
-                            // reporter is a hunt instrument (dfx=wwcensus),
+                            // reporter is a hunt instrument (rux:wwcensus (retired dfx=wwcensus)),
                             // not default output — idle-task word residue on
                             // quiet boots made the serial unusable.
                             && crate::trace::EVENT_WWCENSUS.armed()
@@ -9072,7 +9072,7 @@ pub fn scheduler_tick() {
                                     .load(core::sync::atomic::Ordering::Relaxed)
                                     as u64);
                                 putchar(b'\n');
-                                // dfx=leakhunt: the acquire site of the
+                                // rux:leakhunt (retired dfx=leakhunt): the acquire site of the
                                 // leaked count (last PREEMPT_OFFSET
                                 // acquire on the incumbent).
                                 crate::dfx::leakorigin::report_incumbent_site(cur);
@@ -9864,7 +9864,7 @@ pub fn scheduler_tick() {
                     }
                     ph(*tp_named as u64);
                     putchar(b'\n');
-                    // dfx=leakhunt: name the acquire site of the leaked
+                    // rux:leakhunt (retired dfx=leakhunt): name the acquire site of the leaked
                     // count (last PREEMPT_OFFSET acquire on this task).
                     crate::dfx::leakorigin::report_parked_site(*task);
                 }
@@ -9885,7 +9885,7 @@ pub fn scheduler_tick() {
                 }
             }
             // stress-port r3 census print: every 1000 walks while
-            // dfx=leakhunt is armed (direct console — IRQ context).
+            // rux:leakhunt (retired dfx=leakhunt) is armed (direct console — IRQ context).
             if crate::trace::EVENT_LEAKHUNT.armed()
                 && epoch % 1000 == 0
             {
@@ -11859,7 +11859,7 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
     });
 }
 
-/// Lost-park idle-lie report (fix-lostpark lane, dfx=lostpark): called
+/// Lost-park idle-lie report (fix-lostpark lane, rux:lostpark (retired dfx=lostpark)): called
 /// from the idle loop when the CPU's own slot names a real task after
 /// schedule() returned. Rate-limited to one line per CPU per 10 jiffies
 /// with a global budget, direct-console (R34 discipline — the caller may
@@ -12522,7 +12522,7 @@ pub fn cpu_idle_loop() -> ! {
             crate::timer::nohz::tick_nohz_idle_enter();
         }
 
-        // Lost-park lie detector (fix-lostpark lane, dfx=lostpark): this
+        // Lost-park lie detector (fix-lostpark lane, rux:lostpark (retired dfx=lostpark)): this
         // CPU just ran schedule() and is about to idle-mark/halt, but its
         // slot names a REAL task. With an empty global queue that task is
         // registered-nowhere and "running-nowhere" — every wake of it is

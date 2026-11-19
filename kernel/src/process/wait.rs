@@ -405,7 +405,7 @@ impl WaitQueueHead {
                     };
                     if !woke {
                         entry.clear_woken();
-                        // Lost-park ring (rux:lostpark tracepoint; retired token dfx=lostpark): the refused-wake
+                        // Lost-park ring (rux:lostpark tracepoint; retired token rux:lostpark (retired dfx=lostpark)): the refused-wake
                         // token return — pid, state bits, preempt_count.
                         if crate::dfx::lostpark::armed() {
                             let st = unsafe { (*task).state() };

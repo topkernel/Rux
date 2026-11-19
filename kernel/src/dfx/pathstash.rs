@@ -1,4 +1,4 @@
-//! Per-task last-open path stash for TXN-HANG (dfx=txnhunt).
+//! Per-task last-open path stash for TXN-HANG (rux:txnhunt (retired dfx=txnhunt)).
 //!
 //! Leg-28 item 2: sc303's TXN-HANG showed storage_daemon parked
 //! UNINTERRUPTIBLE in open() for 5.5s→26s under the code-37 handler,
@@ -11,7 +11,7 @@
 //! inside the open work itself, so the stash holds exactly the path
 //! the stuck open is working on).
 //!
-//! Contract: zero cost when dfx=txnhunt is off (one switch check);
+//! Contract: zero cost when rux:txnhunt (retired dfx=txnhunt) is off (one switch check);
 //! no locks — 8 slots indexed by tid % 8, tid word acts as the
 //! publication flag; diagnostics only, torn reads can mix bytes of
 //! two paths of tasks colliding on a slot, which is cosmetic (bounded

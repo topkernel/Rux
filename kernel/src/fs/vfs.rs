@@ -1489,7 +1489,7 @@ pub fn vfs_bind_mount(
             // context; the post-exec launcher child mounts its sandbox
             // and paid its whole 3s appspawn watchdog to this probe (the
             // sc37 bindrec lesson, replayed). 110th: default flipped —
-            // arms only via dfx=ohhunt (or legacy sprobe=1).
+            // arms only via rux:ohhunt (retired dfx=ohhunt) (or legacy sprobe=1).
             if crate::dfx::switches::oh_hunt_prints_on()
                 && MTPROBE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400
             {

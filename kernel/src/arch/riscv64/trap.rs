@@ -515,7 +515,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
         CURRENT_PT_REGS[cpu_id].store(prev_pt_regs, core::sync::atomic::Ordering::Relaxed);
     }
 
-    // Leak-origin tripwire (dfx=leakhunt): this frame returns to
+    // Leak-origin tripwire (rux:leakhunt (retired dfx=leakhunt)): this frame returns to
     // userspace, so the task's preempt_count must be exactly 0 (no
     // in-flight IRQ, every syscall-path guard dropped). A nonzero count
     // here is a leaked PREEMPT_OFFSET caught at the earliest possible

@@ -996,7 +996,7 @@ pub(crate) fn binder_sareg_samgr_pid() -> u32 {
 /// (SAREG/SACSA/SLRD/SLTX/btx/payload-head). Their ~7k lines/boot of
 /// emit-lock traffic inflate the very latencies they measure — the QPICK
 /// census measured a ~3 ms sender-build window with them armed.
-/// dfx=bindertrace now arms ONLY the passive census (BRTT/QPICK stamps);
+/// rux:bindertrace (retired dfx=bindertrace) now arms ONLY the passive census (BRTT/QPICK stamps);
 /// the print family additionally needs cmdline `binderprobe=1`
 /// (forkprof/syscost-style cmdline key, NOT a new dfx switch).
 fn binder_probe_on() -> bool {
@@ -1004,7 +1004,7 @@ fn binder_probe_on() -> bool {
 }
 
 // ============================================================================
-// 105th RTT census (dfx=bindertrace) — the SA-chain round-trip split.
+// 105th RTT census (rux:bindertrace (retired dfx=bindertrace)) — the SA-chain round-trip split.
 //
 // The 103rd's ladder put +14.1s (89% of the boot gap with the install
 // stream) on the SA chain, with the box 46% idle: every binder
@@ -1122,7 +1122,7 @@ mod rtt_census {
 const RTT_TICKS_PER_US: u64 = crate::config::TIMER_CLOCK_FREQ_HZ / 1_000_000;
 
 // ============================================================================
-// leg-30B: AMS46 — the Gate-1 arsenal (dfx=ams46).
+// leg-30B: AMS46 — the Gate-1 arsenal (rux:ams46 (retired dfx=ams46)).
 //
 // The wall (sc306/307/309/311B/312B/313B): accountmgr's
 // AbilityManagerAdapter::StartUser sends IAbilityManager code 46
@@ -1150,7 +1150,7 @@ const RTT_TICKS_PER_US: u64 = crate::config::TIMER_CLOCK_FREQ_HZ / 1_000_000;
 //   AMS46 census — ~5 s node/proc state: async slot held, parked depth,
 //                  foundation proc todo depth, waiting readers
 //
-// All prints budget-capped; zero cost when dfx=ams46 is off.
+// All prints budget-capped; zero cost when rux:ams46 (retired dfx=ams46) is off.
 // ============================================================================
 
 static AMS46_NODE_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -1179,7 +1179,7 @@ fn ams46_on() -> bool {
 }
 
 // ============================================================================
-// 73rd (accountmgr wedge lane, dfx=txnhunt). The ohw94 decode: accountmgr
+// 73rd (accountmgr wedge lane, rux:txnhunt (retired dfx=txnhunt)). The ohw94 decode: accountmgr
 // tid 810's write at j3354 staged [BC_TRANSACTION(code2, h=0 -> samgr),
 // BC_REPLY(outer txn4392 error parcel)] — the reply was correctly refused
 // why=7 (reference binder.c:3010 parity), the samgr reply txn4456 landed
@@ -1249,7 +1249,7 @@ fn is_acct(pid: u32) -> bool {
 }
 
 // ============================================================================
-// 72nd (death-callback window tracer, dfx=txnhunt). The devmgr founder
+// 72nd (death-callback window tracer, rux:txnhunt (retired dfx=txnhunt)). The devmgr founder
 // class (ohw87/91): the thread that reads a BR_DEAD_BINDER runs the
 // death-callback chain inline (DevSvcManagerOnServiceDied ->
 // RemoveService -> DevSvcManager.mutex held -> NotifyStatus external
@@ -1264,7 +1264,7 @@ fn is_acct(pid: u32) -> bool {
 //     call made by a listener callback).
 // Window opens at DeadBinder staging, closes at BC_DEAD_BINDER_DONE
 // (the image's callback-completion write). Budget-capped; zero cost
-// when dfx=txnhunt is off.
+// when rux:txnhunt (retired dfx=txnhunt) is off.
 // ============================================================================
 static DEATHCB_TIDS: [core::sync::atomic::AtomicU32; 8] =
     [const { core::sync::atomic::AtomicU32::new(0) }; 8];
@@ -1435,7 +1435,7 @@ unsafe fn stage_thread_error(ft: &Arc<BinderThread>, cmd: u32, class_write: bool
 }
 
 // ============================================================================
-// POOL CENSUS (leg-33B, dfx=poolcensus) — reader-exhaustion adjudication
+// POOL CENSUS (leg-33B, rux:poolcensus (retired dfx=poolcensus)) — reader-exhaustion adjudication
 //
 // One line per binder proc with queued todo: todo depth, max_threads,
 // requested_threads, and the worker-pool shape (looper-flag workers split
@@ -1521,7 +1521,7 @@ fn app_child_pids_contains(pid: u32) -> bool {
 /// context-manager target, dead target proc) so "never tried" separates
 /// from "tried and failed silently".
 fn app_txn_fail_print(proc: &BinderProc, why: &str, handle: u64, code: u64) {
-    // 110th: rides dfx=bindertrace with the APPTXN tracer (skip the
+    // 110th: rides rux:bindertrace (retired dfx=bindertrace) with the APPTXN tracer (skip the
     // comm scan entirely on standard boots).
     if !crate::trace::EVENT_BINDERTRACE.armed() {
         return;
@@ -1590,7 +1590,7 @@ pub(crate) struct BinderTxn {
     /// capacity signal, not a lost wake). SAFETY: written under WORLD at
     /// enqueue, read in the PICK-LATE probe under WORLD.
     enq_elig: core::cell::UnsafeCell<u8>,
-    /// 105th RTT census (dfx=bindertrace), ns-domain twins of the
+    /// 105th RTT census (rux:bindertrace (retired dfx=bindertrace)), ns-domain twins of the
     /// jiffies stamps: enq_ns = constructor time (request: enqueue;
     /// reply: submit), pick_ns = server BR_TRANSACTION staging time, 0
     /// until then. Jiffies (10 ms) cannot resolve the 4-5 ms fast-path
@@ -2753,14 +2753,14 @@ pub fn binder_open(file: &crate::fs::File, ctx: BinderCtx) -> i32 {
         let mut w = world_lock();
         w.as_mut().unwrap().procs.push(proc.clone());
     }
-    // dfx=schb: record the new proc for the heartbeat's SC-PROC drain
+    // rux:schb (retired dfx=schb): record the new proc for the heartbeat's SC-PROC drain
     // (no-op unless the switch is armed; never any I/O on this path).
     crate::dfx::schb::note_proc_open(pid);
     // Serial-cleanliness (print-audit lane, 2026-11): binder_open runs
     // once per binder-using process start — on OH boots that is nearly
     // every spawn, so these two lines were a fixed ~1 ms polled-UART tax
     // per process start (the EXITGRP class, e2717687). The info line is
-    // demoted to pr_debug; the sc157 open-probe joins the dfx=syscalltrace
+    // demoted to pr_debug; the sc157 open-probe joins the rux:syscalltrace (retired dfx=syscalltrace)
     // family (the sc156/sc157 hunts re-arm with the flag).
     crate::pr_debug!("binder: pid {} opened the device (proc {})", pid, id);
     // sc157: device-open visibility at warn level (boot loglevel drops
@@ -2848,7 +2848,7 @@ pub fn binder_close(file: &crate::fs::File) -> i32 {
             // serving (UnlockUser logs minutes later), so the close is the
             // event to localize: who closed, what died with it. Rate-
             // limited budget so a chatty boot cannot flood the UART.
-            // 110th: rides dfx=bindertrace (the whole-registry victim
+            // 110th: rides rux:bindertrace (retired dfx=bindertrace) (the whole-registry victim
             // scan + print ran on every fd close of every perf boot).
             if crate::trace::EVENT_BINDERTRACE.armed()
             {
@@ -2914,7 +2914,7 @@ pub fn binder_close(file: &crate::fs::File) -> i32 {
                     // carries dozens of armed refs across holder procs;
                     // see the DRS tap note). Collected (desc, cookie)
                     // pairs print AFTER the qim borrow ends.
-                    // 110th: rides dfx=bindertrace — the foundation
+                    // 110th: rides rux:bindertrace (retired dfx=bindertrace) — the foundation
                     // crash-restart loop printed ~167 of these on every
                     // perf boot (emit + hilogd drain each).
                     static NOTICE_N: core::sync::atomic::AtomicUsize =
@@ -3440,7 +3440,7 @@ pub fn binder_task_died(dying_pid: u32, dying_tgid: u32, dying_tid: u32) {
             // SERVICING (txn stacked) or with undrained work leaks its
             // userspace locks permanently (pthread mutexes are not robust).
             // This detector names every such victim at death time.
-            // 110th: rides dfx=bindertrace (~17 lines on the crash-
+            // 110th: rides rux:bindertrace (retired dfx=bindertrace) (~17 lines on the crash-
             // restart loops of every perf boot).
             if crate::trace::EVENT_BINDERTRACE.armed()
             {
@@ -3746,7 +3746,7 @@ pub fn binder_mmap_handler(
     // Serial-cleanliness (print-audit lane, 2026-11): binder_mmap runs
     // once per binder-using process start — two lines per spawn through
     // the polled UART (the EXITGRP class, e2717687). The sc160 probe
-    // joins the dfx=syscalltrace family (the hunt re-arms with the
+    // joins the rux:syscalltrace (retired dfx=syscalltrace) family (the hunt re-arms with the
     // flag); the info line is demoted to pr_debug.
     if crate::trace::EVENT_SYSCALLTRACE.armed()
     {
@@ -3893,7 +3893,7 @@ pub fn binder_on_tgid_exit(tgid: u32) {
                                         // (reg_tgid exit path) — same class as
                                         // the proc-exit notice. lb51: lockless
                                         // writer + budget (under WORLD).
-                                        // 110th: rides dfx=bindertrace.
+                                        // 110th: rides rux:bindertrace (retired dfx=bindertrace).
                                         static CNOTICE_N: core::sync::atomic::AtomicUsize =
                                             core::sync::atomic::AtomicUsize::new(0);
                                         if crate::trace::EVENT_BINDERTRACE.armed() && CNOTICE_N
@@ -4389,7 +4389,7 @@ unsafe fn holder_forensics(t: &Arc<BinderThread>, out: &mut alloc::string::Strin
 /// One report per wait episode. The first owing process gets a full
 /// per-thread dump (proc todo depth, looper/wait/stack state of every
 /// worker) so the next wedge names the exact thread that ate the wake.
-/// dfx=sleepsnap (b11 appspawn wedge hunt): one line per S-state task —
+/// rux:sleepsnap (retired dfx=sleepsnap) (b11 appspawn wedge hunt): one line per S-state task —
 /// comm/tid/state, the syscall number the thread is parked in, its rip
 /// and first two args, read from the fixed user entry frame at
 /// kernel_stack_top - PT_REGS_SIZE (same contract as the holder-task
@@ -4397,7 +4397,7 @@ unsafe fn holder_forensics(t: &Arc<BinderThread>, out: &mut alloc::string::Strin
 /// requests (write OK, reply never comes, no fork) while its kickdog
 /// thread lives: this names the exact syscall the server main thread is
 /// sleeping in, at khungtaskd cadence. Purely diagnostic; OFF unless
-/// dfx=sleepsnap is on the cmdline.
+/// rux:sleepsnap (retired dfx=sleepsnap) is on the cmdline.
 /// Park-walk latch ring (54th hunt): tgids whose threads get the
 /// ufw/uss user-frame walk in sleep_snapshot. Latched directly on
 /// main-stack futex waits, and from the txn-hang audit for hung-txn
@@ -4756,7 +4756,7 @@ pub fn sleep_snapshot() {
             // file paths, so the raw addresses symbolize offline.
             // Read contract: same as the pollfd decode below (bounded
             // page-table walks of the parker's own memory under the
-            // bucket lock; hunting boots only, dfx=sleepsnap-gated).
+            // bucket lock; hunting boots only, rux:sleepsnap (retired dfx=sleepsnap)-gated).
             #[cfg(feature = "x86_64")]
             if top != 0 {
                 let regs = (top.wrapping_sub(
@@ -5227,7 +5227,7 @@ pub fn sleep_snapshot() {
             // 97th (hp97): pr_warn, not pr_info — the hunt rigs run
             // LOGLEVEL=4 (rig default; the LL7 tax is +55s) and printk
             // drops level>console BEFORE the ring, so the whole census
-            // was invisible on the boots that arm dfx=sleepsnap. Switch-
+            // was invisible on the boots that arm rux:sleepsnap (retired dfx=sleepsnap). Switch-
             // gated path; standard boots never reach here.
             crate::pr_warn!("{}", chunk);
             rest = tail;
@@ -5334,7 +5334,7 @@ pub fn txn_owing_of(tgid: u32, tid: u32) -> (usize, u64, u32) {
     (n, own_txn, own_tid)
 }
 
-/// dfx=txnhunt (leg-27): in-flight sync-txn hang audit, called at the
+/// rux:txnhunt (retired dfx=txnhunt) (leg-27): in-flight sync-txn hang audit, called at the
 /// ~1 Hz timer heartbeat. The 15 s samgr code-7 family (SLOW-TXN census,
 /// queue=0 exec=15020ms) only becomes visible at REPLY time — 15 s too
 /// late to see what the server was doing — and the 60 s khungtaskd
@@ -5350,7 +5350,7 @@ pub fn txn_owing_of(tgid: u32, tid: u32) -> (usize, u64, u32) {
 /// the hung servers' PROCESSES, printed as TXN-HANG-OUT lines — the
 /// synchronous fan-out chain the handler is stuck behind, named
 /// end-to-end. Rate-capped to one burst per 5 s; bounded (8 + 8 lines);
-/// zero cost when dfx=txnhunt is off.
+/// zero cost when rux:txnhunt (retired dfx=txnhunt) is off.
 pub fn txn_hang_audit() {
     if !crate::trace::EVENT_TXNHANG.armed() {
         return;
@@ -6339,7 +6339,7 @@ fn bc_name(cmd: u32) -> &'static str {
     }
 }
 
-/// dfx=txnhunt extension (holder-chain lane): BWR-park audit. The FFRT
+/// rux:txnhunt (retired dfx=txnhunt) extension (holder-chain lane): BWR-park audit. The FFRT
 /// mass-park wedge face (480 census rows in ffrt::mutexPrivate::wait,
 /// libffrt 0xce0c7) names the WAITERS, never the HOLDER — the holder is
 /// itself asleep mid-critical-section, and the two park sites it can be
@@ -6374,7 +6374,7 @@ fn bc_name(cmd: u32) -> &'static str {
 ///      printed. Snapshot under WORLD (sc89: no task lookups / user
 ///      reads / prints under the guard); task forensics + user BWR
 ///      decode + prints happen after the guard drops (sc207). Bounded
-///     (24 lines + 1 census line); zero cost when dfx=txnhunt is off.
+///     (24 lines + 1 census line); zero cost when rux:txnhunt (retired dfx=txnhunt) is off.
 pub fn bwr_park_audit() {
     if !crate::trace::EVENT_TXNHANG.armed() {
         return;
@@ -6768,7 +6768,7 @@ pub fn bwr_park_audit() {
         // sc57 (57th): FFRT waiter-chain walk for futex-parked binder
         // threads — names the contested ffrt::mutex/shared_mutex whose
         // unlock never comes (the waiter-pool census misses waiters
-        // parked after the pool fills). dfx=fuxstuck gates the walker.
+        // parked after the pool fills). rux:fuxstuck (retired dfx=fuxstuck) gates the walker.
         let chain_txt = if park == "FUTEX"
             && crate::trace::EVENT_FUXSTUCK.armed()
             && !task.is_null()
@@ -7182,7 +7182,7 @@ pub fn bwr_park_audit() {
     }
 }
 
-/// dfx=ams46 (leg-30B): ~5 s census of the latched AMS node + its
+/// rux:ams46 (retired dfx=ams46) (leg-30B): ~5 s census of the latched AMS node + its
 /// foundation process. Prints ONLY while there is pending work on the
 /// node/proc (async slot held, txns parked, or proc todo non-empty), so
 /// a healthy quiesced draw costs zero lines. The census is the
@@ -7358,7 +7358,7 @@ pub fn ams46_audit() {
     }
 }
 
-/// POOL CENSUS (leg-33B, dfx=poolcensus): every ~5 s, one line per
+/// POOL CENSUS (leg-33B, rux:poolcensus (retired dfx=poolcensus)): every ~5 s, one line per
 /// binder proc that has queued todo work — the reader-exhaustion
 /// adjudication backdrop (sc329B: foundation proc todo grew while every
 /// OS_IPC reader was parked as a client and the pool never grew).
@@ -7867,7 +7867,7 @@ fn thread_census_of(t: &Arc<BinderThread>) -> alloc::string::String {
     s
 }
 
-/// dfx=schb heartbeat counts (sc-series quiet-quiet soft-wedge hunt):
+/// rux:schb (retired dfx=schb) heartbeat counts (sc-series quiet-quiet soft-wedge hunt):
 /// cheap per-beat binder summary — live proc count, threads parked in
 /// the blocking binder read, and waiters older than 15s (the rekick
 /// threshold; a healthy boot parks readers for 1-3s at most). Read-only
@@ -7902,7 +7902,7 @@ pub fn schb_beat() -> (usize, usize, usize) {
     (procs, waiters, waiters15)
 }
 
-/// dfx=schb wedge census: EVERY read-wait binder thread regardless of
+/// rux:schb (retired dfx=schb) wedge census: EVERY read-wait binder thread regardless of
 /// age. stall_report only prints waiters older than STALL_SECS (120s);
 /// the census fires at pid-plateau+60s where the wedge's waiters are
 /// younger. Formats under WORLD (no I/O); the caller emits the lines via
@@ -8617,7 +8617,7 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
             // token); the pid field stays t_from-gated like the
             // reference.
             let (sender_pid, token, ftoken) = {
-                // dfx=syscalltrace: the GET_SENDER_INFO round-trip trace.
+                // rux:syscalltrace (retired dfx=syscalltrace): the GET_SENDER_INFO round-trip trace.
                 // Ungated it prints twice per call — samgr-side polls make
                 // this the highest-rate binder ioctl of an OH boot, and
                 // hilogd.rd_kmsg then eats a vCPU copying it to /data.
@@ -9362,7 +9362,7 @@ fn binder_thread_write(
                         }
                     }
                 }
-                // dfx=bindertrace: payload head for small parcels — the
+                // rux:bindertrace (retired dfx=bindertrace): payload head for small parcels — the
                 // interface token ("ohos.system...." / hdf names) is ASCII
                 // at the head and names the target interface; replies carry
                 // the result int. Read BEFORE the world lock (uaccess).
@@ -10778,7 +10778,7 @@ fn binder_transaction(
             txn_id = world.next_id;
             world.next_id += 1;
 
-            // dfx=bindertrace: one line per resolved transaction — the
+            // rux:bindertrace (retired dfx=bindertrace): one line per resolved transaction — the
             // HDF devmgr↔devhost handshake debugging needed the actual
             // conversation (who calls whom, which codes, oneway or not),
             // not just the failures. 105th: print family behind
@@ -11247,7 +11247,7 @@ fn binder_transaction(
     // pristine OH boot through acquire_emit_lock — a top-5 kernel
     // site in the SA-window hiperf record — while the hunt it served
     // (SA 501 registration) is closed. Hunts needing SAREG/SLRD
-    // pairing arm dfx=bindertrace binderprobe=1 (105th: the print
+    // pairing arm rux:bindertrace (retired dfx=bindertrace) binderprobe=1 (105th: the print
     // family left plain bindertrace to the passive census).
     if crate::trace::EVENT_BINDERTRACE.armed()
         && binder_probe_on()
@@ -11575,7 +11575,7 @@ fn binder_transaction(
         }
     }
 
-    // 74th installs lane (dfx=txnhunt, oh-launcher hunt): the BMS
+    // 74th installs lane (rux:txnhunt (retired dfx=txnhunt), oh-launcher hunt): the BMS
     // first-boot install stream posts per-bundle tasks to the separate
     // `installs` daemon over binder (BundleInstallerHost). 71.6
     // evidence: every fresh roll since cg17 completes the scan
@@ -11647,7 +11647,7 @@ fn binder_transaction(
         }
     }
 
-    // leg-30B (dfx=ams46): Gate-1 arsenal ENQ hook. Match the
+    // leg-30B (rux:ams46 (retired dfx=ams46)): Gate-1 arsenal ENQ hook. Match the
     // IAbilityManager interface token on the sender's parcel head,
     // latch the AMS node id + foundation pid on first sight, and ring
     // every code-46 (StartUser) send for read/free/retire correlation.
@@ -11703,7 +11703,7 @@ fn binder_transaction(
         }
     }
 
-    // leg-30B5 RIPPLE (dfx=ams46): inside the 120 s window after the
+    // leg-30B5 RIPPLE (rux:ams46 (retired dfx=ams46)): inside the 120 s window after the
     // traced code-46 was READ, print every transaction whose sender or
     // receiver is the foundation proc (AMS46_TPID) or the StartUser
     // sender proc (AMS46_SENDER). Budget 640; zero lines outside the
@@ -11883,7 +11883,7 @@ fn binder_transaction(
                 .trim_end_matches('\0');
             // 110th: the RS tracer sub-block (32-byte parcel copy +
             // hex format + ~112 print lines per perf boot) rides
-            // dfx=bindertrace.
+            // rux:bindertrace (retired dfx=bindertrace).
             if comm_now.starts_with("render_servi")
                 && crate::trace::EVENT_BINDERTRACE.armed()
             {
@@ -11958,7 +11958,7 @@ fn binder_transaction(
         ];
         let mut name_hit = false;
         // 110th: the 192-byte parcel copy + name match ran on EVERY
-        // transaction of every perf boot; rides dfx=bindertrace (the
+        // transaction of every perf boot; rides rux:bindertrace (retired dfx=bindertrace) (the
         // devmgr SAREG latch above stays live — the FXDV tracer in
         // futex.rs keys on it).
         if !reply
@@ -12406,7 +12406,7 @@ fn binder_transaction(
                     // sync branch below for the rationale). 110th: the
                     // whole block (comm scan + print, ~320 lines in the
                     // 9-12s spawn window of every perf boot) rides the
-                    // dfx=bindertrace gate like the rest of the tracer.
+                    // rux:bindertrace (retired dfx=bindertrace) gate like the rest of the tracer.
                     if crate::trace::EVENT_BINDERTRACE.armed()
                     {
                         let comm = crate::sched::current()
@@ -12576,7 +12576,7 @@ fn binder_transaction(
                 // whose sender is app-family or whose target pid is a
                 // registered forked appspawn child: names the last hop
                 // that ever targeted a parked child. 110th: rides the
-                // dfx=bindertrace gate with the oneway half above.
+                // rux:bindertrace (retired dfx=bindertrace) gate with the oneway half above.
                 if crate::trace::EVENT_BINDERTRACE.armed()
                 {
                     let comm = crate::sched::current()
@@ -13682,7 +13682,7 @@ fn binder_thread_read(
                             // transaction is being read out to its
                             // receiving thread (BR_TRANSACTION/BR_REPLY).
                             crate::trace::trace_binder_transaction_received(t.id);
-                            // leg-30B (dfx=ams46): read-side trace — a
+                            // leg-30B (rux:ams46 (retired dfx=ams46)): read-side trace — a
                             // foundation thread picked up the traced
                             // code-46 StartUser. This line is the
                             // kernel-delivery-COMPLETE marker: everything
@@ -14151,7 +14151,7 @@ fn binder_thread_read(
         // (Linux "goto retry").
     }
 
-    // POOL-SPAWN proof print (dfx=poolcensus): one line per emission,
+    // POOL-SPAWN proof print (rux:poolcensus (retired dfx=poolcensus)): one line per emission,
     // rate-capped, OUTSIDE the WORLD guard. Names the proc whose read
     // carried the BR_SPAWN_LOOPER request — the live counterpart of the
     // census lines.

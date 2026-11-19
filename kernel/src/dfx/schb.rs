@@ -2,7 +2,7 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! Soft-wedge heartbeat (`dfx=schb`, sc-series quiet-quiet hunt, session R).
+//! Soft-wedge heartbeat (`rux:schb (retired dfx=schb)`, sc-series quiet-quiet hunt, session R).
 //!
 //! The quiet-quiet boot (quietcon + loglevel=3) has a second failure shape
 //! the classic-race probes cannot see: the pid flow stalls in the
@@ -102,7 +102,7 @@ static PROC_RING: crate::sync::spinlock::Spinlock<[(u64, u32, u64); PROC_RING_LE
 static PROC_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Record a binder-proc creation (called from `binder_open`). No-op
-/// unless `dfx=schb`. Bounded cost: one switch load + one spinlock store.
+/// unless `rux:schb (retired dfx=schb)`. Bounded cost: one switch load + one spinlock store.
 pub fn note_proc_open(pid: u32) {
     if !crate::trace::EVENT_SCHB.armed() {
         return;
@@ -135,7 +135,7 @@ static PACE_SLOW: AtomicU64 = AtomicU64::new(0);
 
 /// Record one COW fault resolution attempt. `j0` is the jiffies value
 /// captured at handle_cow_fault entry (callers pass it so the exit-side
-/// cost stays one read + adds). No-op unless `dfx=schb`.
+/// cost stays one read + adds). No-op unless `rux:schb (retired dfx=schb)`.
 pub fn note_cow(j0: u64) {
     if !crate::trace::EVENT_SCHB.armed() {
         return;
@@ -180,7 +180,7 @@ fn pace_snapshot() -> (u64, u64, u64, u64, u64, u64) {
 /// Called from the oom killer's "no killable processes" path: raw UART,
 /// allocation-free, counters only — safe in any context, once per boot
 /// regardless of dfx switches (NET_PAGES is always live; the kstack
-/// high-water needs dfx=schb to have armed its probe).
+/// high-water needs rux:schb (retired dfx=schb) to have armed its probe).
 pub fn oom_anat_dump() {
     use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
     static DONE: AtomicBool = AtomicBool::new(false);
@@ -253,7 +253,7 @@ pub fn oom_anat_dump() {
     crate::mm::small_alloc::census_peek3(7);
 }
 
-/// Start the schbd kthread. Gated on the `dfx=schb` switch; called from
+/// Start the schbd kthread. Gated on the `rux:schb (retired dfx=schb)` switch; called from
 /// the same late-boot slot as khungtaskd (secondaries online, timer
 /// wakeups routable).
 pub fn init() {
@@ -432,7 +432,7 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
 
         // Leg-16 anatomy line: decomposes heapK at the floor. procs =
         // tgid leaders; kN/kK/kHW = live kernel stacks / their bytes /
-        // boot-max high-water (probe armed by dfx=schb); smallK vs
+        // boot-max high-water (probe armed by rux:schb (retired dfx=schb)); smallK vs
         // smallPgK = live small-object estimate vs slab pages actually
         // held (the delta is packing slack); oN = buddy per-order live
         // pages (o5 = the 128KB kernel-stack class on this config).
@@ -623,11 +623,11 @@ fn wedge_census(t_secs: u64, pidmax: u32, plateau_secs: u64) {
         crate::printk::set_console_loglevel(4);
     }
     crate::ipc::binder::stall_report();
-    // dfx=sleepsnap names the syscall every S-state task is parked in —
+    // rux:sleepsnap (retired dfx=sleepsnap) names the syscall every S-state task is parked in —
     // the wedge census's blind spot is a server parked OUTSIDE binder
     // (samgr in sc201: not runnable, not binder-waiting, clients owed
     // 200s+). sleep_snapshot is self-gated on its own dfx switch; boots
-    // that arm dfx=schb,sleepsnap get its census inside this lifted
+    // that arm rux:schb (retired dfx=schb),sleepsnap get its census inside this lifted
     // window (its khungtaskd-driven prints at loglevel 3 are dropped
     // pre-ring, so the 60s cadence costs no UART burn).
     crate::ipc::binder::sleep_snapshot();

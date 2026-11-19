@@ -74,7 +74,7 @@ static INPUT_ISR_BARS: [core::sync::atomic::AtomicU64; 2] =
 /// avail ring, so the device can keep streaming — and pushed into the
 /// evdev buffers (which wakes the poll/select/epoll waiters) only after
 /// every device lock is dropped.
-/// dfx=inputtrace tick probe: drain both event queues from timer
+/// rux:inputtrace (retired dfx=inputtrace) tick probe: drain both event queues from timer
 /// context. If IN-EV prints here while no hard IRQ ever scheduled the
 /// tasklet, the INTx wiring is the break; if the queues are empty, the
 /// device never wrote (QEMU-side drop).

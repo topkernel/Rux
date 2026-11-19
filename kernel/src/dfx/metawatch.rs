@@ -1,4 +1,4 @@
-//! Buddy-meta shadow scan (dfx=metawatch) — wildwrite-hunt line.
+//! Buddy-meta shadow scan (rux:metawatch (retired dfx=metawatch)) — wildwrite-hunt line.
 //!
 //! The unified-engine hypothesis (session 4-12 archives) gives the wild
 //! writer two downstream faces: kernel-STATIC victims (watched by the

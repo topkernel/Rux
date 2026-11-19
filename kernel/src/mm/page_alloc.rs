@@ -419,7 +419,7 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                     super::kswapd::wakeup_kswapd(order as i32);
                 }
                 // Leg-15 pace: one tick per slowpath entry (zone fastpath
-                // failed), dfx=schb-gated counter only.
+                // failed), rux:schb (retired dfx=schb)-gated counter only.
                 crate::dfx::schb::note_slow();
 
                 // Synchronous direct reclaim (Linux __alloc_pages_slowpath):
@@ -1191,7 +1191,7 @@ pub fn free_pages(addr: usize, order: usize) {
     // a teardown/unmap leaf put reaching 0 on a cache-owned frame — the
     // phantom-put's free face; first boot's capture #1 ring: PUT
     // old=1->0 with NO matching get since the frame's cache insert).
-    // Under dfx=mmforensics: capture AT this moment (the rings still
+    // Under rux:mmforensics (retired dfx=mmforensics): capture AT this moment (the rings still
     // hold the fresh evidence — the install sites, the transition
     // sequence) and REFUSE the free (quarantine-leak), so the frame
     // never re-enters circulation and scrambles the trail.
@@ -1301,7 +1301,7 @@ pub fn free_pages(addr: usize, order: usize) {
     //       from free contexts wedges the box).
     //   owner != dying pid : foreign free — the frame may still be mapped
     //       by a live process (its r-x text); recycling it is the SIGILL
-    //       mechanism. Under dfx=mmforensics refuse the free (leak) and
+    //       mechanism. Under rux:mmforensics (retired dfx=mmforensics) refuse the free (leak) and
     //       print the evidence; with the switch off, clear the stamp and
     //       keep the historical allocator behavior.
     // The walk-path (exit/unmap) frees are adjudicated properly in

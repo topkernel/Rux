@@ -1,4 +1,4 @@
-//! Slow-kernel-entry audit (leg-33B, `dfx=slowtask`).
+//! Slow-kernel-entry audit (leg-33B, `rux:slowtask (retired dfx=slowtask)`).
 //!
 //! sc329B adjudication gap: the TXN-HANG lines name the SERVER thread of
 //! a hung transaction and its LAST kernel entry (sys/rip), but nothing
@@ -145,7 +145,7 @@ unsafe fn audit(now: u64) {
         // SAFETY: diagnostic reads under the for_each_task contract.
         let tk = unsafe { &*task };
         let st_bits = tk.state().bits();
-        // Lost-park all-task census (dfx=lostpark): one unfiltered row
+        // Lost-park all-task census (rux:lostpark (retired dfx=lostpark)): one unfiltered row
         // per task every audit round while wedged-hunting — answers
         // "which bookkeeping class does the vanished task rest in"
         // (runqueue, slots, wakeable state, pid-hash presence).
@@ -176,7 +176,7 @@ unsafe fn audit(now: u64) {
         }
         let sleeping = st_bits & 0x3 != 0; // INTERRUPTIBLE | UNINTERRUPTIBLE
         if !sleeping {
-            // Lost-park census (fix-lostpark, dfx=lostpark): a RUNNING
+            // Lost-park census (fix-lostpark, rux:lostpark (retired dfx=lostpark)): a RUNNING
             // task owned by no CPU slot is the R46 phantom family — on
             // x86_64 the idle-loop harvester is riscv64-gated, so nothing
             // else ever names or heals it. Report it with the same
@@ -234,7 +234,7 @@ unsafe fn audit(now: u64) {
         };
         if sys == 0 {
             // Not a syscall entry (interrupt frame) — skip, except for
-            // the lost-park census (dfx=lostpark): a USER task parked
+            // the lost-park census (rux:lostpark (retired dfx=lostpark)): a USER task parked
             // under an interrupt frame never re-enters its wait loop's
             // recheck and no wake path names it — the vanished-task
             // signature of the ping-pong wedge. Name it once per audit

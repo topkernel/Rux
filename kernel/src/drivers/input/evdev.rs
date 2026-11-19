@@ -147,7 +147,7 @@ pub struct EvdevDevice {
     pub open_file_ids: Spinlock<[u64; 4]>,
     /// Number of valid entries in `open_file_ids`.
     pub open_file_count: core::sync::atomic::AtomicU32,
-    /// Events pushed since boot (dfx=inputtrace counter).
+    /// Events pushed since boot (rux:inputtrace (retired dfx=inputtrace) counter).
     pub events_pushed: core::sync::atomic::AtomicU32,
     /// Device ID
     pub id: InputId,
@@ -273,7 +273,7 @@ impl EvdevDevice {
 /// Push event (called from softirq context)
 pub fn push_event(&self, event: InputEvent) {
         {
-            // dfx=inputtrace: the input arrival trace (release-visible via
+            // rux:inputtrace (retired dfx=inputtrace): the input arrival trace (release-visible via
             // the raw UART path — this is the datum that says whether the
             // guest's event source reaches the device at all). Line
             // rides the taskdump funnel (obs-hygiene): one atomic write,
@@ -730,7 +730,7 @@ fn evdev_file_read(file: &File, buf: &mut [u8]) -> isize {
                         itt_msg(b"\n");
                     }
                 }
-                // dfx=inputtrace: the userspace READ hop — pid, which node,
+                // rux:inputtrace (retired dfx=inputtrace): the userspace READ hop — pid, which node,
                 // how many events remained after this one. If this prints
                 // during a gesture the delivery chain is complete and any
                 // remaining failure is consumer-side semantics.
@@ -785,7 +785,7 @@ fn evdev_file_read(file: &File, buf: &mut [u8]) -> isize {
 /// Backstop poll interval for the blocking read sleep.
 const EVDEV_READ_POLL_MS: u64 = 10;
 
-/// dfx=inputtrace: announce which node the guest opened. Also records
+/// rux:inputtrace (retired dfx=inputtrace): announce which node the guest opened. Also records
 /// input:evdev_open (hop 2a of the input chain — a consumer opened the
 /// node; pid/comm name the opener in the trace record header and the
 /// serial echo). `node` is the devfs minor (64/65/66).
@@ -882,7 +882,7 @@ fn evdev_file_poll(file: &File, events: u16) -> u16 {
         if device.has_event() {
             ready |= POLLIN | POLLRDNORM;
         }
-        // dfx=inputtrace (leg-9 epoll hunt): one line per POLL dispatch,
+        // rux:inputtrace (retired dfx=inputtrace) (leg-9 epoll hunt): one line per POLL dispatch,
         // raw-console (loglevel-proof; pr_info is dropped at loglevel=3).
         // The r13ep2/r13ep3 A/B proved the virtqueues ARE drained during
         // an epoll-only boot (14 INPTRC) yet epoll_wait returned idle —
@@ -1085,7 +1085,7 @@ pub fn evdev_file_ioctl(file: &File, cmd: u32, arg: usize) -> Option<i64> {
         return None;
     }
 
-    // dfx=inputtrace: the capability probe — what we hand to the input
+    // rux:inputtrace (retired dfx=inputtrace): the capability probe — what we hand to the input
     // framework for classification. A device whose EVIOCGBIT(0) misses
     // EV_SYN/EV_KEY/EV_ABS, or whose name/id ioctls return garbage, is
     // rejected by consumers after open (opened-but-never-read is the
@@ -1604,7 +1604,7 @@ pub fn push_input_event(is_pointer: bool, event: InputEvent) {
         }
     }
 
-    // dfx=inputtrace: payload trace to hunt phantom event streams. Prints
+    // rux:inputtrace (retired dfx=inputtrace): payload trace to hunt phantom event streams. Prints
     // every event with a monotonically increasing ordinal so serial-log
     // frequency analysis works; rate-limited so a flooding stream cannot
     // wedge the serial console; gated by a runtime switch (default OFF).
@@ -1848,7 +1848,7 @@ fn current_pid_tgid() -> (u64, u64) {
     }
 }
 
-// Raw-console writers for the dfx=inputtrace path (same shape as
+// Raw-console writers for the rux:inputtrace (retired dfx=inputtrace) path (same shape as
 // sched/wakewatch's ww_msg/ww_u64): printk is unusable here because the
 // trace must survive loglevel=3 boots, and the callers can be in IRQ
 // context, so no printk locks.

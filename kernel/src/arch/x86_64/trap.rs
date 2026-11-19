@@ -980,7 +980,7 @@ pub fn current_task_pt_regs() -> Option<&'static mut PtRegs> {
 #[no_mangle]
 pub extern "C" fn x86_bad_frame_exit(regs: *mut PtRegs) -> ! {
     // Forensics: full scribble crash capture (raw console; gated on
-    // dfx=scribble inside crash_report itself).
+    // rux:scribble (retired dfx=scribble) inside crash_report itself).
     if !regs.is_null() {
         // SAFETY: diagnostic reads of the frame trap_exit just validated
         // (and rejected); the memory is the current task's stack.
@@ -1216,7 +1216,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
         // (85% of a 400MB serial log) and slowed the whole boot enough
         // to cost samgr the hdf_devmgr race. The remaining per-trap
         // line (syscall entries are the overwhelming majority) is
-        // likewise UART-flooding: it now needs dfx=steptrace.
+        // likewise UART-flooding: it now needs rux:steptrace (retired dfx=steptrace).
         let routine_ipi = !regs_ref.user_mode()
             && (0xE0..=0xE5).contains(&vector);
         if !routine_ipi
@@ -1374,7 +1374,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                         core::sync::atomic::Ordering::Relaxed,
                     );
                     // 118th param-stall conviction dump (one-shot once
-                    // jiffies >= 30 000 = 300 s, dfx=schedtrace-gated): the
+                    // jiffies >= 30 000 = 300 s, rux:schedtrace (retired dfx=schedtrace)-gated): the
                     // OH ladder stall reduces to init handling zero
                     // param-set messages — this dumps init's fd inventory +
                     // socket queue depths + epoll interest sets + the trace
@@ -1511,7 +1511,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
         }
     }
 
-    // Leak-origin tripwire (dfx=leakhunt): this frame returns to
+    // Leak-origin tripwire (rux:leakhunt (retired dfx=leakhunt)): this frame returns to
     // userspace, so the task's preempt_count must be exactly 0 (no
     // in-flight IRQ, every syscall-path guard dropped). A nonzero count
     // here is a leaked PREEMPT_OFFSET caught at the earliest possible
@@ -2001,7 +2001,7 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
         }
     }
 
-    // 1.5 Scribble hunter (dfx=scribble): GS-pairing tripwire + verify
+    // 1.5 Scribble hunter (rux:scribble (retired dfx=scribble)): GS-pairing tripwire + verify
     // quiescent tasks' tracked scheduling fields against their shadows +
     // scheduler-consistency scan (double-run seed detection).
     // Throttled inside; no-op unless the runtime switch is on.
@@ -3938,7 +3938,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
             // Forensic ring tail: the last 12 completed syscalls before
             // the crash (pid/nr/a0/ret), oldest first. Identifies the
             // in-flight syscall for interrupt-time crashes. The ring is
-            // recorded only under dfx=sysring (perf lane 2026-11) — say
+            // recorded only under rux:sysring (retired dfx=sysring) (perf lane 2026-11) — say
             // so instead of replaying a stale/zero ring.
             if crate::trace::EVENT_SYSRING.armed() {
                 use crate::syscall::dispatch::{SYSCALL_CURSOR, SYSCALL_RING};
@@ -3960,7 +3960,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
                     crate::console::uart_putc_raw(b'\n');
                 }
             } else {
-                for &b in b"kp-sys ring off (boot with dfx=sysring)\n" {
+                for &b in b"kp-sys ring off (boot with rux:sysring (retired dfx=sysring))\n" {
                     crate::console::uart_putc_raw(b);
                 }
             }
@@ -4240,7 +4240,7 @@ fn utime_sample_rip(rip: u64, comm: &[u8; 16]) {
     }
 }
 
-/// Periodic report (dfx=ripsample): the launcher's user-rip histogram
+/// Periodic report (rux:ripsample (retired dfx=ripsample)): the launcher's user-rip histogram
 /// + utime/stime split + the kernel-mode focus table. Self-throttled
 /// to one print every 60 s.
 pub fn utime_ripsample_report() {

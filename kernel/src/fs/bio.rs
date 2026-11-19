@@ -630,7 +630,7 @@ impl BlockCache {
         }
         // bucket lock released; entry is unpinnable and unhashed
 
-        // dfx=exthunt: the victim left the hash — from here until the
+        // rux:exthunt (retired dfx=exthunt): the victim left the hash — from here until the
         // Phase-4 sync lands, every lookup of this key misses and may
         // fabricate a fresh entry over stale disk (the unhashed-victim
         // window; see the tracers in ext4/extent.rs).
@@ -798,7 +798,7 @@ impl BlockCache {
                         // Being evicted: treat as not found — pinning it
                         // would hand out a buffer that is about to be
                         // freed (R7-C1 resurrection race).
-                        // dfx=exthunt: same-key eviction = miss-causing
+                        // rux:exthunt (retired dfx=exthunt): same-key eviction = miss-causing
                         // event (see bread_async Phase 1).
                         if entry.key == (device_major, device_minor, blocknr) {
                             skipped_evicting = true;
@@ -808,7 +808,7 @@ impl BlockCache {
                         continue;
                     }
                     if entry.key == (device_major, device_minor, blocknr) {
-                        // dfx=exthunt: a SECOND live entry for the same
+                        // rux:exthunt (retired dfx=exthunt): a SECOND live entry for the same
                         // block forks the buffer-cache view — writers and
                         // readers can land on different copies (the
                         // zzprobe4/ftest04 extent-revert family). Count
@@ -935,7 +935,7 @@ impl BlockCache {
             }
 
             // Phase 2: Read from disk (no locks held)
-            // dfx=exthunt: fresh-entry fabrication, sync path.
+            // rux:exthunt (retired dfx=exthunt): fresh-entry fabrication, sync path.
             crate::fs::ext4::extent::exthunt_fab(blocknr, skipped_evicting, true);
             let mut bh = Box::new(BufferHead::new(blocknr, self.block_size));
 
@@ -1556,7 +1556,7 @@ pub fn bread_async(
                 // R9-9: same guards as get() — skip entries being evicted
                 // and dead (freed/reused) BufferHeads.
                 if entry.evicting {
-                    // dfx=exthunt: an evicting entry with OUR key is the
+                    // rux:exthunt (retired dfx=exthunt): an evicting entry with OUR key is the
                     // miss-causing event — its Phase-4 sync may not have
                     // landed, so a Phase-2 fabrication would read stale
                     // disk over a block whose only dirty copy is the
@@ -1630,7 +1630,7 @@ pub fn bread_async(
                     // wake-nested-in-a-driver-lock site; INV-LOCK-6).
                     drop(lru);
                     drop(bucket);
-                    // dfx=exthunt: block-cache hit truth (buffer pointer +
+                    // rux:exthunt (retired dfx=exthunt): block-cache hit truth (buffer pointer +
                     // first bytes) — see exthunt_rxbit/exthunt_rxbhit.
                     // SAFETY: hit_bh passed the b_data length guard above.
                     unsafe {
@@ -1663,7 +1663,7 @@ pub fn bread_async(
         // Phase 2: Cache miss — submit async I/O (no lock held).
         // Uninit buffer: the device DMA fills every byte; zero-filling 4 KiB
         // per block was measurable waste on the batch read-ahead path.
-        // dfx=exthunt: fresh-entry fabrication (adjudicates the unhashed
+        // rux:exthunt (retired dfx=exthunt): fresh-entry fabrication (adjudicates the unhashed
         // evicting-victim race — see the tracers in ext4/extent.rs).
         crate::fs::ext4::extent::exthunt_fab(blocknr, skipped_evicting, false);
         let block_size = cache.block_size;
@@ -1851,7 +1851,7 @@ pub fn block_cached(device: &'static blkdev::GenDisk, blocknr: u64) -> bool {
         let cache = get_block_cache();
         let index = cache.hash_index(device_major, device_minor, blocknr);
         let bucket = cache.buckets[index].lock_irqsave();
-        // dfx=exthunt: detect the guard's blind spot under the lock (an
+        // rux:exthunt (retired dfx=exthunt): detect the guard's blind spot under the lock (an
         // evicting same-key entry makes this lookup return false while the
         // victim's dirty data may not be on disk yet); print after release.
         let mut evicting_match = false;

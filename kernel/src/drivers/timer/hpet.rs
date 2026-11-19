@@ -56,7 +56,7 @@ const CFG_ENABLE: u32 = 1;
 static BASE: AtomicU64 = AtomicU64::new(0);
 /// wildwrite-hunt guard cluster: the QUIET-after-init timekeeper
 /// statics live in a page-exclusive 2-page region (page 0 = canary
-/// fill, page 1 = the members) so dfx=wildwatch can clear RW on their
+/// fill, page 1 = the members) so rux:wildwatch (retired dfx=wildwatch) can clear RW on their
 /// PTEs after init — a wild store then page-faults at the writer's RIP
 /// instead of silently landing (b77/wt1 smashed BASE/BASE_LOCKED here;
 /// read-side healing survives, attribution did not exist). The hot
@@ -226,7 +226,7 @@ fn validated_read_base() -> usize {
     good as usize
 }
 
-/// True while dfx=wildwatch holds the guard cluster read-only.
+/// True while rux:wildwatch (retired dfx=wildwatch) holds the guard cluster read-only.
 fn guard_armed() -> bool {
     #[cfg(feature = "x86_64")]
     {

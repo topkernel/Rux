@@ -1257,7 +1257,7 @@ fn syslog_clear() {
 
 /// Newest `n` records, oldest-first, syslog-style one line each.
 ///
-/// rux:schb wedge census (tracepoint; retired cmdline token was dfx=schb) (sc-series quiet-quiet hunt): quietcon diverts
+/// rux:schb wedge census (tracepoint; retired cmdline token was rux:schb (retired dfx=schb)) (sc-series quiet-quiet hunt): quietcon diverts
 /// the userspace /dev/console stream into this ring, so the tail around
 /// a soft-wedge is the userspace last-known-good boundary. Records are
 /// COPIED out under the ring lock (bounded hold) and formatted after it

@@ -167,7 +167,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
     let cr2 = crate::arch::cpu::read_cr2();
     let fault_addr = VirtAddr::new(cr2);
 
-    // Per-fault line gated behind dfx=steptrace: a full OH boot takes
+    // Per-fault line gated behind rux:steptrace (retired dfx=steptrace): a full OH boot takes
     // millions of user faults (demand paging every .so page); left on,
     // these three lines per fault dominated the serial log and slowed
     // TCG enough to change service-start races.
@@ -542,7 +542,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
             regs.rip,
             crate::sched::get_current_pid()
         );
-        // dfx=wildwatch (wildwrite-hunt): a write fault inside a guarded
+        // rux:wildwatch (retired dfx=wildwatch) (wildwrite-hunt): a write fault inside a guarded
         // region IS the wild writer caught in the act — banner it so the
         // serial line is unmissable, then let the normal printer below
         // carry rip + the rbp walk into the KERNPANIC dump.

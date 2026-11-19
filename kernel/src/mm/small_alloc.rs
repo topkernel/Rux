@@ -191,7 +191,7 @@ struct SmallCache {
     /// lb260/lb261 OH allocator-freeze) — nonzero means the wild-write
     /// producer struck this class's list.
     walk_cycles: AtomicUsize,
-    /// dfx=allocwatch section meter: max slow-path section duration
+    /// rux:allocwatch (retired dfx=allocwatch) section meter: max slow-path section duration
     /// (TSC cycles) and count of sections >10 ms (25M cycles @2.5GHz).
     slow_max_cyc: AtomicU64,
     slow_over_10ms: AtomicU64,
@@ -374,7 +374,7 @@ pub fn alloc(size: usize, align: usize) -> *mut u8 {
     let cache = &CACHES[ci];
     let mut first: *mut u8 = core::ptr::null_mut();
     let _g = cache.lock.lock_irqsave();
-    // dfx=allocwatch: cross-CPU holder stamp (frozen-holder naming; the
+    // rux:allocwatch (retired dfx=allocwatch): cross-CPU holder stamp (frozen-holder naming; the
     // holder's own tick is dead at IF=0 — see dfx/allocwatch.rs) + the
     // section-duration meter (lb268: one bounded section held 300 ms of
     // real KVM execution — name the cost class).
@@ -405,7 +405,7 @@ pub fn alloc(size: usize, align: usize) -> *mut u8 {
         // directly under the lock, no row touched.
         first = alloc_locked(ci, heap_start);
     }
-    // dfx=allocwatch section meter (see _t0 above). lock_holds is
+    // rux:allocwatch (retired dfx=allocwatch) section meter (see _t0 above). lock_holds is
     // counted AFTER the guard drops (106th): it is a shared-line RMW —
     // inside the irqsave window it also extended every section's IF=0
     // span; the count itself only needs the section to have happened.
@@ -710,7 +710,7 @@ fn flush_batch(entries: &[usize], ci: usize, heap_start: usize) {
     let mut ret: [usize; MAG_DEPTH + 1] = [0; MAG_DEPTH + 1]; // pages to buddy-free after unlock
     let mut nret = 0usize;
     let _g = cache.lock.lock_irqsave();
-    // dfx=allocwatch: cross-CPU holder stamp (see dfx/allocwatch.rs).
+    // rux:allocwatch (retired dfx=allocwatch): cross-CPU holder stamp (see dfx/allocwatch.rs).
     let _aw = crate::dfx::allocwatch::guard(
         crate::dfx::allocwatch::SITE_SMALL_ALLOC,
         ci as u8,
@@ -834,7 +834,7 @@ pub fn live_stats_kib() -> (u64, u64) {
 /// free). Object headers carry vtables/magic/locks that identify the
 /// owning type — the census counts say WHICH CLASS holds the heap, this
 /// says WHICH TYPE fills the class. Caller must not hold the class lock.
-/// dfx=allocwatch probe: per-class slow-path section durations (max ms
+/// rux:allocwatch (retired dfx=allocwatch) probe: per-class slow-path section durations (max ms
 /// and count of sections >10 ms) — separates a genuinely long section
 /// from a stale stamp. Reset on read.
 pub fn audit_section_peek() -> [(u64, u64); 8] {
@@ -848,7 +848,7 @@ pub fn audit_section_peek() -> [(u64, u64); 8] {
     out
 }
 
-/// dfx=allocwatch probe: live lock-word state of every class lock
+/// rux:allocwatch (retired dfx=allocwatch) probe: live lock-word state of every class lock
 /// (bit i = CACHES[i] held at sample time). A sample is not a snapshot;
 /// the caller filters transients (see dfx/allocwatch.rs STUCK detection
 /// — a bit set at every tick for >1 s with no matching holder stamp is
@@ -886,7 +886,7 @@ pub fn census_peek(ci: usize, per_page: usize) {
     let mut nvals = 0usize;
     let mut seen_total: u64 = 0;
     let _g = cache.lock.lock_irqsave();
-    // dfx=allocwatch: cross-CPU holder stamp (see dfx/allocwatch.rs).
+    // rux:allocwatch (retired dfx=allocwatch): cross-CPU holder stamp (see dfx/allocwatch.rs).
     let _aw = crate::dfx::allocwatch::guard(
         crate::dfx::allocwatch::SITE_SMALL_ALLOC,
         ci as u8,
@@ -991,7 +991,7 @@ pub fn census_peek3(ci: usize) {
     let (mut n_uv, mut n_kh, mut n_sm, mut n_ot) = (0u64, 0u64, 0u64, 0u64);
     let mut total: u64 = 0;
     let _g = cache.lock.lock_irqsave();
-    // dfx=allocwatch: cross-CPU holder stamp (see dfx/allocwatch.rs).
+    // rux:allocwatch (retired dfx=allocwatch): cross-CPU holder stamp (see dfx/allocwatch.rs).
     let _aw = crate::dfx::allocwatch::guard(
         crate::dfx::allocwatch::SITE_SMALL_ALLOC,
         ci as u8,

@@ -1406,7 +1406,7 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
         // si_code/si_pid distinguish a real sender (SI_USER/SI_TKILL
         // carry one) from a bare/stale bitmap bit (empty queue). The
         // storm's SIGKILLs bypassed every send-path print; this is the
-        // delivery-side ground truth. 110th: rides the rux:sigtrace tracepoint (retired token dfx=sigtrace) (the
+        // delivery-side ground truth. 110th: rides the rux:sigtrace tracepoint (retired token rux:sigtrace (retired dfx=sigtrace)) (the
         // kill-storm census printed on the crash-restart loops of every
         // perf boot).
         if (sig == 9 || sig == 15)
@@ -3168,7 +3168,7 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
             core::sync::atomic::AtomicU32::new(0);
         // oh-svc T1 abort-reason tap (known-gap 4): the dump walks the
         // exec-VMA map and scans the user stack — gated behind
-        // dfx=ohhunt so ordinary userspace aborts (glibc assertions in
+        // rux:ohhunt (retired dfx=ohhunt) so ordinary userspace aborts (glibc assertions in
         // LTP runs included) cost nothing.
         if crate::trace::EVENT_OHHUNT.armed()
             && ABORT_N.load(core::sync::atomic::Ordering::Relaxed) < 8
@@ -3453,7 +3453,7 @@ unsafe fn send_signal_locked_info(
     //
     // RETIRED (probe-retire): the trace was unconditional (it fired on
     // every systemd SIGTERM/SIGHUP of a service unit). It now lives
-    // behind the existing signal-family switch (dfx=sigtrace) — the same
+    // behind the existing signal-family switch (rux:sigtrace (retired dfx=sigtrace)) — the same
     // gate the other signal forensics in this file use — so an ordinary
     // boot is silent and a signal hunt can still arm it.
     if crate::trace::EVENT_SIGTRACE.armed()
@@ -3574,7 +3574,7 @@ unsafe fn send_signal_locked_info(
     // send path — disposition, block state, pending-after. OH init blocks
     // SIGCHLD and reads it via signalfd; any silent drop here wedges the
     // whole service-restart machinery. Rate-limited. Serial-cleanliness:
-    // opt-in via dfx=sfddbg (every child exit reaches here on ordinary
+    // opt-in via rux:sfddbg (retired dfx=sfddbg) (every child exit reaches here on ordinary
     // boots too).
     if task.pid() == 1
         && crate::trace::EVENT_SFDDBG.armed()

@@ -12,7 +12,7 @@ use crate::arch::uaccess::strncpy_from_user;
 /// Maximum path length (PATH_MAX)
 const PATH_MAX: usize = 4096;
 
-/// (28th successor) BMS scan-leg fs probe — dfx=ams46 cohort.
+/// (28th successor) BMS scan-leg fs probe — rux:ams46 (retired dfx=ams46) cohort.
 ///
 /// The initial user-0 preinstall scan never installs on fresh boots
 /// (dead since cg17), so user 100's per-user bundle query comes back
@@ -35,7 +35,7 @@ const PATH_MAX: usize = 4096;
 /// SAVING records opens bmsdb.db writable) and per-directory getdents
 /// outcomes (an empty ScanDir result is the first-boot verdict; a
 /// walked /system/app tree is the install branch firing). Budgeted;
-/// OFF unless dfx=ams46.
+/// OFF unless rux:ams46 (retired dfx=ams46).
 fn bmsscan_on() -> bool {
     crate::trace::EVENT_AMS46.armed()
 }
@@ -290,7 +290,7 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
     // the target O_PATH then fstatat(fd,"",AT_EMPTY_PATH)s it).
     // RETIRED (probe-retire): the trace was unconditional (19 lines per
     // ub2404 boot) — it now lives behind the existing OH hunt-print
-    // master gate (dfx=ohhunt), budget unchanged.
+    // master gate (rux:ohhunt (retired dfx=ohhunt)), budget unchanged.
     if crate::dfx::switches::oh_hunt_prints_on() {
         const O_PATH_X: u32 = 0x200000;
         if (flags & O_PATH_X) != 0 {
@@ -314,7 +314,7 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
 
     // OH bring-up: capped .so-open trace (SUCCESS too — a dlopen retry
     // loop is only visible when the loaded-each-round libs are shown).
-    // dfx=syscalltrace only: ungated, hilogd.rd_kmsg copies the whole
+    // rux:syscalltrace (retired dfx=syscalltrace) only: ungated, hilogd.rd_kmsg copies the whole
     // trace from /dev/kmsg and eats a vCPU at KVM speed (b128/b129).
     if full_path.ends_with(".so")
         && crate::trace::EVENT_SYSCALLTRACE.armed()
@@ -527,7 +527,7 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
     // drain to the busy-poll UART (~87us/byte charged as launcher
     // stime). 110th: default flipped — the probe block (a second
     // path_lookup + String formatting per /dev open, ~227 lines/boot)
-    // arms only via dfx=ohhunt (or legacy sprobe=1).
+    // arms only via rux:ohhunt (retired dfx=ohhunt) (or legacy sprobe=1).
     if full_path.starts_with("/dev/") && crate::dfx::switches::oh_hunt_prints_on() {
         let root = crate::sched::current()
             .and_then(|t| unsafe { (*t).fs_arc() })
@@ -1368,7 +1368,7 @@ pub fn sys_getdents(args: SyscallArgs) -> i64 {
 /// baked per-user-100 bundle dirs at runtime with no guest-side record
 /// (bindwalk saw el2/100/log as ino 172 and el1/100/database as ino 44
 /// — neither is the baked inode 79/41), so every relevant syscall's
-/// path + result is recorded kernel-side while dfx=datatap is on.
+/// path + result is recorded kernel-side while rux:datatap (retired dfx=datatap) is on.
 fn datatap_enabled(path: &str) -> bool {
     crate::trace::EVENT_DATATAP.armed()
         && (path.starts_with("/data/") || path == "/data")
@@ -2457,7 +2457,7 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
             // complete on serial.
             // RETIRED (probe-retire): the tap was unconditional and
             // unbounded; it now lives behind the existing OH hunt-print
-            // master gate (dfx=ohhunt).
+            // master gate (rux:ohhunt (retired dfx=ohhunt)).
             if args[3] & 8192 != 0 && crate::dfx::switches::oh_hunt_prints_on() {
                 crate::pr_warn!(
                     "mnt-precheck-fail MS_MOVE '{}' -> '{}': {} (pid {})",
@@ -2530,7 +2530,7 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
         // userspace-side, and this branch returns before the generic
         // mount tap, so the move map is otherwise invisible.
         // RETIRED (probe-retire): 21 lines per ub2404 boot; behind the
-        // existing OH hunt-print master gate (dfx=ohhunt).
+        // existing OH hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)).
         if crate::dfx::switches::oh_hunt_prints_on() {
             static MSMV_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
@@ -2601,7 +2601,7 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
         // rides this path and aborts midway on any EINVAL row.
         // RETIRED (probe-retire): 116 lines per ub2404 boot (systemd
         // remounts / for ro, then every sandbox re-flag); behind the
-        // existing OH hunt-print master gate (dfx=ohhunt).
+        // existing OH hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)).
         if crate::dfx::switches::oh_hunt_prints_on() {
             static RMNT_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
@@ -2814,7 +2814,7 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
             //   - FAILURES stay visible (a genuine error path) but keep
             //     ONE budgeted line (first 16);
             //   - SUCCESSES move behind the existing OH hunt-print
-            //     master gate (dfx=ohhunt), budget 128.
+            //     master gate (rux:ohhunt (retired dfx=ohhunt)), budget 128.
             if ret != 0 {
                 static MNT_FAIL_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
@@ -4659,7 +4659,7 @@ pub fn sys_openat2(args: SyscallArgs) -> i64 {
         {
             // RETIRED (probe-retire): the 24.04 bring-up probe was
             // unconditional (one line per pid-1 cgroup openat2); behind
-            // the existing OH hunt-print master gate (dfx=ohhunt) and
+            // the existing OH hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)) and
             // budgeted.
             static NOBLEDBG2_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
@@ -5114,7 +5114,7 @@ fn do_fsync(args: SyscallArgs, datasync: i32) -> i64 {
                     {
                         return -(errno::EINVAL as i64);
                     }
-                    // dfx=txnhunt (leg-29A): name the file when this
+                    // rux:txnhunt (retired dfx=txnhunt) (leg-29A): name the file when this
                     // fsync/fdatasync later draws a TXN-HANG — sc310's
                     // hiview handler sat in fdatasync(fd) for 43 min
                     // and the entry frame showed only the raw fd.
@@ -7146,7 +7146,7 @@ pub fn sys_move_mount(args: SyscallArgs) -> i64 {
                 // new-API attaches are otherwise invisible on serial —
                 // systemd 255's namespace prep uses them exclusively.
                 // RETIRED (probe-retire): unconditional; behind the
-                // existing OH hunt-print master gate (dfx=ohhunt).
+                // existing OH hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)).
                 if crate::dfx::switches::oh_hunt_prints_on() {
                     static MOVE_OK_N: core::sync::atomic::AtomicUsize =
                         core::sync::atomic::AtomicUsize::new(0);
@@ -7910,7 +7910,7 @@ pub fn sys_mount_setattr(args: SyscallArgs) -> i64 {
         // are the Protect*/namespace knob — needed them visible.
         // RETIRED (probe-retire): 71 lines per ub2404 boot (systemd
         // resets the namespace flags on every mount); behind the existing
-        // OH hunt-print master gate (dfx=ohhunt).
+        // OH hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)).
         if crate::dfx::switches::oh_hunt_prints_on() {
             static MSA_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);

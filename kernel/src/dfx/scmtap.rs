@@ -2,7 +2,7 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! dfx=scmtap — SCM_RIGHTS relay tap (gdm session-fifo hunt, session 21).
+//! rux:scmtap (retired dfx=scmtap) — SCM_RIGHTS relay tap (gdm session-fifo hunt, session 21).
 //!
 //! The greeter session dies milliseconds after CreateSession: logind
 //! sends the reply carrying the session fifo's write fd, the dbus-daemon
@@ -33,14 +33,14 @@
 //!   (the exact moment logind's EPOLLHUP fires): names the closing
 //!   process and the fifo inode.
 //!
-//! Every line is behind the `dfx=scmtap` switch; cost when off is one
+//! Every line is behind the `rux:scmtap (retired dfx=scmtap)` switch; cost when off is one
 //! relaxed load per potential print site.
 
 // Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 
-/// Whether the tap is armed (`dfx=scmtap`).
+/// Whether the tap is armed (`rux:scmtap (retired dfx=scmtap)`).
 pub fn enabled() -> bool {
     crate::trace::EVENT_SCMTAP.armed()
 }

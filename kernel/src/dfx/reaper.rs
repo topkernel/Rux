@@ -32,7 +32,7 @@
 //! CLD_* (1 EXITED, 2 KILLED, 3 DUMPED, 5 STOPPED, 6 CONTINUED) and a
 //! si_status that is the raw exit code (0-255) or term signal.
 //!
-//! Everything is OFF unless booted with `dfx=schedtrace` — the SAME
+//! Everything is OFF unless booted with `rux:schedtrace (retired dfx=schedtrace)` — the SAME
 //! switch as the first-leg wait4 arm. The dfx switch table is frozen;
 //! this is an extension of that existing gated probe, not a new switch.
 //!
@@ -87,7 +87,7 @@ static NAME_MAP: crate::sync::spinlock::Spinlock<[NameRec; NAME_MAP_LEN]> =
 static EXIT_MAP: crate::sync::spinlock::Spinlock<[ExitRec; EXIT_MAP_LEN]> =
     crate::sync::spinlock::Spinlock::new([ExitRec { pid: 0, t_exit: 0, code: 0, last_report: 0 }; EXIT_MAP_LEN]);
 
-/// The gate for every arm here (dfx=schedtrace).
+/// The gate for every arm here (rux:schedtrace (retired dfx=schedtrace)).
 #[inline]
 pub fn on() -> bool {
     crate::trace::EVENT_SCHEDTRACE.armed()

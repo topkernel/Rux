@@ -2,7 +2,7 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! Full physical-accounting ledger (fake-OOM family, dfx=ledger).
+//! Full physical-accounting ledger (fake-OOM family, rux:ledger (retired dfx=ledger)).
 //!
 //! `oom_forensic_dump` answers "is the allocator's own state consistent?"
 //! This module answers the question one level up: WHERE DID THE RAM GO?
@@ -467,7 +467,7 @@ pub fn run_pending() {
 }
 
 /// Periodic raw time series (fake-OOM audit): one compact + one census
-/// line every SERIES_PERIOD while dfx=ledger is armed — the anon-growth
+/// line every SERIES_PERIOD while rux:ledger (retired dfx=ledger) is armed — the anon-growth
 /// curve that discriminates a leak (monotone growth after service
 /// steady-state) from genuine consumption. Raw UART on purpose: the
 /// printk path can wedge during exactly the storms this instruments.

@@ -1690,7 +1690,7 @@ tracepoints! {
     };
 
     /// rux:fuxstuck — one FUX-STUCK census row of the futex-stuck
-    /// census (dfx-migrate migration of the bespoke `dfx=fuxstuck`
+    /// census (dfx-migrate migration of the bespoke `rux:fuxstuck (retired dfx=fuxstuck)`
     /// switch; the event IS the family's gate — arm it via
     /// `trace_event=` or `set_event`, and the census, the RWFRZ freeze
     /// machinery, the reader scans and the wake-verdict hooks all run,
@@ -1731,7 +1731,7 @@ tracepoints! {
     };
 
     /// rux:txnhang — one TXN-HANG hit of the in-flight binder
-    /// transaction audit (dfx-migrate migration of `dfx=txnhunt`;
+    /// transaction audit (dfx-migrate migration of `rux:txnhunt (retired dfx=txnhunt)`;
     /// the event IS the family's gate). A sync transaction picked up
     /// by its server but unreplied for >= 1 s: the txn id and code,
     /// both ends (from pid.tid -> to pid.tid), the age, and the
@@ -1770,7 +1770,7 @@ tracepoints! {
     };
 
     /// rux:schedtrace — one scheduler-forensics hit row (dfx-migrate
-    /// migration of `dfx=schedtrace`; the event IS the family's gate —
+    /// migration of `rux:schedtrace (retired dfx=schedtrace)`; the event IS the family's gate —
     /// EXITNOTIFY delivery log, WAKE-REFUSED evidence, R56 orphan
     /// harvest, ENQ-CLAIMED stamping, the wakewatch mini-ring dumps and
     /// the reaper zombie scan all key off it). `kind` names the probe:
@@ -1802,7 +1802,7 @@ tracepoints! {
     };
 
     /// rux:mmforensics — one mm-forensics hit row (dfx-migrate
-    /// migration of `dfx=mmforensics`; the event IS the family's gate —
+    /// migration of `rux:mmforensics (retired dfx=mmforensics)`; the event IS the family's gate —
     /// the PTEI/PT_STAMP/PT_FREE rings, the double-teardown detector
     /// and capture_frame all key off it). `kind` names the hit:
     ///   0 FUT_REPEAT — a page-table root was torn down twice (the
@@ -1833,7 +1833,7 @@ tracepoints! {
     };
 
     /// rux:sysring — one row of the forensic SYSCALL_RING's replayed
-    /// views (dfx-migrate migration of `dfx=sysring`; the event IS the
+    /// views (dfx-migrate migration of `rux:sysring (retired dfx=sysring)`; the event IS the
     /// family's gate — the ring record at syscall exit, the panic/NOVMA
     /// replays and the childexit dump all key off it). The record
     /// mirrors one ring entry: pid, nr, a0, a1, ret. The raw per-
@@ -1861,7 +1861,7 @@ tracepoints! {
     };
 
     /// rux:ohhunt — one OH graphics-hunt tap row (dfx-migrate migration
-    /// of `dfx=ohhunt`; the event IS the family's gate — the drm ioctl
+    /// of `rux:ohhunt (retired dfx=ohhunt)`; the event IS the family's gate — the drm ioctl
     /// traces, the mmap placement attribution, the prime-import probe,
     /// the SIGABRT first-raise dump, the mount/bindwalk taps and the
     /// NOBLEDBG/UNIXCONNECT lines all key off it, with `sprobe=1` as
@@ -1895,7 +1895,7 @@ tracepoints! {
     };
 
     /// rux:sigtrace — one signal-delivery forensics row (dfx-migrate
-    /// migration of `dfx=sigtrace`; the event IS the family's gate).
+    /// migration of `rux:sigtrace (retired dfx=sigtrace)`; the event IS the family's gate).
     /// `kind`: 0 FRAME_SETUP (setup_frame: sp before, frame addr,
     /// handler pc) 1 FRAME_RESTORE (restore_sigcontext: frame addr,
     /// restored pc) 2 SIGDEATH (a signal took a task down: a=sig,
@@ -1931,7 +1931,7 @@ tracepoints! {
     };
 
     /// rux:futex_miss — the futex wake-miss probe's hit row (dfx-migrate
-    /// migration of `dfx=futextrace`; the event IS the family's gate).
+    /// migration of `rux:futextrace (retired dfx=futextrace)`; the event IS the family's gate).
     /// A FUTEX_WAKE wanted more waiters than it found on its key; the
     /// probe scanned every bucket for same-uaddr waiters under a
     /// non-matching key. The row carries the uaddr, the waker's and
@@ -1956,14 +1956,14 @@ tracepoints! {
     };
 
     /// rux:taskdump — one task-state snapshot trigger (dfx-migrate
-    /// migration of the `dfx=taskdump` / `dfx=periodic` / `dfx=watchdog`
+    /// migration of the `rux:taskdump (retired dfx=taskdump)` / `rux:periodic (retired dfx=periodic)` / `rux:watchdog (retired dfx=watchdog)`
     /// debug aids; the event IS the gate for all three triggers). The
     /// multi-line dump itself stays serial (echo); this record names the
     /// trigger and when it fired. `kind`:
-    ///   0 SYSRQ   — the UART magic/sysrq hook (old dfx=taskdump)
-    ///   1 PERIODIC — the timer-cadence snapshot (old dfx=periodic)
+    ///   0 SYSRQ   — the UART magic/sysrq hook (old rux:taskdump (retired dfx=taskdump))
+    ///   1 PERIODIC — the timer-cadence snapshot (old rux:periodic (retired dfx=periodic))
     ///   2 WATCHDOG — the snapshot after a spinlock deadlock print
-    ///                (old dfx=watchdog)
+    ///                (old rux:watchdog (retired dfx=watchdog))
     /// a carries the trigger's discriminator (jiffies at fire, or the
     /// watchdog's lock address).
     EVENT_TASKDUMP / taskdump_fmt / trace_taskdump :
@@ -1983,7 +1983,7 @@ tracepoints! {
     };
 
     /// rux:memwatch — the heap-leak census's gate row (dfx-migrate
-    /// migration of `dfx=memwatch`; the event IS the switch — the
+    /// migration of `rux:memwatch (retired dfx=memwatch)`; the event IS the switch — the
     /// allocator-prologue counters, the size-class histograms and the
     /// periodic report all key off it). Each periodic report records
     /// one row with the census totals: buddy used kB, memwatch
@@ -2010,7 +2010,7 @@ tracepoints! {
     };
 
     /// rux:schb — the soft-wedge heartbeat family (dfx-migrate round 5, retired
-    /// token `dfx=schb`; the event IS the family's gate — the schbd
+    /// token `rux:schb (retired dfx=schb)`; the event IS the family's gate — the schbd
     /// kthread start, the COW/reclaim pace counters, the proc-open ring
     /// and the wedge census all key off it). Each heartbeat beat records
     /// one row; pid=pidmax, a=flow, b=bw15. The SC-HB / SC-ANAT /
@@ -2033,7 +2033,7 @@ tracepoints! {
         format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
     };
 
-    /// rux:parkdump — the futex park-dump family (retired token `dfx=parkdump`; the
+    /// rux:parkdump — the futex park-dump family (retired token `rux:parkdump (retired dfx=parkdump)`; the
     /// event IS the gate — the RWFRZ writer-park dump and the APP-PARK
     /// child dump with their APPMAP/fd-table companions). One row per
     /// park dump: pid=the parked task, a=jiffies. The multi-line dumps
@@ -2056,7 +2056,7 @@ tracepoints! {
     };
 
     /// rux:sleepsnap — the S-state entry-frame snapshot family (retired token
-    /// `dfx=sleepsnap`; the event IS the gate — the khungtaskd-cadence
+    /// `rux:sleepsnap (retired dfx=sleepsnap)`; the event IS the gate — the khungtaskd-cadence
     /// snapshot of every S-state task's user entry frame). One row per
     /// snapshot round: pid=task count sampled. The per-task lines stay
     /// serial echo.
@@ -2076,7 +2076,7 @@ tracepoints! {
         format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
     };
 
-    /// rux:ksprobe — the kernel-stack high-water probe (retired token `dfx=ksprobe`;
+    /// rux:ksprobe — the kernel-stack high-water probe (retired token `rux:ksprobe (retired dfx=ksprobe)`;
     /// the event IS the gate — zero-at-alloc / scan-at-free over every
     /// fresh kernel stack plus the SC-KREC stash; consumed by the
     /// rux:schb anatomy lines, so boots that want the kHW column arm
@@ -2098,7 +2098,7 @@ tracepoints! {
     };
 
     /// rux:wwcensus — the wakewatch/timer census heartbeat family (retired token
-    /// `dfx=wwcensus`; the event IS the gate — the WW/WW2/WW3 ~1 Hz
+    /// `rux:wwcensus (retired dfx=wwcensus)`; the event IS the gate — the WW/WW2/WW3 ~1 Hz
     /// census lines, the wakewatch wake/pick line and the periodic
     /// PREEMPT-LEAK reporter). Gate-only this round: every census line
     /// is already the observation; the ring row per beat is the WW
@@ -2120,7 +2120,7 @@ tracepoints! {
         format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
     };
 
-    /// rux:bindertrace — the per-transaction binder trace (retired token `dfx=bindertrace`;
+    /// rux:bindertrace — the per-transaction binder trace (retired token `rux:bindertrace (retired dfx=bindertrace)`;
     /// the event IS the gate for the `btx:` per-transaction lines).
     /// Gate-only: the btx: line is the observation; the reference
     /// binder:* events already carry the transaction timeline in the
@@ -2139,7 +2139,7 @@ tracepoints! {
     };
 
     /// rux:syscalltrace — the OH bring-up syscall-trace family (retired token
-    /// `dfx=syscalltrace`; the event IS the gate for the so-open /
+    /// `rux:syscalltrace (retired dfx=syscalltrace)`; the event IS the gate for the so-open /
     /// FIXED-MAP / PROTNONE-MAP / mremap / GET_SENDER_INFO taps).
     /// Gate-only: the prints are the observation; raw_syscalls:*
     /// already carries the syscall boundary in the ring.
@@ -2156,7 +2156,7 @@ tracepoints! {
         format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
     };
 
-    /// rux:inputtrace — the input-event payload trace (retired token `dfx=inputtrace`;
+    /// rux:inputtrace — the input-event payload trace (retired token `rux:inputtrace (retired dfx=inputtrace)`;
     /// the event IS the gate for the per-event evdev push records).
     /// Gate-only: each pushed event prints one line (echo); volume
     /// makes per-event ring rows noise.
@@ -2173,7 +2173,7 @@ tracepoints! {
         format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
     };
 
-    /// rux:exthunt — the ext4 extent-tree hunt (retired token `dfx=exthunt`; the
+    /// rux:exthunt — the ext4 extent-tree hunt (retired token `rux:exthunt (retired dfx=exthunt)`; the
     /// event IS the gate — read-side walks that conclude hole/error on
     /// a depth>=1 tree, and root promotions). One row per hit: a=ino,
     /// b=iblock (HOLE) or new depth (PROMOTE). The header-byte dumps
@@ -2195,7 +2195,7 @@ tracepoints! {
         format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
     };
 
-    /// rux:sfddbg — the signalfd probes (retired token `dfx=sfddbg`; the event IS
+    /// rux:sfddbg — the signalfd probes (retired token `rux:sfddbg (retired dfx=sfddbg)`; the event IS
     /// the gate — pid-1 signal delivery traces and the signalfd
     /// registry notify hook). Gate-only: the prints are the
     /// observation.
@@ -2212,7 +2212,7 @@ tracepoints! {
         format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
     };
 
-    /// rux:dbtrace — the udev-db tmpfs tracer (retired token `dfx=dbtrace`; the
+    /// rux:dbtrace — the udev-db tmpfs tracer (retired token `rux:dbtrace (retired dfx=dbtrace)`; the
     /// event IS the gate for the I:/G:/Q:/S:/E:/V: payload prints).
     /// Gate-only.
     EVENT_DBTRACE / dbtrace_fmt / trace_dbtrace :
@@ -2228,7 +2228,7 @@ tracepoints! {
         format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
     };
 
-    /// rux:datatap — the /data namespace mutation tap (retired token `dfx=datatap`;
+    /// rux:datatap — the /data namespace mutation tap (retired token `rux:datatap (retired dfx=datatap)`;
     /// the event IS the gate — mkdir/rmdir/unlink/rename/chown/xattr
     /// lines, bindwalk ENOENT dumps, negative-dentry hits). Gate-only:
     /// every mutation prints one line (echo).
@@ -2245,7 +2245,7 @@ tracepoints! {
         format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
     };
 
-    /// rux:ams46 — the StartUser(46) lifecycle arsenal (retired token `dfx=ams46`;
+    /// rux:ams46 — the StartUser(46) lifecycle arsenal (retired token `rux:ams46 (retired dfx=ams46)`;
     /// the event IS the gate — enqueue/route/read/free/sweep/silence
     /// traces plus the ~5 s node census). Gate-only: the census prints
     /// are the observation.
@@ -2262,7 +2262,7 @@ tracepoints! {
         format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
     };
 
-    /// rux:vmap — the VMA-origin adjudication taps (retired token `dfx=vmap`; the
+    /// rux:vmap — the VMA-origin adjudication taps (retired token `rux:vmap (retired dfx=vmap)`; the
     /// event IS the gate — PROT_NONE mprotect and small anonymous
     /// PROT_NONE mmap traces). Gate-only.
     EVENT_VMAP / vmap_fmt / trace_vmap :
@@ -2278,7 +2278,7 @@ tracepoints! {
         format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
     };
 
-    /// rux:poolcensus — the binder thread-pool census (retired token `dfx=poolcensus`;
+    /// rux:poolcensus — the binder thread-pool census (retired token `rux:poolcensus (retired dfx=poolcensus)`;
     /// the event IS the gate — the ~5 s per-proc pool census lines and
     /// the POOL-SPAWN prints). One row per census round: a=procs with
     /// todo or pool. The per-proc lines stay serial echo.
@@ -2299,7 +2299,7 @@ tracepoints! {
         format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
     };
 
-    /// rux:slowtask — the slow-kernel-entry audit (retired token `dfx=slowtask`; the
+    /// rux:slowtask — the slow-kernel-entry audit (retired token `rux:slowtask (retired dfx=slowtask)`; the
     /// event IS the gate — the ~4 s rounds of unchanged-entry tasks
     /// with their parked kernel-stack chains). One row per reported
     /// task: pid, a=syscall nr, b=epc.
@@ -2320,7 +2320,7 @@ tracepoints! {
         format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
     };
 
-    /// rux:execcost — the execve per-stage cost ladder (retired token `dfx=execcost`;
+    /// rux:execcost — the execve per-stage cost ladder (retired token `rux:execcost (retired dfx=execcost)`;
     /// the event IS the gate for the ladder/image lines). Gate-only:
     /// the printed ladder is the observation.
     EVENT_EXECCOST / execcost_fmt / trace_execcost :
@@ -2337,7 +2337,7 @@ tracepoints! {
     };
 
     /// rux:tfdcensus — the windowed timerfd_create caller census (retired token
-    /// `dfx=tfdcensus`; the event IS the gate — first 16 calls of
+    /// `rux:tfdcensus (retired dfx=tfdcensus)`; the event IS the gate — first 16 calls of
     /// every 5 s window). Gate-only this round: the window prints are
     /// the observation.
     EVENT_TFDCENSUS / tfdcensus_fmt / trace_tfdcensus :
@@ -2356,7 +2356,7 @@ tracepoints! {
         format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
     };
 
-    /// rux:scmtap — the SCM_RIGHTS relay tap (retired token `dfx=scmtap`; the
+    /// rux:scmtap — the SCM_RIGHTS relay tap (retired token `rux:scmtap (retired dfx=scmtap)`; the
     /// event IS the gate — per sendmsg/recvmsg/drop fd-relay lines).
     /// Gate-only.
     EVENT_SCMTAP / scmtap_fmt / trace_scmtap :
@@ -2373,7 +2373,7 @@ tracepoints! {
     };
 
     /// rux:sysforensic — the per-syscall forensic instruments (retired token
-    /// `dfx=sysforensic`; the event IS the gate — the fail rings, the
+    /// `rux:sysforensic (retired dfx=sysforensic)`; the event IS the gate — the fail rings, the
     /// comm-scanning sc-hooks and the double-record tap). Gate-only.
     EVENT_SYSFORENSIC / sysforensic_fmt / trace_sysforensic :
         "rux", "sysforensic", 90,
@@ -2388,7 +2388,7 @@ tracepoints! {
         format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
     };
 
-    /// rux:filerd — the cached-read cost anatomy (retired token `dfx=filerd`; the
+    /// rux:filerd — the cached-read cost anatomy (retired token `rux:filerd (retired dfx=filerd)`; the
     /// event IS the gate — the RDTSC phase counters on the ext4 read
     /// fast path, reported via /proc/filerd). Gate-only: the report
     /// file is the observation.
@@ -2405,7 +2405,7 @@ tracepoints! {
         format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
     };
 
-    /// rux:lostpark — the SMP lost-park forensics (retired token `dfx=lostpark`; the
+    /// rux:lostpark — the SMP lost-park forensics (retired token `rux:lostpark (retired dfx=lostpark)`; the
     /// event IS the gate — the idle-loop lie detector, the wake-skip
     /// census and the LOSTPARK ring). One row per ring dump: a=entries.
     /// The per-event lines stay serial echo.
@@ -2426,7 +2426,7 @@ tracepoints! {
     };
 
     /// rux:allocwatch — the allocator class-lock holder watch (retired token
-    /// `dfx=allocwatch`; the event IS the gate — acquire stamps plus
+    /// `rux:allocwatch (retired dfx=allocwatch)`; the event IS the gate — acquire stamps plus
     /// the scheduler_tick cross-CPU scan). One row per stuck report:
     /// pid=holder, a=site, b=held ms. The STUCK-CLASS lines stay
     /// serial echo.
@@ -2447,7 +2447,7 @@ tracepoints! {
     };
 
     /// rux:r83scan — the periodic 2 MiB-slice heap fingerprint scan (retired token
-    /// `dfx=r83scan`; the event IS the gate for the magic_scan sweep).
+    /// `rux:r83scan (retired dfx=r83scan)`; the event IS the gate for the magic_scan sweep).
     /// Gate-only: hit prints stay serial.
     EVENT_R83SCAN / r83scan_fmt / trace_r83scan :
         "rux", "r83scan", 94,
@@ -2462,7 +2462,7 @@ tracepoints! {
         format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
     };
 
-    /// rux:leakhunt — the preempt-leak origin probe (retired token `dfx=leakhunt`;
+    /// rux:leakhunt — the preempt-leak origin probe (retired token `rux:leakhunt (retired dfx=leakhunt)`;
     /// the event IS the engine gate — the outermost-acquire side
     /// table, the user-return checks and the PREEMPT-LEAK reports all
     /// key off it). Gate-only: the reports are the observation.
@@ -2479,7 +2479,7 @@ tracepoints! {
         format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
     };
 
-    /// rux:acqdiv — the acquire-divergent live print (retired token `dfx=acqdiv`;
+    /// rux:acqdiv — the acquire-divergent live print (retired token `rux:acqdiv (retired dfx=acqdiv)`;
     /// the event IS the gate for the ACQUIRE-DIVERGENT print inside
     /// the leakorigin tap — it fires only when rux:leakhunt is armed
     /// too; the retired boot token arms both). Gate-only.
@@ -2496,7 +2496,7 @@ tracepoints! {
         format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
     };
 
-    /// rux:metawatch — the buddy-meta shadow audit (retired token `dfx=metawatch`;
+    /// rux:metawatch — the buddy-meta shadow audit (retired token `rux:metawatch (retired dfx=metawatch)`;
     /// the event IS the gate — the 10 s shadow free-set cross-check).
     /// Gate-only: META-SMASH findings stay serial (multi-line).
     EVENT_METAWATCH / metawatch_fmt / trace_metawatch :
@@ -2513,9 +2513,9 @@ tracepoints! {
     };
 
     /// rux:scribble — the byte-level scribble hunter engine (retired token
-    /// `dfx=scribble`; the event IS the engine gate — the shadow
+    /// `rux:scribble (retired dfx=scribble)`; the event IS the engine gate — the shadow
     /// canary writes, the switch-out/timer verification and the CONS
-    /// report ring). The gdb-park companions (dfx=scribblepark /
+    /// report ring). The gdb-park companions (rux:scribblepark (retired dfx=scribblepark) /
     /// -pid1 / -sweep) remain bespoke switches: parking a CPU for an
     /// external debugger is an action, not observation.
     EVENT_SCRIBBLE / scribble_fmt / trace_scribble :
@@ -2532,7 +2532,7 @@ tracepoints! {
     };
 
     /// rux:monowatch — the CLOCK_MONOTONIC jump tripwire (retired token
-    /// `dfx=monowatch`; the event IS the gate for the ~1 Hz timebase
+    /// `rux:monowatch (retired dfx=monowatch)`; the event IS the gate for the ~1 Hz timebase
     /// samples). One row per jump/spike report: a=backwards ns,
     /// b=spike ns.
     EVENT_MONOWATCH / monowatch_fmt / trace_monowatch :
@@ -2551,7 +2551,7 @@ tracepoints! {
         format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
     };
 
-    /// rux:epollscan — the epoll interest-scan trace (retired token `dfx=epollscan`;
+    /// rux:epollscan — the epoll interest-scan trace (retired token `rux:epollscan (retired dfx=epollscan)`;
     /// the event IS the gate for the per-epoll_wait scan lines; the
     /// round-3 rux:epoll_* family carries the structured rows).
     /// Gate-only.
@@ -2569,7 +2569,7 @@ tracepoints! {
     };
 
     /// rux:treehunt — the process-tree invariant validator (retired token
-    /// `dfx=treehunt`; the event IS the gate for the ~1 Hz walk). One
+    /// `rux:treehunt (retired dfx=treehunt)`; the event IS the gate for the ~1 Hz walk). One
     /// row per flagged task: pid, a=parent snapshot, b=leader
     /// parent.
     EVENT_TREEHUNT / treehunt_fmt / trace_treehunt :
@@ -2588,7 +2588,7 @@ tracepoints! {
         format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
     };
 
-    /// rux:tcptrace — the TCP per-segment forensics (retired token `dfx=tcptrace`;
+    /// rux:tcptrace — the TCP per-segment forensics (retired token `rux:tcptrace (retired dfx=tcptrace)`;
     /// the event IS the gate for the seq/ack/len/flags lines).
     /// Gate-only: every segment prints (budget-capped echo).
     EVENT_TCPTRACE / tcptrace_fmt / trace_tcptrace :
@@ -2604,7 +2604,7 @@ tracepoints! {
         format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
     };
 
-    /// rux:strace1 — the PID 1 syscall trace (retired token `dfx=strace1`; the
+    /// rux:strace1 — the PID 1 syscall trace (retired token `rux:strace1 (retired dfx=strace1)`; the
     /// event IS the gate for the per-syscall pathname-decoded lines).
     /// Gate-only.
     EVENT_STRACE1 / strace1_fmt / trace_strace1 :
@@ -2621,7 +2621,7 @@ tracepoints! {
     };
 
     /// rux:ripsample — the user-mode rip histogram rider (retired token
-    /// `dfx=ripsample`; the event IS the gate for the 60 s tick-path
+    /// `rux:ripsample (retired dfx=ripsample)`; the event IS the gate for the 60 s tick-path
     /// sampling). Gate-only: the histogram report stays serial.
     EVENT_RIPSAMPLE / ripsample_fmt / trace_ripsample :
         "rux", "ripsample", 104,
@@ -2637,7 +2637,7 @@ tracepoints! {
     };
 
     /// rux:socksnap — the AF_UNIX namespace + epoll interest dump (retired token
-    /// `dfx=socksnap`; the event IS the gate). One row per dump: pid=
+    /// `rux:socksnap (retired dfx=socksnap)`; the event IS the gate). One row per dump: pid=
     /// listeners, a=epoll instances. The per-object lines stay serial
     /// echo.
     EVENT_SOCKSNAP / socksnap_fmt / trace_socksnap :
@@ -2657,7 +2657,7 @@ tracepoints! {
     };
 
     /// rux:writetrace — the short-write printable capture (retired token
-    /// `dfx=writetrace`; the event IS the gate for the hex-prefixed
+    /// `rux:writetrace (retired dfx=writetrace)`; the event IS the gate for the hex-prefixed
     /// frame prints). Gate-only.
     EVENT_WRITETRACE / writetrace_fmt / trace_writetrace :
         "rux", "writetrace", 106,
@@ -2672,7 +2672,7 @@ tracepoints! {
         format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
     };
 
-    /// rux:ledger — the physical-accounting ledger (retired token `dfx=ledger`;
+    /// rux:ledger — the physical-accounting ledger (retired token `rux:ledger (retired dfx=ledger)`;
     /// the event IS the gate — the UART `LEDGER!` magic and the
     /// OOM-moment census). One row per census dump: a=used kb,
     /// b=leaked kb estimate.
@@ -2692,7 +2692,7 @@ tracepoints! {
         format!("kind={} pid={} a={:#x} b={:#x}", kind, args[1] as i32, args[2], args[3])
     };
 
-    /// rux:pid1spin — the pid-1 RUNNING-spin watch (retired token `dfx=pid1spin`;
+    /// rux:pid1spin — the pid-1 RUNNING-spin watch (retired token `rux:pid1spin (retired dfx=pid1spin)`;
     /// the event IS the gate — the ~2 s heartbeat's kernel-entry
     /// frame while init spins). One row per spin line: a=syscall nr,
     /// b=user rip.
@@ -2713,7 +2713,7 @@ tracepoints! {
     };
 
     /// rux:steptrace — the per-trap/per-return syscall trace (retired token
-    /// `dfx=steptrace`; the event IS the gate for the two-line
+    /// `rux:steptrace (retired dfx=steptrace)`; the event IS the gate for the two-line
     /// entry+return prints). Gate-only.
     EVENT_STEPTRACE / steptrace_fmt / trace_steptrace :
         "rux", "steptrace", 109,
@@ -2729,7 +2729,7 @@ tracepoints! {
     };
 
     /// rux:pctlmon — the param-service socket monitor (dfx-migrate
-    /// round 5, retired token `dfx=pctlmon`; the event IS the family's
+    /// round 5, retired token `rux:pctlmon (retired dfx=pctlmon)`; the event IS the family's
     /// gate — the PCTL-SEND tap plus the connect/accept/close lifecycle
     /// of every paramservice-classified unix socket with queue depths).
     /// Gate-only: the lifecycle prints are the observation.

@@ -407,7 +407,7 @@ impl UnixSocket {
     }
 
     /// Stream-pair diagnostic for the epoll-interest dumps (69th,
-    /// dfx=pid1spin): the two sides of a connection in one snapshot —
+    /// rux:pid1spin (retired dfx=pid1spin)): the two sides of a connection in one snapshot —
     /// own queue (segs/bytes), own EOF/dead, and the WRITE-ROOM inputs
     /// (peer truesize vs own sndbuf cap), so a dump line decides
     /// "writable" exactly like unix_file_poll's POLLOUT leg. Locks are
@@ -636,7 +636,7 @@ fn hilogtap_on() -> bool {
     }
 }
 
-/// dfx=pctlmon (66th): arm ONLY the param-service control tap + lifecycle
+/// rux:pctlmon (retired dfx=pctlmon) (66th): arm ONLY the param-service control tap + lifecycle
 /// prints — no hilog record scanning, so a boot can trace the param
 /// protocol's full path (client send → queue → server read → reply)
 /// without the hilogtap CPU tax.
@@ -1304,7 +1304,7 @@ fn unix_recvmsg_user(
 /// unix_recv's tail): EOF, ENOTCONN, or EAGAIN.
 // 122nd err-latch watchdog: the app-hang root is a growing non-errno
 // value in a live socket's err field; log the caller whenever a change
-// is observed at the recv gate (rate-limited). dfx=schedtrace-gated.
+// is observed at the recv gate (rate-limited). rux:schedtrace (retired dfx=schedtrace)-gated.
 fn err_latch_watchdog(sock: &Arc<UnixSocket>) {
     if !crate::trace::EVENT_SCHEDTRACE.armed() {
         return;
@@ -1396,7 +1396,7 @@ pub fn unix_bind(sock: &Arc<UnixSocket>, addr: &UnixAddr) -> Result<(), i32> {
     // UNIXBIND trace (noble-desktop dbus hunt) — retired: an
     // unconditional per-bind print of every /run/ socket name (15 lines
     // per ub2404 boot, unbounded on a busy /run). Behind the existing OH
-    // hunt-print master gate (dfx=ohhunt) and budgeted.
+    // hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)) and budgeted.
     if crate::dfx::switches::oh_hunt_prints_on()
         && addr.key.len() > 1
         && !addr.key.starts_with("\0")
@@ -1544,7 +1544,7 @@ pub fn unix_connect(
     // UNIXCONNECT trace — retired: an unconditional per-connect print of
     // every /run/ socket name (338 lines per ub2404 boot: journal,
     // nscd, userdb). Behind the existing OH hunt-print master gate
-    // (dfx=ohhunt) and budgeted.
+    // (rux:ohhunt (retired dfx=ohhunt)) and budgeted.
     if crate::dfx::switches::oh_hunt_prints_on()
         && addr.key.len() > 1
         && !addr.key.starts_with(' ')
@@ -1663,7 +1663,7 @@ pub fn unix_connect(
             sock.has_peer_m.store(true, Ordering::Release);
             *sock.state.lock() = UnixState::Connected;
             server.accept_queue.lock().push_back(child);
-            // 66th (dfx=pctlmon): a client just queued itself onto the
+            // 66th (rux:pctlmon (retired dfx=pctlmon)): a client just queued itself onto the
             // param-service listener — the connect half of the connection
             // lifecycle (PCTL-ACCEPT names the accept half). A connect
             // with no matching accept = requests queueing on a child init
@@ -1700,7 +1700,7 @@ pub fn unix_connect(
             if fid != 0 {
                 crate::syscall::misc::epoll_notify_file(fid);
             }
-            // dfx=socksnap (launcher-chain hunt, b16): name every client
+            // rux:socksnap (retired dfx=socksnap) (launcher-chain hunt, b16): name every client
             // that reaches a Spawn-family listener. The OH appspawn
             // protocol is one connect + one request + one pid reply, so
             // this line paired with the REQ dump in unix_send answers
@@ -1840,7 +1840,7 @@ pub fn unix_peer_bound_name(sock: &Arc<UnixSocket>) -> Option<String> {
 /// queued bytes ≈ real heap cost (the r8 1-byte-storm hole stays closed
 /// — the charge still exceeds the true per-segment allocation).
 
-/// 122nd err-write trap (dfx=schedtrace): UnixSocket.err is being
+/// 122nd err-write trap (rux:schedtrace (retired dfx=schedtrace)): UnixSocket.err is being
 /// scribbled with a truesize-class counter at the message rate; the
 /// jammed-hilogd reader chain is fully explained by it. This wrapper
 /// names every WRITER: a store whose new value differs logs the new
@@ -2079,7 +2079,7 @@ pub fn unix_send(
             return Err(-32); // EPIPE
         }
 
-        // dfx=socksnap (launcher-chain hunt, b16): dump the head of every
+        // rux:socksnap (retired dfx=socksnap) (launcher-chain hunt, b16): dump the head of every
         // message whose receiving end belongs to a Spawn-family listener
         // (AppSpawn/NativeSpawn/CJAppSpawn/HybridSpawn). The OH request
         // carries the target process name as a C string inside the struct,
@@ -2142,7 +2142,7 @@ pub fn unix_send(
         // instrument, not kernel semantics — OFF by default like every
         // DFX probe (filerd discipline); arm with hilogtap=1 when a boot
         // needs the HILOG-AMS/slog/alog/ilog/PCTL evidence.
-        // 66th: dfx=pctlmon arms ONLY the param tap below (no record
+        // 66th: rux:pctlmon (retired dfx=pctlmon) arms ONLY the param tap below (no record
         // scanning) — the 105-timeout hunt needs PCTL-SEND on every boot
         // without hilogtap's cost.
         // The first tap smeared the whole datagram through a printable
@@ -2876,7 +2876,7 @@ pub fn unix_recv(
                 // parses as a ParamMessage, print it — client-send lines
                 // without a matching PCTL-RECV name where the installs
                 // ctl sets die (queue stall vs server epoll wake loss).
-                // 110th: gated behind dfx=pctlmon (the switch built for
+                // 110th: gated behind rux:pctlmon (retired dfx=pctlmon) (the switch built for
                 // exactly this tap) — ~132 lines rode every perf boot,
                 // each costing UART emit + hilogd drain.
                 if copied >= 12 && crate::process::current_pid() == 1 && pctlmon_on() {
@@ -3051,7 +3051,7 @@ pub fn unix_shutdown(sock: &Arc<UnixSocket>, how: i32) -> Result<(), i32> {
 
 /// close(): release the name, mark the peer's EOF, wake waiters.
 pub fn unix_close(sock: &Arc<UnixSocket>) {
-    // 66th (dfx=pctlmon): last close of a param-service socket — either
+    // 66th (rux:pctlmon (retired dfx=pctlmon)): last close of a param-service socket — either
     // init dropping an accepted client (unread queued requests die here,
     // and the CLIENT sees EPIPE only on its NEXT send) or a client dying.
     // queued>0 on an init-side close = requests silently dropped.
@@ -3471,7 +3471,7 @@ fn unix_read_user_inner(file: &File, dst: *mut u8, count: usize) -> isize {
                 // same way). A fd-carrying segment touched by a plain
                 // read is the dbus "message refers to more unix fds
                 // than were sent" corruption shape, so make the loss
-                // visible when hunting (dfx=scmtap).
+                // visible when hunting (rux:scmtap (retired dfx=scmtap)).
                 if crate::dfx::scmtap::enabled() && !r.files.is_empty() {
                     crate::dfx::scmtap::tap_rx_drop("PLAINREAD", r.files.len());
                 }
@@ -3780,13 +3780,13 @@ pub fn unix_poll_unwait(file: &File, task: *mut crate::process::task::Task) {
     }
 }
 
-/// dfx=socksnap (appspawn wedge hunt, b15): one console line per
+/// rux:socksnap (retired dfx=socksnap) (appspawn wedge hunt, b15): one console line per
 /// LISTENING socket in the namespace — registry key, accept-queue depth,
 /// backlog cap, and the open-file-description id that epoll registrations
 /// key on. Cross-reference the printed file id against the epoll interest
 /// dump (syscall::misc::epoll_interest_snapshot) to decide whether a
 /// wedged server's listener is still registered anywhere. Purely
-/// diagnostic; self-gated, OFF unless dfx=socksnap is on the cmdline.
+/// diagnostic; self-gated, OFF unless rux:socksnap (retired dfx=socksnap) is on the cmdline.
 pub fn unix_listener_snapshot() {
     if !crate::trace::EVENT_SOCKSNAP.armed() {
         return;
@@ -3860,7 +3860,7 @@ fn unix_socket_install(
     if cloexec {
         fdtable.set_fd_cloexec(fd, true);
     }
-    // 66th (dfx=pctlmon): init accepted a param-service client — the
+    // 66th (rux:pctlmon (retired dfx=pctlmon)): init accepted a param-service client — the
     // accept half of the lifecycle (PCTL-CONNECT named the connect).
     // fd/file_id bind the server-side interest init's epoll will watch.
     if pctlmon_on()
@@ -4195,7 +4195,7 @@ pub fn unix_getsockopt(sock: &Arc<UnixSocket>, level: i32, optname: i32) -> Resu
 ///   recvq>0 + reader asleep + woken=0  -> LOST WAKE (our bug)
 ///   recvq>0 + reader asleep + woken=1  -> sticky-skip W1 class
 ///
-/// Piggybacks on dfx=sleepsnap (same hunting boots; zero cost off).
+/// Piggybacks on rux:sleepsnap (retired dfx=sleepsnap) (same hunting boots; zero cost off).
 /// Deduped on (tid, sys, fd, segs, charge): a queue that GROWS while
 /// its reader sleeps reprints — that line is the smoking gun.
 pub fn unix_park_audit() {

@@ -224,7 +224,7 @@ static UART_IRQ_ARMED: core::sync::atomic::AtomicBool =
 static mut DUMP_MAGIC_POS: usize = 0;
 
 /// Rolling-match position for the "LEDGER!" accounting-census magic
-/// (the ledger trigger; retired cmdline token dfx=ledger). The RX handler only latches dfx::ledger::PENDING — the
+/// (the ledger trigger; retired cmdline token rux:ledger (retired dfx=ledger)). The RX handler only latches dfx::ledger::PENDING — the
 /// census itself runs from the timer softirq (see ledger.rs).
 static mut LEDGER_MAGIC_POS: usize = 0;
 
@@ -714,7 +714,7 @@ fn read_reg(base: u16, offset: usize) -> u8 {
 
 /// RX-byte debug magics shared by both arch UART RX paths.
 ///
-/// - "DUMP!" (armed by the rux:taskdump tracepoint (retired token dfx=taskdump)): the RX interrupt is the only code
+/// - "DUMP!" (armed by the rux:taskdump tracepoint (retired token rux:taskdump (retired dfx=taskdump))): the RX interrupt is the only code
 ///   guaranteed to still run when every task is wedged (silent-hang form —
 ///   no spinlock to trip the deadlock watchdog), which is exactly when a
 ///   task snapshot is needed. Rolling-window match so the sequence may
@@ -746,7 +746,7 @@ fn uart_rx_debug_magic(c: u8) {
             }
         }
 
-        // Accounting-ledger magic trigger (the ledger trigger; retired cmdline token dfx=ledger): latch only — the
+        // Accounting-ledger magic trigger (the ledger trigger; retired cmdline token rux:ledger (retired dfx=ledger)): latch only — the
         // census is printk-heavy and runs from the timer softirq.
         if crate::trace::EVENT_LEDGER.armed() {
             const LMAGIC: &[u8; 7] = b"LEDGER!";

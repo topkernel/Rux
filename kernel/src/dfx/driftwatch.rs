@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 //! Zero-put / free-refusal attribution counters (fake-OOM freelist-drift
-//! family, dfx=ledger).
+//! family, rux:ledger (retired dfx=ledger)).
 //!
 //! The MEMLEDGER census proved the drift mechanism — pages reach
 //! refcount 0 without ever re-entering the buddy — but a post-hoc census

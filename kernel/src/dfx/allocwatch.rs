@@ -1,4 +1,4 @@
-//! Allocator class-lock holder watch (dfx=allocwatch).
+//! Allocator class-lock holder watch (rux:allocwatch (retired dfx=allocwatch)).
 //!
 //! The OH dark-boot family (2026-11-02 decodes, lb234/235/241/243/244):
 //! every allocating syscall parks (unix_write_slice_owned -> RawVec

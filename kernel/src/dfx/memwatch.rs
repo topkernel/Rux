@@ -2,7 +2,7 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! Heap-leak hunting instrumentation (dfx=memwatch).
+//! Heap-leak hunting instrumentation (rux:memwatch (token dfx=memwatch)).
 //!
 //! Two near-zero-cost layers, both fed from the `#[global_allocator]`:
 //!
@@ -24,7 +24,7 @@ use super::taskdump::{taskdump_dec, taskdump_raw_line};
 
 // dfx-migrate: the runtime switch state now lives in the unified
 // trace framework — `rux:memwatch` IS the switch (armed via
-// trace_event=, tracefs set_event, or the retired dfx=memwatch boot
+// trace_event=, tracefs set_event, or the retired rux:memwatch (token dfx=memwatch) boot
 // alias). No local static: armed() reads the event directly.
 
 /// Dealloc-refusal diagnostics (buddy_allocator.rs dealloc early-returns).
@@ -127,7 +127,7 @@ static RSITES: [Site; 64] = [const {
 /// above phys_end inside that window is UNMAPPED, and a stale or
 /// scribbled frame pointer landing there passed the old range-only
 /// gate and page-faulted the diagnostic walk itself. The speed lane
-/// double-confirmed the shape on OH: dfx=memwatch panicked with
+/// double-confirmed the shape on OH: rux:memwatch (token dfx=memwatch) panicked with
 /// "Fatal exception in interrupt" at t=7.9s — the allocator hook runs
 /// from softirq, and the fault arrives with IRQ context set. Shared
 /// by memwatch's fp walk and taskdump's kernel-stack word walks so
@@ -757,7 +757,7 @@ fn tracked_index(phys: usize) -> usize {
     // so a PFN past 2 GiB (high RAM) is outside the tracked range; an
     // unguarded return made note_page_free's `table[first]` load panic
     // ("index out of bounds: len 524288, index 1572173", boot u5) the
-    // moment a high-RAM page was freed (dfx=memwatch boots died ~180
+    // moment a high-RAM page was freed (rux:memwatch (token dfx=memwatch) boots died ~180
     // log lines in).
     if idx >= PPAGE_TABLE_ENTRIES {
         return usize::MAX;

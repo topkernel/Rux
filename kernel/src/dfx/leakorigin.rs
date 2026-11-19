@@ -1,4 +1,4 @@
-//! Leak-origin probe (dfx=leakhunt) — names the acquire site of a leaked
+//! Leak-origin probe (rux:leakhunt (retired dfx=leakhunt)) — names the acquire site of a leaked
 //! PREEMPT_OFFSET (and, since s14, of a stranded HARDIRQ_OFFSET — the
 //! pc=0x10000/0x10001 incumbent face of the fleet's four-faced wedge
 //! family; `hsite=` in every report names the trap bracket that booked
@@ -23,7 +23,7 @@
 //! carries the recorded acquire site (file:line of the guard
 //! construction) — the producer is named directly, not inferred.
 //!
-//! Costs when armed (dfx=leakhunt): one side-table store per outermost
+//! Costs when armed (rux:leakhunt (retired dfx=leakhunt)): one side-table store per outermost
 //! guard acquire and one preempt_count load per user-mode trap return.
 //! OFF by default (the switch mirrors into ENABLED); the disabled-path
 //! cost is one relaxed load per outermost acquire.
@@ -35,7 +35,7 @@
 use core::panic::Location;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
-/// Mirror of the dfx=leakhunt runtime switch (set from dfx/switches.rs).
+/// Mirror of the rux:leakhunt (retired dfx=leakhunt) runtime switch (set from dfx/switches.rs).
 
 /// Total print budget for the boot (reports + parked-site lines).
 static BUDGET: AtomicU32 = AtomicU32::new(400);
@@ -315,7 +315,7 @@ pub fn note_acquire(
 /// with the x86_64 IRQ-exit kpreempt hook armed by default; the wedge-
 /// fix lane's bisect (28b1afca) proved hook-ON causes exactly the
 /// both-CPU DEADLOCK family. The print was never isolated from that
-/// cause. Re-armed via the `dfx=acqdiv` runtime switch for the A/B: the
+/// cause. Re-armed via the `rux:acqdiv (retired dfx=acqdiv)` runtime switch for the A/B: the
 /// print rides only on boots that ask for it, on a tree where kpreempt
 /// defaults OFF.
 

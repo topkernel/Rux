@@ -76,7 +76,7 @@ pub static TICK_ENTRY_PC: [core::sync::atomic::AtomicU32;
 /// tick's interrupted RIP names the kernel function it was spinning in
 /// (symbolize offline with addr2line). Written on the owning CPU from
 /// the same sites as TICK_ENTRY_PC; read from the wakewatch strand
-/// print under dfx=leakhunt.
+/// print under rux:leakhunt (retired dfx=leakhunt).
 pub static TICK_ENTRY_RIP: [core::sync::atomic::AtomicU64;
     crate::config::MAX_CPUS] =
     [const { core::sync::atomic::AtomicU64::new(0) };
@@ -187,7 +187,7 @@ pub fn preemptible() -> bool {
 
 /// Add value to current task's preempt_count
 ///
-/// #[track_caller] + the leakorigin hook (dfx=leakhunt): when val is
+/// #[track_caller] + the leakorigin hook (rux:leakhunt (retired dfx=leakhunt)): when val is
 /// PREEMPT_OFFSET, record the acquire site in the per-task shadow (last
 /// acquire wins). The disabled-path cost is one register compare plus
 /// one relaxed load. At a leak, the shadow names the most recent guard
@@ -320,7 +320,7 @@ pub fn preempt_count_reset() {
 /// Called at the beginning of hardware interrupt handling.
 /// IRQ entry path.
 ///
-/// #[track_caller] (s14): under dfx=leakhunt the leakorigin hardirq
+/// #[track_caller] (s14): under rux:leakhunt (retired dfx=leakhunt) the leakorigin hardirq
 /// shadow records `Location::caller()` — without this attribute every
 /// acquire would name this line; with it, the trap dispatch site
 /// (timer/soft/ext bracket) is recorded.
@@ -351,7 +351,7 @@ pub fn irq_enter() {
         }
     }
     preempt_count_add(HARDIRQ_OFFSET);
-    // s14 IRQ-PAIR booking check (dfx=leakhunt): remember which task
+    // s14 IRQ-PAIR booking check (rux:leakhunt (retired dfx=leakhunt)): remember which task
     // THIS cpu's bracket booked +HARDIRQ_OFFSET on; irq_exit verifies
     // the paired sub lands on the same task. RISC-V S-mode hardirqs
     // cannot nest on one cpu (SIE cleared for the handler), so the

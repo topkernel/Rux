@@ -31,7 +31,7 @@
 //! A canary page rides in front of the live members: DMA-class writers
 //! do not go through PTEs at all, so the RO trap cannot see them. The
 //! canary is pattern-filled at arm time and verified from the timer
-//! softirq cadence (dfx=wildwatch gates everything; zero cost when off).
+//! softirq cadence (rux:wildwatch (retired dfx=wildwatch) gates everything; zero cost when off).
 
 #[cfg(feature = "x86_64")]
 pub use x86::*;
@@ -86,7 +86,7 @@ mod x86 {
     /// succeeds (observed: at dfx::init time the image PD for the guard
     /// chunk still reads as zeros — parts of the kernel image mapping
     /// settle after dfx::init; the engine only fires minutes in, so a
-    /// 1 s-late arming loses nothing). No-op unless dfx=wildwatch.
+    /// 1 s-late arming loses nothing). No-op unless rux:wildwatch (retired dfx=wildwatch).
     pub fn arm() {
         static ARM_TRIES: core::sync::atomic::AtomicU32 =
             core::sync::atomic::AtomicU32::new(0);

@@ -67,7 +67,7 @@ struct WwSlot {
     /// mass); wtie= is that entry-time mass, and it is the field that
     /// separates deep-queue service latency (wtie ~ nr_running) from a
     /// walk defect (wtie ~ 1 with visits in the hundreds).
-    /// Computed at note_wake only under dfx=wwcensus (O(nr) walk).
+    /// Computed at note_wake only under rux:wwcensus (retired dfx=wwcensus) (O(nr) walk).
     wtie: AtomicU64,
 }
 
@@ -443,7 +443,7 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
         ww_msg(b"\n");
         // s14: name WHY this victim sat unpicked through the whole
         // strand window — the fair-class refusal history accumulated by
-        // note_pick_skip (dfx=schedtrace). No-op when the history is
+        // note_pick_skip (rux:schedtrace (retired dfx=schedtrace)). No-op when the history is
         // empty (skip reasons were never recorded / not armed).
         super::fair::print_skip_history(task);
     }
@@ -454,7 +454,7 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
 /// from timer.rs; printk, not direct console, so it cannot interleave
 /// with GRQ-held prints.
 pub fn heartbeat() {
-    // Serial-noise policy: hunt instrument, prints only on dfx=wwcensus
+    // Serial-noise policy: hunt instrument, prints only on rux:wwcensus (retired dfx=wwcensus)
     // boots; ordinary boots keep a clean serial prompt.
     if !crate::trace::EVENT_WWCENSUS.armed() {
         return;

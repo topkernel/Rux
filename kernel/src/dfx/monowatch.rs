@@ -2,7 +2,7 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! CLOCK_MONOTONIC jump tripwire (dfx=monowatch).
+//! CLOCK_MONOTONIC jump tripwire (rux:monowatch (retired dfx=monowatch)).
 //!
 //! The faultlat side-finding — an in-guest CLOCK_MONOTONIC that ran ~700 s
 //! ahead of real elapsed during one probe run — made every duration,

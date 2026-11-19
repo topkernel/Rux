@@ -1076,7 +1076,7 @@ pub fn pte_install_log(root_ppn: u64, va: u64, ppn: u64) {
     use core::sync::atomic::Ordering::Relaxed;
     // Hot path (every user PTE install — a fork copies hundreds of them):
     // the ring writes are forensic-only and cost 4 emulated atomics per
-    // copied PTE under TCG. Behind the dfx=mmforensics runtime switch.
+    // copied PTE under TCG. Behind the rux:mmforensics (retired dfx=mmforensics) runtime switch.
     if !crate::trace::EVENT_MMFORENSICS.armed() {
         return;
     }
@@ -1116,7 +1116,7 @@ pub unsafe fn free_user_page_tables(
     // Double-teardown detector: the same root walked twice means two
     // MmStructs ended up owning one page-table tree — the second walk
     // chases recycled frames full of foreign data. Behind the
-    // dfx=mmforensics runtime switch (see pte_install_log).
+    // rux:mmforensics (retired dfx=mmforensics) runtime switch (see pte_install_log).
     if crate::trace::EVENT_MMFORENSICS.armed() {
         use core::sync::atomic::Ordering::Relaxed;
         for k in 0..FUT_RING.len() {
@@ -2693,7 +2693,7 @@ pub fn get_kernel_page_table_ppn() -> u64 {
 /// residual): the frame is double-tracked, and the referencing tree that
 /// is NOT the stamping root holds the stale pointer.
 ///
-/// Safety shape (forensic, gated by dfx=mmforensics, <= a few/boot):
+/// Safety shape (forensic, gated by rux:mmforensics (retired dfx=mmforensics), <= a few/boot):
 /// - task set snapshotted with `for_each_task_try` (non-blocking; held
 ///   pid-hash buckets are skipped and reported);
 /// - each task's root is read with a single-field unsafe peek

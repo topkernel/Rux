@@ -103,7 +103,7 @@ pub(crate) fn do_execve_elf(
     };
     use crate::mm::alloc_and_map_user_table as alloc_and_map_to_user_table;
 
-    // EXECCOST (dfx=execcost): image-side stage stamps, raw read_time()
+    // EXECCOST (rux:execcost (retired dfx=execcost)): image-side stage stamps, raw read_time()
     // ticks. Paired with the ladder line (EXECCOST) from do_execve — same
     // switch, its own rate-limit counter (approximate lockstep; both lines
     // carry pid+path for pairing).
@@ -154,7 +154,7 @@ pub(crate) fn do_execve_elf(
         // create/inherit discipline lives here.
         crate::ipc::keys::exec_clear_thread_keyring();
         // 125th waitid leg: SPAWN clock for com.*-named executables (the
-        // OH bundle-name convention); dfx=schedtrace-gated (dfx/reaper.rs).
+        // OH bundle-name convention); rux:schedtrace (retired dfx=schedtrace)-gated (dfx/reaper.rs).
         if crate::dfx::reaper::on() {
             crate::dfx::reaper::note_nameset(unsafe { (*task_ptr).pid() }, &name);
         }

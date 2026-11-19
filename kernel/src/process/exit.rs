@@ -1560,7 +1560,7 @@ pub fn do_exit(exit_code: i32) -> ! {
                     // "handler exits mid-transaction"). own=1 marks the
                     // exact-tid match; own=0 means a sibling owes it.
                     let owing_own = owing_stid != 0 && owing_stid == dying_pid;
-                    // HOTPATH-PRINT: dfx=fuxstuck-gated UI-family exits.
+                    // HOTPATH-PRINT: rux:fuxstuck (retired dfx=fuxstuck)-gated UI-family exits.
                     crate::pr_warn!(
                         "UIEXIT[{}] tid={} comm='{}' tgid={} leader='{}' ppid={}('{}') code={:#x} cause={} sig={} sender={} sicode={:#x} grpexit={} leader={} lastsys={}({:#x},{:#x}) exrip={:#x} owing_n={} owing_txn={} owing_stid={} own={}",
                         n,
@@ -1596,7 +1596,7 @@ pub fn do_exit(exit_code: i32) -> ! {
     // an FFRT/binder worker that exits while holding a userspace
     // ffrt::mutex leaves every later locker parked forever with no
     // kernel-visible holder (the mutex has no owner field in the
-    // image's libffrt). dfx=txnhunt prints every NON-LEADER exit in
+    // image's libffrt). rux:txnhunt (retired dfx=txnhunt) prints every NON-LEADER exit in
     // the registered samgr pid, bounded to 64/boot.
     {
         use core::sync::atomic::Ordering::Relaxed;
@@ -1613,7 +1613,7 @@ pub fn do_exit(exit_code: i32) -> ! {
             let comm = core::str::from_utf8(unsafe { (*current).comm() })
                 .unwrap_or("")
                 .trim_end_matches('\0');
-            // HOTPATH-PRINT: dfx=txnhunt-gated samgr thread exit line.
+            // HOTPATH-PRINT: rux:txnhunt (retired dfx=txnhunt)-gated samgr thread exit line.
             crate::pr_warn!(
                 "SAMGR-THREADEXIT tid={} comm='{}' code={}",
                 dying_pid,
@@ -1780,7 +1780,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         // thread exits of every boot; pthread create/exit loops (and any
         // thread-heavy bring-up) paid it directly. The dumps belong to
         // the syscall-trace hunt that added them: default off behind
-        // dfx=syscalltrace (sc129/sc131/sc135 hunts re-arm with the flag).
+        // rux:syscalltrace (retired dfx=syscalltrace) (sc129/sc131/sc135 hunts re-arm with the flag).
         if !((*current).pid() == (*current).tgid())
             && crate::trace::EVENT_SYSCALLTRACE.armed()
         {
@@ -1966,7 +1966,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         //
         // RETIRED (probe-retire): the line was unconditional (18 lines
         // per ub2404 boot — every service that died of a signal). It now
-        // lives behind the existing signal-family switch (dfx=sigtrace).
+        // lives behind the existing signal-family switch (rux:sigtrace (retired dfx=sigtrace)).
         if exit_code < 0
             && crate::trace::EVENT_SIGTRACE.armed()
         {
@@ -2396,7 +2396,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         // 125th waitid leg: reaper forensics — record + print every
         // leader ZOMBIE (exit time, decoded status, parent, SPAWN age,
         // last-syscall latch) so the REAP4/REAPW arms can time the reap
-        // and ZLINGER can catch the never-reaped case. dfx=schedtrace-
+        // and ZLINGER can catch the never-reaped case. rux:schedtrace (retired dfx=schedtrace)-
         // gated (dfx/reaper.rs). Non-leaders never reach ZOMBIE (the
         // deferred-release tail above), so this fires per process.
         if crate::dfx::reaper::on() {
@@ -2539,7 +2539,7 @@ unsafe fn reparent_children_to_init(dying: *mut Task) {
             // moved here that its already-run reparent would never move
             // again. The freed-then-reaped dest left every moved child
             // (and its thread-group members) naming freed memory — the
-            // TREE-PARENT-DEAD draws of dfx=treehunt +
+            // TREE-PARENT-DEAD draws of rux:treehunt (retired dfx=treehunt) +
             // test/subreap_churn.c, and the ancestor sc304's subreaper
             // walk faulted into.
             let st = (*member).state();
@@ -3507,7 +3507,7 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
         if let Some(child_ptr) = zombie_ptr {
             let child = &*child_ptr;
             let child_pid = child.pid();
-            // W4SPIN (69th, dfx=pid1spin): init's SIGCHLD handler loops
+            // W4SPIN (69th, rux:pid1spin (retired dfx=pid1spin)): init's SIGCHLD handler loops
             // `while (waitpid(-1, &st, WNOHANG) > 0);` — a positive return
             // stream that never ends wedges pid 1 at 100% CPU and kills
             // the param service (the 105-family root). Once per second,

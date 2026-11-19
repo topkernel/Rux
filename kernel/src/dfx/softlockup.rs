@@ -223,7 +223,7 @@ pub fn check() {
                 // ran. The shadow is plain atomics keyed by task pointer;
                 // the stuck task is pinned by the wedged CPU's sched slot
                 // (same read discipline as the pid above). All three are
-                // budgeted and no-op unless dfx=leakhunt is armed.
+                // budgeted and no-op unless rux:leakhunt (retired dfx=leakhunt) is armed.
                 crate::dfx::leakorigin::report_hardirq_origin(
                     b"LOCKUP-HARDIRQ", stuck_task,
                 );

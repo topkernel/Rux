@@ -93,9 +93,9 @@ static SLOTS: [Slot; SCRIBBLE_SLOTS] = [const {
 }; SCRIBBLE_SLOTS];
 
 pub static HITS: AtomicU32 = AtomicU32::new(0);
-/// Park for the gdb breakpoint after the first hit (dfx=scribblepark).
+/// Park for the gdb breakpoint after the first hit (rux:scribblepark (retired dfx=scribblepark)).
 pub static PARK: AtomicBool = AtomicBool::new(false);
-/// Park when pid 1 registers (dfx=scribblepid1) so gdb can arm
+/// Park when pid 1 registers (rux:scribblepid1 (retired dfx=scribblepid1)) so gdb can arm
 /// watchpoints on the long-lived init task's Task struct + kernel
 /// stack at their boot-fixed addresses.
 pub static PARK_PID1: AtomicBool = AtomicBool::new(false);
@@ -111,7 +111,7 @@ static BADIRET_ANNOUNCED: AtomicBool = AtomicBool::new(false);
 // R68: Task-header canary global one-shot (see verify()).
 static HEADER_HIT_ANNOUNCED: AtomicBool = AtomicBool::new(false);
 
-// ---- pick/publish event ring (dfx=scribble) -------------------------
+// ---- pick/publish event ring (rux:scribble (retired dfx=scribble)) -------------------------
 // Every mark_picked_on_cpu and x86_switch_publish appends here; the CONS
 // report dumps the tail, showing the last picks/switches around an
 // abandoned pick (on_cpu=1, claim=-1, re-linked, owned by no slot).
@@ -180,7 +180,7 @@ pub fn ring_dump() {
     }
 }
 
-// ---- R69 allocator double-handoff audit (dfx=scribble) -----------------
+// ---- R69 allocator double-handoff audit (rux:scribble (retired dfx=scribble)) -----------------
 // The x86 scribble morphology (live Task headers carrying another
 // allocation's bytes, live stacks carrying foreign small-integer data)
 // is what a buddy page handed to a SECOND owner while the first still

@@ -457,14 +457,14 @@ pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) ->
             }
         }
     }
-    // Scribble hunter (dfx=scribble): record the switch completion.
+    // Scribble hunter (rux:scribble (retired dfx=scribble)): record the switch completion.
     crate::dfx::scribble::ring_log(
         crate::arch::cpu_id() as usize,
         2,
         prev as u64,
         next as u64,
     );
-    // Scribble hunter (dfx=scribble): quiesce point — prev's context is
+    // Scribble hunter (rux:scribble (retired dfx=scribble)): quiesce point — prev's context is
     // fully saved here, so any tracked field off its shadow was written
     // by someone else while it ran.
     if !prev.is_null() {

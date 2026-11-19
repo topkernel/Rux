@@ -2,7 +2,7 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! dfx=filerd — cached-file read cost anatomy probe (bw_file_rd lane).
+//! rux:filerd (retired dfx=filerd) — cached-file read cost anatomy probe (bw_file_rd lane).
 //!
 //! The lmbench `bw_file_rd 1m io_only` row ran 50x slower than the
 //! reference kernel (669 MB/s vs 33.6 GB/s, KVM, strong profile) while
@@ -26,7 +26,7 @@
 //!
 //! Cycles are raw RDTSC ticks; `tsc_hz` is self-measured at read time by
 //! bracketing a ~10 ms busy window between the calibrated 10 MHz
-//! timekeeper and RDTSC. All hooks are behind a single `dfx=filerd`
+//! timekeeper and RDTSC. All hooks are behind a single `rux:filerd (retired dfx=filerd)`
 //! cmdline switch (one relaxed atomic load per read call when enabled,
 //! zero instrumentation cost when off). OFF by default like every DFX
 //! probe.

@@ -8,7 +8,7 @@
 //! POINTER's origin: which structure still references a frame that
 //! re-entered circulation, and when that reference was created.
 //!
-//! This module is the capture side of `dfx=mmforensics` (existing gated
+//! This module is the capture side of `rux:mmforensics (retired dfx=mmforensics)` (existing gated
 //! family — no new switch). At a double-tracking event it dumps the
 //! frame's FULL tracking state:
 //!
@@ -88,7 +88,7 @@ pub static REF_CUR: AtomicUsize = AtomicUsize::new(0);
 
 /// Record a get/put transition on a page-cache-typed descriptor.
 /// `kind`: 0 = get_page, 1 = put (site-attributed). No-op unless
-/// `dfx=mmforensics` is armed; takes no locks (safe under PTE locks).
+/// `rux:mmforensics (retired dfx=mmforensics)` is armed; takes no locks (safe under PTE locks).
 #[inline]
 pub fn note_ref(page: *const crate::mm::page_desc::Page, kind: u8, site: u8, old: i32) {
     if !crate::trace::EVENT_MMFORENSICS.armed() {
@@ -302,7 +302,7 @@ fn ring_history(ppn: u64) {
 }
 
 /// Deep capture of one frame's tracking state. Rate-limited; a no-op
-/// unless `dfx=mmforensics` armed the switch.
+/// unless `rux:mmforensics (retired dfx=mmforensics)` armed the switch.
 pub fn capture_frame(pfn: usize, why: &'static str) {
     if !crate::trace::EVENT_MMFORENSICS.armed() {
         return;

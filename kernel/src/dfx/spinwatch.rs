@@ -1,4 +1,4 @@
-//! dfx=spinwatch — rapid zero-event epoll-return census (hilog-flood lane).
+//! rux:spinwatch (retired dfx=spinwatch) — rapid zero-event epoll-return census (hilog-flood lane).
 //!
 //! The OH boot's log flood is the visible face of service loops that
 //! should PARK but cycle: FFRT sleepers (os_ds_service's EpollManager

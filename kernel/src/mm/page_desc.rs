@@ -1276,7 +1276,7 @@ pub fn page_desc_stats() -> PageDescStats {
     // boot with less RAM — descriptors past the mapped range are unmapped
     // vmemmap, and dereferencing them panics the periodic DFX dump
     // (observed: KERNPANIC in page_desc_stats 8s into a -m 1G boot with
-    // dfx=periodic,taskdump). The vmemmap-mapped count is the direct
+    // rux:periodic (retired dfx=periodic),taskdump). The vmemmap-mapped count is the direct
     // dereference-safety bound; F12's phys_memory_size estimate is kept
     // for total_pages above.
     let live_pages = live_pages.min(crate::mm::vmemmap::vmemmap_stats().nr_pages);

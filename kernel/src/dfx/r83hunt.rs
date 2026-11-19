@@ -445,7 +445,7 @@ pub fn sched_tick_audit() {
         }
     }
     // (3) Heap fingerprint scan every 64 jiffies: 2 MiB per pass.
-    // Opt-in (dfx=r83scan): the sweep read_volatile-walks the heap from
+    // Opt-in (rux:r83scan (retired dfx=r83scan)): the sweep read_volatile-walks the heap from
     // timer context and two verification boots faulted inside it (one
     // past the mapped window, one on a corrupted va_pa_offset read) —
     // diagnostics default OFF per the dfx convention.

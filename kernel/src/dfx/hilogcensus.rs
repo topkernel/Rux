@@ -1,4 +1,4 @@
-//! dfx=hilogcensus — per-caller census of the OpenHarmony log fabric
+//! rux:hilogcensus (retired dfx=hilogcensus) — per-caller census of the OpenHarmony log fabric
 //! (hilog-flood lane).
 //!
 //! The OH boot floods the hilog unix-dgram fabric at 10^4-10^6 msg/s

@@ -9,7 +9,7 @@
 //! spinlock deadlock watchdog spinning with local IRQs off and possibly
 //! with locks the printk path itself needs.
 //!
-//! Gated by the `dfx=watchdog` / `dfx=taskdump` runtime switches (see
+//! Gated by the `rux:watchdog (retired dfx=watchdog)` / `rux:taskdump (retired dfx=taskdump)` runtime switches (see
 //! switches.rs); also available on demand through the UART trigger when
 //! `taskdump` is on.
 
@@ -849,7 +849,7 @@ pub fn dump_all_tasks(reason: &str) {
         puts(" linked= probes skipped (GRQ lock busy)\n");
     }
     // Heap/page snapshot on every periodic dump: the leak curve rides the
-    // same 5s cadence, and with dfx=memwatch the size-class growth table
+    // same 5s cadence, and with rux:memwatch (retired dfx=memwatch) the size-class growth table
     // and big-object call-site histogram follow (memwatch.rs). Only from
     // the periodic path — the watchdog variant may run while the heap lock
     // is the wedged one, and the stats walk takes allocator locks.
@@ -1622,7 +1622,7 @@ extern "C" fn defer_emit_fn(_arg: *mut core::ffi::c_void) -> i32 {
 /// khungtaskd cadence (60 s) sees a 7.4 s park only at 61 s; this runs
 /// the same snapshot every ~5 s for the first ~60 s of boot so the
 /// park-time kernel stack is captured while the boot is still young.
-/// Self-gated on dfx=sleepsnap inside sleep_snapshot itself.
+/// Self-gated on rux:sleepsnap (retired dfx=sleepsnap) inside sleep_snapshot itself.
 pub fn sleep_snapshot_early() {
     use core::sync::atomic::Ordering;
     static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -1641,14 +1641,14 @@ pub fn sleep_snapshot_early() {
     N.fetch_add(1, Ordering::Relaxed);
     crate::ipc::binder::sleep_snapshot();
     // 53rd drain hunt: park-side AF_UNIX queue/wait census on the same
-    // cadence (self-gated on dfx=sleepsnap inside).
+    // cadence (self-gated on rux:sleepsnap (retired dfx=sleepsnap) inside).
     crate::net::unix::unix_park_audit();
     // 53rd timer-drive hunt: armed timerfd wheel entries + waiter census
-    // (self-gated on dfx=sleepsnap inside).
+    // (self-gated on rux:sleepsnap (retired dfx=sleepsnap) inside).
     crate::syscall::misc::timerfd_wheel_audit();
 }
 
-/// pid=1 RUNNING-spin audit (69th, dfx=pid1spin): ohw75 proved the
+/// pid=1 RUNNING-spin audit (69th, rux:pid1spin (retired dfx=pid1spin)): ohw75 proved the
 /// 105-family's dead leg is init itself going 100%-CPU RUNNING and
 /// silent (no LoopEvent prints, no param reads) from t=34.7 to the end
 /// of the boot while the rest of the system stays alive. This audit

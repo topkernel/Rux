@@ -752,7 +752,7 @@ fn ext4_file_read_perblock(
         // block 0 (superblock-backup garbage) — review 5.5 (稀疏洞读盘 0,
         // 非缓存路径).
         if this_block == 0 {
-            // dfx=exthunt: O_DIRECT hole verdict — see exthunt_read_hole.
+            // rux:exthunt (retired dfx=exthunt): O_DIRECT hole verdict — see exthunt_read_hole.
             crate::fs::ext4::extent::exthunt_read_hole(
                 inode.ino,
                 &inode.block,
@@ -777,7 +777,7 @@ fn ext4_file_read_perblock(
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
             let data = &(*bh).b_data;
-            // dfx=exthunt: O_DIRECT serve truth (see exthunt_rd_od).
+            // rux:exthunt (retired dfx=exthunt): O_DIRECT serve truth (see exthunt_rd_od).
             crate::fs::ext4::extent::exthunt_rd_od(
                 inode.ino as u64,
                 block_index as u64,
@@ -997,7 +997,7 @@ fn ext4_file_read_cached_dst(
         // 4 KiB-read hot path under TCG.
         let mut run: [(u64, *const u8); 16] = [(0, core::ptr::null()); 16];
         let want = core::cmp::min(pages_wanted, run.len());
-        // dfx=filerd: phase anatomy of the warm path (bw_file_rd 50x
+        // rux:filerd (retired dfx=filerd): phase anatomy of the warm path (bw_file_rd 50x
         // attribution). The probe's copy bracket is skipped on the
         // user-fault early returns below — a diagnostic undercount on
         // the EFAULT path only, never on the benchmark's fast path.
@@ -1029,7 +1029,7 @@ fn ext4_file_read_cached_dst(
             while i < run_len {
                 let in_page_off = if i == 0 { page_offset } else { 0 };
                 let remaining_now = to_read - total_read;
-                // dfx=exthunt: frame-hit truth for the run's first page
+                // rux:exthunt (retired dfx=exthunt): frame-hit truth for the run's first page
                 // (a poisoned frame shows zeros here) — see exthunt_rd_hit.
                 if i == 0 {
                     // SAFETY: page_data is a valid page-aligned pointer of
@@ -1109,7 +1109,7 @@ fn ext4_file_read_cached_dst(
             continue;
         }
 
-        // dfx=filerd: this read call fell off the warm path.
+        // rux:filerd (retired dfx=filerd): this read call fell off the warm path.
         if probe {
             crate::dfx::filerd::note_miss();
         }
@@ -1193,7 +1193,7 @@ fn ext4_file_read_cached_dst(
                 unsafe {
                     if let Some(bh) = bio::bread(fs.device, block_nr) {
                         let data = &(*bh).b_data;
-                        // dfx=exthunt: sync-fallback serve truth (see
+                        // rux:exthunt (retired dfx=exthunt): sync-fallback serve truth (see
                         // exthunt_rd_serve).
                         crate::fs::ext4::extent::exthunt_rd_serve(
                             ino,
@@ -1336,7 +1336,7 @@ fn fill_page_cache_batch(
             Err(_) => break, // metadata failure: stop extending the batch
         };
         if block_nr == 0 {
-            // dfx=exthunt: the reader just verdict "hole" from the cached
+            // rux:exthunt (retired dfx=exthunt): the reader just verdict "hole" from the cached
             // root — see exthunt_read_hole.
             crate::fs::ext4::extent::exthunt_read_hole(
                 inode.ino as u32,
@@ -1401,7 +1401,7 @@ fn fill_page_cache_batch(
 
         match bio::bread_async_multi(fs.device, block_nr, submit_blocks, &completions[count]) {
             Some(bh) => {
-                // dfx=exthunt: batch submit truth (see exthunt_rd_batch).
+                // rux:exthunt (retired dfx=exthunt): batch submit truth (see exthunt_rd_batch).
                 crate::fs::ext4::extent::exthunt_rd_batch(
                     ino,
                     run_first,
@@ -2185,7 +2185,7 @@ fn ext4_file_write_src(
                             // a freshly allocated block whose disk contents
                             // are irrelevant — getblk_zero creates a zeroed
                             // dirty buffer without the disk read.
-                            // dfx=exthunt: unwritten-materialization zero.
+                            // rux:exthunt (retired dfx=exthunt): unwritten-materialization zero.
                             crate::fs::ext4::extent::exthunt_zzero(
                                 "mat", inode.ino, block_index, phys,
                             );
@@ -2239,7 +2239,7 @@ fn ext4_file_write_src(
                             // SAFETY: freshly allocated block; getblk_zero
                             // fabricates the zeroed dirty buffer without a
                             // disk read (full-block overwrite follows).
-                            // dfx=exthunt: hole-fill allocation zero.
+                            // rux:exthunt (retired dfx=exthunt): hole-fill allocation zero.
                             crate::fs::ext4::extent::exthunt_zzero(
                                 "hole", inode.ino, block_index, new_block,
                             );
@@ -2348,7 +2348,7 @@ fn ext4_file_write_src(
                 &mut data[block_offset..block_offset + write_in_block],
             );
 
-            // dfx=exthunt: the writer's (logical, phys, pattern) truth.
+            // rux:exthunt (retired dfx=exthunt): the writer's (logical, phys, pattern) truth.
             crate::fs::ext4::extent::exthunt_wr_put(
                 inode.ino,
                 block_index,
@@ -3663,7 +3663,7 @@ pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {    // SAFETY: 
 pub fn ext4_file_read_user_vfs(file: &File, dst: *mut u8, count: usize) -> isize {
     // SAFETY: same inode/fs lifetime guarantees as ext4_file_read_vfs.
     unsafe {
-        // dfx=filerd: outer bracket for the whole fast path (the lock /
+        // rux:filerd (retired dfx=filerd): outer bracket for the whole fast path (the lock /
         // pin / copy / unpin / epilog phases are charged inside; the
         // residue vs their sum is resolution + ra_state + loop scaffolding).
         let probe = crate::dfx::filerd::on();

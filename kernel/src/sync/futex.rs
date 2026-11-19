@@ -153,7 +153,7 @@ pub fn fxrs_word_watched(uaddr: usize) -> bool {
 //     names a wake-scan miss;
 //   - no WAKE near the birth at all names the never-sent branch
 //     (userspace ordering — reference-diff territory).
-// dfx=fuxstuck-gated push (one lock+copy per wake op); zero cost off.
+// rux:fuxstuck (retired dfx=fuxstuck)-gated push (one lock+copy per wake op); zero cost off.
 #[derive(Clone, Copy)]
 pub struct FuxWakeOp {
     pub j: u64,
@@ -502,7 +502,7 @@ impl FutexKey {
         // uaddr AND the resolved physical identity — so a lost cross-
         // process wake (parent WAIT vs exec'd child WAKE on a MAP_SHARED
         // page) shows which side resolved which frame. Gated behind
-        // dfx=futextrace (console-cost discipline; see FXDV2 note).
+        // rux:futextrace (retired dfx=futextrace) (console-cost discipline; see FXDV2 note).
         if crate::trace::EVENT_FUTEX_MISS.armed() {
             static FXK_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
@@ -627,7 +627,7 @@ struct Waiter {
     /// Whether already woken
     woken: bool,
     /// Jiffies when this waiter was linked into its bucket chain (the
-    /// park stamp for the dfx=fuxstuck census; 0 on the alloc_waiter
+    /// park stamp for the rux:fuxstuck (retired dfx=fuxstuck) census; 0 on the alloc_waiter
     /// placeholder, overwritten at real insertion). NOT reset on requeue —
     /// the park episode continues, so the original stamp stays truthful.
     park_j: u64,
@@ -1301,7 +1301,7 @@ pub static FUXPARK_J: core::sync::atomic::AtomicU32 =
 /// the live word). Watch arming: slot 1 when free; a DIFFERENT page than
 /// slot 1 takes slot 2 (the PTE watch is per page — a same-page shift is
 /// already covered by slot 1's page plus the FW-PG page-mate log).
-/// dfx=fuxstuck-gated by the caller.
+/// rux:fuxstuck (retired dfx=fuxstuck)-gated by the caller.
 ///
 /// huks-wedge lane (hw1): STICKY watch slots. The 81st re-targeted slot
 /// 1 on every latch, so with several stalled tgids the write watch kept
@@ -2746,7 +2746,7 @@ pub fn oh67_m2_decode() -> alloc::string::String {
 //   {size@104 magic@112 stk@120}; the coroutine stack is [co+120,
 //   co+120+size) with the saved RSP inside it, growing down.
 //
-// All reads are page-table walks of frozen wedged memory; dfx=fuxstuck
+// All reads are page-table walks of frozen wedged memory; rux:fuxstuck (retired dfx=fuxstuck)
 // gates the print sites (the audit burst and the FW write path).
 // x86_64-only (the OH image and the fs/TLS offsets are x86_64).
 
@@ -4680,7 +4680,7 @@ pub fn ffrt_lock_holder_scan(tgid: u32, lock: u64) -> alloc::string::String {
     out
 }
 
-/// dfx=fuxstuck (17th successor): futex-stuck census, called at the ~1 Hz
+/// rux:fuxstuck (retired dfx=fuxstuck) (17th successor): futex-stuck census, called at the ~1 Hz
 /// timer heartbeat (same slot as the TXN-HANG audit). The post-creation OH
 /// stall web parks threads in userspace-internal condvars (useriam's FFRT
 /// executor 248-596 s, distributeddata's DB_TaskExecutor, samgr's Executor)
@@ -4700,7 +4700,7 @@ pub fn ffrt_lock_holder_scan(tgid: u32, lock: u64) -> alloc::string::String {
 /// locks (waiter_of discipline) copying POD only; phase B reads task state
 /// under for_each_task (pid-hash per-bucket lock, slowtask contract) — the
 /// two phases never nest. Bounded: 8 lines per burst, 32 sampled waiters.
-/// Zero cost when dfx=fuxstuck is off (one switch load).
+/// Zero cost when rux:fuxstuck (retired dfx=fuxstuck) is off (one switch load).
 pub fn futex_stuck_census() {
     use alloc::vec::Vec;
     use core::sync::atomic::Ordering::Relaxed;
@@ -5830,7 +5830,7 @@ pub fn futex_stuck_census() {
         let g = &groups[gi];
         let h = histos.iter().find(|h| h.tgid == g.tgid);
         // HOTPATH-PRINT: fuxstuck census report — gated by
-        // dfx=fuxstuck at futex_stuck_census() entry plus the 5s burst
+        // rux:fuxstuck (retired dfx=fuxstuck) at futex_stuck_census() entry plus the 5s burst
         // budget and the 1200-line LINES cap; never fires on a plain boot.
         use core::fmt::Write as _;
         let mut vmx = alloc::string::String::new();
@@ -6057,7 +6057,7 @@ pub fn futex_stuck_census() {
                 }
                 let _ = write!(prev_s, " {:#x}", a);
             }
-            // HOTPATH-PRINT: FUX-CHAIN — same dfx=fuxstuck gate and
+            // HOTPATH-PRINT: FUX-CHAIN — same rux:fuxstuck (retired dfx=fuxstuck) gate and
             // burst budget as the FUX-STUCK row it follows; one to
             // three lines per reported group.
             crate::pr_warn!(
@@ -6083,7 +6083,7 @@ pub fn futex_stuck_census() {
             }
         }
         // 85th: park-page structure signature — page-start words and the
-        // wait-word neighborhood; same dfx=fuxstuck gate + burst budget
+        // wait-word neighborhood; same rux:fuxstuck (retired dfx=fuxstuck) gate + burst budget
         // as the row above (follows its group).
         if g.rep_pw0_ok || g.rep_pwu_ok {
             let mut w_s = alloc::string::String::new();
@@ -6115,7 +6115,7 @@ pub fn futex_stuck_census() {
         }
     }
     if total > printed && printed == 8 {
-        // HOTPATH-PRINT: census overflow marker — same dfx=fuxstuck gate
+        // HOTPATH-PRINT: census overflow marker — same rux:fuxstuck (retired dfx=fuxstuck) gate
         // and 5s burst budget as the FUX-STUCK rows above (8 per burst).
         crate::pr_warn!(
             "FUX-STUCK-SUM stuck_total={} printed=8 (sampled {})",
@@ -6443,7 +6443,7 @@ pub fn futex_stuck_census() {
                         g.rep_u2v_cls as char
                     );
                 }
-                // HOTPATH-PRINT: fuxstuck graph row — same dfx=fuxstuck
+                // HOTPATH-PRINT: fuxstuck graph row — same rux:fuxstuck (retired dfx=fuxstuck)
                 // gate + 5s burst budget + LINES cap as FUX-STUCK.
                 crate::pr_warn!(
                     "FUX-GRAPH tgid={} tid={} ({}) uaddr={:#x} n={} park={}s..{}s anywoken={} fval={:#x} {}={:#x} fto={:#x} A+{:#x} {} uret={}",
@@ -6932,7 +6932,7 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
     #[cfg(feature = "dfx-futex-trace")]
     ftx_trace(b"WAKE-OUT", uaddr, ret as u64, woken_n as u64);
 
-    // b133 hunt (dfx=syscalltrace): OH's samgr/SA threads park forever in
+    // b133 hunt (rux:syscalltrace (retired dfx=syscalltrace)): OH's samgr/SA threads park forever in
     // PRIVATE futex_wait inside musl's ld.so malloc locks — 120s+ binder
     // stalls queue the whole display chain behind them. Wake/wait protocol
     // is documented-solid, so the prime suspect is a KEY MISMATCH: a
@@ -8241,7 +8241,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
         // RETIRED (probe-retire): the latch self-armed on EVERY boot
         // (udisksd contention is ordinary on 24.04) and the exit.rs
         // forensics then printed per thread exit. Behind the existing
-        // futex-hunt switch (dfx=futextrace), same as freeze_scan.
+        // futex-hunt switch (rux:futextrace (retired dfx=futextrace)), same as freeze_scan.
         if matches!(cmd, FUTEX_WAIT | FUTEX_WAIT_BITSET)
             && (val == 1 || val == 2)
             && RWFRZ_EXIT_WATCH_TGID.load(Relaxed) == 0
@@ -8278,7 +8278,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
         // logs an FW row with rip), run the thread-side holder hunt, and
         // run the CoTask saved-stack decoder — while any live holder is
         // still parked mid-critical-section and nameable. Once per tgid;
-        // dfx=fuxstuck-gated (the page compare below is the only cost
+        // rux:fuxstuck (retired dfx=fuxstuck)-gated (the page compare below is the only cost
         // on switch-off boots).
         // 120th ROOT-CAUSE CORRECTION (presence hunt): the 118th's
         // original gate compared `uaddr & 0xffff_f000 == 0x3fbf_13e000`
@@ -8405,7 +8405,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
     // comm read + utf8 + name compare per op on every boot that never
     // runs hdf_devmgr; latched (or in the FXDV2 arena window below), it
     // printed up to 900 lines of HEALTHY churn per OH boot (~0.6 s of
-    // polled-16550 time). The hunt is gated behind dfx=futextrace (the
+    // polled-16550 time). The hunt is gated behind rux:futextrace (retired dfx=futextrace) (the
     // same switch as the wake-miss scan in futex_wake_in_mm); the
     // sc184/sc185 hunts re-arm with the flag.
     if crate::trace::EVENT_FUTEX_MISS.armed()
@@ -8567,7 +8567,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
         // while the count is nonzero) vs lost-wake (WAKE issued, writer
         // still parked) vs coherence drift (two processes observe
         // different vals for the same word).
-        // GATED behind dfx=futextrace since the lb243 decode: this tracer
+        // GATED behind rux:futextrace (retired dfx=futextrace) since the lb243 decode: this tracer
         // ran ALWAYS-ON from inside do_futex's hot path, and the param
         // arena is the boot critical path (param_service sync + every
         // param read). Its 500 budgeted console writes (each allocating +
@@ -8577,7 +8577,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
         // print half-done (lb243: samgr's self-send worker frozen at
         // do_futex+0x112e over LowerHex/unix_write_slice_owned residue)
         // and the param sync chain freezes the whole service graph — the
-        // 'samgr-dark' boot family. Hunt with dfx=futextrace, never by
+        // 'samgr-dark' boot family. Hunt with rux:futextrace (retired dfx=futextrace), never by
         // default.
         if (0x7ff0_0000_0000..0x7ff0_0010_0000).contains(&uaddr)
             && crate::trace::EVENT_FUTEX_MISS.armed()
@@ -8768,7 +8768,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
     ) {
         fuxw_push(cmd as u8, uaddr as u64, ret as i32);
     }
-    // 76th (launcher lane, dfx=txnhunt): samgr FFRT wake audit. The
+    // 76th (launcher lane, rux:txnhunt (retired dfx=txnhunt)): samgr FFRT wake audit. The
     // accountmgr ready-flag gate (ohw106): accountmgr's four SA-listener
     // subscribes post two subscribe-time OnAddSystemAbility notify tasks
     // into samgr's FFRT workHandler queue ~30 ms apart — the FIRST runs
@@ -8778,7 +8778,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
     // this tap prints every WAKE-class op issued by a samgr thread
     // during the first 70 s so the missing PostTask's wake (and its ret
     // — whether a parked worker was actually found) is visible. Zero
-    // cost when dfx=txnhunt is off.
+    // cost when rux:txnhunt (retired dfx=txnhunt) is off.
     if matches!(
         cmd,
         FUTEX_WAKE | FUTEX_WAKE_BITSET | FUTEX_WAKE_OP | FUTEX_REQUEUE | FUTEX_CMP_REQUEUE
@@ -8885,7 +8885,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                 PARK_TGID[tslot].load(Relaxed) == cur_tgid
                     && PARK_TGID_N[tslot].fetch_add(1, Relaxed) < 3
             };
-            // dfx=parkdump: each park dump costs hundreds of UART+kmsg
+            // rux:parkdump (retired dfx=parkdump): each park dump costs hundreds of UART+kmsg
             // lines (hilogd.rd_kmsg eats a vCPU copying them out of
             // /dev/kmsg — the b128/b129 lesson), so the park-dump family
             // is OFF in launcher-milestone boots.
@@ -8960,7 +8960,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                         core::sync::atomic::AtomicU32::new(0);
                     let n =
                         APPPARK_DUMPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    // dfx=parkdump: the APP-PARK dump prints the child's
+                    // rux:parkdump (retired dfx=parkdump): the APP-PARK dump prints the child's
                     // whole lib-region VMA table (APPMAP, ~2.9k lines per
                     // dump in sc179) + fd table + syscall rings — pure
                     // chain forensics, OFF in milestone boots (b128/b129
@@ -9405,7 +9405,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
     // main-thread futex on a shallow frame hit this — two pr_warn
     // lines per op through the polled UART until the 400-op budget
     // burned (~0.8 s of serial per boot). The census joins the
-    // dfx=futextrace family; the sc118/sc119 hunts re-arm with the
+    // rux:futextrace (retired dfx=futextrace) family; the sc118/sc119 hunts re-arm with the
     // flag.
     {
         const STK_PAGE: usize = 0x7fffffffc000;
@@ -9528,7 +9528,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
     // Serial-cleanliness (print-audit lane, 2026-11): condition_variable
     // wait_for is a hot per-op path for foundation/sa_main threads —
     // ungated this paid a comm compare per timed WAIT plus up to 240
-    // pr_warn lines per OH boot. The census joins the dfx=futextrace
+    // pr_warn lines per OH boot. The census joins the rux:futextrace (retired dfx=futextrace)
     // family; the sc156 hunt re-arms with the flag.
     if matches!(op & FUTEX_CMD_MASK, FUTEX_WAIT | FUTEX_WAIT_BITSET)
         && timeout != 0
@@ -11919,7 +11919,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
     // contention — every ub2404 boot printed ~150 RWFRZ lines in the
     // settled phase. The entire body (adoption included — adopting a
     // word also fills a RWFRZ_WATCH slot, arming the per-op tracer)
-    // now sits behind the existing futex-hunt switch (dfx=futextrace).
+    // now sits behind the existing futex-hunt switch (rux:futextrace (retired dfx=futextrace)).
     // The only functional action inside is watch-slot bookkeeping; the
     // explicit rwfrzwatch= cmdline pre-arm above stays available.
     if !crate::trace::EVENT_FUTEX_MISS.armed() {

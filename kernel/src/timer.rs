@@ -552,40 +552,40 @@ pub fn timer_softirq_handler(_nr: usize) {
             .is_ok()
         {
             // Hunt instrument (serial-noise policy): the WW/WW2/WW3 census
-            // lines print only on dfx=wwcensus boots; ordinary boots keep
+            // lines print only on rux:wwcensus (retired dfx=wwcensus) boots; ordinary boots keep
             // a clean serial prompt.
             if crate::trace::EVENT_WWCENSUS.armed() {
                 ww_heartbeat(now_time);
             }
-            // leg-27: in-flight binder txn hang audit (dfx=txnhunt,
+            // leg-27: in-flight binder txn hang audit (rux:txnhunt (retired dfx=txnhunt),
             // self-gated + rate-capped inside). Runs on the same ~1 Hz
             // heartbeat slot; zero cost when off.
             crate::ipc::binder::txn_hang_audit();
-            // holder-chain lane (dfx=txnhunt, same switch): BWR-park
+            // holder-chain lane (rux:txnhunt (retired dfx=txnhunt), same switch): BWR-park
             // audit — every binder thread with a transaction stack (or
             // an anomalous ioctl park) gets one line naming its CURRENT
             // syscall + the decoded write sub-command of the BWR it is
             // parked in; the FFRT mutex holders parked inside a binder
             // ioctl (the futex-census blind spot) surface here.
             crate::ipc::binder::bwr_park_audit();
-            // leg-30B: AMS46 node/proc census (dfx=ams46, self-gated +
+            // leg-30B: AMS46 node/proc census (rux:ams46 (retired dfx=ams46), self-gated +
             // rate-capped inside) — the Gate-1 delivery adjudication
             // backdrop for the accountmgr->AMS StartUser oneway.
             crate::ipc::binder::ams46_audit();
-            // leg-29A: process-tree invariant validator (dfx=treehunt,
+            // leg-29A: process-tree invariant validator (rux:treehunt (retired dfx=treehunt),
             // self-gated + rate-capped inside) — E8-REPAR unlinked-
             // snapshot root-cause hunt.
             crate::dfx::treehunt::tick();
-            // leg-33B: slow-kernel-entry audit (dfx=slowtask, self-gated +
+            // leg-33B: slow-kernel-entry audit (rux:slowtask (retired dfx=slowtask), self-gated +
             // rate-capped inside) — leaf attribution for nested-call
             // cascades (fs/futex stalls behind reader exhaustion).
             crate::dfx::slowtask::tick();
-            // 17th successor: futex-stuck census (dfx=fuxstuck, self-gated
+            // 17th successor: futex-stuck census (rux:fuxstuck (retired dfx=fuxstuck), self-gated
             // + rate-capped inside) — per-condvar producer-starvation
             // adjudication for the OH post-creation stall web.
             crate::sync::futex::futex_stuck_census();
             // 53rd (52nd §6a): early-cadence S-state sleep snapshot
-            // (dfx=sleepsnap inside): every ~5 s for the first minute, so
+            // (rux:sleepsnap (retired dfx=sleepsnap) inside): every ~5 s for the first minute, so
             // a 7.4 s park (hilogd main) is captured with its parked
             // kernel stack while the boot is still young; the khungtaskd
             // 60 s cadence continues afterward.
@@ -897,7 +897,7 @@ pub fn timer_softirq_handler(_nr: usize) {
     // ring with no scheduled consumer — the ftest01 wedge family).
     crate::drivers::virtio::vw_lag_watchdog(current);
 
-    // dfx=claiminject (GNOME-wedge adjudication): every 50 jiffies, leak
+    // rux:claiminject (retired dfx=claiminject) (GNOME-wedge adjudication): every 50 jiffies, leak
     // a foreign claim onto the linked pickable set. Unpatched kernels
     // must wedge (the g2 stranding reproduced deterministically); kernels
     // with the pick-side stale-claim heal must keep scheduling.
@@ -911,7 +911,7 @@ pub fn timer_softirq_handler(_nr: usize) {
         }
     }
 
-    // dfx=oncpuinject (R85 tail-wedge adjudication): every 50 jiffies,
+    // rux:oncpuinject (retired dfx=oncpuinject) (R85 tail-wedge adjudication): every 50 jiffies,
     // stamp the lost-release ownership shape {on_cpu=1, claim=7, LIVE}
     // onto the linked pickable set. Unpatched kernels strand the poisoned
     // tasks exactly like the pid-1 tail wedge (every pick skips them
@@ -1100,7 +1100,7 @@ fn run_wheel_sweep(
 /// inside `timer_softirq_handler` (RT-2X split: the hardirq fast path
 /// runs the sweep only, never these). `current` is the jiffy at dispatch.
 fn softirq_diagnostics(current: u64) {
-    // DFX dfx=periodic: a task snapshot every PERIODIC_DUMP_SECS. Silent
+    // DFX rux:periodic (retired dfx=periodic): a task snapshot every PERIODIC_DUMP_SECS. Silent
     // hangs (form-B) trip no watchdog and swallow the UART magic (a wedged
     // shell stops draining the RX path) — a timed snapshot from the timer
     // softirq always lands. SBI-direct, no locks held here.
@@ -1140,7 +1140,7 @@ fn softirq_diagnostics(current: u64) {
 
     // perf-audit line (cmdline `syscost=1`): whole-syscall cost table +
     // tick-mode accounting + kernel-rip histogram dump every 60 s from
-    // this softirq. Own cmdline key — no dfx=switches.rs bit consumed.
+    // this softirq. Own cmdline key — no rux:switches (retired dfx=switches).rs bit consumed.
     crate::dfx::syscost::tick(current);
 
     // vm-op stage profiler (cmdline `mmprof=1`, oh-launcher perf
@@ -1156,14 +1156,14 @@ fn softirq_diagnostics(current: u64) {
     // (F4 diagnosis), same 60 s cadence.
     crate::dfx::fsw::tick(current);
 
-    // dfx=monowatch: ~1 Hz timebase jump tripwire (backward motion or
+    // rux:monowatch (retired dfx=monowatch): ~1 Hz timebase jump tripwire (backward motion or
     // multi-second spikes, clocksource named) — same printk discipline
     // as the periodic dump above.
     if crate::trace::EVENT_MONOWATCH.armed() {
         crate::dfx::monowatch::tick(current);
     }
 
-    // dfx=wildwatch: canary re-verify on a 1 s cadence (DMA-class
+    // rux:wildwatch (retired dfx=wildwatch): canary re-verify on a 1 s cadence (DMA-class
     // writers bypass PTEs; the RO trap cannot see them).
     if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WildWatch)
         && current.saturating_sub(LAST_WILDWATCH_VERIFY.load(Ordering::Relaxed)) >= 100
@@ -1172,14 +1172,14 @@ fn softirq_diagnostics(current: u64) {
         crate::dfx::wildwatch::verify();
     }
 
-    // dfx=metawatch: buddy-meta shadow audit on a 10 s cadence (the
+    // rux:metawatch (retired dfx=metawatch): buddy-meta shadow audit on a 10 s cadence (the
     // buddy face of the wild writer — see dfx/metawatch.rs). Throttle
     // is internal to the module.
     if crate::trace::EVENT_METAWATCH.armed() {
         crate::dfx::metawatch::tick(current);
     }
 
-    // dfx=schedtrace reaper forensics (125th waitid leg): 1 Hz zombie-
+    // rux:schedtrace (retired dfx=schedtrace) reaper forensics (125th waitid leg): 1 Hz zombie-
     // linger scan — names un-reaped children and what the non-reaping
     // parent is blocked on instead (dfx/reaper.rs).
     if crate::trace::EVENT_SCHEDTRACE.armed()
@@ -1189,7 +1189,7 @@ fn softirq_diagnostics(current: u64) {
         crate::dfx::reaper::zombie_scan(current);
     }
 
-    // dfx=ledger: run a pending on-demand accounting census latched by the
+    // rux:ledger (retired dfx=ledger): run a pending on-demand accounting census latched by the
     // "LEDGER!" UART magic. The RX IRQ itself only sets the flag (printk
     // from IRQ context is the classic self-wedge); this softirq already
     // hosts the periodic dumps, so printk discipline is the same.
@@ -1452,14 +1452,14 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
     }
 }
 
-/// Jiffies of the last periodic DFX snapshot (dfx=periodic).
+/// Jiffies of the last periodic DFX snapshot (rux:periodic (retired dfx=periodic)).
 static LAST_PERIODIC_DUMP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static LAST_PHANTOM_RELINK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// Jiffies of the last reaper zombie-linger scan (dfx=schedtrace).
+/// Jiffies of the last reaper zombie-linger scan (rux:schedtrace (retired dfx=schedtrace)).
 static LAST_REAPER_SCAN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// Jiffies of the last wildwatch canary verify (dfx=wildwatch).
+/// Jiffies of the last wildwatch canary verify (rux:wildwatch (retired dfx=wildwatch)).
 static LAST_WILDWATCH_VERIFY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 // ==================== Wakewatch forensics (vsync-starvation hunt) ====

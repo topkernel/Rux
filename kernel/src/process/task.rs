@@ -276,7 +276,7 @@ fn kstack_slab_free(bottom: *mut u8) -> bool {
     true
 }
 
-/// Packed-slab state for the SC-ANAT beat line (dfx=schb):
+/// Packed-slab state for the SC-ANAT beat line (rux:schb (retired dfx=schb)):
 /// (blocks, live slots, fallback note). x86_64 only — every other arch
 /// keeps the plain power-of-two buddy allocation and reports zeros.
 #[cfg(target_arch = "x86_64")]
@@ -296,7 +296,7 @@ pub fn kstack_slab_stats() -> (u64, u64, u64) {
     (0, 0, 0)
 }
 
-// Leg-16 kernel-heap anatomy (dfx=schb): live kernel-stack count and the
+// Leg-16 kernel-heap anatomy (rux:schb (retired dfx=schb)): live kernel-stack count and the
 // boot-max stack high-water in bytes. The high-water probe ZEROES each
 // fresh stack at alloc (outside every lock) and scans for the first
 // nonzero word from the bottom at free time — the depth distribution is
@@ -307,7 +307,7 @@ static KSTACK_LIVE: AtomicU64 = AtomicU64::new(0);
 static KSTACK_HW: AtomicU64 = AtomicU64::new(0);
 
 /// Leg-16 anatomy: (live kernel-stack count, boot-max high-water bytes).
-/// Both stay 0 unless dfx=schb armed the probe at alloc time.
+/// Both stay 0 unless rux:schb (retired dfx=schb) armed the probe at alloc time.
 pub fn kstack_anat() -> (u64, u64) {
     (KSTACK_LIVE.load(Ordering::Relaxed), KSTACK_HW.load(Ordering::Relaxed))
 }
@@ -535,7 +535,7 @@ fn stack_cache_free(stack_bottom: *mut u8) {
             }
         }
     }
-    // Leg-16 anatomy (dfx=schb,ksprobe): the high-water scan + record
+    // Leg-16 anatomy (rux:schb (retired dfx=schb),ksprobe): the high-water scan + record
     // stash lives in free_kernel_stack (needs self for comm/pid); this
     // side only keeps the live count honest for the SC-ANAT kN column.
     if crate::trace::EVENT_SCHB.armed()
@@ -1567,7 +1567,7 @@ pub struct Task {
     /// evidence, kept ON the task so no address-keyed side table can
     /// steal it mid-strand (the 61st's 256-slot SKIP_HIST collided).
     /// All writes are gated behind sched::sched_hist_armed()
-    /// (dfx=fuxstuck|schedtrace) and happen under the GRQ lock; the
+    /// (rux:fuxstuck (retired dfx=fuxstuck)|schedtrace) and happen under the GRQ lock; the
     /// census reads them lock-free. Ring entries pack
     /// kind:4|why:8|jiffies:30|aux:22 (kind: 1=link 2=refuse 3=pick
     /// 4=heal-claim 5=heal-oncpu; see sched::sched_hist_ring).
@@ -3468,7 +3468,7 @@ impl Task {
             }
             return false;
         }
-        // Scribble hunter (dfx=scribble): track this Task's scheduling
+        // Scribble hunter (rux:scribble (retired dfx=scribble)): track this Task's scheduling
         // fields from birth. No-op unless the runtime switch is on.
         #[cfg(feature = "x86_64")]
         crate::dfx::scribble::register(ptr);
@@ -3652,7 +3652,7 @@ impl Task {
     ) -> bool {
         if task.is_null() {
             // WAKE-REFUSE-PT1 (runq-strand hunt) — RETIRED (probe-retire):
-            // behind dfx=schedtrace like the rest of the refusal-point
+            // behind rux:schedtrace (retired dfx=schedtrace) like the rest of the refusal-point
             // family; also fixes a latent null-deref in the print itself.
             if crate::trace::EVENT_SCHEDTRACE.armed() {
                 static RF: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -3695,7 +3695,7 @@ impl Task {
                 v <<= 4;
             }
             unsafe { putchar(b'\n'); }
-            // WAKE-REFUSE-PT2 — RETIRED (probe-retire): dfx=schedtrace
+            // WAKE-REFUSE-PT2 — RETIRED (probe-retire): rux:schedtrace (retired dfx=schedtrace)
             // gates the refusal-point family; the wild-pointer DROP itself
             // stays unconditional (crash-class guard above).
             if crate::trace::EVENT_SCHEDTRACE.armed() {
@@ -3720,7 +3720,7 @@ impl Task {
                 use crate::console::putchar;
                 const MSG: &[u8] = b"WAKE-POISONED-TASK dropped\n";
                 for &b in MSG { unsafe { putchar(b); } }
-                // WAKE-REFUSE-PT3 — RETIRED (probe-retire): dfx=schedtrace
+                // WAKE-REFUSE-PT3 — RETIRED (probe-retire): rux:schedtrace (retired dfx=schedtrace)
                 // gates the refusal-point family; the poison DROP stays.
                 if crate::trace::EVENT_SCHEDTRACE.armed() {
                     static RF: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -3917,7 +3917,7 @@ impl Task {
                         // W2 print + monopolist capture — RETIRED
                         // (probe-retire): the wake-refusal census COUNTERS
                         // stay always-on (merge-gate band); the per-event
-                        // serial lines move behind dfx=schedtrace.
+                        // serial lines move behind rux:schedtrace (retired dfx=schedtrace).
                         if crate::trace::EVENT_SCHEDTRACE.armed()
                             && !mid_pick
                             && W2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16
@@ -3979,7 +3979,7 @@ impl Task {
                             }
                         }
                     // WAKE-REFUSE-PT4 — RETIRED (probe-retire):
-                    // dfx=schedtrace gates the refusal-point family.
+                    // rux:schedtrace (retired dfx=schedtrace) gates the refusal-point family.
                     if crate::trace::EVENT_SCHEDTRACE.armed() {
                         static RF4: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
                         let rn = RF4.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -4151,7 +4151,7 @@ impl Task {
                     // WAKE-REFUSE-PT5 — RETIRED (probe-retire): this is
                     // the loudest refusal-point arm (a benign scheduler
                     // race outcome, ~12 lines every ordinary boot); behind
-                    // dfx=schedtrace. The heal + resched logic is unchanged.
+                    // rux:schedtrace (retired dfx=schedtrace). The heal + resched logic is unchanged.
                     if crate::trace::EVENT_SCHEDTRACE.armed() {
                         static RF5: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
                         let rn = RF5.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -4435,7 +4435,7 @@ impl Task {
         }
     }
 
-    /// Raw parent-children-list head pointer (dfx=treehunt reads it to
+    /// Raw parent-children-list head pointer (rux:treehunt (retired dfx=treehunt) reads it to
     /// distinguish linked leaders from unlinked snapshot members; null
     /// for members by design). Diagnostic use only.
     #[inline]
@@ -5441,7 +5441,7 @@ impl Task {
         ) {
             Ok(_) => {
                 crate::sched::sched::pick_trace(self as *const Task as *mut Task, 6);
-                // Wakewatch (dfx=schedtrace): the switch-in affirm — the
+                // Wakewatch (rux:schedtrace (retired dfx=schedtrace)): the switch-in affirm — the
                 // pick materialized into a register restore.
                 crate::sched::sched::ww_record(
                     self as *const Task as *mut Task,
@@ -5616,7 +5616,7 @@ impl Task {
                 }
             }
 
-            // Leg-16 anatomy (dfx=schb,ksprobe): high-water scan + record
+            // Leg-16 anatomy (rux:schb (retired dfx=schb),ksprobe): high-water scan + record
             // stash. The stack is dead (on_cpu cleared + RCU waited
             // upstream), no locks held — safe to walk. Records stash the
             // surviving return addresses for the next schbd beat (the
@@ -6487,7 +6487,7 @@ impl Task {
         // memory that gets reaped and recycled while the members live.
         // The member's own exit then walks release_task's
         // parent_ptr()/remove_child through freed memory (the sc304
-        // signal-Arc Oops family; reproduced by dfx=treehunt +
+        // signal-Arc Oops family; reproduced by rux:treehunt (retired dfx=treehunt) +
         // test/subreap_churn.c as TREE-SNAP-STALE). Refresh every
         // member's snapshot to the new dest under this same lock hold —
         // the ring walk is the same bounded pattern the reparent member

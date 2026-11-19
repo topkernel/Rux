@@ -102,7 +102,7 @@ const EPOLL_RECHECK_JIFFIES: u64 = {
 /// inside the lock: an allocation whose per-CPU magazine row was empty
 /// takes the small_alloc class lock and can walk pages / touch the buddy
 /// under it — sections measured at 300 ms of real KVM time under OH-boot
-/// churn (dfx=allocwatch, lb268, same evidence class as the shard-registry
+/// churn (rux:allocwatch (retired dfx=allocwatch), lb268, same evidence class as the shard-registry
 /// fix). For that whole window every other thread touching that epoll's
 /// entries spins; that stall was the terminal wedge of the failing OH
 /// boots (CPU frozen at pc=0x103 spinning on an EpollFile.entries lock).
@@ -134,7 +134,7 @@ struct EpollEntry {
     /// (LTP epoll_wait07: "Write channel for the 2nd time. No events
     /// expected").
     oneshot_fired: bool,
-    /// dfx=socksnap (b16 appspawn hunt): how many times a wait delivered
+    /// rux:socksnap (retired dfx=socksnap) (b16 appspawn hunt): how many times a wait delivered
     /// this entry — a readable LT entry with reports==0 while its epoll's
     /// wait_count grows is the lost-delivery signature.
     reports: u64,
@@ -168,10 +168,10 @@ struct EpollFile {
     /// the re-check timer, signal delivery, or `epoll_notify_file` once
     /// fd-side producers (pipe/socket/...) are wired to call it.
     wait_queue: crate::process::wait::WaitQueueHead,
-    /// dfx=socksnap (b16): creator pid, printed by the interest dump so an
+    /// rux:socksnap (retired dfx=socksnap) (b16): creator pid, printed by the interest dump so an
     /// epoll line can be tied to its owning process.
     owner_pid: u32,
-    /// dfx=socksnap (b16): total completed wait syscalls on this instance.
+    /// rux:socksnap (retired dfx=socksnap) (b16): total completed wait syscalls on this instance.
     wait_count: u64,
     /// In-flight `epoll_notify_file` sections holding a raw pointer to this
     /// instance (UAF close of the 3d5f24f11 window — see
@@ -251,7 +251,7 @@ unsafe impl Send for EpollWakeNode {}
 /// ALLOCATED) inside the lock: an allocation whose per-CPU magazine row
 /// was empty takes the small_alloc class lock and can walk pages / touch
 /// the buddy under it — sections measured at 300 ms of real KVM time
-/// under OH-boot churn (dfx=allocwatch, lb268). For that whole window
+/// under OH-boot churn (rux:allocwatch (retired dfx=allocwatch), lb268). For that whole window
 /// every producer mapping to the shard spins IRQs-off in
 /// epoll_notify_file's lock_irqsave, no CPU on the box reports a
 /// quiescent state, and the fdreap grace round prints
@@ -363,7 +363,7 @@ pub fn epoll_notify_file(file_id: u64) {
     // shard), not O(total registry); the leak symptom the original hunt
     // chased (dead processes' epolls growing the registry) now shows up
     // as the TOTAL counter. Name sizes BEFORE taking the lock (printk
-    // discipline). 110th: the census print rides dfx=epolltrace (~57
+    // discipline). 110th: the census print rides rux:epolltrace (retired dfx=epolltrace) (~57
     // lines per perf boot in the spawn window).
     {
         static EPN_N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -648,7 +648,7 @@ fn epoll_wake_unregister(file_id: u64, ep: *mut EpollFile) {
     }
 }
 
-/// dfx=socksnap (b20 epoll wedge hunt): dump the epoll instances watching
+/// rux:socksnap (retired dfx=socksnap) (b20 epoll wedge hunt): dump the epoll instances watching
 /// `file_id` — one line per instance with owner, completed-wait count, and
 /// the entry row (fd, events, fid, last_reported, reports). Called from the
 /// Spawn-family connect trace (net::unix) because the khungtaskd cadence
@@ -732,7 +732,7 @@ pub fn epoll_dump_for_file(file_id: u64) {
     }
 }
 
-/// dfx=socksnap (appspawn wedge hunt, b15): dump the interest set of every
+/// rux:socksnap (retired dfx=socksnap) (appspawn wedge hunt, b15): dump the interest set of every
 /// epoll instance reachable through the wake registry — one line per
 /// instance listing up to 24 registered fds (fd number, events mask, file
 /// id, ET snapshot). Cross-reference against the AF_UNIX listener dump
@@ -741,7 +741,7 @@ pub fn epoll_dump_for_file(file_id: u64) {
 /// never made); one whose listener IS registered but never reports has a
 /// readiness bug. Lock order registry → entries matches epoll_notify_file.
 /// Formatting happens AFTER both locks drop (collect under lock, print
-/// outside). Purely diagnostic; self-gated by dfx=socksnap.
+/// outside). Purely diagnostic; self-gated by rux:socksnap (retired dfx=socksnap).
 pub fn epoll_interest_snapshot() {
     if !crate::trace::EVENT_SOCKSNAP.armed() {
         return;
@@ -1719,7 +1719,7 @@ fn poll_wait_impls(file: &crate::fs::File) -> Option<(PollWaitRegFn, PollWaitUnr
 }
 
 
-// Raw-console writers for the dfx=epollscan trace (leg-9 epoll hunt):
+// Raw-console writers for the rux:epollscan (retired dfx=epollscan) trace (leg-9 epoll hunt):
 // pr_info is dropped whole at session loglevel=3, so the scan trace uses
 // the same putchar_no_lock path as sched/wakewatch's ww_msg and evdev's
 // INPTRC/INPPL lines.
@@ -2720,7 +2720,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
     // monitor fd at all, and as which fd number? Budgeted.
     //
     // RETIRED (probe-retire): unconditional (3 lines per ub2404 boot);
-    // behind the existing OH hunt-print master gate (dfx=ohhunt) like the
+    // behind the existing OH hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)) like the
     // rest of the uevent-hunt family.
     if crate::dfx::switches::oh_hunt_prints_on() {
         static UEC_N: core::sync::atomic::AtomicUsize =
@@ -3074,7 +3074,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                 // whether the fd still resolves to the same description:
                 // a DEL of a still-live registered fd is the dark-child
                 // signature; a foreign-process DEL names the diverging
-                // caller directly). dfx=pid1spin-gated.
+                // caller directly). rux:pid1spin (retired dfx=pid1spin)-gated.
                 if crate::trace::EVENT_PID1SPIN.armed() {
                     static DEL_N: core::sync::atomic::AtomicUsize =
                         core::sync::atomic::AtomicUsize::new(0);
@@ -3162,7 +3162,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
     0
 }
 
-/// dfx=pid1spin (69th): dump pid `pid`'s epoll interests with the live
+/// rux:pid1spin (retired dfx=pid1spin) (69th): dump pid `pid`'s epoll interests with the live
 /// readiness of each watched file — the discriminator between the three
 /// ways init's LoopEvent can go dark over the param children:
 ///   (a) the interest is GONE (purged as a dead fd / never added),
@@ -3328,7 +3328,7 @@ pub fn param_stall_dump() {
         }
     }
     // …and the last 48 syscalls of pid 1 — the userspace loop's actual
-    // behavior at the stall (needs dfx=sysforensic to be recording).
+    // behavior at the stall (needs rux:sysforensic (retired dfx=sysforensic) to be recording).
     crate::dfx::taskdump::dump_syscall_ring_for(1);
     // SAFETY: read-only diagnostic walk of pid 1's fdtable.
     let tk = unsafe { &*task };
@@ -3610,7 +3610,7 @@ pub fn pid1_epoll_interest_dump(pid: crate::process::task::Pid) {
         let epoll = unsafe { &*epoll_ptr };
         let mut entries = epoll.entries.lock();
         // Intrusive-list walk (117th): count first for the header, then
-        // the per-entry rows (diagnostic path, dfx=pid1spin-gated).
+        // the per-entry rows (diagnostic path, rux:pid1spin (retired dfx=pid1spin)-gated).
         let head = entries.init_once();
         // SAFETY: read-only counting walk of nodes linked under this lock.
         let mut total: usize = 0;
@@ -3941,7 +3941,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
         let alloc_cap = (maxevents as usize).min(4096);
         let mut ready_events: alloc::vec::Vec<EPollEvent> =
             alloc::vec::Vec::with_capacity(alloc_cap);
-        // dfx=epolltrace: identity of each ready fd (fd, file ops table) so
+        // rux:epolltrace (retired dfx=epolltrace): identity of each ready fd (fd, file ops table) so
         // the trace line can be symbolized against the kernel ELF. Pushed
         // only while tracing is armed (diagnostic boots accept the alloc).
         let mut trace_fds: alloc::vec::Vec<(i32, u32, *const ())> =
@@ -3962,7 +3962,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
         // boot and printed a summary every 500 rounds — an unbounded
         // flood (22 lines in the first 90 s of an ub2404 boot, growing
         // forever). It now lives behind the existing epoll delivery
-        // trace switch (dfx=epolltrace), which is the switch whose doc
+        // trace switch (rux:epolltrace (retired dfx=epolltrace)), which is the switch whose doc
         // names exactly this hunt ("permanently ready fds that spin
         // epoll_pwait/ppoll callers").
         const PROBE_CAP: usize = 48;
@@ -4033,7 +4033,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                 // with the first skipped fd and its live verdict.
                 //
                 // RETIRED (probe-retire): unconditional; behind the
-                // existing epoll delivery trace switch (dfx=epolltrace),
+                // existing epoll delivery trace switch (rux:epolltrace (retired dfx=epolltrace)),
                 // the switch whose doc names this hunt.
                 if crate::trace::EVENT_EPOLL_DELIVERY.armed() {
                     static USTRV_N: core::sync::atomic::AtomicUsize =
@@ -4078,7 +4078,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                     // 69th (ohw82 second face): a purged interest on a
                     // LIVE child = that child goes dark forever (client
                     // sends land in a queue nobody polls — the 105s).
-                    // dfx=pid1spin names every purge for pid 1's epoll:
+                    // rux:pid1spin (retired dfx=pid1spin) names every purge for pid 1's epoll:
                     // fd-gone vs fd-reused (and the new file's class).
                     // 79th: the pid==1 restriction dropped — ohw124 lost
                     // fd 21's interest with NO purge print, so if this
@@ -4197,7 +4197,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                         file.get_ops().map_or(core::ptr::null(), |o| o as *const _ as *const ()),
                     ));
                 }
-                // dfx=socksnap (b16): count the delivery.
+                // rux:socksnap (retired dfx=socksnap) (b16): count the delivery.
                 entry.reports = entry.reports.saturating_add(1);
                 ready_events.push(EPollEvent {
                     events: ep_events & report_mask,
@@ -4256,7 +4256,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
             );
         }
 
-        // dfx=epollscan (leg-9 epoll hunt): one raw-console line per scan —
+        // rux:epollscan (retired dfx=epollscan) (leg-9 epoll hunt): one raw-console line per scan —
         // the r13ep2 boot had 14 events drained into the device queue yet
         // every epoll_wait returned idle, so the missing datum is whether
         // the scan ran at all, how many interests it saw, and what it
@@ -4302,7 +4302,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                     );
                 }
             }
-            // dfx=epolltrace: who got woken by which fd. Rate-limited to the
+            // rux:epolltrace (retired dfx=epolltrace): who got woken by which fd. Rate-limited to the
             // first 400 deliveries plus every 2000th after, so a spinning
             // waiter does not flood the serial console.
             if crate::trace::EVENT_EPOLL_DELIVERY.armed() {
@@ -4351,7 +4351,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
             if uncopied > 0 {
                 return -(errno::EFAULT as i64);
             }
-            // dfx=socksnap (b16): one completed wait syscall.
+            // rux:socksnap (retired dfx=socksnap) (b16): one completed wait syscall.
             epoll.wait_count = epoll.wait_count.saturating_add(1);
             return count as i64;
         }
@@ -4373,7 +4373,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
         }
 
         if crate::signal::signal_pending() {
-            // dfx=epolltrace: an EINTR-storm burns a waiter at ~100% CPU
+            // rux:epolltrace (retired dfx=epolltrace): an EINTR-storm burns a waiter at ~100% CPU
             // with ZERO ready deliveries (invisible to the delivery trace).
             // Rate-limited print of the pending mask so a storm is obvious.
             if crate::trace::EVENT_EPOLL_DELIVERY.armed()
@@ -5261,7 +5261,7 @@ pub fn signalfd_notify_task(task: *mut crate::process::task::Task) {
     let registry = SIGNALFD_WAKE_REGISTRY.lock_irqsave();
     // SFDDBG (launcher bring-up): did the wake reach a pid-1-owned fd?
     // Zero bindings means the fd was never registered (or was closed).
-    // Serial-cleanliness: opt-in via dfx=sfddbg.
+    // Serial-cleanliness: opt-in via rux:sfddbg (retired dfx=sfddbg).
     if unsafe { (*task).pid() == 1 }
         && crate::trace::EVENT_SFDDBG.armed()
     {
@@ -5339,7 +5339,7 @@ fn signalfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
             // (74 lines per ub2404 boot) while the other two SFDDBG
             // arms in this file already honour the switch whose own doc
             // says "ordinary boots must keep a clean serial". Now gated
-            // by dfx=sfddbg like its siblings.
+            // by rux:sfddbg (retired dfx=sfddbg) like its siblings.
             if (*current).pid() == 1
                 && crate::trace::EVENT_SFDDBG.armed()
             {
@@ -5758,7 +5758,7 @@ pub fn sys_timerfd_create(args: SyscallArgs) -> i64 {
     static TFDC_N: core::sync::atomic::AtomicUsize =
         core::sync::atomic::AtomicUsize::new(0);
     let tfdc_i = TFDC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    // dfx=tfdcensus: WINDOWED caller census. The syscost boots show the
+    // rux:tfdcensus (retired dfx=tfdcensus): WINDOWED caller census. The syscost boots show the
     // storm accelerating 1.9k -> 4.3k/s by t=240s, so a boot-start budget
     // only ever names bluetooth/audio's one-shots. Behind the switch the
     // tap prints the first 16 calls of every 500-jiffy window, so the
@@ -5785,7 +5785,7 @@ pub fn sys_timerfd_create(args: SyscallArgs) -> i64 {
         WIN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16
     } else {
         // 110th: the unconditional boot-start budget is gone — the
-        // census arms only via dfx=tfdcensus (113 lines rode the
+        // census arms only via rux:tfdcensus (retired dfx=tfdcensus) (113 lines rode the
         // pre-launcher window of every perf boot).
         false
     };
@@ -6566,7 +6566,7 @@ pub fn epoll_purge_closed_fd(fd: usize, dying_file_id: u64) {
 /// in timerfd_poll_wait while its wheel entry is long OVERDUE (or has
 /// vanished without delivering) is the lost-timer class — and the
 /// year-timeout condvar pandemic upstream of it (52nd §6a descent).
-/// Piggybacks on dfx=sleepsnap cadence (self-gated). Deduped on
+/// Piggybacks on rux:sleepsnap (retired dfx=sleepsnap) cadence (self-gated). Deduped on
 /// (tfd_addr, expires): each re-arm prints once; an unchanged overdue
 /// state prints once and stays named by its first line.
 pub fn timerfd_wheel_audit() {

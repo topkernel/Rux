@@ -614,12 +614,12 @@ impl BuddyAllocator {
                 // (task_page_mark from alloc_task_slot — before R69 the
                 // probe read a table nobody wrote and never fired), so the
                 // event is also recorded with a caller backtrace for the
-                // deferred audit printer in dfx=scribble mode.
+                // deferred audit printer in rux:scribble (retired dfx=scribble) mode.
                 if !crate::sched::sched::IN_TASK_ALLOC.load(core::sync::atomic::Ordering::Acquire)
                     && crate::sched::sched::task_page_is_owned(addr as *const u8)
                 {
                     // R69: also record the event with a caller backtrace
-                    // for the deferred audit printer (dfx=scribble,
+                    // for the deferred audit printer (rux:scribble (retired dfx=scribble),
                     // x86_64 — the dfx scribble module is x86-only).
                     #[cfg(feature = "x86_64")]
                     if crate::trace::EVENT_SCRIBBLE.armed() {
@@ -662,7 +662,7 @@ impl BuddyAllocator {
                 // R43: taint-only (SBI ecall under the heap lock was an
                 // A-form wedge ingredient — see the R18-1 note above).
                 // R69: also record the event with a caller backtrace for
-                // the deferred audit printer (dfx=scribble, x86_64).
+                // the deferred audit printer (rux:scribble (retired dfx=scribble), x86_64).
                 #[cfg(feature = "x86_64")]
                 if crate::trace::EVENT_SCRIBBLE.armed() {
                     let frames = crate::dfx::scribble::audit_frames();
@@ -791,7 +791,7 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         }
 
         let _guard = self.lock.lock_irqsave();
-        // dfx=allocwatch: cross-CPU holder stamp (see dfx/allocwatch.rs).
+        // rux:allocwatch (retired dfx=allocwatch): cross-CPU holder stamp (see dfx/allocwatch.rs).
         // The GlobalAlloc main path — RawVec finish_grow lands here for
         // sizes above the small_alloc classes.
         let _aw = crate::dfx::allocwatch::guard(
@@ -959,7 +959,7 @@ impl BuddyAllocator {
             return core::ptr::null_mut();
         }
         let _guard = self.lock.lock_irqsave();
-        // dfx=allocwatch: cross-CPU holder stamp (see dfx/allocwatch.rs).
+        // rux:allocwatch (retired dfx=allocwatch): cross-CPU holder stamp (see dfx/allocwatch.rs).
         // Runs NESTED under the small_alloc class lock (class -> buddy
         // order) — a stamp pair names the whole frozen chain.
         let _aw = crate::dfx::allocwatch::guard(
@@ -984,7 +984,7 @@ impl BuddyAllocator {
             return;
         }
         let _guard = self.lock.lock_irqsave();
-        // dfx=allocwatch: cross-CPU holder stamp (see dfx/allocwatch.rs).
+        // rux:allocwatch (retired dfx=allocwatch): cross-CPU holder stamp (see dfx/allocwatch.rs).
         let _aw = crate::dfx::allocwatch::guard(
             crate::dfx::allocwatch::SITE_BUDDY,
             0,
@@ -1036,7 +1036,7 @@ impl BuddyAllocator {
         // free_task_slot maintain it) is the double-handoff engine's
         // fuel — the page would return to the free lists while its Task
         // still runs, and the next two allocations share it. Refuse
-        // under dfx=scribble (the bitmap is exact since R69; the old
+        // under rux:scribble (retired dfx=scribble) (the bitmap is exact since R69; the old
         // R17-B refusal was withdrawn because the pre-Batch-8 bitmap
         // aliased) and record with a caller backtrace either way.
         // IN_TASK_FREE marks the legitimate release path.
@@ -1076,7 +1076,7 @@ impl BuddyAllocator {
         }
 
         let _guard = self.lock.lock_irqsave();
-        // dfx=allocwatch: cross-CPU holder stamp (see dfx/allocwatch.rs).
+        // rux:allocwatch (retired dfx=allocwatch): cross-CPU holder stamp (see dfx/allocwatch.rs).
         let _aw = crate::dfx::allocwatch::guard(
             crate::dfx::allocwatch::SITE_BUDDY,
             0,
@@ -1095,7 +1095,7 @@ impl BuddyAllocator {
 /// Note: This is the only allocator instance, used for kernel heap allocation and #[global_allocator]
 pub static GLOBAL_ALLOCATOR: BuddyAllocator = BuddyAllocator::new();
 
-/// dfx=allocwatch probe: main buddy lock word state at sample time;
+/// rux:allocwatch (retired dfx=allocwatch) probe: main buddy lock word state at sample time;
 /// see dfx/allocwatch.rs (STUCK detection).
 pub fn audit_lock_held() -> bool {
     GLOBAL_ALLOCATOR.lock.is_locked()
@@ -1223,7 +1223,7 @@ pub fn buddy_stats() -> BuddyStats {    let mut stats = BuddyStats::default();
 }
 
 // ============================================================================
-// Meta shadow audit (dfx=metawatch, wildwrite-hunt line session 13)
+// Meta shadow audit (rux:metawatch (retired dfx=metawatch), wildwrite-hunt line session 13)
 //
 // The unified-engine hypothesis says the wild writer's second downstream
 // face is buddy-meta corruption (the ww-v2 order-18 grind: an impossible

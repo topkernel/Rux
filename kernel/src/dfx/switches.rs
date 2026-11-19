@@ -206,7 +206,7 @@ pub fn enabled(switch: DfxSwitch) -> bool {
 /// /dev/kmsg drain). They had only the `sprobe=0` silencer before, so
 /// the default was ON. This gate flips the default: armed ONLY when
 /// the unified-framework event `rux:ohhunt` is armed (`trace_event=`,
-/// `set_event`, or the retired `dfx=ohhunt` boot token — see
+/// `set_event`, or the retired `rux:ohhunt (token dfx=ohhunt)` boot token — see
 /// or the legacy `sprobe=1` opt-in. Hunt
 /// rigs that still want the prints add one of those tokens.
 pub fn oh_hunt_prints_on() -> bool {

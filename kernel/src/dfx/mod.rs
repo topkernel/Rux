@@ -28,7 +28,7 @@
 
 pub mod mmforensics;
 pub mod taint;
-/// Allocator class-lock holder watch (cmdline `dfx=allocwatch`): cross-CPU
+/// Allocator class-lock holder watch (cmdline `rux:allocwatch (retired dfx=allocwatch)`): cross-CPU
 /// naming of a small_alloc/slab/buddy class-lock holder frozen mid-section
 /// (IF=0 kills its own tick; only the other CPU's tick can see it);
 /// see dfx/allocwatch.rs.
@@ -55,15 +55,15 @@ pub mod driftwatch;
 pub mod scribble;
 /// R83 (R74 producer hunt): live task-header audit + victim dumps.
 pub mod r83hunt;
-/// CLOCK_MONOTONIC jump tripwire (dfx=monowatch): samples the shared
+/// CLOCK_MONOTONIC jump tripwire (rux:monowatch (retired dfx=monowatch)): samples the shared
 /// timebase ~1 Hz and reports backward motion or multi-second spikes
 /// with the active clocksource named.
 pub mod monowatch;
-/// Wild-write attribution tripwire (dfx=wildwatch, x86_64): RO-guards
+/// Wild-write attribution tripwire (rux:wildwatch (retired dfx=wildwatch), x86_64): RO-guards
 /// the hpet quiet-statics cluster in every page-table alias; see
 /// dfx/wildwatch.rs (wildwrite-hunt line).
 pub mod wildwatch;
-/// Buddy-meta shadow scan (dfx=metawatch): periodic lock-confirmed
+/// Buddy-meta shadow scan (rux:metawatch (retired dfx=metawatch)): periodic lock-confirmed
 /// INV-HEAP-* audit of the buddy free lists + per-page bitmap; see
 /// dfx/metawatch.rs (wildwrite-hunt line).
 pub mod metawatch;
@@ -71,7 +71,7 @@ pub mod metawatch;
 /// histogram (perf-audit line, cmdline `syscost=1`); see dfx/syscost.rs.
 pub mod syscost;
 /// Cached-file read(2) cost anatomy (perf-filerd lane, cmdline
-/// `dfx=filerd`): RDTSC phase counters around the ext4 read fast path,
+/// `rux:filerd (retired dfx=filerd)`): RDTSC phase counters around the ext4 read fast path,
 /// reported via /proc/filerd; see dfx/filerd.rs.
 pub mod filerd;
 /// pstore-lite: the last panic's record in reserved RAM, re-exposed as
@@ -82,7 +82,7 @@ pub mod pstore;
 /// task-death policy (Tranche 5); see dfx/oops.rs.
 pub mod oops;
 /// Soft-wedge heartbeat + one-shot wedge census (sc-series quiet-quiet
-/// hunt, cmdline `dfx=schb`); see dfx/schb.rs.
+/// hunt, cmdline `rux:schb (retired dfx=schb)`); see dfx/schb.rs.
 pub mod schb;
 /// ext4/bio cost-anatomy counters (perf-audit line, cmdline `fsw=1`);
 /// see dfx/fsw.rs.
@@ -102,28 +102,28 @@ pub mod hilogcensus;
 /// dumps the interest set with live poll verdicts when a spinner is
 /// caught; see dfx/spinwatch.rs.
 pub mod spinwatch;
-/// Leak-origin probe (cmdline `dfx=leakhunt`): records the call site of
+/// Leak-origin probe (cmdline `rux:leakhunt (retired dfx=leakhunt)`): records the call site of
 /// every task's OUTERMOST PREEMPT_OFFSET acquire and reports it the
 /// moment a task returns to userspace (or is seen parked) with a nonzero
 /// preempt_count — names the producer of the leaked-count wake-strand
 /// family; see dfx/leakorigin.rs.
 pub mod leakorigin;
-/// Last-open path stash for TXN-HANG (dfx=txnhunt): sys_openat stashes
+/// Last-open path stash for TXN-HANG (rux:txnhunt (retired dfx=txnhunt)): sys_openat stashes
 /// the resolved path at entry so the 1 Hz audit can name the file a
 /// hung server thread is stuck opening (leg-28 item 2: storage_daemon
 /// D-state open family); see dfx/pathstash.rs.
 pub mod pathstash;
-/// Process-tree invariant validator (dfx=treehunt, leg-29A): catches a
+/// Process-tree invariant validator (rux:treehunt (retired dfx=treehunt), leg-29A): catches a
 /// live task whose parent pointer names released memory — the E8-REPAR
 /// "unlinked snapshot" class that produced the sc304 signal-Arc Oops —
 /// plus stale thread-group parent snapshots; see dfx/treehunt.rs.
 pub mod treehunt;
-/// Slow-kernel-entry audit (dfx=slowtask, leg-33B): tasks stuck on the
+/// Slow-kernel-entry audit (rux:slowtask (retired dfx=slowtask), leg-33B): tasks stuck on the
 /// same syscall entry for >= 8 s get a line with args and the parked
 /// kernel-stack chain — attributes the leaf of nested-call cascades
 /// (fs stalls behind binder reader exhaustion). See dfx/slowtask.rs.
 pub mod slowtask;
-/// SCM_RIGHTS relay tap (dfx=scmtap, gdm session-fifo hunt): one line
+/// SCM_RIGHTS relay tap (rux:scmtap (retired dfx=scmtap), gdm session-fifo hunt): one line
 /// per unix-fd hop/drop plus the fifo last-writer-close line; see
 /// dfx/scmtap.rs.
 pub mod scmtap;
@@ -135,7 +135,7 @@ pub mod forkprof;
 /// handoff): TSC deltas per vm-op stage + issuer attribution, dumped
 /// from the timer heartbeat; see dfx/mmprof.rs.
 pub mod mmprof;
-/// Lost-park event ring (dfx=lostpark, fix-lostpark lane): last-64
+/// Lost-park event ring (rux:lostpark (retired dfx=lostpark), fix-lostpark lane): last-64
 /// scheduling events around an SMP lost-park wedge, dumped by the
 /// wakewatch heartbeat when the system freezes; see dfx/lostpark.rs.
 pub mod lostpark;
@@ -143,7 +143,7 @@ pub mod lostpark;
 /// lane): NS-sum brackets for the __schedule, context_switch, wake and
 /// semop/pipe/unix bodies, dumped at shutdown; see dfx/cctx.rs.
 pub mod cctx;
-/// Reaper forensics (dfx=schedtrace, reaper-waitid lane): SPAWN/ZEXIT/
+/// Reaper forensics (rux:schedtrace (retired dfx=schedtrace), reaper-waitid lane): SPAWN/ZEXIT/
 /// REAP4/REAP4N/REAPW/ZLINGER — who reaps the OH launcher/systemui
 /// app-cycle children, and whether they linger un-reaped; see
 /// dfx/reaper.rs.

@@ -508,7 +508,7 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
         // "PERMISSION DENIED"/"interfaceToken failed" family) arrive after
         // its ~20 init-time frames; the old 48/pid budget cut exactly
         // there and the AddSystemAbility(5100) failure reason stayed
-        // invisible (dfx=writetrace boots only).
+        // invisible (rux:writetrace (retired dfx=writetrace) boots only).
         const WTRACE_PID_MAX: usize = 512;
         const WTRACE_SLOTS: usize = 256;
         static WTRACE_USED: [core::sync::atomic::AtomicU8; WTRACE_SLOTS] =
@@ -577,7 +577,7 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
     // RETIRED (probe-retire): the relay echoed 198 stderr lines of OTHER
     // guests' services on an ordinary ub2404 boot — Linux never copies
     // userspace stderr onto the kernel console. It now lives behind the
-    // existing OH hunt-print master gate (dfx=ohhunt); the write path
+    // existing OH hunt-print master gate (rux:ohhunt (retired dfx=ohhunt)); the write path
     // itself is untouched.
     if fd == 2 && crate::dfx::switches::oh_hunt_prints_on() {
         const STDERR_DUMP_N: usize = 200;
@@ -747,7 +747,7 @@ fn write_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: u
     }
 
     // Regular file or redirected output
-    // dfx=txnhunt (leg-29A): name the file when this write
+    // rux:txnhunt (retired dfx=txnhunt) (leg-29A): name the file when this write
     // later draws a TXN-HANG (sc303's storage family parked
     // in a write(9) loop; entry frame shows only the raw
     // fd). Stash BEFORE the pipe fast path so a hang in a
@@ -899,7 +899,7 @@ fn write_file_core(fd: usize, file: &crate::fs::file::File, buf: usize, count: u
         if result <= 0 {
             if result < 0 && total == 0 {
                 first_err = result as i32;
-                // 118th EIO hunt (dfx=eiotrace): 'Failed to write event
+                // 118th EIO hunt (rux:eiotrace (retired dfx=eiotrace)): 'Failed to write event
                 // ret -5' from init_hisysevent — name the exact file the
                 // write failed on (ops identity + file_id + first bytes),
                 // pid + comm, budgeted. Direct console (no printk/console
@@ -1408,7 +1408,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                 // fires exactly when the kms sw winsys's MAP_DUMB or its
                 // node mmap fails inside RS while the same chain works in
                 // isolation (glmprobe). Trace the MAP_DUMB requests and
-                // every failing drm ioctl. Gated behind dfx=ohhunt
+                // every failing drm ioctl. Gated behind rux:ohhunt (retired dfx=ohhunt)
                 // (known-gap 4: hunt taps off the hot path by default).
                 if crate::trace::EVENT_OHHUNT.armed()
                     && request == 0xc010_64b3
@@ -3013,7 +3013,7 @@ pub fn sys_sendfile(args: SyscallArgs) -> i64 {
     }
 }
 
-/// 118th EIO hunt, syscall-exit face (dfx=eiotrace rides EpollTrace): the
+/// 118th EIO hunt, syscall-exit face (rux:eiotrace (retired dfx=eiotrace) rides EpollTrace): the
 /// write(2)-path logger never fired while 'Failed to write event ret -5'
 /// prints — so the -5 rides a DIFFERENT syscall. One budgeted line per
 /// -EIO syscall exit: nr, args head, pid, comm. Direct console, guarded.
@@ -3086,7 +3086,7 @@ pub fn syscall_eio_line(nr: usize, args: [u64; 6]) {
     putchar(b'\n');
 }
 
-/// 118th EIO hunt (dfx=eiotrace rides DfxSwitch::EpollTrace): one budgeted
+/// 118th EIO hunt (rux:eiotrace (retired dfx=eiotrace) rides DfxSwitch::EpollTrace): one budgeted
 /// line per failing write — pid, comm, fd, ops identity (symbolizes against
 /// the kernel ELF), file_id, and the first bytes of the payload (names the
 /// protocol — e.g. a hisysevent frame). Direct console with a reentrancy

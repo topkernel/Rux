@@ -1,4 +1,4 @@
-//! dfx=unixrd — AF_UNIX hot-path per-op phase anatomy probe (39th lane).
+//! rux:unixrd (retired dfx=unixrd) — AF_UNIX hot-path per-op phase anatomy probe (39th lane).
 //!
 //! The hilogd storm measures recvmsg 28-58 us / recvfrom 9 us / writev
 //! 22 us per-op (syscost per-nr tables) against the reference kernel's
