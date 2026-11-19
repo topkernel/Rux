@@ -368,7 +368,13 @@ fn stack_cache_alloc() -> *mut u8 {
         // previous owner (the FREED_STACKS ring names it). The scan runs
         // BEFORE the leg-16 zeroing and the canary write; armed boots
         // only; cold allocation path.
-        if crate::trace::EVENT_SCRIBBLE.armed() {
+        let scribble_scan_known = crate::trace::EVENT_SCRIBBLE.armed()
+            && freed_stack_containing(bottom as usize + KERNEL_STACK_SIZE / 2).is_some();
+        if scribble_scan_known {
+            // Only slots the FREED_STACKS ring knows were painted — a
+            // fresh slab carve was never painted and its stale content
+            // is not evidence (fq1's 16 first-boot hits were all
+            // prev-owner-not-found false positives).
             let base = bottom as usize;
             let mut hits = 0u32;
             let mut first_off = 0usize;
