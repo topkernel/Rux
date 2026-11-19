@@ -248,16 +248,20 @@ pub fn ready() -> bool {
 ///
 /// SAFETY (caller): `base` must be an initialized, mapped HPET block.
 #[inline]
-unsafe fn r32(base: usize, off: usize) -> u32 {
-    unsafe { core::ptr::read_volatile((base + off) as *const u32) }
+fn r32(base: usize, off: usize) -> u32 {
+    // INV-MMIO-1: the HPET register file is mapped at the fixed alias
+    // this module computes (see init); single u32 inside that mapping.
+    crate::safety::mmio::MmioRegion::new(base + off, 4).read_u32(0)
+}
 }
 
 /// 32-bit MMIO write at `base + off`.
 ///
 /// SAFETY (caller): `base` must be an initialized, mapped HPET block.
 #[inline]
-unsafe fn w32(base: usize, off: usize, v: u32) {
-    unsafe { core::ptr::write_volatile((base + off) as *mut u32, v) }
+fn w32(base: usize, off: usize, v: u32) {
+    crate::safety::mmio::MmioRegion::new(base + off, 4).write_u32(0, v)
+}
 }
 
 /// Read the 64-bit main counter (two 32-bit halves).  The HPET-spec
@@ -282,9 +286,9 @@ pub fn read_counter() -> u64 {
     }
     loop {
         // SAFETY: validated_read_base returned a validated, mapped block.
-        let hi1 = unsafe { r32(base, HPET_CNTR_HI) } as u64;
-        let lo = unsafe { r32(base, HPET_CNTR_LO) } as u64;
-        let hi2 = unsafe { r32(base, HPET_CNTR_HI) } as u64;
+        let hi1 =  r32(base, HPET_CNTR_HI)  as u64;
+        let lo =  r32(base, HPET_CNTR_LO)  as u64;
+        let hi2 =  r32(base, HPET_CNTR_HI)  as u64;
         if hi1 == hi2 {
             return (hi1 << 32) | lo;
         }
@@ -429,11 +433,11 @@ pub fn init() -> bool {
     // period within the HPET spec bound (<= 100 ns) and an integer
     // multiple of the nominal 10 MHz domain.
     // SAFETY: base validated above.
-    let id = unsafe { r32(base, HPET_ID) };
+    let id =  r32(base, HPET_ID) ;
     if id >> 16 == 0 || id & ID_COUNT_SIZE_CAP == 0 {
         return false;
     }
-    let period_fs = unsafe { r32(base, HPET_ID + 4) } as u64;
+    let period_fs =  r32(base, HPET_ID + 4)  as u64;
     // 1 fs .. 100 ns; zero or huge periods mean no HPET / broken model.
     if period_fs == 0 || period_fs > 100_000_000 {
         return false;
@@ -449,8 +453,8 @@ pub fn init() -> bool {
     // Enable the main counter (LEGACY stays clear: the PIT must keep
     // ticking for the IRQ0 fallback path and the TSC/LAPIC calibration).
     // SAFETY: base validated above.
-    let cfg = unsafe { r32(base, HPET_CFG) };
-    unsafe { w32(base, HPET_CFG, cfg | CFG_ENABLE) };
+    let cfg =  r32(base, HPET_CFG) ;
+     w32(base, HPET_CFG, cfg | CFG_ENABLE) ;
 
     // Verify it actually counts: at >= 10 MHz the counter must advance
     // during a short bounded spin.  Retry with a longer spin before
@@ -458,12 +462,12 @@ pub fn init() -> bool {
     let mut ok = false;
     for spin in [20_000u64, 2_000_000] {
         // SAFETY: base validated above.
-        let c0 = unsafe { read_counter_raw(base) };
+        let c0 =  read_counter_raw(base) ;
         for _ in 0..spin {
             core::hint::spin_loop();
         }
         // SAFETY: base validated above.
-        let c1 = unsafe { read_counter_raw(base) };
+        let c1 =  read_counter_raw(base) ;
         if c1 > c0 {
             ok = true;
             break;
@@ -472,7 +476,7 @@ pub fn init() -> bool {
     if !ok {
         // Disable again — do not leave a half-initialized counter.
         // SAFETY: base validated above.
-        unsafe { w32(base, HPET_CFG, cfg) };
+         w32(base, HPET_CFG, cfg) ;
         return false;
     }
 
@@ -558,8 +562,8 @@ pub fn calibrate_tsc() -> bool {
 /// when the 429 s high-half boundary lands mid-read.
 ///
 /// SAFETY (caller): `base` must be a mapped HPET block.
-unsafe fn read_counter_raw(base: usize) -> u64 {
-    unsafe {
+fn read_counter_raw(base: usize) -> u64 {
+    
         let hi1 = r32(base, HPET_CNTR_HI) as u64;
         let lo = r32(base, HPET_CNTR_LO) as u64;
         let hi2 = r32(base, HPET_CNTR_HI) as u64;
@@ -570,5 +574,5 @@ unsafe fn read_counter_raw(base: usize) -> u64 {
             let lo = r32(base, HPET_CNTR_LO) as u64;
             (hi << 32) | lo
         }
-    }
+    
 }

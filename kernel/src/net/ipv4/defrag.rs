@@ -165,15 +165,9 @@ pub fn ip_defrag(
                 return; // global cap — drop
             }
             let mut hdr = [0u8; IPHDR_LEN];
-            // SAFETY: ip_hdr aliases a validated repr(C) IpHdr of exactly
-            // IPHDR_LEN bytes.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    ip_hdr as *const IpHdr as *const u8,
-                    hdr.as_mut_ptr(),
-                    IPHDR_LEN,
-                );
-            }
+            // ip_hdr aliases a validated repr(C) IpHdr of exactly
+            // IPHDR_LEN bytes (the byte-image view is safe).
+            hdr.copy_from_slice(&crate::safety::bytes::bytes_of(ip_hdr)[..IPHDR_LEN]);
             table.entries[idx] = Some(FragEntry {
                 src: src_ip,
                 dst: dest_ip,
@@ -219,8 +213,8 @@ pub fn ip_defrag(
             let ihl = e.hdr[0] & 0x0F;
             let mut hdr = e.hdr;
             let data = e.data;
-            // SAFETY: hdr is a 20-byte aligned stack buffer.
-            let h = unsafe { &mut *(hdr.as_mut_ptr() as *mut IpHdr) };
+            // The shared header-write edge over the exactly-sized buffer.
+            let Some(h) = crate::net::buffer::hdr_view_mut::<IpHdr>(&mut hdr[..]) else { return };
             h.tot_len = total.to_be();
             h.frag_off = 0;
             h.check = 0;
@@ -248,19 +242,19 @@ fn dispatch_reassembled(hdr: [u8; IPHDR_LEN], payload: &[u8], src_ip: u32, dest_
         skb.free();
         return;
     }
-    // Parse the patched header fresh from the rebuilt packet.
-    // SAFETY: skb holds exactly IPHDR_LEN + payload valid bytes.
-    let hdr_ref = unsafe {
-        let bytes = core::slice::from_raw_parts(skb.data, skb.len as usize);
+    // Parse the patched header fresh from the rebuilt packet (clamped
+    // safe view).
+    let hdr: IpHdr = {
+        let bytes = skb.data_all();
         match IpHdr::from_bytes(bytes) {
-            Some(h) => h,
+            Some(h) => *h,
             None => {
                 skb.free();
                 return;
             }
         }
     };
-    super::ip_dispatch(&mut skb, hdr_ref, src_ip, dest_ip);
+    super::ip_dispatch(&mut skb, &hdr, src_ip, dest_ip);
     skb.free();
 }
 

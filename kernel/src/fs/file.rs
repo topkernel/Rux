@@ -545,6 +545,14 @@ impl File {
         unsafe { *self.private_data.get() }
     }
 
+    /// Clear the private-data slot (the close-path twin; called only
+    /// from a file's own close serialization).
+    pub fn clear_private_data(&self) {
+        // SAFETY: the store races no live handle (close is the last
+        // user of this open file description).
+        unsafe { *self.private_data.get() = None };
+    }
+
     /// Get close-on-exec flag
     pub fn get_cloexec(&self) -> bool {
         *self.cloexec.lock()

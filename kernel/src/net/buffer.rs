@@ -499,6 +499,28 @@ impl SkBuff {
         Some(())
     }
 
+    /// Append `size_of::<T>()` bytes at the tail and hand a typed
+    /// mutable view (the header-APPEND edge — protocols that build
+    /// payload-first, header-last, e.g. ARP). INH-BUF-4 as push_hdr.
+    pub fn put_hdr<T: Copy>(&mut self, build: impl FnOnce(&mut T)) -> Option<()> {
+        let ptr = self.skb_put(core::mem::size_of::<T>() as u32)?;
+        // SAFETY: skb_put returned tail space of at least size_of::<T>()
+        // bytes inside this exclusively-owned buffer.
+        let h: &mut T = unsafe { &mut *ptr.cast::<T>() };
+        build(h);
+        Some(())
+    }
+
+    /// Push raw bytes as new headroom (the byte-level twin of
+    /// push_hdr_val — INH-BUF-4).
+    pub fn push_bytes(&mut self, src: &[u8]) -> Option<()> {
+        let ptr = self.skb_push(src.len() as u32)?;
+        // SAFETY: skb_push returned headroom of src.len() bytes inside
+        // this exclusively-owned buffer.
+        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), ptr, src.len()) };
+        Some(())
+    }
+
     /// Push a ready-made header VALUE as new headroom (the build edge
     /// for callers that compute the header on the stack — INH-BUF-4).
     pub fn push_hdr_val<T: Copy>(&mut self, hdr: &T) -> Option<()> {

@@ -125,6 +125,8 @@ pub fn ip_push_header(
     })
     .ok_or(())?;
 
+    Ok(())
+}
 
 /// Send IPv4 packet (for upper layer protocols)
 ///
@@ -227,13 +229,16 @@ pub fn ip_rcv(skb: &mut SkBuff) -> Result<(), ()> {
         return Ok(());
     }
     let hdr_len = (ihl as usize) * 4;
-    if hdr_len > data.len() {
-        drop(3);
-        return Ok(());
-    }
-    if checksum::ip_checksum(&data[..hdr_len]) != 0 {
-        drop(4);
-        return Ok(());
+    {
+        let wire = skb.data_all();
+        if hdr_len > wire.len() {
+            drop(3);
+            return Ok(());
+        }
+        if checksum::ip_checksum(&wire[..hdr_len]) != 0 {
+            drop(4);
+            return Ok(());
+        }
     }
 
     // Trim skb to IP-reported length (matches the reference ip_rcv:
@@ -266,11 +271,11 @@ pub fn ip_rcv(skb: &mut SkBuff) -> Result<(), ()> {
         // The payload slice [hdr_len, ip_total_len) is in-bounds
         // (checked above) — the safe clamped view.
         let payload = skb.data_slice_at(hdr_len as u32, ip_total_len - hdr_len as u32);
-        defrag::ip_defrag(ip_hdr, payload, frag_off as u32, mf, src_ip, dest_ip);
+        defrag::ip_defrag(&ip_hdr, payload, frag_off as u32, mf, src_ip, dest_ip);
         return Ok(());
     }
 
-    ip_dispatch(skb, ip_hdr, src_ip, dest_ip);
+    ip_dispatch(skb, &ip_hdr, src_ip, dest_ip);
 
     Ok(())
 }

@@ -88,10 +88,9 @@ impl Plic {
             // Clear all enable bits for this S-mode context
             for word in 0..((MAX_INTERRUPTS + 31) / 32) {
                 let addr = self.base + offset::ENABLE_BASE + ctx * offset::ENABLE_SIZE + word * 4;
-                // SAFETY: addr is a valid PLIC enable register for the S-mode context.
-                unsafe {
-                    asm!("sw zero, 0(a0)", in("a0") addr, options(nostack));
-                }
+                // INV-MMIO-1: mapped PLIC enable register for this
+                // S-mode context (MmioRegion owns the volatile word).
+                crate::safety::mmio::MmioRegion::new(addr, 4).write_u32(0, 0);
             }
 
             // Set threshold = 0 for this S-mode context
@@ -101,19 +100,15 @@ impl Plic {
 
     fn set_priority(&self, irq: usize, priority: u32) {
         let addr = self.base + offset::PRIORITY + irq * 4;
-        // SAFETY: addr is a valid PLIC priority register (PLIC_BASE + 4*irq).
-        unsafe {
-            asm!("sw t1, 0(a0)", in("a0") addr, in("t1") priority, options(nostack));
-        }
+        // INV-MMIO-1: mapped PLIC priority register (PLIC_BASE + 4*irq).
+        crate::safety::mmio::MmioRegion::new(addr, 4).write_u32(0, priority);
     }
 
     fn set_threshold(&self, hart: usize, threshold: u32) {
         let ctx = s_mode_ctx(hart);
         let addr = self.base + offset::CONTEXT_BASE + ctx * offset::CONTEXT_SIZE + offset::CONTEXT_THRESHOLD;
-        // SAFETY: addr is a valid PLIC threshold register for the S-mode context.
-        unsafe {
-            asm!("sw t1, 0(a0)", in("a0") addr, in("t1") threshold, options(nostack));
-        }
+        // INV-MMIO-1: mapped PLIC threshold register for this context.
+        crate::safety::mmio::MmioRegion::new(addr, 4).write_u32(0, threshold);
     }
 
     /// Enable an interrupt for a given hart.
@@ -129,15 +124,12 @@ impl Plic {
         let word = irq / 32;
         let bit = irq % 32;
         let addr = self.base + offset::ENABLE_BASE + ctx * offset::ENABLE_SIZE + word * 4;
-        // SAFETY: addr is a valid PLIC enable register for the S-mode context.
-        // Each hart has its own enable context, so no cross-hart race in
-        // the current configuration.
-        unsafe {
-            let value: u32;
-            asm!("lw {}, 0({})", out(reg) value, in(reg) addr, options(nostack));
-            let new_value = value | (1 << bit);
-            asm!("sw t1, 0(a0)", in("a0") addr, in("t1") new_value, options(nostack));
-        }
+        // INV-MMIO-1: mapped PLIC enable register for this S-mode
+        // context. Each hart has its own enable context, so no
+        // cross-hart race in the current configuration.
+        let reg = crate::safety::mmio::MmioRegion::new(addr, 4);
+        let value = reg.read_u32(0);
+        reg.write_u32(0, value | (1 << bit));
     }
 
     fn disable_interrupt(&self, hart: usize, irq: usize) {
@@ -146,33 +138,25 @@ impl Plic {
         let word = irq / 32;
         let bit = irq % 32;
         let addr = self.base + offset::ENABLE_BASE + ctx * offset::ENABLE_SIZE + word * 4;
-        // SAFETY: addr is a valid PLIC enable register; read-modify-write to clear one bit.
-        unsafe {
-            let value: u32;
-            asm!("lw {}, 0({})", out(reg) value, in(reg) addr, options(nostack));
-            let new_value = value & !(1 << bit);
-            asm!("sw t1, 0(a0)", in("a0") addr, in("t1") new_value, options(nostack));
-        }
+        // INV-MMIO-1: mapped PLIC enable register; RMW clears one bit.
+        let reg = crate::safety::mmio::MmioRegion::new(addr, 4);
+        let value = reg.read_u32(0);
+        reg.write_u32(0, value & !(1 << bit));
     }
 
     pub fn claim(&self, hart: usize) -> Option<usize> {
         let ctx = s_mode_ctx(hart);
         let addr = self.base + offset::CONTEXT_BASE + ctx * offset::CONTEXT_SIZE + offset::CONTEXT_CLAIM;
-        // SAFETY: addr is a valid PLIC claim/complete register for the S-mode context.
-        unsafe {
-            let irq: u32;
-            asm!("lw {}, 0({})", out(reg) irq, in(reg) addr, options(nostack));
-            if irq == 0 { None } else { Some(irq as usize) }
-        }
+        // INV-MMIO-1: mapped PLIC claim/complete register for this context.
+        let irq = crate::safety::mmio::MmioRegion::new(addr, 4).read_u32(0);
+        if irq == 0 { None } else { Some(irq as usize) }
     }
 
     pub fn complete(&self, hart: usize, irq: usize) {
         let ctx = s_mode_ctx(hart);
         let addr = self.base + offset::CONTEXT_BASE + ctx * offset::CONTEXT_SIZE + offset::CONTEXT_CLAIM;
-        // SAFETY: addr is a valid PLIC claim/complete register; writing irq completes the claim.
-        unsafe {
-            asm!("sw t1, 0(a0)", in("a0") addr, in("t1") irq as u32, options(nostack));
-        }
+        // INV-MMIO-1: writing irq completes the claim.
+        crate::safety::mmio::MmioRegion::new(addr, 4).write_u32(0, irq as u32);
     }
 
     /// Read one word of the PLIC pending array.
@@ -187,12 +171,8 @@ impl Plic {
             return 0;
         }
         let addr = self.base + offset::PENDING + word * 4;
-        // SAFETY: addr is a valid PLIC pending register (read-only).
-        unsafe {
-            let pending: u32;
-            asm!("lw {}, 0({})", out(reg) pending, in(reg) addr, options(nostack));
-            pending
-        }
+        // INV-MMIO-1: mapped PLIC pending register (read-only).
+        crate::safety::mmio::MmioRegion::new(addr, 4).read_u32(0)
     }
 
     /// Read the FIRST pending word (IRQs 0..31). See read_pending_word for
@@ -204,13 +184,9 @@ impl Plic {
     pub fn trigger_ipi(&self, irq: usize) {
         if irq >= 32 { return; }
         let addr = self.base + offset::PENDING;
-        // SAFETY: addr is a valid PLIC pending register; read-modify-write to set a pending bit.
-        unsafe {
-            let pending: u32;
-            asm!("lw {}, 0({})", out(reg) pending, in(reg) addr, options(nostack));
-            let new_pending = pending | (1 << irq);
-            asm!("sw t1, 0(a0)", in("a0") addr, in("t1") new_pending, options(nostack));
-        }
+        // INV-MMIO-1: mapped PLIC pending register; RMW sets a pending bit.
+        let pending = crate::safety::mmio::MmioRegion::new(addr, 4).read_u32(0);
+        crate::safety::mmio::MmioRegion::new(addr, 4).write_u32(0, pending | (1 << irq));
     }
 }
 
@@ -387,17 +363,9 @@ pub fn vw_plic_dump() {
         let ctx = s_mode_ctx(hart);
         let addr = self_addr_enable(ctx, 0);
         let addr1 = self_addr_enable(ctx, 1);
-        // SAFETY: PLIC enable register reads (diagnostic context).
-        let en0 = unsafe {
-            let v: u32;
-            asm!("lw {}, 0({})", out(reg) v, in(reg) addr, options(nostack));
-            v
-        };
-        let en1 = unsafe {
-            let v: u32;
-            asm!("lw {}, 0({})", out(reg) v, in(reg) addr1, options(nostack));
-            v
-        };
+        // INV-MMIO-1: mapped PLIC enable register reads (diagnostic).
+        let en0 = crate::safety::mmio::MmioRegion::new(addr, 4).read_u32(0);
+        let en1 = crate::safety::mmio::MmioRegion::new(addr1, 4).read_u32(0);
         let th = read_threshold(ctx);
         crate::pr_err!(
             "VW-PLIC ctx={} (hart {}) enable[0]={:08x} enable[1]={:08x} threshold={}",
@@ -419,10 +387,6 @@ fn read_threshold(ctx: usize) -> u32 {
         + offset::CONTEXT_BASE
         + ctx * offset::CONTEXT_SIZE
         + offset::CONTEXT_THRESHOLD;
-    // SAFETY: PLIC threshold register read (diagnostic context).
-    unsafe {
-        let v: u32;
-        asm!("lw {}, 0({})", out(reg) v, in(reg) addr, options(nostack));
-        v
-    }
+    // INV-MMIO-1: mapped PLIC threshold register read (diagnostic).
+    crate::safety::mmio::MmioRegion::new(addr, 4).read_u32(0)
 }

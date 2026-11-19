@@ -135,6 +135,7 @@ pub enum SocketType {
 
 /// Socket address
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct SockAddrIn {
     pub sin_family: u16,
     pub sin_port: u16,
@@ -148,11 +149,7 @@ impl SockAddrIn {
         if data.len() < 16 {
             return None;
         }
-        // SAFETY: data is at least 16 bytes (size_of::<SockAddrIn>), and the
-        // pointer is valid for that duration since it comes from a slice reference.
-        unsafe {
-            Some(&*(data.as_ptr() as *const SockAddrIn))
-        }
+        crate::net::buffer::hdr_view::<SockAddrIn>(data)
     }
 
     /// Get port number (host byte order)
@@ -171,6 +168,7 @@ impl SockAddrIn {
 /// are handed to the protocol layers as [u8;16], v4-mapped contents are
 /// normalized to the v4 fast path.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct SockAddrIn6 {
     pub sin6_family: u16,
     pub sin6_port: u16,
@@ -188,11 +186,7 @@ impl SockAddrIn6 {
         if data.len() < SOCKADDR_IN6_LEN {
             return None;
         }
-        // SAFETY: length checked above; natural alignment of the repr(C)
-        // fields (u16/u32) is satisfied by the copy-based caller path.
-        unsafe {
-            Some(&*(data.as_ptr() as *const SockAddrIn6))
-        }
+        crate::net::buffer::hdr_view::<SockAddrIn6>(data)
     }
 
     /// Port (host byte order)
@@ -1261,7 +1255,7 @@ fn socket_wait_round(socket: &Socket, kind: WaitKind, deadline: Option<u64>) -> 
         SocketType::Udp => socket.udp_fd.load(core::sync::atomic::Ordering::Acquire),
         SocketType::Tcp => socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire),
     };
-    let tpid = unsafe { (*current).pid() } as i32;
+    let tpid = current.pid() as i32;
 
     // Atomically set INTERRUPTIBLE and add to the queue under the same
     // lock — prevents the lost-wakeup race (prepare_to_wait contract).
@@ -1417,9 +1411,8 @@ pub fn inet_socket_type(file: &File) -> Option<SocketType> {
 fn checked_socket_ptr(file: &File, site: &'static str) -> Option<usize> {
     // SAFETY: private_data cell read; set at socket creation, cleared
     // only by close (serialized with the ops dispatch by the fd table).
-    let raw = match unsafe { *file.private_data.get() } {
-        Some(p) => p as usize,
-        None => return None,
+    let Some(raw) = file.private_data_ptr().map(|p| p as usize) else {
+        return None;
     };
     let (lo, _) = crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.heap_bounds();
     // Valid kernel-heap pointer: at/after the buddy heap start, within
@@ -1628,17 +1621,14 @@ fn socket_write(file: &File, buf: &[u8]) -> isize {
 
 fn socket_close(file: &File) -> i32 {
     // SAFETY: private_data was set during socket creation from Arc::into_raw.
-    let ptr = match unsafe { *file.private_data.get() } {
-        Some(p) => p,
-        None => return 0,
-    };
+    let Some(ptr) = file.private_data_ptr() else { return 0 };
 
-    // Reconstruct the Arc that was leaked via into_raw so it can be properly
-    // dropped.  This consumes the raw pointer, so we must clear private_data
-    // first to prevent a second reconstruction.
-    // SAFETY: ptr was created by Arc::into_raw(Arc::clone(&socket)) in
-    // sys_socket_create, so it is a valid Arc with a +1 strong count.
-    unsafe { *file.private_data.get() = None; }
+    // Reconstruct the Arc that was leaked via into_raw so it can be
+    // properly dropped (INV-NETARC-1: ptr came from Arc::into_raw in
+    // sys_socket_create with a +1 strong count; clearing first prevents
+    // a second reconstruction).
+    file.clear_private_data();
+    // SAFETY: the slot's sole Arc reference, checked above.
     let socket_arc = unsafe { Arc::from_raw(ptr as *const Socket) };
 
     // MSG_MORE cork release (Linux inet_release/ip_cork_release): data
@@ -1856,14 +1846,9 @@ pub fn socket_file_stat(file: &File, stat: &mut crate::fs::Stat) -> Option<i32> 
 
 /// Recover the Arc<Socket> behind an AF_INET socket File.
 fn socket_of_file(file: &File) -> Option<Arc<Socket>> {
-    // SAFETY: the dispatcher identity-checked the File against SOCKET_OPS;
-    // private_data was installed by socket creation as Arc::into_raw and
-    // stays valid while the File exists. Clone without consuming.
-    let ptr = unsafe { *file.private_data.get() }?;
-    let arc = unsafe { Arc::from_raw(ptr as *const Socket) };
-    let cloned = Arc::clone(&arc);
-    core::mem::forget(arc);
-    Some(cloned)
+    // The dispatcher identity-checked the File against SOCKET_OPS; the
+    // shared net-family edge clones without consuming the slot's ref.
+    crate::net::file_arc::<Socket>(file)
 }
 
 /// Register `task` on the socket's wait queue. RX landing (wake_tcp_matches
@@ -1992,20 +1977,20 @@ impl SocketTable {
     }
 }
 
-static mut SOCKET_TABLE: Spinlock<SocketTable> = Spinlock::new(SocketTable::new());
+static SOCKET_TABLE: Spinlock<SocketTable> = Spinlock::new(SocketTable::new());
 
 /// Allocate a slot in the global socket table (one consolidated
 /// static-mut access; the Spinlock serializes all users, irqsave for
 /// the NetRx softirq's wake hooks).
 fn socket_table_alloc(socket: Arc<Socket>) -> Result<usize, ()> {
     // SAFETY: static-mut access under the table Spinlock.
-    unsafe { SOCKET_TABLE.lock_irqsave().alloc(socket) }
+    SOCKET_TABLE.lock_irqsave().alloc(socket)
 }
 
 /// Lock the global socket table for a caller-provided critical section.
 pub fn socket_table_lock() -> crate::sync::spinlock::SpinlockIrqGuard<'static, SocketTable> {
     // SAFETY: static-mut access; the Spinlock serializes all users.
-    unsafe { SOCKET_TABLE.lock_irqsave() }
+    SOCKET_TABLE.lock_irqsave()
 }
 
 // W3 wake hooks — called by the protocol layers (tcp_rcv / udp_rcv /
@@ -2015,19 +2000,19 @@ pub fn socket_table_lock() -> crate::sync::spinlock::SpinlockIrqGuard<'static, S
 /// Wake the wait queue of every VFS socket bound to TCP protocol slot `tcp_fd`.
 pub fn wake_tcp_socket(tcp_fd: i32) {
     // SAFETY: SOCKET_TABLE is a global protected by Spinlock; we hold the lock.
-    unsafe { SOCKET_TABLE.lock_irqsave().wake_tcp_matches(tcp_fd) }
+    SOCKET_TABLE.lock_irqsave().wake_tcp_matches(tcp_fd)
 }
 
 /// Wake the wait queue of every VFS socket bound to UDP protocol slot `udp_fd`.
 pub fn wake_udp_socket(udp_fd: i32) {
     // SAFETY: SOCKET_TABLE is a global protected by Spinlock; we hold the lock.
-    unsafe { SOCKET_TABLE.lock_irqsave().wake_udp_matches(udp_fd) }
+    SOCKET_TABLE.lock_irqsave().wake_udp_matches(udp_fd)
 }
 
 /// Wake every TCP socket's wait queue (timer-tick state transitions).
 pub fn wake_all_tcp_sockets() {
     // SAFETY: SOCKET_TABLE is a global protected by Spinlock; we hold the lock.
-    unsafe { SOCKET_TABLE.lock_irqsave().wake_all_tcp() }
+    SOCKET_TABLE.lock_irqsave().wake_all_tcp()
 }
 
 /// Create socket and return file descriptor
@@ -2159,17 +2144,15 @@ fn unwind_socket_creation(file: &Arc<File>, sock_type: SocketType, proto_fd: i32
     }
     // SAFETY: the Option<*mut u8> in private_data came from Arc::into_raw
     // above; we are the sole owner (the File is about to drop, no ops ran).
-    let ptr = unsafe { *file.private_data.get() };
-    if let Some(ptr) = ptr {
-        unsafe { drop(Arc::from_raw(ptr as *const Socket)); }
-    }
+    // INV-NETARC-1: drop the slot's sole Arc reference.
+    crate::net::take_file_arc::<Socket>(file);
 }
 
 /// Get socket from file descriptor
 pub fn get_socket(fd: usize) -> Option<Arc<Socket>> {
     // SAFETY: SOCKET_TABLE is a global protected by Spinlock; we hold the lock.
     // irqsave: shared with the NetRx-softirq wake hooks (R34 discipline).
-    unsafe { SOCKET_TABLE.lock_irqsave().get(fd) }
+    SOCKET_TABLE.lock_irqsave().get(fd)
 }
 
 /// Create a process fd for an accepted TCP connection.
@@ -2289,10 +2272,8 @@ fn unwind_accepted(file: &Arc<File>, tcp_fd: i32) {
     if free_now {
         crate::net::tcp::tcp_socket_free(tcp_fd);
     }
-    let ptr = unsafe { *file.private_data.get() };
-    if let Some(ptr) = ptr {
-        unsafe { drop(Arc::from_raw(ptr as *const Socket)); }
-    }
+    // INV-NETARC-1: drop the slot's sole Arc reference.
+    crate::net::take_file_arc::<Socket>(file);
 }
 
 /// Get socket from file descriptor (via File private_data)
@@ -2323,12 +2304,7 @@ pub fn socket_of_arc(file: &Arc<File>) -> Option<Arc<Socket>> {
     // Arc::as_ptr(&socket). The Arc is owned by SOCKET_TABLE (one strong
     // count). We increment the strong count so the returned Arc is an independent
     // reference.
-    let ptr = unsafe { *file.private_data.get() }?;
-    let socket_ptr = ptr as *const Socket;
-    unsafe {
-        Arc::increment_strong_count(socket_ptr);
-        Some(Arc::from_raw(socket_ptr))
-    }
+    crate::net::file_arc::<Socket>(file)
 }
 
 /// Resolve a process fd to its TCP protocol-table index.
@@ -2376,12 +2352,11 @@ fn linger_drain_wait(tcp_fd: i32, secs: u32) {
     }
 
     let target = timer::get_jiffies() + timer::msecs_to_jiffies(secs as u64 * 1000);
-    let current = match crate::sched::current() {
-        Some(c) => c as *mut crate::process::task::Task,
-        None => return, // no task context: cannot sleep
+    let Some(current) = crate::sched::current() else {
+        return; // no task context: cannot sleep
     };
-    // SAFETY: current is the running task's pointer (we are it).
-    let pid = unsafe { (*current).pid() };
+    // current() is the safe handle to the running task (we are it).
+    let pid = current.pid();
     let timer_id = crate::timer::add_timer_wakeup(target, pid);
 
     loop {
@@ -2389,15 +2364,11 @@ fn linger_drain_wait(tcp_fd: i32, secs: u32) {
             crate::timer::del_timer(timer_id);
             return;
         }
-        // SAFETY: current is the running task's pointer (see above).
-        unsafe {
-            (*current).set_state(crate::process::task::TaskState::new(
-                crate::process::task::TaskState::INTERRUPTIBLE,
-            ));
-        }
+        current.set_state(crate::process::task::TaskState::new(
+            crate::process::task::TaskState::INTERRUPTIBLE,
+        ));
         if drained(tcp_fd) || timer::get_jiffies() >= target {
-            // SAFETY: see above.
-            unsafe { crate::sched::dequeue_task(&*current); }
+            crate::sched::dequeue_task(current);
             crate::timer::del_timer(timer_id);
             return;
         }

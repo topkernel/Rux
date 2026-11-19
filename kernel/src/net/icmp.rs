@@ -46,7 +46,7 @@ pub struct IcmpHdr {
 
 impl IcmpHdr {
     /// Create ICMP header from byte slice
-    pub fn from_bytes(data: &[u8]) -> Option<&'static Self> {
+    pub fn from_bytes(data: &[u8]) -> Option<&Self> {
         if data.len() < ICMP_HDR_LEN {
             return None;
         }
@@ -131,7 +131,7 @@ pub fn icmp_rcv(skb: &SkBuff, src_ip: u32, _dest_ip: u32) -> Result<(), ()> {
                 // The payload starts with original IP header + 8 bytes
                 // of transport header (length checked above — the
                 // shared header-view edge, INH-BUF-3).
-                let Some(orig_ip_hdr) = crate::net::buffer::hdr_view::<crate::net::ipv4::IpHdr>(payload) else { break };
+                let Some(orig_ip_hdr) = crate::net::buffer::hdr_view::<crate::net::ipv4::IpHdr>(payload) else { return Ok(()) };
                 let orig_src_ip = u32::from_be(orig_ip_hdr.saddr);
                 let orig_dst_ip = u32::from_be(orig_ip_hdr.daddr);
                 let orig_proto = orig_ip_hdr.protocol;
