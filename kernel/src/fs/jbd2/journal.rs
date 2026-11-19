@@ -873,7 +873,21 @@ impl Journal {
     }
 
     /// Abort the journal
+    ///
+    /// Mirrors jbd2_journal_abort's __journal_abort_soft print: an aborted
+    /// journal stops all metadata persistence — the condition must be
+    /// visible on the console, once, with the errno that caused it.
     pub fn abort(&self, errno: i32) {
+        static ABORT_N: AtomicUsize = AtomicUsize::new(0);
+        if ABORT_N.fetch_add(1, Ordering::Relaxed) == 0 {
+            crate::pr_warn!(
+                "jbd2: journal aborted (errno {}), log head={} tail={} free={}",
+                errno,
+                self.j_head.load(Ordering::SeqCst),
+                self.j_tail.load(Ordering::SeqCst),
+                self.j_free.load(Ordering::SeqCst)
+            );
+        }
         self.j_errno.store(errno, Ordering::SeqCst);
         self.j_flags.fetch_or(JBD2_ABORT, Ordering::SeqCst);
     }

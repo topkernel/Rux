@@ -1000,3 +1000,26 @@ registered per the data-corruption doctrine.
   −3.5%, rest ≤ ±5.3%). fio verify=md5 buffered 4k+1M, unaligned-head
   4k+1M, write→fsync→read-back all err=0; make test 1335/1335;
   triple-arch rc=0. [lane worktree bufw-parity run/BUFW-PARITY.md]
+
+  **Journal log-area lifecycle closed (journal-life, 2026-11-19).** The
+  ext4-persist residual — journaled fs silently stops persisting after
+  ~83 files under churn while create+fsync return success — was a
+  two-layer data-loss class: (1) j_last was computed s_first + s_maxlen
+  instead of the reference's s_maxlen, claiming one block BEYOND the
+  journal inode as usable log; write-through commits keep tail == head,
+  so the first commit whose span crossed the phantom block hit a jmap
+  hole and aborted the journal permanently; (2) jbd2 returned POSITIVE
+  errno across the syscall boundary (Err(30) → sys_mkdirat returned
+  +30), so the dead journal surfaced as garbage non-error returns while
+  nothing persisted — the API-contract break. Both fixed in the
+  reference shape; running out of log now completes write-through-only
+  with a WARN instead of aborting (__jbd2_log_wait_for_space is a no-op
+  in this design: the log is empty between commits). Bug-class
+  taxonomy: SAFE-code bugs (arithmetic + sign convention), no unsafe
+  touched. Evidence: hard-kill battery 81/300 → 300/300 (x3) and
+  900/900 on the 3x battery, content-OK all survivors, e2fsck in the
+  accepted kill-window class, journal-less control unchanged;
+  same-rig pbench A/B vs main all fs rows within ±2% (p2 −0.9%,
+  write_fsync +0.7%, mkdrmdir +1.6%, unlink −4.4%); riscv make test and
+  triple-arch builds green. [lane worktree journal-life
+  run/JOURNAL-LIFE.md]
