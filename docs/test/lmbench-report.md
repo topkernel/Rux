@@ -168,6 +168,38 @@ handoff), open (1.44x — walk loop + File construct), read (1.42x —
 copy tail), write (1.13x). lat_fs re-polluted by boot noise (no
 honest number this round).
 
+## Patrol round 4 (2026-11-19 08:xx): LIVOLOCK ROOT FIXED (eb37a3b57) — lat_fs default battery completes 3/3; official runner DONE; residual tmpfs-write wedge → mkdir EIO chain open
+
+THE FIX (eb37a3b57, gated 1334/1334 + triple-arch rc=0): __schedule's
+voluntary-sleep exemption zeroed IRQ-class counts and allowed the park
+— but while a REAL tick/device bracket is in flight on this cpu those
+bits are LEGAL nesting, and zeroing them breaks the bracket's paired
+irq_exit sub (underflow-clamp or re-leak onto the parked sleeper). A
+lat_fs worker parking inside its write's IO wait with an IRQ in flight
+got its live bracket wiped; every later ownership adjudication then
+read forged counts — the marks-drift livelock (claim=6→7→3, round
+stalled 100+ s). The exemption now consults the 119th booked-bracket
+depth: live bracket => refuse the park (the reference never parks
+inside an interrupt; its IRQ count is per-CPU and irq_exit zeroes it
+before any sleeping context resumes).
+
+Verified: lat_fs default battery (0k/1k/4k/10k) COMPLETES 3/3 boots at
+6.0/8.0/12.0 s with clean power-down (was: deterministic stall, 100+ s
+hang); PICK-SKIP-ALL 86→5; official lmbench_run rig: DONE, zero
+timeouts on boot 1; boot-2 0k row 20607/18301 files/s — at/above the
+standing band (19922/19658).
+
+RESIDUAL (open, P0 by data-integrity adjacency): the official rig
+still shows an intermittent chain — cpu3 wedges 10 s in
+tmpfs_file_write (the /tmp scratch is tmpfs; REMOTE-BT timeout = IF=0
+spin; soft lockup PID=315 lastsys=61) → the wedged task's exit parks
+(FTS-SLOT-WAIT) → its page is withheld (FTS-SLOT-LEAK) → its fds pin
+inodes → the round's directory teardown stalls → the NEXT round's
+mkdir gets EIO (8 mkdirfails, one directory prefix). Function-level
+localized: node.write_at's page path (pgdir page pool vs reclaim
+interaction). Boot 1 had the mkdirfails WITHOUT the lockup; boot 2 the
+lockup without mkdirfails — both faces need the same audit.
+
 ## Patrol round 3 (2026-11-19 05:xx): the 1k-round livelock isolated to ONE worker — ownership marks drift across pick cpus
 
 Round-3 landings (gated riscv 1334/1334, triple-arch rc=0, pushed
