@@ -4465,10 +4465,36 @@ unsafe fn __schedule() {
             // one nested lock the schedule path takes under the GRQ).
             grq_site_mark_fp_at(cpu_id, grq_site(GRQ_CALLER_SCHED, GRQ_STEP_NESTED_LOCK));
             if id != 0 && !crate::timer::timer_pending(id) {
-                // SAFETY: prev is this CPU's current task.
-                (*prev).set_state(TaskState::new(TaskState::RUNNING));
-                prev_running = true;
-                NSLPARK_RESCUED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                // R13 (oh-launch round 13, the pid-312 strand): the rescue
+                // may flip ONLY a task that actually went to sleep
+                // voluntarily — a SLEEPING prev. The terminal deschedule
+                // path (schedule_dead_never_returns) calls schedule() with
+                // STALE timer ids/kinds left over from the dying task's
+                // earlier timed sleeps, and the unconditional
+                // set_state(RUNNING) here kept flipping the parked-dying
+                // task DEAD -> RUNNING on EVERY retry round (fr11:
+                // TERM-DESCHED stuck pid=312 rounds=N state=0x1 pacing
+                // 13+ seconds under the abort storm; every relink screen
+                // then legitimately treats it as a live RUNNING task —
+                // the harvest, the phantom sweep, the picks). A DEAD or
+                // otherwise non-sleeping prev is never "rescued" from a
+                // sleep it is not in; clear the stale id so the dead leg
+                // does not re-evaluate every round.
+                if (*prev).state().is_sleeping() {
+                    // SAFETY: prev is this CPU's current task.
+                    (*prev).set_state(TaskState::new(TaskState::RUNNING));
+                    prev_running = true;
+                    NSLPARK_RESCUED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                } else {
+                    // SAFETY: prev is this CPU's current task; clearing its
+                    // own stale sleep-timer record.
+                    (*prev)
+                        .timed_sleep_timer_id
+                        .store(0, core::sync::atomic::Ordering::Relaxed);
+                    (*prev)
+                        .timed_sleep_kind
+                        .store(crate::timer::TSLEEP_NONE, core::sync::atomic::Ordering::Relaxed);
+                }
             }
         }
     }
