@@ -391,6 +391,15 @@ struct TxnBlock {
     /// the user-side addresses the sender's PTR objects carry map back
     /// against block_user_base() = user_base + block_off.
     user_base: u64,
+    /// Precomputed layout end (block_off + align8 of the three sub-areas)
+    /// — span_ok runs on every accessor call, so the bound is computed
+    /// once at construction, not per access.
+    layout_end: usize,
+    /// Precomputed extra-area base (block-relative).
+    extra_base: usize,
+    /// Precomputed offsets-array base (block-relative) — the offsets
+    /// array sits right after the data sub-area.
+    offsets_base: usize,
 }
 
 impl TxnBlock {
@@ -411,15 +420,13 @@ impl TxnBlock {
             offsets_size,
             extra_size,
             user_base,
+            layout_end: block_off
+                + align8(data_size)
+                + align8(offsets_size)
+                + align8(extra_size),
+            extra_base: align8(data_size) + align8(offsets_size),
+            offsets_base: align8(data_size),
         }
-    }
-
-    /// End of this block's reserved layout within the allocation.
-    fn layout_end(&self) -> usize {
-        self.block_off
-            + align8(self.data_size)
-            + align8(self.offsets_size)
-            + align8(self.extra_size)
     }
 
     /// True when [abs, abs+len) lies fully inside the allocation AND
@@ -427,7 +434,7 @@ impl TxnBlock {
     /// are computed.
     fn span_ok(&self, abs: usize, len: usize) -> bool {
         len.checked_add(abs).map_or(false, |end| {
-            end <= self.alloc_len && abs >= self.block_off && end <= self.layout_end()
+            end <= self.alloc_len && abs >= self.block_off && end <= self.layout_end
         })
     }
 
@@ -523,7 +530,7 @@ impl TxnBlock {
     /// Volatile-read the i-th entry of the offsets array (sender-
     /// controlled usize; the caller re-validates it against data_size).
     fn offsets_entry(&self, i: usize) -> Option<usize> {
-        let abs = self.block_off + align8(self.data_size) + i.checked_mul(8)?;
+        let abs = self.block_off + self.offsets_base + i.checked_mul(8)?;
         if !self.span_ok(abs, 8) || !self.aligned(abs, 8) {
             return None;
         }
@@ -536,7 +543,7 @@ impl TxnBlock {
     /// Write the secctx string (+ NUL) at extra-area offset `at`.
     /// `secctx_space` reserved >= bytes.len() + 1.
     fn extra_write_bytes(&self, at: usize, bytes: &[u8]) -> Option<()> {
-        let abs = self.block_off + align8(self.data_size) + align8(self.offsets_size) + at;
+        let abs = self.block_off + self.extra_base + at;
         let total = bytes.len().checked_add(1)?;
         if !self.span_ok(abs, total) {
             return None;
@@ -553,7 +560,7 @@ impl TxnBlock {
     /// Mutable byte window into the extra (sg) area (extra-relative
     /// `at`/`len`); the sg-copy twin of block_window.
     fn extra_window(&mut self, at: usize, len: usize) -> Option<&mut [u8]> {
-        let abs = self.block_off + align8(self.data_size) + align8(self.offsets_size) + at;
+        let abs = self.block_off + self.extra_base + at;
         if !self.span_ok(abs, len) {
             return None;
         }
@@ -604,7 +611,7 @@ impl TxnBlock {
         // address of its sg copy; map it back to the kernel address and
         // bound it inside the extra area.
         let block_user = self.block_user_base()?;
-        let extra_base = align8(self.data_size) + align8(self.offsets_size);
+        let extra_base = self.extra_base;
         let rel = p.buffer.checked_sub(block_user)? as usize;
         if rel < extra_base
             || !rel
