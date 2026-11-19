@@ -266,6 +266,53 @@ impl CacheEntry {
     }
 }
 
+impl CacheEntry {
+    /// Shared view of the entry's BufferHead; None for a dead entry.
+    ///
+    /// INV-BIO-BH: the caller holds the bucket lock (entry hash-linked)
+    /// or a pin (refcount > 0) — under either, the Box backing `bh`
+    /// cannot be freed for the borrow's duration.
+    #[inline]
+    fn bh(&self) -> Option<&BufferHead> {
+        if self.bh.is_null() {
+            None
+        } else {
+            // SAFETY: INV-BIO-BH; Box-owned, non-null (checked).
+            Some(unsafe { &*self.bh })
+        }
+    }
+
+    /// Exclusive view of the entry's BufferHead; None for a dead entry.
+    ///
+    /// Same contract as [`Self::bh`], plus: the caller must hold the
+    /// bucket lock so no other holder observes the mutation window
+    /// (exactly the discipline the raw `(*entry.bh).b_data` writes
+    /// already carried).
+    #[inline]
+    fn bh_mut(&self) -> Option<&mut BufferHead> {
+        if self.bh.is_null() {
+            None
+        } else {
+            // SAFETY: INV-BIO-BH + bucket lock held; single live &mut
+            // window under the same lock the pre-conversion writes had.
+            Some(unsafe { &mut *self.bh })
+        }
+    }
+}
+
+/// Borrow a hash-linked (or LRU-linked) cache entry.
+///
+/// INV-BIO-ENTRY: `p` came from a bucket chain or the LRU list and the
+/// corresponding lock (bucket / lru) is held — under that lock the entry
+/// cannot be unlinked and freed, so the borrow is live for the walk.
+/// The round-1 TaskRef shape applied to the buffer cache.
+#[inline]
+fn entry_ref(p: *mut CacheEntry) -> &'static CacheEntry {
+    // SAFETY: INV-BIO-ENTRY; entries are Box::into_raw allocations that
+    // live while linked under their locks.
+    unsafe { &*p }
+}
+
 impl Drop for CacheEntry {
     fn drop(&mut self) {
         if !self.bh.is_null() {
@@ -361,12 +408,24 @@ impl BlockCache {
 
     /// Acquire LRU lock while already holding a bucket lock.
     ///
-    /// # Safety
-    /// Caller MUST hold the bucket lock for `bucket_idx` (or any bucket).
-    /// This enforces the bucket→LRU lock ordering documented on BlockCache.
+    /// The bucket guard is passed as a TOKEN (unsafe-slim round 2): the
+    /// compiler now proves the bucket→LRU lock ordering documented on
+    /// BlockCache — this cannot be called without a live bucket guard.
     #[inline]
-    unsafe fn lru_lock_under_bucket(&self) -> crate::sync::spinlock::SpinlockGuard<'_, LruState> {
-        // SAFETY: caller guarantees bucket lock is held (lock hierarchy).
+    fn lru_lock_under_bucket<'a, T>(
+        &self,
+        _bucket_held: &crate::sync::spinlock::SpinlockGuard<'a, T>,
+    ) -> crate::sync::spinlock::SpinlockGuard<'_, LruState> {
+        self.lru.lock()
+    }
+
+    /// Same guard-token contract, irqsave bucket flavor (bread_async's
+    /// Phase 1/3 hold the bucket with IRQs off).
+    #[inline]
+    fn lru_lock_under_bucket_irqsave<'a, T>(
+        &self,
+        _bucket_held: &crate::sync::spinlock::SpinlockIrqGuard<'a, T>,
+    ) -> crate::sync::spinlock::SpinlockGuard<'_, LruState> {
         self.lru.lock()
     }
 
@@ -379,49 +438,54 @@ impl BlockCache {
         (hash as usize) & (self.hash_size - 1)
     }
 
-    /// Move entry to LRU head. Caller must hold the lru lock.
-    // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-    unsafe fn move_to_lru_head(lru: &mut LruState, entry_ptr: *mut CacheEntry) {
-        let entry = &mut *entry_ptr;
+    /// Move entry to LRU head. Caller must hold the lru lock
+    /// (INV-BIO-ENTRY; the unsafe raw-deref window is confined to here).
+    fn move_to_lru_head(lru: &mut LruState, entry_ptr: *mut CacheEntry) {
+        // SAFETY: INV-BIO-ENTRY — lru lock held; entry and every neighbor
+        // it names in prev/next are linked under the same lock, so the
+        // whole relink is one raw-deref window.
+        unsafe {
+            let entry = &mut *entry_ptr;
 
-        // R7-C1: an entry unlinked by evict_one Phase 1 (both links None)
-        // but still visible in the hash chain can race here via get().
-        // Unlinking it again would drop lru.tail (lru_next None -> tail =
-        // lru_prev = None) and leave the real tail orphaned — instead treat
-        // it as a fresh insert (same as push_lru_head).
-        if entry.lru_prev.is_none() && entry.lru_next.is_none() && lru.head != Some(entry_ptr) {
-            Self::push_lru_head(lru, entry_ptr);
-            return;
-        }
-        if lru.head == Some(entry_ptr) {
-            return; // already at head
-        }
+            // R7-C1: an entry unlinked by evict_one Phase 1 (both links
+            // None) but still visible in the hash chain can race here via
+            // get(). Unlinking it again would drop lru.tail (lru_next None
+            // -> tail = lru_prev = None) and leave the real tail orphaned
+            // — instead treat it as a fresh insert (same as push_lru_head).
+            if entry.lru_prev.is_none() && entry.lru_next.is_none() && lru.head != Some(entry_ptr) {
+                Self::push_lru_head(lru, entry_ptr);
+                return;
+            }
+            if lru.head == Some(entry_ptr) {
+                return; // already at head
+            }
 
-        // Unlink from current position
-        if let Some(prev) = entry.lru_prev {
-            (*prev).lru_next = entry.lru_next;
-        }
-        if let Some(next) = entry.lru_next {
-            (*next).lru_prev = entry.lru_prev;
-        } else {
-            lru.tail = entry.lru_prev;
-        }
+            // Unlink from current position
+            if let Some(prev) = entry.lru_prev {
+                (*prev).lru_next = entry.lru_next;
+            }
+            if let Some(next) = entry.lru_next {
+                (*next).lru_prev = entry.lru_prev;
+            } else {
+                lru.tail = entry.lru_prev;
+            }
 
-        // Insert at head
-        entry.lru_prev = None;
-        entry.lru_next = lru.head;
-        if let Some(head) = lru.head {
-            (*head).lru_prev = Some(entry_ptr);
-        }
-        lru.head = Some(entry_ptr);
-        if lru.tail.is_none() {
-            lru.tail = Some(entry_ptr);
+            // Insert at head
+            entry.lru_prev = None;
+            entry.lru_next = lru.head;
+            if let Some(head) = lru.head {
+                (*head).lru_prev = Some(entry_ptr);
+            }
+            lru.head = Some(entry_ptr);
+            if lru.tail.is_none() {
+                lru.tail = Some(entry_ptr);
+            }
         }
     }
 
     /// Push an entry that is currently UNLINKED onto the LRU head.
-    /// Caller must hold the lru lock.
-    unsafe fn push_lru_head(lru: &mut LruState, entry_ptr: *mut CacheEntry) {
+    /// Caller must hold the lru lock (INV-BIO-ENTRY).
+    fn push_lru_head(lru: &mut LruState, entry_ptr: *mut CacheEntry) {
         // R7-C1: idempotent — evict_one Phase 2 re-inserts after a pin
         // recheck; a concurrent get() may have re-linked the entry at head
         // already. Pushing again would self-loop (entry.lru_next = head =
@@ -429,34 +493,41 @@ impl BlockCache {
         if lru.head == Some(entry_ptr) {
             return;
         }
-        let entry = &mut *entry_ptr;
-        entry.lru_prev = None;
-        entry.lru_next = lru.head;
-        if let Some(head) = lru.head {
-            (*head).lru_prev = Some(entry_ptr);
-        }
-        lru.head = Some(entry_ptr);
-        if lru.tail.is_none() {
-            lru.tail = Some(entry_ptr);
+        // SAFETY: INV-BIO-ENTRY — lru lock held; head is a linked entry.
+        unsafe {
+            let entry = &mut *entry_ptr;
+            entry.lru_prev = None;
+            entry.lru_next = lru.head;
+            if let Some(head) = lru.head {
+                (*head).lru_prev = Some(entry_ptr);
+            }
+            lru.head = Some(entry_ptr);
+            if lru.tail.is_none() {
+                lru.tail = Some(entry_ptr);
+            }
         }
     }
 
-    /// Unlink entry from LRU list. Caller must hold the lru lock.
-    // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-    unsafe fn remove_from_lru(lru: &mut LruState, entry_ptr: *mut CacheEntry) {
-        let entry = &*entry_ptr;
-        if let Some(prev) = entry.lru_prev {
-            (*prev).lru_next = entry.lru_next;
-        } else {
-            lru.head = entry.lru_next;
+    /// Unlink entry from LRU list. Caller must hold the lru lock
+    /// (INV-BIO-ENTRY; the unsafe raw-deref window is confined to here).
+    fn remove_from_lru(lru: &mut LruState, entry_ptr: *mut CacheEntry) {
+        // SAFETY: INV-BIO-ENTRY — lru lock held; prev/next are linked
+        // entries under the same lock.
+        unsafe {
+            let entry = &*entry_ptr;
+            if let Some(prev) = entry.lru_prev {
+                (*prev).lru_next = entry.lru_next;
+            } else {
+                lru.head = entry.lru_next;
+            }
+            if let Some(next) = entry.lru_next {
+                (*next).lru_prev = entry.lru_prev;
+            } else {
+                lru.tail = entry.lru_prev;
+            }
+            (*entry_ptr).lru_prev = None;
+            (*entry_ptr).lru_next = None;
         }
-        if let Some(next) = entry.lru_next {
-            (*next).lru_prev = entry.lru_prev;
-        } else {
-            lru.tail = entry.lru_prev;
-        }
-        (*entry_ptr).lru_prev = None;
-        (*entry_ptr).lru_next = None;
     }
 
     /// Evict one entry from the LRU tail.
@@ -483,17 +554,15 @@ impl BlockCache {
             let mut current = lru.tail;
             let mut found = None;
             while let Some(entry_ptr) = current {
-                // SAFETY: entry_ptr is a valid raw pointer from the LRU list;
-                // all CacheEntry pointers in the LRU were created by Box::into_raw
-                // and remain valid while in the cache.
-                unsafe {
-                    let entry = &*entry_ptr;
-                    if !entry.evicting && !entry.bh.is_null() && unsafe { (*entry.bh).count() == 0 } {
-                        found = Some(entry_ptr);
-                        break;
-                    }
-                    current = entry.lru_prev;
+                // INV-BIO-ENTRY: lru lock held; walk mates are linked.
+                let entry = entry_ref(entry_ptr);
+                if !entry.evicting
+                    && entry.bh().is_some_and(|bh| bh.count() == 0)
+                {
+                    found = Some(entry_ptr);
+                    break;
                 }
+                current = entry.lru_prev;
             }
             match found {
                 Some(entry_ptr) => entry_ptr,
@@ -504,10 +573,10 @@ impl BlockCache {
         // until Phase 2 takes the bucket lock, and the count recheck there
         // aborts the eviction if a pin arrived in this window.
 
-        let victim_key = unsafe { (*victim).key };
+        let victim_key = entry_ref(victim).key;
         let bucket_idx = self.hash_index(victim_key.0, victim_key.1, victim_key.2);
 
-        unsafe {
+        {
             let mut bucket = self.buckets[bucket_idx].lock();
             // R11-1 (S2 root cause): PRESENCE IS AUTHORITATIVE. Every free
             // path unlinks from the hash under this same bucket lock, so
@@ -523,16 +592,20 @@ impl BlockCache {
             let mut present = false;
             while let Some(cp) = current {
                 if cp == victim {
-                    if let Some(pp) = prev {
-                        (*pp).hash_next = (*cp).hash_next;
-                    } else {
-                        bucket.head = (*cp).hash_next;
+                    // SAFETY: bucket lock held; cp/prev chain-linked
+                    // (INV-BIO-ENTRY) — the unhash relink writes.
+                    unsafe {
+                        if let Some(pp) = prev {
+                            (*pp).hash_next = (*cp).hash_next;
+                        } else {
+                            bucket.head = (*cp).hash_next;
+                        }
                     }
                     present = true;
                     break;
                 }
                 prev = Some(cp);
-                current = (*cp).hash_next;
+                current = entry_ref(cp).hash_next;
             }
             if !present {
                 // Another CPU already evicted (and possibly freed) this
@@ -541,14 +614,19 @@ impl BlockCache {
             }
             // Alive (presence under the lock): now the pin/flag rechecks
             // are reads of valid memory.
-            if (*(*victim).bh).count() != 0 {
+            let ve = entry_ref(victim);
+            if ve.bh().map_or(true, |bh| bh.count() != 0) {
                 // Pinned between Phase 1 and Phase 2 — but we already
                 // unlinked it! Re-link at the head and abort.
-                (*victim).hash_next = bucket.head;
+                // SAFETY: bucket lock held relink write (INV-BIO-ENTRY).
+                unsafe {
+                    (*victim).hash_next = bucket.head;
+                }
                 bucket.head = Some(victim);
                 return false;
             }
-            (*victim).evicting = true;
+            // SAFETY: bucket lock held; victim present in chain.
+            unsafe { (*victim).evicting = true; }
         }
         // bucket lock released; entry is unpinnable and unhashed
 
@@ -556,8 +634,10 @@ impl BlockCache {
         // Phase-4 sync lands, every lookup of this key misses and may
         // fabricate a fresh entry over stale disk (the unhashed-victim
         // window; see the tracers in ext4/extent.rs).
-        let vkey = unsafe { (*victim).key };
-        let v_dirty = unsafe { (*(*victim).bh).is_dirty() };
+        let ve = entry_ref(victim);
+        let vkey = ve.key;
+        let v_dirty = ve.bh().is_some_and(|bh| bh.is_dirty());
+        drop(ve);
         if crate::trace::EVENT_EXTHUNT.armed()
             && crate::fs::ext4::extent::exthunt_phys_watched(vkey.2)
         {
@@ -566,15 +646,15 @@ impl BlockCache {
 
         {
             let mut lru = self.lru.lock_irqsave();
-            // SAFETY: victim is a valid CacheEntry pointer picked from the
-            // LRU list in Phase 1; the LRU lock is held.
-            unsafe { Self::remove_from_lru(&mut lru, victim); }
+            // INV-BIO-ENTRY: victim picked from the LRU list in Phase 1.
+            Self::remove_from_lru(&mut lru, victim);
         }
 
         // Phase 4: Sync if dirty (NO locks held — I/O is safe)
-        // SAFETY: victim is unhashed, unlinked and unpinnable; its bh field
+        // victim is unhashed, unlinked and unpinnable; its bh field
         // points to a valid BufferHead owned by this entry.
-        unsafe {
+        {
+            let victim_bh = entry_ref(victim).bh();
             if v_dirty {
                 // Ordered-publication guard: if this block is a pending
                 // entry/post block, writing it here (before its prereqs)
@@ -587,9 +667,10 @@ impl BlockCache {
                 if publication_constrained(vkey.0, vkey.1, vkey.2) {
                     let _ = flush_publication_constraints(vkey.0, vkey.1, vkey.2);
                 }
-                let sync_rc = match (*(*victim).bh).sync() {
-                    Ok(()) => 0,
-                    Err(e) => e,
+                let sync_rc = match victim_bh.map(|bh| bh.sync()) {
+                    Some(Ok(())) => 0,
+                    Some(Err(e)) => e,
+                    None => -5,
                 };
                 if crate::trace::EVENT_EXTHUNT.armed()
                     && crate::fs::ext4::extent::exthunt_phys_watched(vkey.2)
@@ -600,7 +681,9 @@ impl BlockCache {
             } else {
                 crate::dfx::fsw::note_evict(false);
             }
-            let _ = Box::from_raw(victim);
+            // SAFETY: victim is unhashed + unlinked + unpinnable; the
+            // Box::into_raw from insertion is reclaimed exactly once.
+            let _ = unsafe { Box::from_raw(victim) };
         }
         self.count.fetch_sub(1, Ordering::Release);
         true
@@ -642,37 +725,42 @@ impl BlockCache {
             let mut prev: Option<*mut CacheEntry> = None;
             let mut current = bucket.head;
             while let Some(cp) = current {
-                // SAFETY: chain pointers are valid under the bucket lock
-                // (created by Box::into_raw, freed only under this lock).
-                unsafe {
-                    if (*cp).key == (mj, mi, blocknr) {
-                        found = Some(cp);
-                        break;
-                    }
-                    prev = Some(cp);
-                    current = (*cp).hash_next;
+                // INV-BIO-ENTRY: bucket lock held; chain-linked entries.
+                let ce = entry_ref(cp);
+                if ce.key == (mj, mi, blocknr) {
+                    found = Some(cp);
+                    break;
                 }
+                prev = Some(cp);
+                current = ce.hash_next;
             }
             let cp = match found {
                 Some(cp) => cp,
                 None => return, // nothing cached for this block
             };
-            // SAFETY: cp was found in the chain under this lock.
-            unsafe {
-                if (*cp).evicting || (*cp).bh.is_null() {
-                    return; // mid-eviction / dead — nothing to drop
+            // cp was found in the chain under this lock.
+            {
+                let ce = entry_ref(cp);
+                if ce.evicting {
+                    return; // mid-eviction — nothing to drop
                 }
-                let bh = &*(*cp).bh;
+                let Some(bh) = ce.bh() else {
+                    return; // dead — nothing to drop
+                };
                 if bh.count() != 0 || !bh.is_dirty() {
                     return; // pinned or clean — leave it
                 }
                 // Unhash under the same lock that get() pins under:
                 // after this, no new pins can arrive.
-                (*cp).evicting = true;
-                if let Some(pp) = prev {
-                    (*pp).hash_next = (*cp).hash_next;
-                } else {
-                    bucket.head = (*cp).hash_next;
+                // SAFETY: bucket lock held; unhash relink write
+                // (INV-BIO-ENTRY).
+                unsafe {
+                    (*cp).evicting = true;
+                    if let Some(pp) = prev {
+                        (*pp).hash_next = (*cp).hash_next;
+                    } else {
+                        bucket.head = (*cp).hash_next;
+                    }
                 }
             }
             victim = cp;
@@ -680,8 +768,7 @@ impl BlockCache {
         // Bucket lock released; victim unhashed and unpinnable.
         {
             let mut lru = self.lru.lock_irqsave();
-            // SAFETY: victim was LRU-linked; LRU lock held for the unlink.
-            unsafe { Self::remove_from_lru(&mut lru, victim); }
+            Self::remove_from_lru(&mut lru, victim);
         }
         crate::dfx::fsw::note_drop_block();
         // SAFETY: unhashed, LRU-unlinked, unpinnable; bh owned by it.
@@ -691,11 +778,10 @@ impl BlockCache {
 
     /// Get or create buffer (synchronous read on cache miss).
     fn get(&self, device: &'static blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
-        // SAFETY (remainder, chain-walk only): all CacheEntry pointers in
-        // the hash chain were created by Box::into_raw and stay valid
-        // while linked under the bucket lock (Commit B converts these to
-        // typed accessors).
-        unsafe {
+        // Chain walks go through entry_ref()/CacheEntry::bh() (INV-BIO-ENTRY
+        // / INV-BIO-BH); the only raw windows left are the relink writes,
+        // each marked inline.
+        {
             let (device_major, device_minor) = (device.major, device.first_minor);
             let index = self.hash_index(device_major, device_minor, blocknr);
 
@@ -707,7 +793,7 @@ impl BlockCache {
                 let mut current = bucket.head;
 
                 while let Some(entry_ptr) = current {
-                    let entry = &*entry_ptr;
+                    let entry = entry_ref(entry_ptr);
                     if entry.evicting {
                         // Being evicted: treat as not found — pinning it
                         // would hand out a buffer that is about to be
@@ -733,13 +819,13 @@ impl BlockCache {
                             let mut dup = 0usize;
                             let mut c2 = bucket.head;
                             while let Some(cp2) = c2 {
-                                if unsafe { !(*cp2).bh.is_null() }
-                                    && (*cp2).key
-                                        == (device_major, device_minor, blocknr)
+                                let e2 = entry_ref(cp2);
+                                if e2.bh().is_some()
+                                    && e2.key == (device_major, device_minor, blocknr)
                                 {
                                     dup += 1;
                                 }
-                                c2 = unsafe { (*cp2).hash_next };
+                                c2 = e2.hash_next;
                             }
                             if dup >= 2 {
                                 use core::sync::atomic::{
@@ -779,7 +865,7 @@ impl BlockCache {
                         // corrupted ext4 metadata handling (inode.rs:563
                         // slice panic). Report via SBI (safe under any lock)
                         // and treat as a miss so the caller re-reads.
-                        if unsafe { entry.bh.is_null() || (*entry.bh).b_data.len() != self.block_size as usize } {
+                        if entry.bh().is_none_or(|bh| bh.b_data.len() != self.block_size as usize) {
                             let msg = b"bio: dead bh in chain blk=";
                             unsafe {
                                 for &b in msg { crate::console::putchar_no_lock(b); }
@@ -803,22 +889,27 @@ impl BlockCache {
                         // readv02/mmapstress04 mismatches — the zero-fill
                         // of BufferHead::new used to mask this). Treat it
                         // as a miss: Phase 2 re-reads the block from disk.
-                        if unsafe { !(*entry.bh).get_state().is_uptodate() } {
+                        if entry.bh().is_none_or(|bh| !bh.get_state().is_uptodate()) {
                             prev = Some(entry_ptr);
                             current = entry.hash_next;
                             continue;
                         }
                         // Found — move to hash chain head
                         if prev.is_some() {
-                            let prev_entry = &mut *prev.unwrap();
-                            prev_entry.hash_next = entry.hash_next;
-                            (*entry_ptr).hash_next = bucket.head;
+                            // SAFETY: prev/entry are chain-linked under the
+                            // bucket lock (INV-BIO-ENTRY); relinking writes.
+                            unsafe {
+                                let prev_entry = &mut *prev.unwrap();
+                                prev_entry.hash_next = entry.hash_next;
+                                (*entry_ptr).hash_next = bucket.head;
+                            }
                             bucket.head = Some(entry_ptr);
                         }
                         // Move to LRU head (bucket lock held — enforces ordering)
-                        let mut lru = unsafe { self.lru_lock_under_bucket() };
+                        let mut lru = self.lru_lock_under_bucket(&bucket);
                         Self::move_to_lru_head(&mut lru, entry_ptr);
-                        (*entry.bh).get();
+                        let bh = entry.bh().unwrap();
+                        bh.get();
                         return Some(entry.bh);
                     }
                     prev = Some(entry_ptr);
@@ -871,42 +962,50 @@ impl BlockCache {
                 // Double-check for duplicate inserted by another thread
                 let mut current = bucket.head;
                 while let Some(cp) = current {
-                    if (*cp).key == (device_major, device_minor, blocknr) {
+                    let ce = entry_ref(cp);
+                    if ce.key == (device_major, device_minor, blocknr) {
                         // R9-8: apply the same integrity guard as Phase 1 —
                         // a dead (freed/reused) duplicate entry must not be
                         // handed out here after the fresh read.
-                        if unsafe { (*cp).bh.is_null() || (*(*cp).bh).b_data.len() != self.block_size as usize } {
-                            current = (*cp).hash_next;
+                        if ce.bh().is_none_or(|b| b.b_data.len() != self.block_size as usize) {
+                            current = ce.hash_next;
                             continue;
                         }
                         // Same failed-async rule as Phase 1: a !Uptodate
                         // duplicate is residue, not data — skip it and
                         // insert the fresh buffer at the chain head (the
                         // stale entry is reclaimed by LRU eviction later).
-                        if unsafe { !(*(*cp).bh).get_state().is_uptodate() } {
-                            current = (*cp).hash_next;
+                        if ce.bh().is_none_or(|b| !b.get_state().is_uptodate()) {
+                            current = ce.hash_next;
                             continue;
                         }
-                        (*(*cp).bh).get();
-                        let mut lru = unsafe { self.lru_lock_under_bucket() };
+                        ce.bh().unwrap().get();
+                        let mut lru = self.lru_lock_under_bucket(&bucket);
                         Self::move_to_lru_head(&mut lru, cp);
-                        let _ = Box::from_raw(entry_ptr);
-                        return Some((*cp).bh);
+                        // SAFETY: entry_ptr was created by Box::into_raw
+                        // above; never published, dropped on the dup path.
+                        let _ = unsafe { Box::from_raw(entry_ptr) };
+                        return Some(ce.bh);
                     }
-                    current = (*cp).hash_next;
+                    current = ce.hash_next;
                 }
 
                 // Insert at hash chain head
-                (*entry_ptr).hash_next = bucket.head;
+                // SAFETY: entry_ptr is the freshly Box::into_raw'd entry;
+                // bucket lock held (INV-BIO-ENTRY relink write).
+                unsafe {
+                    (*entry_ptr).hash_next = bucket.head;
+                }
                 bucket.head = Some(entry_ptr);
 
                 // Insert at LRU head (bucket lock held — enforces ordering)
-                let mut lru = unsafe { self.lru_lock_under_bucket() };
+                let mut lru = self.lru_lock_under_bucket(&bucket);
                 Self::move_to_lru_head(&mut lru, entry_ptr);
             }
 
             self.count.fetch_add(1, Ordering::Release);
-            Some((*entry_ptr).bh)
+            // SAFETY: entry_ptr linked above under the bucket lock.
+            Some(unsafe { (*entry_ptr).bh })
         }
     }
 
@@ -937,11 +1036,11 @@ impl BlockCache {
         blocknr: u64,
         zero_on_hit: bool,
     ) -> Option<*mut BufferHead> {
-        // SAFETY (remainder, chain-walk only): same entry-lifetime
-        // guarantees as get(); the BufferHead is either found in the cache
+        // Chain walks go through entry_ref()/CacheEntry::bh() (INV-BIO-ENTRY
+        // / INV-BIO-BH); the BufferHead is either found in the cache
         // (pinned via get()) or freshly created and inserted below, never
         // freed while the caller holds a reference.
-        unsafe {
+        {
             let (device_major, device_minor) = (device.major, device.first_minor);
             let index = self.hash_index(device_major, device_minor, blocknr);
 
@@ -950,20 +1049,18 @@ impl BlockCache {
                 let mut bucket = self.buckets[index].lock();
                 let mut current = bucket.head;
                 while let Some(entry_ptr) = current {
-                    let entry = &*entry_ptr;
+                    let entry = entry_ref(entry_ptr);
                     current = entry.hash_next;
                     if entry.evicting {
                         continue;
                     }
                     if entry.key == (device_major, device_minor, blocknr) {
-                        if entry.bh.is_null()
-                            || (*entry.bh).b_data.len() != self.block_size as usize
-                        {
+                        if entry.bh().is_none_or(|b| b.b_data.len() != self.block_size as usize) {
                             continue; // dead entry — treat as miss
                         }
                         // Failed-async residue: never hand out a !Uptodate
                         // buffer (see get() Phase 1).
-                        if !(*entry.bh).get_state().is_uptodate() {
+                        if entry.bh().is_none_or(|b| !b.get_state().is_uptodate()) {
                             continue;
                         }
                         // HIT: for get_zero callers, zero it. The caller just
@@ -979,10 +1076,11 @@ impl BlockCache {
                         // reach disk. get_overwrite callers skip this —
                         // they rewrite every byte themselves.
                         if zero_on_hit {
-                            (*entry.bh).b_data.fill(0);
-                            (*entry.bh).set_state_bit(BufferState::BH_Dirty);
+                            let bm = entry.bh_mut().unwrap();
+                            bm.b_data.fill(0);
+                            bm.set_state_bit(BufferState::BH_Dirty);
                         }
-                        (*entry.bh).get();
+                        entry.bh().unwrap().get();
                         return Some(entry.bh);
                     }
                 }
@@ -1012,40 +1110,46 @@ impl BlockCache {
                 let mut bucket = self.buckets[index].lock();
                 let mut current = bucket.head;
                 while let Some(cp) = current {
-                    if (*cp).key == (device_major, device_minor, blocknr) {
-                        if (*cp).bh.is_null()
-                            || (*(*cp).bh).b_data.len() != self.block_size as usize
-                        {
-                            current = (*cp).hash_next;
+                    let ce = entry_ref(cp);
+                    if ce.key == (device_major, device_minor, blocknr) {
+                        if ce.bh().is_none_or(|b| b.b_data.len() != self.block_size as usize) {
+                            current = ce.hash_next;
                             continue;
                         }
                         // Failed-async residue — skip, insert ours (get()
                         // Phase 3 discipline).
-                        if !(*(*cp).bh).get_state().is_uptodate() {
-                            current = (*cp).hash_next;
+                        if ce.bh().is_none_or(|b| !b.get_state().is_uptodate()) {
+                            current = ce.hash_next;
                             continue;
                         }
                         // Duplicate insert lost the race: same contract as
                         // Phase 1 (zero for get_zero callers; untouched for
                         // get_overwrite callers, who rewrite every byte).
                         if zero_on_hit {
-                            (*(*cp).bh).b_data.fill(0);
-                            (*(*cp).bh).set_state_bit(BufferState::BH_Dirty);
+                            let bm = ce.bh_mut().unwrap();
+                            bm.b_data.fill(0);
+                            bm.set_state_bit(BufferState::BH_Dirty);
                         }
-                        (*(*cp).bh).get();
-                        let _ = Box::from_raw(entry_ptr);
-                        return Some((*cp).bh);
+                        ce.bh().unwrap().get();
+                        // SAFETY: our never-published entry, dropped.
+                        let _ = unsafe { Box::from_raw(entry_ptr) };
+                        return Some(ce.bh);
                     }
-                    current = (*cp).hash_next;
+                    current = ce.hash_next;
                 }
-                (*entry_ptr).hash_next = bucket.head;
+                // SAFETY: fresh Box::into_raw entry; bucket lock held
+                // (INV-BIO-ENTRY relink write).
+                unsafe {
+                    (*entry_ptr).hash_next = bucket.head;
+                }
                 bucket.head = Some(entry_ptr);
-                let mut lru = self.lru_lock_under_bucket();
+                let mut lru = self.lru_lock_under_bucket(&bucket);
                 Self::move_to_lru_head(&mut lru, entry_ptr);
             }
 
             self.count.fetch_add(1, Ordering::Release);
-            Some((*entry_ptr).bh)
+            // SAFETY: entry_ptr linked above under the bucket lock.
+            Some(unsafe { (*entry_ptr).bh })
         }
     }
 
@@ -1075,35 +1179,32 @@ impl BlockCache {
             let bucket = self.buckets[i].lock();
             let mut current = bucket.head;
             while let Some(entry_ptr) = current {
-                // SAFETY: entry_ptr is from the hash chain (created by Box::into_raw);
-                // bucket lock is held so the entry cannot be freed concurrently.
-                unsafe {
-                    let entry = &*entry_ptr;
-                    // Leg-52 (route-1 exposure): a linked entry with a null
-                    // bh has been observed (evict_one Phase 1 guards the
-                    // same shape; R11-1's family ends in exactly this
-                    // NULL+0x30 b_state panic). Skip and count — do not
-                    // dereference. The fs lane owns the producer hunt.
-                    if !entry.bh.is_null() && (*entry.bh).is_dirty() {
-                        (*entry.bh).get();
+                // INV-BIO-ENTRY: bucket lock held.
+                let entry = entry_ref(entry_ptr);
+                // Leg-52 (route-1 exposure): a linked entry with a null
+                // bh has been observed (evict_one Phase 1 guards the
+                // same shape; R11-1's family ends in exactly this
+                // NULL+0x30 b_state panic). Skip and count — do not
+                // dereference. The fs lane owns the producer hunt.
+                if let Some(bh) = entry.bh() {
+                    if bh.is_dirty() {
+                        bh.get();
                         dirty_list.push(entry.bh);
-                    } else if entry.bh.is_null() {
-                        SYNC_WALK_NULL_BH.fetch_add(1, Ordering::Relaxed);
                     }
-                    current = entry.hash_next;
+                } else {
+                    SYNC_WALK_NULL_BH.fetch_add(1, Ordering::Relaxed);
                 }
+                current = entry.hash_next;
             }
         }
         // Phase 2: Sync without holding any lock
         let mut first_error: i32 = 0;
         for bh in &dirty_list {
-            // SAFETY: bh pointers were collected under bucket locks above and had
-            // their refcount incremented; they remain valid BufferHead pointers.
-            unsafe {
-                if let Err(e) = (**bh).sync() {
-                    if first_error == 0 {
-                        first_error = e;
-                    }
+            // SAFETY: bh pointers were collected under bucket locks above
+            // and had their refcount incremented (pin); valid BufferHeads.
+            if let Err(e) = unsafe { (**bh).sync() } {
+                if first_error == 0 {
+                    first_error = e;
                 }
             }
             self.put(*bh);
@@ -1138,37 +1239,30 @@ impl BlockCache {
             let bucket = self.buckets[i].lock();
             let mut current = bucket.head;
             while let Some(entry_ptr) = current {
-                // SAFETY: entry_ptr is from the hash chain (Box::into_raw);
-                // bucket lock is held so the entry cannot be freed
-                // concurrently.
-                unsafe {
-                    let entry = &*entry_ptr;
-                    // Leg-52: same null-bh guard as sync_all (the pa92nj
-                    // crash chain faulted HERE first).
-                    if entry.bh.is_null() {
-                        SYNC_WALK_NULL_BH.fetch_add(1, Ordering::Relaxed);
-                        current = entry.hash_next;
-                        continue;
-                    }
-                    let bh = &*entry.bh;
-                    let same_dev = bh.b_device.is_some_and(|d| core::ptr::eq(d, device));
-                    if bh.is_dirty() && same_dev && Some(bh.b_blocknr) != skip {
-                        bh.get();
-                        dirty_list.push(entry.bh);
-                    }
+                // INV-BIO-ENTRY: bucket lock held.
+                let entry = entry_ref(entry_ptr);
+                // Leg-52: same null-bh guard as sync_all (the pa92nj
+                // crash chain faulted HERE first).
+                let Some(bh) = entry.bh() else {
+                    SYNC_WALK_NULL_BH.fetch_add(1, Ordering::Relaxed);
                     current = entry.hash_next;
+                    continue;
+                };
+                let same_dev = bh.b_device.is_some_and(|d| core::ptr::eq(d, device));
+                if bh.is_dirty() && same_dev && Some(bh.b_blocknr) != skip {
+                    bh.get();
+                    dirty_list.push(entry.bh);
                 }
+                current = entry.hash_next;
             }
         }
         let mut first_error: i32 = 0;
         for bh in &dirty_list {
-            // SAFETY: bh pointers were collected under bucket locks above and
-            // had their refcount incremented; they remain valid BufferHeads.
-            unsafe {
-                if let Err(e) = (**bh).sync() {
-                    if first_error == 0 {
-                        first_error = e;
-                    }
+            // SAFETY: collected under bucket locks with a refcount pin;
+            // valid BufferHeads.
+            if let Err(e) = unsafe { (**bh).sync() } {
+                if first_error == 0 {
+                    first_error = e;
                 }
             }
             self.put(*bh);
@@ -1186,14 +1280,14 @@ impl BlockCache {
             let mut bucket = self.buckets[i].lock();
             let mut current = bucket.head;
             while let Some(entry_ptr) = current {
-                // SAFETY: entry_ptr is from the hash chain (created by Box::into_raw);
-                // we hold the bucket lock and are draining the entire chain, so
+                // SAFETY: bucket lock held and the chain is being drained;
                 // Box::from_raw reclaims the CacheEntry and its BufferHead.
-                unsafe {
+                let next = unsafe {
                     let next = (*entry_ptr).hash_next;
                     let _ = Box::from_raw(entry_ptr);
-                    current = next;
-                }
+                    next
+                };
+                current = next;
             }
             bucket.head = None;
         }
@@ -1226,40 +1320,48 @@ impl BlockCache {
             let mut current = bucket.head;
             let mut prev: Option<*mut CacheEntry> = None;
             while let Some(entry_ptr) = current {
-                // SAFETY: entry_ptr is from the hash chain (created by
-                // Box::into_raw); the bucket lock is held.
-                unsafe {
-                    let entry = &mut *entry_ptr;
-                    let next = entry.hash_next;
-                    if entry.key.0 == device_major && entry.key.1 == device_minor {
-                        if (*entry.bh).count() == 0 {
-                            // Unlink from the chain; the LRU link is
-                            // removed under the lru lock below.
-                            entry.evicting = true;
+                // INV-BIO-ENTRY: bucket lock held.
+                let entry = entry_ref(entry_ptr);
+                let next = entry.hash_next;
+                if entry.key.0 == device_major && entry.key.1 == device_minor {
+                    // Behavior-preserving form: the original body
+                    // dereferenced entry.bh unconditionally (a null bh
+                    // faulted); keep the identical failure class.
+                    let bh = entry.bh().expect("bio: dead bh in invalidate_device walk");
+                    if bh.count() == 0 {
+                        // Unlink from the chain; the LRU link is
+                        // removed under the lru lock below.
+                        // SAFETY: bucket lock held; the unhash relink
+                        // write plus the guarded free (entry marked
+                        // evicting first, so get() skips it).
+                        unsafe {
+                            (*entry_ptr).evicting = true;
                             match prev {
                                 Some(pp) => (*pp).hash_next = next,
                                 None => bucket.head = next,
                             }
-                            let mut lru = self.lru.lock_irqsave();
-                            Self::remove_from_lru(&mut lru, entry_ptr);
-                            // No I/O, no sync: dirty data is discarded
-                            // (detach semantics). Presence under the
-                            // bucket lock makes the free safe (get()
-                            // skips evicting entries).
-                            let _ = Box::from_raw(entry_ptr);
-                            self.count.fetch_sub(1, Ordering::Release);
-                        } else {
-                            // Pinned: keep the buffer for its holder, but
-                            // make sure it never syncs against the dead
-                            // device after release.
-                            (*entry.bh).clear_state_bit(BufferState::BH_Dirty);
-                            prev = Some(entry_ptr);
                         }
+                        let mut lru = self.lru.lock_irqsave();
+                        Self::remove_from_lru(&mut lru, entry_ptr);
+                        // No I/O, no sync: dirty data is discarded
+                        // (detach semantics). Presence under the
+                        // bucket lock makes the free safe (get()
+                        // skips evicting entries).
+                        // SAFETY: unhashed + evicting-marked + LRU-
+                        // unlinked; the Box::into_raw reclaim.
+                        let _ = unsafe { Box::from_raw(entry_ptr) };
+                        self.count.fetch_sub(1, Ordering::Release);
                     } else {
+                        // Pinned: keep the buffer for its holder, but
+                        // make sure it never syncs against the dead
+                        // device after release.
+                        bh.clear_state_bit(BufferState::BH_Dirty);
                         prev = Some(entry_ptr);
                     }
-                    current = next;
+                } else {
+                    prev = Some(entry_ptr);
                 }
+                current = next;
             }
         }
     }
@@ -1435,10 +1537,9 @@ pub fn bread_async(
     blocknr: u64,
     completion: &crate::fs::io_completion::IoCompletion,
 ) -> Option<*mut BufferHead> {
-    // SAFETY (remainder, chain-walk only): all CacheEntry pointers in the
-    // hash chain were created by Box::into_raw and stay valid while linked
-    // under the bucket lock.
-    unsafe {
+    // Chain walks go through entry_ref()/CacheEntry::bh()
+    // (INV-BIO-ENTRY / INV-BIO-BH); remaining raw windows are marked.
+    {
         let (device_major, device_minor) = (device.major, device.first_minor);
         let cache = get_block_cache();
         let index = cache.hash_index(device_major, device_minor, blocknr);
@@ -1451,7 +1552,7 @@ pub fn bread_async(
             let mut current = bucket.head;
 
             while let Some(entry_ptr) = current {
-                let entry = &*entry_ptr;
+                let entry = entry_ref(entry_ptr);
                 // R9-9: same guards as get() — skip entries being evicted
                 // and dead (freed/reused) BufferHeads.
                 if entry.evicting {
@@ -1467,13 +1568,15 @@ pub fn bread_async(
                     current = entry.hash_next;
                     continue;
                 }
-                if unsafe { entry.bh.is_null() || (*entry.bh).b_data.len() != cache.block_size as usize } {
+                if entry.bh().is_none_or(|b| b.b_data.len() != cache.block_size as usize) {
                     prev = Some(entry_ptr);
                     current = entry.hash_next;
                     continue;
                 }
                 if entry.key == (device_major, device_minor, blocknr) {
-                    let state = (*entry.bh).get_state();
+                    // bh() is Some here: the length guard above continued
+                    // on the dead-entry path.
+                    let state = entry.bh().unwrap().get_state();
                     if !state.test(BufferState::BH_Uptodate)
                         && state.test(BufferState::BH_Req)
                     {
@@ -1482,10 +1585,14 @@ pub fn bread_async(
                         // stale buffer contents (review 2R.11) — take a
                         // reference, drop the lock, wait for the owner's
                         // I/O, then complete.
-                        let bh = entry.bh;
-                        (*bh).get();
+                        // SAFETY: entry.bh passed the len guard above
+                        // (non-null, block-sized); pinned before unlock.
+                        let (bh, status) = unsafe {
+                            let bh = entry.bh;
+                            (*bh).get();
+                            (bh, wait_buffer_io_done(bh))
+                        };
                         drop(bucket);
-                        let status = wait_buffer_io_done(bh);
                         completion.complete(status);
                         return Some(bh);
                     }
@@ -1501,14 +1608,18 @@ pub fn bread_async(
                     }
                     // Cache hit (up to date)
                     if prev.is_some() {
-                        let prev_entry = &mut *prev.unwrap();
-                        prev_entry.hash_next = entry.hash_next;
-                        (*entry_ptr).hash_next = bucket.head;
+                        // SAFETY: bucket lock held; chain relink write
+                        // (INV-BIO-ENTRY).
+                        unsafe {
+                            let prev_entry = &mut *prev.unwrap();
+                            prev_entry.hash_next = entry.hash_next;
+                            (*entry_ptr).hash_next = bucket.head;
+                        }
                         bucket.head = Some(entry_ptr);
                     }
-                    let mut lru = unsafe { cache.lru_lock_under_bucket() };
+                    let mut lru = cache.lru_lock_under_bucket_irqsave(&bucket);
                     BlockCache::move_to_lru_head(&mut lru, entry_ptr);
-                    (*entry.bh).get();
+                    entry.bh().unwrap().get();
                     let hit_bh = entry.bh;
                     // Bucket/LRU locks drop HERE. The caller will bread_wait()
                     // on its completion; no I/O is in flight for a cache hit,
@@ -1581,33 +1692,33 @@ pub fn bread_async(
             let mut dup_bh: Option<*mut BufferHead> = None;
             let mut current = bucket.head;
             while let Some(cp) = current {
-                if (*cp).key == (device_major, device_minor, blocknr) {
+                let ce = entry_ref(cp);
+                if ce.key == (device_major, device_minor, blocknr) {
                     // R13-2: same dead/evicting guards as get() Phase 3.
-                    if (*cp).evicting
-                        || unsafe {
-                            (*cp).bh.is_null()
-                                || (*(*cp).bh).b_data.len() != cache.block_size as usize
-                        }
+                    if ce.evicting
+                        || ce.bh()
+                            .is_none_or(|b| b.b_data.len() != cache.block_size as usize)
                     {
-                        current = (*cp).hash_next;
+                        current = ce.hash_next;
                         continue;
                     }
                     // Failed-async residue: a !Uptodate, !BH_Req duplicate
                     // holds garbage from a FAILED read — do not return it;
                     // publish our fresh entry instead (the stale one is
                     // skipped by lookups and reclaimed by LRU eviction).
-                    let st = unsafe { (*(*cp).bh).get_state() };
+                    // bh() is Some here (length guard above).
+                    let st = ce.bh().unwrap().get_state();
                     if !st.test(BufferState::BH_Uptodate) && !st.test(BufferState::BH_Req) {
-                        current = (*cp).hash_next;
+                        current = ce.hash_next;
                         continue;
                     }
-                    (*(*cp).bh).get();
-                    let mut lru = unsafe { cache.lru_lock_under_bucket() };
+                    ce.bh().unwrap().get();
+                    let mut lru = cache.lru_lock_under_bucket_irqsave(&bucket);
                     BlockCache::move_to_lru_head(&mut lru, cp);
-                    dup_bh = Some((*cp).bh);
+                    dup_bh = Some(ce.bh);
                     break;
                 }
-                current = (*cp).hash_next;
+                current = ce.hash_next;
             }
             drop(bucket);
 
@@ -1627,9 +1738,10 @@ pub fn bread_async(
                 } else {
                     // SAFETY: entry_ptr was created by Box::into_raw above;
                     // our I/O has finished and the entry was never published.
-                    let _ = Box::from_raw(entry_ptr);
+                    let _ = unsafe { Box::from_raw(entry_ptr) };
                 }
-                let settle = wait_buffer_io_done(existing_bh);
+                // SAFETY: existing_bh was pinned in the dup walk above.
+                let settle = unsafe { wait_buffer_io_done(existing_bh) };
                 // Re-settle the completion as an INTERNAL signal carrying the
                 // existing buffer's settled status: the token on it names OUR
                 // redundant buffer, but the caller's bread_wait() will check
@@ -1646,15 +1758,20 @@ pub fn bread_async(
 
             {
                 let mut bucket = cache.buckets[index].lock_irqsave();
-                (*entry_ptr).hash_next = bucket.head;
+                // SAFETY: fresh Box::into_raw entry; bucket lock held
+                // (INV-BIO-ENTRY relink write).
+                unsafe {
+                    (*entry_ptr).hash_next = bucket.head;
+                }
                 bucket.head = Some(entry_ptr);
 
-                let mut lru = unsafe { cache.lru_lock_under_bucket() };
+                let mut lru = cache.lru_lock_under_bucket_irqsave(&bucket);
                 BlockCache::move_to_lru_head(&mut lru, entry_ptr);
             }
 
             cache.count.fetch_add(1, Ordering::Release);
-            Some((*entry_ptr).bh)
+            // SAFETY: entry_ptr linked above under the bucket lock.
+            Some(unsafe { (*entry_ptr).bh })
         }
     }
 }
@@ -1727,10 +1844,10 @@ pub fn brelse(bh: *const BufferHead) {
 /// runs and use per-block `bread_async`, which returns the cached
 /// (uptodate, possibly dirty) contents instead.
 pub fn block_cached(device: &'static blkdev::GenDisk, blocknr: u64) -> bool {
-    // SAFETY: device is a valid GenDisk pointer from the block device layer;
-    // entry traversal mirrors bread_async Phase 1 under the bucket lock.
-    unsafe {
-        let (device_major, device_minor) = ((*device).major, (*device).first_minor);
+    // Entry traversal mirrors bread_async Phase 1 under the bucket lock
+    // (INV-BIO-ENTRY / INV-BIO-BH).
+    {
+        let (device_major, device_minor) = (device.major, device.first_minor);
         let cache = get_block_cache();
         let index = cache.hash_index(device_major, device_minor, blocknr);
         let bucket = cache.buckets[index].lock_irqsave();
@@ -1740,7 +1857,7 @@ pub fn block_cached(device: &'static blkdev::GenDisk, blocknr: u64) -> bool {
         let mut evicting_match = false;
         let mut current = bucket.head;
         while let Some(entry_ptr) = current {
-            let entry = &*entry_ptr;
+            let entry = entry_ref(entry_ptr);
             // Same validity guards as bread_async Phase 1: skip entries
             // being evicted and dead (freed/reused) BufferHeads.
             if entry.evicting {
@@ -1750,7 +1867,7 @@ pub fn block_cached(device: &'static blkdev::GenDisk, blocknr: u64) -> bool {
                 current = entry.hash_next;
                 continue;
             }
-            if entry.bh.is_null() || (*entry.bh).b_data.len() != cache.block_size as usize {
+            if entry.bh().is_none_or(|bh| bh.b_data.len() != cache.block_size as usize) {
                 current = entry.hash_next;
                 continue;
             }
@@ -1776,17 +1893,16 @@ pub fn block_cached(device: &'static blkdev::GenDisk, blocknr: u64) -> bool {
 /// write+fsync row). A mid-eviction entry reports true (the caller's
 /// bread slow path sees the settled state).
 pub fn block_dirty_cached(device: &'static blkdev::GenDisk, blocknr: u64) -> bool {
-    // SAFETY: device is a valid GenDisk pointer; only identity fields
-    // are read, and the entry walk mirrors block_cached under the same
-    // bucket lock.
-    unsafe {
-        let (device_major, device_minor) = ((*device).major, (*device).first_minor);
+    // Entry walk mirrors block_cached under the same bucket lock
+    // (INV-BIO-ENTRY / INV-BIO-BH).
+    {
+        let (device_major, device_minor) = (device.major, device.first_minor);
         let cache = get_block_cache();
         let index = cache.hash_index(device_major, device_minor, blocknr);
         let bucket = cache.buckets[index].lock_irqsave();
         let mut current = bucket.head;
         while let Some(entry_ptr) = current {
-            let entry = &*entry_ptr;
+            let entry = entry_ref(entry_ptr);
             if entry.evicting {
                 if entry.key == (device_major, device_minor, blocknr) {
                     drop(bucket);
@@ -1795,12 +1911,12 @@ pub fn block_dirty_cached(device: &'static blkdev::GenDisk, blocknr: u64) -> boo
                 current = entry.hash_next;
                 continue;
             }
-            if entry.bh.is_null() || (*entry.bh).b_data.len() != cache.block_size as usize {
+            if entry.bh().is_none_or(|bh| bh.b_data.len() != cache.block_size as usize) {
                 current = entry.hash_next;
                 continue;
             }
             if entry.key == (device_major, device_minor, blocknr) {
-                let dirty = (*entry.bh).is_dirty();
+                let dirty = entry.bh().unwrap().is_dirty();
                 drop(bucket);
                 return dirty;
             }
@@ -1822,19 +1938,21 @@ pub fn block_dirty_cached(device: &'static blkdev::GenDisk, blocknr: u64) -> boo
 /// a 128 MB file turns over the 8192-entry cache ~4x, and the loop's
 /// bread() of each absent block paid one 4 KiB device read apiece).
 pub fn block_absent_durable(device: &'static blkdev::GenDisk, blocknr: u64) -> bool {
-    // SAFETY: device is a valid GenDisk pointer; bucket traversal
-    // mirrors block_cached under the same bucket lock.
-    unsafe {
-        let (device_major, device_minor) = ((*device).major, (*device).first_minor);
+    // Bucket traversal mirrors block_cached under the same bucket lock
+    // (INV-BIO-ENTRY / INV-BIO-BH).
+    {
+        let (device_major, device_minor) = (device.major, device.first_minor);
         let cache = get_block_cache();
         let index = cache.hash_index(device_major, device_minor, blocknr);
         let bucket = cache.buckets[index].lock_irqsave();
         let mut current = bucket.head;
         while let Some(entry_ptr) = current {
-            let entry = &*entry_ptr;
+            let entry = entry_ref(entry_ptr);
             if entry.key == (device_major, device_minor, blocknr)
-                && (entry.evicting || (!entry.bh.is_null()
-                    && (*entry.bh).b_data.len() == cache.block_size as usize))
+                && (entry.evicting
+                    || entry
+                        .bh()
+                        .is_some_and(|bh| bh.b_data.len() == cache.block_size as usize))
             {
                 // Present (or its eviction still in flight): not
                 // provably durable by absence.
@@ -2608,12 +2726,14 @@ pub fn sync_dirty_blocks_batched(
                 break;
             }
         };
-        // SAFETY: bh is valid and pinned for this iteration.
-        unsafe {
+        // bh is valid and pinned for this iteration.
+        {
+            // SAFETY: pinned by bread above.
             if force_dirty {
-                (*bh).set_state_bit(BufferState::BH_Dirty);
+                unsafe { (*bh).set_state_bit(BufferState::BH_Dirty) };
             }
-            if !(*bh).is_dirty() {
+            // SAFETY: same pin.
+            if !unsafe { (*bh).is_dirty() } {
                 get_block_cache().put(bh);
                 continue;
             }
@@ -2628,15 +2748,15 @@ pub fn sync_dirty_blocks_batched(
             }
             continue;
         }
-        // SAFETY: bh is pinned and its bytes are caller-stabilized; the
-        // span drains before this function returns.
-        let submitted = unsafe {
-            batch.submit_ref(device, blk * spb, &(*bh).b_data)
-        };
+        // bh is pinned and its bytes are caller-stabilized; the span
+        // drains before this function returns.
+        // SAFETY: pinned; b_data read spans the drain window.
+        let submitted = unsafe { batch.submit_ref(device, blk * spb, &(*bh).b_data) };
         if submitted {
             pinned.push(bh);
         } else {
             drain(&mut batch, &mut pinned, &mut first_err);
+            // SAFETY: same pinned window.
             let retried = unsafe { batch.submit_ref(device, blk * spb, &(*bh).b_data) };
             if retried {
                 pinned.push(bh);
@@ -3581,19 +3701,18 @@ impl BlockCache {
         let bucket = self.buckets[index].lock();
         let mut current = bucket.head;
         while let Some(entry_ptr) = current {
-            // SAFETY: entry_ptr is from the hash chain; bucket lock held.
-            unsafe {
-                let entry = &*entry_ptr;
-                if entry.key == (dev.0, dev.1, blocknr)
-                    && !entry.evicting
-                    && !entry.bh.is_null()
-                    && (*entry.bh).b_data.len() == self.block_size as usize
-                {
-                    (*entry.bh).get();
-                    return Some(entry.bh);
-                }
-                current = entry.hash_next;
+            // INV-BIO-ENTRY: bucket lock held.
+            let entry = entry_ref(entry_ptr);
+            if entry.key == (dev.0, dev.1, blocknr)
+                && !entry.evicting
+                && entry
+                    .bh()
+                    .is_some_and(|bh| bh.b_data.len() == self.block_size as usize)
+            {
+                entry.bh().unwrap().get();
+                return Some(entry.bh);
             }
+            current = entry.hash_next;
         }
         None
     }
