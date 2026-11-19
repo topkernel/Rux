@@ -168,6 +168,46 @@ handoff), open (1.44x — walk loop + File construct), read (1.42x —
 copy tail), write (1.13x). lat_fs re-polluted by boot noise (no
 honest number this round).
 
+## Patrol round 3 (2026-11-19 05:xx): the 1k-round livelock isolated to ONE worker — ownership marks drift across pick cpus
+
+Round-3 landings (gated riscv 1334/1334, triple-arch rc=0, pushed
+4a63cbd74..9605de79d): SOFTIRQ_OFFSET booked-task pairing (the 119th
+HARDIRQ discipline extended — the Session-6 migration-leak producer),
+reference-parity context discipline (schedule() refuses interrupt
+context, might_sleep_check at sleeping points), the VWWAIT phase
+counters, and the tick-level probe fix (PREEMPT-LEAK no longer counts
+its own hardirq level).
+
+Fresh s1k isolations (lfdec-p1/p2/p3): the timer wheel is HEALTHY at
+the stall (ARMS/WW2/WW lines live, hres_next future, no
+TIMER-SOFTIRQ-STALL, no lockups, NSLPARK 0) — the round-2 "wheel
+starvation" reading was the heartbeat's own death artifact, retracted.
+The stall shape: workers 314-316 exit at t=16-22s; worker 317 (the
+1k writer) keeps RUNNING for 100+ s with vruntime advancing (it runs!)
+while PICK-SKIP-ALL why=1 fires constantly with its ownership marks
+DRIFTING across pick cpus (claim=6→7→3, slot=cpu6→7→3 in successive
+captures) — it is picked, switched out mid-write with its IRQ-class
+bits present, refused by the pc!=0 discipline (correctly), left
+RUNNING+unlinked between heals, re-picked elsewhere, and the cycle
+repeats: a livelock that stretches a 40s round past 100s. QEMU-monitor
+captures caught it mid-insert_ext and mid-puts_batch (normal work);
+the biglock census shows it legitimately holding EXT4-BIGLOCK depth=1
+with zero waiters (not lock-blocked).
+
+VWWAIT: enter=1.9M sched=954K resp=34 timeout=0 on the stalled boot —
+the sleep loop is healthy; resp counts only the post-registration
+exits (fast-path and deadline exits are uncounted — instrument
+asymmetry, not a finding).
+
+Next levers: (1) the pick→switch-out→refuse→requeue cycle's cost —
+the pc!=0 discipline refusal dequeues prev each time (dequeue_if_
+enqueued) and the phantom sweep re-links it ≤1 s later; a
+hysteresis/affinity pin for a repeatedly-refused RUNNING task is the
+reference's task_cpu stability shape; (2) audit why 317's ownership
+marks migrate between cpus at all (its affinity is 0xff, but each
+refusal→heal→repick lands it on a DIFFERENT cpu — reference CFS keeps
+a task on its prev cpu unless idle balance moves it).
+
 ## Patrol round 2 (2026-11-19 03:xx): strand-recovery round landed (4 commits); captures name the lock-convoy root
 
 Landed and gated (riscv 1334/1334, triple-arch rc=0, pushed
